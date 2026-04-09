@@ -1,0 +1,27 @@
+"""Reward terms and aggregation aligned to deletion-based counterfactual scoring."""
+
+from src.rewards.aggregation import aggregate_reward_terms
+from src.rewards.anti_collapse import (
+    CollapseDiagnostics,
+    analyze_batch_collapse,
+    collapse_penalty_from_diagnostics,
+)
+from src.rewards.counterfactual_reward import (
+    CounterfactualScorer,
+    RewardContext,
+    build_reward_breakdown,
+)
+from src.rewards.types import RewardBreakdown, RewardTerm, RewardWeights
+
+__all__ = [
+    "CollapseDiagnostics",
+    "CounterfactualScorer",
+    "RewardBreakdown",
+    "RewardContext",
+    "RewardTerm",
+    "RewardWeights",
+    "aggregate_reward_terms",
+    "analyze_batch_collapse",
+    "build_reward_breakdown",
+    "collapse_penalty_from_diagnostics",
+]
