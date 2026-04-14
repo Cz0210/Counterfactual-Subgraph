@@ -6,15 +6,24 @@ from src.rewards.anti_collapse import (
     analyze_batch_collapse,
     collapse_penalty_from_diagnostics,
 )
+from src.rewards.chem_rules import ChemRewardEngine
 from src.rewards.counterfactual_reward import (
     CounterfactualScorer,
     RewardContext,
     build_reward_breakdown,
 )
+from src.rewards.reward_calculator import (
+    CounterfactualReward,
+    load_oracle_bundle,
+    prepare_smiles_for_oracle,
+    smiles_to_morgan_array,
+)
 from src.rewards.types import RewardBreakdown, RewardTerm, RewardWeights
 
 __all__ = [
+    "ChemRewardEngine",
     "CollapseDiagnostics",
+    "CounterfactualReward",
     "CounterfactualScorer",
     "RewardBreakdown",
     "RewardContext",
@@ -24,4 +33,7 @@ __all__ = [
     "analyze_batch_collapse",
     "build_reward_breakdown",
     "collapse_penalty_from_diagnostics",
+    "load_oracle_bundle",
+    "prepare_smiles_for_oracle",
+    "smiles_to_morgan_array",
 ]

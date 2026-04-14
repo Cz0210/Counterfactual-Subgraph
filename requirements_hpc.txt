@@ -5,6 +5,7 @@
 
 transformers
 pandas
+scikit-learn
 einops
 accelerate
 peft

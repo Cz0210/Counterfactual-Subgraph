@@ -263,6 +263,40 @@ Accepted
 
 ---
 
+## [2026-04-14] Add a lightweight RandomForest Oracle and residual-based PPO reward wrapper
+
+### Background
+The repository has completed the SFT stage and is moving toward PPO. At that point the project needs a reward path that is both chemically constrained and fast enough to run inside RL rollouts. The existing codebase already has RDKit-backed capped-subgraph validation and deletion, but it still lacked:
+
+- a lightweight local Oracle for fast activity scoring;
+- a PPO-facing reward wrapper that combines validity, subgraph, and counterfactual terms;
+- a clear decision on whether the semantic reward should score the fragment itself or the residual molecule after deletion.
+
+### Decision
+Add:
+
+- `scripts/train_aids_oracle.py` to train a RandomForest classifier on Morgan fingerprints from `data/aids_dataset.csv`;
+- `src/rewards/chem_rules.py` as a small structural reward engine for validity and parent-subgraph checks;
+- `src/rewards/reward_calculator.py` as the PPO-facing reward wrapper that loads the Oracle bundle and computes `R_valid + R_subgraph + R_counterfactual`.
+
+The counterfactual term is explicitly defined on the residual molecule `x \ g` after deleting the generated fragment, not on the fragment alone. Dummy atoms (`*`) are cleaned through RDKit graph editing before Morgan fingerprint extraction.
+
+### Alternatives considered
+1. Score the generated fragment by itself and treat that as the counterfactual term.
+2. Put Oracle logic directly inside the PPO training script.
+3. Save a custom Python class inside the pickle bundle instead of a plain dictionary.
+
+### Consequences
+- PPO reward computation stays aligned with the v3 deletion-based counterfactual objective.
+- Oracle scoring remains fast enough for rollout-time use because it relies on RandomForest plus Morgan fingerprints.
+- Structural chemistry checks stay modular and reusable instead of being buried in the train loop.
+- The saved Oracle bundle is easier to reload across scripts because it stores plain metadata alongside the fitted sklearn model.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-13] Add base-model metric tooling and presentation visualization for the SFT stage
 
 ### Background
