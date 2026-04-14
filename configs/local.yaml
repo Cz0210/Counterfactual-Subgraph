@@ -1,0 +1,30 @@
+runtime:
+  environment: local
+  device: auto
+  dry_run: true
+  num_workers: 0
+paths:
+  output_root: outputs/local
+  cache_root: .cache/local
+  model_root: pretrained_models
+run:
+  notes: local_development
+model:
+  model_path: pretrained_models/ChemLLM-7B-Chat
+  model_name_or_path: pretrained_models/ChemLLM-7B-Chat
+  tokenizer_path: pretrained_models/ChemLLM-7B-Chat
+  trust_remote_code: true
+data:
+  raw_hiv_csv: raw/AIDS/HIV.csv
+  dataset_path: raw/AIDS/HIV.csv
+inference:
+  use_llm: true
+  fallback_to_heuristic: true
+  sample_from_dataset: true
+  sample_seed: 7
+slurm:
+  partition: debug
+  time: "00:30:00"
+  cpus_per_task: 2
+  mem: 8G
+  gres: "gpu:1"

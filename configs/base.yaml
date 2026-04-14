@@ -1,0 +1,63 @@
+project:
+  name: counterfactual_subgraph_v3
+  task: counterfactual_fragment_generation
+runtime:
+  environment: auto
+  device: auto
+  log_level: INFO
+  seed: 7
+  dry_run: true
+  load_model: false
+  local_files_only: true
+  single_node_single_gpu: true
+  num_workers: 0
+paths:
+  data_root: data
+  output_root: outputs
+  cache_root: .cache
+  model_root: models
+run:
+  name: null
+  notes: bootstrap_runtime
+model:
+  model_path: null
+  model_name_or_path: null
+  tokenizer_path: null
+  trust_remote_code: false
+  revision: null
+data:
+  train_file: processed/train.jsonl
+  valid_file: processed/valid.jsonl
+  test_file: processed/test.jsonl
+  raw_hiv_csv: raw/AIDS/HIV.csv
+  dataset_path: raw/AIDS/HIV.csv
+  smiles_column: smiles
+  label_column: HIV_active
+  activity_column: activity
+training:
+  stage: weak_supervision_sft
+  max_steps: 100
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00002
+  save_steps: 100
+evaluation:
+  split: valid
+  checkpoint_path: null
+  max_examples: 100
+inference:
+  smiles: null
+  label: null
+  max_new_tokens: 64
+  temperature: 0.0
+  top_p: 1.0
+  use_llm: true
+  fallback_to_heuristic: true
+  sample_from_dataset: true
+  sample_seed: 7
+slurm:
+  partition: default
+  time: "12:00:00"
+  cpus_per_task: 4
+  mem: 16G
+  gres: "gpu:1"

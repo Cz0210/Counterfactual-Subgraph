@@ -1,0 +1,9 @@
+training:
+  stage: weak_supervision_sft
+  max_steps: 1000
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00002
+  save_steps: 200
+run:
+  name: sft

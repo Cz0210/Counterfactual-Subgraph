@@ -1,0 +1,9 @@
+training:
+  stage: counterfactual_rl
+  max_steps: 500
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00001
+  save_steps: 100
+run:
+  name: rl

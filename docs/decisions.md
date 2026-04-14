@@ -162,3 +162,252 @@ The bootstrap intentionally implements only safe low-level helpers such as JSONL
 
 ### Status
 Accepted
+
+---
+
+## [2026-04-09] Implement chemistry utilities with RDKit-first behavior and explicit failure types
+
+### Background
+The v3 objective depends on structural correctness before any reward or training logic can be trusted. The repository therefore needs a chemistry layer that can safely parse SMILES, check connectedness and parent-substructure relations, and attempt fragment deletion without forcing train code to interpret raw RDKit exceptions.
+
+### Decision
+Implement the first chemistry utility layer in:
+
+- `src/chem/smiles_utils.py`
+- `src/chem/substructure.py`
+- `src/chem/deletion.py`
+- `src/chem/validation.py`
+
+The layer is RDKit-first when RDKit is available, but it must also degrade safely when RDKit is missing by returning structured failure types instead of crashing. The shared result dataclasses now carry normalized failure categories, and `validate_fragment_candidate(...)` aggregates these into one interface for downstream reward and evaluation code.
+
+### Alternatives considered
+1. Raise raw exceptions from RDKit and let train or eval scripts handle them.
+2. Hard-require RDKit at import time and fail the whole repository if it is absent.
+3. Delay chemistry implementation until reward or inference code exists.
+
+### Consequences
+- Reward and evaluation modules can consume chemistry results without duplicating error handling.
+- The repository remains usable in environments where RDKit has not been installed yet.
+- Deletion behavior is deterministic at the interface level, with the first matched connected fragment removed and failures surfaced explicitly.
+
+### Status
+Accepted
+
+---
+
+## [2026-04-10] Add a config-driven local and HPC runtime layer without hardcoded paths
+
+### Background
+The rebuilt repository now has modular source folders and chemistry utilities, but it still needs a stable way to run from a local workstation and from an HPC cluster. Without a shared runtime layer, path handling, log directories, and environment-specific behavior would drift into ad hoc script logic.
+
+### Decision
+Add a runtime adaptation layer based on repository-relative config files and thin CLI entrypoints.
+
+This layer includes:
+
+- base, local, hpc, sft, rl, and eval config files under `configs/`
+- environment detection and config merging in `src/utils/env.py`
+- repository-relative path resolution in `src/utils/paths.py`
+- file-backed logging helpers in `src/utils/logging_utils.py`
+- run entrypoints in `scripts/run_sft.py`, `scripts/run_rl.py`, `scripts/run_eval.py`, and `scripts/run_infer.py`
+- Slurm templates for single-node single-GPU execution under `scripts/slurm/`
+
+Model and tokenizer handling must support local filesystem paths and avoid silent remote downloads by default.
+
+### Alternatives considered
+1. Hardcode local and HPC paths directly inside the stage scripts.
+2. Depend on an external YAML package before adding any runtime config support.
+3. Jump directly to distributed training setup before the single-node path is stable.
+
+### Consequences
+- Local development and HPC submission now share one config and path resolution story.
+- The codebase remains portable because configs stay relative and resolved at runtime.
+- The repository can prepare deterministic run manifests before full SFT, RL, and evaluation logic is implemented.
+- Distributed training remains intentionally out of scope for this phase.
+
+### Status
+Accepted
+
+---
+
+## [2026-04-10] Implement a minimal single-sample inference loop with heuristic fragment generation
+
+### Background
+The repository already has chemistry utilities and runtime adaptation, but it still needs a runnable end-to-end path from one parent SMILES to one fragment candidate. This is necessary to validate the IO contract before wiring any full SFT or RL training logic.
+
+### Decision
+Implement a minimal inference closure centered on `scripts/run_infer.py` and `src/eval/inference.py`.
+
+This path:
+
+- accepts one parent SMILES from CLI or config
+- produces one heuristic fragment candidate without using a trained policy
+- runs chemistry utilities for parseability, connectedness, and parent-substructure checks
+- prints a structured JSON result
+- stays independent of the full training stack
+
+The heuristic prefers small connected parent substructures when chemistry backends are available, and falls back to the parent SMILES when no smaller valid candidate can be established.
+
+### Alternatives considered
+1. Keep `run_infer.py` as config-only runtime preparation.
+2. Wait for a trained model before implementing any inference path.
+3. Print only free-form text instead of a machine-readable result.
+
+### Consequences
+- The project now has a minimal runnable contract for one-sample inference.
+- Chemistry utilities can be exercised from a real CLI path without invoking training code.
+- The current fragment proposal is intentionally heuristic and not yet counterfactual-optimal, but it keeps the repository moving toward the v3 objective with a reviewable baseline.
+
+### Status
+Accepted
+
+---
+
+## [2026-04-13] Add base-model metric tooling and presentation visualization for the SFT stage
+
+### Background
+The SFT stage now has stable headline numbers for validity, capping behavior, and token accuracy, but the project still lacked two practical tools: a deterministic way to compute baseline metrics from JSONL inference logs, and a reusable plotting pipeline for lab-meeting summaries.
+
+### Decision
+Add a small evaluation utility layer for base-model JSONL logs and extend the SFT visualization module with presentation-ready outputs.
+
+This change introduces:
+
+- `src/eval/base_metrics.py` for RDKit-backed capping/validity statistics
+- `src/eval/base_inference.py` for deterministic base-model batch inference over `sft_val.jsonl`
+- `scripts/eval_base_metrics.py` as a thin CLI entrypoint for base-model log evaluation
+- `scripts/run_infer_base.py` as a thin CLI entrypoint that saves base-model predictions to JSONL
+- an upgraded `src/eval/sft_visualization.py` that renders:
+  - base-vs-SFT comparison bars
+  - a dual-axis simulated training dynamics figure
+  - a high-resolution RDKit rendering of a capped fragment
+- the updated `scripts/visualize_sft_summary.py` CLI for parameterized figure generation
+
+### Alternatives considered
+1. Compute baseline metrics manually in notebooks.
+2. Keep visualization code in a single ad hoc script under `scripts/`.
+3. Hardcode baseline numbers directly into plotting code without a reusable evaluation helper.
+
+### Consequences
+- The repository now has a reproducible path from base-model inference logs to group-meeting figures.
+- Evaluation logic remains modular under `src/eval/`, while CLI scripts stay thin and HPC-friendly.
+- Presentation plots can be regenerated with different baseline numbers without editing source code.
+- The training dynamics figure now uses discrete epoch-level line charts instead of dense smooth curves, which makes the plot easier to explain during presentations.
+
+### Status
+Accepted
+
+---
+
+## [2026-04-11] Add balanced capped-fragment SFT data preparation for the HIV dataset
+
+### Background
+The rebuilt repository already has RDKit-backed capped-subgraph utilities and thin runtime entrypoints, but it still lacked a concrete path for constructing supervised fine-tuning data from the local HIV CSV. Because the HIV benchmark is heavily label-imbalanced, a naive sample would underexpose positive molecules during SFT.
+
+### Decision
+Add a new balanced SFT data-preparation path centered on `scripts/prepare_sft_data.py` and `src/data/sft_preparation.py`.
+
+This path:
+
+- loads `data/raw/AIDS/HIV.csv` with pandas
+- filters out invalid parent SMILES using the existing chemistry layer
+- keeps all valid positive molecules and fills the remaining target size with sampled negatives
+- constructs capped fragment targets by cutting one or two acyclic single bonds with RDKit dummy-atom capping
+- validates generated fragments with the shared capped-subgraph checks
+- writes minimal `instruction` / `output` JSONL files for ChemLLM SFT
+
+### Alternatives considered
+1. Reuse the placeholder `scripts/prepare_data.py` without adding reusable source modules.
+2. Sample the HIV dataset according to its natural class distribution.
+3. Generate weak targets without validating capped-subgraph correctness against the parent molecule.
+
+### Consequences
+- The repository now has an end-to-end path for building balanced SFT supervision data aligned with the capped-fragment objective.
+- Positive molecules are intentionally overrepresented relative to the raw dataset so ChemLLM sees enough active-molecule structure during SFT.
+- Fragment generation can still fail for some molecules, so the script explicitly reports success rate and observed label ratios after construction.
+
+### Status
+Accepted
+
+---
+
+## [2026-04-10] Treat dummy atoms as attachment-point caps in the chemistry layer
+
+### Background
+The project now needs chemically valid graph cutting. Plain atom deletion breaks
+valence and makes the fragment contract ambiguous whenever the generated
+subgraph has open attachment points to the rest of the parent molecule.
+
+### Decision
+Adopt dummy atoms (`*`) as the canonical capping representation inside
+`src/chem/`.
+
+This means:
+
+- capped fragment SMILES such as `*c1ccccc1` are parsed and sanitized through a
+  dummy-aware RDKit path;
+- dummy atoms are treated as attachment-point queries when checking whether a
+  fragment is a valid parent subgraph;
+- capped deletion uses RDKit core replacement semantics so the remainder graph
+  is also capped with dummy atoms instead of leaving broken chemistry.
+
+### Alternatives considered
+1. Keep using uncapped raw atom deletion and repair broken valence later.
+2. Represent cut points with text markers outside SMILES instead of dummy atoms.
+3. Treat dummy atoms as ordinary fragment atoms that should also be deleted from
+   the parent match.
+
+### Consequences
+- The chemistry layer now distinguishes between real fragment atoms and dummy
+  attachment points.
+- Validation and deletion stay aligned with the v3 counterfactual objective,
+  because both fragment extraction and residual construction use the same capped
+  semantics.
+- Future model outputs can use capped fragment SMILES directly without adding an
+  extra post-processing representation.
+
+### Status
+Accepted
+
+---
+
+## [2026-04-10] Bootstrap local-only ChemLLM inference with dataset-backed sampling
+
+### Background
+The chemistry layer can now validate capped fragment SMILES, but the repository
+still needs a real local-model inference path before SFT or RL code is added.
+At the same time, the user needs a safe way to confirm that the local AIDS/HIV
+CSV file and local ChemLLM checkpoint are usable without any accidental network
+requests.
+
+### Decision
+Add a local-only ChemLLM inference bootstrap consisting of:
+
+- `scripts/test_assets.py` for local dataset and model asset validation;
+- a ChemLLM-specific prompt builder with hard-coded capped-fragment few-shot
+  examples;
+- a lightweight Hugging Face `ChemLLMGenerator` that always loads with
+  `local_files_only=True`;
+- dataset-backed `run_infer.py` behavior that samples one real molecule from the
+  local AIDS/HIV CSV file when no explicit SMILES is provided.
+
+If the local transformers stack is unavailable at runtime, the CLI is allowed to
+fall back to the existing heuristic inference path, but it must surface the
+model-side failure explicitly in the structured result.
+
+### Alternatives considered
+1. Wait for training code before integrating any real LLM backend.
+2. Hardcode one demo SMILES instead of sampling a real local dataset row.
+3. Allow `from_pretrained` to use default remote resolution behavior.
+
+### Consequences
+- The project now has a true local model inference integration point without
+  depending on vLLM or distributed serving.
+- Asset validation becomes safer because the repository refuses to reach out to
+  Hugging Face when local files are incomplete.
+- The inference CLI stays usable in lightweight dev environments because it can
+  degrade to heuristic generation while still reporting why the model path did
+  not run.
+
+### Status
+Accepted

@@ -1,11 +1,6 @@
-"""Placeholder CLI for counterfactual RL training."""
+"""Backward-compatible wrapper for scripts/run_rl.py."""
 
-
-def main() -> None:
-    raise SystemExit(
-        "RL training is intentionally deferred. This bootstrap phase only "
-        "defines repository structure and interfaces."
-    )
+from run_rl import main
 
 
 if __name__ == "__main__":

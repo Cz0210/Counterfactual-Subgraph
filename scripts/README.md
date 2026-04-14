@@ -8,6 +8,7 @@ can stabilize interfaces before training logic is implemented.
 Planned entrypoints:
 
 - `scripts/prepare_data.py`
+- `scripts/prepare_sft_data.py`
 - `scripts/infer_single.py`
 - `scripts/train_sft.py`
 - `scripts/train_rl.py`

@@ -1,11 +1,6 @@
-"""Placeholder CLI for single-example inference."""
+"""Backward-compatible wrapper for scripts/run_infer.py."""
 
-
-def main() -> None:
-    raise SystemExit(
-        "Single-example inference is not implemented yet. This bootstrap "
-        "phase only defines repository structure and interfaces."
-    )
+from run_infer import main
 
 
 if __name__ == "__main__":

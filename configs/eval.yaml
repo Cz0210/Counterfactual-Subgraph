@@ -1,0 +1,6 @@
+evaluation:
+  split: test
+  checkpoint_path: null
+  max_examples: 200
+run:
+  name: eval

@@ -1,0 +1,31 @@
+runtime:
+  environment: hpc
+  device: cuda
+  dry_run: false
+  num_workers: 4
+paths:
+  data_root: /share/home/u20526/czx/counterfactual-subgraph/data/
+  output_root: /share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/
+  cache_root: /share/home/u20526/czx/counterfactual-subgraph/.cache/huggingface/
+  model_root: /share/home/u20526/czx/counterfactual-subgraph/pretrained_models/
+run:
+  notes: single_node_single_gpu_hpc
+model:
+  model_path: /share/home/u20526/czx/counterfactual-subgraph/pretrained_models/ChemLLM-7B-Chat
+  model_name_or_path: /share/home/u20526/czx/counterfactual-subgraph/pretrained_models/ChemLLM-7B-Chat
+  tokenizer_path: /share/home/u20526/czx/counterfactual-subgraph/pretrained_models/ChemLLM-7B-Chat
+  trust_remote_code: true
+data:
+  raw_hiv_csv: /share/home/u20526/czx/counterfactual-subgraph/data/raw/AIDS/HIV.csv
+  dataset_path: /share/home/u20526/czx/counterfactual-subgraph/data/raw/AIDS/HIV.csv
+  train_file: /share/home/u20526/czx/counterfactual-subgraph/data/processed/train.jsonl
+  valid_file: /share/home/u20526/czx/counterfactual-subgraph/data/processed/valid.jsonl
+  test_file: /share/home/u20526/czx/counterfactual-subgraph/data/processed/test.jsonl
+evaluation:
+  checkpoint_path: /share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/checkpoints/<run_name>
+slurm:
+  partition: A800
+  time: "24:00:00"
+  cpus_per_task: 7
+  mem: 32G
+  gres: "gpu:a800:1"

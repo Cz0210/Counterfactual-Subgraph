@@ -73,10 +73,15 @@ If any old code path optimizes toward these non-counterfactual objectives, it sh
 │   └── splits/
 ├── scripts/
 │   ├── prepare_data.py
+│   ├── run_sft.py
+│   ├── run_rl.py
+│   ├── run_eval.py
+│   ├── run_infer.py
 │   ├── train_sft.py
 │   ├── train_rl.py
 │   ├── eval_model.py
-│   └── infer_single.py
+│   ├── infer_single.py
+│   └── slurm/
 ├── src/
 │   ├── data/
 │   ├── models/
@@ -178,7 +183,109 @@ Additional derived files may include prompts, weak targets, reward annotations, 
 
 ---
 
-## 9. Suggested First Commands
+## 9. Runtime Configuration
+
+The repository now includes config-driven runtime entrypoints for local development
+and Slurm-based HPC usage.
+
+Primary config files:
+
+- `configs/base.yaml`: shared defaults
+- `configs/local.yaml`: local-machine overrides
+- `configs/hpc.yaml`: HPC overrides for single-node single-GPU runs
+- `configs/sft.yaml`: SFT-stage overrides
+- `configs/rl.yaml`: RL-stage overrides
+- `configs/eval.yaml`: evaluation-stage overrides
+
+Config merge order for the new run scripts is:
+
+1. `configs/base.yaml`
+2. `configs/{local|hpc}.yaml`
+3. one stage config such as `configs/sft.yaml`
+4. any extra `--config ...` files
+5. any CLI overrides such as `--model-path`, `--output-root`, or `--set section.key=value`
+
+All paths in config files should stay relative to the repository root. The scripts
+resolve them at runtime and save the resolved absolute paths into
+`resolved_config.json` inside each run directory.
+
+---
+
+## 10. Local Development
+
+Local runtime preparation examples:
+
+```bash
+python3 scripts/run_sft.py \
+  --environment local \
+  --run-name dev_sft \
+  --model-path models/my_local_model \
+  --tokenizer-path models/my_local_model \
+  --print-config
+
+python3 scripts/run_infer.py \
+  --environment local \
+  --model-path models/my_local_model \
+  --tokenizer-path models/my_local_model \
+  --smiles "CCO" \
+  --label 1 \
+  --print-config
+```
+
+The current runtime layer already supports a minimal single-example inference loop
+in `scripts/run_infer.py`: it produces one heuristic fragment candidate, runs
+chemistry checks, and prints a structured JSON result. Full SFT, RL, and standalone
+evaluation execution logic are still incremental and not yet implemented in these
+run scripts.
+
+---
+
+## 11. Local Model And Tokenizer Paths
+
+Model and tokenizer loading is designed for local filesystem paths.
+
+- Use `--model-path` to point to a local checkpoint directory.
+- Use `--tokenizer-path` to point to a local tokenizer directory. If omitted in a
+  future direct loader call, the model path may also be used as the tokenizer path.
+- Set `--load-model` if you want the run script to attempt an actual local load.
+
+The implementation intentionally keeps `local_files_only=true` by default in the
+runtime config so that local development and HPC jobs do not silently depend on
+network downloads.
+
+---
+
+## 12. HPC Usage
+
+The HPC layer currently targets:
+
+- local development on one machine
+- Slurm jobs on one node with one GPU
+
+It does not implement distributed training yet.
+
+Example Slurm entrypoints:
+
+- `scripts/slurm/train_sft.slurm`
+- `scripts/slurm/train_rl.slurm`
+- `scripts/slurm/eval.slurm`
+
+Example submission:
+
+```bash
+sbatch scripts/slurm/train_sft.slurm
+sbatch scripts/slurm/train_rl.slurm
+sbatch scripts/slurm/eval.slurm
+```
+
+Each Slurm script derives the repository root relative to its own location and does
+not hardcode machine-specific absolute paths. Override local artifact locations with
+environment variables such as `MODEL_PATH`, `TOKENIZER_PATH`, and `CHECKPOINT_PATH`
+before submission if needed.
+
+---
+
+## 13. Suggested First Commands
 
 Once the repository skeleton is created, a reasonable next sequence is:
 

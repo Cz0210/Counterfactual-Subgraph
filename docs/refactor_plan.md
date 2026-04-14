@@ -298,6 +298,49 @@ Success criteria:
 
 ---
 
+## Phase 2.5: Local/HPC runtime adaptation layer
+
+Objective:
+
+- make the modular repository runnable in both local development and HPC settings;
+- keep all path handling config-driven and repository-relative;
+- support single-machine or single-node single-GPU execution only for now.
+
+Modules and files:
+
+- `configs/base.yaml`
+- `configs/local.yaml`
+- `configs/hpc.yaml`
+- `configs/sft.yaml`
+- `configs/rl.yaml`
+- `configs/eval.yaml`
+- `src/utils/paths.py`
+- `src/utils/env.py`
+- `src/utils/logging_utils.py`
+- `src/utils/seed.py`
+- `scripts/run_sft.py`
+- `scripts/run_rl.py`
+- `scripts/run_eval.py`
+- `scripts/run_infer.py`
+- `scripts/slurm/*.slurm`
+
+Target capabilities:
+
+- merge stage and environment configs deterministically;
+- resolve all runtime paths without hardcoded absolute paths;
+- support local model and tokenizer paths;
+- create per-run log and manifest directories;
+- provide Slurm templates for single-node single-GPU jobs;
+- keep CLI entrypoints thin and compatible with later training logic.
+
+Success criteria:
+
+- a local or HPC user can prepare a run from config and CLI only;
+- scripts save a resolved manifest for reproducibility;
+- the runtime layer does not assume distributed training.
+
+---
+
 ## Phase 3: Reward subsystem
 
 Objective:
@@ -375,6 +418,11 @@ Target capabilities:
 Success criteria:
 
 - one can test the contract “parent SMILES → fragment SMILES” before any large-scale training.
+
+Status:
+
+- minimal heuristic single-sample inference implemented on 2026-04-10 in `scripts/run_infer.py` and `src/eval/inference.py`
+- trained-model inference remains a later step
 
 ---
 

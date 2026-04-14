@@ -1,11 +1,6 @@
-"""Placeholder CLI for evaluation."""
+"""Backward-compatible wrapper for scripts/run_eval.py."""
 
-
-def main() -> None:
-    raise SystemExit(
-        "Evaluation CLI wiring is not implemented yet. This bootstrap phase "
-        "only defines repository structure and interfaces."
-    )
+from run_eval import main
 
 
 if __name__ == "__main__":

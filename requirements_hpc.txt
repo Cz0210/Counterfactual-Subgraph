@@ -1,0 +1,13 @@
+# HPC dependency bundle for ChemLLM inference, SFT, and RL.
+# Install a CUDA-matched PyTorch build separately on the cluster.
+# Install RDKit separately via conda-forge, for example:
+#   conda install -c conda-forge rdkit
+
+transformers
+pandas
+einops
+accelerate
+peft
+trl
+bitsandbytes
+wandb
