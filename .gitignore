@@ -28,3 +28,4 @@ pretrained_models/
 data/
 outputs/
 .codex
+.cache/
