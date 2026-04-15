@@ -192,6 +192,46 @@ Accepted
 
 ---
 
+## [2026-04-15] Fall back to TRL value-head wrapper for InternLM2 PPO value model
+
+### Background
+The explicit sequence-classification critic introduced for experimental PPO
+alignment turned out to be incompatible with the ChemLLM / InternLM2 base
+checkpoint in environments where the InternLM2 config is not registered under
+Hugging Face's `AutoModelForSequenceClassification` auto-mapping.
+
+### Decision
+Replace the PPO `value_model` in `scripts/train_ppo.py` with
+`trl.AutoModelForCausalLMWithValueHead` loaded on top of the same quantized
+ChemLLM base weights, and monkey-patch:
+
+- `value_model.base_model_prefix = "pretrained_model"`
+
+so that stricter `trl.experimental.ppo.PPOTrainer` builds can still treat the
+wrapper like a native model during critic setup.
+
+Only the wrapper's value head remains trainable; the wrapped causal LM backbone
+stays frozen.
+
+### Alternatives considered
+1. Keep using `AutoModelForSequenceClassification` and require a newer
+   InternLM2 registration patch from transformers.
+2. Drop experimental PPOTrainer and fully hand-roll critic/value optimization.
+3. Try to emulate a sequence-classification head with another custom wrapper.
+
+### Consequences
+- PPO critic initialization no longer depends on InternLM2 being registered in
+  the sequence-classification auto-model registry.
+- The project keeps the reward path aligned to the deletion-based
+  counterfactual objective while staying closer to TRL's expected interfaces.
+- The monkey patch is intentionally local to the PPO script and should be
+  revisited if upstream TRL or transformers support improves.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background

@@ -525,7 +525,6 @@ def import_training_dependencies() -> dict[str, Any]:
         from peft import PeftModel, prepare_model_for_kbit_training
         from transformers import (
             AutoModelForCausalLM,
-            AutoModelForSequenceClassification,
             AutoTokenizer,
             BitsAndBytesConfig,
             set_seed,
@@ -534,6 +533,10 @@ def import_training_dependencies() -> dict[str, Any]:
             from trl.experimental.ppo import PPOConfig, PPOTrainer
         except ImportError:
             from trl import PPOConfig, PPOTrainer
+        try:
+            from trl import AutoModelForCausalLMWithValueHead
+        except ImportError:
+            from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
     except ImportError as exc:  # pragma: no cover - depends on runtime environment
         raise RuntimeError(
             "PPO training requires torch, transformers, datasets, peft, and trl."
@@ -545,7 +548,7 @@ def import_training_dependencies() -> dict[str, Any]:
         "PeftModel": PeftModel,
         "prepare_model_for_kbit_training": prepare_model_for_kbit_training,
         "AutoModelForCausalLM": AutoModelForCausalLM,
-        "AutoModelForSequenceClassification": AutoModelForSequenceClassification,
+        "AutoModelForCausalLMWithValueHead": AutoModelForCausalLMWithValueHead,
         "AutoTokenizer": AutoTokenizer,
         "BitsAndBytesConfig": BitsAndBytesConfig,
         "PPOConfig": PPOConfig,
@@ -625,67 +628,55 @@ def build_value_model(
     trust_remote_code: bool,
     local_files_only: bool,
 ) -> Any:
-    """Load an explicit scalar value model for experimental TRL PPOTrainer.
+    """Load a TRL value-head wrapper compatible with InternLM2-based ChemLLM.
 
-    Recent ``trl.experimental.ppo.PPOTrainer`` variants expect a real
-    ``transformers`` sequence-classification model instead of ``None`` or a
-    lightweight wrapper placeholder. We therefore load a 4-bit
-    ``AutoModelForSequenceClassification`` with ``num_labels=1`` and keep only
-    the scalar head trainable.
+    InternLM2 configs used by ChemLLM are not always registered for the Hugging
+    Face sequence-classification auto-model mapping, so the PPO value model
+    falls back to TRL's causal-LM value-head wrapper. We then
+    monkey-patch ``base_model_prefix`` so newer experimental PPO trainers can
+    treat the wrapper like a native transformers model.
     """
 
-    torch = deps["torch"]
-    quantization_config = deps["BitsAndBytesConfig"](
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-    value_model = deps["AutoModelForSequenceClassification"].from_pretrained(
-        str(model_path),
+    base_model = build_quantized_base_model(
+        deps,
+        model_path=model_path,
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
-        quantization_config=quantization_config,
-        dtype=torch.bfloat16,
-        device_map="auto",
-        num_labels=1,
+        prepare_for_training=False,
     )
-    if hasattr(value_model, "config"):
-        value_model.config.use_cache = False
-        value_model.config.pad_token_id = tokenizer.pad_token_id
-    if hasattr(value_model, "generation_config") and value_model.generation_config is not None:
-        value_model.generation_config.use_cache = False
+    value_model = deps["AutoModelForCausalLMWithValueHead"].from_pretrained(base_model)
 
-    if hasattr(value_model, "enable_input_require_grads"):
-        value_model.enable_input_require_grads()
-    value_model = deps["prepare_model_for_kbit_training"](
-        value_model,
-        use_gradient_checkpointing=True,
-    )
-    if hasattr(value_model, "gradient_checkpointing_enable"):
-        value_model.gradient_checkpointing_enable()
+    # Monkey Patch: 欺骗 TRL experimental API，让它以为这是一个原生的分类模型
+    if not hasattr(value_model, "base_model_prefix"):
+        value_model.base_model_prefix = "pretrained_model"
+
+    pretrained_model = getattr(value_model, "pretrained_model", None)
+    if pretrained_model is not None:
+        if hasattr(pretrained_model, "config"):
+            pretrained_model.config.use_cache = False
+            pretrained_model.config.pad_token_id = tokenizer.pad_token_id
+        if (
+            hasattr(pretrained_model, "generation_config")
+            and pretrained_model.generation_config is not None
+        ):
+            pretrained_model.generation_config.use_cache = False
+
+    if hasattr(value_model, "v_head"):
+        value_model.v_head.requires_grad_(True)
 
     for parameter in value_model.parameters():
         parameter.requires_grad = False
 
-    head_modules = [
-        getattr(value_model, attribute_name, None)
-        for attribute_name in ("score", "classifier", "classification_head")
-    ]
-    head_modules = [module for module in head_modules if module is not None]
-    for module in head_modules:
-        for parameter in module.parameters():
+    if hasattr(value_model, "v_head"):
+        for parameter in value_model.v_head.parameters():
             parameter.requires_grad = True
 
-    if not any(parameter.requires_grad for parameter in value_model.parameters()):
-        for name, parameter in value_model.named_parameters():
-            if any(token in name for token in ("score", "classifier", "classification_head")):
-                parameter.requires_grad = True
+    if pretrained_model is not None:
+        pretrained_model.eval()
+    value_model.train()
 
     if not any(parameter.requires_grad for parameter in value_model.parameters()):
-        raise RuntimeError(
-            "Could not identify a trainable scalar head on the PPO value model."
-        )
+        raise RuntimeError("Could not identify a trainable TRL value head for PPO.")
 
     return value_model
 
