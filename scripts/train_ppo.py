@@ -530,8 +530,11 @@ def import_training_dependencies() -> dict[str, Any]:
             set_seed,
         )
         try:
-            from trl import PPOConfig, PPOTrainer
-            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
+            from trl.experimental.ppo import (
+                AutoModelForCausalLMWithValueHead,
+                PPOConfig,
+                PPOTrainer,
+            )
         except ImportError:
             from trl import PPOConfig, PPOTrainer
             from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
@@ -723,6 +726,60 @@ def build_ppo_config(
     return ppo_config_cls(**filtered_kwargs)
 
 
+def build_ppo_trainer(
+    deps: dict[str, Any],
+    *,
+    ppo_config: Any,
+    policy_model: Any,
+    reference_model: Any,
+    tokenizer: Any,
+    dataset: Any,
+    logger: Any,
+) -> Any:
+    """Build PPOTrainer defensively across TRL API variants."""
+
+    torch = deps["torch"]
+    trainer_cls = deps["PPOTrainer"]
+    trainer_signature = inspect.signature(trainer_cls.__init__)
+    supported_keys = set(trainer_signature.parameters.keys())
+
+    trainer_kwargs: dict[str, Any] = {}
+
+    if "args" in supported_keys:
+        trainer_kwargs["args"] = ppo_config
+    elif "config" in supported_keys:
+        trainer_kwargs["config"] = ppo_config
+
+    if "model" in supported_keys:
+        trainer_kwargs["model"] = policy_model
+
+    if "ref_model" in supported_keys:
+        trainer_kwargs["ref_model"] = reference_model
+
+    if "processing_class" in supported_keys:
+        trainer_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in supported_keys:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    if "train_dataset" in supported_keys:
+        trainer_kwargs["train_dataset"] = dataset
+    elif "dataset" in supported_keys:
+        trainer_kwargs["dataset"] = dataset
+
+    if "data_collator" in supported_keys:
+        trainer_kwargs["data_collator"] = build_data_collator()
+
+    # Experimental PPOTrainer may expose Trainer-like required kwargs.
+    if "reward_model" in supported_keys and "reward_model" not in trainer_kwargs:
+        trainer_kwargs["reward_model"] = torch.nn.Identity()
+
+    if "value_model" in supported_keys and "value_model" not in trainer_kwargs:
+        trainer_kwargs["value_model"] = getattr(policy_model, "v_head", None) or torch.nn.Identity()
+
+    logger.info("Filtered PPOTrainer kwargs for current TRL version: %s", sorted(trainer_kwargs))
+    return trainer_cls(**trainer_kwargs)
+
+
 def normalize_token_tensor_list(
     torch: Any,
     values: Sequence[Any],
@@ -773,6 +830,46 @@ def normalize_generation_tensors(torch: Any, generated: Any) -> list[Any]:
             return [generated]
         return [generated[index] for index in range(generated.shape[0])]
     return list(generated)
+
+
+def run_ppo_step(
+    trainer: Any,
+    *,
+    query_tensors: Sequence[Any],
+    response_tensors: Sequence[Any],
+    rewards: Sequence[Any],
+) -> Any:
+    """Call PPOTrainer.step() defensively across TRL API variants."""
+
+    step_method = getattr(trainer, "step", None)
+    if step_method is None:
+        raise RuntimeError(
+            "Current PPOTrainer implementation does not expose step(). "
+            "This train_ppo.py rollout loop expects a step-based PPO API."
+        )
+
+    parameter_names = [
+        name
+        for name in inspect.signature(step_method).parameters.keys()
+        if name != "self"
+    ]
+
+    if len(parameter_names) < 3:
+        return step_method(query_tensors, response_tensors, rewards)
+
+    step_kwargs: dict[str, Any] = {}
+    for name in parameter_names:
+        lowered = name.lower()
+        if "query" in lowered:
+            step_kwargs[name] = query_tensors
+        elif "response" in lowered:
+            step_kwargs[name] = response_tensors
+        elif "reward" in lowered or "score" in lowered:
+            step_kwargs[name] = rewards
+
+    if len(step_kwargs) >= 3:
+        return step_method(**step_kwargs)
+    return step_method(query_tensors, response_tensors, rewards)
 
 
 def summarize_reward_traces(traces: Sequence[RewardTrace], responses: Sequence[str]) -> dict[str, float]:
@@ -952,13 +1049,14 @@ def main() -> None:
         logger=logger,
     )
 
-    ppo_trainer = deps["PPOTrainer"](
-        config=ppo_config,
-        model=policy_model,
-        ref_model=reference_model,
+    ppo_trainer = build_ppo_trainer(
+        deps,
+        ppo_config=ppo_config,
+        policy_model=policy_model,
+        reference_model=reference_model,
         tokenizer=tokenizer,
         dataset=dataset,
-        data_collator=build_data_collator(),
+        logger=logger,
     )
 
     rewarder = ChemRLRewarder(
@@ -1019,7 +1117,12 @@ def main() -> None:
                 device=ppo_trainer.accelerator.device,
             )
 
-            trainer_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+            trainer_stats = run_ppo_step(
+                ppo_trainer,
+                query_tensors=query_tensors,
+                response_tensors=response_tensors,
+                rewards=rewards,
+            )
 
             summary = summarize_reward_traces(traces, cleaned_responses)
             merged_stats = {
