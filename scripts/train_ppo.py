@@ -25,6 +25,11 @@ from pathlib import Path
 import re
 from typing import Any, Sequence
 
+# 开启离线模式：只记录不上传
+os.environ["WANDB_MODE"] = "offline"
+# 确保不会因为寻找 netrc 文件或登录信息而卡住
+os.environ["WANDB_SILENT"] = "true"
+
 from src.data.prompts import build_counterfactual_prompt
 from src.data.schemas import MoleculeRecord
 from src.models import clean_generated_smiles
@@ -40,6 +45,7 @@ DEFAULT_SFT_ADAPTER = REPO_ROOT / "outputs" / "hpc" / "sft_checkpoints" / "check
 DEFAULT_ORACLE_PATH = REPO_ROOT / "outputs" / "hpc" / "oracle" / "aids_rf_model.pkl"
 DEFAULT_DATASET_PATH = REPO_ROOT / "data" / "raw" / "AIDS" / "HIV.csv"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "hpc" / "rl_checkpoints"
+DEFAULT_WANDB_RUN_NAME = "ppo_aids_rl_v1"
 
 _SMILES_FIELD_PATTERNS = (
     re.compile(r"MOLECULE_SMILES:\s*(?P<smiles>[^\n\r]+)"),
@@ -926,6 +932,8 @@ def build_ppo_config(
         "mini_batch_size": int(actual_mini_batch_size),
         "learning_rate": float(args.learning_rate),
         "max_steps": int(args.max_steps),
+        "report_to": "wandb",
+        "run_name": DEFAULT_WANDB_RUN_NAME,
         "seed": int(args.seed),
     }
 
@@ -943,7 +951,7 @@ def build_ppo_config(
         desired_kwargs["kl_coef"] = float(args.init_kl_coef)
 
     if "log_with" in supported_keys:
-        desired_kwargs["log_with"] = None
+        desired_kwargs["log_with"] = "wandb"
 
     if "generate_kwargs" in supported_keys:
         desired_kwargs["generate_kwargs"] = generation_kwargs
@@ -1069,7 +1077,7 @@ def main() -> None:
     oracle_path = Path(args.oracle_path).expanduser().resolve()
 
     ensure_directory(output_dir)
-    run_name = f"ppo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_name = f"{DEFAULT_WANDB_RUN_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     log_dir = output_dir / "logs"
     logger = configure_run_logger(
         "train_ppo",
@@ -1092,6 +1100,8 @@ def main() -> None:
             "oracle_path": str(oracle_path),
             "dataset_path": str(dataset_path),
             "output_dir": str(output_dir),
+            "wandb_run_name": DEFAULT_WANDB_RUN_NAME,
+            "wandb_mode": os.environ.get("WANDB_MODE"),
             "args": vars(args),
         },
     )

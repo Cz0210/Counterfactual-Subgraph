@@ -271,6 +271,46 @@ Accepted
 
 ---
 
+## [2026-04-15] Run PPO WandB logging in offline mode for HPC nodes
+
+### Background
+The PPO training entrypoint is designed for HPC execution, but compute nodes in
+the target environment do not have outbound internet access. Direct online
+Weights & Biases logging would therefore stall or fail during trainer startup.
+
+### Decision
+Configure `scripts/train_ppo.py` to force WandB offline mode via environment
+variables:
+
+- `WANDB_MODE=offline`
+- `WANDB_SILENT=true`
+
+At the same time, keep the trainer-side reporting target aligned to WandB when
+supported by the runtime PPO config, so metrics are still written locally into
+the standard `wandb/` directory for later sync.
+
+The PPO config builder now forwards:
+
+- `report_to="wandb"` when supported;
+- `log_with="wandb"` for older compatible signatures;
+- `run_name="ppo_aids_rl_v1"` as the semantic experiment label.
+
+### Alternatives considered
+1. Disable WandB entirely on HPC and rely only on stdout or custom JSON logs.
+2. Require a separate shell wrapper to export WandB offline variables.
+3. Keep online WandB enabled and tolerate repeated timeout failures.
+
+### Consequences
+- PPO runs on air-gapped or internal-only HPC nodes no longer depend on live
+  WandB connectivity.
+- Local WandB artifacts remain available for later `wandb sync`.
+- Experiment naming is more stable across local logs and offline WandB runs.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
