@@ -474,6 +474,51 @@ Accepted
 
 ---
 
+## [2026-04-16] Disable InternLM2 KV cache across PPO trainer wrappers before rollout
+
+### Background
+After the PPO entrypoint finally entered the trainer-managed batch generation
+loop, ChemLLM's InternLM2 generation stack still failed inside
+`modeling_internlm2.py` when the runtime attempted to consume incompatible
+`past_key_values`. This failure occurred during PPO rollout rather than during
+model initialization.
+
+### Decision
+Add a trainer-side runtime patch in `scripts/train_ppo.py` that recursively
+walks the trainer model and common wrapper attributes such as:
+
+- `policy_model`
+- `pretrained_model`
+- `model`
+- `base_model`
+
+For each discovered layer, the patch:
+
+- forces `config.use_cache = False` when available;
+- forces `generation_config.use_cache = False` when available;
+- synchronizes `pad_token_id` and `eos_token_id` with the tokenizer.
+
+This patch is applied immediately after PPO trainer construction and before
+`ppo_trainer.train()`.
+
+### Alternatives considered
+1. Rely only on the earlier model-loading-time `use_cache=False` settings.
+2. Try to sanitize or rewrite `past_key_values` formats for InternLM2.
+3. Revert back to a completely manual rollout loop outside experimental TRL.
+
+### Consequences
+- PPO rollout is less likely to trigger InternLM2 KV-cache compatibility bugs
+  through deeply wrapped trainer models.
+- Token id settings stay aligned between tokenizer and generation config at the
+  exact point where trainer-managed generation begins.
+- The workaround remains local to the repository and does not require patching
+  upstream model files.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background

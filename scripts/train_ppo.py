@@ -1108,6 +1108,79 @@ def build_ppo_trainer(
     return trainer_cls(**trainer_kwargs)
 
 
+def patch_generation_runtime_for_internlm2(
+    model: Any,
+    tokenizer: Any,
+    *,
+    visited: set[int] | None = None,
+) -> None:
+    """Disable KV cache and align token ids across wrapped InternLM2 models.
+
+    ChemLLM's InternLM2 generation path can crash when experimental TRL /
+    transformers passes incompatible ``past_key_values`` during batched PPO
+    rollout. We therefore recursively disable ``use_cache`` and keep
+    ``pad_token_id`` / ``eos_token_id`` synchronized with the tokenizer across
+    wrappers such as ``PolicyAndValueWrapper``, PEFT models, and TRL value-head
+    wrappers.
+    """
+
+    if model is None:
+        return
+
+    if visited is None:
+        visited = set()
+
+    model_identity = id(model)
+    if model_identity in visited:
+        return
+    visited.add(model_identity)
+
+    config = getattr(model, "config", None)
+    if config is not None:
+        if hasattr(config, "use_cache"):
+            config.use_cache = False
+        if hasattr(config, "pad_token_id"):
+            config.pad_token_id = tokenizer.pad_token_id
+        if hasattr(config, "eos_token_id"):
+            config.eos_token_id = tokenizer.eos_token_id
+
+    generation_config = getattr(model, "generation_config", None)
+    if generation_config is not None:
+        if hasattr(generation_config, "use_cache"):
+            generation_config.use_cache = False
+        if hasattr(generation_config, "pad_token_id"):
+            generation_config.pad_token_id = tokenizer.pad_token_id
+        if hasattr(generation_config, "eos_token_id"):
+            generation_config.eos_token_id = tokenizer.eos_token_id
+
+    for attribute_name in (
+        "policy_model",
+        "pretrained_model",
+        "model",
+        "base_model",
+        "language_model",
+    ):
+        nested_model = getattr(model, attribute_name, None)
+        if nested_model is not None:
+            patch_generation_runtime_for_internlm2(
+                nested_model,
+                tokenizer,
+                visited=visited,
+            )
+
+
+def patch_ppo_trainer_generation_runtime(ppo_trainer: Any, tokenizer: Any) -> None:
+    """Patch trainer-managed models before PPO rollout begins."""
+
+    trainer_model = getattr(ppo_trainer, "model", None)
+    patch_generation_runtime_for_internlm2(trainer_model, tokenizer)
+
+    for attribute_name in ("policy_model", "ref_model", "reference_model", "value_model"):
+        nested_model = getattr(ppo_trainer, attribute_name, None)
+        if nested_model is not None:
+            patch_generation_runtime_for_internlm2(nested_model, tokenizer)
+
+
 def save_final_model(
     trainer: Any,
     tokenizer: Any,
@@ -1261,6 +1334,8 @@ def main() -> None:
         reward_model=reward_model,
         logger=logger,
     )
+    # 禁用 KV Cache 以绕过 InternLM2 架构的生成兼容性 Bug
+    patch_ppo_trainer_generation_runtime(ppo_trainer, tokenizer)
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()
