@@ -529,7 +529,8 @@ def import_training_dependencies() -> dict[str, Any]:
             set_seed,
         )
         try:
-            from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
+            from trl import PPOConfig, PPOTrainer
+            from trl.experimental.ppo import AutoModelForCausalLMWithValueHead
         except ImportError:
             from trl import PPOConfig, PPOTrainer
             from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
@@ -856,7 +857,6 @@ def main() -> None:
     )
 
     ppo_config = deps["PPOConfig"](
-        model_name=str(model_path),
         learning_rate=float(args.learning_rate),
         batch_size=int(actual_batch_size),
         mini_batch_size=int(actual_mini_batch_size),
@@ -864,8 +864,6 @@ def main() -> None:
         ppo_epochs=int(args.ppo_epochs),
         init_kl_coef=float(args.init_kl_coef),
         seed=int(args.seed),
-        log_with=None,
-        optimize_cuda_cache=True,
     )
 
     ppo_trainer = deps["PPOTrainer"](
