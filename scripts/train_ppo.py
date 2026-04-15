@@ -860,8 +860,6 @@ def main() -> None:
         learning_rate=float(args.learning_rate),
         batch_size=int(actual_batch_size),
         mini_batch_size=int(actual_mini_batch_size),
-        gradient_accumulation_steps=int(args.gradient_accumulation_steps),
-        ppo_epochs=int(args.ppo_epochs),
         init_kl_coef=float(args.init_kl_coef),
         seed=int(args.seed),
     )
