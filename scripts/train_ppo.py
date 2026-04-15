@@ -734,7 +734,10 @@ def _decode_text_batch(tokenizer: Any, payload: Any, *, torch: Any) -> list[str]
     if torch.is_tensor(payload):
         if payload.dim() == 1:
             payload = payload.unsqueeze(0)
-        return [str(text).strip() for text in tokenizer.batch_decode(payload, skip_special_tokens=True)]
+        return [
+            str(text).strip()
+            for text in tokenizer.batch_decode(payload.detach().cpu().tolist(), skip_special_tokens=True)
+        ]
     if isinstance(payload, dict):
         for key in ("query", "prompt", "response", "completion", "text"):
             if key in payload:
@@ -894,14 +897,49 @@ def build_hf_dataset(deps: dict[str, Any], tokenizer: Any, examples: Sequence[Pr
         row["input_ids"] = encoded["input_ids"]
         return row
 
-    return dataset.map(tokenize_row)
+    dataset = dataset.map(tokenize_row)
+    # 将数据集的底层格式转为 PyTorch Tensor，同时保留 query / smiles 等原始列。
+    dataset.set_format(
+        type="torch",
+        columns=["input_ids"],
+        output_all_columns=True,
+    )
+    return dataset
 
 
-def build_data_collator() -> Any:
-    """Return a minimal collator compatible with classic TRL PPOTrainer."""
+def build_data_collator(tokenizer: Any) -> Any:
+    """Return a tensor-producing collator compatible with experimental PPOTrainer."""
 
-    def collate(features: list[dict[str, Any]]) -> dict[str, list[Any]]:
-        return {key: [feature[key] for feature in features] for key in features[0]}
+    import torch
+
+    def collate(features: list[dict[str, Any]]) -> dict[str, Any]:
+        batch: dict[str, Any] = {}
+
+        if "input_ids" in features[0]:
+            token_features = []
+            for feature in features:
+                input_ids = feature["input_ids"]
+                if torch.is_tensor(input_ids):
+                    input_ids = input_ids.detach().cpu().tolist()
+                token_features.append({"input_ids": input_ids})
+            padded = tokenizer.pad(
+                token_features,
+                padding=True,
+                return_tensors="pt",
+            )
+            batch.update(padded)
+
+        for key in features[0]:
+            if key in {"input_ids", "attention_mask"}:
+                continue
+            values = [feature[key] for feature in features]
+            if all(torch.is_tensor(value) for value in values):
+                try:
+                    batch[key] = torch.stack(values)
+                    continue
+                except Exception:
+                    pass
+            batch[key] = values
 
     return collate
 
@@ -1028,7 +1066,7 @@ def build_ppo_trainer(
         trainer_kwargs["dataset_text_field"] = "query"
 
     if "data_collator" in supported_keys:
-        trainer_kwargs["data_collator"] = build_data_collator()
+        trainer_kwargs["data_collator"] = build_data_collator(tokenizer)
 
     if "reward_model" in supported_keys:
         trainer_kwargs["reward_model"] = reward_model

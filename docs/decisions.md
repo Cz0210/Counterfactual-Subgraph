@@ -311,6 +311,51 @@ Accepted
 
 ---
 
+## [2026-04-16] Force PPO datasets to emit tensors before entering experimental trainer
+
+### Background
+After the PPO entrypoint successfully crossed model and trainer initialization,
+the first runtime failure inside `trl.experimental.ppo.PPOTrainer.train()`
+occurred when the trainer tried to move `data["input_ids"]` onto the device.
+The immediate cause was that the Hugging Face dataset / collator path was still
+yielding Python lists instead of PyTorch tensors.
+
+### Decision
+Update `scripts/train_ppo.py` so that the PPO training dataset explicitly calls:
+
+- `dataset.set_format(type="torch", columns=["input_ids"], output_all_columns=True)`
+
+after tokenization, and replace the custom collator with a tensor-aware version
+that:
+
+- pads `input_ids` through `tokenizer.pad(..., return_tensors="pt")`;
+- emits `input_ids` and `attention_mask` as tensors;
+- preserves text metadata fields such as `query` and `parent_smiles` as Python
+  lists for downstream reward reconstruction.
+
+The reward wrapper's decoding path also now detaches tensor inputs to CPU
+before `batch_decode`, while keeping the returned reward tensor on the same
+device as `input_ids`.
+
+### Alternatives considered
+1. Rely only on `set_format("torch")` and keep the old collator unchanged.
+2. Drop the custom collator entirely and hope the trainer default handles mixed
+   text-and-tensor batches correctly.
+3. Convert data inside the trainer loop instead of fixing the dataset contract.
+
+### Consequences
+- Experimental PPOTrainer can now consume `input_ids` with a valid `.to(device)`
+  path.
+- The batch contract is more explicit and robust against future TRL internal
+  assumptions.
+- Reward evaluation remains device-safe even when the trainer feeds tensor
+  batches directly from GPU-backed training steps.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
