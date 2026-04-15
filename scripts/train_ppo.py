@@ -1157,45 +1157,59 @@ def sync_generation_token_ids(
             )
 
 
-def hijack_generate(target_model: Any) -> None:
-    """Hijack generate() to force cache-disabling kwargs at call time."""
+def patch_internlm_cache(trainer_model: Any) -> None:
+    """Patch the deepest InternLM2 generation class to ignore cache inputs.
 
-    if target_model is None or not hasattr(target_model, "generate"):
+    Experimental TRL and newer transformers can pass DynamicCache-structured
+    values that InternLM2's custom ``prepare_inputs_for_generation`` does not
+    understand. We therefore walk through common wrapper layers, find the
+    underlying causal LM class, and override its preparation method so every
+    generation call behaves like cache is fully disabled.
+    """
+
+    import torch
+
+    inner_model = trainer_model
+    for _ in range(5):
+        if hasattr(inner_model, "policy_model"):
+            inner_model = inner_model.policy_model
+        elif hasattr(inner_model, "base_model"):
+            inner_model = inner_model.base_model
+        elif hasattr(inner_model, "model") and not isinstance(inner_model.model, torch.nn.ModuleDict):
+            inner_model = inner_model.model
+        else:
+            break
+
+    model_cls = inner_model.__class__
+    if getattr(model_cls, "_is_cache_patched", False):
         return
-    if getattr(target_model, "_codex_generate_hijacked", False):
+
+    original_prepare = getattr(model_cls, "prepare_inputs_for_generation", None)
+    if original_prepare is None:
         return
 
-    original_generate = target_model.generate
-
-    def patched_generate(*args: Any, **kwargs: Any) -> Any:
-        # 无论 TRL 传了什么，强行覆写为 False
+    def patched_prepare(
+        self: Any,
+        input_ids: Any,
+        past_key_values: Any = None,
+        attention_mask: Any = None,
+        inputs_embeds: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        # 核心绝杀：无论 TRL 怎么传，强制把 past_key_values 设为 None
+        # 这会彻底切断出 Bug 的代码分支，让模型使用全量计算（等效于关闭 cache）
         kwargs["use_cache"] = False
-        kwargs.pop("past_key_values", None)
-        return original_generate(*args, **kwargs)
+        return original_prepare(
+            self,
+            input_ids,
+            past_key_values=None,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
 
-    target_model.generate = patched_generate
-    target_model._codex_generate_hijacked = True
-
-
-def patch_ppo_trainer_generate_runtime(ppo_trainer: Any, tokenizer: Any) -> None:
-    """Apply token-id sync and generate hijacking before PPO rollout begins."""
-
-    trainer_model = getattr(ppo_trainer, "model", None)
-    sync_generation_token_ids(trainer_model, tokenizer)
-
-    hijack_generate(trainer_model)
-    if hasattr(trainer_model, "policy_model"):
-        sync_generation_token_ids(trainer_model.policy_model, tokenizer)
-        hijack_generate(trainer_model.policy_model)
-    if hasattr(trainer_model, "policy_model") and hasattr(trainer_model.policy_model, "base_model"):
-        sync_generation_token_ids(trainer_model.policy_model.base_model, tokenizer)
-        hijack_generate(trainer_model.policy_model.base_model)
-
-    for attribute_name in ("pretrained_model", "language_model"):
-        nested_model = getattr(getattr(ppo_trainer, "model", None), attribute_name, None)
-        if nested_model is not None:
-            sync_generation_token_ids(nested_model, tokenizer)
-            hijack_generate(nested_model)
+    model_cls.prepare_inputs_for_generation = patched_prepare
+    model_cls._is_cache_patched = True
 
 
 def save_final_model(
@@ -1351,8 +1365,8 @@ def main() -> None:
         reward_model=reward_model,
         logger=logger,
     )
-    # 终极拦截：通过 generate 劫持强制关闭运行时 KV Cache 参数
-    patch_ppo_trainer_generate_runtime(ppo_trainer, tokenizer)
+    sync_generation_token_ids(getattr(ppo_trainer, "model", None), tokenizer)
+    patch_internlm_cache(ppo_trainer.model)
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()

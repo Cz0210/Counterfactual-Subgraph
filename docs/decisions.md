@@ -556,6 +556,46 @@ Accepted
 
 ---
 
+## [2026-04-16] Override InternLM2 prepare_inputs_for_generation at the deepest wrapped class
+
+### Background
+The generate-method hijack still proved insufficient once TRL, PEFT, and the
+current transformers cache stack interacted through multiple wrapper layers.
+InternLM2 continued to fail inside its own `prepare_inputs_for_generation`
+implementation because the expected tuple-style cache structure no longer
+matched what the runtime was trying to pass.
+
+### Decision
+Replace the generate-method interception in `scripts/train_ppo.py` with a
+deeper class-level patch that:
+
+- unwraps the trainer model through common wrapper attributes such as
+  `policy_model`, `base_model`, and `model`;
+- identifies the actual underlying causal LM class;
+- overrides `prepare_inputs_for_generation` on that class;
+- forces `past_key_values=None` and `use_cache=False` on every call.
+
+Tokenizer-aligned `pad_token_id` / `eos_token_id` synchronization remains in
+place before the patch is applied.
+
+### Alternatives considered
+1. Keep layering more `generate()` wrappers on top of TRL and PEFT.
+2. Patch InternLM2 source files directly in the runtime environment.
+3. Abandon trainer-managed generation and return to a manual PPO loop.
+
+### Consequences
+- The cache-breaking branch is cut off at the exact InternLM2 method where the
+  incompatibility manifests.
+- The fix is more resilient to outer wrapper churn because it targets the
+  effective model class rather than only the outermost object.
+- The workaround stays local to repository code and can be removed later if
+  upstream InternLM2 / transformers compatibility improves.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
