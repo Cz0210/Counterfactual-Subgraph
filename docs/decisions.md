@@ -356,6 +356,44 @@ Accepted
 
 ---
 
+## [2026-04-16] Use DataCollatorWithPadding-backed PPO collator for tensor-safe batches
+
+### Background
+After forcing the PPO dataset into torch format, the next trainer failure still
+occurred at batch materialization time because the custom collator path was not
+reliably returning a dictionary of tensors. In practice, the trainer ended up
+receiving `None` instead of a batch payload.
+
+### Decision
+Replace the fragile handcrafted padding path in `scripts/train_ppo.py` with a
+wrapper around Hugging Face's standard `DataCollatorWithPadding`, configured
+with `return_tensors="pt"`.
+
+The PPO collator now:
+
+- delegates token padding to `DataCollatorWithPadding`;
+- guarantees a returned batch dictionary;
+- validates that `input_ids` exists and is a tensor;
+- preserves non-model metadata fields such as `query`, `parent_smiles`, and
+  `original_label` as Python lists for downstream reward reconstruction.
+
+### Alternatives considered
+1. Keep the custom collator and only add a missing `return batch`.
+2. Drop metadata preservation and use a raw Hugging Face collator directly.
+3. Remove the collator override and rely fully on trainer defaults.
+
+### Consequences
+- PPO batches now have a much stronger contract before they enter
+  `trl.experimental.ppo.PPOTrainer`.
+- Standard padding behavior is delegated to a well-tested transformers utility.
+- Reward logic can still reconstruct prompt context without coupling that logic
+  to the token padding implementation.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background

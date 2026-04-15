@@ -530,6 +530,7 @@ def import_training_dependencies() -> dict[str, Any]:
             AutoModelForCausalLM,
             AutoTokenizer,
             BitsAndBytesConfig,
+            DataCollatorWithPadding,
             set_seed,
         )
         try:
@@ -554,6 +555,7 @@ def import_training_dependencies() -> dict[str, Any]:
         "AutoModelForCausalLMWithValueHead": AutoModelForCausalLMWithValueHead,
         "AutoTokenizer": AutoTokenizer,
         "BitsAndBytesConfig": BitsAndBytesConfig,
+        "DataCollatorWithPadding": DataCollatorWithPadding,
         "PPOConfig": PPOConfig,
         "PPOTrainer": PPOTrainer,
         "set_seed": set_seed,
@@ -898,6 +900,8 @@ def build_hf_dataset(deps: dict[str, Any], tokenizer: Any, examples: Sequence[Pr
         return row
 
     dataset = dataset.map(tokenize_row)
+    if "input_ids" not in dataset.column_names:
+        raise RuntimeError("Tokenized PPO dataset is missing required 'input_ids' column.")
     # 将数据集的底层格式转为 PyTorch Tensor，同时保留 query / smiles 等原始列。
     dataset.set_format(
         type="torch",
@@ -907,27 +911,37 @@ def build_hf_dataset(deps: dict[str, Any], tokenizer: Any, examples: Sequence[Pr
     return dataset
 
 
-def build_data_collator(tokenizer: Any) -> Any:
-    """Return a tensor-producing collator compatible with experimental PPOTrainer."""
+def build_data_collator(deps: dict[str, Any], tokenizer: Any) -> Any:
+    """Return a tensor-producing collator compatible with experimental PPOTrainer.
+
+    We use Hugging Face's standard ``DataCollatorWithPadding`` for the model
+    inputs, then re-attach non-tensor metadata fields so reward reconstruction
+    still has access to the original prompt strings.
+    """
 
     import torch
 
+    standard_collator = deps["DataCollatorWithPadding"](
+        tokenizer=tokenizer,
+        return_tensors="pt",
+    )
+
     def collate(features: list[dict[str, Any]]) -> dict[str, Any]:
+        if not features:
+            raise ValueError("PPO data_collator received an empty features list.")
+
         batch: dict[str, Any] = {}
 
-        if "input_ids" in features[0]:
-            token_features = []
-            for feature in features:
-                input_ids = feature["input_ids"]
-                if torch.is_tensor(input_ids):
-                    input_ids = input_ids.detach().cpu().tolist()
-                token_features.append({"input_ids": input_ids})
-            padded = tokenizer.pad(
-                token_features,
-                padding=True,
-                return_tensors="pt",
-            )
-            batch.update(padded)
+        if "input_ids" not in features[0]:
+            raise KeyError("PPO data_collator expected every feature to contain 'input_ids'.")
+
+        token_features = []
+        for feature in features:
+            input_ids = feature["input_ids"]
+            if torch.is_tensor(input_ids):
+                input_ids = input_ids.detach().cpu().tolist()
+            token_features.append({"input_ids": input_ids})
+        batch.update(standard_collator(token_features))
 
         for key in features[0]:
             if key in {"input_ids", "attention_mask"}:
@@ -940,6 +954,10 @@ def build_data_collator(tokenizer: Any) -> Any:
                 except Exception:
                     pass
             batch[key] = values
+
+        if "input_ids" not in batch or not torch.is_tensor(batch["input_ids"]):
+            raise RuntimeError("PPO data_collator failed to return tensor 'input_ids'.")
+        return batch
 
     return collate
 
@@ -1066,7 +1084,7 @@ def build_ppo_trainer(
         trainer_kwargs["dataset_text_field"] = "query"
 
     if "data_collator" in supported_keys:
-        trainer_kwargs["data_collator"] = build_data_collator(tokenizer)
+        trainer_kwargs["data_collator"] = build_data_collator(deps, tokenizer)
 
     if "reward_model" in supported_keys:
         trainer_kwargs["reward_model"] = reward_model
