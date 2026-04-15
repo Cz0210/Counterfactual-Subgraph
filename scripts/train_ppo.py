@@ -1108,21 +1108,13 @@ def build_ppo_trainer(
     return trainer_cls(**trainer_kwargs)
 
 
-def patch_generation_runtime_for_internlm2(
+def sync_generation_token_ids(
     model: Any,
     tokenizer: Any,
     *,
     visited: set[int] | None = None,
 ) -> None:
-    """Disable KV cache and align token ids across wrapped InternLM2 models.
-
-    ChemLLM's InternLM2 generation path can crash when experimental TRL /
-    transformers passes incompatible ``past_key_values`` during batched PPO
-    rollout. We therefore recursively disable ``use_cache`` and keep
-    ``pad_token_id`` / ``eos_token_id`` synchronized with the tokenizer across
-    wrappers such as ``PolicyAndValueWrapper``, PEFT models, and TRL value-head
-    wrappers.
-    """
+    """Synchronize generation token ids across wrapped PPO models."""
 
     if model is None:
         return
@@ -1137,8 +1129,6 @@ def patch_generation_runtime_for_internlm2(
 
     config = getattr(model, "config", None)
     if config is not None:
-        if hasattr(config, "use_cache"):
-            config.use_cache = False
         if hasattr(config, "pad_token_id"):
             config.pad_token_id = tokenizer.pad_token_id
         if hasattr(config, "eos_token_id"):
@@ -1146,8 +1136,6 @@ def patch_generation_runtime_for_internlm2(
 
     generation_config = getattr(model, "generation_config", None)
     if generation_config is not None:
-        if hasattr(generation_config, "use_cache"):
-            generation_config.use_cache = False
         if hasattr(generation_config, "pad_token_id"):
             generation_config.pad_token_id = tokenizer.pad_token_id
         if hasattr(generation_config, "eos_token_id"):
@@ -1162,23 +1150,52 @@ def patch_generation_runtime_for_internlm2(
     ):
         nested_model = getattr(model, attribute_name, None)
         if nested_model is not None:
-            patch_generation_runtime_for_internlm2(
+            sync_generation_token_ids(
                 nested_model,
                 tokenizer,
                 visited=visited,
             )
 
 
-def patch_ppo_trainer_generation_runtime(ppo_trainer: Any, tokenizer: Any) -> None:
-    """Patch trainer-managed models before PPO rollout begins."""
+def hijack_generate(target_model: Any) -> None:
+    """Hijack generate() to force cache-disabling kwargs at call time."""
+
+    if target_model is None or not hasattr(target_model, "generate"):
+        return
+    if getattr(target_model, "_codex_generate_hijacked", False):
+        return
+
+    original_generate = target_model.generate
+
+    def patched_generate(*args: Any, **kwargs: Any) -> Any:
+        # 无论 TRL 传了什么，强行覆写为 False
+        kwargs["use_cache"] = False
+        kwargs.pop("past_key_values", None)
+        return original_generate(*args, **kwargs)
+
+    target_model.generate = patched_generate
+    target_model._codex_generate_hijacked = True
+
+
+def patch_ppo_trainer_generate_runtime(ppo_trainer: Any, tokenizer: Any) -> None:
+    """Apply token-id sync and generate hijacking before PPO rollout begins."""
 
     trainer_model = getattr(ppo_trainer, "model", None)
-    patch_generation_runtime_for_internlm2(trainer_model, tokenizer)
+    sync_generation_token_ids(trainer_model, tokenizer)
 
-    for attribute_name in ("policy_model", "ref_model", "reference_model", "value_model"):
-        nested_model = getattr(ppo_trainer, attribute_name, None)
+    hijack_generate(trainer_model)
+    if hasattr(trainer_model, "policy_model"):
+        sync_generation_token_ids(trainer_model.policy_model, tokenizer)
+        hijack_generate(trainer_model.policy_model)
+    if hasattr(trainer_model, "policy_model") and hasattr(trainer_model.policy_model, "base_model"):
+        sync_generation_token_ids(trainer_model.policy_model.base_model, tokenizer)
+        hijack_generate(trainer_model.policy_model.base_model)
+
+    for attribute_name in ("pretrained_model", "language_model"):
+        nested_model = getattr(getattr(ppo_trainer, "model", None), attribute_name, None)
         if nested_model is not None:
-            patch_generation_runtime_for_internlm2(nested_model, tokenizer)
+            sync_generation_token_ids(nested_model, tokenizer)
+            hijack_generate(nested_model)
 
 
 def save_final_model(
@@ -1334,8 +1351,8 @@ def main() -> None:
         reward_model=reward_model,
         logger=logger,
     )
-    # 禁用 KV Cache 以绕过 InternLM2 架构的生成兼容性 Bug
-    patch_ppo_trainer_generation_runtime(ppo_trainer, tokenizer)
+    # 终极拦截：通过 generate 劫持强制关闭运行时 KV Cache 参数
+    patch_ppo_trainer_generate_runtime(ppo_trainer, tokenizer)
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()

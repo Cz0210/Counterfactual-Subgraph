@@ -519,6 +519,43 @@ Accepted
 
 ---
 
+## [2026-04-16] Replace static InternLM2 cache patch with generate-method hijacking
+
+### Background
+Even after synchronizing `use_cache=False` into wrapped model configs, the PPO
+runtime could still reintroduce cache-related generation kwargs dynamically
+through experimental TRL batch generation. As a result, InternLM2 continued to
+receive incompatible cache inputs during rollout.
+
+### Decision
+Change the PPO runtime workaround in `scripts/train_ppo.py` from static
+generation-config edits to method hijacking:
+
+- keep tokenizer-aligned `pad_token_id` / `eos_token_id` synchronization;
+- wrap `generate()` on the trainer model, policy model, and base model when
+  available;
+- force `kwargs["use_cache"] = False` on every generation call;
+- drop `past_key_values` from generation kwargs before delegating to the
+  original method.
+
+### Alternatives considered
+1. Keep stacking more static `config.use_cache=False` assignments.
+2. Patch InternLM2 model code directly.
+3. Revert back to a custom manual rollout loop outside experimental TRL.
+
+### Consequences
+- Cache disabling now applies at the exact generation call boundary where TRL
+  injects kwargs.
+- The workaround is less sensitive to internal trainer overrides of static
+  generation config.
+- The script keeps a narrow, local compatibility layer without mutating
+  external package files.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
