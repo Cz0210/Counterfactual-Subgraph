@@ -655,6 +655,27 @@ def build_value_head_model(
     return value_head_model
 
 
+def ensure_generation_config_on_wrapper(model: Any) -> Any:
+    """Expose generation_config on TRL value-head wrappers.
+
+    Newer TRL experimental PPOTrainer implementations may expect the wrapper
+    object itself to carry ``generation_config``, while
+    ``AutoModelForCausalLMWithValueHead`` keeps it on ``pretrained_model``.
+    """
+
+    if model is None:
+        return None
+
+    if hasattr(model, "generation_config") and model.generation_config is not None:
+        return model
+
+    pretrained_model = getattr(model, "pretrained_model", None)
+    generation_config = getattr(pretrained_model, "generation_config", None)
+    if generation_config is not None:
+        model.generation_config = generation_config
+    return model
+
+
 def build_hf_dataset(deps: dict[str, Any], tokenizer: Any, examples: Sequence[PromptExample]) -> Any:
     """Materialize a Hugging Face dataset with one tokenized query column."""
 
@@ -1040,6 +1061,8 @@ def main() -> None:
         local_files_only=args.local_files_only,
         is_trainable=False,
     )
+    policy_model = ensure_generation_config_on_wrapper(policy_model)
+    reference_model = ensure_generation_config_on_wrapper(reference_model)
 
     ppo_config = build_ppo_config(
         deps,
