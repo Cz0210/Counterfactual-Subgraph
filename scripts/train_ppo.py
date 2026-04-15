@@ -986,6 +986,7 @@ def build_ppo_config(
     desired_kwargs: dict[str, Any] = {
         "batch_size": int(actual_batch_size),
         "mini_batch_size": int(actual_mini_batch_size),
+        "gradient_checkpointing": False,
         "learning_rate": float(args.learning_rate),
         "max_steps": int(args.max_steps),
         "report_to": "wandb",
@@ -1093,6 +1094,31 @@ def build_ppo_trainer(
 
     logger.info("Filtered PPOTrainer kwargs for current TRL version: %s", sorted(trainer_kwargs))
     return trainer_cls(**trainer_kwargs)
+
+
+def patch_trl_policy_and_value_wrapper(ppo_trainer: Any) -> None:
+    """Expose gradient checkpointing hooks on TRL experimental wrappers.
+
+    Some ``trl.experimental`` releases wrap the policy/value stack in a
+    ``PolicyAndValueWrapper`` but forget to forward
+    ``gradient_checkpointing_disable`` / ``gradient_checkpointing_enable``.
+    During generation, TRL may call these methods on the wrapper object
+    directly, which then raises an ``AttributeError`` even though the wrapped
+    policy model implements them correctly.
+    """
+
+    wrapper = getattr(ppo_trainer, "model", None)
+    if wrapper is None:
+        return
+
+    policy_model = getattr(wrapper, "policy_model", None)
+    if policy_model is None:
+        return
+
+    if hasattr(policy_model, "gradient_checkpointing_disable"):
+        wrapper.gradient_checkpointing_disable = policy_model.gradient_checkpointing_disable
+    if hasattr(policy_model, "gradient_checkpointing_enable"):
+        wrapper.gradient_checkpointing_enable = policy_model.gradient_checkpointing_enable
 
 
 def save_final_model(
@@ -1248,6 +1274,8 @@ def main() -> None:
         reward_model=reward_model,
         logger=logger,
     )
+    # Monkey Patch: 修复 TRL Experimental API 中 PolicyAndValueWrapper 属性丢失的官方 Bug
+    patch_trl_policy_and_value_wrapper(ppo_trainer)
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()

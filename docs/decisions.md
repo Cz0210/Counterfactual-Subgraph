@@ -394,6 +394,47 @@ Accepted
 
 ---
 
+## [2026-04-16] Monkey-patch experimental PPO wrapper to expose gradient checkpointing hooks
+
+### Background
+After the PPO data path was repaired, the next runtime failure came from
+`trl.experimental.ppo` itself: the trainer's internal `PolicyAndValueWrapper`
+was missing `gradient_checkpointing_disable` and
+`gradient_checkpointing_enable`, even though the wrapped policy model already
+implemented them.
+
+### Decision
+Patch the trainer-managed wrapper immediately after PPO trainer construction in
+`scripts/train_ppo.py`:
+
+- if `ppo_trainer.model.policy_model.gradient_checkpointing_disable` exists,
+  bind it onto `ppo_trainer.model.gradient_checkpointing_disable`;
+- do the same for `gradient_checkpointing_enable`.
+
+In parallel, the PPO config builder now explicitly forwards
+`gradient_checkpointing=False` when the runtime config signature supports that
+field, so trainer-side generation does not try to rely on checkpoint toggling
+more than necessary.
+
+### Alternatives considered
+1. Wait for an upstream TRL patch and leave the local training script broken.
+2. Disable wrapper-managed generation entirely and fall back to a handwritten
+   PPO rollout loop again.
+3. Monkey-patch TRL package files directly in the environment.
+
+### Consequences
+- The repository no longer depends on an immediate upstream TRL fix for this
+  wrapper attribute bug.
+- The workaround stays local to the PPO entrypoint instead of mutating
+  site-packages.
+- Generation-time checkpoint toggling is less likely to derail short HPC PPO
+  smoke tests.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
