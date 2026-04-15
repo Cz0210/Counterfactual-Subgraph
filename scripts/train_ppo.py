@@ -17,21 +17,18 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 import inspect
-import json
 import os
 from pathlib import Path
 import re
-from statistics import mean
 from typing import Any, Sequence
 
 from src.data.prompts import build_counterfactual_prompt
 from src.data.schemas import MoleculeRecord
 from src.models import clean_generated_smiles
-from src.rewards import analyze_batch_collapse
-from src.reward.reward_wrapper import ChemRLRewarder, RewardTrace
+from src.reward.reward_wrapper import ChemRLRewarder
 from src.utils.io import ensure_directory, read_jsonl
 from src.utils.logging_utils import RunContext, configure_run_logger, write_runtime_manifest
 from src.utils import apply_dotlist_overrides, load_and_merge_config_files
@@ -928,7 +925,16 @@ def build_ppo_config(
         "batch_size": int(actual_batch_size),
         "mini_batch_size": int(actual_mini_batch_size),
         "learning_rate": float(args.learning_rate),
+        "max_steps": int(args.max_steps),
         "seed": int(args.seed),
+    }
+
+    generation_kwargs = {
+        "max_new_tokens": int(args.max_new_tokens),
+        "do_sample": True,
+        "temperature": float(args.temperature),
+        "top_p": float(args.top_p),
+        "use_cache": False,
     }
 
     if "init_kl_coef" in supported_keys:
@@ -938,6 +944,15 @@ def build_ppo_config(
 
     if "log_with" in supported_keys:
         desired_kwargs["log_with"] = None
+
+    if "generate_kwargs" in supported_keys:
+        desired_kwargs["generate_kwargs"] = generation_kwargs
+    elif "generation_kwargs" in supported_keys:
+        desired_kwargs["generation_kwargs"] = generation_kwargs
+    elif "response_length" in supported_keys:
+        desired_kwargs["response_length"] = int(args.max_new_tokens)
+    elif "max_new_tokens" in supported_keys:
+        desired_kwargs["max_new_tokens"] = int(args.max_new_tokens)
 
     filtered_kwargs = {
         key: value
@@ -1016,254 +1031,29 @@ def build_ppo_trainer(
     return trainer_cls(**trainer_kwargs)
 
 
-def get_trainer_dataloader(trainer: Any) -> Any:
-    """Return the active training dataloader across TRL / Trainer variants."""
-
-    dataloader = getattr(trainer, "dataloader", None)
-    if dataloader is not None:
-        return dataloader
-
-    get_train_dataloader = getattr(trainer, "get_train_dataloader", None)
-    if callable(get_train_dataloader):
-        return get_train_dataloader()
-
-    raise RuntimeError("Current PPOTrainer does not expose a usable training dataloader.")
-
-
-def resolve_trainer_device(trainer: Any, fallback_model: Any) -> Any:
-    """Infer the device used by the active PPO policy."""
-
-    accelerator = getattr(trainer, "accelerator", None)
-    device = getattr(accelerator, "device", None)
-    if device is not None:
-        return device
-
-    for model in (getattr(trainer, "model", None), fallback_model):
-        if model is None:
-            continue
-        try:
-            return next(model.parameters()).device
-        except (AttributeError, StopIteration, TypeError):
-            continue
-
-    raise RuntimeError("Could not infer the PPO training device from trainer or model.")
-
-
-def is_main_process(trainer: Any) -> bool:
-    """Best-effort main-process check for single-node logging and checkpointing."""
-
-    accelerator = getattr(trainer, "accelerator", None)
-    if accelerator is None:
-        return True
-    return bool(getattr(accelerator, "is_main_process", True))
-
-
-def generate_responses(
-    trainer: Any,
-    *,
-    torch: Any,
-    policy_model: Any,
-    query_tensors: Sequence[Any],
-    generation_kwargs: dict[str, Any],
-) -> Any:
-    """Generate responses via trainer.generate() or fall back to model.generate()."""
-
-    generate_method = getattr(trainer, "generate", None)
-    if callable(generate_method):
-        return generate_method(
-            query_tensors,
-            return_prompt=False,
-            **generation_kwargs,
-        )
-
-    model = getattr(trainer, "model", None) or policy_model
-    if model is None or not hasattr(model, "generate"):
-        raise RuntimeError("Neither PPOTrainer nor the wrapped policy model exposes generate().")
-
-    if not query_tensors:
-        raise ValueError("query_tensors must not be empty during PPO generation.")
-    input_ids = torch.nn.utils.rnn.pad_sequence(
-        list(query_tensors),
-        batch_first=True,
-        padding_value=int(generation_kwargs.get("pad_token_id", 0)),
-    )
-    attention_mask = input_ids.ne(int(generation_kwargs.get("pad_token_id", 0))).long()
-    return model.generate(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        **generation_kwargs,
-    )
-
-
-def normalize_token_tensor_list(
-    torch: Any,
-    values: Sequence[Any],
-    *,
-    device: Any,
-) -> list[Any]:
-    """Convert token sequences into the 1D long tensors expected by PPO step/generate."""
-
-    normalized: list[Any] = []
-    for value in values:
-        tensor = value if torch.is_tensor(value) else torch.tensor(value, dtype=torch.long)
-        tensor = tensor.to(device=device, dtype=torch.long)
-        if tensor.dim() == 0:
-            tensor = tensor.unsqueeze(0)
-        elif tensor.dim() > 1:
-            tensor = tensor.reshape(-1)
-        normalized.append(tensor.contiguous())
-    return normalized
-
-
-def normalize_reward_tensor_list(
-    torch: Any,
-    values: Sequence[Any],
-    *,
-    device: Any,
-) -> list[Any]:
-    """Convert reward values into scalar float tensors for PPOTrainer.step()."""
-
-    normalized: list[Any] = []
-    for value in values:
-        tensor = value if torch.is_tensor(value) else torch.tensor(value, dtype=torch.float32)
-        tensor = tensor.to(device=device, dtype=torch.float32)
-        if tensor.dim() > 0:
-            tensor = tensor.reshape(-1)
-            if tensor.numel() != 1:
-                tensor = tensor.mean()
-            else:
-                tensor = tensor.squeeze(0)
-        normalized.append(tensor)
-    return normalized
-
-
-def normalize_generation_tensors(torch: Any, generated: Any) -> list[Any]:
-    """Normalize different TRL generate() return types into a list of tensors."""
-
-    if torch.is_tensor(generated):
-        if generated.dim() == 1:
-            return [generated]
-        return [generated[index] for index in range(generated.shape[0])]
-    return list(generated)
-
-
-def run_ppo_step(
-    trainer: Any,
-    *,
-    query_tensors: Sequence[Any],
-    response_tensors: Sequence[Any],
-    rewards: Sequence[Any],
-) -> Any:
-    """Call PPOTrainer.step() defensively across TRL API variants."""
-
-    step_method = getattr(trainer, "step", None)
-    if step_method is None:
-        raise RuntimeError(
-            "Current PPOTrainer implementation does not expose step(). "
-            "This train_ppo.py rollout loop expects a step-based PPO API."
-        )
-
-    parameter_names = [
-        name
-        for name in inspect.signature(step_method).parameters.keys()
-        if name != "self"
-    ]
-
-    if len(parameter_names) < 3:
-        return step_method(query_tensors, response_tensors, rewards)
-
-    step_kwargs: dict[str, Any] = {}
-    for name in parameter_names:
-        lowered = name.lower()
-        if "query" in lowered:
-            step_kwargs[name] = query_tensors
-        elif "response" in lowered:
-            step_kwargs[name] = response_tensors
-        elif "reward" in lowered or "score" in lowered:
-            step_kwargs[name] = rewards
-
-    if len(step_kwargs) >= 3:
-        return step_method(**step_kwargs)
-    return step_method(query_tensors, response_tensors, rewards)
-
-
-def summarize_reward_traces(traces: Sequence[RewardTrace], responses: Sequence[str]) -> dict[str, float]:
-    """Aggregate reward traces into one flat logging dictionary."""
-
-    rewards = [float(trace.reward) for trace in traces]
-    target_probabilities = [
-        float(trace.target_probability)
-        for trace in traces
-        if trace.target_probability is not None
-    ]
-    collapse = analyze_batch_collapse(list(responses))
-
-    return {
-        "reward_mean": mean(rewards) if rewards else 0.0,
-        "reward_min": min(rewards) if rewards else 0.0,
-        "reward_max": max(rewards) if rewards else 0.0,
-        "valid_rate": mean(1.0 if trace.valid_smiles else 0.0 for trace in traces) if traces else 0.0,
-        "connected_rate": (
-            mean(1.0 if trace.connected_fragment else 0.0 for trace in traces) if traces else 0.0
-        ),
-        "subgraph_rate": mean(1.0 if trace.is_subgraph else 0.0 for trace in traces) if traces else 0.0,
-        "deletion_rate": mean(1.0 if trace.deletion_success else 0.0 for trace in traces) if traces else 0.0,
-        "flip_rate": mean(1.0 if trace.flip_success else 0.0 for trace in traces) if traces else 0.0,
-        "target_probability_mean": mean(target_probabilities) if target_probabilities else 0.0,
-        "response_length_mean": mean(len(response) for response in responses) if responses else 0.0,
-        "collapse_longest_run": float(collapse.longest_run),
-        "collapse_dominant_fraction": float(collapse.dominant_character_fraction),
-        "collapse_duplicate_fraction": float(collapse.duplicate_output_fraction),
-    }
-
-
-def scalarize_stats(payload: dict[str, Any]) -> dict[str, float | int | str | bool | None]:
-    """Best-effort conversion of trainer stats to JSON-friendly scalars."""
-
-    flattened: dict[str, float | int | str | bool | None] = {}
-    for key, value in payload.items():
-        if isinstance(value, (float, int, str, bool)) or value is None:
-            flattened[str(key)] = value
-            continue
-        if hasattr(value, "item"):
-            try:
-                flattened[str(key)] = value.item()
-                continue
-            except Exception:
-                pass
-        flattened[str(key)] = str(value)
-    return flattened
-
-
-def append_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
-    """Append dictionaries to a JSONL file."""
-
-    ensure_directory(path.parent)
-    with path.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False))
-            handle.write("\n")
-
-
-def save_checkpoint(
+def save_final_model(
     trainer: Any,
     tokenizer: Any,
     output_dir: Path,
-    *,
-    step: int | str,
 ) -> Path:
-    """Persist the PPO policy and tokenizer to one checkpoint directory."""
+    """Persist the final PPO artifacts after trainer-managed training."""
 
-    checkpoint_dir = output_dir / f"checkpoint-{step}"
-    ensure_directory(checkpoint_dir)
-    if hasattr(trainer, "save_pretrained"):
-        trainer.save_pretrained(str(checkpoint_dir))
+    accelerator = getattr(trainer, "accelerator", None)
+    if accelerator is not None and not bool(getattr(accelerator, "is_main_process", True)):
+        return output_dir
+
+    ensure_directory(output_dir)
+    save_model = getattr(trainer, "save_model", None)
+    if callable(save_model):
+        save_model(str(output_dir))
+    elif hasattr(trainer, "save_pretrained"):
+        trainer.save_pretrained(str(output_dir))
     elif hasattr(trainer, "model") and hasattr(trainer.model, "save_pretrained"):
-        trainer.model.save_pretrained(str(checkpoint_dir))
+        trainer.model.save_pretrained(str(output_dir))
     else:  # pragma: no cover - depends on TRL runtime
-        raise RuntimeError("Neither PPOTrainer nor its model exposes save_pretrained().")
-    tokenizer.save_pretrained(str(checkpoint_dir))
-    return checkpoint_dir
+        raise RuntimeError("Neither PPOTrainer nor its model exposes a save method.")
+    tokenizer.save_pretrained(str(output_dir))
+    return output_dir
 
 
 def main() -> None:
@@ -1393,141 +1183,14 @@ def main() -> None:
         logger=logger,
     )
 
-    generation_kwargs = {
-        "max_new_tokens": int(args.max_new_tokens),
-        "do_sample": True,
-        "temperature": float(args.temperature),
-        "top_p": float(args.top_p),
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-        "use_cache": False,
-    }
-
-    stats_path = output_dir / "ppo_stats.jsonl"
-    samples_path = output_dir / "ppo_samples.jsonl"
-    global_step = 0
-    trainer_device = resolve_trainer_device(ppo_trainer, policy_model)
-    dataloader = get_trainer_dataloader(ppo_trainer)
-
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
-
-    while global_step < int(args.max_steps):
-        for batch in dataloader:
-            global_step += 1
-            query_tensors = normalize_token_tensor_list(
-                torch,
-                batch["input_ids"],
-                device=trainer_device,
-            )
-            generated = generate_responses(
-                ppo_trainer,
-                torch=torch,
-                policy_model=policy_model,
-                query_tensors=query_tensors,
-                generation_kwargs=generation_kwargs,
-            )
-            response_tensors = normalize_token_tensor_list(
-                torch,
-                normalize_generation_tensors(torch, generated),
-                device=trainer_device,
-            )
-            raw_responses = [
-                tokenizer.decode(response_tensor, skip_special_tokens=True).strip()
-                for response_tensor in response_tensors
-            ]
-            cleaned_responses = [clean_generated_smiles(text) for text in raw_responses]
-            parent_smiles_batch = [str(value) for value in batch["parent_smiles"]]
-            original_label_batch = [int(value) for value in batch["original_label"]]
-
-            traces = rewarder.calculate_reward_details_batch(
-                parent_smiles_batch,
-                cleaned_responses,
-                parent_labels=original_label_batch,
-            )
-            rewards = normalize_reward_tensor_list(
-                torch,
-                [trace.reward for trace in traces],
-                device=trainer_device,
-            )
-
-            trainer_stats = run_ppo_step(
-                ppo_trainer,
-                query_tensors=query_tensors,
-                response_tensors=response_tensors,
-                rewards=rewards,
-            )
-
-            summary = summarize_reward_traces(traces, cleaned_responses)
-            merged_stats = {
-                "step": global_step,
-                **summary,
-                **scalarize_stats(trainer_stats),
-            }
-
-            if is_main_process(ppo_trainer):
-                append_jsonl(stats_path, [merged_stats])
-                sample_rows: list[dict[str, Any]] = []
-                for local_index, trace in enumerate(traces[: min(3, len(traces))]):
-                    sample_rows.append(
-                        {
-                            "step": global_step,
-                            "index_in_batch": local_index,
-                            "query": batch["query"][local_index],
-                            "parent_smiles": parent_smiles_batch[local_index],
-                            "original_label": original_label_batch[local_index],
-                            "raw_response": raw_responses[local_index],
-                            "cleaned_response": cleaned_responses[local_index],
-                            "reward_trace": trace.to_dict(),
-                        }
-                    )
-                append_jsonl(samples_path, sample_rows)
-
-            if global_step == 1 or global_step % int(args.logging_steps) == 0:
-                logger.info(
-                    "step=%s reward_mean=%.4f valid_rate=%.3f subgraph_rate=%.3f flip_rate=%.3f "
-                    "target_prob=%.4f dup=%.3f longest_run=%.0f",
-                    global_step,
-                    summary["reward_mean"],
-                    summary["valid_rate"],
-                    summary["subgraph_rate"],
-                    summary["flip_rate"],
-                    summary["target_probability_mean"],
-                    summary["collapse_duplicate_fraction"],
-                    summary["collapse_longest_run"],
-                )
-
-            try:
-                ppo_trainer.log_stats(
-                    trainer_stats,
-                    {
-                        "query": batch["query"],
-                        "response": raw_responses,
-                    },
-                    rewards,
-                )
-            except Exception:
-                logger.debug("ppo_trainer.log_stats failed; continuing.", exc_info=True)
-
-            if global_step % int(args.save_steps) == 0 and is_main_process(ppo_trainer):
-                checkpoint_dir = save_checkpoint(
-                    ppo_trainer,
-                    tokenizer,
-                    output_dir,
-                    step=global_step,
-                )
-                logger.info("Saved PPO checkpoint to %s", checkpoint_dir)
-
-            if global_step >= int(args.max_steps):
-                break
-
-    if is_main_process(ppo_trainer):
-        final_checkpoint = save_checkpoint(
-            ppo_trainer,
-            tokenizer,
-            output_dir,
-            step="final",
-        )
-        logger.info("Training finished. Final checkpoint saved to %s", final_checkpoint)
+    ppo_trainer.train()
+    final_output_dir = save_final_model(
+        ppo_trainer,
+        tokenizer,
+        output_dir,
+    )
+    logger.info("Training finished. Final checkpoint saved to %s", final_output_dir)
 
 
 if __name__ == "__main__":

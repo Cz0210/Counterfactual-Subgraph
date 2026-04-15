@@ -232,6 +232,45 @@ Accepted
 
 ---
 
+## [2026-04-15] Let experimental PPOTrainer own rollout and optimization
+
+### Background
+Once the experimental PPO trainer, explicit value model, and reward model were
+all wired successfully, the remaining failures came from the old handwritten
+training loop that still tried to call trainer-side generation and manual PPO
+updates directly.
+
+### Decision
+Remove the legacy step-by-step PPO loop from `scripts/train_ppo.py` and switch
+the entrypoint to the trainer-managed flow:
+
+- initialize policy, reference, value, and reward models;
+- construct `PPOTrainer`;
+- call `ppo_trainer.train()`;
+- save the final checkpoint via the trainer's own save path.
+
+The PPO config assembly now also forwards `max_steps` and generation-related
+kwargs when the runtime `PPOConfig` signature supports them.
+
+### Alternatives considered
+1. Keep maintaining a hybrid script that mixes experimental trainer internals
+   with a manual rollout loop.
+2. Revert fully to a classic step-based TRL API.
+3. Move rollout back outside the trainer and bypass `reward_model`.
+
+### Consequences
+- The PPO entrypoint now matches the ownership model of newer
+  `trl.experimental.ppo` releases more closely.
+- Fewer incompatibilities should appear around missing `generate()` or `step()`
+  methods on experimental trainer objects.
+- Reward evaluation stays aligned with the repository's residual-graph
+  counterfactual objective, but execution control is delegated to TRL.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
