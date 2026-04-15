@@ -31,6 +31,8 @@ set -euo pipefail
 source /share/home/u20526/anaconda3/bin/activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
+
 python scripts/run_infer_sft.py \
   --val-file data/sft_val.jsonl \
   --sample-size 50 \

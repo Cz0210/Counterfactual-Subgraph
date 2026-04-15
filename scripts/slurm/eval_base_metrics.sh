@@ -29,5 +29,6 @@ echo "====================="
 # 确保在项目根目录下执行
 cd /share/home/u20526/czx/counterfactual-subgraph
 
-python scripts/eval_base_metrics.py outputs/hpc/logs/base_infer_results.jsonl
+export PYTHONPATH=$PWD
 
+python scripts/eval_base_metrics.py outputs/hpc/logs/base_infer_results.jsonl

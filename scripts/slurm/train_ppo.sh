@@ -27,6 +27,8 @@ echo "====================="
 
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
+
 echo "===== RUNNING PPO TRAINING ====="
 python scripts/train_ppo.py --config configs/hpc.yaml "$@"
 echo "===== DONE ====="

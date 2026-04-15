@@ -27,6 +27,8 @@ echo "====================="
 
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
+
 echo "===== RUNNING RL TRAINING WRAPPER ====="
 python scripts/train_rl.py --config configs/hpc.yaml "$@"
 echo "===== DONE ====="

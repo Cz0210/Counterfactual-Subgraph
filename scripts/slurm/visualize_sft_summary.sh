@@ -29,6 +29,7 @@ echo "====================="
 # 确保在项目根目录下执行
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
 
 python scripts/visualize_sft_summary.py \
   --base-validity 70.0 \

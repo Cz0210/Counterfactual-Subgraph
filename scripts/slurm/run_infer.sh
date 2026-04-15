@@ -25,6 +25,8 @@ echo "====================="
 # 确保在项目根目录下执行
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
+
 echo "===== RUNNING INFERENCE ====="
 # 执行闭环推理，强制不回退，并指定 hpc 配置
 python scripts/run_infer.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false

@@ -223,6 +223,10 @@ Every generated or updated Slurm script must include all of the following:
 
 - Include lightweight `echo`-based environment diagnostics, such as Python path,
   Python version, and CUDA availability checks.
+- After `cd /share/home/u20526/czx/counterfactual-subgraph`, every Slurm script
+  must explicitly declare `export PYTHONPATH=$PWD` before running the target
+  Python command. This is a hard requirement so that `import src` works
+  reliably from any submission directory.
 - The Python command must explicitly include `--config configs/hpc.yaml`.
 - If the target task is inference or evaluation, the Slurm command should also
   include `--set inference.fallback_to_heuristic=false` unless there is a clear

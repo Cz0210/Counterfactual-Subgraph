@@ -30,9 +30,10 @@ echo "====================="
 source /share/home/u20526/anaconda3/bin/activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
+
 python scripts/run_infer_base.py \
   --val-file data/sft_val.jsonl \
   --sample-size 50 \
   --seed 7 \
   --output-jsonl outputs/hpc/logs/base_infer_results.jsonl
-
