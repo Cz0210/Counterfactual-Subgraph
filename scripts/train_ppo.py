@@ -525,6 +525,7 @@ def import_training_dependencies() -> dict[str, Any]:
         from peft import PeftModel, prepare_model_for_kbit_training
         from transformers import (
             AutoModelForCausalLM,
+            AutoModelForSequenceClassification,
             AutoTokenizer,
             BitsAndBytesConfig,
             set_seed,
@@ -544,6 +545,7 @@ def import_training_dependencies() -> dict[str, Any]:
         "PeftModel": PeftModel,
         "prepare_model_for_kbit_training": prepare_model_for_kbit_training,
         "AutoModelForCausalLM": AutoModelForCausalLM,
+        "AutoModelForSequenceClassification": AutoModelForSequenceClassification,
         "AutoTokenizer": AutoTokenizer,
         "BitsAndBytesConfig": BitsAndBytesConfig,
         "PPOConfig": PPOConfig,
@@ -615,6 +617,79 @@ def build_quantized_base_model(
     return model
 
 
+def build_value_model(
+    deps: dict[str, Any],
+    *,
+    model_path: Path,
+    tokenizer: Any,
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> Any:
+    """Load an explicit scalar value model for experimental TRL PPOTrainer.
+
+    Recent ``trl.experimental.ppo.PPOTrainer`` variants expect a real
+    ``transformers`` sequence-classification model instead of ``None`` or a
+    lightweight wrapper placeholder. We therefore load a 4-bit
+    ``AutoModelForSequenceClassification`` with ``num_labels=1`` and keep only
+    the scalar head trainable.
+    """
+
+    torch = deps["torch"]
+    quantization_config = deps["BitsAndBytesConfig"](
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    value_model = deps["AutoModelForSequenceClassification"].from_pretrained(
+        str(model_path),
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+        quantization_config=quantization_config,
+        dtype=torch.bfloat16,
+        device_map="auto",
+        num_labels=1,
+    )
+    if hasattr(value_model, "config"):
+        value_model.config.use_cache = False
+        value_model.config.pad_token_id = tokenizer.pad_token_id
+    if hasattr(value_model, "generation_config") and value_model.generation_config is not None:
+        value_model.generation_config.use_cache = False
+
+    if hasattr(value_model, "enable_input_require_grads"):
+        value_model.enable_input_require_grads()
+    value_model = deps["prepare_model_for_kbit_training"](
+        value_model,
+        use_gradient_checkpointing=True,
+    )
+    if hasattr(value_model, "gradient_checkpointing_enable"):
+        value_model.gradient_checkpointing_enable()
+
+    for parameter in value_model.parameters():
+        parameter.requires_grad = False
+
+    head_modules = [
+        getattr(value_model, attribute_name, None)
+        for attribute_name in ("score", "classifier", "classification_head")
+    ]
+    head_modules = [module for module in head_modules if module is not None]
+    for module in head_modules:
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+
+    if not any(parameter.requires_grad for parameter in value_model.parameters()):
+        for name, parameter in value_model.named_parameters():
+            if any(token in name for token in ("score", "classifier", "classification_head")):
+                parameter.requires_grad = True
+
+    if not any(parameter.requires_grad for parameter in value_model.parameters()):
+        raise RuntimeError(
+            "Could not identify a trainable scalar head on the PPO value model."
+        )
+
+    return value_model
+
+
 def build_policy_model(
     deps: dict[str, Any],
     *,
@@ -653,6 +728,162 @@ def build_policy_model(
             parameter.requires_grad = False
         policy_model.eval()
     return policy_model
+
+
+def _decode_text_batch(tokenizer: Any, payload: Any, *, torch: Any) -> list[str]:
+    """Decode one batch-like payload into plain strings."""
+
+    if payload is None:
+        return []
+    if isinstance(payload, str):
+        return [payload]
+    if torch.is_tensor(payload):
+        if payload.dim() == 1:
+            payload = payload.unsqueeze(0)
+        return [str(text).strip() for text in tokenizer.batch_decode(payload, skip_special_tokens=True)]
+    if isinstance(payload, dict):
+        for key in ("query", "prompt", "response", "completion", "text"):
+            if key in payload:
+                return _decode_text_batch(tokenizer, payload[key], torch=torch)
+        return [str(payload)]
+
+    values = list(payload) if isinstance(payload, Sequence) else [payload]
+    if not values:
+        return []
+    if all(isinstance(value, str) for value in values):
+        return [str(value).strip() for value in values]
+    if all(torch.is_tensor(value) for value in values):
+        batch = []
+        for value in values:
+            tensor = value.detach().cpu()
+            if tensor.dim() == 0:
+                tensor = tensor.unsqueeze(0)
+            batch.append(tensor.tolist())
+        return [str(text).strip() for text in tokenizer.batch_decode(batch, skip_special_tokens=True)]
+    if all(isinstance(value, (list, tuple)) for value in values):
+        return [str(text).strip() for text in tokenizer.batch_decode(values, skip_special_tokens=True)]
+    return [str(value).strip() for value in values]
+
+
+class _KeywordLookup:
+    """Small helper to retrieve the first present non-null kwarg."""
+
+    @staticmethod
+    def first_present(mapping: dict[str, Any], keys: Sequence[str]) -> Any:
+        for key in keys:
+            if key in mapping and mapping[key] is not None:
+                return mapping[key]
+        return None
+
+
+def _extract_fragment_from_text(combined_text: str, prompt_text: str | None) -> str:
+    """Recover the generated fragment from a decoded prompt+completion string."""
+
+    normalized_combined = str(combined_text or "").strip()
+    normalized_prompt = str(prompt_text or "").strip()
+
+    if normalized_prompt and normalized_combined.startswith(normalized_prompt):
+        candidate = normalized_combined[len(normalized_prompt) :].strip()
+        if candidate:
+            cleaned = clean_generated_smiles(candidate)
+            if cleaned:
+                return cleaned
+
+    if "FRAGMENT_SMILES:" in normalized_combined:
+        _, _, suffix = normalized_combined.partition("FRAGMENT_SMILES:")
+        cleaned = clean_generated_smiles(suffix)
+        if cleaned:
+            return cleaned
+
+    return clean_generated_smiles(normalized_combined)
+
+
+def build_reward_model_wrapper(
+    deps: dict[str, Any],
+    *,
+    tokenizer: Any,
+    rewarder: ChemRLRewarder,
+) -> Any:
+    """Create a torch ``reward_model`` compatible with experimental TRL PPO."""
+
+    torch = deps["torch"]
+
+    class ChemRewardModelWrapper(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tokenizer = tokenizer
+            self.rewarder = rewarder
+            self.reward_floor = float(rewarder.minimum_reward)
+
+        def _recover_prompt_texts(
+            self,
+            kwargs: dict[str, Any],
+            *,
+            batch_size: int,
+        ) -> list[str | None]:
+            prompt_payload = _KeywordLookup.first_present(
+                kwargs,
+                ("prompts", "queries", "query", "input_texts", "texts"),
+            )
+            if prompt_payload is None:
+                return [None] * batch_size
+
+            prompt_texts = _decode_text_batch(self.tokenizer, prompt_payload, torch=torch)
+            if not prompt_texts:
+                return [None] * batch_size
+            if len(prompt_texts) < batch_size:
+                prompt_texts = prompt_texts + [prompt_texts[-1]] * (batch_size - len(prompt_texts))
+            return prompt_texts[:batch_size]
+
+        def forward(self, input_ids: Any, attention_mask: Any = None, **kwargs: Any) -> Any:
+            decoded_texts = _decode_text_batch(self.tokenizer, input_ids, torch=torch)
+            if not decoded_texts:
+                if torch.is_tensor(input_ids):
+                    return torch.zeros((0, 1), dtype=torch.float32, device=input_ids.device)
+                return torch.zeros((0, 1), dtype=torch.float32)
+
+            prompt_texts = self._recover_prompt_texts(kwargs, batch_size=len(decoded_texts))
+            parent_smiles_batch: list[str] = []
+            parent_labels: list[int] = []
+            generated_smiles_batch: list[str] = []
+
+            for decoded_text, prompt_text in zip(decoded_texts, prompt_texts, strict=True):
+                context_text = prompt_text or decoded_text
+                try:
+                    parent_smiles = extract_parent_smiles_from_prompt(context_text)
+                except Exception:
+                    try:
+                        parent_smiles = extract_parent_smiles_from_prompt(decoded_text)
+                    except Exception:
+                        parent_smiles = ""
+
+                label = extract_label_from_prompt(context_text)
+                if label is None:
+                    label = extract_label_from_prompt(decoded_text)
+                if label is None:
+                    label = self.rewarder.default_parent_label
+
+                parent_smiles_batch.append(parent_smiles)
+                parent_labels.append(int(label))
+                generated_smiles_batch.append(
+                    _extract_fragment_from_text(decoded_text, prompt_text)
+                )
+
+            rewards = self.rewarder.calculate_rewards_with_labels(
+                parent_smiles_batch,
+                generated_smiles_batch,
+                parent_labels,
+            )
+
+            device = input_ids.device if torch.is_tensor(input_ids) else None
+            reward_tensor = torch.tensor(
+                [float(score) for score in rewards],
+                dtype=torch.float32,
+                device=device,
+            ).view(-1, 1)
+            return reward_tensor
+
+    return ChemRewardModelWrapper()
 
 
 def build_hf_dataset(deps: dict[str, Any], tokenizer: Any, examples: Sequence[PromptExample]) -> Any:
@@ -726,123 +957,16 @@ def build_ppo_config(
     return ppo_config_cls(**filtered_kwargs)
 
 
-def build_reward_adapter(deps: dict[str, Any], *, tokenizer: Any, rewarder: ChemRLRewarder) -> Any:
-    """Wrap ``ChemRLRewarder`` into a callable object accepted by new TRL APIs.
-
-    Different TRL experimental releases may expect either ``reward_model`` or
-    ``reward_funcs``. This adapter is intentionally permissive about input
-    formats so it can survive minor signature churn without changing the
-    counterfactual reward semantics.
-    """
-
-    torch = deps["torch"]
-
-    class _RewardAdapter(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-
-        def _decode_batch(self, payload: Any) -> list[str]:
-            if payload is None:
-                return []
-            if isinstance(payload, str):
-                return [payload]
-            if torch.is_tensor(payload):
-                if payload.dim() == 1:
-                    payload = payload.unsqueeze(0)
-                return [str(text).strip() for text in tokenizer.batch_decode(payload, skip_special_tokens=True)]
-            if isinstance(payload, dict):
-                for key in ("query", "prompt", "response", "completion", "text"):
-                    if key in payload:
-                        return self._decode_batch(payload[key])
-                return [str(payload)]
-
-            values = list(payload) if isinstance(payload, Sequence) else [payload]
-            if not values:
-                return []
-            if all(isinstance(value, str) for value in values):
-                return [str(value).strip() for value in values]
-            if all(torch.is_tensor(value) for value in values):
-                batch = []
-                for value in values:
-                    tensor = value.detach().cpu()
-                    if tensor.dim() == 0:
-                        tensor = tensor.unsqueeze(0)
-                    batch.append(tensor.tolist())
-                return [str(text).strip() for text in tokenizer.batch_decode(batch, skip_special_tokens=True)]
-            if all(isinstance(value, (list, tuple)) for value in values):
-                return [str(text).strip() for text in tokenizer.batch_decode(values, skip_special_tokens=True)]
-            return [str(value).strip() for value in values]
-
-        @staticmethod
-        def _first_present(mapping: dict[str, Any], keys: Sequence[str]) -> Any:
-            for key in keys:
-                if key in mapping and mapping[key] is not None:
-                    return mapping[key]
-            return None
-
-        def _extract_batches(self, *args: Any, **kwargs: Any) -> tuple[list[str], list[str]]:
-            prompt_payload = self._first_present(
-                kwargs,
-                ("prompts", "queries", "query", "input_texts", "texts", "samples"),
-            )
-            response_payload = self._first_present(
-                kwargs,
-                ("responses", "completions", "response", "generated_texts", "samples"),
-            )
-
-            if prompt_payload is None and len(args) >= 1:
-                prompt_payload = args[0]
-            if response_payload is None and len(args) >= 2:
-                response_payload = args[1]
-
-            prompts = self._decode_batch(prompt_payload)
-            responses = self._decode_batch(response_payload)
-            if prompts and responses and len(prompts) != len(responses):
-                minimum = min(len(prompts), len(responses))
-                prompts = prompts[:minimum]
-                responses = responses[:minimum]
-            return prompts, responses
-
-        def forward(self, *args: Any, **kwargs: Any) -> Any:
-            prompts, responses = self._extract_batches(*args, **kwargs)
-            if not prompts or not responses:
-                return []
-
-            parent_smiles_batch: list[str] = []
-            original_label_batch: list[int] = []
-            cleaned_responses: list[str] = []
-
-            for prompt, response in zip(prompts, responses, strict=True):
-                try:
-                    parent_smiles = extract_parent_smiles_from_prompt(prompt)
-                except Exception:
-                    parent_smiles = ""
-                label = extract_label_from_prompt(prompt)
-                if label is None:
-                    label = rewarder.default_parent_label
-                parent_smiles_batch.append(parent_smiles)
-                original_label_batch.append(int(label))
-                cleaned_responses.append(clean_generated_smiles(response))
-
-            traces = rewarder.calculate_reward_details_batch(
-                parent_smiles_batch,
-                cleaned_responses,
-                parent_labels=original_label_batch,
-            )
-            return [float(trace.reward) for trace in traces]
-
-    return _RewardAdapter()
-
-
 def build_ppo_trainer(
     deps: dict[str, Any],
     *,
     ppo_config: Any,
     policy_model: Any,
     reference_model: Any,
+    value_model: Any,
     tokenizer: Any,
     dataset: Any,
-    reward_adapter: Any,
+    reward_model: Any,
     logger: Any,
 ) -> Any:
     """Build PPOTrainer defensively across TRL API variants."""
@@ -871,6 +995,11 @@ def build_ppo_trainer(
     elif "reference_model" in supported_keys:
         trainer_kwargs["reference_model"] = reference_model
 
+    if "value_model" in supported_keys:
+        trainer_kwargs["value_model"] = value_model
+    elif "critic_model" in supported_keys:
+        trainer_kwargs["critic_model"] = value_model
+
     if "processing_class" in supported_keys:
         trainer_kwargs["processing_class"] = tokenizer
     elif "tokenizer" in supported_keys:
@@ -887,18 +1016,10 @@ def build_ppo_trainer(
     if "data_collator" in supported_keys:
         trainer_kwargs["data_collator"] = build_data_collator()
 
-    if "reward_funcs" in supported_keys:
-        trainer_kwargs["reward_funcs"] = [reward_adapter]
-    elif "reward_model" in supported_keys:
-        trainer_kwargs["reward_model"] = reward_adapter
-
-    # New experimental PPOTrainer builds can share the backbone internally when
-    # no external value model is provided. We therefore never construct a
-    # wrapper-side value head in this script.
-    if "value_model" in supported_keys:
-        value_model_param = trainer_signature.parameters["value_model"]
-        if value_model_param.default is inspect._empty or value_model_param.default is not None:
-            trainer_kwargs["value_model"] = None
+    if "reward_model" in supported_keys:
+        trainer_kwargs["reward_model"] = reward_model
+    elif "reward_funcs" in supported_keys:
+        trainer_kwargs["reward_funcs"] = [reward_model]
 
     logger.info("Filtered PPOTrainer kwargs for current TRL version: %s", sorted(trainer_kwargs))
     return trainer_cls(**trainer_kwargs)
@@ -1243,6 +1364,13 @@ def main() -> None:
         local_files_only=args.local_files_only,
         is_trainable=False,
     )
+    value_model = build_value_model(
+        deps,
+        model_path=model_path,
+        tokenizer=tokenizer,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
 
     ppo_config = build_ppo_config(
         deps,
@@ -1256,7 +1384,7 @@ def main() -> None:
         oracle_path=oracle_path,
         default_parent_label=args.default_parent_label,
     )
-    reward_adapter = build_reward_adapter(
+    reward_model = build_reward_model_wrapper(
         deps,
         tokenizer=tokenizer,
         rewarder=rewarder,
@@ -1267,9 +1395,10 @@ def main() -> None:
         ppo_config=ppo_config,
         policy_model=policy_model,
         reference_model=reference_model,
+        value_model=value_model,
         tokenizer=tokenizer,
         dataset=dataset,
-        reward_adapter=reward_adapter,
+        reward_model=reward_model,
         logger=logger,
     )
 

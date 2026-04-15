@@ -153,6 +153,45 @@ Accepted
 
 ---
 
+## [2026-04-15] Use explicit value and reward models for experimental PPOTrainer
+
+### Background
+Follow-up PPO integration work revealed another compatibility shift in newer
+`trl.experimental.ppo.PPOTrainer` builds: the trainer now expects a real
+transformers-style `value_model` object and also routes internal scoring
+through a PyTorch `reward_model(input_ids=..., attention_mask=..., ...)`
+interface.
+
+### Decision
+Keep the policy and reference networks as native causal LMs, but explicitly add:
+
+- a 4-bit `AutoModelForSequenceClassification` value model with `num_labels=1`;
+- a torch `reward_model` wrapper that decodes generated sequences back to text,
+  reconstructs the parent / fragment pair, and calls `ChemRLRewarder`.
+
+The trainer initialization in `scripts/train_ppo.py` now wires:
+
+- `model`: native causal LM policy with the SFT LoRA adapter;
+- `ref_model`: frozen native causal LM reference policy;
+- `value_model`: explicit scalar sequence-classification model;
+- `reward_model`: deletion-based chemistry reward wrapper.
+
+### Alternatives considered
+1. Continue passing `None` for the value model and rely on implicit trainer behavior.
+2. Keep reward scoring entirely outside the trainer and ignore new internal hooks.
+3. Reintroduce custom non-transformers wrapper classes around the value head.
+
+### Consequences
+- PPO initialization is better aligned with stricter experimental TRL releases.
+- Internal trainer scoring can now call a PyTorch-compatible reward interface
+  without losing the repository's residual-graph counterfactual objective.
+- The value network contract is explicit instead of version-dependent.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background
