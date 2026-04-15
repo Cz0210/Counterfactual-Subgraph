@@ -182,3 +182,53 @@ When asked to help with this project:
 5. keep changes scoped and reviewable.
 
 If the task is ambiguous, do not invent a new research objective. Preserve the counterfactual v3 objective unless the user explicitly revises it.
+
+---
+
+## 13. Workflow & Automation
+
+### 13.1 Automatic Slurm Script Synchronization
+
+Whenever any core code is added or modified, especially Python entrypoints under
+`scripts/`, the corresponding Slurm submission script must also be created or
+updated automatically.
+
+### 13.2 Slurm Script Location and Naming
+
+- All generated Slurm submission scripts must live under `scripts/slurm/`.
+- The submission script name must match the target Python script name, with the
+  suffix changed to `.sh`.
+- Example:
+  - `scripts/train_ppo.py` -> `scripts/slurm/train_ppo.sh`
+  - `scripts/run_infer.py` -> `scripts/slurm/run_infer.sh`
+
+### 13.3 Slurm Script Format Baseline
+
+- Use `scripts/slurm/eval_base_metrics.sh` as the formatting baseline.
+- Keep the scripts thin, explicit, and directly runnable through `sbatch`.
+
+### 13.4 Mandatory HPC Runtime Settings
+
+Every generated or updated Slurm script must include all of the following:
+
+- `#SBATCH --partition=A800`
+- `#SBATCH --gres=gpu:a800:1`
+- `#SBATCH --output=logs/%j.out`
+- `#SBATCH --error=logs/%j.err`
+- `source ~/.bashrc`
+- `conda activate smiles_pip118`
+- `cd /share/home/u20526/czx/counterfactual-subgraph`
+
+### 13.5 Execution Rules
+
+- Include lightweight `echo`-based environment diagnostics, such as Python path,
+  Python version, and CUDA availability checks.
+- The Python command must explicitly include `--config configs/hpc.yaml`.
+- If the target task is inference or evaluation, the Slurm command should also
+  include `--set inference.fallback_to_heuristic=false` unless there is a clear
+  task-specific reason not to do so.
+
+### 13.6 Completion Requirement
+
+A scripting task is not complete until the paired Slurm script has also been
+checked and brought into sync with the latest CLI behavior.

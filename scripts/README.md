@@ -2,8 +2,12 @@
 
 This directory is reserved for thin command-line entrypoints only.
 
-During the bootstrap phase, these scripts remain placeholders so the project
-can stabilize interfaces before training logic is implemented.
+Some scripts are still bootstrap placeholders, but the repository now also
+contains concrete local/HPC entrypoints for:
+
+- SFT training
+- AIDS oracle training
+- PPO RL training
 
 Planned entrypoints:
 
@@ -12,5 +16,6 @@ Planned entrypoints:
 - `scripts/infer_single.py`
 - `scripts/train_aids_oracle.py`
 - `scripts/train_sft.py`
+- `scripts/train_ppo.py`
 - `scripts/train_rl.py`
 - `scripts/eval_model.py`

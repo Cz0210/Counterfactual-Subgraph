@@ -60,6 +60,55 @@ Accepted
 
 ---
 
+## [2026-04-15] Implement first PPO training path with residual-based reward wrapper
+
+### Background
+The repository already had a trained SFT adapter, a lightweight AIDS oracle,
+and a chemistry layer for capped fragment validation and deletion. What was
+still missing was a real PPO training path that could optimize ChemLLM outputs
+toward the deletion-based counterfactual objective on HPC hardware.
+
+### Decision
+Add a concrete PPO training entrypoint in `scripts/train_ppo.py` together with a
+unified reward wrapper in `src/rewards/reward_wrapper.py`.
+
+The reward wrapper uses a three-stage early-stop flow:
+
+- parseability and connectedness checks;
+- parent-subgraph validation for capped fragments;
+- residual-molecule scoring after deleting the fragment from the parent.
+
+The semantic reward term is computed on the residual graph rather than on the
+fragment alone, because the v3 objective is label flipping after deletion.
+
+The PPO script loads:
+
+- ChemLLM-7B-Chat in 4-bit mode;
+- the SFT LoRA checkpoint as the initial policy;
+- a frozen LoRA-backed reference model for KL control;
+- prompts from either the raw HIV CSV or a JSONL prompt file.
+
+The training loop logs reward statistics, structural pass rates, simple
+collapse diagnostics, and representative generations into the run directory.
+
+### Alternatives considered
+1. Keep RL as a runtime-preparation placeholder only.
+2. Score the fragment alone with the oracle instead of the residual molecule.
+3. Hardcode one dataset schema and refuse either CSV or JSONL prompts.
+
+### Consequences
+- The repository now has a runnable PPO-stage backbone aligned with the
+  counterfactual v3 objective.
+- KL control remains anchored to the SFT adapter rather than drifting from the
+  base model directly.
+- PPO runs surface chemistry and collapse signals explicitly instead of hiding
+  them inside trainer internals.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background

@@ -1,6 +1,6 @@
-"""Backward-compatible wrapper for scripts/run_rl.py."""
+"""Backward-compatible wrapper for scripts/train_ppo.py."""
 
-from run_rl import main
+from train_ppo import main
 
 
 if __name__ == "__main__":

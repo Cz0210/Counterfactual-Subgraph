@@ -18,13 +18,16 @@ from src.rewards.reward_calculator import (
     prepare_smiles_for_oracle,
     smiles_to_morgan_array,
 )
+from src.rewards.reward_wrapper import ChemRLRewarder, RewardTrace, shape_probability_reward
 from src.rewards.types import RewardBreakdown, RewardTerm, RewardWeights
 
 __all__ = [
     "ChemRewardEngine",
+    "ChemRLRewarder",
     "CollapseDiagnostics",
     "CounterfactualReward",
     "CounterfactualScorer",
+    "RewardTrace",
     "RewardBreakdown",
     "RewardContext",
     "RewardTerm",
@@ -35,5 +38,6 @@ __all__ = [
     "collapse_penalty_from_diagnostics",
     "load_oracle_bundle",
     "prepare_smiles_for_oracle",
+    "shape_probability_reward",
     "smiles_to_morgan_array",
 ]
