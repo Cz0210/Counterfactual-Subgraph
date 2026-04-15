@@ -109,6 +109,50 @@ Accepted
 
 ---
 
+## [2026-04-15] Switch PPO policy loading back to native causal LM for experimental TRL
+
+### Background
+After the first PPO entrypoint landed, newer `trl.experimental.ppo` builds
+showed constructor-time incompatibilities with explicit value-head wrappers,
+including failures around missing wrapper attributes such as
+`base_model_prefix`. This indicated that the trainer now expects native causal
+LM policies and prefers to manage policy/value wrapping internally.
+
+### Decision
+Update `scripts/train_ppo.py` so that PPO loads native
+`AutoModelForCausalLM`-style PEFT models for both the trainable policy and the
+frozen reference policy, without constructing
+`AutoModelForCausalLMWithValueHead`.
+
+The PPO trainer initialization is now version-adaptive in three ways:
+
+- `PPOConfig` kwargs are filtered against the runtime signature;
+- trainer kwargs map across `args/config`, `model/policy`, and
+  `ref_model/ref_policy` variants;
+- external `value_model` is omitted or forced to `None` so TRL can own value
+  wrapping internally.
+
+The script also provides a lightweight reward adapter that exposes
+`ChemRLRewarder` as either `reward_model` or `reward_funcs` when those newer
+experimental hooks are present.
+
+### Alternatives considered
+1. Keep the explicit value-head wrapper and patch missing attributes one by one.
+2. Pin the repository to one older TRL version instead of adapting the code.
+3. Move the whole PPO path back to a handwritten optimizer loop.
+
+### Consequences
+- The PPO script is better aligned with current experimental TRL architecture.
+- Fewer wrapper-specific attribute mismatches should appear when the trainer is
+  upgraded.
+- The script still keeps the repository's deletion-based counterfactual reward
+  logic outside trainer internals.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background

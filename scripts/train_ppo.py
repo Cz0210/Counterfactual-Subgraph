@@ -904,6 +904,85 @@ def build_ppo_trainer(
     return trainer_cls(**trainer_kwargs)
 
 
+def get_trainer_dataloader(trainer: Any) -> Any:
+    """Return the active training dataloader across TRL / Trainer variants."""
+
+    dataloader = getattr(trainer, "dataloader", None)
+    if dataloader is not None:
+        return dataloader
+
+    get_train_dataloader = getattr(trainer, "get_train_dataloader", None)
+    if callable(get_train_dataloader):
+        return get_train_dataloader()
+
+    raise RuntimeError("Current PPOTrainer does not expose a usable training dataloader.")
+
+
+def resolve_trainer_device(trainer: Any, fallback_model: Any) -> Any:
+    """Infer the device used by the active PPO policy."""
+
+    accelerator = getattr(trainer, "accelerator", None)
+    device = getattr(accelerator, "device", None)
+    if device is not None:
+        return device
+
+    for model in (getattr(trainer, "model", None), fallback_model):
+        if model is None:
+            continue
+        try:
+            return next(model.parameters()).device
+        except (AttributeError, StopIteration, TypeError):
+            continue
+
+    raise RuntimeError("Could not infer the PPO training device from trainer or model.")
+
+
+def is_main_process(trainer: Any) -> bool:
+    """Best-effort main-process check for single-node logging and checkpointing."""
+
+    accelerator = getattr(trainer, "accelerator", None)
+    if accelerator is None:
+        return True
+    return bool(getattr(accelerator, "is_main_process", True))
+
+
+def generate_responses(
+    trainer: Any,
+    *,
+    torch: Any,
+    policy_model: Any,
+    query_tensors: Sequence[Any],
+    generation_kwargs: dict[str, Any],
+) -> Any:
+    """Generate responses via trainer.generate() or fall back to model.generate()."""
+
+    generate_method = getattr(trainer, "generate", None)
+    if callable(generate_method):
+        return generate_method(
+            query_tensors,
+            return_prompt=False,
+            **generation_kwargs,
+        )
+
+    model = getattr(trainer, "model", None) or policy_model
+    if model is None or not hasattr(model, "generate"):
+        raise RuntimeError("Neither PPOTrainer nor the wrapped policy model exposes generate().")
+
+    if not query_tensors:
+        raise ValueError("query_tensors must not be empty during PPO generation.")
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        list(query_tensors),
+        batch_first=True,
+        padding_value=int(generation_kwargs.get("pad_token_id", 0)),
+    )
+    attention_mask = input_ids.ne(int(generation_kwargs.get("pad_token_id", 0))).long()
+    return model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        **generation_kwargs,
+    )
+
+
 def normalize_token_tensor_list(
     torch: Any,
     values: Sequence[Any],
@@ -1207,26 +1286,30 @@ def main() -> None:
     stats_path = output_dir / "ppo_stats.jsonl"
     samples_path = output_dir / "ppo_samples.jsonl"
     global_step = 0
+    trainer_device = resolve_trainer_device(ppo_trainer, policy_model)
+    dataloader = get_trainer_dataloader(ppo_trainer)
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
 
     while global_step < int(args.max_steps):
-        for batch in ppo_trainer.dataloader:
+        for batch in dataloader:
             global_step += 1
             query_tensors = normalize_token_tensor_list(
                 torch,
                 batch["input_ids"],
-                device=ppo_trainer.accelerator.device,
+                device=trainer_device,
             )
-            generated = ppo_trainer.generate(
-                query_tensors,
-                return_prompt=False,
-                **generation_kwargs,
+            generated = generate_responses(
+                ppo_trainer,
+                torch=torch,
+                policy_model=policy_model,
+                query_tensors=query_tensors,
+                generation_kwargs=generation_kwargs,
             )
             response_tensors = normalize_token_tensor_list(
                 torch,
                 normalize_generation_tensors(torch, generated),
-                device=ppo_trainer.accelerator.device,
+                device=trainer_device,
             )
             raw_responses = [
                 tokenizer.decode(response_tensor, skip_special_tokens=True).strip()
@@ -1244,7 +1327,7 @@ def main() -> None:
             rewards = normalize_reward_tensor_list(
                 torch,
                 [trace.reward for trace in traces],
-                device=ppo_trainer.accelerator.device,
+                device=trainer_device,
             )
 
             trainer_stats = run_ppo_step(
@@ -1261,7 +1344,7 @@ def main() -> None:
                 **scalarize_stats(trainer_stats),
             }
 
-            if ppo_trainer.accelerator.is_main_process:
+            if is_main_process(ppo_trainer):
                 append_jsonl(stats_path, [merged_stats])
                 sample_rows: list[dict[str, Any]] = []
                 for local_index, trace in enumerate(traces[: min(3, len(traces))]):
@@ -1305,7 +1388,7 @@ def main() -> None:
             except Exception:
                 logger.debug("ppo_trainer.log_stats failed; continuing.", exc_info=True)
 
-            if global_step % int(args.save_steps) == 0 and ppo_trainer.accelerator.is_main_process:
+            if global_step % int(args.save_steps) == 0 and is_main_process(ppo_trainer):
                 checkpoint_dir = save_checkpoint(
                     ppo_trainer,
                     tokenizer,
@@ -1317,7 +1400,7 @@ def main() -> None:
             if global_step >= int(args.max_steps):
                 break
 
-    if ppo_trainer.accelerator.is_main_process:
+    if is_main_process(ppo_trainer):
         final_checkpoint = save_checkpoint(
             ppo_trainer,
             tokenizer,
