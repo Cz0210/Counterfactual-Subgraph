@@ -2,7 +2,9 @@
 
 输入：
 - `data/aids_dataset.csv`
-- 需要包含两列：`smiles` 和 `activity`
+- 需要包含 `smiles` 列，以及以下标签列之一：
+  - `HIV_active`：MoleculeNet 风格的二分类标签，优先使用
+  - `activity`：NCI 原始活性标签，支持 `CI` / `CM` / `CA`
 
 输出：
 - `outputs/oracle/aids_rf_model.pkl`
@@ -134,23 +136,41 @@ def _load_dataset(csv_path: Path) -> "pd.DataFrame":
         raise FileNotFoundError(f"Dataset CSV does not exist: {csv_path}")
 
     frame = pd.read_csv(csv_path)
-    required_columns = {"smiles", "activity"}
-    missing_columns = required_columns - set(frame.columns)
-    if missing_columns:
+    if "smiles" not in frame.columns:
+        raise ValueError("Dataset CSV is missing required column: 'smiles'")
+
+    if "HIV_active" in frame.columns:
+        label_column = "HIV_active"
+    elif "activity" in frame.columns:
+        label_column = "activity"
+    else:
         raise ValueError(
-            f"Dataset CSV is missing required columns: {sorted(missing_columns)}"
+            "Dataset CSV must contain either 'HIV_active' or 'activity' as the label column."
         )
 
-    frame = frame.loc[:, ["smiles", "activity"]].copy()
-    frame = frame.dropna(subset=["smiles", "activity"])
+    frame = frame.loc[:, ["smiles", label_column]].copy()
+    frame = frame.dropna(subset=["smiles", label_column])
     frame["smiles"] = frame["smiles"].astype(str).str.strip()
+    raw_labels = frame[label_column]
+
+    if label_column == "HIV_active":
+        # MoleculeNet 版本已经是二分类标签，直接安全转换即可。
+        frame["activity"] = pd.to_numeric(raw_labels, errors="coerce")
+    else:
+        # NCI 原始 HIV 数据常见的是字符串标签，需要先映射到 0/1。
+        normalized_labels = raw_labels.astype(str).str.strip().str.upper()
+        mapped_labels = normalized_labels.map({"CI": 0, "CM": 1, "CA": 1})
+        numeric_labels = pd.to_numeric(normalized_labels, errors="coerce")
+        frame["activity"] = mapped_labels.where(mapped_labels.notna(), numeric_labels)
+
+    frame = frame.dropna(subset=["activity"])
     frame["activity"] = frame["activity"].astype(int)
     frame = frame[frame["activity"].isin((0, 1))]
     frame = frame[frame["smiles"] != ""]
     if frame.empty:
         raise ValueError("No usable rows remained after basic CSV filtering.")
 
-    return frame.reset_index(drop=True)
+    return frame.loc[:, ["smiles", "activity"]].reset_index(drop=True)
 
 
 def _build_feature_matrix(
