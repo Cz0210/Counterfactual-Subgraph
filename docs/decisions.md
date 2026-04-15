@@ -435,6 +435,45 @@ Accepted
 
 ---
 
+## [2026-04-16] Escalate PPO wrapper gradient-checkpointing fix from instance patch to class patch
+
+### Background
+The first local workaround for the experimental TRL wrapper bug patched the
+trainer instance after construction. That turned out to be insufficient because
+the runtime path could still recreate or access a wrapper object that had not
+received the instance-local method bindings.
+
+### Decision
+Move the gradient-checkpointing workaround into the TRL import phase inside
+`scripts/train_ppo.py` by patching the wrapper class itself:
+
+- import `trl.experimental.ppo.ppo_trainer` when available;
+- if `PolicyAndValueWrapper` exists, inject no-op
+  `gradient_checkpointing_disable` and `gradient_checkpointing_enable` methods
+  onto the class when they are missing.
+
+This class-level patch supersedes the earlier instance-level workaround. The
+config-side guard `gradient_checkpointing=False` remains in place as a second
+line of defense.
+
+### Alternatives considered
+1. Keep stacking more instance-local patches after trainer construction.
+2. Patch TRL directly inside site-packages on the target machine.
+3. Revert to non-experimental PPO code paths entirely.
+
+### Consequences
+- Any `PolicyAndValueWrapper` instantiated after the patch inherits the missing
+  methods automatically.
+- The PPO script becomes less sensitive to internal wrapper recreation inside
+  experimental TRL.
+- The workaround remains local to the repository instead of mutating external
+  package files.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Treat counterfactual fragment generation as the sole primary objective
 
 ### Background

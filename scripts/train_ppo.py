@@ -538,6 +538,10 @@ def import_training_dependencies() -> dict[str, Any]:
         except ImportError:
             from trl import PPOConfig, PPOTrainer
         try:
+            import trl.experimental.ppo.ppo_trainer as ppo_trainer_module
+        except ImportError:
+            ppo_trainer_module = None
+        try:
             from trl import AutoModelForCausalLMWithValueHead
         except ImportError:
             from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
@@ -545,6 +549,14 @@ def import_training_dependencies() -> dict[str, Any]:
         raise RuntimeError(
             "PPO training requires torch, transformers, datasets, peft, and trl."
         ) from exc
+
+    # 终极类级别猴子补丁：只要 TRL 敢实例化这个外壳，默认就带这两个空方法，直接规避报错
+    if ppo_trainer_module is not None and hasattr(ppo_trainer_module, "PolicyAndValueWrapper"):
+        wrapper_cls = ppo_trainer_module.PolicyAndValueWrapper
+        if not hasattr(wrapper_cls, "gradient_checkpointing_disable"):
+            wrapper_cls.gradient_checkpointing_disable = lambda self: None
+        if not hasattr(wrapper_cls, "gradient_checkpointing_enable"):
+            wrapper_cls.gradient_checkpointing_enable = lambda self: None
 
     return {
         "torch": torch,
@@ -1096,31 +1108,6 @@ def build_ppo_trainer(
     return trainer_cls(**trainer_kwargs)
 
 
-def patch_trl_policy_and_value_wrapper(ppo_trainer: Any) -> None:
-    """Expose gradient checkpointing hooks on TRL experimental wrappers.
-
-    Some ``trl.experimental`` releases wrap the policy/value stack in a
-    ``PolicyAndValueWrapper`` but forget to forward
-    ``gradient_checkpointing_disable`` / ``gradient_checkpointing_enable``.
-    During generation, TRL may call these methods on the wrapper object
-    directly, which then raises an ``AttributeError`` even though the wrapped
-    policy model implements them correctly.
-    """
-
-    wrapper = getattr(ppo_trainer, "model", None)
-    if wrapper is None:
-        return
-
-    policy_model = getattr(wrapper, "policy_model", None)
-    if policy_model is None:
-        return
-
-    if hasattr(policy_model, "gradient_checkpointing_disable"):
-        wrapper.gradient_checkpointing_disable = policy_model.gradient_checkpointing_disable
-    if hasattr(policy_model, "gradient_checkpointing_enable"):
-        wrapper.gradient_checkpointing_enable = policy_model.gradient_checkpointing_enable
-
-
 def save_final_model(
     trainer: Any,
     tokenizer: Any,
@@ -1274,8 +1261,6 @@ def main() -> None:
         reward_model=reward_model,
         logger=logger,
     )
-    # Monkey Patch: 修复 TRL Experimental API 中 PolicyAndValueWrapper 属性丢失的官方 Bug
-    patch_trl_policy_and_value_wrapper(ppo_trainer)
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()
