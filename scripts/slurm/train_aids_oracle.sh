@@ -29,6 +29,8 @@ echo "====================="
 # 确保在项目根目录下执行
 cd /share/home/u20526/czx/counterfactual-subgraph
 
+export PYTHONPATH=$PWD
+
 python3 scripts/train_aids_oracle.py \
   --data-path data/raw/AIDS/HIV.csv \
   --output-path outputs/hpc/oracle/aids_rf_model.pkl
