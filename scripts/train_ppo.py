@@ -530,14 +530,9 @@ def import_training_dependencies() -> dict[str, Any]:
             set_seed,
         )
         try:
-            from trl.experimental.ppo import (
-                AutoModelForCausalLMWithValueHead,
-                PPOConfig,
-                PPOTrainer,
-            )
+            from trl.experimental.ppo import PPOConfig, PPOTrainer
         except ImportError:
             from trl import PPOConfig, PPOTrainer
-            from trl.models.modeling_value_head import AutoModelForCausalLMWithValueHead
     except ImportError as exc:  # pragma: no cover - depends on runtime environment
         raise RuntimeError(
             "PPO training requires torch, transformers, datasets, peft, and trl."
@@ -549,7 +544,6 @@ def import_training_dependencies() -> dict[str, Any]:
         "PeftModel": PeftModel,
         "prepare_model_for_kbit_training": prepare_model_for_kbit_training,
         "AutoModelForCausalLM": AutoModelForCausalLM,
-        "AutoModelForCausalLMWithValueHead": AutoModelForCausalLMWithValueHead,
         "AutoTokenizer": AutoTokenizer,
         "BitsAndBytesConfig": BitsAndBytesConfig,
         "PPOConfig": PPOConfig,
@@ -587,6 +581,7 @@ def build_quantized_base_model(
     model_path: Path,
     trust_remote_code: bool,
     local_files_only: bool,
+    prepare_for_training: bool,
 ) -> Any:
     """Load the 4-bit ChemLLM base model for QLoRA-style PPO."""
 
@@ -608,18 +603,19 @@ def build_quantized_base_model(
     model.config.use_cache = False
     if hasattr(model, "generation_config") and model.generation_config is not None:
         model.generation_config.use_cache = False
-    if hasattr(model, "enable_input_require_grads"):
+    if prepare_for_training and hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
-    model = deps["prepare_model_for_kbit_training"](
-        model,
-        use_gradient_checkpointing=True,
-    )
-    if hasattr(model, "gradient_checkpointing_enable"):
+    if prepare_for_training:
+        model = deps["prepare_model_for_kbit_training"](
+            model,
+            use_gradient_checkpointing=True,
+        )
+    if prepare_for_training and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
     return model
 
 
-def build_value_head_model(
+def build_policy_model(
     deps: dict[str, Any],
     *,
     model_path: Path,
@@ -628,52 +624,35 @@ def build_value_head_model(
     local_files_only: bool,
     is_trainable: bool,
 ) -> Any:
-    """Load base model + LoRA adapter, then wrap it with a value head."""
+    """Load base model + LoRA adapter as a native causal LM.
+
+    Newer ``trl.experimental.ppo.PPOTrainer`` versions manage the policy/value
+    wrapping internally, so we intentionally keep the external model as a
+    plain causal LM (potentially PEFT-wrapped) instead of constructing an
+    explicit value-head wrapper here.
+    """
 
     base_model = build_quantized_base_model(
         deps,
         model_path=model_path,
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
+        prepare_for_training=is_trainable,
     )
-    peft_model = deps["PeftModel"].from_pretrained(
+    policy_model = deps["PeftModel"].from_pretrained(
         base_model,
         str(adapter_path),
         is_trainable=is_trainable,
     )
-    value_head_model = deps["AutoModelForCausalLMWithValueHead"].from_pretrained(peft_model)
-    if hasattr(value_head_model, "pretrained_model"):
-        pretrained_model = value_head_model.pretrained_model
-        if hasattr(pretrained_model, "config"):
-            pretrained_model.config.use_cache = False
-        if hasattr(pretrained_model, "generation_config") and pretrained_model.generation_config:
-            pretrained_model.generation_config.use_cache = False
+    if hasattr(policy_model, "config"):
+        policy_model.config.use_cache = False
+    if hasattr(policy_model, "generation_config") and policy_model.generation_config:
+        policy_model.generation_config.use_cache = False
     if not is_trainable:
-        for parameter in value_head_model.parameters():
+        for parameter in policy_model.parameters():
             parameter.requires_grad = False
-        value_head_model.eval()
-    return value_head_model
-
-
-def ensure_generation_config_on_wrapper(model: Any) -> Any:
-    """Expose generation_config on TRL value-head wrappers.
-
-    Newer TRL experimental PPOTrainer implementations may expect the wrapper
-    object itself to carry ``generation_config``, while
-    ``AutoModelForCausalLMWithValueHead`` keeps it on ``pretrained_model``.
-    """
-
-    if model is None:
-        return None
-
-    if hasattr(model, "generation_config") and model.generation_config is not None:
-        return model
-
-    pretrained_model = getattr(model, "pretrained_model", None)
-    generation_config = getattr(pretrained_model, "generation_config", None)
-    if generation_config is not None:
-        model.generation_config = generation_config
-    return model
+        policy_model.eval()
+    return policy_model
 
 
 def build_hf_dataset(deps: dict[str, Any], tokenizer: Any, examples: Sequence[PromptExample]) -> Any:
@@ -747,6 +726,114 @@ def build_ppo_config(
     return ppo_config_cls(**filtered_kwargs)
 
 
+def build_reward_adapter(deps: dict[str, Any], *, tokenizer: Any, rewarder: ChemRLRewarder) -> Any:
+    """Wrap ``ChemRLRewarder`` into a callable object accepted by new TRL APIs.
+
+    Different TRL experimental releases may expect either ``reward_model`` or
+    ``reward_funcs``. This adapter is intentionally permissive about input
+    formats so it can survive minor signature churn without changing the
+    counterfactual reward semantics.
+    """
+
+    torch = deps["torch"]
+
+    class _RewardAdapter(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def _decode_batch(self, payload: Any) -> list[str]:
+            if payload is None:
+                return []
+            if isinstance(payload, str):
+                return [payload]
+            if torch.is_tensor(payload):
+                if payload.dim() == 1:
+                    payload = payload.unsqueeze(0)
+                return [str(text).strip() for text in tokenizer.batch_decode(payload, skip_special_tokens=True)]
+            if isinstance(payload, dict):
+                for key in ("query", "prompt", "response", "completion", "text"):
+                    if key in payload:
+                        return self._decode_batch(payload[key])
+                return [str(payload)]
+
+            values = list(payload) if isinstance(payload, Sequence) else [payload]
+            if not values:
+                return []
+            if all(isinstance(value, str) for value in values):
+                return [str(value).strip() for value in values]
+            if all(torch.is_tensor(value) for value in values):
+                batch = []
+                for value in values:
+                    tensor = value.detach().cpu()
+                    if tensor.dim() == 0:
+                        tensor = tensor.unsqueeze(0)
+                    batch.append(tensor.tolist())
+                return [str(text).strip() for text in tokenizer.batch_decode(batch, skip_special_tokens=True)]
+            if all(isinstance(value, (list, tuple)) for value in values):
+                return [str(text).strip() for text in tokenizer.batch_decode(values, skip_special_tokens=True)]
+            return [str(value).strip() for value in values]
+
+        @staticmethod
+        def _first_present(mapping: dict[str, Any], keys: Sequence[str]) -> Any:
+            for key in keys:
+                if key in mapping and mapping[key] is not None:
+                    return mapping[key]
+            return None
+
+        def _extract_batches(self, *args: Any, **kwargs: Any) -> tuple[list[str], list[str]]:
+            prompt_payload = self._first_present(
+                kwargs,
+                ("prompts", "queries", "query", "input_texts", "texts", "samples"),
+            )
+            response_payload = self._first_present(
+                kwargs,
+                ("responses", "completions", "response", "generated_texts", "samples"),
+            )
+
+            if prompt_payload is None and len(args) >= 1:
+                prompt_payload = args[0]
+            if response_payload is None and len(args) >= 2:
+                response_payload = args[1]
+
+            prompts = self._decode_batch(prompt_payload)
+            responses = self._decode_batch(response_payload)
+            if prompts and responses and len(prompts) != len(responses):
+                minimum = min(len(prompts), len(responses))
+                prompts = prompts[:minimum]
+                responses = responses[:minimum]
+            return prompts, responses
+
+        def forward(self, *args: Any, **kwargs: Any) -> Any:
+            prompts, responses = self._extract_batches(*args, **kwargs)
+            if not prompts or not responses:
+                return []
+
+            parent_smiles_batch: list[str] = []
+            original_label_batch: list[int] = []
+            cleaned_responses: list[str] = []
+
+            for prompt, response in zip(prompts, responses, strict=True):
+                try:
+                    parent_smiles = extract_parent_smiles_from_prompt(prompt)
+                except Exception:
+                    parent_smiles = ""
+                label = extract_label_from_prompt(prompt)
+                if label is None:
+                    label = rewarder.default_parent_label
+                parent_smiles_batch.append(parent_smiles)
+                original_label_batch.append(int(label))
+                cleaned_responses.append(clean_generated_smiles(response))
+
+            traces = rewarder.calculate_reward_details_batch(
+                parent_smiles_batch,
+                cleaned_responses,
+                parent_labels=original_label_batch,
+            )
+            return [float(trace.reward) for trace in traces]
+
+    return _RewardAdapter()
+
+
 def build_ppo_trainer(
     deps: dict[str, Any],
     *,
@@ -755,11 +842,10 @@ def build_ppo_trainer(
     reference_model: Any,
     tokenizer: Any,
     dataset: Any,
+    reward_adapter: Any,
     logger: Any,
 ) -> Any:
     """Build PPOTrainer defensively across TRL API variants."""
-
-    torch = deps["torch"]
     trainer_cls = deps["PPOTrainer"]
     trainer_signature = inspect.signature(trainer_cls.__init__)
     supported_keys = set(trainer_signature.parameters.keys())
@@ -773,9 +859,17 @@ def build_ppo_trainer(
 
     if "model" in supported_keys:
         trainer_kwargs["model"] = policy_model
+    elif "policy" in supported_keys:
+        trainer_kwargs["policy"] = policy_model
+    elif "policy_model" in supported_keys:
+        trainer_kwargs["policy_model"] = policy_model
 
     if "ref_model" in supported_keys:
         trainer_kwargs["ref_model"] = reference_model
+    elif "ref_policy" in supported_keys:
+        trainer_kwargs["ref_policy"] = reference_model
+    elif "reference_model" in supported_keys:
+        trainer_kwargs["reference_model"] = reference_model
 
     if "processing_class" in supported_keys:
         trainer_kwargs["processing_class"] = tokenizer
@@ -787,15 +881,24 @@ def build_ppo_trainer(
     elif "dataset" in supported_keys:
         trainer_kwargs["dataset"] = dataset
 
+    if "dataset_text_field" in supported_keys:
+        trainer_kwargs["dataset_text_field"] = "query"
+
     if "data_collator" in supported_keys:
         trainer_kwargs["data_collator"] = build_data_collator()
 
-    # Experimental PPOTrainer may expose Trainer-like required kwargs.
-    if "reward_model" in supported_keys and "reward_model" not in trainer_kwargs:
-        trainer_kwargs["reward_model"] = torch.nn.Identity()
+    if "reward_funcs" in supported_keys:
+        trainer_kwargs["reward_funcs"] = [reward_adapter]
+    elif "reward_model" in supported_keys:
+        trainer_kwargs["reward_model"] = reward_adapter
 
-    if "value_model" in supported_keys and "value_model" not in trainer_kwargs:
-        trainer_kwargs["value_model"] = getattr(policy_model, "v_head", None) or torch.nn.Identity()
+    # New experimental PPOTrainer builds can share the backbone internally when
+    # no external value model is provided. We therefore never construct a
+    # wrapper-side value head in this script.
+    if "value_model" in supported_keys:
+        value_model_param = trainer_signature.parameters["value_model"]
+        if value_model_param.default is inspect._empty or value_model_param.default is not None:
+            trainer_kwargs["value_model"] = None
 
     logger.info("Filtered PPOTrainer kwargs for current TRL version: %s", sorted(trainer_kwargs))
     return trainer_cls(**trainer_kwargs)
@@ -1045,7 +1148,7 @@ def main() -> None:
         len(dataset),
     )
 
-    policy_model = build_value_head_model(
+    policy_model = build_policy_model(
         deps,
         model_path=model_path,
         adapter_path=sft_adapter_path,
@@ -1053,7 +1156,7 @@ def main() -> None:
         local_files_only=args.local_files_only,
         is_trainable=True,
     )
-    reference_model = build_value_head_model(
+    reference_model = build_policy_model(
         deps,
         model_path=model_path,
         adapter_path=sft_adapter_path,
@@ -1061,8 +1164,6 @@ def main() -> None:
         local_files_only=args.local_files_only,
         is_trainable=False,
     )
-    policy_model = ensure_generation_config_on_wrapper(policy_model)
-    reference_model = ensure_generation_config_on_wrapper(reference_model)
 
     ppo_config = build_ppo_config(
         deps,
@@ -1072,6 +1173,16 @@ def main() -> None:
         logger=logger,
     )
 
+    rewarder = ChemRLRewarder(
+        oracle_path=oracle_path,
+        default_parent_label=args.default_parent_label,
+    )
+    reward_adapter = build_reward_adapter(
+        deps,
+        tokenizer=tokenizer,
+        rewarder=rewarder,
+    )
+
     ppo_trainer = build_ppo_trainer(
         deps,
         ppo_config=ppo_config,
@@ -1079,12 +1190,8 @@ def main() -> None:
         reference_model=reference_model,
         tokenizer=tokenizer,
         dataset=dataset,
+        reward_adapter=reward_adapter,
         logger=logger,
-    )
-
-    rewarder = ChemRLRewarder(
-        oracle_path=oracle_path,
-        default_parent_label=args.default_parent_label,
     )
 
     generation_kwargs = {
