@@ -19,6 +19,7 @@ import argparse
 import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import inspect
 import json
 import os
 from pathlib import Path
@@ -598,7 +599,7 @@ def build_quantized_base_model(
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
         quantization_config=quantization_config,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
     )
     model.config.use_cache = False
@@ -675,6 +676,93 @@ def build_data_collator() -> Any:
         return {key: [feature[key] for feature in features] for key in features[0]}
 
     return collate
+
+
+def build_ppo_config(
+    deps: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    actual_batch_size: int,
+    actual_mini_batch_size: int,
+    logger: Any,
+) -> Any:
+    """Build PPOConfig defensively across TRL versions.
+
+    Different TRL releases expose different PPOConfig signatures. Instead of
+    hardcoding one version's arguments, inspect the runtime signature and keep
+    only the kwargs that are actually supported.
+    """
+
+    ppo_config_cls = deps["PPOConfig"]
+    try:
+        supported_keys = set(inspect.signature(ppo_config_cls).parameters.keys())
+    except (TypeError, ValueError):  # pragma: no cover - defensive fallback
+        supported_keys = set()
+
+    desired_kwargs: dict[str, Any] = {
+        "batch_size": int(actual_batch_size),
+        "mini_batch_size": int(actual_mini_batch_size),
+        "learning_rate": float(args.learning_rate),
+        "seed": int(args.seed),
+    }
+
+    if "init_kl_coef" in supported_keys:
+        desired_kwargs["init_kl_coef"] = float(args.init_kl_coef)
+    elif "kl_coef" in supported_keys:
+        desired_kwargs["kl_coef"] = float(args.init_kl_coef)
+
+    if "log_with" in supported_keys:
+        desired_kwargs["log_with"] = None
+
+    filtered_kwargs = {
+        key: value
+        for key, value in desired_kwargs.items()
+        if not supported_keys or key in supported_keys
+    }
+    logger.info("Filtered PPOConfig kwargs for current TRL version: %s", sorted(filtered_kwargs))
+    return ppo_config_cls(**filtered_kwargs)
+
+
+def normalize_token_tensor_list(
+    torch: Any,
+    values: Sequence[Any],
+    *,
+    device: Any,
+) -> list[Any]:
+    """Convert token sequences into the 1D long tensors expected by PPO step/generate."""
+
+    normalized: list[Any] = []
+    for value in values:
+        tensor = value if torch.is_tensor(value) else torch.tensor(value, dtype=torch.long)
+        tensor = tensor.to(device=device, dtype=torch.long)
+        if tensor.dim() == 0:
+            tensor = tensor.unsqueeze(0)
+        elif tensor.dim() > 1:
+            tensor = tensor.reshape(-1)
+        normalized.append(tensor.contiguous())
+    return normalized
+
+
+def normalize_reward_tensor_list(
+    torch: Any,
+    values: Sequence[Any],
+    *,
+    device: Any,
+) -> list[Any]:
+    """Convert reward values into scalar float tensors for PPOTrainer.step()."""
+
+    normalized: list[Any] = []
+    for value in values:
+        tensor = value if torch.is_tensor(value) else torch.tensor(value, dtype=torch.float32)
+        tensor = tensor.to(device=device, dtype=torch.float32)
+        if tensor.dim() > 0:
+            tensor = tensor.reshape(-1)
+            if tensor.numel() != 1:
+                tensor = tensor.mean()
+            else:
+                tensor = tensor.squeeze(0)
+        normalized.append(tensor)
+    return normalized
 
 
 def normalize_generation_tensors(torch: Any, generated: Any) -> list[Any]:
@@ -856,12 +944,12 @@ def main() -> None:
         is_trainable=False,
     )
 
-    ppo_config = deps["PPOConfig"](
-        learning_rate=float(args.learning_rate),
-        batch_size=int(actual_batch_size),
-        mini_batch_size=int(actual_mini_batch_size),
-        init_kl_coef=float(args.init_kl_coef),
-        seed=int(args.seed),
+    ppo_config = build_ppo_config(
+        deps,
+        args=args,
+        actual_batch_size=int(actual_batch_size),
+        actual_mini_batch_size=int(actual_mini_batch_size),
+        logger=logger,
     )
 
     ppo_trainer = deps["PPOTrainer"](
@@ -897,16 +985,21 @@ def main() -> None:
     while global_step < int(args.max_steps):
         for batch in ppo_trainer.dataloader:
             global_step += 1
-            query_tensors = [
-                torch.tensor(ids, dtype=torch.long, device=ppo_trainer.accelerator.device)
-                for ids in batch["input_ids"]
-            ]
+            query_tensors = normalize_token_tensor_list(
+                torch,
+                batch["input_ids"],
+                device=ppo_trainer.accelerator.device,
+            )
             generated = ppo_trainer.generate(
                 query_tensors,
                 return_prompt=False,
                 **generation_kwargs,
             )
-            response_tensors = normalize_generation_tensors(torch, generated)
+            response_tensors = normalize_token_tensor_list(
+                torch,
+                normalize_generation_tensors(torch, generated),
+                device=ppo_trainer.accelerator.device,
+            )
             raw_responses = [
                 tokenizer.decode(response_tensor, skip_special_tokens=True).strip()
                 for response_tensor in response_tensors
@@ -920,10 +1013,11 @@ def main() -> None:
                 cleaned_responses,
                 parent_labels=original_label_batch,
             )
-            rewards = [
-                torch.tensor(trace.reward, dtype=torch.float32, device=ppo_trainer.accelerator.device)
-                for trace in traces
-            ]
+            rewards = normalize_reward_tensor_list(
+                torch,
+                [trace.reward for trace in traces],
+                device=ppo_trainer.accelerator.device,
+            )
 
             trainer_stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
 
