@@ -60,6 +60,52 @@ Accepted
 
 ---
 
+## [2026-04-16] Add PPO runtime import-path introspection for ChemLLM cache debugging
+
+### Background
+The ChemLLM / InternLM2 PPO path hit a cache-related generation crash inside
+`modeling_internlm2.py`, but local repository edits alone were not enough to
+prove which dynamically cached file the Slurm job was actually importing at
+runtime. In a VS Code plus Git plus HPC workflow, the repository copy, the
+Hugging Face dynamic module cache, and the job's working directory can diverge.
+
+### Decision
+Add lightweight runtime introspection to `scripts/train_ppo.py` so every PPO
+run logs:
+
+- the wrapped policy / reference / value model module names;
+- the resolved module source files;
+- the resolved `prepare_inputs_for_generation` source files;
+- key environment variables such as `PYTHONPATH`, `HF_HOME`,
+  `TRANSFORMERS_CACHE`, and `HUGGINGFACE_HUB_CACHE`.
+
+Also add a dedicated Slurm smoke-test entrypoint:
+
+- `scripts/slurm/debug_check_chemllm_runtime_path.sh`
+
+that reuses the normal HPC environment bootstrap, prints repository and Python
+runtime information, and runs a tiny PPO smoke test through
+`scripts/train_rl.py`.
+
+### Alternatives considered
+1. Keep reasoning about cache behavior from static local files only.
+2. Patch more InternLM2 code blindly without first proving the runtime import
+   path.
+3. Ask users to manually add debug prints on the HPC side.
+
+### Consequences
+- Future Slurm logs can show exactly which `modeling_internlm2.py` was imported
+  during PPO generation.
+- Runtime path mismatches between repository code and Hugging Face dynamic cache
+  are easier to detect before chasing deeper trainer bugs.
+- The repository now has a reusable HPC-first smoke test for ChemLLM runtime
+  path debugging.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-15] Implement first PPO training path with residual-based reward wrapper
 
 ### Background

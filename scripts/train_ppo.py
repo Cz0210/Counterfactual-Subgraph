@@ -23,6 +23,8 @@ import inspect
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 from typing import Any, Sequence
 
 # 开启离线模式：只记录不上传
@@ -1212,6 +1214,109 @@ def patch_internlm_cache(trainer_model: Any) -> None:
     model_cls._is_cache_patched = True
 
 
+def _safe_source_path(target: Any) -> str | None:
+    """Best-effort source path lookup for runtime module introspection."""
+
+    if target is None:
+        return None
+    try:
+        source_path = inspect.getsourcefile(target) or inspect.getfile(target)
+    except (OSError, TypeError):
+        return None
+    return str(source_path) if source_path else None
+
+
+def _safe_git_commit() -> str | None:
+    """Return the current repository commit if git metadata is available."""
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def collect_runtime_environment_debug() -> dict[str, Any]:
+    """Collect basic runtime environment fields for Slurm log diagnosis."""
+
+    return {
+        "python_executable": sys.executable,
+        "cwd": str(Path.cwd()),
+        "git_commit": _safe_git_commit(),
+        "hf_home": os.environ.get("HF_HOME"),
+        "transformers_cache": os.environ.get("TRANSFORMERS_CACHE"),
+        "huggingface_hub_cache": os.environ.get("HUGGINGFACE_HUB_CACHE"),
+        "pythonpath": os.environ.get("PYTHONPATH"),
+        "conda_default_env": os.environ.get("CONDA_DEFAULT_ENV"),
+    }
+
+
+def collect_runtime_model_debug(model: Any) -> dict[str, Any]:
+    """Collect the actual runtime module/file chain for wrapped PPO models."""
+
+    debug_info: dict[str, Any] = {
+        **collect_runtime_environment_debug(),
+        "layers": [],
+    }
+
+    current_model = model
+    visited: set[int] = set()
+    for depth in range(8):
+        if current_model is None:
+            break
+        identity = id(current_model)
+        if identity in visited:
+            break
+        visited.add(identity)
+
+        class_module_name = getattr(current_model.__class__, "__module__", None)
+        class_module = sys.modules.get(class_module_name)
+        prepare_method = getattr(current_model.__class__, "prepare_inputs_for_generation", None)
+        layer_info: dict[str, Any] = {
+            "depth": depth,
+            "class_name": current_model.__class__.__name__,
+            "class_module": class_module_name,
+            "class_source_file": _safe_source_path(current_model.__class__),
+            "module_file": getattr(class_module, "__file__", None),
+            "prepare_inputs_source_file": _safe_source_path(prepare_method),
+        }
+        debug_info["layers"].append(layer_info)
+
+        next_model = None
+        for attribute_name in (
+            "policy_model",
+            "pretrained_model",
+            "model",
+            "base_model",
+            "language_model",
+        ):
+            candidate = getattr(current_model, attribute_name, None)
+            if candidate is not None and id(candidate) not in visited:
+                layer_info["next_attr"] = attribute_name
+                next_model = candidate
+                break
+        current_model = next_model
+
+    return debug_info
+
+
+def log_runtime_model_debug(
+    logger: Any,
+    *,
+    label: str,
+    model: Any,
+) -> None:
+    """Emit runtime import-path diagnostics into the training log."""
+
+    logger.info("Runtime model debug [%s]: %s", label, collect_runtime_model_debug(model))
+
+
 def save_final_model(
     trainer: Any,
     tokenizer: Any,
@@ -1262,11 +1367,13 @@ def main() -> None:
         ),
         log_dir=log_dir,
     )
+    logger.info("Runtime environment: %s", collect_runtime_environment_debug())
 
     write_runtime_manifest(
         output_dir / "train_ppo_manifest.json",
         {
             "run_name": run_name,
+            "git_commit": _safe_git_commit(),
             "config_files": [str(Path(path).expanduser().resolve()) for path in args.config],
             "model_path": str(model_path),
             "sft_adapter_path": str(sft_adapter_path),
@@ -1365,8 +1472,13 @@ def main() -> None:
         reward_model=reward_model,
         logger=logger,
     )
+    log_runtime_model_debug(logger, label="policy_model", model=policy_model)
+    log_runtime_model_debug(logger, label="reference_model", model=reference_model)
+    log_runtime_model_debug(logger, label="value_model", model=value_model)
+    log_runtime_model_debug(logger, label="ppo_trainer.model_before_patch", model=getattr(ppo_trainer, "model", None))
     sync_generation_token_ids(getattr(ppo_trainer, "model", None), tokenizer)
     patch_internlm_cache(ppo_trainer.model)
+    log_runtime_model_debug(logger, label="ppo_trainer.model_after_patch", model=getattr(ppo_trainer, "model", None))
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()
