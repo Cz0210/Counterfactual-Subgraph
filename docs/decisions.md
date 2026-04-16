@@ -60,6 +60,47 @@ Accepted
 
 ---
 
+## [2026-04-16] Make ChemLLM cache patch tool classify guarded vs unguarded accesses
+
+### Background
+The first repository-side ChemLLM cache patch tool could add the helper and
+patch the forward-path cache-length logic, but its multiline matching for
+`prepare_inputs_for_generation()` was too brittle. As soon as the target block
+contained nested indentation, comments, or slightly different formatting, the
+prepare-path patch silently failed. The checker output also counted every
+`past_key_values[0][0].shape[2]` occurrence as equally dangerous even after it
+had been moved under the new guard.
+
+### Decision
+Rework `tools/check_or_patch_chemllm_cache.py` to use indentation-aware,
+line-based patching and reporting:
+
+- patch the forward cache-length block and the
+  `prepare_inputs_for_generation()` block independently;
+- insert `else: past_key_values = None` / `past_length = 0` for the prepare
+  path;
+- detect already-patched blocks and skip them cleanly;
+- classify dangerous accesses as either `guarded` or `unguarded`, and treat
+  `unguarded_count=0` as the real success criterion.
+
+### Alternatives considered
+1. Keep the old regexes and only tweak them slightly.
+2. Require manual patching for the prepare path on HPC.
+3. Keep counting all `shape[2]` accesses as equally dangerous.
+
+### Consequences
+- The repository-side helper can now patch both critical cache branches before
+  HPC smoke testing.
+- Patch results are easier to interpret because protected accesses are no
+  longer reported as unresolved failures.
+- HPC documentation can now point users to `unguarded_count=0` instead of
+  incorrectly suggesting that all `shape[2]` accesses must disappear.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-16] Add PPO runtime import-path introspection for ChemLLM cache debugging
 
 ### Background

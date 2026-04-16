@@ -78,6 +78,15 @@ The tool will:
 - patch the `forward()` / `past_key_values_length` branch;
 - print a unified diff and a post-patch summary.
 
+Important:
+
+- after a successful patch, `past_key_values[0][0].shape[2]` may still appear in
+  the file;
+- that is acceptable if the access is now inside
+  `if _has_valid_past_key_values(past_key_values):`;
+- the real success criterion is `unguarded_count=0`;
+- `guarded_count>0` is allowed.
+
 ## 5. Submit the runtime-path smoke test
 
 The repository now includes a debug Slurm template that prints:
@@ -135,6 +144,13 @@ You want to confirm:
 
 If the runtime points to an unexpected `modeling_internlm2.py`, patch that file,
 not the one you assumed from static inspection.
+
+When checking the patch-tool output, interpret it like this:
+
+1. `has__has_valid_past_key_values=True` means the helper exists.
+2. `unguarded_count=0` means the dangerous accesses are no longer exposed.
+3. `guarded_count>0` means the accesses still exist, but only inside the new
+   helper-protected branch.
 
 ## 8. If the cache file keeps getting regenerated
 

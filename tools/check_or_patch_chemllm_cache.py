@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Inspect and optionally patch a ChemLLM InternLM2 cache module.
 
-This helper is meant to be copied to / executed on HPC after the repository has
-been synced there. It focuses on the cache-related crash pattern:
-
-    past_key_values[0][0].shape[2]
-
-where the outer ``past_key_values`` object is non-null but the first cached
-key/value entry is still ``None``.
+This helper is meant to be synced to HPC and executed there against the real
+Hugging Face dynamic-module cache file used at runtime.
 """
 
 from __future__ import annotations
@@ -15,7 +10,6 @@ from __future__ import annotations
 import argparse
 import difflib
 from pathlib import Path
-import re
 import shutil
 import sys
 from typing import Iterable
@@ -23,6 +17,8 @@ from typing import Iterable
 
 DANGEROUS_EXPR = "past_key_values[0][0].shape[2]"
 HELPER_NAME = "_has_valid_past_key_values"
+HELPER_GUARD = "if _has_valid_past_key_values(past_key_values):"
+
 HELPER_SNIPPET = '''
 def _has_valid_past_key_values(past_key_values) -> bool:
     """Return True only when the first cached key/value tensor is really present."""
@@ -42,23 +38,6 @@ def _has_valid_past_key_values(past_key_values) -> bool:
 '''.lstrip("\n")
 
 
-FORWARD_PATTERN = re.compile(
-    r"(?P<indent>[ \t]*)seq_length_with_past = seq_length\n"
-    r"(?P=indent)past_key_values_length = 0\n"
-    r"(?P=indent)if past_key_values is not None:\n"
-    r"(?P=indent)    past_key_values_length = past_key_values\[0\]\[0\]\.shape\[2\]\n"
-    r"(?P=indent)    seq_length_with_past = seq_length_with_past \+ past_key_values_length",
-    re.MULTILINE,
-)
-
-PREPARE_PATTERN = re.compile(
-    r"(?P<indent>[ \t]*)if past_key_values is not None:\n"
-    r"(?P=indent)    past_length = past_key_values\[0\]\[0\]\.shape\[2\]\n"
-    r"(?P<body>(?:\n(?P=indent)    .*)*?\n(?P=indent)    input_ids = input_ids\[:, remove_prefix_length\])",
-    re.MULTILINE,
-)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", required=True, help="目标 modeling_internlm2.py 路径。")
@@ -71,128 +50,257 @@ def build_parser() -> argparse.ArgumentParser:
         "--context",
         type=int,
         default=4,
-        help="打印危险命中附近的上下文行数。",
+        help="打印命中位置附近的上下文行数。",
     )
     return parser
 
 
-def count_occurrences(text: str, needle: str) -> list[int]:
-    positions: list[int] = []
-    start = 0
-    while True:
-        index = text.find(needle, start)
-        if index < 0:
-            return positions
-        positions.append(index)
-        start = index + len(needle)
+def stripped(line: str) -> str:
+    return line.strip()
 
 
-def byte_offset_to_line_number(text: str, offset: int) -> int:
-    return text[:offset].count("\n") + 1
+def indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
 
 
-def render_context(text: str, *, line_number: int, radius: int) -> str:
-    lines = text.splitlines()
+def indent_text(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def is_significant(line: str) -> bool:
+    text = stripped(line)
+    return bool(text) and not text.startswith("#")
+
+
+def ensure_trailing_newline(line: str) -> str:
+    return line if line.endswith("\n") else line + "\n"
+
+
+def render_context(lines: list[str], *, line_number: int, radius: int) -> str:
     start = max(0, line_number - radius - 1)
     end = min(len(lines), line_number + radius)
     rendered: list[str] = []
     for current in range(start, end):
         marker = ">>" if current + 1 == line_number else "  "
-        rendered.append(f"{marker} {current + 1:4d}: {lines[current]}")
+        rendered.append(f"{marker} {current + 1:4d}: {lines[current].rstrip()}")
     return "\n".join(rendered)
 
 
+def classify_occurrences(lines: list[str]) -> list[dict[str, object]]:
+    """Classify dangerous accesses as guarded or unguarded by indentation scope."""
+
+    occurrences: list[dict[str, object]] = []
+    active_guard_indents: list[int] = []
+
+    for index, line in enumerate(lines):
+        if is_significant(line):
+            current_indent = indent_of(line)
+            while active_guard_indents and current_indent <= active_guard_indents[-1]:
+                active_guard_indents.pop()
+
+            if stripped(line) == HELPER_GUARD:
+                active_guard_indents.append(current_indent)
+
+        if DANGEROUS_EXPR in line:
+            occurrences.append(
+                {
+                    "line_number": index + 1,
+                    "guarded": bool(active_guard_indents),
+                }
+            )
+
+    return occurrences
+
+
 def summarize_file(text: str) -> dict[str, object]:
-    occurrences = count_occurrences(text, DANGEROUS_EXPR)
+    lines = text.splitlines()
+    occurrences = classify_occurrences([ensure_trailing_newline(line) for line in lines])
+    guarded_lines = [item["line_number"] for item in occurrences if item["guarded"]]
+    unguarded_lines = [item["line_number"] for item in occurrences if not item["guarded"]]
     return {
         "has_helper": HELPER_NAME in text,
-        "dangerous_count": len(occurrences),
-        "dangerous_lines": [byte_offset_to_line_number(text, offset) for offset in occurrences],
+        "guarded_count": len(guarded_lines),
+        "unguarded_count": len(unguarded_lines),
+        "guarded_lines": guarded_lines,
+        "unguarded_lines": unguarded_lines,
     }
 
 
 def print_summary(path: Path, text: str, *, context: int) -> None:
     summary = summarize_file(text)
+    lines = [ensure_trailing_newline(line) for line in text.splitlines()]
+
     print(f"[summary] path={path}")
     print(f"[summary] has_{HELPER_NAME}={summary['has_helper']}")
-    print(f"[summary] dangerous_count={summary['dangerous_count']}")
-    if summary["dangerous_lines"]:
-        print(f"[summary] dangerous_lines={summary['dangerous_lines']}")
-    else:
-        print("[summary] dangerous_lines=[]")
+    print(f"[summary] unguarded_count={summary['unguarded_count']}")
+    print(f"[summary] guarded_count={summary['guarded_count']}")
+    print(f"[summary] unguarded_lines={summary['unguarded_lines']}")
+    print(f"[summary] guarded_lines={summary['guarded_lines']}")
 
-    occurrences = count_occurrences(text, DANGEROUS_EXPR)
-    for index, offset in enumerate(occurrences, start=1):
-        line_number = byte_offset_to_line_number(text, offset)
+    occurrences = classify_occurrences(lines)
+    for index, occurrence in enumerate(occurrences, start=1):
+        line_number = int(occurrence["line_number"])
+        label = "guarded" if occurrence["guarded"] else "unguarded"
         print("")
-        print(f"[context #{index}] line={line_number}")
-        print(render_context(text, line_number=line_number, radius=context))
+        print(f"[{label} #{index}] line={line_number}")
+        print(render_context(lines, line_number=line_number, radius=context))
 
 
-def ensure_helper(text: str) -> tuple[str, bool]:
+def ensure_helper(text: str) -> tuple[str, str]:
     if HELPER_NAME in text:
-        return text, False
+        return text, "skipped existing helper"
 
     anchor = '_CONFIG_FOR_DOC = "InternLM2Config"\n'
     if anchor in text:
-        return text.replace(anchor, anchor + "\n" + HELPER_SNIPPET, 1), True
+        return text.replace(anchor, anchor + "\n" + HELPER_SNIPPET, 1), "added helper"
 
     doc_anchor = "__all__ ="
     if doc_anchor in text:
-        return text.replace(doc_anchor, HELPER_SNIPPET + doc_anchor, 1), True
+        return text.replace(doc_anchor, HELPER_SNIPPET + doc_anchor, 1), "added helper"
 
-    return HELPER_SNIPPET + text, True
-
-
-def patch_forward_block(text: str) -> tuple[str, int]:
-    def _replace(match: re.Match[str]) -> str:
-        indent = match.group("indent")
-        return (
-            f"{indent}seq_length_with_past = seq_length\n"
-            f"{indent}past_key_values_length = 0\n"
-            f"{indent}if _has_valid_past_key_values(past_key_values):\n"
-            f"{indent}    past_key_values_length = past_key_values[0][0].shape[2]\n"
-            f"{indent}    seq_length_with_past = seq_length_with_past + past_key_values_length\n"
-            f"{indent}else:\n"
-            f"{indent}    past_key_values = None"
-        )
-
-    return FORWARD_PATTERN.subn(_replace, text)
+    return HELPER_SNIPPET + text, "added helper"
 
 
-def patch_prepare_block(text: str) -> tuple[str, int]:
-    def _replace(match: re.Match[str]) -> str:
-        indent = match.group("indent")
-        body = match.group("body")
-        return (
-            f"{indent}if _has_valid_past_key_values(past_key_values):\n"
-            f"{indent}    past_length = past_key_values[0][0].shape[2]"
-            f"{body}\n"
-            f"{indent}else:\n"
-            f"{indent}    past_key_values = None\n"
-            f"{indent}    past_length = 0"
-        )
+def patch_forward_blocks(lines: list[str]) -> tuple[list[str], dict[str, int]]:
+    stats = {"patched": 0, "skipped": 0}
+    result: list[str] = []
+    index = 0
 
-    return PREPARE_PATTERN.subn(_replace, text)
+    while index < len(lines):
+        line = lines[index]
+
+        if (
+            stripped(line) == HELPER_GUARD
+            and index + 2 < len(lines)
+            and stripped(lines[index + 1]) == f"past_key_values_length = {DANGEROUS_EXPR}"
+            and stripped(lines[index + 2]) == "seq_length_with_past = seq_length_with_past + past_key_values_length"
+        ):
+            stats["skipped"] += 1
+            result.append(line)
+            index += 1
+            continue
+
+        if (
+            stripped(line) == "if past_key_values is not None:"
+            and index + 2 < len(lines)
+            and stripped(lines[index + 1]) == f"past_key_values_length = {DANGEROUS_EXPR}"
+            and stripped(lines[index + 2]) == "seq_length_with_past = seq_length_with_past + past_key_values_length"
+        ):
+            base_indent = indent_text(line)
+            body_indent = base_indent + " " * 4
+            result.extend(
+                [
+                    f"{base_indent}{HELPER_GUARD}\n",
+                    f"{body_indent}past_key_values_length = {DANGEROUS_EXPR}\n",
+                    f"{body_indent}seq_length_with_past = seq_length_with_past + past_key_values_length\n",
+                    f"{base_indent}else:\n",
+                    f"{body_indent}past_key_values = None\n",
+                ]
+            )
+            stats["patched"] += 1
+            index += 3
+            continue
+
+        result.append(line)
+        index += 1
+
+    return result, stats
 
 
-def apply_patch(text: str) -> tuple[str, list[str]]:
-    patched_text = text
-    changes: list[str] = []
+def find_block_end(lines: list[str], start_index: int, base_indent: int) -> int:
+    end_index = start_index
+    index = start_index + 1
+    while index < len(lines):
+        candidate = lines[index]
+        if not is_significant(candidate):
+            end_index = index
+            index += 1
+            continue
+        if indent_of(candidate) <= base_indent:
+            break
+        end_index = index
+        index += 1
+    return end_index
 
-    patched_text, helper_changed = ensure_helper(patched_text)
-    if helper_changed:
-        changes.append("added _has_valid_past_key_values helper")
 
-    patched_text, forward_changes = patch_forward_block(patched_text)
-    if forward_changes:
-        changes.append(f"patched forward past_key_values_length block x{forward_changes}")
+def patch_prepare_blocks(lines: list[str]) -> tuple[list[str], dict[str, int]]:
+    stats = {"patched": 0, "skipped": 0}
+    result: list[str] = []
+    index = 0
 
-    patched_text, prepare_changes = patch_prepare_block(patched_text)
-    if prepare_changes:
-        changes.append(f"patched prepare_inputs_for_generation block x{prepare_changes}")
+    while index < len(lines):
+        line = lines[index]
 
-    return patched_text, changes
+        if (
+            stripped(line) == HELPER_GUARD
+            and index + 1 < len(lines)
+            and stripped(lines[index + 1]) == f"past_length = {DANGEROUS_EXPR}"
+        ):
+            stats["skipped"] += 1
+            result.append(line)
+            index += 1
+            continue
+
+        if (
+            stripped(line) == "if past_key_values is not None:"
+            and index + 1 < len(lines)
+            and stripped(lines[index + 1]) == f"past_length = {DANGEROUS_EXPR}"
+        ):
+            base_indent = indent_of(line)
+            base_indent_text = indent_text(line)
+            body_indent_text = base_indent_text + " " * 4
+            block_end = find_block_end(lines, index, base_indent)
+            block_lines = lines[index + 1 : block_end + 1]
+            has_target_line = any(
+                stripped(candidate).startswith("input_ids = input_ids[:, remove_prefix_length")
+                for candidate in block_lines
+            )
+            if not has_target_line:
+                result.append(line)
+                index += 1
+                continue
+
+            result.append(f"{base_indent_text}{HELPER_GUARD}\n")
+            result.extend(block_lines)
+            result.extend(
+                [
+                    f"{base_indent_text}else:\n",
+                    f"{body_indent_text}past_key_values = None\n",
+                    f"{body_indent_text}past_length = 0\n",
+                ]
+            )
+            stats["patched"] += 1
+            index = block_end + 1
+            continue
+
+        result.append(line)
+        index += 1
+
+    return result, stats
+
+
+def apply_patch(text: str) -> tuple[str, dict[str, str]]:
+    patched_text, helper_status = ensure_helper(text)
+    lines = patched_text.splitlines(keepends=True)
+
+    lines, forward_stats = patch_forward_blocks(lines)
+    lines, prepare_stats = patch_prepare_blocks(lines)
+    patched_text = "".join(lines)
+
+    summary = {
+        "helper": helper_status,
+        "forward": (
+            f"patched x{forward_stats['patched']}"
+            if forward_stats["patched"]
+            else f"skipped existing x{forward_stats['skipped']}" if forward_stats["skipped"] else "no match"
+        ),
+        "prepare_inputs_for_generation": (
+            f"patched x{prepare_stats['patched']}"
+            if prepare_stats["patched"]
+            else f"skipped existing x{prepare_stats['skipped']}" if prepare_stats["skipped"] else "no match"
+        ),
+    }
+    return patched_text, summary
 
 
 def write_backup_if_needed(path: Path) -> Path:
@@ -225,8 +333,12 @@ def main() -> int:
     if not args.patch:
         return 0
 
-    patched_text, changes = apply_patch(original_text)
+    patched_text, patch_summary = apply_patch(original_text)
     if patched_text == original_text:
+        print("")
+        print(f"[patch] helper={patch_summary['helper']}")
+        print(f"[patch] forward={patch_summary['forward']}")
+        print(f"[patch] prepare_inputs_for_generation={patch_summary['prepare_inputs_for_generation']}")
         print("[patch] no textual changes were necessary.")
         return 0
 
@@ -235,7 +347,9 @@ def main() -> int:
 
     print("")
     print(f"[patch] backup={backup_path}")
-    print(f"[patch] changes={changes}")
+    print(f"[patch] helper={patch_summary['helper']}")
+    print(f"[patch] forward={patch_summary['forward']}")
+    print(f"[patch] prepare_inputs_for_generation={patch_summary['prepare_inputs_for_generation']}")
     print("[patch] diff:")
     print(unified_diff(original_text, patched_text, path=target_path))
     print("")
