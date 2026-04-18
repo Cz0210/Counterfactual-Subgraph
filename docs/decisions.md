@@ -29,6 +29,66 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-18] Add a decoded-SMILES chemistry reward PPO loop alongside the TRL compatibility baseline
+
+### Background
+The repository's TRL experimental PPO smoke test now runs end to end, but the
+successful path still relies on a hidden-state reward adapter that only
+validates trainer interface compatibility. The logs already make this
+limitation explicit:
+
+- `ChemRewardModelWrapper remains the chemistry reward component and is not equivalent to TRL hidden-state reward head`
+
+That means the baseline does not prove that decoded fragment strings are being
+scored by the chemistry reward and then used for PPO updates.
+
+### Decision
+Keep the TRL experimental path as the engineering baseline, but add a second
+training mode in `scripts/train_ppo.py`:
+
+- `--ppo-loop decoded_chem`
+
+This mode performs the reward flow explicitly:
+
+- prompt batch
+- `policy_model.generate()`
+- decode generated response text
+- extract one fragment candidate
+- call `ChemRLRewarder.compute_rewards_from_decoded(...)`
+- run a local PPO-style update with policy logprobs, reference logprobs,
+  token-aligned value predictions, KL-shaped rewards, clipped policy loss, and
+  clipped value loss
+
+The CLI also now supports:
+
+- `--require-chemistry-reward-path`
+- `--decoded-chem-smoke-test`
+
+and the repository includes a dedicated Slurm smoke-test script:
+
+- `scripts/slurm/debug_decoded_chem_ppo_smoketest.sh`
+
+### Alternatives considered
+1. Keep using the TRL hidden-state reward adapter and treat it as good enough.
+2. Patch TRL site-packages until they can consume the chemistry wrapper
+   directly.
+3. Block all further work until a legacy `PPOTrainer.step(...)` API is proven
+   available in every environment.
+
+### Consequences
+- The repository now has one baseline path for TRL interface compatibility and
+  one separate path that makes decoded-SMILES chemistry rewards enter PPO
+  updates explicitly.
+- Smoke-test logs can now distinguish “trainer compatibility succeeded” from
+  “decoded chemistry reward was called and used in an update”.
+- The local PPO loop stays inside repository code, so no external environment
+  patching is required.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-18] Skip trainer-managed completion previews when experimental PPO has no usable eval dataloader
 
 ### Background

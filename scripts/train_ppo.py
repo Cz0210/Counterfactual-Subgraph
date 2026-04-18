@@ -206,6 +206,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip TRL experimental PPO generate_completions(), useful when eval_dataloader is unavailable.",
     )
     parser.add_argument(
+        "--ppo-loop",
+        choices=("trl_experimental", "decoded_chem"),
+        default="trl_experimental",
+        help="Choose between the baseline TRL experimental loop and the decoded-SMILES chemistry PPO loop.",
+    )
+    parser.add_argument(
+        "--require-chemistry-reward-path",
+        action="store_true",
+        help="Fail unless the training path explicitly performs decode -> chemistry reward -> PPO update.",
+    )
+    parser.add_argument(
+        "--decoded-chem-smoke-test",
+        action="store_true",
+        help="Enable extra logging and assertions for the decoded chemistry PPO smoke test.",
+    )
+    parser.add_argument(
         "--max-prompt-examples",
         type=int,
         default=0,
@@ -1514,6 +1530,283 @@ def disable_generate_completions_if_needed(
     )
 
 
+def log_reward_flow_conclusion(logger: Any) -> None:
+    """Make the baseline reward-flow limitation explicit in logs."""
+
+    logger.warning(
+        "[REWARD_FLOW_CONCLUSION] Current baseline path uses TRL hidden-state reward adapter and does not prove decoded-SMILES chemistry reward enters PPO."
+    )
+    logger.warning(
+        "This baseline only validates TRL interface compatibility; it does not prove chemistry reward enters PPO."
+    )
+
+
+def extract_fragment_smiles(text: str) -> str:
+    """Extract one best-effort fragment candidate from raw generated text."""
+
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+
+    for candidate in normalized.splitlines():
+        cleaned = clean_generated_smiles(candidate)
+        if cleaned:
+            return cleaned
+    return clean_generated_smiles(normalized)
+
+
+def _resolve_batch_list_field(
+    batch: dict[str, Any],
+    *candidate_keys: str,
+) -> list[Any]:
+    """Resolve one metadata field from a collated batch."""
+
+    for key in candidate_keys:
+        if key not in batch:
+            continue
+        value = batch[key]
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        return [value]
+    raise KeyError(f"None of the candidate batch keys were found: {candidate_keys}")
+
+
+def _build_response_mask(
+    response_ids: Any,
+    *,
+    eos_token_id: int | None,
+    torch: Any,
+) -> Any:
+    """Build a response-token mask that keeps tokens through the first EOS."""
+
+    if response_ids.ndim != 2:
+        raise ValueError("response_ids must be a rank-2 tensor.")
+
+    batch_size, response_length = response_ids.shape
+    mask = torch.ones((batch_size, response_length), dtype=torch.bool, device=response_ids.device)
+    if response_length == 0:
+        return mask
+    if eos_token_id is None:
+        return mask
+
+    eos_matches = response_ids.eq(int(eos_token_id))
+    for row_index in range(batch_size):
+        eos_positions = eos_matches[row_index].nonzero(as_tuple=False)
+        if eos_positions.numel() == 0:
+            continue
+        first_eos = int(eos_positions[0].item())
+        if first_eos + 1 < response_length:
+            mask[row_index, first_eos + 1 :] = False
+    return mask
+
+
+def _masked_mean(values: Any, mask: Any) -> Any:
+    """Average only over valid response positions."""
+
+    mask_float = mask.to(dtype=values.dtype)
+    denominator = mask_float.sum().clamp_min(1.0)
+    return (values * mask_float).sum() / denominator
+
+
+def _masked_whiten(
+    values: Any,
+    mask: Any,
+    *,
+    eps: float = 1e-8,
+    torch: Any,
+) -> Any:
+    """Normalize valid entries while keeping invalid positions at zero."""
+
+    mask_float = mask.to(dtype=values.dtype)
+    denominator = mask_float.sum().clamp_min(1.0)
+    mean = (values * mask_float).sum() / denominator
+    variance = (((values - mean) * mask_float) ** 2).sum() / denominator
+    whitened = (values - mean) / torch.sqrt(variance + eps)
+    return whitened * mask_float
+
+
+def _infer_single_training_device(
+    *,
+    logger: Any,
+    torch: Any,
+    policy_model: Any,
+    reference_model: Any,
+    value_model: Any,
+) -> Any:
+    """Require the decoded PPO path to run on one effective device."""
+
+    policy_device, _ = _infer_module_device_and_dtype(policy_model, torch=torch)
+    reference_device, _ = _infer_module_device_and_dtype(reference_model, torch=torch)
+    value_device, _ = _infer_module_device_and_dtype(value_model, torch=torch)
+    logger.info(
+        "[DECODED_CHEM_DEVICES] policy=%s reference=%s value=%s",
+        policy_device,
+        reference_device,
+        value_device,
+    )
+    if not (policy_device == reference_device == value_device):
+        raise NotImplementedError(
+            "Decoded chemistry PPO currently expects policy, reference, and value models to share one device."
+        )
+    return policy_device
+
+
+def _compute_response_logprobs(
+    model: Any,
+    *,
+    query_ids: Any,
+    query_attention_mask: Any,
+    response_ids: Any,
+    response_mask: Any,
+    torch: Any,
+) -> Any:
+    """Compute token logprobs for the response segment."""
+
+    combined_ids = torch.cat([query_ids, response_ids], dim=1)
+    combined_attention_mask = torch.cat(
+        [query_attention_mask, response_mask.to(dtype=query_attention_mask.dtype)],
+        dim=1,
+    )
+    outputs = model(
+        input_ids=combined_ids,
+        attention_mask=combined_attention_mask,
+        return_dict=True,
+        use_cache=False,
+    )
+    logits = outputs.logits
+    shift_logits = logits[:, :-1, :]
+    shift_labels = combined_ids[:, 1:]
+    log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+    token_logprobs = log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
+    prompt_length = query_ids.size(1)
+    return token_logprobs[:, prompt_length - 1 : prompt_length - 1 + response_ids.size(1)]
+
+
+def _compute_response_values(
+    value_model: Any,
+    *,
+    query_ids: Any,
+    query_attention_mask: Any,
+    response_ids: Any,
+    response_mask: Any,
+    torch: Any,
+) -> Any:
+    """Compute token-aligned value predictions for the response segment."""
+
+    combined_ids = torch.cat([query_ids, response_ids], dim=1)
+    combined_attention_mask = torch.cat(
+        [query_attention_mask, response_mask.to(dtype=query_attention_mask.dtype)],
+        dim=1,
+    )
+    backbone = getattr(value_model, "pretrained_model", value_model)
+    outputs = backbone(
+        input_ids=combined_ids,
+        attention_mask=combined_attention_mask,
+        output_hidden_states=True,
+        return_dict=True,
+        use_cache=False,
+    )
+    hidden_states = outputs.hidden_states[-1]
+    if hasattr(value_model, "v_head"):
+        raw_values = value_model.v_head(hidden_states)
+    elif hasattr(value_model, "score"):
+        raw_values = value_model.score(hidden_states)
+    else:
+        raise RuntimeError("value_model has neither v_head nor score for decoded PPO values.")
+    if raw_values.ndim == 3 and raw_values.size(-1) == 1:
+        raw_values = raw_values.squeeze(-1)
+    prompt_length = query_ids.size(1)
+    return raw_values[:, prompt_length - 1 : prompt_length - 1 + response_ids.size(1)]
+
+
+def _build_sequence_reward_assignments(
+    *,
+    sequence_rewards: Any,
+    policy_logprobs: Any,
+    ref_logprobs: Any,
+    response_mask: Any,
+    kl_coef: float,
+    torch: Any,
+) -> Any:
+    """Distribute sequence-level chemistry rewards across response tokens."""
+
+    token_rewards = -float(kl_coef) * (policy_logprobs - ref_logprobs)
+    valid_lengths = response_mask.to(dtype=torch.long).sum(dim=1)
+    for row_index in range(sequence_rewards.size(0)):
+        if int(valid_lengths[row_index].item()) <= 0:
+            continue
+        last_index = int(valid_lengths[row_index].item()) - 1
+        token_rewards[row_index, last_index] = token_rewards[row_index, last_index] + sequence_rewards[row_index]
+    return token_rewards * response_mask.to(dtype=token_rewards.dtype)
+
+
+def _discounted_cumsum(
+    token_rewards: Any,
+    *,
+    response_mask: Any,
+    gamma: float = 1.0,
+    torch: Any,
+) -> Any:
+    """Compute simple undiscounted returns over valid response tokens."""
+
+    returns = torch.zeros_like(token_rewards)
+    running = torch.zeros(token_rewards.size(0), dtype=token_rewards.dtype, device=token_rewards.device)
+    for column in range(token_rewards.size(1) - 1, -1, -1):
+        running = token_rewards[:, column] + float(gamma) * running
+        running = running * response_mask[:, column].to(dtype=running.dtype)
+        returns[:, column] = running
+    return returns
+
+
+def save_decoded_chem_checkpoint(
+    *,
+    policy_model: Any,
+    value_model: Any,
+    tokenizer: Any,
+    output_dir: Path,
+    torch: Any,
+) -> Path:
+    """Persist policy/tokenizer plus the standalone value head for local PPO."""
+
+    ensure_directory(output_dir)
+    if hasattr(policy_model, "save_pretrained"):
+        policy_model.save_pretrained(str(output_dir))
+    else:
+        raise RuntimeError("Decoded chemistry PPO could not save the policy model.")
+    tokenizer.save_pretrained(str(output_dir))
+    if hasattr(value_model, "v_head"):
+        torch.save(value_model.v_head.state_dict(), output_dir / "decoded_chem_value_head.pt")
+    return output_dir
+
+
+def log_available_ppo_step_apis(logger: Any) -> None:
+    """Record whether the current runtime exposes TRL step-style PPO APIs."""
+
+    try:
+        from trl import PPOTrainer as RootPPOTrainer
+
+        logger.info(
+            "[DECODED_CHEM_PPO_API] root_trl_trainer_module=%s root_trl_has_step=%s",
+            getattr(RootPPOTrainer, "__module__", None),
+            hasattr(RootPPOTrainer, "step"),
+        )
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        logger.info("[DECODED_CHEM_PPO_API] root_trl_import_failed=%s", exc)
+
+    try:
+        from trl.experimental.ppo import PPOTrainer as ExperimentalPPOTrainer
+
+        logger.info(
+            "[DECODED_CHEM_PPO_API] experimental_trainer_module=%s experimental_has_step=%s",
+            getattr(ExperimentalPPOTrainer, "__module__", None),
+            hasattr(ExperimentalPPOTrainer, "step"),
+        )
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        logger.info("[DECODED_CHEM_PPO_API] experimental_trl_import_failed=%s", exc)
+
+
 def sync_generation_token_ids(
     model: Any,
     tokenizer: Any,
@@ -1723,6 +2016,457 @@ def log_runtime_model_debug(
     logger.info("Runtime model debug [%s]: %s", label, collect_runtime_model_debug(model))
 
 
+def run_trl_experimental_ppo_loop(
+    *,
+    deps: dict[str, Any],
+    args: argparse.Namespace,
+    actual_batch_size: int,
+    actual_mini_batch_size: int,
+    policy_model: Any,
+    reference_model: Any,
+    value_model: Any,
+    tokenizer: Any,
+    dataset: Any,
+    chem_reward_model: Any,
+    output_dir: Path,
+    logger: Any,
+) -> Path:
+    """Run the current baseline PPO path through TRL experimental trainer APIs."""
+
+    log_reward_flow_conclusion(logger)
+    ppo_config = build_ppo_config(
+        deps,
+        args=args,
+        actual_batch_size=int(actual_batch_size),
+        actual_mini_batch_size=int(actual_mini_batch_size),
+        logger=logger,
+    )
+
+    reward_model = ensure_reward_model_for_experimental_ppo(
+        chem_reward_model,
+        fallback_lm_model=(
+            getattr(value_model, "pretrained_model", None)
+            or getattr(reference_model, "pretrained_model", None)
+            or reference_model
+            or policy_model
+        ),
+        deps=deps,
+        name="reward_model",
+    )
+    if args.diagnose_reward_flow:
+        logger.info(
+            "Reward-flow diagnostics enabled: chem_reward_model=%s trainer_reward_model=%s",
+            type(chem_reward_model),
+            type(reward_model),
+        )
+        logger.info(
+            "Reward-flow diagnostics: trainer reward_model base_model_prefix=%s has_score=%s interface_compatibility_only=%s",
+            getattr(reward_model, "base_model_prefix", None),
+            hasattr(reward_model, "score"),
+            getattr(reward_model, "interface_compatibility_only", False),
+        )
+
+    ppo_trainer = build_ppo_trainer(
+        deps,
+        ppo_config=ppo_config,
+        policy_model=policy_model,
+        reference_model=reference_model,
+        value_model=value_model,
+        tokenizer=tokenizer,
+        dataset=dataset,
+        reward_model=reward_model,
+        logger=logger,
+    )
+    log_runtime_model_debug(logger, label="policy_model", model=policy_model)
+    log_runtime_model_debug(logger, label="reference_model", model=reference_model)
+    log_runtime_model_debug(logger, label="value_model", model=value_model)
+    log_runtime_model_debug(logger, label="reward_model", model=reward_model)
+    log_runtime_model_debug(
+        logger,
+        label="ppo_trainer.model_before_patch",
+        model=getattr(ppo_trainer, "model", None),
+    )
+    sync_generation_token_ids(getattr(ppo_trainer, "model", None), tokenizer)
+    patch_internlm_cache(ppo_trainer.model)
+    log_runtime_model_debug(
+        logger,
+        label="ppo_trainer.model_after_patch",
+        model=getattr(ppo_trainer, "model", None),
+    )
+
+    generate_completions_skip_reason = None
+    if args.skip_generate_completions:
+        generate_completions_skip_reason = "skip flag enabled"
+    else:
+        generate_completions_skip_reason = diagnose_eval_dataloader_for_generate_completions(ppo_trainer)
+    if generate_completions_skip_reason is not None:
+        disable_generate_completions_if_needed(
+            ppo_trainer,
+            logger,
+            reason=generate_completions_skip_reason,
+        )
+
+    logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
+    ppo_trainer.train()
+    return save_final_model(
+        ppo_trainer,
+        tokenizer,
+        output_dir,
+    )
+
+
+def run_decoded_chem_ppo_loop(
+    *,
+    deps: dict[str, Any],
+    args: argparse.Namespace,
+    actual_batch_size: int,
+    policy_model: Any,
+    reference_model: Any,
+    value_model: Any,
+    tokenizer: Any,
+    train_dataset: Any,
+    chem_reward_model: Any,
+    chem_rewarder: ChemRLRewarder,
+    output_dir: Path,
+    logger: Any,
+) -> Path:
+    """Run a local PPO loop with explicit decoded-SMILES chemistry rewards."""
+
+    torch = deps["torch"]
+    if args.diagnose_reward_flow:
+        logger.info(
+            "Reward-flow diagnostics enabled: decoded chemistry PPO will use chem_reward_model=%s and ChemRLRewarder=%s",
+            type(chem_reward_model),
+            type(chem_rewarder),
+        )
+    log_available_ppo_step_apis(logger)
+    logger.info(
+        "[DECODED_CHEM_PPO_API] Using local PPO loss; decoded chemistry rewards will be computed explicitly and fed into the PPO update."
+    )
+
+    rollout_device = _infer_single_training_device(
+        logger=logger,
+        torch=torch,
+        policy_model=policy_model,
+        reference_model=reference_model,
+        value_model=value_model,
+    )
+
+    policy_model.train()
+    reference_model.eval()
+    value_model.train()
+    sync_generation_token_ids(policy_model, tokenizer)
+    patch_internlm_cache(policy_model)
+    sync_generation_token_ids(reference_model, tokenizer)
+    sync_generation_token_ids(value_model, tokenizer)
+    log_runtime_model_debug(logger, label="decoded_chem.policy_model", model=policy_model)
+    log_runtime_model_debug(logger, label="decoded_chem.reference_model", model=reference_model)
+    log_runtime_model_debug(logger, label="decoded_chem.value_model", model=value_model)
+
+    trainable_parameters = [
+        parameter
+        for parameter in list(policy_model.parameters()) + list(value_model.parameters())
+        if parameter.requires_grad
+    ]
+    if not trainable_parameters:
+        raise RuntimeError("Decoded chemistry PPO could not find any trainable parameters.")
+
+    optimizer = torch.optim.AdamW(
+        trainable_parameters,
+        lr=float(args.learning_rate),
+    )
+    data_collator = build_data_collator(deps, tokenizer)
+    dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=int(actual_batch_size),
+        shuffle=False,
+        collate_fn=data_collator,
+    )
+    dataloader_iterator = iter(dataloader)
+
+    batch_fields_logged = False
+    chemistry_reward_called = False
+    chemistry_reward_update_called = False
+
+    logger.info(
+        "Starting decoded chemistry PPO loop with max_steps=%s batch_size=%s",
+        args.max_steps,
+        actual_batch_size,
+    )
+    for step_index in range(1, int(args.max_steps) + 1):
+        try:
+            batch = next(dataloader_iterator)
+        except StopIteration:
+            dataloader_iterator = iter(dataloader)
+            batch = next(dataloader_iterator)
+
+        if not batch_fields_logged or args.decoded_chem_smoke_test:
+            logger.info(
+                "[DECODED_CHEM_BATCH_FIELDS] keys=%s",
+                sorted(batch.keys()),
+            )
+            batch_fields_logged = True
+
+        prompt_texts = [str(text) for text in _resolve_batch_list_field(batch, "query", "prompt", "text")]
+        parent_smiles_batch = [
+            str(smiles)
+            for smiles in _resolve_batch_list_field(batch, "parent_smiles", "smiles")
+        ]
+        parent_labels = [int(label) for label in _resolve_batch_list_field(batch, "original_label", "label")]
+        try:
+            batch_ids = list(_resolve_batch_list_field(batch, "index", "id", "graph_id"))
+        except KeyError:
+            batch_ids = list(range(len(parent_smiles_batch)))
+
+        input_ids = batch["input_ids"].to(rollout_device)
+        attention_mask = batch["attention_mask"].to(rollout_device)
+        if input_ids.ndim != 2:
+            raise RuntimeError("Decoded chemistry PPO expects rank-2 input_ids tensors.")
+
+        with torch.no_grad():
+            generated_ids = policy_model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=int(args.max_new_tokens),
+                do_sample=True,
+                top_p=float(args.top_p),
+                temperature=float(args.temperature),
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=False,
+            )
+
+        response_ids = generated_ids[:, input_ids.shape[1] :]
+        if response_ids.size(1) == 0:
+            raise RuntimeError("Decoded chemistry PPO generation returned an empty response segment.")
+        response_mask = _build_response_mask(
+            response_ids,
+            eos_token_id=tokenizer.eos_token_id,
+            torch=torch,
+        )
+        response_texts = tokenizer.batch_decode(
+            response_ids.detach().cpu().tolist(),
+            skip_special_tokens=True,
+        )
+        full_texts = tokenizer.batch_decode(
+            generated_ids.detach().cpu().tolist(),
+            skip_special_tokens=True,
+        )
+
+        fragments: list[str] = []
+        for full_text, response_text, prompt_text in zip(
+            full_texts,
+            response_texts,
+            prompt_texts,
+            strict=True,
+        ):
+            fragment = _extract_fragment_from_text(full_text, prompt_text)
+            if not fragment:
+                fragment = extract_fragment_smiles(response_text)
+            fragments.append(fragment)
+
+        sample_parent = parent_smiles_batch[0] if parent_smiles_batch else ""
+        sample_response = response_texts[0] if response_texts else ""
+        sample_fragment = fragments[0] if fragments else ""
+        logger.info(
+            "[DECODED_CHEM_GENERATION_SAMPLE] parent=%s response=%s",
+            sample_parent,
+            sample_response,
+        )
+        logger.info(
+            "[DECODED_CHEM_FRAGMENT_SAMPLE] raw=%s fragment=%s",
+            sample_response,
+            sample_fragment,
+        )
+
+        reward_tensor, reward_logs = chem_rewarder.compute_rewards_from_decoded(
+            parent_smiles=parent_smiles_batch,
+            generated_fragments=fragments,
+            labels=parent_labels,
+            metas=[
+                {
+                    "id": batch_ids[index],
+                    "index": batch_ids[index],
+                    "prompt": prompt_texts[index],
+                }
+                for index in range(len(parent_smiles_batch))
+            ],
+            device=rollout_device,
+        )
+        chemistry_reward_called = True
+        logger.info("[CHEM_REWARD_CALLED] batch_size=%s", len(reward_logs))
+
+        missing_components = sorted(
+            {
+                component_name
+                for reward_log in reward_logs
+                for component_name in ("format", "length", "teacher_sem")
+                if reward_log.get(component_name) is None
+            }
+        )
+        if missing_components:
+            logger.warning(
+                "[CHEM_REWARD_COMPONENTS_MISSING] missing=%s",
+                ",".join(missing_components),
+            )
+        reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
+        for reward_log in reward_logs_to_print:
+            logger.info(
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s fragment=%s format=%s valid=%s sub=%s len=%s sem=%s total=%s",
+                reward_log.get("id"),
+                reward_log.get("parent_smiles"),
+                reward_log.get("fragment"),
+                reward_log.get("format"),
+                reward_log.get("valid"),
+                reward_log.get("substructure"),
+                reward_log.get("length"),
+                reward_log.get("semantic"),
+                reward_log.get("total"),
+            )
+
+        with torch.no_grad():
+            old_logprobs = _compute_response_logprobs(
+                policy_model,
+                query_ids=input_ids,
+                query_attention_mask=attention_mask,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                torch=torch,
+            )
+            ref_logprobs = _compute_response_logprobs(
+                reference_model,
+                query_ids=input_ids,
+                query_attention_mask=attention_mask,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                torch=torch,
+            )
+            old_values = _compute_response_values(
+                value_model,
+                query_ids=input_ids,
+                query_attention_mask=attention_mask,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                torch=torch,
+            )
+
+        token_rewards = _build_sequence_reward_assignments(
+            sequence_rewards=reward_tensor.to(dtype=old_logprobs.dtype),
+            policy_logprobs=old_logprobs,
+            ref_logprobs=ref_logprobs,
+            response_mask=response_mask,
+            kl_coef=float(args.init_kl_coef),
+            torch=torch,
+        )
+        returns = _discounted_cumsum(
+            token_rewards,
+            response_mask=response_mask,
+            gamma=1.0,
+            torch=torch,
+        )
+        advantages = returns - old_values
+        advantages = _masked_whiten(
+            advantages.detach(),
+            response_mask,
+            torch=torch,
+        )
+
+        old_logprobs = old_logprobs.detach()
+        ref_logprobs = ref_logprobs.detach()
+        old_values = old_values.detach()
+        returns = returns.detach()
+
+        clip_range = 0.2
+        value_clip_range = 0.2
+        value_loss_coef = 0.5
+        max_grad_norm = 1.0
+        last_policy_loss = None
+        last_value_loss = None
+        last_total_loss = None
+        last_approx_kl = None
+        for _ppo_epoch in range(max(1, int(args.ppo_epochs))):
+            optimizer.zero_grad(set_to_none=True)
+            current_logprobs = _compute_response_logprobs(
+                policy_model,
+                query_ids=input_ids,
+                query_attention_mask=attention_mask,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                torch=torch,
+            )
+            current_values = _compute_response_values(
+                value_model,
+                query_ids=input_ids,
+                query_attention_mask=attention_mask,
+                response_ids=response_ids,
+                response_mask=response_mask,
+                torch=torch,
+            )
+
+            ratios = torch.exp(current_logprobs - old_logprobs)
+            unclipped_objective = ratios * advantages
+            clipped_objective = torch.clamp(
+                ratios,
+                1.0 - clip_range,
+                1.0 + clip_range,
+            ) * advantages
+            policy_loss = -_masked_mean(
+                torch.minimum(unclipped_objective, clipped_objective),
+                response_mask,
+            )
+
+            clipped_values = old_values + torch.clamp(
+                current_values - old_values,
+                -value_clip_range,
+                value_clip_range,
+            )
+            value_loss = 0.5 * _masked_mean(
+                torch.maximum(
+                    (current_values - returns) ** 2,
+                    (clipped_values - returns) ** 2,
+                ),
+                response_mask,
+            )
+
+            total_loss = policy_loss + value_loss_coef * value_loss
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(trainable_parameters, max_grad_norm)
+            optimizer.step()
+
+            last_policy_loss = float(policy_loss.detach().cpu().item())
+            last_value_loss = float(value_loss.detach().cpu().item())
+            last_total_loss = float(total_loss.detach().cpu().item())
+            last_approx_kl = float(
+                _masked_mean(current_logprobs - ref_logprobs, response_mask).detach().cpu().item()
+            )
+
+        chemistry_reward_update_called = True
+        logger.info(
+            "[DECODED_CHEM_PPO_UPDATE] step=%s reward_mean=%.4f reward_min=%.4f reward_max=%.4f policy_loss=%.4f value_loss=%.4f total_loss=%.4f approx_kl=%.4f",
+            step_index,
+            float(reward_tensor.mean().detach().cpu().item()),
+            float(reward_tensor.min().detach().cpu().item()),
+            float(reward_tensor.max().detach().cpu().item()),
+            float(last_policy_loss or 0.0),
+            float(last_value_loss or 0.0),
+            float(last_total_loss or 0.0),
+            float(last_approx_kl or 0.0),
+        )
+
+    if args.require_chemistry_reward_path and not chemistry_reward_called:
+        raise RuntimeError("Decoded chemistry PPO did not call the chemistry reward path.")
+    if args.require_chemistry_reward_path and not chemistry_reward_update_called:
+        raise RuntimeError("Decoded chemistry PPO did not execute a PPO update with chemistry rewards.")
+
+    return save_decoded_chem_checkpoint(
+        policy_model=policy_model,
+        value_model=value_model,
+        tokenizer=tokenizer,
+        output_dir=output_dir,
+        torch=torch,
+    )
+
+
 def save_final_model(
     trainer: Any,
     tokenizer: Any,
@@ -1852,14 +2596,6 @@ def main() -> None:
     logger.info("value_model has v_head: %s", hasattr(value_model, "v_head"))
     logger.info("value_model has score after adapter: %s", hasattr(value_model, "score"))
 
-    ppo_config = build_ppo_config(
-        deps,
-        args=args,
-        actual_batch_size=int(actual_batch_size),
-        actual_mini_batch_size=int(actual_mini_batch_size),
-        logger=logger,
-    )
-
     rewarder = ChemRLRewarder(
         oracle_path=oracle_path,
         default_parent_label=args.default_parent_label,
@@ -1870,69 +2606,44 @@ def main() -> None:
         rewarder=rewarder,
     )
     logger.info("chem_reward_model component type: %s", type(chem_reward_model))
-    reward_model = ensure_reward_model_for_experimental_ppo(
-        chem_reward_model,
-        fallback_lm_model=(
-            getattr(value_model, "pretrained_model", None)
-            or getattr(reference_model, "pretrained_model", None)
-            or reference_model
-            or policy_model
-        ),
-        deps=deps,
-        name="reward_model",
-    )
-    if args.diagnose_reward_flow:
-        logger.info(
-            "Reward-flow diagnostics enabled: chem_reward_model=%s trainer_reward_model=%s",
-            type(chem_reward_model),
-            type(reward_model),
+    if args.ppo_loop == "trl_experimental":
+        if args.require_chemistry_reward_path:
+            log_reward_flow_conclusion(logger)
+            raise RuntimeError(
+                "Decoded chemistry reward path was required, but --ppo-loop trl_experimental only validates TRL interface compatibility."
+            )
+        final_output_dir = run_trl_experimental_ppo_loop(
+            deps=deps,
+            args=args,
+            actual_batch_size=int(actual_batch_size),
+            actual_mini_batch_size=int(actual_mini_batch_size),
+            policy_model=policy_model,
+            reference_model=reference_model,
+            value_model=value_model,
+            tokenizer=tokenizer,
+            dataset=dataset,
+            chem_reward_model=chem_reward_model,
+            output_dir=output_dir,
+            logger=logger,
         )
-        logger.info(
-            "Reward-flow diagnostics: trainer reward_model base_model_prefix=%s has_score=%s interface_compatibility_only=%s",
-            getattr(reward_model, "base_model_prefix", None),
-            hasattr(reward_model, "score"),
-            getattr(reward_model, "interface_compatibility_only", False),
+    elif args.ppo_loop == "decoded_chem":
+        final_output_dir = run_decoded_chem_ppo_loop(
+            deps=deps,
+            args=args,
+            actual_batch_size=int(actual_batch_size),
+            policy_model=policy_model,
+            reference_model=reference_model,
+            value_model=value_model,
+            tokenizer=tokenizer,
+            train_dataset=dataset,
+            chem_reward_model=chem_reward_model,
+            chem_rewarder=rewarder,
+            output_dir=output_dir,
+            logger=logger,
         )
+    else:  # pragma: no cover - argparse enforces valid choices
+        raise ValueError(f"Unsupported PPO loop: {args.ppo_loop}")
 
-    ppo_trainer = build_ppo_trainer(
-        deps,
-        ppo_config=ppo_config,
-        policy_model=policy_model,
-        reference_model=reference_model,
-        value_model=value_model,
-        tokenizer=tokenizer,
-        dataset=dataset,
-        reward_model=reward_model,
-        logger=logger,
-    )
-    log_runtime_model_debug(logger, label="policy_model", model=policy_model)
-    log_runtime_model_debug(logger, label="reference_model", model=reference_model)
-    log_runtime_model_debug(logger, label="value_model", model=value_model)
-    log_runtime_model_debug(logger, label="reward_model", model=reward_model)
-    log_runtime_model_debug(logger, label="ppo_trainer.model_before_patch", model=getattr(ppo_trainer, "model", None))
-    sync_generation_token_ids(getattr(ppo_trainer, "model", None), tokenizer)
-    patch_internlm_cache(ppo_trainer.model)
-    log_runtime_model_debug(logger, label="ppo_trainer.model_after_patch", model=getattr(ppo_trainer, "model", None))
-
-    generate_completions_skip_reason = None
-    if args.skip_generate_completions:
-        generate_completions_skip_reason = "skip flag enabled"
-    else:
-        generate_completions_skip_reason = diagnose_eval_dataloader_for_generate_completions(ppo_trainer)
-    if generate_completions_skip_reason is not None:
-        disable_generate_completions_if_needed(
-            ppo_trainer,
-            logger,
-            reason=generate_completions_skip_reason,
-        )
-
-    logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
-    ppo_trainer.train()
-    final_output_dir = save_final_model(
-        ppo_trainer,
-        tokenizer,
-        output_dir,
-    )
     logger.info("Training finished. Final checkpoint saved to %s", final_output_dir)
 
 

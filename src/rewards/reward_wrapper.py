@@ -215,6 +215,68 @@ class ChemRLRewarder:
             )
         return traces
 
+    def compute_rewards_from_decoded(
+        self,
+        *,
+        parent_smiles: Sequence[str],
+        generated_fragments: Sequence[str],
+        labels: Sequence[int] | None = None,
+        metas: Sequence[dict[str, Any]] | None = None,
+        device: Any = None,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        """Return a reward tensor and structured per-sample logs for decoded PPO.
+
+        This keeps the chemistry-reward path explicit:
+
+        decoded fragment strings -> rich reward traces -> tensor for PPO update.
+        """
+
+        traces = self.calculate_reward_details_batch(
+            parent_smiles,
+            generated_fragments,
+            parent_labels=labels,
+        )
+
+        reward_logs: list[dict[str, Any]] = []
+        for index, trace in enumerate(traces):
+            meta = metas[index] if metas is not None and index < len(metas) else {}
+            breakdown = dict(trace.breakdown)
+            reward_logs.append(
+                {
+                    "id": meta.get("id", meta.get("index", index)),
+                    "parent_smiles": trace.parent_smiles,
+                    "fragment": trace.normalized_generated_smiles,
+                    "format": None,
+                    "valid": breakdown.get("valid_r"),
+                    "substructure": breakdown.get("subgraph_r"),
+                    "length": None,
+                    "semantic": breakdown.get("cf_r"),
+                    "teacher_sem": None,
+                    "total": float(trace.reward),
+                    "parse_ok": bool(trace.valid_smiles),
+                    "substructure_ok": bool(trace.is_subgraph),
+                    "connected_ok": bool(trace.connected_fragment),
+                    "deletion_ok": bool(trace.deletion_success),
+                    "target_probability": trace.target_probability,
+                    "failure_stage": trace.failure_stage,
+                    "error_message": trace.error_message,
+                }
+            )
+
+        try:
+            import torch
+        except ImportError as exc:  # pragma: no cover - depends on training env
+            raise RuntimeError(
+                "compute_rewards_from_decoded requires torch in the PPO runtime."
+            ) from exc
+
+        reward_tensor = torch.tensor(
+            [float(trace.reward) for trace in traces],
+            dtype=torch.float32,
+            device=device,
+        )
+        return reward_tensor, reward_logs
+
     def _calculate_single_reward(
         self,
         *,

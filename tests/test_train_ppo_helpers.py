@@ -6,6 +6,7 @@ from scripts.train_ppo import (
     disable_generate_completions_if_needed,
     ensure_reward_model_for_experimental_ppo,
     ensure_score_head_for_experimental_ppo,
+    extract_fragment_smiles,
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
 )
@@ -97,6 +98,10 @@ class TrainPPOHelperTests(unittest.TestCase):
     def test_probability_reward_keeps_dense_exploration_signal(self) -> None:
         self.assertAlmostEqual(shape_probability_reward(0.2), 0.2)
         self.assertAlmostEqual(shape_probability_reward(0.8), 9.0)
+
+    def test_extract_fragment_smiles_uses_first_non_empty_line(self) -> None:
+        raw_text = "\n CCO \nExplanation should be ignored"
+        self.assertEqual(extract_fragment_smiles(raw_text), "CCO")
 
     def test_score_adapter_keeps_existing_score(self) -> None:
         model = type("ModelWithScore", (), {})()

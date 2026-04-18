@@ -176,6 +176,7 @@ python scripts/train_rl.py \
   --max-prompt-examples 8 \
   --output-dir outputs/hpc/rl_checkpoints/debug_runtime_path \
   --diagnose-reward-flow \
+  --ppo-loop trl_experimental \
   --skip-generate-completions \
   "$@"
 TRAIN_EXIT_CODE=$?
@@ -394,6 +395,7 @@ python scripts/train_rl.py \
   --max-prompt-examples 8 \
   --output-dir outputs/hpc/rl_checkpoints/debug_runtime_path \
   --diagnose-reward-flow \
+  --ppo-loop trl_experimental \
   --skip-generate-completions \
   "$@"
 TRAIN_EXIT_CODE=$?
