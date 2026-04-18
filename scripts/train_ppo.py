@@ -2312,16 +2312,26 @@ def run_decoded_chem_ppo_loop(
         reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
         for reward_log in reward_logs_to_print:
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s fragment=%s format=%s valid=%s sub=%s len=%s sem=%s total=%s",
+                "[DUMMY_FRAGMENT_NORMALIZED] raw=%s core=%s dummy_count=%s raw_parse_ok=%s core_parse_ok=%s",
+                reward_log.get("raw_fragment"),
+                reward_log.get("core_fragment"),
+                reward_log.get("dummy_count"),
+                reward_log.get("parse_ok"),
+                reward_log.get("core_parse_ok"),
+            )
+            logger.info(
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s format=%s valid=%s sub=%s len=%s sem=%s total=%s teacher_input_smiles=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
-                reward_log.get("fragment"),
+                reward_log.get("raw_fragment"),
+                reward_log.get("core_fragment"),
                 reward_log.get("format"),
                 reward_log.get("valid"),
                 reward_log.get("substructure"),
                 reward_log.get("length"),
                 reward_log.get("semantic"),
                 reward_log.get("total"),
+                reward_log.get("teacher_input_smiles"),
             )
 
         with torch.no_grad():

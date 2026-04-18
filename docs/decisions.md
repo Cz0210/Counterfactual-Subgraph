@@ -29,6 +29,53 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-19] Treat dummy-atom attachment points as valid decoded-fragment syntax in PPO chemistry rewards
+
+### Background
+The decoded chemistry PPO path now makes reward computation explicit, but the
+rewarder was still too harsh on fragment strings containing `*`, for example
+`*CC(=O)O`. In this project those stars are not arbitrary garbage characters;
+they encode attachment points created by fragment cutting. If the rewarder
+treated them as invalid text, PPO would incorrectly learn that many chemically
+meaningful capped fragments were malformed.
+
+### Decision
+Keep two fragment views inside `src/rewards/reward_wrapper.py`:
+
+- `raw_fragment_smiles`: the exact decoded fragment candidate, which may contain
+  dummy atoms such as `*`;
+- `core_fragment_smiles`: a dummy-free core used for substructure checks,
+  compactness statistics, and any future fragment-level teacher signal.
+
+The rewarder now:
+
+- parses capped fragments with dummy-aware RDKit sanitization;
+- removes dummy atoms through molecule editing instead of string replacement;
+- checks parent substructure on the core fragment rather than on the raw capped
+  string;
+- counts fragment size on non-dummy atoms only;
+- exposes raw/core parse flags and dummy counts in reward traces and decoded PPO
+  logs.
+
+### Alternatives considered
+1. Keep treating all `*` tokens as invalid output.
+2. Strip `*` with naive string replacement before every reward computation.
+3. Move the dummy-aware normalization into TRL adapters instead of the chemistry
+   rewarder.
+
+### Consequences
+- Decoded PPO logs can now distinguish raw capped fragments from their
+  dummy-free core.
+- Validity and substructure rewards no longer collapse to zero solely because a
+  fragment uses attachment-point notation.
+- The chemistry reward path remains honest about what is still missing, such as
+  any dedicated teacher-semantic term.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-18] Add a decoded-SMILES chemistry reward PPO loop alongside the TRL compatibility baseline
 
 ### Background

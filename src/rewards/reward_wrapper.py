@@ -30,7 +30,8 @@ from src.chem import (
     is_connected_fragment,
     is_parent_substructure,
     is_rdkit_available,
-    is_valid_capped_subgraph,
+    parse_smiles,
+    sanitize_molecule,
 )
 from src.rewards.reward_calculator import (
     load_oracle_bundle,
@@ -70,13 +71,15 @@ def shape_probability_reward(
     return probability
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RewardTrace:
     """Structured debug record for one PPO reward computation."""
 
     parent_smiles: str
     generated_smiles: str
     normalized_generated_smiles: str
+    raw_fragment_smiles: str | None = None
+    core_fragment_smiles: str | None = None
     original_label: int
     target_label: int
     reward: float
@@ -89,6 +92,12 @@ class RewardTrace:
     target_probability: float | None = None
     inactive_probability: float | None = None
     residual_smiles: str | None = None
+    raw_parse_ok: bool = False
+    core_parse_ok: bool = False
+    has_dummy_atoms: bool = False
+    dummy_count: int = 0
+    core_atom_count: int = 0
+    teacher_input_smiles: str | None = None
     failure_stage: str | None = None
     error_message: str | None = None
     breakdown: dict[str, float] = field(default_factory=dict)
@@ -97,6 +106,130 @@ class RewardTrace:
         """Return a JSON-serializable dictionary for logging."""
 
         return asdict(self)
+
+
+def has_dummy_atom(mol: object | None) -> bool:
+    """Return whether the RDKit molecule contains at least one dummy atom."""
+
+    if Chem is None or mol is None:
+        return False
+    try:
+        return any(atom.GetAtomicNum() == 0 for atom in mol.GetAtoms())
+    except Exception:  # pragma: no cover - defensive around RDKit objects
+        return False
+
+
+def _dummy_atom_count(mol: object | None) -> int:
+    if Chem is None or mol is None:
+        return 0
+    try:
+        return sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 0)
+    except Exception:  # pragma: no cover - defensive around RDKit objects
+        return 0
+
+
+def _non_dummy_atom_count(mol: object | None) -> int:
+    if Chem is None or mol is None:
+        return 0
+    try:
+        return sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() != 0)
+    except Exception:  # pragma: no cover - defensive around RDKit objects
+        return 0
+
+
+def remove_dummy_atoms_from_mol(mol: object | None) -> object | None:
+    """Remove atomic-number-0 atoms and return a sanitized core molecule."""
+
+    if Chem is None or mol is None:
+        return None
+
+    editable = Chem.RWMol(Chem.Mol(mol))
+    dummy_indices = sorted(
+        (atom.GetIdx() for atom in editable.GetAtoms() if atom.GetAtomicNum() == 0),
+        reverse=True,
+    )
+    for atom_index in dummy_indices:
+        editable.RemoveAtom(atom_index)
+
+    core_mol = editable.GetMol()
+    if core_mol.GetNumAtoms() == 0:
+        return None
+
+    sanitized_core, _, _, _ = sanitize_molecule(
+        core_mol,
+        allow_capped_fragments=False,
+    )
+    return sanitized_core
+
+
+def mol_to_smiles_safe(mol: object | None) -> str | None:
+    """Canonicalize a molecule defensively."""
+
+    if Chem is None or mol is None:
+        return None
+    try:
+        return Chem.MolToSmiles(mol, canonical=True)
+    except Exception:  # pragma: no cover - depends on RDKit internals
+        return None
+
+
+def normalize_fragment_with_dummy_atoms(fragment_smiles: str) -> dict[str, Any]:
+    """Build one raw/core fragment view while preserving dummy-atom semantics."""
+
+    normalized = str(fragment_smiles or "").strip()
+    normalized_fragment: dict[str, Any] = {
+        "raw": normalized,
+        "raw_parse_ok": False,
+        "raw_sanitized": False,
+        "raw_mol": None,
+        "raw_canonical_smiles": None,
+        "has_dummy": False,
+        "core_mol": None,
+        "core_smiles": None,
+        "core_parse_ok": False,
+        "dummy_count": 0,
+        "core_atom_count": 0,
+    }
+    if not normalized or not is_rdkit_available() or Chem is None:
+        return normalized_fragment
+
+    parsed_raw = parse_smiles(
+        normalized,
+        sanitize=True,
+        canonicalize=True,
+        allow_capped_fragments=True,
+    )
+    normalized_fragment["raw_parse_ok"] = bool(parsed_raw.parseable)
+    normalized_fragment["raw_sanitized"] = bool(parsed_raw.sanitized)
+    normalized_fragment["raw_mol"] = parsed_raw.mol
+    normalized_fragment["raw_canonical_smiles"] = parsed_raw.canonical_smiles
+    if parsed_raw.mol is None:
+        return normalized_fragment
+
+    normalized_fragment["has_dummy"] = has_dummy_atom(parsed_raw.mol)
+    normalized_fragment["dummy_count"] = _dummy_atom_count(parsed_raw.mol)
+
+    if normalized_fragment["has_dummy"]:
+        core_mol = remove_dummy_atoms_from_mol(parsed_raw.mol)
+        normalized_fragment["core_mol"] = core_mol
+        normalized_fragment["core_smiles"] = mol_to_smiles_safe(core_mol)
+        normalized_fragment["core_parse_ok"] = core_mol is not None
+        normalized_fragment["core_atom_count"] = _non_dummy_atom_count(core_mol)
+        return normalized_fragment
+
+    sanitized_core = None
+    if parsed_raw.mol is not None:
+        sanitized_core, _, _, _ = sanitize_molecule(
+            parsed_raw.mol,
+            allow_capped_fragments=False,
+        )
+    normalized_fragment["core_mol"] = sanitized_core
+    normalized_fragment["core_smiles"] = (
+        parsed_raw.canonical_smiles if sanitized_core is not None else None
+    )
+    normalized_fragment["core_parse_ok"] = sanitized_core is not None
+    normalized_fragment["core_atom_count"] = _non_dummy_atom_count(sanitized_core)
+    return normalized_fragment
 
 
 class ChemRLRewarder:
@@ -116,6 +249,16 @@ class ChemRLRewarder:
         *,
         default_parent_label: int = 1,
         minimum_reward: float = -5.0,
+        format_pass_reward: float = 0.25,
+        format_penalty: float = -0.25,
+        valid_pass_reward: float = 1.0,
+        partial_valid_reward: float = 0.3,
+        invalid_smiles_penalty: float = -2.0,
+        subgraph_pass_reward: float = 1.0,
+        invalid_subgraph_penalty: float = -2.0,
+        compactness_bonus: float = 0.25,
+        compact_atom_target: int = 12,
+        compact_atom_penalty_scale: float = 0.05,
         success_threshold: float = 0.5,
         success_base_reward: float = 5.0,
         probability_scale: float = 5.0,
@@ -132,6 +275,16 @@ class ChemRLRewarder:
         self.oracle_path = Path(oracle_path).expanduser().resolve()
         self.default_parent_label = int(default_parent_label)
         self.minimum_reward = float(minimum_reward)
+        self.format_pass_reward = float(format_pass_reward)
+        self.format_penalty = float(format_penalty)
+        self.valid_pass_reward = float(valid_pass_reward)
+        self.partial_valid_reward = float(partial_valid_reward)
+        self.invalid_smiles_penalty = float(invalid_smiles_penalty)
+        self.subgraph_pass_reward = float(subgraph_pass_reward)
+        self.invalid_subgraph_penalty = float(invalid_subgraph_penalty)
+        self.compactness_bonus = float(compactness_bonus)
+        self.compact_atom_target = int(compact_atom_target)
+        self.compact_atom_penalty_scale = float(compact_atom_penalty_scale)
         self.success_threshold = float(success_threshold)
         self.success_base_reward = float(success_base_reward)
         self.probability_scale = float(probability_scale)
@@ -245,18 +398,25 @@ class ChemRLRewarder:
                 {
                     "id": meta.get("id", meta.get("index", index)),
                     "parent_smiles": trace.parent_smiles,
-                    "fragment": trace.normalized_generated_smiles,
-                    "format": None,
+                    "fragment": trace.raw_fragment_smiles or trace.normalized_generated_smiles,
+                    "raw_fragment": trace.raw_fragment_smiles or trace.normalized_generated_smiles,
+                    "core_fragment": trace.core_fragment_smiles,
+                    "format": breakdown.get("format_r"),
                     "valid": breakdown.get("valid_r"),
                     "substructure": breakdown.get("subgraph_r"),
-                    "length": None,
+                    "length": breakdown.get("length_r"),
                     "semantic": breakdown.get("cf_r"),
                     "teacher_sem": None,
                     "total": float(trace.reward),
-                    "parse_ok": bool(trace.valid_smiles),
+                    "parse_ok": bool(trace.raw_parse_ok),
+                    "core_parse_ok": bool(trace.core_parse_ok),
                     "substructure_ok": bool(trace.is_subgraph),
                     "connected_ok": bool(trace.connected_fragment),
                     "deletion_ok": bool(trace.deletion_success),
+                    "has_dummy": bool(trace.has_dummy_atoms),
+                    "dummy_count": int(trace.dummy_count),
+                    "core_atom_count": int(trace.core_atom_count),
+                    "teacher_input_smiles": trace.teacher_input_smiles,
                     "target_probability": trace.target_probability,
                     "failure_stage": trace.failure_stage,
                     "error_message": trace.error_message,
@@ -296,7 +456,13 @@ class ChemRLRewarder:
                 original_label=self.default_parent_label,
                 failure_stage="label",
                 error_message=f"Unsupported original label: {original_label}",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": 0.0,
+                    "valid_r": 0.0,
+                    "subgraph_r": 0.0,
+                    "length_r": 0.0,
+                    "cf_r": self.minimum_reward,
+                },
             )
 
         target_label = 1 - int(original_label)
@@ -309,7 +475,13 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="parent",
                 error_message="Parent SMILES is empty.",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": 0.0,
+                    "valid_r": 0.0,
+                    "subgraph_r": 0.0,
+                    "length_r": 0.0,
+                    "cf_r": self.minimum_reward,
+                },
             )
 
         if not normalized_generated:
@@ -320,36 +492,48 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message="Generated fragment is empty.",
-                breakdown={"valid_r": self.minimum_reward, "subgraph_r": 0.0, "cf_r": 0.0},
+                breakdown={
+                    "format_r": self.format_penalty,
+                    "valid_r": self.invalid_smiles_penalty,
+                    "subgraph_r": 0.0,
+                    "length_r": 0.0,
+                    "cf_r": 0.0,
+                },
             )
 
         # Step A: parseability and connectivity.
-        try:
-            parent_mol = Chem.MolFromSmiles(normalized_parent, sanitize=True)
-            fragment_mol = Chem.MolFromSmiles(normalized_generated, sanitize=True)
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="validity",
-                error_message=f"RDKit parse failure: {exc}",
-                breakdown={"valid_r": self.minimum_reward, "subgraph_r": 0.0, "cf_r": 0.0},
-            )
-
-        if parent_mol is None:
+        parent = parse_smiles(
+            normalized_parent,
+            sanitize=True,
+            canonicalize=False,
+            allow_capped_fragments=False,
+        )
+        if not parent.sanitized or parent.mol is None:
             return self._fail(
                 parent_smiles=normalized_parent,
                 generated_smiles=generated_smiles,
                 normalized_generated=normalized_generated,
                 original_label=int(original_label),
                 failure_stage="parent",
-                error_message="Parent SMILES could not be parsed by RDKit.",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                error_message=(
+                    "Parent SMILES could not be parsed by RDKit."
+                    if not parent.failure_reason
+                    else f"Parent SMILES is not usable: {parent.failure_reason}"
+                ),
+                breakdown={
+                    "format_r": 0.0,
+                    "valid_r": 0.0,
+                    "subgraph_r": 0.0,
+                    "length_r": 0.0,
+                    "cf_r": self.minimum_reward,
+                },
             )
 
-        if fragment_mol is None:
+        fragment_info = normalize_fragment_with_dummy_atoms(normalized_generated)
+        format_reward = self._compute_format_reward(normalized_generated, fragment_info)
+        valid_reward = self._compute_valid_reward(fragment_info)
+        length_reward = self._compute_length_reward(fragment_info["core_atom_count"])
+        if not fragment_info["raw_parse_ok"]:
             return self._fail(
                 parent_smiles=normalized_parent,
                 generated_smiles=generated_smiles,
@@ -357,7 +541,21 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message="Generated fragment could not be parsed by RDKit.",
-                breakdown={"valid_r": self.minimum_reward, "subgraph_r": 0.0, "cf_r": 0.0},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": 0.0,
+                    "length_r": 0.0,
+                    "cf_r": 0.0,
+                },
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=fragment_info["core_smiles"],
             )
 
         try:
@@ -370,7 +568,21 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message=f"Fragment connectivity check failed: {exc}",
-                breakdown={"valid_r": self.minimum_reward, "subgraph_r": 0.0, "cf_r": 0.0},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": 0.0,
+                    "length_r": length_reward,
+                    "cf_r": 0.0,
+                },
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=fragment_info["core_smiles"],
             )
 
         if not connected_fragment:
@@ -381,26 +593,58 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message="Generated fragment is not connected.",
-                breakdown={"valid_r": self.minimum_reward, "subgraph_r": 0.0, "cf_r": 0.0},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": 0.0,
+                    "length_r": length_reward,
+                    "cf_r": 0.0,
+                },
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=fragment_info["core_smiles"],
             )
 
         # Step B: subgraph match against the parent molecule.
+        core_smiles = fragment_info["core_smiles"]
+        core_mol = fragment_info["core_mol"]
+        if core_mol is None or not fragment_info["core_parse_ok"] or not core_smiles:
+            return self._fail(
+                parent_smiles=normalized_parent,
+                generated_smiles=generated_smiles,
+                normalized_generated=normalized_generated,
+                original_label=int(original_label),
+                failure_stage="subgraph",
+                error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.invalid_subgraph_penalty,
+                    "length_r": length_reward,
+                    "cf_r": 0.0,
+                },
+                valid_smiles=True,
+                connected_fragment=True,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
+            )
+
         try:
-            fragment_has_dummy = any(atom.GetAtomicNum() == 0 for atom in fragment_mol.GetAtoms())
-            if fragment_has_dummy:
-                query_mol = Chem.MolFromSmarts(normalized_generated)
-                has_raw_match = bool(
-                    query_mol is not None
-                    and parent_mol.HasSubstructMatch(query_mol, useChirality=True)
-                )
-                has_precise_match = bool(
-                    has_raw_match and is_valid_capped_subgraph(normalized_parent, normalized_generated)
-                )
-            else:
-                has_precise_match = bool(
-                    parent_mol.HasSubstructMatch(fragment_mol, useChirality=True)
-                    and is_parent_substructure(normalized_parent, normalized_generated)
-                )
+            has_precise_match = bool(
+                parent.mol.HasSubstructMatch(core_mol, useChirality=True)
+                and is_parent_substructure(normalized_parent, core_smiles)
+            )
         except Exception as exc:
             return self._fail(
                 parent_smiles=normalized_parent,
@@ -409,7 +653,21 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="subgraph",
                 error_message=f"Subgraph check failed: {exc}",
-                breakdown={"valid_r": 0.0, "subgraph_r": self.minimum_reward, "cf_r": 0.0},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.invalid_subgraph_penalty,
+                    "length_r": length_reward,
+                    "cf_r": 0.0,
+                },
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         if not has_precise_match:
@@ -420,9 +678,23 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="subgraph",
                 error_message="Generated fragment is not a valid parent subgraph.",
-                breakdown={"valid_r": 0.0, "subgraph_r": self.minimum_reward, "cf_r": 0.0},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.invalid_subgraph_penalty,
+                    "length_r": length_reward,
+                    "cf_r": 0.0,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         # Step C: deletion-based counterfactual scoring on the residual molecule.
@@ -439,10 +711,24 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message=f"Deletion step failed: {exc}",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         if residual_smiles is None:
@@ -453,10 +739,24 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message=deletion_error or "Residual deletion failed.",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         try:
@@ -469,12 +769,26 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message=f"Residual cleanup failed: {exc}",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
                 deletion_success=True,
                 residual_smiles=residual_smiles,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         if residual_for_oracle in (None, ""):
@@ -485,12 +799,26 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message="Residual molecule is empty or unusable after dummy-atom cleanup.",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
                 deletion_success=True,
                 residual_smiles=residual_smiles,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         try:
@@ -508,12 +836,26 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message=f"Morgan fingerprint generation failed: {exc}",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
                 deletion_success=True,
                 residual_smiles=residual_smiles,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         if fingerprint is None:
@@ -524,12 +866,26 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message="Morgan fingerprint generation returned None.",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
                 deletion_success=True,
                 residual_smiles=residual_smiles,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         try:
@@ -544,12 +900,26 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message=f"Oracle prediction failed: {exc}",
-                breakdown={"valid_r": 0.0, "subgraph_r": 0.0, "cf_r": self.minimum_reward},
+                breakdown={
+                    "format_r": format_reward,
+                    "valid_r": valid_reward,
+                    "subgraph_r": self.subgraph_pass_reward,
+                    "length_r": length_reward,
+                    "cf_r": self.minimum_reward,
+                },
                 valid_smiles=True,
                 connected_fragment=True,
                 is_subgraph=True,
                 deletion_success=True,
                 residual_smiles=residual_smiles,
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=fragment_info["core_smiles"],
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
             )
 
         probability_map = {
@@ -569,9 +939,17 @@ class ChemRLRewarder:
             parent_smiles=normalized_parent,
             generated_smiles=str(generated_smiles),
             normalized_generated_smiles=normalized_generated,
+            raw_fragment_smiles=normalized_generated,
+            core_fragment_smiles=core_smiles,
             original_label=int(original_label),
             target_label=target_label,
-            reward=float(reward),
+            reward=float(
+                format_reward
+                + valid_reward
+                + self.subgraph_pass_reward
+                + length_reward
+                + reward
+            ),
             valid_smiles=True,
             connected_fragment=True,
             is_subgraph=True,
@@ -581,13 +959,55 @@ class ChemRLRewarder:
             target_probability=target_probability,
             inactive_probability=inactive_probability,
             residual_smiles=residual_for_oracle,
+            raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+            core_parse_ok=bool(fragment_info["core_parse_ok"]),
+            has_dummy_atoms=bool(fragment_info["has_dummy"]),
+            dummy_count=int(fragment_info["dummy_count"]),
+            core_atom_count=int(fragment_info["core_atom_count"]),
+            teacher_input_smiles=core_smiles,
             failure_stage=None,
             error_message=None,
             breakdown={
-                "valid_r": 0.0,
-                "subgraph_r": 0.0,
+                "format_r": format_reward,
+                "valid_r": valid_reward,
+                "subgraph_r": self.subgraph_pass_reward,
+                "length_r": length_reward,
                 "cf_r": float(reward),
             },
+        )
+
+    def _compute_format_reward(
+        self,
+        fragment_smiles: str,
+        fragment_info: dict[str, Any],
+    ) -> float:
+        normalized = str(fragment_smiles or "").strip()
+        if not normalized:
+            return self.format_penalty
+        if any(separator in normalized for separator in ("\n", "\r", "\t", ";")):
+            return self.format_penalty
+        if fragment_info.get("raw_parse_ok"):
+            return self.format_pass_reward
+        return self.format_penalty
+
+    def _compute_valid_reward(self, fragment_info: dict[str, Any]) -> float:
+        if fragment_info.get("raw_parse_ok") and fragment_info.get("core_parse_ok"):
+            return self.valid_pass_reward
+        if fragment_info.get("raw_parse_ok"):
+            return self.partial_valid_reward
+        return self.invalid_smiles_penalty
+
+    def _compute_length_reward(self, core_atom_count: int) -> float:
+        if core_atom_count <= 0:
+            return 0.0
+        if core_atom_count <= self.compact_atom_target:
+            return self.compactness_bonus
+        overflow = core_atom_count - self.compact_atom_target
+        return float(
+            max(
+                -self.compactness_bonus,
+                self.compactness_bonus - overflow * self.compact_atom_penalty_scale,
+            )
         )
 
     def _delete_to_residual_smiles(
@@ -602,11 +1022,23 @@ class ChemRLRewarder:
         ``delete_fragment_from_parent`` so PPO still sees a deterministic residual.
         """
 
-        parent_mol = Chem.MolFromSmiles(parent_smiles, sanitize=True)
-        fragment_mol = Chem.MolFromSmiles(fragment_smiles, sanitize=True)
-        if parent_mol is None or fragment_mol is None:
+        parent = parse_smiles(
+            parent_smiles,
+            sanitize=True,
+            canonicalize=False,
+            allow_capped_fragments=False,
+        )
+        fragment = parse_smiles(
+            fragment_smiles,
+            sanitize=True,
+            canonicalize=False,
+            allow_capped_fragments=True,
+        )
+        if not parent.sanitized or parent.mol is None or not fragment.sanitized or fragment.mol is None:
             return None, "Parent or fragment could not be parsed for deletion."
 
+        parent_mol = Chem.Mol(parent.mol)
+        fragment_mol = Chem.Mol(fragment.mol)
         deletion_query, expected_removed_atoms = self._build_deletion_query(fragment_mol)
         if deletion_query is None or expected_removed_atoms <= 0:
             return None, "Could not build a deletion query from the generated fragment."
@@ -759,6 +1191,14 @@ class ChemRLRewarder:
         is_subgraph: bool = False,
         deletion_success: bool = False,
         residual_smiles: str | None = None,
+        raw_fragment_smiles: str | None = None,
+        core_fragment_smiles: str | None = None,
+        raw_parse_ok: bool = False,
+        core_parse_ok: bool = False,
+        has_dummy_atoms: bool = False,
+        dummy_count: int = 0,
+        core_atom_count: int = 0,
+        teacher_input_smiles: str | None = None,
     ) -> RewardTrace:
         """Build one failure trace consistently."""
 
@@ -766,6 +1206,8 @@ class ChemRLRewarder:
             parent_smiles=parent_smiles,
             generated_smiles=str(generated_smiles),
             normalized_generated_smiles=normalized_generated,
+            raw_fragment_smiles=raw_fragment_smiles,
+            core_fragment_smiles=core_fragment_smiles,
             original_label=int(original_label),
             target_label=1 - int(original_label),
             reward=float(sum(breakdown.values())),
@@ -778,6 +1220,12 @@ class ChemRLRewarder:
             target_probability=None,
             inactive_probability=None,
             residual_smiles=residual_smiles,
+            raw_parse_ok=bool(raw_parse_ok),
+            core_parse_ok=bool(core_parse_ok),
+            has_dummy_atoms=bool(has_dummy_atoms),
+            dummy_count=int(dummy_count),
+            core_atom_count=int(core_atom_count),
+            teacher_input_smiles=teacher_input_smiles,
             failure_stage=failure_stage,
             error_message=error_message,
             breakdown=dict(breakdown),
@@ -787,5 +1235,9 @@ class ChemRLRewarder:
 __all__ = [
     "ChemRLRewarder",
     "RewardTrace",
+    "has_dummy_atom",
+    "mol_to_smiles_safe",
+    "normalize_fragment_with_dummy_atoms",
+    "remove_dummy_atoms_from_mol",
     "shape_probability_reward",
 ]
