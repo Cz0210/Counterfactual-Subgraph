@@ -29,6 +29,56 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-18] Attach a local `.score` adapter for TRL value-head critics in experimental PPO
+
+### Background
+The ChemLLM PPO smoke test moved past the earlier InternLM2 cache failure, but
+then failed inside `trl.experimental.utils.get_reward()` when the trainer tried
+to evaluate the critic with:
+
+- `model.score(output.hidden_states[-1])`
+
+Our repository-side `value_model` was still
+`AutoModelForCausalLMWithValueHead`, which exposes `v_head` rather than a
+top-level `.score` method. Patching TRL in site-packages was explicitly out of
+scope for the VS Code plus Git plus HPC workflow.
+
+### Decision
+Add a repository-local compatibility helper in `scripts/train_ppo.py`:
+
+- `ensure_score_head_for_experimental_ppo(model, name=...)`
+
+The helper now:
+
+- leaves models that already expose `.score` unchanged;
+- searches the top-level object and common wrapper layers such as
+  `pretrained_model`, `base_model`, and `model` for a reachable `v_head`;
+- attaches `model.score(hidden_states)` dynamically when only `v_head` exists;
+- logs which wrapper layer supplied the adapted value head.
+
+The adapter is applied to `value_model` before `PPOTrainer` construction. The
+policy and reference models remain untouched so generation behavior stays
+isolated from this critic-side interface patch.
+
+### Alternatives considered
+1. Patch `trl.experimental` directly inside the conda environment.
+2. Replace the value wrapper again with another custom critic type.
+3. Fork the PPO rollout path away from the trainer-managed `get_reward()`
+   utility.
+
+### Consequences
+- Experimental PPO can keep using the existing TRL value-head wrapper while
+  satisfying the newer `.score(hidden_states)` critic contract.
+- The compatibility layer stays local to repository code and is therefore easy
+  to review, sync to HPC, and remove later if upstream APIs converge.
+- Smoke-test logs now make it explicit whether the value model has both
+  `v_head` and the adapted `.score` interface before training begins.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-09] Rebuild repository from scratch with documentation-first workflow
 
 ### Background

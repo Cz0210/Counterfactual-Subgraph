@@ -20,6 +20,7 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime
 import inspect
+import logging
 import os
 from pathlib import Path
 import re
@@ -54,6 +55,7 @@ _SMILES_FIELD_PATTERNS = (
     re.compile(r"PARENT_SMILES:\s*(?P<smiles>[^\n\r]+)"),
 )
 _LABEL_PATTERN = re.compile(r"ORIGINAL_LABEL:\s*(?P<label>[01])")
+_SCORE_ADAPTER_ATTRS = ("pretrained_model", "base_model", "model")
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,6 +700,81 @@ def build_value_model(
         raise RuntimeError("Could not identify a trainable TRL value head for PPO.")
 
     return value_model
+
+
+def _iter_score_adapter_candidates(model: Any) -> Sequence[tuple[str, Any]]:
+    """Yield likely wrapper layers that may own a PPO-compatible value head."""
+
+    if model is None:
+        return ()
+
+    candidates: list[tuple[str, Any]] = []
+    queue: list[tuple[str, Any]] = [("self", model)]
+    visited: set[int] = set()
+
+    while queue:
+        path, current = queue.pop(0)
+        if current is None:
+            continue
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        candidates.append((path, current))
+
+        for attr_name in _SCORE_ADAPTER_ATTRS:
+            child = getattr(current, attr_name, None)
+            if child is None:
+                continue
+            child_path = f"{path}.{attr_name}" if path != "self" else attr_name
+            queue.append((child_path, child))
+
+    return candidates
+
+
+def ensure_score_head_for_experimental_ppo(model: Any, name: str = "model") -> Any:
+    """Attach a local ``.score`` adapter when TRL PPO only finds ``.v_head``.
+
+    Newer ``trl.experimental`` PPO utilities call ``model.score(hidden_states)``
+    for critic-style value evaluation. ``AutoModelForCausalLMWithValueHead``
+    exposes ``v_head`` instead, so we bridge that interface locally without
+    touching site-packages or changing the policy/reference generation path.
+    """
+
+    logger = logging.getLogger("train_ppo")
+
+    if model is None:
+        logger.warning("%s is None; cannot attach experimental PPO score adapter.", name)
+        return model
+
+    if hasattr(model, "score"):
+        logger.info("%s already has .score; no adapter needed.", name)
+        return model
+
+    for path, candidate in _iter_score_adapter_candidates(model):
+        v_head = getattr(candidate, "v_head", None)
+        if v_head is None:
+            continue
+
+        def _score(hidden_states: Any, *args: Any, _v_head: Any = v_head, **kwargs: Any) -> Any:
+            return _v_head(hidden_states)
+
+        setattr(model, "score", _score)
+        logger.info(
+            "Attached experimental PPO score adapter to %s using %s.v_head (type=%s); hasattr(score)=%s",
+            name,
+            path,
+            candidate.__class__.__name__,
+            hasattr(model, "score"),
+        )
+        return model
+
+    logger.warning(
+        "%s has no .score and no reachable .v_head; experimental PPO may fail. type=%s",
+        name,
+        type(model),
+    )
+    return model
 
 
 def build_policy_model(
@@ -1442,6 +1519,9 @@ def main() -> None:
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
     )
+    value_model = ensure_score_head_for_experimental_ppo(value_model, "value_model")
+    logger.info("value_model has v_head: %s", hasattr(value_model, "v_head"))
+    logger.info("value_model has score after adapter: %s", hasattr(value_model, "score"))
 
     ppo_config = build_ppo_config(
         deps,
@@ -1460,6 +1540,8 @@ def main() -> None:
         tokenizer=tokenizer,
         rewarder=rewarder,
     )
+    if hasattr(reward_model, "score") or hasattr(reward_model, "v_head"):
+        reward_model = ensure_score_head_for_experimental_ppo(reward_model, "reward_model")
 
     ppo_trainer = build_ppo_trainer(
         deps,

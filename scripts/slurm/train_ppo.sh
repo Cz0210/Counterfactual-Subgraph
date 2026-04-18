@@ -13,6 +13,7 @@ conda activate smiles_pip118
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
 echo "pwd before cd: $(pwd)"
+echo "conda env: ${CONDA_DEFAULT_ENV:-}"
 which python
 python -V
 python - <<'PY'
@@ -28,6 +29,8 @@ echo "====================="
 cd /share/home/u20526/czx/counterfactual-subgraph
 
 export PYTHONPATH=$PWD
+echo "repo pwd: $(pwd)"
+echo "PYTHONPATH(after export): ${PYTHONPATH}"
 
 echo "===== RUNNING PPO TRAINING ====="
 python scripts/train_ppo.py --config configs/hpc.yaml "$@"

@@ -2,10 +2,20 @@ import unittest
 
 from scripts.train_ppo import (
     build_prompt_example_from_json_row,
+    ensure_score_head_for_experimental_ppo,
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
 )
 from src.rewards.reward_wrapper import shape_probability_reward
+
+
+class _DummyVHead:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def __call__(self, hidden_states):
+        self.calls.append(hidden_states)
+        return {"hidden_states": hidden_states}
 
 
 class TrainPPOHelperTests(unittest.TestCase):
@@ -47,6 +57,42 @@ class TrainPPOHelperTests(unittest.TestCase):
     def test_probability_reward_keeps_dense_exploration_signal(self) -> None:
         self.assertAlmostEqual(shape_probability_reward(0.2), 0.2)
         self.assertAlmostEqual(shape_probability_reward(0.8), 9.0)
+
+    def test_score_adapter_keeps_existing_score(self) -> None:
+        model = type("ModelWithScore", (), {})()
+        existing = lambda hidden_states: ("existing", hidden_states)
+        model.score = existing
+
+        adapted = ensure_score_head_for_experimental_ppo(model, "value_model")
+
+        self.assertIs(adapted.score, existing)
+        self.assertEqual(adapted.score("hs"), ("existing", "hs"))
+
+    def test_score_adapter_uses_top_level_v_head(self) -> None:
+        model = type("ModelWithVHead", (), {})()
+        model.v_head = _DummyVHead()
+
+        adapted = ensure_score_head_for_experimental_ppo(model, "value_model")
+        result = adapted.score("hidden_states")
+
+        self.assertTrue(hasattr(adapted, "score"))
+        self.assertEqual(result, {"hidden_states": "hidden_states"})
+        self.assertEqual(model.v_head.calls, ["hidden_states"])
+
+    def test_score_adapter_finds_nested_v_head(self) -> None:
+        wrapped = type("WrappedModel", (), {})()
+        wrapped.pretrained_model = type("InnerModel", (), {})()
+        wrapped.pretrained_model.v_head = _DummyVHead()
+
+        adapted = ensure_score_head_for_experimental_ppo(wrapped, "value_model")
+        result = adapted.score("nested_hidden_states")
+
+        self.assertTrue(hasattr(adapted, "score"))
+        self.assertEqual(result, {"hidden_states": "nested_hidden_states"})
+        self.assertEqual(
+            wrapped.pretrained_model.v_head.calls,
+            ["nested_hidden_states"],
+        )
 
 
 if __name__ == "__main__":
