@@ -7,6 +7,11 @@ from src.rewards.reward_calculator import (
     prepare_smiles_for_oracle,
     smiles_to_morgan_array,
 )
+from src.rewards.teacher_semantic import (
+    TeacherSemanticResult,
+    TeacherSemanticScorer,
+    require_teacher_semantic_scorer,
+)
 from src.rewards.reward_wrapper import ChemRLRewarder, RewardTrace, shape_probability_reward
 
 __all__ = [
@@ -14,8 +19,11 @@ __all__ = [
     "ChemRLRewarder",
     "CounterfactualReward",
     "RewardTrace",
+    "TeacherSemanticResult",
+    "TeacherSemanticScorer",
     "load_oracle_bundle",
     "prepare_smiles_for_oracle",
+    "require_teacher_semantic_scorer",
     "shape_probability_reward",
     "smiles_to_morgan_array",
 ]

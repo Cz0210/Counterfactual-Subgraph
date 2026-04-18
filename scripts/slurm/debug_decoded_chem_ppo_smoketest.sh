@@ -21,6 +21,7 @@ source ~/.bashrc
 conda activate smiles_pip118
 
 PROJECT_DIR=/share/home/u20526/czx/counterfactual-subgraph
+TEACHER_PATH=${TEACHER_PATH:-${PROJECT_DIR}/outputs/hpc/oracle/aids_rf_model.pkl}
 
 export HF_HOME=/share/home/u20526/.cache/huggingface
 export HF_MODULES_CACHE=/share/home/u20526/.cache/huggingface/modules
@@ -54,6 +55,16 @@ echo "git commit:"
 git rev-parse HEAD
 echo "PYTHONPATH(after cd)=${PYTHONPATH}"
 echo "======================"
+
+echo "===== TEACHER CHECK ====="
+echo "TEACHER_PATH=${TEACHER_PATH}"
+if [ ! -f "${TEACHER_PATH}" ]; then
+  echo "[ERROR] Teacher file not found: ${TEACHER_PATH}"
+  echo "[ERROR] Please set TEACHER_PATH=/path/to/teacher classifier bundle"
+  exit 1
+fi
+echo "[OK] Teacher file found."
+echo "========================="
 
 echo "===== CHEMLLM SOURCE MODEL PATCH CHECK ====="
 CHEMLLM_SOURCE_FILE="${PROJECT_DIR}/pretrained_models/ChemLLM-7B-Chat/modeling_internlm2.py"
@@ -125,6 +136,9 @@ python scripts/train_rl.py \
   --ppo-loop decoded_chem \
   --require-chemistry-reward-path \
   --decoded-chem-smoke-test \
+  --teacher-path "${TEACHER_PATH}" \
+  --require-teacher-sem \
+  --teacher-sem-scale 1.0 \
   "$@"
 TRAIN_EXIT_CODE=$?
 set -e

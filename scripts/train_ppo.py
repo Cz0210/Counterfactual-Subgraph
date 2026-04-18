@@ -37,6 +37,10 @@ from src.data.prompts import build_counterfactual_prompt
 from src.data.schemas import MoleculeRecord
 from src.models import clean_generated_smiles
 from src.reward.reward_wrapper import ChemRLRewarder
+from src.rewards.teacher_semantic import (
+    TeacherSemanticScorer,
+    require_teacher_semantic_scorer,
+)
 from src.utils.io import ensure_directory, read_jsonl
 from src.utils.logging_utils import RunContext, configure_run_logger, write_runtime_manifest
 from src.utils import apply_dotlist_overrides, load_and_merge_config_files
@@ -46,6 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_MODEL = REPO_ROOT / "pretrained_models" / "ChemLLM-7B-Chat"
 DEFAULT_SFT_ADAPTER = REPO_ROOT / "outputs" / "hpc" / "sft_checkpoints" / "checkpoint-500"
 DEFAULT_ORACLE_PATH = REPO_ROOT / "outputs" / "hpc" / "oracle" / "aids_rf_model.pkl"
+DEFAULT_TEACHER_PATH = DEFAULT_ORACLE_PATH
 DEFAULT_DATASET_PATH = REPO_ROOT / "data" / "raw" / "AIDS" / "HIV.csv"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "hpc" / "rl_checkpoints"
 DEFAULT_WANDB_RUN_NAME = "ppo_aids_rl_v1"
@@ -106,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--oracle-path",
         default=str(DEFAULT_ORACLE_PATH),
         help="AIDS Oracle bundle 路径。",
+    )
+    parser.add_argument(
+        "--teacher-path",
+        default=str(DEFAULT_TEACHER_PATH),
+        help="Teacher semantic classifier 路径。当前优先支持带 predict_proba 的 sklearn bundle。",
     )
     parser.add_argument(
         "--dataset-path",
@@ -220,6 +230,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--decoded-chem-smoke-test",
         action="store_true",
         help="Enable extra logging and assertions for the decoded chemistry PPO smoke test.",
+    )
+    parser.add_argument(
+        "--require-teacher-sem",
+        action="store_true",
+        help="Fail unless teacher semantic reward is available for the decoded chemistry PPO path.",
+    )
+    parser.add_argument(
+        "--teacher-sem-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor applied to successful teacher semantic rewards.",
+    )
+    parser.add_argument(
+        "--teacher-sem-missing-penalty",
+        type=float,
+        default=-5.0,
+        help="Fallback teacher-semantic penalty when the teacher is unavailable or skipped.",
     )
     parser.add_argument(
         "--max-prompt-examples",
@@ -2300,10 +2327,19 @@ def run_decoded_chem_ppo_loop(
             {
                 component_name
                 for reward_log in reward_logs
-                for component_name in ("format", "length", "teacher_sem")
+                for component_name in ("format", "length")
                 if reward_log.get(component_name) is None
             }
         )
+        teacher_sem_missing = any(
+            (
+                not reward_log.get("teacher_called", False)
+                and reward_log.get("teacher_reason") != "invalid_or_not_substructure"
+            )
+            for reward_log in reward_logs
+        )
+        if teacher_sem_missing:
+            missing_components.append("teacher_sem")
         if missing_components:
             logger.warning(
                 "[CHEM_REWARD_COMPONENTS_MISSING] missing=%s",
@@ -2311,6 +2347,33 @@ def run_decoded_chem_ppo_loop(
             )
         reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
         for reward_log in reward_logs_to_print:
+            teacher_reason = reward_log.get("teacher_reason")
+            if reward_log.get("teacher_called"):
+                logger.info(
+                    "[TEACHER_SEM_CALLED] input=%s label=%s",
+                    reward_log.get("teacher_input_smiles"),
+                    reward_log.get("original_label"),
+                )
+                logger.info(
+                    "[TEACHER_SEM_RESULT] input=%s label=%s prob=%s teacher_sem=%s reason=%s",
+                    reward_log.get("teacher_input_smiles"),
+                    reward_log.get("original_label"),
+                    reward_log.get("teacher_prob"),
+                    reward_log.get("teacher_sem"),
+                    teacher_reason,
+                )
+            elif teacher_reason == "invalid_or_not_substructure":
+                logger.info(
+                    "[TEACHER_SEM_SKIPPED] reason=%s input=%s",
+                    teacher_reason,
+                    reward_log.get("teacher_input_smiles"),
+                )
+            else:
+                logger.warning(
+                    "[TEACHER_SEM_UNAVAILABLE] reason=%s input=%s",
+                    teacher_reason,
+                    reward_log.get("teacher_input_smiles"),
+                )
             logger.info(
                 "[DUMMY_FRAGMENT_NORMALIZED] raw=%s core=%s dummy_count=%s raw_parse_ok=%s core_parse_ok=%s",
                 reward_log.get("raw_fragment"),
@@ -2320,7 +2383,7 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s format=%s valid=%s sub=%s len=%s sem=%s total=%s teacher_input_smiles=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s counterfactual_sem=%s total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
@@ -2330,8 +2393,12 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("substructure"),
                 reward_log.get("length"),
                 reward_log.get("semantic"),
+                reward_log.get("teacher_sem"),
+                reward_log.get("counterfactual_sem"),
                 reward_log.get("total"),
                 reward_log.get("teacher_input_smiles"),
+                reward_log.get("teacher_prob"),
+                teacher_reason,
             )
 
         with torch.no_grad():
@@ -2513,6 +2580,7 @@ def main() -> None:
     model_path = Path(args.model_path).expanduser().resolve()
     sft_adapter_path = Path(args.sft_adapter_path).expanduser().resolve()
     oracle_path = Path(args.oracle_path).expanduser().resolve()
+    teacher_path = Path(args.teacher_path).expanduser().resolve()
 
     ensure_directory(output_dir)
     run_name = f"{DEFAULT_WANDB_RUN_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -2538,6 +2606,7 @@ def main() -> None:
             "model_path": str(model_path),
             "sft_adapter_path": str(sft_adapter_path),
             "oracle_path": str(oracle_path),
+            "teacher_path": str(teacher_path),
             "dataset_path": str(dataset_path),
             "output_dir": str(output_dir),
             "wandb_run_name": DEFAULT_WANDB_RUN_NAME,
@@ -2606,9 +2675,32 @@ def main() -> None:
     logger.info("value_model has v_head: %s", hasattr(value_model, "v_head"))
     logger.info("value_model has score after adapter: %s", hasattr(value_model, "score"))
 
+    teacher_scorer: TeacherSemanticScorer | None = None
+    if args.ppo_loop == "decoded_chem" or args.require_teacher_sem:
+        teacher_scorer = TeacherSemanticScorer(
+            teacher_path=teacher_path,
+            device="cpu",
+            logger=logger,
+        )
+        logger.info(
+            "[TEACHER_AUDIT] path=%s available=%s format=%s reason=%s",
+            teacher_path,
+            teacher_scorer.available,
+            teacher_scorer.teacher_format,
+            teacher_scorer.availability_reason,
+        )
+        if args.require_teacher_sem:
+            require_teacher_semantic_scorer(
+                teacher_scorer,
+                teacher_path=teacher_path,
+            )
+
     rewarder = ChemRLRewarder(
         oracle_path=oracle_path,
         default_parent_label=args.default_parent_label,
+        teacher_scorer=teacher_scorer,
+        teacher_sem_scale=args.teacher_sem_scale,
+        teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
     )
     chem_reward_model = build_reward_model_wrapper(
         deps,

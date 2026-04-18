@@ -18,6 +18,11 @@ from src.rewards.reward_calculator import (
     prepare_smiles_for_oracle,
     smiles_to_morgan_array,
 )
+from src.rewards.teacher_semantic import (
+    TeacherSemanticResult,
+    TeacherSemanticScorer,
+    require_teacher_semantic_scorer,
+)
 from src.rewards.reward_wrapper import ChemRLRewarder, RewardTrace, shape_probability_reward
 from src.rewards.types import RewardBreakdown, RewardTerm, RewardWeights
 
@@ -32,12 +37,15 @@ __all__ = [
     "RewardContext",
     "RewardTerm",
     "RewardWeights",
+    "TeacherSemanticResult",
+    "TeacherSemanticScorer",
     "aggregate_reward_terms",
     "analyze_batch_collapse",
     "build_reward_breakdown",
     "collapse_penalty_from_diagnostics",
     "load_oracle_bundle",
     "prepare_smiles_for_oracle",
+    "require_teacher_semantic_scorer",
     "shape_probability_reward",
     "smiles_to_morgan_array",
 ]

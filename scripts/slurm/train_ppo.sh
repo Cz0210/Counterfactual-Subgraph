@@ -31,6 +31,7 @@ cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 echo "repo pwd: $(pwd)"
 echo "PYTHONPATH(after export): ${PYTHONPATH}"
+echo "TEACHER_PATH(env, optional): ${TEACHER_PATH:-<use train_ppo.py default>}"
 
 echo "===== RUNNING PPO TRAINING ====="
 python scripts/train_ppo.py --config configs/hpc.yaml "$@"

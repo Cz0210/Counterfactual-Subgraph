@@ -29,6 +29,62 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-19] Add explicit teacher-semantic scoring on core fragments in the decoded chemistry PPO path
+
+### Background
+The decoded chemistry PPO loop now proves that generated text is decoded,
+normalized, scored by chemistry utilities, and then used in a PPO update.
+However, the logs still showed:
+
+- `[CHEM_REWARD_COMPONENTS_MISSING] missing=teacher_sem`
+
+That made it impossible to tell whether any auxiliary fragment-level semantic
+signal was actually being applied after dummy-atom normalization.
+
+### Decision
+Add a dedicated `TeacherSemanticScorer` and wire it into the decoded chemistry
+reward path only.
+
+Key rules:
+
+- the teacher always receives `core_fragment_smiles`, never the raw capped
+  fragment with `*`;
+- invalid or non-substructure fragments do not call the teacher and instead log
+  a skip reason;
+- when the teacher backend is unavailable, the code uses an explicit fallback
+  penalty and logs the unavailability rather than pretending a real score
+  exists;
+- the repository's existing residual-molecule counterfactual term remains in
+  place, so the teacher-semantic term is an auxiliary signal rather than a
+  replacement for the deletion-based objective.
+
+Because the repository currently ships one concrete classifier artifact at
+`outputs/hpc/oracle/aids_rf_model.pkl`, the scorer first supports that
+scikit-learn style bundle format (`predict_proba` plus fingerprint metadata).
+Torch checkpoints are only accepted when they carry equally explicit
+fingerprint configuration.
+
+### Alternatives considered
+1. Continue logging `teacher_sem` as missing.
+2. Treat the residual-molecule oracle as if it already satisfied the teacher
+   role and hide the distinction.
+3. Require a new `teacher/teacher.pt` artifact before any teacher-semantic work
+   could proceed.
+
+### Consequences
+- decoded PPO logs now expose `[TEACHER_SEM_CALLED]`,
+  `[TEACHER_SEM_RESULT]`, `[TEACHER_SEM_SKIPPED]`, and
+  `[TEACHER_SEM_UNAVAILABLE]`;
+- `CHEM_REWARD_COMPONENTS` now shows both `teacher_sem` and the residual
+  counterfactual term separately;
+- the decoded chemistry smoke-test Slurm script now checks for a teacher file
+  before submitting training.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-19] Treat dummy-atom attachment points as valid decoded-fragment syntax in PPO chemistry rewards
 
 ### Background
