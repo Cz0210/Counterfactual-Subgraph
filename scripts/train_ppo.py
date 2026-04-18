@@ -196,6 +196,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="每多少个 PPO step 输出一次摘要日志。",
     )
     parser.add_argument(
+        "--diagnose-reward-flow",
+        action="store_true",
+        help="输出额外的 reward-flow 调试日志，便于 smoke test 排查。",
+    )
+    parser.add_argument(
+        "--skip-generate-completions",
+        action="store_true",
+        help="Skip TRL experimental PPO generate_completions(), useful when eval_dataloader is unavailable.",
+    )
+    parser.add_argument(
         "--max-prompt-examples",
         type=int,
         default=0,
@@ -1445,6 +1455,65 @@ def build_ppo_trainer(
     return trainer_cls(**trainer_kwargs)
 
 
+def diagnose_eval_dataloader_for_generate_completions(ppo_trainer: Any) -> str | None:
+    """Return a concrete reason when trainer-side completions are unsafe to run."""
+
+    eval_dataloader = getattr(ppo_trainer, "eval_dataloader", None)
+    if eval_dataloader is None:
+        return "ppo_trainer.eval_dataloader is None"
+
+    eval_dataset = getattr(eval_dataloader, "dataset", None)
+    if eval_dataset is None:
+        return "ppo_trainer.eval_dataloader.dataset is None"
+
+    try:
+        len(eval_dataset)
+    except Exception as exc:
+        return f"len(ppo_trainer.eval_dataloader.dataset) failed: {exc}"
+
+    sampler = getattr(eval_dataloader, "sampler", None)
+    if sampler is None:
+        return "ppo_trainer.eval_dataloader.sampler is None"
+
+    data_source = getattr(sampler, "data_source", None)
+    if data_source is None:
+        return "ppo_trainer.eval_dataloader.sampler.data_source is None"
+
+    try:
+        len(data_source)
+    except Exception as exc:
+        return f"len(ppo_trainer.eval_dataloader.sampler.data_source) failed: {exc}"
+
+    return None
+
+
+def disable_generate_completions_if_needed(
+    ppo_trainer: Any,
+    logger: Any,
+    *,
+    reason: str = "",
+) -> None:
+    """Replace trainer-side completion preview generation with a no-op logger."""
+
+    import types
+
+    original = getattr(ppo_trainer, "generate_completions", None)
+
+    def _skip_generate_completions(self: Any, *args: Any, **kwargs: Any) -> None:
+        logger.warning(
+            "[PPO_GENERATE_COMPLETIONS_SKIPPED] Skipping TRL generate_completions because eval_dataloader is unavailable. reason=%s",
+            reason,
+        )
+        return None
+
+    ppo_trainer.generate_completions = types.MethodType(_skip_generate_completions, ppo_trainer)
+    logger.warning(
+        "[PPO_GENERATE_COMPLETIONS_SKIPPED] Patched ppo_trainer.generate_completions. original=%s reason=%s",
+        original,
+        reason,
+    )
+
+
 def sync_generation_token_ids(
     model: Any,
     tokenizer: Any,
@@ -1812,6 +1881,18 @@ def main() -> None:
         deps=deps,
         name="reward_model",
     )
+    if args.diagnose_reward_flow:
+        logger.info(
+            "Reward-flow diagnostics enabled: chem_reward_model=%s trainer_reward_model=%s",
+            type(chem_reward_model),
+            type(reward_model),
+        )
+        logger.info(
+            "Reward-flow diagnostics: trainer reward_model base_model_prefix=%s has_score=%s interface_compatibility_only=%s",
+            getattr(reward_model, "base_model_prefix", None),
+            hasattr(reward_model, "score"),
+            getattr(reward_model, "interface_compatibility_only", False),
+        )
 
     ppo_trainer = build_ppo_trainer(
         deps,
@@ -1832,6 +1913,18 @@ def main() -> None:
     sync_generation_token_ids(getattr(ppo_trainer, "model", None), tokenizer)
     patch_internlm_cache(ppo_trainer.model)
     log_runtime_model_debug(logger, label="ppo_trainer.model_after_patch", model=getattr(ppo_trainer, "model", None))
+
+    generate_completions_skip_reason = None
+    if args.skip_generate_completions:
+        generate_completions_skip_reason = "skip flag enabled"
+    else:
+        generate_completions_skip_reason = diagnose_eval_dataloader_for_generate_completions(ppo_trainer)
+    if generate_completions_skip_reason is not None:
+        disable_generate_completions_if_needed(
+            ppo_trainer,
+            logger,
+            reason=generate_completions_skip_reason,
+        )
 
     logger.info("Starting PPO training loop with max_steps=%s", args.max_steps)
     ppo_trainer.train()

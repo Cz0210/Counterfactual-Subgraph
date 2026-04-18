@@ -2,6 +2,8 @@ import unittest
 
 from scripts.train_ppo import (
     build_prompt_example_from_json_row,
+    diagnose_eval_dataloader_for_generate_completions,
+    disable_generate_completions_if_needed,
     ensure_reward_model_for_experimental_ppo,
     ensure_score_head_for_experimental_ppo,
     extract_parent_smiles_from_prompt,
@@ -22,6 +24,16 @@ class _DummyVHead:
     def __call__(self, hidden_states):
         self.calls.append(hidden_states)
         return {"hidden_states": hidden_states}
+
+
+class _ListLogger:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def warning(self, message: str, *args) -> None:
+        if args:
+            message = message % args
+        self.messages.append(message)
 
 
 if torch is not None:
@@ -121,6 +133,36 @@ class TrainPPOHelperTests(unittest.TestCase):
             wrapped.pretrained_model.v_head.calls,
             ["nested_hidden_states"],
         )
+
+    def test_eval_dataloader_diagnosis_reports_missing_data_source(self) -> None:
+        trainer = type("Trainer", (), {})()
+        trainer.eval_dataloader = type("EvalDataLoader", (), {})()
+        trainer.eval_dataloader.dataset = [1, 2, 3]
+        trainer.eval_dataloader.sampler = type("Sampler", (), {"data_source": None})()
+
+        reason = diagnose_eval_dataloader_for_generate_completions(trainer)
+
+        self.assertEqual(reason, "ppo_trainer.eval_dataloader.sampler.data_source is None")
+
+    def test_disable_generate_completions_installs_no_op_patch(self) -> None:
+        trainer = type("Trainer", (), {})()
+
+        def _original_generate_completions(self, *args, **kwargs):
+            raise AssertionError("original generate_completions should have been patched out")
+
+        trainer.generate_completions = _original_generate_completions.__get__(trainer, trainer.__class__)
+        logger = _ListLogger()
+
+        disable_generate_completions_if_needed(
+            trainer,
+            logger,
+            reason="skip flag enabled",
+        )
+        result = trainer.generate_completions()
+
+        self.assertIsNone(result)
+        self.assertTrue(any("[PPO_GENERATE_COMPLETIONS_SKIPPED]" in message for message in logger.messages))
+        self.assertTrue(any("reason=skip flag enabled" in message for message in logger.messages))
 
     @unittest.skipIf(torch is None, "torch is required for reward adapter helper tests")
     def test_reward_model_adapter_uses_existing_backbone(self) -> None:

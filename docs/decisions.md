@@ -29,6 +29,52 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-18] Skip trainer-managed completion previews when experimental PPO has no usable eval dataloader
+
+### Background
+After the ChemLLM cache fix, the value-model `.score` adapter, and the
+reward-model compatibility adapter were all in place, the PPO smoke test
+finally entered the trainer loop and emitted PPO metrics. The next failure came
+from `trl.experimental.ppo.PPOTrainer.generate_completions()`, which tried to
+iterate `self.eval_dataloader` even though the smoke-test path had no usable
+evaluation data source. That eventually surfaced as:
+
+- `TypeError: object of type 'NoneType' has no len()`
+
+### Decision
+Keep the main PPO training loop intact, but add a local repository-side guard
+in `scripts/train_ppo.py` for the trainer-managed completion-preview stage:
+
+- add `--skip-generate-completions` as an explicit CLI escape hatch;
+- add `--diagnose-reward-flow` as a smoke-test-friendly debug flag;
+- detect unusable completion-preview loaders such as missing
+  `eval_dataloader`, missing `dataset`, or `sampler.data_source is None`;
+- replace `ppo_trainer.generate_completions()` with a no-op logger only when
+  the skip flag is enabled or the evaluation loader is clearly unusable.
+
+The HPC smoke-test script now always passes both diagnostic flags so it can
+focus on initialization and the core PPO loop without failing in the preview
+generation branch.
+
+### Alternatives considered
+1. Patch `trl.experimental` directly in site-packages to special-case missing
+   eval loaders.
+2. Fabricate a fake evaluation dataset just to satisfy completion previews.
+3. Catch and suppress broad exceptions around `ppo_trainer.train()`.
+
+### Consequences
+- The smoke test can keep exercising PPO initialization and training steps even
+  when the trainer's optional preview-generation path has no evaluation data.
+- Main training errors are still surfaced normally because only
+  `generate_completions()` is replaced, not the full trainer loop.
+- Slurm logs now include explicit `[PPO_GENERATE_COMPLETIONS_SKIPPED]` markers
+  so it is obvious when this guard was applied.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-18] Separate chemistry reward logic from TRL experimental reward-model interface compatibility
 
 ### Background
