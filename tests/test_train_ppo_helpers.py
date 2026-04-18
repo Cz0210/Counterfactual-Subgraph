@@ -2,11 +2,17 @@ import unittest
 
 from scripts.train_ppo import (
     build_prompt_example_from_json_row,
+    ensure_reward_model_for_experimental_ppo,
     ensure_score_head_for_experimental_ppo,
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
 )
 from src.rewards.reward_wrapper import shape_probability_reward
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - depends on local test environment
+    torch = None
 
 
 class _DummyVHead:
@@ -16,6 +22,28 @@ class _DummyVHead:
     def __call__(self, hidden_states):
         self.calls.append(hidden_states)
         return {"hidden_states": hidden_states}
+
+
+if torch is not None:
+    class _DummyBackbone(torch.nn.Module):
+        def __init__(self, hidden_size: int = 4) -> None:
+            super().__init__()
+            self.config = type("Config", (), {"hidden_size": hidden_size, "torch_dtype": torch.float32})()
+            self.proj = torch.nn.Linear(hidden_size, hidden_size, bias=False)
+
+        def forward(self, *args, **kwargs):
+            return {"args": args, "kwargs": kwargs}
+
+
+    class _RewardWrapperWithBackbone(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backbone = _DummyBackbone()
+
+
+    class _ChemistryOnlyRewardWrapper(torch.nn.Module):
+        def forward(self, *_args, **_kwargs):
+            return torch.zeros((1, 1), dtype=torch.float32)
 
 
 class TrainPPOHelperTests(unittest.TestCase):
@@ -93,6 +121,45 @@ class TrainPPOHelperTests(unittest.TestCase):
             wrapped.pretrained_model.v_head.calls,
             ["nested_hidden_states"],
         )
+
+    @unittest.skipIf(torch is None, "torch is required for reward adapter helper tests")
+    def test_reward_model_adapter_uses_existing_backbone(self) -> None:
+        reward_model = _RewardWrapperWithBackbone()
+
+        adapted = ensure_reward_model_for_experimental_ppo(
+            reward_model,
+            fallback_lm_model=None,
+            name="reward_model",
+        )
+
+        self.assertIs(adapted, reward_model)
+        self.assertTrue(hasattr(adapted, "base_model_prefix"))
+        self.assertEqual(adapted.base_model_prefix, "backbone")
+        self.assertIs(getattr(adapted, adapted.base_model_prefix), adapted.backbone)
+        self.assertTrue(hasattr(adapted, "score"))
+        score_output = adapted.score(torch.zeros((2, 3, adapted.backbone.config.hidden_size)))
+        self.assertEqual(tuple(score_output.shape), (2, 3, 1))
+
+    @unittest.skipIf(torch is None, "torch is required for reward adapter helper tests")
+    def test_reward_model_adapter_builds_fallback_trl_wrapper(self) -> None:
+        chemistry_reward_model = _ChemistryOnlyRewardWrapper()
+        fallback_backbone = _DummyBackbone(hidden_size=6)
+
+        adapted = ensure_reward_model_for_experimental_ppo(
+            chemistry_reward_model,
+            fallback_lm_model=fallback_backbone,
+            name="reward_model",
+        )
+
+        self.assertIsNot(adapted, chemistry_reward_model)
+        self.assertTrue(hasattr(adapted, "base_model_prefix"))
+        self.assertEqual(adapted.base_model_prefix, "pretrained_model")
+        self.assertIs(adapted.pretrained_model, fallback_backbone)
+        self.assertTrue(hasattr(adapted, "score"))
+        self.assertTrue(getattr(adapted, "interface_compatibility_only", False))
+        self.assertIs(getattr(adapted, "chemistry_reward_component"), chemistry_reward_model)
+        score_output = adapted.score(torch.zeros((1, 5, fallback_backbone.config.hidden_size)))
+        self.assertEqual(tuple(score_output.shape), (1, 5, 1))
 
 
 if __name__ == "__main__":

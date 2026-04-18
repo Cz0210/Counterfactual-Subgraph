@@ -55,7 +55,8 @@ _SMILES_FIELD_PATTERNS = (
     re.compile(r"PARENT_SMILES:\s*(?P<smiles>[^\n\r]+)"),
 )
 _LABEL_PATTERN = re.compile(r"ORIGINAL_LABEL:\s*(?P<label>[01])")
-_SCORE_ADAPTER_ATTRS = ("pretrained_model", "base_model", "model")
+_MODEL_WRAPPER_ATTRS = ("pretrained_model", "base_model", "model")
+_REWARD_BACKBONE_ATTRS = _MODEL_WRAPPER_ATTRS + ("lm_backbone", "backbone", "language_model")
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,8 +703,12 @@ def build_value_model(
     return value_model
 
 
-def _iter_score_adapter_candidates(model: Any) -> Sequence[tuple[str, Any]]:
-    """Yield likely wrapper layers that may own a PPO-compatible value head."""
+def _iter_named_module_candidates(
+    model: Any,
+    *,
+    attr_names: Sequence[str],
+) -> Sequence[tuple[str, Any]]:
+    """Yield the root object and common wrapper layers for adapter discovery."""
 
     if model is None:
         return ()
@@ -722,7 +727,7 @@ def _iter_score_adapter_candidates(model: Any) -> Sequence[tuple[str, Any]]:
         visited.add(identity)
         candidates.append((path, current))
 
-        for attr_name in _SCORE_ADAPTER_ATTRS:
+        for attr_name in attr_names:
             child = getattr(current, attr_name, None)
             if child is None:
                 continue
@@ -730,6 +735,100 @@ def _iter_score_adapter_candidates(model: Any) -> Sequence[tuple[str, Any]]:
             queue.append((child_path, child))
 
     return candidates
+
+
+def _iter_score_adapter_candidates(model: Any) -> Sequence[tuple[str, Any]]:
+    """Yield likely wrapper layers that may own a PPO-compatible value head."""
+
+    return _iter_named_module_candidates(model, attr_names=_MODEL_WRAPPER_ATTRS)
+
+
+def _resolve_hidden_size_from_model(model: Any) -> int | None:
+    """Best-effort hidden-size inference for lightweight PPO score heads."""
+
+    config = getattr(model, "config", None)
+    for attr_name in ("hidden_size", "n_embd", "d_model"):
+        value = getattr(config, attr_name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _infer_module_device_and_dtype(
+    module: Any,
+    *,
+    torch: Any,
+) -> tuple[Any, Any]:
+    """Infer a stable device / floating dtype pair for a newly created head."""
+
+    device = None
+    dtype = None
+
+    for tensor in list(module.parameters()) + list(module.buffers()):
+        if device is None:
+            device = tensor.device
+        tensor_dtype = getattr(tensor, "dtype", None)
+        if tensor_dtype is not None and getattr(tensor_dtype, "is_floating_point", False):
+            dtype = tensor_dtype
+            break
+
+    if device is None:
+        try:
+            first_parameter = next(module.parameters())
+            device = first_parameter.device
+        except StopIteration:
+            device = torch.device("cpu")
+
+    if dtype is None:
+        module_dtype = getattr(module, "dtype", None)
+        if isinstance(module_dtype, torch.dtype) and module_dtype.is_floating_point:
+            dtype = module_dtype
+
+    if dtype is None:
+        config_dtype = getattr(getattr(module, "config", None), "torch_dtype", None)
+        if isinstance(config_dtype, torch.dtype) and config_dtype.is_floating_point:
+            dtype = config_dtype
+
+    if dtype is None:
+        dtype = torch.float32
+
+    return device, dtype
+
+
+def _find_reward_backbone_on_model(model: Any) -> tuple[str | None, Any, str | None]:
+    """Find a usable LM-like backbone exposed by a reward wrapper if present."""
+
+    if model is None:
+        return None, None, None
+
+    for attr_name in _REWARD_BACKBONE_ATTRS:
+        candidate = getattr(model, attr_name, None)
+        if candidate is not None and callable(getattr(candidate, "forward", None)):
+            return attr_name, candidate, f"self.{attr_name}"
+
+    for path, candidate in _iter_named_module_candidates(model, attr_names=_REWARD_BACKBONE_ATTRS):
+        if path == "self":
+            continue
+        if candidate is not None and callable(getattr(candidate, "forward", None)):
+            return None, candidate, path
+
+    return None, None, None
+
+
+def _coerce_reward_backbone_candidate(model: Any) -> tuple[Any, str | None]:
+    """Normalize a fallback model into one forwardable backbone object."""
+
+    if model is None:
+        return None, None
+
+    if callable(getattr(model, "forward", None)):
+        return model, f"fallback:{model.__class__.__name__}"
+
+    _, candidate, source = _find_reward_backbone_on_model(model)
+    return candidate, source
 
 
 def ensure_score_head_for_experimental_ppo(model: Any, name: str = "model") -> Any:
@@ -775,6 +874,159 @@ def ensure_score_head_for_experimental_ppo(model: Any, name: str = "model") -> A
         type(model),
     )
     return model
+
+
+def ensure_reward_model_for_experimental_ppo(
+    reward_model: Any,
+    *,
+    fallback_lm_model: Any = None,
+    deps: dict[str, Any] | None = None,
+    name: str = "reward_model",
+) -> Any:
+    """Adapt custom reward components to TRL experimental PPO's reward-model API.
+
+    ``ChemRewardModelWrapper`` computes chemistry-aware rewards from decoded
+    strings, but newer ``trl.experimental`` PPO ``get_reward()`` expects a
+    Hugging Face-style reward model with:
+
+    - ``base_model_prefix`` pointing to a forwardable LM backbone;
+    - ``getattr(model, model.base_model_prefix)`` returning that backbone;
+    - ``score(hidden_states)`` mapping token hidden states to scalar logits.
+
+    When the custom reward component does not already expose that contract, we
+    build a lightweight compatibility adapter for smoke-test / interface
+    validation only. This adapter is not equivalent to the repository's
+    chemistry reward objective.
+    """
+
+    logger = logging.getLogger("train_ppo")
+
+    if deps is not None:
+        torch = deps["torch"]
+    else:  # pragma: no cover - exercised in real training environments
+        import torch  # type: ignore
+
+    logger.info("reward_model before adapter: %s", type(reward_model))
+
+    if reward_model is None:
+        logger.warning("%s is None; cannot build an experimental PPO reward adapter.", name)
+        return reward_model
+
+    base_model_prefix = getattr(reward_model, "base_model_prefix", None)
+    existing_backbone = None
+    if isinstance(base_model_prefix, str) and base_model_prefix:
+        existing_backbone = getattr(reward_model, base_model_prefix, None)
+
+    if existing_backbone is not None and hasattr(reward_model, "score"):
+        logger.info("%s already exposes base_model_prefix=%s and .score; no adapter needed.", name, base_model_prefix)
+        logger.info("reward_model after adapter: %s", type(reward_model))
+        logger.info("reward_model has base_model_prefix: %s", hasattr(reward_model, "base_model_prefix"))
+        logger.info("reward_model base_model_prefix: %s", getattr(reward_model, "base_model_prefix", None))
+        logger.info("reward_model has score: %s", hasattr(reward_model, "score"))
+        return reward_model
+
+    direct_attr_name, backbone, backbone_source = _find_reward_backbone_on_model(reward_model)
+    if backbone is not None:
+        exposed_attr_name = direct_attr_name or "pretrained_model"
+        if getattr(reward_model, exposed_attr_name, None) is not backbone:
+            setattr(reward_model, exposed_attr_name, backbone)
+        reward_model.base_model_prefix = exposed_attr_name
+        reward_model = ensure_score_head_for_experimental_ppo(reward_model, name=name)
+
+        if not hasattr(reward_model, "score"):
+            hidden_size = _resolve_hidden_size_from_model(backbone)
+            if hidden_size is None:
+                raise ValueError(
+                    f"Cannot infer hidden_size for {name} score head from backbone source {backbone_source}."
+                )
+            device, dtype = _infer_module_device_and_dtype(backbone, torch=torch)
+            score_head = torch.nn.Linear(hidden_size, 1, bias=False)
+            score_head.to(device=device, dtype=dtype)
+            with torch.no_grad():
+                score_head.weight.zero_()
+            for parameter in score_head.parameters():
+                parameter.requires_grad = False
+            setattr(reward_model, "score", score_head)
+            logger.info(
+                "Attached linear score head to %s using backbone source %s; hidden_size=%s device=%s dtype=%s",
+                name,
+                backbone_source,
+                hidden_size,
+                device,
+                dtype,
+            )
+
+        logger.info("reward_model after adapter: %s", type(reward_model))
+        logger.info("reward_model has base_model_prefix: %s", hasattr(reward_model, "base_model_prefix"))
+        logger.info("reward_model base_model_prefix: %s", getattr(reward_model, "base_model_prefix", None))
+        logger.info("reward_model has score: %s", hasattr(reward_model, "score"))
+        return reward_model
+
+    fallback_backbone, fallback_source = _coerce_reward_backbone_candidate(fallback_lm_model)
+    if fallback_backbone is None:
+        logger.warning(
+            "%s does not expose a TRL-compatible backbone and no fallback LM backbone was available. type=%s",
+            name,
+            type(reward_model),
+        )
+        logger.info("reward_model after adapter: %s", type(reward_model))
+        logger.info("reward_model has base_model_prefix: %s", hasattr(reward_model, "base_model_prefix"))
+        logger.info("reward_model base_model_prefix: %s", getattr(reward_model, "base_model_prefix", None))
+        logger.info("reward_model has score: %s", hasattr(reward_model, "score"))
+        return reward_model
+
+    hidden_size = _resolve_hidden_size_from_model(fallback_backbone)
+    if hidden_size is None:
+        raise ValueError(
+            f"Cannot infer hidden_size for {name} fallback reward adapter from {fallback_source}."
+        )
+    device, dtype = _infer_module_device_and_dtype(fallback_backbone, torch=torch)
+
+    class ExperimentalPPORewardModelAdapter(torch.nn.Module):
+        base_model_prefix = "pretrained_model"
+
+        def __init__(self, pretrained_model: Any, chemistry_reward_component: Any) -> None:
+            super().__init__()
+            self.pretrained_model = pretrained_model
+            self.score = torch.nn.Linear(hidden_size, 1, bias=False)
+            self.score.to(device=device, dtype=dtype)
+            with torch.no_grad():
+                self.score.weight.zero_()
+            for parameter in self.score.parameters():
+                parameter.requires_grad = False
+            self.interface_compatibility_only = True
+            self.adapter_note = (
+                "Using experimental PPO-compatible reward adapter for smoke test / interface compatibility. "
+                "ChemRewardModelWrapper remains the chemistry reward component and is not equivalent to TRL hidden-state reward head."
+            )
+            object.__setattr__(self, "chemistry_reward_component", chemistry_reward_component)
+
+        def forward(self, *args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("output_hidden_states", True)
+            kwargs.setdefault("return_dict", True)
+            return self.pretrained_model(*args, **kwargs)
+
+    adapted_reward_model = ExperimentalPPORewardModelAdapter(
+        pretrained_model=fallback_backbone,
+        chemistry_reward_component=reward_model,
+    )
+    logger.info(
+        "Using experimental PPO-compatible reward adapter for smoke test / interface compatibility. "
+        "ChemRewardModelWrapper remains the chemistry reward component and is not equivalent to TRL hidden-state reward head."
+    )
+    logger.info(
+        "Attached fallback reward adapter to %s using %s; hidden_size=%s device=%s dtype=%s",
+        name,
+        fallback_source,
+        hidden_size,
+        device,
+        dtype,
+    )
+    logger.info("reward_model after adapter: %s", type(adapted_reward_model))
+    logger.info("reward_model has base_model_prefix: %s", hasattr(adapted_reward_model, "base_model_prefix"))
+    logger.info("reward_model base_model_prefix: %s", getattr(adapted_reward_model, "base_model_prefix", None))
+    logger.info("reward_model has score: %s", hasattr(adapted_reward_model, "score"))
+    return adapted_reward_model
 
 
 def build_policy_model(
@@ -894,7 +1146,13 @@ def build_reward_model_wrapper(
     tokenizer: Any,
     rewarder: ChemRLRewarder,
 ) -> Any:
-    """Create a torch ``reward_model`` compatible with experimental TRL PPO."""
+    """Create the repository's chemistry reward component.
+
+    This wrapper computes deletion-based chemistry rewards from decoded text.
+    It is *not* the same contract as the hidden-state reward model expected by
+    newer ``trl.experimental`` PPO ``get_reward()`` paths, so the trainer-facing
+    reward model may still need a separate interface adapter.
+    """
 
     torch = deps["torch"]
 
@@ -1371,6 +1629,8 @@ def collect_runtime_model_debug(model: Any) -> dict[str, Any]:
             "pretrained_model",
             "model",
             "base_model",
+            "lm_backbone",
+            "backbone",
             "language_model",
         ):
             candidate = getattr(current_model, attribute_name, None)
@@ -1535,13 +1795,23 @@ def main() -> None:
         oracle_path=oracle_path,
         default_parent_label=args.default_parent_label,
     )
-    reward_model = build_reward_model_wrapper(
+    chem_reward_model = build_reward_model_wrapper(
         deps,
         tokenizer=tokenizer,
         rewarder=rewarder,
     )
-    if hasattr(reward_model, "score") or hasattr(reward_model, "v_head"):
-        reward_model = ensure_score_head_for_experimental_ppo(reward_model, "reward_model")
+    logger.info("chem_reward_model component type: %s", type(chem_reward_model))
+    reward_model = ensure_reward_model_for_experimental_ppo(
+        chem_reward_model,
+        fallback_lm_model=(
+            getattr(value_model, "pretrained_model", None)
+            or getattr(reference_model, "pretrained_model", None)
+            or reference_model
+            or policy_model
+        ),
+        deps=deps,
+        name="reward_model",
+    )
 
     ppo_trainer = build_ppo_trainer(
         deps,
@@ -1557,6 +1827,7 @@ def main() -> None:
     log_runtime_model_debug(logger, label="policy_model", model=policy_model)
     log_runtime_model_debug(logger, label="reference_model", model=reference_model)
     log_runtime_model_debug(logger, label="value_model", model=value_model)
+    log_runtime_model_debug(logger, label="reward_model", model=reward_model)
     log_runtime_model_debug(logger, label="ppo_trainer.model_before_patch", model=getattr(ppo_trainer, "model", None))
     sync_generation_token_ids(getattr(ppo_trainer, "model", None), tokenizer)
     patch_internlm_cache(ppo_trainer.model)

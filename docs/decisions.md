@@ -29,6 +29,62 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-18] Separate chemistry reward logic from TRL experimental reward-model interface compatibility
+
+### Background
+After the local `.score` adapter fixed the PPO critic-side value-model crash,
+the smoke test progressed further and then failed inside
+`trl.experimental.utils.get_reward()` with:
+
+- `AttributeError: 'ChemRewardModelWrapper' object has no attribute 'base_model_prefix'`
+
+The repository's `ChemRewardModelWrapper` computes chemistry-aware rewards by
+decoding generated text back into parent / fragment pairs and calling
+`ChemRLRewarder`. That is not the same interface as the Hugging Face-style
+reward model expected by this experimental TRL path, which assumes:
+
+- `base_model_prefix`
+- a forwardable LM backbone accessible through that prefix
+- `score(hidden_states)`
+
+### Decision
+Keep `ChemRewardModelWrapper` as the repository's chemistry reward component,
+but stop passing it directly to experimental PPO when the runtime expects a
+hidden-state reward model.
+
+Instead, `scripts/train_ppo.py` now adds
+`ensure_reward_model_for_experimental_ppo(...)`, which:
+
+- reuses an existing reward-side backbone if one is already exposed;
+- otherwise builds a lightweight TRL-compatible reward adapter around a
+  fallback LM backbone such as `value_model.pretrained_model`;
+- adds `base_model_prefix` and a token-level `score` head for interface
+  compatibility;
+- logs explicitly that the fallback adapter is only for smoke-test /
+  interface-validation purposes and is not equivalent to the repository's
+  deletion-based chemistry reward objective.
+
+### Alternatives considered
+1. Patch TRL directly in site-packages so it can accept the chemistry wrapper.
+2. Pretend the chemistry wrapper is a native hidden-state reward model by
+   adding only one missing attribute at a time.
+3. Remove the chemistry reward component entirely and silently replace it with
+   a generic reward head.
+
+### Consequences
+- The smoke test can progress past TRL's stricter `reward_model` interface
+  checks without mutating the external conda environment.
+- Repository code now makes the mismatch between chemistry rewards and TRL's
+  hidden-state reward-model contract explicit instead of hiding it behind
+  brittle monkey patches.
+- Future work can reconnect true chemistry rewards to trainer-managed PPO more
+  cleanly because the current limitation is now documented in code and docs.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-18] Attach a local `.score` adapter for TRL value-head critics in experimental PPO
 
 ### Background
