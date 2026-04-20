@@ -37,6 +37,7 @@ from src.data.prompts import build_counterfactual_prompt
 from src.data.schemas import MoleculeRecord
 from src.models import clean_generated_smiles
 from src.reward.reward_wrapper import ChemRLRewarder
+from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
 from src.rewards.teacher_semantic import (
     TeacherSemanticScorer,
     require_teacher_semantic_scorer,
@@ -247,6 +248,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=-5.0,
         help="Fallback teacher-semantic penalty when the teacher is unavailable or skipped.",
+    )
+    parser.add_argument(
+        "--teacher-cf-flip-bonus",
+        type=float,
+        default=1.0,
+        help="Bonus added to counterfactual_sem when the residual teacher prediction flips away from the original label.",
+    )
+    parser.add_argument(
+        "--disable-counterfactual-teacher",
+        action="store_true",
+        help="Disable the deletion-based counterfactual teacher oracle and keep only fragment-level teacher diagnostics.",
     )
     parser.add_argument(
         "--max-prompt-examples",
@@ -2333,8 +2345,9 @@ def run_decoded_chem_ppo_loop(
         )
         teacher_sem_missing = any(
             (
-                not reward_log.get("teacher_called", False)
-                and reward_log.get("teacher_reason") != "invalid_or_not_substructure"
+                not reward_log.get("counterfactual_called", False)
+                and reward_log.get("counterfactual_reason")
+                not in ("invalid_or_not_substructure", "counterfactual_teacher_disabled")
             )
             for reward_log in reward_logs
         )
@@ -2348,6 +2361,7 @@ def run_decoded_chem_ppo_loop(
         reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
         for reward_log in reward_logs_to_print:
             teacher_reason = reward_log.get("teacher_reason")
+            counterfactual_reason = reward_log.get("counterfactual_reason")
             if reward_log.get("teacher_called"):
                 logger.info(
                     "[TEACHER_SEM_CALLED] input=%s label=%s",
@@ -2359,7 +2373,7 @@ def run_decoded_chem_ppo_loop(
                     reward_log.get("teacher_input_smiles"),
                     reward_log.get("original_label"),
                     reward_log.get("teacher_prob"),
-                    reward_log.get("teacher_sem"),
+                    reward_log.get("fragment_teacher_sem"),
                     teacher_reason,
                 )
             elif teacher_reason == "invalid_or_not_substructure":
@@ -2374,6 +2388,48 @@ def run_decoded_chem_ppo_loop(
                     teacher_reason,
                     reward_log.get("teacher_input_smiles"),
                 )
+            if reward_log.get("counterfactual_called"):
+                logger.info(
+                    "[CF_ORACLE_CALLED] parent=%s fragment=%s label=%s",
+                    reward_log.get("parent_smiles"),
+                    reward_log.get("core_fragment"),
+                    reward_log.get("original_label"),
+                )
+                logger.info(
+                    "[CF_ORACLE_RESULT] parent_without_fragment=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s counterfactual_sem=%s reason=%s",
+                    reward_log.get("parent_without_fragment_smiles"),
+                    reward_log.get("p_before"),
+                    reward_log.get("p_after"),
+                    reward_log.get("cf_drop"),
+                    reward_log.get("cf_flip"),
+                    reward_log.get("counterfactual_sem"),
+                    counterfactual_reason,
+                )
+            elif counterfactual_reason == "invalid_or_not_substructure":
+                logger.info(
+                    "[CF_ORACLE_SKIPPED] reason=%s parent=%s fragment=%s",
+                    counterfactual_reason,
+                    reward_log.get("parent_smiles"),
+                    reward_log.get("core_fragment"),
+                )
+            elif counterfactual_reason and (
+                "deletion" in counterfactual_reason
+                or "residual" in counterfactual_reason
+                or "substructure" in counterfactual_reason
+            ):
+                logger.warning(
+                    "[CF_ORACLE_DELETION_FAILED] reason=%s parent=%s fragment=%s",
+                    counterfactual_reason,
+                    reward_log.get("parent_smiles"),
+                    reward_log.get("core_fragment"),
+                )
+            else:
+                logger.warning(
+                    "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
+                    counterfactual_reason,
+                    reward_log.get("parent_smiles"),
+                    reward_log.get("core_fragment"),
+                )
             logger.info(
                 "[DUMMY_FRAGMENT_NORMALIZED] raw=%s core=%s dummy_count=%s raw_parse_ok=%s core_parse_ok=%s",
                 reward_log.get("raw_fragment"),
@@ -2383,7 +2439,7 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s counterfactual_sem=%s total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
@@ -2394,11 +2450,18 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("length"),
                 reward_log.get("semantic"),
                 reward_log.get("teacher_sem"),
+                reward_log.get("fragment_teacher_sem"),
                 reward_log.get("counterfactual_sem"),
+                reward_log.get("p_before"),
+                reward_log.get("p_after"),
+                reward_log.get("cf_drop"),
+                reward_log.get("cf_flip"),
+                reward_log.get("parent_without_fragment_smiles"),
                 reward_log.get("total"),
                 reward_log.get("teacher_input_smiles"),
                 reward_log.get("teacher_prob"),
                 teacher_reason,
+                counterfactual_reason,
             )
 
         with torch.no_grad():
@@ -2675,7 +2738,22 @@ def main() -> None:
     logger.info("value_model has v_head: %s", hasattr(value_model, "v_head"))
     logger.info("value_model has score after adapter: %s", hasattr(value_model, "score"))
 
+    logger.info(
+        "[TEACHER_SEM_CONFIG] teacher_path=%s require=%s scale=%s missing_penalty=%s cf_flip_bonus=%s disable_counterfactual_teacher=%s",
+        teacher_path,
+        args.require_teacher_sem,
+        args.teacher_sem_scale,
+        args.teacher_sem_missing_penalty,
+        args.teacher_cf_flip_bonus,
+        args.disable_counterfactual_teacher,
+    )
+    if args.require_teacher_sem and args.disable_counterfactual_teacher:
+        raise RuntimeError(
+            "--require-teacher-sem cannot be used together with --disable-counterfactual-teacher."
+        )
+
     teacher_scorer: TeacherSemanticScorer | None = None
+    counterfactual_teacher_scorer: CounterfactualTeacherScorer | None = None
     if args.ppo_loop == "decoded_chem" or args.require_teacher_sem:
         teacher_scorer = TeacherSemanticScorer(
             teacher_path=teacher_path,
@@ -2694,13 +2772,25 @@ def main() -> None:
                 teacher_scorer,
                 teacher_path=teacher_path,
             )
+        if not args.disable_counterfactual_teacher:
+            counterfactual_teacher_scorer = CounterfactualTeacherScorer(
+                teacher_path=teacher_path,
+                device="cpu",
+                logger=logger,
+                flip_bonus=args.teacher_cf_flip_bonus,
+                missing_penalty=args.teacher_sem_missing_penalty,
+                teacher_scorer=teacher_scorer,
+            )
 
     rewarder = ChemRLRewarder(
         oracle_path=oracle_path,
         default_parent_label=args.default_parent_label,
         teacher_scorer=teacher_scorer,
+        counterfactual_teacher_scorer=counterfactual_teacher_scorer,
         teacher_sem_scale=args.teacher_sem_scale,
         teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
+        require_teacher_sem=args.require_teacher_sem,
+        disable_counterfactual_teacher=args.disable_counterfactual_teacher,
     )
     chem_reward_model = build_reward_model_wrapper(
         deps,

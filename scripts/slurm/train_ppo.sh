@@ -10,6 +10,9 @@
 source ~/.bashrc
 conda activate smiles_pip118
 
+PROJECT_DIR=/share/home/u20526/czx/counterfactual-subgraph
+TEACHER_PATH=${TEACHER_PATH:-${PROJECT_DIR}/outputs/hpc/oracle/aids_rf_model.pkl}
+
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
 echo "pwd before cd: $(pwd)"
@@ -26,13 +29,24 @@ if torch.cuda.is_available():
 PY
 echo "====================="
 
-cd /share/home/u20526/czx/counterfactual-subgraph
+cd "${PROJECT_DIR}"
 
 export PYTHONPATH=$PWD
 echo "repo pwd: $(pwd)"
 echo "PYTHONPATH(after export): ${PYTHONPATH}"
-echo "TEACHER_PATH(env, optional): ${TEACHER_PATH:-<use train_ppo.py default>}"
+echo "TEACHER_PATH=${TEACHER_PATH}"
+if [ ! -f "${TEACHER_PATH}" ]; then
+  echo "[ERROR] Teacher file not found: ${TEACHER_PATH}"
+  exit 1
+fi
 
 echo "===== RUNNING PPO TRAINING ====="
-python scripts/train_ppo.py --config configs/hpc.yaml "$@"
+python scripts/train_ppo.py \
+  --config configs/hpc.yaml \
+  --teacher-path "${TEACHER_PATH}" \
+  --require-teacher-sem \
+  --teacher-sem-scale 1.0 \
+  --teacher-sem-missing-penalty -5.0 \
+  --teacher-cf-flip-bonus 1.0 \
+  "$@"
 echo "===== DONE ====="

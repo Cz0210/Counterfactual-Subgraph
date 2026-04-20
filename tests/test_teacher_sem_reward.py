@@ -99,8 +99,7 @@ class TeacherSemanticRewardTests(unittest.TestCase):
         self.assertEqual(trace.teacher_input_smiles, "CC(=O)O")
         self.assertEqual(trace.teacher_probability, 0.8)
         self.assertEqual(trace.teacher_reason, "ok")
-        self.assertGreater(trace.breakdown["teacher_sem_r"], 0.0)
-        self.assertNotIn(trace.reward, (-2.5, -5.0))
+        self.assertGreater(trace.breakdown["fragment_teacher_sem_r"], 0.0)
 
     def test_invalid_fragment_does_not_call_teacher(self) -> None:
         teacher = _FakeTeacherScorer(probability=0.8)
@@ -115,7 +114,10 @@ class TeacherSemanticRewardTests(unittest.TestCase):
         self.assertEqual(len(teacher.calls), 0)
         self.assertFalse(trace.teacher_called)
         self.assertEqual(trace.teacher_reason, "invalid_or_not_substructure")
-        self.assertEqual(trace.breakdown["teacher_sem_r"], rewarder.teacher_sem_missing_penalty)
+        self.assertEqual(
+            trace.breakdown["fragment_teacher_sem_r"],
+            rewarder.teacher_sem_missing_penalty,
+        )
 
     def test_non_substructure_does_not_call_teacher(self) -> None:
         teacher = _FakeTeacherScorer(probability=0.8)
@@ -130,7 +132,10 @@ class TeacherSemanticRewardTests(unittest.TestCase):
         self.assertEqual(len(teacher.calls), 0)
         self.assertFalse(trace.teacher_called)
         self.assertEqual(trace.teacher_reason, "invalid_or_not_substructure")
-        self.assertEqual(trace.breakdown["teacher_sem_r"], rewarder.teacher_sem_missing_penalty)
+        self.assertEqual(
+            trace.breakdown["fragment_teacher_sem_r"],
+            rewarder.teacher_sem_missing_penalty,
+        )
 
 
 @unittest.skipUnless(is_rdkit_available(), "RDKit is required for teacher-semantic scorer tests")

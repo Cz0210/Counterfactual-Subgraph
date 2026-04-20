@@ -1383,3 +1383,48 @@ model-side failure explicitly in the structured result.
 
 ### Status
 Accepted
+
+---
+
+## [2026-04-19] Make decoded chemistry PPO use a deletion-based counterfactual teacher oracle
+
+### Background
+The decoded chemistry PPO smoke test already proved that a fragment-level
+teacher score on `core_fragment_smiles` could be computed, but the semantic
+term that actually entered `total` still came from a fixed
+`counterfactual_sem=-5.0` missing penalty whenever the deletion-based branch
+was unavailable. That meant the PPO loop still was not aligned tightly enough
+with the v3 counterfactual objective.
+
+### Decision
+Introduce an explicit deletion-based counterfactual teacher scorer that:
+
+- deletes exactly one matched instance of the core fragment from the parent
+  molecule;
+- scores both the original parent and the residual parent with the teacher
+  classifier;
+- computes `cf_drop = p_before - p_after` and adds a configurable flip bonus
+  when the residual prediction no longer matches the original label;
+- uses this deletion-based `counterfactual_sem` as the default semantic term
+  that enters the decoded PPO reward and total score.
+
+The earlier fragment-level teacher score is retained only as an auxiliary
+diagnostic field (`fragment_teacher_sem`) so we can still inspect whether the
+generated fragment itself looks label-associated.
+
+### Alternatives considered
+1. Keep using the fragment-level teacher score as the main semantic reward.
+2. Continue using the old residual-oracle fallback plus a fixed missing penalty.
+3. Collapse fragment-level and counterfactual teacher semantics into one field.
+
+### Consequences
+- The decoded PPO path is now explicitly aligned with the repository's
+  counterfactual deletion objective instead of a fragment-only semantic proxy.
+- Logs can distinguish fragment-level diagnostics from the real
+  counterfactual reward that enters PPO.
+- Deletion failures, unavailable teacher backends, and disabled counterfactual
+  teacher scoring are surfaced explicitly instead of being hidden behind an
+  unexplained `-5.0`.
+
+### Status
+Accepted

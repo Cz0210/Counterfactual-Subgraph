@@ -4,18 +4,15 @@ This module intentionally keeps the reward interface small and defensive:
 
 1. Step A checks whether the generated fragment is parseable and connected.
 2. Step B checks whether the fragment is a genuine parent subgraph.
-3. Step C evaluates the counterfactual effect after deleting the fragment.
+3. Step C computes the semantic term with a deletion-based counterfactual
+   teacher oracle on the parent and residual molecules.
 
 Important alignment note:
 The repository's source-of-truth documents define the task as deletion-based
-counterfactual generation, so the semantic reward is computed on the residual
-molecule after deletion rather than on the fragment alone.
-
-Implementation detail:
-The rewarder first attempts ``Chem.DeleteSubstructs`` as requested, then checks
-whether RDKit removed the expected number of real fragment atoms. If symmetry or
-query ambiguity causes over-deletion or under-deletion, the rewarder falls back
-to the repository's deterministic single-match deletion helper.
+counterfactual generation. Fragment-level teacher scores are retained only as
+diagnostic fields; the semantic term that enters the decoded PPO reward is the
+counterfactual score computed after deleting one matched fragment instance from
+the parent molecule.
 """
 
 from __future__ import annotations
@@ -35,9 +32,8 @@ from src.chem import (
 )
 from src.rewards.reward_calculator import (
     load_oracle_bundle,
-    prepare_smiles_for_oracle,
-    smiles_to_morgan_array,
 )
+from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
 from src.rewards.teacher_semantic import TeacherSemanticScorer
 
 try:
@@ -104,6 +100,17 @@ class RewardTrace:
     teacher_probability: float | None = None
     teacher_predicted_label: int | None = None
     teacher_reason: str | None = None
+    fragment_teacher_sem: float | None = None
+    parent_without_fragment_smiles: str | None = None
+    counterfactual_teacher_available: bool = False
+    counterfactual_teacher_called: bool = False
+    counterfactual_teacher_reason: str | None = None
+    p_before: float | None = None
+    p_after: float | None = None
+    pred_before: int | None = None
+    pred_after: int | None = None
+    cf_drop: float | None = None
+    cf_flip: bool = False
     failure_stage: str | None = None
     error_message: str | None = None
     breakdown: dict[str, float] = field(default_factory=dict)
@@ -266,8 +273,11 @@ class ChemRLRewarder:
         compact_atom_target: int = 12,
         compact_atom_penalty_scale: float = 0.05,
         teacher_scorer: TeacherSemanticScorer | None = None,
+        counterfactual_teacher_scorer: CounterfactualTeacherScorer | None = None,
         teacher_sem_scale: float = 1.0,
         teacher_sem_missing_penalty: float = -5.0,
+        require_teacher_sem: bool = False,
+        disable_counterfactual_teacher: bool = False,
         success_threshold: float = 0.5,
         success_base_reward: float = 5.0,
         probability_scale: float = 5.0,
@@ -295,11 +305,19 @@ class ChemRLRewarder:
         self.compact_atom_target = int(compact_atom_target)
         self.compact_atom_penalty_scale = float(compact_atom_penalty_scale)
         self.teacher_scorer = teacher_scorer
+        self.counterfactual_teacher_scorer = counterfactual_teacher_scorer
         self.teacher_sem_scale = float(teacher_sem_scale)
         self.teacher_sem_missing_penalty = float(teacher_sem_missing_penalty)
+        self.require_teacher_sem = bool(require_teacher_sem)
+        self.disable_counterfactual_teacher = bool(disable_counterfactual_teacher)
         self.success_threshold = float(success_threshold)
         self.success_base_reward = float(success_base_reward)
         self.probability_scale = float(probability_scale)
+
+        if self.require_teacher_sem and self.disable_counterfactual_teacher:
+            raise ValueError(
+                "require_teacher_sem=True is incompatible with disable_counterfactual_teacher=True."
+            )
 
         if quiet_rdkit and RDLogger is not None:
             try:
@@ -417,8 +435,9 @@ class ChemRLRewarder:
                     "valid": breakdown.get("valid_r"),
                     "substructure": breakdown.get("subgraph_r"),
                     "length": breakdown.get("length_r"),
-                    "semantic": breakdown.get("teacher_sem_r"),
+                    "semantic": breakdown.get("sem_r"),
                     "teacher_sem": breakdown.get("teacher_sem_r"),
+                    "fragment_teacher_sem": breakdown.get("fragment_teacher_sem_r"),
                     "counterfactual_sem": breakdown.get("cf_r"),
                     "total": float(trace.reward),
                     "parse_ok": bool(trace.raw_parse_ok),
@@ -435,6 +454,16 @@ class ChemRLRewarder:
                     "teacher_prob": trace.teacher_probability,
                     "teacher_label": trace.teacher_predicted_label,
                     "teacher_reason": trace.teacher_reason,
+                    "parent_without_fragment_smiles": trace.parent_without_fragment_smiles,
+                    "counterfactual_teacher_available": bool(trace.counterfactual_teacher_available),
+                    "counterfactual_called": bool(trace.counterfactual_teacher_called),
+                    "counterfactual_reason": trace.counterfactual_teacher_reason,
+                    "p_before": trace.p_before,
+                    "p_after": trace.p_after,
+                    "pred_before": trace.pred_before,
+                    "pred_after": trace.pred_after,
+                    "cf_drop": trace.cf_drop,
+                    "cf_flip": bool(trace.cf_flip),
                     "target_probability": trace.target_probability,
                     "failure_stage": trace.failure_stage,
                     "error_message": trace.error_message,
@@ -480,10 +509,12 @@ class ChemRLRewarder:
                     valid_reward=0.0,
                     subgraph_reward=0.0,
                     length_reward=0.0,
-                    teacher_reward=0.0,
+                    semantic_reward=0.0,
+                    fragment_teacher_reward=0.0,
                     counterfactual_reward=self.minimum_reward,
                 ),
                 teacher_reason="invalid_or_missing_label",
+                counterfactual_teacher_reason="invalid_or_missing_label",
             )
 
         target_label = 1 - int(original_label)
@@ -501,10 +532,12 @@ class ChemRLRewarder:
                     valid_reward=0.0,
                     subgraph_reward=0.0,
                     length_reward=0.0,
-                    teacher_reward=0.0,
+                    semantic_reward=0.0,
+                    fragment_teacher_reward=0.0,
                     counterfactual_reward=self.minimum_reward,
                 ),
                 teacher_reason="invalid_or_missing_label",
+                counterfactual_teacher_reason="invalid_or_missing_label",
             )
 
         if not normalized_generated:
@@ -520,10 +553,12 @@ class ChemRLRewarder:
                     valid_reward=self.invalid_smiles_penalty,
                     subgraph_reward=0.0,
                     length_reward=0.0,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 teacher_reason="invalid_or_not_substructure",
+                counterfactual_teacher_reason="invalid_or_not_substructure",
             )
 
         # Step A: parseability and connectivity.
@@ -550,7 +585,8 @@ class ChemRLRewarder:
                     valid_reward=0.0,
                     subgraph_reward=0.0,
                     length_reward=0.0,
-                    teacher_reward=0.0,
+                    semantic_reward=0.0,
+                    fragment_teacher_reward=0.0,
                     counterfactual_reward=self.minimum_reward,
                 ),
                 teacher_reason="invalid_or_missing_label",
@@ -565,6 +601,16 @@ class ChemRLRewarder:
             teacher_input_smiles=fragment_info["core_smiles"],
             teacher_reason="invalid_or_not_substructure",
         )
+        base_trace_kwargs.update(
+            self._counterfactual_trace_kwargs(
+                counterfactual_teacher_available=bool(
+                    self.counterfactual_teacher_scorer is not None
+                    and self.counterfactual_teacher_scorer.available
+                ),
+                counterfactual_teacher_called=False,
+                counterfactual_teacher_reason="invalid_or_not_substructure",
+            )
+        )
         if not fragment_info["raw_parse_ok"]:
             return self._fail(
                 parent_smiles=normalized_parent,
@@ -578,8 +624,9 @@ class ChemRLRewarder:
                     valid_reward=valid_reward,
                     subgraph_reward=0.0,
                     length_reward=0.0,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 **base_trace_kwargs,
             )
@@ -599,8 +646,9 @@ class ChemRLRewarder:
                     valid_reward=valid_reward,
                     subgraph_reward=0.0,
                     length_reward=length_reward,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 **base_trace_kwargs,
             )
@@ -618,8 +666,9 @@ class ChemRLRewarder:
                     valid_reward=valid_reward,
                     subgraph_reward=0.0,
                     length_reward=length_reward,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 **base_trace_kwargs,
             )
@@ -640,8 +689,9 @@ class ChemRLRewarder:
                     valid_reward=valid_reward,
                     subgraph_reward=self.invalid_subgraph_penalty,
                     length_reward=length_reward,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 valid_smiles=True,
                 connected_fragment=True,
@@ -666,8 +716,9 @@ class ChemRLRewarder:
                     valid_reward=valid_reward,
                     subgraph_reward=self.invalid_subgraph_penalty,
                     length_reward=length_reward,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 **base_trace_kwargs,
             )
@@ -685,228 +736,47 @@ class ChemRLRewarder:
                     valid_reward=valid_reward,
                     subgraph_reward=self.invalid_subgraph_penalty,
                     length_reward=length_reward,
-                    teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 valid_smiles=True,
                 connected_fragment=True,
                 **base_trace_kwargs,
             )
 
-        teacher_reward, teacher_trace_kwargs = self._score_teacher_semantic(
+        fragment_teacher_reward, teacher_trace_kwargs = self._score_teacher_semantic(
             core_smiles=core_smiles,
             original_label=int(original_label),
             parent_smiles=normalized_parent,
             fragment_info=fragment_info,
         )
+        counterfactual_reward, counterfactual_trace_kwargs = (
+            self._score_counterfactual_semantic(
+                parent_smiles=normalized_parent,
+                core_smiles=core_smiles,
+                raw_fragment_smiles=normalized_generated,
+                original_label=int(original_label),
+                fragment_info=fragment_info,
+                valid_reward=valid_reward,
+                substructure_ok=has_precise_match,
+            )
+        )
         success_trace_kwargs = {
             **base_trace_kwargs,
             **teacher_trace_kwargs,
+            **counterfactual_trace_kwargs,
             "teacher_input_smiles": core_smiles,
+            "fragment_teacher_sem": fragment_teacher_reward,
         }
-
-        # Step C: deletion-based counterfactual scoring on the residual molecule.
-        try:
-            residual_smiles, deletion_error = self._delete_to_residual_smiles(
-                normalized_parent,
-                normalized_generated,
-            )
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message=f"Deletion step failed: {exc}",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                **success_trace_kwargs,
-            )
-
-        if residual_smiles is None:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message=deletion_error or "Residual deletion failed.",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                **success_trace_kwargs,
-            )
-
-        try:
-            residual_for_oracle = prepare_smiles_for_oracle(residual_smiles)
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message=f"Residual cleanup failed: {exc}",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                deletion_success=True,
-                residual_smiles=residual_smiles,
-                **success_trace_kwargs,
-            )
-
-        if residual_for_oracle in (None, ""):
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message="Residual molecule is empty or unusable after dummy-atom cleanup.",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                deletion_success=True,
-                residual_smiles=residual_smiles,
-                **success_trace_kwargs,
-            )
-
-        try:
-            fingerprint = smiles_to_morgan_array(
-                residual_for_oracle,
-                radius=self._fingerprint_radius,
-                n_bits=self._fingerprint_bits,
-                clean_dummy_atoms=False,
-            )
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message=f"Morgan fingerprint generation failed: {exc}",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                deletion_success=True,
-                residual_smiles=residual_smiles,
-                **success_trace_kwargs,
-            )
-
-        if fingerprint is None:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message="Morgan fingerprint generation returned None.",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                deletion_success=True,
-                residual_smiles=residual_smiles,
-                **success_trace_kwargs,
-            )
-
-        try:
-            probabilities = self._oracle_model.predict_proba(
-                fingerprint.reshape(1, -1)
-            )[0]
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message=f"Oracle prediction failed: {exc}",
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    teacher_reward=teacher_reward,
-                    counterfactual_reward=self.minimum_reward,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                deletion_success=True,
-                residual_smiles=residual_smiles,
-                **success_trace_kwargs,
-            )
-
-        probability_map = {
-            int(label): float(probability)
-            for label, probability in zip(self._class_labels, probabilities, strict=True)
-        }
-        target_probability = float(probability_map.get(target_label, 0.0))
-        inactive_probability = float(probability_map.get(0, 0.0))
-        reward = shape_probability_reward(
-            target_probability,
-            success_threshold=self.success_threshold,
-            success_base_reward=self.success_base_reward,
-            probability_scale=self.probability_scale,
-        )
         breakdown = self._build_breakdown(
             format_reward=format_reward,
             valid_reward=valid_reward,
             subgraph_reward=self.subgraph_pass_reward,
             length_reward=length_reward,
-            teacher_reward=teacher_reward,
-            counterfactual_reward=float(reward),
+            semantic_reward=counterfactual_reward,
+            fragment_teacher_reward=fragment_teacher_reward,
+            counterfactual_reward=counterfactual_reward,
         )
 
         return RewardTrace(
@@ -917,16 +787,20 @@ class ChemRLRewarder:
             core_fragment_smiles=core_smiles,
             original_label=int(original_label),
             target_label=target_label,
-            reward=float(sum(breakdown.values())),
+            reward=self._reward_from_breakdown(breakdown),
             valid_smiles=True,
             connected_fragment=True,
             is_subgraph=True,
-            deletion_success=True,
-            counterfactual_evaluated=True,
-            flip_success=target_probability > self.success_threshold,
-            target_probability=target_probability,
-            inactive_probability=inactive_probability,
-            residual_smiles=residual_for_oracle,
+            deletion_success=bool(
+                success_trace_kwargs.get("parent_without_fragment_smiles")
+            ),
+            counterfactual_evaluated=bool(
+                success_trace_kwargs.get("counterfactual_teacher_called", False)
+            ),
+            flip_success=bool(success_trace_kwargs.get("cf_flip", False)),
+            target_probability=success_trace_kwargs.get("p_after"),
+            inactive_probability=None,
+            residual_smiles=success_trace_kwargs.get("parent_without_fragment_smiles"),
             raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
             core_parse_ok=bool(fragment_info["core_parse_ok"]),
             has_dummy_atoms=bool(fragment_info["has_dummy"]),
@@ -938,6 +812,25 @@ class ChemRLRewarder:
             teacher_probability=success_trace_kwargs.get("teacher_probability"),
             teacher_predicted_label=success_trace_kwargs.get("teacher_predicted_label"),
             teacher_reason=success_trace_kwargs.get("teacher_reason"),
+            fragment_teacher_sem=fragment_teacher_reward,
+            parent_without_fragment_smiles=success_trace_kwargs.get(
+                "parent_without_fragment_smiles"
+            ),
+            counterfactual_teacher_available=bool(
+                success_trace_kwargs.get("counterfactual_teacher_available", False)
+            ),
+            counterfactual_teacher_called=bool(
+                success_trace_kwargs.get("counterfactual_teacher_called", False)
+            ),
+            counterfactual_teacher_reason=success_trace_kwargs.get(
+                "counterfactual_teacher_reason"
+            ),
+            p_before=success_trace_kwargs.get("p_before"),
+            p_after=success_trace_kwargs.get("p_after"),
+            pred_before=success_trace_kwargs.get("pred_before"),
+            pred_after=success_trace_kwargs.get("pred_after"),
+            cf_drop=success_trace_kwargs.get("cf_drop"),
+            cf_flip=bool(success_trace_kwargs.get("cf_flip", False)),
             failure_stage=None,
             error_message=None,
             breakdown=breakdown,
@@ -984,7 +877,8 @@ class ChemRLRewarder:
         valid_reward: float,
         subgraph_reward: float,
         length_reward: float,
-        teacher_reward: float,
+        semantic_reward: float,
+        fragment_teacher_reward: float,
         counterfactual_reward: float,
     ) -> dict[str, float]:
         return {
@@ -992,9 +886,20 @@ class ChemRLRewarder:
             "valid_r": float(valid_reward),
             "subgraph_r": float(subgraph_reward),
             "length_r": float(length_reward),
-            "teacher_sem_r": float(teacher_reward),
+            "sem_r": float(semantic_reward),
+            "teacher_sem_r": float(semantic_reward),
             "cf_r": float(counterfactual_reward),
+            "fragment_teacher_sem_r": float(fragment_teacher_reward),
         }
+
+    def _reward_from_breakdown(self, breakdown: dict[str, float]) -> float:
+        return float(
+            breakdown.get("format_r", 0.0)
+            + breakdown.get("valid_r", 0.0)
+            + breakdown.get("subgraph_r", 0.0)
+            + breakdown.get("length_r", 0.0)
+            + breakdown.get("sem_r", 0.0)
+        )
 
     def _fragment_trace_kwargs(
         self,
@@ -1021,6 +926,33 @@ class ChemRLRewarder:
             "teacher_probability": teacher_probability,
             "teacher_predicted_label": teacher_predicted_label,
             "teacher_reason": teacher_reason,
+        }
+
+    def _counterfactual_trace_kwargs(
+        self,
+        *,
+        parent_without_fragment_smiles: str | None = None,
+        counterfactual_teacher_available: bool = False,
+        counterfactual_teacher_called: bool = False,
+        counterfactual_teacher_reason: str | None = None,
+        p_before: float | None = None,
+        p_after: float | None = None,
+        pred_before: int | None = None,
+        pred_after: int | None = None,
+        cf_drop: float | None = None,
+        cf_flip: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "parent_without_fragment_smiles": parent_without_fragment_smiles,
+            "counterfactual_teacher_available": bool(counterfactual_teacher_available),
+            "counterfactual_teacher_called": bool(counterfactual_teacher_called),
+            "counterfactual_teacher_reason": counterfactual_teacher_reason,
+            "p_before": p_before,
+            "p_after": p_after,
+            "pred_before": pred_before,
+            "pred_after": pred_after,
+            "cf_drop": cf_drop,
+            "cf_flip": bool(cf_flip),
         }
 
     def _score_teacher_semantic(
@@ -1067,6 +999,129 @@ class ChemRLRewarder:
             teacher_probability=teacher_result.get("teacher_prob"),
             teacher_predicted_label=teacher_result.get("teacher_label"),
             teacher_reason=teacher_result.get("teacher_reason"),
+        )
+
+    def _score_counterfactual_semantic(
+        self,
+        *,
+        parent_smiles: str,
+        core_smiles: str | None,
+        raw_fragment_smiles: str,
+        original_label: int,
+        fragment_info: dict[str, Any],
+        valid_reward: float,
+        substructure_ok: bool,
+    ) -> tuple[float, dict[str, Any]]:
+        if (
+            not core_smiles
+            or not fragment_info.get("core_parse_ok")
+            or valid_reward <= 0.0
+            or not substructure_ok
+            or not parent_smiles
+        ):
+            _LOGGER.info(
+                "[CF_ORACLE_SKIPPED] reason=%s parent=%s fragment=%s",
+                "invalid_or_not_substructure",
+                parent_smiles,
+                core_smiles,
+            )
+            return self.teacher_sem_missing_penalty, self._counterfactual_trace_kwargs(
+                counterfactual_teacher_available=bool(
+                    self.counterfactual_teacher_scorer is not None
+                    and self.counterfactual_teacher_scorer.available
+                ),
+                counterfactual_teacher_called=False,
+                counterfactual_teacher_reason="invalid_or_not_substructure",
+            )
+
+        if self.disable_counterfactual_teacher:
+            _LOGGER.warning(
+                "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
+                "counterfactual_teacher_disabled",
+                parent_smiles,
+                core_smiles,
+            )
+            return self.teacher_sem_missing_penalty, self._counterfactual_trace_kwargs(
+                counterfactual_teacher_available=False,
+                counterfactual_teacher_called=False,
+                counterfactual_teacher_reason="counterfactual_teacher_disabled",
+            )
+
+        if self.counterfactual_teacher_scorer is None:
+            _LOGGER.warning(
+                "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
+                "counterfactual_teacher_unavailable",
+                parent_smiles,
+                core_smiles,
+            )
+            return self.teacher_sem_missing_penalty, self._counterfactual_trace_kwargs(
+                counterfactual_teacher_available=False,
+                counterfactual_teacher_called=False,
+                counterfactual_teacher_reason="counterfactual_teacher_unavailable",
+            )
+
+        _LOGGER.info(
+            "[CF_ORACLE_CALLED] parent=%s fragment=%s label=%s",
+            parent_smiles,
+            core_smiles,
+            original_label,
+        )
+        counterfactual_result = self.counterfactual_teacher_scorer.score_counterfactual(
+            parent_smiles=parent_smiles,
+            core_fragment_smiles=core_smiles,
+            label=int(original_label),
+            raw_fragment_smiles=raw_fragment_smiles,
+            meta={"raw_fragment": raw_fragment_smiles},
+        )
+        counterfactual_result_ok = bool(counterfactual_result.get("teacher_result_ok"))
+        if counterfactual_result_ok:
+            _LOGGER.info(
+                "[CF_ORACLE_RESULT] parent_without_fragment=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s counterfactual_sem=%s reason=%s",
+                counterfactual_result.get("parent_without_fragment_smiles"),
+                counterfactual_result.get("p_before"),
+                counterfactual_result.get("p_after"),
+                counterfactual_result.get("cf_drop"),
+                counterfactual_result.get("cf_flip"),
+                counterfactual_result.get("counterfactual_sem"),
+                counterfactual_result.get("teacher_reason"),
+            )
+        else:
+            reason = str(counterfactual_result.get("teacher_reason"))
+            if "deletion" in reason or "residual" in reason or "substructure" in reason:
+                _LOGGER.warning(
+                    "[CF_ORACLE_DELETION_FAILED] reason=%s parent=%s fragment=%s",
+                    reason,
+                    parent_smiles,
+                    core_smiles,
+                )
+            else:
+                _LOGGER.warning(
+                    "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
+                    reason,
+                    parent_smiles,
+                    core_smiles,
+                )
+        counterfactual_reward = (
+            self.teacher_sem_scale
+            * float(counterfactual_result.get("counterfactual_sem", 0.0))
+            if counterfactual_result_ok
+            else self.teacher_sem_missing_penalty
+        )
+        return counterfactual_reward, self._counterfactual_trace_kwargs(
+            parent_without_fragment_smiles=counterfactual_result.get(
+                "parent_without_fragment_smiles"
+            ),
+            counterfactual_teacher_available=bool(
+                counterfactual_result.get("teacher_available")
+            ),
+            counterfactual_teacher_called=counterfactual_result_ok,
+            counterfactual_teacher_reason=counterfactual_result.get("teacher_reason"),
+            p_before=counterfactual_result.get("p_before"),
+            p_after=counterfactual_result.get("p_after"),
+            pred_before=counterfactual_result.get("pred_before"),
+            pred_after=counterfactual_result.get("pred_after"),
+            cf_drop=counterfactual_result.get("cf_drop"),
+            cf_flip=bool(counterfactual_result.get("cf_flip", False)),
         )
 
     def _delete_to_residual_smiles(
@@ -1263,6 +1318,17 @@ class ChemRLRewarder:
         teacher_probability: float | None = None,
         teacher_predicted_label: int | None = None,
         teacher_reason: str | None = None,
+        fragment_teacher_sem: float | None = None,
+        parent_without_fragment_smiles: str | None = None,
+        counterfactual_teacher_available: bool = False,
+        counterfactual_teacher_called: bool = False,
+        counterfactual_teacher_reason: str | None = None,
+        p_before: float | None = None,
+        p_after: float | None = None,
+        pred_before: int | None = None,
+        pred_after: int | None = None,
+        cf_drop: float | None = None,
+        cf_flip: bool = False,
     ) -> RewardTrace:
         """Build one failure trace consistently."""
 
@@ -1274,7 +1340,7 @@ class ChemRLRewarder:
             core_fragment_smiles=core_fragment_smiles,
             original_label=int(original_label),
             target_label=1 - int(original_label),
-            reward=float(sum(breakdown.values())),
+            reward=self._reward_from_breakdown(breakdown),
             valid_smiles=bool(valid_smiles),
             connected_fragment=bool(connected_fragment),
             is_subgraph=bool(is_subgraph),
@@ -1295,6 +1361,17 @@ class ChemRLRewarder:
             teacher_probability=teacher_probability,
             teacher_predicted_label=teacher_predicted_label,
             teacher_reason=teacher_reason,
+            fragment_teacher_sem=fragment_teacher_sem,
+            parent_without_fragment_smiles=parent_without_fragment_smiles,
+            counterfactual_teacher_available=bool(counterfactual_teacher_available),
+            counterfactual_teacher_called=bool(counterfactual_teacher_called),
+            counterfactual_teacher_reason=counterfactual_teacher_reason,
+            p_before=p_before,
+            p_after=p_after,
+            pred_before=pred_before,
+            pred_after=pred_after,
+            cf_drop=cf_drop,
+            cf_flip=bool(cf_flip),
             failure_stage=failure_stage,
             error_message=error_message,
             breakdown=dict(breakdown),

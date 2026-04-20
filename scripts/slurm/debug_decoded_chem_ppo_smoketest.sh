@@ -139,6 +139,8 @@ python scripts/train_rl.py \
   --teacher-path "${TEACHER_PATH}" \
   --require-teacher-sem \
   --teacher-sem-scale 1.0 \
+  --teacher-sem-missing-penalty -5.0 \
+  --teacher-cf-flip-bonus 1.0 \
   "$@"
 TRAIN_EXIT_CODE=$?
 set -e

@@ -1,6 +1,11 @@
 """兼容层：保留 `src.reward.*` 导入路径，同时复用 `src.rewards.*` 实现。"""
 
 from src.rewards.chem_rules import ChemRewardEngine
+from src.rewards.counterfactual_oracle import (
+    CounterfactualTeacherResult,
+    CounterfactualTeacherScorer,
+    delete_one_substructure,
+)
 from src.rewards.reward_calculator import (
     CounterfactualReward,
     load_oracle_bundle,
@@ -18,9 +23,12 @@ __all__ = [
     "ChemRewardEngine",
     "ChemRLRewarder",
     "CounterfactualReward",
+    "CounterfactualTeacherResult",
+    "CounterfactualTeacherScorer",
     "RewardTrace",
     "TeacherSemanticResult",
     "TeacherSemanticScorer",
+    "delete_one_substructure",
     "load_oracle_bundle",
     "prepare_smiles_for_oracle",
     "require_teacher_semantic_scorer",

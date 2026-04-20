@@ -7,6 +7,11 @@ from src.rewards.anti_collapse import (
     collapse_penalty_from_diagnostics,
 )
 from src.rewards.chem_rules import ChemRewardEngine
+from src.rewards.counterfactual_oracle import (
+    CounterfactualTeacherResult,
+    CounterfactualTeacherScorer,
+    delete_one_substructure,
+)
 from src.rewards.counterfactual_reward import (
     CounterfactualScorer,
     RewardContext,
@@ -32,6 +37,8 @@ __all__ = [
     "CollapseDiagnostics",
     "CounterfactualReward",
     "CounterfactualScorer",
+    "CounterfactualTeacherResult",
+    "CounterfactualTeacherScorer",
     "RewardTrace",
     "RewardBreakdown",
     "RewardContext",
@@ -43,6 +50,7 @@ __all__ = [
     "analyze_batch_collapse",
     "build_reward_breakdown",
     "collapse_penalty_from_diagnostics",
+    "delete_one_substructure",
     "load_oracle_bundle",
     "prepare_smiles_for_oracle",
     "require_teacher_semantic_scorer",
