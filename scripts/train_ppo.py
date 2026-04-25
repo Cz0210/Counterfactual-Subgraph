@@ -333,6 +333,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of parent-aware repair candidates to inspect per fragment.",
     )
     parser.add_argument(
+        "--enable-parent-projection",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable parent-constrained retrieval projection for parseable non-substructure decoded fragments.",
+    )
+    parser.add_argument(
+        "--projection-min-score",
+        type=float,
+        default=0.35,
+        help="Minimum retrieval score required to accept a parent projection.",
+    )
+    parser.add_argument(
+        "--projection-max-candidates",
+        type=int,
+        default=128,
+        help="Maximum parent-derived projection candidates to keep per molecule.",
+    )
+    parser.add_argument(
+        "--projection-min-atoms",
+        type=int,
+        default=3,
+        help="Minimum atom count for parent-derived projection candidates.",
+    )
+    parser.add_argument(
+        "--projection-max-atom-ratio",
+        type=float,
+        default=0.70,
+        help="Maximum candidate atom_count / parent_atom_count for projection.",
+    )
+    parser.add_argument(
+        "--projection-penalty",
+        type=float,
+        default=0.5,
+        help="Penalty subtracted from reward_total after a successful retrieval projection.",
+    )
+    parser.add_argument(
+        "--projection-enable-khop3",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Allow atom-centered k=3 neighborhoods when projection candidates are insufficient.",
+    )
+    parser.add_argument(
+        "--projection-mcs-timeout",
+        type=int,
+        default=1,
+        help="RDKit MCS timeout in seconds for projection retrieval scoring.",
+    )
+    parser.add_argument(
         "--disable-counterfactual-teacher",
         action="store_true",
         help="Disable the deletion-based counterfactual teacher oracle and keep only fragment-level teacher diagnostics.",
@@ -2557,6 +2605,23 @@ def run_decoded_chem_ppo_loop(
             parse_failed_with_dummy_count,
             parse_failed_without_dummy_count,
         )
+        projection_attempted_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("projection_attempted")
+        )
+        projection_success_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("projection_success")
+        )
+        projection_low_score_count = sum(
+            1
+            for reward_log in reward_logs
+            if reward_log.get("projection_reason") == "projection_failed_low_score"
+        )
+        logger.info(
+            "[CHEM_REWARD_PROJECTION_STATS] attempted=%s success=%s failed_low_score=%s",
+            projection_attempted_count,
+            projection_success_count,
+            projection_low_score_count,
+        )
         reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
         for reward_log in reward_logs_to_print:
             teacher_reason = reward_log.get("teacher_reason")
@@ -2641,7 +2706,7 @@ def run_decoded_chem_ppo_loop(
                 )
             if reward_log.get("failure_tag"):
                 logger.info(
-                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s parse_failed_reason=%s parse_stage=%s raw_has_dummy=%s raw_dummy_count=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s invalid_detail=%s fragment_chars=%s error=%s",
+                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s parse_failed_reason=%s parse_stage=%s raw_has_dummy=%s raw_dummy_count=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s invalid_detail=%s fragment_chars=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s error=%s",
                     reward_log.get("id"),
                     reward_log.get("failure_tag"),
                     reward_log.get("parse_failed_reason"),
@@ -2653,6 +2718,17 @@ def run_decoded_chem_ppo_loop(
                     reward_log.get("dummy_removed_before_parse"),
                     reward_log.get("invalid_detail"),
                     reward_log.get("generated_char_count"),
+                    reward_log.get("projection_attempted"),
+                    reward_log.get("projection_success"),
+                    reward_log.get("projection_method"),
+                    reward_log.get("projection_score"),
+                    reward_log.get("projection_source"),
+                    reward_log.get("projected_fragment"),
+                    reward_log.get("projection_atom_count"),
+                    reward_log.get("projection_atom_ratio"),
+                    reward_log.get("projection_penalty"),
+                    reward_log.get("num_projection_candidates"),
+                    reward_log.get("projection_reason"),
                     reward_log.get("error_message"),
                 )
             logger.info(
@@ -2671,11 +2747,22 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
                 reward_log.get("core_fragment"),
+                reward_log.get("projection_attempted"),
+                reward_log.get("projection_success"),
+                reward_log.get("projection_method"),
+                reward_log.get("projection_score"),
+                reward_log.get("projection_source"),
+                reward_log.get("projected_fragment"),
+                reward_log.get("projection_atom_count"),
+                reward_log.get("projection_atom_ratio"),
+                reward_log.get("projection_penalty"),
+                reward_log.get("num_projection_candidates"),
+                reward_log.get("projection_reason"),
                 reward_log.get("raw_has_dummy"),
                 reward_log.get("raw_dummy_count"),
                 reward_log.get("parse_stage"),
@@ -3020,6 +3107,17 @@ def main() -> None:
         args.repair_min_similarity,
         args.repair_max_candidates,
     )
+    logger.info(
+        "[PARENT_PROJECTION_CONFIG] enabled=%s min_score=%s max_candidates=%s min_atoms=%s max_atom_ratio=%s penalty=%s enable_khop3=%s mcs_timeout=%s",
+        args.enable_parent_projection,
+        args.projection_min_score,
+        args.projection_max_candidates,
+        args.projection_min_atoms,
+        args.projection_max_atom_ratio,
+        args.projection_penalty,
+        args.projection_enable_khop3,
+        args.projection_mcs_timeout,
+    )
     if args.require_teacher_sem and args.disable_counterfactual_teacher:
         raise RuntimeError(
             "--require-teacher-sem cannot be used together with --disable-counterfactual-teacher."
@@ -3067,6 +3165,14 @@ def main() -> None:
         enable_parent_aware_repair=args.enable_parent_aware_repair,
         repair_min_similarity=args.repair_min_similarity,
         repair_max_candidates=args.repair_max_candidates,
+        enable_parent_projection=args.enable_parent_projection,
+        projection_min_score=args.projection_min_score,
+        projection_max_candidates=args.projection_max_candidates,
+        projection_min_atoms=args.projection_min_atoms,
+        projection_max_atom_ratio=args.projection_max_atom_ratio,
+        projection_penalty=args.projection_penalty,
+        projection_enable_khop3=args.projection_enable_khop3,
+        projection_mcs_timeout=args.projection_mcs_timeout,
         max_generation_chars=args.reward_max_fragment_chars,
         require_teacher_sem=args.require_teacher_sem,
         disable_counterfactual_teacher=args.disable_counterfactual_teacher,

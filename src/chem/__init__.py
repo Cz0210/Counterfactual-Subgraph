@@ -5,6 +5,11 @@ from src.chem.deletion import (
     delete_fragment_from_parent,
     get_remainder_graph,
 )
+from src.chem.projection import (
+    ParentProjectionCandidate,
+    build_parent_projection_candidates,
+    project_fragment_to_parent_subgraph,
+)
 from src.chem.repair import repair_fragment_to_parent_subgraph
 from src.chem.smiles_utils import (
     canonicalize_smiles,
@@ -22,6 +27,7 @@ from src.chem.substructure import (
 from src.chem.types import (
     ChemistryFailureType,
     DeletionResult,
+    FragmentProjectionResult,
     FragmentRepairResult,
     FragmentValidationResult,
     ParsedMolecule,
@@ -32,11 +38,14 @@ __all__ = [
     "ChemistryFailureType",
     "DeletionResult",
     "FragmentDeletionEngine",
+    "FragmentProjectionResult",
     "FragmentRepairResult",
     "FragmentValidationResult",
     "FragmentValidator",
+    "ParentProjectionCandidate",
     "ParsedMolecule",
     "SubstructureMatcher",
+    "build_parent_projection_candidates",
     "canonicalize_smiles",
     "delete_fragment_from_parent",
     "find_parent_substructure_matches",
@@ -46,6 +55,7 @@ __all__ = [
     "is_parent_substructure",
     "is_valid_capped_subgraph",
     "parse_smiles",
+    "project_fragment_to_parent_subgraph",
     "repair_fragment_to_parent_subgraph",
     "sanitize_molecule",
     "validate_fragment_candidate",

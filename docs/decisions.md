@@ -29,6 +29,57 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-25] Add parent-constrained retrieval projection for decoded PPO non-substructure fragments
+
+### Background
+Decoded-chem PPO now surfaces parse failures separately from parseable fragments
+that are not valid parent substructures. The latter failure bucket is actionable:
+the raw fragment already has a chemically parseable shape, but the exact graph
+does not occur in the parent molecule. For the current instance-level candidate
+generator, these cases should be repaired by projecting onto strict
+parent-derived candidates before reward and oracle scoring.
+
+### Decision
+Add an optional parent-constrained candidate retrieval projection path for
+decoded PPO:
+
+- keep parse-failed raw fragments on the existing failure path;
+- mark parseable strict parent substructures as `projection_method=identity`;
+- when a parseable connected core is not a parent substructure, build a
+  parent-derived candidate pool from ring systems, SMARTS functional-group
+  neighborhoods, atom-centered k-hop neighborhoods, bond-centered k-hop
+  neighborhoods, and stable parent-index BRICS components;
+- filter candidates to connected, RDKit-parseable, non-full-parent subgraphs
+  whose deletion leaves a non-empty residual;
+- score candidates with Morgan Tanimoto, MCS atom coverage, functional-group
+  overlap, atom-count difference, and a large-fragment penalty;
+- if the best score passes the configured threshold, continue reward and
+  deletion-oracle scoring on the projected fragment and subtract a projection
+  penalty from `reward_total`;
+- expose projection controls through `scripts/train_ppo.py`, decoded PPO logs,
+  and Slurm wrappers.
+
+### Alternatives considered
+1. Reuse the existing parent-aware repair path without adding k-hop candidates,
+   strict deletion filtering, or projection-specific logs.
+2. Penalize all parseable non-substructure outputs without attempting a
+   parent-constrained projection.
+3. Rewrite raw fragments directly with string heuristics instead of retrieving
+   from parent atom-index subgraphs.
+
+### Consequences
+- The dominant `parse_ok_but_not_substructure` failure bucket can now produce
+  rewardable parent-derived fragments without changing parse-failed behavior.
+- Logs now record projection attempt/success, retrieval score/source, projected
+  fragment, atom statistics, candidate count, and applied penalty.
+- HPC diagnosis can run fixed 50-step and 200-step projection jobs through
+  dedicated Slurm scripts without hand-written `sbatch --export` arguments.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-25] Wire parent-aware repair controls through decoded PPO CLI and Slurm wrappers
 
 ### Background

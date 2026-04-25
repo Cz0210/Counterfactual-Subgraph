@@ -30,6 +30,7 @@ from src.chem import (
     is_parent_substructure,
     is_rdkit_available,
     parse_smiles,
+    project_fragment_to_parent_subgraph,
     repair_fragment_to_parent_subgraph,
     sanitize_molecule,
 )
@@ -136,6 +137,17 @@ class RewardTrace:
     repair_source: str | None = None
     repair_similarity: float | None = None
     repair_reason: str | None = None
+    projection_attempted: bool = False
+    projection_success: bool = False
+    projection_method: str | None = None
+    projection_score: float | None = None
+    projection_source: str | None = None
+    projected_fragment_smiles: str | None = None
+    projection_atom_count: int | None = None
+    projection_atom_ratio: float | None = None
+    projection_penalty: float = 0.0
+    num_projection_candidates: int = 0
+    projection_reason: str | None = None
     error_message: str | None = None
     breakdown: dict[str, float] = field(default_factory=dict)
 
@@ -407,6 +419,14 @@ class ChemRLRewarder:
         enable_parent_aware_repair: bool = False,
         repair_min_similarity: float = 0.35,
         repair_max_candidates: int = 24,
+        enable_parent_projection: bool = False,
+        projection_min_score: float = 0.35,
+        projection_max_candidates: int = 128,
+        projection_min_atoms: int = 3,
+        projection_max_atom_ratio: float = 0.70,
+        projection_penalty: float = 0.5,
+        projection_enable_khop3: bool = False,
+        projection_mcs_timeout: int = 1,
         require_teacher_sem: bool = False,
         disable_counterfactual_teacher: bool = False,
         success_threshold: float = 0.5,
@@ -445,6 +465,14 @@ class ChemRLRewarder:
         self.enable_parent_aware_repair = bool(enable_parent_aware_repair)
         self.repair_min_similarity = float(repair_min_similarity)
         self.repair_max_candidates = int(repair_max_candidates)
+        self.enable_parent_projection = bool(enable_parent_projection)
+        self.projection_min_score = float(projection_min_score)
+        self.projection_max_candidates = int(projection_max_candidates)
+        self.projection_min_atoms = int(projection_min_atoms)
+        self.projection_max_atom_ratio = float(projection_max_atom_ratio)
+        self.projection_penalty = float(projection_penalty)
+        self.projection_enable_khop3 = bool(projection_enable_khop3)
+        self.projection_mcs_timeout = int(projection_mcs_timeout)
         self.require_teacher_sem = bool(require_teacher_sem)
         self.disable_counterfactual_teacher = bool(disable_counterfactual_teacher)
         self.success_threshold = float(success_threshold)
@@ -456,6 +484,16 @@ class ChemRLRewarder:
             raise ValueError("repair_min_similarity must be in [0, 1].")
         if self.repair_max_candidates <= 0:
             raise ValueError("repair_max_candidates must be positive.")
+        if self.projection_min_score < 0.0:
+            raise ValueError("projection_min_score must be non-negative.")
+        if self.projection_max_candidates <= 0:
+            raise ValueError("projection_max_candidates must be positive.")
+        if self.projection_min_atoms <= 0:
+            raise ValueError("projection_min_atoms must be positive.")
+        if self.projection_max_atom_ratio <= 0.0:
+            raise ValueError("projection_max_atom_ratio must be positive.")
+        if self.projection_mcs_timeout <= 0:
+            raise ValueError("projection_mcs_timeout must be positive.")
 
         if self.require_teacher_sem and self.disable_counterfactual_teacher:
             raise ValueError(
@@ -630,6 +668,17 @@ class ChemRLRewarder:
                     "repair_source": trace.repair_source,
                     "repair_similarity": trace.repair_similarity,
                     "repair_reason": trace.repair_reason,
+                    "projection_attempted": bool(trace.projection_attempted),
+                    "projection_success": bool(trace.projection_success),
+                    "projection_method": trace.projection_method,
+                    "projection_score": trace.projection_score,
+                    "projection_source": trace.projection_source,
+                    "projected_fragment": trace.projected_fragment_smiles,
+                    "projection_atom_count": trace.projection_atom_count,
+                    "projection_atom_ratio": trace.projection_atom_ratio,
+                    "projection_penalty": trace.projection_penalty,
+                    "num_projection_candidates": int(trace.num_projection_candidates),
+                    "projection_reason": trace.projection_reason,
                     "error_message": trace.error_message,
                     "original_label": trace.original_label,
                 }
@@ -800,6 +849,9 @@ class ChemRLRewarder:
         effective_generated_char_count = generated_char_count
         repair_trace_kwargs = self._repair_trace_kwargs()
         repair_attempt_consumed = False
+        projection_trace_kwargs = self._projection_trace_kwargs()
+        projection_attempt_consumed = False
+        projection_penalty_applied = 0.0
 
         while True:
             fragment_info = normalize_fragment_with_dummy_atoms(effective_fragment)
@@ -823,6 +875,7 @@ class ChemRLRewarder:
                 )
             )
             base_trace_kwargs.update(repair_trace_kwargs)
+            base_trace_kwargs.update(projection_trace_kwargs)
 
             if not fragment_info["raw_parse_ok"]:
                 parse_failure_reason = str(
@@ -1012,6 +1065,7 @@ class ChemRLRewarder:
                     full_parent=True,
                     empty_residual=True,
                     **repair_trace_kwargs,
+                    **projection_trace_kwargs,
                 )
 
             try:
@@ -1042,7 +1096,60 @@ class ChemRLRewarder:
                     **base_trace_kwargs,
                 )
 
+            if has_precise_match and not bool(
+                projection_trace_kwargs.get("projection_success", False)
+            ):
+                parent_atom_count = max(1, int(parent.mol.GetNumAtoms()))
+                projection_trace_kwargs = self._projection_trace_kwargs(
+                    projection_attempted=False,
+                    projection_success=True,
+                    projection_method="identity",
+                    projected_fragment_smiles=core_smiles,
+                    projection_source="identity",
+                    projection_score=1.0,
+                    projection_reason="already_strict_parent_substructure",
+                    projected_atom_count=int(fragment_info["core_atom_count"]),
+                    projected_atom_ratio=(
+                        int(fragment_info["core_atom_count"]) / parent_atom_count
+                    ),
+                    projection_penalty=0.0,
+                    num_projection_candidates=0,
+                )
+                base_trace_kwargs.update(projection_trace_kwargs)
+
             if not has_precise_match:
+                projection_invalid_detail = "not_parent_substructure"
+                if not projection_attempt_consumed and self.enable_parent_projection:
+                    projection_result, projection_trace_kwargs = self._attempt_parent_projection(
+                        parent_smiles=normalized_parent,
+                        raw_fragment_smiles=decoded_raw_fragment,
+                    )
+                    projection_attempt_consumed = True
+                    projection_invalid_detail = (
+                        getattr(projection_result, "reason", None)
+                        or "projection_failed"
+                    )
+                    if (
+                        projection_result is not None
+                        and projection_result.success
+                        and projection_result.projected_fragment_smiles
+                        and projection_result.projected_fragment_smiles != effective_fragment
+                    ):
+                        effective_fragment = str(
+                            projection_result.projected_fragment_smiles
+                        ).strip()
+                        effective_generated_char_count = len(effective_fragment)
+                        projection_penalty_applied = (
+                            self.projection_penalty
+                            if projection_result.projection_method == "retrieval"
+                            else 0.0
+                        )
+                        projection_trace_kwargs["projection_penalty"] = (
+                            projection_penalty_applied
+                        )
+                        continue
+                    base_trace_kwargs.update(projection_trace_kwargs)
+
                 if not repair_attempt_consumed and self.enable_parent_aware_repair:
                     repair_result, repair_trace_kwargs = self._attempt_parent_aware_repair(
                         parent_smiles=normalized_parent,
@@ -1069,7 +1176,7 @@ class ChemRLRewarder:
                     error_message="Generated fragment is not a valid parent subgraph.",
                     generated_char_count=effective_generated_char_count,
                     failure_tag="parse_ok_but_not_substructure",
-                    invalid_detail="not_parent_substructure",
+                    invalid_detail=projection_invalid_detail,
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
                         valid_reward=valid_reward,
@@ -1126,11 +1233,11 @@ class ChemRLRewarder:
             parent_smiles=normalized_parent,
             generated_smiles=str(generated_smiles),
             normalized_generated_smiles=normalized_generated,
-            raw_fragment_smiles=normalized_generated,
+            raw_fragment_smiles=decoded_raw_fragment,
             core_fragment_smiles=core_smiles,
             original_label=int(original_label),
             target_label=target_label,
-            reward=self._reward_from_breakdown(breakdown),
+            reward=self._reward_from_breakdown(breakdown) - projection_penalty_applied,
             valid_smiles=True,
             connected_fragment=True,
             is_subgraph=True,
@@ -1190,6 +1297,37 @@ class ChemRLRewarder:
             cf_flip=bool(success_trace_kwargs.get("cf_flip", False)),
             failure_stage=None,
             generated_char_count=generated_char_count,
+            repair_attempted=bool(success_trace_kwargs.get("repair_attempted", False)),
+            repair_success=bool(success_trace_kwargs.get("repair_success", False)),
+            repaired_fragment_smiles=success_trace_kwargs.get("repaired_fragment_smiles"),
+            repair_source=success_trace_kwargs.get("repair_source"),
+            repair_similarity=success_trace_kwargs.get("repair_similarity"),
+            repair_reason=success_trace_kwargs.get("repair_reason"),
+            projection_attempted=bool(
+                success_trace_kwargs.get("projection_attempted", False)
+            ),
+            projection_success=bool(
+                success_trace_kwargs.get("projection_success", False)
+            ),
+            projection_method=success_trace_kwargs.get("projection_method"),
+            projection_score=success_trace_kwargs.get("projection_score"),
+            projection_source=success_trace_kwargs.get("projection_source"),
+            projected_fragment_smiles=success_trace_kwargs.get(
+                "projected_fragment_smiles"
+            ),
+            projection_atom_count=success_trace_kwargs.get("projection_atom_count"),
+            projection_atom_ratio=success_trace_kwargs.get("projection_atom_ratio"),
+            projection_penalty=float(
+                success_trace_kwargs.get(
+                    "projection_penalty",
+                    projection_penalty_applied,
+                )
+                or 0.0
+            ),
+            num_projection_candidates=int(
+                success_trace_kwargs.get("num_projection_candidates", 0) or 0
+            ),
+            projection_reason=success_trace_kwargs.get("projection_reason"),
             error_message=None,
             breakdown=breakdown,
         )
@@ -1369,6 +1507,74 @@ class ChemRLRewarder:
             "repair_similarity": repair_similarity,
             "repair_reason": repair_reason,
         }
+
+    def _projection_trace_kwargs(
+        self,
+        *,
+        projection_attempted: bool = False,
+        projection_success: bool = False,
+        projection_method: str | None = None,
+        projected_fragment_smiles: str | None = None,
+        projection_source: str | None = None,
+        projection_score: float | None = None,
+        projection_reason: str | None = None,
+        projected_atom_count: int | None = None,
+        projected_atom_ratio: float | None = None,
+        projection_penalty: float = 0.0,
+        num_projection_candidates: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "projection_attempted": bool(projection_attempted),
+            "projection_success": bool(projection_success),
+            "projection_method": projection_method,
+            "projected_fragment_smiles": projected_fragment_smiles,
+            "projection_source": projection_source,
+            "projection_score": projection_score,
+            "projection_reason": projection_reason,
+            "projection_atom_count": projected_atom_count,
+            "projection_atom_ratio": projected_atom_ratio,
+            "projection_penalty": float(projection_penalty),
+            "num_projection_candidates": int(num_projection_candidates),
+        }
+
+    def _attempt_parent_projection(
+        self,
+        *,
+        parent_smiles: str,
+        raw_fragment_smiles: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        if not self.enable_parent_projection:
+            return None, self._projection_trace_kwargs()
+
+        projection_result = project_fragment_to_parent_subgraph(
+            parent_smiles,
+            raw_fragment_smiles,
+            min_score=self.projection_min_score,
+            max_candidates=self.projection_max_candidates,
+            min_atoms=self.projection_min_atoms,
+            max_atom_ratio=self.projection_max_atom_ratio,
+            enable_khop3=self.projection_enable_khop3,
+            mcs_timeout=self.projection_mcs_timeout,
+        )
+        applied_penalty = (
+            self.projection_penalty
+            if projection_result.success
+            and projection_result.projection_method == "retrieval"
+            else 0.0
+        )
+        return projection_result, self._projection_trace_kwargs(
+            projection_attempted=projection_result.attempted,
+            projection_success=projection_result.success,
+            projection_method=projection_result.projection_method,
+            projected_fragment_smiles=projection_result.projected_fragment_smiles,
+            projection_source=projection_result.projection_source,
+            projection_score=projection_result.projection_score,
+            projection_reason=projection_result.reason,
+            projected_atom_count=projection_result.projected_atom_count,
+            projected_atom_ratio=projection_result.projected_atom_ratio,
+            projection_penalty=applied_penalty,
+            num_projection_candidates=projection_result.candidate_count,
+        )
 
     def _attempt_parent_aware_repair(
         self,
@@ -1794,6 +2000,17 @@ class ChemRLRewarder:
         repair_source: str | None = None,
         repair_similarity: float | None = None,
         repair_reason: str | None = None,
+        projection_attempted: bool = False,
+        projection_success: bool = False,
+        projection_method: str | None = None,
+        projection_score: float | None = None,
+        projection_source: str | None = None,
+        projected_fragment_smiles: str | None = None,
+        projection_atom_count: int | None = None,
+        projection_atom_ratio: float | None = None,
+        projection_penalty: float = 0.0,
+        num_projection_candidates: int = 0,
+        projection_reason: str | None = None,
         empty_response: bool = False,
         full_parent: bool = False,
         empty_residual: bool = False,
@@ -1867,6 +2084,17 @@ class ChemRLRewarder:
             repair_source=repair_source,
             repair_similarity=repair_similarity,
             repair_reason=repair_reason,
+            projection_attempted=bool(projection_attempted),
+            projection_success=bool(projection_success),
+            projection_method=projection_method,
+            projection_score=projection_score,
+            projection_source=projection_source,
+            projected_fragment_smiles=projected_fragment_smiles,
+            projection_atom_count=projection_atom_count,
+            projection_atom_ratio=projection_atom_ratio,
+            projection_penalty=float(projection_penalty),
+            num_projection_candidates=int(num_projection_candidates),
+            projection_reason=projection_reason,
             error_message=error_message,
             breakdown=dict(breakdown),
         )

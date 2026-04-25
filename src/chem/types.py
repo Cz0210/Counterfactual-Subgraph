@@ -84,3 +84,21 @@ class FragmentRepairResult:
     repair_similarity: float | None = None
     reason: str | None = None
     candidate_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentProjectionResult:
+    """Result of projecting one decoded fragment onto a parent-derived candidate."""
+
+    parent_smiles: str
+    raw_fragment_smiles: str
+    attempted: bool
+    success: bool
+    projection_method: str | None = None
+    projected_fragment_smiles: str | None = None
+    projection_source: str | None = None
+    projection_score: float | None = None
+    reason: str | None = None
+    candidate_count: int = 0
+    projected_atom_count: int | None = None
+    projected_atom_ratio: float | None = None

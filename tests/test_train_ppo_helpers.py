@@ -180,6 +180,37 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertAlmostEqual(args.repair_min_similarity, 0.45)
         self.assertEqual(args.repair_max_candidates, 32)
 
+    def test_parser_accepts_parent_projection_flags(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--enable-parent-projection",
+                "--projection-min-score",
+                "0.45",
+                "--projection-max-candidates",
+                "64",
+                "--projection-min-atoms",
+                "4",
+                "--projection-max-atom-ratio",
+                "0.6",
+                "--projection-penalty",
+                "0.7",
+                "--projection-enable-khop3",
+                "--projection-mcs-timeout",
+                "2",
+            ]
+        )
+
+        self.assertTrue(args.enable_parent_projection)
+        self.assertAlmostEqual(args.projection_min_score, 0.45)
+        self.assertEqual(args.projection_max_candidates, 64)
+        self.assertEqual(args.projection_min_atoms, 4)
+        self.assertAlmostEqual(args.projection_max_atom_ratio, 0.6)
+        self.assertAlmostEqual(args.projection_penalty, 0.7)
+        self.assertTrue(args.projection_enable_khop3)
+        self.assertEqual(args.projection_mcs_timeout, 2)
+
     def test_score_adapter_keeps_existing_score(self) -> None:
         model = type("ModelWithScore", (), {})()
         existing = lambda hidden_states: ("existing", hidden_states)

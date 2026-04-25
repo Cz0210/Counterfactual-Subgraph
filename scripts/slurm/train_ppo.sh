@@ -19,6 +19,14 @@ GEN_DO_SAMPLE=${GEN_DO_SAMPLE:-}
 ENABLE_PARENT_AWARE_REPAIR=${ENABLE_PARENT_AWARE_REPAIR:-}
 REPAIR_MIN_SIMILARITY=${REPAIR_MIN_SIMILARITY:-}
 REPAIR_MAX_CANDIDATES=${REPAIR_MAX_CANDIDATES:-}
+ENABLE_PARENT_PROJECTION=${ENABLE_PARENT_PROJECTION:-}
+PROJECTION_MIN_SCORE=${PROJECTION_MIN_SCORE:-}
+PROJECTION_MAX_CANDIDATES=${PROJECTION_MAX_CANDIDATES:-}
+PROJECTION_MIN_ATOMS=${PROJECTION_MIN_ATOMS:-}
+PROJECTION_MAX_ATOM_RATIO=${PROJECTION_MAX_ATOM_RATIO:-}
+PROJECTION_PENALTY=${PROJECTION_PENALTY:-}
+PROJECTION_ENABLE_KHOP3=${PROJECTION_ENABLE_KHOP3:-}
+PROJECTION_MCS_TIMEOUT=${PROJECTION_MCS_TIMEOUT:-}
 
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
@@ -49,6 +57,14 @@ echo "GEN_DO_SAMPLE=${GEN_DO_SAMPLE:-<unset>}"
 echo "ENABLE_PARENT_AWARE_REPAIR=${ENABLE_PARENT_AWARE_REPAIR:-<unset>}"
 echo "REPAIR_MIN_SIMILARITY=${REPAIR_MIN_SIMILARITY:-<unset>}"
 echo "REPAIR_MAX_CANDIDATES=${REPAIR_MAX_CANDIDATES:-<unset>}"
+echo "ENABLE_PARENT_PROJECTION=${ENABLE_PARENT_PROJECTION:-<unset>}"
+echo "PROJECTION_MIN_SCORE=${PROJECTION_MIN_SCORE:-<unset>}"
+echo "PROJECTION_MAX_CANDIDATES=${PROJECTION_MAX_CANDIDATES:-<unset>}"
+echo "PROJECTION_MIN_ATOMS=${PROJECTION_MIN_ATOMS:-<unset>}"
+echo "PROJECTION_MAX_ATOM_RATIO=${PROJECTION_MAX_ATOM_RATIO:-<unset>}"
+echo "PROJECTION_PENALTY=${PROJECTION_PENALTY:-<unset>}"
+echo "PROJECTION_ENABLE_KHOP3=${PROJECTION_ENABLE_KHOP3:-<unset>}"
+echo "PROJECTION_MCS_TIMEOUT=${PROJECTION_MCS_TIMEOUT:-<unset>}"
 if [ ! -f "${TEACHER_PATH}" ]; then
   echo "[ERROR] Teacher file not found: ${TEACHER_PATH}"
   exit 1
@@ -113,6 +129,52 @@ if [ -n "${REPAIR_MIN_SIMILARITY}" ]; then
 fi
 if [ -n "${REPAIR_MAX_CANDIDATES}" ]; then
   cmd+=(--repair-max-candidates "${REPAIR_MAX_CANDIDATES}")
+fi
+if [ -n "${ENABLE_PARENT_PROJECTION}" ]; then
+  case "${ENABLE_PARENT_PROJECTION,,}" in
+    1|true|yes|on)
+      cmd+=(--enable-parent-projection)
+      ;;
+    0|false|no|off)
+      cmd+=(--no-enable-parent-projection)
+      ;;
+    *)
+      echo "[ERROR] ENABLE_PARENT_PROJECTION must be one of: true/false/1/0/yes/no/on/off"
+      exit 1
+      ;;
+  esac
+fi
+if [ -n "${PROJECTION_MIN_SCORE}" ]; then
+  cmd+=(--projection-min-score "${PROJECTION_MIN_SCORE}")
+fi
+if [ -n "${PROJECTION_MAX_CANDIDATES}" ]; then
+  cmd+=(--projection-max-candidates "${PROJECTION_MAX_CANDIDATES}")
+fi
+if [ -n "${PROJECTION_MIN_ATOMS}" ]; then
+  cmd+=(--projection-min-atoms "${PROJECTION_MIN_ATOMS}")
+fi
+if [ -n "${PROJECTION_MAX_ATOM_RATIO}" ]; then
+  cmd+=(--projection-max-atom-ratio "${PROJECTION_MAX_ATOM_RATIO}")
+fi
+if [ -n "${PROJECTION_PENALTY}" ]; then
+  cmd+=(--projection-penalty "${PROJECTION_PENALTY}")
+fi
+if [ -n "${PROJECTION_ENABLE_KHOP3}" ]; then
+  case "${PROJECTION_ENABLE_KHOP3,,}" in
+    1|true|yes|on)
+      cmd+=(--projection-enable-khop3)
+      ;;
+    0|false|no|off)
+      cmd+=(--no-projection-enable-khop3)
+      ;;
+    *)
+      echo "[ERROR] PROJECTION_ENABLE_KHOP3 must be one of: true/false/1/0/yes/no/on/off"
+      exit 1
+      ;;
+  esac
+fi
+if [ -n "${PROJECTION_MCS_TIMEOUT}" ]; then
+  cmd+=(--projection-mcs-timeout "${PROJECTION_MCS_TIMEOUT}")
 fi
 cmd+=("$@")
 
