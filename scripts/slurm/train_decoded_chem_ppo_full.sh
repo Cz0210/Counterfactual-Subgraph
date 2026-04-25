@@ -26,6 +26,9 @@ RUN_NAME=${RUN_NAME:-decoded_chem_ppo_full_$(date +%Y%m%d_%H%M%S)}
 MAX_STEPS=${MAX_STEPS:-1000}
 LOGGING_STEPS=${LOGGING_STEPS:-10}
 OUTPUT_DIR=${OUTPUT_DIR:-${PROJECT_DIR}/outputs/hpc/rl_checkpoints/${RUN_NAME}}
+SFT_LORA_PATH=${SFT_LORA_PATH:-}
+FULL_PARENT_PENALTY=${FULL_PARENT_PENALTY:-}
+EMPTY_RESIDUAL_PENALTY=${EMPTY_RESIDUAL_PENALTY:-}
 
 export HF_HOME=/share/home/u20526/.cache/huggingface
 export HF_MODULES_CACHE=/share/home/u20526/.cache/huggingface/modules
@@ -48,12 +51,15 @@ echo "RUN_NAME=${RUN_NAME}"
 echo "MAX_STEPS=${MAX_STEPS}"
 echo "LOGGING_STEPS=${LOGGING_STEPS}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
+echo "SFT_LORA_PATH=${SFT_LORA_PATH:-<unset>}"
+echo "FULL_PARENT_PENALTY=${FULL_PARENT_PENALTY:-<unset>}"
+echo "EMPTY_RESIDUAL_PENALTY=${EMPTY_RESIDUAL_PENALTY:-<unset>}"
 echo "====================="
 
 cd "${PROJECT_DIR}"
 mkdir -p logs
 
-export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH=$PWD
 
 echo "===== REPO CHECK ====="
 echo "pwd after cd: $(pwd)"
@@ -133,21 +139,45 @@ echo "==============================="
 
 echo "===== RUNNING DECODED CHEM PPO FULL TRAINING ====="
 
+cmd=(
+  python
+  scripts/train_rl.py
+  --config
+  configs/hpc.yaml
+  --max-steps
+  "${MAX_STEPS}"
+  --logging-steps
+  "${LOGGING_STEPS}"
+  --output-dir
+  "${OUTPUT_DIR}"
+  --diagnose-reward-flow
+  --ppo-loop
+  decoded_chem
+  --require-chemistry-reward-path
+  --teacher-path
+  "${TEACHER_PATH}"
+  --require-teacher-sem
+  --teacher-sem-scale
+  1.0
+  --teacher-sem-missing-penalty
+  -5.0
+  --teacher-cf-flip-bonus
+  1.0
+)
+
+if [ -n "${SFT_LORA_PATH}" ]; then
+  cmd+=(--sft-lora-path "${SFT_LORA_PATH}")
+fi
+if [ -n "${FULL_PARENT_PENALTY}" ]; then
+  cmd+=(--full-parent-penalty "${FULL_PARENT_PENALTY}")
+fi
+if [ -n "${EMPTY_RESIDUAL_PENALTY}" ]; then
+  cmd+=(--empty-residual-penalty "${EMPTY_RESIDUAL_PENALTY}")
+fi
+cmd+=("$@")
+
 set +e
-python scripts/train_rl.py \
-  --config configs/hpc.yaml \
-  --max-steps "${MAX_STEPS}" \
-  --logging-steps "${LOGGING_STEPS}" \
-  --output-dir "${OUTPUT_DIR}" \
-  --diagnose-reward-flow \
-  --ppo-loop decoded_chem \
-  --require-chemistry-reward-path \
-  --teacher-path "${TEACHER_PATH}" \
-  --require-teacher-sem \
-  --teacher-sem-scale 1.0 \
-  --teacher-sem-missing-penalty -5.0 \
-  --teacher-cf-flip-bonus 1.0 \
-  "$@"
+"${cmd[@]}"
 TRAIN_EXIT_CODE=$?
 set -e
 

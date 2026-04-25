@@ -29,6 +29,56 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-25] Let decoded-chem PPO initialize both policy and reference from one explicit SFT LoRA checkpoint
+
+### Background
+The decoded chemistry PPO path is meant to start from an SFT policy rather than
+from the raw base model. That becomes especially important once we want to run
+PPO from a chosen SFT v2 checkpoint such as `checkpoint-300`. If the trainable
+policy starts from that checkpoint but the KL reference remains the bare base
+model, the KL term is misaligned and can exaggerate drift. At the same time,
+collapsed generations such as empty responses, full-parent fragments, and
+empty-residual deletions need to be surfaced explicitly in logs rather than
+appearing as opaque chemistry failures.
+
+### Decision
+Keep the decoded-chem PPO objective unchanged, but make initialization and
+anti-collapse diagnostics explicit:
+
+- add `--sft-lora-path` as the preferred CLI name for the SFT initialization
+  checkpoint while keeping the old `--sft-adapter-path` path for backward
+  compatibility;
+- resolve one effective SFT LoRA path and use it for both the trainable PPO
+  policy and the frozen KL reference model;
+- log the resolved policy/reference initialization path so HPC runs can verify
+  that both models start from the same checkpoint;
+- treat empty decoded responses as empty fragments instead of letting prompt
+  echo accidentally fall back to the parent molecule;
+- add explicit `full_parent` and `empty_residual` handling with configurable
+  penalties and stable log fields (`empty_response`, `full_parent`,
+  `empty_residual`, `oracle_ok`, `cf_drop`, `cf_flip`, `reward_total`).
+
+### Alternatives considered
+1. Keep using only `--sft-adapter-path` and rely on users to infer whether the
+   reference model matches the policy.
+2. Let the KL reference remain the raw base model even when PPO starts from an
+   SFT adapter.
+3. Leave empty-response and full-parent cases to be inferred indirectly from
+   teacher-oracle failure reasons.
+
+### Consequences
+- PPO runs can now be launched from an explicit SFT v2 checkpoint such as
+  `checkpoint-300` with policy/reference alignment preserved.
+- Decoded-chem logs are easier to grep for collapse-related cases without
+  changing the underlying deletion-based counterfactual objective.
+- The full-training Slurm wrapper can forward the chosen SFT LoRA checkpoint
+  and the new explicit penalties through `sbatch --export=ALL,...`.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-25] Make SFT fragment-distribution audits chunkable and existence-first for HPC runs
 
 ### Background

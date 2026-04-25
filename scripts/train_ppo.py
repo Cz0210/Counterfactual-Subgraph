@@ -106,7 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sft-adapter-path",
         default=str(DEFAULT_SFT_ADAPTER),
-        help="SFT LoRA checkpoint 路径，例如 checkpoint-500。",
+        help="Legacy name for the SFT LoRA checkpoint path, for backward compatibility.",
+    )
+    parser.add_argument(
+        "--sft-lora-path",
+        default=None,
+        help="SFT LoRA checkpoint 路径，例如 checkpoint-300。若提供则优先于 --sft-adapter-path。",
     )
     parser.add_argument(
         "--oracle-path",
@@ -254,6 +259,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Bonus added to counterfactual_sem when the residual teacher prediction flips away from the original label.",
+    )
+    parser.add_argument(
+        "--full-parent-penalty",
+        type=float,
+        default=-5.0,
+        help="Penalty applied when the generated fragment matches the full parent molecule.",
+    )
+    parser.add_argument(
+        "--empty-residual-penalty",
+        type=float,
+        default=-5.0,
+        help="Penalty applied when deletion yields an empty residual molecule.",
     )
     parser.add_argument(
         "--disable-counterfactual-teacher",
@@ -1191,6 +1208,8 @@ def _extract_fragment_from_text(combined_text: str, prompt_text: str | None) -> 
 
     if normalized_prompt and normalized_combined.startswith(normalized_prompt):
         candidate = normalized_combined[len(normalized_prompt) :].strip()
+        if not candidate:
+            return ""
         if candidate:
             cleaned = clean_generated_smiles(candidate)
             if cleaned:
@@ -1198,6 +1217,8 @@ def _extract_fragment_from_text(combined_text: str, prompt_text: str | None) -> 
 
     if "FRAGMENT_SMILES:" in normalized_combined:
         _, _, suffix = normalized_combined.partition("FRAGMENT_SMILES:")
+        if not suffix.strip():
+            return ""
         cleaned = clean_generated_smiles(suffix)
         if cleaned:
             return cleaned
@@ -2277,7 +2298,21 @@ def run_decoded_chem_ppo_loop(
 
         response_ids = generated_ids[:, input_ids.shape[1] :]
         if response_ids.size(1) == 0:
-            raise RuntimeError("Decoded chemistry PPO generation returned an empty response segment.")
+            surrogate_token_id = tokenizer.eos_token_id
+            if surrogate_token_id is None:
+                surrogate_token_id = tokenizer.pad_token_id
+            if surrogate_token_id is None:
+                surrogate_token_id = 0
+            logger.warning(
+                "[DECODED_CHEM_EMPTY_RESPONSE_BATCH] step=%s surrogate_token_id=%s batch_size=%s",
+                step_index,
+                surrogate_token_id,
+                response_ids.size(0),
+            )
+            response_ids = generated_ids.new_full(
+                (generated_ids.size(0), 1),
+                int(surrogate_token_id),
+            )
         response_mask = _build_response_mask(
             response_ids,
             eos_token_id=tokenizer.eos_token_id,
@@ -2308,9 +2343,10 @@ def run_decoded_chem_ppo_loop(
         sample_response = response_texts[0] if response_texts else ""
         sample_fragment = fragments[0] if fragments else ""
         logger.info(
-            "[DECODED_CHEM_GENERATION_SAMPLE] parent=%s response=%s",
+            "[DECODED_CHEM_GENERATION_SAMPLE] parent=%s response=%s empty_response=%s",
             sample_parent,
             sample_response,
+            not bool(str(sample_response).strip()),
         )
         logger.info(
             "[DECODED_CHEM_FRAGMENT_SAMPLE] raw=%s fragment=%s",
@@ -2439,11 +2475,15 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s empty_response=%s full_parent=%s empty_residual=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
                 reward_log.get("core_fragment"),
+                reward_log.get("empty_response"),
+                reward_log.get("full_parent"),
+                reward_log.get("empty_residual"),
+                reward_log.get("oracle_ok"),
                 reward_log.get("format"),
                 reward_log.get("valid"),
                 reward_log.get("substructure"),
@@ -2458,6 +2498,7 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("cf_flip"),
                 reward_log.get("parent_without_fragment_smiles"),
                 reward_log.get("total"),
+                reward_log.get("reward_total"),
                 reward_log.get("teacher_input_smiles"),
                 reward_log.get("teacher_prob"),
                 teacher_reason,
@@ -2632,6 +2673,13 @@ def save_final_model(
     return output_dir
 
 
+def resolve_sft_lora_path(args: argparse.Namespace) -> Path:
+    """Resolve the initial PPO LoRA checkpoint path with explicit CLI precedence."""
+
+    configured_path = args.sft_lora_path or args.sft_adapter_path
+    return Path(str(configured_path)).expanduser().resolve()
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -2641,9 +2689,13 @@ def main() -> None:
     dataset_path = Path(args.dataset_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     model_path = Path(args.model_path).expanduser().resolve()
-    sft_adapter_path = Path(args.sft_adapter_path).expanduser().resolve()
+    sft_lora_path = resolve_sft_lora_path(args)
     oracle_path = Path(args.oracle_path).expanduser().resolve()
     teacher_path = Path(args.teacher_path).expanduser().resolve()
+    if not sft_lora_path.exists():
+        raise FileNotFoundError(
+            f"SFT LoRA checkpoint path does not exist: {sft_lora_path}"
+        )
 
     ensure_directory(output_dir)
     run_name = f"{DEFAULT_WANDB_RUN_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -2667,7 +2719,8 @@ def main() -> None:
             "git_commit": _safe_git_commit(),
             "config_files": [str(Path(path).expanduser().resolve()) for path in args.config],
             "model_path": str(model_path),
-            "sft_adapter_path": str(sft_adapter_path),
+            "sft_adapter_path": str(Path(args.sft_adapter_path).expanduser().resolve()),
+            "sft_lora_path": str(sft_lora_path),
             "oracle_path": str(oracle_path),
             "teacher_path": str(teacher_path),
             "dataset_path": str(dataset_path),
@@ -2686,6 +2739,13 @@ def main() -> None:
         max_prompt_examples=args.max_prompt_examples,
     )
     logger.info("Loaded %s PPO prompt examples from %s", len(examples), dataset_path)
+    logger.info(
+        "[PPO_INIT_LORA] base_model=%s policy_lora=%s reference_lora=%s aligned=%s",
+        model_path,
+        sft_lora_path,
+        sft_lora_path,
+        True,
+    )
 
     deps = import_training_dependencies()
     deps["set_seed"](args.seed)
@@ -2714,7 +2774,7 @@ def main() -> None:
     policy_model = build_policy_model(
         deps,
         model_path=model_path,
-        adapter_path=sft_adapter_path,
+        adapter_path=sft_lora_path,
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
         is_trainable=True,
@@ -2722,7 +2782,7 @@ def main() -> None:
     reference_model = build_policy_model(
         deps,
         model_path=model_path,
-        adapter_path=sft_adapter_path,
+        adapter_path=sft_lora_path,
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
         is_trainable=False,
@@ -2789,6 +2849,8 @@ def main() -> None:
         counterfactual_teacher_scorer=counterfactual_teacher_scorer,
         teacher_sem_scale=args.teacher_sem_scale,
         teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
+        full_parent_penalty=args.full_parent_penalty,
+        empty_residual_penalty=args.empty_residual_penalty,
         require_teacher_sem=args.require_teacher_sem,
         disable_counterfactual_teacher=args.disable_counterfactual_teacher,
     )

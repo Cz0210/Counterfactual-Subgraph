@@ -89,6 +89,10 @@ class RewardTrace:
     target_probability: float | None = None
     inactive_probability: float | None = None
     residual_smiles: str | None = None
+    empty_response: bool = False
+    full_parent: bool = False
+    empty_residual: bool = False
+    oracle_ok: bool = False
     raw_parse_ok: bool = False
     core_parse_ok: bool = False
     has_dummy_atoms: bool = False
@@ -276,6 +280,8 @@ class ChemRLRewarder:
         counterfactual_teacher_scorer: CounterfactualTeacherScorer | None = None,
         teacher_sem_scale: float = 1.0,
         teacher_sem_missing_penalty: float = -5.0,
+        full_parent_penalty: float = -5.0,
+        empty_residual_penalty: float = -5.0,
         require_teacher_sem: bool = False,
         disable_counterfactual_teacher: bool = False,
         success_threshold: float = 0.5,
@@ -308,6 +314,8 @@ class ChemRLRewarder:
         self.counterfactual_teacher_scorer = counterfactual_teacher_scorer
         self.teacher_sem_scale = float(teacher_sem_scale)
         self.teacher_sem_missing_penalty = float(teacher_sem_missing_penalty)
+        self.full_parent_penalty = float(full_parent_penalty)
+        self.empty_residual_penalty = float(empty_residual_penalty)
         self.require_teacher_sem = bool(require_teacher_sem)
         self.disable_counterfactual_teacher = bool(disable_counterfactual_teacher)
         self.success_threshold = float(success_threshold)
@@ -458,12 +466,17 @@ class ChemRLRewarder:
                     "counterfactual_teacher_available": bool(trace.counterfactual_teacher_available),
                     "counterfactual_called": bool(trace.counterfactual_teacher_called),
                     "counterfactual_reason": trace.counterfactual_teacher_reason,
+                    "empty_response": bool(trace.empty_response),
+                    "full_parent": bool(trace.full_parent),
+                    "empty_residual": bool(trace.empty_residual),
+                    "oracle_ok": bool(trace.oracle_ok),
                     "p_before": trace.p_before,
                     "p_after": trace.p_after,
                     "pred_before": trace.pred_before,
                     "pred_after": trace.pred_after,
                     "cf_drop": trace.cf_drop,
                     "cf_flip": bool(trace.cf_flip),
+                    "reward_total": float(trace.reward),
                     "target_probability": trace.target_probability,
                     "failure_stage": trace.failure_stage,
                     "error_message": trace.error_message,
@@ -557,6 +570,7 @@ class ChemRLRewarder:
                     fragment_teacher_reward=self.teacher_sem_missing_penalty,
                     counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
+                empty_response=True,
                 teacher_reason="invalid_or_not_substructure",
                 counterfactual_teacher_reason="invalid_or_not_substructure",
             )
@@ -591,6 +605,7 @@ class ChemRLRewarder:
                 ),
                 teacher_reason="invalid_or_missing_label",
             )
+        parent_canonical_smiles = mol_to_smiles_safe(parent.mol)
 
         fragment_info = normalize_fragment_with_dummy_atoms(normalized_generated)
         format_reward = self._compute_format_reward(normalized_generated, fragment_info)
@@ -697,6 +712,51 @@ class ChemRLRewarder:
                 connected_fragment=True,
                 **base_trace_kwargs,
             )
+        is_full_parent = bool(
+            core_smiles
+            and parent_canonical_smiles
+            and core_smiles == parent_canonical_smiles
+        )
+        if is_full_parent:
+            return self._fail(
+                parent_smiles=normalized_parent,
+                generated_smiles=generated_smiles,
+                normalized_generated=normalized_generated,
+                original_label=int(original_label),
+                failure_stage="counterfactual",
+                error_message="Generated fragment matches the full parent molecule.",
+                breakdown=self._build_breakdown(
+                    format_reward=format_reward,
+                    valid_reward=valid_reward,
+                    subgraph_reward=self.subgraph_pass_reward,
+                    length_reward=length_reward,
+                    semantic_reward=self.full_parent_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.full_parent_penalty,
+                ),
+                valid_smiles=True,
+                connected_fragment=True,
+                is_subgraph=True,
+                residual_smiles="",
+                raw_fragment_smiles=normalized_generated,
+                core_fragment_smiles=core_smiles,
+                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                dummy_count=int(fragment_info["dummy_count"]),
+                core_atom_count=int(fragment_info["core_atom_count"]),
+                teacher_input_smiles=core_smiles,
+                teacher_reason="full_parent_fragment",
+                parent_without_fragment_smiles="",
+                counterfactual_teacher_available=bool(
+                    self.counterfactual_teacher_scorer is not None
+                    and self.counterfactual_teacher_scorer.available
+                ),
+                counterfactual_teacher_called=False,
+                counterfactual_teacher_reason="full_parent_fragment",
+                full_parent=True,
+                empty_residual=True,
+            )
 
         try:
             has_precise_match = bool(
@@ -801,6 +861,13 @@ class ChemRLRewarder:
             target_probability=success_trace_kwargs.get("p_after"),
             inactive_probability=None,
             residual_smiles=success_trace_kwargs.get("parent_without_fragment_smiles"),
+            empty_response=False,
+            full_parent=bool(success_trace_kwargs.get("full_parent", False)),
+            empty_residual=bool(success_trace_kwargs.get("empty_residual", False)),
+            oracle_ok=bool(
+                success_trace_kwargs.get("counterfactual_teacher_called", False)
+                and success_trace_kwargs.get("counterfactual_teacher_reason") == "ok"
+            ),
             raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
             core_parse_ok=bool(fragment_info["core_parse_ok"]),
             has_dummy_atoms=bool(fragment_info["has_dummy"]),
@@ -941,6 +1008,7 @@ class ChemRLRewarder:
         pred_after: int | None = None,
         cf_drop: float | None = None,
         cf_flip: bool = False,
+        empty_residual: bool = False,
     ) -> dict[str, Any]:
         return {
             "parent_without_fragment_smiles": parent_without_fragment_smiles,
@@ -953,6 +1021,7 @@ class ChemRLRewarder:
             "pred_after": pred_after,
             "cf_drop": cf_drop,
             "cf_flip": bool(cf_flip),
+            "empty_residual": bool(empty_residual),
         }
 
     def _score_teacher_semantic(
@@ -1101,11 +1170,20 @@ class ChemRLRewarder:
                     parent_smiles,
                     core_smiles,
                 )
+        failure_reason = str(counterfactual_result.get("teacher_reason"))
+        empty_residual = failure_reason in {
+            "empty_residual_after_deletion",
+            "empty_residual_smiles",
+        }
         counterfactual_reward = (
             self.teacher_sem_scale
             * float(counterfactual_result.get("counterfactual_sem", 0.0))
             if counterfactual_result_ok
-            else self.teacher_sem_missing_penalty
+            else (
+                self.empty_residual_penalty
+                if empty_residual
+                else self.teacher_sem_missing_penalty
+            )
         )
         return counterfactual_reward, self._counterfactual_trace_kwargs(
             parent_without_fragment_smiles=counterfactual_result.get(
@@ -1122,6 +1200,7 @@ class ChemRLRewarder:
             pred_after=counterfactual_result.get("pred_after"),
             cf_drop=counterfactual_result.get("cf_drop"),
             cf_flip=bool(counterfactual_result.get("cf_flip", False)),
+            empty_residual=empty_residual,
         )
 
     def _delete_to_residual_smiles(
@@ -1329,6 +1408,9 @@ class ChemRLRewarder:
         pred_after: int | None = None,
         cf_drop: float | None = None,
         cf_flip: bool = False,
+        empty_response: bool = False,
+        full_parent: bool = False,
+        empty_residual: bool = False,
     ) -> RewardTrace:
         """Build one failure trace consistently."""
 
@@ -1350,6 +1432,10 @@ class ChemRLRewarder:
             target_probability=None,
             inactive_probability=None,
             residual_smiles=residual_smiles,
+            empty_response=bool(empty_response),
+            full_parent=bool(full_parent),
+            empty_residual=bool(empty_residual),
+            oracle_ok=False,
             raw_parse_ok=bool(raw_parse_ok),
             core_parse_ok=bool(core_parse_ok),
             has_dummy_atoms=bool(has_dummy_atoms),
