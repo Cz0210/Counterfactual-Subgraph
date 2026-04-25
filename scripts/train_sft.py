@@ -39,6 +39,12 @@ LORA_TARGET_MODULES = (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--config",
+        action="append",
+        default=[],
+        help="Accepted for HPC wrapper compatibility. The current SFT trainer uses explicit CLI overrides only.",
+    )
+    parser.add_argument(
         "--model-path",
         default=str(DEFAULT_MODEL_PATH),
         help="Path to the local ChemLLM-7B-Chat checkpoint.",
@@ -63,6 +69,36 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=7,
         help="Random seed for training.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=500,
+        help="Total optimization steps.",
+    )
+    parser.add_argument(
+        "--logging-steps",
+        type=int,
+        default=10,
+        help="How often to emit trainer logs.",
+    )
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=100,
+        help="How often to save checkpoints.",
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=100,
+        help="How often to run validation.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=2e-4,
+        help="Learning rate for QLoRA training.",
     )
     return parser
 
@@ -150,7 +186,7 @@ def build_peft_config() -> LoraConfig:
     )
 
 
-def build_training_args(output_dir: Path) -> TrainingArguments:
+def build_training_args(output_dir: Path, args: argparse.Namespace) -> TrainingArguments:
     """Construct the fixed training arguments for a stable Trainer setup."""
 
     return TrainingArguments(
@@ -158,12 +194,12 @@ def build_training_args(output_dir: Path) -> TrainingArguments:
         per_device_train_batch_size=4,
         per_device_eval_batch_size=4,
         gradient_accumulation_steps=4,
-        learning_rate=2e-4,
-        max_steps=500,
+        learning_rate=args.learning_rate,
+        max_steps=args.max_steps,
         bf16=True,
-        logging_steps=10,
-        save_steps=100,
-        eval_steps=100,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
         eval_strategy="steps",
         save_strategy="steps",
         save_total_limit=3,
@@ -196,7 +232,7 @@ def main() -> None:
     eval_dataset = dataset["validation"].map(add_text_column)
     model = build_quantized_model(model_path)
     peft_config = build_peft_config()
-    training_args = build_training_args(output_dir)
+    training_args = build_training_args(output_dir, args)
 
     trainer = SFTTrainer(
         model=model,

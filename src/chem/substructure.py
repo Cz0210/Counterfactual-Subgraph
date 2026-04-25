@@ -27,6 +27,8 @@ class SubstructureMatcher(Protocol):
 def find_parent_substructure_matches(
     parent_smiles: str,
     fragment_smiles: str,
+    *,
+    max_matches: int | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Return deterministic atom-index matches for a fragment in the parent.
 
@@ -49,21 +51,72 @@ def find_parent_substructure_matches(
         return ()
     if not fragment.sanitized or fragment.mol is None:
         return ()
+    if not _fragment_can_fit_parent(parent, fragment):
+        return ()
     if fragment.contains_dummy_atoms:
-        return _find_capped_subgraph_matches(parent.mol, fragment.smiles, fragment.mol)
+        return _find_capped_subgraph_matches(
+            parent.mol,
+            fragment.smiles,
+            fragment.mol,
+            max_matches=max_matches,
+        )
 
-    matches = parent.mol.GetSubstructMatches(
+    if max_matches == 1 and not parent.mol.HasSubstructMatch(
         fragment.mol,
         useChirality=True,
-        uniquify=True,
-    )
+    ):
+        return ()
+
+    if max_matches is None:
+        matches = parent.mol.GetSubstructMatches(
+            fragment.mol,
+            useChirality=True,
+            uniquify=True,
+        )
+    else:
+        matches = parent.mol.GetSubstructMatches(
+            fragment.mol,
+            useChirality=True,
+            uniquify=True,
+            maxMatches=max(1, int(max_matches)),
+        )
     return tuple(tuple(match) for match in matches)
 
 
 def is_parent_substructure(parent_smiles: str, fragment_smiles: str) -> bool:
     """Return whether the fragment is a sanitized substructure of the parent."""
 
-    return len(find_parent_substructure_matches(parent_smiles, fragment_smiles)) > 0
+    if not is_rdkit_available() or Chem is None:
+        return False
+
+    parent = parse_smiles(parent_smiles, sanitize=True, canonicalize=False)
+    fragment = parse_smiles(
+        fragment_smiles,
+        sanitize=True,
+        canonicalize=False,
+        allow_capped_fragments=True,
+    )
+    if not parent.sanitized or parent.mol is None:
+        return False
+    if not fragment.sanitized or fragment.mol is None:
+        return False
+    if not _fragment_can_fit_parent(parent, fragment):
+        return False
+    if fragment.contains_dummy_atoms:
+        return len(
+            _find_capped_subgraph_matches(
+                parent.mol,
+                fragment.smiles,
+                fragment.mol,
+                max_matches=1,
+            )
+        ) > 0
+    return bool(
+        parent.mol.HasSubstructMatch(
+            fragment.mol,
+            useChirality=True,
+        )
+    )
 
 
 def is_valid_capped_subgraph(parent_smiles: str, capped_fragment_smiles: str) -> bool:
@@ -87,8 +140,17 @@ def is_valid_capped_subgraph(parent_smiles: str, capped_fragment_smiles: str) ->
         return False
     if not fragment.sanitized or fragment.mol is None:
         return False
+    if not _fragment_can_fit_parent(parent, fragment):
+        return False
 
-    return len(_find_capped_subgraph_matches(parent.mol, fragment.smiles, fragment.mol)) > 0
+    return len(
+        _find_capped_subgraph_matches(
+            parent.mol,
+            fragment.smiles,
+            fragment.mol,
+            max_matches=1,
+        )
+    ) > 0
 
 
 def is_connected_fragment(fragment_smiles: str) -> bool:
@@ -121,6 +183,18 @@ def _non_dummy_atom_indices(mol: object) -> tuple[int, ...]:
     return tuple(atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() != 0)
 
 
+def _fragment_can_fit_parent(parent: object, fragment: object) -> bool:
+    parent_atom_count = getattr(parent, "atom_count", None)
+    fragment_atom_count = getattr(fragment, "atom_count", None)
+    if (
+        isinstance(parent_atom_count, int)
+        and isinstance(fragment_atom_count, int)
+        and fragment_atom_count > parent_atom_count
+    ):
+        return False
+    return True
+
+
 def _is_well_formed_capped_fragment(fragment_mol: object) -> bool:
     real_atom_indices = _non_dummy_atom_indices(fragment_mol)
     if not real_atom_indices:
@@ -150,6 +224,8 @@ def _find_capped_subgraph_matches(
     parent_mol: object,
     capped_fragment_smiles: str,
     fragment_mol: object,
+    *,
+    max_matches: int | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     if Chem is None:
         return ()
@@ -160,11 +236,19 @@ def _find_capped_subgraph_matches(
     if query is None:
         return ()
 
-    matches = parent_mol.GetSubstructMatches(
-        query,
-        useChirality=True,
-        uniquify=True,
-    )
+    if max_matches is None:
+        matches = parent_mol.GetSubstructMatches(
+            query,
+            useChirality=True,
+            uniquify=True,
+        )
+    else:
+        matches = parent_mol.GetSubstructMatches(
+            query,
+            useChirality=True,
+            uniquify=True,
+            maxMatches=max(1, int(max_matches)),
+        )
     if not matches:
         return ()
 
@@ -202,5 +286,7 @@ def _find_capped_subgraph_matches(
             continue
 
         valid_matches.append(tuple(match))
+        if max_matches is not None and len(valid_matches) >= max_matches:
+            break
 
     return tuple(valid_matches)

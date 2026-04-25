@@ -29,6 +29,51 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-25] Make SFT fragment-distribution audits chunkable and existence-first for HPC runs
+
+### Background
+The new SFT audit scripts are intended to characterize whether weak labels and
+SFT generations collapse toward near-parent fragments or tiny trivial pieces.
+On larger files, however, a few symmetric molecules caused audit runs to stall
+for a long time inside RDKit substructure enumeration, which made whole-file
+audits unreliable on both local machines and HPC nodes.
+
+### Decision
+Keep the audit objective unchanged, but make the audit path operationally safe:
+
+- add chunk/window controls and progress logging to
+  `scripts/analyze_sft_fragment_distribution.py`;
+- isolate per-sample audit exceptions so one bad molecule does not abort the
+  entire batch unless `--fail-fast` is explicitly requested;
+- prefer existence-first substructure checks (`HasSubstructMatch` or capped
+  queries limited to `maxMatches=1`) when the audit only needs to know whether
+  a match exists;
+- add cheap pruning before expensive chemistry work, including parse failures,
+  fragment-larger-than-parent checks, and a full-parent shortcut based on
+  canonical core equality;
+- emit slow-sample records so long-running parent/fragment pairs can be
+  inspected and re-run in isolated chunks on HPC.
+
+### Alternatives considered
+1. Keep the original all-in-one audit and rely on manual interruption when a
+   job stalls.
+2. Disable substructure and deletion checks globally, even for manageable
+   molecules.
+3. Rewrite the chemistry layer around a separate matching backend.
+
+### Consequences
+- SFT audits can now be submitted in bounded chunks through Slurm.
+- Large runs produce explicit progress, warning, and slow-sample artifacts
+  instead of appearing silently hung.
+- The chemistry layer still enforces the same counterfactual-fragment
+  definition, but audit-time existence checks avoid enumerating every symmetric
+  match when only a yes/no answer is needed.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-19] Add explicit teacher-semantic scoring on core fragments in the decoded chemistry PPO path
 
 ### Background

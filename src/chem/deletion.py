@@ -65,7 +65,12 @@ def _clear_broken_aromatic_flags(mol: object) -> None:
             bond.SetBondType(Chem.BondType.SINGLE)
 
 
-def delete_fragment_from_parent(parent_smiles: str, fragment_smiles: str) -> DeletionResult:
+def delete_fragment_from_parent(
+    parent_smiles: str,
+    fragment_smiles: str,
+    *,
+    max_matches: int | None = None,
+) -> DeletionResult:
     """Delete one connected fragment match from the parent molecule."""
 
     if not is_rdkit_available() or Chem is None:
@@ -108,9 +113,17 @@ def delete_fragment_from_parent(parent_smiles: str, fragment_smiles: str) -> Del
         )
 
     if fragment.contains_dummy_atoms:
-        return _delete_capped_fragment_from_parent(parent, fragment)
+        return _delete_capped_fragment_from_parent(
+            parent,
+            fragment,
+            max_matches=max_matches,
+        )
 
-    matches = find_parent_substructure_matches(parent_smiles, fragment_smiles)
+    matches = find_parent_substructure_matches(
+        parent_smiles,
+        fragment_smiles,
+        max_matches=max_matches,
+    )
     if not matches:
         return _failure(
             parent_smiles,
@@ -178,7 +191,12 @@ def get_remainder_graph(parent_smiles: str, capped_fragment_smiles: str) -> str:
     return result.residual_smiles
 
 
-def _delete_capped_fragment_from_parent(parent: object, fragment: object) -> DeletionResult:
+def _delete_capped_fragment_from_parent(
+    parent: object,
+    fragment: object,
+    *,
+    max_matches: int | None = None,
+) -> DeletionResult:
     parent_smiles = parent.smiles
     fragment_smiles = fragment.smiles
 
@@ -192,7 +210,11 @@ def _delete_capped_fragment_from_parent(parent: object, fragment: object) -> Del
             ),
         )
 
-    matches = find_parent_substructure_matches(parent_smiles, fragment_smiles)
+    matches = find_parent_substructure_matches(
+        parent_smiles,
+        fragment_smiles,
+        max_matches=max_matches,
+    )
     if not matches:
         return _failure(
             parent_smiles,
