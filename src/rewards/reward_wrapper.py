@@ -17,9 +17,11 @@ the parent molecule.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 import logging
 from pathlib import Path
+import re
 from typing import Any, Sequence
 
 from src.chem import (
@@ -44,6 +46,7 @@ except ImportError:  # pragma: no cover - depends on local runtime
 
 
 _LOGGER = logging.getLogger(__name__)
+_RING_TOKEN_PATTERN = re.compile(r"%\d{2}|\d")
 
 
 def shape_probability_reward(
@@ -116,6 +119,9 @@ class RewardTrace:
     cf_drop: float | None = None
     cf_flip: bool = False
     failure_stage: str | None = None
+    failure_tag: str | None = None
+    invalid_detail: str | None = None
+    generated_char_count: int = 0
     error_message: str | None = None
     breakdown: dict[str, float] = field(default_factory=dict)
 
@@ -188,6 +194,62 @@ def mol_to_smiles_safe(mol: object | None) -> str | None:
         return Chem.MolToSmiles(mol, canonical=True)
     except Exception:  # pragma: no cover - depends on RDKit internals
         return None
+
+
+def preprocess_generated_fragment(generated_smiles: str) -> tuple[str, int]:
+    """Apply the light decoded-fragment cleanup before chemistry rewarding."""
+
+    normalized = str(generated_smiles or "").strip()
+    if not normalized:
+        return "", 0
+    first_line = normalized.splitlines()[0].strip()
+    return first_line, len(first_line)
+
+
+def _collect_ring_tokens_outside_brackets(smiles: str) -> list[str]:
+    tokens: list[str] = []
+    bracket_depth = 0
+    index = 0
+    text = str(smiles or "")
+    while index < len(text):
+        char = text[index]
+        if char == "[":
+            bracket_depth += 1
+            index += 1
+            continue
+        if char == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            index += 1
+            continue
+        if bracket_depth == 0:
+            if (
+                char == "%"
+                and index + 2 < len(text)
+                and text[index + 1 : index + 3].isdigit()
+            ):
+                tokens.append(text[index : index + 3])
+                index += 3
+                continue
+            if char.isdigit():
+                tokens.append(char)
+        index += 1
+    return tokens
+
+
+def detect_obvious_parse_failure_detail(smiles: str) -> str | None:
+    """Return a coarse reason when the fragment likely failed due to missing closure."""
+
+    normalized = str(smiles or "").strip()
+    if not normalized:
+        return None
+    if normalized.count("(") != normalized.count(")"):
+        return "parse_failed_unbalanced_parentheses"
+    if normalized.count("[") != normalized.count("]"):
+        return "parse_failed_unbalanced_brackets"
+    ring_tokens = _collect_ring_tokens_outside_brackets(normalized)
+    if any(count % 2 == 1 for count in Counter(ring_tokens).values()):
+        return "parse_failed_unclosed_ring"
+    return None
 
 
 def normalize_fragment_with_dummy_atoms(fragment_smiles: str) -> dict[str, Any]:
@@ -280,8 +342,9 @@ class ChemRLRewarder:
         counterfactual_teacher_scorer: CounterfactualTeacherScorer | None = None,
         teacher_sem_scale: float = 1.0,
         teacher_sem_missing_penalty: float = -5.0,
-        full_parent_penalty: float = -5.0,
-        empty_residual_penalty: float = -5.0,
+        full_parent_penalty: float = -6.0,
+        empty_residual_penalty: float = -4.0,
+        max_generation_chars: int = 96,
         require_teacher_sem: bool = False,
         disable_counterfactual_teacher: bool = False,
         success_threshold: float = 0.5,
@@ -316,11 +379,14 @@ class ChemRLRewarder:
         self.teacher_sem_missing_penalty = float(teacher_sem_missing_penalty)
         self.full_parent_penalty = float(full_parent_penalty)
         self.empty_residual_penalty = float(empty_residual_penalty)
+        self.max_generation_chars = int(max_generation_chars)
         self.require_teacher_sem = bool(require_teacher_sem)
         self.disable_counterfactual_teacher = bool(disable_counterfactual_teacher)
         self.success_threshold = float(success_threshold)
         self.success_base_reward = float(success_base_reward)
         self.probability_scale = float(probability_scale)
+        if self.max_generation_chars <= 0:
+            raise ValueError("max_generation_chars must be positive.")
 
         if self.require_teacher_sem and self.disable_counterfactual_teacher:
             raise ValueError(
@@ -479,6 +545,9 @@ class ChemRLRewarder:
                     "reward_total": float(trace.reward),
                     "target_probability": trace.target_probability,
                     "failure_stage": trace.failure_stage,
+                    "failure_tag": trace.failure_tag,
+                    "invalid_detail": trace.invalid_detail,
+                    "generated_char_count": int(trace.generated_char_count),
                     "error_message": trace.error_message,
                     "original_label": trace.original_label,
                 }
@@ -508,7 +577,9 @@ class ChemRLRewarder:
         """Compute one reward with step-by-step early stopping."""
 
         normalized_parent = str(parent_smiles or "").strip()
-        normalized_generated = str(generated_smiles or "").strip()
+        normalized_generated, generated_char_count = preprocess_generated_fragment(
+            generated_smiles
+        )
         if int(original_label) not in (0, 1):
             return self._fail(
                 parent_smiles=normalized_parent,
@@ -517,6 +588,7 @@ class ChemRLRewarder:
                 original_label=self.default_parent_label,
                 failure_stage="label",
                 error_message=f"Unsupported original label: {original_label}",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=0.0,
                     valid_reward=0.0,
@@ -540,6 +612,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="parent",
                 error_message="Parent SMILES is empty.",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=0.0,
                     valid_reward=0.0,
@@ -561,6 +634,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message="Generated fragment is empty.",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=self.format_penalty,
                     valid_reward=self.invalid_smiles_penalty,
@@ -571,8 +645,39 @@ class ChemRLRewarder:
                     counterfactual_reward=self.teacher_sem_missing_penalty,
                 ),
                 empty_response=True,
-                teacher_reason="invalid_or_not_substructure",
-                counterfactual_teacher_reason="invalid_or_not_substructure",
+                teacher_reason="empty_response",
+                counterfactual_teacher_reason="empty_response",
+            )
+
+        if generated_char_count > self.max_generation_chars:
+            return self._fail(
+                parent_smiles=normalized_parent,
+                generated_smiles=generated_smiles,
+                normalized_generated=normalized_generated,
+                original_label=int(original_label),
+                failure_stage="validity",
+                error_message=(
+                    "Generated fragment exceeded the reward-side character limit: "
+                    f"{generated_char_count} > {self.max_generation_chars}"
+                ),
+                generated_char_count=generated_char_count,
+                failure_tag="invalid_generation_too_long",
+                invalid_detail=(
+                    f"fragment_length_exceeds_limit:{generated_char_count}>{self.max_generation_chars}"
+                ),
+                breakdown=self._build_breakdown(
+                    format_reward=self.format_penalty,
+                    valid_reward=self.invalid_smiles_penalty,
+                    subgraph_reward=0.0,
+                    length_reward=0.0,
+                    semantic_reward=self.teacher_sem_missing_penalty,
+                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                    counterfactual_reward=self.teacher_sem_missing_penalty,
+                ),
+                raw_fragment_smiles=normalized_generated,
+                teacher_input_smiles=normalized_generated,
+                teacher_reason="invalid_generation_too_long",
+                counterfactual_teacher_reason="invalid_generation_too_long",
             )
 
         # Step A: parseability and connectivity.
@@ -594,6 +699,7 @@ class ChemRLRewarder:
                     if not parent.failure_reason
                     else f"Parent SMILES is not usable: {parent.failure_reason}"
                 ),
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=0.0,
                     valid_reward=0.0,
@@ -626,6 +732,7 @@ class ChemRLRewarder:
                 counterfactual_teacher_reason="invalid_or_not_substructure",
             )
         )
+        parse_failure_detail = detect_obvious_parse_failure_detail(normalized_generated)
         if not fragment_info["raw_parse_ok"]:
             return self._fail(
                 parent_smiles=normalized_parent,
@@ -633,7 +740,16 @@ class ChemRLRewarder:
                 normalized_generated=normalized_generated,
                 original_label=int(original_label),
                 failure_stage="validity",
-                error_message="Generated fragment could not be parsed by RDKit.",
+                error_message=(
+                    "Generated fragment could not be parsed by RDKit."
+                    if parse_failure_detail is None
+                    else (
+                        "Generated fragment could not be parsed by RDKit. "
+                        f"Likely cause: {parse_failure_detail}."
+                    )
+                ),
+                generated_char_count=generated_char_count,
+                invalid_detail=parse_failure_detail,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -656,6 +772,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message=f"Fragment connectivity check failed: {exc}",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -676,6 +793,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="validity",
                 error_message="Generated fragment is not connected.",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -699,6 +817,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="subgraph",
                 error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -725,6 +844,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="counterfactual",
                 error_message="Generated fragment matches the full parent molecule.",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -771,6 +891,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="subgraph",
                 error_message=f"Subgraph check failed: {exc}",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -791,6 +912,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 failure_stage="subgraph",
                 error_message="Generated fragment is not a valid parent subgraph.",
+                generated_char_count=generated_char_count,
                 breakdown=self._build_breakdown(
                     format_reward=format_reward,
                     valid_reward=valid_reward,
@@ -899,6 +1021,7 @@ class ChemRLRewarder:
             cf_drop=success_trace_kwargs.get("cf_drop"),
             cf_flip=bool(success_trace_kwargs.get("cf_flip", False)),
             failure_stage=None,
+            generated_char_count=generated_char_count,
             error_message=None,
             breakdown=breakdown,
         )
@@ -936,6 +1059,27 @@ class ChemRLRewarder:
                 self.compactness_bonus - overflow * self.compact_atom_penalty_scale,
             )
         )
+
+    def _infer_failure_tag(
+        self,
+        *,
+        explicit_failure_tag: str | None,
+        failure_stage: str,
+        empty_response: bool,
+        full_parent: bool,
+        empty_residual: bool,
+    ) -> str | None:
+        if explicit_failure_tag:
+            return explicit_failure_tag
+        if empty_response:
+            return "empty_response"
+        if full_parent:
+            return "full_parent_fragment"
+        if empty_residual:
+            return "empty_residual"
+        if failure_stage in {"validity", "subgraph", "counterfactual"}:
+            return "invalid_or_not_substructure"
+        return failure_stage or None
 
     def _build_breakdown(
         self,
@@ -1408,6 +1552,9 @@ class ChemRLRewarder:
         pred_after: int | None = None,
         cf_drop: float | None = None,
         cf_flip: bool = False,
+        failure_tag: str | None = None,
+        invalid_detail: str | None = None,
+        generated_char_count: int = 0,
         empty_response: bool = False,
         full_parent: bool = False,
         empty_residual: bool = False,
@@ -1459,6 +1606,15 @@ class ChemRLRewarder:
             cf_drop=cf_drop,
             cf_flip=bool(cf_flip),
             failure_stage=failure_stage,
+            failure_tag=self._infer_failure_tag(
+                explicit_failure_tag=failure_tag,
+                failure_stage=failure_stage,
+                empty_response=bool(empty_response),
+                full_parent=bool(full_parent),
+                empty_residual=bool(empty_residual),
+            ),
+            invalid_detail=invalid_detail,
+            generated_char_count=int(generated_char_count),
             error_message=error_message,
             breakdown=dict(breakdown),
         )

@@ -55,6 +55,8 @@ DEFAULT_TEACHER_PATH = DEFAULT_ORACLE_PATH
 DEFAULT_DATASET_PATH = REPO_ROOT / "data" / "raw" / "AIDS" / "HIV.csv"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "hpc" / "rl_checkpoints"
 DEFAULT_WANDB_RUN_NAME = "ppo_aids_rl_v1"
+DEFAULT_DECODED_CHEM_GEN_MAX_NEW_TOKENS = 48
+DEFAULT_REWARD_MAX_FRAGMENT_CHARS = 96
 
 _SMILES_FIELD_PATTERNS = (
     re.compile(r"MOLECULE_SMILES:\s*(?P<smiles>[^\n\r]+)"),
@@ -81,6 +83,16 @@ class PromptExample:
             "parent_smiles": self.parent_smiles,
             "original_label": int(self.original_label),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedChemGenerationConfig:
+    """Resolved generation kwargs for the decoded chemistry PPO loop."""
+
+    max_new_tokens: int
+    temperature: float
+    top_p: float
+    do_sample: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -200,6 +212,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="nucleus sampling top-p。",
     )
     parser.add_argument(
+        "--gen-max-new-tokens",
+        type=int,
+        default=None,
+        help="Decoded chemistry PPO 专用 max_new_tokens。若 decoded_chem 未显式提供长度，则默认收紧到 48。",
+    )
+    parser.add_argument(
+        "--gen-temperature",
+        type=float,
+        default=None,
+        help="Decoded chemistry PPO 专用 temperature。默认回退到 --temperature。",
+    )
+    parser.add_argument(
+        "--gen-top-p",
+        type=float,
+        default=None,
+        help="Decoded chemistry PPO 专用 top-p。默认回退到 --top-p。",
+    )
+    parser.add_argument(
+        "--gen-do-sample",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Decoded chemistry PPO 专用 do_sample 开关。默认保持当前 decoded_chem 路径的采样行为。",
+    )
+    parser.add_argument(
+        "--reward-max-fragment-chars",
+        type=int,
+        default=DEFAULT_REWARD_MAX_FRAGMENT_CHARS,
+        help="进入 chemistry reward 前允许的 fragment 最大字符长度，超出则直接记为 invalid_generation_too_long。",
+    )
+    parser.add_argument(
         "--save-steps",
         type=int,
         default=100,
@@ -263,13 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--full-parent-penalty",
         type=float,
-        default=-5.0,
+        default=-6.0,
         help="Penalty applied when the generated fragment matches the full parent molecule.",
     )
     parser.add_argument(
         "--empty-residual-penalty",
         type=float,
-        default=-5.0,
+        default=-4.0,
         help="Penalty applied when deletion yields an empty residual molecule.",
     )
     parser.add_argument(
@@ -383,6 +425,71 @@ def apply_config_overrides(args: argparse.Namespace, parser: argparse.ArgumentPa
         args.trust_remote_code = bool(model_cfg["trust_remote_code"])
 
     return args
+
+
+def _cli_flag_present(argv: Sequence[str], flag: str) -> bool:
+    """Return whether one CLI flag was supplied explicitly."""
+
+    normalized_flag = str(flag).strip()
+    return any(
+        argument == normalized_flag or argument.startswith(f"{normalized_flag}=")
+        for argument in argv
+    )
+
+
+def apply_decoded_chem_generation_defaults(
+    args: argparse.Namespace,
+    *,
+    argv: Sequence[str] | None = None,
+) -> argparse.Namespace:
+    """Tighten decoded_chem generation length unless the user already overrode it."""
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if (
+        getattr(args, "ppo_loop", None) == "decoded_chem"
+        and args.gen_max_new_tokens is None
+        and not _cli_flag_present(raw_argv, "--max-new-tokens")
+    ):
+        args.gen_max_new_tokens = DEFAULT_DECODED_CHEM_GEN_MAX_NEW_TOKENS
+    return args
+
+
+def resolve_decoded_chem_generation_config(
+    args: argparse.Namespace,
+) -> DecodedChemGenerationConfig:
+    """Resolve decoded chemistry generation kwargs with backward-compatible fallbacks."""
+
+    max_new_tokens = (
+        int(args.gen_max_new_tokens)
+        if args.gen_max_new_tokens is not None
+        else int(args.max_new_tokens)
+    )
+    temperature = (
+        float(args.gen_temperature)
+        if args.gen_temperature is not None
+        else float(args.temperature)
+    )
+    top_p = float(args.gen_top_p) if args.gen_top_p is not None else float(args.top_p)
+    do_sample = bool(args.gen_do_sample) if args.gen_do_sample is not None else True
+
+    if max_new_tokens <= 0:
+        raise ValueError("Decoded chemistry PPO requires gen_max_new_tokens > 0.")
+    if temperature < 0.0:
+        raise ValueError("Decoded chemistry PPO requires generation temperature >= 0.")
+    if do_sample and temperature <= 0.0:
+        raise ValueError(
+            "Decoded chemistry PPO sampling requires a positive temperature. "
+            "Use --no-gen-do-sample for greedy decoding."
+        )
+    if top_p <= 0.0 or top_p > 1.0:
+        raise ValueError("Decoded chemistry PPO requires generation top_p in (0, 1].")
+
+    return DecodedChemGenerationConfig(
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        do_sample=do_sample,
+    )
 
 
 def normalize_hiv_label(value: object) -> int | None:
@@ -1206,12 +1313,18 @@ def _extract_fragment_from_text(combined_text: str, prompt_text: str | None) -> 
     normalized_combined = str(combined_text or "").strip()
     normalized_prompt = str(prompt_text or "").strip()
 
+    def _first_line(text: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+        return normalized.splitlines()[0].strip()
+
     if normalized_prompt and normalized_combined.startswith(normalized_prompt):
         candidate = normalized_combined[len(normalized_prompt) :].strip()
         if not candidate:
             return ""
         if candidate:
-            cleaned = clean_generated_smiles(candidate)
+            cleaned = clean_generated_smiles(_first_line(candidate))
             if cleaned:
                 return cleaned
 
@@ -1219,11 +1332,11 @@ def _extract_fragment_from_text(combined_text: str, prompt_text: str | None) -> 
         _, _, suffix = normalized_combined.partition("FRAGMENT_SMILES:")
         if not suffix.strip():
             return ""
-        cleaned = clean_generated_smiles(suffix)
+        cleaned = clean_generated_smiles(_first_line(suffix))
         if cleaned:
             return cleaned
 
-    return clean_generated_smiles(normalized_combined)
+    return clean_generated_smiles(_first_line(normalized_combined))
 
 
 def build_reward_model_wrapper(
@@ -1607,12 +1720,8 @@ def extract_fragment_smiles(text: str) -> str:
     normalized = str(text or "").strip()
     if not normalized:
         return ""
-
-    for candidate in normalized.splitlines():
-        cleaned = clean_generated_smiles(candidate)
-        if cleaned:
-            return cleaned
-    return clean_generated_smiles(normalized)
+    first_line = normalized.splitlines()[0].strip()
+    return clean_generated_smiles(first_line)
 
 
 def _resolve_batch_list_field(
@@ -2247,6 +2356,16 @@ def run_decoded_chem_ppo_loop(
     batch_fields_logged = False
     chemistry_reward_called = False
     chemistry_reward_update_called = False
+    generation_config = resolve_decoded_chem_generation_config(args)
+
+    logger.info(
+        "[DECODED_CHEM_GENERATION_CONFIG] max_new_tokens=%s do_sample=%s temperature=%s top_p=%s reward_max_fragment_chars=%s",
+        generation_config.max_new_tokens,
+        generation_config.do_sample,
+        generation_config.temperature,
+        generation_config.top_p,
+        args.reward_max_fragment_chars,
+    )
 
     logger.info(
         "Starting decoded chemistry PPO loop with max_steps=%s batch_size=%s",
@@ -2284,17 +2403,20 @@ def run_decoded_chem_ppo_loop(
             raise RuntimeError("Decoded chemistry PPO expects rank-2 input_ids tensors.")
 
         with torch.no_grad():
-            generated_ids = policy_model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=int(args.max_new_tokens),
-                do_sample=True,
-                top_p=float(args.top_p),
-                temperature=float(args.temperature),
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                use_cache=False,
-            )
+            generation_kwargs: dict[str, Any] = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "max_new_tokens": generation_config.max_new_tokens,
+                "do_sample": generation_config.do_sample,
+                "pad_token_id": tokenizer.pad_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+                "use_cache": False,
+            }
+            if generation_config.do_sample:
+                generation_kwargs["top_p"] = generation_config.top_p
+                generation_kwargs["temperature"] = generation_config.temperature
+
+            generated_ids = policy_model.generate(**generation_kwargs)
 
         response_ids = generated_ids[:, input_ids.shape[1] :]
         if response_ids.size(1) == 0:
@@ -2383,7 +2505,13 @@ def run_decoded_chem_ppo_loop(
             (
                 not reward_log.get("counterfactual_called", False)
                 and reward_log.get("counterfactual_reason")
-                not in ("invalid_or_not_substructure", "counterfactual_teacher_disabled")
+                not in (
+                    "invalid_or_not_substructure",
+                    "invalid_generation_too_long",
+                    "full_parent_fragment",
+                    "empty_response",
+                    "counterfactual_teacher_disabled",
+                )
             )
             for reward_log in reward_logs
         )
@@ -2412,7 +2540,12 @@ def run_decoded_chem_ppo_loop(
                     reward_log.get("fragment_teacher_sem"),
                     teacher_reason,
                 )
-            elif teacher_reason == "invalid_or_not_substructure":
+            elif teacher_reason in (
+                "invalid_or_not_substructure",
+                "invalid_generation_too_long",
+                "full_parent_fragment",
+                "empty_response",
+            ):
                 logger.info(
                     "[TEACHER_SEM_SKIPPED] reason=%s input=%s",
                     teacher_reason,
@@ -2441,7 +2574,12 @@ def run_decoded_chem_ppo_loop(
                     reward_log.get("counterfactual_sem"),
                     counterfactual_reason,
                 )
-            elif counterfactual_reason == "invalid_or_not_substructure":
+            elif counterfactual_reason in (
+                "invalid_or_not_substructure",
+                "invalid_generation_too_long",
+                "full_parent_fragment",
+                "empty_response",
+            ):
                 logger.info(
                     "[CF_ORACLE_SKIPPED] reason=%s parent=%s fragment=%s",
                     counterfactual_reason,
@@ -2466,6 +2604,15 @@ def run_decoded_chem_ppo_loop(
                     reward_log.get("parent_smiles"),
                     reward_log.get("core_fragment"),
                 )
+            if reward_log.get("failure_tag"):
+                logger.info(
+                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s invalid_detail=%s fragment_chars=%s error=%s",
+                    reward_log.get("id"),
+                    reward_log.get("failure_tag"),
+                    reward_log.get("invalid_detail"),
+                    reward_log.get("generated_char_count"),
+                    reward_log.get("error_message"),
+                )
             logger.info(
                 "[DUMMY_FRAGMENT_NORMALIZED] raw=%s core=%s dummy_count=%s raw_parse_ok=%s core_parse_ok=%s",
                 reward_log.get("raw_fragment"),
@@ -2475,7 +2622,7 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s empty_response=%s full_parent=%s empty_residual=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
@@ -2483,6 +2630,9 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("empty_response"),
                 reward_log.get("full_parent"),
                 reward_log.get("empty_residual"),
+                reward_log.get("failure_tag"),
+                reward_log.get("invalid_detail"),
+                reward_log.get("generated_char_count"),
                 reward_log.get("oracle_ok"),
                 reward_log.get("format"),
                 reward_log.get("valid"),
@@ -2684,6 +2834,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     args = apply_config_overrides(args, parser)
+    args = apply_decoded_chem_generation_defaults(args)
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -2851,6 +3002,7 @@ def main() -> None:
         teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
         full_parent_penalty=args.full_parent_penalty,
         empty_residual_penalty=args.empty_residual_penalty,
+        max_generation_chars=args.reward_max_fragment_chars,
         require_teacher_sem=args.require_teacher_sem,
         disable_counterfactual_teacher=args.disable_counterfactual_teacher,
     )

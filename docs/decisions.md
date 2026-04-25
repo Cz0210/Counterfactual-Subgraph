@@ -29,6 +29,61 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-25] Harden decoded-chem PPO against overlong invalid fragments and surface failure buckets explicitly
+
+### Background
+After the second SFT round, decoded-chem PPO could initialize from
+`checkpoint-300`, keep policy/reference aligned, and run a full 200-step
+diagnose loop. The dominant failure mode, however, was no longer empty
+responses. Instead, many generations failed as invalid or non-substructure
+fragments, often because the decoded fragment was too long, truncated, or left
+rings / brackets / parentheses unclosed. At the same time, full-parent and
+empty-residual failures were still present, but their penalties were not strong
+enough to clearly dominate those degenerate behaviors.
+
+### Decision
+Keep candidate-pool, selector, and SFT logic unchanged, and apply a minimal
+decoded-chem PPO hardening pass only on generation / reward constraints:
+
+- add decoded-generation-specific CLI knobs
+  (`--gen-max-new-tokens`, `--gen-temperature`, `--gen-top-p`,
+  `--gen-do-sample`) while keeping the legacy PPO generation flags usable;
+- when decoded-chem PPO is launched without an explicit generation-length
+  override, tighten its default `max_new_tokens` to `48`;
+- preprocess decoded fragments before chemistry reward by stripping whitespace,
+  keeping only the first line, and rejecting overlong fragments as
+  `invalid_generation_too_long`;
+- keep parse failures on the normal invalid path, but add an explicit
+  `invalid_detail` field for obvious closure issues such as unbalanced
+  parentheses, brackets, or ring digits;
+- increase the default full-parent / empty-residual penalties to `-6.0` and
+  `-4.0`, respectively;
+- log `failure_tag`, `invalid_detail`, and generated fragment length alongside
+  the existing `CHEM_REWARD_COMPONENTS` fields so bad cases can be grepped
+  directly from decoded PPO diagnose runs;
+- forward the new decoded-generation controls through the main HPC Slurm
+  wrappers using `sbatch --export=ALL,...`.
+
+### Alternatives considered
+1. Leave generation settings untouched and only adjust the reward penalties.
+2. Solve the issue in the candidate pool or selector instead of in decoded PPO.
+3. Add aggressive chemistry-aware truncation that rewrites generated fragments
+   rather than rejecting obviously bad strings early.
+
+### Consequences
+- Decoded PPO now pushes back earlier on the observed overlong / truncated
+  invalid fragments without changing the project objective.
+- Logs can distinguish `invalid_generation_too_long`,
+  `invalid_or_not_substructure`, `full_parent_fragment`, and `empty_response`
+  directly.
+- HPC diagnose runs can sweep decoded generation settings through Slurm exports
+  instead of editing shell scripts by hand.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-25] Let decoded-chem PPO initialize both policy and reference from one explicit SFT LoRA checkpoint
 
 ### Background

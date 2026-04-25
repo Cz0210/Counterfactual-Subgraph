@@ -137,6 +137,35 @@ class TeacherSemanticRewardTests(unittest.TestCase):
             rewarder.teacher_sem_missing_penalty,
         )
 
+    def test_overlong_fragment_is_bucketed_before_teacher_scoring(self) -> None:
+        teacher = _FakeTeacherScorer(probability=0.8)
+        rewarder = self._build_rewarder(teacher_scorer=teacher)
+        rewarder.max_generation_chars = 12
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["CCO"],
+            ["CCCCCCCCCCCCCCCC"],
+            parent_labels=[0],
+        )[0]
+
+        self.assertEqual(len(teacher.calls), 0)
+        self.assertEqual(trace.failure_tag, "invalid_generation_too_long")
+        self.assertEqual(trace.teacher_reason, "invalid_generation_too_long")
+        self.assertEqual(trace.counterfactual_teacher_reason, "invalid_generation_too_long")
+        self.assertGreater(trace.generated_char_count, rewarder.max_generation_chars)
+
+    def test_parse_failure_exposes_unclosed_ring_detail(self) -> None:
+        rewarder = self._build_rewarder(teacher_scorer=None)
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["c1ccccc1O"],
+            ["c1ccccc"],
+            parent_labels=[0],
+        )[0]
+
+        self.assertEqual(trace.failure_tag, "invalid_or_not_substructure")
+        self.assertEqual(trace.invalid_detail, "parse_failed_unclosed_ring")
+
 
 @unittest.skipUnless(is_rdkit_available(), "RDKit is required for teacher-semantic scorer tests")
 class TeacherSemanticScorerTests(unittest.TestCase):

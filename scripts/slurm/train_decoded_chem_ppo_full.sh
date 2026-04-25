@@ -29,6 +29,10 @@ OUTPUT_DIR=${OUTPUT_DIR:-${PROJECT_DIR}/outputs/hpc/rl_checkpoints/${RUN_NAME}}
 SFT_LORA_PATH=${SFT_LORA_PATH:-}
 FULL_PARENT_PENALTY=${FULL_PARENT_PENALTY:-}
 EMPTY_RESIDUAL_PENALTY=${EMPTY_RESIDUAL_PENALTY:-}
+GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-}
+GEN_TEMPERATURE=${GEN_TEMPERATURE:-}
+GEN_TOP_P=${GEN_TOP_P:-}
+GEN_DO_SAMPLE=${GEN_DO_SAMPLE:-}
 
 export HF_HOME=/share/home/u20526/.cache/huggingface
 export HF_MODULES_CACHE=/share/home/u20526/.cache/huggingface/modules
@@ -54,6 +58,10 @@ echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "SFT_LORA_PATH=${SFT_LORA_PATH:-<unset>}"
 echo "FULL_PARENT_PENALTY=${FULL_PARENT_PENALTY:-<unset>}"
 echo "EMPTY_RESIDUAL_PENALTY=${EMPTY_RESIDUAL_PENALTY:-<unset>}"
+echo "GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-<unset>}"
+echo "GEN_TEMPERATURE=${GEN_TEMPERATURE:-<unset>}"
+echo "GEN_TOP_P=${GEN_TOP_P:-<unset>}"
+echo "GEN_DO_SAMPLE=${GEN_DO_SAMPLE:-<unset>}"
 echo "====================="
 
 cd "${PROJECT_DIR}"
@@ -173,6 +181,29 @@ if [ -n "${FULL_PARENT_PENALTY}" ]; then
 fi
 if [ -n "${EMPTY_RESIDUAL_PENALTY}" ]; then
   cmd+=(--empty-residual-penalty "${EMPTY_RESIDUAL_PENALTY}")
+fi
+if [ -n "${GEN_MAX_NEW_TOKENS}" ]; then
+  cmd+=(--gen-max-new-tokens "${GEN_MAX_NEW_TOKENS}")
+fi
+if [ -n "${GEN_TEMPERATURE}" ]; then
+  cmd+=(--gen-temperature "${GEN_TEMPERATURE}")
+fi
+if [ -n "${GEN_TOP_P}" ]; then
+  cmd+=(--gen-top-p "${GEN_TOP_P}")
+fi
+if [ -n "${GEN_DO_SAMPLE}" ]; then
+  case "${GEN_DO_SAMPLE,,}" in
+    1|true|yes|on)
+      cmd+=(--gen-do-sample)
+      ;;
+    0|false|no|off)
+      cmd+=(--no-gen-do-sample)
+      ;;
+    *)
+      echo "[ERROR] GEN_DO_SAMPLE must be one of: true/false/1/0/yes/no/on/off"
+      exit 1
+      ;;
+  esac
 fi
 cmd+=("$@")
 

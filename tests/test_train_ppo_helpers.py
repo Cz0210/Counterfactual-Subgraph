@@ -1,6 +1,8 @@
+import argparse
 import unittest
 
 from scripts.train_ppo import (
+    apply_decoded_chem_generation_defaults,
     build_prompt_example_from_json_row,
     diagnose_eval_dataloader_for_generate_completions,
     disable_generate_completions_if_needed,
@@ -9,8 +11,13 @@ from scripts.train_ppo import (
     extract_fragment_smiles,
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
+    resolve_decoded_chem_generation_config,
 )
-from src.rewards.reward_wrapper import shape_probability_reward
+from src.rewards.reward_wrapper import (
+    detect_obvious_parse_failure_detail,
+    preprocess_generated_fragment,
+    shape_probability_reward,
+)
 
 try:
     import torch
@@ -102,6 +109,58 @@ class TrainPPOHelperTests(unittest.TestCase):
     def test_extract_fragment_smiles_uses_first_non_empty_line(self) -> None:
         raw_text = "\n CCO \nExplanation should be ignored"
         self.assertEqual(extract_fragment_smiles(raw_text), "CCO")
+
+    def test_preprocess_generated_fragment_keeps_only_first_line(self) -> None:
+        fragment, char_count = preprocess_generated_fragment("\n CCO \nN#N\n")
+
+        self.assertEqual(fragment, "CCO")
+        self.assertEqual(char_count, 3)
+
+    def test_detect_obvious_parse_failure_detail_flags_unclosed_ring(self) -> None:
+        self.assertEqual(
+            detect_obvious_parse_failure_detail("c1ccccc"),
+            "parse_failed_unclosed_ring",
+        )
+
+    def test_apply_decoded_chem_generation_defaults_tightens_decoded_length(self) -> None:
+        args = argparse.Namespace(
+            ppo_loop="decoded_chem",
+            gen_max_new_tokens=None,
+            max_new_tokens=64,
+        )
+
+        apply_decoded_chem_generation_defaults(args, argv=[])
+
+        self.assertEqual(args.gen_max_new_tokens, 48)
+
+    def test_apply_decoded_chem_generation_defaults_respects_legacy_max_new_tokens(self) -> None:
+        args = argparse.Namespace(
+            ppo_loop="decoded_chem",
+            gen_max_new_tokens=None,
+            max_new_tokens=40,
+        )
+
+        apply_decoded_chem_generation_defaults(args, argv=["--max-new-tokens", "40"])
+
+        self.assertIsNone(args.gen_max_new_tokens)
+
+    def test_resolve_decoded_chem_generation_config_prefers_gen_overrides(self) -> None:
+        args = argparse.Namespace(
+            gen_max_new_tokens=32,
+            max_new_tokens=64,
+            gen_temperature=0.6,
+            temperature=0.8,
+            gen_top_p=0.9,
+            top_p=0.95,
+            gen_do_sample=False,
+        )
+
+        config = resolve_decoded_chem_generation_config(args)
+
+        self.assertEqual(config.max_new_tokens, 32)
+        self.assertAlmostEqual(config.temperature, 0.6)
+        self.assertAlmostEqual(config.top_p, 0.9)
+        self.assertFalse(config.do_sample)
 
     def test_score_adapter_keeps_existing_score(self) -> None:
         model = type("ModelWithScore", (), {})()
