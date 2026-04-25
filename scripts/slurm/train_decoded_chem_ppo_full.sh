@@ -53,7 +53,7 @@ echo "====================="
 cd "${PROJECT_DIR}"
 mkdir -p logs
 
-export PYTHONPATH=$PWD
+export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "===== REPO CHECK ====="
 echo "pwd after cd: $(pwd)"
