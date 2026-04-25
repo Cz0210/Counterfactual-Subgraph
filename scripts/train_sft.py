@@ -100,7 +100,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=2e-4,
         help="Learning rate for QLoRA training.",
     )
+    parser.add_argument(
+        "--report-to",
+        default="none",
+        help=(
+            "Trainer reporting backends. Use 'none' to disable integrations, "
+            "'wandb', 'tensorboard', or a comma-separated list."
+        ),
+    )
     return parser
+
+
+def parse_report_to(report_to: str) -> list[str]:
+    """Normalize CLI report_to input into the Trainer-compatible list form."""
+
+    normalized = str(report_to or "none").strip()
+    if not normalized or normalized.lower() == "none":
+        return []
+    return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
 def load_local_dataset(train_file: Path, val_file: Path):
@@ -205,7 +222,7 @@ def build_training_args(output_dir: Path, args: argparse.Namespace) -> TrainingA
         save_total_limit=3,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
-        report_to="wandb",
+        report_to=parse_report_to(args.report_to),
         optim="paged_adamw_8bit",
         remove_unused_columns=False,
         gradient_checkpointing=True,

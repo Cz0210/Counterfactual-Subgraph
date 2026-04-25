@@ -25,6 +25,7 @@ SAVE_STEPS=${SAVE_STEPS:-100}
 EVAL_STEPS=${EVAL_STEPS:-100}
 LEARNING_RATE=${LEARNING_RATE:-2e-4}
 SEED=${SEED:-7}
+REPORT_TO=${REPORT_TO:-none}
 
 export HF_HOME=/share/home/u20526/.cache/huggingface
 export HF_MODULES_CACHE=/share/home/u20526/.cache/huggingface/modules
@@ -48,6 +49,7 @@ echo "HF_HOME=${HF_HOME}"
 echo "HF_MODULES_CACHE=${HF_MODULES_CACHE}"
 echo "TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
 echo "HUGGINGFACE_HUB_CACHE=${HUGGINGFACE_HUB_CACHE}"
+echo "REPORT_TO=${REPORT_TO}"
 echo "====================="
 
 cd "${PROJECT_DIR}"
@@ -67,6 +69,7 @@ echo "SAVE_STEPS=${SAVE_STEPS}"
 echo "EVAL_STEPS=${EVAL_STEPS}"
 echo "LEARNING_RATE=${LEARNING_RATE}"
 echo "SEED=${SEED}"
+echo "REPORT_TO=${REPORT_TO}"
 echo "========================"
 
 if [ ! -f "${TRAIN_FILE}" ]; then
@@ -89,5 +92,6 @@ python scripts/train_sft.py \
   --save-steps "${SAVE_STEPS}" \
   --eval-steps "${EVAL_STEPS}" \
   --learning-rate "${LEARNING_RATE}" \
+  --report-to "${REPORT_TO}" \
   --seed "${SEED}" \
   "$@"
