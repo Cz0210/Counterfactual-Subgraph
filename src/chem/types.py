@@ -69,3 +69,18 @@ class FragmentValidationResult:
     residual_smiles: str | None = None
     failure_types: tuple[ChemistryFailureType, ...] = ()
     failure_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentRepairResult:
+    """Result of attempting to repair one decoded fragment to a parent-derived subgraph."""
+
+    parent_smiles: str
+    raw_fragment_smiles: str
+    attempted: bool
+    success: bool
+    repaired_fragment_smiles: str | None = None
+    repair_source: str | None = None
+    repair_similarity: float | None = None
+    reason: str | None = None
+    candidate_count: int = 0

@@ -30,6 +30,7 @@ from src.chem import (
     is_parent_substructure,
     is_rdkit_available,
     parse_smiles,
+    repair_fragment_to_parent_subgraph,
     sanitize_molecule,
 )
 from src.rewards.reward_calculator import (
@@ -122,6 +123,12 @@ class RewardTrace:
     failure_tag: str | None = None
     invalid_detail: str | None = None
     generated_char_count: int = 0
+    repair_attempted: bool = False
+    repair_success: bool = False
+    repaired_fragment_smiles: str | None = None
+    repair_source: str | None = None
+    repair_similarity: float | None = None
+    repair_reason: str | None = None
     error_message: str | None = None
     breakdown: dict[str, float] = field(default_factory=dict)
 
@@ -345,6 +352,9 @@ class ChemRLRewarder:
         full_parent_penalty: float = -6.0,
         empty_residual_penalty: float = -4.0,
         max_generation_chars: int = 96,
+        enable_parent_aware_repair: bool = False,
+        repair_min_similarity: float = 0.35,
+        repair_max_candidates: int = 24,
         require_teacher_sem: bool = False,
         disable_counterfactual_teacher: bool = False,
         success_threshold: float = 0.5,
@@ -380,6 +390,9 @@ class ChemRLRewarder:
         self.full_parent_penalty = float(full_parent_penalty)
         self.empty_residual_penalty = float(empty_residual_penalty)
         self.max_generation_chars = int(max_generation_chars)
+        self.enable_parent_aware_repair = bool(enable_parent_aware_repair)
+        self.repair_min_similarity = float(repair_min_similarity)
+        self.repair_max_candidates = int(repair_max_candidates)
         self.require_teacher_sem = bool(require_teacher_sem)
         self.disable_counterfactual_teacher = bool(disable_counterfactual_teacher)
         self.success_threshold = float(success_threshold)
@@ -387,6 +400,10 @@ class ChemRLRewarder:
         self.probability_scale = float(probability_scale)
         if self.max_generation_chars <= 0:
             raise ValueError("max_generation_chars must be positive.")
+        if self.repair_min_similarity < 0.0 or self.repair_min_similarity > 1.0:
+            raise ValueError("repair_min_similarity must be in [0, 1].")
+        if self.repair_max_candidates <= 0:
+            raise ValueError("repair_max_candidates must be positive.")
 
         if self.require_teacher_sem and self.disable_counterfactual_teacher:
             raise ValueError(
@@ -548,6 +565,12 @@ class ChemRLRewarder:
                     "failure_tag": trace.failure_tag,
                     "invalid_detail": trace.invalid_detail,
                     "generated_char_count": int(trace.generated_char_count),
+                    "repair_attempted": bool(trace.repair_attempted),
+                    "repair_success": bool(trace.repair_success),
+                    "repaired_fragment": trace.repaired_fragment_smiles,
+                    "repair_source": trace.repair_source,
+                    "repair_similarity": trace.repair_similarity,
+                    "repair_reason": trace.repair_reason,
                     "error_message": trace.error_message,
                     "original_label": trace.original_label,
                 }
@@ -713,219 +736,280 @@ class ChemRLRewarder:
             )
         parent_canonical_smiles = mol_to_smiles_safe(parent.mol)
 
-        fragment_info = normalize_fragment_with_dummy_atoms(normalized_generated)
-        format_reward = self._compute_format_reward(normalized_generated, fragment_info)
-        valid_reward = self._compute_valid_reward(fragment_info)
-        length_reward = self._compute_length_reward(fragment_info["core_atom_count"])
-        base_trace_kwargs = self._fragment_trace_kwargs(
-            fragment_info,
-            teacher_input_smiles=fragment_info["core_smiles"],
-            teacher_reason="invalid_or_not_substructure",
-        )
-        base_trace_kwargs.update(
-            self._counterfactual_trace_kwargs(
-                counterfactual_teacher_available=bool(
-                    self.counterfactual_teacher_scorer is not None
-                    and self.counterfactual_teacher_scorer.available
-                ),
-                counterfactual_teacher_called=False,
-                counterfactual_teacher_reason="invalid_or_not_substructure",
+        decoded_raw_fragment = normalized_generated
+        effective_fragment = normalized_generated
+        effective_generated_char_count = generated_char_count
+        repair_trace_kwargs = self._repair_trace_kwargs()
+        repair_attempt_consumed = False
+
+        while True:
+            fragment_info = normalize_fragment_with_dummy_atoms(effective_fragment)
+            format_reward = self._compute_format_reward(effective_fragment, fragment_info)
+            valid_reward = self._compute_valid_reward(fragment_info)
+            length_reward = self._compute_length_reward(fragment_info["core_atom_count"])
+            base_trace_kwargs = self._fragment_trace_kwargs(
+                fragment_info,
+                raw_fragment_smiles_override=decoded_raw_fragment,
+                teacher_input_smiles=fragment_info["core_smiles"],
+                teacher_reason="invalid_or_not_substructure",
             )
-        )
-        parse_failure_detail = detect_obvious_parse_failure_detail(normalized_generated)
-        if not fragment_info["raw_parse_ok"]:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="validity",
-                error_message=(
-                    "Generated fragment could not be parsed by RDKit."
-                    if parse_failure_detail is None
-                    else (
-                        "Generated fragment could not be parsed by RDKit. "
-                        f"Likely cause: {parse_failure_detail}."
+            base_trace_kwargs.update(
+                self._counterfactual_trace_kwargs(
+                    counterfactual_teacher_available=bool(
+                        self.counterfactual_teacher_scorer is not None
+                        and self.counterfactual_teacher_scorer.available
+                    ),
+                    counterfactual_teacher_called=False,
+                    counterfactual_teacher_reason="invalid_or_not_substructure",
+                )
+            )
+            base_trace_kwargs.update(repair_trace_kwargs)
+
+            parse_failure_detail = detect_obvious_parse_failure_detail(effective_fragment)
+            if not fragment_info["raw_parse_ok"]:
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="validity",
+                    error_message=(
+                        "Generated fragment could not be parsed by RDKit."
+                        if parse_failure_detail is None
+                        else (
+                            "Generated fragment could not be parsed by RDKit. "
+                            f"Likely cause: {parse_failure_detail}."
+                        )
+                    ),
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag=self._parse_failure_tag(parse_failure_detail),
+                    invalid_detail=parse_failure_detail,
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=0.0,
+                        length_reward=0.0,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    **base_trace_kwargs,
+                )
+
+            try:
+                connected_fragment = bool(is_connected_fragment(effective_fragment))
+            except Exception as exc:
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="validity",
+                    error_message=f"Fragment connectivity check failed: {exc}",
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_ok_but_not_substructure",
+                    invalid_detail="fragment_connectivity_check_failed",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=0.0,
+                        length_reward=length_reward,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    **base_trace_kwargs,
+                )
+
+            if not connected_fragment:
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="validity",
+                    error_message="Generated fragment is not connected.",
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_ok_but_not_substructure",
+                    invalid_detail="fragment_not_connected",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=0.0,
+                        length_reward=length_reward,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    **base_trace_kwargs,
+                )
+
+            # Step B: subgraph match against the parent molecule.
+            core_smiles = fragment_info["core_smiles"]
+            core_mol = fragment_info["core_mol"]
+            if core_mol is None or not fragment_info["core_parse_ok"] or not core_smiles:
+                if not repair_attempt_consumed and self.enable_parent_aware_repair:
+                    repair_result, repair_trace_kwargs = self._attempt_parent_aware_repair(
+                        parent_smiles=normalized_parent,
+                        raw_fragment_smiles=decoded_raw_fragment,
                     )
-                ),
-                generated_char_count=generated_char_count,
-                invalid_detail=parse_failure_detail,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=0.0,
-                    length_reward=0.0,
-                    semantic_reward=self.teacher_sem_missing_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.teacher_sem_missing_penalty,
-                ),
-                **base_trace_kwargs,
-            )
+                    repair_attempt_consumed = True
+                    if (
+                        repair_result is not None
+                        and repair_result.success
+                        and repair_result.repaired_fragment_smiles
+                        and repair_result.repaired_fragment_smiles != effective_fragment
+                    ):
+                        effective_fragment = str(repair_result.repaired_fragment_smiles).strip()
+                        effective_generated_char_count = len(effective_fragment)
+                        continue
+                    base_trace_kwargs.update(repair_trace_kwargs)
 
-        try:
-            connected_fragment = bool(is_connected_fragment(normalized_generated))
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="validity",
-                error_message=f"Fragment connectivity check failed: {exc}",
-                generated_char_count=generated_char_count,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=0.0,
-                    length_reward=length_reward,
-                    semantic_reward=self.teacher_sem_missing_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.teacher_sem_missing_penalty,
-                ),
-                **base_trace_kwargs,
-            )
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="subgraph",
+                    error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_ok_but_not_substructure",
+                    invalid_detail="core_fragment_unusable_after_dummy_normalization",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=self.invalid_subgraph_penalty,
+                        length_reward=length_reward,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    valid_smiles=True,
+                    connected_fragment=True,
+                    **base_trace_kwargs,
+                )
 
-        if not connected_fragment:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="validity",
-                error_message="Generated fragment is not connected.",
-                generated_char_count=generated_char_count,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=0.0,
-                    length_reward=length_reward,
-                    semantic_reward=self.teacher_sem_missing_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.teacher_sem_missing_penalty,
-                ),
-                **base_trace_kwargs,
+            is_full_parent = bool(
+                core_smiles
+                and parent_canonical_smiles
+                and core_smiles == parent_canonical_smiles
             )
+            if is_full_parent:
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="counterfactual",
+                    error_message="Generated fragment matches the full parent molecule.",
+                    generated_char_count=effective_generated_char_count,
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=self.subgraph_pass_reward,
+                        length_reward=length_reward,
+                        semantic_reward=self.full_parent_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.full_parent_penalty,
+                    ),
+                    valid_smiles=True,
+                    connected_fragment=True,
+                    is_subgraph=True,
+                    residual_smiles="",
+                    raw_fragment_smiles=decoded_raw_fragment,
+                    core_fragment_smiles=core_smiles,
+                    raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
+                    core_parse_ok=bool(fragment_info["core_parse_ok"]),
+                    has_dummy_atoms=bool(fragment_info["has_dummy"]),
+                    dummy_count=int(fragment_info["dummy_count"]),
+                    core_atom_count=int(fragment_info["core_atom_count"]),
+                    teacher_input_smiles=core_smiles,
+                    teacher_reason="full_parent_fragment",
+                    parent_without_fragment_smiles="",
+                    counterfactual_teacher_available=bool(
+                        self.counterfactual_teacher_scorer is not None
+                        and self.counterfactual_teacher_scorer.available
+                    ),
+                    counterfactual_teacher_called=False,
+                    counterfactual_teacher_reason="full_parent_fragment",
+                    full_parent=True,
+                    empty_residual=True,
+                    **repair_trace_kwargs,
+                )
 
-        # Step B: subgraph match against the parent molecule.
-        core_smiles = fragment_info["core_smiles"]
-        core_mol = fragment_info["core_mol"]
-        if core_mol is None or not fragment_info["core_parse_ok"] or not core_smiles:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="subgraph",
-                error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
-                generated_char_count=generated_char_count,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.invalid_subgraph_penalty,
-                    length_reward=length_reward,
-                    semantic_reward=self.teacher_sem_missing_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.teacher_sem_missing_penalty,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                **base_trace_kwargs,
-            )
-        is_full_parent = bool(
-            core_smiles
-            and parent_canonical_smiles
-            and core_smiles == parent_canonical_smiles
-        )
-        if is_full_parent:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="counterfactual",
-                error_message="Generated fragment matches the full parent molecule.",
-                generated_char_count=generated_char_count,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.subgraph_pass_reward,
-                    length_reward=length_reward,
-                    semantic_reward=self.full_parent_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.full_parent_penalty,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                is_subgraph=True,
-                residual_smiles="",
-                raw_fragment_smiles=normalized_generated,
-                core_fragment_smiles=core_smiles,
-                raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
-                core_parse_ok=bool(fragment_info["core_parse_ok"]),
-                has_dummy_atoms=bool(fragment_info["has_dummy"]),
-                dummy_count=int(fragment_info["dummy_count"]),
-                core_atom_count=int(fragment_info["core_atom_count"]),
-                teacher_input_smiles=core_smiles,
-                teacher_reason="full_parent_fragment",
-                parent_without_fragment_smiles="",
-                counterfactual_teacher_available=bool(
-                    self.counterfactual_teacher_scorer is not None
-                    and self.counterfactual_teacher_scorer.available
-                ),
-                counterfactual_teacher_called=False,
-                counterfactual_teacher_reason="full_parent_fragment",
-                full_parent=True,
-                empty_residual=True,
-            )
+            try:
+                has_precise_match = bool(
+                    parent.mol.HasSubstructMatch(core_mol, useChirality=True)
+                    and is_parent_substructure(normalized_parent, core_smiles)
+                )
+            except Exception as exc:
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="subgraph",
+                    error_message=f"Subgraph check failed: {exc}",
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_ok_but_not_substructure",
+                    invalid_detail="subgraph_check_failed",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=self.invalid_subgraph_penalty,
+                        length_reward=length_reward,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    **base_trace_kwargs,
+                )
 
-        try:
-            has_precise_match = bool(
-                parent.mol.HasSubstructMatch(core_mol, useChirality=True)
-                and is_parent_substructure(normalized_parent, core_smiles)
-            )
-        except Exception as exc:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="subgraph",
-                error_message=f"Subgraph check failed: {exc}",
-                generated_char_count=generated_char_count,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.invalid_subgraph_penalty,
-                    length_reward=length_reward,
-                    semantic_reward=self.teacher_sem_missing_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.teacher_sem_missing_penalty,
-                ),
-                **base_trace_kwargs,
-            )
+            if not has_precise_match:
+                if not repair_attempt_consumed and self.enable_parent_aware_repair:
+                    repair_result, repair_trace_kwargs = self._attempt_parent_aware_repair(
+                        parent_smiles=normalized_parent,
+                        raw_fragment_smiles=decoded_raw_fragment,
+                    )
+                    repair_attempt_consumed = True
+                    if (
+                        repair_result is not None
+                        and repair_result.success
+                        and repair_result.repaired_fragment_smiles
+                        and repair_result.repaired_fragment_smiles != effective_fragment
+                    ):
+                        effective_fragment = str(repair_result.repaired_fragment_smiles).strip()
+                        effective_generated_char_count = len(effective_fragment)
+                        continue
+                    base_trace_kwargs.update(repair_trace_kwargs)
 
-        if not has_precise_match:
-            return self._fail(
-                parent_smiles=normalized_parent,
-                generated_smiles=generated_smiles,
-                normalized_generated=normalized_generated,
-                original_label=int(original_label),
-                failure_stage="subgraph",
-                error_message="Generated fragment is not a valid parent subgraph.",
-                generated_char_count=generated_char_count,
-                breakdown=self._build_breakdown(
-                    format_reward=format_reward,
-                    valid_reward=valid_reward,
-                    subgraph_reward=self.invalid_subgraph_penalty,
-                    length_reward=length_reward,
-                    semantic_reward=self.teacher_sem_missing_penalty,
-                    fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                    counterfactual_reward=self.teacher_sem_missing_penalty,
-                ),
-                valid_smiles=True,
-                connected_fragment=True,
-                **base_trace_kwargs,
-            )
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="subgraph",
+                    error_message="Generated fragment is not a valid parent subgraph.",
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_ok_but_not_substructure",
+                    invalid_detail="not_parent_substructure",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=self.invalid_subgraph_penalty,
+                        length_reward=length_reward,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    valid_smiles=True,
+                    connected_fragment=True,
+                    **base_trace_kwargs,
+                )
+
+            normalized_generated = effective_fragment
+            generated_char_count = effective_generated_char_count
+            break
 
         fragment_teacher_reward, teacher_trace_kwargs = self._score_teacher_semantic(
             core_smiles=core_smiles,
@@ -1081,6 +1165,11 @@ class ChemRLRewarder:
             return "invalid_or_not_substructure"
         return failure_stage or None
 
+    def _parse_failure_tag(self, parse_failure_detail: str | None) -> str:
+        if parse_failure_detail:
+            return parse_failure_detail
+        return "parse_failed"
+
     def _build_breakdown(
         self,
         *,
@@ -1116,6 +1205,7 @@ class ChemRLRewarder:
         self,
         fragment_info: dict[str, Any],
         *,
+        raw_fragment_smiles_override: str | None = None,
         teacher_input_smiles: str | None,
         teacher_available: bool = False,
         teacher_called: bool = False,
@@ -1124,7 +1214,11 @@ class ChemRLRewarder:
         teacher_reason: str | None = None,
     ) -> dict[str, Any]:
         return {
-            "raw_fragment_smiles": fragment_info.get("raw"),
+            "raw_fragment_smiles": (
+                raw_fragment_smiles_override
+                if raw_fragment_smiles_override is not None
+                else fragment_info.get("raw")
+            ),
             "core_fragment_smiles": fragment_info.get("core_smiles"),
             "raw_parse_ok": bool(fragment_info.get("raw_parse_ok")),
             "core_parse_ok": bool(fragment_info.get("core_parse_ok")),
@@ -1167,6 +1261,49 @@ class ChemRLRewarder:
             "cf_flip": bool(cf_flip),
             "empty_residual": bool(empty_residual),
         }
+
+    def _repair_trace_kwargs(
+        self,
+        *,
+        repair_attempted: bool = False,
+        repair_success: bool = False,
+        repaired_fragment_smiles: str | None = None,
+        repair_source: str | None = None,
+        repair_similarity: float | None = None,
+        repair_reason: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "repair_attempted": bool(repair_attempted),
+            "repair_success": bool(repair_success),
+            "repaired_fragment_smiles": repaired_fragment_smiles,
+            "repair_source": repair_source,
+            "repair_similarity": repair_similarity,
+            "repair_reason": repair_reason,
+        }
+
+    def _attempt_parent_aware_repair(
+        self,
+        *,
+        parent_smiles: str,
+        raw_fragment_smiles: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        if not self.enable_parent_aware_repair:
+            return None, self._repair_trace_kwargs()
+
+        repair_result = repair_fragment_to_parent_subgraph(
+            parent_smiles,
+            raw_fragment_smiles,
+            min_similarity=self.repair_min_similarity,
+            max_candidates=self.repair_max_candidates,
+        )
+        return repair_result, self._repair_trace_kwargs(
+            repair_attempted=repair_result.attempted,
+            repair_success=repair_result.success,
+            repaired_fragment_smiles=repair_result.repaired_fragment_smiles,
+            repair_source=repair_result.repair_source,
+            repair_similarity=repair_result.repair_similarity,
+            repair_reason=repair_result.reason,
+        )
 
     def _score_teacher_semantic(
         self,
@@ -1555,6 +1692,12 @@ class ChemRLRewarder:
         failure_tag: str | None = None,
         invalid_detail: str | None = None,
         generated_char_count: int = 0,
+        repair_attempted: bool = False,
+        repair_success: bool = False,
+        repaired_fragment_smiles: str | None = None,
+        repair_source: str | None = None,
+        repair_similarity: float | None = None,
+        repair_reason: str | None = None,
         empty_response: bool = False,
         full_parent: bool = False,
         empty_residual: bool = False,
@@ -1615,6 +1758,12 @@ class ChemRLRewarder:
             ),
             invalid_detail=invalid_detail,
             generated_char_count=int(generated_char_count),
+            repair_attempted=bool(repair_attempted),
+            repair_success=bool(repair_success),
+            repaired_fragment_smiles=repaired_fragment_smiles,
+            repair_source=repair_source,
+            repair_similarity=repair_similarity,
+            repair_reason=repair_reason,
             error_message=error_message,
             breakdown=dict(breakdown),
         )
