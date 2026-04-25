@@ -3,6 +3,7 @@ import unittest
 
 from scripts.train_ppo import (
     apply_decoded_chem_generation_defaults,
+    build_parser,
     build_prompt_example_from_json_row,
     diagnose_eval_dataloader_for_generate_completions,
     disable_generate_completions_if_needed,
@@ -161,6 +162,23 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertAlmostEqual(config.temperature, 0.6)
         self.assertAlmostEqual(config.top_p, 0.9)
         self.assertFalse(config.do_sample)
+
+    def test_parser_accepts_parent_repair_flags(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--enable-parent-aware-repair",
+                "--repair-min-similarity",
+                "0.45",
+                "--repair-max-candidates",
+                "32",
+            ]
+        )
+
+        self.assertTrue(args.enable_parent_aware_repair)
+        self.assertAlmostEqual(args.repair_min_similarity, 0.45)
+        self.assertEqual(args.repair_max_candidates, 32)
 
     def test_score_adapter_keeps_existing_score(self) -> None:
         model = type("ModelWithScore", (), {})()

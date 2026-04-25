@@ -29,6 +29,47 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-25] Wire parent-aware repair controls through decoded PPO CLI and Slurm wrappers
+
+### Background
+The decoded PPO rewarder already supported one optional parent-aware repair
+attempt for broken decoded fragments, but the training entrypoint and the HPC
+Slurm wrappers did not expose those controls. As a result, users could set
+environment variables such as `ENABLE_PARENT_AWARE_REPAIR=true` in `sbatch`
+commands without the settings ever reaching `ChemRLRewarder`.
+
+### Decision
+Expose the existing repair controls end-to-end without changing the reward
+objective:
+
+- add `--enable-parent-aware-repair`,
+  `--repair-min-similarity`, and `--repair-max-candidates` to
+  `scripts/train_ppo.py`;
+- pass the parsed values into `ChemRLRewarder`;
+- log the resolved repair configuration at startup;
+- forward the corresponding environment variables through
+  `scripts/slurm/train_decoded_chem_ppo_full.sh` and
+  `scripts/slurm/train_ppo.sh`.
+
+### Alternatives considered
+1. Leave repair available only as a code-level option in `reward_wrapper`.
+2. Ask users to edit the Slurm shell scripts manually for each experiment.
+3. Rework repair behavior inside the rewarder without exposing it through the
+   CLI.
+
+### Consequences
+- `sbatch --export=ALL,ENABLE_PARENT_AWARE_REPAIR=...` style launches now
+  actually affect decoded PPO runs.
+- HPC diagnose jobs can sweep repair settings in the same way they already
+  sweep decoded generation settings.
+- The reward behavior itself is unchanged unless the user explicitly enables
+  repair.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-25] Preserve raw dummy-atom evidence in decoded PPO parse-failure logs
 
 ### Background

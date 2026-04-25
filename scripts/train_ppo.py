@@ -315,6 +315,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Penalty applied when deletion yields an empty residual molecule.",
     )
     parser.add_argument(
+        "--enable-parent-aware-repair",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable one parent-aware repair attempt when a decoded fragment fails core/substructure checks.",
+    )
+    parser.add_argument(
+        "--repair-min-similarity",
+        type=float,
+        default=0.35,
+        help="Minimum similarity threshold for parent-aware repair candidates.",
+    )
+    parser.add_argument(
+        "--repair-max-candidates",
+        type=int,
+        default=24,
+        help="Maximum number of parent-aware repair candidates to inspect per fragment.",
+    )
+    parser.add_argument(
         "--disable-counterfactual-teacher",
         action="store_true",
         help="Disable the deletion-based counterfactual teacher oracle and keep only fragment-level teacher diagnostics.",
@@ -2996,6 +3014,12 @@ def main() -> None:
         args.teacher_cf_flip_bonus,
         args.disable_counterfactual_teacher,
     )
+    logger.info(
+        "[PARENT_REPAIR_CONFIG] enabled=%s min_similarity=%s max_candidates=%s",
+        args.enable_parent_aware_repair,
+        args.repair_min_similarity,
+        args.repair_max_candidates,
+    )
     if args.require_teacher_sem and args.disable_counterfactual_teacher:
         raise RuntimeError(
             "--require-teacher-sem cannot be used together with --disable-counterfactual-teacher."
@@ -3040,6 +3064,9 @@ def main() -> None:
         teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
         full_parent_penalty=args.full_parent_penalty,
         empty_residual_penalty=args.empty_residual_penalty,
+        enable_parent_aware_repair=args.enable_parent_aware_repair,
+        repair_min_similarity=args.repair_min_similarity,
+        repair_max_candidates=args.repair_max_candidates,
         max_generation_chars=args.reward_max_fragment_chars,
         require_teacher_sem=args.require_teacher_sem,
         disable_counterfactual_teacher=args.disable_counterfactual_teacher,

@@ -16,6 +16,9 @@ GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-}
 GEN_TEMPERATURE=${GEN_TEMPERATURE:-}
 GEN_TOP_P=${GEN_TOP_P:-}
 GEN_DO_SAMPLE=${GEN_DO_SAMPLE:-}
+ENABLE_PARENT_AWARE_REPAIR=${ENABLE_PARENT_AWARE_REPAIR:-}
+REPAIR_MIN_SIMILARITY=${REPAIR_MIN_SIMILARITY:-}
+REPAIR_MAX_CANDIDATES=${REPAIR_MAX_CANDIDATES:-}
 
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
@@ -43,6 +46,9 @@ echo "GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-<unset>}"
 echo "GEN_TEMPERATURE=${GEN_TEMPERATURE:-<unset>}"
 echo "GEN_TOP_P=${GEN_TOP_P:-<unset>}"
 echo "GEN_DO_SAMPLE=${GEN_DO_SAMPLE:-<unset>}"
+echo "ENABLE_PARENT_AWARE_REPAIR=${ENABLE_PARENT_AWARE_REPAIR:-<unset>}"
+echo "REPAIR_MIN_SIMILARITY=${REPAIR_MIN_SIMILARITY:-<unset>}"
+echo "REPAIR_MAX_CANDIDATES=${REPAIR_MAX_CANDIDATES:-<unset>}"
 if [ ! -f "${TEACHER_PATH}" ]; then
   echo "[ERROR] Teacher file not found: ${TEACHER_PATH}"
   exit 1
@@ -87,6 +93,26 @@ if [ -n "${GEN_DO_SAMPLE}" ]; then
       exit 1
       ;;
   esac
+fi
+if [ -n "${ENABLE_PARENT_AWARE_REPAIR}" ]; then
+  case "${ENABLE_PARENT_AWARE_REPAIR,,}" in
+    1|true|yes|on)
+      cmd+=(--enable-parent-aware-repair)
+      ;;
+    0|false|no|off)
+      cmd+=(--no-enable-parent-aware-repair)
+      ;;
+    *)
+      echo "[ERROR] ENABLE_PARENT_AWARE_REPAIR must be one of: true/false/1/0/yes/no/on/off"
+      exit 1
+      ;;
+  esac
+fi
+if [ -n "${REPAIR_MIN_SIMILARITY}" ]; then
+  cmd+=(--repair-min-similarity "${REPAIR_MIN_SIMILARITY}")
+fi
+if [ -n "${REPAIR_MAX_CANDIDATES}" ]; then
+  cmd+=(--repair-max-candidates "${REPAIR_MAX_CANDIDATES}")
 fi
 cmd+=("$@")
 
