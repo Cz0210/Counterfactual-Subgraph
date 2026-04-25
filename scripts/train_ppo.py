@@ -2522,6 +2522,23 @@ def run_decoded_chem_ppo_loop(
                 "[CHEM_REWARD_COMPONENTS_MISSING] missing=%s",
                 ",".join(missing_components),
             )
+        parse_failed_with_dummy_count = sum(
+            1
+            for reward_log in reward_logs
+            if str(reward_log.get("parse_failed_reason") or "").startswith("parse_failed")
+            and bool(reward_log.get("raw_has_dummy"))
+        )
+        parse_failed_without_dummy_count = sum(
+            1
+            for reward_log in reward_logs
+            if str(reward_log.get("parse_failed_reason") or "").startswith("parse_failed")
+            and not bool(reward_log.get("raw_has_dummy"))
+        )
+        logger.info(
+            "[CHEM_REWARD_PARSE_STATS] parse_failed_with_dummy_count=%s parse_failed_without_dummy_count=%s",
+            parse_failed_with_dummy_count,
+            parse_failed_without_dummy_count,
+        )
         reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
         for reward_log in reward_logs_to_print:
             teacher_reason = reward_log.get("teacher_reason")
@@ -2606,27 +2623,48 @@ def run_decoded_chem_ppo_loop(
                 )
             if reward_log.get("failure_tag"):
                 logger.info(
-                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s invalid_detail=%s fragment_chars=%s error=%s",
+                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s parse_failed_reason=%s parse_stage=%s raw_has_dummy=%s raw_dummy_count=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s invalid_detail=%s fragment_chars=%s error=%s",
                     reward_log.get("id"),
                     reward_log.get("failure_tag"),
+                    reward_log.get("parse_failed_reason"),
+                    reward_log.get("parse_stage"),
+                    reward_log.get("raw_has_dummy"),
+                    reward_log.get("raw_dummy_count"),
+                    reward_log.get("parsed_raw_with_dummy"),
+                    reward_log.get("parsed_core"),
+                    reward_log.get("dummy_removed_before_parse"),
                     reward_log.get("invalid_detail"),
                     reward_log.get("generated_char_count"),
                     reward_log.get("error_message"),
                 )
             logger.info(
-                "[DUMMY_FRAGMENT_NORMALIZED] raw=%s core=%s dummy_count=%s raw_parse_ok=%s core_parse_ok=%s",
+                "[DUMMY_FRAGMENT_NORMALIZED] raw=%s core=%s raw_has_dummy=%s raw_dummy_count=%s dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s raw_parse_ok=%s core_parse_ok=%s",
                 reward_log.get("raw_fragment"),
                 reward_log.get("core_fragment"),
+                reward_log.get("raw_has_dummy"),
+                reward_log.get("raw_dummy_count"),
                 reward_log.get("dummy_count"),
+                reward_log.get("parse_stage"),
+                reward_log.get("parsed_raw_with_dummy"),
+                reward_log.get("parsed_core"),
+                reward_log.get("dummy_removed_before_parse"),
+                reward_log.get("parse_failed_reason"),
                 reward_log.get("parse_ok"),
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
                 reward_log.get("core_fragment"),
+                reward_log.get("raw_has_dummy"),
+                reward_log.get("raw_dummy_count"),
+                reward_log.get("parse_stage"),
+                reward_log.get("parsed_raw_with_dummy"),
+                reward_log.get("parsed_core"),
+                reward_log.get("dummy_removed_before_parse"),
+                reward_log.get("parse_failed_reason"),
                 reward_log.get("empty_response"),
                 reward_log.get("full_parent"),
                 reward_log.get("empty_residual"),

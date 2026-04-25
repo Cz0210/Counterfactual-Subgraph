@@ -50,6 +50,31 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertEqual(info["core_smiles"], "c1ccccc1")
         self.assertEqual(info["core_atom_count"], 6)
 
+    def test_normalize_fragment_with_dummy_atoms_preserves_raw_dummy_info_on_parse_failure(self) -> None:
+        info = normalize_fragment_with_dummy_atoms("*C?")
+
+        self.assertFalse(info["raw_parse_ok"])
+        self.assertTrue(info["raw_has_dummy"])
+        self.assertEqual(info["raw_dummy_count"], 1)
+        self.assertTrue(info["has_dummy"])
+        self.assertEqual(info["dummy_count"], 1)
+        self.assertEqual(info["parse_stage"], "raw_with_dummy")
+        self.assertFalse(info["dummy_removed_before_parse"])
+        self.assertFalse(info["parsed_raw_with_dummy"])
+        self.assertFalse(info["parsed_core"])
+        self.assertEqual(info["parse_failed_reason"], "parse_failed_raw_with_dummy")
+
+    def test_normalize_fragment_without_dummy_uses_raw_without_dummy_bucket(self) -> None:
+        info = normalize_fragment_with_dummy_atoms("C?C")
+
+        self.assertFalse(info["raw_parse_ok"])
+        self.assertFalse(info["raw_has_dummy"])
+        self.assertEqual(info["raw_dummy_count"], 0)
+        self.assertFalse(info["has_dummy"])
+        self.assertEqual(info["dummy_count"], 0)
+        self.assertEqual(info["parse_stage"], "raw_without_dummy")
+        self.assertEqual(info["parse_failed_reason"], "parse_failed_raw_without_dummy")
+
     def test_reward_trace_uses_core_fragment_for_dummy_atom_substructure(self) -> None:
         rewarder = self._build_rewarder()
         parent = "O=C(O)Cc1ccc(SSc2ccc(CC(=O)O)cc2)cc1"
@@ -71,6 +96,27 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertGreater(trace.breakdown["valid_r"], 0.0)
         self.assertGreater(trace.breakdown["subgraph_r"], 0.0)
         self.assertGreaterEqual(trace.breakdown["length_r"], 0.0)
+
+    def test_reward_trace_marks_parse_failed_after_dummy_removal(self) -> None:
+        rewarder = self._build_rewarder()
+        parent = "CCO"
+        fragment = "*"
+
+        trace = rewarder.calculate_reward_details_batch(
+            [parent],
+            [fragment],
+            parent_labels=[1],
+        )[0]
+
+        self.assertTrue(trace.raw_parse_ok)
+        self.assertTrue(trace.raw_has_dummy)
+        self.assertEqual(trace.raw_dummy_count, 1)
+        self.assertEqual(trace.failure_tag, "parse_failed_after_dummy_removal")
+        self.assertEqual(trace.parse_stage, "core_after_dummy_removal")
+        self.assertTrue(trace.parsed_raw_with_dummy)
+        self.assertFalse(trace.parsed_core)
+        self.assertFalse(trace.dummy_removed_before_parse)
+        self.assertEqual(trace.parse_failed_reason, "parse_failed_after_dummy_removal")
 
 
 if __name__ == "__main__":

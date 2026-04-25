@@ -101,6 +101,13 @@ class RewardTrace:
     core_parse_ok: bool = False
     has_dummy_atoms: bool = False
     dummy_count: int = 0
+    raw_has_dummy: bool = False
+    raw_dummy_count: int = 0
+    parse_stage: str | None = None
+    parsed_raw_with_dummy: bool = False
+    parsed_core: bool = False
+    dummy_removed_before_parse: bool = False
+    parse_failed_reason: str | None = None
     core_atom_count: int = 0
     teacher_input_smiles: str | None = None
     teacher_available: bool = False
@@ -259,50 +266,94 @@ def detect_obvious_parse_failure_detail(smiles: str) -> str | None:
     return None
 
 
+def classify_parse_failed_reason(
+    *,
+    raw_fragment_smiles: str,
+    raw_has_dummy: bool,
+    parse_stage: str | None,
+) -> str:
+    """Bucket parse failures without rewriting the fragment string."""
+
+    closure_reason = detect_obvious_parse_failure_detail(raw_fragment_smiles)
+    if closure_reason is not None:
+        return closure_reason
+    if parse_stage == "core_after_dummy_removal":
+        return "parse_failed_after_dummy_removal"
+    if raw_has_dummy:
+        return "parse_failed_raw_with_dummy"
+    return "parse_failed_raw_without_dummy"
+
+
 def normalize_fragment_with_dummy_atoms(fragment_smiles: str) -> dict[str, Any]:
     """Build one raw/core fragment view while preserving dummy-atom semantics."""
 
     normalized = str(fragment_smiles or "").strip()
+    raw_dummy_count = normalized.count("*")
+    raw_has_dummy = raw_dummy_count > 0
     normalized_fragment: dict[str, Any] = {
         "raw": normalized,
         "raw_parse_ok": False,
         "raw_sanitized": False,
         "raw_mol": None,
         "raw_canonical_smiles": None,
-        "has_dummy": False,
+        "has_dummy": raw_has_dummy,
+        "raw_has_dummy": raw_has_dummy,
+        "raw_dummy_count": raw_dummy_count,
         "core_mol": None,
         "core_smiles": None,
         "core_parse_ok": False,
-        "dummy_count": 0,
+        "dummy_count": raw_dummy_count,
+        "parse_stage": None,
+        "parsed_raw_with_dummy": False,
+        "parsed_core": False,
+        "dummy_removed_before_parse": False,
+        "parse_failed_reason": None,
         "core_atom_count": 0,
     }
     if not normalized or not is_rdkit_available() or Chem is None:
         return normalized_fragment
 
+    normalized_fragment["parse_stage"] = "raw_with_dummy" if raw_has_dummy else "raw_without_dummy"
     parsed_raw = parse_smiles(
         normalized,
         sanitize=True,
         canonicalize=True,
         allow_capped_fragments=True,
     )
+    normalized_fragment["parsed_raw_with_dummy"] = bool(parsed_raw.parseable)
     normalized_fragment["raw_parse_ok"] = bool(parsed_raw.parseable)
     normalized_fragment["raw_sanitized"] = bool(parsed_raw.sanitized)
     normalized_fragment["raw_mol"] = parsed_raw.mol
     normalized_fragment["raw_canonical_smiles"] = parsed_raw.canonical_smiles
     if parsed_raw.mol is None:
+        normalized_fragment["parse_failed_reason"] = classify_parse_failed_reason(
+            raw_fragment_smiles=normalized,
+            raw_has_dummy=raw_has_dummy,
+            parse_stage=normalized_fragment["parse_stage"],
+        )
         return normalized_fragment
 
-    normalized_fragment["has_dummy"] = has_dummy_atom(parsed_raw.mol)
-    normalized_fragment["dummy_count"] = _dummy_atom_count(parsed_raw.mol)
+    parsed_dummy_count = _dummy_atom_count(parsed_raw.mol)
+    normalized_fragment["has_dummy"] = raw_has_dummy or has_dummy_atom(parsed_raw.mol)
+    normalized_fragment["dummy_count"] = max(raw_dummy_count, parsed_dummy_count)
 
     if normalized_fragment["has_dummy"]:
+        normalized_fragment["parse_stage"] = "core_after_dummy_removal"
         core_mol = remove_dummy_atoms_from_mol(parsed_raw.mol)
         normalized_fragment["core_mol"] = core_mol
         normalized_fragment["core_smiles"] = mol_to_smiles_safe(core_mol)
+        normalized_fragment["parsed_core"] = core_mol is not None
         normalized_fragment["core_parse_ok"] = core_mol is not None
         normalized_fragment["core_atom_count"] = _non_dummy_atom_count(core_mol)
+        if core_mol is None:
+            normalized_fragment["parse_failed_reason"] = classify_parse_failed_reason(
+                raw_fragment_smiles=normalized,
+                raw_has_dummy=raw_has_dummy,
+                parse_stage=normalized_fragment["parse_stage"],
+            )
         return normalized_fragment
 
+    normalized_fragment["parse_stage"] = "core_without_dummy_removal"
     sanitized_core = None
     if parsed_raw.mol is not None:
         sanitized_core, _, _, _ = sanitize_molecule(
@@ -313,6 +364,7 @@ def normalize_fragment_with_dummy_atoms(fragment_smiles: str) -> dict[str, Any]:
     normalized_fragment["core_smiles"] = (
         parsed_raw.canonical_smiles if sanitized_core is not None else None
     )
+    normalized_fragment["parsed_core"] = sanitized_core is not None
     normalized_fragment["core_parse_ok"] = sanitized_core is not None
     normalized_fragment["core_atom_count"] = _non_dummy_atom_count(sanitized_core)
     return normalized_fragment
@@ -533,6 +585,13 @@ class ChemRLRewarder:
                     "total": float(trace.reward),
                     "parse_ok": bool(trace.raw_parse_ok),
                     "core_parse_ok": bool(trace.core_parse_ok),
+                    "raw_has_dummy": bool(trace.raw_has_dummy),
+                    "raw_dummy_count": int(trace.raw_dummy_count),
+                    "parse_stage": trace.parse_stage,
+                    "parsed_raw_with_dummy": bool(trace.parsed_raw_with_dummy),
+                    "parsed_core": bool(trace.parsed_core),
+                    "dummy_removed_before_parse": bool(trace.dummy_removed_before_parse),
+                    "parse_failed_reason": trace.parse_failed_reason,
                     "substructure_ok": bool(trace.is_subgraph),
                     "connected_ok": bool(trace.connected_fragment),
                     "deletion_ok": bool(trace.deletion_success),
@@ -765,8 +824,15 @@ class ChemRLRewarder:
             )
             base_trace_kwargs.update(repair_trace_kwargs)
 
-            parse_failure_detail = detect_obvious_parse_failure_detail(effective_fragment)
             if not fragment_info["raw_parse_ok"]:
+                parse_failure_reason = str(
+                    fragment_info.get("parse_failed_reason")
+                    or classify_parse_failed_reason(
+                        raw_fragment_smiles=effective_fragment,
+                        raw_has_dummy=bool(fragment_info.get("raw_has_dummy")),
+                        parse_stage=fragment_info.get("parse_stage"),
+                    )
+                )
                 return self._fail(
                     parent_smiles=normalized_parent,
                     generated_smiles=generated_smiles,
@@ -775,15 +841,15 @@ class ChemRLRewarder:
                     failure_stage="validity",
                     error_message=(
                         "Generated fragment could not be parsed by RDKit."
-                        if parse_failure_detail is None
+                        if parse_failure_reason is None
                         else (
                             "Generated fragment could not be parsed by RDKit. "
-                            f"Likely cause: {parse_failure_detail}."
+                            f"Likely cause: {parse_failure_reason}."
                         )
                     ),
                     generated_char_count=effective_generated_char_count,
-                    failure_tag=self._parse_failure_tag(parse_failure_detail),
-                    invalid_detail=parse_failure_detail,
+                    failure_tag=self._parse_failure_tag(parse_failure_reason),
+                    invalid_detail=parse_failure_reason,
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
                         valid_reward=valid_reward,
@@ -873,7 +939,11 @@ class ChemRLRewarder:
                     failure_stage="subgraph",
                     error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
                     generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_ok_but_not_substructure",
+                    failure_tag=(
+                        "parse_failed_after_dummy_removal"
+                        if bool(fragment_info.get("raw_has_dummy"))
+                        else "parse_ok_but_not_substructure"
+                    ),
                     invalid_detail="core_fragment_unusable_after_dummy_normalization",
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
@@ -922,6 +992,13 @@ class ChemRLRewarder:
                     core_parse_ok=bool(fragment_info["core_parse_ok"]),
                     has_dummy_atoms=bool(fragment_info["has_dummy"]),
                     dummy_count=int(fragment_info["dummy_count"]),
+                    raw_has_dummy=bool(fragment_info["raw_has_dummy"]),
+                    raw_dummy_count=int(fragment_info["raw_dummy_count"]),
+                    parse_stage=fragment_info.get("parse_stage"),
+                    parsed_raw_with_dummy=bool(fragment_info["parsed_raw_with_dummy"]),
+                    parsed_core=bool(fragment_info["parsed_core"]),
+                    dummy_removed_before_parse=bool(fragment_info["dummy_removed_before_parse"]),
+                    parse_failed_reason=fragment_info.get("parse_failed_reason"),
                     core_atom_count=int(fragment_info["core_atom_count"]),
                     teacher_input_smiles=core_smiles,
                     teacher_reason="full_parent_fragment",
@@ -1078,6 +1155,13 @@ class ChemRLRewarder:
             core_parse_ok=bool(fragment_info["core_parse_ok"]),
             has_dummy_atoms=bool(fragment_info["has_dummy"]),
             dummy_count=int(fragment_info["dummy_count"]),
+            raw_has_dummy=bool(fragment_info["raw_has_dummy"]),
+            raw_dummy_count=int(fragment_info["raw_dummy_count"]),
+            parse_stage=fragment_info.get("parse_stage"),
+            parsed_raw_with_dummy=bool(fragment_info["parsed_raw_with_dummy"]),
+            parsed_core=bool(fragment_info["parsed_core"]),
+            dummy_removed_before_parse=bool(fragment_info["dummy_removed_before_parse"]),
+            parse_failed_reason=fragment_info.get("parse_failed_reason"),
             core_atom_count=int(fragment_info["core_atom_count"]),
             teacher_input_smiles=core_smiles,
             teacher_available=bool(success_trace_kwargs.get("teacher_available", False)),
@@ -1166,9 +1250,7 @@ class ChemRLRewarder:
         return failure_stage or None
 
     def _parse_failure_tag(self, parse_failure_detail: str | None) -> str:
-        if parse_failure_detail:
-            return parse_failure_detail
-        return "parse_failed"
+        return parse_failure_detail or "parse_failed"
 
     def _build_breakdown(
         self,
@@ -1224,6 +1306,13 @@ class ChemRLRewarder:
             "core_parse_ok": bool(fragment_info.get("core_parse_ok")),
             "has_dummy_atoms": bool(fragment_info.get("has_dummy")),
             "dummy_count": int(fragment_info.get("dummy_count", 0)),
+            "raw_has_dummy": bool(fragment_info.get("raw_has_dummy")),
+            "raw_dummy_count": int(fragment_info.get("raw_dummy_count", 0)),
+            "parse_stage": fragment_info.get("parse_stage"),
+            "parsed_raw_with_dummy": bool(fragment_info.get("parsed_raw_with_dummy")),
+            "parsed_core": bool(fragment_info.get("parsed_core")),
+            "dummy_removed_before_parse": bool(fragment_info.get("dummy_removed_before_parse")),
+            "parse_failed_reason": fragment_info.get("parse_failed_reason"),
             "core_atom_count": int(fragment_info.get("core_atom_count", 0)),
             "teacher_input_smiles": teacher_input_smiles,
             "teacher_available": bool(teacher_available),
@@ -1671,6 +1760,13 @@ class ChemRLRewarder:
         core_parse_ok: bool = False,
         has_dummy_atoms: bool = False,
         dummy_count: int = 0,
+        raw_has_dummy: bool = False,
+        raw_dummy_count: int = 0,
+        parse_stage: str | None = None,
+        parsed_raw_with_dummy: bool = False,
+        parsed_core: bool = False,
+        dummy_removed_before_parse: bool = False,
+        parse_failed_reason: str | None = None,
         core_atom_count: int = 0,
         teacher_input_smiles: str | None = None,
         teacher_available: bool = False,
@@ -1730,6 +1826,13 @@ class ChemRLRewarder:
             core_parse_ok=bool(core_parse_ok),
             has_dummy_atoms=bool(has_dummy_atoms),
             dummy_count=int(dummy_count),
+            raw_has_dummy=bool(raw_has_dummy),
+            raw_dummy_count=int(raw_dummy_count),
+            parse_stage=parse_stage,
+            parsed_raw_with_dummy=bool(parsed_raw_with_dummy),
+            parsed_core=bool(parsed_core),
+            dummy_removed_before_parse=bool(dummy_removed_before_parse),
+            parse_failed_reason=parse_failed_reason,
             core_atom_count=int(core_atom_count),
             teacher_input_smiles=teacher_input_smiles,
             teacher_available=bool(teacher_available),

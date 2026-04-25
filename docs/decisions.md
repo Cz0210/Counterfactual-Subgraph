@@ -29,6 +29,59 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-25] Preserve raw dummy-atom evidence in decoded PPO parse-failure logs
+
+### Background
+The decoded-chem PPO reward path already used dummy-aware normalization for
+successful capped fragments such as `*CC(=O)O`, but parse-failed fragments were
+still difficult to diagnose from logs alone. In particular, once raw parsing
+failed, the existing trace fields could lose the evidence that the original
+fragment string actually contained `*`, which made it hard to tell whether
+failures mostly came from uncapped raw fragments or from the dummy-atom path
+itself.
+
+### Decision
+Keep the decoded PPO chemistry objective unchanged and apply a minimal logging /
+normalization refinement only in `reward_wrapper` and `train_ppo`:
+
+- preserve the raw fragment string as the source of truth for dummy presence and
+  dummy count before any RDKit parsing happens;
+- continue to parse the raw fragment with `*` intact and never do string-level
+  `replace("*", "")` before `MolFromSmiles`;
+- keep `core_fragment` as a derived post-parse view used for teacher scoring and
+  deletion checks only;
+- surface explicit parse metadata in decoded PPO logs, including
+  `raw_has_dummy`, `raw_dummy_count`, `parse_stage`,
+  `parsed_raw_with_dummy`, `parsed_core`, `dummy_removed_before_parse`, and
+  `parse_failed_reason`;
+- split parse-failure buckets into
+  `parse_failed_raw_with_dummy`, `parse_failed_raw_without_dummy`,
+  `parse_failed_after_dummy_removal`, plus the existing obvious closure buckets
+  such as `parse_failed_unclosed_ring` and
+  `parse_failed_unbalanced_parentheses`;
+- add per-batch counters for parse failures with and without raw dummy atoms.
+
+### Alternatives considered
+1. Keep the existing reward path unchanged and infer dummy-related failures only
+   from ad hoc grep patterns.
+2. Strip dummy atoms from strings before parsing so that all failures collapse
+   onto core-fragment syntax.
+3. Attempt automatic repair of ring digits or parentheses during reward-time
+   normalization.
+
+### Consequences
+- Diagnose logs can now answer whether parse failures mostly come from raw
+  fragments without `*` or from dummy-aware normalization paths.
+- Successful capped fragments still use the same raw-then-core workflow, so the
+  counterfactual objective and deletion logic do not change.
+- The codebase now makes it explicit that dummy removal happens after raw
+  parsing, not before it.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-25] Harden decoded-chem PPO against overlong invalid fragments and surface failure buckets explicitly
 
 ### Background
