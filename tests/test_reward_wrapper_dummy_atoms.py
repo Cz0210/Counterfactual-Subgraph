@@ -18,7 +18,7 @@ class _FakeOracleModel:
 
 @unittest.skipUnless(is_rdkit_available(), "RDKit is required for dummy-atom reward tests")
 class RewardWrapperDummyAtomTests(unittest.TestCase):
-    def _build_rewarder(self) -> ChemRLRewarder:
+    def _build_rewarder(self, **kwargs) -> ChemRLRewarder:
         oracle_bundle = {
             "model": _FakeOracleModel([0.8, 0.2]),
             "fingerprint_radius": 2,
@@ -28,7 +28,7 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
             "src.rewards.reward_wrapper.load_oracle_bundle",
             return_value=oracle_bundle,
         ):
-            return ChemRLRewarder(oracle_path="unused.pkl")
+            return ChemRLRewarder(oracle_path="unused.pkl", **kwargs)
 
     def test_normalize_fragment_with_dummy_atoms_keeps_aliphatic_core(self) -> None:
         info = normalize_fragment_with_dummy_atoms("*CC(=O)O")
@@ -117,6 +117,66 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertFalse(trace.parsed_core)
         self.assertFalse(trace.dummy_removed_before_parse)
         self.assertEqual(trace.parse_failed_reason, "parse_failed_after_dummy_removal")
+
+    def test_tiny_fragment_hard_fail_overrides_positive_terms(self) -> None:
+        rewarder = self._build_rewarder(
+            min_fragment_atoms=3,
+            tiny_fragment_hard_fail_penalty=-6.0,
+        )
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["CCO"],
+            ["O"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertTrue(trace.tiny_fragment_hard_fail)
+        self.assertEqual(trace.fragment_atom_count, 1)
+        self.assertEqual(trace.min_fragment_atoms, 3)
+        self.assertEqual(trace.failure_tag, "tiny_fragment_hard_fail")
+        self.assertAlmostEqual(trace.reward, -6.0)
+
+    def test_component_salvage_runs_before_not_connected_failure(self) -> None:
+        rewarder = self._build_rewarder(
+            component_salvage_min_atoms=2,
+            min_residual_atoms=0,
+        )
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["CCCCO"],
+            ["CCC.O"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertTrue(trace.component_salvage_attempted)
+        self.assertTrue(trace.component_salvage_success)
+        self.assertGreaterEqual(trace.raw_component_count, 2)
+        self.assertEqual(trace.component_salvage_stage, "raw")
+        self.assertTrue(trace.salvaged_fragment)
+
+    def test_minimal_syntax_repair_can_flow_into_projection(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_parent_projection=True,
+            projection_min_score=0.35,
+            projection_min_atoms=3,
+            projection_max_atom_ratio=0.70,
+            projection_mcs_timeout=1,
+            enable_minimal_syntax_repair=True,
+            syntax_repair_min_atoms=3,
+        )
+        parent = "CC(=O)Oc1ccccc1C(=O)O"
+
+        trace = rewarder.calculate_reward_details_batch(
+            [parent],
+            ["CC(=O)N("],
+            parent_labels=[1],
+        )[0]
+
+        self.assertTrue(trace.repair_attempted)
+        self.assertTrue(trace.repair_success)
+        self.assertTrue(trace.repair_candidate_accepted)
+        self.assertGreater(trace.repair_candidate_count, 0)
+        self.assertTrue(trace.projection_success)
 
 
 if __name__ == "__main__":

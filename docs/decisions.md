@@ -29,6 +29,49 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-26] Tighten decoded PPO parse/connect diagnostics and tiny-fragment guard
+
+### Background
+The `decoded_chem_diag50_parsefix_connectfix_v2` diagnose run showed that
+minimal syntax repair was attempted but never surfaced successful repaired
+candidates, disconnected fragments were not reliably entering component
+salvage, and the policy was beginning to exploit very small fragments such as
+`O`, `S`, and `N=O`.
+
+### Decision
+Keep projection-v1 and the existing decoded PPO Slurm parameter chain intact,
+and make a narrow reward-path patch:
+
+- expand minimal syntax repair diagnostics with candidate counts, acceptance,
+  and fine-grained failure reasons;
+- detect raw and core disconnected components before strict substructure checks
+  and run component salvage on the disconnected representation;
+- add a diagnose-configurable tiny-fragment hard fail after strict/projected
+  fragment resolution, so projection success cannot bypass the minimum atom
+  constraint;
+- add a v3 50-step Slurm wrapper that enables the new guard with
+  `MIN_FRAGMENT_ATOMS=3` and `TINY_FRAGMENT_HARD_FAIL_PENALTY=-6.0`.
+
+### Alternatives considered
+1. Rewrite parse-failed outputs into nearest valid molecules.
+2. Move tiny-fragment suppression into the prompt only.
+3. Rebuild projection-v1 instead of preserving the existing retrieval path.
+
+### Consequences
+- Repaired parseable candidates now continue into the same strict parent
+  subgraph / retrieval projection path rather than being treated as a separate
+  unconstrained repair objective.
+- Diagnose logs distinguish raw/core component counts and salvage failure
+  stages.
+- Very small strict or projected fragments receive a fixed hard-fail reward in
+  the new diagnose script, preventing positive reward terms from masking tiny
+  fragment collapse.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-25] Add parent-constrained retrieval projection for decoded PPO non-substructure fragments
 
 ### Background

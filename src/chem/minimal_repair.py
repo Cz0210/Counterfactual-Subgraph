@@ -81,7 +81,9 @@ def repair_minimal_fragment_syntax(
         if not candidate or candidate == normalized:
             return
         edit_distance = int(suffix_trim_count + added_parentheses + added_ring_closures)
-        if edit_distance <= 0 or edit_distance > int(max_edits):
+        if edit_distance <= 0:
+            return
+        if suffix_trim_count <= 0 and edit_distance > int(max_edits):
             return
         if suffix_trim_count > int(max_suffix_trim):
             return
@@ -98,12 +100,11 @@ def repair_minimal_fragment_syntax(
             )
         )
 
-    tail_trim_candidates = _tail_trim_candidates(
-        normalized,
-        max_suffix_trim=max_suffix_trim,
-        max_edits=max_edits,
-    )
     if allow_tail_trim:
+        tail_trim_candidates = _tail_trim_candidates(
+            normalized,
+            max_suffix_trim=max_suffix_trim,
+        )
         for candidate, trim_count in tail_trim_candidates:
             add_candidate(
                 candidate,
@@ -111,43 +112,80 @@ def repair_minimal_fragment_syntax(
                 "minimal_tail_trim",
                 suffix_trim_count=trim_count,
             )
+            if allow_parentheses_fix:
+                for repaired, added_parentheses in _parentheses_closure_variants(
+                    candidate,
+                    max_added_closures=max_added_closures,
+                ):
+                    add_candidate(
+                        repaired,
+                        "tail_trim_parentheses_closure",
+                        "trimmed_tail_and_added_missing_right_parentheses",
+                        suffix_trim_count=trim_count,
+                        added_parentheses=added_parentheses,
+                    )
+            if allow_ring_fix:
+                for repaired, added_rings in _ring_closure_variants(
+                    candidate,
+                    max_added_closures=max_added_closures,
+                ):
+                    add_candidate(
+                        repaired,
+                        "tail_trim_ring_closure",
+                        "trimmed_tail_and_added_unclosed_ring_digits",
+                        suffix_trim_count=trim_count,
+                        added_ring_closures=added_rings,
+                    )
 
     if allow_parentheses_fix:
-        missing_right = normalized.count("(") - normalized.count(")")
-        if 0 < missing_right <= int(max_added_closures):
+        for repaired, added_parentheses in _parentheses_closure_variants(
+            normalized,
+            max_added_closures=max_added_closures,
+        ):
             add_candidate(
-                normalized + ")" * missing_right,
+                repaired,
                 "parentheses_closure",
                 "added_missing_right_parentheses",
-                added_parentheses=missing_right,
+                added_parentheses=added_parentheses,
             )
 
     if allow_ring_fix:
-        unclosed_ring_tokens = _unclosed_ring_tokens(normalized)
-        if len(unclosed_ring_tokens) == 1 and int(max_added_closures) >= 1:
+        for repaired, added_rings in _ring_closure_variants(
+            normalized,
+            max_added_closures=max_added_closures,
+        ):
             add_candidate(
-                normalized + unclosed_ring_tokens[0],
+                repaired,
                 "ring_closure",
-                "added_single_unclosed_ring_digit",
-                added_ring_closures=1,
+                "added_unclosed_ring_digits",
+                added_ring_closures=added_rings,
             )
 
     if allow_balanced_prefix_salvage:
-        prefix_candidates = _balanced_prefix_candidates(
+        prefix_candidates = _prefix_salvage_candidates(
             normalized,
             max_suffix_trim=max_suffix_trim,
-            max_edits=max_edits,
+            allow_parentheses_fix=allow_parentheses_fix,
+            allow_ring_fix=allow_ring_fix,
+            max_added_closures=max_added_closures,
         )
         prefix_items = [
             (
                 candidate,
-                "balanced_prefix",
-                "longest_parseable_balanced_prefix",
+                method,
+                reason,
                 trim_count,
-                0,
-                0,
+                added_parentheses,
+                added_rings,
             )
-            for candidate, trim_count in prefix_candidates
+            for (
+                candidate,
+                trim_count,
+                method,
+                reason,
+                added_parentheses,
+                added_rings,
+            ) in prefix_candidates
         ]
         if prefer_prefix_salvage:
             candidates = prefix_items + candidates
@@ -155,10 +193,25 @@ def repair_minimal_fragment_syntax(
             candidates.extend(prefix_items)
 
     seen: set[str] = set()
+    unique_candidates: list[tuple[str, str, str, int, int, int]] = []
     for candidate, method, reason, suffix_trim, added_parens, added_rings in candidates:
         if candidate in seen:
             continue
         seen.add(candidate)
+        unique_candidates.append(
+            (candidate, method, reason, suffix_trim, added_parens, added_rings)
+        )
+
+    candidate_count = len(unique_candidates)
+    rejection_counts: Counter[str] = Counter()
+    for (
+        candidate,
+        method,
+        reason,
+        suffix_trim,
+        added_parens,
+        added_rings,
+    ) in unique_candidates:
         parsed = parse_smiles(
             candidate,
             sanitize=True,
@@ -166,9 +219,11 @@ def repair_minimal_fragment_syntax(
             allow_capped_fragments=True,
         )
         if not parsed.parseable or parsed.mol is None:
+            rejection_counts["repair_candidate_parse_failed"] += 1
             continue
         atom_count = _non_dummy_atom_count(parsed.mol)
         if atom_count < int(min_atoms):
+            rejection_counts["repair_candidate_too_small"] += 1
             continue
         return FragmentSyntaxRepairResult(
             raw_fragment_smiles=normalized,
@@ -182,13 +237,25 @@ def repair_minimal_fragment_syntax(
             added_parentheses=added_parens,
             added_ring_closures=added_rings,
             repaired_atom_count=atom_count,
+            candidate_count=candidate_count,
+            candidate_accepted=True,
         )
 
+    failure_reason, failure_stage = _repair_failure_from_rejections(
+        candidate_count=candidate_count,
+        rejection_counts=rejection_counts,
+        fallback_reason=parse_failed_reason,
+    )
     return FragmentSyntaxRepairResult(
         raw_fragment_smiles=normalized,
         attempted=True,
         success=False,
-        reason=parse_failed_reason or "minimal_syntax_repair_failed",
+        reason=failure_reason,
+        failure_reason=failure_reason,
+        failure_stage=failure_stage,
+        candidate_count=candidate_count,
+        candidate_accepted=False,
+        candidate_rejected_reason=failure_reason,
     )
 
 
@@ -196,10 +263,9 @@ def _tail_trim_candidates(
     text: str,
     *,
     max_suffix_trim: int,
-    max_edits: int,
 ) -> tuple[tuple[str, int], ...]:
     candidates: list[tuple[str, int]] = []
-    max_trim = min(int(max_suffix_trim), int(max_edits), max(0, len(text) - 1))
+    max_trim = min(int(max_suffix_trim), max(0, len(text) - 1))
     for trim_count in range(1, max_trim + 1):
         candidate = text[:-trim_count].strip()
         if not candidate:
@@ -209,21 +275,114 @@ def _tail_trim_candidates(
     return tuple(candidates)
 
 
-def _balanced_prefix_candidates(
+def _prefix_salvage_candidates(
     text: str,
     *,
     max_suffix_trim: int,
-    max_edits: int,
-) -> tuple[tuple[str, int], ...]:
-    candidates: list[tuple[str, int]] = []
-    max_trim = min(int(max_suffix_trim), int(max_edits), max(0, len(text) - 1))
+    allow_parentheses_fix: bool,
+    allow_ring_fix: bool,
+    max_added_closures: int,
+) -> tuple[tuple[str, int, str, str, int, int], ...]:
+    candidates: list[tuple[str, int, str, str, int, int]] = []
+    max_trim = min(int(max_suffix_trim), max(0, len(text) - 1))
     for trim_count in range(1, max_trim + 1):
         prefix = text[:-trim_count].strip()
         if not prefix:
             continue
         if _has_balanced_simple_syntax(prefix):
-            candidates.append((prefix, trim_count))
+            candidates.append(
+                (
+                    prefix,
+                    trim_count,
+                    "balanced_prefix",
+                    "longest_parseable_balanced_prefix",
+                    0,
+                    0,
+                )
+            )
+        if allow_parentheses_fix:
+            for repaired, added_parentheses in _parentheses_closure_variants(
+                prefix,
+                max_added_closures=max_added_closures,
+            ):
+                if _ends_with_dangling_token(repaired):
+                    continue
+                candidates.append(
+                    (
+                        repaired,
+                        trim_count,
+                        "balanced_prefix_parentheses_closure",
+                        "prefix_salvage_added_missing_right_parentheses",
+                        added_parentheses,
+                        0,
+                    )
+                )
+        if allow_ring_fix:
+            for repaired, added_rings in _ring_closure_variants(
+                prefix,
+                max_added_closures=max_added_closures,
+            ):
+                if _ends_with_dangling_token(repaired):
+                    continue
+                candidates.append(
+                    (
+                        repaired,
+                        trim_count,
+                        "balanced_prefix_ring_closure",
+                        "prefix_salvage_added_unclosed_ring_digits",
+                        0,
+                        added_rings,
+                    )
+                )
     return tuple(candidates)
+
+
+def _parentheses_closure_variants(
+    text: str,
+    *,
+    max_added_closures: int,
+) -> tuple[tuple[str, int], ...]:
+    missing_right = str(text or "").count("(") - str(text or "").count(")")
+    if 0 < missing_right <= int(max_added_closures):
+        return ((str(text or "").strip() + ")" * missing_right, missing_right),)
+    return ()
+
+
+def _ring_closure_variants(
+    text: str,
+    *,
+    max_added_closures: int,
+) -> tuple[tuple[str, int], ...]:
+    unclosed_ring_tokens = _unclosed_ring_tokens(text)
+    if not unclosed_ring_tokens:
+        return ()
+    if len(unclosed_ring_tokens) <= int(max_added_closures):
+        return (
+            (
+                str(text or "").strip() + "".join(unclosed_ring_tokens),
+                len(unclosed_ring_tokens),
+            ),
+        )
+    return ()
+
+
+def _repair_failure_from_rejections(
+    *,
+    candidate_count: int,
+    rejection_counts: Counter[str],
+    fallback_reason: str | None,
+) -> tuple[str, str]:
+    if candidate_count <= 0:
+        return "repair_no_candidate_generated", "candidate_generation"
+    if rejection_counts:
+        reason, _ = rejection_counts.most_common(1)[0]
+        stage = (
+            "parse"
+            if reason == "repair_candidate_parse_failed"
+            else "candidate_filter"
+        )
+        return reason, stage
+    return fallback_reason or "repair_candidate_other", "candidate_filter"
 
 
 def _has_balanced_simple_syntax(text: str) -> bool:

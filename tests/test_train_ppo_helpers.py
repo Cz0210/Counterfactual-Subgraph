@@ -211,6 +211,21 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertTrue(args.projection_enable_khop3)
         self.assertEqual(args.projection_mcs_timeout, 2)
 
+    def test_parser_accepts_tiny_fragment_guard_flags(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--min-fragment-atoms",
+                "3",
+                "--tiny-fragment-hard-fail-penalty",
+                "-6.0",
+            ]
+        )
+
+        self.assertEqual(args.min_fragment_atoms, 3)
+        self.assertAlmostEqual(args.tiny_fragment_hard_fail_penalty, -6.0)
+
     def test_score_adapter_keeps_existing_score(self) -> None:
         model = type("ModelWithScore", (), {})()
         existing = lambda hidden_states: ("existing", hidden_states)

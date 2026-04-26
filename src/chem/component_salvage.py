@@ -36,6 +36,8 @@ def salvage_connected_component(
             attempted=False,
             success=False,
             reason="empty_fragment",
+            failure_reason="empty_fragment",
+            failure_stage="input",
         )
     if not is_rdkit_available() or Chem is None:
         return FragmentComponentSalvageResult(
@@ -43,6 +45,8 @@ def salvage_connected_component(
             attempted=False,
             success=False,
             reason="rdkit_unavailable",
+            failure_reason="rdkit_unavailable",
+            failure_stage="runtime",
         )
 
     parsed = parse_smiles(
@@ -57,6 +61,8 @@ def salvage_connected_component(
             attempted=False,
             success=False,
             reason="parse_failed",
+            failure_reason="component_salvage_parse_failed",
+            failure_stage="parse",
         )
 
     try:
@@ -69,10 +75,12 @@ def salvage_connected_component(
     if component_count <= 1:
         return FragmentComponentSalvageResult(
             raw_fragment_smiles=normalized_fragment,
-            attempted=False,
+            attempted=True,
             success=False,
             component_count=component_count,
-            reason="fragment_already_connected",
+            reason="no_disconnected_components_detected",
+            failure_reason="no_disconnected_components_detected",
+            failure_stage="component_detection",
         )
     if component_count > int(max_components):
         return FragmentComponentSalvageResult(
@@ -81,6 +89,8 @@ def salvage_connected_component(
             success=False,
             component_count=component_count,
             reason="too_many_components",
+            failure_reason="too_many_components",
+            failure_stage="component_detection",
         )
 
     components: list[tuple[str, int, float, bool]] = []
@@ -121,7 +131,9 @@ def salvage_connected_component(
             attempted=True,
             success=False,
             component_count=component_count,
-            reason="all_components_too_small_or_invalid",
+            reason="no_component_meets_min_atoms",
+            failure_reason="no_component_meets_min_atoms",
+            failure_stage="component_filter",
         )
 
     if method == "largest":
@@ -131,7 +143,14 @@ def salvage_connected_component(
         selected = max(components, key=lambda item: (item[3], item[2], item[1], item[0]))
         salvage_method = "best_parent_match"
     else:
-        selected = max(components, key=lambda item: (item[3], item[2], item[1], item[0]))
+        largest = max(components, key=lambda item: (item[1], item[3], item[2], item[0]))
+        if largest[3] or largest[2] >= float(projection_min_score):
+            selected = largest
+        else:
+            selected = max(
+                components,
+                key=lambda item: (item[3], item[2], item[1], item[0]),
+            )
         salvage_method = "largest_then_best_parent_match"
 
     return FragmentComponentSalvageResult(

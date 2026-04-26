@@ -119,6 +119,11 @@ class FragmentSyntaxRepairResult:
     added_parentheses: int = 0
     added_ring_closures: int = 0
     repaired_atom_count: int | None = None
+    failure_reason: str | None = None
+    failure_stage: str | None = None
+    candidate_count: int = 0
+    candidate_accepted: bool = False
+    candidate_rejected_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,3 +138,5 @@ class FragmentComponentSalvageResult:
     salvaged_fragment_smiles: str | None = None
     salvaged_atom_count: int | None = None
     reason: str | None = None
+    failure_reason: str | None = None
+    failure_stage: str | None = None

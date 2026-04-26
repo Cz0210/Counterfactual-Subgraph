@@ -60,6 +60,8 @@ ENABLE_LIGHT_DUMMY_SALVAGE=${ENABLE_LIGHT_DUMMY_SALVAGE:-}
 NEAR_PARENT_HARD_RATIO=${NEAR_PARENT_HARD_RATIO:-}
 MIN_RESIDUAL_ATOMS=${MIN_RESIDUAL_ATOMS:-}
 MIN_RESIDUAL_RATIO=${MIN_RESIDUAL_RATIO:-}
+MIN_FRAGMENT_ATOMS=${MIN_FRAGMENT_ATOMS:-}
+TINY_FRAGMENT_HARD_FAIL_PENALTY=${TINY_FRAGMENT_HARD_FAIL_PENALTY:-}
 
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
@@ -128,6 +130,8 @@ echo "ENABLE_LIGHT_DUMMY_SALVAGE=${ENABLE_LIGHT_DUMMY_SALVAGE:-<unset>}"
 echo "NEAR_PARENT_HARD_RATIO=${NEAR_PARENT_HARD_RATIO:-<unset>}"
 echo "MIN_RESIDUAL_ATOMS=${MIN_RESIDUAL_ATOMS:-<unset>}"
 echo "MIN_RESIDUAL_RATIO=${MIN_RESIDUAL_RATIO:-<unset>}"
+echo "MIN_FRAGMENT_ATOMS=${MIN_FRAGMENT_ATOMS:-<unset>}"
+echo "TINY_FRAGMENT_HARD_FAIL_PENALTY=${TINY_FRAGMENT_HARD_FAIL_PENALTY:-<unset>}"
 if [ ! -f "${TEACHER_PATH}" ]; then
   echo "[ERROR] Teacher file not found: ${TEACHER_PATH}"
   exit 1
@@ -327,6 +331,12 @@ if [ -n "${MIN_RESIDUAL_ATOMS}" ]; then
 fi
 if [ -n "${MIN_RESIDUAL_RATIO}" ]; then
   cmd+=(--min-residual-ratio "${MIN_RESIDUAL_RATIO}")
+fi
+if [ -n "${MIN_FRAGMENT_ATOMS}" ]; then
+  cmd+=(--min-fragment-atoms "${MIN_FRAGMENT_ATOMS}")
+fi
+if [ -n "${TINY_FRAGMENT_HARD_FAIL_PENALTY}" ]; then
+  cmd+=(--tiny-fragment-hard-fail-penalty "${TINY_FRAGMENT_HARD_FAIL_PENALTY}")
 fi
 cmd+=("$@")
 
