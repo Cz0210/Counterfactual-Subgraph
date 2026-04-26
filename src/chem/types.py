@@ -102,3 +102,34 @@ class FragmentProjectionResult:
     candidate_count: int = 0
     projected_atom_count: int | None = None
     projected_atom_ratio: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentSyntaxRepairResult:
+    """Result of a strictly local syntax repair attempt."""
+
+    raw_fragment_smiles: str
+    attempted: bool
+    success: bool
+    repaired_fragment_smiles: str | None = None
+    repair_method: str | None = None
+    reason: str | None = None
+    edit_distance: int = 0
+    suffix_trim_count: int = 0
+    added_parentheses: int = 0
+    added_ring_closures: int = 0
+    repaired_atom_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentComponentSalvageResult:
+    """Result of extracting one connected component from a decoded fragment."""
+
+    raw_fragment_smiles: str
+    attempted: bool
+    success: bool
+    component_count: int = 0
+    salvage_method: str | None = None
+    salvaged_fragment_smiles: str | None = None
+    salvaged_atom_count: int | None = None
+    reason: str | None = None

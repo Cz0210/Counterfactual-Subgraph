@@ -1,10 +1,12 @@
 """Chemistry interfaces for parsing, validation, substructure checks, and deletion."""
 
+from src.chem.component_salvage import salvage_connected_component
 from src.chem.deletion import (
     FragmentDeletionEngine,
     delete_fragment_from_parent,
     get_remainder_graph,
 )
+from src.chem.minimal_repair import repair_minimal_fragment_syntax
 from src.chem.projection import (
     ParentProjectionCandidate,
     build_parent_projection_candidates,
@@ -27,8 +29,10 @@ from src.chem.substructure import (
 from src.chem.types import (
     ChemistryFailureType,
     DeletionResult,
+    FragmentComponentSalvageResult,
     FragmentProjectionResult,
     FragmentRepairResult,
+    FragmentSyntaxRepairResult,
     FragmentValidationResult,
     ParsedMolecule,
 )
@@ -37,9 +41,11 @@ from src.chem.validation import FragmentValidator, validate_fragment_candidate
 __all__ = [
     "ChemistryFailureType",
     "DeletionResult",
+    "FragmentComponentSalvageResult",
     "FragmentDeletionEngine",
     "FragmentProjectionResult",
     "FragmentRepairResult",
+    "FragmentSyntaxRepairResult",
     "FragmentValidationResult",
     "FragmentValidator",
     "ParentProjectionCandidate",
@@ -56,7 +62,9 @@ __all__ = [
     "is_valid_capped_subgraph",
     "parse_smiles",
     "project_fragment_to_parent_subgraph",
+    "repair_minimal_fragment_syntax",
     "repair_fragment_to_parent_subgraph",
+    "salvage_connected_component",
     "sanitize_molecule",
     "validate_fragment_candidate",
 ]

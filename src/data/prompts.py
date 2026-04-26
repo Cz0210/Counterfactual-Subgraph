@@ -20,6 +20,8 @@ _DECODED_CHEM_EXACT_PARENT_PROMPT_PREFIX = (
     "molecule.\n"
     "Do not invent atoms, rings, branches, or substituents.\n"
     "Prefer one functional group or one ring neighborhood from the parent.\n"
+    "Output one connected fragment only; keep it short and chemically closed.\n"
+    "Use at most one dummy atom * when possible.\n"
     "Output only one fragment SMILES, no extra text."
 )
 

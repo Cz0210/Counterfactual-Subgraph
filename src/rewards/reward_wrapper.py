@@ -31,7 +31,9 @@ from src.chem import (
     is_rdkit_available,
     parse_smiles,
     project_fragment_to_parent_subgraph,
+    repair_minimal_fragment_syntax,
     repair_fragment_to_parent_subgraph,
+    salvage_connected_component,
     sanitize_molecule,
 )
 from src.rewards.reward_calculator import (
@@ -137,6 +139,30 @@ class RewardTrace:
     repair_source: str | None = None
     repair_similarity: float | None = None
     repair_reason: str | None = None
+    repair_method: str | None = None
+    repair_edit_distance: int = 0
+    repair_suffix_trim_count: int = 0
+    repair_added_parentheses: int = 0
+    repair_added_ring_closures: int = 0
+    repaired_raw_fragment: str | None = None
+    repaired_fragment_chars: int = 0
+    repaired_parse_stage: str | None = None
+    repaired_parsed_raw: bool = False
+    repaired_parsed_core: bool = False
+    component_salvage_attempted: bool = False
+    component_salvage_success: bool = False
+    component_count: int = 0
+    salvage_method: str | None = None
+    salvaged_fragment: str | None = None
+    salvaged_atom_count: int | None = None
+    multi_dummy_hard_fail: bool = False
+    dummy_salvage_attempted: bool = False
+    dummy_salvage_success: bool = False
+    dummy_salvage_method: str | None = None
+    dummy_salvaged_fragment: str | None = None
+    near_parent_hard_fail: bool = False
+    residual_atom_count: int | None = None
+    residual_atom_ratio: float | None = None
     projection_attempted: bool = False
     projection_success: bool = False
     projection_method: str | None = None
@@ -427,6 +453,24 @@ class ChemRLRewarder:
         projection_penalty: float = 0.5,
         projection_enable_khop3: bool = False,
         projection_mcs_timeout: int = 1,
+        enable_minimal_syntax_repair: bool = True,
+        syntax_repair_max_edits: int = 4,
+        syntax_repair_min_atoms: int = 3,
+        syntax_repair_allow_parentheses_fix: bool = True,
+        syntax_repair_allow_ring_fix: bool = True,
+        syntax_repair_allow_tail_trim: bool = True,
+        syntax_repair_allow_balanced_prefix_salvage: bool = True,
+        syntax_repair_prefer_prefix_salvage: bool = True,
+        syntax_repair_max_suffix_trim: int = 8,
+        syntax_repair_max_added_closures: int = 2,
+        enable_component_salvage: bool = True,
+        component_salvage_method: str = "largest_then_best_parent_match",
+        component_salvage_min_atoms: int = 3,
+        multi_dummy_hard_fail_threshold: int = 3,
+        enable_light_dummy_salvage: bool = False,
+        near_parent_hard_ratio: float = 0.85,
+        min_residual_atoms: int = 3,
+        min_residual_ratio: float = 0.10,
         require_teacher_sem: bool = False,
         disable_counterfactual_teacher: bool = False,
         success_threshold: float = 0.5,
@@ -473,6 +517,32 @@ class ChemRLRewarder:
         self.projection_penalty = float(projection_penalty)
         self.projection_enable_khop3 = bool(projection_enable_khop3)
         self.projection_mcs_timeout = int(projection_mcs_timeout)
+        self.enable_minimal_syntax_repair = bool(enable_minimal_syntax_repair)
+        self.syntax_repair_max_edits = int(syntax_repair_max_edits)
+        self.syntax_repair_min_atoms = int(syntax_repair_min_atoms)
+        self.syntax_repair_allow_parentheses_fix = bool(
+            syntax_repair_allow_parentheses_fix
+        )
+        self.syntax_repair_allow_ring_fix = bool(syntax_repair_allow_ring_fix)
+        self.syntax_repair_allow_tail_trim = bool(syntax_repair_allow_tail_trim)
+        self.syntax_repair_allow_balanced_prefix_salvage = bool(
+            syntax_repair_allow_balanced_prefix_salvage
+        )
+        self.syntax_repair_prefer_prefix_salvage = bool(
+            syntax_repair_prefer_prefix_salvage
+        )
+        self.syntax_repair_max_suffix_trim = int(syntax_repair_max_suffix_trim)
+        self.syntax_repair_max_added_closures = int(
+            syntax_repair_max_added_closures
+        )
+        self.enable_component_salvage = bool(enable_component_salvage)
+        self.component_salvage_method = str(component_salvage_method)
+        self.component_salvage_min_atoms = int(component_salvage_min_atoms)
+        self.multi_dummy_hard_fail_threshold = int(multi_dummy_hard_fail_threshold)
+        self.enable_light_dummy_salvage = bool(enable_light_dummy_salvage)
+        self.near_parent_hard_ratio = float(near_parent_hard_ratio)
+        self.min_residual_atoms = int(min_residual_atoms)
+        self.min_residual_ratio = float(min_residual_ratio)
         self.require_teacher_sem = bool(require_teacher_sem)
         self.disable_counterfactual_teacher = bool(disable_counterfactual_teacher)
         self.success_threshold = float(success_threshold)
@@ -494,6 +564,24 @@ class ChemRLRewarder:
             raise ValueError("projection_max_atom_ratio must be positive.")
         if self.projection_mcs_timeout <= 0:
             raise ValueError("projection_mcs_timeout must be positive.")
+        if self.syntax_repair_max_edits <= 0:
+            raise ValueError("syntax_repair_max_edits must be positive.")
+        if self.syntax_repair_min_atoms <= 0:
+            raise ValueError("syntax_repair_min_atoms must be positive.")
+        if self.syntax_repair_max_suffix_trim <= 0:
+            raise ValueError("syntax_repair_max_suffix_trim must be positive.")
+        if self.syntax_repair_max_added_closures <= 0:
+            raise ValueError("syntax_repair_max_added_closures must be positive.")
+        if self.component_salvage_min_atoms <= 0:
+            raise ValueError("component_salvage_min_atoms must be positive.")
+        if self.multi_dummy_hard_fail_threshold <= 0:
+            raise ValueError("multi_dummy_hard_fail_threshold must be positive.")
+        if self.near_parent_hard_ratio <= 0.0:
+            raise ValueError("near_parent_hard_ratio must be positive.")
+        if self.min_residual_atoms < 0:
+            raise ValueError("min_residual_atoms must be non-negative.")
+        if self.min_residual_ratio < 0.0:
+            raise ValueError("min_residual_ratio must be non-negative.")
 
         if self.require_teacher_sem and self.disable_counterfactual_teacher:
             raise ValueError(
@@ -668,6 +756,30 @@ class ChemRLRewarder:
                     "repair_source": trace.repair_source,
                     "repair_similarity": trace.repair_similarity,
                     "repair_reason": trace.repair_reason,
+                    "repair_method": trace.repair_method,
+                    "repair_edit_distance": int(trace.repair_edit_distance),
+                    "repair_suffix_trim_count": int(trace.repair_suffix_trim_count),
+                    "repair_added_parentheses": int(trace.repair_added_parentheses),
+                    "repair_added_ring_closures": int(trace.repair_added_ring_closures),
+                    "repaired_raw_fragment": trace.repaired_raw_fragment,
+                    "repaired_fragment_chars": int(trace.repaired_fragment_chars),
+                    "repaired_parse_stage": trace.repaired_parse_stage,
+                    "repaired_parsed_raw": bool(trace.repaired_parsed_raw),
+                    "repaired_parsed_core": bool(trace.repaired_parsed_core),
+                    "component_salvage_attempted": bool(trace.component_salvage_attempted),
+                    "component_salvage_success": bool(trace.component_salvage_success),
+                    "component_count": int(trace.component_count),
+                    "salvage_method": trace.salvage_method,
+                    "salvaged_fragment": trace.salvaged_fragment,
+                    "salvaged_atom_count": trace.salvaged_atom_count,
+                    "multi_dummy_hard_fail": bool(trace.multi_dummy_hard_fail),
+                    "dummy_salvage_attempted": bool(trace.dummy_salvage_attempted),
+                    "dummy_salvage_success": bool(trace.dummy_salvage_success),
+                    "dummy_salvage_method": trace.dummy_salvage_method,
+                    "dummy_salvaged_fragment": trace.dummy_salvaged_fragment,
+                    "near_parent_hard_fail": bool(trace.near_parent_hard_fail),
+                    "residual_atom_count": trace.residual_atom_count,
+                    "residual_atom_ratio": trace.residual_atom_ratio,
                     "projection_attempted": bool(trace.projection_attempted),
                     "projection_success": bool(trace.projection_success),
                     "projection_method": trace.projection_method,
@@ -849,6 +961,11 @@ class ChemRLRewarder:
         effective_generated_char_count = generated_char_count
         repair_trace_kwargs = self._repair_trace_kwargs()
         repair_attempt_consumed = False
+        syntax_repair_attempt_consumed = False
+        component_salvage_trace_kwargs = self._component_salvage_trace_kwargs()
+        component_salvage_attempt_consumed = False
+        dummy_trace_kwargs = self._dummy_trace_kwargs()
+        residual_guard_trace_kwargs = self._residual_guard_trace_kwargs()
         projection_trace_kwargs = self._projection_trace_kwargs()
         projection_attempt_consumed = False
         projection_penalty_applied = 0.0
@@ -875,6 +992,9 @@ class ChemRLRewarder:
                 )
             )
             base_trace_kwargs.update(repair_trace_kwargs)
+            base_trace_kwargs.update(component_salvage_trace_kwargs)
+            base_trace_kwargs.update(dummy_trace_kwargs)
+            base_trace_kwargs.update(residual_guard_trace_kwargs)
             base_trace_kwargs.update(projection_trace_kwargs)
 
             if not fragment_info["raw_parse_ok"]:
@@ -886,6 +1006,31 @@ class ChemRLRewarder:
                         parse_stage=fragment_info.get("parse_stage"),
                     )
                 )
+                if (
+                    not syntax_repair_attempt_consumed
+                    and self.enable_minimal_syntax_repair
+                ):
+                    syntax_repair_result, repair_trace_kwargs = (
+                        self._attempt_minimal_syntax_repair(
+                            raw_fragment_smiles=effective_fragment,
+                            parse_failed_reason=parse_failure_reason,
+                        )
+                    )
+                    syntax_repair_attempt_consumed = True
+                    if (
+                        syntax_repair_result is not None
+                        and syntax_repair_result.success
+                        and syntax_repair_result.repaired_fragment_smiles
+                        and syntax_repair_result.repaired_fragment_smiles
+                        != effective_fragment
+                    ):
+                        effective_fragment = str(
+                            syntax_repair_result.repaired_fragment_smiles
+                        ).strip()
+                        effective_generated_char_count = len(effective_fragment)
+                        continue
+                    base_trace_kwargs.update(repair_trace_kwargs)
+
                 return self._fail(
                     parent_smiles=normalized_parent,
                     generated_smiles=generated_smiles,
@@ -901,11 +1046,52 @@ class ChemRLRewarder:
                         )
                     ),
                     generated_char_count=effective_generated_char_count,
-                    failure_tag=self._parse_failure_tag(parse_failure_reason),
-                    invalid_detail=parse_failure_reason,
+                    failure_tag=(
+                        "parse_failed_after_minimal_repair"
+                        if bool(base_trace_kwargs.get("repair_attempted"))
+                        else self._parse_failure_tag(parse_failure_reason)
+                    ),
+                    invalid_detail=(
+                        f"{parse_failure_reason}:minimal_syntax_repair_failed"
+                        if bool(base_trace_kwargs.get("repair_attempted"))
+                        else parse_failure_reason
+                    ),
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
                         valid_reward=valid_reward,
+                        subgraph_reward=0.0,
+                        length_reward=0.0,
+                        semantic_reward=self.teacher_sem_missing_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=self.teacher_sem_missing_penalty,
+                    ),
+                    **base_trace_kwargs,
+                )
+
+            raw_dummy_count = int(fragment_info.get("raw_dummy_count", 0) or 0)
+            if raw_dummy_count >= self.multi_dummy_hard_fail_threshold:
+                dummy_trace_kwargs = self._dummy_trace_kwargs(
+                    multi_dummy_hard_fail=True,
+                    dummy_salvage_attempted=bool(self.enable_light_dummy_salvage),
+                    dummy_salvage_success=False,
+                )
+                base_trace_kwargs.update(dummy_trace_kwargs)
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="validity",
+                    error_message=(
+                        "Generated fragment contains too many dummy atoms: "
+                        f"{raw_dummy_count} >= {self.multi_dummy_hard_fail_threshold}"
+                    ),
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_failed_after_dummy_removal",
+                    invalid_detail="multi_dummy_hard_fail",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=self.invalid_smiles_penalty,
                         subgraph_reward=0.0,
                         length_reward=0.0,
                         semantic_reward=self.teacher_sem_missing_penalty,
@@ -941,6 +1127,30 @@ class ChemRLRewarder:
                 )
 
             if not connected_fragment:
+                if (
+                    not component_salvage_attempt_consumed
+                    and self.enable_component_salvage
+                ):
+                    salvage_result, component_salvage_trace_kwargs = (
+                        self._attempt_component_salvage(
+                            parent_smiles=normalized_parent,
+                            raw_fragment_smiles=effective_fragment,
+                        )
+                    )
+                    component_salvage_attempt_consumed = True
+                    if (
+                        salvage_result is not None
+                        and salvage_result.success
+                        and salvage_result.salvaged_fragment_smiles
+                        and salvage_result.salvaged_fragment_smiles != effective_fragment
+                    ):
+                        effective_fragment = str(
+                            salvage_result.salvaged_fragment_smiles
+                        ).strip()
+                        effective_generated_char_count = len(effective_fragment)
+                        continue
+                    base_trace_kwargs.update(component_salvage_trace_kwargs)
+
                 return self._fail(
                     parent_smiles=normalized_parent,
                     generated_smiles=generated_smiles,
@@ -949,7 +1159,7 @@ class ChemRLRewarder:
                     failure_stage="validity",
                     error_message="Generated fragment is not connected.",
                     generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_ok_but_not_substructure",
+                    failure_tag="fragment_not_connected",
                     invalid_detail="fragment_not_connected",
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
@@ -967,6 +1177,14 @@ class ChemRLRewarder:
             core_smiles = fragment_info["core_smiles"]
             core_mol = fragment_info["core_mol"]
             if core_mol is None or not fragment_info["core_parse_ok"] or not core_smiles:
+                dummy_trace_kwargs = self._dummy_trace_kwargs(
+                    dummy_salvage_attempted=bool(self.enable_light_dummy_salvage),
+                    dummy_salvage_success=False,
+                    dummy_salvage_method=(
+                        "disabled" if not self.enable_light_dummy_salvage else None
+                    ),
+                )
+                base_trace_kwargs.update(dummy_trace_kwargs)
                 if not repair_attempt_consumed and self.enable_parent_aware_repair:
                     repair_result, repair_trace_kwargs = self._attempt_parent_aware_repair(
                         parent_smiles=normalized_parent,
@@ -1064,7 +1282,11 @@ class ChemRLRewarder:
                     counterfactual_teacher_reason="full_parent_fragment",
                     full_parent=True,
                     empty_residual=True,
+                    residual_atom_count=0,
+                    residual_atom_ratio=0.0,
                     **repair_trace_kwargs,
+                    **component_salvage_trace_kwargs,
+                    **dummy_trace_kwargs,
                     **projection_trace_kwargs,
                 )
 
@@ -1122,7 +1344,7 @@ class ChemRLRewarder:
                 if not projection_attempt_consumed and self.enable_parent_projection:
                     projection_result, projection_trace_kwargs = self._attempt_parent_projection(
                         parent_smiles=normalized_parent,
-                        raw_fragment_smiles=decoded_raw_fragment,
+                        raw_fragment_smiles=effective_fragment,
                     )
                     projection_attempt_consumed = True
                     projection_invalid_detail = (
@@ -1175,7 +1397,11 @@ class ChemRLRewarder:
                     failure_stage="subgraph",
                     error_message="Generated fragment is not a valid parent subgraph.",
                     generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_ok_but_not_substructure",
+                    failure_tag=(
+                        "projection_failed_low_score"
+                        if projection_invalid_detail == "projection_failed_low_score"
+                        else "parse_ok_but_not_substructure"
+                    ),
                     invalid_detail=projection_invalid_detail,
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
@@ -1189,6 +1415,92 @@ class ChemRLRewarder:
                     valid_smiles=True,
                     connected_fragment=True,
                     **base_trace_kwargs,
+                )
+
+            parent_atom_count = max(1, int(parent.mol.GetNumAtoms()))
+            core_atom_count = int(fragment_info["core_atom_count"])
+            atom_ratio = core_atom_count / parent_atom_count
+            deletion_for_guard = delete_fragment_from_parent(
+                normalized_parent,
+                core_smiles,
+                max_matches=1,
+            )
+            residual_atom_count = deletion_for_guard.residual_atom_count
+            residual_atom_ratio = (
+                residual_atom_count / parent_atom_count
+                if residual_atom_count is not None
+                else None
+            )
+            residual_guard_trace_kwargs = self._residual_guard_trace_kwargs(
+                residual_atom_count=residual_atom_count,
+                residual_atom_ratio=residual_atom_ratio,
+            )
+            base_trace_kwargs.update(residual_guard_trace_kwargs)
+            hard_guard_tag: str | None = None
+            hard_guard_penalty = self.full_parent_penalty
+            near_parent_hard_fail = False
+            if atom_ratio >= self.near_parent_hard_ratio:
+                hard_guard_tag = "near_parent_fragment"
+                near_parent_hard_fail = True
+                hard_guard_penalty = self.full_parent_penalty
+            elif residual_atom_count is not None and residual_atom_count < self.min_residual_atoms:
+                hard_guard_tag = "tiny_residual_fragment"
+                hard_guard_penalty = self.empty_residual_penalty
+            elif (
+                residual_atom_ratio is not None
+                and residual_atom_ratio <= self.min_residual_ratio
+            ):
+                hard_guard_tag = "tiny_residual_fragment"
+                hard_guard_penalty = self.empty_residual_penalty
+
+            if hard_guard_tag is not None:
+                residual_guard_trace_kwargs = self._residual_guard_trace_kwargs(
+                    near_parent_hard_fail=near_parent_hard_fail,
+                    residual_atom_count=residual_atom_count,
+                    residual_atom_ratio=residual_atom_ratio,
+                )
+                base_trace_kwargs.update(residual_guard_trace_kwargs)
+                hard_guard_trace_kwargs = dict(base_trace_kwargs)
+                hard_guard_trace_kwargs.update(
+                    {
+                        "raw_fragment_smiles": decoded_raw_fragment,
+                        "core_fragment_smiles": core_smiles,
+                        "teacher_input_smiles": core_smiles,
+                        "teacher_reason": hard_guard_tag,
+                        "counterfactual_teacher_available": bool(
+                            self.counterfactual_teacher_scorer is not None
+                            and self.counterfactual_teacher_scorer.available
+                        ),
+                        "counterfactual_teacher_called": False,
+                        "counterfactual_teacher_reason": hard_guard_tag,
+                    }
+                )
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="counterfactual",
+                    error_message=(
+                        "Generated fragment is too close to the full parent or leaves a tiny residual."
+                    ),
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag=hard_guard_tag,
+                    invalid_detail=hard_guard_tag,
+                    breakdown=self._build_breakdown(
+                        format_reward=0.0,
+                        valid_reward=0.0,
+                        subgraph_reward=0.0,
+                        length_reward=0.0,
+                        semantic_reward=hard_guard_penalty,
+                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                        counterfactual_reward=hard_guard_penalty,
+                    ),
+                    valid_smiles=True,
+                    connected_fragment=True,
+                    is_subgraph=True,
+                    residual_smiles=deletion_for_guard.residual_smiles,
+                    **hard_guard_trace_kwargs,
                 )
 
             normalized_generated = effective_fragment
@@ -1303,6 +1615,56 @@ class ChemRLRewarder:
             repair_source=success_trace_kwargs.get("repair_source"),
             repair_similarity=success_trace_kwargs.get("repair_similarity"),
             repair_reason=success_trace_kwargs.get("repair_reason"),
+            repair_method=success_trace_kwargs.get("repair_method"),
+            repair_edit_distance=int(
+                success_trace_kwargs.get("repair_edit_distance", 0) or 0
+            ),
+            repair_suffix_trim_count=int(
+                success_trace_kwargs.get("repair_suffix_trim_count", 0) or 0
+            ),
+            repair_added_parentheses=int(
+                success_trace_kwargs.get("repair_added_parentheses", 0) or 0
+            ),
+            repair_added_ring_closures=int(
+                success_trace_kwargs.get("repair_added_ring_closures", 0) or 0
+            ),
+            repaired_raw_fragment=success_trace_kwargs.get("repaired_raw_fragment"),
+            repaired_fragment_chars=int(
+                success_trace_kwargs.get("repaired_fragment_chars", 0) or 0
+            ),
+            repaired_parse_stage=success_trace_kwargs.get("repaired_parse_stage"),
+            repaired_parsed_raw=bool(
+                success_trace_kwargs.get("repaired_parsed_raw", False)
+            ),
+            repaired_parsed_core=bool(
+                success_trace_kwargs.get("repaired_parsed_core", False)
+            ),
+            component_salvage_attempted=bool(
+                success_trace_kwargs.get("component_salvage_attempted", False)
+            ),
+            component_salvage_success=bool(
+                success_trace_kwargs.get("component_salvage_success", False)
+            ),
+            component_count=int(success_trace_kwargs.get("component_count", 0) or 0),
+            salvage_method=success_trace_kwargs.get("salvage_method"),
+            salvaged_fragment=success_trace_kwargs.get("salvaged_fragment"),
+            salvaged_atom_count=success_trace_kwargs.get("salvaged_atom_count"),
+            multi_dummy_hard_fail=bool(
+                success_trace_kwargs.get("multi_dummy_hard_fail", False)
+            ),
+            dummy_salvage_attempted=bool(
+                success_trace_kwargs.get("dummy_salvage_attempted", False)
+            ),
+            dummy_salvage_success=bool(
+                success_trace_kwargs.get("dummy_salvage_success", False)
+            ),
+            dummy_salvage_method=success_trace_kwargs.get("dummy_salvage_method"),
+            dummy_salvaged_fragment=success_trace_kwargs.get("dummy_salvaged_fragment"),
+            near_parent_hard_fail=bool(
+                success_trace_kwargs.get("near_parent_hard_fail", False)
+            ),
+            residual_atom_count=success_trace_kwargs.get("residual_atom_count"),
+            residual_atom_ratio=success_trace_kwargs.get("residual_atom_ratio"),
             projection_attempted=bool(
                 success_trace_kwargs.get("projection_attempted", False)
             ),
@@ -1498,6 +1860,16 @@ class ChemRLRewarder:
         repair_source: str | None = None,
         repair_similarity: float | None = None,
         repair_reason: str | None = None,
+        repair_method: str | None = None,
+        repair_edit_distance: int = 0,
+        repair_suffix_trim_count: int = 0,
+        repair_added_parentheses: int = 0,
+        repair_added_ring_closures: int = 0,
+        repaired_raw_fragment: str | None = None,
+        repaired_fragment_chars: int = 0,
+        repaired_parse_stage: str | None = None,
+        repaired_parsed_raw: bool = False,
+        repaired_parsed_core: bool = False,
     ) -> dict[str, Any]:
         return {
             "repair_attempted": bool(repair_attempted),
@@ -1506,6 +1878,65 @@ class ChemRLRewarder:
             "repair_source": repair_source,
             "repair_similarity": repair_similarity,
             "repair_reason": repair_reason,
+            "repair_method": repair_method,
+            "repair_edit_distance": int(repair_edit_distance),
+            "repair_suffix_trim_count": int(repair_suffix_trim_count),
+            "repair_added_parentheses": int(repair_added_parentheses),
+            "repair_added_ring_closures": int(repair_added_ring_closures),
+            "repaired_raw_fragment": repaired_raw_fragment,
+            "repaired_fragment_chars": int(repaired_fragment_chars),
+            "repaired_parse_stage": repaired_parse_stage,
+            "repaired_parsed_raw": bool(repaired_parsed_raw),
+            "repaired_parsed_core": bool(repaired_parsed_core),
+        }
+
+    def _component_salvage_trace_kwargs(
+        self,
+        *,
+        component_salvage_attempted: bool = False,
+        component_salvage_success: bool = False,
+        component_count: int = 0,
+        salvage_method: str | None = None,
+        salvaged_fragment: str | None = None,
+        salvaged_atom_count: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "component_salvage_attempted": bool(component_salvage_attempted),
+            "component_salvage_success": bool(component_salvage_success),
+            "component_count": int(component_count),
+            "salvage_method": salvage_method,
+            "salvaged_fragment": salvaged_fragment,
+            "salvaged_atom_count": salvaged_atom_count,
+        }
+
+    def _dummy_trace_kwargs(
+        self,
+        *,
+        multi_dummy_hard_fail: bool = False,
+        dummy_salvage_attempted: bool = False,
+        dummy_salvage_success: bool = False,
+        dummy_salvage_method: str | None = None,
+        dummy_salvaged_fragment: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "multi_dummy_hard_fail": bool(multi_dummy_hard_fail),
+            "dummy_salvage_attempted": bool(dummy_salvage_attempted),
+            "dummy_salvage_success": bool(dummy_salvage_success),
+            "dummy_salvage_method": dummy_salvage_method,
+            "dummy_salvaged_fragment": dummy_salvaged_fragment,
+        }
+
+    def _residual_guard_trace_kwargs(
+        self,
+        *,
+        near_parent_hard_fail: bool = False,
+        residual_atom_count: int | None = None,
+        residual_atom_ratio: float | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "near_parent_hard_fail": bool(near_parent_hard_fail),
+            "residual_atom_count": residual_atom_count,
+            "residual_atom_ratio": residual_atom_ratio,
         }
 
     def _projection_trace_kwargs(
@@ -1574,6 +2005,90 @@ class ChemRLRewarder:
             projected_atom_ratio=projection_result.projected_atom_ratio,
             projection_penalty=applied_penalty,
             num_projection_candidates=projection_result.candidate_count,
+        )
+
+    def _attempt_minimal_syntax_repair(
+        self,
+        *,
+        raw_fragment_smiles: str,
+        parse_failed_reason: str | None,
+    ) -> tuple[Any, dict[str, Any]]:
+        if not self.enable_minimal_syntax_repair:
+            return None, self._repair_trace_kwargs()
+
+        repair_result = repair_minimal_fragment_syntax(
+            raw_fragment_smiles,
+            parse_failed_reason=parse_failed_reason,
+            max_edits=self.syntax_repair_max_edits,
+            min_atoms=self.syntax_repair_min_atoms,
+            allow_parentheses_fix=self.syntax_repair_allow_parentheses_fix,
+            allow_ring_fix=self.syntax_repair_allow_ring_fix,
+            allow_tail_trim=self.syntax_repair_allow_tail_trim,
+            allow_balanced_prefix_salvage=self.syntax_repair_allow_balanced_prefix_salvage,
+            prefer_prefix_salvage=self.syntax_repair_prefer_prefix_salvage,
+            max_suffix_trim=self.syntax_repair_max_suffix_trim,
+            max_added_closures=self.syntax_repair_max_added_closures,
+        )
+        repaired_info = (
+            normalize_fragment_with_dummy_atoms(repair_result.repaired_fragment_smiles)
+            if repair_result.success and repair_result.repaired_fragment_smiles
+            else None
+        )
+        return repair_result, self._repair_trace_kwargs(
+            repair_attempted=repair_result.attempted,
+            repair_success=repair_result.success,
+            repaired_fragment_smiles=repair_result.repaired_fragment_smiles,
+            repair_source="minimal_syntax",
+            repair_reason=repair_result.reason,
+            repair_method=repair_result.repair_method,
+            repair_edit_distance=repair_result.edit_distance,
+            repair_suffix_trim_count=repair_result.suffix_trim_count,
+            repair_added_parentheses=repair_result.added_parentheses,
+            repair_added_ring_closures=repair_result.added_ring_closures,
+            repaired_raw_fragment=repair_result.repaired_fragment_smiles,
+            repaired_fragment_chars=len(repair_result.repaired_fragment_smiles or ""),
+            repaired_parse_stage=(
+                repaired_info.get("parse_stage") if repaired_info is not None else None
+            ),
+            repaired_parsed_raw=(
+                bool(repaired_info.get("raw_parse_ok"))
+                if repaired_info is not None
+                else False
+            ),
+            repaired_parsed_core=(
+                bool(repaired_info.get("core_parse_ok"))
+                if repaired_info is not None
+                else False
+            ),
+        )
+
+    def _attempt_component_salvage(
+        self,
+        *,
+        parent_smiles: str,
+        raw_fragment_smiles: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        if not self.enable_component_salvage:
+            return None, self._component_salvage_trace_kwargs()
+
+        salvage_result = salvage_connected_component(
+            parent_smiles,
+            raw_fragment_smiles,
+            method=self.component_salvage_method,
+            min_atoms=self.component_salvage_min_atoms,
+            projection_min_score=self.projection_min_score,
+            projection_max_candidates=self.projection_max_candidates,
+            projection_max_atom_ratio=self.projection_max_atom_ratio,
+            projection_enable_khop3=self.projection_enable_khop3,
+            projection_mcs_timeout=self.projection_mcs_timeout,
+        )
+        return salvage_result, self._component_salvage_trace_kwargs(
+            component_salvage_attempted=salvage_result.attempted,
+            component_salvage_success=salvage_result.success,
+            component_count=salvage_result.component_count,
+            salvage_method=salvage_result.salvage_method,
+            salvaged_fragment=salvage_result.salvaged_fragment_smiles,
+            salvaged_atom_count=salvage_result.salvaged_atom_count,
         )
 
     def _attempt_parent_aware_repair(
@@ -2000,6 +2515,30 @@ class ChemRLRewarder:
         repair_source: str | None = None,
         repair_similarity: float | None = None,
         repair_reason: str | None = None,
+        repair_method: str | None = None,
+        repair_edit_distance: int = 0,
+        repair_suffix_trim_count: int = 0,
+        repair_added_parentheses: int = 0,
+        repair_added_ring_closures: int = 0,
+        repaired_raw_fragment: str | None = None,
+        repaired_fragment_chars: int = 0,
+        repaired_parse_stage: str | None = None,
+        repaired_parsed_raw: bool = False,
+        repaired_parsed_core: bool = False,
+        component_salvage_attempted: bool = False,
+        component_salvage_success: bool = False,
+        component_count: int = 0,
+        salvage_method: str | None = None,
+        salvaged_fragment: str | None = None,
+        salvaged_atom_count: int | None = None,
+        multi_dummy_hard_fail: bool = False,
+        dummy_salvage_attempted: bool = False,
+        dummy_salvage_success: bool = False,
+        dummy_salvage_method: str | None = None,
+        dummy_salvaged_fragment: str | None = None,
+        near_parent_hard_fail: bool = False,
+        residual_atom_count: int | None = None,
+        residual_atom_ratio: float | None = None,
         projection_attempted: bool = False,
         projection_success: bool = False,
         projection_method: str | None = None,
@@ -2084,6 +2623,30 @@ class ChemRLRewarder:
             repair_source=repair_source,
             repair_similarity=repair_similarity,
             repair_reason=repair_reason,
+            repair_method=repair_method,
+            repair_edit_distance=int(repair_edit_distance),
+            repair_suffix_trim_count=int(repair_suffix_trim_count),
+            repair_added_parentheses=int(repair_added_parentheses),
+            repair_added_ring_closures=int(repair_added_ring_closures),
+            repaired_raw_fragment=repaired_raw_fragment,
+            repaired_fragment_chars=int(repaired_fragment_chars),
+            repaired_parse_stage=repaired_parse_stage,
+            repaired_parsed_raw=bool(repaired_parsed_raw),
+            repaired_parsed_core=bool(repaired_parsed_core),
+            component_salvage_attempted=bool(component_salvage_attempted),
+            component_salvage_success=bool(component_salvage_success),
+            component_count=int(component_count),
+            salvage_method=salvage_method,
+            salvaged_fragment=salvaged_fragment,
+            salvaged_atom_count=salvaged_atom_count,
+            multi_dummy_hard_fail=bool(multi_dummy_hard_fail),
+            dummy_salvage_attempted=bool(dummy_salvage_attempted),
+            dummy_salvage_success=bool(dummy_salvage_success),
+            dummy_salvage_method=dummy_salvage_method,
+            dummy_salvaged_fragment=dummy_salvaged_fragment,
+            near_parent_hard_fail=bool(near_parent_hard_fail),
+            residual_atom_count=residual_atom_count,
+            residual_atom_ratio=residual_atom_ratio,
             projection_attempted=bool(projection_attempted),
             projection_success=bool(projection_success),
             projection_method=projection_method,

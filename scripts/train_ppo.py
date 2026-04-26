@@ -381,6 +381,114 @@ def build_parser() -> argparse.ArgumentParser:
         help="RDKit MCS timeout in seconds for projection retrieval scoring.",
     )
     parser.add_argument(
+        "--enable-minimal-syntax-repair",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable local syntax-only repair before failing parse errors.",
+    )
+    parser.add_argument(
+        "--repair-max-edits",
+        type=int,
+        default=4,
+        help="Maximum local syntax repair edits.",
+    )
+    parser.add_argument(
+        "--repair-min-atoms",
+        type=int,
+        default=3,
+        help="Minimum non-dummy atoms required after syntax repair.",
+    )
+    parser.add_argument(
+        "--repair-allow-parentheses-fix",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow adding a small number of missing right parentheses.",
+    )
+    parser.add_argument(
+        "--repair-allow-ring-fix",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow minimal safe ring closure or ring-balanced prefix salvage.",
+    )
+    parser.add_argument(
+        "--repair-allow-tail-trim",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow short suffix trimming for dangling decoded tails.",
+    )
+    parser.add_argument(
+        "--repair-allow-balanced-prefix-salvage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow longest parseable balanced-prefix salvage.",
+    )
+    parser.add_argument(
+        "--repair-prefer-prefix-salvage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Try balanced-prefix salvage before other minimal repair candidates.",
+    )
+    parser.add_argument(
+        "--repair-max-suffix-trim",
+        type=int,
+        default=8,
+        help="Maximum suffix characters removed by minimal syntax repair.",
+    )
+    parser.add_argument(
+        "--repair-max-added-closures",
+        type=int,
+        default=2,
+        help="Maximum parentheses/ring closure characters added by minimal syntax repair.",
+    )
+    parser.add_argument(
+        "--enable-component-salvage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Try connected-component salvage for parseable disconnected fragments.",
+    )
+    parser.add_argument(
+        "--component-salvage-method",
+        default="largest_then_best_parent_match",
+        choices=("largest", "best_parent_match", "largest_then_best_parent_match"),
+        help="Connected-component salvage selection policy.",
+    )
+    parser.add_argument(
+        "--component-salvage-min-atoms",
+        type=int,
+        default=3,
+        help="Minimum non-dummy atoms for a salvaged connected component.",
+    )
+    parser.add_argument(
+        "--multi-dummy-hard-fail-threshold",
+        type=int,
+        default=3,
+        help="Hard-fail decoded fragments with at least this many raw dummy atoms.",
+    )
+    parser.add_argument(
+        "--enable-light-dummy-salvage",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable very light dummy salvage after raw dummy-aware parsing.",
+    )
+    parser.add_argument(
+        "--near-parent-hard-ratio",
+        type=float,
+        default=0.85,
+        help="Hard-fail fragments with atom_count / parent_atom_count at or above this ratio.",
+    )
+    parser.add_argument(
+        "--min-residual-atoms",
+        type=int,
+        default=3,
+        help="Hard-fail fragments whose deletion leaves fewer residual atoms than this value.",
+    )
+    parser.add_argument(
+        "--min-residual-ratio",
+        type=float,
+        default=0.10,
+        help="Hard-fail fragments whose deletion leaves at most this residual atom ratio.",
+    )
+    parser.add_argument(
         "--disable-counterfactual-teacher",
         action="store_true",
         help="Disable the deletion-based counterfactual teacher oracle and keep only fragment-level teacher diagnostics.",
@@ -2575,6 +2683,8 @@ def run_decoded_chem_ppo_loop(
                     "invalid_or_not_substructure",
                     "invalid_generation_too_long",
                     "full_parent_fragment",
+                    "near_parent_fragment",
+                    "tiny_residual_fragment",
                     "empty_response",
                     "counterfactual_teacher_disabled",
                 )
@@ -2604,6 +2714,33 @@ def run_decoded_chem_ppo_loop(
             "[CHEM_REWARD_PARSE_STATS] parse_failed_with_dummy_count=%s parse_failed_without_dummy_count=%s",
             parse_failed_with_dummy_count,
             parse_failed_without_dummy_count,
+        )
+        repair_attempted_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("repair_attempted")
+        )
+        repair_success_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("repair_success")
+        )
+        component_salvage_attempted_count = sum(
+            1
+            for reward_log in reward_logs
+            if reward_log.get("component_salvage_attempted")
+        )
+        component_salvage_success_count = sum(
+            1
+            for reward_log in reward_logs
+            if reward_log.get("component_salvage_success")
+        )
+        near_parent_hard_fail_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("near_parent_hard_fail")
+        )
+        logger.info(
+            "[CHEM_REWARD_REPAIR_STATS] repair_attempted=%s repair_success=%s component_salvage_attempted=%s component_salvage_success=%s near_parent_hard_fail=%s",
+            repair_attempted_count,
+            repair_success_count,
+            component_salvage_attempted_count,
+            component_salvage_success_count,
+            near_parent_hard_fail_count,
         )
         projection_attempted_count = sum(
             1 for reward_log in reward_logs if reward_log.get("projection_attempted")
@@ -2644,6 +2781,8 @@ def run_decoded_chem_ppo_loop(
                 "invalid_or_not_substructure",
                 "invalid_generation_too_long",
                 "full_parent_fragment",
+                "near_parent_fragment",
+                "tiny_residual_fragment",
                 "empty_response",
             ):
                 logger.info(
@@ -2678,6 +2817,8 @@ def run_decoded_chem_ppo_loop(
                 "invalid_or_not_substructure",
                 "invalid_generation_too_long",
                 "full_parent_fragment",
+                "near_parent_fragment",
+                "tiny_residual_fragment",
                 "empty_response",
             ):
                 logger.info(
@@ -2706,7 +2847,7 @@ def run_decoded_chem_ppo_loop(
                 )
             if reward_log.get("failure_tag"):
                 logger.info(
-                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s parse_failed_reason=%s parse_stage=%s raw_has_dummy=%s raw_dummy_count=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s invalid_detail=%s fragment_chars=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s error=%s",
+                    "[CHEM_REWARD_FAILURE] id=%s failure_tag=%s parse_failed_reason=%s parse_stage=%s raw_has_dummy=%s raw_dummy_count=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s invalid_detail=%s fragment_chars=%s repair_attempted=%s repair_success=%s repair_method=%s repair_reason=%s repair_edit_distance=%s repair_suffix_trim_count=%s repair_added_parentheses=%s repair_added_ring_closures=%s repaired_raw_fragment=%s repaired_fragment_chars=%s repaired_parse_stage=%s repaired_parsed_raw=%s repaired_parsed_core=%s component_salvage_attempted=%s component_salvage_success=%s component_count=%s salvage_method=%s salvaged_fragment=%s salvaged_atom_count=%s multi_dummy_hard_fail=%s dummy_salvage_attempted=%s dummy_salvage_success=%s dummy_salvage_method=%s dummy_salvaged_fragment=%s near_parent_hard_fail=%s residual_atom_count=%s residual_atom_ratio=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s error=%s",
                     reward_log.get("id"),
                     reward_log.get("failure_tag"),
                     reward_log.get("parse_failed_reason"),
@@ -2718,6 +2859,33 @@ def run_decoded_chem_ppo_loop(
                     reward_log.get("dummy_removed_before_parse"),
                     reward_log.get("invalid_detail"),
                     reward_log.get("generated_char_count"),
+                    reward_log.get("repair_attempted"),
+                    reward_log.get("repair_success"),
+                    reward_log.get("repair_method"),
+                    reward_log.get("repair_reason"),
+                    reward_log.get("repair_edit_distance"),
+                    reward_log.get("repair_suffix_trim_count"),
+                    reward_log.get("repair_added_parentheses"),
+                    reward_log.get("repair_added_ring_closures"),
+                    reward_log.get("repaired_raw_fragment"),
+                    reward_log.get("repaired_fragment_chars"),
+                    reward_log.get("repaired_parse_stage"),
+                    reward_log.get("repaired_parsed_raw"),
+                    reward_log.get("repaired_parsed_core"),
+                    reward_log.get("component_salvage_attempted"),
+                    reward_log.get("component_salvage_success"),
+                    reward_log.get("component_count"),
+                    reward_log.get("salvage_method"),
+                    reward_log.get("salvaged_fragment"),
+                    reward_log.get("salvaged_atom_count"),
+                    reward_log.get("multi_dummy_hard_fail"),
+                    reward_log.get("dummy_salvage_attempted"),
+                    reward_log.get("dummy_salvage_success"),
+                    reward_log.get("dummy_salvage_method"),
+                    reward_log.get("dummy_salvaged_fragment"),
+                    reward_log.get("near_parent_hard_fail"),
+                    reward_log.get("residual_atom_count"),
+                    reward_log.get("residual_atom_ratio"),
                     reward_log.get("projection_attempted"),
                     reward_log.get("projection_success"),
                     reward_log.get("projection_method"),
@@ -2747,11 +2915,38 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s repair_attempted=%s repair_success=%s repair_method=%s repair_reason=%s repair_edit_distance=%s repair_suffix_trim_count=%s repair_added_parentheses=%s repair_added_ring_closures=%s repaired_raw_fragment=%s repaired_fragment_chars=%s repaired_parse_stage=%s repaired_parsed_raw=%s repaired_parsed_core=%s component_salvage_attempted=%s component_salvage_success=%s component_count=%s salvage_method=%s salvaged_fragment=%s salvaged_atom_count=%s multi_dummy_hard_fail=%s dummy_salvage_attempted=%s dummy_salvage_success=%s dummy_salvage_method=%s dummy_salvaged_fragment=%s near_parent_hard_fail=%s residual_atom_count=%s residual_atom_ratio=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
                 reward_log.get("core_fragment"),
+                reward_log.get("repair_attempted"),
+                reward_log.get("repair_success"),
+                reward_log.get("repair_method"),
+                reward_log.get("repair_reason"),
+                reward_log.get("repair_edit_distance"),
+                reward_log.get("repair_suffix_trim_count"),
+                reward_log.get("repair_added_parentheses"),
+                reward_log.get("repair_added_ring_closures"),
+                reward_log.get("repaired_raw_fragment"),
+                reward_log.get("repaired_fragment_chars"),
+                reward_log.get("repaired_parse_stage"),
+                reward_log.get("repaired_parsed_raw"),
+                reward_log.get("repaired_parsed_core"),
+                reward_log.get("component_salvage_attempted"),
+                reward_log.get("component_salvage_success"),
+                reward_log.get("component_count"),
+                reward_log.get("salvage_method"),
+                reward_log.get("salvaged_fragment"),
+                reward_log.get("salvaged_atom_count"),
+                reward_log.get("multi_dummy_hard_fail"),
+                reward_log.get("dummy_salvage_attempted"),
+                reward_log.get("dummy_salvage_success"),
+                reward_log.get("dummy_salvage_method"),
+                reward_log.get("dummy_salvaged_fragment"),
+                reward_log.get("near_parent_hard_fail"),
+                reward_log.get("residual_atom_count"),
+                reward_log.get("residual_atom_ratio"),
                 reward_log.get("projection_attempted"),
                 reward_log.get("projection_success"),
                 reward_log.get("projection_method"),
@@ -3118,6 +3313,30 @@ def main() -> None:
         args.projection_enable_khop3,
         args.projection_mcs_timeout,
     )
+    logger.info(
+        "[MINIMAL_SYNTAX_REPAIR_CONFIG] enabled=%s max_edits=%s min_atoms=%s allow_parentheses=%s allow_ring=%s allow_tail_trim=%s allow_prefix=%s prefer_prefix=%s max_suffix_trim=%s max_added_closures=%s",
+        args.enable_minimal_syntax_repair,
+        args.repair_max_edits,
+        args.repair_min_atoms,
+        args.repair_allow_parentheses_fix,
+        args.repair_allow_ring_fix,
+        args.repair_allow_tail_trim,
+        args.repair_allow_balanced_prefix_salvage,
+        args.repair_prefer_prefix_salvage,
+        args.repair_max_suffix_trim,
+        args.repair_max_added_closures,
+    )
+    logger.info(
+        "[COMPONENT_DUMMY_RESIDUAL_GUARD_CONFIG] component_salvage=%s component_method=%s component_min_atoms=%s multi_dummy_threshold=%s light_dummy_salvage=%s near_parent_ratio=%s min_residual_atoms=%s min_residual_ratio=%s",
+        args.enable_component_salvage,
+        args.component_salvage_method,
+        args.component_salvage_min_atoms,
+        args.multi_dummy_hard_fail_threshold,
+        args.enable_light_dummy_salvage,
+        args.near_parent_hard_ratio,
+        args.min_residual_atoms,
+        args.min_residual_ratio,
+    )
     if args.require_teacher_sem and args.disable_counterfactual_teacher:
         raise RuntimeError(
             "--require-teacher-sem cannot be used together with --disable-counterfactual-teacher."
@@ -3173,6 +3392,24 @@ def main() -> None:
         projection_penalty=args.projection_penalty,
         projection_enable_khop3=args.projection_enable_khop3,
         projection_mcs_timeout=args.projection_mcs_timeout,
+        enable_minimal_syntax_repair=args.enable_minimal_syntax_repair,
+        syntax_repair_max_edits=args.repair_max_edits,
+        syntax_repair_min_atoms=args.repair_min_atoms,
+        syntax_repair_allow_parentheses_fix=args.repair_allow_parentheses_fix,
+        syntax_repair_allow_ring_fix=args.repair_allow_ring_fix,
+        syntax_repair_allow_tail_trim=args.repair_allow_tail_trim,
+        syntax_repair_allow_balanced_prefix_salvage=args.repair_allow_balanced_prefix_salvage,
+        syntax_repair_prefer_prefix_salvage=args.repair_prefer_prefix_salvage,
+        syntax_repair_max_suffix_trim=args.repair_max_suffix_trim,
+        syntax_repair_max_added_closures=args.repair_max_added_closures,
+        enable_component_salvage=args.enable_component_salvage,
+        component_salvage_method=args.component_salvage_method,
+        component_salvage_min_atoms=args.component_salvage_min_atoms,
+        multi_dummy_hard_fail_threshold=args.multi_dummy_hard_fail_threshold,
+        enable_light_dummy_salvage=args.enable_light_dummy_salvage,
+        near_parent_hard_ratio=args.near_parent_hard_ratio,
+        min_residual_atoms=args.min_residual_atoms,
+        min_residual_ratio=args.min_residual_ratio,
         max_generation_chars=args.reward_max_fragment_chars,
         require_teacher_sem=args.require_teacher_sem,
         disable_counterfactual_teacher=args.disable_counterfactual_teacher,
