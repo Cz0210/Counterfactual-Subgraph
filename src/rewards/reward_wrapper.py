@@ -1343,6 +1343,30 @@ class ChemRLRewarder:
                 and core_smiles == parent_canonical_smiles
             )
             if is_full_parent:
+                full_parent_trace_kwargs = self._merge_reward_fields(
+                    base_trace_kwargs,
+                    repair_trace_kwargs,
+                    component_salvage_trace_kwargs,
+                    dummy_trace_kwargs,
+                    residual_guard_trace_kwargs,
+                    projection_trace_kwargs,
+                    size_window_trace_kwargs,
+                    raw_fragment_smiles=decoded_raw_fragment,
+                    core_fragment_smiles=core_smiles,
+                    teacher_input_smiles=core_smiles,
+                    teacher_reason="full_parent_fragment",
+                    parent_without_fragment_smiles="",
+                    counterfactual_teacher_available=bool(
+                        self.counterfactual_teacher_scorer is not None
+                        and self.counterfactual_teacher_scorer.available
+                    ),
+                    counterfactual_teacher_called=False,
+                    counterfactual_teacher_reason="full_parent_fragment",
+                    full_parent=True,
+                    empty_residual=True,
+                    residual_atom_count=0,
+                    residual_atom_ratio=0.0,
+                )
                 return self._fail(
                     parent_smiles=normalized_parent,
                     generated_smiles=generated_smiles,
@@ -1364,41 +1388,7 @@ class ChemRLRewarder:
                     connected_fragment=True,
                     is_subgraph=True,
                     residual_smiles="",
-                    raw_fragment_smiles=decoded_raw_fragment,
-                    core_fragment_smiles=core_smiles,
-                    raw_parse_ok=bool(fragment_info["raw_parse_ok"]),
-                    core_parse_ok=bool(fragment_info["core_parse_ok"]),
-                    has_dummy_atoms=bool(fragment_info["has_dummy"]),
-                    dummy_count=int(fragment_info["dummy_count"]),
-                    raw_has_dummy=bool(fragment_info["raw_has_dummy"]),
-                    raw_dummy_count=int(fragment_info["raw_dummy_count"]),
-                    parse_stage=fragment_info.get("parse_stage"),
-                    parsed_raw_with_dummy=bool(fragment_info["parsed_raw_with_dummy"]),
-                    parsed_core=bool(fragment_info["parsed_core"]),
-                    dummy_removed_before_parse=bool(fragment_info["dummy_removed_before_parse"]),
-                    parse_failed_reason=fragment_info.get("parse_failed_reason"),
-                    core_atom_count=int(fragment_info["core_atom_count"]),
-                    raw_component_count=int(fragment_info.get("raw_component_count", 0)),
-                    core_component_count=int(fragment_info.get("core_component_count", 0)),
-                    fragment_atom_count=int(fragment_info["core_atom_count"]),
-                    min_fragment_atoms=int(self.min_fragment_atoms),
-                    teacher_input_smiles=core_smiles,
-                    teacher_reason="full_parent_fragment",
-                    parent_without_fragment_smiles="",
-                    counterfactual_teacher_available=bool(
-                        self.counterfactual_teacher_scorer is not None
-                        and self.counterfactual_teacher_scorer.available
-                    ),
-                    counterfactual_teacher_called=False,
-                    counterfactual_teacher_reason="full_parent_fragment",
-                    full_parent=True,
-                    empty_residual=True,
-                    residual_atom_count=0,
-                    residual_atom_ratio=0.0,
-                    **repair_trace_kwargs,
-                    **component_salvage_trace_kwargs,
-                    **dummy_trace_kwargs,
-                    **projection_trace_kwargs,
+                    **full_parent_trace_kwargs,
                 )
 
             try:
@@ -2038,6 +2028,20 @@ class ChemRLRewarder:
 
     def _parse_failure_tag(self, parse_failure_detail: str | None) -> str:
         return parse_failure_detail or "parse_failed"
+
+    def _merge_reward_fields(
+        self,
+        *field_groups: dict[str, Any] | None,
+        **overrides: Any,
+    ) -> dict[str, Any]:
+        """Merge trace-field dictionaries so later values override earlier ones."""
+
+        merged: dict[str, Any] = {}
+        for field_group in field_groups:
+            if field_group:
+                merged.update(field_group)
+        merged.update(overrides)
+        return merged
 
     def _build_breakdown(
         self,

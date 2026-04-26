@@ -204,6 +204,34 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertEqual(trace.final_fragment_atom_count, 3)
         self.assertAlmostEqual(trace.final_fragment_atom_ratio or 0.0, 0.5)
 
+    def test_full_parent_fail_keeps_component_fields_without_keyword_collision(self) -> None:
+        rewarder = self._build_rewarder()
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["CCO"],
+            ["CCO"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertEqual(trace.failure_tag, "full_parent_fragment")
+        self.assertEqual(trace.raw_component_count, 1)
+        self.assertEqual(trace.core_component_count, 1)
+        self.assertTrue(hasattr(trace, "size_window_bucket"))
+
+    def test_near_parent_fail_keeps_size_window_fields_without_keyword_collision(self) -> None:
+        rewarder = self._build_rewarder()
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["CCCCCCC"],
+            ["CCCCCC"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertEqual(trace.failure_tag, "near_parent_fragment")
+        self.assertEqual(trace.raw_component_count, 1)
+        self.assertEqual(trace.core_component_count, 1)
+        self.assertEqual(trace.size_window_bucket, "hard_failed_near_parent")
+
 
 if __name__ == "__main__":
     unittest.main()
