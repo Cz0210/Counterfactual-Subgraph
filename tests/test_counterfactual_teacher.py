@@ -231,6 +231,8 @@ class CounterfactualTeacherTests(unittest.TestCase):
             + trace.breakdown["valid_r"]
             + trace.breakdown["subgraph_r"]
             + trace.breakdown["length_r"]
+            + trace.breakdown["size_window_r"]
+            + trace.breakdown["dummy_r"]
             + trace.breakdown["cf_r"]
         )
         self.assertAlmostEqual(trace.reward, expected_total)

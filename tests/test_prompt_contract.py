@@ -8,5 +8,6 @@ def test_counterfactual_prompt_uses_fragment_only_contract() -> None:
     prompt = build_counterfactual_prompt(record)
 
     assert "deletion is most likely to flip the molecule label" in prompt
+    assert "Do not use dummy atoms such as '*'" in prompt
     assert "Output SMILES only, no extra text." in prompt
     assert prompt.endswith("FRAGMENT_SMILES:")

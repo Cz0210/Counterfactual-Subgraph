@@ -93,6 +93,7 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertEqual(trace.core_fragment_smiles, "CC(=O)O")
         self.assertEqual(trace.teacher_input_smiles, "CC(=O)O")
         self.assertTrue(trace.is_subgraph)
+        self.assertLess(trace.breakdown["dummy_r"], 0.0)
         self.assertGreater(trace.breakdown["valid_r"], 0.0)
         self.assertGreater(trace.breakdown["subgraph_r"], 0.0)
         self.assertGreaterEqual(trace.breakdown["length_r"], 0.0)

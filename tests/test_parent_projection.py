@@ -119,6 +119,8 @@ class ParentProjectionTests(unittest.TestCase):
             + trace.breakdown["valid_r"]
             + trace.breakdown["subgraph_r"]
             + trace.breakdown["length_r"]
+            + trace.breakdown["size_window_r"]
+            + trace.breakdown["dummy_r"]
             + trace.breakdown["sem_r"]
         )
         self.assertAlmostEqual(trace.reward, unpenalized - 0.5)

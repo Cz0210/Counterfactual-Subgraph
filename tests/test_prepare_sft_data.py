@@ -1,8 +1,12 @@
 import unittest
 from unittest.mock import Mock
 
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover - optional local test dependency
+    pd = None
 
+from src.chem import is_rdkit_available
 from src.data.sft_preparation import (
     build_balanced_candidate_pool,
     build_sft_instruction,
@@ -12,16 +16,23 @@ from src.data.sft_preparation import (
 )
 
 
+@unittest.skipUnless(
+    is_rdkit_available() and pd is not None,
+    "RDKit and pandas are required for SFT preparation tests",
+)
 class PrepareSFTDataTests(unittest.TestCase):
     def test_instruction_matches_minimal_prompt_contract(self) -> None:
         instruction = build_sft_instruction("CCO")
         expected = (
             "[System]\n"
-            "Generate a valid, chemically capped subgraph for the following parent molecule. "
-            "Output only the fragment SMILES.\n\n"
-            "[Input]\n"
-            "PARENT_SMILES: CCO\n\n"
-            "[Output]\n"
+            "You are a chemistry assistant. Output ONLY one valid connected substructure "
+            "SMILES of the input molecule. Do not output dummy atoms such as '*'. "
+            "No extra words, no explanations, no quotes.\n\n"
+            "[User]\n"
+            "SMILES: CCO\n"
+            "Return ONE connected substructure as a valid SMILES fragment. "
+            "Do not use dummy atom '*'.\n\n"
+            "[Assistant]\n"
         )
         self.assertEqual(instruction, expected)
 
@@ -85,6 +96,8 @@ class PrepareSFTDataTests(unittest.TestCase):
         self.assertGreater(summary.refill_records_attempted, 0)
         self.assertEqual(sum(example.label == 1 for example in examples), 1)
         self.assertEqual(sum(example.label == 0 for example in examples), 4)
+        self.assertTrue(all("*" not in example.response for example in examples))
+        self.assertTrue(all(example.meta["target_format"] == "core_no_dummy" for example in examples))
 
     def test_split_and_ratio_helpers_are_stable(self) -> None:
         examples = [

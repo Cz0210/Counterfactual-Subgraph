@@ -6,23 +6,23 @@ from src.data.schemas import MoleculeRecord
 
 
 _PROMPT_PREFIX = (
-    "You are given a molecule SMILES. Output ONE connected substructure "
+    "You are given a molecule SMILES. Output ONE connected core-fragment "
     "SMILES whose deletion is most likely to flip the molecule label.\n"
     "The output fragment must be a valid connected substructure of the "
     "molecule.\n"
+    "Do not use dummy atoms such as '*'.\n"
     "Output SMILES only, no extra text."
 )
 
 _DECODED_CHEM_EXACT_PARENT_PROMPT_PREFIX = (
-    "You are given a molecule SMILES. Output ONE connected substructure "
+    "You are given a molecule SMILES. Output ONE connected core-fragment "
     "SMILES whose deletion is most likely to flip the molecule label.\n"
     "The fragment must be an exact connected substructure of the parent "
     "molecule.\n"
     "Do not invent atoms, rings, branches, or substituents.\n"
     "Prefer one functional group or one ring neighborhood from the parent.\n"
-    "Output one connected fragment only; keep it short and chemically closed.\n"
-    "Use at most one dummy atom * when possible.\n"
-    "Output only one fragment SMILES, no extra text."
+    "Do not use dummy atoms such as '*'.\n"
+    "Output only one connected fragment SMILES, no extra text."
 )
 
 

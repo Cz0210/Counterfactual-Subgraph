@@ -29,6 +29,8 @@ from src.chem import (
     generate_minimal_syntax_repair_candidates,
     is_parent_substructure,
     is_rdkit_available,
+    match_core_fragment_to_parent,
+    normalize_core_fragment,
     parse_smiles,
     project_fragment_to_parent_subgraph,
     repair_minimal_fragment_syntax,
@@ -483,6 +485,8 @@ class ChemRLRewarder:
         full_parent_penalty: float = -6.0,
         empty_residual_penalty: float = -4.0,
         max_generation_chars: int = 96,
+        core_output_mode: bool = True,
+        dummy_output_penalty: float = -0.25,
         enable_parent_aware_repair: bool = False,
         repair_min_similarity: float = 0.35,
         repair_max_candidates: int = 24,
@@ -555,6 +559,8 @@ class ChemRLRewarder:
         self.full_parent_penalty = float(full_parent_penalty)
         self.empty_residual_penalty = float(empty_residual_penalty)
         self.max_generation_chars = int(max_generation_chars)
+        self.core_output_mode = bool(core_output_mode)
+        self.dummy_output_penalty = float(dummy_output_penalty)
         self.enable_parent_aware_repair = bool(enable_parent_aware_repair)
         self.repair_min_similarity = float(repair_min_similarity)
         self.repair_max_candidates = int(repair_max_candidates)
@@ -737,6 +743,7 @@ class ChemRLRewarder:
         *,
         parent_smiles: Sequence[str],
         generated_fragments: Sequence[str],
+        raw_outputs: Sequence[str] | None = None,
         labels: Sequence[int] | None = None,
         metas: Sequence[dict[str, Any]] | None = None,
         device: Any = None,
@@ -758,18 +765,50 @@ class ChemRLRewarder:
         for index, trace in enumerate(traces):
             meta = metas[index] if metas is not None and index < len(metas) else {}
             breakdown = dict(trace.breakdown)
+            raw_output = (
+                str(raw_outputs[index])
+                if raw_outputs is not None and index < len(raw_outputs)
+                else str(trace.generated_smiles)
+            )
+            original_core = normalize_core_fragment(
+                trace.raw_fragment_smiles or trace.normalized_generated_smiles,
+                keep_largest_component=True,
+            ).core_fragment_smiles
+            strict_fragment = trace.projected_fragment_smiles or trace.core_fragment_smiles
+            strict_match = (
+                match_core_fragment_to_parent(trace.parent_smiles, strict_fragment)
+                if strict_fragment
+                else None
+            )
+            dummy_output_in_core_mode = bool(self.core_output_mode and trace.raw_has_dummy)
             reward_logs.append(
                 {
                     "id": meta.get("id", meta.get("index", index)),
+                    "parent_id": meta.get("id", meta.get("index", index)),
                     "parent_smiles": trace.parent_smiles,
                     "fragment": trace.raw_fragment_smiles or trace.normalized_generated_smiles,
                     "raw_fragment": trace.raw_fragment_smiles or trace.normalized_generated_smiles,
+                    "raw_output": raw_output,
                     "core_fragment": trace.core_fragment_smiles,
+                    "original_core_fragment": original_core,
+                    "projected_fragment": strict_fragment,
+                    "explanation_fragment_with_dummy": (
+                        strict_match.explanation_fragment_with_dummy
+                        if strict_match is not None and strict_match.matched
+                        else None
+                    ),
                     "format": breakdown.get("format_r"),
-                    "valid": breakdown.get("valid_r"),
-                    "substructure": breakdown.get("subgraph_r"),
+                    "format_component": breakdown.get("format_r"),
+                    "valid": bool(trace.valid_smiles),
+                    "valid_component": breakdown.get("valid_r"),
+                    "sanitize_ok": bool(trace.core_parse_ok),
+                    "substructure": bool(trace.is_subgraph),
+                    "substructure_component": breakdown.get("subgraph_r"),
                     "length": breakdown.get("length_r"),
+                    "length_component": breakdown.get("length_r"),
+                    "dummy_penalty": breakdown.get("dummy_r", 0.0),
                     "semantic": breakdown.get("sem_r"),
+                    "semantic_component": breakdown.get("sem_r"),
                     "teacher_sem": breakdown.get("teacher_sem_r"),
                     "fragment_teacher_sem": breakdown.get("fragment_teacher_sem_r"),
                     "counterfactual_sem": breakdown.get("cf_r"),
@@ -870,7 +909,7 @@ class ChemRLRewarder:
                     "projection_method": trace.projection_method,
                     "projection_score": trace.projection_score,
                     "projection_source": trace.projection_source,
-                    "projected_fragment": trace.projected_fragment_smiles,
+                    "projected_fragment": strict_fragment,
                     "projection_atom_count": trace.projection_atom_count,
                     "projection_atom_ratio": trace.projection_atom_ratio,
                     "projection_penalty": trace.projection_penalty,
@@ -882,6 +921,35 @@ class ChemRLRewarder:
                     "size_window_high": trace.size_window_high,
                     "final_fragment_atom_count": int(trace.final_fragment_atom_count),
                     "final_fragment_atom_ratio": trace.final_fragment_atom_ratio,
+                    "direct_substructure_success": bool(
+                        trace.is_subgraph and trace.projection_method == "identity"
+                    ),
+                    "dummy_output_in_core_mode": dummy_output_in_core_mode,
+                    "parent_atom_indices": (
+                        list(strict_match.match_atom_indices)
+                        if strict_match is not None and strict_match.matched
+                        else []
+                    ),
+                    "boundary_bonds": (
+                        strict_match.boundary_bonds_as_dicts()
+                        if strict_match is not None and strict_match.matched
+                        else []
+                    ),
+                    "attachment_points": (
+                        list(strict_match.attachment_points)
+                        if strict_match is not None and strict_match.matched
+                        else []
+                    ),
+                    "atom_count": (
+                        strict_match.atom_count
+                        if strict_match is not None and strict_match.matched
+                        else int(trace.final_fragment_atom_count)
+                    ),
+                    "atom_ratio": (
+                        strict_match.atom_ratio
+                        if strict_match is not None and strict_match.matched
+                        else trace.final_fragment_atom_ratio
+                    ),
                     "error_message": trace.error_message,
                     "original_label": trace.original_label,
                 }
@@ -1067,6 +1135,11 @@ class ChemRLRewarder:
             format_reward = self._compute_format_reward(effective_fragment, fragment_info)
             valid_reward = self._compute_valid_reward(fragment_info)
             length_reward = self._compute_length_reward(fragment_info["core_atom_count"])
+            dummy_output_penalty = (
+                self.dummy_output_penalty
+                if self.core_output_mode and bool(fragment_info.get("raw_has_dummy"))
+                else 0.0
+            )
             base_trace_kwargs = self._fragment_trace_kwargs(
                 fragment_info,
                 raw_fragment_smiles_override=decoded_raw_fragment,
@@ -1163,7 +1236,10 @@ class ChemRLRewarder:
                 )
 
             raw_dummy_count = int(fragment_info.get("raw_dummy_count", 0) or 0)
-            if raw_dummy_count >= self.multi_dummy_hard_fail_threshold:
+            if (
+                not self.core_output_mode
+                and raw_dummy_count >= self.multi_dummy_hard_fail_threshold
+            ):
                 dummy_trace_kwargs = self._dummy_trace_kwargs(
                     multi_dummy_hard_fail=True,
                     dummy_salvage_attempted=bool(self.enable_light_dummy_salvage),
@@ -1732,6 +1808,7 @@ class ChemRLRewarder:
             subgraph_reward=self.subgraph_pass_reward,
             length_reward=length_reward,
             size_window_reward=size_window_reward,
+            dummy_reward=dummy_output_penalty,
             semantic_reward=counterfactual_reward,
             fragment_teacher_reward=fragment_teacher_reward,
             counterfactual_reward=counterfactual_reward,
@@ -2051,6 +2128,7 @@ class ChemRLRewarder:
         subgraph_reward: float,
         length_reward: float,
         size_window_reward: float = 0.0,
+        dummy_reward: float = 0.0,
         semantic_reward: float,
         fragment_teacher_reward: float,
         counterfactual_reward: float,
@@ -2061,6 +2139,7 @@ class ChemRLRewarder:
             "subgraph_r": float(subgraph_reward),
             "length_r": float(length_reward),
             "size_window_r": float(size_window_reward),
+            "dummy_r": float(dummy_reward),
             "sem_r": float(semantic_reward),
             "teacher_sem_r": float(semantic_reward),
             "cf_r": float(counterfactual_reward),
@@ -2074,6 +2153,7 @@ class ChemRLRewarder:
             + breakdown.get("subgraph_r", 0.0)
             + breakdown.get("length_r", 0.0)
             + breakdown.get("size_window_r", 0.0)
+            + breakdown.get("dummy_r", 0.0)
             + breakdown.get("sem_r", 0.0)
         )
 

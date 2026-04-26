@@ -34,6 +34,8 @@ cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 
 python scripts/run_infer_sft.py \
+  --base-model pretrained_models/ChemLLM-7B-Chat \
+  --lora-root outputs/hpc/sft_checkpoints \
   --val-file data/sft_val.jsonl \
   --sample-size 50 \
   --seed 7 \

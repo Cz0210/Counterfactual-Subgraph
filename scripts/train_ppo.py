@@ -42,7 +42,7 @@ from src.rewards.teacher_semantic import (
     TeacherSemanticScorer,
     require_teacher_semantic_scorer,
 )
-from src.utils.io import ensure_directory, read_jsonl
+from src.utils.io import ensure_directory, read_jsonl, write_jsonl
 from src.utils.logging_utils import RunContext, configure_run_logger, write_runtime_manifest
 from src.utils import apply_dotlist_overrides, load_and_merge_config_files
 
@@ -146,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="PPO checkpoint 和日志输出目录。",
     )
     parser.add_argument(
+        "--candidate-pool-path",
+        default=None,
+        help="Optional JSONL path for saving per-sample decoded chemistry candidate traces. Defaults to <output-dir>/candidate_pool.jsonl.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=7,
@@ -240,6 +245,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_REWARD_MAX_FRAGMENT_CHARS,
         help="进入 chemistry reward 前允许的 fragment 最大字符长度，超出则直接记为 invalid_generation_too_long。",
+    )
+    parser.add_argument(
+        "--core-output-mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Treat decoded fragments as core_no_dummy targets. Dummy atoms remain warning-only post-processing metadata.",
+    )
+    parser.add_argument(
+        "--dummy-output-penalty",
+        type=float,
+        default=-0.25,
+        help="Light penalty applied when the model still emits '*' in core_output_mode.",
     )
     parser.add_argument(
         "--save-steps",
@@ -2578,6 +2595,12 @@ def run_decoded_chem_ppo_loop(
     batch_fields_logged = False
     chemistry_reward_called = False
     chemistry_reward_update_called = False
+    candidate_pool_rows: list[dict[str, Any]] = []
+    candidate_pool_path = (
+        Path(args.candidate_pool_path).expanduser().resolve()
+        if args.candidate_pool_path
+        else output_dir / "candidate_pool.jsonl"
+    )
     generation_config = resolve_decoded_chem_generation_config(args)
 
     logger.info(
@@ -2587,6 +2610,12 @@ def run_decoded_chem_ppo_loop(
         generation_config.temperature,
         generation_config.top_p,
         args.reward_max_fragment_chars,
+    )
+    logger.info(
+        "[CHEM_REWARD_CORE_MODE] core_output_mode=%s dummy_output_penalty=%s candidate_pool_path=%s",
+        args.core_output_mode,
+        args.dummy_output_penalty,
+        candidate_pool_path,
     )
 
     logger.info(
@@ -2701,6 +2730,7 @@ def run_decoded_chem_ppo_loop(
         reward_tensor, reward_logs = chem_rewarder.compute_rewards_from_decoded(
             parent_smiles=parent_smiles_batch,
             generated_fragments=fragments,
+            raw_outputs=response_texts,
             labels=parent_labels,
             metas=[
                 {
@@ -2712,6 +2742,9 @@ def run_decoded_chem_ppo_loop(
             ],
             device=rollout_device,
         )
+        for reward_log in reward_logs:
+            reward_log["step_index"] = step_index
+        candidate_pool_rows.extend(reward_logs)
         chemistry_reward_called = True
         logger.info("[CHEM_REWARD_CALLED] batch_size=%s", len(reward_logs))
 
@@ -2801,16 +2834,92 @@ def run_decoded_chem_ppo_loop(
         projection_success_count = sum(
             1 for reward_log in reward_logs if reward_log.get("projection_success")
         )
+        direct_substructure_success_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("direct_substructure_success")
+        )
+        projection_failed_count = max(
+            0,
+            projection_attempted_count - projection_success_count,
+        )
         projection_low_score_count = sum(
             1
             for reward_log in reward_logs
             if reward_log.get("projection_reason") == "projection_failed_low_score"
         )
         logger.info(
-            "[CHEM_REWARD_PROJECTION_STATS] attempted=%s success=%s failed_low_score=%s",
+            "[CHEM_REWARD_PROJECTION_STATS] attempted=%s success=%s failed=%s failed_low_score=%s direct_substructure_success=%s",
             projection_attempted_count,
             projection_success_count,
+            projection_failed_count,
             projection_low_score_count,
+            direct_substructure_success_count,
+        )
+        dummy_output_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("dummy_output_in_core_mode")
+        )
+        dummy_penalties = [
+            float(reward_log.get("dummy_penalty") or 0.0)
+            for reward_log in reward_logs
+            if reward_log.get("dummy_output_in_core_mode")
+        ]
+        logger.info(
+            "[CHEM_REWARD_DUMMY_OUTPUT_STATS] dummy_output_in_core_mode=%s dummy_output_rate=%.4f dummy_penalty_mean=%.4f",
+            dummy_output_count,
+            dummy_output_count / max(1, len(reward_logs)),
+            (sum(dummy_penalties) / len(dummy_penalties)) if dummy_penalties else 0.0,
+        )
+        cf_oracle_called_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("counterfactual_called")
+        )
+        cf_drop_values = [
+            float(reward_log.get("cf_drop"))
+            for reward_log in reward_logs
+            if reward_log.get("counterfactual_called")
+            and reward_log.get("cf_drop") is not None
+        ]
+        cf_flip_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("cf_flip")
+        )
+        full_parent_count = sum(
+            1 for reward_log in reward_logs if reward_log.get("full_parent")
+        )
+        too_small_count = sum(
+            1
+            for reward_log in reward_logs
+            if (
+                reward_log.get("failure_tag") in {"too_small", "tiny_fragment_hard_fail"}
+                or int(reward_log.get("atom_count") or 0) <= 2
+            )
+        )
+        parse_failed_count = sum(
+            1
+            for reward_log in reward_logs
+            if str(reward_log.get("failure_tag") or "").startswith("parse_failed")
+        )
+        sanitize_failed_count = sum(
+            1
+            for reward_log in reward_logs
+            if "sanitize" in str(reward_log.get("failure_tag") or "")
+            or "sanitize" in str(reward_log.get("invalid_detail") or "")
+            or "unusable_after" in str(reward_log.get("invalid_detail") or "")
+        )
+        logger.info(
+            "[CHEM_REWARD_CF_ORACLE] cf_oracle_called=%s cf_drop_mean=%.4f cf_flip_rate=%.4f full_parent_rate=%.4f too_small_rate=%.4f",
+            cf_oracle_called_count,
+            (sum(cf_drop_values) / len(cf_drop_values)) if cf_drop_values else 0.0,
+            cf_flip_count / max(1, cf_oracle_called_count),
+            full_parent_count / max(1, len(reward_logs)),
+            too_small_count / max(1, len(reward_logs)),
+        )
+        logger.info(
+            "[CHEM_REWARD_FAILURE_STATS] parse_failed=%s sanitize_failed=%s dummy_output_in_core_mode=%s direct_substructure_success=%s projection_attempted=%s projection_success=%s projection_failed=%s",
+            parse_failed_count,
+            sanitize_failed_count,
+            dummy_output_count,
+            direct_substructure_success_count,
+            projection_attempted_count,
+            projection_success_count,
+            projection_failed_count,
         )
         reward_logs_to_print = reward_logs if args.decoded_chem_smoke_test else reward_logs[: min(2, len(reward_logs))]
         for reward_log in reward_logs_to_print:
@@ -3233,6 +3342,12 @@ def run_decoded_chem_ppo_loop(
         raise RuntimeError("Decoded chemistry PPO did not call the chemistry reward path.")
     if args.require_chemistry_reward_path and not chemistry_reward_update_called:
         raise RuntimeError("Decoded chemistry PPO did not execute a PPO update with chemistry rewards.")
+    write_jsonl(candidate_pool_path, candidate_pool_rows)
+    logger.info(
+        "Saved decoded chemistry candidate pool to %s (%s rows)",
+        candidate_pool_path,
+        len(candidate_pool_rows),
+    )
 
     return save_decoded_chem_checkpoint(
         policy_model=policy_model,
@@ -3452,6 +3567,12 @@ def main() -> None:
         args.size_window_small_penalty,
         args.size_window_large_penalty,
     )
+    logger.info(
+        "[CORE_OUTPUT_MODE_CONFIG] enabled=%s dummy_output_penalty=%s candidate_pool_path=%s",
+        args.core_output_mode,
+        args.dummy_output_penalty,
+        args.candidate_pool_path or str(output_dir / "candidate_pool.jsonl"),
+    )
     if args.require_teacher_sem and args.disable_counterfactual_teacher:
         raise RuntimeError(
             "--require-teacher-sem cannot be used together with --disable-counterfactual-teacher."
@@ -3534,6 +3655,8 @@ def main() -> None:
         size_window_small_penalty=args.size_window_small_penalty,
         size_window_large_penalty=args.size_window_large_penalty,
         max_generation_chars=args.reward_max_fragment_chars,
+        core_output_mode=args.core_output_mode,
+        dummy_output_penalty=args.dummy_output_penalty,
         require_teacher_sem=args.require_teacher_sem,
         disable_counterfactual_teacher=args.disable_counterfactual_teacher,
     )

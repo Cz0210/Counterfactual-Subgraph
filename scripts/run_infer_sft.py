@@ -34,19 +34,22 @@ from src.models.llm_generator import clean_generated_smiles
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_MODEL = REPO_ROOT / "pretrained_models" / "ChemLLM-7B-Chat"
-DEFAULT_LORA_ROOT = REPO_ROOT / "outputs" / "hpc" / "sft_checkpoints"
-DEFAULT_VAL_JSONL = REPO_ROOT / "data" / "sft_val.jsonl"
-DEFAULT_LOG_PATH = REPO_ROOT / "outputs" / "hpc" / "logs" / "sft_infer_results.txt"
+DEFAULT_LORA_ROOT = REPO_ROOT / "ckpt" / "sft_v3_core_lora"
+DEFAULT_VAL_JSONL = REPO_ROOT / "data" / "sft_v3_core_val.jsonl"
+DEFAULT_LOG_PATH = REPO_ROOT / "outputs" / "sft_v3_core_eval" / "sft_infer_results.txt"
 PROMPT_TEMPLATE = (
     "[System]\n"
-    "Generate a valid, chemically capped subgraph for the following parent molecule. "
-    "Output only the fragment SMILES.\n\n"
-    "[Input]\n"
-    "PARENT_SMILES: {parent_smiles}\n\n"
-    "[Output]\n"
+    "You are a chemistry assistant. Output ONLY one valid connected substructure "
+    "SMILES of the input molecule. Do not output dummy atoms such as '*'. "
+    "No extra words, no explanations, no quotes.\n\n"
+    "[User]\n"
+    "SMILES: {parent_smiles}\n"
+    "Return ONE connected substructure as a valid SMILES fragment. "
+    "Do not use dummy atom '*'.\n\n"
+    "[Assistant]\n"
 )
 PARENT_SMILES_PATTERN = re.compile(
-    r"PARENT_SMILES:\s*(?P<smiles>.+?)\n\n\[Output\]\n?\s*$",
+    r"(?:PARENT_SMILES|SMILES):\s*(?P<smiles>.+?)(?:\n\n\[Assistant\]\n?\s*$|\n\n\[Output\]\n?\s*$)",
     flags=re.DOTALL,
 )
 

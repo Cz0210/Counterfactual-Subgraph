@@ -23,10 +23,10 @@ tensorboard/
 *.safetensors
 *.ckpt
 
-data/raw/
-pretrained_models/
-data/
-outputs/
+/data/raw/
+/pretrained_models/
+/data/
+/outputs/
 .codex
 
 .cache/

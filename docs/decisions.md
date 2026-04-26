@@ -6,6 +6,52 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-04-26] Switch SFT and decoded PPO text targets to core-only fragments
+
+### Background
+Decoded PPO diagnostics showed repeated failure buckets around raw dummy-atom
+targets: `parse_failed`, `invalid_or_not_substructure`, and
+`core_fragment_unusable_after_dummy_normalization`. The project objective is
+still deletion-based counterfactual subgraph generation, but requiring the LLM
+to emit capped `*...*` fragments was unnecessarily expanding the text search
+space and entangling text generation with RDKit attachment-point bookkeeping.
+
+### Decision
+Adopt `v3_core` / `core_no_dummy` as the default text target for the current
+SFT and decoded PPO path:
+
+- SFT dataset responses now store no-dummy `core_fragment` strings while
+  preserving the original dummy-bearing fragment as metadata;
+- PPO prompts and core-mode prompt builders now instruct the model to emit only
+  connected core-fragment SMILES without `*`;
+- RDKit remains responsible for strict parent-substructure matching,
+  parent-constrained projection, boundary-bond detection, and optional recovery
+  of an explanation fragment with dummy attachment markers;
+- deletion-based teacher-oracle scoring continues to operate on the strict or
+  projected parent subgraph, not on fragment-only teacher semantics;
+- decoded PPO keeps projection and repair scaffolding, but dummy output is now
+  treated as a warning plus light penalty in core mode instead of being the
+  desired text format.
+
+### Alternatives considered
+1. Keep dummy-bearing targets and only patch parse/salvage heuristics.
+2. Remove dummy handling from the codebase entirely.
+3. Switch to a graph-only generator and bypass SMILES decoding altogether.
+
+### Consequences
+- New `data/sft_v3_core_train.jsonl` and `data/sft_v3_core_val.jsonl` datasets
+  can coexist with legacy dummy-target datasets.
+- Core-only eval summaries now report dummy-output and stripped-core recovery
+  metrics explicitly.
+- Decoded PPO candidate pools now retain both core fragments and RDKit-restored
+  explanation fragments with dummy attachment points, so diagnostics remain
+  available without making dummy atoms part of the model target.
+
+### Status
+Accepted
+
+---
+
 ## Template
 
 ```md

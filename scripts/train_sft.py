@@ -24,9 +24,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = (
     REPO_ROOT / "pretrained_models" / "ChemLLM-7B-Chat"
 )
-DEFAULT_TRAIN_FILE = REPO_ROOT / "data" / "sft_train.jsonl"
-DEFAULT_VAL_FILE = REPO_ROOT / "data" / "sft_val.jsonl"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "hpc" / "sft_checkpoints"
+DEFAULT_TRAIN_FILE = REPO_ROOT / "data" / "sft_v3_core_train.jsonl"
+DEFAULT_VAL_FILE = REPO_ROOT / "data" / "sft_v3_core_val.jsonl"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "ckpt" / "sft_v3_core_lora"
 LORA_TARGET_MODULES = (
     "wqkv",
     "wo",

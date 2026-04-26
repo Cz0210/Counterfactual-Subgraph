@@ -18,9 +18,7 @@ SYSTEM_PROMPT = (
     "You are ChemLLM for counterfactual subgraph generation.\n"
     "Given one complete parent molecule SMILES, output exactly one connected "
     "subgraph SMILES from that parent.\n"
-    "Every cut bond must be capped with a dummy atom '*'.\n"
-    "Use one '*' for each broken attachment point, so two cuts require two "
-    "dummy atoms.\n"
+    "Output the core fragment only and do not use dummy atoms such as '*'.\n"
     "The fragment must stay chemically meaningful, connected, and must be a "
     "real subgraph of the parent molecule.\n"
     "Output the fragment SMILES only. Do not explain, do not restate the "
@@ -31,18 +29,18 @@ SYSTEM_PROMPT = (
 FEW_SHOT_EXAMPLES: tuple[FewShotExample, ...] = (
     FewShotExample(
         parent_smiles="Cc1ccccc1",
-        fragment_smiles="*C",
-        rationale="methyl branch cut from toluene",
+        fragment_smiles="C",
+        rationale="methyl branch from toluene",
     ),
     FewShotExample(
         parent_smiles="COC",
-        fragment_smiles="*O*",
-        rationale="oxygen bridge with two broken attachments",
+        fragment_smiles="CO",
+        rationale="methoxy fragment from dimethyl ether",
     ),
     FewShotExample(
         parent_smiles="c1ccccc1O",
-        fragment_smiles="*O",
-        rationale="hydroxyl group detached from phenyl ring",
+        fragment_smiles="O",
+        rationale="hydroxyl group from phenol",
     ),
 )
 
@@ -105,7 +103,7 @@ def build_chemllm_messages(
 ) -> list[dict[str, str]]:
     """Build a message list that can be passed to chat-style tokenizers."""
 
-    user_lines = ["Return exactly one capped fragment SMILES."]
+    user_lines = ["Return exactly one connected core fragment SMILES without dummy atoms."]
     if label is not None:
         user_lines.append(f"ORIGINAL_LABEL: {label}")
     user_lines.extend(
