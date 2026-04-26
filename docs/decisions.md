@@ -29,6 +29,53 @@ Proposed / Accepted / Deprecated / Superseded
 
 ---
 
+## [2026-04-26] v4 minimal patch for decoded PPO repair, salvage semantics, and size-window reward
+
+### Background
+The `decoded_chem_diag50_parsefix_connectfix_v3` diagnose run kept the
+projection-v1 retrieval path alive and activated the tiny-fragment hard guard,
+but three problems remained: minimal syntax repair still failed mostly at
+`repair_candidate_parse_failed`, component salvage logs still mixed raw/core
+disconnects with core-unusable cases, and the policy could still oscillate
+between tiny fragments and near-parent fragments.
+
+### Decision
+Keep projection-v1, the decoded PPO main loop, and the existing Slurm argument
+chain intact, and apply only a narrow v4 repair-path patch:
+
+- upgrade minimal syntax repair from single accepted candidate to
+  multi-candidate generation with staged diagnostics
+  (parse/core/strict-parent/projection);
+- let repair candidates prove they are either strict parent subgraphs or
+  projectable through the existing parent-constrained retrieval path before
+  counting as `repair_success=True`;
+- restrict component salvage to true raw/core disconnected fragments, and label
+  core-unusable normalization failures explicitly instead of routing them
+  through `fragment_not_connected`;
+- add a soft size-window reward on the final accepted fragment atom ratio while
+  preserving tiny-fragment, near-parent, and tiny-residual hard fails;
+- add a dedicated v4 diagnose Slurm wrapper with all arguments encoded in the
+  script.
+
+### Alternatives considered
+1. Add a global nearest-valid-molecule repairer after parse failure.
+2. Rewrite projection-v1 instead of keeping the existing retrieval path.
+3. Rework the entire reward framework instead of patching the decoded PPO
+   reward wrapper in place.
+
+### Consequences
+- Repair logs now distinguish whether failure happened at parse, core
+  normalization, strict-parent validation, or repair-time projection.
+- Component salvage logs now distinguish raw/core disconnected inputs from
+  non-salvageable core normalization failures.
+- The final accepted fragment now carries explicit size-window diagnostics
+  without weakening existing hard guards.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-26] Tighten decoded PPO parse/connect diagnostics and tiny-fragment guard
 
 ### Background

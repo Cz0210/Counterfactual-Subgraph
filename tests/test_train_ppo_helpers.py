@@ -226,6 +226,32 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertEqual(args.min_fragment_atoms, 3)
         self.assertAlmostEqual(args.tiny_fragment_hard_fail_penalty, -6.0)
 
+    def test_parser_accepts_size_window_flags(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--enable-size-window-reward",
+                "--size-window-low",
+                "0.2",
+                "--size-window-high",
+                "0.6",
+                "--size-window-bonus",
+                "0.5",
+                "--size-window-small-penalty",
+                "-0.3",
+                "--size-window-large-penalty",
+                "-0.2",
+            ]
+        )
+
+        self.assertTrue(args.enable_size_window_reward)
+        self.assertAlmostEqual(args.size_window_low, 0.2)
+        self.assertAlmostEqual(args.size_window_high, 0.6)
+        self.assertAlmostEqual(args.size_window_bonus, 0.5)
+        self.assertAlmostEqual(args.size_window_small_penalty, -0.3)
+        self.assertAlmostEqual(args.size_window_large_penalty, -0.2)
+
     def test_score_adapter_keeps_existing_score(self) -> None:
         model = type("ModelWithScore", (), {})()
         existing = lambda hidden_states: ("existing", hidden_states)

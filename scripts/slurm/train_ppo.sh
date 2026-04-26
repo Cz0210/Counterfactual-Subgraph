@@ -62,6 +62,12 @@ MIN_RESIDUAL_ATOMS=${MIN_RESIDUAL_ATOMS:-}
 MIN_RESIDUAL_RATIO=${MIN_RESIDUAL_RATIO:-}
 MIN_FRAGMENT_ATOMS=${MIN_FRAGMENT_ATOMS:-}
 TINY_FRAGMENT_HARD_FAIL_PENALTY=${TINY_FRAGMENT_HARD_FAIL_PENALTY:-}
+ENABLE_SIZE_WINDOW_REWARD=${ENABLE_SIZE_WINDOW_REWARD:-}
+SIZE_WINDOW_LOW=${SIZE_WINDOW_LOW:-}
+SIZE_WINDOW_HIGH=${SIZE_WINDOW_HIGH:-}
+SIZE_WINDOW_BONUS=${SIZE_WINDOW_BONUS:-}
+SIZE_WINDOW_SMALL_PENALTY=${SIZE_WINDOW_SMALL_PENALTY:-}
+SIZE_WINDOW_LARGE_PENALTY=${SIZE_WINDOW_LARGE_PENALTY:-}
 
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
@@ -132,6 +138,12 @@ echo "MIN_RESIDUAL_ATOMS=${MIN_RESIDUAL_ATOMS:-<unset>}"
 echo "MIN_RESIDUAL_RATIO=${MIN_RESIDUAL_RATIO:-<unset>}"
 echo "MIN_FRAGMENT_ATOMS=${MIN_FRAGMENT_ATOMS:-<unset>}"
 echo "TINY_FRAGMENT_HARD_FAIL_PENALTY=${TINY_FRAGMENT_HARD_FAIL_PENALTY:-<unset>}"
+echo "ENABLE_SIZE_WINDOW_REWARD=${ENABLE_SIZE_WINDOW_REWARD:-<unset>}"
+echo "SIZE_WINDOW_LOW=${SIZE_WINDOW_LOW:-<unset>}"
+echo "SIZE_WINDOW_HIGH=${SIZE_WINDOW_HIGH:-<unset>}"
+echo "SIZE_WINDOW_BONUS=${SIZE_WINDOW_BONUS:-<unset>}"
+echo "SIZE_WINDOW_SMALL_PENALTY=${SIZE_WINDOW_SMALL_PENALTY:-<unset>}"
+echo "SIZE_WINDOW_LARGE_PENALTY=${SIZE_WINDOW_LARGE_PENALTY:-<unset>}"
 if [ ! -f "${TEACHER_PATH}" ]; then
   echo "[ERROR] Teacher file not found: ${TEACHER_PATH}"
   exit 1
@@ -337,6 +349,22 @@ if [ -n "${MIN_FRAGMENT_ATOMS}" ]; then
 fi
 if [ -n "${TINY_FRAGMENT_HARD_FAIL_PENALTY}" ]; then
   cmd+=(--tiny-fragment-hard-fail-penalty "${TINY_FRAGMENT_HARD_FAIL_PENALTY}")
+fi
+append_bool_flag "${ENABLE_SIZE_WINDOW_REWARD}" "--enable-size-window-reward" "--no-enable-size-window-reward" "ENABLE_SIZE_WINDOW_REWARD"
+if [ -n "${SIZE_WINDOW_LOW}" ]; then
+  cmd+=(--size-window-low "${SIZE_WINDOW_LOW}")
+fi
+if [ -n "${SIZE_WINDOW_HIGH}" ]; then
+  cmd+=(--size-window-high "${SIZE_WINDOW_HIGH}")
+fi
+if [ -n "${SIZE_WINDOW_BONUS}" ]; then
+  cmd+=(--size-window-bonus "${SIZE_WINDOW_BONUS}")
+fi
+if [ -n "${SIZE_WINDOW_SMALL_PENALTY}" ]; then
+  cmd+=(--size-window-small-penalty "${SIZE_WINDOW_SMALL_PENALTY}")
+fi
+if [ -n "${SIZE_WINDOW_LARGE_PENALTY}" ]; then
+  cmd+=(--size-window-large-penalty "${SIZE_WINDOW_LARGE_PENALTY}")
 fi
 cmd+=("$@")
 

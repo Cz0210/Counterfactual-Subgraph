@@ -105,6 +105,19 @@ class FragmentProjectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FragmentSyntaxRepairCandidate:
+    """One local syntax-repair candidate before parent/projection validation."""
+
+    fragment_smiles: str
+    repair_method: str | None = None
+    reason: str | None = None
+    edit_distance: int = 0
+    suffix_trim_count: int = 0
+    added_parentheses: int = 0
+    added_ring_closures: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class FragmentSyntaxRepairResult:
     """Result of a strictly local syntax repair attempt."""
 
@@ -122,6 +135,12 @@ class FragmentSyntaxRepairResult:
     failure_reason: str | None = None
     failure_stage: str | None = None
     candidate_count: int = 0
+    candidates_parse_ok: int = 0
+    candidates_core_ok: int = 0
+    candidates_parent_ok: int = 0
+    candidates_projection_ok: int = 0
+    best_candidate: str | None = None
+    accept_stage: str | None = None
     candidate_accepted: bool = False
     candidate_rejected_reason: str | None = None
 
@@ -134,9 +153,14 @@ class FragmentComponentSalvageResult:
     attempted: bool
     success: bool
     component_count: int = 0
+    raw_component_count: int = 0
+    core_component_count: int = 0
+    salvage_stage: str | None = None
     salvage_method: str | None = None
     salvaged_fragment_smiles: str | None = None
     salvaged_atom_count: int | None = None
+    candidate_count: int = 0
+    best_candidate: str | None = None
     reason: str | None = None
     failure_reason: str | None = None
     failure_stage: str | None = None

@@ -176,7 +176,33 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertTrue(trace.repair_success)
         self.assertTrue(trace.repair_candidate_accepted)
         self.assertGreater(trace.repair_candidate_count, 0)
+        self.assertGreater(trace.repair_candidates_parse_ok, 0)
+        self.assertGreater(trace.repair_candidates_core_ok, 0)
+        self.assertEqual(trace.repair_accept_stage, "projection")
         self.assertTrue(trace.projection_success)
+
+    def test_size_window_reward_prefers_medium_fragment(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_size_window_reward=True,
+            size_window_low=0.15,
+            size_window_high=0.65,
+            size_window_bonus=0.4,
+            size_window_small_penalty=-0.4,
+            size_window_large_penalty=-0.4,
+            min_residual_atoms=0,
+            min_residual_ratio=0.0,
+        )
+
+        trace = rewarder.calculate_reward_details_batch(
+            ["CCCCCC"],
+            ["CCC"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertEqual(trace.size_window_bucket, "in_window")
+        self.assertAlmostEqual(trace.size_window_reward, 0.4)
+        self.assertEqual(trace.final_fragment_atom_count, 3)
+        self.assertAlmostEqual(trace.final_fragment_atom_ratio or 0.0, 0.5)
 
 
 if __name__ == "__main__":

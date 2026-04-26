@@ -7,6 +7,7 @@ from src.chem.deletion import (
     get_remainder_graph,
 )
 from src.chem.minimal_repair import repair_minimal_fragment_syntax
+from src.chem.minimal_repair import generate_minimal_syntax_repair_candidates
 from src.chem.projection import (
     ParentProjectionCandidate,
     build_parent_projection_candidates,
@@ -32,6 +33,7 @@ from src.chem.types import (
     FragmentComponentSalvageResult,
     FragmentProjectionResult,
     FragmentRepairResult,
+    FragmentSyntaxRepairCandidate,
     FragmentSyntaxRepairResult,
     FragmentValidationResult,
     ParsedMolecule,
@@ -45,6 +47,7 @@ __all__ = [
     "FragmentDeletionEngine",
     "FragmentProjectionResult",
     "FragmentRepairResult",
+    "FragmentSyntaxRepairCandidate",
     "FragmentSyntaxRepairResult",
     "FragmentValidationResult",
     "FragmentValidator",
@@ -55,6 +58,7 @@ __all__ = [
     "canonicalize_smiles",
     "delete_fragment_from_parent",
     "find_parent_substructure_matches",
+    "generate_minimal_syntax_repair_candidates",
     "get_remainder_graph",
     "is_rdkit_available",
     "is_connected_fragment",
