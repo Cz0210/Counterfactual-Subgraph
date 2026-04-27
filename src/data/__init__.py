@@ -79,3 +79,57 @@ else:
             "split_examples",
         ]
     )
+
+try:  # pragma: no cover - optional compatibility layer
+    from src.data.hiv_dataset_utils import (
+        HIVParentRecord,
+        label_counts,
+        load_hiv_dataframe as load_hiv_dataframe_v2,
+        normalize_hiv_records,
+        resolve_hiv_column_names,
+        sample_records_by_strata,
+        stratified_round_robin_order,
+    )
+    from src.data.sft_v3_builder import (
+        SFTV3BuildArtifacts,
+        SFTV3BuilderConfig,
+        SFTV3Example,
+        SFTV3ReferenceCandidate,
+        build_and_write_sft_v3_dataset,
+        select_reference_candidate_for_parent,
+        split_examples_scaffold_aware,
+    )
+except ImportError:  # pragma: no cover - optional build dependency path
+    HIVParentRecord = None
+    label_counts = None
+    load_hiv_dataframe_v2 = None
+    normalize_hiv_records = None
+    resolve_hiv_column_names = None
+    sample_records_by_strata = None
+    stratified_round_robin_order = None
+    SFTV3BuildArtifacts = None
+    SFTV3BuilderConfig = None
+    SFTV3Example = None
+    SFTV3ReferenceCandidate = None
+    build_and_write_sft_v3_dataset = None
+    select_reference_candidate_for_parent = None
+    split_examples_scaffold_aware = None
+else:
+    __all__.extend(
+        [
+            "HIVParentRecord",
+            "label_counts",
+            "load_hiv_dataframe_v2",
+            "normalize_hiv_records",
+            "resolve_hiv_column_names",
+            "sample_records_by_strata",
+            "stratified_round_robin_order",
+            "SFTV3BuildArtifacts",
+            "SFTV3BuilderConfig",
+            "SFTV3Example",
+            "SFTV3ReferenceCandidate",
+            "build_and_write_sft_v3_dataset",
+            "select_reference_candidate_for_parent",
+            "split_examples_scaffold_aware",
+        ]
+    )

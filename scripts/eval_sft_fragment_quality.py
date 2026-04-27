@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accepted for HPC wrapper compatibility. The current evaluator uses explicit CLI overrides only.",
     )
     parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        help="Accepted for HPC wrapper compatibility. The current evaluator ignores runtime key=value overrides.",
+    )
+    parser.add_argument(
         "--base-model",
         default=str(DEFAULT_BASE_MODEL),
         help="Path to the base ChemLLM model.",

@@ -101,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Learning rate for QLoRA training.",
     )
     parser.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=3,
+        help="Maximum number of checkpoints kept on disk.",
+    )
+    parser.add_argument(
         "--report-to",
         default="none",
         help=(
@@ -219,7 +225,7 @@ def build_training_args(output_dir: Path, args: argparse.Namespace) -> TrainingA
         eval_steps=args.eval_steps,
         eval_strategy="steps",
         save_strategy="steps",
-        save_total_limit=3,
+        save_total_limit=args.save_total_limit,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         report_to=parse_report_to(args.report_to),

@@ -6,6 +6,62 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-04-27] Rebuild SFT v3 from raw HIV.csv with scaffold-aware parent sampling and parent-derived reference ranking
+
+### Background
+The repository's earlier SFT data path was built from a much smaller weak-target
+pool and inherited two distribution problems: too many near-parent large
+fragments and a non-trivial tail of trivial tiny fragments. For the current v3
+counterfactual objective, the SFT initializer should expose the model to more
+strict parent substructures whose deletion leaves a non-empty residual and
+whose size distribution is centered in a usable mid-range before PPO starts.
+
+### Decision
+Add a new `scripts/build_sft_v3_from_hiv.py` pipeline backed by
+`src/data/sft_v3_builder.py` and `src/data/hiv_dataset_utils.py`:
+
+- read raw `HIV.csv` directly with flexible field-name detection for SMILES and
+  labels;
+- normalize parent molecules with RDKit canonicalization and build scaffold +
+  parent-size metadata;
+- keep positive-class parents aggressively while downsampling negatives with a
+  scaffold-and-size-diversity-first round-robin strategy instead of raw
+  full-retention or rigid 1:1 balancing;
+- generate reference candidates only from parent-derived connected fragments,
+  primarily through the existing projection candidate pool
+  (ring systems, functional-group neighborhoods, BRICS components, atom/bond
+  k-hop fragments) plus a lightweight Murcko-like scaffold path;
+- filter candidates by strict parent-substructure matching, non-empty deletion
+  residual, non-full-parent status, and a default mid-size atom-ratio window of
+  `[0.10, 0.55]`;
+- if an oracle bundle is provided, weak-rank filtered candidates by
+  `cf_flip -> cf_drop -> size closeness`; otherwise fall back to a size-aware
+  heuristic ranking;
+- keep the final text target as core-only fragment SMILES while preserving the
+  recovered dummy-capped explanation fragment in metadata.
+
+### Alternatives considered
+1. Keep extending the old `prepare_sft_data.py` weak-target path.
+2. Rebuild SFT references from arbitrary fragment-only teacher semantics rather
+   than deletion-based parent-derived candidates.
+3. Preserve all negatives and rely on later SFT/PPO reweighting to correct the
+   data imbalance.
+
+### Consequences
+- The project now has a direct raw-HIV -> SFT-v3 rebuild path that is aligned
+  with the residual-graph counterfactual objective.
+- SFT train/val JSONL outputs remain compatible with `scripts/train_sft.py`,
+  `scripts/eval_sft_fragment_quality.py`, and
+  `scripts/analyze_sft_fragment_distribution.py`.
+- HPC workflows can rebuild, train, and evaluate the new dataset through
+  dedicated Slurm wrappers without changing the local VSCode -> `git push` ->
+  HPC `git pull` -> `sbatch` loop.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-26] Switch SFT and decoded PPO text targets to core-only fragments
 
 ### Background
