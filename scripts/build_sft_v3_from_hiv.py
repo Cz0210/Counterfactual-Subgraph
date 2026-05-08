@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT_CSV = REPO_ROOT / "data" / "raw" / "AIDS" / "HIV.csv"
 DEFAULT_TRAIN_JSONL = REPO_ROOT / "data" / "sft_v3_hiv_train.jsonl"
 DEFAULT_VAL_JSONL = REPO_ROOT / "data" / "sft_v3_hiv_val.jsonl"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.sft_v3_builder import SFTV3BuilderConfig, build_and_write_sft_v3_dataset
 

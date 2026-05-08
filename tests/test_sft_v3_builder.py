@@ -6,7 +6,11 @@ except ImportError:  # pragma: no cover - optional local test dependency
     pd = None
 
 from src.chem import is_rdkit_available
-from src.data.hiv_dataset_utils import HIVParentRecord, normalize_hiv_records, sample_records_by_strata
+from src.data.hiv_dataset_utils import (
+    HIVParentRecord,
+    normalize_hiv_records,
+    sample_records_by_strata,
+)
 from src.data.sft_v3_builder import (
     SFTV3BuilderConfig,
     SFTV3Example,
@@ -37,6 +41,24 @@ class SFTV3BuilderTests(unittest.TestCase):
         self.assertEqual(summary["valid_label_counts"]["1"], 1)
         self.assertEqual(summary["valid_label_counts"]["0"], 1)
         self.assertGreaterEqual(summary["dropped_counts"]["empty_smiles"], 1)
+
+    def test_normalize_hiv_records_supports_class_alias_and_string_positive_label(self) -> None:
+        dataframe = pd.DataFrame(
+            [
+                {"smiles": "CCO", "class": "active"},
+                {"smiles": "c1ccccc1O", "class": "inactive"},
+            ]
+        )
+
+        records, summary = normalize_hiv_records(dataframe, positive_label="active")
+
+        self.assertEqual(summary["smiles_column"], "smiles")
+        self.assertEqual(summary["label_column"], "class")
+        self.assertEqual(summary["positive_label_normalized"], "active")
+        self.assertEqual(summary["negative_label_normalized"], "inactive")
+        self.assertEqual(summary["valid_label_counts"]["1"], 1)
+        self.assertEqual(summary["valid_label_counts"]["0"], 1)
+        self.assertEqual([record.label for record in records], [1, 0])
 
     def test_sample_records_by_strata_spreads_across_groups(self) -> None:
         records = [

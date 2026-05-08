@@ -17,10 +17,12 @@ source ~/.bashrc
 conda activate smiles_pip118
 
 PROJECT_DIR=${PROJECT_DIR:-/share/home/u20526/czx/counterfactual-subgraph}
+RUN_NAME=${RUN_NAME:-sft_v3_hiv_$(date +%Y%m%d_%H%M%S)}
+RUN_ROOT=${RUN_ROOT:-${PROJECT_DIR}/outputs/hpc/sft_v3_hiv_runs/${RUN_NAME}}
+DATASET_DIR=${DATASET_DIR:-${RUN_ROOT}/dataset}
 INPUT_CSV=${INPUT_CSV:-${PROJECT_DIR}/data/raw/AIDS/HIV.csv}
-TRAIN_OUTPUT=${TRAIN_OUTPUT:-${PROJECT_DIR}/data/sft_v3_hiv_train.jsonl}
-VAL_OUTPUT=${VAL_OUTPUT:-${PROJECT_DIR}/data/sft_v3_hiv_val.jsonl}
-RUN_NAME=${RUN_NAME:-build_sft_v3_$(date +%Y%m%d_%H%M%S)}
+TRAIN_OUTPUT=${TRAIN_OUTPUT:-${DATASET_DIR}/sft_v3_hiv_train.jsonl}
+VAL_OUTPUT=${VAL_OUTPUT:-${DATASET_DIR}/sft_v3_hiv_val.jsonl}
 POSITIVE_LABEL=${POSITIVE_LABEL:-1}
 NEG_POS_RATIO=${NEG_POS_RATIO:-2.0}
 VAL_RATIO=${VAL_RATIO:-0.1}
@@ -32,10 +34,15 @@ MAX_FRAG_ATOMS=${MAX_FRAG_ATOMS:-30}
 ORACLE_PATH=${ORACLE_PATH:-}
 USE_ORACLE_RANKING=${USE_ORACLE_RANKING:-true}
 SEED=${SEED:-7}
-WARN_LOG=${WARN_LOG:-${PROJECT_DIR}/logs/${RUN_NAME}.warn.log}
+WARN_LOG=${WARN_LOG:-${RUN_ROOT}/logs/build.warn.log}
 
-cd "${PROJECT_DIR}"
+cd /share/home/u20526/czx/counterfactual-subgraph
+if [ "${PROJECT_DIR}" != "/share/home/u20526/czx/counterfactual-subgraph" ]; then
+  cd "${PROJECT_DIR}"
+fi
 mkdir -p logs
+mkdir -p "${DATASET_DIR}"
+mkdir -p "$(dirname "${WARN_LOG}")"
 
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
@@ -52,6 +59,8 @@ if torch.cuda.is_available():
     print("device name:", torch.cuda.get_device_name(0))
 PY
 echo "INPUT_CSV=${INPUT_CSV}"
+echo "RUN_ROOT=${RUN_ROOT}"
+echo "DATASET_DIR=${DATASET_DIR}"
 echo "TRAIN_OUTPUT=${TRAIN_OUTPUT}"
 echo "VAL_OUTPUT=${VAL_OUTPUT}"
 echo "RUN_NAME=${RUN_NAME}"

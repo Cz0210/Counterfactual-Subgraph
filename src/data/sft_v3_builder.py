@@ -536,6 +536,8 @@ def _select_parent_queues(
     summary = {
         "raw_positive_count": raw_positive_count,
         "raw_negative_count": len(negative_records),
+        "positive_strata_count": len({record.stratum_key for record in positive_records}),
+        "negative_strata_count": len({record.stratum_key for record in negative_records}),
         "desired_negative_target": desired_negative_target,
         "neg_pos_ratio": config.neg_pos_ratio,
         "max_parents": config.max_parents,
@@ -544,9 +546,11 @@ def _select_parent_queues(
     if config.max_parents is None:
         summary.update(
             {
-                "selection_mode": "keep_all_positives_negatives_by_target",
+                "selection_mode": "uncapped_diversity_ordered_negatives",
                 "selected_positive_count": raw_positive_count,
-                "selected_negative_count": len(negative_records),
+                "positive_queue_count": raw_positive_count,
+                "selected_negative_count": desired_negative_target,
+                "negative_queue_count": len(negative_records),
                 "negative_success_target": desired_negative_target,
             }
         )
@@ -568,7 +572,9 @@ def _select_parent_queues(
             {
                 "selection_mode": "positive_only_due_to_parent_cap",
                 "selected_positive_count": len(selected_positives),
+                "positive_queue_count": len(selected_positives),
                 "selected_negative_count": 0,
+                "negative_queue_count": 0,
                 "negative_success_target": 0,
             }
         )
@@ -590,7 +596,9 @@ def _select_parent_queues(
         {
             "selection_mode": "capped_parent_pool",
             "selected_positive_count": raw_positive_count,
+            "positive_queue_count": raw_positive_count,
             "selected_negative_count": len(selected_negatives),
+            "negative_queue_count": len(selected_negatives),
             "negative_success_target": len(selected_negatives),
         }
     )
@@ -1085,6 +1093,7 @@ def _render_report(
         f"valid_rows: {normalization_summary['valid_rows']}",
         f"dropped_rows: {normalization_summary['dropped_rows']}",
         f"label_counts: {normalization_summary['valid_label_counts']}",
+        f"available_label_tokens: {normalization_summary.get('available_label_tokens')}",
         f"smiles_column: {normalization_summary['smiles_column']}",
         f"label_column: {normalization_summary['label_column']}",
         "",
@@ -1093,7 +1102,11 @@ def _render_report(
         f"selection_mode: {selection_summary['selection_mode']}",
         f"selected_positive_count: {selection_summary['selected_positive_count']}",
         f"selected_negative_count: {selection_summary['selected_negative_count']}",
+        f"positive_queue_count: {selection_summary.get('positive_queue_count')}",
+        f"negative_queue_count: {selection_summary.get('negative_queue_count')}",
         f"negative_success_target: {selection_summary['negative_success_target']}",
+        f"positive_strata_count: {selection_summary.get('positive_strata_count')}",
+        f"negative_strata_count: {selection_summary.get('negative_strata_count')}",
         "",
         "Candidate Build",
         "---------------",

@@ -6,6 +6,61 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-08] Restore and harden the raw HIV -> SFT v3 rebuild path as a first-class workflow
+
+### Background
+The repository already had a scaffold-aware SFT v3 rebuild pipeline, but the
+active worktree had lost `src/data/hiv_dataset_utils.py`, which broke the raw
+HIV.csv normalization and parent-sampling path outright. At the same time, the
+HPC build wrapper and human-readable reports needed a bit more explicit
+bookkeeping so the negative-pool sampling behavior remained easy to audit when
+rebuilding a larger SFT initializer for later PPO runs.
+
+### Decision
+Keep the existing raw-HIV -> parent-derived reference build strategy, and make
+the following operational hardening changes instead of inventing a new data
+objective:
+
+- restore `src/data/hiv_dataset_utils.py` as the source of truth for flexible
+  HIV column detection, label normalization, scaffold extraction, and
+  scaffold+size diversity sampling;
+- preserve the current parent-derived candidate path in
+  `src/data/sft_v3_builder.py`, but expose clearer selection/report metadata
+  for positive/negative queue sizes, stratum counts, and raw label tokens;
+- standardize the HPC default path layout under
+  `outputs/hpc/sft_v3_hiv_runs/<RUN_NAME>/...` so dataset build, audit, train,
+  and eval can share one experiment name without hand-editing multiple paths;
+- add a login-node submission helper that emits the full Slurm dependency graph
+  from one command, keeping build as the root stage, launching audit and train
+  after build, and launching eval after train;
+- keep the paired Slurm builder wrapper in sync by ensuring the warn-log parent
+  directory is created before stderr teeing;
+- extend tests so the rebuild path is checked against both numeric HIV labels
+  and string-valued class aliases.
+
+### Alternatives considered
+1. Re-implement the builder around the older `prepare_sft_data.py` flow.
+2. Patch only the import error and leave the reporting/slurm path unchanged.
+3. Introduce a new sampling objective before the current v3 path was even
+   operational again.
+
+### Consequences
+- The repo once again has a working, auditable `HIV.csv -> SFT v3` builder
+  compatible with the current training/eval scripts.
+- Sampling summaries now make it clearer how many negative parents are
+  available versus how many are actually targeted for successful selection.
+- The default HPC workflow is now easier to operate because `RUN_NAME` can
+  identify the full dataset/audit/train/eval artifact tree.
+- The HPC workflow is now one-command submit friendly without giving up the
+  stage-specific Slurm wrappers.
+- The HPC `sbatch` path is less brittle because warn-log teeing no longer
+  depends on the log directory already existing.
+
+### Status
+Accepted
+
+---
+
 ## [2026-04-27] Rebuild SFT v3 from raw HIV.csv with scaffold-aware parent sampling and parent-derived reference ranking
 
 ### Background

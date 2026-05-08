@@ -16,11 +16,13 @@ source ~/.bashrc
 conda activate smiles_pip118
 
 PROJECT_DIR=${PROJECT_DIR:-/share/home/u20526/czx/counterfactual-subgraph}
+RUN_NAME=${RUN_NAME:-sft_v3_hiv_$(date +%Y%m%d_%H%M%S)}
+RUN_ROOT=${RUN_ROOT:-${PROJECT_DIR}/outputs/hpc/sft_v3_hiv_runs/${RUN_NAME}}
+DATASET_DIR=${DATASET_DIR:-${RUN_ROOT}/dataset}
 BASE_MODEL=${BASE_MODEL:-${PROJECT_DIR}/pretrained_models/ChemLLM-7B-Chat}
-TRAIN_FILE=${TRAIN_FILE:-${PROJECT_DIR}/data/sft_v3_hiv_train.jsonl}
-VAL_FILE=${VAL_FILE:-${PROJECT_DIR}/data/sft_v3_hiv_val.jsonl}
-RUN_NAME=${RUN_NAME:-sft_v3_$(date +%Y%m%d_%H%M%S)}
-OUTPUT_DIR=${OUTPUT_DIR:-${PROJECT_DIR}/outputs/hpc/sft_checkpoints/${RUN_NAME}}
+TRAIN_FILE=${TRAIN_FILE:-${DATASET_DIR}/sft_v3_hiv_train.jsonl}
+VAL_FILE=${VAL_FILE:-${DATASET_DIR}/sft_v3_hiv_val.jsonl}
+OUTPUT_DIR=${OUTPUT_DIR:-${RUN_ROOT}/train}
 MAX_STEPS=${MAX_STEPS:-500}
 LOGGING_STEPS=${LOGGING_STEPS:-10}
 SAVE_STEPS=${SAVE_STEPS:-100}
@@ -35,8 +37,12 @@ export HF_MODULES_CACHE=/share/home/u20526/.cache/huggingface/modules
 export TRANSFORMERS_CACHE=/share/home/u20526/.cache/huggingface
 export HUGGINGFACE_HUB_CACHE=/share/home/u20526/.cache/huggingface/hub
 
-cd "${PROJECT_DIR}"
+cd /share/home/u20526/czx/counterfactual-subgraph
+if [ "${PROJECT_DIR}" != "/share/home/u20526/czx/counterfactual-subgraph" ]; then
+  cd "${PROJECT_DIR}"
+fi
 mkdir -p logs
+mkdir -p "${OUTPUT_DIR}"
 
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
@@ -56,6 +62,9 @@ echo "HF_HOME=${HF_HOME}"
 echo "HF_MODULES_CACHE=${HF_MODULES_CACHE}"
 echo "TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
 echo "HUGGINGFACE_HUB_CACHE=${HUGGINGFACE_HUB_CACHE}"
+echo "RUN_NAME=${RUN_NAME}"
+echo "RUN_ROOT=${RUN_ROOT}"
+echo "DATASET_DIR=${DATASET_DIR}"
 echo "BASE_MODEL=${BASE_MODEL}"
 echo "TRAIN_FILE=${TRAIN_FILE}"
 echo "VAL_FILE=${VAL_FILE}"

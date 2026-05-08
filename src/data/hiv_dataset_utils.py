@@ -176,7 +176,7 @@ def normalize_hiv_records(
             )
         )
 
-    label_counts = Counter(record.label for record in records)
+    normalized_label_counts = Counter(record.label for record in records)
     summary = {
         "input_rows": int(len(dataframe)),
         "valid_rows": int(len(records)),
@@ -187,9 +187,10 @@ def normalize_hiv_records(
         "positive_label": positive_label,
         "positive_label_normalized": positive_token,
         "negative_label_normalized": negative_token,
+        "available_label_tokens": unique_label_tokens,
         "valid_label_counts": {
-            "0": int(label_counts.get(0, 0)),
-            "1": int(label_counts.get(1, 0)),
+            "0": int(normalized_label_counts.get(0, 0)),
+            "1": int(normalized_label_counts.get(1, 0)),
         },
     }
     return records, summary
