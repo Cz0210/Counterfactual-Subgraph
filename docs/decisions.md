@@ -6,6 +6,50 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-09] Replace the SFT v3 HIV scaffold split with a label-stratified scaffold holdout
+
+### Background
+The rebuilt raw-HIV SFT v3 dataset was already structurally healthy, but the
+existing `scaffold_group_greedy` split could severely distort validation label
+balance. In the observed full build, validation drifted toward almost all
+positives (`{'0': 24, '1': 404}`), making the split unrepresentative even
+though scaffold overlap remained zero.
+
+### Decision
+Keep candidate generation, fragment filtering, oracle ranking, and text target
+format unchanged, and only replace the train/val split logic in
+`src/data/sft_v3_builder.py`:
+
+- make the default split objective explicitly label-stratified at the scaffold
+  group level, so validation selection optimizes per-label target counts before
+  raw total-count closeness;
+- preserve scaffold-level holdout by assigning each effective scaffold group to
+  exactly one split;
+- treat missing/acyclic scaffolds as stable per-example pseudo-scaffolds during
+  splitting so they do not collapse into one oversized group;
+- surface split diagnostics such as total/target/actual label counts,
+  per-label target error, actual val ratio, and per-label val ratio.
+
+### Alternatives considered
+1. Keep the old global scaffold greedy split and only tweak weights slightly.
+2. Fall back to pure label-stratified random splitting and give up scaffold
+   holdout.
+3. Rebuild the dataset again with different parent sampling instead of fixing
+   the split itself.
+
+### Consequences
+- Validation should remain much closer to the global 2:1 label mix while still
+  keeping scaffold overlap at zero in normal cases.
+- Large scaffold groups can still introduce small count error, but the error is
+  now explicit in the split summary/report instead of being silent.
+- The rebuild path stays fully compatible with the existing SFT build, audit,
+  train, and eval scripts.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-08] Restore and harden the raw HIV -> SFT v3 rebuild path as a first-class workflow
 
 ### Background

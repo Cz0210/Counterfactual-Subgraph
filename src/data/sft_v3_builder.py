@@ -406,26 +406,26 @@ def select_reference_candidate_for_parent(
     )
 
 
-def split_examples_scaffold_aware(
+def label_stratified_scaffold_split(
     examples: list[SFTV3Example],
     *,
     val_ratio: float,
     seed: int,
 ) -> tuple[list[SFTV3Example], list[SFTV3Example], dict[str, Any]]:
-    """Split examples with an approximate scaffold-level holdout."""
+    """Split examples by scaffold while explicitly optimizing label balance."""
 
     if len(examples) <= 1:
-        return list(examples), [], {
-            "method": "degenerate_all_train",
-            "val_ratio": val_ratio,
-            "train_label_counts": _example_label_counts(examples),
-            "val_label_counts": {"0": 0, "1": 0},
-        }
+        return list(examples), [], _split_summary(
+            method="degenerate_all_train",
+            train_examples=list(examples),
+            val_examples=[],
+            target_val_total=0,
+            total_examples=examples,
+            val_ratio=val_ratio,
+        )
 
     target_val_total = max(1, min(len(examples) - 1, int(round(len(examples) * val_ratio))))
-    scaffold_groups: dict[str, list[SFTV3Example]] = defaultdict(list)
-    for example in examples:
-        scaffold_groups[str(example.scaffold_smiles or "ACYCLIC")].append(example)
+    scaffold_groups = _group_examples_by_effective_scaffold(examples)
     if len(scaffold_groups) <= 1:
         train_examples, val_examples = _fallback_label_stratified_split(
             examples,
@@ -437,60 +437,60 @@ def split_examples_scaffold_aware(
             train_examples=train_examples,
             val_examples=val_examples,
             target_val_total=target_val_total,
+            total_examples=examples,
+            val_ratio=val_ratio,
         )
 
+    target_val_label_counts = _compute_target_val_label_counts(
+        examples,
+        target_val_total=target_val_total,
+        val_ratio=val_ratio,
+    )
     groups = list(scaffold_groups.items())
     rng = random.Random(seed)
     rng.shuffle(groups)
     groups.sort(key=lambda item: len(item[1]), reverse=True)
 
-    total_pos = sum(1 for example in examples if example.label == 1)
-    total_neg = len(examples) - total_pos
-    target_val_pos = int(round(total_pos * val_ratio))
-    target_val_neg = int(round(total_neg * val_ratio))
-    target_val_pos = min(target_val_total, max(0, target_val_pos))
-    target_val_neg = min(target_val_total, max(0, target_val_neg))
-
     selected_scaffolds: set[str] = set()
     current_val: list[SFTV3Example] = []
-    current_total = 0
-    current_pos = 0
-    current_neg = 0
+    current_label_counts: Counter[int] = Counter()
+    current_score = _label_stratified_split_score(
+        current_label_counts,
+        current_total=0,
+        target_val_total=target_val_total,
+        target_val_label_counts=target_val_label_counts,
+    )
     remaining_groups = list(groups)
 
-    while remaining_groups and current_total < target_val_total:
+    while remaining_groups and len(current_val) < target_val_total:
         best_index = 0
-        best_score: tuple[float, float, float, int] | None = None
+        best_score: tuple[float, ...] | None = None
         for index, (_scaffold, scaffold_examples) in enumerate(remaining_groups):
-            group_total = len(scaffold_examples)
-            group_pos = sum(1 for example in scaffold_examples if example.label == 1)
-            group_neg = group_total - group_pos
-            new_total = current_total + group_total
-            new_pos = current_pos + group_pos
-            new_neg = current_neg + group_neg
-            overshoot = max(0, new_total - target_val_total)
-            score = (
-                abs(target_val_total - new_total) + (4.0 * overshoot),
-                abs(target_val_pos - new_pos),
-                abs(target_val_neg - new_neg),
-                group_total,
+            group_label_counts = Counter(example.label for example in scaffold_examples)
+            candidate_score = _label_stratified_split_score(
+                current_label_counts + group_label_counts,
+                current_total=len(current_val) + len(scaffold_examples),
+                target_val_total=target_val_total,
+                target_val_label_counts=target_val_label_counts,
             )
-            if best_score is None or score < best_score:
-                best_score = score
+            if best_score is None or candidate_score < best_score:
+                best_score = candidate_score
                 best_index = index
 
-        scaffold, scaffold_examples = remaining_groups.pop(best_index)
-        selected_scaffolds.add(scaffold)
+        if best_score is None or best_score >= current_score:
+            break
+
+        scaffold_key, scaffold_examples = remaining_groups.pop(best_index)
+        selected_scaffolds.add(scaffold_key)
         current_val.extend(scaffold_examples)
-        current_total += len(scaffold_examples)
-        current_pos += sum(1 for example in scaffold_examples if example.label == 1)
-        current_neg += sum(1 for example in scaffold_examples if example.label == 0)
+        current_label_counts.update(example.label for example in scaffold_examples)
+        current_score = best_score
 
     val_examples = list(current_val)
     train_examples = [
         example
-        for scaffold, scaffold_examples in groups
-        if scaffold not in selected_scaffolds
+        for scaffold_key, scaffold_examples in groups
+        if scaffold_key not in selected_scaffolds
         for example in scaffold_examples
     ]
     if not train_examples or not val_examples:
@@ -504,12 +504,31 @@ def split_examples_scaffold_aware(
             train_examples=train_examples,
             val_examples=val_examples,
             target_val_total=target_val_total,
+            total_examples=examples,
+            val_ratio=val_ratio,
         )
     return train_examples, val_examples, _split_summary(
-        method="scaffold_group_greedy",
+        method="label_stratified_scaffold",
         train_examples=train_examples,
         val_examples=val_examples,
         target_val_total=target_val_total,
+        total_examples=examples,
+        val_ratio=val_ratio,
+    )
+
+
+def split_examples_scaffold_aware(
+    examples: list[SFTV3Example],
+    *,
+    val_ratio: float,
+    seed: int,
+) -> tuple[list[SFTV3Example], list[SFTV3Example], dict[str, Any]]:
+    """Backward-compatible public split entrypoint for SFT v3 datasets."""
+
+    return label_stratified_scaffold_split(
+        examples,
+        val_ratio=val_ratio,
+        seed=seed,
     )
 
 
@@ -944,6 +963,82 @@ def _target_atom_count(
     return (config.min_frag_atoms + config.max_frag_atoms) / 2.0
 
 
+def _group_examples_by_effective_scaffold(
+    examples: list[SFTV3Example],
+) -> dict[str, list[SFTV3Example]]:
+    groups: dict[str, list[SFTV3Example]] = defaultdict(list)
+    for example in examples:
+        groups[_effective_split_scaffold_key(example)].append(example)
+    return groups
+
+
+def _effective_split_scaffold_key(example: SFTV3Example) -> str:
+    raw_scaffold = str(example.scaffold_smiles or "").strip()
+    if raw_scaffold and raw_scaffold.upper() not in {"ACYCLIC", "__NO_SCAFFOLD__", "NO_SCAFFOLD"}:
+        return raw_scaffold
+    stable_id = str(example.sample_id or example.graph_id or example.parent_smiles)
+    return f"__NO_SCAFFOLD__:{stable_id}"
+
+
+def _compute_target_val_label_counts(
+    examples: list[SFTV3Example],
+    *,
+    target_val_total: int,
+    val_ratio: float,
+) -> dict[int, int]:
+    label_totals = Counter(example.label for example in examples)
+    raw_targets = {
+        label: float(count) * float(val_ratio)
+        for label, count in label_totals.items()
+    }
+    target_counts = {
+        label: int(math.floor(value))
+        for label, value in raw_targets.items()
+    }
+    remaining = max(0, int(target_val_total) - sum(target_counts.values()))
+    remainders = sorted(
+        (
+            raw_targets[label] - target_counts[label],
+            label_totals[label],
+            -int(label),
+            label,
+        )
+        for label in label_totals
+    )
+    while remaining > 0 and remainders:
+        _fractional, _label_total, _neg_label, label = remainders.pop()
+        target_counts[label] += 1
+        remaining -= 1
+    return target_counts
+
+
+def _label_stratified_split_score(
+    current_label_counts: Counter[int],
+    *,
+    current_total: int,
+    target_val_total: int,
+    target_val_label_counts: dict[int, int],
+) -> tuple[float, ...]:
+    labels = sorted(target_val_label_counts)
+    label_abs_error = 0.0
+    label_overshoot = 0.0
+    for label in labels:
+        target_count = int(target_val_label_counts.get(label, 0))
+        actual_count = int(current_label_counts.get(label, 0))
+        label_abs_error += abs(target_count - actual_count)
+        label_overshoot += max(0, actual_count - target_count)
+
+    total_overshoot = max(0, int(current_total) - int(target_val_total))
+    total_abs_error = abs(int(target_val_total) - int(current_total))
+    return (
+        float(label_abs_error),
+        float(label_overshoot),
+        float(total_abs_error + (4 * total_overshoot)),
+        float(total_overshoot),
+        float(current_total),
+    )
+
+
 def _fallback_label_stratified_split(
     examples: list[SFTV3Example],
     *,
@@ -975,16 +1070,50 @@ def _split_summary(
     train_examples: list[SFTV3Example],
     val_examples: list[SFTV3Example],
     target_val_total: int,
+    total_examples: list[SFTV3Example],
+    val_ratio: float,
 ) -> dict[str, Any]:
-    train_scaffolds = {example.scaffold_smiles for example in train_examples}
-    val_scaffolds = {example.scaffold_smiles for example in val_examples}
+    train_scaffolds = {_effective_split_scaffold_key(example) for example in train_examples}
+    val_scaffolds = {_effective_split_scaffold_key(example) for example in val_examples}
+    total_label_counts = _example_label_counts(total_examples)
+    target_val_label_counts_raw = _compute_target_val_label_counts(
+        total_examples,
+        target_val_total=target_val_total,
+        val_ratio=val_ratio,
+    )
+    target_val_label_counts = {
+        str(label): int(target_val_label_counts_raw.get(label, 0))
+        for label in sorted({0, 1, *target_val_label_counts_raw.keys()})
+    }
+    actual_val_label_counts = _example_label_counts(val_examples)
+    label_val_target_error = {
+        label: int(actual_val_label_counts.get(label, 0)) - int(target_val_label_counts.get(label, 0))
+        for label in sorted({*actual_val_label_counts.keys(), *target_val_label_counts.keys()})
+    }
+    per_label_val_ratio_actual: dict[str, float | None] = {}
+    for label, total_count in total_label_counts.items():
+        denominator = int(total_count)
+        actual_count = int(actual_val_label_counts.get(label, 0))
+        per_label_val_ratio_actual[label] = (
+            _round(actual_count / denominator)
+            if denominator > 0
+            else None
+        )
     return {
         "method": method,
+        "split_method": method,
+        "val_ratio": float(val_ratio),
         "target_val_total": int(target_val_total),
         "train_count": len(train_examples),
         "val_count": len(val_examples),
         "train_label_counts": _example_label_counts(train_examples),
         "val_label_counts": _example_label_counts(val_examples),
+        "total_label_counts": total_label_counts,
+        "target_val_label_counts": target_val_label_counts,
+        "actual_val_label_counts": actual_val_label_counts,
+        "label_val_target_error": label_val_target_error,
+        "val_ratio_actual": _round(len(val_examples) / len(total_examples)) if total_examples else 0.0,
+        "per_label_val_ratio_actual": per_label_val_ratio_actual,
         "train_unique_scaffolds": len(train_scaffolds),
         "val_unique_scaffolds": len(val_scaffolds),
         "scaffold_overlap_count": len(train_scaffolds & val_scaffolds),
@@ -1120,10 +1249,19 @@ def _render_report(
         "Split",
         "-----",
         f"method: {split_summary['method']}",
+        f"split_method: {split_summary.get('split_method')}",
         f"train_count: {split_summary['train_count']}",
         f"val_count: {split_summary['val_count']}",
+        f"total_label_counts: {split_summary.get('total_label_counts')}",
         f"train_label_counts: {split_summary['train_label_counts']}",
         f"val_label_counts: {split_summary['val_label_counts']}",
+        f"target_val_label_counts: {split_summary.get('target_val_label_counts')}",
+        f"actual_val_label_counts: {split_summary.get('actual_val_label_counts')}",
+        f"label_val_target_error: {split_summary.get('label_val_target_error')}",
+        f"val_ratio_actual: {split_summary.get('val_ratio_actual')}",
+        f"per_label_val_ratio_actual: {split_summary.get('per_label_val_ratio_actual')}",
+        f"train_unique_scaffolds: {split_summary.get('train_unique_scaffolds')}",
+        f"val_unique_scaffolds: {split_summary.get('val_unique_scaffolds')}",
         f"scaffold_overlap_count: {split_summary['scaffold_overlap_count']}",
         "",
         "Train Summary",
@@ -1258,6 +1396,7 @@ __all__ = [
     "SFTV3Example",
     "SFTV3ReferenceCandidate",
     "build_and_write_sft_v3_dataset",
+    "label_stratified_scaffold_split",
     "select_reference_candidate_for_parent",
     "split_examples_scaffold_aware",
 ]

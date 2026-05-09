@@ -14,9 +14,159 @@ from src.data.hiv_dataset_utils import (
 from src.data.sft_v3_builder import (
     SFTV3BuilderConfig,
     SFTV3Example,
+    label_stratified_scaffold_split,
     select_reference_candidate_for_parent,
     split_examples_scaffold_aware,
 )
+
+
+def _make_fake_example(
+    sample_id: str,
+    *,
+    label: int,
+    scaffold: str | None,
+) -> SFTV3Example:
+    normalized_scaffold = scaffold if scaffold is not None else ""
+    return SFTV3Example(
+        sample_id=sample_id,
+        graph_id=sample_id,
+        parent_smiles=f"C{sample_id}",
+        label=label,
+        parent_atom_count=12,
+        scaffold_smiles=normalized_scaffold,
+        instruction=f"prompt:{sample_id}",
+        output="CCO",
+        meta={
+            "atom_ratio": 0.25,
+            "candidate_strategy": "fg_carboxyl",
+        },
+    )
+
+
+class SFTV3SplitTests(unittest.TestCase):
+    def test_label_stratified_scaffold_split_preserves_approximate_two_to_one_ratio(self) -> None:
+        examples = [
+            _make_fake_example(
+                f"neg_{index}_{copy_index}",
+                label=0,
+                scaffold=f"neg_scaf_{index}",
+            )
+            for index in range(45)
+            for copy_index in range(2)
+        ] + [
+            _make_fake_example(
+                f"pos_{index}",
+                label=1,
+                scaffold=f"pos_scaf_{index}",
+            )
+            for index in range(45)
+        ]
+
+        train_examples, val_examples, summary = label_stratified_scaffold_split(
+            examples,
+            val_ratio=0.1,
+            seed=7,
+        )
+
+        self.assertEqual(len(train_examples) + len(val_examples), len(examples))
+        self.assertEqual(summary["scaffold_overlap_count"], 0)
+        self.assertEqual(summary["split_method"], "label_stratified_scaffold")
+        self.assertEqual(summary["target_val_total"], 14)
+        self.assertIn(summary["val_label_counts"]["0"], {8, 9, 10})
+        self.assertIn(summary["val_label_counts"]["1"], {4, 5, 6})
+        self.assertLessEqual(abs(summary["label_val_target_error"]["0"]), 1)
+        self.assertLessEqual(abs(summary["label_val_target_error"]["1"]), 1)
+
+    def test_label_stratified_scaffold_split_keeps_scaffolds_disjoint(self) -> None:
+        examples = [
+            _make_fake_example(f"neg_{index}", label=0, scaffold=f"shared_neg_{index}")
+            for index in range(30)
+        ] + [
+            _make_fake_example(f"pos_{index}", label=1, scaffold=f"shared_pos_{index}")
+            for index in range(15)
+        ]
+
+        train_examples, val_examples, summary = label_stratified_scaffold_split(
+            examples,
+            val_ratio=0.2,
+            seed=11,
+        )
+
+        train_scaffolds = {example.scaffold_smiles for example in train_examples}
+        val_scaffolds = {example.scaffold_smiles for example in val_examples}
+        self.assertTrue(train_examples)
+        self.assertTrue(val_examples)
+        self.assertEqual(summary["scaffold_overlap_count"], 0)
+        self.assertFalse(train_scaffolds & val_scaffolds)
+
+    def test_label_stratified_scaffold_split_handles_missing_scaffolds_without_one_huge_group(self) -> None:
+        examples = [
+            _make_fake_example(
+                f"neg_no_scaf_{index}",
+                label=0,
+                scaffold="" if index % 2 == 0 else "ACYCLIC",
+            )
+            for index in range(40)
+        ] + [
+            _make_fake_example(
+                f"pos_no_scaf_{index}",
+                label=1,
+                scaffold=None if index % 2 == 0 else "ACYCLIC",
+            )
+            for index in range(20)
+        ]
+
+        train_examples, val_examples, summary = label_stratified_scaffold_split(
+            examples,
+            val_ratio=0.1,
+            seed=19,
+        )
+
+        self.assertEqual(len(train_examples) + len(val_examples), len(examples))
+        self.assertEqual(summary["scaffold_overlap_count"], 0)
+        self.assertGreaterEqual(summary["val_label_counts"]["0"], 3)
+        self.assertGreaterEqual(summary["val_label_counts"]["1"], 1)
+        self.assertGreater(summary["val_unique_scaffolds"], 1)
+        self.assertLessEqual(abs(summary["label_val_target_error"]["0"]), 1)
+        self.assertLessEqual(abs(summary["label_val_target_error"]["1"]), 1)
+
+    def test_label_stratified_scaffold_split_records_target_error_with_large_group_pressure(self) -> None:
+        examples = [
+            _make_fake_example(
+                f"neg_large_{index}",
+                label=0,
+                scaffold=f"neg_scaf_{index}",
+            )
+            for index in range(40)
+        ] + [
+            _make_fake_example(
+                f"pos_big_{index}",
+                label=1,
+                scaffold="pos_big_group",
+            )
+            for index in range(8)
+        ] + [
+            _make_fake_example(
+                f"pos_small_{index}",
+                label=1,
+                scaffold=f"pos_small_{index}",
+            )
+            for index in range(12)
+        ]
+
+        _train_examples, val_examples, summary = label_stratified_scaffold_split(
+            examples,
+            val_ratio=0.1,
+            seed=23,
+        )
+
+        self.assertTrue(val_examples)
+        self.assertIn("0", summary["label_val_target_error"])
+        self.assertIn("1", summary["label_val_target_error"])
+        self.assertEqual(summary["scaffold_overlap_count"], 0)
+        self.assertGreater(summary["val_label_counts"]["0"], 0)
+        self.assertGreater(summary["val_label_counts"]["1"], 0)
+        self.assertLess(summary["val_label_counts"]["1"], len(val_examples))
 
 
 @unittest.skipUnless(
@@ -123,6 +273,7 @@ class SFTV3BuilderTests(unittest.TestCase):
         self.assertTrue(train_examples)
         self.assertTrue(val_examples)
         self.assertEqual(summary["scaffold_overlap_count"], 0)
+        self.assertEqual(summary["split_method"], "label_stratified_scaffold")
 
 
 if __name__ == "__main__":
