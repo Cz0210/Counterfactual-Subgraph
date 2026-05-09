@@ -211,6 +211,37 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertTrue(args.projection_enable_khop3)
         self.assertEqual(args.projection_mcs_timeout, 2)
 
+    def test_parser_accepts_substructure_distance_reward_flags(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "--enable-substructure-distance-reward",
+                "--substructure-distance-reward-weight",
+                "0.6",
+                "--substructure-distance-min-atom-ratio",
+                "0.12",
+                "--substructure-distance-max-atom-ratio",
+                "0.62",
+                "--substructure-distance-topk",
+                "16",
+                "--substructure-distance-mcs-timeout",
+                "2",
+                "--substructure-distance-sim-threshold",
+                "0.1",
+                "--disable-projected-cf-reward",
+            ]
+        )
+
+        self.assertTrue(args.enable_substructure_distance_reward)
+        self.assertAlmostEqual(args.substructure_distance_reward_weight, 0.6)
+        self.assertAlmostEqual(args.substructure_distance_min_atom_ratio, 0.12)
+        self.assertAlmostEqual(args.substructure_distance_max_atom_ratio, 0.62)
+        self.assertEqual(args.substructure_distance_topk, 16)
+        self.assertEqual(args.substructure_distance_mcs_timeout, 2)
+        self.assertAlmostEqual(args.substructure_distance_sim_threshold, 0.1)
+        self.assertTrue(args.disable_projected_cf_reward)
+
     def test_parser_accepts_tiny_fragment_guard_flags(self) -> None:
         parser = build_parser()
 

@@ -266,7 +266,8 @@ class CounterfactualTeacherTests(unittest.TestCase):
 
         self.assertEqual(len(counterfactual_teacher.calls), 0)
         self.assertFalse(trace.counterfactual_teacher_called)
-        self.assertEqual(trace.counterfactual_teacher_reason, "invalid_or_not_substructure")
+        self.assertEqual(trace.counterfactual_teacher_reason, "not_direct_substructure")
+        self.assertEqual(trace.cf_reward_skipped_reason, "not_direct_substructure")
 
     def test_deletion_failure_has_clear_reason(self) -> None:
         fake_teacher = _FakeProbabilityTeacherScorer({self.PARENT: 0.9})

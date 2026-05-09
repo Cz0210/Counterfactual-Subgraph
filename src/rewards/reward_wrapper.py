@@ -25,6 +25,7 @@ import re
 from typing import Any, Sequence
 
 from src.chem import (
+    compute_substructure_distance_reward,
     delete_fragment_from_parent,
     generate_minimal_syntax_repair_candidates,
     is_parent_substructure,
@@ -93,9 +94,18 @@ class RewardTrace:
     valid_smiles: bool = False
     connected_fragment: bool = False
     is_subgraph: bool = False
+    direct_substructure: bool = False
     deletion_success: bool = False
     counterfactual_evaluated: bool = False
     flip_success: bool = False
+    substructure_similarity: float = 0.0
+    substructure_distance: float = 1.0
+    substructure_distance_reward: float = 0.0
+    substructure_distance_weight: float = 0.0
+    nearest_parent_subgraph_smiles: str | None = None
+    nearest_parent_subgraph_atom_indices: tuple[int, ...] | None = None
+    used_projected_subgraph_for_reward: bool = False
+    cf_reward_skipped_reason: str | None = None
     target_probability: float | None = None
     inactive_probability: float | None = None
     residual_smiles: str | None = None
@@ -498,6 +508,14 @@ class ChemRLRewarder:
         projection_penalty: float = 0.5,
         projection_enable_khop3: bool = False,
         projection_mcs_timeout: int = 1,
+        enable_substructure_distance_reward: bool = False,
+        substructure_distance_reward_weight: float = 0.5,
+        substructure_distance_min_atom_ratio: float = 0.10,
+        substructure_distance_max_atom_ratio: float = 0.65,
+        substructure_distance_topk: int = 20,
+        substructure_distance_mcs_timeout: int = 1,
+        substructure_distance_sim_threshold: float = 0.0,
+        disable_projected_cf_reward: bool = True,
         enable_minimal_syntax_repair: bool = True,
         syntax_repair_max_edits: int = 4,
         syntax_repair_min_atoms: int = 3,
@@ -572,6 +590,26 @@ class ChemRLRewarder:
         self.projection_penalty = float(projection_penalty)
         self.projection_enable_khop3 = bool(projection_enable_khop3)
         self.projection_mcs_timeout = int(projection_mcs_timeout)
+        self.enable_substructure_distance_reward = bool(
+            enable_substructure_distance_reward
+        )
+        self.substructure_distance_reward_weight = float(
+            substructure_distance_reward_weight
+        )
+        self.substructure_distance_min_atom_ratio = float(
+            substructure_distance_min_atom_ratio
+        )
+        self.substructure_distance_max_atom_ratio = float(
+            substructure_distance_max_atom_ratio
+        )
+        self.substructure_distance_topk = int(substructure_distance_topk)
+        self.substructure_distance_mcs_timeout = int(
+            substructure_distance_mcs_timeout
+        )
+        self.substructure_distance_sim_threshold = float(
+            substructure_distance_sim_threshold
+        )
+        self.disable_projected_cf_reward = bool(disable_projected_cf_reward)
         self.enable_minimal_syntax_repair = bool(enable_minimal_syntax_repair)
         self.syntax_repair_max_edits = int(syntax_repair_max_edits)
         self.syntax_repair_min_atoms = int(syntax_repair_min_atoms)
@@ -627,6 +665,28 @@ class ChemRLRewarder:
             raise ValueError("projection_max_atom_ratio must be positive.")
         if self.projection_mcs_timeout <= 0:
             raise ValueError("projection_mcs_timeout must be positive.")
+        if self.substructure_distance_reward_weight < 0.0:
+            raise ValueError("substructure_distance_reward_weight must be non-negative.")
+        if self.substructure_distance_min_atom_ratio < 0.0:
+            raise ValueError("substructure_distance_min_atom_ratio must be non-negative.")
+        if self.substructure_distance_max_atom_ratio <= 0.0:
+            raise ValueError("substructure_distance_max_atom_ratio must be positive.")
+        if (
+            self.substructure_distance_min_atom_ratio
+            > self.substructure_distance_max_atom_ratio
+        ):
+            raise ValueError(
+                "substructure_distance_min_atom_ratio must be <= substructure_distance_max_atom_ratio."
+            )
+        if self.substructure_distance_topk <= 0:
+            raise ValueError("substructure_distance_topk must be positive.")
+        if self.substructure_distance_mcs_timeout <= 0:
+            raise ValueError("substructure_distance_mcs_timeout must be positive.")
+        if (
+            self.substructure_distance_sim_threshold < 0.0
+            or self.substructure_distance_sim_threshold > 1.0
+        ):
+            raise ValueError("substructure_distance_sim_threshold must be in [0, 1].")
         if self.syntax_repair_max_edits <= 0:
             raise ValueError("syntax_repair_max_edits must be positive.")
         if self.syntax_repair_min_atoms <= 0:
@@ -774,7 +834,9 @@ class ChemRLRewarder:
                 trace.raw_fragment_smiles or trace.normalized_generated_smiles,
                 keep_largest_component=True,
             ).core_fragment_smiles
-            strict_fragment = trace.projected_fragment_smiles or trace.core_fragment_smiles
+            strict_fragment = (
+                trace.core_fragment_smiles if trace.direct_substructure else None
+            )
             strict_match = (
                 match_core_fragment_to_parent(trace.parent_smiles, strict_fragment)
                 if strict_fragment
@@ -804,6 +866,11 @@ class ChemRLRewarder:
                     "sanitize_ok": bool(trace.core_parse_ok),
                     "substructure": bool(trace.is_subgraph),
                     "substructure_component": breakdown.get("subgraph_r"),
+                    "direct_substructure": bool(trace.direct_substructure),
+                    "subdist_similarity": trace.substructure_similarity,
+                    "subdist_distance": trace.substructure_distance,
+                    "subdist_reward": trace.substructure_distance_reward,
+                    "subdist_weight": trace.substructure_distance_weight,
                     "length": breakdown.get("length_r"),
                     "length_component": breakdown.get("length_r"),
                     "dummy_penalty": breakdown.get("dummy_r", 0.0),
@@ -838,6 +905,7 @@ class ChemRLRewarder:
                     "counterfactual_teacher_available": bool(trace.counterfactual_teacher_available),
                     "counterfactual_called": bool(trace.counterfactual_teacher_called),
                     "counterfactual_reason": trace.counterfactual_teacher_reason,
+                    "cf_reward_skipped_reason": trace.cf_reward_skipped_reason,
                     "empty_response": bool(trace.empty_response),
                     "full_parent": bool(trace.full_parent),
                     "empty_residual": bool(trace.empty_residual),
@@ -909,12 +977,21 @@ class ChemRLRewarder:
                     "projection_method": trace.projection_method,
                     "projection_score": trace.projection_score,
                     "projection_source": trace.projection_source,
-                    "projected_fragment": strict_fragment,
+                    "projected_fragment": trace.projected_fragment_smiles,
                     "projection_atom_count": trace.projection_atom_count,
                     "projection_atom_ratio": trace.projection_atom_ratio,
                     "projection_penalty": trace.projection_penalty,
                     "num_projection_candidates": int(trace.num_projection_candidates),
                     "projection_reason": trace.projection_reason,
+                    "nearest_parent_subgraph_smiles": trace.nearest_parent_subgraph_smiles,
+                    "nearest_parent_subgraph_atom_indices": (
+                        list(trace.nearest_parent_subgraph_atom_indices)
+                        if trace.nearest_parent_subgraph_atom_indices is not None
+                        else []
+                    ),
+                    "used_projected_subgraph_for_reward": bool(
+                        trace.used_projected_subgraph_for_reward
+                    ),
                     "size_window_reward": trace.size_window_reward,
                     "size_window_bucket": trace.size_window_bucket,
                     "size_window_low": trace.size_window_low,
@@ -922,7 +999,7 @@ class ChemRLRewarder:
                     "final_fragment_atom_count": int(trace.final_fragment_atom_count),
                     "final_fragment_atom_ratio": trace.final_fragment_atom_ratio,
                     "direct_substructure_success": bool(
-                        trace.is_subgraph and trace.projection_method == "identity"
+                        trace.direct_substructure
                     ),
                     "dummy_output_in_core_mode": dummy_output_in_core_mode,
                     "parent_atom_indices": (
@@ -1127,8 +1204,6 @@ class ChemRLRewarder:
         residual_guard_trace_kwargs = self._residual_guard_trace_kwargs()
         projection_trace_kwargs = self._projection_trace_kwargs()
         size_window_trace_kwargs = self._size_window_trace_kwargs()
-        projection_attempt_consumed = False
-        projection_penalty_applied = 0.0
 
         while True:
             fragment_info = normalize_fragment_with_dummy_atoms(effective_fragment)
@@ -1396,7 +1471,7 @@ class ChemRLRewarder:
                     failure_tag=(
                         "parse_failed_after_dummy_removal"
                         if bool(fragment_info.get("raw_has_dummy"))
-                        else "parse_ok_but_not_substructure"
+                        else "parse_ok_but_core_unusable"
                     ),
                     invalid_detail=invalid_detail,
                     breakdown=self._build_breakdown(
@@ -1442,6 +1517,18 @@ class ChemRLRewarder:
                     empty_residual=True,
                     residual_atom_count=0,
                     residual_atom_ratio=0.0,
+                    direct_substructure=True,
+                    substructure_similarity=1.0,
+                    substructure_distance=0.0,
+                    substructure_distance_reward=1.0,
+                    substructure_distance_weight=float(
+                        self.substructure_distance_reward_weight
+                        if self.enable_substructure_distance_reward
+                        else 0.0
+                    ),
+                    nearest_parent_subgraph_smiles=core_smiles,
+                    nearest_parent_subgraph_atom_indices=(),
+                    used_projected_subgraph_for_reward=False,
                 )
                 return self._fail(
                     parent_smiles=normalized_parent,
@@ -1456,6 +1543,7 @@ class ChemRLRewarder:
                         valid_reward=valid_reward,
                         subgraph_reward=self.subgraph_pass_reward,
                         length_reward=length_reward,
+                        substructure_distance_reward=1.0,
                         semantic_reward=self.full_parent_penalty,
                         fragment_teacher_reward=self.teacher_sem_missing_penalty,
                         counterfactual_reward=self.full_parent_penalty,
@@ -1463,15 +1551,17 @@ class ChemRLRewarder:
                     valid_smiles=True,
                     connected_fragment=True,
                     is_subgraph=True,
+                    direct_substructure=True,
                     residual_smiles="",
                     **full_parent_trace_kwargs,
                 )
 
             try:
-                has_precise_match = bool(
-                    parent.mol.HasSubstructMatch(core_mol, useChirality=True)
-                    and is_parent_substructure(normalized_parent, core_smiles)
+                direct_match = match_core_fragment_to_parent(
+                    normalized_parent,
+                    core_smiles,
                 )
+                has_precise_match = bool(direct_match.matched)
             except Exception as exc:
                 return self._fail(
                     parent_smiles=normalized_parent,
@@ -1481,12 +1571,12 @@ class ChemRLRewarder:
                     failure_stage="subgraph",
                     error_message=f"Subgraph check failed: {exc}",
                     generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_ok_but_not_substructure",
+                    failure_tag="parse_ok_but_not_direct_substructure",
                     invalid_detail="subgraph_check_failed",
                     breakdown=self._build_breakdown(
                         format_reward=format_reward,
                         valid_reward=valid_reward,
-                        subgraph_reward=self.invalid_subgraph_penalty,
+                        subgraph_reward=0.0,
                         length_reward=length_reward,
                         semantic_reward=self.teacher_sem_missing_penalty,
                         fragment_teacher_reward=self.teacher_sem_missing_penalty,
@@ -1495,121 +1585,86 @@ class ChemRLRewarder:
                     **base_trace_kwargs,
                 )
 
-            if has_precise_match and not bool(
-                projection_trace_kwargs.get("projection_success", False)
-            ):
-                parent_atom_count = max(1, int(parent.mol.GetNumAtoms()))
-                projection_trace_kwargs = self._projection_trace_kwargs(
-                    projection_attempted=False,
-                    projection_success=True,
-                    projection_method="identity",
-                    projected_fragment_smiles=core_smiles,
-                    projection_source="identity",
-                    projection_score=1.0,
-                    projection_reason="already_strict_parent_substructure",
-                    projected_atom_count=int(fragment_info["core_atom_count"]),
-                    projected_atom_ratio=(
-                        int(fragment_info["core_atom_count"]) / parent_atom_count
-                    ),
-                    projection_penalty=0.0,
-                    num_projection_candidates=0,
-                )
-                base_trace_kwargs.update(projection_trace_kwargs)
-
-            if not has_precise_match:
-                projection_invalid_detail = "not_parent_substructure"
-                if not projection_attempt_consumed and self.enable_parent_projection:
-                    projection_result, projection_trace_kwargs = self._attempt_parent_projection(
-                        parent_smiles=normalized_parent,
-                        raw_fragment_smiles=effective_fragment,
-                    )
-                    projection_attempt_consumed = True
-                    projection_invalid_detail = (
-                        getattr(projection_result, "reason", None)
-                        or "projection_failed"
-                    )
-                    if (
-                        projection_result is not None
-                        and projection_result.success
-                        and projection_result.projected_fragment_smiles
-                        and projection_result.projected_fragment_smiles != effective_fragment
-                    ):
-                        effective_fragment = str(
-                            projection_result.projected_fragment_smiles
-                        ).strip()
-                        effective_generated_char_count = len(effective_fragment)
-                        projection_penalty_applied = (
-                            self.projection_penalty
-                            if projection_result.projection_method == "retrieval"
-                            else 0.0
-                        )
-                        projection_trace_kwargs["projection_penalty"] = (
-                            projection_penalty_applied
-                        )
-                        continue
-                    base_trace_kwargs.update(projection_trace_kwargs)
-
-                if not repair_attempt_consumed and self.enable_parent_aware_repair:
-                    repair_result, repair_trace_kwargs = self._attempt_parent_aware_repair(
-                        parent_smiles=normalized_parent,
-                        raw_fragment_smiles=decoded_raw_fragment,
-                    )
-                    repair_attempt_consumed = True
-                    if (
-                        repair_result is not None
-                        and repair_result.success
-                        and repair_result.repaired_fragment_smiles
-                        and repair_result.repaired_fragment_smiles != effective_fragment
-                    ):
-                        effective_fragment = str(repair_result.repaired_fragment_smiles).strip()
-                        effective_generated_char_count = len(effective_fragment)
-                        continue
-                    base_trace_kwargs.update(repair_trace_kwargs)
-
-                if (
-                    bool(repair_trace_kwargs.get("repair_success"))
-                    and repair_trace_kwargs.get("repair_source") == "minimal_syntax"
-                ):
-                    repair_trace_kwargs = dict(repair_trace_kwargs)
-                    repair_trace_kwargs.update(
-                        {
-                            "repair_failure_reason": "repair_candidate_core_unusable",
-                            "repair_failure_stage": "core_normalization",
-                            "repair_candidate_accepted": False,
-                            "repair_candidate_rejected_reason": "repair_candidate_core_unusable",
-                        }
-                    )
-                    base_trace_kwargs.update(repair_trace_kwargs)
-
-                return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="subgraph",
-                    error_message="Generated fragment is not a valid parent subgraph.",
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag=(
-                        "projection_failed_low_score"
-                        if projection_invalid_detail == "projection_failed_low_score"
-                        else "parse_ok_but_not_substructure"
-                    ),
-                    invalid_detail=projection_invalid_detail,
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=self.invalid_subgraph_penalty,
-                        length_reward=length_reward,
-                        semantic_reward=self.teacher_sem_missing_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.teacher_sem_missing_penalty,
-                    ),
-                    valid_smiles=True,
-                    connected_fragment=True,
-                    **base_trace_kwargs,
-                )
-
+            substructure_distance_result = compute_substructure_distance_reward(
+                normalized_parent,
+                core_smiles,
+                min_atom_ratio=self.substructure_distance_min_atom_ratio,
+                max_atom_ratio=self.substructure_distance_max_atom_ratio,
+                topk=self.substructure_distance_topk,
+                similarity_threshold=self.substructure_distance_sim_threshold,
+                mcs_timeout=self.substructure_distance_mcs_timeout,
+            )
+            nearest_atom_indices = substructure_distance_result.get(
+                "nearest_parent_subgraph_atom_indices"
+            )
+            nearest_atom_count = (
+                len(nearest_atom_indices) if nearest_atom_indices is not None else None
+            )
             parent_atom_count = max(1, int(parent.mol.GetNumAtoms()))
+            substructure_trace_kwargs = self._substructure_distance_trace_kwargs(
+                direct_substructure=bool(
+                    substructure_distance_result.get("direct_substructure", False)
+                ),
+                substructure_similarity=float(
+                    substructure_distance_result.get("substructure_similarity", 0.0)
+                    or 0.0
+                ),
+                substructure_distance=float(
+                    substructure_distance_result.get("substructure_distance", 1.0)
+                    or 1.0
+                ),
+                substructure_distance_reward=float(
+                    substructure_distance_result.get(
+                        "substructure_distance_reward",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                nearest_parent_subgraph_smiles=substructure_distance_result.get(
+                    "nearest_parent_subgraph_smiles"
+                ),
+                nearest_parent_subgraph_atom_indices=nearest_atom_indices,
+                used_projected_subgraph_for_reward=False,
+                projection_attempted=not has_precise_match,
+                projection_success=(
+                    not has_precise_match
+                    and bool(
+                    substructure_distance_result.get("nearest_parent_subgraph_smiles")
+                    )
+                ),
+                projection_method=str(
+                    substructure_distance_result.get("projection_method") or "none"
+                ),
+                projection_score=(
+                    float(
+                        substructure_distance_result.get("substructure_similarity", 0.0)
+                        or 0.0
+                    )
+                    if substructure_distance_result.get("nearest_parent_subgraph_smiles")
+                    else None
+                ),
+                projection_reason=(
+                    str(substructure_distance_result.get("failure_tag"))
+                    if substructure_distance_result.get("failure_tag")
+                    else (
+                        "direct_match"
+                        if has_precise_match
+                        else "nearest_parent_subgraph_debug_only"
+                    )
+                ),
+                projection_atom_count=nearest_atom_count,
+                projection_atom_ratio=(
+                    (nearest_atom_count / parent_atom_count)
+                    if nearest_atom_count is not None and parent_atom_count > 0
+                    else None
+                ),
+                num_projection_candidates=int(
+                    substructure_distance_result.get("num_parent_candidates", 0) or 0
+                ),
+            )
+            projection_trace_kwargs = substructure_trace_kwargs
+            base_trace_kwargs.update(substructure_trace_kwargs)
+
             core_atom_count = int(fragment_info["core_atom_count"])
             if (
                 self.min_fragment_atoms > 0
@@ -1660,16 +1715,156 @@ class ChemRLRewarder:
                         valid_reward=0.0,
                         subgraph_reward=0.0,
                         length_reward=0.0,
+                        substructure_distance_reward=float(
+                            substructure_distance_result.get(
+                                "substructure_distance_reward",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
                         semantic_reward=self.tiny_fragment_hard_fail_penalty,
                         fragment_teacher_reward=self.teacher_sem_missing_penalty,
                         counterfactual_reward=self.tiny_fragment_hard_fail_penalty,
                     ),
                     valid_smiles=True,
                     connected_fragment=True,
-                    is_subgraph=True,
+                    is_subgraph=bool(has_precise_match),
+                    direct_substructure=bool(has_precise_match),
                     **tiny_guard_trace_kwargs,
                 )
             atom_ratio = core_atom_count / parent_atom_count
+            size_window_reward, size_window_bucket = self._compute_size_window_reward(
+                atom_ratio=atom_ratio,
+            )
+            size_window_trace_kwargs = self._size_window_trace_kwargs(
+                size_window_reward=size_window_reward,
+                size_window_bucket=size_window_bucket,
+                final_fragment_atom_count=core_atom_count,
+                final_fragment_atom_ratio=atom_ratio,
+            )
+            base_trace_kwargs.update(size_window_trace_kwargs)
+            if not has_precise_match:
+                fragment_teacher_reward, teacher_trace_kwargs = (
+                    self._score_teacher_semantic(
+                        core_smiles=core_smiles,
+                        original_label=int(original_label),
+                        parent_smiles=normalized_parent,
+                        fragment_info=fragment_info,
+                    )
+                )
+                not_direct_trace_kwargs = self._merge_reward_fields(
+                    base_trace_kwargs,
+                    teacher_trace_kwargs,
+                    self._counterfactual_trace_kwargs(
+                        counterfactual_teacher_available=bool(
+                            self.counterfactual_teacher_scorer is not None
+                            and self.counterfactual_teacher_scorer.available
+                        ),
+                        counterfactual_teacher_called=False,
+                        counterfactual_teacher_reason="not_direct_substructure",
+                    ),
+                    self._substructure_distance_trace_kwargs(
+                        direct_substructure=False,
+                        substructure_similarity=float(
+                            substructure_distance_result.get(
+                                "substructure_similarity",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                        substructure_distance=float(
+                            substructure_distance_result.get(
+                                "substructure_distance",
+                                1.0,
+                            )
+                            or 1.0
+                        ),
+                        substructure_distance_reward=float(
+                            substructure_distance_result.get(
+                                "substructure_distance_reward",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                        nearest_parent_subgraph_smiles=substructure_distance_result.get(
+                            "nearest_parent_subgraph_smiles"
+                        ),
+                        nearest_parent_subgraph_atom_indices=nearest_atom_indices,
+                        used_projected_subgraph_for_reward=False,
+                        cf_reward_skipped_reason="not_direct_substructure",
+                        projection_attempted=True,
+                        projection_success=bool(
+                            substructure_distance_result.get(
+                                "nearest_parent_subgraph_smiles"
+                            )
+                        ),
+                        projection_method=str(
+                            substructure_distance_result.get("projection_method")
+                            or "none"
+                        ),
+                        projection_score=float(
+                            substructure_distance_result.get(
+                                "substructure_similarity",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                        projection_reason="nearest_parent_subgraph_debug_only",
+                        projection_atom_count=nearest_atom_count,
+                        projection_atom_ratio=(
+                            (nearest_atom_count / parent_atom_count)
+                            if nearest_atom_count is not None and parent_atom_count > 0
+                            else None
+                        ),
+                        num_projection_candidates=int(
+                            substructure_distance_result.get(
+                                "num_parent_candidates",
+                                0,
+                            )
+                            or 0
+                        ),
+                    ),
+                    raw_fragment_smiles=decoded_raw_fragment,
+                    core_fragment_smiles=core_smiles,
+                    teacher_input_smiles=core_smiles,
+                    fragment_teacher_sem=fragment_teacher_reward,
+                )
+                return self._fail(
+                    parent_smiles=normalized_parent,
+                    generated_smiles=generated_smiles,
+                    normalized_generated=effective_fragment,
+                    original_label=int(original_label),
+                    failure_stage="subgraph",
+                    error_message=(
+                        "Generated fragment is parseable but does not directly match the parent."
+                    ),
+                    generated_char_count=effective_generated_char_count,
+                    failure_tag="parse_ok_but_not_direct_substructure",
+                    invalid_detail="not_parent_substructure",
+                    breakdown=self._build_breakdown(
+                        format_reward=format_reward,
+                        valid_reward=valid_reward,
+                        subgraph_reward=0.0,
+                        length_reward=length_reward,
+                        size_window_reward=size_window_reward,
+                        dummy_reward=dummy_output_penalty,
+                        substructure_distance_reward=float(
+                            substructure_distance_result.get(
+                                "substructure_distance_reward",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                        semantic_reward=0.0,
+                        fragment_teacher_reward=fragment_teacher_reward,
+                        counterfactual_reward=0.0,
+                    ),
+                    valid_smiles=True,
+                    connected_fragment=True,
+                    is_subgraph=False,
+                    direct_substructure=False,
+                    **not_direct_trace_kwargs,
+                )
             deletion_for_guard = delete_fragment_from_parent(
                 normalized_parent,
                 core_smiles,
@@ -1753,6 +1948,13 @@ class ChemRLRewarder:
                         valid_reward=0.0,
                         subgraph_reward=0.0,
                         length_reward=0.0,
+                        substructure_distance_reward=float(
+                            substructure_distance_result.get(
+                                "substructure_distance_reward",
+                                1.0,
+                            )
+                            or 0.0
+                        ),
                         semantic_reward=hard_guard_penalty,
                         fragment_teacher_reward=self.teacher_sem_missing_penalty,
                         counterfactual_reward=hard_guard_penalty,
@@ -1760,20 +1962,10 @@ class ChemRLRewarder:
                     valid_smiles=True,
                     connected_fragment=True,
                     is_subgraph=True,
+                    direct_substructure=True,
                     residual_smiles=deletion_for_guard.residual_smiles,
                     **hard_guard_trace_kwargs,
                 )
-
-            size_window_reward, size_window_bucket = self._compute_size_window_reward(
-                atom_ratio=atom_ratio,
-            )
-            size_window_trace_kwargs = self._size_window_trace_kwargs(
-                size_window_reward=size_window_reward,
-                size_window_bucket=size_window_bucket,
-                final_fragment_atom_count=core_atom_count,
-                final_fragment_atom_ratio=atom_ratio,
-            )
-            base_trace_kwargs.update(size_window_trace_kwargs)
             normalized_generated = effective_fragment
             generated_char_count = effective_generated_char_count
             break
@@ -1792,7 +1984,7 @@ class ChemRLRewarder:
                 original_label=int(original_label),
                 fragment_info=fragment_info,
                 valid_reward=valid_reward,
-                substructure_ok=has_precise_match,
+                direct_substructure=has_precise_match,
             )
         )
         success_trace_kwargs = {
@@ -1809,6 +2001,10 @@ class ChemRLRewarder:
             length_reward=length_reward,
             size_window_reward=size_window_reward,
             dummy_reward=dummy_output_penalty,
+            substructure_distance_reward=float(
+                substructure_distance_result.get("substructure_distance_reward", 1.0)
+                or 0.0
+            ),
             semantic_reward=counterfactual_reward,
             fragment_teacher_reward=fragment_teacher_reward,
             counterfactual_reward=counterfactual_reward,
@@ -1822,10 +2018,11 @@ class ChemRLRewarder:
             core_fragment_smiles=core_smiles,
             original_label=int(original_label),
             target_label=target_label,
-            reward=self._reward_from_breakdown(breakdown) - projection_penalty_applied,
+            reward=self._reward_from_breakdown(breakdown),
             valid_smiles=True,
             connected_fragment=True,
             is_subgraph=True,
+            direct_substructure=True,
             deletion_success=bool(
                 success_trace_kwargs.get("parent_without_fragment_smiles")
             ),
@@ -1833,6 +2030,43 @@ class ChemRLRewarder:
                 success_trace_kwargs.get("counterfactual_teacher_called", False)
             ),
             flip_success=bool(success_trace_kwargs.get("cf_flip", False)),
+            substructure_similarity=float(
+                success_trace_kwargs.get("substructure_similarity", 1.0) or 1.0
+            ),
+            substructure_distance=float(
+                success_trace_kwargs.get("substructure_distance", 0.0) or 0.0
+            ),
+            substructure_distance_reward=float(
+                success_trace_kwargs.get("substructure_distance_reward", 1.0) or 0.0
+            ),
+            substructure_distance_weight=float(
+                success_trace_kwargs.get(
+                    "substructure_distance_weight",
+                    self.substructure_distance_reward_weight
+                    if self.enable_substructure_distance_reward
+                    else 0.0,
+                )
+                or 0.0
+            ),
+            nearest_parent_subgraph_smiles=success_trace_kwargs.get(
+                "nearest_parent_subgraph_smiles"
+            ),
+            nearest_parent_subgraph_atom_indices=(
+                tuple(
+                    int(index)
+                    for index in (
+                        success_trace_kwargs.get("nearest_parent_subgraph_atom_indices")
+                        or ()
+                    )
+                )
+                or None
+            ),
+            used_projected_subgraph_for_reward=bool(
+                success_trace_kwargs.get("used_projected_subgraph_for_reward", False)
+            ),
+            cf_reward_skipped_reason=success_trace_kwargs.get(
+                "cf_reward_skipped_reason"
+            ),
             target_probability=success_trace_kwargs.get("p_after"),
             inactive_probability=None,
             residual_smiles=success_trace_kwargs.get("parent_without_fragment_smiles"),
@@ -2005,13 +2239,7 @@ class ChemRLRewarder:
             ),
             projection_atom_count=success_trace_kwargs.get("projection_atom_count"),
             projection_atom_ratio=success_trace_kwargs.get("projection_atom_ratio"),
-            projection_penalty=float(
-                success_trace_kwargs.get(
-                    "projection_penalty",
-                    projection_penalty_applied,
-                )
-                or 0.0
-            ),
+            projection_penalty=float(success_trace_kwargs.get("projection_penalty", 0.0) or 0.0),
             num_projection_candidates=int(
                 success_trace_kwargs.get("num_projection_candidates", 0) or 0
             ),
@@ -2129,10 +2357,16 @@ class ChemRLRewarder:
         length_reward: float,
         size_window_reward: float = 0.0,
         dummy_reward: float = 0.0,
+        substructure_distance_reward: float = 0.0,
         semantic_reward: float,
         fragment_teacher_reward: float,
         counterfactual_reward: float,
     ) -> dict[str, float]:
+        weighted_subdistance = (
+            self.substructure_distance_reward_weight * float(substructure_distance_reward)
+            if self.enable_substructure_distance_reward
+            else 0.0
+        )
         return {
             "format_r": float(format_reward),
             "valid_r": float(valid_reward),
@@ -2140,6 +2374,9 @@ class ChemRLRewarder:
             "length_r": float(length_reward),
             "size_window_r": float(size_window_reward),
             "dummy_r": float(dummy_reward),
+            "subdist_r": float(substructure_distance_reward),
+            "subdist_weight": float(self.substructure_distance_reward_weight),
+            "subdist_weighted_r": float(weighted_subdistance),
             "sem_r": float(semantic_reward),
             "teacher_sem_r": float(semantic_reward),
             "cf_r": float(counterfactual_reward),
@@ -2154,6 +2391,7 @@ class ChemRLRewarder:
             + breakdown.get("length_r", 0.0)
             + breakdown.get("size_window_r", 0.0)
             + breakdown.get("dummy_r", 0.0)
+            + breakdown.get("subdist_weighted_r", 0.0)
             + breakdown.get("sem_r", 0.0)
         )
 
@@ -2227,6 +2465,61 @@ class ChemRLRewarder:
             "cf_drop": cf_drop,
             "cf_flip": bool(cf_flip),
             "empty_residual": bool(empty_residual),
+        }
+
+    def _substructure_distance_trace_kwargs(
+        self,
+        *,
+        direct_substructure: bool = False,
+        substructure_similarity: float = 0.0,
+        substructure_distance: float = 1.0,
+        substructure_distance_reward: float = 0.0,
+        nearest_parent_subgraph_smiles: str | None = None,
+        nearest_parent_subgraph_atom_indices: Sequence[int] | None = None,
+        used_projected_subgraph_for_reward: bool = False,
+        cf_reward_skipped_reason: str | None = None,
+        projection_attempted: bool = False,
+        projection_success: bool = False,
+        projection_method: str | None = None,
+        projection_source: str | None = None,
+        projection_score: float | None = None,
+        projection_reason: str | None = None,
+        projection_atom_count: int | None = None,
+        projection_atom_ratio: float | None = None,
+        num_projection_candidates: int = 0,
+    ) -> dict[str, Any]:
+        normalized_indices = (
+            tuple(int(index) for index in nearest_parent_subgraph_atom_indices)
+            if nearest_parent_subgraph_atom_indices
+            else None
+        )
+        return {
+            "direct_substructure": bool(direct_substructure),
+            "substructure_similarity": float(substructure_similarity),
+            "substructure_distance": float(substructure_distance),
+            "substructure_distance_reward": float(substructure_distance_reward),
+            "substructure_distance_weight": float(
+                self.substructure_distance_reward_weight
+                if self.enable_substructure_distance_reward
+                else 0.0
+            ),
+            "nearest_parent_subgraph_smiles": nearest_parent_subgraph_smiles,
+            "nearest_parent_subgraph_atom_indices": normalized_indices,
+            "used_projected_subgraph_for_reward": bool(
+                used_projected_subgraph_for_reward
+            ),
+            "cf_reward_skipped_reason": cf_reward_skipped_reason,
+            "projection_attempted": bool(projection_attempted),
+            "projection_success": bool(projection_success),
+            "projection_method": projection_method,
+            "projected_fragment_smiles": nearest_parent_subgraph_smiles,
+            "projection_source": projection_source,
+            "projection_score": projection_score,
+            "projection_reason": projection_reason,
+            "projection_atom_count": projection_atom_count,
+            "projection_atom_ratio": projection_atom_ratio,
+            "projection_penalty": 0.0,
+            "num_projection_candidates": int(num_projection_candidates),
         }
 
     def _repair_trace_kwargs(
@@ -2817,13 +3110,12 @@ class ChemRLRewarder:
         original_label: int,
         fragment_info: dict[str, Any],
         valid_reward: float,
-        substructure_ok: bool,
+        direct_substructure: bool,
     ) -> tuple[float, dict[str, Any]]:
         if (
             not core_smiles
             or not fragment_info.get("core_parse_ok")
             or valid_reward <= 0.0
-            or not substructure_ok
             or not parent_smiles
         ):
             _LOGGER.info(
@@ -2839,6 +3131,29 @@ class ChemRLRewarder:
                 ),
                 counterfactual_teacher_called=False,
                 counterfactual_teacher_reason="invalid_or_not_substructure",
+            )
+
+        if not direct_substructure:
+            _LOGGER.info(
+                "[CF_ORACLE_SKIPPED] reason=%s parent=%s fragment=%s",
+                "not_direct_substructure",
+                parent_smiles,
+                core_smiles,
+            )
+            return 0.0, self._merge_reward_fields(
+                self._counterfactual_trace_kwargs(
+                    counterfactual_teacher_available=bool(
+                        self.counterfactual_teacher_scorer is not None
+                        and self.counterfactual_teacher_scorer.available
+                    ),
+                    counterfactual_teacher_called=False,
+                    counterfactual_teacher_reason="not_direct_substructure",
+                ),
+                self._substructure_distance_trace_kwargs(
+                    direct_substructure=False,
+                    used_projected_subgraph_for_reward=False,
+                    cf_reward_skipped_reason="not_direct_substructure",
+                ),
             )
 
         if self.disable_counterfactual_teacher:
@@ -3120,8 +3435,17 @@ class ChemRLRewarder:
         valid_smiles: bool = False,
         connected_fragment: bool = False,
         is_subgraph: bool = False,
+        direct_substructure: bool = False,
         deletion_success: bool = False,
         residual_smiles: str | None = None,
+        substructure_similarity: float = 0.0,
+        substructure_distance: float = 1.0,
+        substructure_distance_reward: float = 0.0,
+        substructure_distance_weight: float = 0.0,
+        nearest_parent_subgraph_smiles: str | None = None,
+        nearest_parent_subgraph_atom_indices: Sequence[int] | None = None,
+        used_projected_subgraph_for_reward: bool = False,
+        cf_reward_skipped_reason: str | None = None,
         raw_fragment_smiles: str | None = None,
         core_fragment_smiles: str | None = None,
         raw_parse_ok: bool = False,
@@ -3241,9 +3565,24 @@ class ChemRLRewarder:
             valid_smiles=bool(valid_smiles),
             connected_fragment=bool(connected_fragment),
             is_subgraph=bool(is_subgraph),
+            direct_substructure=bool(direct_substructure),
             deletion_success=bool(deletion_success),
             counterfactual_evaluated=False,
             flip_success=False,
+            substructure_similarity=float(substructure_similarity),
+            substructure_distance=float(substructure_distance),
+            substructure_distance_reward=float(substructure_distance_reward),
+            substructure_distance_weight=float(substructure_distance_weight),
+            nearest_parent_subgraph_smiles=nearest_parent_subgraph_smiles,
+            nearest_parent_subgraph_atom_indices=(
+                tuple(int(index) for index in nearest_parent_subgraph_atom_indices)
+                if nearest_parent_subgraph_atom_indices
+                else None
+            ),
+            used_projected_subgraph_for_reward=bool(
+                used_projected_subgraph_for_reward
+            ),
+            cf_reward_skipped_reason=cf_reward_skipped_reason,
             target_probability=None,
             inactive_probability=None,
             residual_smiles=residual_smiles,

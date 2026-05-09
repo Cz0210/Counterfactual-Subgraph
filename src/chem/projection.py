@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from math import ceil
 
+from src.chem.core_fragment import match_core_fragment_to_parent
 from src.chem.deletion import delete_fragment_from_parent
 from src.chem.smiles_utils import is_rdkit_available, parse_smiles, sanitize_molecule
 from src.chem.substructure import is_connected_fragment, is_parent_substructure
@@ -278,6 +280,7 @@ def build_parent_projection_candidates(
     parent_smiles: str | None = None,
     max_candidates: int = 128,
     min_atoms: int = 3,
+    min_atom_ratio: float = 0.0,
     max_atom_ratio: float = 0.70,
     enable_khop3: bool = False,
 ) -> tuple[ParentProjectionCandidate, ...]:
@@ -308,6 +311,7 @@ def build_parent_projection_candidates(
             source=source,
             parent_atom_count=parent_atom_count,
             min_atoms=int(min_atoms),
+            min_atom_ratio=float(min_atom_ratio),
             max_atom_ratio=float(max_atom_ratio),
             seen_smiles=seen_smiles,
         )
@@ -426,6 +430,7 @@ def _candidate_from_atom_indices(
     source: str,
     parent_atom_count: int,
     min_atoms: int,
+    min_atom_ratio: float,
     max_atom_ratio: float,
     seen_smiles: set[str],
 ) -> ParentProjectionCandidate | None:
@@ -435,6 +440,8 @@ def _candidate_from_atom_indices(
     if atom_count >= int(parent_atom_count):
         return None
     atom_ratio = atom_count / max(1, int(parent_atom_count))
+    if atom_ratio < float(min_atom_ratio):
+        return None
     if atom_ratio > float(max_atom_ratio):
         return None
     if not _atom_set_is_connected(parent_mol, atom_indices):
@@ -713,6 +720,248 @@ def _mcs_atom_coverage(
     return float(max(0, int(getattr(result, "numAtoms", 0))) / max(1, query_atom_count))
 
 
+def compute_substructure_distance_reward(
+    parent_smiles: str,
+    fragment_smiles: str,
+    *,
+    min_atom_ratio: float = 0.10,
+    max_atom_ratio: float = 0.65,
+    topk: int = 20,
+    similarity_threshold: float = 0.0,
+    mcs_timeout: int = 1,
+) -> dict[str, object]:
+    """Score one fragment by similarity to the nearest legal parent subgraph.
+
+    Important: this helper never substitutes the nearest parent subgraph for the
+    original fragment in downstream reward computation. It is only used to
+    measure how close a parseable fragment is to a real connected parent
+    subgraph.
+    """
+
+    normalized_parent = str(parent_smiles or "").strip()
+    normalized_fragment = str(fragment_smiles or "").strip()
+    default_result: dict[str, object] = {
+        "parse_ok": False,
+        "direct_substructure": False,
+        "substructure_similarity": 0.0,
+        "substructure_distance": 1.0,
+        "substructure_distance_reward": 0.0,
+        "nearest_parent_subgraph_smiles": None,
+        "nearest_parent_subgraph_atom_indices": None,
+        "num_parent_candidates": 0,
+        "projection_method": "none",
+        "failure_tag": "parse_failed",
+        "used_projected_subgraph_for_reward": False,
+    }
+    if not normalized_parent:
+        return {
+            **default_result,
+            "failure_tag": "missing_parent_smiles",
+        }
+    if not normalized_fragment:
+        return {
+            **default_result,
+            "failure_tag": "empty_fragment",
+        }
+    if not is_rdkit_available() or Chem is None:
+        return {
+            **default_result,
+            "failure_tag": "rdkit_unavailable",
+        }
+
+    parent = parse_smiles(
+        normalized_parent,
+        sanitize=True,
+        canonicalize=False,
+        allow_capped_fragments=False,
+    )
+    if not parent.sanitized or parent.mol is None:
+        return {
+            **default_result,
+            "failure_tag": "parent_parse_failed",
+        }
+
+    fragment = parse_smiles(
+        normalized_fragment,
+        sanitize=True,
+        canonicalize=False,
+        allow_capped_fragments=True,
+    )
+    if not fragment.parseable or fragment.mol is None:
+        return default_result
+
+    query_core = _core_mol_from_parsed(fragment)
+    query_smiles = _mol_to_smiles(query_core)
+    if query_core is None or not query_smiles:
+        return {
+            **default_result,
+            "parse_ok": True,
+            "failure_tag": "core_fragment_unusable_after_normalization",
+        }
+    if not is_connected_fragment(query_smiles):
+        return {
+            **default_result,
+            "parse_ok": True,
+            "failure_tag": "fragment_not_connected",
+        }
+
+    direct_match = match_core_fragment_to_parent(normalized_parent, query_smiles)
+    if direct_match.matched:
+        return {
+            "parse_ok": True,
+            "direct_substructure": True,
+            "substructure_similarity": 1.0,
+            "substructure_distance": 0.0,
+            "substructure_distance_reward": 1.0,
+            "nearest_parent_subgraph_smiles": query_smiles,
+            "nearest_parent_subgraph_atom_indices": list(direct_match.match_atom_indices),
+            "num_parent_candidates": 0,
+            "projection_method": "direct_match",
+            "failure_tag": None,
+            "used_projected_subgraph_for_reward": False,
+        }
+
+    parent_atom_count = int(parent.mol.GetNumAtoms())
+    if parent_atom_count <= 0:
+        return {
+            **default_result,
+            "parse_ok": True,
+            "failure_tag": "parent_atom_count_invalid",
+        }
+
+    min_atoms = max(1, int(ceil(parent_atom_count * max(0.0, float(min_atom_ratio)))))
+    candidate_limit = max(64, int(topk) * 8)
+    candidates = build_parent_projection_candidates(
+        parent.mol,
+        parent_smiles=normalized_parent,
+        max_candidates=candidate_limit,
+        min_atoms=min_atoms,
+        min_atom_ratio=float(min_atom_ratio),
+        max_atom_ratio=float(max_atom_ratio),
+        enable_khop3=True,
+    )
+    if not candidates:
+        return {
+            "parse_ok": True,
+            "direct_substructure": False,
+            "substructure_similarity": 0.0,
+            "substructure_distance": 1.0,
+            "substructure_distance_reward": 0.0,
+            "nearest_parent_subgraph_smiles": None,
+            "nearest_parent_subgraph_atom_indices": None,
+            "num_parent_candidates": 0,
+            "projection_method": "none",
+            "failure_tag": "parse_ok_but_not_direct_substructure",
+            "used_projected_subgraph_for_reward": False,
+        }
+
+    query_atom_count = max(1, _non_dummy_atom_count(query_core))
+    query_atom_counts = _atom_symbol_counts(query_core)
+    prelim_scored: list[dict[str, object]] = []
+    for candidate in candidates:
+        fp_sim = _morgan_tanimoto(query_core, candidate.mol)
+        atom_comp_sim = _atom_composition_similarity(
+            query_atom_counts,
+            _atom_symbol_counts(candidate.mol),
+        )
+        size_sim = _size_similarity(query_atom_count, candidate.atom_count)
+        prelim_score = _clip_unit_interval(
+            0.45 * fp_sim + 0.10 * atom_comp_sim + 0.10 * size_sim
+        )
+        prelim_scored.append(
+            {
+                "candidate": candidate,
+                "fp_sim": fp_sim,
+                "atom_comp_sim": atom_comp_sim,
+                "size_sim": size_sim,
+                "prelim_score": prelim_score,
+            }
+        )
+
+    prelim_scored.sort(
+        key=lambda item: (
+            float(item["prelim_score"]),
+            -abs(int(item["candidate"].atom_count) - query_atom_count),
+            -int(item["candidate"].atom_count),
+            str(item["candidate"].smiles),
+        ),
+        reverse=True,
+    )
+    topk_limit = max(1, min(int(topk), len(prelim_scored)))
+    best_entry: dict[str, object] | None = None
+    for index, entry in enumerate(prelim_scored):
+        candidate = entry["candidate"]
+        mcs_sim = (
+            _mcs_size_normalized_similarity(
+                query_core,
+                candidate.mol,
+                query_atom_count=query_atom_count,
+                candidate_atom_count=candidate.atom_count,
+                timeout=max(1, int(mcs_timeout)),
+            )
+            if index < topk_limit
+            else 0.0
+        )
+        similarity = _clip_unit_interval(
+            0.45 * float(entry["fp_sim"])
+            + 0.35 * mcs_sim
+            + 0.10 * float(entry["atom_comp_sim"])
+            + 0.10 * float(entry["size_sim"])
+        )
+        scored_entry = {
+            **entry,
+            "mcs_sim": mcs_sim,
+            "similarity": similarity,
+        }
+        if best_entry is None:
+            best_entry = scored_entry
+            continue
+        if float(scored_entry["similarity"]) > float(best_entry["similarity"]):
+            best_entry = scored_entry
+            continue
+        if (
+            float(scored_entry["similarity"]) == float(best_entry["similarity"])
+            and float(scored_entry["fp_sim"]) > float(best_entry["fp_sim"])
+        ):
+            best_entry = scored_entry
+
+    if best_entry is None:
+        return {
+            "parse_ok": True,
+            "direct_substructure": False,
+            "substructure_similarity": 0.0,
+            "substructure_distance": 1.0,
+            "substructure_distance_reward": 0.0,
+            "nearest_parent_subgraph_smiles": None,
+            "nearest_parent_subgraph_atom_indices": None,
+            "num_parent_candidates": len(candidates),
+            "projection_method": "none",
+            "failure_tag": "parse_ok_but_not_direct_substructure",
+            "used_projected_subgraph_for_reward": False,
+        }
+
+    best_candidate = best_entry["candidate"]
+    similarity = _clip_unit_interval(float(best_entry["similarity"]))
+    distance = _clip_unit_interval(1.0 - similarity)
+    reward = _thresholded_similarity_reward(
+        similarity,
+        threshold=float(similarity_threshold),
+    )
+    return {
+        "parse_ok": True,
+        "direct_substructure": False,
+        "substructure_similarity": similarity,
+        "substructure_distance": distance,
+        "substructure_distance_reward": reward,
+        "nearest_parent_subgraph_smiles": best_candidate.smiles,
+        "nearest_parent_subgraph_atom_indices": list(best_candidate.atom_indices),
+        "num_parent_candidates": len(candidates),
+        "projection_method": "nearest_parent_subgraph",
+        "failure_tag": "parse_ok_but_not_direct_substructure",
+        "used_projected_subgraph_for_reward": False,
+    }
+
+
 def _functional_group_names(mol: object | None) -> frozenset[str]:
     if Chem is None or mol is None:
         return frozenset()
@@ -747,7 +996,87 @@ def _too_large_penalty(atom_ratio: float, max_atom_ratio: float) -> float:
     return float(min(1.0, max(0.0, (atom_ratio - soft_limit) / span)))
 
 
+def _atom_symbol_counts(mol: object | None) -> dict[str, int]:
+    if Chem is None or mol is None:
+        return {}
+    counts: dict[str, int] = {}
+    try:
+        for atom in mol.GetAtoms():
+            if atom.GetAtomicNum() == 0:
+                continue
+            symbol = str(atom.GetSymbol())
+            counts[symbol] = counts.get(symbol, 0) + 1
+    except Exception:  # pragma: no cover - defensive around RDKit objects
+        return {}
+    return counts
+
+
+def _atom_composition_similarity(
+    left_counts: dict[str, int],
+    right_counts: dict[str, int],
+) -> float:
+    if not left_counts and not right_counts:
+        return 1.0
+    keys = set(left_counts) | set(right_counts)
+    if not keys:
+        return 1.0
+    numerator = sum(min(left_counts.get(key, 0), right_counts.get(key, 0)) for key in keys)
+    denominator = sum(max(left_counts.get(key, 0), right_counts.get(key, 0)) for key in keys)
+    if denominator <= 0:
+        return 0.0
+    return _clip_unit_interval(float(numerator / denominator))
+
+
+def _size_similarity(query_atom_count: int, candidate_atom_count: int) -> float:
+    denominator = max(1, int(query_atom_count), int(candidate_atom_count))
+    difference = abs(int(query_atom_count) - int(candidate_atom_count))
+    return _clip_unit_interval(1.0 - min(1.0, difference / denominator))
+
+
+def _mcs_size_normalized_similarity(
+    query_mol: object,
+    candidate_mol: object,
+    *,
+    query_atom_count: int,
+    candidate_atom_count: int,
+    timeout: int,
+) -> float:
+    if rdFMCS is None:
+        return 0.0
+    try:
+        result = rdFMCS.FindMCS(
+            [query_mol, candidate_mol],
+            timeout=max(1, int(timeout)),
+            ringMatchesRingOnly=True,
+            completeRingsOnly=False,
+            matchValences=False,
+        )
+    except Exception:  # pragma: no cover - depends on RDKit internals
+        return 0.0
+    if getattr(result, "canceled", False):
+        return 0.0
+    denominator = max(1, int(query_atom_count), int(candidate_atom_count))
+    return _clip_unit_interval(float(max(0, int(getattr(result, "numAtoms", 0))) / denominator))
+
+
+def _thresholded_similarity_reward(similarity: float, *, threshold: float) -> float:
+    clipped_similarity = _clip_unit_interval(float(similarity))
+    clipped_threshold = _clip_unit_interval(float(threshold))
+    if clipped_threshold <= 0.0:
+        return clipped_similarity
+    if clipped_similarity <= clipped_threshold:
+        return 0.0
+    return _clip_unit_interval(
+        (clipped_similarity - clipped_threshold) / max(1e-6, 1.0 - clipped_threshold)
+    )
+
+
+def _clip_unit_interval(value: float) -> float:
+    return float(min(1.0, max(0.0, float(value))))
+
+
 __all__ = [
+    "compute_substructure_distance_reward",
     "ParentProjectionCandidate",
     "build_parent_projection_candidates",
     "project_fragment_to_parent_subgraph",

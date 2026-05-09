@@ -6,6 +6,55 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-09] Add nearest-parent-subgraph distance reward and stop using projected fragments for counterfactual reward
+
+### Background
+The decoded PPO path previously had one high-risk mismatch with the v3
+counterfactual objective: when a parseable core fragment was not a strict
+parent substructure, the reward wrapper could retrieve one projected legal
+parent subgraph and then continue deletion-based reward computation on that
+projected fragment instead of on the model's own output. This hid the true
+failure mode and turned the projection module into an answer-rewriting path
+rather than a structural-distance diagnostic.
+
+### Decision
+Keep the strict exact-substructure reward, but separate it from a new dense
+auxiliary reward based on the nearest legal connected parent subgraph:
+
+- direct parent matches keep the exact binary substructure reward and remain the
+  only cases allowed to call the deletion-based counterfactual teacher;
+- parseable but non-direct fragments now compute
+  `substructure_similarity / substructure_distance / substructure_distance_reward`
+  against the nearest legal parent subgraph built from the existing
+  parent-derived candidate pool;
+- the nearest legal parent subgraph is logged for debugging only and is never
+  substituted back into the reward path for counterfactual deletion scoring;
+- non-direct fragments explicitly log
+  `used_projected_subgraph_for_reward=False` and
+  `cf_reward_skipped_reason=not_direct_substructure`;
+- the decoded PPO CLI and Slurm path expose dedicated knobs for enabling the
+  new dense reward and tuning its candidate window and MCS settings.
+
+### Alternatives considered
+1. Keep the projection-retrieval path as the effective reward fragment and only
+   add more logging around it.
+2. Treat all parseable non-substructure outputs as hard failures with zero
+   dense structural feedback.
+3. Replace the distance reward with fragment-only teacher semantics.
+
+### Consequences
+- Reward logs now distinguish exact direct substructure success from
+  non-direct-but-similar fragments.
+- Deletion-based counterfactual reward is again aligned with the model output
+  instead of a projected replacement fragment.
+- PPO can still receive a dense structural signal for near-miss fragments
+  without allowing reward leakage through projection.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-09] Replace the SFT v3 HIV scaffold split with a label-stratified scaffold holdout
 
 ### Background

@@ -19,6 +19,7 @@ from src.chem.minimal_repair import generate_minimal_syntax_repair_candidates
 from src.chem.projection import (
     ParentProjectionCandidate,
     build_parent_projection_candidates,
+    compute_substructure_distance_reward,
     project_fragment_to_parent_subgraph,
 )
 from src.chem.repair import repair_fragment_to_parent_subgraph
@@ -67,6 +68,7 @@ __all__ = [
     "SubstructureMatcher",
     "build_dummy_fragment_from_parent_match",
     "build_parent_projection_candidates",
+    "compute_substructure_distance_reward",
     "canonicalize_smiles",
     "delete_fragment_from_parent",
     "find_parent_substructure_matches",

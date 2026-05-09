@@ -119,7 +119,7 @@ class TeacherSemanticRewardTests(unittest.TestCase):
             rewarder.teacher_sem_missing_penalty,
         )
 
-    def test_non_substructure_does_not_call_teacher(self) -> None:
+    def test_non_direct_fragment_still_records_fragment_teacher_semantic(self) -> None:
         teacher = _FakeTeacherScorer(probability=0.8)
         rewarder = self._build_rewarder(teacher_scorer=teacher)
 
@@ -129,13 +129,12 @@ class TeacherSemanticRewardTests(unittest.TestCase):
             parent_labels=[0],
         )[0]
 
-        self.assertEqual(len(teacher.calls), 0)
-        self.assertFalse(trace.teacher_called)
-        self.assertEqual(trace.teacher_reason, "invalid_or_not_substructure")
-        self.assertEqual(
-            trace.breakdown["fragment_teacher_sem_r"],
-            rewarder.teacher_sem_missing_penalty,
-        )
+        self.assertEqual(len(teacher.calls), 1)
+        self.assertTrue(trace.teacher_called)
+        self.assertEqual(trace.teacher_reason, "ok")
+        self.assertGreater(trace.breakdown["fragment_teacher_sem_r"], 0.0)
+        self.assertFalse(trace.direct_substructure)
+        self.assertEqual(trace.failure_tag, "parse_ok_but_not_direct_substructure")
 
     def test_overlong_fragment_is_bucketed_before_teacher_scoring(self) -> None:
         teacher = _FakeTeacherScorer(probability=0.8)
