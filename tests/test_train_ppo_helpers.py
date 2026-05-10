@@ -12,6 +12,7 @@ from scripts.train_ppo import (
     extract_fragment_smiles,
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
+    resolve_projected_cf_reward_enabled,
     resolve_decoded_chem_generation_config,
     resolve_sft_lora_path,
 )
@@ -273,6 +274,39 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertEqual(args.substructure_distance_mcs_timeout, 2)
         self.assertAlmostEqual(args.substructure_distance_sim_threshold, 0.1)
         self.assertTrue(args.disable_projected_cf_reward)
+
+    def test_parser_accepts_enable_projected_cf_reward_flag(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["--enable-projected-cf-reward"])
+
+        self.assertTrue(args.enable_projected_cf_reward)
+        self.assertFalse(args.disable_projected_cf_reward)
+
+    def test_resolve_projected_cf_reward_enabled_prefers_explicit_enable(self) -> None:
+        args = argparse.Namespace(
+            enable_projected_cf_reward=True,
+            disable_projected_cf_reward=False,
+        )
+
+        self.assertTrue(resolve_projected_cf_reward_enabled(args))
+
+    def test_resolve_projected_cf_reward_enabled_defaults_to_disabled(self) -> None:
+        args = argparse.Namespace(
+            enable_projected_cf_reward=False,
+            disable_projected_cf_reward=False,
+        )
+
+        self.assertFalse(resolve_projected_cf_reward_enabled(args))
+
+    def test_resolve_projected_cf_reward_enabled_rejects_conflict(self) -> None:
+        args = argparse.Namespace(
+            enable_projected_cf_reward=True,
+            disable_projected_cf_reward=True,
+        )
+
+        with self.assertRaises(ValueError):
+            resolve_projected_cf_reward_enabled(args)
 
     def test_parser_accepts_tiny_fragment_guard_flags(self) -> None:
         parser = build_parser()

@@ -515,7 +515,8 @@ class ChemRLRewarder:
         substructure_distance_topk: int = 20,
         substructure_distance_mcs_timeout: int = 1,
         substructure_distance_sim_threshold: float = 0.0,
-        disable_projected_cf_reward: bool = True,
+        enable_projected_cf_reward: bool = False,
+        disable_projected_cf_reward: bool | None = None,
         enable_minimal_syntax_repair: bool = True,
         syntax_repair_max_edits: int = 4,
         syntax_repair_min_atoms: int = 3,
@@ -609,7 +610,23 @@ class ChemRLRewarder:
         self.substructure_distance_sim_threshold = float(
             substructure_distance_sim_threshold
         )
-        self.disable_projected_cf_reward = bool(disable_projected_cf_reward)
+        enable_projected_cf_reward = bool(enable_projected_cf_reward)
+        disable_projected_cf_reward = (
+            None
+            if disable_projected_cf_reward is None
+            else bool(disable_projected_cf_reward)
+        )
+        if enable_projected_cf_reward and disable_projected_cf_reward is True:
+            raise ValueError(
+                "Projected counterfactual reward cannot be enabled and disabled at the same time."
+            )
+        if disable_projected_cf_reward is None:
+            self.enable_projected_cf_reward = enable_projected_cf_reward
+        elif disable_projected_cf_reward is False:
+            self.enable_projected_cf_reward = True
+        else:
+            self.enable_projected_cf_reward = False
+        self.disable_projected_cf_reward = not self.enable_projected_cf_reward
         self.enable_minimal_syntax_repair = bool(enable_minimal_syntax_repair)
         self.syntax_repair_max_edits = int(syntax_repair_max_edits)
         self.syntax_repair_min_atoms = int(syntax_repair_min_atoms)
@@ -1766,17 +1783,42 @@ class ChemRLRewarder:
                         fragment_info=fragment_info,
                     )
                 )
+                projected_fragment_smiles = substructure_distance_result.get(
+                    "nearest_parent_subgraph_smiles"
+                )
+                projection_success = bool(projected_fragment_smiles)
+                projection_method = str(
+                    substructure_distance_result.get("projection_method") or "none"
+                )
+                counterfactual_reward, counterfactual_trace_kwargs = (
+                    self._score_counterfactual_semantic(
+                        parent_smiles=normalized_parent,
+                        core_smiles=core_smiles,
+                        raw_fragment_smiles=normalized_generated,
+                        original_label=int(original_label),
+                        fragment_info=fragment_info,
+                        valid_reward=valid_reward,
+                        direct_substructure=False,
+                        projected_fragment_smiles=(
+                            str(projected_fragment_smiles)
+                            if projected_fragment_smiles is not None
+                            else None
+                        ),
+                        projection_attempted=True,
+                        projection_success=projection_success,
+                        projection_method=projection_method,
+                    )
+                )
+                projected_cf_reward_used = bool(
+                    counterfactual_trace_kwargs.get(
+                        "used_projected_subgraph_for_reward",
+                        False,
+                    )
+                )
                 not_direct_trace_kwargs = self._merge_reward_fields(
                     base_trace_kwargs,
                     teacher_trace_kwargs,
-                    self._counterfactual_trace_kwargs(
-                        counterfactual_teacher_available=bool(
-                            self.counterfactual_teacher_scorer is not None
-                            and self.counterfactual_teacher_scorer.available
-                        ),
-                        counterfactual_teacher_called=False,
-                        counterfactual_teacher_reason="not_direct_substructure",
-                    ),
+                    counterfactual_trace_kwargs,
                     self._substructure_distance_trace_kwargs(
                         direct_substructure=False,
                         substructure_similarity=float(
@@ -1804,18 +1846,13 @@ class ChemRLRewarder:
                             "nearest_parent_subgraph_smiles"
                         ),
                         nearest_parent_subgraph_atom_indices=nearest_atom_indices,
-                        used_projected_subgraph_for_reward=False,
-                        cf_reward_skipped_reason="not_direct_substructure",
+                        used_projected_subgraph_for_reward=projected_cf_reward_used,
+                        cf_reward_skipped_reason=counterfactual_trace_kwargs.get(
+                            "cf_reward_skipped_reason"
+                        ),
                         projection_attempted=True,
-                        projection_success=bool(
-                            substructure_distance_result.get(
-                                "nearest_parent_subgraph_smiles"
-                            )
-                        ),
-                        projection_method=str(
-                            substructure_distance_result.get("projection_method")
-                            or "none"
-                        ),
+                        projection_success=projection_success,
+                        projection_method=projection_method,
                         projection_score=float(
                             substructure_distance_result.get(
                                 "substructure_similarity",
@@ -1823,7 +1860,11 @@ class ChemRLRewarder:
                             )
                             or 0.0
                         ),
-                        projection_reason="nearest_parent_subgraph_debug_only",
+                        projection_reason=(
+                            "projected_subgraph_for_counterfactual_reward"
+                            if projected_cf_reward_used
+                            else "nearest_parent_subgraph_debug_only"
+                        ),
                         projection_atom_count=nearest_atom_count,
                         projection_atom_ratio=(
                             (nearest_atom_count / parent_atom_count)
@@ -1840,7 +1881,10 @@ class ChemRLRewarder:
                     ),
                     raw_fragment_smiles=decoded_raw_fragment,
                     core_fragment_smiles=core_smiles,
-                    teacher_input_smiles=core_smiles,
+                    teacher_input_smiles=counterfactual_trace_kwargs.get(
+                        "teacher_input_smiles",
+                        core_smiles,
+                    ),
                     fragment_teacher_sem=fragment_teacher_reward,
                 )
                 return self._fail(
@@ -1871,9 +1915,9 @@ class ChemRLRewarder:
                                 )
                                 or 0.0
                             ),
-                            semantic_reward=0.0,
+                            semantic_reward=counterfactual_reward,
                             fragment_teacher_reward=fragment_teacher_reward,
-                            counterfactual_reward=0.0,
+                            counterfactual_reward=counterfactual_reward,
                         ),
                         valid_smiles=True,
                         connected_fragment=True,
@@ -3135,6 +3179,32 @@ class ChemRLRewarder:
             teacher_reason=teacher_result.get("teacher_reason"),
         )
 
+    def _resolve_projected_counterfactual_fragment(
+        self,
+        *,
+        parent_smiles: str,
+        projected_fragment_smiles: str | None,
+    ) -> str | None:
+        normalized_projected = str(projected_fragment_smiles or "").strip()
+        if not normalized_projected:
+            return None
+
+        projected_info = normalize_fragment_with_dummy_atoms(normalized_projected)
+        projected_core_smiles = str(projected_info.get("core_smiles") or "").strip()
+        if not projected_core_smiles or not bool(projected_info.get("core_parse_ok")):
+            return None
+
+        try:
+            projected_match = match_core_fragment_to_parent(
+                parent_smiles,
+                projected_core_smiles,
+            )
+        except Exception:
+            return None
+        if not projected_match.matched:
+            return None
+        return projected_core_smiles
+
     def _score_counterfactual_semantic(
         self,
         *,
@@ -3145,6 +3215,10 @@ class ChemRLRewarder:
         fragment_info: dict[str, Any],
         valid_reward: float,
         direct_substructure: bool,
+        projected_fragment_smiles: str | None = None,
+        projection_attempted: bool = False,
+        projection_success: bool = False,
+        projection_method: str | None = None,
     ) -> tuple[float, dict[str, Any]]:
         if (
             not core_smiles
@@ -3167,7 +3241,66 @@ class ChemRLRewarder:
                 counterfactual_teacher_reason="invalid_or_not_substructure",
             )
 
+        reward_fragment_smiles = core_smiles
+        used_projected_subgraph_for_reward = False
         if not direct_substructure:
+            projected_counterfactual_fragment = None
+            if (
+                self.enable_projected_cf_reward
+                and self.enable_parent_projection
+                and projection_attempted
+                and projection_success
+            ):
+                projected_counterfactual_fragment = (
+                    self._resolve_projected_counterfactual_fragment(
+                        parent_smiles=parent_smiles,
+                        projected_fragment_smiles=projected_fragment_smiles,
+                    )
+                )
+            if projected_counterfactual_fragment is not None:
+                reward_fragment_smiles = projected_counterfactual_fragment
+                used_projected_subgraph_for_reward = True
+                _LOGGER.info(
+                    "[CF_ORACLE_USING_PROJECTED] parent=%s raw_fragment=%s core_fragment=%s projected_fragment=%s method=%s",
+                    parent_smiles,
+                    raw_fragment_smiles,
+                    core_smiles,
+                    reward_fragment_smiles,
+                    projection_method,
+                )
+            else:
+                skip_reason = "not_direct_substructure"
+                if (
+                    self.enable_projected_cf_reward
+                    and self.enable_parent_projection
+                    and projection_attempted
+                    and projection_success
+                    and projected_fragment_smiles
+                ):
+                    skip_reason = "projected_subgraph_invalid"
+                _LOGGER.info(
+                    "[CF_ORACLE_SKIPPED] reason=%s parent=%s fragment=%s projected_fragment=%s",
+                    skip_reason,
+                    parent_smiles,
+                    core_smiles,
+                    projected_fragment_smiles,
+                )
+                return 0.0, self._merge_reward_fields(
+                    self._counterfactual_trace_kwargs(
+                        counterfactual_teacher_available=bool(
+                            self.counterfactual_teacher_scorer is not None
+                            and self.counterfactual_teacher_scorer.available
+                        ),
+                        counterfactual_teacher_called=False,
+                        counterfactual_teacher_reason=skip_reason,
+                    ),
+                used_projected_subgraph_for_reward=False,
+                cf_reward_skipped_reason=skip_reason,
+                teacher_input_smiles=core_smiles,
+                oracle_ok=False,
+            )
+
+        if reward_fragment_smiles is None:
             _LOGGER.info(
                 "[CF_ORACLE_SKIPPED] reason=%s parent=%s fragment=%s",
                 "not_direct_substructure",
@@ -3183,11 +3316,10 @@ class ChemRLRewarder:
                     counterfactual_teacher_called=False,
                     counterfactual_teacher_reason="not_direct_substructure",
                 ),
-                self._substructure_distance_trace_kwargs(
-                    direct_substructure=False,
-                    used_projected_subgraph_for_reward=False,
-                    cf_reward_skipped_reason="not_direct_substructure",
-                ),
+                used_projected_subgraph_for_reward=False,
+                cf_reward_skipped_reason="not_direct_substructure",
+                teacher_input_smiles=core_smiles,
+                oracle_ok=False,
             )
 
         if self.disable_counterfactual_teacher:
@@ -3195,12 +3327,18 @@ class ChemRLRewarder:
                 "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
                 "counterfactual_teacher_disabled",
                 parent_smiles,
-                core_smiles,
+                reward_fragment_smiles,
             )
-            return self.teacher_sem_missing_penalty, self._counterfactual_trace_kwargs(
-                counterfactual_teacher_available=False,
-                counterfactual_teacher_called=False,
-                counterfactual_teacher_reason="counterfactual_teacher_disabled",
+            return self.teacher_sem_missing_penalty, self._merge_reward_fields(
+                self._counterfactual_trace_kwargs(
+                    counterfactual_teacher_available=False,
+                    counterfactual_teacher_called=False,
+                    counterfactual_teacher_reason="counterfactual_teacher_disabled",
+                ),
+                used_projected_subgraph_for_reward=used_projected_subgraph_for_reward,
+                cf_reward_skipped_reason=None,
+                teacher_input_smiles=reward_fragment_smiles,
+                oracle_ok=False,
             )
 
         if self.counterfactual_teacher_scorer is None:
@@ -3208,26 +3346,36 @@ class ChemRLRewarder:
                 "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
                 "counterfactual_teacher_unavailable",
                 parent_smiles,
-                core_smiles,
+                reward_fragment_smiles,
             )
-            return self.teacher_sem_missing_penalty, self._counterfactual_trace_kwargs(
-                counterfactual_teacher_available=False,
-                counterfactual_teacher_called=False,
-                counterfactual_teacher_reason="counterfactual_teacher_unavailable",
+            return self.teacher_sem_missing_penalty, self._merge_reward_fields(
+                self._counterfactual_trace_kwargs(
+                    counterfactual_teacher_available=False,
+                    counterfactual_teacher_called=False,
+                    counterfactual_teacher_reason="counterfactual_teacher_unavailable",
+                ),
+                used_projected_subgraph_for_reward=used_projected_subgraph_for_reward,
+                cf_reward_skipped_reason=None,
+                teacher_input_smiles=reward_fragment_smiles,
+                oracle_ok=False,
             )
 
         _LOGGER.info(
             "[CF_ORACLE_CALLED] parent=%s fragment=%s label=%s",
             parent_smiles,
-            core_smiles,
+            reward_fragment_smiles,
             original_label,
         )
         counterfactual_result = self.counterfactual_teacher_scorer.score_counterfactual(
             parent_smiles=parent_smiles,
-            core_fragment_smiles=core_smiles,
+            core_fragment_smiles=reward_fragment_smiles,
             label=int(original_label),
             raw_fragment_smiles=raw_fragment_smiles,
-            meta={"raw_fragment": raw_fragment_smiles},
+            meta={
+                "raw_fragment": raw_fragment_smiles,
+                "projected_fragment": projected_fragment_smiles,
+                "used_projected_subgraph_for_reward": used_projected_subgraph_for_reward,
+            },
         )
         counterfactual_result_ok = bool(counterfactual_result.get("teacher_result_ok"))
         if counterfactual_result_ok:
@@ -3248,14 +3396,14 @@ class ChemRLRewarder:
                     "[CF_ORACLE_DELETION_FAILED] reason=%s parent=%s fragment=%s",
                     reason,
                     parent_smiles,
-                    core_smiles,
+                    reward_fragment_smiles,
                 )
             else:
                 _LOGGER.warning(
                     "[CF_ORACLE_UNAVAILABLE] reason=%s parent=%s fragment=%s",
                     reason,
                     parent_smiles,
-                    core_smiles,
+                    reward_fragment_smiles,
                 )
         failure_reason = str(counterfactual_result.get("teacher_reason"))
         empty_residual = failure_reason in {
@@ -3272,22 +3420,31 @@ class ChemRLRewarder:
                 else self.teacher_sem_missing_penalty
             )
         )
-        return counterfactual_reward, self._counterfactual_trace_kwargs(
-            parent_without_fragment_smiles=counterfactual_result.get(
-                "parent_without_fragment_smiles"
+        return counterfactual_reward, self._merge_reward_fields(
+            self._counterfactual_trace_kwargs(
+                parent_without_fragment_smiles=counterfactual_result.get(
+                    "parent_without_fragment_smiles"
+                ),
+                counterfactual_teacher_available=bool(
+                    counterfactual_result.get("teacher_available")
+                ),
+                counterfactual_teacher_called=counterfactual_result_ok,
+                counterfactual_teacher_reason=counterfactual_result.get("teacher_reason"),
+                p_before=counterfactual_result.get("p_before"),
+                p_after=counterfactual_result.get("p_after"),
+                pred_before=counterfactual_result.get("pred_before"),
+                pred_after=counterfactual_result.get("pred_after"),
+                cf_drop=counterfactual_result.get("cf_drop"),
+                cf_flip=bool(counterfactual_result.get("cf_flip", False)),
+                empty_residual=empty_residual,
             ),
-            counterfactual_teacher_available=bool(
-                counterfactual_result.get("teacher_available")
+            used_projected_subgraph_for_reward=used_projected_subgraph_for_reward,
+            cf_reward_skipped_reason=None,
+            teacher_input_smiles=reward_fragment_smiles,
+            oracle_ok=bool(
+                counterfactual_result_ok
+                and counterfactual_result.get("teacher_reason") == "ok"
             ),
-            counterfactual_teacher_called=counterfactual_result_ok,
-            counterfactual_teacher_reason=counterfactual_result.get("teacher_reason"),
-            p_before=counterfactual_result.get("p_before"),
-            p_after=counterfactual_result.get("p_after"),
-            pred_before=counterfactual_result.get("pred_before"),
-            pred_after=counterfactual_result.get("pred_after"),
-            cf_drop=counterfactual_result.get("cf_drop"),
-            cf_flip=bool(counterfactual_result.get("cf_flip", False)),
-            empty_residual=empty_residual,
         )
 
     def _delete_to_residual_smiles(
@@ -3472,6 +3629,7 @@ class ChemRLRewarder:
         direct_substructure: bool = False,
         deletion_success: bool = False,
         residual_smiles: str | None = None,
+        oracle_ok: bool = False,
         substructure_similarity: float = 0.0,
         substructure_distance: float = 1.0,
         substructure_distance_reward: float = 0.0,
@@ -3623,7 +3781,7 @@ class ChemRLRewarder:
             empty_response=bool(empty_response),
             full_parent=bool(full_parent),
             empty_residual=bool(empty_residual),
-            oracle_ok=False,
+            oracle_ok=bool(oracle_ok),
             raw_parse_ok=bool(raw_parse_ok),
             core_parse_ok=bool(core_parse_ok),
             has_dummy_atoms=bool(has_dummy_atoms),

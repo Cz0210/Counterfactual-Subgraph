@@ -66,7 +66,12 @@ class _FakeCounterfactualTeacherScorer:
 class ParentProjectionTests(unittest.TestCase):
     PARENT = "CC(=O)Oc1ccccc1C(=O)O"
 
-    def _build_rewarder(self, *, counterfactual_teacher=None) -> ChemRLRewarder:
+    def _build_rewarder(
+        self,
+        *,
+        counterfactual_teacher=None,
+        enable_projected_cf_reward: bool = False,
+    ) -> ChemRLRewarder:
         oracle_bundle = {
             "model": _FakeOracleModel(),
             "fingerprint_radius": 2,
@@ -88,7 +93,8 @@ class ParentProjectionTests(unittest.TestCase):
                 projection_mcs_timeout=1,
                 enable_substructure_distance_reward=True,
                 substructure_distance_reward_weight=0.5,
-                disable_projected_cf_reward=True,
+                enable_projected_cf_reward=enable_projected_cf_reward,
+                disable_projected_cf_reward=not enable_projected_cf_reward,
             )
 
     def test_candidate_pool_filters_to_strict_parent_subgraphs(self) -> None:
@@ -172,6 +178,41 @@ class ParentProjectionTests(unittest.TestCase):
             + trace.breakdown["sem_r"]
         )
         self.assertAlmostEqual(trace.reward, expected_total)
+
+    def test_rewarder_uses_projected_fragment_for_counterfactual_reward_when_enabled(self) -> None:
+        counterfactual_teacher = _FakeCounterfactualTeacherScorer()
+        rewarder = self._build_rewarder(
+            counterfactual_teacher=counterfactual_teacher,
+            enable_projected_cf_reward=True,
+        )
+
+        trace = rewarder.calculate_reward_details_batch(
+            [self.PARENT],
+            ["CC(=O)N"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertTrue(trace.projection_attempted)
+        self.assertTrue(trace.projection_success)
+        self.assertEqual(trace.projection_method, "nearest_parent_subgraph")
+        self.assertTrue(trace.projected_fragment_smiles)
+        self.assertFalse(trace.direct_substructure)
+        self.assertTrue(trace.used_projected_subgraph_for_reward)
+        self.assertIsNone(trace.cf_reward_skipped_reason)
+        self.assertTrue(trace.counterfactual_teacher_called)
+        self.assertTrue(trace.oracle_ok)
+        self.assertEqual(trace.counterfactual_teacher_reason, "ok")
+        self.assertEqual(trace.teacher_input_smiles, trace.projected_fragment_smiles)
+        self.assertEqual(trace.parent_without_fragment_smiles, "CCO")
+        self.assertEqual(len(counterfactual_teacher.calls), 1)
+        self.assertEqual(
+            counterfactual_teacher.calls[0]["core_fragment_smiles"],
+            trace.projected_fragment_smiles,
+        )
+        self.assertAlmostEqual(trace.cf_drop or 0.0, 0.6)
+        self.assertTrue(trace.cf_flip)
+        self.assertGreater(trace.breakdown["cf_r"], 0.0)
+        self.assertGreater(trace.reward, 0.0)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,62 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-10] Add an explicit enable switch for projected counterfactual reward and route successful projections into the deletion teacher
+
+### Background
+The decoded PPO stack already surfaced projection diagnostics such as
+`projection_attempted`, `projection_success`, and `projected_fragment`, but the
+projected counterfactual reward path never actually became live in practice.
+Two gaps caused that:
+
+- the CLI/HPC workflow only exposed the legacy negative flag name
+  `disable_projected_cf_reward`, so omitting the flag still left the feature
+  disabled by default;
+- `ChemRLRewarder` logged projected subgraphs for non-direct fragments, but the
+  non-direct reward branch still skipped the counterfactual teacher
+  unconditionally and never consumed the projected fragment even when a legal
+  parent subgraph was available.
+
+### Decision
+Keep projected counterfactual reward disabled by default, preserve the old
+negative flag for compatibility, and add one explicit positive path:
+
+- `scripts/train_ppo.py` now accepts `--enable-projected-cf-reward` and resolves
+  it against the legacy `--disable-projected-cf-reward` flag with an explicit
+  conflict error;
+- `scripts/slurm/train_ppo.sh` now forwards
+  `ENABLE_PROJECTED_CF_REWARD=true/false` and the legacy disable env override;
+- `ChemRLRewarder` now uses a projected parent subgraph for deletion-based
+  counterfactual reward only when all gating conditions are satisfied:
+  projected-cf reward enabled, parent projection enabled, projection attempted
+  and successful, and the projected fragment revalidates as a legal parent
+  substructure;
+- the raw model output stays unchanged in logs and candidate-pool rows; the
+  projected fragment is tracked separately through
+  `projected_fragment_smiles` / `used_projected_subgraph_for_reward`.
+
+### Alternatives considered
+1. Keep the old negative-only flag and rely on `--no-disable-...` style usage.
+2. Treat projection diagnostics as logging-only forever and never reuse them for
+   counterfactual reward.
+3. Replace the model output with the projected fragment downstream.
+
+### Consequences
+- Default behavior remains unchanged: projected counterfactual reward is off
+  unless the user explicitly enables it.
+- When enabled, parseable non-direct fragments can now receive deletion-based
+  counterfactual reward through a legal projected parent subgraph without
+  pretending that the model originally emitted that projected fragment.
+- Logs now make the resolved runtime state explicit via
+  `[PROJECTED_CF_REWARD_CONFIG]`, and relevant reward traces surface
+  `used_projected_subgraph_for_reward=True` when the projected path is actually
+  used.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-10] Deduplicate decoded PPO failure-trace kwargs before calling `_fail`
 
 ### Background

@@ -477,10 +477,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional threshold used to normalize the continuous nearest-parent-subgraph similarity reward.",
     )
     parser.add_argument(
+        "--enable-projected-cf-reward",
+        action="store_true",
+        default=_env_bool("ENABLE_PROJECTED_CF_REWARD", False),
+        help="Allow projection-success parent subgraphs to participate in deletion-based counterfactual reward.",
+    )
+    parser.add_argument(
         "--disable-projected-cf-reward",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("DISABLE_PROJECTED_CF_REWARD", True),
-        help="Do not substitute projected parent subgraphs into deletion-based counterfactual reward computation.",
+        action="store_true",
+        default=_env_bool("DISABLE_PROJECTED_CF_REWARD", False),
+        help="Legacy override that disables projected-subgraph counterfactual reward even when projection succeeds.",
     )
     parser.add_argument(
         "--enable-minimal-syntax-repair",
@@ -814,6 +820,25 @@ def resolve_decoded_chem_generation_config(
         top_p=top_p,
         do_sample=do_sample,
     )
+
+
+def resolve_projected_cf_reward_enabled(args: argparse.Namespace) -> bool:
+    """Resolve the projected counterfactual-reward switch.
+
+    Default behavior remains disabled. Users can enable the feature explicitly
+    via `--enable-projected-cf-reward` (or `ENABLE_PROJECTED_CF_REWARD=true`).
+    The legacy `--disable-projected-cf-reward` / `DISABLE_PROJECTED_CF_REWARD=1`
+    path is preserved as an explicit override.
+    """
+
+    enable_flag = bool(getattr(args, "enable_projected_cf_reward", False))
+    disable_flag = bool(getattr(args, "disable_projected_cf_reward", False))
+    if enable_flag and disable_flag:
+        raise ValueError(
+            "Projected counterfactual reward received both enable and disable flags. "
+            "Use only one of --enable-projected-cf-reward or --disable-projected-cf-reward."
+        )
+    return bool(enable_flag and not disable_flag)
 
 
 def normalize_hiv_label(value: object) -> int | None:
@@ -3513,6 +3538,8 @@ def main() -> None:
     args = parser.parse_args()
     args = apply_config_overrides(args, parser)
     args = apply_decoded_chem_generation_defaults(args)
+    projected_cf_reward_enabled = resolve_projected_cf_reward_enabled(args)
+    args.projected_cf_reward_enabled = projected_cf_reward_enabled
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -3540,6 +3567,18 @@ def main() -> None:
         log_dir=log_dir,
     )
     logger.info("Runtime environment: %s", collect_runtime_environment_debug())
+    logger.info(
+        "[PROJECTED_CF_REWARD_CONFIG] enabled=%s enable_flag=%s disable_flag=%s parent_projection=%s",
+        projected_cf_reward_enabled,
+        args.enable_projected_cf_reward,
+        args.disable_projected_cf_reward,
+        args.enable_parent_projection,
+    )
+    if projected_cf_reward_enabled and not args.enable_parent_projection:
+        logger.warning(
+            "[PROJECTED_CF_REWARD_CONFIG] enabled=True but parent projection is disabled; "
+            "non-direct fragments will still skip projected counterfactual reward."
+        )
 
     write_runtime_manifest(
         output_dir / "train_ppo_manifest.json",
@@ -3768,6 +3807,7 @@ def main() -> None:
         substructure_distance_topk=args.substructure_distance_topk,
         substructure_distance_mcs_timeout=args.substructure_distance_mcs_timeout,
         substructure_distance_sim_threshold=args.substructure_distance_sim_threshold,
+        enable_projected_cf_reward=projected_cf_reward_enabled,
         disable_projected_cf_reward=args.disable_projected_cf_reward,
         enable_minimal_syntax_repair=args.enable_minimal_syntax_repair,
         syntax_repair_max_edits=args.repair_max_edits,
