@@ -90,6 +90,8 @@ if [ ! -f "${VAL_FILE}" ]; then
   exit 1
 fi
 
+echo "SFT dataset compatibility: train_sft.py will normalize prompt/completion from prompt-response or instruction-output fields when needed."
+
 python scripts/train_sft.py \
   --config configs/hpc.yaml \
   --model-path "${BASE_MODEL}" \

@@ -6,6 +6,53 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-10] Normalize legacy SFT JSONL columns to TRL prompt-completion format at train time
+
+### Background
+The rebuilt SFT v3 datasets and some older SFT exports were still centered on
+`instruction` / `output` audit fields, and the current HIV builder also emitted
+`prompt` plus `response` without a `completion` alias. On HPC, TRL's
+`SFTTrainer` entered prompt-completion tokenization mode and failed early with
+`KeyError: 'completion'`, even though the train/validation splits themselves
+were valid and readable.
+
+### Decision
+Keep the existing SFT data objective, candidate generation, filtering, and PPO
+logic unchanged, and add a narrow compatibility layer for SFT-only training:
+
+- `scripts/train_sft.py` now normalizes loaded JSONL rows before constructing
+  `SFTTrainer`, preserving legacy audit fields while materializing
+  `prompt` / `completion` when possible;
+- the normalization supports three input shapes:
+  direct `prompt` / `completion`, legacy `instruction` / `output` with optional
+  `input`, and the current builder's `prompt` / `response` alias;
+- completions are prefixed with a separator newline when synthesized so prompt
+  and fragment text do not concatenate silently;
+- train/eval startup now logs normalized column names plus prompt/completion
+  previews, and raises a clear `ValueError` with available columns when a split
+  still lacks the required fields;
+- the SFT v3 builder now writes a `completion` alias in new JSONL outputs so
+  future datasets are directly compatible with TRL prompt-completion mode.
+
+### Alternatives considered
+1. Require every existing SFT dataset to be rebuilt before retraining.
+2. Patch TRL usage to rely only on a concatenated `text` column and skip
+   prompt-completion compatibility entirely.
+3. Broaden the fix into a larger SFT data-schema refactor.
+
+### Consequences
+- Existing `instruction` / `output` JSONL files can be trained directly without
+  a dataset rebuild.
+- Current builder outputs are now safer for TRL because `completion` is written
+  explicitly in addition to the preserved legacy fields.
+- SFT failures around missing text columns now surface with actionable dataset
+  diagnostics instead of an internal TRL `KeyError`.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-09] Add nearest-parent-subgraph distance reward and stop using projected fragments for counterfactual reward
 
 ### Background

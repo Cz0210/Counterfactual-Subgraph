@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""QLoRA SFT training for ChemLLM-7B-Chat with forced EOS alignment."""
+"""QLoRA SFT training for ChemLLM-7B-Chat."""
 
 from __future__ import annotations
 
 import argparse
 import os
 from pathlib import Path
+import sys
 
 import torch
 from datasets import load_dataset
@@ -19,8 +20,17 @@ from transformers import (
 )
 from trl import SFTTrainer
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.data.sft_column_compat import (
+    REQUIRED_SFT_COLUMNS,
+    SUPPORTED_SFT_FORMATS_MESSAGE,
+    build_missing_sft_fields_error,
+    normalize_sft_example,
+    validate_required_sft_fields,
+)
 DEFAULT_MODEL_PATH = (
     REPO_ROOT / "pretrained_models" / "ChemLLM-7B-Chat"
 )
@@ -136,6 +146,64 @@ def load_local_dataset(train_file: Path, val_file: Path):
     return load_dataset("json", data_files=data_files)
 
 
+def _preview_text(value: object, limit: int) -> str:
+    text = "<missing>" if value is None else str(value)
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def normalize_sft_dataset_split(dataset_split, *, split_name: str):
+    """Materialize prompt/completion columns before handing data to TRL."""
+
+    original_columns = list(dataset_split.column_names)
+
+    def normalize_and_validate(example: dict[str, object], index: int) -> dict[str, object]:
+        normalized = normalize_sft_example(example)
+        validate_required_sft_fields(
+            normalized,
+            available_columns=original_columns,
+            split_name=split_name,
+            row_index=index,
+        )
+        return normalized
+
+    normalized_split = dataset_split.map(
+        normalize_and_validate,
+        with_indices=True,
+        desc=f"Normalizing {split_name} prompt/completion columns",
+    )
+
+    missing_columns = sorted(set(REQUIRED_SFT_COLUMNS) - set(normalized_split.column_names))
+    if missing_columns:
+        raise ValueError(
+            build_missing_sft_fields_error(
+                available_columns=normalized_split.column_names,
+                missing_fields=missing_columns,
+                split_name=split_name,
+            )
+        )
+    if len(normalized_split) == 0:
+        raise ValueError(
+            f"{split_name} dataset is empty after normalization; "
+            f"available columns={list(normalized_split.column_names)}. "
+            f"{SUPPORTED_SFT_FORMATS_MESSAGE}"
+        )
+
+    first_example = normalized_split[0]
+    print(f"{split_name} dataset column names: {list(normalized_split.column_names)}")
+    print(
+        f"{split_name} first prompt preview (300 chars): "
+        f"{_preview_text(first_example.get('prompt'), 300)}"
+    )
+    print(
+        f"{split_name} first completion preview (100 chars): "
+        f"{_preview_text(first_example.get('completion'), 100)}"
+    )
+    return normalized_split
+
+
 def build_tokenizer(model_path: Path):
     """Load tokenizer and make sure EOS and PAD are usable."""
 
@@ -150,20 +218,6 @@ def build_tokenizer(model_path: Path):
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     return tokenizer
-
-
-def build_text_column_mapper(tokenizer):
-    """Create a dataset mapper that materializes one stable text column."""
-
-    eos_token = tokenizer.eos_token
-
-    def add_text_column(example: dict[str, str]) -> dict[str, str]:
-        instruction_text = str(example["instruction"])
-        output_text = str(example["output"]).strip()
-        example["text"] = f"{instruction_text}{output_text}{eos_token}"
-        return example
-
-    return add_text_column
 
 
 def build_quantized_model(model_path: Path):
@@ -249,10 +303,9 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     dataset = load_local_dataset(train_file, val_file)
+    train_dataset = normalize_sft_dataset_split(dataset["train"], split_name="train")
+    eval_dataset = normalize_sft_dataset_split(dataset["validation"], split_name="eval")
     tokenizer = build_tokenizer(model_path)
-    add_text_column = build_text_column_mapper(tokenizer)
-    train_dataset = dataset["train"].map(add_text_column)
-    eval_dataset = dataset["validation"].map(add_text_column)
     model = build_quantized_model(model_path)
     peft_config = build_peft_config()
     training_args = build_training_args(output_dir, args)

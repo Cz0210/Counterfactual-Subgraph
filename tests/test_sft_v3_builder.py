@@ -44,6 +44,15 @@ def _make_fake_example(
 
 
 class SFTV3SplitTests(unittest.TestCase):
+    def test_sft_v3_example_to_json_includes_completion_alias(self) -> None:
+        example = _make_fake_example("sample", label=1, scaffold="scaf")
+
+        payload = example.to_json()
+
+        self.assertEqual(payload["prompt"], example.instruction)
+        self.assertEqual(payload["response"], example.output)
+        self.assertEqual(payload["completion"], "\nCCO")
+
     def test_label_stratified_scaffold_split_preserves_approximate_two_to_one_ratio(self) -> None:
         examples = [
             _make_fake_example(

@@ -25,6 +25,7 @@ from src.data.hiv_dataset_utils import (
     stratified_round_robin_order,
 )
 from src.data.prompts import build_counterfactual_prompt
+from src.data.sft_column_compat import normalize_completion_text
 from src.data.schemas import MoleculeRecord
 from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
 from src.utils.io import ensure_directory, write_jsonl
@@ -142,6 +143,7 @@ class SFTV3Example:
             "parent_smiles": self.parent_smiles,
             "label": int(self.label),
             "prompt": self.instruction,
+            "completion": normalize_completion_text(self.output),
             "response": self.output,
             "instruction": self.instruction,
             "output": self.output,
