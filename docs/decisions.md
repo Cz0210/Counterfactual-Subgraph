@@ -6,6 +6,54 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-10] Deduplicate decoded PPO failure-trace kwargs before calling `_fail`
+
+### Background
+The decoded chemistry PPO reward path correctly handled early success cases, but
+some reward-failure branches accumulated debug fields from multiple trace
+dictionaries and then passed them into `ChemRLRewarder._fail(...)` alongside
+explicit keyword arguments. When a failure dict already contained fields such as
+`direct_substructure`, `projection_attempted`, or
+`substructure_distance_reward`, Python raised
+`TypeError: ... got multiple values for keyword argument ...` instead of
+returning a penalized failure trace.
+
+### Decision
+Keep the decoded PPO objective, reward semantics, projection behavior, and
+training CLI unchanged, and harden only the failure-trace assembly:
+
+- add a dedicated `_merge_failure_fields(...)` helper in
+  `src/rewards/reward_wrapper.py` so `_fail(...)` kwargs are merged into one
+  dict before the call;
+- update every `_fail(...)` call site that mixed explicit kwargs with trace-dict
+  expansion to use the merged call pattern;
+- add regression tests covering the public
+  `compute_rewards_from_decoded(...)` path for parseable-but-not-direct
+  fragments, plus a direct `_fail(...)` assembly test where the extra trace dict
+  already contains `direct_substructure=False`.
+
+### Alternatives considered
+1. Remove only the current duplicated `direct_substructure` field from one
+   failing branch.
+2. Drop projection/subdistance diagnostics from failure traces entirely.
+3. Broaden the change into a larger PPO reward refactor.
+
+### Consequences
+- Reward failure branches such as parseable non-substructures now return logged
+  negative/low-value traces instead of aborting PPO with a keyword-collision
+  exception.
+- Existing diagnostics remain visible in `[CHEM_REWARD_COMPONENTS]`, including
+  `failure_tag`, `invalid_detail`, `direct_substructure`,
+  `projection_attempted`, `projection_success`, `projection_method`, and
+  `reward_total`.
+- The fix stays local to reward-trace assembly and does not change SFT data,
+  PPO loss flow, teacher scoring logic, or HPC launch semantics.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-10] Standardize decoded PPO initialization on SFT_LORA_PATH with INIT_LORA_PATH alias and explicit init logging
 
 ### Background

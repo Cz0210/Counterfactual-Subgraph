@@ -6,6 +6,11 @@ import numpy as np
 from src.chem import is_rdkit_available
 from src.rewards.reward_wrapper import ChemRLRewarder, normalize_fragment_with_dummy_atoms
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - depends on local test environment
+    torch = None
+
 
 class _FakeOracleModel:
     def __init__(self, probabilities: list[float]) -> None:
@@ -232,6 +237,103 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertEqual(trace.raw_component_count, 1)
         self.assertEqual(trace.core_component_count, 1)
         self.assertEqual(trace.size_window_bucket, "hard_failed_near_parent")
+
+    @unittest.skipIf(torch is None, "torch is required for decoded reward-wrapper tests")
+    def test_compute_rewards_from_decoded_not_direct_substructure_returns_failure_log(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_parent_projection=True,
+            enable_substructure_distance_reward=True,
+            substructure_distance_reward_weight=0.0,
+            substructure_distance_sim_threshold=0.95,
+            enable_size_window_reward=False,
+            format_pass_reward=0.0,
+            valid_pass_reward=0.0,
+            partial_valid_reward=0.0,
+            compactness_bonus=0.0,
+            min_fragment_atoms=0,
+            min_residual_atoms=0,
+            min_residual_ratio=0.0,
+        )
+        parent = "CCOc1ccc(N)cc1"
+        fragment = "C1CCCCC1"
+
+        reward_tensor, reward_logs = rewarder.compute_rewards_from_decoded(
+            parent_smiles=[parent],
+            generated_fragments=[fragment],
+            raw_outputs=[fragment],
+            labels=[1],
+            metas=[{"id": "projection-failure-regression"}],
+            device="cpu",
+        )
+
+        self.assertEqual(tuple(reward_tensor.shape), (1,))
+        self.assertEqual(len(reward_logs), 1)
+
+        reward_log = reward_logs[0]
+        self.assertEqual(
+            reward_log["failure_tag"],
+            "parse_ok_but_not_direct_substructure",
+        )
+        self.assertEqual(reward_log["invalid_detail"], "not_parent_substructure")
+        self.assertFalse(reward_log["direct_substructure"])
+        self.assertFalse(reward_log["substructure"])
+        self.assertTrue(reward_log["valid"] or reward_log["parse_ok"])
+        self.assertIn("projection_attempted", reward_log)
+        self.assertIn("projection_success", reward_log)
+        self.assertIn("projection_method", reward_log)
+        self.assertLessEqual(float(reward_log["reward_total"]), 0.5)
+
+    def test_merge_failure_fields_avoids_duplicate_keyword_collisions(self) -> None:
+        rewarder = self._build_rewarder()
+
+        failure_kwargs = rewarder._merge_failure_fields(
+            {
+                "direct_substructure": False,
+                "substructure_similarity": 0.2,
+                "substructure_distance": 0.8,
+                "substructure_distance_reward": 0.0,
+                "used_projected_subgraph_for_reward": False,
+                "projection_attempted": True,
+                "projection_success": False,
+                "projection_method": "nearest_parent_subgraph",
+                "projection_score": 0.2,
+                "projection_source": "debug",
+                "projected_fragment_smiles": None,
+                "projection_reason": "projection_failed_low_score",
+                "failure_tag": "from_trace_dict",
+                "invalid_detail": "from_trace_dict",
+            },
+            parent_smiles="CCO",
+            generated_smiles="N1CCCCC1",
+            normalized_generated="N1CCCCC1",
+            original_label=1,
+            failure_stage="subgraph",
+            error_message="Simulated non-substructure failure.",
+            breakdown=rewarder._build_breakdown(
+                format_reward=0.0,
+                valid_reward=0.0,
+                subgraph_reward=0.0,
+                length_reward=0.0,
+                semantic_reward=0.0,
+                fragment_teacher_reward=0.0,
+                counterfactual_reward=0.0,
+            ),
+            valid_smiles=True,
+            connected_fragment=True,
+            is_subgraph=False,
+            direct_substructure=False,
+            failure_tag="parse_ok_but_not_direct_substructure",
+            invalid_detail="not_parent_substructure",
+        )
+
+        trace = rewarder._fail(**failure_kwargs)
+
+        self.assertEqual(trace.failure_tag, "parse_ok_but_not_direct_substructure")
+        self.assertEqual(trace.invalid_detail, "not_parent_substructure")
+        self.assertFalse(trace.direct_substructure)
+        self.assertTrue(trace.projection_attempted)
+        self.assertFalse(trace.projection_success)
+        self.assertEqual(trace.projection_reason, "projection_failed_low_score")
 
 
 if __name__ == "__main__":

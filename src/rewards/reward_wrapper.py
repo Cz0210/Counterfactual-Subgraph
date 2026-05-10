@@ -1274,40 +1274,42 @@ class ChemRLRewarder:
                     base_trace_kwargs.update(repair_trace_kwargs)
 
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="validity",
-                    error_message=(
-                        "Generated fragment could not be parsed by RDKit."
-                        if parse_failure_reason is None
-                        else (
-                            "Generated fragment could not be parsed by RDKit. "
-                            f"Likely cause: {parse_failure_reason}."
-                        )
-                    ),
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag=(
-                        "parse_failed_after_minimal_repair"
-                        if bool(base_trace_kwargs.get("repair_attempted"))
-                        else self._parse_failure_tag(parse_failure_reason)
-                    ),
-                    invalid_detail=(
-                        f"{parse_failure_reason}:minimal_syntax_repair_failed"
-                        if bool(base_trace_kwargs.get("repair_attempted"))
-                        else parse_failure_reason
-                    ),
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=0.0,
-                        length_reward=0.0,
-                        semantic_reward=self.teacher_sem_missing_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.teacher_sem_missing_penalty,
-                    ),
-                    **base_trace_kwargs,
+                    **self._merge_failure_fields(
+                        base_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="validity",
+                        error_message=(
+                            "Generated fragment could not be parsed by RDKit."
+                            if parse_failure_reason is None
+                            else (
+                                "Generated fragment could not be parsed by RDKit. "
+                                f"Likely cause: {parse_failure_reason}."
+                            )
+                        ),
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag=(
+                            "parse_failed_after_minimal_repair"
+                            if bool(base_trace_kwargs.get("repair_attempted"))
+                            else self._parse_failure_tag(parse_failure_reason)
+                        ),
+                        invalid_detail=(
+                            f"{parse_failure_reason}:minimal_syntax_repair_failed"
+                            if bool(base_trace_kwargs.get("repair_attempted"))
+                            else parse_failure_reason
+                        ),
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=valid_reward,
+                            subgraph_reward=0.0,
+                            length_reward=0.0,
+                            semantic_reward=self.teacher_sem_missing_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.teacher_sem_missing_penalty,
+                        ),
+                    )
                 )
 
             raw_dummy_count = int(fragment_info.get("raw_dummy_count", 0) or 0)
@@ -1322,28 +1324,30 @@ class ChemRLRewarder:
                 )
                 base_trace_kwargs.update(dummy_trace_kwargs)
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="validity",
-                    error_message=(
-                        "Generated fragment contains too many dummy atoms: "
-                        f"{raw_dummy_count} >= {self.multi_dummy_hard_fail_threshold}"
-                    ),
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_failed_after_dummy_removal",
-                    invalid_detail="multi_dummy_hard_fail",
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=self.invalid_smiles_penalty,
-                        subgraph_reward=0.0,
-                        length_reward=0.0,
-                        semantic_reward=self.teacher_sem_missing_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.teacher_sem_missing_penalty,
-                    ),
-                    **base_trace_kwargs,
+                    **self._merge_failure_fields(
+                        base_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="validity",
+                        error_message=(
+                            "Generated fragment contains too many dummy atoms: "
+                            f"{raw_dummy_count} >= {self.multi_dummy_hard_fail_threshold}"
+                        ),
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag="parse_failed_after_dummy_removal",
+                        invalid_detail="multi_dummy_hard_fail",
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=self.invalid_smiles_penalty,
+                            subgraph_reward=0.0,
+                            length_reward=0.0,
+                            semantic_reward=self.teacher_sem_missing_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.teacher_sem_missing_penalty,
+                        ),
+                    )
                 )
 
             raw_component_count = int(fragment_info.get("raw_component_count", 0) or 0)
@@ -1392,25 +1396,27 @@ class ChemRLRewarder:
                     base_trace_kwargs.update(component_salvage_trace_kwargs)
 
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="validity",
-                    error_message="Generated fragment is not connected.",
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag="fragment_not_connected",
-                    invalid_detail="fragment_not_connected",
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=0.0,
-                        length_reward=length_reward,
-                        semantic_reward=self.teacher_sem_missing_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.teacher_sem_missing_penalty,
-                    ),
-                    **base_trace_kwargs,
+                    **self._merge_failure_fields(
+                        base_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="validity",
+                        error_message="Generated fragment is not connected.",
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag="fragment_not_connected",
+                        invalid_detail="fragment_not_connected",
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=valid_reward,
+                            subgraph_reward=0.0,
+                            length_reward=length_reward,
+                            semantic_reward=self.teacher_sem_missing_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.teacher_sem_missing_penalty,
+                        ),
+                    )
                 )
 
             # Step B: subgraph match against the parent molecule.
@@ -1461,31 +1467,33 @@ class ChemRLRewarder:
                     else "core_fragment_unusable_after_normalization"
                 )
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="subgraph",
-                    error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag=(
-                        "parse_failed_after_dummy_removal"
-                        if bool(fragment_info.get("raw_has_dummy"))
-                        else "parse_ok_but_core_unusable"
-                    ),
-                    invalid_detail=invalid_detail,
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=self.invalid_subgraph_penalty,
-                        length_reward=length_reward,
-                        semantic_reward=self.teacher_sem_missing_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.teacher_sem_missing_penalty,
-                    ),
-                    valid_smiles=True,
-                    connected_fragment=not raw_disconnected,
-                    **base_trace_kwargs,
+                    **self._merge_failure_fields(
+                        base_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="subgraph",
+                        error_message="Generated fragment did not yield a usable core fragment after dummy-atom normalization.",
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag=(
+                            "parse_failed_after_dummy_removal"
+                            if bool(fragment_info.get("raw_has_dummy"))
+                            else "parse_ok_but_core_unusable"
+                        ),
+                        invalid_detail=invalid_detail,
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=valid_reward,
+                            subgraph_reward=self.invalid_subgraph_penalty,
+                            length_reward=length_reward,
+                            semantic_reward=self.teacher_sem_missing_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.teacher_sem_missing_penalty,
+                        ),
+                        valid_smiles=True,
+                        connected_fragment=not raw_disconnected,
+                    )
                 )
 
             is_full_parent = bool(
@@ -1531,29 +1539,31 @@ class ChemRLRewarder:
                     used_projected_subgraph_for_reward=False,
                 )
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="counterfactual",
-                    error_message="Generated fragment matches the full parent molecule.",
-                    generated_char_count=effective_generated_char_count,
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=self.subgraph_pass_reward,
-                        length_reward=length_reward,
-                        substructure_distance_reward=1.0,
-                        semantic_reward=self.full_parent_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.full_parent_penalty,
-                    ),
-                    valid_smiles=True,
-                    connected_fragment=True,
-                    is_subgraph=True,
-                    direct_substructure=True,
-                    residual_smiles="",
-                    **full_parent_trace_kwargs,
+                    **self._merge_failure_fields(
+                        full_parent_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="counterfactual",
+                        error_message="Generated fragment matches the full parent molecule.",
+                        generated_char_count=effective_generated_char_count,
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=valid_reward,
+                            subgraph_reward=self.subgraph_pass_reward,
+                            length_reward=length_reward,
+                            substructure_distance_reward=1.0,
+                            semantic_reward=self.full_parent_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.full_parent_penalty,
+                        ),
+                        valid_smiles=True,
+                        connected_fragment=True,
+                        is_subgraph=True,
+                        direct_substructure=True,
+                        residual_smiles="",
+                    )
                 )
 
             try:
@@ -1564,25 +1574,27 @@ class ChemRLRewarder:
                 has_precise_match = bool(direct_match.matched)
             except Exception as exc:
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="subgraph",
-                    error_message=f"Subgraph check failed: {exc}",
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_ok_but_not_direct_substructure",
-                    invalid_detail="subgraph_check_failed",
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=0.0,
-                        length_reward=length_reward,
-                        semantic_reward=self.teacher_sem_missing_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.teacher_sem_missing_penalty,
-                    ),
-                    **base_trace_kwargs,
+                    **self._merge_failure_fields(
+                        base_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="subgraph",
+                        error_message=f"Subgraph check failed: {exc}",
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag="parse_ok_but_not_direct_substructure",
+                        invalid_detail="subgraph_check_failed",
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=valid_reward,
+                            subgraph_reward=0.0,
+                            length_reward=length_reward,
+                            semantic_reward=self.teacher_sem_missing_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.teacher_sem_missing_penalty,
+                        ),
+                    )
                 )
 
             substructure_distance_result = compute_substructure_distance_reward(
@@ -1698,39 +1710,41 @@ class ChemRLRewarder:
                     }
                 )
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="counterfactual",
-                    error_message=(
-                        "Generated fragment is below the configured minimum "
-                        f"atom count: {core_atom_count} < {self.min_fragment_atoms}."
-                    ),
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag="tiny_fragment_hard_fail",
-                    invalid_detail="tiny_fragment_hard_fail",
-                    breakdown=self._build_breakdown(
-                        format_reward=0.0,
-                        valid_reward=0.0,
-                        subgraph_reward=0.0,
-                        length_reward=0.0,
-                        substructure_distance_reward=float(
-                            substructure_distance_result.get(
-                                "substructure_distance_reward",
-                                0.0,
-                            )
-                            or 0.0
+                    **self._merge_failure_fields(
+                        tiny_guard_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="counterfactual",
+                        error_message=(
+                            "Generated fragment is below the configured minimum "
+                            f"atom count: {core_atom_count} < {self.min_fragment_atoms}."
                         ),
-                        semantic_reward=self.tiny_fragment_hard_fail_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=self.tiny_fragment_hard_fail_penalty,
-                    ),
-                    valid_smiles=True,
-                    connected_fragment=True,
-                    is_subgraph=bool(has_precise_match),
-                    direct_substructure=bool(has_precise_match),
-                    **tiny_guard_trace_kwargs,
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag="tiny_fragment_hard_fail",
+                        invalid_detail="tiny_fragment_hard_fail",
+                        breakdown=self._build_breakdown(
+                            format_reward=0.0,
+                            valid_reward=0.0,
+                            subgraph_reward=0.0,
+                            length_reward=0.0,
+                            substructure_distance_reward=float(
+                                substructure_distance_result.get(
+                                    "substructure_distance_reward",
+                                    0.0,
+                                )
+                                or 0.0
+                            ),
+                            semantic_reward=self.tiny_fragment_hard_fail_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=self.tiny_fragment_hard_fail_penalty,
+                        ),
+                        valid_smiles=True,
+                        connected_fragment=True,
+                        is_subgraph=bool(has_precise_match),
+                        direct_substructure=bool(has_precise_match),
+                    )
                 )
             atom_ratio = core_atom_count / parent_atom_count
             size_window_reward, size_window_bucket = self._compute_size_window_reward(
@@ -1830,40 +1844,42 @@ class ChemRLRewarder:
                     fragment_teacher_sem=fragment_teacher_reward,
                 )
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="subgraph",
-                    error_message=(
-                        "Generated fragment is parseable but does not directly match the parent."
-                    ),
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag="parse_ok_but_not_direct_substructure",
-                    invalid_detail="not_parent_substructure",
-                    breakdown=self._build_breakdown(
-                        format_reward=format_reward,
-                        valid_reward=valid_reward,
-                        subgraph_reward=0.0,
-                        length_reward=length_reward,
-                        size_window_reward=size_window_reward,
-                        dummy_reward=dummy_output_penalty,
-                        substructure_distance_reward=float(
-                            substructure_distance_result.get(
-                                "substructure_distance_reward",
-                                0.0,
-                            )
-                            or 0.0
+                    **self._merge_failure_fields(
+                        not_direct_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="subgraph",
+                        error_message=(
+                            "Generated fragment is parseable but does not directly match the parent."
                         ),
-                        semantic_reward=0.0,
-                        fragment_teacher_reward=fragment_teacher_reward,
-                        counterfactual_reward=0.0,
-                    ),
-                    valid_smiles=True,
-                    connected_fragment=True,
-                    is_subgraph=False,
-                    direct_substructure=False,
-                    **not_direct_trace_kwargs,
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag="parse_ok_but_not_direct_substructure",
+                        invalid_detail="not_parent_substructure",
+                        breakdown=self._build_breakdown(
+                            format_reward=format_reward,
+                            valid_reward=valid_reward,
+                            subgraph_reward=0.0,
+                            length_reward=length_reward,
+                            size_window_reward=size_window_reward,
+                            dummy_reward=dummy_output_penalty,
+                            substructure_distance_reward=float(
+                                substructure_distance_result.get(
+                                    "substructure_distance_reward",
+                                    0.0,
+                                )
+                                or 0.0
+                            ),
+                            semantic_reward=0.0,
+                            fragment_teacher_reward=fragment_teacher_reward,
+                            counterfactual_reward=0.0,
+                        ),
+                        valid_smiles=True,
+                        connected_fragment=True,
+                        is_subgraph=False,
+                        direct_substructure=False,
+                    )
                 )
             deletion_for_guard = delete_fragment_from_parent(
                 normalized_parent,
@@ -1932,39 +1948,41 @@ class ChemRLRewarder:
                     }
                 )
                 return self._fail(
-                    parent_smiles=normalized_parent,
-                    generated_smiles=generated_smiles,
-                    normalized_generated=effective_fragment,
-                    original_label=int(original_label),
-                    failure_stage="counterfactual",
-                    error_message=(
-                        "Generated fragment is too close to the full parent or leaves a tiny residual."
-                    ),
-                    generated_char_count=effective_generated_char_count,
-                    failure_tag=hard_guard_tag,
-                    invalid_detail=hard_guard_tag,
-                    breakdown=self._build_breakdown(
-                        format_reward=0.0,
-                        valid_reward=0.0,
-                        subgraph_reward=0.0,
-                        length_reward=0.0,
-                        substructure_distance_reward=float(
-                            substructure_distance_result.get(
-                                "substructure_distance_reward",
-                                1.0,
-                            )
-                            or 0.0
+                    **self._merge_failure_fields(
+                        hard_guard_trace_kwargs,
+                        parent_smiles=normalized_parent,
+                        generated_smiles=generated_smiles,
+                        normalized_generated=effective_fragment,
+                        original_label=int(original_label),
+                        failure_stage="counterfactual",
+                        error_message=(
+                            "Generated fragment is too close to the full parent or leaves a tiny residual."
                         ),
-                        semantic_reward=hard_guard_penalty,
-                        fragment_teacher_reward=self.teacher_sem_missing_penalty,
-                        counterfactual_reward=hard_guard_penalty,
-                    ),
-                    valid_smiles=True,
-                    connected_fragment=True,
-                    is_subgraph=True,
-                    direct_substructure=True,
-                    residual_smiles=deletion_for_guard.residual_smiles,
-                    **hard_guard_trace_kwargs,
+                        generated_char_count=effective_generated_char_count,
+                        failure_tag=hard_guard_tag,
+                        invalid_detail=hard_guard_tag,
+                        breakdown=self._build_breakdown(
+                            format_reward=0.0,
+                            valid_reward=0.0,
+                            subgraph_reward=0.0,
+                            length_reward=0.0,
+                            substructure_distance_reward=float(
+                                substructure_distance_result.get(
+                                    "substructure_distance_reward",
+                                    1.0,
+                                )
+                                or 0.0
+                            ),
+                            semantic_reward=hard_guard_penalty,
+                            fragment_teacher_reward=self.teacher_sem_missing_penalty,
+                            counterfactual_reward=hard_guard_penalty,
+                        ),
+                        valid_smiles=True,
+                        connected_fragment=True,
+                        is_subgraph=True,
+                        direct_substructure=True,
+                        residual_smiles=deletion_for_guard.residual_smiles,
+                    )
                 )
             normalized_generated = effective_fragment
             generated_char_count = effective_generated_char_count
@@ -2347,6 +2365,22 @@ class ChemRLRewarder:
                 merged.update(field_group)
         merged.update(overrides)
         return merged
+
+    def _merge_failure_fields(
+        self,
+        *field_groups: dict[str, Any] | None,
+        **overrides: Any,
+    ) -> dict[str, Any]:
+        """Merge `_fail(...)` kwargs before calling into the helper.
+
+        Failure traces accumulate fields from several debug dictionaries
+        (`base_trace_kwargs`, projection/subdistance fields, repair fields, and
+        explicit call-site overrides). Building the final kwargs up front keeps
+        the latest explicit value while avoiding Python keyword-collision
+        errors such as duplicate `direct_substructure=...`.
+        """
+
+        return self._merge_reward_fields(*field_groups, **overrides)
 
     def _build_breakdown(
         self,
