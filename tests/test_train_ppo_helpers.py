@@ -13,6 +13,7 @@ from scripts.train_ppo import (
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
     resolve_decoded_chem_generation_config,
+    resolve_sft_lora_path,
 )
 from src.rewards.reward_wrapper import (
     detect_obvious_parse_failure_detail,
@@ -162,6 +163,37 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertAlmostEqual(config.temperature, 0.6)
         self.assertAlmostEqual(config.top_p, 0.9)
         self.assertFalse(config.do_sample)
+
+    def test_resolve_sft_lora_path_prefers_explicit_sft_lora_path(self) -> None:
+        args = argparse.Namespace(
+            sft_lora_path="outputs/hpc/sft_checkpoints/from_sft_lora",
+            init_lora_path="outputs/hpc/sft_checkpoints/from_init_lora",
+            sft_adapter_path="outputs/hpc/sft_checkpoints/from_adapter",
+        )
+
+        path, source = resolve_sft_lora_path(args)
+
+        self.assertTrue(str(path).endswith("outputs/hpc/sft_checkpoints/from_sft_lora"))
+        self.assertEqual(source, "sft_lora_path")
+
+    def test_resolve_sft_lora_path_uses_init_lora_alias_before_legacy_adapter(self) -> None:
+        args = argparse.Namespace(
+            sft_lora_path=None,
+            init_lora_path="outputs/hpc/sft_checkpoints/from_init_lora",
+            sft_adapter_path="outputs/hpc/sft_checkpoints/from_adapter",
+        )
+
+        path, source = resolve_sft_lora_path(args)
+
+        self.assertTrue(str(path).endswith("outputs/hpc/sft_checkpoints/from_init_lora"))
+        self.assertEqual(source, "init_lora_path")
+
+    def test_parser_accepts_init_lora_path_alias(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["--init-lora-path", "outputs/hpc/sft_checkpoints/alias"])
+
+        self.assertEqual(args.init_lora_path, "outputs/hpc/sft_checkpoints/alias")
 
     def test_parser_accepts_parent_repair_flags(self) -> None:
         parser = build_parser()

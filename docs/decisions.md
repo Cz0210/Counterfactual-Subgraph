@@ -6,6 +6,51 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-10] Standardize decoded PPO initialization on SFT_LORA_PATH with INIT_LORA_PATH alias and explicit init logging
+
+### Background
+The decoded chemistry PPO path already expected an SFT-initialized LoRA policy,
+but the repository exposed that checkpoint through a mix of names depending on
+which layer a user looked at: `--sft-lora-path` in `scripts/train_ppo.py`,
+`SFT_LORA_PATH` in the generic Slurm wrapper, and several older diagnostic
+scripts that still hardcoded a specific checkpoint path. This made it too easy
+to launch PPO from the wrong adapter when switching from an older checkpoint to
+the newer SFT v3 HIV runs.
+
+### Decision
+Keep `SFT_LORA_PATH` / `--sft-lora-path` as the canonical decoded PPO
+initialization path, and add one narrow compatibility alias plus stronger
+runtime logging:
+
+- `scripts/train_ppo.py` now accepts `--init-lora-path` as a compatibility
+  alias, with precedence `--sft-lora-path` > `--init-lora-path` >
+  `--sft-adapter-path`;
+- the PPO runtime manifest and logs record both the raw init-path arguments and
+  the final resolved checkpoint path plus its source field;
+- `scripts/slurm/train_ppo.sh` and
+  `scripts/slurm/train_decoded_chem_ppo_full.sh` now accept `INIT_LORA_PATH`
+  as an environment-variable alias, resolve one final init LoRA path, echo it,
+  and warn if both alias names are set to different values.
+
+### Alternatives considered
+1. Leave the existing `SFT_LORA_PATH` support unchanged and rely on users to
+   inspect each Slurm script manually.
+2. Rename every PPO entrypoint to one new variable and break the older wrappers.
+3. Broaden the compatibility layer to ambiguous names such as `CHECKPOINT_PATH`.
+
+### Consequences
+- The canonical answer for decoded PPO initialization remains:
+  use `SFT_LORA_PATH` / `--sft-lora-path`.
+- Existing workflows keep working, while `INIT_LORA_PATH` can be used as a
+  clear compatibility alias in shared shell snippets.
+- PPO logs now make it obvious which LoRA checkpoint was actually loaded for
+  policy/reference initialization.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-10] Normalize legacy SFT JSONL columns to TRL prompt-completion format at train time
 
 ### Background

@@ -19,7 +19,9 @@ if [ -n "${RUN_NAME}" ] && [ -z "${OUTPUT_DIR}" ]; then
 fi
 MAX_STEPS=${MAX_STEPS:-}
 LOGGING_STEPS=${LOGGING_STEPS:-}
+SAVE_STEPS=${SAVE_STEPS:-}
 SFT_LORA_PATH=${SFT_LORA_PATH:-}
+INIT_LORA_PATH=${INIT_LORA_PATH:-}
 PPO_LOOP=${PPO_LOOP:-}
 DIAGNOSE_REWARD_FLOW=${DIAGNOSE_REWARD_FLOW:-}
 REQUIRE_CHEMISTRY_REWARD_PATH=${REQUIRE_CHEMISTRY_REWARD_PATH:-}
@@ -69,6 +71,8 @@ SIZE_WINDOW_BONUS=${SIZE_WINDOW_BONUS:-}
 SIZE_WINDOW_SMALL_PENALTY=${SIZE_WINDOW_SMALL_PENALTY:-}
 SIZE_WINDOW_LARGE_PENALTY=${SIZE_WINDOW_LARGE_PENALTY:-}
 
+RESOLVED_SFT_LORA_PATH=${SFT_LORA_PATH:-${INIT_LORA_PATH:-}}
+
 echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
 echo "pwd before cd: $(pwd)"
@@ -95,7 +99,10 @@ echo "RUN_NAME=${RUN_NAME:-<unset>}"
 echo "OUTPUT_DIR=${OUTPUT_DIR:-<unset>}"
 echo "MAX_STEPS=${MAX_STEPS:-<unset>}"
 echo "LOGGING_STEPS=${LOGGING_STEPS:-<unset>}"
+echo "SAVE_STEPS=${SAVE_STEPS:-<unset>}"
 echo "SFT_LORA_PATH=${SFT_LORA_PATH:-<unset>}"
+echo "INIT_LORA_PATH=${INIT_LORA_PATH:-<unset>}"
+echo "RESOLVED_SFT_LORA_PATH=${RESOLVED_SFT_LORA_PATH:-<unset>}"
 echo "PPO_LOOP=${PPO_LOOP:-<unset>}"
 echo "DIAGNOSE_REWARD_FLOW=${DIAGNOSE_REWARD_FLOW:-<unset>}"
 echo "REQUIRE_CHEMISTRY_REWARD_PATH=${REQUIRE_CHEMISTRY_REWARD_PATH:-<unset>}"
@@ -175,8 +182,14 @@ fi
 if [ -n "${LOGGING_STEPS}" ]; then
   cmd+=(--logging-steps "${LOGGING_STEPS}")
 fi
-if [ -n "${SFT_LORA_PATH}" ]; then
-  cmd+=(--sft-lora-path "${SFT_LORA_PATH}")
+if [ -n "${SAVE_STEPS}" ]; then
+  cmd+=(--save-steps "${SAVE_STEPS}")
+fi
+if [ -n "${SFT_LORA_PATH}" ] && [ -n "${INIT_LORA_PATH}" ] && [ "${SFT_LORA_PATH}" != "${INIT_LORA_PATH}" ]; then
+  echo "[WARN] Both SFT_LORA_PATH and INIT_LORA_PATH are set; using SFT_LORA_PATH=${SFT_LORA_PATH}"
+fi
+if [ -n "${RESOLVED_SFT_LORA_PATH}" ]; then
+  cmd+=(--sft-lora-path "${RESOLVED_SFT_LORA_PATH}")
 fi
 if [ -n "${PPO_LOOP}" ]; then
   cmd+=(--ppo-loop "${PPO_LOOP}")

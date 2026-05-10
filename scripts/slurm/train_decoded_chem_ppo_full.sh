@@ -25,8 +25,10 @@ TEACHER_PATH=${TEACHER_PATH:-${PROJECT_DIR}/outputs/hpc/oracle/aids_rf_model.pkl
 RUN_NAME=${RUN_NAME:-decoded_chem_ppo_full_$(date +%Y%m%d_%H%M%S)}
 MAX_STEPS=${MAX_STEPS:-1000}
 LOGGING_STEPS=${LOGGING_STEPS:-10}
+SAVE_STEPS=${SAVE_STEPS:-}
 OUTPUT_DIR=${OUTPUT_DIR:-${PROJECT_DIR}/outputs/hpc/rl_checkpoints/${RUN_NAME}}
 SFT_LORA_PATH=${SFT_LORA_PATH:-}
+INIT_LORA_PATH=${INIT_LORA_PATH:-}
 FULL_PARENT_PENALTY=${FULL_PARENT_PENALTY:-}
 EMPTY_RESIDUAL_PENALTY=${EMPTY_RESIDUAL_PENALTY:-}
 GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-}
@@ -44,6 +46,8 @@ PROJECTION_MAX_ATOM_RATIO=${PROJECTION_MAX_ATOM_RATIO:-}
 PROJECTION_PENALTY=${PROJECTION_PENALTY:-}
 PROJECTION_ENABLE_KHOP3=${PROJECTION_ENABLE_KHOP3:-}
 PROJECTION_MCS_TIMEOUT=${PROJECTION_MCS_TIMEOUT:-}
+
+RESOLVED_SFT_LORA_PATH=${SFT_LORA_PATH:-${INIT_LORA_PATH:-}}
 
 export HF_HOME=/share/home/u20526/.cache/huggingface
 export HF_MODULES_CACHE=/share/home/u20526/.cache/huggingface/modules
@@ -65,8 +69,11 @@ echo "PYTHONPATH(before cd)=${PYTHONPATH:-}"
 echo "RUN_NAME=${RUN_NAME}"
 echo "MAX_STEPS=${MAX_STEPS}"
 echo "LOGGING_STEPS=${LOGGING_STEPS}"
+echo "SAVE_STEPS=${SAVE_STEPS:-<unset>}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "SFT_LORA_PATH=${SFT_LORA_PATH:-<unset>}"
+echo "INIT_LORA_PATH=${INIT_LORA_PATH:-<unset>}"
+echo "RESOLVED_SFT_LORA_PATH=${RESOLVED_SFT_LORA_PATH:-<unset>}"
 echo "FULL_PARENT_PENALTY=${FULL_PARENT_PENALTY:-<unset>}"
 echo "EMPTY_RESIDUAL_PENALTY=${EMPTY_RESIDUAL_PENALTY:-<unset>}"
 echo "GEN_MAX_NEW_TOKENS=${GEN_MAX_NEW_TOKENS:-<unset>}"
@@ -195,8 +202,15 @@ cmd=(
   1.0
 )
 
-if [ -n "${SFT_LORA_PATH}" ]; then
-  cmd+=(--sft-lora-path "${SFT_LORA_PATH}")
+if [ -n "${SAVE_STEPS}" ]; then
+  cmd+=(--save-steps "${SAVE_STEPS}")
+fi
+
+if [ -n "${SFT_LORA_PATH}" ] && [ -n "${INIT_LORA_PATH}" ] && [ "${SFT_LORA_PATH}" != "${INIT_LORA_PATH}" ]; then
+  echo "[WARN] Both SFT_LORA_PATH and INIT_LORA_PATH are set; using SFT_LORA_PATH=${SFT_LORA_PATH}"
+fi
+if [ -n "${RESOLVED_SFT_LORA_PATH}" ]; then
+  cmd+=(--sft-lora-path "${RESOLVED_SFT_LORA_PATH}")
 fi
 if [ -n "${FULL_PARENT_PENALTY}" ]; then
   cmd+=(--full-parent-penalty "${FULL_PARENT_PENALTY}")

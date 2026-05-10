@@ -158,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="SFT LoRA checkpoint 路径，例如 checkpoint-300。若提供则优先于 --sft-adapter-path。",
     )
     parser.add_argument(
+        "--init-lora-path",
+        default=None,
+        help="Alias for the initial PPO policy LoRA checkpoint path. Lower precedence than --sft-lora-path, higher than --sft-adapter-path.",
+    )
+    parser.add_argument(
         "--oracle-path",
         default=str(DEFAULT_ORACLE_PATH),
         help="AIDS Oracle bundle 路径。",
@@ -3486,11 +3491,21 @@ def save_final_model(
     return output_dir
 
 
-def resolve_sft_lora_path(args: argparse.Namespace) -> Path:
+def resolve_sft_lora_path(args: argparse.Namespace) -> tuple[Path, str]:
     """Resolve the initial PPO LoRA checkpoint path with explicit CLI precedence."""
 
-    configured_path = args.sft_lora_path or args.sft_adapter_path
-    return Path(str(configured_path)).expanduser().resolve()
+    candidates = (
+        ("sft_lora_path", getattr(args, "sft_lora_path", None)),
+        ("init_lora_path", getattr(args, "init_lora_path", None)),
+        ("sft_adapter_path", getattr(args, "sft_adapter_path", None)),
+    )
+    for source_name, configured_path in candidates:
+        if configured_path not in (None, ""):
+            return Path(str(configured_path)).expanduser().resolve(), source_name
+    raise ValueError(
+        "No initial PPO LoRA checkpoint path was provided. "
+        "Set --sft-lora-path, --init-lora-path, or --sft-adapter-path."
+    )
 
 
 def main() -> None:
@@ -3503,7 +3518,7 @@ def main() -> None:
     dataset_path = Path(args.dataset_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     model_path = Path(args.model_path).expanduser().resolve()
-    sft_lora_path = resolve_sft_lora_path(args)
+    sft_lora_path, sft_lora_source = resolve_sft_lora_path(args)
     oracle_path = Path(args.oracle_path).expanduser().resolve()
     teacher_path = Path(args.teacher_path).expanduser().resolve()
     if not sft_lora_path.exists():
@@ -3534,7 +3549,13 @@ def main() -> None:
             "config_files": [str(Path(path).expanduser().resolve()) for path in args.config],
             "model_path": str(model_path),
             "sft_adapter_path": str(Path(args.sft_adapter_path).expanduser().resolve()),
+            "init_lora_path": (
+                str(Path(args.init_lora_path).expanduser().resolve())
+                if args.init_lora_path not in (None, "")
+                else None
+            ),
             "sft_lora_path": str(sft_lora_path),
+            "sft_lora_source": sft_lora_source,
             "oracle_path": str(oracle_path),
             "teacher_path": str(teacher_path),
             "dataset_path": str(dataset_path),
@@ -3554,11 +3575,20 @@ def main() -> None:
     )
     logger.info("Loaded %s PPO prompt examples from %s", len(examples), dataset_path)
     logger.info(
-        "[PPO_INIT_LORA] base_model=%s policy_lora=%s reference_lora=%s aligned=%s",
+        "[PPO_INIT_LORA] base_model=%s policy_lora=%s reference_lora=%s source=%s aligned=%s",
         model_path,
         sft_lora_path,
         sft_lora_path,
+        sft_lora_source,
         True,
+    )
+    logger.info(
+        "[PPO_INIT_LORA_ARGS] sft_lora_path=%s init_lora_path=%s sft_adapter_path=%s resolved=%s source=%s",
+        args.sft_lora_path,
+        args.init_lora_path,
+        args.sft_adapter_path,
+        sft_lora_path,
+        sft_lora_source,
     )
 
     deps = import_training_dependencies()
