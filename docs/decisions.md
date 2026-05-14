@@ -6,6 +6,69 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-14] Apply projection penalty inside decoded PPO reward breakdown whenever a non-direct fragment needs a successful parent projection
+
+### Background
+After enabling both projected-cf reward and substructure distance reward, the
+decoded PPO diagnostic logs correctly showed
+`[PROJECTED_CF_REWARD_CONFIG] enabled=True`,
+`[SUBSTRUCTURE_DISTANCE_REWARD_CONFIG] enabled=True`, and non-zero
+`subdist_contribution`. However, `projection_penalty` still stayed at `0.0` in
+`[CHEM_REWARD_COMPONENTS]` even when `PROJECTION_PENALTY=1.0` was passed through
+the Slurm environment and parseable non-direct fragments were being rescued by a
+nearest parent subgraph or by the projected counterfactual path.
+
+The core issue was that projection diagnostics were being carried only as trace
+metadata, while reward aggregation never subtracted the configured penalty from
+`reward_total`. In the main non-direct branch, later trace merges also replaced
+the projection-debug fields with a distance-reward trace that defaulted the
+penalty back to `0.0`.
+
+### Decision
+Keep the projection search algorithm, teacher/oracle calls, and PPO loss logic
+unchanged, and fix only the reward aggregation and observability layer:
+
+- decoded reward breakdowns now carry explicit
+  `projection_penalty_config`, `projection_penalty_applied`,
+  `reward_before_projection_penalty`, and
+  `reward_after_projection_penalty` fields;
+- `reward_total` is now the post-penalty value:
+  `reward_after_projection_penalty =
+  reward_before_projection_penalty - projection_penalty_applied`;
+- the penalty is applied whenever a fragment is not a direct parent
+  substructure and the nearest-parent projection path succeeded
+  (`projection_attempted=True` and `projection_success=True`);
+- direct-substructure examples keep `projection_penalty_applied=0.0`;
+- parse-failed / core-unusable examples that never reached a successful
+  projection path also keep `projection_penalty_applied=0.0`;
+- `scripts/train_ppo.py` now also accepts `PROJECTION_PENALTY` as an env-backed
+  default for direct local launches, while `scripts/slurm/train_ppo.sh`
+  continues forwarding `--projection-penalty`.
+
+### Alternatives considered
+1. Apply projection penalty only when
+   `used_projected_subgraph_for_reward=True`, leaving other successful nearest
+   parent projections unpenalized.
+2. Push the penalty into PPO loss code instead of the chemistry reward
+   breakdown.
+3. Keep penalty logging separate and ask users to post-process logs to estimate
+   the effective reward.
+
+### Consequences
+- Projection dependence now affects `reward_total` directly instead of being a
+  logging-only diagnostic.
+- Logs and `candidate_pool.jsonl` rows now show both the configured penalty and
+  the actually applied deduction, making it easier to audit whether projected
+  rescue is being overused.
+- The fix remains local to reward composition and runtime config plumbing; it
+  does not touch SFT datasets, PPO update math, teacher/oracle scoring, or the
+  parent-projection retrieval algorithm itself.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-14] Make substructure distance reward a first-class PPO shaping term with explicit runtime config and contribution logging
 
 ### Background

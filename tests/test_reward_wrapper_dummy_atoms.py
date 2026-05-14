@@ -286,6 +286,9 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertIn("projection_attempted", reward_log)
         self.assertIn("projection_success", reward_log)
         self.assertIn("projection_method", reward_log)
+        self.assertIn("projection_penalty_applied", reward_log)
+        self.assertIn("reward_before_projection_penalty", reward_log)
+        self.assertIn("reward_after_projection_penalty", reward_log)
         self.assertLessEqual(float(reward_log["reward_total"]), 0.5)
 
     @unittest.skipIf(torch is None, "torch is required for decoded reward-wrapper tests")
@@ -296,6 +299,7 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
             substructure_distance_reward_weight=0.3,
             enable_projected_cf_reward=True,
             disable_projected_cf_reward=False,
+            projection_penalty=1.0,
             enable_size_window_reward=False,
             format_pass_reward=0.0,
             valid_pass_reward=0.0,
@@ -323,6 +327,16 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertFalse(reward_log["direct_substructure"])
         self.assertAlmostEqual(float(reward_log["subdist_weight"]), 0.3)
         self.assertNotEqual(float(reward_log["subdist_contribution"]), 0.0)
+        self.assertAlmostEqual(float(reward_log["projection_penalty_applied"]), 1.0)
+        self.assertAlmostEqual(
+            float(reward_log["reward_before_projection_penalty"])
+            - float(reward_log["reward_after_projection_penalty"]),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            float(reward_log["reward_after_projection_penalty"]),
+            float(reward_log["reward_total"]),
+        )
         self.assertIn("used_projected_subgraph_for_reward", reward_log)
         self.assertIn("projected_fragment", reward_log)
 

@@ -206,8 +206,12 @@ class RewardTrace:
     projection_atom_count: int | None = None
     projection_atom_ratio: float | None = None
     projection_penalty: float = 0.0
+    projection_penalty_config: float = 0.0
+    projection_penalty_applied: float = 0.0
     num_projection_candidates: int = 0
     projection_reason: str | None = None
+    reward_before_projection_penalty: float = 0.0
+    reward_after_projection_penalty: float = 0.0
     size_window_reward: float = 0.0
     size_window_bucket: str | None = None
     size_window_low: float | None = None
@@ -999,7 +1003,10 @@ class ChemRLRewarder:
                     "projection_atom_count": trace.projection_atom_count,
                     "projection_atom_ratio": trace.projection_atom_ratio,
                     "projection_penalty": trace.projection_penalty,
-                    "projection_penalty_applied": trace.projection_penalty,
+                    "projection_penalty_config": trace.projection_penalty_config,
+                    "projection_penalty_applied": trace.projection_penalty_applied,
+                    "reward_before_projection_penalty": trace.reward_before_projection_penalty,
+                    "reward_after_projection_penalty": trace.reward_after_projection_penalty,
                     "num_projection_candidates": int(trace.num_projection_candidates),
                     "projection_reason": trace.projection_reason,
                     "nearest_parent_subgraph_smiles": trace.nearest_parent_subgraph_smiles,
@@ -1632,6 +1639,17 @@ class ChemRLRewarder:
                 len(nearest_atom_indices) if nearest_atom_indices is not None else None
             )
             parent_atom_count = max(1, int(parent.mol.GetNumAtoms()))
+            nearest_parent_projection_success = bool(
+                (not has_precise_match)
+                and substructure_distance_result.get("nearest_parent_subgraph_smiles")
+            )
+            nearest_parent_projection_penalty = (
+                self._compute_projection_penalty_applied(
+                    direct_substructure=bool(has_precise_match),
+                    projection_attempted=bool(not has_precise_match),
+                    projection_success=nearest_parent_projection_success,
+                )
+            )
             substructure_trace_kwargs = self._substructure_distance_trace_kwargs(
                 direct_substructure=bool(
                     substructure_distance_result.get("direct_substructure", False)
@@ -1657,12 +1675,7 @@ class ChemRLRewarder:
                 nearest_parent_subgraph_atom_indices=nearest_atom_indices,
                 used_projected_subgraph_for_reward=False,
                 projection_attempted=not has_precise_match,
-                projection_success=(
-                    not has_precise_match
-                    and bool(
-                    substructure_distance_result.get("nearest_parent_subgraph_smiles")
-                    )
-                ),
+                projection_success=nearest_parent_projection_success,
                 projection_method=str(
                     substructure_distance_result.get("projection_method") or "none"
                 ),
@@ -1689,6 +1702,7 @@ class ChemRLRewarder:
                     if nearest_atom_count is not None and parent_atom_count > 0
                     else None
                 ),
+                projection_penalty_applied=nearest_parent_projection_penalty,
                 num_projection_candidates=int(
                     substructure_distance_result.get("num_parent_candidates", 0) or 0
                 ),
@@ -1755,6 +1769,7 @@ class ChemRLRewarder:
                                 )
                                 or 0.0
                             ),
+                            projection_penalty_applied=nearest_parent_projection_penalty,
                             semantic_reward=self.tiny_fragment_hard_fail_penalty,
                             fragment_teacher_reward=self.teacher_sem_missing_penalty,
                             counterfactual_reward=self.tiny_fragment_hard_fail_penalty,
@@ -1789,6 +1804,13 @@ class ChemRLRewarder:
                     "nearest_parent_subgraph_smiles"
                 )
                 projection_success = bool(projected_fragment_smiles)
+                projection_penalty_applied = (
+                    self._compute_projection_penalty_applied(
+                        direct_substructure=False,
+                        projection_attempted=True,
+                        projection_success=projection_success,
+                    )
+                )
                 projection_method = str(
                     substructure_distance_result.get("projection_method") or "none"
                 )
@@ -1873,6 +1895,7 @@ class ChemRLRewarder:
                             if nearest_atom_count is not None and parent_atom_count > 0
                             else None
                         ),
+                        projection_penalty_applied=projection_penalty_applied,
                         num_projection_candidates=int(
                             substructure_distance_result.get(
                                 "num_parent_candidates",
@@ -1917,6 +1940,7 @@ class ChemRLRewarder:
                                 )
                                 or 0.0
                             ),
+                            projection_penalty_applied=projection_penalty_applied,
                             semantic_reward=counterfactual_reward,
                             fragment_teacher_reward=fragment_teacher_reward,
                             counterfactual_reward=counterfactual_reward,
@@ -2019,6 +2043,7 @@ class ChemRLRewarder:
                                 )
                                 or 0.0
                             ),
+                            projection_penalty_applied=nearest_parent_projection_penalty,
                             semantic_reward=hard_guard_penalty,
                             fragment_teacher_reward=self.teacher_sem_missing_penalty,
                             counterfactual_reward=hard_guard_penalty,
@@ -2314,10 +2339,33 @@ class ChemRLRewarder:
             projection_atom_count=success_trace_kwargs.get("projection_atom_count"),
             projection_atom_ratio=success_trace_kwargs.get("projection_atom_ratio"),
             projection_penalty=float(success_trace_kwargs.get("projection_penalty", 0.0) or 0.0),
+            projection_penalty_config=float(
+                success_trace_kwargs.get(
+                    "projection_penalty_config",
+                    breakdown.get("projection_penalty_config", self.projection_penalty),
+                )
+                or 0.0
+            ),
+            projection_penalty_applied=float(
+                success_trace_kwargs.get(
+                    "projection_penalty_applied",
+                    breakdown.get(
+                        "projection_penalty_applied",
+                        breakdown.get("projection_penalty", 0.0),
+                    ),
+                )
+                or 0.0
+            ),
             num_projection_candidates=int(
                 success_trace_kwargs.get("num_projection_candidates", 0) or 0
             ),
             projection_reason=success_trace_kwargs.get("projection_reason"),
+            reward_before_projection_penalty=float(
+                breakdown.get("reward_before_projection_penalty", 0.0) or 0.0
+            ),
+            reward_after_projection_penalty=float(
+                breakdown.get("reward_after_projection_penalty", 0.0) or 0.0
+            ),
             size_window_reward=float(
                 success_trace_kwargs.get("size_window_reward", 0.0) or 0.0
             ),
@@ -2448,6 +2496,7 @@ class ChemRLRewarder:
         size_window_reward: float = 0.0,
         dummy_reward: float = 0.0,
         substructure_distance_reward: float = 0.0,
+        projection_penalty_applied: float = 0.0,
         semantic_reward: float,
         fragment_teacher_reward: float,
         counterfactual_reward: float,
@@ -2459,6 +2508,22 @@ class ChemRLRewarder:
         )
         weighted_subdistance = (
             resolved_subdistance_weight * float(substructure_distance_reward)
+        )
+        reward_before_projection_penalty = (
+            float(format_reward)
+            + float(valid_reward)
+            + float(subgraph_reward)
+            + float(length_reward)
+            + float(size_window_reward)
+            + float(dummy_reward)
+            + float(weighted_subdistance)
+            + float(semantic_reward)
+        )
+        resolved_projection_penalty_applied = float(
+            max(0.0, float(projection_penalty_applied))
+        )
+        reward_after_projection_penalty = (
+            reward_before_projection_penalty - resolved_projection_penalty_applied
         )
         return {
             "format_r": float(format_reward),
@@ -2475,9 +2540,20 @@ class ChemRLRewarder:
             "teacher_sem_r": float(semantic_reward),
             "cf_r": float(counterfactual_reward),
             "fragment_teacher_sem_r": float(fragment_teacher_reward),
+            "projection_penalty_config": float(self.projection_penalty),
+            "projection_penalty": float(resolved_projection_penalty_applied),
+            "projection_penalty_applied": float(resolved_projection_penalty_applied),
+            "reward_before_projection_penalty": float(
+                reward_before_projection_penalty
+            ),
+            "reward_after_projection_penalty": float(
+                reward_after_projection_penalty
+            ),
         }
 
     def _reward_from_breakdown(self, breakdown: dict[str, float]) -> float:
+        if "reward_after_projection_penalty" in breakdown:
+            return float(breakdown.get("reward_after_projection_penalty", 0.0) or 0.0)
         subdist_contribution = float(
             breakdown.get(
                 "subdist_contribution",
@@ -2587,6 +2663,7 @@ class ChemRLRewarder:
         projection_reason: str | None = None,
         projection_atom_count: int | None = None,
         projection_atom_ratio: float | None = None,
+        projection_penalty_applied: float = 0.0,
         num_projection_candidates: int = 0,
     ) -> dict[str, Any]:
         normalized_indices = (
@@ -2627,7 +2704,9 @@ class ChemRLRewarder:
             "projection_reason": projection_reason,
             "projection_atom_count": projection_atom_count,
             "projection_atom_ratio": projection_atom_ratio,
-            "projection_penalty": 0.0,
+            "projection_penalty": float(projection_penalty_applied),
+            "projection_penalty_config": float(self.projection_penalty),
+            "projection_penalty_applied": float(projection_penalty_applied),
             "num_projection_candidates": int(num_projection_candidates),
         }
 
@@ -2775,6 +2854,21 @@ class ChemRLRewarder:
             "final_fragment_atom_ratio": final_fragment_atom_ratio,
         }
 
+    def _compute_projection_penalty_applied(
+        self,
+        *,
+        direct_substructure: bool,
+        projection_attempted: bool,
+        projection_success: bool,
+    ) -> float:
+        if (
+            direct_substructure
+            or not projection_attempted
+            or not projection_success
+        ):
+            return 0.0
+        return float(max(0.0, float(self.projection_penalty)))
+
     def _projection_trace_kwargs(
         self,
         *,
@@ -2801,6 +2895,8 @@ class ChemRLRewarder:
             "projection_atom_count": projected_atom_count,
             "projection_atom_ratio": projected_atom_ratio,
             "projection_penalty": float(projection_penalty),
+            "projection_penalty_config": float(self.projection_penalty),
+            "projection_penalty_applied": float(projection_penalty),
             "num_projection_candidates": int(num_projection_candidates),
         }
 
@@ -3920,8 +4016,32 @@ class ChemRLRewarder:
             projection_atom_count=projection_atom_count,
             projection_atom_ratio=projection_atom_ratio,
             projection_penalty=float(projection_penalty),
+            projection_penalty_config=float(
+                breakdown.get("projection_penalty_config", self.projection_penalty)
+            ),
+            projection_penalty_applied=float(
+                breakdown.get(
+                    "projection_penalty_applied",
+                    breakdown.get("projection_penalty", projection_penalty),
+                )
+            ),
             num_projection_candidates=int(num_projection_candidates),
             projection_reason=projection_reason,
+            reward_before_projection_penalty=float(
+                breakdown.get(
+                    "reward_before_projection_penalty",
+                    self._reward_from_breakdown(
+                        {
+                            key: value
+                            for key, value in breakdown.items()
+                            if key != "reward_after_projection_penalty"
+                        }
+                    ),
+                )
+            ),
+            reward_after_projection_penalty=float(
+                breakdown.get("reward_after_projection_penalty", self._reward_from_breakdown(breakdown))
+            ),
             size_window_reward=float(size_window_reward),
             size_window_bucket=size_window_bucket,
             size_window_low=(

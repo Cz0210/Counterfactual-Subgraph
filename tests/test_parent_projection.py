@@ -73,6 +73,7 @@ class ParentProjectionTests(unittest.TestCase):
         enable_projected_cf_reward: bool = False,
         enable_substructure_distance_reward: bool = True,
         substructure_distance_reward_weight: float = 0.5,
+        projection_penalty: float = 0.5,
     ) -> ChemRLRewarder:
         oracle_bundle = {
             "model": _FakeOracleModel(),
@@ -91,7 +92,7 @@ class ParentProjectionTests(unittest.TestCase):
                 projection_max_candidates=128,
                 projection_min_atoms=3,
                 projection_max_atom_ratio=0.70,
-                projection_penalty=0.5,
+                projection_penalty=projection_penalty,
                 projection_mcs_timeout=1,
                 enable_substructure_distance_reward=enable_substructure_distance_reward,
                 substructure_distance_reward_weight=substructure_distance_reward_weight,
@@ -171,6 +172,14 @@ class ParentProjectionTests(unittest.TestCase):
         self.assertGreater(trace.substructure_distance_reward, 0.0)
         self.assertAlmostEqual(trace.substructure_distance_weight, 0.5)
         self.assertGreater(trace.substructure_distance_contribution, 0.0)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 0.5)
+        self.assertAlmostEqual(trace.projection_penalty, 0.5)
+        self.assertAlmostEqual(trace.projection_penalty_config, 0.5)
+        self.assertAlmostEqual(
+            trace.reward_before_projection_penalty - trace.reward_after_projection_penalty,
+            0.5,
+        )
+        self.assertAlmostEqual(trace.reward_after_projection_penalty, trace.reward)
         self.assertAlmostEqual(
             trace.substructure_distance_contribution,
             trace.breakdown["subdist_contribution"],
@@ -207,6 +216,7 @@ class ParentProjectionTests(unittest.TestCase):
         self.assertGreater(trace.substructure_distance_reward, 0.0)
         self.assertAlmostEqual(trace.substructure_distance_weight, 0.0)
         self.assertAlmostEqual(trace.substructure_distance_contribution, 0.0)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 0.5)
         self.assertAlmostEqual(trace.breakdown["subdist_weight"], 0.0)
         self.assertAlmostEqual(trace.breakdown["subdist_contribution"], 0.0)
         self.assertAlmostEqual(trace.breakdown["subdist_weighted_r"], 0.0)
@@ -227,6 +237,67 @@ class ParentProjectionTests(unittest.TestCase):
         self.assertIsNotNone(trace.failure_tag)
         self.assertLessEqual(trace.substructure_distance_contribution, 0.0)
         self.assertLessEqual(trace.breakdown["subdist_contribution"], 0.0)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 0.0)
+
+    def test_direct_substructure_does_not_apply_projection_penalty(self) -> None:
+        rewarder = self._build_rewarder(projection_penalty=1.0)
+
+        trace = rewarder.calculate_reward_details_batch(
+            [self.PARENT],
+            ["CC(=O)O"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertTrue(trace.direct_substructure)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 0.0)
+        self.assertAlmostEqual(trace.projection_penalty, 0.0)
+        self.assertAlmostEqual(trace.reward_before_projection_penalty, trace.reward)
+        self.assertAlmostEqual(trace.reward_after_projection_penalty, trace.reward)
+
+    def test_projection_penalty_reduces_not_direct_reward_by_one(self) -> None:
+        counterfactual_teacher = _FakeCounterfactualTeacherScorer()
+        rewarder_without_penalty = self._build_rewarder(
+            counterfactual_teacher=counterfactual_teacher,
+            enable_projected_cf_reward=True,
+            substructure_distance_reward_weight=0.3,
+            projection_penalty=0.0,
+        )
+        rewarder_with_penalty = self._build_rewarder(
+            counterfactual_teacher=_FakeCounterfactualTeacherScorer(),
+            enable_projected_cf_reward=True,
+            substructure_distance_reward_weight=0.3,
+            projection_penalty=1.0,
+        )
+
+        trace_without_penalty = rewarder_without_penalty.calculate_reward_details_batch(
+            [self.PARENT],
+            ["CC(=O)N"],
+            parent_labels=[1],
+        )[0]
+        trace_with_penalty = rewarder_with_penalty.calculate_reward_details_batch(
+            [self.PARENT],
+            ["CC(=O)N"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertFalse(trace_with_penalty.direct_substructure)
+        self.assertTrue(trace_with_penalty.used_projected_subgraph_for_reward)
+        self.assertAlmostEqual(trace_without_penalty.projection_penalty_applied, 0.0)
+        self.assertAlmostEqual(trace_with_penalty.projection_penalty_applied, 1.0)
+        self.assertAlmostEqual(trace_with_penalty.projection_penalty, 1.0)
+        self.assertAlmostEqual(trace_with_penalty.projection_penalty_config, 1.0)
+        self.assertAlmostEqual(
+            trace_with_penalty.reward_before_projection_penalty,
+            trace_without_penalty.reward_before_projection_penalty,
+        )
+        self.assertAlmostEqual(
+            trace_with_penalty.reward_after_projection_penalty,
+            trace_with_penalty.reward_before_projection_penalty - 1.0,
+        )
+        self.assertAlmostEqual(
+            trace_without_penalty.reward - trace_with_penalty.reward,
+            1.0,
+        )
 
     def test_rewarder_uses_projected_fragment_for_counterfactual_reward_when_enabled(self) -> None:
         counterfactual_teacher = _FakeCounterfactualTeacherScorer()
@@ -234,6 +305,7 @@ class ParentProjectionTests(unittest.TestCase):
             counterfactual_teacher=counterfactual_teacher,
             enable_projected_cf_reward=True,
             substructure_distance_reward_weight=0.3,
+            projection_penalty=1.0,
         )
 
         trace = rewarder.calculate_reward_details_batch(
@@ -261,6 +333,8 @@ class ParentProjectionTests(unittest.TestCase):
         )
         self.assertAlmostEqual(trace.substructure_distance_weight, 0.3)
         self.assertGreater(trace.substructure_distance_contribution, 0.0)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 1.0)
+        self.assertAlmostEqual(trace.reward_after_projection_penalty, trace.reward)
         self.assertAlmostEqual(trace.cf_drop or 0.0, 0.6)
         self.assertTrue(trace.cf_flip)
         self.assertGreater(trace.breakdown["cf_r"], 0.0)

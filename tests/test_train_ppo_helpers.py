@@ -247,6 +247,17 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertTrue(args.projection_enable_khop3)
         self.assertEqual(args.projection_mcs_timeout, 2)
 
+    def test_parser_reads_projection_penalty_env_var(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"PROJECTION_PENALTY": "1.0"},
+            clear=False,
+        ):
+            parser = build_parser()
+            args = parser.parse_args([])
+
+        self.assertAlmostEqual(args.projection_penalty, 1.0)
+
     def test_parser_accepts_substructure_distance_reward_flags(self) -> None:
         parser = build_parser()
 
