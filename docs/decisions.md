@@ -6,6 +6,62 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-14] Make decoded PPO failure traces tolerate forward-compatible reward-debug fields
+
+### Background
+After enabling both projection penalty and substructure distance reward in the
+decoded PPO diagnostic, normal reward paths worked for the first few samples,
+but a later parseable non-direct fragment crashed inside
+`ChemRLRewarder._fail(...)` with:
+
+`TypeError: ChemRLRewarder._fail() got an unexpected keyword argument 'projection_penalty_config'`
+
+The reward path had already been extended to merge richer debug dictionaries
+containing fields such as `projection_penalty_config`,
+`projection_penalty_applied`, `reward_before_projection_penalty`,
+`reward_after_projection_penalty`, and `subdist_contribution`. Successful
+traces handled those fields, but failure branches still routed everything
+through an older `_fail(...)` signature with a closed keyword list. As soon as a
+failure path inherited a new trace field, PPO aborted instead of returning a
+penalized failure trace.
+
+### Decision
+Keep reward semantics unchanged and only harden the failure-trace plumbing:
+
+- `_fail(...)` now accepts the currently expanded projection-penalty fields
+  explicitly and also captures future trace extensions through
+  `**extra_trace_fields`;
+- failure trace construction now uses a small merge helper that appends only
+  real `RewardTrace` dataclass fields and never lets unknown logging keys crash
+  PPO;
+- explicit/core `_fail(...)` arguments still have priority, while future fields
+  can populate newly added `RewardTrace` slots without requiring every old call
+  site to be rewritten immediately;
+- parse-failed, core-unusable, and parseable-but-not-direct branches now all
+  keep returning structured failure traces even when projection/distance debug
+  fields are present.
+
+### Alternatives considered
+1. Add only `projection_penalty_config` to the `_fail(...)` signature and leave
+   the rest of the trace field flow unchanged.
+2. Strip all non-core debug fields before failure handling and accept reduced
+   observability on error paths.
+3. Move failure-trace construction out of `_fail(...)` entirely and duplicate
+   trace assembly across call sites.
+
+### Consequences
+- PPO no longer aborts when a failure branch inherits newer reward-debug fields.
+- Failure rows in `CHEM_REWARD_COMPONENTS` and `candidate_pool.jsonl` retain the
+  same projection and distance diagnostics as success rows, which keeps reward
+  debugging consistent through bad generations.
+- Future reward-trace extensions are less likely to require emergency fixes in
+  `_fail(...)`, as long as they also become `RewardTrace` fields.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-14] Apply projection penalty inside decoded PPO reward breakdown whenever a non-direct fragment needs a successful parent projection
 
 ### Background

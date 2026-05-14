@@ -227,6 +227,9 @@ class RewardTrace:
         return asdict(self)
 
 
+_REWARD_TRACE_FIELD_NAMES = frozenset(RewardTrace.__dataclass_fields__.keys())
+
+
 def has_dummy_atom(mol: object | None) -> bool:
     """Return whether the RDKit molecule contains at least one dummy atom."""
 
@@ -2486,6 +2489,28 @@ class ChemRLRewarder:
 
         return self._merge_reward_fields(*field_groups, **overrides)
 
+    def _merge_trace_payload_fields(
+        self,
+        trace_payload: dict[str, Any],
+        extra_fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append future RewardTrace fields without overriding resolved core keys.
+
+        Failure traces often aggregate debug dictionaries from several reward
+        components. When new trace fields are introduced, we want `_fail(...)`
+        to keep returning a structured trace instead of crashing on unexpected
+        kwargs. This helper only appends keys that are real `RewardTrace`
+        fields and that were not already resolved explicitly by `_fail(...)`.
+        """
+
+        if not extra_fields:
+            return trace_payload
+
+        for field_name, field_value in extra_fields.items():
+            if field_name in _REWARD_TRACE_FIELD_NAMES and field_name not in trace_payload:
+                trace_payload[field_name] = field_value
+        return trace_payload
+
     def _build_breakdown(
         self,
         *,
@@ -3859,8 +3884,12 @@ class ChemRLRewarder:
         projection_atom_count: int | None = None,
         projection_atom_ratio: float | None = None,
         projection_penalty: float = 0.0,
+        projection_penalty_config: float | None = None,
+        projection_penalty_applied: float | None = None,
         num_projection_candidates: int = 0,
         projection_reason: str | None = None,
+        reward_before_projection_penalty: float | None = None,
+        reward_after_projection_penalty: float | None = None,
         size_window_reward: float = 0.0,
         size_window_bucket: str | None = None,
         size_window_low: float | None = None,
@@ -3870,10 +3899,55 @@ class ChemRLRewarder:
         empty_response: bool = False,
         full_parent: bool = False,
         empty_residual: bool = False,
+        **extra_trace_fields: Any,
     ) -> RewardTrace:
         """Build one failure trace consistently."""
 
-        return RewardTrace(
+        resolved_projection_penalty_config = float(
+            self.projection_penalty
+            if projection_penalty_config is None
+            else projection_penalty_config
+        )
+        if projection_penalty_config is None:
+            resolved_projection_penalty_config = float(
+                breakdown.get(
+                    "projection_penalty_config",
+                    resolved_projection_penalty_config,
+                )
+            )
+
+        resolved_projection_penalty_applied = float(
+            projection_penalty_applied
+            if projection_penalty_applied is not None
+            else breakdown.get(
+                "projection_penalty_applied",
+                breakdown.get("projection_penalty", projection_penalty),
+            )
+        )
+        resolved_reward_before_projection_penalty = float(
+            reward_before_projection_penalty
+            if reward_before_projection_penalty is not None
+            else breakdown.get(
+                "reward_before_projection_penalty",
+                self._reward_from_breakdown(
+                    {
+                        key: value
+                        for key, value in breakdown.items()
+                        if key != "reward_after_projection_penalty"
+                    }
+                ),
+            )
+        )
+        resolved_reward_after_projection_penalty = float(
+            reward_after_projection_penalty
+            if reward_after_projection_penalty is not None
+            else breakdown.get(
+                "reward_after_projection_penalty",
+                self._reward_from_breakdown(breakdown),
+            )
+        )
+
+        trace_payload: dict[str, Any] = dict(
             parent_smiles=parent_smiles,
             generated_smiles=str(generated_smiles),
             normalized_generated_smiles=normalized_generated,
@@ -4016,32 +4090,12 @@ class ChemRLRewarder:
             projection_atom_count=projection_atom_count,
             projection_atom_ratio=projection_atom_ratio,
             projection_penalty=float(projection_penalty),
-            projection_penalty_config=float(
-                breakdown.get("projection_penalty_config", self.projection_penalty)
-            ),
-            projection_penalty_applied=float(
-                breakdown.get(
-                    "projection_penalty_applied",
-                    breakdown.get("projection_penalty", projection_penalty),
-                )
-            ),
+            projection_penalty_config=resolved_projection_penalty_config,
+            projection_penalty_applied=resolved_projection_penalty_applied,
             num_projection_candidates=int(num_projection_candidates),
             projection_reason=projection_reason,
-            reward_before_projection_penalty=float(
-                breakdown.get(
-                    "reward_before_projection_penalty",
-                    self._reward_from_breakdown(
-                        {
-                            key: value
-                            for key, value in breakdown.items()
-                            if key != "reward_after_projection_penalty"
-                        }
-                    ),
-                )
-            ),
-            reward_after_projection_penalty=float(
-                breakdown.get("reward_after_projection_penalty", self._reward_from_breakdown(breakdown))
-            ),
+            reward_before_projection_penalty=resolved_reward_before_projection_penalty,
+            reward_after_projection_penalty=resolved_reward_after_projection_penalty,
             size_window_reward=float(size_window_reward),
             size_window_bucket=size_window_bucket,
             size_window_low=(
@@ -4058,6 +4112,10 @@ class ChemRLRewarder:
             final_fragment_atom_ratio=final_fragment_atom_ratio,
             error_message=error_message,
             breakdown=dict(breakdown),
+        )
+
+        return RewardTrace(
+            **self._merge_trace_payload_fields(trace_payload, extra_trace_fields)
         )
 
 

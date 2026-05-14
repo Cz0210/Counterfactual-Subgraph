@@ -123,6 +123,8 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertFalse(trace.parsed_core)
         self.assertFalse(trace.dummy_removed_before_parse)
         self.assertEqual(trace.parse_failed_reason, "parse_failed_after_dummy_removal")
+        self.assertAlmostEqual(trace.projection_penalty_config, 0.0)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 0.0)
 
     def test_tiny_fragment_hard_fail_overrides_positive_terms(self) -> None:
         rewarder = self._build_rewarder(
@@ -286,6 +288,7 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertIn("projection_attempted", reward_log)
         self.assertIn("projection_success", reward_log)
         self.assertIn("projection_method", reward_log)
+        self.assertIn("projection_penalty_config", reward_log)
         self.assertIn("projection_penalty_applied", reward_log)
         self.assertIn("reward_before_projection_penalty", reward_log)
         self.assertIn("reward_after_projection_penalty", reward_log)
@@ -360,6 +363,8 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         reward_log = reward_logs[0]
         self.assertFalse(reward_log["parse_ok"])
         self.assertIsNotNone(reward_log["failure_tag"])
+        self.assertIn("projection_penalty_config", reward_log)
+        self.assertIn("projection_penalty_applied", reward_log)
         self.assertLessEqual(float(reward_log["subdist_contribution"]), 0.0)
 
     def test_merge_failure_fields_avoids_duplicate_keyword_collisions(self) -> None:
@@ -379,6 +384,13 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
                 "projection_source": "debug",
                 "projected_fragment_smiles": None,
                 "projection_reason": "projection_failed_low_score",
+                "projection_penalty_config": 1.0,
+                "projection_penalty_applied": 0.0,
+                "reward_before_projection_penalty": 0.2,
+                "reward_after_projection_penalty": 0.2,
+                "subdist_weight": 0.3,
+                "subdist_contribution": 0.0,
+                "projected_cf_reward_scale": 0.4,
                 "failure_tag": "from_trace_dict",
                 "invalid_detail": "from_trace_dict",
             },
@@ -413,6 +425,10 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertTrue(trace.projection_attempted)
         self.assertFalse(trace.projection_success)
         self.assertEqual(trace.projection_reason, "projection_failed_low_score")
+        self.assertAlmostEqual(trace.projection_penalty_config, 1.0)
+        self.assertAlmostEqual(trace.projection_penalty_applied, 0.0)
+        self.assertAlmostEqual(trace.reward_before_projection_penalty, 0.2)
+        self.assertAlmostEqual(trace.reward_after_projection_penalty, 0.2)
 
 
 if __name__ == "__main__":
