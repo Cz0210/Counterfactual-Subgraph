@@ -71,6 +71,8 @@ class ParentProjectionTests(unittest.TestCase):
         *,
         counterfactual_teacher=None,
         enable_projected_cf_reward: bool = False,
+        enable_substructure_distance_reward: bool = True,
+        substructure_distance_reward_weight: float = 0.5,
     ) -> ChemRLRewarder:
         oracle_bundle = {
             "model": _FakeOracleModel(),
@@ -91,8 +93,8 @@ class ParentProjectionTests(unittest.TestCase):
                 projection_max_atom_ratio=0.70,
                 projection_penalty=0.5,
                 projection_mcs_timeout=1,
-                enable_substructure_distance_reward=True,
-                substructure_distance_reward_weight=0.5,
+                enable_substructure_distance_reward=enable_substructure_distance_reward,
+                substructure_distance_reward_weight=substructure_distance_reward_weight,
                 enable_projected_cf_reward=enable_projected_cf_reward,
                 disable_projected_cf_reward=not enable_projected_cf_reward,
             )
@@ -167,6 +169,16 @@ class ParentProjectionTests(unittest.TestCase):
         self.assertFalse(trace.used_projected_subgraph_for_reward)
         self.assertGreater(trace.substructure_similarity, 0.0)
         self.assertGreater(trace.substructure_distance_reward, 0.0)
+        self.assertAlmostEqual(trace.substructure_distance_weight, 0.5)
+        self.assertGreater(trace.substructure_distance_contribution, 0.0)
+        self.assertAlmostEqual(
+            trace.substructure_distance_contribution,
+            trace.breakdown["subdist_contribution"],
+        )
+        self.assertAlmostEqual(
+            trace.substructure_distance_contribution,
+            trace.breakdown["subdist_weighted_r"],
+        )
         self.assertEqual(len(counterfactual_teacher.calls), 0)
         expected_total = (
             trace.breakdown["format_r"]
@@ -179,11 +191,49 @@ class ParentProjectionTests(unittest.TestCase):
         )
         self.assertAlmostEqual(trace.reward, expected_total)
 
+    def test_rewarder_keeps_zero_subdist_contribution_when_disabled(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_substructure_distance_reward=False,
+            substructure_distance_reward_weight=0.3,
+        )
+
+        trace = rewarder.calculate_reward_details_batch(
+            [self.PARENT],
+            ["CC(=O)N"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertFalse(trace.direct_substructure)
+        self.assertGreater(trace.substructure_distance_reward, 0.0)
+        self.assertAlmostEqual(trace.substructure_distance_weight, 0.0)
+        self.assertAlmostEqual(trace.substructure_distance_contribution, 0.0)
+        self.assertAlmostEqual(trace.breakdown["subdist_weight"], 0.0)
+        self.assertAlmostEqual(trace.breakdown["subdist_contribution"], 0.0)
+        self.assertAlmostEqual(trace.breakdown["subdist_weighted_r"], 0.0)
+
+    def test_parse_failed_fragment_does_not_get_positive_subdist_contribution(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_substructure_distance_reward=True,
+            substructure_distance_reward_weight=0.3,
+        )
+
+        trace = rewarder.calculate_reward_details_batch(
+            [self.PARENT],
+            ["C?C"],
+            parent_labels=[1],
+        )[0]
+
+        self.assertFalse(trace.raw_parse_ok)
+        self.assertIsNotNone(trace.failure_tag)
+        self.assertLessEqual(trace.substructure_distance_contribution, 0.0)
+        self.assertLessEqual(trace.breakdown["subdist_contribution"], 0.0)
+
     def test_rewarder_uses_projected_fragment_for_counterfactual_reward_when_enabled(self) -> None:
         counterfactual_teacher = _FakeCounterfactualTeacherScorer()
         rewarder = self._build_rewarder(
             counterfactual_teacher=counterfactual_teacher,
             enable_projected_cf_reward=True,
+            substructure_distance_reward_weight=0.3,
         )
 
         trace = rewarder.calculate_reward_details_batch(
@@ -209,6 +259,8 @@ class ParentProjectionTests(unittest.TestCase):
             counterfactual_teacher.calls[0]["core_fragment_smiles"],
             trace.projected_fragment_smiles,
         )
+        self.assertAlmostEqual(trace.substructure_distance_weight, 0.3)
+        self.assertGreater(trace.substructure_distance_contribution, 0.0)
         self.assertAlmostEqual(trace.cf_drop or 0.0, 0.6)
         self.assertTrue(trace.cf_flip)
         self.assertGreater(trace.breakdown["cf_r"], 0.0)

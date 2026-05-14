@@ -6,6 +6,66 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-14] Make substructure distance reward a first-class PPO shaping term with explicit runtime config and contribution logging
+
+### Background
+The decoded PPO diagnostic path already computed nearest-parent-subgraph
+distance fields such as `substructure_similarity`,
+`substructure_distance_reward`, and the shorter `subdist_*` aliases, but recent
+projected-cf reward runs still surfaced `subdist_weight=0.0` inside
+`[CHEM_REWARD_COMPONENTS]`. In practice that meant the dense distance reward was
+being logged without actually contributing to `reward_total`, mostly because the
+generic HPC wrapper `scripts/slurm/train_ppo.sh` never forwarded the distance
+reward enable/weight knobs even though `scripts/train_ppo.py` and the rewarder
+already knew about them.
+
+### Decision
+Keep the decoded PPO loss flow, SFT pipeline, teacher/oracle stack, and
+projection semantics unchanged, and fix only the reward configuration,
+parameter plumbing, and diagnostics:
+
+- `scripts/train_ppo.py` now resolves the canonical runtime switch
+  `--enable-substructure-distance-reward` /
+  `--no-enable-substructure-distance-reward` explicitly, rejects a CLI conflict,
+  supports the env alias `SUBDIST_WEIGHT` alongside
+  `SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT`, and logs the resolved runtime state via
+  `[SUBSTRUCTURE_DISTANCE_REWARD_CONFIG]`;
+- when the feature is disabled, the effective runtime weight is forced to
+  `0.0`, so logs and reward traces cannot silently show a stale positive weight;
+- `src/rewards/reward_wrapper.py` now surfaces
+  `subdist_contribution = subdist_weight * subdist_reward` explicitly in both
+  breakdowns and decoded reward logs, while preserving the legacy
+  `subdist_weighted_r` key for compatibility;
+- `scripts/slurm/train_ppo.sh` now exports, echoes, and forwards the full
+  distance-reward knob family so local Codex edits and HPC `sbatch` runs stay in
+  sync;
+- the recommended default shaping weight is now `0.3`, which keeps distance
+  reward active as a conservative continuous constraint without overriding hard
+  failure penalties or projected-cf reward behavior.
+
+### Alternatives considered
+1. Leave the reward wrapper unchanged and only document that users must switch
+   to a dedicated `train_decoded_chem_ppo_subdist_reward.sh` script.
+2. Broaden the change into a larger reward refactor that changes PPO loss
+   semantics or projection behavior.
+3. Introduce a second negative CLI spelling such as
+   `--disable-substructure-distance-reward`.
+
+### Consequences
+- Enabling distance reward now makes `subdist_weight > 0` and
+  `subdist_contribution != 0` visible in reward traces when the fragment earns
+  non-zero dense similarity reward.
+- Disabled runs remain explicit and unambiguous because both the config log and
+  the trace fields resolve to `weight=0.0`.
+- Projected counterfactual reward and distance reward can now be diagnosed
+  together: projected fragments may still power deletion-based cf reward, while
+  the raw/core fragment keeps its own nearest-parent-subgraph shaping term.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-10] Add an explicit enable switch for projected counterfactual reward and route successful projections into the deletion teacher
 
 ### Background

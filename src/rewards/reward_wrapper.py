@@ -102,6 +102,7 @@ class RewardTrace:
     substructure_distance: float = 1.0
     substructure_distance_reward: float = 0.0
     substructure_distance_weight: float = 0.0
+    substructure_distance_contribution: float = 0.0
     nearest_parent_subgraph_smiles: str | None = None
     nearest_parent_subgraph_atom_indices: tuple[int, ...] | None = None
     used_projected_subgraph_for_reward: bool = False
@@ -509,7 +510,7 @@ class ChemRLRewarder:
         projection_enable_khop3: bool = False,
         projection_mcs_timeout: int = 1,
         enable_substructure_distance_reward: bool = False,
-        substructure_distance_reward_weight: float = 0.5,
+        substructure_distance_reward_weight: float = 0.3,
         substructure_distance_min_atom_ratio: float = 0.10,
         substructure_distance_max_atom_ratio: float = 0.65,
         substructure_distance_topk: int = 20,
@@ -870,7 +871,6 @@ class ChemRLRewarder:
                     "raw_output": raw_output,
                     "core_fragment": trace.core_fragment_smiles,
                     "original_core_fragment": original_core,
-                    "projected_fragment": strict_fragment,
                     "explanation_fragment_with_dummy": (
                         strict_match.explanation_fragment_with_dummy
                         if strict_match is not None and strict_match.matched
@@ -888,6 +888,7 @@ class ChemRLRewarder:
                     "subdist_distance": trace.substructure_distance,
                     "subdist_reward": trace.substructure_distance_reward,
                     "subdist_weight": trace.substructure_distance_weight,
+                    "subdist_contribution": trace.substructure_distance_contribution,
                     "length": breakdown.get("length_r"),
                     "length_component": breakdown.get("length_r"),
                     "dummy_penalty": breakdown.get("dummy_r", 0.0),
@@ -998,6 +999,7 @@ class ChemRLRewarder:
                     "projection_atom_count": trace.projection_atom_count,
                     "projection_atom_ratio": trace.projection_atom_ratio,
                     "projection_penalty": trace.projection_penalty,
+                    "projection_penalty_applied": trace.projection_penalty,
                     "num_projection_candidates": int(trace.num_projection_candidates),
                     "projection_reason": trace.projection_reason,
                     "nearest_parent_subgraph_smiles": trace.nearest_parent_subgraph_smiles,
@@ -2110,6 +2112,16 @@ class ChemRLRewarder:
                 )
                 or 0.0
             ),
+            substructure_distance_contribution=float(
+                success_trace_kwargs.get(
+                    "substructure_distance_contribution",
+                    breakdown.get(
+                        "subdist_contribution",
+                        breakdown.get("subdist_weighted_r", 0.0),
+                    ),
+                )
+                or 0.0
+            ),
             nearest_parent_subgraph_smiles=success_trace_kwargs.get(
                 "nearest_parent_subgraph_smiles"
             ),
@@ -2440,10 +2452,13 @@ class ChemRLRewarder:
         fragment_teacher_reward: float,
         counterfactual_reward: float,
     ) -> dict[str, float]:
-        weighted_subdistance = (
-            self.substructure_distance_reward_weight * float(substructure_distance_reward)
+        resolved_subdistance_weight = (
+            float(self.substructure_distance_reward_weight)
             if self.enable_substructure_distance_reward
             else 0.0
+        )
+        weighted_subdistance = (
+            resolved_subdistance_weight * float(substructure_distance_reward)
         )
         return {
             "format_r": float(format_reward),
@@ -2453,7 +2468,8 @@ class ChemRLRewarder:
             "size_window_r": float(size_window_reward),
             "dummy_r": float(dummy_reward),
             "subdist_r": float(substructure_distance_reward),
-            "subdist_weight": float(self.substructure_distance_reward_weight),
+            "subdist_weight": float(resolved_subdistance_weight),
+            "subdist_contribution": float(weighted_subdistance),
             "subdist_weighted_r": float(weighted_subdistance),
             "sem_r": float(semantic_reward),
             "teacher_sem_r": float(semantic_reward),
@@ -2462,6 +2478,13 @@ class ChemRLRewarder:
         }
 
     def _reward_from_breakdown(self, breakdown: dict[str, float]) -> float:
+        subdist_contribution = float(
+            breakdown.get(
+                "subdist_contribution",
+                breakdown.get("subdist_weighted_r", 0.0),
+            )
+            or 0.0
+        )
         return float(
             breakdown.get("format_r", 0.0)
             + breakdown.get("valid_r", 0.0)
@@ -2469,7 +2492,7 @@ class ChemRLRewarder:
             + breakdown.get("length_r", 0.0)
             + breakdown.get("size_window_r", 0.0)
             + breakdown.get("dummy_r", 0.0)
-            + breakdown.get("subdist_weighted_r", 0.0)
+            + subdist_contribution
             + breakdown.get("sem_r", 0.0)
         )
 
@@ -2578,6 +2601,14 @@ class ChemRLRewarder:
             "substructure_distance_reward": float(substructure_distance_reward),
             "substructure_distance_weight": float(
                 self.substructure_distance_reward_weight
+                if self.enable_substructure_distance_reward
+                else 0.0
+            ),
+            "substructure_distance_contribution": float(
+                (
+                    self.substructure_distance_reward_weight
+                    * float(substructure_distance_reward)
+                )
                 if self.enable_substructure_distance_reward
                 else 0.0
             ),
@@ -3634,6 +3665,7 @@ class ChemRLRewarder:
         substructure_distance: float = 1.0,
         substructure_distance_reward: float = 0.0,
         substructure_distance_weight: float = 0.0,
+        substructure_distance_contribution: float | None = None,
         nearest_parent_subgraph_smiles: str | None = None,
         nearest_parent_subgraph_atom_indices: Sequence[int] | None = None,
         used_projected_subgraph_for_reward: bool = False,
@@ -3765,6 +3797,14 @@ class ChemRLRewarder:
             substructure_distance=float(substructure_distance),
             substructure_distance_reward=float(substructure_distance_reward),
             substructure_distance_weight=float(substructure_distance_weight),
+            substructure_distance_contribution=float(
+                breakdown.get(
+                    "subdist_contribution",
+                    breakdown.get("subdist_weighted_r", 0.0),
+                )
+                if substructure_distance_contribution is None
+                else substructure_distance_contribution
+            ),
             nearest_parent_subgraph_smiles=nearest_parent_subgraph_smiles,
             nearest_parent_subgraph_atom_indices=(
                 tuple(int(index) for index in nearest_parent_subgraph_atom_indices)

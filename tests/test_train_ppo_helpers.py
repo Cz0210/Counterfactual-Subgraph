@@ -1,5 +1,7 @@
 import argparse
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from scripts.train_ppo import (
     apply_decoded_chem_generation_defaults,
@@ -13,6 +15,7 @@ from scripts.train_ppo import (
     extract_parent_smiles_from_prompt,
     normalize_hiv_label,
     resolve_projected_cf_reward_enabled,
+    resolve_substructure_distance_reward_config,
     resolve_decoded_chem_generation_config,
     resolve_sft_lora_path,
 )
@@ -283,6 +286,13 @@ class TrainPPOHelperTests(unittest.TestCase):
         self.assertTrue(args.enable_projected_cf_reward)
         self.assertFalse(args.disable_projected_cf_reward)
 
+    def test_parser_accepts_no_enable_substructure_distance_reward_flag(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["--no-enable-substructure-distance-reward"])
+
+        self.assertFalse(args.enable_substructure_distance_reward)
+
     def test_resolve_projected_cf_reward_enabled_prefers_explicit_enable(self) -> None:
         args = argparse.Namespace(
             enable_projected_cf_reward=True,
@@ -307,6 +317,100 @@ class TrainPPOHelperTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             resolve_projected_cf_reward_enabled(args)
+
+    def test_resolve_substructure_distance_reward_config_keeps_enabled_weight(self) -> None:
+        args = argparse.Namespace(
+            enable_substructure_distance_reward=True,
+            substructure_distance_reward_weight=0.3,
+        )
+
+        enabled, weight = resolve_substructure_distance_reward_config(
+            args,
+            argv=["--enable-substructure-distance-reward"],
+        )
+
+        self.assertTrue(enabled)
+        self.assertAlmostEqual(weight, 0.3)
+
+    def test_resolve_substructure_distance_reward_config_zeroes_weight_when_disabled(self) -> None:
+        args = argparse.Namespace(
+            enable_substructure_distance_reward=False,
+            substructure_distance_reward_weight=0.3,
+        )
+
+        enabled, weight = resolve_substructure_distance_reward_config(
+            args,
+            argv=["--no-enable-substructure-distance-reward"],
+        )
+
+        self.assertFalse(enabled)
+        self.assertAlmostEqual(weight, 0.0)
+
+    def test_resolve_substructure_distance_reward_config_rejects_conflict(self) -> None:
+        parser = build_parser()
+        argv = [
+            "--enable-substructure-distance-reward",
+            "--no-enable-substructure-distance-reward",
+        ]
+        args = parser.parse_args(argv)
+
+        with self.assertRaises(ValueError):
+            resolve_substructure_distance_reward_config(args, argv=argv)
+
+    def test_parser_reads_substructure_distance_reward_env_vars(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "ENABLE_SUBSTRUCTURE_DISTANCE_REWARD": "true",
+                "SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT": "0.3",
+            },
+            clear=False,
+        ):
+            parser = build_parser()
+            args = parser.parse_args([])
+
+        enabled, weight = resolve_substructure_distance_reward_config(args, argv=[])
+        self.assertTrue(enabled)
+        self.assertAlmostEqual(weight, 0.3)
+
+    def test_parser_reads_legacy_subdist_weight_env_alias(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "ENABLE_SUBSTRUCTURE_DISTANCE_REWARD": "true",
+                "SUBDIST_WEIGHT": "0.4",
+            },
+            clear=False,
+        ):
+            parser = build_parser()
+            args = parser.parse_args([])
+
+        enabled, weight = resolve_substructure_distance_reward_config(args, argv=[])
+        self.assertTrue(enabled)
+        self.assertAlmostEqual(weight, 0.4)
+
+    def test_train_ppo_slurm_script_forwards_substructure_distance_reward_flags(self) -> None:
+        script_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "slurm"
+            / "train_ppo.sh"
+        )
+        script_text = script_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "ENABLE_SUBSTRUCTURE_DISTANCE_REWARD=${ENABLE_SUBSTRUCTURE_DISTANCE_REWARD:-}",
+            script_text,
+        )
+        self.assertIn(
+            "SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT=${SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT:-}",
+            script_text,
+        )
+        self.assertIn(
+            'append_bool_flag "${ENABLE_SUBSTRUCTURE_DISTANCE_REWARD}" "--enable-substructure-distance-reward" "--no-enable-substructure-distance-reward" "ENABLE_SUBSTRUCTURE_DISTANCE_REWARD"',
+            script_text,
+        )
+        self.assertIn("--substructure-distance-reward-weight", script_text)
 
     def test_parser_accepts_tiny_fragment_guard_flags(self) -> None:
         parser = build_parser()

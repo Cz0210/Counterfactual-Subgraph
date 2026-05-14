@@ -67,8 +67,16 @@ _MODEL_WRAPPER_ATTRS = ("pretrained_model", "base_model", "model")
 _REWARD_BACKBONE_ATTRS = _MODEL_WRAPPER_ATTRS + ("lm_backbone", "backbone", "language_model")
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
+def _first_non_empty_env_value(name: str, aliases: Sequence[str] = ()) -> str | None:
+    for candidate_name in (name, *aliases):
+        value = os.environ.get(candidate_name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _env_bool(name: str, default: bool, aliases: Sequence[str] = ()) -> bool:
+    value = _first_non_empty_env_value(name, aliases)
     if value is None or not str(value).strip():
         return bool(default)
     normalized = str(value).strip().lower()
@@ -79,8 +87,8 @@ def _env_bool(name: str, default: bool) -> bool:
     return bool(default)
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
+def _env_int(name: str, default: int, aliases: Sequence[str] = ()) -> int:
+    value = _first_non_empty_env_value(name, aliases)
     if value is None or not str(value).strip():
         return int(default)
     try:
@@ -89,8 +97,8 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.environ.get(name)
+def _env_float(name: str, default: float, aliases: Sequence[str] = ()) -> float:
+    value = _first_non_empty_env_value(name, aliases)
     if value is None or not str(value).strip():
         return float(default)
     try:
@@ -437,13 +445,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable-substructure-distance-reward",
         action=argparse.BooleanOptionalAction,
-        default=_env_bool("ENABLE_SUBSTRUCTURE_DISTANCE_REWARD", False),
+        default=_env_bool(
+            "ENABLE_SUBSTRUCTURE_DISTANCE_REWARD",
+            False,
+            aliases=("SUBSTRUCTURE_DISTANCE_REWARD_ENABLED",),
+        ),
         help="Enable dense nearest-parent-subgraph similarity reward for parseable non-direct fragments.",
     )
     parser.add_argument(
         "--substructure-distance-reward-weight",
         type=float,
-        default=_env_float("SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT", 0.5),
+        default=_env_float(
+            "SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT",
+            0.3,
+            aliases=("SUBSTRUCTURE_DISTANCE_WEIGHT", "SUBDIST_WEIGHT"),
+        ),
         help="Weight applied to the continuous nearest-parent-subgraph similarity reward.",
     )
     parser.add_argument(
@@ -839,6 +855,51 @@ def resolve_projected_cf_reward_enabled(args: argparse.Namespace) -> bool:
             "Use only one of --enable-projected-cf-reward or --disable-projected-cf-reward."
         )
     return bool(enable_flag and not disable_flag)
+
+
+def resolve_substructure_distance_reward_config(
+    args: argparse.Namespace,
+    *,
+    argv: Sequence[str] | None = None,
+) -> tuple[bool, float]:
+    """Resolve runtime distance-reward enablement and effective weight.
+
+    Canonical user-facing switches are:
+
+    - `--enable-substructure-distance-reward`
+    - `--no-enable-substructure-distance-reward`
+    - `ENABLE_SUBSTRUCTURE_DISTANCE_REWARD=true|false`
+    - `SUBSTRUCTURE_DISTANCE_REWARD_WEIGHT=<float>`
+
+    The effective runtime weight is forced to `0.0` when the feature is
+    disabled so logs and reward traces make the inactive state unambiguous.
+    """
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    enable_flag_present = _cli_flag_present(
+        raw_argv,
+        "--enable-substructure-distance-reward",
+    )
+    disable_flag_present = _cli_flag_present(
+        raw_argv,
+        "--no-enable-substructure-distance-reward",
+    )
+    if enable_flag_present and disable_flag_present:
+        raise ValueError(
+            "Substructure distance reward received both enable and disable flags. "
+            "Use only one of --enable-substructure-distance-reward or "
+            "--no-enable-substructure-distance-reward."
+        )
+
+    enabled = bool(getattr(args, "enable_substructure_distance_reward", False))
+    configured_weight = float(
+        getattr(args, "substructure_distance_reward_weight", 0.0) or 0.0
+    )
+    if configured_weight < 0.0:
+        raise ValueError(
+            "Substructure distance reward weight must be non-negative."
+        )
+    return enabled, (configured_weight if enabled else 0.0)
 
 
 def normalize_hiv_label(value: object) -> int | None:
@@ -3216,7 +3277,7 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("core_parse_ok"),
             )
             logger.info(
-                "[SUBSTRUCTURE_DISTANCE_REWARD] parent_smiles=%s fragment_smiles=%s parse_ok=%s direct_substructure=%s num_parent_candidates=%s nearest_parent_subgraph_smiles=%s substructure_similarity=%s substructure_distance=%s substructure_distance_reward=%s projection_method=%s used_projected_subgraph_for_reward=%s cf_reward_skipped_reason=%s",
+                "[SUBSTRUCTURE_DISTANCE_REWARD] parent_smiles=%s fragment_smiles=%s parse_ok=%s direct_substructure=%s num_parent_candidates=%s nearest_parent_subgraph_smiles=%s substructure_similarity=%s substructure_distance=%s substructure_distance_reward=%s subdist_weight=%s subdist_contribution=%s projection_method=%s used_projected_subgraph_for_reward=%s cf_reward_skipped_reason=%s reward_total=%s",
                 reward_log.get("parent_smiles"),
                 reward_log.get("core_fragment") or reward_log.get("raw_fragment"),
                 reward_log.get("parse_ok"),
@@ -3226,12 +3287,15 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("subdist_similarity"),
                 reward_log.get("subdist_distance"),
                 reward_log.get("subdist_reward"),
+                reward_log.get("subdist_weight"),
+                reward_log.get("subdist_contribution"),
                 reward_log.get("projection_method"),
                 reward_log.get("used_projected_subgraph_for_reward"),
                 reward_log.get("cf_reward_skipped_reason"),
+                reward_log.get("reward_total"),
             )
             logger.info(
-                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s repair_attempted=%s repair_success=%s repair_method=%s repair_reason=%s repair_edit_distance=%s repair_suffix_trim_count=%s repair_added_parentheses=%s repair_added_ring_closures=%s repaired_raw_fragment=%s repaired_fragment_chars=%s repaired_parse_stage=%s repaired_parsed_raw=%s repaired_parsed_core=%s repair_failure_reason=%s repair_failure_stage=%s repair_candidate_count=%s repair_candidates_parse_ok=%s repair_candidates_core_ok=%s repair_candidates_parent_ok=%s repair_candidates_projection_ok=%s repair_best_candidate=%s repair_accept_stage=%s repair_candidate_accepted=%s repair_candidate_rejected_reason=%s component_salvage_attempted=%s component_salvage_success=%s component_count=%s raw_component_count=%s core_component_count=%s salvage_method=%s salvaged_fragment=%s salvaged_atom_count=%s component_salvage_failure_reason=%s component_salvage_stage=%s component_salvage_candidate_count=%s component_salvage_best_candidate=%s multi_dummy_hard_fail=%s dummy_salvage_attempted=%s dummy_salvage_success=%s dummy_salvage_method=%s dummy_salvaged_fragment=%s near_parent_hard_fail=%s tiny_fragment_hard_fail=%s fragment_atom_count=%s min_fragment_atoms=%s residual_atom_count=%s residual_atom_ratio=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s size_window_reward=%s size_window_bucket=%s size_window_low=%s size_window_high=%s final_fragment_atom_count=%s final_fragment_atom_ratio=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s direct_substructure=%s subdist_similarity=%s subdist_distance=%s subdist_reward=%s subdist_weight=%s used_projected_subgraph_for_reward=%s cf_reward_skipped_reason=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
+                "[CHEM_REWARD_COMPONENTS] id=%s parent=%s raw_fragment=%s core_fragment=%s repair_attempted=%s repair_success=%s repair_method=%s repair_reason=%s repair_edit_distance=%s repair_suffix_trim_count=%s repair_added_parentheses=%s repair_added_ring_closures=%s repaired_raw_fragment=%s repaired_fragment_chars=%s repaired_parse_stage=%s repaired_parsed_raw=%s repaired_parsed_core=%s repair_failure_reason=%s repair_failure_stage=%s repair_candidate_count=%s repair_candidates_parse_ok=%s repair_candidates_core_ok=%s repair_candidates_parent_ok=%s repair_candidates_projection_ok=%s repair_best_candidate=%s repair_accept_stage=%s repair_candidate_accepted=%s repair_candidate_rejected_reason=%s component_salvage_attempted=%s component_salvage_success=%s component_count=%s raw_component_count=%s core_component_count=%s salvage_method=%s salvaged_fragment=%s salvaged_atom_count=%s component_salvage_failure_reason=%s component_salvage_stage=%s component_salvage_candidate_count=%s component_salvage_best_candidate=%s multi_dummy_hard_fail=%s dummy_salvage_attempted=%s dummy_salvage_success=%s dummy_salvage_method=%s dummy_salvaged_fragment=%s near_parent_hard_fail=%s tiny_fragment_hard_fail=%s fragment_atom_count=%s min_fragment_atoms=%s residual_atom_count=%s residual_atom_ratio=%s projection_attempted=%s projection_success=%s projection_method=%s projection_score=%s projection_source=%s projected_fragment=%s projection_atom_count=%s projection_atom_ratio=%s projection_penalty=%s num_projection_candidates=%s projection_reason=%s size_window_reward=%s size_window_bucket=%s size_window_low=%s size_window_high=%s final_fragment_atom_count=%s final_fragment_atom_ratio=%s raw_has_dummy=%s raw_dummy_count=%s parse_stage=%s parsed_raw_with_dummy=%s parsed_core=%s dummy_removed_before_parse=%s parse_failed_reason=%s empty_response=%s full_parent=%s empty_residual=%s failure_tag=%s invalid_detail=%s fragment_chars=%s oracle_ok=%s format=%s valid=%s sub=%s direct_substructure=%s subdist_similarity=%s subdist_distance=%s subdist_reward=%s subdist_weight=%s subdist_contribution=%s used_projected_subgraph_for_reward=%s cf_reward_skipped_reason=%s len=%s sem=%s teacher_sem=%s fragment_teacher_sem=%s counterfactual_sem=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s parent_without_fragment_smiles=%s total=%s reward_total=%s teacher_input_smiles=%s teacher_prob=%s teacher_reason=%s counterfactual_reason=%s",
                 reward_log.get("id"),
                 reward_log.get("parent_smiles"),
                 reward_log.get("raw_fragment"),
@@ -3322,6 +3386,7 @@ def run_decoded_chem_ppo_loop(
                 reward_log.get("subdist_distance"),
                 reward_log.get("subdist_reward"),
                 reward_log.get("subdist_weight"),
+                reward_log.get("subdist_contribution"),
                 reward_log.get("used_projected_subgraph_for_reward"),
                 reward_log.get("cf_reward_skipped_reason"),
                 reward_log.get("length"),
@@ -3538,6 +3603,10 @@ def main() -> None:
     args = parser.parse_args()
     args = apply_config_overrides(args, parser)
     args = apply_decoded_chem_generation_defaults(args)
+    (
+        args.enable_substructure_distance_reward,
+        args.substructure_distance_reward_weight,
+    ) = resolve_substructure_distance_reward_config(args)
     projected_cf_reward_enabled = resolve_projected_cf_reward_enabled(args)
     args.projected_cf_reward_enabled = projected_cf_reward_enabled
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -3573,6 +3642,17 @@ def main() -> None:
         args.enable_projected_cf_reward,
         args.disable_projected_cf_reward,
         args.enable_parent_projection,
+    )
+    logger.info(
+        "[SUBSTRUCTURE_DISTANCE_REWARD_CONFIG] enabled=%s weight=%s mode=%s min_atom_ratio=%s max_atom_ratio=%s topk=%s mcs_timeout=%s sim_threshold=%s",
+        args.enable_substructure_distance_reward,
+        args.substructure_distance_reward_weight,
+        "shaping_reward",
+        args.substructure_distance_min_atom_ratio,
+        args.substructure_distance_max_atom_ratio,
+        args.substructure_distance_topk,
+        args.substructure_distance_mcs_timeout,
+        args.substructure_distance_sim_threshold,
     )
     if projected_cf_reward_enabled and not args.enable_parent_projection:
         logger.warning(

@@ -278,10 +278,75 @@ class RewardWrapperDummyAtomTests(unittest.TestCase):
         self.assertFalse(reward_log["direct_substructure"])
         self.assertFalse(reward_log["substructure"])
         self.assertTrue(reward_log["valid"] or reward_log["parse_ok"])
+        self.assertIn("subdist_similarity", reward_log)
+        self.assertIn("subdist_distance", reward_log)
+        self.assertIn("subdist_reward", reward_log)
+        self.assertIn("subdist_weight", reward_log)
+        self.assertIn("subdist_contribution", reward_log)
         self.assertIn("projection_attempted", reward_log)
         self.assertIn("projection_success", reward_log)
         self.assertIn("projection_method", reward_log)
         self.assertLessEqual(float(reward_log["reward_total"]), 0.5)
+
+    @unittest.skipIf(torch is None, "torch is required for decoded reward-wrapper tests")
+    def test_compute_rewards_from_decoded_logs_nonzero_subdist_contribution_when_enabled(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_parent_projection=True,
+            enable_substructure_distance_reward=True,
+            substructure_distance_reward_weight=0.3,
+            enable_projected_cf_reward=True,
+            disable_projected_cf_reward=False,
+            enable_size_window_reward=False,
+            format_pass_reward=0.0,
+            valid_pass_reward=0.0,
+            partial_valid_reward=0.0,
+            compactness_bonus=0.0,
+            min_fragment_atoms=0,
+            min_residual_atoms=0,
+            min_residual_ratio=0.0,
+        )
+        parent = "CCOc1ccc(N)cc1"
+        fragment = "C1COCCN1"
+
+        reward_tensor, reward_logs = rewarder.compute_rewards_from_decoded(
+            parent_smiles=[parent],
+            generated_fragments=[fragment],
+            raw_outputs=[fragment],
+            labels=[1],
+            metas=[{"id": "subdist-enabled"}],
+            device="cpu",
+        )
+
+        self.assertEqual(tuple(reward_tensor.shape), (1,))
+        reward_log = reward_logs[0]
+        self.assertTrue(reward_log["parse_ok"])
+        self.assertFalse(reward_log["direct_substructure"])
+        self.assertAlmostEqual(float(reward_log["subdist_weight"]), 0.3)
+        self.assertNotEqual(float(reward_log["subdist_contribution"]), 0.0)
+        self.assertIn("used_projected_subgraph_for_reward", reward_log)
+        self.assertIn("projected_fragment", reward_log)
+
+    @unittest.skipIf(torch is None, "torch is required for decoded reward-wrapper tests")
+    def test_compute_rewards_from_decoded_parse_failed_keeps_non_positive_subdist_contribution(self) -> None:
+        rewarder = self._build_rewarder(
+            enable_substructure_distance_reward=True,
+            substructure_distance_reward_weight=0.3,
+        )
+
+        reward_tensor, reward_logs = rewarder.compute_rewards_from_decoded(
+            parent_smiles=["CCOc1ccc(N)cc1"],
+            generated_fragments=["C?C"],
+            raw_outputs=["C?C"],
+            labels=[1],
+            metas=[{"id": "parse-failed-subdist"}],
+            device="cpu",
+        )
+
+        self.assertEqual(tuple(reward_tensor.shape), (1,))
+        reward_log = reward_logs[0]
+        self.assertFalse(reward_log["parse_ok"])
+        self.assertIsNotNone(reward_log["failure_tag"])
+        self.assertLessEqual(float(reward_log["subdist_contribution"]), 0.0)
 
     def test_merge_failure_fields_avoids_duplicate_keyword_collisions(self) -> None:
         rewarder = self._build_rewarder()
