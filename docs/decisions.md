@@ -6,6 +6,66 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-17] Add a parallel conservative stable-PPO path without modifying the existing PPO entrypoint
+
+### Background
+The repository already had a working decoded-chem PPO path and a best short-run
+checkpoint from the original shuffled prompt order, but longer 150/200/300-step
+runs showed drift symptoms:
+
+- later-step reward and `cf_flip` dropped;
+- `approx_kl` rose in the back half of longer runs;
+- short shuffled PPO remained more reliable than simply extending ordinary PPO.
+
+The user explicitly required that the original PPO code remain untouched so the
+team could run apples-to-apples control experiments between:
+
+1. the existing PPO path, and
+2. a new conservative / stable PPO path with stronger KL control and lower
+   update aggressiveness.
+
+### Decision
+Add a new stable-only training and analysis path that stays fully parallel to
+the original PPO entrypoint:
+
+- `scripts/train_ppo_stable.py` is a new decoded-chem PPO entrypoint that
+  reuses existing loaders / model builders / reward helpers but implements its
+  own conservative PPO update behavior;
+- `src/rewards/reward_wrapper_stable.py` adds a stable-only post-processing
+  layer around the existing reward wrapper so teacher-confidence gating can be
+  applied without changing default reward behavior in ordinary PPO;
+- the stable PPO path now supports optional environment / CLI overrides for:
+  lower learning rate, smaller clip range, fewer PPO epochs, explicit gradient
+  clipping, reward clipping, optional reward / advantage normalization, target
+  and hard KL monitoring, adaptive KL penalty, teacher-confidence gating, and
+  validation-based best-checkpoint / early-stop logic;
+- new Slurm wrappers were added for:
+  - a 5-step smoke run, and
+  - a 200-step conservative shuffled-label1 run;
+- `scripts/make_stratified_ppo_prompts.py` adds a new stratified shuffle tool
+  for PPO prompt CSVs;
+- `scripts/analyze_stable_ppo_log.py` adds a stable-PPO segment analyzer for
+  1-50 / 51-100 / 101-150 / 151-200 blocks.
+
+### Alternatives considered
+1. Modify `scripts/train_ppo.py` in place to add stable flags.
+2. Change the default reward wrapper behavior globally.
+3. Keep using only the original shuffled short-run PPO path and skip a
+   conservative long-run branch entirely.
+
+### Consequences
+- The old PPO entrypoint and its paired Slurm script remain unchanged, which
+  preserves backward compatibility and protects current baselines.
+- Conservative long-run PPO can now be tested as a parallel branch rather than
+  as a behavior change hidden behind new flags in the original script.
+- Teacher-confidence gating and stable-KL logic are isolated to the new stable
+  path, which keeps the default reward semantics unchanged for existing runs.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-17] Add full-dataset candidate-pool generation and selector-facing audit for original shuffle100 before any further PPO training
 
 ### Background

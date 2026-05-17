@@ -4,14 +4,20 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import math
 import os
 from pathlib import Path
+import sys
 from typing import Any, Sequence
 
-from src.data.ppo_prompt_dataset import PPOPromptRecord, load_ppo_prompt_records
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.chem import is_parent_substructure
+from src.data.ppo_prompt_dataset import load_ppo_prompt_records
 from src.eval.full_candidate_pool import _enrich_reward_log
 from src.reward.reward_wrapper import ChemRLRewarder
 from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
@@ -46,14 +52,12 @@ from scripts.train_ppo import (
     build_hf_dataset,
     build_parser as build_base_parser,
     build_policy_model,
-    build_reward_model_wrapper,
     build_tokenizer,
     build_value_model,
     collect_runtime_environment_debug,
     ensure_score_head_for_experimental_ppo,
     extract_fragment_smiles,
     import_training_dependencies,
-    load_prompt_examples,
     log_available_ppo_step_apis,
     log_runtime_model_debug,
     patch_internlm_cache,
@@ -66,8 +70,6 @@ from scripts.train_ppo import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "hpc" / "rl_checkpoints"
 DEFAULT_VAL_SCORE_ATOM_RATIO_TARGET = 0.35
 
 
@@ -340,6 +342,34 @@ def resolve_stable_config(args: argparse.Namespace) -> StablePPOConfig:
     )
 
 
+def load_stable_prompt_examples(
+    dataset_path: Path,
+    *,
+    default_parent_label: int,
+    only_positive: bool,
+    max_prompt_examples: int,
+) -> list[PromptExample]:
+    target_label = 1 if only_positive else None
+    records, _metadata = load_ppo_prompt_records(
+        dataset_path,
+        label_col="label",
+        smiles_col="parent_smiles",
+        target_label=target_label,
+        limit=max_prompt_examples,
+    )
+    if not records:
+        raise ValueError(f"No usable PPO prompt examples were found in {dataset_path}")
+    return [
+        PromptExample(
+            index=int(record.parent_index),
+            prompt=record.prompt,
+            parent_smiles=record.parent_smiles,
+            original_label=int(record.label if record.label in (0, 1) else default_parent_label),
+        )
+        for record in records
+    ]
+
+
 def _resolve_final_fragment_for_metrics(row: dict[str, Any]) -> str | None:
     projected_fragment = row.get("projected_fragment") or row.get(
         "nearest_parent_subgraph_smiles"
@@ -361,17 +391,15 @@ def _infer_final_substructure_rate_from_logs(
         return 0.0
     success_count = 0
     for reward_log in reward_logs:
-        direct_substructure = bool(
-            reward_log.get("direct_substructure")
-            or reward_log.get("direct_substructure_success")
-        )
-        projection_method = str(reward_log.get("projection_method") or "").strip().lower()
         final_fragment = _resolve_final_fragment_for_metrics(reward_log)
-        if direct_substructure:
-            success_count += 1
+        parent_smiles = str(reward_log.get("parent_smiles") or "").strip()
+        if not final_fragment or not parent_smiles:
             continue
-        if projection_method == "nearest_parent_subgraph" and final_fragment:
-            success_count += 1
+        try:
+            if is_parent_substructure(parent_smiles, final_fragment):
+                success_count += 1
+        except Exception:
+            continue
     return _safe_rate(success_count, len(reward_logs))
 
 
@@ -468,8 +496,7 @@ def _maybe_clip_and_normalize_rewards(
                 clipped_reward = min(clipped_reward, clip_max)
             processed[index] = float(clipped_reward)
             if index < len(reward_logs):
-                reward_logs[index]["reward_total"] = float(clipped_reward)
-                reward_logs[index]["total"] = float(clipped_reward)
+                reward_logs[index]["stable_ppo_reward_after_clip"] = float(clipped_reward)
             logger.info(
                 "[STABLE_PPO_REWARD_CLIP] step=%s index=%s raw_reward=%s clipped_reward=%s clip_min=%s clip_max=%s",
                 step_index,
@@ -505,8 +532,12 @@ def _maybe_clip_and_normalize_rewards(
                 )
                 for index in range(processed.numel()):
                     if index < len(reward_logs):
-                        reward_logs[index]["reward_total"] = float(processed[index].item())
-                        reward_logs[index]["total"] = float(processed[index].item())
+                        reward_logs[index]["stable_ppo_reward_used"] = float(
+                            processed[index].item()
+                        )
+    for index in range(processed.numel()):
+        if index < len(reward_logs):
+            reward_logs[index]["stable_ppo_reward_used"] = float(processed[index].item())
 
     return processed.to(device=reward_tensor.device, dtype=reward_tensor.dtype)
 
@@ -843,13 +874,11 @@ def run_stable_decoded_chem_ppo_loop(
     value_model: Any,
     tokenizer: Any,
     train_dataset: Any,
-    chem_reward_model: Any,
     stable_reward_wrapper: StableChemRLRewardWrapper,
     output_dir: Path,
     logger: Any,
 ) -> Path:
     torch = deps["torch"]
-    del chem_reward_model
 
     log_available_ppo_step_apis(logger)
     logger.info(
@@ -1025,6 +1054,8 @@ def run_stable_decoded_chem_ppo_loop(
             step_index=step_index,
         )
         chemistry_reward_called = True
+        raw_reward_tensor = reward_tensor.clone().detach()
+        raw_step_metrics = _summarize_step_metrics(reward_logs)
         reward_tensor = _maybe_clip_and_normalize_rewards(
             reward_tensor,
             reward_logs=reward_logs,
@@ -1037,8 +1068,6 @@ def run_stable_decoded_chem_ppo_loop(
         for reward_log in reward_logs:
             reward_log["step_index"] = step_index
         candidate_pool_rows.extend(reward_logs)
-
-        step_metrics = _summarize_step_metrics(reward_logs)
 
         with torch.no_grad():
             old_logprobs = _compute_response_logprobs(
@@ -1218,26 +1247,27 @@ def run_stable_decoded_chem_ppo_loop(
             early_stop_reason = "hard_kl"
 
         logger.info(
-            "[STABLE_PPO_UPDATE] step=%s reward_mean=%.4f reward_min=%.4f reward_max=%.4f policy_loss=%.4f value_loss=%.4f total_loss=%.4f approx_kl=%.4f parse_ok_rate=%.4f valid_rate=%.4f direct_substructure_rate=%.4f final_substructure_rate=%.4f projection_used_rate=%.4f oracle_ok_rate=%.4f cf_flip_rate=%.4f cf_drop_mean=%.4f core_unusable_count=%s parse_failed_count=%s atom_ratio_mean=%.4f",
+            "[STABLE_PPO_UPDATE] step=%s reward_mean=%.4f reward_min=%.4f reward_max=%.4f ppo_reward_mean=%.4f policy_loss=%.4f value_loss=%.4f total_loss=%.4f approx_kl=%.4f parse_ok_rate=%.4f valid_rate=%.4f direct_substructure_rate=%.4f final_substructure_rate=%.4f projection_used_rate=%.4f oracle_ok_rate=%.4f cf_flip_rate=%.4f cf_drop_mean=%.4f core_unusable_count=%s parse_failed_count=%s atom_ratio_mean=%.4f",
             step_index,
+            float(raw_reward_tensor.mean().detach().cpu().item()),
+            float(raw_reward_tensor.min().detach().cpu().item()),
+            float(raw_reward_tensor.max().detach().cpu().item()),
             float(reward_tensor.mean().detach().cpu().item()),
-            float(reward_tensor.min().detach().cpu().item()),
-            float(reward_tensor.max().detach().cpu().item()),
             last_policy_loss,
             last_value_loss,
             last_total_loss,
             last_approx_kl,
-            step_metrics["parse_ok_rate"],
-            step_metrics["valid_rate"],
-            step_metrics["direct_substructure_rate"],
-            step_metrics["final_substructure_rate"],
-            step_metrics["projection_used_rate"],
-            step_metrics["oracle_ok_rate"],
-            step_metrics["cf_flip_rate"],
-            step_metrics["cf_drop_mean"],
-            int(step_metrics["core_unusable_count"]),
-            int(step_metrics["parse_failed_count"]),
-            step_metrics["atom_ratio_mean"],
+            raw_step_metrics["parse_ok_rate"],
+            raw_step_metrics["valid_rate"],
+            raw_step_metrics["direct_substructure_rate"],
+            raw_step_metrics["final_substructure_rate"],
+            raw_step_metrics["projection_used_rate"],
+            raw_step_metrics["oracle_ok_rate"],
+            raw_step_metrics["cf_flip_rate"],
+            raw_step_metrics["cf_drop_mean"],
+            int(raw_step_metrics["core_unusable_count"]),
+            int(raw_step_metrics["parse_failed_count"]),
+            raw_step_metrics["atom_ratio_mean"],
         )
 
         if step_index % max(1, int(args.save_steps)) == 0:
@@ -1323,6 +1353,11 @@ def main() -> None:
     args.projected_cf_reward_enabled = projected_cf_reward_enabled
     stable_config = resolve_stable_config(args)
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if args.ppo_loop != "decoded_chem":
+        raise ValueError(
+            "train_ppo_stable.py only supports --ppo-loop decoded_chem. "
+            "Use the original train_ppo.py for trl_experimental compatibility checks."
+        )
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
@@ -1358,15 +1393,14 @@ def main() -> None:
             "dataset_path": str(dataset_path),
             "output_dir": str(output_dir),
             "args": vars(args),
-            "stable_config": stable_config.__dict__,
+            "stable_config": asdict(stable_config),
         },
     )
 
-    examples = load_prompt_examples(
+    examples = load_stable_prompt_examples(
         dataset_path,
         default_parent_label=args.default_parent_label,
         only_positive=args.only_positive,
-        include_label_in_prompt=args.include_label_in_prompt,
         max_prompt_examples=args.max_prompt_examples,
     )
     deps = import_training_dependencies()
@@ -1501,12 +1535,6 @@ def main() -> None:
         ),
         logger=logger,
     )
-    chem_reward_model = build_reward_model_wrapper(
-        deps,
-        tokenizer=tokenizer,
-        rewarder=rewarder,
-    )
-
     final_output_dir = run_stable_decoded_chem_ppo_loop(
         deps=deps,
         args=args,
@@ -1517,7 +1545,6 @@ def main() -> None:
         value_model=value_model,
         tokenizer=tokenizer,
         train_dataset=dataset,
-        chem_reward_model=chem_reward_model,
         stable_reward_wrapper=stable_reward_wrapper,
         output_dir=output_dir,
         logger=logger,
@@ -1527,3 +1554,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    PromptExample,
