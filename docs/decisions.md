@@ -6,6 +6,54 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-17] Add a dedicated Slurm wrapper for auditing the stable300 candidate pool with the existing selector-facing audit script
+
+### Background
+The repository already has a selector-facing candidate-pool audit entrypoint in
+`scripts/audit_candidate_pool.py`, and the stable300 run
+`decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500`
+has completed. The immediate need is to audit its saved
+`candidate_pool.jsonl` on HPC without introducing a new audit implementation or
+changing any PPO or stable-PPO training code.
+
+The existing audit CLI was confirmed to support the required arguments:
+
+- `--pool_jsonl`
+- `--out_json`
+- `--out_txt`
+- `--group_by_label`
+- `--sim_sample_size`
+- `--topk_show`
+
+### Decision
+Add only a thin Slurm wrapper:
+
+- `scripts/slurm/audit_candidate_pool_stable300.sh`
+
+This wrapper:
+
+- targets the stable300 candidate pool path directly;
+- prints environment and path diagnostics;
+- checks that both the candidate pool and the audit script exist;
+- writes outputs into
+  `outputs/hpc/audits/<RUN_NAME>_candidate_pool_audit/`;
+- reuses the existing `scripts/audit_candidate_pool.py` unchanged.
+
+### Alternatives considered
+1. Write a new stable300-specific audit script.
+2. Hardcode the stable300 path inside the existing audit Python entrypoint.
+3. Run the audit manually from an interactive shell without a Slurm wrapper.
+
+### Consequences
+- Stable300 can now be audited with a single `sbatch` command.
+- The result remains directly comparable with earlier candidate-pool audits
+  because the same Python audit implementation is reused.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-17] Add a parallel conservative stable-PPO path without modifying the existing PPO entrypoint
 
 ### Background
