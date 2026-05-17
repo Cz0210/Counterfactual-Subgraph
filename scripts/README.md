@@ -9,6 +9,8 @@ contains concrete local/HPC entrypoints for:
 - SFT v3 HIV dataset rebuild and audit
 - AIDS oracle training
 - PPO RL training
+- PPO candidate-pool audit
+- PPO reward/teacher audit
 
 Recommended HPC run layout for the rebuilt HIV-derived SFT v3 workflow:
 
@@ -77,5 +79,7 @@ Planned entrypoints:
 - `scripts/train_rl.py`
 - `scripts/run_ppo_v3_core_smoke.sh`
 - `scripts/run_ppo_v3_core_diagnose.sh`
+- `scripts/audit_candidate_pool.py`
+- `scripts/audit_reward_teacher.py`
 - `scripts/eval_model.py`
 - `scripts/run_eval_sft_v3_core.sh`

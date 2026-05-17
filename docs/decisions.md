@@ -6,6 +6,118 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-17] Add an independent reward/teacher audit entrypoint for diagnosing PPO-100 vs long-run degradation
+
+### Background
+The current decoded PPO workflow reached a point where `PPO-100` looked better
+than 150/200/300-step checkpoints on reward, direct-substructure rate, and
+parse/core usability, but that trend alone could not distinguish between:
+
+- benign PPO policy drift after longer optimization;
+- data-order / prompt-difficulty effects from short sequential training;
+- an actual problem in the reward function or teacher/oracle behavior.
+
+The team therefore needed a standalone audit path that could inspect teacher
+reliability on original parents and analyze `candidate_pool.jsonl` for
+counterfactual-oracle coverage, reward alignment, projection shortcuts, and
+size shortcuts, without changing SFT v3 data construction, SFT training, or
+PPO main training logic.
+
+### Decision
+Add a separate reward/teacher diagnosis entrypoint that stays fully outside the
+training loop:
+
+- new audit logic now lives in `src/eval/reward_teacher_audit.py`;
+- `scripts/audit_reward_teacher.py` provides a thin CLI for dataset-backed
+  teacher reliability plus candidate-pool reward auditing;
+- `scripts/slurm/audit_reward_teacher.sh` hardcodes the current best 100-step
+  candidate pool, the label=1 PPO prompt dataset, and the AIDS random-forest
+  teacher so HPC usage stays one-command simple via
+  `sbatch scripts/slurm/audit_reward_teacher.sh`;
+- the audit explicitly tolerates candidate-pool schema drift by accepting
+  compatibility aliases such as `p_before/teacher_p_before`,
+  `p_after/teacher_p_after`, `cf_drop/counterfactual_drop/teacher_cf_drop`,
+  `cf_flip/counterfactual_flip`, and
+  `counterfactual_reason/cf_reward_skipped_reason`;
+- final outputs now separate six questions the team cares about most:
+  teacher reliability, cf-oracle skip/deletion failure pressure, reward-to-cf
+  alignment, projection loopholes, size loopholes, and whether current
+  degradation looks more like PPO drift or reward/teacher trouble.
+
+### Alternatives considered
+1. Reuse only PPO training logs and avoid any new structured audit.
+2. Fold reward/teacher diagnosis into `train_ppo.py`, making the training
+   entrypoint even more coupled to analysis logic.
+3. Jump directly to shuffle-100 or multi-seed-100 experiments before first
+   checking whether the current reward/teacher pipeline is itself suspicious.
+
+### Consequences
+- PPO checkpoint diagnosis becomes reproducible from saved artifacts instead of
+  depending on partial training logs.
+- Teacher/oracle reliability on original parents can now be audited directly,
+  which helps separate model-side label noise from PPO optimization effects.
+- Projection and oversized-fragment shortcuts become explicit audit outputs
+  instead of vague hypotheses during long-run PPO comparisons.
+- The change remains evaluation-only and does not alter SFT data, SFT training,
+  or PPO optimization behavior.
+
+### Status
+Accepted
+
+---
+
+## [2026-05-14] Add a selector-facing candidate-pool audit entrypoint for checkpoint-level PPO evaluation
+
+### Background
+The current decoded PPO workflow has already reached the stage where the
+important question is no longer "can PPO run?" but "is a short-run checkpoint a
+good candidate-pool generator for the downstream class-level selector?" The
+team identified the 100-step run
+`decoded_chem_ppo_sanity100_sftv3_projcf_dist03_projpen1_failfix_ckpt500` as a
+better candidate than the longer 300-step run, which showed more policy drift.
+At that point, continuing long PPO training was less urgent than auditing the
+quality, diversity, projection dependence, and counterfactual utility of the
+already generated `candidate_pool.jsonl`.
+
+### Decision
+Add a dedicated audit path for PPO candidate pools without touching SFT v3
+dataset construction, SFT training, PPO loss, teacher/oracle logic, or
+projection search:
+
+- new selector-facing audit logic now lives in
+  `src/eval/candidate_pool_audit.py`;
+- `scripts/audit_candidate_pool.py` provides a thin CLI wrapper for JSON/TXT
+  reports over `candidate_pool.jsonl`;
+- `scripts/slurm/audit_candidate_pool.sh` is pinned to the current 100-step run
+  so HPC usage stays one-command simple via
+  `sbatch scripts/slurm/audit_candidate_pool.sh`;
+- the audit uses field-compatibility fallbacks across reward-trace schema
+  variants instead of assuming one rigid JSONL shape, because the pool rows
+  evolved during recent projection-penalty and distance-reward debugging;
+- final recommendations are driven by selector-oriented heuristics such as
+  final-substructure rate, projection-used rate, cf-flip rate, diversity, and
+  Morgan-Tanimoto redundancy.
+
+### Alternatives considered
+1. Reuse training logs only and skip a structured `candidate_pool.jsonl` audit.
+2. Fold candidate-pool analysis into `train_ppo.py`, mixing evaluation logic
+   back into the training entrypoint.
+3. Continue toward 150-step/200-step/1000-step PPO runs first and postpone
+   selector-oriented auditing.
+
+### Consequences
+- Short PPO runs can now be evaluated as generator checkpoints before spending
+  more compute on longer RL training.
+- Candidate-pool readiness for the downstream selector becomes explicit and
+  reproducible through saved JSON and TXT reports.
+- The audit remains decoupled from training so the class-level selector can
+  iterate independently of PPO runtime changes.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-14] Make decoded PPO failure traces tolerate forward-compatible reward-debug fields
 
 ### Background
