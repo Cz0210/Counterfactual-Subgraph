@@ -34,6 +34,7 @@ from src.utils.logging_utils import RunContext, configure_run_logger, write_runt
 
 from scripts.train_ppo import (
     DEFAULT_WANDB_RUN_NAME,
+    PromptExample,
     _build_response_mask,
     _build_sequence_reward_assignments,
     _compute_response_logprobs,
@@ -1554,4 +1555,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    PromptExample,
