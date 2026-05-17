@@ -2,6 +2,7 @@
 
 from src.data.collators import CounterfactualPromptCollator, PromptBatch
 from src.data.dataset import JsonlMoleculeDataset
+from src.data.ppo_prompt_dataset import PPOPromptRecord, load_ppo_prompt_records
 from src.data.prompts import (
     build_counterfactual_prompt,
     build_exact_parent_substructure_prompt,
@@ -13,9 +14,11 @@ __all__ = [
     "FragmentExample",
     "JsonlMoleculeDataset",
     "MoleculeRecord",
+    "PPOPromptRecord",
     "PromptBatch",
     "build_counterfactual_prompt",
     "build_exact_parent_substructure_prompt",
+    "load_ppo_prompt_records",
     "normalize_molecule_record",
 ]
 

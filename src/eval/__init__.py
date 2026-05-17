@@ -6,6 +6,16 @@ from src.eval.candidate_pool_audit import (
     render_audit_report,
     write_audit_outputs,
 )
+from src.eval.full_candidate_pool import (
+    FullPoolGenerationConfig,
+    generate_full_candidate_pool,
+    inspect_checkpoint_directory,
+    resolve_adapter_load_path,
+)
+from src.eval.full_candidate_pool_audit import (
+    FullPoolAuditConfig,
+    audit_full_candidate_pool,
+)
 from src.eval.inference import propose_fragment_candidate, run_minimal_inference
 from src.eval.interfaces import EvaluationExample, EvaluationSummary, Evaluator
 from src.eval.metrics import mean_metric, safe_rate
@@ -16,11 +26,17 @@ __all__ = [
     "EvaluationExample",
     "EvaluationSummary",
     "Evaluator",
+    "FullPoolAuditConfig",
+    "FullPoolGenerationConfig",
     "audit_candidate_pool",
+    "audit_full_candidate_pool",
+    "generate_full_candidate_pool",
+    "inspect_checkpoint_directory",
     "mean_metric",
     "propose_fragment_candidate",
     "render_audit_report",
     "render_summary",
+    "resolve_adapter_load_path",
     "run_minimal_inference",
     "safe_rate",
     "write_audit_outputs",

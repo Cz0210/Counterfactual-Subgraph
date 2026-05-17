@@ -6,6 +6,92 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-17] Add full-dataset candidate-pool generation and selector-facing audit for original shuffle100 before any further PPO training
+
+### Background
+By this point the project had already completed:
+
+- SFT v3;
+- decoded PPO diagnostics;
+- teacher-confidence filtering;
+- ordered-vs-shuffle control experiments.
+
+The working conclusion shifted from "keep extending PPO" to "treat the current
+best shuffled short-run checkpoint as a candidate generator and measure whether
+its full label=1 pool is good enough for the downstream class-level selector."
+
+The current best checkpoint is the original shuffled 100-step run
+`decoded_chem_ppo_sanity100_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500`.
+The next priority is therefore not more PPO optimization, but:
+
+1. generate a full label=1 candidate pool with multiple candidates per parent,
+   without any PPO updates;
+2. compare that pool against an SFT-only baseline;
+3. audit legality, counterfactual utility, diversity, redundancy, and parent
+   coverage in a selector-facing format.
+
+### Decision
+Add a separate full-pool inference and audit path that stays outside SFT and
+PPO training logic:
+
+- `src/data/ppo_prompt_dataset.py` now provides one normalized loader for PPO
+  prompt CSV / JSONL files, including fallbacks for `parent_smiles`, `smiles`,
+  prompt-text SMILES extraction, and prompt reconstruction when needed;
+- `src/eval/full_candidate_pool.py` now provides:
+  - checkpoint inspection helpers for adapter-root vs `checkpoint-*` layouts,
+  - adapter load-path resolution,
+  - offline multi-candidate generation over the full prompt pool,
+  - reward/evaluator reuse through `ChemRLRewarder.compute_rewards_from_decoded(...)`,
+  - JSONL row enrichment so the output is compatible with existing
+    `candidate_pool.jsonl` consumers while also exposing new selector-facing
+    aliases such as `final_fragment`, `projection_used`, `final_substructure`,
+    and `cf_oracle_called`;
+- `scripts/generate_full_candidate_pool.py` is the thin CLI entrypoint for
+  full-dataset inference with either:
+  - SFT-only mode: base model + SFT LoRA, or
+  - PPO mode: base model + resolved PPO adapter;
+- `src/eval/full_candidate_pool_audit.py` now computes a richer audit than the
+  earlier checkpoint-level candidate-pool audit, including:
+  - pool scale,
+  - legality,
+  - counterfactual-oracle usage,
+  - size statistics,
+  - diversity / redundancy,
+  - selector-facing fragment coverage over the full label=1 parent set,
+  - explicit failure-case export;
+- `scripts/audit_full_candidate_pool.py` is the thin CLI wrapper for that
+  selector-facing full-pool audit;
+- new Slurm wrappers now support one-command HPC generation / audit for:
+  - PPO original shuffle100,
+  - optional chained generate+audit,
+  - SFT-only baseline;
+- the shuffle200 path is kept as a future template only; it is not executed by
+  default.
+
+### Alternatives considered
+1. Wait for shuffle200 to finish before building any full-pool generation path.
+2. Reuse only partial `candidate_pool.jsonl` artifacts from training steps
+   instead of running dedicated full-dataset inference.
+3. Build a separate reward implementation for inference-time pool scoring.
+
+### Consequences
+- The repository now has a dedicated offline candidate-generation path that
+  reuses the existing decoded-chem reward/evaluator instead of duplicating the
+  reward logic.
+- Selector readiness can now be judged from saved full-pool artifacts rather
+  than from short PPO logs or early-step candidate traces alone.
+- The checkpoint-inspection helper makes the saved-adapter assumption explicit:
+  decoded-chem PPO saves the final adapter at the run root when adapter files
+  are present there; only if those files are missing do we need to fall back to
+  a `checkpoint-*` subdirectory.
+- The work remains completely outside SFT data construction, SFT training, PPO
+  optimization logic, and reward semantics.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-17] Add a teacher-confidence filter for PPO prompt pools before continuing long decoded-chem PPO runs
 
 ### Background

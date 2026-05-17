@@ -12,6 +12,8 @@ contains concrete local/HPC entrypoints for:
 - PPO candidate-pool audit
 - PPO reward/teacher audit
 - PPO prompt teacher-confidence filtering
+- full candidate-pool generation
+- full candidate-pool audit
 
 Recommended HPC run layout for the rebuilt HIV-derived SFT v3 workflow:
 
@@ -83,5 +85,15 @@ Planned entrypoints:
 - `scripts/audit_candidate_pool.py`
 - `scripts/audit_reward_teacher.py`
 - `scripts/filter_ppo_prompts_by_teacher_confidence.py`
+- `scripts/generate_full_candidate_pool.py`
+- `scripts/audit_full_candidate_pool.py`
 - `scripts/eval_model.py`
 - `scripts/run_eval_sft_v3_core.sh`
+
+Current selector-prep Slurm entrypoints:
+
+- `scripts/slurm/generate_full_pool_orig_shuffle100_label1.sh`
+- `scripts/slurm/audit_full_pool_orig_shuffle100_label1.sh`
+- `scripts/slurm/run_full_pool_orig_shuffle100_label1.sh`
+- `scripts/slurm/generate_full_pool_sft_only_label1.sh`
+- `scripts/slurm/audit_full_pool_sft_only_label1.sh`
