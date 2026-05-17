@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from collections import Counter
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -119,6 +120,25 @@ def _safe_rate(numerator: int, denominator: int) -> float:
 
 def _safe_mean(values: list[float]) -> float | None:
     return (sum(values) / len(values)) if values else None
+
+
+def set_global_generation_seed(seed: int | None) -> None:
+    """Set one global generation seed without touching per-sample sampling."""
+
+    if seed is None:
+        return
+
+    import numpy as np
+    import torch
+    from transformers import set_seed
+
+    resolved_seed = int(seed)
+    random.seed(resolved_seed)
+    np.random.seed(resolved_seed)
+    torch.manual_seed(resolved_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(resolved_seed)
+    set_seed(resolved_seed)
 
 
 def inspect_checkpoint_directory(checkpoint_dir: str | Path) -> CheckpointInspection:
@@ -266,6 +286,44 @@ def _build_lora_model(
     if getattr(model, "generation_config", None) is not None:
         model.generation_config.use_cache = False
     return model
+
+
+def build_generation_kwargs(
+    *,
+    encoded: dict[str, Any],
+    tokenizer: Any,
+    config: FullPoolGenerationConfig,
+) -> dict[str, Any]:
+    """Build one generate() kwargs dict compatible with current PEFT wrappers."""
+
+    generation_kwargs: dict[str, Any] = {
+        **encoded,
+        "max_new_tokens": int(config.max_new_tokens),
+        "num_return_sequences": int(config.num_return_sequences),
+        "do_sample": bool(config.generation_do_sample),
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "use_cache": False,
+    }
+    if config.generation_do_sample:
+        generation_kwargs["temperature"] = float(config.generation_temperature)
+        generation_kwargs["top_p"] = float(config.generation_top_p)
+    generation_kwargs.pop("generator", None)
+    return generation_kwargs
+
+
+def generate_ids_with_sanitized_kwargs(
+    model: Any,
+    generation_kwargs: dict[str, Any],
+    *,
+    torch_module: Any,
+) -> Any:
+    """Call model.generate() after removing unsupported kwargs like generator."""
+
+    sanitized_generation_kwargs = dict(generation_kwargs)
+    sanitized_generation_kwargs.pop("generator", None)
+    with torch_module.no_grad():
+        return model.generate(**sanitized_generation_kwargs)
 
 
 def _resolve_final_fragment(row: dict[str, Any]) -> str | None:
@@ -471,6 +529,8 @@ def generate_full_candidate_pool(
 
     import torch
 
+    set_global_generation_seed(config.seed)
+
     dataset_records, dataset_metadata = load_ppo_prompt_records(
         dataset_path,
         label_col=config.label_col,
@@ -545,8 +605,6 @@ def generate_full_candidate_pool(
     generated_rows: list[dict[str, Any]] = []
     batch_size = max(1, int(config.batch_size))
     model_device = next(model.parameters()).device
-    generator = torch.Generator(device=model_device)
-    generator.manual_seed(int(config.seed))
 
     for batch_start in range(0, len(dataset_records), batch_size):
         batch_records = dataset_records[batch_start : batch_start + batch_size]
@@ -559,22 +617,17 @@ def generate_full_candidate_pool(
         )
         encoded = {key: value.to(model_device) for key, value in encoded.items()}
 
-        generation_kwargs: dict[str, Any] = {
-            **encoded,
-            "max_new_tokens": int(config.max_new_tokens),
-            "num_return_sequences": int(config.num_return_sequences),
-            "do_sample": bool(config.generation_do_sample),
-            "pad_token_id": tokenizer.pad_token_id,
-            "eos_token_id": tokenizer.eos_token_id,
-            "use_cache": False,
-            "generator": generator,
-        }
-        if config.generation_do_sample:
-            generation_kwargs["temperature"] = float(config.generation_temperature)
-            generation_kwargs["top_p"] = float(config.generation_top_p)
-
-        with torch.no_grad():
-            generated_ids = model.generate(**generation_kwargs)
+        generation_kwargs = build_generation_kwargs(
+            encoded=encoded,
+            tokenizer=tokenizer,
+            config=config,
+        )
+        generation_kwargs.pop("generator", None)
+        generated_ids = generate_ids_with_sanitized_kwargs(
+            model,
+            generation_kwargs,
+            torch_module=torch,
+        )
 
         response_ids = generated_ids[:, encoded["input_ids"].shape[1] :]
         response_texts = tokenizer.batch_decode(
@@ -662,7 +715,10 @@ def generate_full_candidate_pool(
 __all__ = [
     "CheckpointInspection",
     "FullPoolGenerationConfig",
+    "build_generation_kwargs",
     "generate_full_candidate_pool",
+    "generate_ids_with_sanitized_kwargs",
     "inspect_checkpoint_directory",
     "resolve_adapter_load_path",
+    "set_global_generation_seed",
 ]
