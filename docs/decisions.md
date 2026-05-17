@@ -6,6 +6,65 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-17] Add a teacher-confidence filter for PPO prompt pools before continuing long decoded-chem PPO runs
+
+### Background
+The reward/teacher audit on the current best short-run checkpoint
+`decoded_chem_ppo_sanity100_sftv3_projcf_dist03_projpen1_failfix_ckpt500`
+showed a split conclusion:
+
+- decoded PPO itself still looked structurally healthy, with
+  `cf_oracle_called_rate` near 1.0 and no obvious projection or size loophole;
+- but teacher reliability on the label=1 parent pool was only moderately
+  trustworthy, with `teacher_correct_rate≈0.855`, `low_confidence_rate≈0.144`,
+  and `very_low_confidence_rate≈0.104`.
+
+That means the next priority is not to keep lengthening PPO blindly, nor to
+rewrite reward shaping immediately. The more controlled next step is to reduce
+teacher-side noise in the PPO prompt pool and compare short filtered runs
+against the current baseline.
+
+### Decision
+Add a standalone teacher-confidence filtering path for PPO prompt CSV files:
+
+- new filtering logic now lives in `src/data/teacher_confidence_filter.py`;
+- `scripts/filter_ppo_prompts_by_teacher_confidence.py` provides a thin CLI
+  wrapper that:
+  - reads a PPO prompt CSV,
+  - resolves `parent_smiles` with fallback to `smiles` and prompt text,
+  - scores each parent with `TeacherSemanticScorer`,
+  - keeps only rows satisfying target-label, `teacher_result_ok`,
+    optional teacher-correctness, and minimum `p_label`;
+- `scripts/slurm/filter_ppo_prompts_teacher_p05_label1.sh` hardcodes the
+  current label=1 PPO prompt CSV, the AIDS RF teacher, and the
+  `p_label >= 0.5 && teacher_correct` filter so HPC usage stays one-command
+  simple via
+  `sbatch scripts/slurm/filter_ppo_prompts_teacher_p05_label1.sh`;
+- `scripts/slurm/train_ppo.sh` now accepts an optional `DATASET_PATH`
+  environment variable and forwards it to `--dataset-path`, so filtered prompt
+  files can be used without changing PPO training code.
+
+### Alternatives considered
+1. Continue training 150/200/300-step PPO on the unfiltered prompt pool first.
+2. Immediately redesign the reward function despite the audit not showing a
+   clear reward loophole yet.
+3. Create a separate custom PPO training wrapper instead of teaching the
+   existing Slurm wrapper to accept a dataset override.
+
+### Consequences
+- The project can now run a cleaner apples-to-apples experiment:
+  unfiltered PPO-100/150 versus teacher-filtered PPO-100/150.
+- Teacher-side uncertainty is reduced before spending more A800 time on longer
+  decoded-chem PPO runs.
+- The change remains outside SFT dataset construction, SFT training, and PPO
+  reward logic; it only filters prompt inputs and improves Slurm parameter
+  plumbing.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-17] Add an independent reward/teacher audit entrypoint for diagnosing PPO-100 vs long-run degradation
 
 ### Background

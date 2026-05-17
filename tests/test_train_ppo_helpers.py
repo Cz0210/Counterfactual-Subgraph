@@ -423,6 +423,19 @@ class TrainPPOHelperTests(unittest.TestCase):
         )
         self.assertIn("--substructure-distance-reward-weight", script_text)
 
+    def test_train_ppo_slurm_script_accepts_dataset_path_override(self) -> None:
+        script_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "slurm"
+            / "train_ppo.sh"
+        )
+        script_text = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("DATASET_PATH=${DATASET_PATH:-}", script_text)
+        self.assertIn('echo "DATASET_PATH=${DATASET_PATH:-<unset>}"', script_text)
+        self.assertIn('cmd+=(--dataset-path "${DATASET_PATH}")', script_text)
+
     def test_parser_accepts_tiny_fragment_guard_flags(self) -> None:
         parser = build_parser()
 

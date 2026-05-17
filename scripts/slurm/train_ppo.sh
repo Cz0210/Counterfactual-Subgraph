@@ -12,6 +12,7 @@ conda activate smiles_pip118
 
 PROJECT_DIR=/share/home/u20526/czx/counterfactual-subgraph
 TEACHER_PATH=${TEACHER_PATH:-${PROJECT_DIR}/outputs/hpc/oracle/aids_rf_model.pkl}
+DATASET_PATH=${DATASET_PATH:-}
 RUN_NAME=${RUN_NAME:-}
 OUTPUT_DIR=${OUTPUT_DIR:-}
 if [ -n "${RUN_NAME}" ] && [ -z "${OUTPUT_DIR}" ]; then
@@ -104,6 +105,7 @@ export PYTHONPATH=$PWD
 echo "repo pwd: $(pwd)"
 echo "PYTHONPATH(after export): ${PYTHONPATH}"
 echo "TEACHER_PATH=${TEACHER_PATH}"
+echo "DATASET_PATH=${DATASET_PATH:-<unset>}"
 echo "RUN_NAME=${RUN_NAME:-<unset>}"
 echo "OUTPUT_DIR=${OUTPUT_DIR:-<unset>}"
 echo "MAX_STEPS=${MAX_STEPS:-<unset>}"
@@ -193,6 +195,9 @@ cmd=(
 
 if [ -n "${OUTPUT_DIR}" ]; then
   cmd+=(--output-dir "${OUTPUT_DIR}")
+fi
+if [ -n "${DATASET_PATH}" ]; then
+  cmd+=(--dataset-path "${DATASET_PATH}")
 fi
 if [ -n "${MAX_STEPS}" ]; then
   cmd+=(--max-steps "${MAX_STEPS}")
