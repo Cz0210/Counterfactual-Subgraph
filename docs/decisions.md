@@ -52,6 +52,47 @@ This wrapper:
 ### Status
 Accepted
 
+## 2026-05-17 Stable300 Full Candidate Pool Wrapper
+
+### Background
+The stable PPO diagnostic path has already converged on
+`decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500`
+as the current selector-ready checkpoint. We do not want to continue PPO
+training, rewrite the existing pool audit, or fork new reward logic just to
+prepare the full label=1 candidate pool.
+
+### Decision
+Reuse the existing full-pool generation and candidate-pool audit entrypoints:
+
+- `scripts/generate_full_candidate_pool.py`
+- `scripts/audit_candidate_pool.py`
+
+and add a single Slurm wrapper:
+
+- `scripts/slurm/generate_and_audit_full_pool_stable300_label1_n4.sh`
+
+The wrapper generates a 4-candidate-per-parent full pool for the complete
+label=1 PPO prompt CSV, skips regeneration when a non-empty pool already
+exists, and then audits the resulting JSONL with the existing
+selector-facing audit script.
+
+### Alternatives considered
+1. Add a new stable-specific Python generation pipeline.
+2. Re-run PPO or tune stable300 before building the full pool.
+3. Write a second full-pool audit implementation tailored to selector prep.
+
+### Consequences
+- Stable300 full-pool generation stays aligned with the same chemistry,
+  projection, oracle, and candidate-pool schema already used elsewhere.
+- The workflow remains `git pull` + `sbatch`, with no checkpoint mutation and
+  no PPO code changes.
+- Existing `candidate_pool.jsonl` runs can be resumed safely because the Slurm
+  wrapper only regenerates when `FORCE_REGEN=true` or the pool is missing /
+  empty.
+
+### Status
+Accepted
+
 ---
 
 ## [2026-05-17] Add a parallel conservative stable-PPO path without modifying the existing PPO entrypoint

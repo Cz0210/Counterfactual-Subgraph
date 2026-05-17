@@ -98,3 +98,4 @@ Current selector-prep Slurm entrypoints:
 - `scripts/slurm/generate_full_pool_sft_only_label1.sh`
 - `scripts/slurm/audit_full_pool_sft_only_label1.sh`
 - `scripts/slurm/audit_candidate_pool_stable300.sh`
+- `scripts/slurm/generate_and_audit_full_pool_stable300_label1_n4.sh`
