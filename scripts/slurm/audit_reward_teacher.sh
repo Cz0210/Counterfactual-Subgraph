@@ -9,10 +9,10 @@
 #SBATCH --error=logs/%j.err
 #SBATCH --job-name=audit_reward_teacher
 
-set -euo pipefail
-
+set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 
 PROJECT_DIR=/share/home/u20526/czx/counterfactual-subgraph
 DATASET_PATH=${PROJECT_DIR}/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv

@@ -9,10 +9,10 @@
 #SBATCH --error=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/logs/%x-%j.err
 #SBATCH --job-name=audit_pool
 
-set -euo pipefail
-
+set -eo pipefail
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 
 PROJECT_DIR=/share/home/u20526/czx/counterfactual-subgraph
 RUN_NAME=decoded_chem_ppo_sanity100_sftv3_projcf_dist03_projpen1_failfix_ckpt500
