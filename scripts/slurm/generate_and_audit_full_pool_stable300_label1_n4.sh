@@ -112,6 +112,7 @@ if [ "${FORCE_REGEN}" = "true" ] || [ "${POOL_NONEMPTY}" != "true" ]; then
 
   python "${GENERATE_SCRIPT}" \
     --config configs/hpc.yaml \
+    --set inference.fallback_to_heuristic=false \
     --dataset-path "${DATASET_PATH}" \
     --base-model-path "${BASE_MODEL_PATH}" \
     --sft-lora-path "${SFT_LORA_PATH}" \
