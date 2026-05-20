@@ -312,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=_env_int("EVAL_NUM_SAMPLES", 0) or 0,
         help="Optional limit on validation prompt count. 0 means full validation set.",
     )
+    parser.add_argument(
+        "--log-unified-ppo-samples",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("LOG_UNIFIED_PPO_SAMPLES", False),
+        help="Emit per-sample label-conditioned reward logs for unified label01 PPO runs.",
+    )
     return parser
 
 
@@ -383,6 +389,45 @@ def _resolve_final_fragment_for_metrics(row: dict[str, Any]) -> str | None:
         if value is not None and str(value).strip():
             return str(value).strip()
     return None
+
+
+def _log_unified_sample_metrics(
+    *,
+    reward_logs: Sequence[dict[str, Any]],
+    parent_labels: Sequence[int],
+    step_index: int,
+    logger: Any,
+) -> None:
+    for row_index, reward_log in enumerate(reward_logs):
+        label = reward_log.get("original_label")
+        if label is None and row_index < len(parent_labels):
+            label = parent_labels[row_index]
+        projection_used = bool(
+            reward_log.get("used_projected_subgraph_for_reward")
+            or reward_log.get("projection_used")
+            or str(reward_log.get("projection_method") or "").strip().lower()
+            == "nearest_parent_subgraph"
+        )
+        logger.info(
+            "[UNIFIED_PPO_SAMPLE] step=%s sample_index=%s label=%s parent_smiles=%s raw_fragment=%s final_fragment=%s parse_ok=%s valid=%s direct_substructure=%s projection_used=%s p_before=%s p_after=%s cf_drop=%s cf_flip=%s reward_total=%s",
+            step_index,
+            row_index,
+            label,
+            reward_log.get("parent_smiles"),
+            reward_log.get("raw_fragment"),
+            reward_log.get("final_fragment")
+            or reward_log.get("projected_fragment")
+            or reward_log.get("core_fragment"),
+            reward_log.get("parse_ok"),
+            reward_log.get("valid"),
+            reward_log.get("direct_substructure"),
+            projection_used,
+            reward_log.get("p_before"),
+            reward_log.get("p_after"),
+            reward_log.get("cf_drop"),
+            reward_log.get("cf_flip"),
+            reward_log.get("reward_total", reward_log.get("total")),
+        )
 
 
 def _infer_final_substructure_rate_from_logs(
@@ -1069,6 +1114,13 @@ def run_stable_decoded_chem_ppo_loop(
         for reward_log in reward_logs:
             reward_log["step_index"] = step_index
         candidate_pool_rows.extend(reward_logs)
+        if args.log_unified_ppo_samples:
+            _log_unified_sample_metrics(
+                reward_logs=reward_logs,
+                parent_labels=parent_labels,
+                step_index=step_index,
+                logger=logger,
+            )
 
         with torch.no_grad():
             old_logprobs = _compute_response_logprobs(

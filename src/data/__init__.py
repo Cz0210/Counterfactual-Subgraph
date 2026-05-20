@@ -8,6 +8,15 @@ from src.data.prompts import (
     build_exact_parent_substructure_prompt,
 )
 from src.data.schemas import FragmentExample, MoleculeRecord, normalize_molecule_record
+from src.data.unified_ppo_prompts import (
+    PromptBuildConfig,
+    UnifiedPromptBuildConfig,
+    build_label_conditioned_prompt,
+    build_label_specific_prompt_rows,
+    build_unified_prompt_rows,
+    check_unified_prompt_balance,
+    write_prompt_csv_and_summary,
+)
 
 __all__ = [
     "CounterfactualPromptCollator",
@@ -15,11 +24,18 @@ __all__ = [
     "JsonlMoleculeDataset",
     "MoleculeRecord",
     "PPOPromptRecord",
+    "PromptBuildConfig",
     "PromptBatch",
+    "UnifiedPromptBuildConfig",
+    "build_label_conditioned_prompt",
     "build_counterfactual_prompt",
     "build_exact_parent_substructure_prompt",
+    "build_label_specific_prompt_rows",
+    "build_unified_prompt_rows",
+    "check_unified_prompt_balance",
     "load_ppo_prompt_records",
     "normalize_molecule_record",
+    "write_prompt_csv_and_summary",
 ]
 
 try:  # pragma: no cover - optional compatibility layer

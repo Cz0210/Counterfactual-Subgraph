@@ -54,6 +54,65 @@ Accepted
 
 ---
 
+## [2026-05-20] Add unified label-conditioned PPO prompt, training-wrapper, and overlap-analysis pipeline
+
+### Background
+The stable300 label=1 pool already became selector-ready, so the next question
+is no longer whether more PPO steps help. Instead, we now need to test whether
+one shared policy can condition on the parent label and produce useful
+counterfactual fragments for both label=0 and label=1 parents, while keeping
+the existing selector and pool-audit tooling intact.
+
+That requires:
+
+- explicit label-conditioned prompt construction for label0, label1, and mixed
+  label01 training sets;
+- a unified stable PPO submission path that keeps per-sample labels visible in
+  logs;
+- separate full-pool generation and selection for unified label0 and label1
+  outputs;
+- a final overlap analysis over the selected category-level fragment sets.
+
+### Decision
+Extend the repository with a unified label-conditioned PPO experiment layer
+without rewriting selector/merge tooling or the legacy PPO entrypoint:
+
+- add `src/data/unified_ppo_prompts.py` plus thin CLIs for:
+  - building label-specific PPO prompts,
+  - building balanced unified label01 prompts,
+  - checking unified prompt balance by 50-row blocks;
+- keep `scripts/train_ppo_stable.py` as the stable PPO entrypoint, but add an
+  opt-in `[UNIFIED_PPO_SAMPLE]` per-sample logging path so unified runs can be
+  audited label-wise without creating a parallel trainer;
+- extend `scripts/analyze_stable_ppo_log.py` to parse the new sample logs and
+  report label0/label1 metrics by training block while preserving old log
+  behavior when the new tag is absent;
+- reuse the existing full-pool generator and selector for unified label0 and
+  label1 pools through new Slurm wrappers only;
+- add `src/eval/selected_subgraph_overlap.py` and a thin CLI that compares
+  selected fragment sets by exact canonical overlap, soft Morgan overlap, and
+  Murcko scaffold overlap.
+
+### Alternatives considered
+1. Fork `train_ppo_stable.py` into a second unified trainer.
+2. Compare full-pool overlap only and skip selector-level overlap.
+3. Build unified prompts with a new schema that drops compatibility anchors like
+   `ORIGINAL_LABEL`, `MOLECULE_SMILES`, and `FRAGMENT_SMILES`.
+
+### Consequences
+- Unified PPO can now be tested with minimal risk to the existing label=1
+  stable300 path because the main trainer is reused rather than duplicated.
+- Selector-level overlap becomes a first-class analysis artifact instead of an
+  ad hoc notebook step.
+- The unified prompt format explicitly conditions on the original label while
+  still preserving compatibility anchors expected by current PPO data loaders
+  and generation helpers.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-20] Add class-level MMR selector and diversity-side pool merge tooling
 
 ### Background

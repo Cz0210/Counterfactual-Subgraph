@@ -22,6 +22,7 @@ KV_RE = re.compile(r"(^|\s)(?P<key>[A-Za-z_][A-Za-z0-9_]*)=")
 
 STABLE_UPDATE_TAG = "STABLE_PPO_UPDATE"
 STABLE_GATE_TAG = "STABLE_PPO_TEACHER_CONF_GATE"
+UNIFIED_SAMPLE_TAG = "UNIFIED_PPO_SAMPLE"
 LEGACY_UPDATE_TAG = "DECODED_CHEM_PPO_UPDATE"
 LEGACY_BATCH_SIZE_TAG = "CHEM_REWARD_CALLED"
 LEGACY_CF_TAG = "CHEM_REWARD_CF_ORACLE"
@@ -181,6 +182,37 @@ def _extract_step_metrics(log_path: Path) -> dict[int, dict[str, Any]]:
     return per_step
 
 
+def _extract_unified_sample_metrics(log_path: Path) -> list[dict[str, Any]]:
+    sample_rows: list[dict[str, Any]] = []
+    with log_path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\n")
+            match = TAG_LINE_RE.match(line)
+            if not match:
+                continue
+            if match.group("tag") != UNIFIED_SAMPLE_TAG:
+                continue
+            parsed = parse_kv_body(match.group("body"))
+            step = int(parsed.get("step") or 0)
+            label = parsed.get("label")
+            if step <= 0 or label not in {"0", "1", 0, 1}:
+                continue
+            sample_rows.append(
+                {
+                    "step": step,
+                    "label": int(label),
+                    "reward_total": _safe_float(parsed.get("reward_total")),
+                    "parse_ok": str(parsed.get("parse_ok") or "").strip().lower() == "true",
+                    "valid": str(parsed.get("valid") or "").strip().lower() == "true",
+                    "direct_substructure": str(parsed.get("direct_substructure") or "").strip().lower() == "true",
+                    "projection_used": str(parsed.get("projection_used") or "").strip().lower() == "true",
+                    "cf_flip": str(parsed.get("cf_flip") or "").strip().lower() == "true",
+                    "cf_drop": _safe_float(parsed.get("cf_drop")),
+                }
+            )
+    return sample_rows
+
+
 def _summarize_ranges(per_step: dict[int, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for label, start, end in STEP_RANGES:
@@ -222,6 +254,66 @@ def _summarize_ranges(per_step: dict[int, dict[str, Any]]) -> dict[str, dict[str
     return summary
 
 
+def _summarize_unified_label_ranges(
+    sample_rows: list[dict[str, Any]],
+    per_step: dict[int, dict[str, Any]],
+) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, dict[str, Any]]]:
+    by_label: dict[str, dict[str, dict[str, Any]]] = {"0": {}, "1": {}}
+    label_mix: dict[str, dict[str, Any]] = {}
+    for range_label, start, end in STEP_RANGES:
+        range_samples = [row for row in sample_rows if start <= int(row["step"]) <= end]
+        label_mix[range_label] = {
+            "num_samples": len(range_samples),
+            "label0_count": sum(1 for row in range_samples if int(row["label"]) == 0),
+            "label1_count": sum(1 for row in range_samples if int(row["label"]) == 1),
+        }
+        total_samples = max(1, len(range_samples))
+        label_mix[range_label]["label0_rate"] = _safe_rate(
+            int(label_mix[range_label]["label0_count"]),
+            total_samples,
+        )
+        label_mix[range_label]["label1_rate"] = _safe_rate(
+            int(label_mix[range_label]["label1_count"]),
+            total_samples,
+        )
+        for label_value in (0, 1):
+            label_rows = [row for row in range_samples if int(row["label"]) == label_value]
+            unique_steps = sorted({int(row["step"]) for row in label_rows})
+            approx_kl_values = [
+                _safe_float(per_step.get(step, {}).get("approx_kl"))
+                for step in unique_steps
+                if step in per_step
+            ]
+            by_label[str(label_value)][range_label] = {
+                "num_samples": len(label_rows),
+                "reward_mean": _mean([_safe_float(row.get("reward_total")) for row in label_rows]),
+                "cf_flip_rate": _safe_rate(
+                    sum(1 for row in label_rows if bool(row.get("cf_flip"))),
+                    len(label_rows),
+                ),
+                "direct_substructure_rate": _safe_rate(
+                    sum(1 for row in label_rows if bool(row.get("direct_substructure"))),
+                    len(label_rows),
+                ),
+                "projection_used_rate": _safe_rate(
+                    sum(1 for row in label_rows if bool(row.get("projection_used"))),
+                    len(label_rows),
+                ),
+                "parse_ok_rate": _safe_rate(
+                    sum(1 for row in label_rows if bool(row.get("parse_ok"))),
+                    len(label_rows),
+                ),
+                "valid_rate": _safe_rate(
+                    sum(1 for row in label_rows if bool(row.get("valid"))),
+                    len(label_rows),
+                ),
+                "cf_drop_mean": _mean([_safe_float(row.get("cf_drop")) for row in label_rows]),
+                "approx_kl_mean": _mean(approx_kl_values),
+                "steps_present": unique_steps,
+            }
+    return by_label, label_mix
+
+
 def _build_judgment(range_summary: dict[str, dict[str, Any]]) -> dict[str, Any]:
     last_range = range_summary["151-200"]
     first_range = range_summary["1-50"]
@@ -251,6 +343,8 @@ def _render_txt(
     per_step: dict[int, dict[str, Any]],
     range_summary: dict[str, dict[str, Any]],
     judgment: dict[str, Any],
+    unified_by_label_ranges: dict[str, dict[str, dict[str, Any]]] | None = None,
+    unified_label_mix_ranges: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         f"log: {log_path}",
@@ -287,6 +381,26 @@ def _render_txt(
             "",
         ]
     )
+    if unified_label_mix_ranges:
+        lines.append("[unified_label_mix]")
+        for range_label, payload in unified_label_mix_ranges.items():
+            lines.append(
+                f"{range_label}: num_samples={payload['num_samples']} label0_count={payload['label0_count']} label1_count={payload['label1_count']} label0_rate={payload['label0_rate']:.4f} label1_rate={payload['label1_rate']:.4f}"
+            )
+        lines.append("")
+    if unified_by_label_ranges:
+        for label_key in ("0", "1"):
+            if label_key not in unified_by_label_ranges:
+                continue
+            lines.append(f"[unified_label_{label_key}]")
+            for range_label in [item[0] for item in STEP_RANGES]:
+                payload = unified_by_label_ranges[label_key].get(range_label)
+                if not payload:
+                    continue
+                lines.append(
+                    f"{range_label}: num_samples={payload['num_samples']} reward_mean={payload['reward_mean']:.4f} cf_flip_rate={payload['cf_flip_rate']:.4f} direct_substructure_rate={payload['direct_substructure_rate']:.4f} projection_used_rate={payload['projection_used_rate']:.4f} approx_kl_mean={payload['approx_kl_mean']:.4f}"
+                )
+            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -299,13 +413,21 @@ def main() -> None:
     out_txt.parent.mkdir(parents=True, exist_ok=True)
 
     per_step = _extract_step_metrics(log_path)
+    unified_sample_rows = _extract_unified_sample_metrics(log_path)
     range_summary = _summarize_ranges(per_step)
     judgment = _build_judgment(range_summary)
+    unified_by_label_ranges, unified_label_mix_ranges = _summarize_unified_label_ranges(
+        unified_sample_rows,
+        per_step,
+    )
     payload = {
         "log_path": str(log_path),
         "num_steps_parsed": len(per_step),
         "ranges": range_summary,
         "judgment": judgment,
+        "unified_sample_count": len(unified_sample_rows),
+        "unified_by_label_ranges": unified_by_label_ranges,
+        "unified_label_mix_ranges": unified_label_mix_ranges,
     }
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     out_txt.write_text(
@@ -314,6 +436,8 @@ def main() -> None:
             per_step=per_step,
             range_summary=range_summary,
             judgment=judgment,
+            unified_by_label_ranges=unified_by_label_ranges,
+            unified_label_mix_ranges=unified_label_mix_ranges,
         ),
         encoding="utf-8",
     )

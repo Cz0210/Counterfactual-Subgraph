@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J full_pool_s300_t07
+#SBATCH -J full_pool_uni_l0
 #SBATCH --partition=A800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -19,37 +19,32 @@ export PYTHONPATH=$PWD
 
 mkdir -p logs
 
-RUN_NAME=decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500
-
-DATASET_PATH=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv
+RUN_NAME=decoded_chem_ppo_stable300_unified_sftv3_projcf_dist03_projpen1_label01_ckpt500
+DATASET_PATH=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label0.csv
 BASE_MODEL_PATH=/share/home/u20526/czx/counterfactual-subgraph/pretrained_models/ChemLLM-7B-Chat
 SFT_LORA_PATH=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/sft_checkpoints/sft_v3_hiv_20260508_resplit_lr2e4_seed7_fix_columns/checkpoint-500
-STABLE_PPO_PATH=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/rl_checkpoints/${RUN_NAME}
+UNIFIED_PPO_PATH=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/rl_checkpoints/${RUN_NAME}
 TEACHER_PATH=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/oracle/aids_rf_model.pkl
 
-OUT_DIR=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/full_candidate_pools/stable300_label1_n4_temp07_topp09
+OUT_DIR=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/full_candidate_pools/unified_stable300_label0_n4
 POOL=${OUT_DIR}/candidate_pool.jsonl
 OUT_SUMMARY=${OUT_DIR}/generation_summary.json
-
-AUDIT_DIR=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/audits/stable300_label1_n4_temp07_topp09_full_pool_audit
+AUDIT_DIR=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/audits/unified_stable300_label0_n4_full_pool_audit
 
 NUM_RETURN_SEQUENCES=4
-GEN_TEMPERATURE=0.7
-GEN_TOP_P=0.9
+GEN_TEMPERATURE=0.5
+GEN_TOP_P=0.8
 GEN_DO_SAMPLE=true
 MAX_NEW_TOKENS=96
 FORCE_REGEN=${FORCE_REGEN:-false}
 
-mkdir -p "${OUT_DIR}"
-mkdir -p "${AUDIT_DIR}"
+mkdir -p "${OUT_DIR}" "${AUDIT_DIR}"
 
-echo "===== ENV CHECK ====="
 echo "host: $(hostname)"
 echo "pwd: $(pwd)"
 echo "git commit: $(git rev-parse HEAD || true)"
-echo "conda env: ${CONDA_DEFAULT_ENV:-unset}"
 echo "python path: $(which python)"
-python --version
+echo "conda env: ${CONDA_DEFAULT_ENV:-unset}"
 python - <<'PY'
 import torch
 print("torch:", torch.__version__)
@@ -58,41 +53,16 @@ if torch.cuda.is_available():
     print("device:", torch.cuda.get_device_name(0))
 PY
 echo "DATASET_PATH=${DATASET_PATH}"
-echo "BASE_MODEL_PATH=${BASE_MODEL_PATH}"
-echo "SFT_LORA_PATH=${SFT_LORA_PATH}"
-echo "STABLE_PPO_PATH=${STABLE_PPO_PATH}"
-echo "TEACHER_PATH=${TEACHER_PATH}"
-echo "OUT_DIR=${OUT_DIR}"
+echo "UNIFIED_PPO_PATH=${UNIFIED_PPO_PATH}"
 echo "POOL=${POOL}"
-echo "OUT_SUMMARY=${OUT_SUMMARY}"
 echo "AUDIT_DIR=${AUDIT_DIR}"
-echo "NUM_RETURN_SEQUENCES=${NUM_RETURN_SEQUENCES}"
-echo "GEN_TEMPERATURE=${GEN_TEMPERATURE}"
-echo "GEN_TOP_P=${GEN_TOP_P}"
-echo "GEN_DO_SAMPLE=${GEN_DO_SAMPLE}"
-echo "MAX_NEW_TOKENS=${MAX_NEW_TOKENS}"
-echo "FORCE_REGEN=${FORCE_REGEN}"
-echo "====================="
 
-for p in "${DATASET_PATH}" "${BASE_MODEL_PATH}" "${SFT_LORA_PATH}" "${STABLE_PPO_PATH}" "${TEACHER_PATH}"; do
+for p in "${DATASET_PATH}" "${BASE_MODEL_PATH}" "${SFT_LORA_PATH}" "${UNIFIED_PPO_PATH}" "${TEACHER_PATH}"; do
   if [ ! -e "${p}" ]; then
     echo "[ERROR] missing path: ${p}"
     exit 1
   fi
 done
-
-echo "===== LOCATE GENERATION SCRIPT ====="
-find scripts src -iname "*candidate*pool*.py" -o -iname "*generate*pool*.py" -o -iname "*full*pool*.py" || true
-echo "===================================="
-
-if [ -f scripts/generate_full_candidate_pool.py ]; then
-  GENERATE_SCRIPT=scripts/generate_full_candidate_pool.py
-else
-  echo "[ERROR] scripts/generate_full_candidate_pool.py not found"
-  exit 1
-fi
-
-python "${GENERATE_SCRIPT}" --help || true
 
 POOL_NONEMPTY=false
 if [ -s "${POOL}" ]; then
@@ -103,21 +73,19 @@ if [ -s "${POOL}" ]; then
 fi
 
 if [ "${FORCE_REGEN}" = "true" ] || [ "${POOL_NONEMPTY}" != "true" ]; then
-  echo "===== GENERATING HIGH-TEMP FULL POOL ====="
-
-  python "${GENERATE_SCRIPT}" \
+  python scripts/generate_full_candidate_pool.py \
     --config configs/hpc.yaml \
     --set inference.fallback_to_heuristic=false \
     --dataset-path "${DATASET_PATH}" \
     --base-model-path "${BASE_MODEL_PATH}" \
     --sft-lora-path "${SFT_LORA_PATH}" \
-    --ppo-checkpoint-path "${STABLE_PPO_PATH}" \
+    --ppo-checkpoint-path "${UNIFIED_PPO_PATH}" \
     --teacher-path "${TEACHER_PATH}" \
     --out-jsonl "${POOL}" \
     --out-summary-json "${OUT_SUMMARY}" \
     --label-col label \
     --smiles-col parent_smiles \
-    --target-label 1 \
+    --target-label 0 \
     --num-return-sequences "${NUM_RETURN_SEQUENCES}" \
     --generation-temperature "${GEN_TEMPERATURE}" \
     --generation-top-p "${GEN_TOP_P}" \
@@ -132,23 +100,7 @@ if [ "${FORCE_REGEN}" = "true" ] || [ "${POOL_NONEMPTY}" != "true" ]; then
     --projection-penalty 1.0 \
     --enable-minimal-syntax-repair \
     --enable-component-salvage
-
-  echo "===== GENERATION DONE ====="
-else
-  echo "===== SKIP GENERATION: existing non-empty pool found ====="
 fi
-
-echo "===== POOL CHECK ====="
-ls -lh "${POOL}"
-wc -l "${POOL}"
-head -n 2 "${POOL}" || true
-
-if [ ! -f scripts/audit_candidate_pool.py ]; then
-  echo "[ERROR] scripts/audit_candidate_pool.py not found"
-  exit 1
-fi
-
-python scripts/audit_candidate_pool.py --help || true
 
 python scripts/audit_candidate_pool.py \
   --config configs/hpc.yaml \
@@ -159,7 +111,5 @@ python scripts/audit_candidate_pool.py \
   --sim_sample_size 10000 \
   --topk_show 30
 
-echo "===== AUDIT DONE ====="
-ls -lh "${AUDIT_DIR}"
-echo "===== AUDIT REPORT ====="
+wc -l "${POOL}"
 cat "${AUDIT_DIR}/audit_report.txt"

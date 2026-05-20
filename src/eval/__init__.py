@@ -25,6 +25,7 @@ from src.eval.inference import propose_fragment_candidate, run_minimal_inference
 from src.eval.interfaces import EvaluationExample, EvaluationSummary, Evaluator
 from src.eval.metrics import mean_metric, safe_rate
 from src.eval.reporting import render_summary
+from src.eval.selected_subgraph_overlap import compare_selected_subgraph_overlap
 
 __all__ = [
     "AuditConfig",
@@ -42,6 +43,7 @@ __all__ = [
     "mean_metric",
     "merge_candidate_pools",
     "propose_fragment_candidate",
+    "compare_selected_subgraph_overlap",
     "render_audit_report",
     "render_summary",
     "resolve_adapter_load_path",
