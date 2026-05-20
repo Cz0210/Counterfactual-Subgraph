@@ -6,6 +6,11 @@ from src.eval.candidate_pool_audit import (
     render_audit_report,
     write_audit_outputs,
 )
+from src.eval.candidate_pool_merge import MergeConfig, merge_candidate_pools
+from src.eval.class_counterfactual_selector import (
+    SelectorConfig,
+    select_class_counterfactual_subgraphs,
+)
 from src.eval.full_candidate_pool import (
     FullPoolGenerationConfig,
     generate_full_candidate_pool,
@@ -28,16 +33,20 @@ __all__ = [
     "Evaluator",
     "FullPoolAuditConfig",
     "FullPoolGenerationConfig",
+    "MergeConfig",
+    "SelectorConfig",
     "audit_candidate_pool",
     "audit_full_candidate_pool",
     "generate_full_candidate_pool",
     "inspect_checkpoint_directory",
     "mean_metric",
+    "merge_candidate_pools",
     "propose_fragment_candidate",
     "render_audit_report",
     "render_summary",
     "resolve_adapter_load_path",
     "run_minimal_inference",
     "safe_rate",
+    "select_class_counterfactual_subgraphs",
     "write_audit_outputs",
 ]

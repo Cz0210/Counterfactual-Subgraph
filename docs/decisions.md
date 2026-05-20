@@ -52,6 +52,62 @@ This wrapper:
 ### Status
 Accepted
 
+---
+
+## [2026-05-20] Add class-level MMR selector and diversity-side pool merge tooling
+
+### Background
+Stable PPO training has already converged far enough for offline pool building,
+and the stable300 full candidate pool audit now says the pool is suitable for a
+selector. At the same time, the audit still flags high mode-collapse risk and
+recommends sampling tuning rather than more PPO steps. That means the next phase
+needs two things:
+
+- a class-level selector that can turn a large candidate pool into a shared,
+  low-redundancy fragment set;
+- a safe way to compare the current base pool against a higher-temperature pool
+  and optionally merge them without touching any PPO training code.
+
+### Decision
+Add a selector-and-merge layer around the existing full-pool generation and
+audit pipeline:
+
+- `src/eval/class_counterfactual_selector.py` implements a greedy MMR selector
+  over filtered counterfactual candidates, scoring fragments by shared
+  counterfactual strength, marginal parent coverage, redundancy penalty, and
+  atom-ratio size regularization.
+- `scripts/select_class_counterfactual_subgraphs.py` exposes that selector as a
+  thin CLI and writes JSON, CSV, summary JSON, and TXT report artifacts.
+- `src/eval/candidate_pool_merge.py` and
+  `scripts/merge_candidate_pools.py` merge multiple pool JSONLs while
+  deduplicating by `(final_fragment, parent_smiles)` and keeping the
+  higher-scoring candidate.
+- New Slurm wrappers cover:
+  - base-pool selector runs,
+  - high-temperature stable300 full-pool generation plus audit,
+  - merged-pool creation plus audit,
+  - merged-pool selector runs.
+
+The implementation explicitly reuses the existing candidate-pool normalization
+contract from `src/eval/candidate_pool_audit.py` so selector filtering stays
+compatible with current and future pool field aliases.
+
+### Alternatives considered
+1. Continue PPO training to chase diversity improvements.
+2. Pick fragments only by raw `cf_drop` without redundancy control.
+3. Rebuild the pool schema specifically for selector consumption.
+
+### Consequences
+- Selector development is now decoupled from PPO training and can iterate on
+  existing stable300 pools.
+- Diversity recovery can be tested through higher-temperature sampling and pool
+  merging without changing stable300 checkpoints.
+- Shared field normalization between audit and selector reduces schema drift
+  risk when pools come from slightly different generation paths.
+
+### Status
+Accepted
+
 ## 2026-05-17 Stable300 Full Candidate Pool Wrapper
 
 ### Background
