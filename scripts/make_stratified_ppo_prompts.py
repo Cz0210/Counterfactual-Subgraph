@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - depends on runtime
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=None, help="Accepted for HPC wrapper parity.")
     parser.add_argument("--dataset-path", required=True, help="Input PPO prompt CSV path.")
     parser.add_argument("--out-csv", required=True, help="Output stratified shuffled CSV path.")
     parser.add_argument("--out-json", required=True, help="Output summary JSON path.")

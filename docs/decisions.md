@@ -6,6 +6,45 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-21] Add a same-source label0 PPO prompt builder for unified label01 runs
+
+### Background
+The existing label=1 PPO prompt CSV in the SFT v3 HIV dataset directory is a
+minimal `smiles,label` file and is consumed by downstream PPO, pool generation,
+and selector jobs. The corresponding label=0 CSV was missing, which prevented
+the unified label01 prompt build from proceeding. Copying label=1 rows and
+changing the label would violate the counterfactual data contract because
+label=0 prompts must come from genuine label=0 parent molecules.
+
+### Decision
+Add a small reusable prompt-CSV builder around the existing PPO prompt dataset
+loader:
+
+- `scripts/build_label_ppo_prompt_csv.py` reads a shared source CSV/JSONL,
+  resolves SMILES and label columns with existing fallbacks, filters by
+  `--target-label`, and writes only `smiles,label`;
+- `scripts/slurm/build_sft_v3_hiv_ppo_prompts_label0_same_as_label1.sh`
+  builds the missing label=0 file from the same SFT v3 train split source and
+  also emits the stratified `shuffle_seed13` variant;
+- `scripts/slurm/build_unified_ppo_prompts_label01.sh` now uses the same
+  minimal builder when label0 is missing, and merges label0/label1 into a
+  shuffled two-column unified CSV without requiring a separate source CSV when
+  both label-specific prompt files already exist.
+
+### Consequences
+- The existing label=1 prompt file and downstream label=1 pipeline remain
+  untouched.
+- Unified label-conditioned PPO can build its input from genuine label=0 and
+  label=1 parents while preserving the minimal prompt CSV schema expected by
+  current generation/training loaders.
+- The label0 build is reproducible from Slurm and produces the same style of
+  stratified shuffle companion file used by stable label=1 PPO runs.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-21] Harden unified label01 prompt Slurm input resolution
 
 ### Background
