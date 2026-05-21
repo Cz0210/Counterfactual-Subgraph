@@ -6,6 +6,40 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-21] Harden unified label01 prompt Slurm input resolution
+
+### Background
+The unified label-conditioned PPO prompt build wrapper previously required an
+original source training CSV even when label0 and label1 PPO prompt CSVs already
+existed. On HPC this caused `build_unified_ppo_prompts_label01.sh` to fail with
+an unresolved `SOURCE_INPUT_CSV`, even though the intended next step could have
+been completed by merging the existing label-specific prompt files.
+
+### Decision
+Keep the Python prompt builders unchanged and harden only the Slurm wrapper:
+
+- preserve explicit `SOURCE_INPUT_CSV` support when the user supplies a valid
+  source CSV;
+- if `SOURCE_INPUT_CSV` is empty and both label-specific prompt CSVs already
+  exist, merge them directly into the unified label01 prompt CSV;
+- otherwise, auto-discover an original training CSV under the dataset directory
+  while excluding derived prompt, audit, candidate, balance, and summary files;
+- emit structured `[UNIFIED_PROMPT_*]` diagnostics and a richer unified summary
+  JSON with source mode and label counts.
+
+### Consequences
+- Existing label=1 prompt artifacts are not rebuilt unless explicitly requested
+  with `FORCE_REBUILD_PROMPTS=true`.
+- HPC users can recover from missing source-path configuration without manual
+  intervention when label0 and label1 prompt CSVs are already available.
+- Failure logs now include dataset CSV listings and column previews, making
+  source CSV selection issues much easier to diagnose.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-17] Add a dedicated Slurm wrapper for auditing the stable300 candidate pool with the existing selector-facing audit script
 
 ### Background

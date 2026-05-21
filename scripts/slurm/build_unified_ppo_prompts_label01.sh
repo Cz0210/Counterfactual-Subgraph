@@ -14,37 +14,232 @@ source ~/.bashrc
 conda activate smiles_pip118
 set -u
 
-cd /share/home/u20526/czx/counterfactual-subgraph
+PROJECT_DIR=${PROJECT_DIR:-/share/home/u20526/czx/counterfactual-subgraph}
+cd "${PROJECT_DIR}"
 export PYTHONPATH=$PWD
 
 mkdir -p logs
 
-PROJECT_DIR=/share/home/u20526/czx/counterfactual-subgraph
-DATASET_DIR=${PROJECT_DIR}/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset
-LABEL1_CSV=${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label1.csv
-LABEL0_CSV=${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label0.csv
-LABEL0_JSON=${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label0.summary.json
-UNIFIED_CSV=${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_unified_label01.csv
-UNIFIED_JSON=${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_unified_label01.summary.json
-BALANCE_JSON=${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_unified_label01.balance.json
+DATASET_DIR=${DATASET_DIR:-${PROJECT_DIR}/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset}
+LABEL1_CSV=${LABEL1_CSV:-${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label1.csv}
+LABEL0_CSV=${LABEL0_CSV:-${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label0.csv}
+LABEL1_JSON=${LABEL1_JSON:-${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label1.summary.json}
+LABEL0_JSON=${LABEL0_JSON:-${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_label0.summary.json}
+UNIFIED_CSV=${UNIFIED_CSV:-${DATASET_DIR}/sft_v3_hiv_ppo_prompts_train_unified_label01.csv}
+UNIFIED_JSON=${UNIFIED_JSON:-${UNIFIED_CSV%.csv}.summary.json}
+BALANCE_JSON=${BALANCE_JSON:-${UNIFIED_CSV%.csv}.balance.json}
 
 SOURCE_INPUT_CSV=${SOURCE_INPUT_CSV:-}
 FORCE_REBUILD_PROMPTS=${FORCE_REBUILD_PROMPTS:-false}
 MAX_PER_LABEL=${MAX_PER_LABEL:-0}
 LABEL_COL=${LABEL_COL:-HIV_active}
 SMILES_COL=${SMILES_COL:-smiles}
+SEED=${SEED:-13}
+
+case "${FORCE_REBUILD_PROMPTS}" in
+  true|TRUE|1|yes|YES) FORCE_REBUILD_PROMPTS=true ;;
+  *) FORCE_REBUILD_PROMPTS=false ;;
+esac
+
+discover_source_input_csv() {
+  DATASET_DIR="${DATASET_DIR}" LABEL_COL="${LABEL_COL}" SMILES_COL="${SMILES_COL}" python - <<'PY'
+import csv
+import os
+from pathlib import Path
+
+dataset_dir = Path(os.environ["DATASET_DIR"]).expanduser()
+label_col = os.environ["LABEL_COL"]
+smiles_col = os.environ["SMILES_COL"]
+derived_terms = (
+    "ppo_prompts",
+    "unified",
+    "summary",
+    "balance",
+    "selected",
+    "audit",
+    "candidate",
+)
+preferred_names = (
+    "sft_v3_hiv_train.csv",
+    "train.csv",
+    "train_split.csv",
+    "hiv_train.csv",
+)
+
+def is_derived(path: Path) -> bool:
+    lowered = path.name.lower()
+    return any(term in lowered for term in derived_terms)
+
+def has_column(header, requested):
+    requested_lower = requested.strip().lower()
+    return any(str(col).strip().lower() == requested_lower for col in header)
+
+def inspect(path, priority):
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            header = list(reader.fieldnames or [])
+            row_count = sum(1 for _ in reader)
+    except Exception:
+        return None
+    return {
+        "path": path,
+        "priority": priority,
+        "row_count": row_count,
+        "has_required_cols": has_column(header, smiles_col) and has_column(header, label_col),
+    }
+
+if not dataset_dir.exists():
+    print("")
+    raise SystemExit(0)
+
+ordered_paths = []
+seen = set()
+for index, name in enumerate(preferred_names):
+    path = dataset_dir / name
+    if path.is_file() and path not in seen:
+        ordered_paths.append(path)
+        seen.add(path)
+for path in sorted(dataset_dir.glob("*.csv")):
+    if path in seen or is_derived(path):
+        continue
+    ordered_paths.append(path)
+    seen.add(path)
+
+inspected = []
+for index, path in enumerate(ordered_paths):
+    item = inspect(path, index)
+    if item:
+        inspected.append(item)
+valid = [item for item in inspected if bool(item["has_required_cols"])]
+if not valid:
+    print("")
+    raise SystemExit(0)
+
+best = sorted(valid, key=lambda item: (-int(item["row_count"]), int(item["priority"])))[0]
+print(best["path"])
+PY
+}
+
+print_dataset_csv_diagnostics() {
+  DATASET_DIR="${DATASET_DIR}" python - <<'PY'
+import csv
+import os
+from pathlib import Path
+
+dataset_dir = Path(os.environ["DATASET_DIR"]).expanduser()
+print("[UNIFIED_PROMPT_SOURCE_DIAGNOSTICS] dataset_dir=", dataset_dir, sep="")
+if not dataset_dir.exists():
+    print("[UNIFIED_PROMPT_SOURCE_DIAGNOSTICS] dataset_dir does not exist")
+    raise SystemExit(0)
+csv_paths = sorted(dataset_dir.glob("*.csv"))
+if not csv_paths:
+    print("[UNIFIED_PROMPT_SOURCE_DIAGNOSTICS] no CSV files found")
+    raise SystemExit(0)
+for path in csv_paths:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            header = list(reader.fieldnames or [])
+    except Exception as exc:
+        print(f"[UNIFIED_PROMPT_SOURCE_DIAGNOSTICS] {path}: failed_to_read={exc}")
+        continue
+    preview = ", ".join(header[:30])
+    if len(header) > 30:
+        preview += ", ..."
+    print(f"[UNIFIED_PROMPT_SOURCE_DIAGNOSTICS] {path}: columns=[{preview}]")
+PY
+}
+
+augment_unified_summary() {
+  UNIFIED_CSV="${UNIFIED_CSV}" \
+  UNIFIED_JSON="${UNIFIED_JSON}" \
+  LABEL0_CSV="${LABEL0_CSV}" \
+  LABEL1_CSV="${LABEL1_CSV}" \
+  SOURCE_INPUT_CSV="${SOURCE_INPUT_CSV}" \
+  SOURCE_MODE="${SOURCE_MODE}" \
+  SEED="${SEED}" \
+  python - <<'PY'
+import csv
+import json
+import os
+from pathlib import Path
+
+unified_csv = Path(os.environ["UNIFIED_CSV"]).expanduser().resolve()
+summary_path = Path(os.environ["UNIFIED_JSON"]).expanduser().resolve()
+label0_csv = str(Path(os.environ["LABEL0_CSV"]).expanduser().resolve())
+label1_csv = str(Path(os.environ["LABEL1_CSV"]).expanduser().resolve())
+source_input_csv = os.environ.get("SOURCE_INPUT_CSV", "")
+source_mode = os.environ["SOURCE_MODE"]
+seed = int(os.environ["SEED"])
+
+with unified_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+    rows = list(csv.DictReader(handle))
+
+def normalize_label(value):
+    text = str(value or "").strip().lower()
+    if text in {"0", "0.0", "false", "inactive", "negative"}:
+        return 0
+    if text in {"1", "1.0", "true", "active", "positive"}:
+        return 1
+    return None
+
+label_counts = {0: 0, 1: 0}
+for row in rows:
+    label = normalize_label(row.get("label"))
+    if label in label_counts:
+        label_counts[label] += 1
+
+if summary_path.exists():
+    data = json.loads(summary_path.read_text(encoding="utf-8"))
+else:
+    data = {}
+
+data.update(
+    {
+        "num_total": len(rows),
+        "num_label0": int(label_counts[0]),
+        "num_label1": int(label_counts[1]),
+        "source_mode": source_mode,
+        "source_input_csv": str(Path(source_input_csv).expanduser().resolve()) if source_input_csv else "",
+        "label0_csv": label0_csv,
+        "label1_csv": label1_csv,
+        "unified_csv": str(unified_csv),
+        "shuffled": True,
+        "seed": seed,
+    }
+)
+summary_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+print(
+    "[UNIFIED_PROMPT_LABEL_COUNTS] "
+    f"num_total={data['num_total']} num_label0={data['num_label0']} "
+    f"num_label1={data['num_label1']} source_mode={source_mode}"
+)
+PY
+}
+
+SOURCE_MODE=unresolved
+if [ -n "${SOURCE_INPUT_CSV}" ]; then
+  if [ -f "${SOURCE_INPUT_CSV}" ]; then
+    SOURCE_MODE=explicit_source_input_csv
+  else
+    echo "[ERROR] explicit SOURCE_INPUT_CSV does not exist: ${SOURCE_INPUT_CSV}"
+    print_dataset_csv_diagnostics
+    echo "Run with:"
+    echo "sbatch --export=ALL,SOURCE_INPUT_CSV=/path/to/train.csv,LABEL_COL=HIV_active,SMILES_COL=smiles scripts/slurm/build_unified_ppo_prompts_label01.sh"
+    exit 1
+  fi
+fi
 
 if [ -z "${SOURCE_INPUT_CSV}" ]; then
-  for candidate in \
-    "${DATASET_DIR}/sft_v3_hiv_train.csv" \
-    "${DATASET_DIR}/sft_v3_hiv_train_label01.csv" \
-    "${DATASET_DIR}/train.csv"
-  do
-    if [ -f "${candidate}" ]; then
-      SOURCE_INPUT_CSV="${candidate}"
-      break
+  if [ "${FORCE_REBUILD_PROMPTS}" = "false" ] && [ -s "${LABEL0_CSV}" ] && [ -s "${LABEL1_CSV}" ]; then
+    SOURCE_MODE=existing_label_prompt_csvs
+  else
+    SOURCE_INPUT_CSV="$(discover_source_input_csv)"
+    if [ -n "${SOURCE_INPUT_CSV}" ]; then
+      SOURCE_MODE=auto_discovered_source_input_csv
     fi
-  done
+  fi
 fi
 
 echo "===== ENV CHECK ====="
@@ -63,6 +258,7 @@ if torch.cuda.is_available():
 PY
 echo "DATASET_DIR=${DATASET_DIR}"
 echo "SOURCE_INPUT_CSV=${SOURCE_INPUT_CSV}"
+echo "SOURCE_MODE=${SOURCE_MODE}"
 echo "LABEL1_CSV=${LABEL1_CSV}"
 echo "LABEL0_CSV=${LABEL0_CSV}"
 echo "UNIFIED_CSV=${UNIFIED_CSV}"
@@ -70,21 +266,22 @@ echo "MAX_PER_LABEL=${MAX_PER_LABEL}"
 echo "FORCE_REBUILD_PROMPTS=${FORCE_REBUILD_PROMPTS}"
 echo "LABEL_COL=${LABEL_COL}"
 echo "SMILES_COL=${SMILES_COL}"
+echo "SEED=${SEED}"
 echo "====================="
+echo "[UNIFIED_PROMPT_BUILD_CONFIG] DATASET_DIR=${DATASET_DIR} SOURCE_INPUT_CSV=${SOURCE_INPUT_CSV} LABEL_COL=${LABEL_COL} SMILES_COL=${SMILES_COL} MAX_PER_LABEL=${MAX_PER_LABEL} FORCE_REBUILD_PROMPTS=${FORCE_REBUILD_PROMPTS} SEED=${SEED}"
+echo "[UNIFIED_PROMPT_SOURCE_MODE] source_mode=${SOURCE_MODE} source_input_csv=${SOURCE_INPUT_CSV:-None} label0_csv=${LABEL0_CSV} label1_csv=${LABEL1_CSV}"
 
 mkdir -p "${DATASET_DIR}"
 
-if [ ! -f "${LABEL1_CSV}" ]; then
-  echo "[ERROR] existing label1 prompt CSV not found: ${LABEL1_CSV}"
+if [ "${SOURCE_MODE}" = "unresolved" ]; then
+  echo "[ERROR] could not resolve SOURCE_INPUT_CSV and existing label0/label1 prompt CSVs are not both available."
+  print_dataset_csv_diagnostics
+  echo "Run with:"
+  echo "sbatch --export=ALL,SOURCE_INPUT_CSV=/path/to/train.csv,LABEL_COL=HIV_active,SMILES_COL=smiles scripts/slurm/build_unified_ppo_prompts_label01.sh"
   exit 1
 fi
 
-if [ -z "${SOURCE_INPUT_CSV}" ] || [ ! -f "${SOURCE_INPUT_CSV}" ]; then
-  echo "[ERROR] could not resolve SOURCE_INPUT_CSV. Set SOURCE_INPUT_CSV=/path/to/train.csv"
-  exit 1
-fi
-
-if [ "${FORCE_REBUILD_PROMPTS}" = "true" ] || [ ! -s "${LABEL0_CSV}" ]; then
+if [ "${SOURCE_MODE}" != "existing_label_prompt_csvs" ] && { [ "${FORCE_REBUILD_PROMPTS}" = "true" ] || [ ! -s "${LABEL0_CSV}" ]; }; then
   python scripts/make_label_specific_ppo_prompts.py \
     --config configs/hpc.yaml \
     --input-csv "${SOURCE_INPUT_CSV}" \
@@ -97,6 +294,29 @@ else
   echo "skip label0 build: existing non-empty ${LABEL0_CSV}"
 fi
 
+if [ "${SOURCE_MODE}" != "existing_label_prompt_csvs" ] && { [ "${FORCE_REBUILD_PROMPTS}" = "true" ] || [ ! -s "${LABEL1_CSV}" ]; }; then
+  python scripts/make_label_specific_ppo_prompts.py \
+    --config configs/hpc.yaml \
+    --input-csv "${SOURCE_INPUT_CSV}" \
+    --label 1 \
+    --out-csv "${LABEL1_CSV}" \
+    --out-json "${LABEL1_JSON}" \
+    --label-col "${LABEL_COL}" \
+    --smiles-col "${SMILES_COL}"
+else
+  echo "skip label1 build: existing non-empty ${LABEL1_CSV}"
+fi
+
+if [ ! -s "${LABEL0_CSV}" ]; then
+  echo "[ERROR] label0 prompt CSV is missing or empty: ${LABEL0_CSV}"
+  exit 1
+fi
+
+if [ ! -s "${LABEL1_CSV}" ]; then
+  echo "[ERROR] label1 prompt CSV is missing or empty: ${LABEL1_CSV}"
+  exit 1
+fi
+
 python scripts/build_unified_ppo_prompts.py \
   --config configs/hpc.yaml \
   --label0-csv "${LABEL0_CSV}" \
@@ -104,8 +324,10 @@ python scripts/build_unified_ppo_prompts.py \
   --out-csv "${UNIFIED_CSV}" \
   --out-json "${UNIFIED_JSON}" \
   --balance-labels \
-  --seed 13 \
+  --seed "${SEED}" \
   --max-per-label "${MAX_PER_LABEL}"
+
+augment_unified_summary
 
 python scripts/check_unified_prompt_balance.py \
   --config configs/hpc.yaml \
@@ -114,6 +336,13 @@ python scripts/check_unified_prompt_balance.py \
   --block-size 50
 
 echo "===== OUTPUT CHECK ====="
-ls -lh "${LABEL0_CSV}" "${LABEL0_JSON}" "${UNIFIED_CSV}" "${UNIFIED_JSON}" "${BALANCE_JSON}"
+for output_path in "${LABEL0_CSV}" "${LABEL0_JSON}" "${LABEL1_CSV}" "${LABEL1_JSON}" "${UNIFIED_CSV}" "${UNIFIED_JSON}" "${BALANCE_JSON}"; do
+  if [ -e "${output_path}" ]; then
+    ls -lh "${output_path}"
+  else
+    echo "[WARN] optional output missing: ${output_path}"
+  fi
+done
+echo "[UNIFIED_PROMPT_OUTPUTS] label0_csv=${LABEL0_CSV} label1_csv=${LABEL1_CSV} unified_csv=${UNIFIED_CSV} unified_summary=${UNIFIED_JSON} balance_summary=${BALANCE_JSON}"
 echo "===== BALANCE SUMMARY ====="
 cat "${BALANCE_JSON}"
