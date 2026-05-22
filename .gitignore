@@ -26,7 +26,16 @@ tensorboard/
 /data/raw/
 /pretrained_models/
 /data/
-/outputs/
+/outputs/*
 .codex
 
 .cache/
+
+!/outputs/
+!/outputs/hpc/
+/outputs/hpc/*
+!/outputs/hpc/ablations/
+/outputs/hpc/ablations/*
+!/outputs/hpc/ablations/label1_sft_ppo/
+/outputs/hpc/ablations/label1_sft_ppo/*
+!/outputs/hpc/ablations/label1_sft_ppo/README_ablation_design.md

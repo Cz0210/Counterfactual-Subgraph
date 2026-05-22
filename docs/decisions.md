@@ -6,6 +6,46 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-22] Add label=1 Base/SFT/PPO ablation wrappers
+
+### Background
+The current stable300 label=1 model is selector-ready, but the project still
+needs a controlled ablation to separate the contribution of SFT from the
+additional contribution of PPO. The comparison must keep the label=1 parent set,
+teacher/oracle, generation count, projection settings, audit tooling, and
+selector settings fixed so the measured differences are attributable to model
+stage rather than sampling or downstream configuration changes.
+
+### Decision
+Add a label=1 ablation layer that reuses the existing full-pool generator,
+candidate-pool audit, and class-level selector:
+
+- `scripts/generate_full_candidate_pool.py` can now treat `--sft-lora-path NONE`
+  as a base-model-only inference run, skipping PEFT adapter loading while
+  preserving existing SFT-only and PPO adapter paths.
+- Three Slurm wrappers generate and audit comparable `n=4` candidate pools for
+  Base ChemLLM, SFT-only, and SFT+PPO stable300.
+- Three selector Slurm wrappers apply the same coverage-heavy MMR selector
+  settings to each pool.
+- `scripts/export_candidate_pool_audit_artifacts.py` materializes audit sidecar
+  artifacts expected by ablation bookkeeping.
+- `scripts/summarize_label1_sft_ppo_ablation.py` combines audit and selector
+  summaries into CSV and Markdown reports.
+
+### Consequences
+- The ablation does not modify PPO training code, stable PPO training code, or
+  label=0 logic.
+- Base ChemLLM can now be evaluated through the same generation/audit path as
+  SFT and PPO checkpoints.
+- The high-temperature merged pool remains reserved for the final complete
+  system and is excluded from this main ablation to avoid confounding sampling
+  diversity with training-stage effects.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-21] Add a same-source label0 PPO prompt builder for unified label01 runs
 
 ### Background

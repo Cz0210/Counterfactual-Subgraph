@@ -288,6 +288,43 @@ def _build_lora_model(
     return model
 
 
+def _build_base_model(
+    *,
+    base_model_path: Path,
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> Any:
+    import torch
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        str(base_model_path),
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+        quantization_config=quantization_config,
+        dtype=torch.bfloat16,
+        device_map="auto",
+    )
+    model.eval()
+    model.config.use_cache = False
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.use_cache = False
+    return model
+
+
+def _is_no_adapter_path(value: str | Path | None) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text.lower() in {"none", "null", "na", "n/a", "base"}
+
+
 def build_generation_kwargs(
     *,
     encoded: dict[str, Any],
@@ -443,7 +480,7 @@ def _build_generation_summary(
     *,
     dataset_metadata: dict[str, Any],
     config: FullPoolGenerationConfig,
-    adapter_path: Path,
+    adapter_path: Path | None,
     load_mode: str,
     checkpoint_inspection: CheckpointInspection | None,
     sft_inspection: CheckpointInspection,
@@ -476,7 +513,7 @@ def _build_generation_summary(
         "generation": asdict(config),
         "model_load": {
             "load_mode": load_mode,
-            "adapter_path": str(adapter_path),
+            "adapter_path": str(adapter_path) if adapter_path is not None else None,
             "ppo_checkpoint_path": (
                 str(Path(ppo_checkpoint_path).expanduser().resolve())
                 if ppo_checkpoint_path
@@ -491,7 +528,11 @@ def _build_generation_summary(
                 "Decoded-chem PPO saves the final trainable LoRA weights at the checkpoint root, "
                 "so loading SFT then stacking PPO is not required when adapter files are present."
                 if load_mode == "ppo"
-                else "SFT-only baseline uses the resolved SFT adapter path."
+                else (
+                    "Base ChemLLM ablation skips PEFT adapter loading and uses the base model only."
+                    if load_mode == "base"
+                    else "SFT-only baseline uses the resolved SFT adapter path."
+                )
             ),
         },
         "outputs": {
@@ -542,24 +583,46 @@ def generate_full_candidate_pool(
         raise ValueError(f"No usable prompt records were found in {dataset_path}")
 
     base_model = Path(base_model_path).expanduser().resolve()
-    sft_dir = Path(sft_lora_path).expanduser().resolve()
     teacher_bundle = Path(teacher_path).expanduser().resolve()
     pool_path = Path(out_jsonl).expanduser().resolve()
     summary_path = Path(out_summary_json).expanduser().resolve()
     ensure_directory(pool_path.parent)
     ensure_directory(summary_path.parent)
 
-    sft_inspection = inspect_checkpoint_directory(sft_dir)
+    no_sft_adapter = _is_no_adapter_path(sft_lora_path)
+    sft_dir = None if no_sft_adapter else Path(sft_lora_path).expanduser().resolve()
+    sft_inspection = (
+        inspect_checkpoint_directory(sft_dir)
+        if sft_dir is not None
+        else CheckpointInspection(
+            checkpoint_dir="",
+            exists=False,
+            root_has_adapter=False,
+            root_adapter_files=(),
+            checkpoint_subdirs=(),
+            checkpoint_subdirs_with_adapter=(),
+            tokenizer_files=(),
+            candidate_pool_exists=False,
+            trainer_state_exists=False,
+            decoded_chem_value_head_exists=False,
+            selected_load_path=None,
+            selected_load_mode=None,
+        )
+    )
     ppo_inspection = (
         inspect_checkpoint_directory(ppo_checkpoint_path)
-        if ppo_checkpoint_path not in (None, "")
+        if not _is_no_adapter_path(ppo_checkpoint_path)
         else None
     )
 
-    if ppo_checkpoint_path not in (None, ""):
+    if not _is_no_adapter_path(ppo_checkpoint_path):
         adapter_path = resolve_adapter_load_path(ppo_checkpoint_path)
         load_mode = "ppo"
+    elif no_sft_adapter:
+        adapter_path = None
+        load_mode = "base"
     else:
+        assert sft_dir is not None
         adapter_path = resolve_adapter_load_path(sft_dir)
         load_mode = "sft_only"
 
@@ -568,12 +631,20 @@ def generate_full_candidate_pool(
         trust_remote_code=config.trust_remote_code,
         local_files_only=config.local_files_only,
     )
-    model = _build_lora_model(
-        base_model_path=base_model,
-        adapter_path=adapter_path,
-        trust_remote_code=config.trust_remote_code,
-        local_files_only=config.local_files_only,
-    )
+    if load_mode == "base":
+        model = _build_base_model(
+            base_model_path=base_model,
+            trust_remote_code=config.trust_remote_code,
+            local_files_only=config.local_files_only,
+        )
+    else:
+        assert adapter_path is not None
+        model = _build_lora_model(
+            base_model_path=base_model,
+            adapter_path=adapter_path,
+            trust_remote_code=config.trust_remote_code,
+            local_files_only=config.local_files_only,
+        )
 
     teacher_scorer = TeacherSemanticScorer(
         teacher_path=teacher_bundle,
@@ -703,7 +774,7 @@ def generate_full_candidate_pool(
         load_mode=load_mode,
         checkpoint_inspection=ppo_inspection,
         sft_inspection=sft_inspection,
-        ppo_checkpoint_path=str(ppo_checkpoint_path) if ppo_checkpoint_path not in (None, "") else None,
+        ppo_checkpoint_path=str(ppo_checkpoint_path) if not _is_no_adapter_path(ppo_checkpoint_path) else None,
     )
     summary_path.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
