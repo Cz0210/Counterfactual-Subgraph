@@ -6,6 +6,45 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-26] Add isolated official GCFExplainer AIDS reproduction scaffold
+
+### Background
+The project needs a reproducible way to run the official GCFExplainer AIDS
+baseline from the frozen third-party source under
+`baselines/gcfexplainer_official/` while preserving the current v3 SMILES
+counterfactual objective and avoiding dependency contamination in the main
+`smiles_pip118` environment.
+
+### Decision
+Add an isolated HPC reproduction scaffold:
+
+- `scripts/slurm/gcfexplainer/reproduce_aids_vrrw.sh` runs upstream
+  `vrrw.py --dataset aids` and syncs official `results/aids/` artifacts into a
+  per-job output directory.
+- `scripts/slurm/gcfexplainer/reproduce_aids_summary.sh` runs upstream
+  `summary.py --dataset aids`, then parses coverage/cost text into JSON and CSV.
+- `scripts/slurm/gcfexplainer/reproduce_aids_all.sh` runs both stages in one
+  Slurm job.
+- `scripts/eval/collect_gcf_official_results.py` parses known and partially
+  unknown summary formats without failing silently.
+- `docs/baselines/gcfexplainer_reproduction.md` documents local checks, separate
+  conda environment setup, Slurm commands, and result inspection.
+
+### Consequences
+- Existing SFT, PPO, reward, selector, and candidate-pool code paths remain
+  unchanged.
+- Official GCFExplainer dependencies stay in a separate `gcfexplainer_py38`
+  environment by default, with `CONDA_ENV` override support.
+- The official AIDS run is recorded as a sanity check, not as a fair comparison
+  with the current HIV/SMILES method.
+- Missing upstream `vrrw.py` or `summary.py` fails fast with explicit errors, and
+  unparseable summary logs still produce machine-readable failure artifacts.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-22] Add label=1 Base/SFT/PPO ablation wrappers
 
 ### Background
