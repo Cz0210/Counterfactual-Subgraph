@@ -11,9 +11,15 @@
 set -eo pipefail
 
 PROJECT_ROOT=/share/home/u20526/czx/counterfactual-subgraph
+CONDA_SH=/share/home/u20526/anaconda3/etc/profile.d/conda.sh
 cd "${PROJECT_ROOT}"
 
-source ~/.bashrc
+if [ ! -f "${CONDA_SH}" ]; then
+  echo "[ERROR] conda profile script not found: ${CONDA_SH}" >&2
+  exit 1
+fi
+
+source "${CONDA_SH}"
 conda activate "${CONDA_ENV:-gcfexplainer_py38}"
 set -u
 
@@ -22,6 +28,7 @@ export PYTHONPATH=$PWD
 JOB_ID=${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}
 OUT_DIR="${PROJECT_ROOT}/outputs/hpc/gcfexplainer/official_aids/${JOB_ID}"
 OFFICIAL_DIR="${PROJECT_ROOT}/baselines/gcfexplainer_official"
+GNN_MODEL="${OFFICIAL_DIR}/data/aids/gnn/model_best.pth"
 VRRW_LOG="${OUT_DIR}/vrrw.log"
 SUMMARY_LOG="${OUT_DIR}/summary.log"
 SUMMARY_JSON="${OUT_DIR}/official_aids_summary.json"
@@ -66,6 +73,12 @@ if [ ! -f "${OFFICIAL_DIR}/vrrw.py" ]; then
 fi
 if [ ! -f "${OFFICIAL_DIR}/summary.py" ]; then
   echo "[ERROR] required official script missing: ${OFFICIAL_DIR}/summary.py" >&2
+  exit 1
+fi
+if [ ! -f "${GNN_MODEL}" ]; then
+  echo "[ERROR] required official AIDS GNN model missing: ${GNN_MODEL}" >&2
+  echo "[ERROR] Train it first with:" >&2
+  echo "  sbatch scripts/slurm/gcfexplainer/train_aids_gnn.sh" >&2
   exit 1
 fi
 

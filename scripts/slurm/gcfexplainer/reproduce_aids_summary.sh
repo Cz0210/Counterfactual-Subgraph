@@ -11,9 +11,15 @@
 set -eo pipefail
 
 PROJECT_ROOT=/share/home/u20526/czx/counterfactual-subgraph
+CONDA_SH=/share/home/u20526/anaconda3/etc/profile.d/conda.sh
 cd "${PROJECT_ROOT}"
 
-source ~/.bashrc
+if [ ! -f "${CONDA_SH}" ]; then
+  echo "[ERROR] conda profile script not found: ${CONDA_SH}" >&2
+  exit 1
+fi
+
+source "${CONDA_SH}"
 conda activate "${CONDA_ENV:-gcfexplainer_py38}"
 set -u
 

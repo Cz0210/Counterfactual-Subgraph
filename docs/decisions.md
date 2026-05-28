@@ -6,6 +6,40 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-28] Harden official GCFExplainer conda activation and add AIDS GNN training wrapper
+
+### Background
+The official GCFExplainer AIDS reproduction needs a temporary upstream GNN
+checkpoint before `vrrw.py` can run. The first Slurm attempt failed before
+training because `source ~/.bashrc` transitively loaded `/etc/bashrc`, where the
+HPC shell referenced `BASHRCSOURCED` while `set -u` behavior could treat it as
+an unbound-variable error.
+
+### Decision
+Keep the fix isolated to the official GCFExplainer scaffold:
+
+- add `scripts/slurm/gcfexplainer/train_aids_gnn.sh` to train upstream
+  `gnn.py --dataset aids` in the separate `gcfexplainer_py38` environment;
+- source `/share/home/u20526/anaconda3/etc/profile.d/conda.sh` directly in all
+  GCFExplainer Slurm wrappers instead of `~/.bashrc`;
+- enable `set -u` only after conda activation in these wrappers;
+- fail fast in the `vrrw` and all-in-one wrappers when
+  `baselines/gcfexplainer_official/data/aids/gnn/model_best.pth` is missing,
+  with a direct pointer to the GNN training sbatch command.
+
+### Consequences
+- Existing SFT, PPO, reward, selector, and candidate-pool code paths remain
+  unchanged.
+- The GCFExplainer baseline no longer depends on user shell startup files for
+  conda activation.
+- Missing official AIDS GNN checkpoints now produce a clear remediation command
+  instead of a later opaque upstream failure.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-26] Add isolated official GCFExplainer AIDS reproduction scaffold
 
 ### Background

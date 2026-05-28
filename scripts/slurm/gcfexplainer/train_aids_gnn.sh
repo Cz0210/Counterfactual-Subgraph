@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J gcf_aids_vrrw
+#SBATCH -J gcf_aids_gnn
 #SBATCH --partition=A800
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -12,6 +12,7 @@ set -eo pipefail
 
 PROJECT_ROOT=/share/home/u20526/czx/counterfactual-subgraph
 CONDA_SH=/share/home/u20526/anaconda3/etc/profile.d/conda.sh
+
 cd "${PROJECT_ROOT}"
 
 if [ ! -f "${CONDA_SH}" ]; then
@@ -26,15 +27,18 @@ set -u
 export PYTHONPATH=$PWD
 
 JOB_ID=${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}
-OUT_DIR="${PROJECT_ROOT}/outputs/hpc/gcfexplainer/official_aids/${JOB_ID}"
+OUT_DIR="${PROJECT_ROOT}/outputs/hpc/gcfexplainer/official_aids_gnn_train/${JOB_ID}"
 OFFICIAL_DIR="${PROJECT_ROOT}/baselines/gcfexplainer_official"
+GNN_LOG="${OUT_DIR}/gnn_train.log"
 GNN_MODEL="${OFFICIAL_DIR}/data/aids/gnn/model_best.pth"
-VRRW_LOG="${OUT_DIR}/vrrw.log"
+OFFICIAL_TRAIN_LOG="${OFFICIAL_DIR}/data/aids/gnn/log.txt"
 
 mkdir -p logs
 mkdir -p "${OUT_DIR}"
 
-echo "===== GCFEXPLAINER OFFICIAL AIDS VRRW ENV CHECK ====="
+exec > >(tee -a "${GNN_LOG}") 2>&1
+
+echo "===== GCFEXPLAINER OFFICIAL AIDS GNN TRAIN ENV CHECK ====="
 echo "hostname: $(hostname)"
 echo "pwd: $(pwd)"
 echo "git commit: $(git rev-parse HEAD || true)"
@@ -56,47 +60,39 @@ except Exception as exc:
     print("torch diagnostics failed:", repr(exc))
 PY
 echo "CONDA_ENV override source: ${CONDA_ENV:-gcfexplainer_py38}"
+echo "GNN_EPOCHS=${GNN_EPOCHS:-1000}"
+echo "CUDA_ID=${CUDA_ID:-0}"
 echo "OUT_DIR=${OUT_DIR}"
 echo "OFFICIAL_DIR=${OFFICIAL_DIR}"
-echo "====================================================="
+echo "=========================================================="
 
 if [ ! -d "${OFFICIAL_DIR}" ]; then
   echo "[ERROR] official GCFExplainer directory not found: ${OFFICIAL_DIR}" >&2
   exit 1
 fi
-if [ ! -f "${OFFICIAL_DIR}/vrrw.py" ]; then
-  echo "[ERROR] required official script missing: ${OFFICIAL_DIR}/vrrw.py" >&2
-  exit 1
-fi
-if [ ! -f "${OFFICIAL_DIR}/summary.py" ]; then
-  echo "[ERROR] required official script missing: ${OFFICIAL_DIR}/summary.py" >&2
-  exit 1
-fi
-if [ ! -f "${GNN_MODEL}" ]; then
-  echo "[ERROR] required official AIDS GNN model missing: ${GNN_MODEL}" >&2
-  echo "[ERROR] Train it first with:" >&2
-  echo "  sbatch scripts/slurm/gcfexplainer/train_aids_gnn.sh" >&2
+if [ ! -f "${OFFICIAL_DIR}/gnn.py" ]; then
+  echo "[ERROR] required official script missing: ${OFFICIAL_DIR}/gnn.py" >&2
   exit 1
 fi
 
 cd "${OFFICIAL_DIR}"
-echo "===== RUNNING: python vrrw.py --dataset aids ====="
-python vrrw.py --dataset aids 2>&1 | tee "${VRRW_LOG}"
+echo "===== RUNNING: python gnn.py --dataset aids --epochs ${GNN_EPOCHS:-1000} --cuda ${CUDA_ID:-0} ====="
+python gnn.py --dataset aids --epochs "${GNN_EPOCHS:-1000}" --cuda "${CUDA_ID:-0}"
 
-echo "===== SYNCING OFFICIAL RESULTS ====="
-if [ -d "${OFFICIAL_DIR}/results/aids" ]; then
-  mkdir -p "${OUT_DIR}/results"
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a "${OFFICIAL_DIR}/results/aids/" "${OUT_DIR}/results/aids/"
-  else
-    mkdir -p "${OUT_DIR}/results/aids"
-    cp -a "${OFFICIAL_DIR}/results/aids/." "${OUT_DIR}/results/aids/"
-  fi
-  find "${OUT_DIR}/results/aids" -maxdepth 3 -type f | sort
+echo "===== CHECKING TRAINED AIDS GNN ARTIFACTS ====="
+if [ ! -f "${GNN_MODEL}" ]; then
+  echo "[ERROR] expected trained GNN model not found: ${GNN_MODEL}" >&2
+  exit 1
+fi
+ls -lh "${GNN_MODEL}"
+
+if [ -f "${OFFICIAL_TRAIN_LOG}" ]; then
+  echo "===== tail -n 80 ${OFFICIAL_TRAIN_LOG} ====="
+  tail -n 80 "${OFFICIAL_TRAIN_LOG}"
 else
-  echo "[WARN] official results directory not found after vrrw: ${OFFICIAL_DIR}/results/aids"
+  echo "[WARN] official GNN train log not found: ${OFFICIAL_TRAIN_LOG}"
 fi
 
-echo "===== GCFEXPLAINER AIDS VRRW DONE ====="
-echo "vrrw_log=${VRRW_LOG}"
-echo "out_dir=${OUT_DIR}"
+echo "===== GCFEXPLAINER AIDS GNN TRAIN DONE ====="
+echo "gnn_train_log=${GNN_LOG}"
+echo "gnn_model=${GNN_MODEL}"

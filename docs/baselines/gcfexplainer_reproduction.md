@@ -56,6 +56,62 @@ print(torch.cuda.is_available())
 PY
 ```
 
+## Bashrc And Conda Activation
+
+Do not initialize the GCFExplainer Slurm wrappers with `source ~/.bashrc`.
+On this HPC, `~/.bashrc` can transitively source `/etc/bashrc`, where
+`BASHRCSOURCED` may be referenced before it is defined. If `set -u` is already
+enabled, Bash exits with:
+
+```text
+/etc/bashrc: line 12: BASHRCSOURCED: unbound variable
+```
+
+The GCFExplainer wrappers therefore source conda directly:
+
+```bash
+source /share/home/u20526/anaconda3/etc/profile.d/conda.sh
+conda activate ${CONDA_ENV:-gcfexplainer_py38}
+set -u
+```
+
+If a new wrapper must source a shell initialization file, temporarily disable
+unbound-variable checking with `set +u` before the source step and re-enable it
+after conda activation.
+
+## Train Official AIDS GNN
+
+The official `vrrw.py` path expects the AIDS GNN checkpoint at:
+
+```text
+baselines/gcfexplainer_official/data/aids/gnn/model_best.pth
+```
+
+Train it first if the checkpoint is missing:
+
+```bash
+cd /share/home/u20526/czx/counterfactual-subgraph
+mkdir -p logs
+sbatch scripts/slurm/gcfexplainer/train_aids_gnn.sh
+```
+
+Optional overrides:
+
+```bash
+GNN_EPOCHS=1000 CUDA_ID=0 CONDA_ENV=gcfexplainer_py38 \
+  sbatch scripts/slurm/gcfexplainer/train_aids_gnn.sh
+```
+
+The training wrapper writes Slurm logs to `logs/%j.out` and `logs/%j.err`, and
+mirrors stdout/stderr to:
+
+```text
+outputs/hpc/gcfexplainer/official_aids_gnn_train/${SLURM_JOB_ID}/gnn_train.log
+```
+
+At the end it checks for `data/aids/gnn/model_best.pth` and prints the last 80
+lines of the official `data/aids/gnn/log.txt`.
+
 ## Slurm Commands
 
 Run the full AIDS reproduction in one job:
