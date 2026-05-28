@@ -6,6 +6,45 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-28] Add HIV quick recourse-level comparison evaluator
+
+### Background
+The official GCFExplainer AIDS reproduction is now available as a sanity check,
+but it is not directly comparable to the current HIV/SMILES counterfactual
+fragment system. The next practical need is a fast recourse-level comparison in
+the current RF-teacher setting that can compare our selected subgraphs with a
+simple opposite-label full-molecule baseline without changing training code.
+
+### Decision
+Add an evaluation-only quick comparison path:
+
+- `scripts/eval/compare_hiv_recourse_baselines.py` evaluates
+  `ours_selected_subgraph` by deleting selected fragments from each target
+  molecule and evaluates `gt_fullgraph_greedy` by greedily choosing
+  opposite-label full molecules;
+- both methods are normalized to per-input recourse candidates `G_i'` and scored
+  with the same RF teacher for `p_before`, `p_after`, `cf_drop`, and `cf_flip`;
+- both methods use the same RDKit MCS proxy distance for approximate recourse
+  cost;
+- `scripts/slurm/gcfexplainer/run_hiv_quick_recourse_compare_label1.sh` provides
+  an HPC wrapper with `smiles_pip118`, environment diagnostics, HIV CSV
+  auto-discovery, and explicit failure when the CSV is ambiguous;
+- `docs/baselines/hiv_quick_recourse_comparison.md` documents the scope,
+  limitations, metrics, and commands.
+
+### Consequences
+- Existing SFT, PPO, reward, selector, and candidate-pool training code remains
+  unchanged.
+- The comparison is explicitly a quick HIV/SMILES RF-teacher analysis, not an
+  official GCFExplainer reproduction and not a learned/exact GED evaluation.
+- Ours-style subgraph match coverage is retained as an internal diagnostic, but
+  headline comparison uses recourse-level coverage, cost, drop, and flip metrics.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-28] Harden official GCFExplainer conda activation and add AIDS GNN training wrapper
 
 ### Background
