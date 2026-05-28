@@ -6,6 +6,46 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-28] Add theta-aware recourse coverage diagnostics and CAMC action-motif comparison
+
+### Background
+The HIV quick comparison ran end to end, but long runs lacked enough progress
+logging for Slurm monitoring. The ours recourse coverage could also show
+`k=20 < k=10`, which indicated that the evaluator was choosing one action before
+applying theta instead of computing theta-aware existential coverage over the
+top-k action set. The current analysis also needs a second, method-aligned view
+that compares shared counterfactual action motifs while remaining applicable to
+fullgraph baselines.
+
+### Decision
+Update only the evaluation and Slurm layers:
+
+- rebuild `scripts/eval/compare_hiv_recourse_baselines.py` around explicit
+  ours action candidates and theta-aware existential aggregation;
+- keep the original recourse-level outputs while adding
+  `ours_action_candidates.csv`, `diagnostic_counts.json`, and `progress.log`;
+- add CAMC output files that evaluate action motifs from our selected fragments
+  and MCS-deleted motifs extracted from GT or extra selected fullgraph SMILES;
+- add flushed logging, tqdm progress, MCS timing diagnostics, and recourse/CAMC
+  monotonicity warning lists;
+- update `scripts/slurm/gcfexplainer/run_hiv_quick_recourse_compare_label1.sh`
+  to tee logs to the run directory and pass CAMC/progress controls.
+
+### Consequences
+- Existing SFT, PPO, reward, selector training, and selected-subgraph artifacts
+  remain unchanged.
+- Recourse coverage is now computed as `exists feasible action` under each
+  theta, so it should be monotone in both `k` and theta.
+- CAMC is more aligned with class-level counterfactual subgraph selection, but
+  fullgraph methods can still participate when they provide selected fullgraph
+  SMILES. Official graph benchmark outputs still require a graph-level CAMC
+  evaluator or a SMILES adapter.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-28] Add HIV quick recourse-level comparison evaluator
 
 ### Background

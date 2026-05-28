@@ -29,6 +29,20 @@ MAX_GT_CANDIDATES=${MAX_GT_CANDIDATES:-2000}
 SEED=${SEED:-13}
 JOB_ID=${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}
 OUT_DIR=${OUT_DIR:-/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_${JOB_ID}}
+PROGRESS_EVERY=${PROGRESS_EVERY:-100}
+DISABLE_TQDM=${DISABLE_TQDM:-false}
+ENABLE_CAMC=${ENABLE_CAMC:-true}
+CAMC_DELTA_LIST=${CAMC_DELTA_LIST:-"0.1 0.2 0.3 0.5"}
+CAMC_TOP_K_LIST=${CAMC_TOP_K_LIST:-"${TOP_K_LIST}"}
+CAMC_MIN_MOTIF_ATOMS=${CAMC_MIN_MOTIF_ATOMS:-2}
+CAMC_USE_STRICT_THETA=${CAMC_USE_STRICT_THETA:-false}
+CAMC_EXTRACTION_THETA_LIST=${CAMC_EXTRACTION_THETA_LIST:-}
+CAMC_EXTRA_FULLGRAPH_SELECTED_CSV=${CAMC_EXTRA_FULLGRAPH_SELECTED_CSV:-}
+
+mkdir -p "${OUT_DIR}" logs
+export OUT_DIR
+export HIV_COMPARE_EXTERNAL_TEE=1
+exec > >(tee -a "${OUT_DIR}/progress.log") 2>&1
 
 if [ -z "${HIV_CSV:-}" ]; then
   HIV_CSV_CANDIDATES=()
@@ -64,8 +78,6 @@ if [ ! -d "${OURS_SELECTED_DIR}" ]; then
   echo "[ERROR] OURS_SELECTED_DIR not found: ${OURS_SELECTED_DIR}" >&2
   exit 1
 fi
-
-mkdir -p "${OUT_DIR}"
 
 echo "===== HIV QUICK RECOURSE COMPARISON ENV CHECK ====="
 echo "hostname: $(hostname)"
@@ -105,10 +117,21 @@ echo "MAX_INPUTS=${MAX_INPUTS:-unset}"
 echo "MAX_GT_CANDIDATES=${MAX_GT_CANDIDATES}"
 echo "SEED=${SEED}"
 echo "OUT_DIR=${OUT_DIR}"
+echo "PROGRESS_EVERY=${PROGRESS_EVERY}"
+echo "DISABLE_TQDM=${DISABLE_TQDM}"
+echo "ENABLE_CAMC=${ENABLE_CAMC}"
+echo "CAMC_DELTA_LIST=${CAMC_DELTA_LIST}"
+echo "CAMC_TOP_K_LIST=${CAMC_TOP_K_LIST}"
+echo "CAMC_MIN_MOTIF_ATOMS=${CAMC_MIN_MOTIF_ATOMS}"
+echo "CAMC_USE_STRICT_THETA=${CAMC_USE_STRICT_THETA}"
+echo "CAMC_EXTRACTION_THETA_LIST=${CAMC_EXTRACTION_THETA_LIST:-unset}"
+echo "CAMC_EXTRA_FULLGRAPH_SELECTED_CSV=${CAMC_EXTRA_FULLGRAPH_SELECTED_CSV:-unset}"
 echo "==================================================="
 
 read -r -a TOP_K_ARGS <<< "${TOP_K_LIST}"
 read -r -a THETA_ARGS <<< "${THETA_LIST}"
+read -r -a CAMC_DELTA_ARGS <<< "${CAMC_DELTA_LIST}"
+read -r -a CAMC_TOP_K_ARGS <<< "${CAMC_TOP_K_LIST}"
 
 CMD=(
   python scripts/eval/compare_hiv_recourse_baselines.py
@@ -123,8 +146,33 @@ CMD=(
   --max-gt-candidates "${MAX_GT_CANDIDATES}"
   --out-dir "${OUT_DIR}"
   --seed "${SEED}"
+  --progress-every "${PROGRESS_EVERY}"
+  --camc-delta-list "${CAMC_DELTA_ARGS[@]}"
+  --camc-top-k-list "${CAMC_TOP_K_ARGS[@]}"
+  --camc-min-motif-atoms "${CAMC_MIN_MOTIF_ATOMS}"
 )
 
+if [ "${DISABLE_TQDM}" = "true" ]; then
+  CMD+=(--disable-tqdm)
+fi
+if [ "${ENABLE_CAMC}" = "true" ]; then
+  CMD+=(--enable-camc)
+else
+  CMD+=(--disable-camc)
+fi
+if [ "${CAMC_USE_STRICT_THETA}" = "true" ]; then
+  CMD+=(--camc-use-strict-theta)
+fi
+if [ -n "${CAMC_EXTRACTION_THETA_LIST}" ]; then
+  read -r -a CAMC_EXTRACTION_THETA_ARGS <<< "${CAMC_EXTRACTION_THETA_LIST}"
+  CMD+=(--camc-extraction-theta-list "${CAMC_EXTRACTION_THETA_ARGS[@]}")
+fi
+if [ -n "${CAMC_EXTRA_FULLGRAPH_SELECTED_CSV}" ]; then
+  read -r -a CAMC_EXTRA_FULLGRAPH_ARGS <<< "${CAMC_EXTRA_FULLGRAPH_SELECTED_CSV}"
+  for extra_fullgraph_spec in "${CAMC_EXTRA_FULLGRAPH_ARGS[@]}"; do
+    CMD+=(--extra-fullgraph-selected-csv "${extra_fullgraph_spec}")
+  done
+fi
 if [ -n "${SMILES_COL:-}" ]; then
   CMD+=(--smiles-col "${SMILES_COL}")
 fi
@@ -143,9 +191,47 @@ echo
 echo "===== comparison_table.csv ====="
 cat "${OUT_DIR}/comparison_table.csv"
 
+if [ "${ENABLE_CAMC}" = "true" ]; then
+  echo "===== camc_comparison_table.csv ====="
+  cat "${OUT_DIR}/camc_comparison_table.csv"
+fi
+
+echo "===== diagnostic_counts.json ====="
+cat "${OUT_DIR}/diagnostic_counts.json"
+
+echo "===== recourse_monotonicity_warnings ====="
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["OUT_DIR"]) / "comparison_summary.json"
+payload = json.loads(path.read_text())
+print(json.dumps(payload.get("recourse_monotonicity_warnings", []), indent=2, sort_keys=True))
+PY
+
+if [ "${ENABLE_CAMC}" = "true" ]; then
+  echo "===== camc_monotonicity_warnings ====="
+  python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["OUT_DIR"]) / "camc_summary.json"
+payload = json.loads(path.read_text())
+print(json.dumps(payload.get("camc_monotonicity_warnings", []), indent=2, sort_keys=True))
+PY
+fi
+
 echo "===== comparison_summary.json ====="
 cat "${OUT_DIR}/comparison_summary.json"
 
 echo "===== HIV QUICK RECOURSE COMPARISON DONE ====="
 echo "comparison_table=${OUT_DIR}/comparison_table.csv"
 echo "comparison_summary=${OUT_DIR}/comparison_summary.json"
+if [ "${ENABLE_CAMC}" = "true" ]; then
+  echo "camc_comparison_table=${OUT_DIR}/camc_comparison_table.csv"
+  echo "camc_summary=${OUT_DIR}/camc_summary.json"
+fi
+echo "diagnostic_counts=${OUT_DIR}/diagnostic_counts.json"
+echo "progress_log=${OUT_DIR}/progress.log"
