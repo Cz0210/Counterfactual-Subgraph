@@ -223,6 +223,15 @@ print(json.dumps(payload.get("camc_monotonicity_warnings", []), indent=2, sort_k
 PY
 fi
 
+echo "===== MorganGenerator deprecation warning check ====="
+MORGAN_WARNING_COUNT=$(grep -c "DEPRECATION WARNING: please use MorganGenerator" "${OUT_DIR}/progress.log" || true)
+echo "morgan_generator_deprecation_warning_count=${MORGAN_WARNING_COUNT}"
+if [ "${MORGAN_WARNING_COUNT}" -gt 0 ]; then
+  echo "[WARNING] MorganGenerator deprecation warnings found in progress.log."
+else
+  echo "[OK] no MorganGenerator deprecation warnings found."
+fi
+
 echo "===== comparison_summary.json ====="
 cat "${OUT_DIR}/comparison_summary.json"
 

@@ -206,7 +206,14 @@ For each method and top-k action motif set `M_k`, CAMC reports:
 - pairwise Morgan fingerprint Tanimoto mean and max.
 
 CAMC writes `camc_comparison_table.csv`, `camc_summary.json`, and
-`camc_per_input.csv`.
+`camc_per_input.csv`. `camc_summary.json` and `diagnostic_counts.json` also
+include `motif_overlap_diagnostics`, which compares ours and GT selected motifs
+by exact overlap, max Tanimoto similarity, atom counts, aromatic motifs, and
+hetero-atom motifs.
+
+The evaluator uses RDKit's MorganGenerator API for motif fingerprints. It also
+defaults to `--suppress-rdkit-warnings` as a log fallback; pass
+`--no-suppress-rdkit-warnings` only when debugging RDKit warning output.
 
 ## Local Command
 
@@ -288,6 +295,7 @@ cat "${OUT}/camc_comparison_table.csv"
 cat "${OUT}/comparison_summary.json"
 cat "${OUT}/diagnostic_counts.json"
 tail -f "${OUT}/progress.log"
+grep -c "DEPRECATION WARNING: please use MorganGenerator" "${OUT}/progress.log" || true
 export OUT
 python - <<'PY'
 import json

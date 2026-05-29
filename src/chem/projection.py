@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from math import ceil
 
 from src.chem.core_fragment import match_core_fragment_to_parent
@@ -15,13 +16,13 @@ from src.chem.types import FragmentProjectionResult
 
 try:
     from rdkit import Chem, DataStructs
-    from rdkit.Chem import BRICS, rdFMCS, rdMolDescriptors
+    from rdkit.Chem import BRICS, rdFingerprintGenerator, rdFMCS
 except ImportError:  # pragma: no cover - depends on local environment
     Chem = None
     DataStructs = None
     BRICS = None
+    rdFingerprintGenerator = None
     rdFMCS = None
-    rdMolDescriptors = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -681,16 +682,25 @@ def _projection_score(
     )
 
 
+@lru_cache(maxsize=1)
+def _get_morgan_fp_generator() -> object | None:
+    if rdFingerprintGenerator is None:
+        return None
+    try:
+        return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    except Exception:  # pragma: no cover - depends on RDKit internals
+        return None
+
+
 def _morgan_tanimoto(query_mol: object, candidate_mol: object) -> float:
-    if DataStructs is None or rdMolDescriptors is None:
+    if DataStructs is None:
+        return 0.0
+    generator = _get_morgan_fp_generator()
+    if generator is None:
         return 0.0
     try:
-        query_fp = rdMolDescriptors.GetMorganFingerprintAsBitVect(query_mol, 2, 2048)
-        candidate_fp = rdMolDescriptors.GetMorganFingerprintAsBitVect(
-            candidate_mol,
-            2,
-            2048,
-        )
+        query_fp = generator.GetFingerprint(query_mol)
+        candidate_fp = generator.GetFingerprint(candidate_mol)
         return float(DataStructs.TanimotoSimilarity(query_fp, candidate_fp))
     except Exception:  # pragma: no cover - depends on RDKit internals
         return 0.0

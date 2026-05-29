@@ -6,6 +6,44 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-05-29] Replace eval Morgan fingerprint calls and add CAMC motif overlap diagnostics
+
+### Background
+The HIV quick comparison plus CAMC run completed, but the Slurm log contained a
+large number of RDKit deprecation warnings:
+`DEPRECATION WARNING: please use MorganGenerator`. These warnings came from
+legacy Morgan fingerprint APIs used by evaluation and similarity helpers, not
+from a training objective change.
+
+### Decision
+Keep the change evaluation/helper scoped:
+
+- replace legacy Morgan bit-vector calls in HIV comparison, selector/audit
+  similarity helpers, selected-subgraph overlap, and chemistry projection/repair
+  Tanimoto helpers with cached `rdFingerprintGenerator.GetMorganGenerator`
+  instances;
+- keep `src/rewards/reward_calculator.py` unchanged because reward code is out
+  of scope and already prefers the newer generator when available;
+- add `--suppress-rdkit-warnings` / `--no-suppress-rdkit-warnings` to the HIV
+  comparison script as a fallback log-control option;
+- add CAMC `motif_overlap_diagnostics` comparing ours and GT selected motifs by
+  exact overlap, max Tanimoto, atom counts, aromatic motifs, and hetero-atom
+  motifs;
+- make the HIV quick Slurm wrapper count MorganGenerator deprecation warnings in
+  `progress.log` at the end of the job.
+
+### Consequences
+- Existing SFT, PPO, reward, selector training, and selected-subgraph artifacts
+  remain unchanged.
+- CAMC metrics are unchanged; the new motif-overlap block is diagnostic only.
+- Future HIV quick comparison logs should show zero MorganGenerator deprecation
+  warnings unless a separate code path still uses RDKit's legacy API.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-28] Add theta-aware recourse coverage diagnostics and CAMC action-motif comparison
 
 ### Background

@@ -16,6 +16,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable, Iterator
@@ -35,12 +36,13 @@ from src.rewards.reward_calculator import (  # noqa: E402
 )
 
 try:  # pragma: no cover - depends on runtime env
-    from rdkit import Chem, DataStructs
-    from rdkit.Chem import AllChem, rdFMCS
+    from rdkit import Chem, DataStructs, RDLogger
+    from rdkit.Chem import rdFingerprintGenerator, rdFMCS
 except ImportError:  # pragma: no cover - depends on runtime env
     Chem = None
     DataStructs = None
-    AllChem = None
+    RDLogger = None
+    rdFingerprintGenerator = None
     rdFMCS = None
 
 try:  # pragma: no cover - optional runtime dependency
@@ -297,6 +299,17 @@ def setup_logging(out_dir: Path) -> logging.Logger:
     else:
         (out_dir / "progress.log").touch(exist_ok=True)
     return logger
+
+
+def configure_rdkit_warnings(*, suppress: bool, logger: logging.Logger) -> None:
+    if not suppress:
+        logger.info("RDKit warning suppression disabled by --no-suppress-rdkit-warnings")
+        return
+    if RDLogger is None:
+        logger.info("RDKit RDLogger unavailable; cannot suppress rdApp.warning")
+        return
+    RDLogger.DisableLog("rdApp.warning")
+    logger.info("RDKit rdApp.warning logs suppressed")
 
 
 @contextmanager
@@ -559,6 +572,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--progress-every", type=int, default=100)
     parser.add_argument("--disable-tqdm", action="store_true", default=False)
+    parser.add_argument("--suppress-rdkit-warnings", dest="suppress_rdkit_warnings", action="store_true", default=True)
+    parser.add_argument("--no-suppress-rdkit-warnings", dest="suppress_rdkit_warnings", action="store_false")
     parser.add_argument("--enable-camc", dest="enable_camc", action="store_true", default=True)
     parser.add_argument("--disable-camc", dest="enable_camc", action="store_false")
     parser.add_argument("--camc-delta-list", nargs="+", type=float, default=[0.1, 0.2, 0.3, 0.5])
@@ -1944,13 +1959,34 @@ def dedupe_fullgraph_motif_pool(method: str, pool_rows: list[dict[str, Any]]) ->
 
 
 def morgan_fp(smiles: str) -> Any | None:
-    if Chem is None or AllChem is None:
-        return None
-    mol = Chem.MolFromSmiles(smiles)
+    fp, _reason = morgan_fp_with_reason(smiles)
+    return fp
+
+
+def morgan_fp_with_reason(smiles: str) -> tuple[Any | None, str]:
+    if Chem is None or rdFingerprintGenerator is None:
+        return None, "rdkit_or_fingerprint_generator_unavailable"
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+    except Exception as exc:
+        return None, f"mol_parse_exception:{exc}"
     if mol is None:
+        return None, "mol_parse_failed"
+    try:
+        generator = get_morgan_fp_generator()
+        if generator is None:
+            return None, "morgan_generator_unavailable"
+        return generator.GetFingerprint(mol), "ok"
+    except Exception as exc:
+        return None, f"fingerprint_failed:{exc}"
+
+
+@lru_cache(maxsize=1)
+def get_morgan_fp_generator() -> Any | None:
+    if rdFingerprintGenerator is None:
         return None
     try:
-        return AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+        return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
     except Exception:
         return None
 
@@ -1977,6 +2013,135 @@ def pairwise_tanimoto_stats(motifs: list[dict[str, Any]]) -> tuple[float | None,
         for right in smiles[i + 1 :]:
             values.append(tanimoto_similarity(left, right))
     return _safe_mean(values), max(values) if values else None
+
+
+def _safe_median(values: list[float]) -> float | None:
+    return float(median(values)) if values else None
+
+
+def _valid_selected_motif_smiles(motifs: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for row in motifs:
+        if not row.get("valid_motif") or not row.get("canonical_motif_smiles"):
+            continue
+        smiles = str(row["canonical_motif_smiles"])
+        if smiles in seen:
+            continue
+        seen.add(smiles)
+        result.append(smiles)
+    return result
+
+
+def _motif_atom_count(smiles: str) -> int | None:
+    if Chem is None:
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    return int(mol.GetNumAtoms())
+
+
+def _motif_has_aromatic_atom(smiles: str) -> bool:
+    if Chem is None:
+        return False
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return False
+    return any(atom.GetIsAromatic() for atom in mol.GetAtoms())
+
+
+def _motif_has_hetero_atom(smiles: str) -> bool:
+    if Chem is None:
+        return False
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return False
+    return any(atom.GetAtomicNum() not in (1, 6) for atom in mol.GetAtoms())
+
+
+def build_motif_overlap_diagnostics(
+    method_to_selected_motifs: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    required = ("ours_selected_subgraph", "gt_fullgraph_greedy")
+    missing = [method for method in required if method not in method_to_selected_motifs]
+    if missing:
+        return {
+            "skipped": True,
+            "reason": f"missing_methods:{','.join(missing)}",
+        }
+
+    ours = _valid_selected_motif_smiles(method_to_selected_motifs["ours_selected_subgraph"])
+    gt = _valid_selected_motif_smiles(method_to_selected_motifs["gt_fullgraph_greedy"])
+    if not ours or not gt:
+        return {
+            "skipped": True,
+            "reason": "empty_valid_selected_motifs",
+            "valid_motif_count_by_method": {
+                "ours_selected_subgraph": len(ours),
+                "gt_fullgraph_greedy": len(gt),
+            },
+        }
+
+    ours_set = set(ours)
+    gt_set = set(gt)
+    overlap = sorted(ours_set & gt_set)
+    union = ours_set | gt_set
+    max_sims: list[float] = []
+    fingerprint_failures: dict[str, int] = {}
+    for ours_smiles in ours:
+        ours_fp, ours_reason = morgan_fp_with_reason(ours_smiles)
+        if ours_fp is None:
+            fingerprint_failures[ours_reason] = fingerprint_failures.get(ours_reason, 0) + 1
+            max_sims.append(0.0)
+            continue
+        best = 0.0
+        for gt_smiles in gt:
+            gt_fp, gt_reason = morgan_fp_with_reason(gt_smiles)
+            if gt_fp is None:
+                fingerprint_failures[gt_reason] = fingerprint_failures.get(gt_reason, 0) + 1
+                continue
+            if DataStructs is None:
+                sim = 0.0
+            else:
+                sim = float(DataStructs.TanimotoSimilarity(ours_fp, gt_fp))
+            best = max(best, sim)
+        max_sims.append(best)
+
+    atom_counts_by_method: dict[str, list[float]] = {}
+    aromatic_counts: dict[str, int] = {}
+    hetero_counts: dict[str, int] = {}
+    for method, smiles_list in {
+        "ours_selected_subgraph": ours,
+        "gt_fullgraph_greedy": gt,
+    }.items():
+        atom_counts = [
+            float(count)
+            for count in (_motif_atom_count(smiles) for smiles in smiles_list)
+            if count is not None
+        ]
+        atom_counts_by_method[method] = atom_counts
+        aromatic_counts[method] = sum(1 for smiles in smiles_list if _motif_has_aromatic_atom(smiles))
+        hetero_counts[method] = sum(1 for smiles in smiles_list if _motif_has_hetero_atom(smiles))
+
+    return {
+        "skipped": False,
+        "exact_overlap_count": len(overlap),
+        "exact_jaccard": float(len(overlap)) / float(len(union)) if union else 0.0,
+        "exact_overlap_motifs": overlap,
+        "mean_max_tanimoto_ours_to_gt": _safe_mean(max_sims),
+        "count_ours_to_gt_sim_ge_0.7": sum(1 for value in max_sims if value >= 0.7),
+        "count_ours_to_gt_sim_ge_0.85": sum(1 for value in max_sims if value >= 0.85),
+        "mean_atom_count_by_method": {
+            method: _safe_mean(values) for method, values in atom_counts_by_method.items()
+        },
+        "median_atom_count_by_method": {
+            method: _safe_median(values) for method, values in atom_counts_by_method.items()
+        },
+        "aromatic_motif_count_by_method": aromatic_counts,
+        "hetero_atom_motif_count_by_method": hetero_counts,
+        "fingerprint_failure_reasons": fingerprint_failures,
+    }
 
 
 def evaluate_single_motif_on_record(
@@ -2462,7 +2627,7 @@ def run_camc(
     camc_top_k_list: list[int],
     camc_delta_list: list[float],
     camc_extraction_theta_list: list[float],
-) -> tuple[dict[str, Any], dict[str, int], dict[str, int], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, int], dict[str, int], list[dict[str, Any]], dict[str, Any]]:
     camc_start = time.time()
     method_to_motif_rows: dict[str, list[dict[str, Any]]] = {}
     method_to_pool_rows: dict[str, list[dict[str, Any]]] = {}
@@ -2568,6 +2733,7 @@ def run_camc(
             method_to_selected_motifs.get("gt_fullgraph_greedy", []),
             CAMC_SELECTED_MOTIF_FIELDS,
         )
+        motif_overlap_diagnostics = build_motif_overlap_diagnostics(method_to_selected_motifs)
 
     with timed_stage("CAMC action motif evaluation", logger, runtime_by_stage):
         camc_runtime = time.time() - camc_start
@@ -2616,6 +2782,7 @@ def run_camc(
         },
         "motif_extraction_stats": motif_extraction_stats,
         "motif_selection_stats": motif_selection_stats,
+        "motif_overlap_diagnostics": motif_overlap_diagnostics,
         "camc_monotonicity_warnings": camc_warnings,
         "output_paths": output_paths,
     }
@@ -2629,7 +2796,7 @@ def run_camc(
         method: sum(1 for row in method_to_pool_rows.get(method, []) if not row.get("valid_motif"))
         for method in method_to_pool_rows
     }
-    return camc_summary, motif_counts, invalid_counts, camc_warnings
+    return camc_summary, motif_counts, invalid_counts, camc_warnings, motif_overlap_diagnostics
 
 
 def main() -> int:
@@ -2638,6 +2805,7 @@ def main() -> int:
     out_dir = args.out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = setup_logging(out_dir)
+    configure_rdkit_warnings(suppress=bool(args.suppress_rdkit_warnings), logger=logger)
     runtime_by_stage: dict[str, float] = {}
 
     if Chem is None or rdFMCS is None:
@@ -2821,8 +2989,18 @@ def main() -> int:
     camc_motif_counts_by_method: dict[str, int] = {}
     camc_invalid_motif_counts_by_method: dict[str, int] = {}
     camc_warnings: list[dict[str, Any]] = []
+    motif_overlap_diagnostics: dict[str, Any] = {
+        "skipped": True,
+        "reason": "camc_disabled",
+    }
     if args.enable_camc:
-        camc_summary, camc_motif_counts_by_method, camc_invalid_motif_counts_by_method, camc_warnings = run_camc(
+        (
+            camc_summary,
+            camc_motif_counts_by_method,
+            camc_invalid_motif_counts_by_method,
+            camc_warnings,
+            motif_overlap_diagnostics,
+        ) = run_camc(
             args=args,
             logger=logger,
             runtime_by_stage=runtime_by_stage,
@@ -2868,6 +3046,7 @@ def main() -> int:
             "mcs_timeout_sec": int(args.mcs_timeout_sec),
             "progress_every": progress_every,
             "disable_tqdm": bool(args.disable_tqdm),
+            "suppress_rdkit_warnings": bool(args.suppress_rdkit_warnings),
             "enable_camc": bool(args.enable_camc),
             "camc_delta_list": camc_delta_list,
             "camc_top_k_list": camc_top_k_list,
@@ -2927,6 +3106,7 @@ def main() -> int:
             "camc_monotonicity_warnings": camc_warnings,
             "camc_motif_counts_by_method": camc_motif_counts_by_method,
             "camc_invalid_motif_counts_by_method": camc_invalid_motif_counts_by_method,
+            "motif_overlap_diagnostics": motif_overlap_diagnostics,
         }
         write_json(out_dir / "run_config.json", run_config)
         write_json(out_dir / "comparison_summary.json", summary)

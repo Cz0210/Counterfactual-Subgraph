@@ -18,10 +18,10 @@ from src.utils.io import ensure_directory, read_jsonl
 
 try:  # pragma: no cover - depends on runtime env
     from rdkit import DataStructs
-    from rdkit.Chem import AllChem
+    from rdkit.Chem import rdFingerprintGenerator
 except ImportError:  # pragma: no cover - depends on runtime env
     DataStructs = None
-    AllChem = None
+    rdFingerprintGenerator = None
 
 
 ATOM_RATIO_BUCKETS = (
@@ -33,6 +33,16 @@ ATOM_RATIO_BUCKETS = (
     ("0.6-0.8", 0.6, 0.8),
     ("0.8-1.0", 0.8, 1.0000001),
 )
+
+
+@lru_cache(maxsize=1)
+def _get_morgan_fp_generator() -> Any | None:
+    if rdFingerprintGenerator is None:
+        return None
+    try:
+        return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,7 +540,7 @@ def _build_similarity_stats(
 ) -> dict[str, Any]:
     unique_fragment_keys = sorted(set(fragment_keys))
     result: dict[str, Any] = {
-        "rdkit_available": bool(DataStructs is not None and AllChem is not None),
+        "rdkit_available": bool(DataStructs is not None and rdFingerprintGenerator is not None),
         "similarity_pool_basis": "unique_final_fragments",
         "similarity_fragment_count": len(unique_fragment_keys),
         "skipped_similarity_count": 0,
@@ -539,7 +549,8 @@ def _build_similarity_stats(
         "mean_pairwise_tanimoto": None,
         "median_pairwise_tanimoto": None,
     }
-    if DataStructs is None or AllChem is None:
+    generator = _get_morgan_fp_generator()
+    if DataStructs is None or generator is None:
         result["skipped_similarity_count"] = len(unique_fragment_keys)
         return result
 
@@ -554,7 +565,12 @@ def _build_similarity_stats(
         if mol is None:
             skipped += 1
             continue
-        fingerprints.append(AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048))
+        try:
+            fingerprint = generator.GetFingerprint(mol)
+        except Exception:
+            skipped += 1
+            continue
+        fingerprints.append(fingerprint)
 
     result["skipped_similarity_count"] = skipped
     if len(fingerprints) < 2:
@@ -795,7 +811,7 @@ def audit_candidate_pool(
             "group_by_label": bool(resolved_config.group_by_label),
             "sim_sample_size": int(resolved_config.sim_sample_size),
             "topk_show": int(resolved_config.topk_show),
-            "rdkit_available": bool(DataStructs is not None and AllChem is not None),
+            "rdkit_available": bool(DataStructs is not None and _get_morgan_fp_generator() is not None),
         },
         "overall": overall,
         "judgment": judgment,

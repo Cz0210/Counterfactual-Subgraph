@@ -25,10 +25,10 @@ from src.utils.io import ensure_directory, read_jsonl
 
 try:  # pragma: no cover - depends on runtime env
     from rdkit import DataStructs
-    from rdkit.Chem import AllChem
+    from rdkit.Chem import rdFingerprintGenerator
 except ImportError:  # pragma: no cover - depends on runtime env
     DataStructs = None
-    AllChem = None
+    rdFingerprintGenerator = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,14 +154,30 @@ def _size_penalty(atom_ratio: float | None) -> float:
     return penalty
 
 
+@lru_cache(maxsize=1)
+def _get_morgan_fp_generator() -> Any | None:
+    if rdFingerprintGenerator is None:
+        return None
+    try:
+        return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=4096)
 def _fingerprint_for_fragment(fragment: str, sim_metric: str) -> Any | None:
-    if sim_metric != "morgan" or DataStructs is None or AllChem is None:
+    if sim_metric != "morgan" or DataStructs is None:
+        return None
+    generator = _get_morgan_fp_generator()
+    if generator is None:
         return None
     parsed = parse_smiles(fragment, sanitize=True, canonicalize=True)
     if not parsed.parseable or not parsed.sanitized or parsed.mol is None:
         return None
-    return AllChem.GetMorganFingerprintAsBitVect(parsed.mol, 2, nBits=2048)
+    try:
+        return generator.GetFingerprint(parsed.mol)
+    except Exception:
+        return None
 
 
 def _fragment_similarity(left: str, right: str, sim_metric: str) -> float:
@@ -610,7 +626,7 @@ def select_class_counterfactual_subgraphs(
             "sim_metric": str(config.sim_metric),
             "top_candidates_per_fragment": int(config.top_candidates_per_fragment),
             "dedup_by_final_fragment": bool(config.dedup_by_final_fragment),
-            "rdkit_available": bool(DataStructs is not None and AllChem is not None),
+            "rdkit_available": bool(DataStructs is not None and _get_morgan_fp_generator() is not None),
         },
         "input_candidate_count": len(rows),
         "valid_candidate_count_after_filter": len(filtered_candidates),

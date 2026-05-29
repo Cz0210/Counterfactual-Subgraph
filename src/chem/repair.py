@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from functools import lru_cache
 
 from src.chem.smiles_utils import is_rdkit_available, parse_smiles, sanitize_molecule
 from src.chem.substructure import is_connected_fragment, is_parent_substructure
@@ -10,12 +11,12 @@ from src.chem.types import FragmentRepairResult
 
 try:
     from rdkit import Chem, DataStructs
-    from rdkit.Chem import BRICS, rdMolDescriptors
+    from rdkit.Chem import BRICS, rdFingerprintGenerator
 except ImportError:  # pragma: no cover - depends on local environment
     Chem = None
     DataStructs = None
     BRICS = None
-    rdMolDescriptors = None
+    rdFingerprintGenerator = None
 
 
 _FUNCTIONAL_GROUP_SMARTS: tuple[tuple[str, str], ...] = (
@@ -328,20 +329,32 @@ def _core_mol_from_smiles(smiles: str) -> object | None:
     return _core_mol_from_parsed(parsed)
 
 
+@lru_cache(maxsize=1)
+def _get_morgan_fp_generator() -> object | None:
+    if rdFingerprintGenerator is None:
+        return None
+    try:
+        return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
+    except Exception:  # pragma: no cover - depends on RDKit internals
+        return None
+
+
 def _tanimoto_similarity(query_core: object, candidate_smiles: str) -> float | None:
     if (
         Chem is None
         or DataStructs is None
-        or rdMolDescriptors is None
         or query_core is None
     ):
+        return None
+    generator = _get_morgan_fp_generator()
+    if generator is None:
         return None
     candidate_core = _core_mol_from_smiles(candidate_smiles)
     if candidate_core is None:
         return None
     try:
-        query_fp = rdMolDescriptors.GetMorganFingerprintAsBitVect(query_core, 2, 1024)
-        candidate_fp = rdMolDescriptors.GetMorganFingerprintAsBitVect(candidate_core, 2, 1024)
+        query_fp = generator.GetFingerprint(query_core)
+        candidate_fp = generator.GetFingerprint(candidate_core)
         return float(DataStructs.TanimotoSimilarity(query_fp, candidate_fp))
     except Exception:  # pragma: no cover - depends on RDKit internals
         return None

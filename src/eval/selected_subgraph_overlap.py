@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,10 @@ from src.utils.io import ensure_directory
 
 try:  # pragma: no cover - depends on runtime env
     from rdkit import DataStructs
-    from rdkit.Chem import AllChem
+    from rdkit.Chem import rdFingerprintGenerator
 except ImportError:  # pragma: no cover - depends on runtime env
     DataStructs = None
-    AllChem = None
+    rdFingerprintGenerator = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,13 +46,29 @@ def _canonicalize_fragment(fragment: str) -> tuple[str, str]:
     return normalized, "ACYCLIC"
 
 
+@lru_cache(maxsize=1)
+def _get_morgan_fp_generator() -> Any | None:
+    if rdFingerprintGenerator is None:
+        return None
+    try:
+        return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    except Exception:
+        return None
+
+
 def _fingerprint(fragment: str) -> Any | None:
-    if DataStructs is None or AllChem is None:
+    if DataStructs is None:
+        return None
+    generator = _get_morgan_fp_generator()
+    if generator is None:
         return None
     parsed = parse_smiles(fragment, sanitize=True, canonicalize=True)
     if not parsed.parseable or not parsed.sanitized or parsed.mol is None:
         return None
-    return AllChem.GetMorganFingerprintAsBitVect(parsed.mol, 2, nBits=2048)
+    try:
+        return generator.GetFingerprint(parsed.mol)
+    except Exception:
+        return None
 
 
 def _similarity(left: str, right: str) -> float:
@@ -209,7 +226,7 @@ def compare_selected_subgraph_overlap(
             "label0_selected_json": str(Path(label0_selected_json).expanduser().resolve()),
             "label1_selected_json": str(Path(label1_selected_json).expanduser().resolve()),
             "sim_thresholds": list(sim_thresholds),
-            "rdkit_available": bool(DataStructs is not None and AllChem is not None),
+            "rdkit_available": bool(DataStructs is not None and _get_morgan_fp_generator() is not None),
         },
         "exact_overlap": {
             "label0_count": len(label0_keys),
