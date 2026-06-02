@@ -6,6 +6,45 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-02] Add embedding-based redundancy mode for class-level selector
+
+### Background
+The class-level counterfactual subgraph selector currently uses greedy MMR with
+Morgan/Tanimoto similarity as the redundancy penalty. For candidate pools that
+also contain learned subgraph embeddings, we need an optional way to compute
+redundancy from embedding cosine similarity while preserving the default Morgan
+behavior and the deletion-based counterfactual objective.
+
+### Decision
+Extend only the selector/evaluation layer:
+
+- keep `sim_metric=morgan` as the default and preserve the existing Morgan
+  fingerprint Tanimoto redundancy path;
+- add `sim_metric=embedding`, where redundancy is
+  `max(0, cosine(candidate_embedding, selected_embedding))`;
+- parse embeddings from `final_fragment_embedding` by default, with fallback
+  fields for `embedding`, `fragment_embedding`, `subgraph_embedding`, and
+  `graph_embedding`;
+- add `embedding_missing_policy={error,skip}` so missing embeddings either fail
+  clearly or are filtered explicitly;
+- record MMR component diagnostics in selected outputs and add pairwise
+  embedding cosine statistics to selector summaries/reports;
+- add an HPC Slurm wrapper for the stable300 label-1 merged pool embedding
+  selector and a lightweight embedding-field checker.
+
+### Consequences
+- Existing SFT, PPO, reward, selector training, and selected-subgraph artifacts
+  remain unchanged.
+- CF score, coverage gain, size penalty, and candidate filters remain the same;
+  only the redundancy similarity source changes when explicitly requested.
+- Existing Morgan/Tanimoto reports remain present for backward compatibility,
+  with embedding statistics reported separately.
+
+### Status
+Accepted
+
+---
+
 ## [2026-05-29] Replace eval Morgan fingerprint calls and add CAMC motif overlap diagnostics
 
 ### Background

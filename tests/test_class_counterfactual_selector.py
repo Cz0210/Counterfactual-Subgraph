@@ -142,6 +142,79 @@ class ClassCounterfactualSelectorTests(unittest.TestCase):
             self.assertTrue((out_dir / "selector_summary.json").exists())
             self.assertTrue((out_dir / "selector_report.txt").exists())
 
+    def test_embedding_redundancy_selector_records_metric_fields(self) -> None:
+        rows = [
+            {
+                "parent_index": 0,
+                "label": 1,
+                "parent_smiles": "CCO",
+                "raw_fragment": "CC",
+                "final_fragment": "CC",
+                "parse_ok": True,
+                "valid": True,
+                "connected": True,
+                "final_substructure": True,
+                "oracle_ok": True,
+                "cf_flip": True,
+                "cf_drop": 0.7,
+                "reward_total": 4.0,
+                "atom_ratio": 0.30,
+                "projection_used": False,
+                "final_fragment_embedding": [1.0, 0.0],
+            },
+            {
+                "parent_index": 1,
+                "label": 1,
+                "parent_smiles": "CCN",
+                "raw_fragment": "NN",
+                "final_fragment": "NN",
+                "parse_ok": True,
+                "valid": True,
+                "connected": True,
+                "final_substructure": True,
+                "oracle_ok": True,
+                "cf_flip": True,
+                "cf_drop": 0.65,
+                "reward_total": 3.5,
+                "atom_ratio": 0.32,
+                "projection_used": False,
+                "final_fragment_embedding": [0.0, 1.0],
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool_path = Path(tmpdir) / "candidate_pool.jsonl"
+            pool_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            out_dir = Path(tmpdir) / "selector"
+            result = select_class_counterfactual_subgraphs(
+                pool_path,
+                out_dir=out_dir,
+                config=SelectorConfig(
+                    label=1,
+                    top_k=2,
+                    min_cf_drop=0.2,
+                    require_cf_flip=True,
+                    require_final_substructure=True,
+                    sim_metric="embedding",
+                    embedding_field="final_fragment_embedding",
+                    embedding_missing_policy="error",
+                ),
+            )
+
+            summary = result["summary"]
+            selected_rows = result["selected_rows"]
+            self.assertEqual(summary["sim_metric"], "embedding")
+            self.assertEqual(summary["embedding_field"], "final_fragment_embedding")
+            self.assertEqual(summary["selected_pairwise_embedding_cosine_max"], 0.0)
+            self.assertEqual(selected_rows[0]["redundancy_sim_metric"], "embedding")
+            self.assertIn("max_redundancy_sim_at_selection", selected_rows[0])
+            persisted = json.loads((out_dir / "selected_subgraphs.json").read_text())
+            self.assertIn("mmr_score", persisted[0])
+            self.assertNotIn("representative_embedding", persisted[0])
+
 
 if __name__ == "__main__":
     unittest.main()

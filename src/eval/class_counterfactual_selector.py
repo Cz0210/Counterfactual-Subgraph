@@ -21,6 +21,11 @@ from src.eval.candidate_pool_audit import (
     _normalize_row,
     _normalize_text,
 )
+from src.eval.subgraph_similarity import (
+    DEFAULT_EMBEDDING_FIELD,
+    cosine_embedding_similarity,
+    get_candidate_embedding,
+)
 from src.utils.io import ensure_directory, read_jsonl
 
 try:  # pragma: no cover - depends on runtime env
@@ -46,6 +51,8 @@ class SelectorConfig:
     require_final_substructure: bool = False
     max_projection_used_rate: float = 1.0
     sim_metric: str = "morgan"
+    embedding_field: str = DEFAULT_EMBEDDING_FIELD
+    embedding_missing_policy: str = "error"
     top_candidates_per_fragment: int = 3
     dedup_by_final_fragment: bool = False
 
@@ -76,6 +83,8 @@ class SelectorCandidate:
     full_parent: bool
     near_parent: bool
     too_small: bool
+    embedding: tuple[float, ...] | None
+    embedding_field_used: str | None
     normalized_row: NormalizedCandidateRow
     raw_payload: dict[str, Any]
 
@@ -97,6 +106,8 @@ class FragmentAggregate:
     mean_reward: float | None
     mean_atom_ratio: float | None
     projection_used_rate: float
+    representative_embedding: tuple[float, ...] | None
+    representative_embedding_field: str | None
     candidate_rows: tuple[SelectorCandidate, ...]
 
 
@@ -190,6 +201,33 @@ def _fragment_similarity(left: str, right: str, sim_metric: str) -> float:
     return float(DataStructs.TanimotoSimilarity(left_fp, right_fp))
 
 
+def _embedding_similarity(
+    left_embedding: tuple[float, ...] | None,
+    right_embedding: tuple[float, ...] | None,
+) -> float:
+    if left_embedding is None or right_embedding is None:
+        return 0.0
+    try:
+        return cosine_embedding_similarity(left_embedding, right_embedding)
+    except ValueError:
+        return 0.0
+
+
+def _aggregate_similarity(
+    left: FragmentAggregate,
+    right: FragmentAggregate,
+    config: SelectorConfig,
+) -> float:
+    if config.sim_metric == "morgan":
+        return _fragment_similarity(left.fragment, right.fragment, "morgan")
+    if config.sim_metric == "embedding":
+        return _embedding_similarity(
+            left.representative_embedding,
+            right.representative_embedding,
+        )
+    raise ValueError(f"Unsupported sim_metric: {config.sim_metric!r}")
+
+
 def _selected_pairwise_similarity(
     fragments: list[str],
     sim_metric: str,
@@ -209,6 +247,61 @@ def _selected_pairwise_similarity(
     if not values:
         return None, None
     return _safe_mean(values), max(values)
+
+
+def _selected_pairwise_embedding_similarity(
+    selected_rows: list[dict[str, Any]],
+) -> dict[str, float | None]:
+    embeddings = [
+        tuple(float(value) for value in row["representative_embedding"])
+        for row in selected_rows
+        if row.get("representative_embedding") is not None
+    ]
+    values: list[float] = []
+    for left_index in range(len(embeddings)):
+        for right_index in range(left_index + 1, len(embeddings)):
+            values.append(
+                _embedding_similarity(
+                    embeddings[left_index],
+                    embeddings[right_index],
+                )
+            )
+    if not values:
+        return {
+            "selected_pairwise_embedding_cosine_mean": None,
+            "selected_pairwise_embedding_cosine_max": None,
+            "selected_pairwise_embedding_cosine_min": None,
+            "selected_pairwise_embedding_cosine_std": None,
+        }
+    mean_value = _safe_mean(values)
+    variance = (
+        sum((value - float(mean_value)) ** 2 for value in values) / len(values)
+        if mean_value is not None
+        else 0.0
+    )
+    return {
+        "selected_pairwise_embedding_cosine_mean": mean_value,
+        "selected_pairwise_embedding_cosine_max": max(values),
+        "selected_pairwise_embedding_cosine_min": min(values),
+        "selected_pairwise_embedding_cosine_std": variance ** 0.5,
+    }
+
+
+def _candidate_embedding_for_config(
+    payload: dict[str, Any],
+    config: SelectorConfig,
+) -> tuple[tuple[float, ...] | None, str | None, str | None]:
+    if config.sim_metric != "embedding":
+        return None, None, None
+    try:
+        parsed = get_candidate_embedding(payload, config.embedding_field)
+    except ValueError as exc:
+        if config.embedding_missing_policy == "skip":
+            return None, None, str(exc)
+        raise ValueError(
+            f"--sim-metric embedding requires usable embeddings in candidate_pool.jsonl: {exc}"
+        ) from exc
+    return tuple(float(value) for value in parsed.vector.tolist()), parsed.field_name, None
 
 
 def _build_selector_candidates(
@@ -273,6 +366,10 @@ def _build_selector_candidates(
         if not parent_smiles:
             filter_counts["missing_parent_smiles"] += 1
             continue
+        embedding, embedding_field_used, embedding_error = _candidate_embedding_for_config(payload, config)
+        if embedding_error is not None:
+            filter_counts["embedding_missing_or_invalid"] += 1
+            continue
 
         accepted.append(
             SelectorCandidate(
@@ -298,6 +395,8 @@ def _build_selector_candidates(
                 full_parent=normalized.full_parent,
                 near_parent=normalized.near_parent,
                 too_small=normalized.too_small,
+                embedding=embedding,
+                embedding_field_used=embedding_field_used,
                 normalized_row=normalized,
                 raw_payload=payload,
             )
@@ -358,6 +457,7 @@ def _aggregate_fragments(
         )
         if projection_used_rate > float(config.max_projection_used_rate):
             continue
+        representative = selected_rows[0]
         aggregates.append(
             FragmentAggregate(
                 fragment=fragment_key,
@@ -380,6 +480,8 @@ def _aggregate_fragments(
                 mean_reward=_safe_mean(rewards),
                 mean_atom_ratio=_safe_mean(atom_ratios),
                 projection_used_rate=projection_used_rate,
+                representative_embedding=representative.embedding,
+                representative_embedding_field=representative.embedding_field_used,
                 candidate_rows=tuple(selected_rows),
             )
         )
@@ -405,6 +507,7 @@ def _select_fragments(
     config: SelectorConfig,
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
+    selected_aggregates: list[FragmentAggregate] = []
     covered_parents: set[str] = set()
 
     while len(selected) < int(config.top_k):
@@ -418,14 +521,15 @@ def _select_fragments(
             new_parents = set(aggregate.parent_keys) - covered_parents
             coverage_gain = _safe_rate(len(new_parents), total_parent_count)
             max_similarity = 0.0
-            if selected_fragments:
+            if selected_aggregates:
                 max_similarity = max(
-                    _fragment_similarity(aggregate.fragment, fragment, config.sim_metric)
-                    for fragment in selected_fragments
+                    _aggregate_similarity(aggregate, selected_aggregate, config)
+                    for selected_aggregate in selected_aggregates
                 )
             size_penalty = _size_penalty(aggregate.mean_atom_ratio)
+            cf_score = _cf_score(aggregate)
             score = (
-                float(config.alpha_cf) * _cf_score(aggregate)
+                float(config.alpha_cf) * cf_score
                 + float(config.beta_coverage) * coverage_gain
                 - float(config.gamma_redundancy) * max_similarity
                 - float(config.eta_size) * size_penalty
@@ -436,6 +540,8 @@ def _select_fragments(
                 "coverage_gain": coverage_gain,
                 "new_parent_count": len(new_parents),
                 "max_similarity_to_previous": max_similarity,
+                "cf_score": cf_score,
+                "size_penalty": size_penalty,
                 "aggregate": aggregate,
             }
             if best_score is None or score > best_score:
@@ -448,11 +554,14 @@ def _select_fragments(
         aggregate = best_choice["aggregate"]
         covered_parents.update(aggregate.parent_keys)
         rank = len(selected) + 1
+        selected_aggregates.append(aggregate)
         selected.append(
             {
                 "rank": rank,
+                "selected_step": rank,
                 "fragment": aggregate.fragment,
                 "score": float(best_choice["score"]),
+                "mmr_score": float(best_choice["score"]),
                 "support_count": int(aggregate.support_count),
                 "support_rate": float(aggregate.support_rate),
                 "coverage_gain": float(best_choice["coverage_gain"]),
@@ -464,6 +573,19 @@ def _select_fragments(
                 "mean_atom_ratio": aggregate.mean_atom_ratio,
                 "projection_used_rate": float(aggregate.projection_used_rate),
                 "max_similarity_to_previous": float(best_choice["max_similarity_to_previous"]),
+                "max_redundancy_sim_at_selection": float(best_choice["max_similarity_to_previous"]),
+                "redundancy_sim_metric": str(config.sim_metric),
+                "cf_score": float(best_choice["cf_score"]),
+                "size_penalty": float(best_choice["size_penalty"]),
+                "embedding_field": (
+                    str(config.embedding_field) if config.sim_metric == "embedding" else None
+                ),
+                "representative_embedding": (
+                    list(aggregate.representative_embedding)
+                    if aggregate.representative_embedding is not None
+                    else None
+                ),
+                "representative_embedding_field": aggregate.representative_embedding_field,
                 "representative_parent_ids": list(
                     aggregate.parent_ids[: max(1, int(config.top_candidates_per_fragment))]
                 ),
@@ -499,6 +621,15 @@ def render_selector_report(summary: dict[str, Any], selected_rows: list[dict[str
         f"- selected_pairwise_tanimoto_mean: {summary['selected_pairwise_tanimoto_mean'] if summary['selected_pairwise_tanimoto_mean'] is not None else 'n/a'}",
         f"- selected_pairwise_tanimoto_max: {summary['selected_pairwise_tanimoto_max'] if summary['selected_pairwise_tanimoto_max'] is not None else 'n/a'}",
         "",
+        "Redundancy similarity metric:",
+        f"- sim_metric: {summary['sim_metric']}",
+        f"- embedding_field: {summary['embedding_field'] if summary['sim_metric'] == 'embedding' else 'n/a'}",
+        "- embedding cosine mapping: max(0, cosine)",
+        f"- selected_pairwise_embedding_cosine_mean: {summary['selected_pairwise_embedding_cosine_mean'] if summary['selected_pairwise_embedding_cosine_mean'] is not None else 'n/a'}",
+        f"- selected_pairwise_embedding_cosine_max: {summary['selected_pairwise_embedding_cosine_max'] if summary['selected_pairwise_embedding_cosine_max'] is not None else 'n/a'}",
+        f"- selected_pairwise_embedding_cosine_min: {summary['selected_pairwise_embedding_cosine_min'] if summary['selected_pairwise_embedding_cosine_min'] is not None else 'n/a'}",
+        f"- selected_pairwise_embedding_cosine_std: {summary['selected_pairwise_embedding_cosine_std'] if summary['selected_pairwise_embedding_cosine_std'] is not None else 'n/a'}",
+        "",
         "Filter counts:",
     ]
     for key, value in sorted(summary["filter_counts"].items()):
@@ -526,25 +657,31 @@ def write_selector_outputs(
 
     output_dir = Path(out_dir).expanduser().resolve()
     ensure_directory(output_dir)
+    public_selected_rows = [
+        {key: value for key, value in row.items() if key != "representative_embedding"}
+        for row in selected_rows
+    ]
     json_path = output_dir / "selected_subgraphs.json"
     csv_path = output_dir / "selected_subgraphs.csv"
     summary_path = output_dir / "selector_summary.json"
     report_path = output_dir / "selector_report.txt"
 
     json_path.write_text(
-        json.dumps(selected_rows, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(public_selected_rows, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     summary_path.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    report_path.write_text(render_selector_report(summary, selected_rows), encoding="utf-8")
+    report_path.write_text(render_selector_report(summary, public_selected_rows), encoding="utf-8")
 
     fieldnames = [
         "rank",
+        "selected_step",
         "fragment",
         "score",
+        "mmr_score",
         "support_count",
         "support_rate",
         "coverage_gain",
@@ -552,18 +689,24 @@ def write_selector_outputs(
         "mean_cf_drop",
         "median_cf_drop",
         "cf_flip_rate",
+        "cf_score",
         "mean_reward",
         "mean_atom_ratio",
+        "size_penalty",
         "projection_used_rate",
         "max_similarity_to_previous",
+        "max_redundancy_sim_at_selection",
+        "redundancy_sim_metric",
+        "embedding_field",
+        "representative_embedding_field",
         "representative_parent_ids",
         "representative_parent_smiles",
         "representative_raw_fragments",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        for row in selected_rows:
+        for row in public_selected_rows:
             payload = dict(row)
             payload["representative_parent_ids"] = "|".join(payload["representative_parent_ids"])
             payload["representative_parent_smiles"] = "|".join(payload["representative_parent_smiles"])
@@ -586,8 +729,13 @@ def select_class_counterfactual_subgraphs(
 ) -> dict[str, Any]:
     """Select a low-redundancy class-level fragment set from a candidate pool."""
 
-    if config.sim_metric != "morgan":
+    if config.sim_metric not in {"morgan", "embedding"}:
         raise ValueError(f"Unsupported sim_metric: {config.sim_metric!r}")
+    if config.embedding_missing_policy not in {"error", "skip"}:
+        raise ValueError(
+            "embedding_missing_policy must be one of {'error', 'skip'}, "
+            f"got {config.embedding_missing_policy!r}"
+        )
 
     pool_path = Path(pool_jsonl).expanduser().resolve()
     rows = read_jsonl(pool_path)
@@ -607,7 +755,17 @@ def select_class_counterfactual_subgraphs(
     selected_fragments = [row["fragment"] for row in selected_rows]
     selected_mean_tanimoto, selected_max_tanimoto = _selected_pairwise_similarity(
         selected_fragments,
-        config.sim_metric,
+        "morgan",
+    )
+    embedding_stats = (
+        _selected_pairwise_embedding_similarity(selected_rows)
+        if config.sim_metric == "embedding"
+        else {
+            "selected_pairwise_embedding_cosine_mean": None,
+            "selected_pairwise_embedding_cosine_max": None,
+            "selected_pairwise_embedding_cosine_min": None,
+            "selected_pairwise_embedding_cosine_std": None,
+        }
     )
     summary = {
         "metadata": {
@@ -624,10 +782,15 @@ def select_class_counterfactual_subgraphs(
             "require_final_substructure": bool(config.require_final_substructure),
             "max_projection_used_rate": float(config.max_projection_used_rate),
             "sim_metric": str(config.sim_metric),
+            "embedding_field": str(config.embedding_field),
+            "embedding_missing_policy": str(config.embedding_missing_policy),
             "top_candidates_per_fragment": int(config.top_candidates_per_fragment),
             "dedup_by_final_fragment": bool(config.dedup_by_final_fragment),
             "rdkit_available": bool(DataStructs is not None and _get_morgan_fp_generator() is not None),
         },
+        "sim_metric": str(config.sim_metric),
+        "embedding_field": str(config.embedding_field),
+        "embedding_missing_policy": str(config.embedding_missing_policy),
         "input_candidate_count": len(rows),
         "valid_candidate_count_after_filter": len(filtered_candidates),
         "unique_fragment_count_after_filter": len(aggregates),
@@ -648,6 +811,10 @@ def select_class_counterfactual_subgraphs(
         ),
         "selected_pairwise_tanimoto_mean": selected_mean_tanimoto,
         "selected_pairwise_tanimoto_max": selected_max_tanimoto,
+        "selected_pairwise_embedding_cosine_mean": embedding_stats["selected_pairwise_embedding_cosine_mean"],
+        "selected_pairwise_embedding_cosine_max": embedding_stats["selected_pairwise_embedding_cosine_max"],
+        "selected_pairwise_embedding_cosine_min": embedding_stats["selected_pairwise_embedding_cosine_min"],
+        "selected_pairwise_embedding_cosine_std": embedding_stats["selected_pairwise_embedding_cosine_std"],
         "selected_fragments": selected_fragments,
         "filter_counts": filter_counts,
     }
@@ -658,7 +825,10 @@ def select_class_counterfactual_subgraphs(
     )
     return {
         "summary": summary,
-        "selected_rows": selected_rows,
+        "selected_rows": [
+            {key: value for key, value in row.items() if key != "representative_embedding"}
+            for row in selected_rows
+        ],
         "outputs": outputs,
     }
 

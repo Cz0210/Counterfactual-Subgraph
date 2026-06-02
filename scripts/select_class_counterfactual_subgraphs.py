@@ -79,8 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sim-metric",
         default="morgan",
-        choices=["morgan"],
+        choices=["morgan", "embedding"],
         help="Redundancy similarity metric.",
+    )
+    parser.add_argument(
+        "--embedding-field",
+        type=str,
+        default="final_fragment_embedding",
+        help="Preferred candidate embedding field when --sim-metric embedding is used.",
+    )
+    parser.add_argument(
+        "--embedding-missing-policy",
+        choices=["error", "skip"],
+        default="error",
+        help="How to handle missing or invalid embeddings when --sim-metric embedding is used.",
     )
     parser.add_argument(
         "--top-candidates-per-fragment",
@@ -114,6 +126,8 @@ def main() -> None:
             require_final_substructure=bool(args.require_final_substructure),
             max_projection_used_rate=float(args.max_projection_used_rate),
             sim_metric=str(args.sim_metric),
+            embedding_field=str(args.embedding_field),
+            embedding_missing_policy=str(args.embedding_missing_policy),
             top_candidates_per_fragment=int(args.top_candidates_per_fragment),
             dedup_by_final_fragment=bool(args.dedup_by_final_fragment),
         ),
@@ -126,6 +140,8 @@ def main() -> None:
     print(f"final_cumulative_coverage: {summary['final_cumulative_coverage']}")
     print(f"selected_mean_cf_drop: {summary['selected_mean_cf_drop']}")
     print(f"selected_pairwise_tanimoto_mean: {summary['selected_pairwise_tanimoto_mean']}")
+    print(f"sim_metric: {summary['sim_metric']}")
+    print(f"selected_pairwise_embedding_cosine_mean: {summary['selected_pairwise_embedding_cosine_mean']}")
     print(f"report_txt: {outputs['report_txt']}")
 
 
