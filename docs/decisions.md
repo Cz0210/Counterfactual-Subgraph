@@ -6,6 +6,43 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-02] Add offline candidate-pool embedding generation for embedding-MMR selection
+
+### Background
+The class-level selector now supports `--sim-metric embedding`, but the current
+stable300 merged candidate pool does not yet contain `final_fragment_embedding`.
+The embedding selector should therefore consume a derived JSONL with learned
+fragment embeddings instead of mutating or regenerating the original
+`candidate_pool.jsonl`.
+
+### Decision
+Add an evaluation/inference utility layer only:
+
+- introduce `scripts/add_candidate_pool_embeddings.py`, which reads an existing
+  candidate pool, embeds each resolved fragment SMILES with the same ChemLLM
+  base-model plus optional SFT/PPO PEFT adapter loading path used by
+  `src.eval.full_candidate_pool`, and writes a new
+  `candidate_pool_with_embeddings.jsonl`;
+- keep `final_fragment` as the primary text source, with fallbacks through
+  `core_fragment`, `final_fragment_smiles`, `candidate_smiles`, and
+  `raw_fragment`;
+- use attention-mask-aware mean pooling by default over the last hidden state,
+  L2-normalize the vector, and record summary/failed-row sidecar files;
+- add stable300 and generic Slurm wrappers for HPC embedding generation, then
+  point the embedding-MMR selector wrapper at the derived embedded pool.
+
+### Consequences
+- Existing SFT, PPO, reward, selector training, selected-subgraph artifacts, and
+  original candidate pools remain unchanged.
+- The embedding selector now has a reproducible upstream preparation step before
+  `--embedding-missing-policy error` is used.
+- The default Morgan/Tanimoto selector path remains unaffected.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-02] Add embedding-based redundancy mode for class-level selector
 
 ### Background

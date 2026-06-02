@@ -19,7 +19,7 @@ export PYTHONPATH=$PWD
 
 mkdir -p logs
 
-CANDIDATE_POOL=${CANDIDATE_POOL:-/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/candidate_pool.jsonl}
+CANDIDATE_POOL=${CANDIDATE_POOL:-/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/candidate_pool_with_embeddings.jsonl}
 EMBEDDING_FIELD=${EMBEDDING_FIELD:-final_fragment_embedding}
 MAX_ROWS=${MAX_ROWS:-20}
 
