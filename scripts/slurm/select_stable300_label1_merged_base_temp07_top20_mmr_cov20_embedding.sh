@@ -19,7 +19,7 @@ export PYTHONPATH=$PWD
 
 mkdir -p logs
 
-POOL=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/candidate_pool.jsonl
+POOL=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/candidate_pool_with_embeddings.jsonl
 OUT_DIR=/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20_embedding
 SELECTOR=scripts/select_class_counterfactual_subgraphs.py
 CHECKER=scripts/check_candidate_pool_embeddings.py
