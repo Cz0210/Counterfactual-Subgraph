@@ -6,6 +6,42 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-10] Add embedding-MMR comparison workflow for GT-fullgraph CAMC motifs
+
+### Background
+The embedding-based selector is available for our merged stable300 candidate
+pool, but the GT-fullgraph CAMC baseline currently exists as action-motif pool
+CSV files rather than selector-readable candidate pools with learned fragment
+embeddings. A fair redundancy comparison requires both ours and GT-fullgraph to
+run the same class-level MMR selector with `sim_metric=embedding`.
+
+### Decision
+Add evaluation/Slurm workflow code only:
+
+- convert the three clean GT-fullgraph CAMC motif pools
+  `label1_1594411`, `label1_1594412`, and `label1_1594413` into
+  selector-readable JSONL pools, explicitly excluding the older `1593189` run;
+- reuse `scripts/add_candidate_pool_embeddings.py` to add
+  `final_fragment_embedding` to the converted GT pools;
+- run embedding-redundancy gamma sweeps for both ours merged and GT-fullgraph
+  proxy pools with identical MMR selector weights except for gamma;
+- summarize ours-vs-GT sweep results by gamma, including GT mean/std over the
+  three clean seeds and a simple pass/fail recommendation rule.
+
+### Consequences
+- Existing SFT, PPO, reward, selector defaults, selected-subgraph artifacts, and
+  original candidate pools remain unchanged.
+- The default selector redundancy metric remains Morgan/Tanimoto unless an
+  experiment script explicitly passes `--sim-metric embedding`.
+- GT-fullgraph CAMC motif pools can now participate in selector-level embedding
+  redundancy comparisons after an explicit conversion and embedding-generation
+  preparation step.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-02] Add offline candidate-pool embedding generation for embedding-MMR selection
 
 ### Background
