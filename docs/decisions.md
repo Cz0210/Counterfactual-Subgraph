@@ -6,6 +6,43 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-10] Relax GT-fullgraph embedding selector flow after candidate-pool diagnosis
+
+### Background
+The first GT-fullgraph embedding selector sweep produced zero coverage and null
+selected metrics. The converted GT CAMC motif pools can lack teacher-recomputed
+`cf_drop` / `cf_flip` fields, while the strict selector wrapper required
+`--require-cf-flip` and the selector default `min_cf_drop=0.2`; this can filter
+all GT proxy candidates before MMR selection.
+
+### Decision
+Keep selector defaults and training code unchanged, but add an explicit GT proxy
+diagnosis and relaxed evaluation path:
+
+- add a selector-pool diagnosis script that reports required-field coverage,
+  embedding availability, strict-filter reasons, and relaxed-GT-filter reasons;
+- make CAMC-to-candidate-pool conversion write `cf_drop=0.0` with
+  `cf_drop_missing=true` when the CAMC motif pool lacks true `cf_drop`;
+- make missing `cf_flip` default to `true` with `cf_flip_missing=true` for this
+  GT proxy candidate-pool conversion;
+- add a relaxed GT embedding sweep wrapper that removes `--require-cf-flip` and
+  sets `--min-cf-drop -999` while keeping embedding redundancy,
+  final-substructure filtering, deduplication, and the shared MMR weights;
+- add a relaxed summary wrapper that compares ours against the relaxed GT sweep
+  root.
+
+### Consequences
+- The original strict GT sweep script remains available for auditing.
+- The relaxed path treats GT CAMC motifs as an already constructed baseline
+  action pool rather than as teacher-rescored generated fragments.
+- Ours and GT still use the same embedding redundancy selector once their
+  candidate pools pass the minimum structural/embedding filters.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-10] Add embedding-MMR comparison workflow for GT-fullgraph CAMC motifs
 
 ### Background

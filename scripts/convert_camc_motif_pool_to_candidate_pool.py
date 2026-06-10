@@ -352,13 +352,16 @@ def convert_csv_to_jsonl(
                     missing_parent_rows += 1
 
                 cf_drop = _as_float(_get(row, cf_drop_field))
-                if cf_drop is None:
+                cf_drop_missing = cf_drop is None
+                if cf_drop_missing:
                     missing_cf_drop_rows += 1
+                    cf_drop = 0.0
 
                 cf_flip = _as_bool(_get(row, cf_flip_field))
+                cf_flip_missing = cf_flip is None
                 if cf_flip is None:
                     missing_cf_flip_rows += 1
-                    cf_flip = True if failure_free else False
+                    cf_flip = True
 
                 final_substructure = _as_bool(_get(row, final_substructure_field))
                 if final_substructure is None:
@@ -366,7 +369,7 @@ def convert_csv_to_jsonl(
 
                 oracle_ok = _as_bool(_get(row, oracle_ok_field))
                 if oracle_ok is None:
-                    oracle_ok = True if failure_free else False
+                    oracle_ok = True
 
                 connected = False
                 try:
@@ -394,7 +397,9 @@ def convert_csv_to_jsonl(
                     "final_substructure": bool(final_substructure),
                     "oracle_ok": bool(oracle_ok),
                     "cf_drop": cf_drop,
+                    "cf_drop_missing": bool(cf_drop_missing),
                     "cf_flip": bool(cf_flip),
+                    "cf_flip_missing": bool(cf_flip_missing),
                     "reward_total": float(cf_drop) if cf_drop is not None else 0.0,
                     "atom_count": int(fragment_atom_count) if fragment_atom_count is not None else None,
                     "atom_ratio": atom_ratio,
