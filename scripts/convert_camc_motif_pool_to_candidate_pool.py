@@ -58,6 +58,19 @@ SUPPORT_FIELD_PRIORITY = (
     "support_count",
     "coverage",
 )
+DISTANCE_FIELD_PRIORITY = (
+    "distance_proxy",
+    "nearest_distance_proxy",
+    "mcs_distance_proxy",
+    "cost",
+)
+SOURCE_FULLGRAPH_FIELD_PRIORITY = (
+    "nearest_fullgraph_rank",
+    "nearest_fullgraph_smiles",
+    "mcs_num_atoms",
+    "mcs_num_bonds",
+    "component_count",
+)
 FINAL_SUBSTRUCTURE_FIELD_PRIORITY = (
     "final_substructure",
     "substructure",
@@ -232,6 +245,23 @@ def _copy_optional_support_fields(row: dict[str, Any], payload: dict[str, Any]) 
             payload[field_name] = row[field_name]
 
 
+def _copy_optional_diagnostic_fields(row: dict[str, Any], payload: dict[str, Any]) -> None:
+    for field_name in DISTANCE_FIELD_PRIORITY:
+        if field_name not in row or row[field_name] in {None, ""}:
+            continue
+        numeric = _as_float(row[field_name])
+        if numeric is None:
+            payload[field_name] = row[field_name]
+        else:
+            payload[field_name] = numeric
+        if field_name == "nearest_distance_proxy" and "distance_proxy" not in payload:
+            payload["distance_proxy"] = numeric if numeric is not None else row[field_name]
+
+    for field_name in SOURCE_FULLGRAPH_FIELD_PRIORITY:
+        if field_name in row and row[field_name] not in {None, ""}:
+            payload[field_name] = row[field_name]
+
+
 def _failed_payload(
     *,
     source_csv: Path,
@@ -309,6 +339,10 @@ def convert_csv_to_jsonl(
             "oracle_ok": oracle_ok_field,
             "failure": failure_field,
             "support_fields": [field for field in SUPPORT_FIELD_PRIORITY if field in header_map],
+            "distance_fields": [field for field in DISTANCE_FIELD_PRIORITY if field in header_map],
+            "source_fullgraph_fields": [
+                field for field in SOURCE_FULLGRAPH_FIELD_PRIORITY if field in header_map
+            ],
         }
 
         with output_path.open("w", encoding="utf-8") as output_handle:
@@ -412,6 +446,7 @@ def convert_csv_to_jsonl(
                     "source_cf_flip_field": cf_flip_field,
                 }
                 _copy_optional_support_fields(row, payload)
+                _copy_optional_diagnostic_fields(row, payload)
                 output_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 converted_rows += 1
 

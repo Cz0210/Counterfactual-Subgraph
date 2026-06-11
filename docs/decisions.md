@@ -6,6 +6,83 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-11] Add selected-set sanity check for CAMC protocol drift diagnosis
+
+### Background
+The legacy HIV quick CAMC table reported much higher Ours coverage than the
+new embedding-selector final table. The new table is computed from selected
+top20 fragments and candidate-pool evidence, while the legacy CAMC evaluator
+uses full target inputs plus RF-teacher deletion evaluation. A dedicated sanity
+check is needed to distinguish true coverage loss from evaluator/protocol
+differences.
+
+### Decision
+Add an evaluation-only selected-set sanity check that:
+
+- reads multiple selector directories, including the old Morgan-MMR set and new
+  embedding-MMR wide-grid sets;
+- evaluates all selected sets under one shared candidate-pool evidence protocol;
+- dumps each selected fragment with selector score, support evidence,
+  cf-drop/flip evidence, atom-ratio evidence, and redundancy diagnostics;
+- records the legacy CAMC generator location
+  (`scripts/eval/compare_hiv_recourse_baselines.py`) and explains why this
+  lightweight sanity command does not rerun teacher-based CAMC unless that full
+  evaluator is launched separately.
+
+### Consequences
+- The check can reveal whether the embedding selector truly sacrificed coverage
+  relative to the old Morgan selected set under the same evidence source.
+- If the old Morgan set is also much lower under candidate-pool evidence than
+  in the legacy CAMC table, the observed drop is mainly due to evaluator or
+  evidence-source differences.
+- Training code, selector defaults, selected-subgraph artifacts, and candidate
+  pools remain unchanged.
+
+### Status
+Accepted
+
+---
+
+## [2026-06-10] Formalize embedding-cosine redundancy selector wide-grid CAMC workflow
+
+### Background
+The gamma-only embedding selector sweep showed that both ours and the relaxed
+GT-fullgraph proxy baseline can run with `--sim-metric embedding`, but the
+first pass did not find an ours gamma that simultaneously preserved
+coverage/flip/cf-drop and reduced embedding redundancy below the GT mean. The
+experiment therefore needs a wider coverage-vs-redundancy search and a final
+CAMC-style table computed from the selected top20 fragments.
+
+### Decision
+Keep selector defaults and all training code unchanged, and add explicit
+evaluation-only Slurm workflows:
+
+- run Ours and GT-fullgraph relaxed selectors with embedding-cosine redundancy
+  over a beta/gamma grid;
+- summarize the grid without requiring identical beta/gamma alignment, while
+  also reporting same-parameter deltas;
+- identify Ours Pareto candidates by maximizing coverage, keeping flip high,
+  preferring higher cf-drop, and minimizing embedding cosine redundancy;
+- write conservative, balanced, and low-redundancy recommended Ours configs;
+- compute the final selected-top20 CAMC-style table from selector outputs and
+  candidate-pool evidence, explicitly flagging GT `cf_drop=0.0` rows as proxy
+  filled rather than teacher re-evaluated strength.
+
+### Consequences
+- The official experiment scripts now make embedding cosine similarity the
+  redundancy term by passing `--sim-metric embedding` explicitly.
+- Morgan/Tanimoto remains available as the selector default and as a reporting
+  diagnostic, but it is no longer the redundancy objective in this formal
+  comparison workflow.
+- Final CAMC table generation is reproducible from selected selector artifacts
+  and candidate pools, with clear warnings about proxy GT cf-drop and
+  theta-coverage fallback sources.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-10] Relax GT-fullgraph embedding selector flow after candidate-pool diagnosis
 
 ### Background
