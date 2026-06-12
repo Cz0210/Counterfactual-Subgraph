@@ -1,0 +1,105 @@
+{
+  "camc_invalid_motif_counts_by_method": {
+    "gt_fullgraph_greedy": 228,
+    "ours_selected_subgraph": 0
+  },
+  "camc_monotonicity_warnings": [],
+  "camc_motif_counts_by_method": {
+    "gt_fullgraph_greedy": 831,
+    "ours_selected_subgraph": 20
+  },
+  "gt_candidate_count": 2000,
+  "mcs_statistics": {
+    "avg_mcs_time": 0.0035548689155047507,
+    "max_mcs_time": 1.205108642578125,
+    "mcs_cache_size": 2886670,
+    "mcs_calls": 2886670,
+    "mcs_failed_count": 0,
+    "mcs_timeout_count": 2408
+  },
+  "motif_overlap_diagnostics": {
+    "aromatic_motif_count_by_method": {
+      "gt_fullgraph_greedy": 11,
+      "ours_selected_subgraph": 11
+    },
+    "count_ours_to_gt_sim_ge_0.7": 2,
+    "count_ours_to_gt_sim_ge_0.85": 2,
+    "exact_jaccard": 0.05263157894736842,
+    "exact_overlap_count": 2,
+    "exact_overlap_motifs": [
+      "C=CC",
+      "c1ccccc1"
+    ],
+    "fingerprint_failure_reasons": {},
+    "hetero_atom_motif_count_by_method": {
+      "gt_fullgraph_greedy": 17,
+      "ours_selected_subgraph": 16
+    },
+    "mean_atom_count_by_method": {
+      "gt_fullgraph_greedy": 8.5,
+      "ours_selected_subgraph": 7.95
+    },
+    "mean_max_tanimoto_ours_to_gt": 0.29489054001554005,
+    "median_atom_count_by_method": {
+      "gt_fullgraph_greedy": 8.5,
+      "ours_selected_subgraph": 7.0
+    },
+    "skipped": false
+  },
+  "num_inputs": 1443,
+  "ours_progress_stats": {
+    "any_flip_count": 1317,
+    "avg_sec_per_input": 0.18336946916348887,
+    "delete_ok_count": 1406,
+    "elapsed_sec": 264.60214400291443,
+    "match_ok_count": 1408,
+    "processed_inputs": 1443,
+    "valid_after_count": 1406
+  },
+  "per_k_any_feasible_by_theta": {
+    "10": {
+      "0.05": 0.015246015246015246,
+      "0.1": 0.07692307692307693,
+      "0.15": 0.15107415107415106,
+      "0.2": 0.23700623700623702
+    },
+    "20": {
+      "0.05": 0.01593901593901594,
+      "0.1": 0.08316008316008316,
+      "0.15": 0.1690921690921691,
+      "0.2": 0.25571725571725573
+    }
+  },
+  "per_k_any_flip_rate": {
+    "10": 0.8905058905058905,
+    "20": 0.9126819126819127
+  },
+  "per_k_delete_ok_rate": {
+    "10": 0.9708939708939709,
+    "20": 0.9743589743589743
+  },
+  "per_k_match_rate": {
+    "10": 0.9722799722799723,
+    "20": 0.9757449757449758
+  },
+  "recourse_monotonicity_warnings": [],
+  "runtime_by_stage": {
+    "CAMC action motif evaluation": 1.2711360454559326,
+    "CAMC action motif extraction": 1.681534767150879,
+    "CAMC action motif selection": 30.94637966156006,
+    "CAMC action motif support / flip / cf_drop precompute": 1832.3272161483765,
+    "evaluate GT fullgraph candidates": 10253.904350757599,
+    "evaluate ours action candidates": 264.91628885269165,
+    "greedy select GT fullgraphs": 2.3639111518859863,
+    "load HIV CSV": 0.20721054077148438,
+    "load config": 6.29425048828125e-05,
+    "load selected fragments": 0.07304954528808594,
+    "load teacher": 25.886962413787842,
+    "parse SMILES": 11.222317695617676,
+    "prepare opposite-label candidates": 69.18015885353088,
+    "prepare target inputs": 50.31285095214844,
+    "recourse-level aggregate metrics": 0.0678396224975586,
+    "write outputs": 0.43459343910217285
+  },
+  "selected_fragment_count": 20
+}

@@ -1,0 +1,69 @@
+{
+  "input_jsonl": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594413/gt_fullgraph_candidate_pool.jsonl",
+  "output_jsonl": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594413/gt_fullgraph_candidate_pool_with_embeddings.jsonl",
+  "total_rows": 1290,
+  "rows_written": 1290,
+  "rows_embedded": 1290,
+  "rows_missing_source": 0,
+  "rows_failed_embedding": 0,
+  "embedding_field": "final_fragment_embedding",
+  "embedding_dim": 4096,
+  "embedding_dimension_distribution": {
+    "4096": 1290
+  },
+  "embedding_source": "final_fragment",
+  "embedding_source_fallbacks": [
+    "core_fragment",
+    "final_fragment_smiles",
+    "candidate_smiles",
+    "raw_fragment"
+  ],
+  "embedding_source_field_counts": {
+    "final_fragment": 1290
+  },
+  "pooling": "mean",
+  "batch_size": 32,
+  "max_length": 128,
+  "model_path": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/rl_checkpoints/decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500",
+  "base_model_path": "/share/home/u20526/czx/counterfactual-subgraph/pretrained_models/ChemLLM-7B-Chat",
+  "load_mode": "adapter",
+  "adapter_path": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/rl_checkpoints/decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500",
+  "device": "cuda",
+  "model_device": "cuda:0",
+  "summary_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594413/embedding_summary.json",
+  "failed_rows_jsonl": null,
+  "checkpoint_inspection": {
+    "checkpoint_dir": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/rl_checkpoints/decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500",
+    "exists": true,
+    "root_has_adapter": true,
+    "root_adapter_files": [
+      "adapter_config.json",
+      "adapter_model.safetensors"
+    ],
+    "checkpoint_subdirs": [
+      "checkpoint-50",
+      "checkpoint-100",
+      "checkpoint-150",
+      "checkpoint-200",
+      "checkpoint-250",
+      "checkpoint-300"
+    ],
+    "checkpoint_subdirs_with_adapter": [
+      "checkpoint-50",
+      "checkpoint-100",
+      "checkpoint-150",
+      "checkpoint-200",
+      "checkpoint-250",
+      "checkpoint-300"
+    ],
+    "tokenizer_files": [
+      "tokenizer_config.json",
+      "special_tokens_map.json"
+    ],
+    "candidate_pool_exists": true,
+    "trainer_state_exists": false,
+    "decoded_chem_value_head_exists": true,
+    "selected_load_path": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/rl_checkpoints/decoded_chem_ppo_stable300_sftv3_projcf_dist03_projpen1_orig_shuffle13_ckpt500",
+    "selected_load_mode": "root_adapter"
+  }
+}

@@ -1,0 +1,485 @@
+{
+  "comparison_table": [
+    {
+      "coverage": 0.015246015246015246,
+      "coverage_theta": 0.015246015246015246,
+      "coverage_unconstrained_flip": 0.8905058905058905,
+      "flip_rate": 0.8905058905058905,
+      "k": 10,
+      "mean_cf_drop": 0.5317042454059888,
+      "mean_cf_drop_covered_only": 0.2936433467062837,
+      "mean_cost": 0.03848780658248063,
+      "median_cost": 0.038404817500307234,
+      "median_cost_covered_only": 0.038404817500307234,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.05,
+      "valid_recourse_rate": 0.9708939708939709
+    },
+    {
+      "coverage": 0.07692307692307693,
+      "coverage_theta": 0.07692307692307693,
+      "coverage_unconstrained_flip": 0.8905058905058905,
+      "flip_rate": 0.8905058905058905,
+      "k": 10,
+      "mean_cf_drop": 0.5211614947321693,
+      "mean_cf_drop_covered_only": 0.32182921494238814,
+      "mean_cost": 0.06666819256575354,
+      "median_cost": 0.06666666666666667,
+      "median_cost_covered_only": 0.06666666666666667,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.1,
+      "valid_recourse_rate": 0.9708939708939709
+    },
+    {
+      "coverage": 0.15107415107415106,
+      "coverage_theta": 0.15107415107415106,
+      "coverage_unconstrained_flip": 0.8905058905058905,
+      "flip_rate": 0.8905058905058905,
+      "k": 10,
+      "mean_cf_drop": 0.5120107815221844,
+      "mean_cf_drop_covered_only": 0.3817279240019476,
+      "mean_cost": 0.09584128708107897,
+      "median_cost": 0.09887218045112782,
+      "median_cost_covered_only": 0.09887218045112782,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.15,
+      "valid_recourse_rate": 0.9708939708939709
+    },
+    {
+      "coverage": 0.23700623700623702,
+      "coverage_theta": 0.23700623700623702,
+      "coverage_unconstrained_flip": 0.8905058905058905,
+      "flip_rate": 0.8905058905058905,
+      "k": 10,
+      "mean_cf_drop": 0.5069794464974802,
+      "mean_cf_drop_covered_only": 0.4081950653391499,
+      "mean_cost": 0.12489578662829998,
+      "median_cost": 0.12871287128712872,
+      "median_cost_covered_only": 0.12871287128712872,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.2,
+      "valid_recourse_rate": 0.9708939708939709
+    },
+    {
+      "coverage": 0.01593901593901594,
+      "coverage_theta": 0.01593901593901594,
+      "coverage_unconstrained_flip": 0.9126819126819127,
+      "flip_rate": 0.9126819126819127,
+      "k": 20,
+      "mean_cf_drop": 0.5576281797077951,
+      "mean_cf_drop_covered_only": 0.2958037809074598,
+      "mean_cost": 0.038194685937417636,
+      "median_cost": 0.0379746835443038,
+      "median_cost_covered_only": 0.0379746835443038,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.05,
+      "valid_recourse_rate": 0.9743589743589743
+    },
+    {
+      "coverage": 0.08316008316008316,
+      "coverage_theta": 0.08316008316008316,
+      "coverage_unconstrained_flip": 0.9126819126819127,
+      "flip_rate": 0.9126819126819127,
+      "k": 20,
+      "mean_cf_drop": 0.5460280905510492,
+      "mean_cf_drop_covered_only": 0.31958188800648,
+      "mean_cost": 0.0673667683338264,
+      "median_cost": 0.06776966556759303,
+      "median_cost_covered_only": 0.06776966556759303,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.1,
+      "valid_recourse_rate": 0.9743589743589743
+    },
+    {
+      "coverage": 0.1690921690921691,
+      "coverage_theta": 0.1690921690921691,
+      "coverage_unconstrained_flip": 0.9126819126819127,
+      "flip_rate": 0.9126819126819127,
+      "k": 20,
+      "mean_cf_drop": 0.5350914010310778,
+      "mean_cf_drop_covered_only": 0.36938489147403475,
+      "mean_cost": 0.09719096594317278,
+      "median_cost": 0.10087619624775901,
+      "median_cost_covered_only": 0.10087619624775901,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.15,
+      "valid_recourse_rate": 0.9743589743589743
+    },
+    {
+      "coverage": 0.25571725571725573,
+      "coverage_theta": 0.25571725571725573,
+      "coverage_unconstrained_flip": 0.9126819126819127,
+      "flip_rate": 0.9126819126819127,
+      "k": 20,
+      "mean_cf_drop": 0.5294823506137022,
+      "mean_cf_drop_covered_only": 0.4018699784315367,
+      "mean_cost": 0.1238950412901686,
+      "median_cost": 0.1262135922330097,
+      "median_cost_covered_only": 0.1262135922330097,
+      "method": "ours_selected_subgraph",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.2,
+      "valid_recourse_rate": 0.9743589743589743
+    },
+    {
+      "coverage": 0.013167013167013167,
+      "coverage_theta": 0.013167013167013167,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 10,
+      "mean_cf_drop": 0.5233822872209499,
+      "mean_cf_drop_covered_only": 0.561561984238856,
+      "mean_cost": 0.039143613165124436,
+      "median_cost": 0.0423728813559322,
+      "median_cost_covered_only": 0.0423728813559322,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.05,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.035343035343035345,
+      "coverage_theta": 0.035343035343035345,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 10,
+      "mean_cf_drop": 0.5233822872209499,
+      "mean_cf_drop_covered_only": 0.5748956411870246,
+      "mean_cost": 0.06539666342844008,
+      "median_cost": 0.06779661016949153,
+      "median_cost_covered_only": 0.06779661016949153,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.1,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.0595980595980596,
+      "coverage_theta": 0.0595980595980596,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 10,
+      "mean_cf_drop": 0.5233822872209499,
+      "mean_cf_drop_covered_only": 0.5986132199838115,
+      "mean_cost": 0.08817990626044314,
+      "median_cost": 0.09312179739850217,
+      "median_cost_covered_only": 0.09312179739850217,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.15,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.0997920997920998,
+      "coverage_theta": 0.0997920997920998,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 10,
+      "mean_cf_drop": 0.52344696728563,
+      "mean_cf_drop_covered_only": 0.6053292514280266,
+      "mean_cost": 0.12374566717915064,
+      "median_cost": 0.12570714862978472,
+      "median_cost_covered_only": 0.12570714862978472,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.2,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.01593901593901594,
+      "coverage_theta": 0.01593901593901594,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 20,
+      "mean_cf_drop": 0.5568265006651633,
+      "mean_cf_drop_covered_only": 0.5701309145161564,
+      "mean_cost": 0.03810235359838465,
+      "median_cost": 0.0423728813559322,
+      "median_cost_covered_only": 0.0423728813559322,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.05,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.04573804573804574,
+      "coverage_theta": 0.04573804573804574,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 20,
+      "mean_cf_drop": 0.5568265006651633,
+      "mean_cf_drop_covered_only": 0.580096126775832,
+      "mean_cost": 0.06480535839167652,
+      "median_cost": 0.06656162166766033,
+      "median_cost_covered_only": 0.06656162166766033,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.1,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.08177408177408177,
+      "coverage_theta": 0.08177408177408177,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 20,
+      "mean_cf_drop": 0.5568265006651633,
+      "mean_cf_drop_covered_only": 0.604808504959953,
+      "mean_cost": 0.09052268170029282,
+      "median_cost": 0.09348516949152542,
+      "median_cost_covered_only": 0.09348516949152542,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.15,
+      "valid_recourse_rate": 1.0
+    },
+    {
+      "coverage": 0.1365211365211365,
+      "coverage_theta": 0.1365211365211365,
+      "coverage_unconstrained_flip": 1.0,
+      "flip_rate": 1.0,
+      "k": 20,
+      "mean_cf_drop": 0.5568911807298433,
+      "mean_cf_drop_covered_only": 0.6122203665260705,
+      "mean_cost": 0.12545663652615444,
+      "median_cost": 0.13043478260869565,
+      "median_cost_covered_only": 0.13043478260869565,
+      "method": "gt_fullgraph_greedy",
+      "num_inputs": 1443,
+      "runtime_sec": 11206.931162118912,
+      "target_label": 1,
+      "theta": 0.2,
+      "valid_recourse_rate": 1.0
+    }
+  ],
+  "data": {
+    "hiv_csv": "/share/home/u20526/czx/counterfactual-subgraph/data/raw/AIDS/HIV.csv",
+    "invalid_label_count": 0,
+    "invalid_smiles_count": 7,
+    "label_col": "HIV_active",
+    "opposite_candidate_count": 2000,
+    "opposite_candidate_count_before_sampling": 39677,
+    "raw_row_count": 41127,
+    "smiles_col": "smiles",
+    "target_record_count": 1443,
+    "target_record_count_before_sampling": 1443,
+    "valid_record_count": 41120
+  },
+  "ours_substructure_match_rate_by_k": {
+    "10": 0.9722799722799723,
+    "20": 0.9757449757449758
+  },
+  "outputs": {
+    "camc_comparison_table_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/camc_comparison_table.csv",
+    "camc_gt_fullgraph_motif_pool_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/camc_gt_fullgraph_motif_pool.csv",
+    "camc_gt_fullgraph_selected_motifs_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/camc_gt_fullgraph_selected_motifs.csv",
+    "camc_ours_action_motifs_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/camc_ours_action_motifs.csv",
+    "camc_per_input_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/camc_per_input.csv",
+    "camc_summary_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/camc_summary.json",
+    "comparison_summary_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/comparison_summary.json",
+    "comparison_table_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/comparison_table.csv",
+    "diagnostic_counts_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/diagnostic_counts.json",
+    "gt_fullgraph_per_input_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/gt_fullgraph_per_input.csv",
+    "gt_selected_fullgraphs_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/gt_selected_fullgraphs.csv",
+    "ours_action_candidates_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/ours_action_candidates.csv",
+    "ours_per_input_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/ours_per_input.csv",
+    "progress_log": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/progress.log",
+    "run_config_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189/run_config.json"
+  },
+  "recourse_monotonicity_warnings": [],
+  "run_config": {
+    "camc_delta_list": [
+      0.1,
+      0.2,
+      0.3,
+      0.5
+    ],
+    "camc_extraction_theta_list": [
+      0.05,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "camc_min_motif_atoms": 2,
+    "camc_top_k_list": [
+      10,
+      20
+    ],
+    "camc_use_strict_theta": false,
+    "config": "configs/hpc.yaml",
+    "disable_tqdm": false,
+    "enable_camc": true,
+    "extra_fullgraph_selected_csv": [],
+    "hiv_csv": "/share/home/u20526/czx/counterfactual-subgraph/data/raw/AIDS/HIV.csv",
+    "label_col": null,
+    "max_gt_candidates": 2000,
+    "max_inputs": null,
+    "mcs_timeout_sec": 1,
+    "ours_selected_dir": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20",
+    "out_dir": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1593189",
+    "progress_every": 100,
+    "seed": 13,
+    "set_overrides": [
+      "inference.fallback_to_heuristic=false"
+    ],
+    "smiles_col": null,
+    "target_label": 1,
+    "teacher_path": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/oracle/aids_rf_model.pkl",
+    "theta_list": [
+      0.05,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "top_k_list": [
+      10,
+      20
+    ]
+  },
+  "selected_files": {
+    "selected_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.csv",
+    "selected_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json",
+    "selector_report": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selector_report.txt",
+    "selector_summary": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selector_summary.json"
+  },
+  "selected_fragment_count": 20,
+  "selected_fragments": [
+    {
+      "fragment": "Cc1ccccc1",
+      "rank": 1,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "c1ccccc1",
+      "rank": 2,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CCC",
+      "rank": 3,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "Cc1cn(C)c(=O)[nH]c1=O",
+      "rank": 4,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "C=Cc1ccccc1S",
+      "rank": 5,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "Cc1cc(S)ccc1Cl",
+      "rank": 6,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "Cc1ccoc1C",
+      "rank": 7,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CC(C)O",
+      "rank": 8,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "NC1CCOC1",
+      "rank": 9,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "C=CC",
+      "rank": 10,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "Sc1ccccc1",
+      "rank": 11,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CC1(C)Oc2ccc3ccc(=O)oc3c2C(O)C1O",
+      "rank": 12,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CC(N)=O",
+      "rank": 13,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "c1cnc2sncc2c1",
+      "rank": 14,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CC1OCCC1N=[N+]=[N-]",
+      "rank": 15,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "Clc1cccc(Cc2cccc(Cl)c2)c1",
+      "rank": 16,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CCOP(=O)(O)OCC",
+      "rank": 17,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "Cn1ncc2c1NC(=N)SC2",
+      "rank": 18,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CC(CO)N=[N+]=[N-]",
+      "rank": 19,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    },
+    {
+      "fragment": "CNC(C)=S",
+      "rank": 20,
+      "source": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20/selected_subgraphs.json"
+    }
+  ]
+}

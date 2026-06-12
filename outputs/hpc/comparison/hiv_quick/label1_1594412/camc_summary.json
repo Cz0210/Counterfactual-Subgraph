@@ -1,0 +1,184 @@
+{
+  "camc_monotonicity_warnings": [],
+  "method_summaries": {
+    "gt_fullgraph_greedy": [
+      {
+        "action_source": "mcs_deleted_motif",
+        "camc_delta_0.1": 0.8884268884268884,
+        "camc_delta_0.2": 0.8364518364518364,
+        "camc_delta_0.3": 0.7761607761607762,
+        "camc_delta_0.5": 0.6403326403326404,
+        "camc_flip_coverage": 0.9064449064449065,
+        "k": 10,
+        "mean_cf_drop_all_matched": 0.524988304249962,
+        "mean_cf_drop_covered": 0.5517373182526407,
+        "method": "gt_fullgraph_greedy",
+        "motif_atom_count_mean": 7.6,
+        "motif_atom_ratio_mean": 0.1326091780618762,
+        "motif_count": 10,
+        "num_inputs": 1443,
+        "pairwise_tanimoto_max": 0.2,
+        "pairwise_tanimoto_mean": 0.041837302332495496,
+        "runtime_sec": 1864.9570817947388,
+        "support_coverage": 0.9930699930699931,
+        "target_label": 1,
+        "valid_motif_count": 10
+      },
+      {
+        "action_source": "mcs_deleted_motif",
+        "camc_delta_0.1": 0.8905058905058905,
+        "camc_delta_0.2": 0.841995841995842,
+        "camc_delta_0.3": 0.7851697851697852,
+        "camc_delta_0.5": 0.6528066528066528,
+        "camc_flip_coverage": 0.9161469161469161,
+        "k": 20,
+        "mean_cf_drop_all_matched": 0.5306035836594709,
+        "mean_cf_drop_covered": 0.5539855748049924,
+        "method": "gt_fullgraph_greedy",
+        "motif_atom_count_mean": 8.5,
+        "motif_atom_ratio_mean": 0.13805680158057387,
+        "motif_count": 20,
+        "num_inputs": 1443,
+        "pairwise_tanimoto_max": 0.23529411764705882,
+        "pairwise_tanimoto_mean": 0.046089232544515774,
+        "runtime_sec": 1864.9570817947388,
+        "support_coverage": 0.9937629937629938,
+        "target_label": 1,
+        "valid_motif_count": 20
+      }
+    ],
+    "ours_selected_subgraph": [
+      {
+        "action_source": "selected_fragment",
+        "camc_delta_0.1": 0.8711018711018711,
+        "camc_delta_0.2": 0.808038808038808,
+        "camc_delta_0.3": 0.7588357588357588,
+        "camc_delta_0.5": 0.6528066528066528,
+        "camc_flip_coverage": 0.8905058905058905,
+        "k": 10,
+        "mean_cf_drop_all_matched": 0.5335977908884625,
+        "mean_cf_drop_covered": 0.5638260052273341,
+        "method": "ours_selected_subgraph",
+        "motif_atom_count_mean": 6.4,
+        "motif_atom_ratio_mean": 0.18136661183031907,
+        "motif_count": 10,
+        "num_inputs": 1443,
+        "pairwise_tanimoto_max": 0.2727272727272727,
+        "pairwise_tanimoto_mean": 0.07486676252874855,
+        "runtime_sec": 1864.9570817947388,
+        "support_coverage": 0.9722799722799723,
+        "target_label": 1,
+        "valid_motif_count": 10
+      },
+      {
+        "action_source": "selected_fragment",
+        "camc_delta_0.1": 0.8828828828828829,
+        "camc_delta_0.2": 0.841995841995842,
+        "camc_delta_0.3": 0.7851697851697852,
+        "camc_delta_0.5": 0.6812196812196812,
+        "camc_flip_coverage": 0.9126819126819127,
+        "k": 20,
+        "mean_cf_drop_all_matched": 0.559918109240596,
+        "mean_cf_drop_covered": 0.5815691893185312,
+        "method": "ours_selected_subgraph",
+        "motif_atom_count_mean": 7.95,
+        "motif_atom_ratio_mean": 0.18513876596457512,
+        "motif_count": 20,
+        "num_inputs": 1443,
+        "pairwise_tanimoto_max": 0.375,
+        "pairwise_tanimoto_mean": 0.06568170333349924,
+        "runtime_sec": 1864.9570817947388,
+        "support_coverage": 0.9757449757449758,
+        "target_label": 1,
+        "valid_motif_count": 20
+      }
+    ]
+  },
+  "motif_extraction_stats": {
+    "gt_fullgraph_greedy": {
+      "pool_row_count": 1443,
+      "unique_valid_motif_count": 831,
+      "valid_pool_row_count": 1215
+    },
+    "ours_selected_subgraph": {
+      "pool_row_count": 20,
+      "unique_valid_motif_count": 20,
+      "valid_pool_row_count": 20
+    }
+  },
+  "motif_overlap_diagnostics": {
+    "aromatic_motif_count_by_method": {
+      "gt_fullgraph_greedy": 11,
+      "ours_selected_subgraph": 11
+    },
+    "count_ours_to_gt_sim_ge_0.7": 2,
+    "count_ours_to_gt_sim_ge_0.85": 2,
+    "exact_jaccard": 0.05263157894736842,
+    "exact_overlap_count": 2,
+    "exact_overlap_motifs": [
+      "C=CC",
+      "c1ccccc1"
+    ],
+    "fingerprint_failure_reasons": {},
+    "hetero_atom_motif_count_by_method": {
+      "gt_fullgraph_greedy": 17,
+      "ours_selected_subgraph": 16
+    },
+    "mean_atom_count_by_method": {
+      "gt_fullgraph_greedy": 8.5,
+      "ours_selected_subgraph": 7.95
+    },
+    "mean_max_tanimoto_ours_to_gt": 0.29489054001554005,
+    "median_atom_count_by_method": {
+      "gt_fullgraph_greedy": 8.5,
+      "ours_selected_subgraph": 7.0
+    },
+    "skipped": false
+  },
+  "motif_selection_stats": {
+    "gt_fullgraph_greedy": {
+      "alpha_cf": 0.8,
+      "beta_coverage": 20.0,
+      "candidate_count": 831,
+      "eta_size": 0.3,
+      "gamma_redundancy": 0.7,
+      "selected_count": 20,
+      "selection_mode": "camc_mmr"
+    },
+    "ours_selected_subgraph": {
+      "candidate_count": 20,
+      "selection_mode": "original_order"
+    }
+  },
+  "output_paths": {
+    "camc_comparison_table_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_comparison_table.csv",
+    "camc_gt_fullgraph_motif_pool_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_gt_fullgraph_motif_pool.csv",
+    "camc_gt_fullgraph_selected_motifs_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_gt_fullgraph_selected_motifs.csv",
+    "camc_ours_action_motifs_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_ours_action_motifs.csv",
+    "camc_per_input_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_per_input.csv",
+    "camc_summary_json": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_summary.json"
+  },
+  "run_config": {
+    "camc_delta_list": [
+      0.1,
+      0.2,
+      0.3,
+      0.5
+    ],
+    "camc_extraction_theta_list": [
+      0.05,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "camc_min_motif_atoms": 2,
+    "camc_reselect_ours_motifs": false,
+    "camc_top_k_list": [
+      10,
+      20
+    ],
+    "camc_use_strict_theta": false,
+    "extra_fullgraph_selected_csv": [],
+    "target_label": 1
+  }
+}

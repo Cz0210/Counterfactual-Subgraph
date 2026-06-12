@@ -1,0 +1,76 @@
+{
+  "camc_invalid_motif_counts_by_method": {
+    "gt_fullgraph_greedy": 235,
+    "ours_selected_subgraph": 0
+  },
+  "camc_monotonicity_warnings": [],
+  "camc_motif_counts_by_method": {
+    "gt_fullgraph_greedy": 864,
+    "ours_selected_subgraph": 20
+  },
+  "gt_candidate_count": 2000,
+  "mcs_statistics": {
+    "avg_mcs_time": 0.0037375584120234668,
+    "max_mcs_time": 1.154710292816162,
+    "mcs_cache_size": 2886669,
+    "mcs_calls": 2886669,
+    "mcs_failed_count": 0,
+    "mcs_timeout_count": 2289
+  },
+  "num_inputs": 1443,
+  "ours_progress_stats": {
+    "any_flip_count": 1317,
+    "avg_sec_per_input": 0.1843265309072747,
+    "delete_ok_count": 1406,
+    "elapsed_sec": 265.9831840991974,
+    "match_ok_count": 1408,
+    "processed_inputs": 1443,
+    "valid_after_count": 1406
+  },
+  "per_k_any_feasible_by_theta": {
+    "10": {
+      "0.05": 0.015246015246015246,
+      "0.1": 0.07692307692307693,
+      "0.15": 0.15107415107415106,
+      "0.2": 0.23700623700623702
+    },
+    "20": {
+      "0.05": 0.01593901593901594,
+      "0.1": 0.08316008316008316,
+      "0.15": 0.1690921690921691,
+      "0.2": 0.25571725571725573
+    }
+  },
+  "per_k_any_flip_rate": {
+    "10": 0.8905058905058905,
+    "20": 0.9126819126819127
+  },
+  "per_k_delete_ok_rate": {
+    "10": 0.9708939708939709,
+    "20": 0.9743589743589743
+  },
+  "per_k_match_rate": {
+    "10": 0.9722799722799723,
+    "20": 0.9757449757449758
+  },
+  "recourse_monotonicity_warnings": [],
+  "runtime_by_stage": {
+    "CAMC action motif evaluation": 1.6781198978424072,
+    "CAMC action motif extraction": 1.709298849105835,
+    "CAMC action motif selection": 34.675854444503784,
+    "CAMC action motif support / flip / cf_drop precompute": 1924.8378179073334,
+    "evaluate GT fullgraph candidates": 10778.846611499786,
+    "evaluate ours action candidates": 266.3130226135254,
+    "greedy select GT fullgraphs": 3.066187858581543,
+    "load HIV CSV": 0.19916343688964844,
+    "load config": 7.486343383789062e-05,
+    "load selected fragments": 0.0737311840057373,
+    "load teacher": 26.825753688812256,
+    "parse SMILES": 11.22250747680664,
+    "prepare opposite-label candidates": 69.74433374404907,
+    "prepare target inputs": 50.6366171836853,
+    "recourse-level aggregate metrics": 0.07270431518554688,
+    "write outputs": 0.4836852550506592
+  },
+  "selected_fragment_count": 20
+}

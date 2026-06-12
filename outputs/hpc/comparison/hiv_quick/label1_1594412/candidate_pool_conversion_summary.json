@@ -1,0 +1,22 @@
+{
+  "input_csv": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/camc_gt_fullgraph_motif_pool.csv",
+  "output_jsonl": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/gt_fullgraph_candidate_pool.jsonl",
+  "total_rows": 1443,
+  "converted_rows": 1302,
+  "skipped_rows": 141,
+  "missing_fragment_rows": 141,
+  "missing_parent_rows": 0,
+  "missing_cf_drop_rows": 1302,
+  "missing_cf_flip_rows": 0,
+  "failed_rows_path": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594412/failed_rows.jsonl",
+  "field_mapping_used": {
+    "fragment": "canonical_motif_smiles",
+    "parent_smiles": "parent_smiles",
+    "cf_drop": null,
+    "cf_flip": "fullgraph_cf_flip",
+    "final_substructure": "valid_motif",
+    "oracle_ok": "valid_motif",
+    "failure": "failure_reason",
+    "support_fields": []
+  }
+}

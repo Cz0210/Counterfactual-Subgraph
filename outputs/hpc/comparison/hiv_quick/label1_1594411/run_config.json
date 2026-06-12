@@ -1,0 +1,50 @@
+{
+  "camc_delta_list": [
+    0.1,
+    0.2,
+    0.3,
+    0.5
+  ],
+  "camc_extraction_theta_list": [
+    0.05,
+    0.1,
+    0.15,
+    0.2
+  ],
+  "camc_min_motif_atoms": 2,
+  "camc_top_k_list": [
+    10,
+    20
+  ],
+  "camc_use_strict_theta": false,
+  "config": "configs/hpc.yaml",
+  "disable_tqdm": false,
+  "enable_camc": true,
+  "extra_fullgraph_selected_csv": [],
+  "hiv_csv": "/share/home/u20526/czx/counterfactual-subgraph/data/raw/AIDS/HIV.csv",
+  "label_col": "HIV_active",
+  "max_gt_candidates": 2000,
+  "max_inputs": null,
+  "mcs_timeout_sec": 1,
+  "ours_selected_dir": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20",
+  "out_dir": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/comparison/hiv_quick/label1_1594411",
+  "progress_every": 100,
+  "seed": 13,
+  "set_overrides": [
+    "inference.fallback_to_heuristic=false"
+  ],
+  "smiles_col": "smiles",
+  "suppress_rdkit_warnings": true,
+  "target_label": 1,
+  "teacher_path": "/share/home/u20526/czx/counterfactual-subgraph/outputs/hpc/oracle/aids_rf_model.pkl",
+  "theta_list": [
+    0.05,
+    0.1,
+    0.15,
+    0.2
+  ],
+  "top_k_list": [
+    10,
+    20
+  ]
+}
