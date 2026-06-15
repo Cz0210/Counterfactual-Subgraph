@@ -39,3 +39,10 @@ tensorboard/
 !/outputs/hpc/ablations/label1_sft_ppo/
 /outputs/hpc/ablations/label1_sft_ppo/*
 !/outputs/hpc/ablations/label1_sft_ppo/README_ablation_design.md
+
+# external pretrained models
+pretrained_models/
+*.tar.gz
+*.pt
+*.pth
+*.ckpt
