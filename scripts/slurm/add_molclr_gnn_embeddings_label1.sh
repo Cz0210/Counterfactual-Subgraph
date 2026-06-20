@@ -26,6 +26,7 @@ ENCODER_TYPE=${ENCODER_TYPE:-gin}
 POOL_JSONL=${POOL_JSONL:-outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/candidate_pool.jsonl}
 OUT_JSONL=${OUT_JSONL:-outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/candidate_pool_with_molclr_gnn_embeddings.jsonl}
 SUMMARY_JSON=${SUMMARY_JSON:-outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/molclr_gnn_embedding_summary.json}
+FAILED_ROWS_JSONL=${FAILED_ROWS_JSONL:-outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07/molclr_gnn_embedding_failed_rows.jsonl}
 EMBEDDING_FIELD=${EMBEDDING_FIELD:-final_fragment_gnn_embedding}
 BATCH_SIZE=${BATCH_SIZE:-64}
 DEVICE=${DEVICE:-auto}
@@ -58,6 +59,7 @@ echo "ENCODER_TYPE=${ENCODER_TYPE}"
 echo "POOL_JSONL=${POOL_JSONL}"
 echo "OUT_JSONL=${OUT_JSONL}"
 echo "SUMMARY_JSON=${SUMMARY_JSON}"
+echo "FAILED_ROWS_JSONL=${FAILED_ROWS_JSONL}"
 echo "EMBEDDING_FIELD=${EMBEDDING_FIELD}"
 echo "BATCH_SIZE=${BATCH_SIZE}"
 echo "DEVICE=${DEVICE}"
@@ -88,6 +90,7 @@ CMD=(
   --candidate-pool "${POOL_JSONL}"
   --out-jsonl "${OUT_JSONL}"
   --summary-json "${SUMMARY_JSON}"
+  --failed-jsonl "${FAILED_ROWS_JSONL}"
   --molclr-root "${MOLCLR_ROOT}"
   --molclr-ckpt "${MOLCLR_CKPT}"
   --encoder-type "${ENCODER_TYPE}"
@@ -113,4 +116,3 @@ python scripts/check_candidate_pool_embeddings.py \
 echo "===== MOLCLR GNN EMBEDDING DONE ====="
 ls -lh "${OUT_JSONL}" "${SUMMARY_JSON}"
 cat "${SUMMARY_JSON}"
-

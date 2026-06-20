@@ -128,3 +128,23 @@ sbatch scripts/slurm/add_molclr_gnn_embeddings_label1.sh
 ```
 
 This writes only the first 20 candidate rows to the configured output JSONL.
+
+## Invalid Fragment Policy
+
+Use `INVALID_POLICY=skip` for selector-ready pools:
+
+```bash
+MOLCLR_ROOT=/path/to/MolCLR \
+MOLCLR_CKPT=/path/to/molclr/pretrained/checkpoint.pth \
+INVALID_POLICY=skip \
+sbatch scripts/slurm/add_molclr_gnn_embeddings_label1.sh
+```
+
+With `skip`, invalid fragment rows are written to
+`molclr_gnn_embedding_failed_rows.jsonl` and are not retained in the output
+pool. Every retained row contains `final_fragment_gnn_embedding`, so
+`--embedding-missing-policy error` can be used by the selector.
+
+With `zero`, invalid fragment rows are retained with a zero vector and
+`molclr_embedding_status='zero_invalid_smiles'`. With `error`, the embedding job
+fails after writing diagnostics.

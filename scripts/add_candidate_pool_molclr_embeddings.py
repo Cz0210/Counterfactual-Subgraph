@@ -16,7 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.embeddings.molclr_gnn_embedding import encode_smiles_list  # noqa: E402
+from src.embeddings.molclr_gnn_embedding import (  # noqa: E402
+    MolCLRFailedSmiles,
+    MolCLRInvalidSmilesError,
+    encode_smiles_list_with_failures,
+)
 
 
 DEFAULT_POOL = (
@@ -143,6 +147,9 @@ def _read_candidate_rows(path: Path, primary_field: str, max_rows: int | None) -
                         "row_index": total_rows - 1,
                         "line_number": line_number,
                         "failure_reason": "missing fragment SMILES source",
+                        "fragment": None,
+                        "source_field": None,
+                        "error_message": "missing fragment SMILES source",
                         "tried_fields": _smiles_fields(primary_field),
                         "row": row,
                     }
@@ -170,6 +177,33 @@ def _write_failed_rows(path: Path, failed_rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in failed_rows:
             handle.write(_json_dumps(row))
+
+
+def _failure_payload(
+    candidate: CandidateRow,
+    *,
+    failure_reason: str,
+    error_message: str,
+) -> dict[str, Any]:
+    return {
+        "row_index": int(candidate.row_index),
+        "line_number": int(candidate.line_number),
+        "failure_reason": str(failure_reason),
+        "fragment": candidate.smiles,
+        "source_field": candidate.smiles_field,
+        "error_message": str(error_message),
+        "row": candidate.row,
+    }
+
+
+def _failed_smiles_map(failures: tuple[MolCLRFailedSmiles, ...]) -> dict[str, MolCLRFailedSmiles]:
+    return {failure.smiles: failure for failure in failures}
+
+
+def _zero_embedding(dim: int | None) -> list[float] | None:
+    if dim is None or int(dim) <= 0:
+        return None
+    return [0.0] * int(dim)
 
 
 def main() -> int:
@@ -214,71 +248,198 @@ def main() -> int:
     rows_with_smiles = [row for row in candidate_rows if row.smiles is not None]
     unique_smiles = sorted({str(row.smiles) for row in rows_with_smiles})
 
-    embeddings = encode_smiles_list(
-        unique_smiles,
-        molclr_root=molclr_root,
-        molclr_ckpt=molclr_ckpt,
-        encoder_type=str(args.encoder_type),
-        batch_size=int(args.batch_size),
-        device=str(args.device),
-        invalid_policy=str(args.invalid_policy),
-    )
+    try:
+        encode_result = encode_smiles_list_with_failures(
+            unique_smiles,
+            molclr_root=molclr_root,
+            molclr_ckpt=molclr_ckpt,
+            encoder_type=str(args.encoder_type),
+            batch_size=int(args.batch_size),
+            device=str(args.device),
+            invalid_policy=str(args.invalid_policy),
+        )
+    except MolCLRInvalidSmilesError as exc:
+        failed_by_smiles = _failed_smiles_map(exc.failures)
+        for candidate in rows_with_smiles:
+            assert candidate.smiles is not None
+            failure = failed_by_smiles.get(candidate.smiles)
+            if failure is None:
+                continue
+            failed_rows.append(
+                _failure_payload(
+                    candidate,
+                    failure_reason=failure.failure_reason,
+                    error_message=failure.error,
+                )
+            )
+        _write_failed_rows(failed_jsonl, failed_rows)
+        summary = {
+            "candidate_pool": str(candidate_pool),
+            "out_jsonl": str(out_jsonl),
+            "input_total_rows": int(total_rows),
+            "total_rows": int(total_rows),
+            "rows_with_resolved_smiles": int(len(rows_with_smiles)),
+            "output_rows": 0,
+            "encoded_rows": 0,
+            "failed_rows": int(len(failed_rows)),
+            "skipped_rows": 0,
+            "zero_embedding_rows": 0,
+            "rows_missing_embedding_in_output": 0,
+            "embedding_dim": None,
+            "embedding_dimension_distribution": {},
+            "embedding_field": str(args.embedding_field),
+            "smiles_field": str(args.smiles_field),
+            "smiles_field_fallbacks": _smiles_fields(str(args.smiles_field)),
+            "molclr_root": str(molclr_root),
+            "molclr_ckpt": str(molclr_ckpt),
+            "encoder_type": str(args.encoder_type),
+            "batch_size": int(args.batch_size),
+            "device": str(args.device),
+            "invalid_policy": str(args.invalid_policy),
+            "max_rows": int(args.max_rows) if args.max_rows is not None else None,
+            "summary_json": str(summary_json),
+            "failed_rows_jsonl": str(failed_jsonl) if failed_rows else None,
+            "failure_reason": str(exc),
+        }
+        summary_json.write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+        return 1
+
+    embeddings = encode_result.embeddings
+    failed_by_smiles = _failed_smiles_map(encode_result.failed_smiles)
+    zero_smiles = set(encode_result.zero_embedding_smiles)
 
     encoded_rows = 0
-    skipped_embedding_rows = 0
+    skipped_rows = 0
+    zero_embedding_rows = 0
+    output_rows = 0
+    rows_missing_embedding_in_output = 0
     embedding_dim: int | None = None
     dim_counter: Counter[int] = Counter()
     source_counter: Counter[str] = Counter()
+    invalid_policy = str(args.invalid_policy)
 
     with out_jsonl.open("w", encoding="utf-8") as handle:
         for candidate in candidate_rows:
             row = dict(candidate.row)
             if candidate.smiles is None:
+                if invalid_policy == "zero":
+                    zero = _zero_embedding(encode_result.embedding_dim)
+                    if zero is not None:
+                        row[str(args.embedding_field)] = zero
+                        row["molclr_embedding_status"] = "zero_missing_smiles_source"
+                        zero_embedding_rows += 1
+                    else:
+                        skipped_rows += 1
+                        continue
+                elif invalid_policy == "skip":
+                    skipped_rows += 1
+                    continue
+                else:
+                    skipped_rows += 1
+                    continue
+                if args.embedding_field not in row:
+                    rows_missing_embedding_in_output += 1
                 handle.write(_json_dumps(row))
+                output_rows += 1
                 continue
+            failure = failed_by_smiles.get(candidate.smiles)
             embedding = embeddings.get(candidate.smiles)
+            if failure is not None and invalid_policy == "skip":
+                skipped_rows += 1
+                failed_rows.append(
+                    _failure_payload(
+                        candidate,
+                        failure_reason=failure.failure_reason,
+                        error_message=failure.error,
+                    )
+                )
+                continue
             if embedding is None:
-                skipped_embedding_rows += 1
+                if invalid_policy == "zero":
+                    zero = _zero_embedding(encode_result.embedding_dim)
+                    if zero is not None:
+                        embedding = zero
+                        row["molclr_embedding_status"] = "zero_missing_embedding"
+                        row["molclr_embedding_error"] = (
+                            failure.error if failure is not None else "MolCLR embedding missing"
+                        )
+                        zero_embedding_rows += 1
+                    else:
+                        skipped_rows += 1
+                        failed_rows.append(
+                            _failure_payload(
+                                candidate,
+                                failure_reason="missing_embedding",
+                                error_message="MolCLR embedding missing and zero dimension unavailable",
+                            )
+                        )
+                        continue
+                elif invalid_policy == "skip":
+                    skipped_rows += 1
+                    failed_rows.append(
+                        _failure_payload(
+                            candidate,
+                            failure_reason="missing_embedding",
+                            error_message="MolCLR embedding missing for resolved SMILES",
+                        )
+                    )
+                    continue
+                else:
+                    skipped_rows += 1
+                    failed_rows.append(
+                        _failure_payload(
+                            candidate,
+                            failure_reason="missing_embedding",
+                            error_message="MolCLR embedding missing for resolved SMILES",
+                        )
+                    )
+                    continue
+            if not embedding or any(not math.isfinite(float(value)) for value in embedding):
+                skipped_rows += 1
                 failed_rows.append(
-                    {
-                        "row_index": candidate.row_index,
-                        "line_number": candidate.line_number,
-                        "failure_reason": "MolCLR embedding missing for resolved SMILES",
-                        "smiles": candidate.smiles,
-                        "smiles_field": candidate.smiles_field,
-                        "row": candidate.row,
-                    }
+                    _failure_payload(
+                        candidate,
+                        failure_reason="invalid_embedding",
+                        error_message="MolCLR embedding was empty or non-finite",
+                    )
                 )
-            elif not embedding or any(not math.isfinite(float(value)) for value in embedding):
-                skipped_embedding_rows += 1
-                failed_rows.append(
-                    {
-                        "row_index": candidate.row_index,
-                        "line_number": candidate.line_number,
-                        "failure_reason": "MolCLR embedding was empty or non-finite",
-                        "smiles": candidate.smiles,
-                        "smiles_field": candidate.smiles_field,
-                        "row": candidate.row,
-                    }
-                )
-            else:
-                row[str(args.embedding_field)] = [float(value) for value in embedding]
+                continue
+
+            row[str(args.embedding_field)] = [float(value) for value in embedding]
+            if candidate.smiles in zero_smiles:
+                row["molclr_embedding_status"] = "zero_invalid_smiles"
+                if failure is not None:
+                    row["molclr_embedding_error"] = failure.error
+                zero_embedding_rows += 1
+            elif row.get("molclr_embedding_status") is None:
                 encoded_rows += 1
-                embedding_dim = int(len(embedding))
-                dim_counter[embedding_dim] += 1
-                source_counter[str(candidate.smiles_field)] += 1
+            embedding_dim = int(len(embedding))
+            dim_counter[embedding_dim] += 1
+            source_counter[str(candidate.smiles_field)] += 1
+            if args.embedding_field not in row:
+                rows_missing_embedding_in_output += 1
             handle.write(_json_dumps(row))
+            output_rows += 1
 
     _write_failed_rows(failed_jsonl, failed_rows)
 
     summary = {
         "candidate_pool": str(candidate_pool),
         "out_jsonl": str(out_jsonl),
+        "input_total_rows": int(total_rows),
         "total_rows": int(total_rows),
         "rows_with_resolved_smiles": int(len(rows_with_smiles)),
+        "output_rows": int(output_rows),
         "encoded_rows": int(encoded_rows),
         "failed_rows": int(len(failed_rows)),
-        "skipped_embedding_rows": int(skipped_embedding_rows),
+        "skipped_rows": int(skipped_rows),
+        "skipped_embedding_rows": int(skipped_rows),
+        "zero_embedding_rows": int(zero_embedding_rows),
+        "rows_missing_embedding_in_output": int(rows_missing_embedding_in_output),
         "embedding_dim": int(embedding_dim) if embedding_dim is not None else None,
         "embedding_dimension_distribution": {
             str(dim): count for dim, count in sorted(dim_counter.items())
@@ -300,7 +461,18 @@ def main() -> int:
     summary_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
 
-    if failed_rows and str(args.invalid_policy) == "error":
+    if invalid_policy == "skip":
+        if output_rows != encoded_rows:
+            raise RuntimeError(
+                "Internal invariant failed for --invalid-policy skip: "
+                f"output_rows={output_rows} but encoded_rows={encoded_rows}."
+            )
+        if rows_missing_embedding_in_output != 0:
+            raise RuntimeError(
+                "Internal invariant failed for --invalid-policy skip: "
+                f"rows_missing_embedding_in_output={rows_missing_embedding_in_output}."
+            )
+    if failed_rows and invalid_policy == "error":
         return 1
     return 0
 

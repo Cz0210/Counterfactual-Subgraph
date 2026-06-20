@@ -28,6 +28,27 @@ class MolCLREmbeddingError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class MolCLRFailedSmiles:
+    """One SMILES that could not be converted into a MolCLR graph."""
+
+    smiles: str
+    error: str
+    failure_reason: str = "invalid_smiles"
+
+
+class MolCLRInvalidSmilesError(ValueError):
+    """Raised for invalid SMILES when invalid_policy='error'."""
+
+    def __init__(self, failures: list[MolCLRFailedSmiles]) -> None:
+        self.failures = tuple(failures)
+        examples = "; ".join(f"{failure.smiles}: {failure.error}" for failure in failures[:8])
+        super().__init__(
+            "Invalid fragment SMILES encountered while building MolCLR graphs: "
+            + examples
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedGraph:
     """A parsed molecular graph plus its original SMILES key."""
 
@@ -47,6 +68,16 @@ class LoadedMolCLRModel:
     matched_state_keys: int | None
     missing_state_keys: int | None
     unexpected_state_keys: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class MolCLREncodeResult:
+    """MolCLR embedding result plus invalid-SMILES diagnostics."""
+
+    embeddings: dict[str, list[float]]
+    failed_smiles: tuple[MolCLRFailedSmiles, ...]
+    zero_embedding_smiles: tuple[str, ...]
+    embedding_dim: int | None
 
 
 ATOM_NUM_LIST = list(range(1, 119))
@@ -624,7 +655,7 @@ def _encode_valid_graphs(
     return embeddings
 
 
-def encode_smiles_list(
+def encode_smiles_list_with_failures(
     smiles_list: Iterable[str],
     molclr_root: str | Path,
     molclr_ckpt: str | Path,
@@ -632,13 +663,13 @@ def encode_smiles_list(
     batch_size: int = 64,
     device: str = "cuda",
     invalid_policy: InvalidPolicy = "error",
-) -> dict[str, list[float]]:
+) -> MolCLREncodeResult:
     """Encode fragment SMILES with a MolCLR pretrained GNN encoder.
 
-    Returns a mapping from each distinct input SMILES string to a normalized
-    embedding list. Invalid SMILES are handled according to ``invalid_policy``:
-    ``error`` raises, ``skip`` omits them, and ``zero`` writes zero vectors with
-    the same dimension as valid embeddings.
+    Returns normalized embeddings and invalid-SMILES diagnostics. Invalid SMILES
+    are handled according to ``invalid_policy``: ``error`` raises
+    :class:`MolCLRInvalidSmilesError`, ``skip`` omits them from embeddings, and
+    ``zero`` writes zero vectors with the same dimension as valid embeddings.
     """
 
     if invalid_policy not in {"error", "skip", "zero"}:
@@ -648,7 +679,12 @@ def encode_smiles_list(
 
     unique_smiles = _unique_normalized_smiles(smiles_list)
     if not unique_smiles:
-        return {}
+        return MolCLREncodeResult(
+            embeddings={},
+            failed_smiles=(),
+            zero_embedding_smiles=(),
+            embedding_dim=None,
+        )
 
     loaded = load_molclr_model(
         molclr_root=molclr_root,
@@ -658,20 +694,20 @@ def encode_smiles_list(
     )
 
     parsed_graphs: list[ParsedGraph] = []
-    invalids: list[tuple[str, str]] = []
+    invalids: list[MolCLRFailedSmiles] = []
     for smiles in unique_smiles:
         try:
             parsed_graphs.append(ParsedGraph(smiles=smiles, data=smiles_to_molclr_data(smiles)))
         except Exception as exc:
-            invalids.append((smiles, str(exc)))
+            invalids.append(MolCLRFailedSmiles(smiles=smiles, error=str(exc)))
 
     if invalids and invalid_policy == "error":
-        examples = "; ".join(f"{smiles}: {reason}" for smiles, reason in invalids[:8])
-        raise ValueError(f"Invalid fragment SMILES encountered while building MolCLR graphs: {examples}")
+        raise MolCLRInvalidSmilesError(invalids)
 
     embeddings = _encode_valid_graphs(parsed_graphs, loaded=loaded, batch_size=int(batch_size))
     embedding_dim = len(next(iter(embeddings.values()))) if embeddings else None
 
+    zero_embedding_smiles: list[str] = []
     if invalids and invalid_policy == "zero":
         if embedding_dim is None:
             dummy_embeddings = _encode_valid_graphs(
@@ -681,17 +717,50 @@ def encode_smiles_list(
             )
             embedding_dim = len(dummy_embeddings["C"])
         zero = [0.0] * int(embedding_dim)
-        for smiles, _reason in invalids:
-            embeddings[smiles] = list(zero)
+        for failure in invalids:
+            embeddings[failure.smiles] = list(zero)
+            zero_embedding_smiles.append(failure.smiles)
 
-    return embeddings
+    return MolCLREncodeResult(
+        embeddings=embeddings,
+        failed_smiles=tuple(invalids),
+        zero_embedding_smiles=tuple(zero_embedding_smiles),
+        embedding_dim=int(embedding_dim) if embedding_dim is not None else None,
+    )
+
+
+def encode_smiles_list(
+    smiles_list: Iterable[str],
+    molclr_root: str | Path,
+    molclr_ckpt: str | Path,
+    encoder_type: str = "gin",
+    batch_size: int = 64,
+    device: str = "cuda",
+    invalid_policy: InvalidPolicy = "error",
+) -> dict[str, list[float]]:
+    """Encode fragment SMILES and return only the SMILES-to-embedding mapping."""
+
+    result = encode_smiles_list_with_failures(
+        smiles_list,
+        molclr_root=molclr_root,
+        molclr_ckpt=molclr_ckpt,
+        encoder_type=encoder_type,
+        batch_size=batch_size,
+        device=device,
+        invalid_policy=invalid_policy,
+    )
+    return result.embeddings
 
 
 __all__ = [
     "InvalidPolicy",
     "LoadedMolCLRModel",
+    "MolCLREncodeResult",
     "MolCLREmbeddingError",
+    "MolCLRFailedSmiles",
+    "MolCLRInvalidSmilesError",
     "encode_smiles_list",
+    "encode_smiles_list_with_failures",
     "load_molclr_model",
     "smiles_to_molclr_data",
 ]

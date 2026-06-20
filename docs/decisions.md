@@ -6,6 +6,40 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-21] Make MolCLR-GNN skip policy produce selector-ready pools
+
+### Background
+The MolCLR-GNN embedding job can encode most candidate fragments while a small
+number of invalid fragment SMILES fail RDKit/PyG graph construction. The
+original `invalid_policy=skip` behavior omitted those SMILES from the embedding
+map but still wrote their original rows to the output JSONL, leaving rows
+without `final_fragment_gnn_embedding` and causing the selector's
+`--embedding-missing-policy error` mode to fail.
+
+### Decision
+Keep selector behavior unchanged and fix only the embedding preparation layer:
+
+- have the MolCLR encoder expose invalid-SMILES details alongside successful
+  embeddings;
+- make `scripts/add_candidate_pool_molclr_embeddings.py` skip failed rows from
+  the output JSONL when `--invalid-policy skip` is used;
+- retain zero-vector behavior only for `--invalid-policy zero`, with an explicit
+  `molclr_embedding_status` marker;
+- expand the summary with input/output row counts, skipped rows, zero rows, and
+  missing-embedding checks.
+
+### Consequences
+- `INVALID_POLICY=skip` now creates selector-ready JSONL files whose retained
+  rows all contain `final_fragment_gnn_embedding`.
+- Failed rows remain auditable through `molclr_gnn_embedding_failed_rows.jsonl`.
+- Existing ChemLLM text embeddings, Morgan/Tanimoto redundancy, and selector
+  logic remain unchanged.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-15] Add MolCLR-GNN embedding redundancy workflow for selector experiments
 
 ### Background
