@@ -25,7 +25,10 @@ BETA_COVERAGE=${BETA_COVERAGE:-20.0}
 GAMMA_REDUNDANCY=${GAMMA_REDUNDANCY:-5.0}
 ETA_SIZE=${ETA_SIZE:-0.3}
 TOP_K=${TOP_K:-20}
-MIN_CF_DROP=${MIN_CF_DROP:-0.2}
+MIN_CF_DROP=${MIN_CF_DROP:-0.0}
+REQUIRE_CF_FLIP=${REQUIRE_CF_FLIP:-0}
+REQUIRE_FINAL_SUBSTRUCTURE=${REQUIRE_FINAL_SUBSTRUCTURE:-0}
+MAX_PROJECTION_USED_RATE=${MAX_PROJECTION_USED_RATE:-1.0}
 POOL_JSONL=${POOL_JSONL:-outputs/hpc/comparison/hiv_quick/label1_1594411/gt_fullgraph_candidate_pool_with_molclr_gnn_embeddings.jsonl}
 OUT_DIR=${OUT_DIR:-outputs/hpc/selectors/molclr_gnn_gt_fullgraph_embedding_label1_relaxed/label1_1594411/beta_20p0_gamma_5p0}
 EMBEDDING_FIELD=${EMBEDDING_FIELD:-final_fragment_gnn_embedding}
@@ -50,10 +53,13 @@ echo "GAMMA_REDUNDANCY=${GAMMA_REDUNDANCY}"
 echo "ETA_SIZE=${ETA_SIZE}"
 echo "TOP_K=${TOP_K}"
 echo "MIN_CF_DROP=${MIN_CF_DROP}"
+echo "REQUIRE_CF_FLIP=${REQUIRE_CF_FLIP}"
+echo "REQUIRE_FINAL_SUBSTRUCTURE=${REQUIRE_FINAL_SUBSTRUCTURE}"
+echo "MAX_PROJECTION_USED_RATE=${MAX_PROJECTION_USED_RATE}"
 echo "POOL_JSONL=${POOL_JSONL}"
 echo "OUT_DIR=${OUT_DIR}"
 echo "EMBEDDING_FIELD=${EMBEDDING_FIELD}"
-echo "GT selector uses --require-cf-flip, --require-final-substructure, --dedup-by-final-fragment"
+echo "GT selector default is relaxed: no CF-flip/final-substructure flags unless env toggles are 1."
 echo "============================================"
 
 for path in "${POOL_JSONL}" scripts/select_class_counterfactual_subgraphs.py scripts/check_candidate_pool_embeddings.py; do
@@ -74,7 +80,8 @@ python scripts/check_candidate_pool_embeddings.py \
   --max-rows 5
 
 mkdir -p "${OUT_DIR}"
-python scripts/select_class_counterfactual_subgraphs.py \
+SELECTOR_CMD=(
+  python scripts/select_class_counterfactual_subgraphs.py
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --pool-jsonl "${POOL_JSONL}" \
@@ -86,13 +93,23 @@ python scripts/select_class_counterfactual_subgraphs.py \
   --eta-size "${ETA_SIZE}" \
   --top-k "${TOP_K}" \
   --min-cf-drop "${MIN_CF_DROP}" \
-  --require-cf-flip \
-  --require-final-substructure \
+  --max-projection-used-rate "${MAX_PROJECTION_USED_RATE}" \
   --dedup-by-final-fragment \
   --sim-metric embedding \
   --embedding-field "${EMBEDDING_FIELD}" \
   --embedding-missing-policy error \
   --top-candidates-per-fragment 3
+)
+
+if [ "${REQUIRE_CF_FLIP}" = "1" ]; then
+  SELECTOR_CMD+=(--require-cf-flip)
+fi
+
+if [ "${REQUIRE_FINAL_SUBSTRUCTURE}" = "1" ]; then
+  SELECTOR_CMD+=(--require-final-substructure)
+fi
+
+"${SELECTOR_CMD[@]}"
 
 echo "===== GT MOLCLR GNN SELECTOR SUMMARY ====="
 cat "${OUT_DIR}/selector_summary.json"
