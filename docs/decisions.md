@@ -6,6 +6,41 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-22] Add no-GNN GT-fullgraph Tanimoto baseline trajectory for Pareto plots
+
+### Background
+MolCLR-GNN selector sweeps provide one trajectory for the current method, but
+the Pareto frontier plot also needs a comparable baseline trajectory that does
+not use GNN embeddings. The available clean GT-fullgraph action motif pool is
+`camc_gt_fullgraph_motif_pool.csv`; it can be re-selected with the same
+top-k/gamma sweep idea using Morgan/Tanimoto redundancy and then evaluated by
+the unchanged legacy HIV quick CAMC evaluator.
+
+### Decision
+Add evaluation-only scripts:
+
+- a GT-fullgraph motif-pool selector that aggregates action motifs, scores them
+  with CF/support/size proxies, and applies greedy MMR with RDKit Morgan
+  Tanimoto redundancy;
+- a Slurm wrapper for gamma/beta sweeps that writes legacy-evaluator-compatible
+  `selected_subgraphs.csv` and `selected_subgraphs.json`;
+- a manifest-driven plotting script that reads legacy evaluator
+  `camc_comparison_table.csv` outputs for Ours-MolCLR-GNN and
+  Baseline-noGNN-Tanimoto trajectories, marks three-objective Pareto points, and
+  exports PNG/PDF figures.
+
+### Consequences
+- The legacy evaluator remains unchanged.
+- The new baseline does not use GNN embeddings; redundancy is the original
+  Morgan/Tanimoto structural similarity.
+- Selected motif outputs are compatible with
+  `scripts/eval/compare_hiv_recourse_baselines.py --ours-selected-dir`.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-21] Make MolCLR-GNN skip policy produce selector-ready pools
 
 ### Background
