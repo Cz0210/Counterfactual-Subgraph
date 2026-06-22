@@ -9,6 +9,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+REQUIRED_MANIFEST_COLUMNS = ("family", "config", "eval_dir", "row_method")
+
+
 def parse_gamma(config):
     m = re.search(r"gamma([0-9]+)p([0-9]+)", config)
     if not m:
@@ -16,36 +19,68 @@ def parse_gamma(config):
     return float(f"{m.group(1)}.{m.group(2)}")
 
 
-def read_manifest(path):
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f, delimiter="\t"))
+def gamma_label(g):
+    if g is None:
+        return "NA"
+    if abs(g - int(g)) < 1e-9:
+        return str(int(g))
+    return str(g)
 
 
-def load_point(item, k=20):
-    path = Path(item["eval_dir"]) / "camc_comparison_table.csv"
-    method = item["row_method"]
-
-    if not path.exists():
-        raise FileNotFoundError(path)
-
+def read_manifest(manifest_path):
+    path = Path(manifest_path)
     with path.open(newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+
+        first_line = sample.splitlines()[0] if sample.splitlines() else ""
+        delimiter = "\t" if "\t" in first_line else ","
+
+        reader = csv.DictReader(f, delimiter=delimiter)
+        fieldnames = reader.fieldnames or []
+
+        missing = [c for c in REQUIRED_MANIFEST_COLUMNS if c not in fieldnames]
+        if missing:
+            raise ValueError(
+                f"Manifest missing columns: {missing}; "
+                f"required={REQUIRED_MANIFEST_COLUMNS}; "
+                f"fieldnames={fieldnames}; "
+                f"detected_delimiter={repr(delimiter)}"
+            )
+
+        rows = list(reader)
+
+    return rows
+
+
+def load_camc_point(item, k):
+    eval_dir = Path(item["eval_dir"])
+    camc_path = eval_dir / "camc_comparison_table.csv"
+    row_method = item["row_method"]
+
+    if not camc_path.exists():
+        raise FileNotFoundError(f"Missing {camc_path}")
+
+    with camc_path.open(newline="") as f:
         reader = csv.DictReader(f)
         for r in reader:
-            if r["method"] == method and int(float(r["k"])) == k:
+            if r.get("method") == row_method and int(float(r.get("k", -1))) == k:
                 return {
                     "family": item["family"],
                     "config": item["config"],
+                    "gamma": parse_gamma(item["config"]),
+                    "eval_dir": str(eval_dir),
+                    "row_method": row_method,
                     "support_coverage": float(r["support_coverage"]),
                     "camc_flip_coverage": float(r["camc_flip_coverage"]),
                     "pairwise_tanimoto_mean": float(r["pairwise_tanimoto_mean"]),
                     "camc_at_05": float(r["camc_delta_0.5"]),
                     "mean_cf_drop_covered": float(r["mean_cf_drop_covered"]),
-                    "gamma": parse_gamma(item["config"]),
-                    "eval_dir": item["eval_dir"],
-                    "row_method": method,
                 }
 
-    raise RuntimeError(f"No matched row in {path}: method={method}, k={k}")
+    raise RuntimeError(
+        f"No matched k={k}, method={row_method} row in {camc_path}"
+    )
 
 
 def dominates(a, b):
@@ -54,11 +89,13 @@ def dominates(a, b):
         and a["camc_flip_coverage"] >= b["camc_flip_coverage"]
         and a["pairwise_tanimoto_mean"] <= b["pairwise_tanimoto_mean"]
     )
+
     strictly_better = (
         a["support_coverage"] > b["support_coverage"]
         or a["camc_flip_coverage"] > b["camc_flip_coverage"]
         or a["pairwise_tanimoto_mean"] < b["pairwise_tanimoto_mean"]
     )
+
     return better_or_equal and strictly_better
 
 
@@ -92,83 +129,51 @@ def write_points(points, out_csv):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for p in points:
-            row = {k: p[k] for k in fields}
-            writer.writerow(row)
+            writer.writerow({c: p[c] for c in fields})
 
 
-def label_for_point(p):
-    if p["family"] == "Ours-MolCLR-GNN":
-        g = p["gamma"]
-        if g is None:
-            return "Ours"
-        if abs(g - int(g)) < 1e-9:
-            return f"O-g{int(g)}"
-        return f"O-g{g}"
-
-    if p["config"] == "seed13":
-        return "B-s13"
-    if p["config"] == "seed21":
-        return "B-s21"
-    if p["config"] == "seed42":
-        return "B-s42"
-    return "B"
+def short_method_label(family):
+    if family.startswith("Ours"):
+        return "O"
+    if family.startswith("Baseline"):
+        return "B"
+    return family[:1]
 
 
-def plot_tradeoff(points, y_key, y_label, title, out_path, legend_loc):
+def point_label(p):
+    return f"{short_method_label(p['family'])}-g{gamma_label(p['gamma'])}"
+
+
+def plot_tradeoff(points, y_key, y_label, title, out_prefix, legend_loc):
     fig, ax = plt.subplots(figsize=(10, 6.2))
 
-    ours = [p for p in points if p["family"] == "Ours-MolCLR-GNN"]
-    baseline = [p for p in points if p["family"] == "Baseline-original"]
+    families = list(dict.fromkeys([p["family"] for p in points]))
 
-    ours = sorted(ours, key=lambda p: p["gamma"] if p["gamma"] is not None else 1e9)
+    markers = ["s", "o", "D", "^", "P"]
 
-    # Ours-MolCLR-GNN trajectory
-    ax.plot(
-        [p["pairwise_tanimoto_mean"] for p in ours],
-        [p[y_key] * 100 for p in ours],
-        linewidth=2.4,
-        alpha=0.85,
-        label="Ours-MolCLR-GNN",
-    )
-    ax.scatter(
-        [p["pairwise_tanimoto_mean"] for p in ours],
-        [p[y_key] * 100 for p in ours],
-        marker="s",
-        s=95,
-        alpha=0.9,
-    )
+    for idx, fam in enumerate(families):
+        rows = [p for p in points if p["family"] == fam]
+        rows = sorted(rows, key=lambda x: (x["gamma"] is None, x["gamma"] if x["gamma"] is not None else 1e9))
 
-    # Original baseline no-GNN seed points
-    ax.scatter(
-        [p["pairwise_tanimoto_mean"] for p in baseline],
-        [p[y_key] * 100 for p in baseline],
-        marker="D",
-        s=105,
-        alpha=0.9,
-        label="Baseline-original no-GNN",
-    )
+        xs = [p["pairwise_tanimoto_mean"] for p in rows]
+        ys = [p[y_key] * 100 for p in rows]
 
-    # baseline seed mean, 仅作为视觉参考
-    if baseline:
-        bx = sum(p["pairwise_tanimoto_mean"] for p in baseline) / len(baseline)
-        by = sum(p[y_key] for p in baseline) / len(baseline) * 100
+        ax.plot(
+            xs,
+            ys,
+            linewidth=2.2,
+            alpha=0.78,
+            label=fam,
+        )
+
         ax.scatter(
-            [bx],
-            [by],
-            marker="X",
-            s=160,
-            alpha=0.95,
-            label="Baseline mean",
-        )
-        ax.annotate(
-            "B-mean",
-            (bx, by),
-            textcoords="offset points",
-            xytext=(8, 8),
-            fontsize=10,
+            xs,
+            ys,
+            marker=markers[idx % len(markers)],
+            s=90,
+            alpha=0.9,
         )
 
-    # Pareto points
     pareto = [p for p in points if p["is_pareto"]]
     ax.scatter(
         [p["pairwise_tanimoto_mean"] for p in pareto],
@@ -181,41 +186,39 @@ def plot_tradeoff(points, y_key, y_label, title, out_path, legend_loc):
         label="3-objective Pareto points",
     )
 
-    # Labels: Ours 合并低 gamma，baseline 标 seed
-    ours_low = [p for p in ours if p["gamma"] in {5.0, 10.0, 20.0}]
-    if ours_low:
-        p = ours_low[-1]
+    # 标签：只标关键点，避免过密
+    for p in points:
+        g = p["gamma"]
+        if g not in {0.0, 1.0, 2.0, 5.0, 20.0, 50.0, 100.0}:
+            continue
+
+        label = point_label(p)
+
+        # Ours 的 5/10/20 经常重合，20 标一次即可
+        if p["family"].startswith("Ours") and g in {5.0, 10.0}:
+            continue
+        if p["family"].startswith("Ours") and g == 20.0:
+            label = "O-g5/10/20"
+
+        if p["family"].startswith("Ours"):
+            offset = (8, -18)
+        else:
+            offset = (8, 8)
+
         ax.annotate(
-            "O-g5/10/20",
+            label,
             (p["pairwise_tanimoto_mean"], p[y_key] * 100),
             textcoords="offset points",
-            xytext=(-80, -18),
-            fontsize=10,
-        )
-
-    for p in ours:
-        if p["gamma"] in {50.0, 100.0}:
-            ax.annotate(
-                label_for_point(p),
-                (p["pairwise_tanimoto_mean"], p[y_key] * 100),
-                textcoords="offset points",
-                xytext=(8, -18),
-                fontsize=10,
-            )
-
-    for p in baseline:
-        ax.annotate(
-            label_for_point(p),
-            (p["pairwise_tanimoto_mean"], p[y_key] * 100),
-            textcoords="offset points",
-            xytext=(8, 8),
-            fontsize=10,
+            xytext=offset,
+            fontsize=9,
         )
 
     xs = [p["pairwise_tanimoto_mean"] for p in points]
     ys = [p[y_key] * 100 for p in points]
+
     x_pad = (max(xs) - min(xs)) * 0.10 if max(xs) > min(xs) else 0.01
-    y_pad = (max(ys) - min(ys)) * 0.13 if max(ys) > min(ys) else 0.2
+    y_pad = (max(ys) - min(ys)) * 0.12 if max(ys) > min(ys) else 0.2
+
     ax.set_xlim(min(xs) - x_pad, max(xs) + x_pad)
     ax.set_ylim(min(ys) - y_pad, max(ys) + y_pad)
 
@@ -223,12 +226,11 @@ def plot_tradeoff(points, y_key, y_label, title, out_path, legend_loc):
     ax.set_ylabel(y_label, fontsize=13)
     ax.set_title(title, fontsize=15, pad=15)
     ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.45)
-
     ax.legend(fontsize=9, loc=legend_loc, frameon=True)
 
     fig.tight_layout()
-    fig.savefig(out_path.with_suffix(".png"), dpi=400, bbox_inches="tight")
-    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(out_prefix.with_suffix(".png"), dpi=400, bbox_inches="tight")
+    fig.savefig(out_prefix.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -242,19 +244,19 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest = read_manifest(args.manifest)
-    points = [load_point(item, k=args.k) for item in manifest]
+    manifest_rows = read_manifest(args.manifest)
+    points = [load_camc_point(row, args.k) for row in manifest_rows]
     points = mark_pareto(points)
 
-    out_csv = out_dir / "pareto_points_ours_gnn_vs_original_baseline.csv"
+    out_csv = out_dir / "pareto_points.csv"
     write_points(points, out_csv)
 
     plot_tradeoff(
         points,
         "camc_flip_coverage",
         "CAMC Flip Coverage ↑ (%)",
-        "Ours-MolCLR-GNN vs. Original Baseline: Redundancy vs. CAMC Flip",
-        out_dir / "ours_gnn_vs_original_baseline_redundancy_vs_camc_flip",
+        "Ours-MolCLR-GNN vs. Baseline-noGNN-Tanimoto: Redundancy vs. CAMC Flip",
+        out_dir / "trajectory_redundancy_vs_camc_flip",
         "lower right",
     )
 
@@ -262,19 +264,18 @@ def main():
         points,
         "support_coverage",
         "Support Coverage ↑ (%)",
-        "Ours-MolCLR-GNN vs. Original Baseline: Redundancy vs. Support",
-        out_dir / "ours_gnn_vs_original_baseline_redundancy_vs_support",
+        "Ours-MolCLR-GNN vs. Baseline-noGNN-Tanimoto: Redundancy vs. Support",
+        out_dir / "trajectory_redundancy_vs_support",
         "upper right",
     )
 
     print("Saved CSV:", out_csv)
     print("Saved figures to:", out_dir)
-
     print("\nPareto frontier points:")
     for p in points:
         if p["is_pareto"]:
             print(
-                f"{p['family']:22s} {p['config']:16s} "
+                f"{p['family']:28s} {p['config']:18s} "
                 f"support={p['support_coverage']:.4f} "
                 f"flip={p['camc_flip_coverage']:.4f} "
                 f"tanimoto={p['pairwise_tanimoto_mean']:.4f}"
@@ -282,4 +283,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
