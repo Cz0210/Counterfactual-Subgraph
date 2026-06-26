@@ -6,6 +6,46 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-26] Add close counterfactual coverage evaluation workflow
+
+### Background
+The selected-subgraph method needs to be evaluated under a GCFExplainer-style
+close counterfactual graph protocol while preserving the existing PPO,
+candidate-pool, audit, overlap, and selector workflows. The comparison must
+support both our selected fragments, which become counterfactual graphs only
+after hard deletion from a parent, and GCF-style baselines that already provide
+full counterfactual graph candidates.
+
+### Decision
+Add evaluation-only code:
+
+- a close counterfactual coverage module that computes hard-deletion residuals,
+  normalized deletion-GED, optional NetworkX GED, teacher prediction deltas, and
+  teacher-embedding distance when the teacher exposes an embedding API;
+- CLI entrypoints for single-mode evaluation, four-way ours/GCF by GED/embedding
+  evaluation, and matplotlib threshold-sweep visualization;
+- a label-1 Slurm wrapper for the VSCode -> git push -> HPC git pull -> sbatch
+  workflow;
+- focused tests for deletion, threshold de-duplication, embedding-distance
+  semantics, and GCF no-deletion behavior.
+
+### Consequences
+- Training logic, reward logic, candidate-pool generation, selector scoring, and
+  overlap analysis remain unchanged.
+- Our selected fragments are evaluated by hard deletion with any-match
+  semantics; GCF candidates are evaluated as full counterfactual graphs.
+- GED defaults to the fast deletion-cost upper bound for our hard-deletion
+  residuals, while GCF GED uses NetworkX graph edit distance because it has no
+  deletion action.
+- Embedding distance is available only when the supplied teacher/model exposes a
+  graph-embedding method; otherwise rows record `embedding_ok=false` with an
+  explicit error.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-22] Add no-GNN GT-fullgraph Tanimoto baseline trajectory for Pareto plots
 
 ### Background

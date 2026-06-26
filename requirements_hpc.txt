@@ -6,6 +6,8 @@
 transformers
 pandas
 scikit-learn
+networkx
+matplotlib
 einops
 accelerate
 peft
