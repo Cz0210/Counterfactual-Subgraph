@@ -1,0 +1,3 @@
+[submodule "baselines/globalgce_official"]
+	path = baselines/globalgce_official
+	url = https://github.com/YinhanHe123/GlobalGCE
