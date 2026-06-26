@@ -23,6 +23,7 @@ export PYTHONPATH=$PWD
 GLOBALGCE_ROOT=${GLOBALGCE_ROOT:-baselines/globalgce_official}
 RUN_ROOT=${RUN_ROOT:-outputs/hpc/globalgce/aids_smoke}
 DEVICE=${DEVICE:-0}
+SMOKE_TRAIN_GNN_EPOCHS=10
 
 echo "===== GLOBALGCE AIDS SMOKE ENV CHECK ====="
 echo "hostname: $(hostname)"
@@ -46,6 +47,7 @@ except Exception as exc:
 PY
 echo "GLOBALGCE_ROOT=${GLOBALGCE_ROOT}"
 echo "RUN_ROOT=${RUN_ROOT}"
+echo "SMOKE_TRAIN_GNN_EPOCHS=${SMOKE_TRAIN_GNN_EPOCHS}"
 echo "=========================================="
 
 python scripts/baselines/globalgce/check_globalgce_layout.py \
@@ -58,7 +60,7 @@ python scripts/baselines/globalgce/run_globalgce_wrapper.py \
   --run-root "$RUN_ROOT" \
   --dataset AIDS \
   --epochs 1 \
-  --train-gnn-epochs 1 \
+  --train-gnn-epochs "$SMOKE_TRAIN_GNN_EPOCHS" \
   --topk 2 \
   --exp-num 1 \
   --batch-size 64 \
