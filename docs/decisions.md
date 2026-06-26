@@ -6,6 +6,45 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-26] Add GlobalGCE baseline reproduction and unified evaluation wrappers
+
+### Background
+GlobalGCE is a relevant global counterfactual explanation baseline, but its
+official outputs and metrics are not directly comparable to the project's
+native-action CCRCov protocol. The official code should remain isolated under
+`baselines/globalgce_official`, while project-owned wrappers should control
+HPC execution, artifact export, and unified re-evaluation.
+
+### Decision
+Add GlobalGCE support without modifying official source code:
+
+- layout checking for `baselines/globalgce_official`;
+- a wrapper that copies official `src` into `outputs/hpc/globalgce/...` and runs
+  `main.py` from the copied tree;
+- an exporter that records official metrics, introspects rules/CF pickles, and
+  writes project-owned JSON/JSONL artifacts;
+- a `src.baselines.globalgce_adapter` module for AIDS label maps, CF graph
+  conversion, rule descriptors, structural redundancy, coverage redundancy, and
+  label-alignment warnings;
+- a unified evaluator that supports first-stage native-CF CCRCov and a
+  rule-action audit mode that reports SuppCov/StructRed/CovRed while explicitly
+  marking safe RHS replacement as unsupported;
+- Slurm wrappers for smoke, official top30, export, and label-specific CCRCov
+  evaluation;
+- baseline documentation in `docs/BASELINE_GLOBALGCE.md`.
+
+### Consequences
+GlobalGCE official code remains untouched. All generated GlobalGCE run outputs
+live under `outputs/hpc/globalgce/...`, and unified evaluation outputs live under
+`outputs/hpc/eval/globalgce/...`. Official validity/proximity metrics remain
+reproduction diagnostics, while final comparison metrics are recomputed by the
+project's frozen teacher and CCRCov protocol.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-26] Add Slurm experiment tracking entrypoint
 
 ### Background
