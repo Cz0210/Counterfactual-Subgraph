@@ -61,6 +61,17 @@ The project currently uses native-action Close Counterfactual Rule Coverage (CCR
 
 ---
 
+## Experiment Tracking
+
+Slurm jobs should be submitted through `scripts/exp_sbatch.py` or `scripts/exp_sbatch.sh` so that job id, command, git commit, environment snapshot, and expected output paths are automatically recorded.
+
+See:
+
+- `docs/EXPERIMENT_TRACKING.md`
+- `docs/EXPERIMENT_LOG.md`
+
+---
+
 ## 3. Planned Repository Layout
 
 ```text

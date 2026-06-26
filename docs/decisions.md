@@ -6,6 +6,38 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-26] Add Slurm experiment tracking entrypoint
+
+### Background
+The project has many Slurm jobs for PPO, candidate-pool generation, selectors,
+baseline evaluation, CCRCov sweeps, and visualization. Direct `sbatch`
+submission makes it easy to lose the job id, command, output root, git commit,
+and notes needed to reconstruct a result later.
+
+### Decision
+Add a lightweight submission and tracking layer:
+
+- `scripts/exp_sbatch.py` calls the real `sbatch` without `shell=True`, records
+  successful and failed submissions, and supports dry-run inspection;
+- `scripts/exp_sbatch.sh` provides a repository-root shell wrapper;
+- `scripts/sync_experiment_status.py` appends Slurm status snapshots using
+  `sacct` with `squeue` fallback;
+- `docs/EXPERIMENT_LOG.md` stores append-only human-readable records;
+- `outputs/hpc/experiment_registry/jobs.jsonl` is the runtime machine-readable
+  registry path;
+- `docs/EXPERIMENT_TRACKING.md` documents the standard workflow and optional
+  shell alias.
+
+### Consequences
+Training, selector, and evaluation logic remain unchanged. Existing Slurm
+scripts are not modified; future submissions should prefer the tracking wrapper
+so that experiment provenance is preserved.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-26] Add close counterfactual coverage evaluation workflow
 
 ### Background
