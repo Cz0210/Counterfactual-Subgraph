@@ -31,7 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="0", help="GPU id or cpu.")
-    parser.add_argument("--reuse-cache", action="store_true", help="Copy official saved_results cache too.")
+    parser.add_argument(
+        "--reuse-cache",
+        action="store_true",
+        help="Deprecated compatibility flag; official saved_results is never copied.",
+    )
     parser.add_argument(
         "--overwrite-run-src",
         action="store_true",
@@ -57,7 +61,21 @@ def run_git(path: Path, args: list[str]) -> str:
     return f"unavailable:{completed.stderr.strip() or completed.stdout.strip()}"
 
 
-def copy_official_src(source: Path, destination: Path, *, reuse_cache: bool, overwrite: bool) -> None:
+GLOBALGCE_RUNTIME_DIRS = [
+    "saved_results",
+    "saved_results/saved_models",
+    "saved_results/saved_models/gnn_model",
+    "saved_results/saved_exp_res",
+    "saved_results/saved_exp_res/GlobalGCE",
+    "saved_results/saved_rules",
+    "saved_results/saved_rules/GlobalGCE",
+    "saved_results/saved_rules/plots",
+    "saved_results/saved_cfs",
+    "saved_results/saved_cfs/GlobalGCE",
+]
+
+
+def copy_official_src(source: Path, destination: Path, *, overwrite: bool) -> None:
     if destination.exists():
         if not overwrite:
             raise FileExistsError(
@@ -66,12 +84,21 @@ def copy_official_src(source: Path, destination: Path, *, reuse_cache: bool, ove
         shutil.rmtree(destination)
 
     def ignore(_dir: str, names: list[str]) -> set[str]:
-        ignored = {"__pycache__", ".pytest_cache"}
-        if not reuse_cache:
-            ignored.add("saved_results")
+        ignored = {"__pycache__", ".pytest_cache", "saved_results"}
         return ignored.intersection(names)
 
     shutil.copytree(source, destination, ignore=ignore)
+
+
+def ensure_globalgce_runtime_dirs(work_src: Path) -> list[str]:
+    """Create the clean saved_results directory skeleton required by GlobalGCE."""
+
+    created_dirs: list[str] = []
+    for relative in GLOBALGCE_RUNTIME_DIRS:
+        path = work_src / relative
+        path.mkdir(parents=True, exist_ok=True)
+        created_dirs.append(str(path))
+    return created_dirs
 
 
 def build_command(args: argparse.Namespace) -> list[str]:
@@ -119,9 +146,9 @@ def main() -> int:
     copy_official_src(
         official_src,
         run_src,
-        reuse_cache=bool(args.reuse_cache),
         overwrite=bool(args.overwrite_run_src),
     )
+    created_runtime_dirs = ensure_globalgce_runtime_dirs(run_src)
 
     command = build_command(args)
     command_text = " ".join(command)
@@ -160,6 +187,8 @@ def main() -> int:
         "num_workers": args.num_workers,
         "device": args.device,
         "reuse_cache": bool(args.reuse_cache),
+        "reuse_cache_note": "official saved_results is intentionally not copied; clean runtime dirs are created",
+        "created_runtime_dirs": created_runtime_dirs,
     }
     (run_root / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False, sort_keys=True),
@@ -167,6 +196,7 @@ def main() -> int:
     )
 
     print(f"[GLOBALGCE_RUN] run_root={run_root}")
+    print(f"[GLOBALGCE_RUN] created_runtime_dirs={len(created_runtime_dirs)}")
     print(f"[GLOBALGCE_RUN] command={command_text}")
     print(f"[GLOBALGCE_RUN] returncode={completed.returncode}")
     if completed.returncode != 0:
