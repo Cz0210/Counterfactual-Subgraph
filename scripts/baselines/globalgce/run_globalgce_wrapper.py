@@ -74,6 +74,13 @@ GLOBALGCE_RUNTIME_DIRS = [
     "saved_results/saved_cfs/GlobalGCE",
 ]
 
+GLOBALGCE_TRAIN_GNN_PATCH_MARKER = (
+    "# patched by counterfactual-subgraph wrapper: avoid None best_model_dict"
+)
+GLOBALGCE_TRAIN_GNN_PATCH_REASON = (
+    "avoid torch.save(None, gnn_model_path) in GlobalGCE smoke/offical run"
+)
+
 
 def copy_official_src(source: Path, destination: Path, *, overwrite: bool) -> None:
     if destination.exists():
@@ -99,6 +106,72 @@ def ensure_globalgce_runtime_dirs(work_src: Path) -> list[str]:
         path.mkdir(parents=True, exist_ok=True)
         created_dirs.append(str(path))
     return created_dirs
+
+
+def patch_globalgce_train_gnn_best_model(work_src: Path) -> dict[str, Any]:
+    """Patch the copied GlobalGCE runtime tree so train_gnn never saves None."""
+
+    target_file = work_src / "models" / "models_utils.py"
+    patch_info: dict[str, Any] = {
+        "applied": False,
+        "target_file": str(target_file),
+        "reason": GLOBALGCE_TRAIN_GNN_PATCH_REASON,
+        "changed": False,
+        "import_copy_added": False,
+        "initialization_patched": False,
+        "fallback_patched": False,
+        "error": None,
+    }
+    if not target_file.exists():
+        patch_info["error"] = f"target file does not exist: {target_file}"
+        return patch_info
+
+    original_text = target_file.read_text(encoding="utf-8")
+    text = original_text
+
+    if "\nimport copy\n" not in f"\n{text}\n":
+        text = "import copy\n" + text
+        patch_info["import_copy_added"] = True
+
+    init_old = "    best_loss, best_model_dict = 10e9, None"
+    init_new = (
+        f"    {GLOBALGCE_TRAIN_GNN_PATCH_MARKER}\n"
+        "    best_loss, best_model_dict = 10e9, copy.deepcopy(gnn_model.state_dict())"
+    )
+    if init_new not in text and init_old in text:
+        text = text.replace(init_old, init_new, 1)
+
+    save_line = "    torch.save(best_model_dict, gnn_model.save_model_path)"
+    fallback_block = (
+        f"    {GLOBALGCE_TRAIN_GNN_PATCH_MARKER}\n"
+        "    if best_model_dict is None:\n"
+        "        best_model_dict = copy.deepcopy(gnn_model.state_dict())\n"
+    )
+    if fallback_block not in text and save_line in text:
+        text = text.replace(save_line, fallback_block + save_line, 1)
+
+    if text != original_text:
+        target_file.write_text(text, encoding="utf-8")
+        patch_info["changed"] = True
+
+    patch_info["initialization_patched"] = (
+        "best_loss, best_model_dict = 10e9, copy.deepcopy(gnn_model.state_dict())"
+        in text
+    )
+    patch_info["fallback_patched"] = (
+        "if best_model_dict is None:\n"
+        "        best_model_dict = copy.deepcopy(gnn_model.state_dict())\n"
+        "    torch.save(best_model_dict, gnn_model.save_model_path)"
+        in text
+    )
+    patch_info["applied"] = bool(
+        "\nimport copy\n" in f"\n{text}\n"
+        and patch_info["initialization_patched"]
+        and patch_info["fallback_patched"]
+    )
+    if not patch_info["applied"] and patch_info["error"] is None:
+        patch_info["error"] = "expected train_gnn patch anchors were not found"
+    return patch_info
 
 
 def build_command(args: argparse.Namespace) -> list[str]:
@@ -149,6 +222,7 @@ def main() -> int:
         overwrite=bool(args.overwrite_run_src),
     )
     created_runtime_dirs = ensure_globalgce_runtime_dirs(run_src)
+    train_gnn_patch = patch_globalgce_train_gnn_best_model(run_src)
 
     command = build_command(args)
     command_text = " ".join(command)
@@ -189,6 +263,9 @@ def main() -> int:
         "reuse_cache": bool(args.reuse_cache),
         "reuse_cache_note": "official saved_results is intentionally not copied; clean runtime dirs are created",
         "created_runtime_dirs": created_runtime_dirs,
+        "runtime_patches": {
+            "train_gnn_best_model_dict": train_gnn_patch,
+        },
     }
     (run_root / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False, sort_keys=True),
@@ -197,6 +274,7 @@ def main() -> int:
 
     print(f"[GLOBALGCE_RUN] run_root={run_root}")
     print(f"[GLOBALGCE_RUN] created_runtime_dirs={len(created_runtime_dirs)}")
+    print(f"[GLOBALGCE_RUN] train_gnn_best_model_patch_applied={train_gnn_patch['applied']}")
     print(f"[GLOBALGCE_RUN] command={command_text}")
     print(f"[GLOBALGCE_RUN] returncode={completed.returncode}")
     if completed.returncode != 0:
