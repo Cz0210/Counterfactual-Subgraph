@@ -51,6 +51,16 @@ If any old code path optimizes toward these non-counterfactual objectives, it sh
 
 ---
 
+## Evaluation Protocol
+
+The project currently uses native-action Close Counterfactual Rule Coverage (CCRCov) as the main cross-baseline evaluation metric. SuppCov is temporarily reserved for subgraph-specific auxiliary analysis. For details, see:
+
+- `docs/EVALUATION_PROTOCOL.md`
+- `docs/BASELINE_ADAPTATION.md`
+- `docs/PROJECT_CONVENTIONS.md`
+
+---
+
 ## 3. Planned Repository Layout
 
 ```text

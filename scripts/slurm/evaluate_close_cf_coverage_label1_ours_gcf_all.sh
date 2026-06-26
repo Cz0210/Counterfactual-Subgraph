@@ -9,8 +9,11 @@
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 
-set -euo pipefail
+set -eo pipefail
 
+# Some HPC bashrc scripts reference unset variables, so nounset must not be
+# enabled before shell/conda initialization.
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
 

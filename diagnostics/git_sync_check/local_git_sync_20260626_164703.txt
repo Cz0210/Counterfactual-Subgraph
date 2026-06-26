@@ -1,0 +1,126 @@
+===== BASIC =====
+MacBook-Air.local
+2026年 6月26日 星期五 16时47分03秒 CST
+/Users/cz0210/Desktop/Documents/Tongji/GEEX/Code/counterfactual-subgraph
+
+===== GIT ROOT / HEAD =====
+/Users/cz0210/Desktop/Documents/Tongji/GEEX/Code/counterfactual-subgraph
+c4df361e4b7be969bd854f45f4bb64f83699b3d3
+main
+?? diagnostics/
+## main...origin/main
+?? diagnostics/
+
+===== REMOTES =====
+origin	git@github.com:Cz0210/Counterfactual-Subgraph.git (fetch)
+origin	git@github.com:Cz0210/Counterfactual-Subgraph.git (push)
+
+===== BRANCH VERBOSE =====
+* main c4df361 [origin/main] 1
+
+===== RECENT COMMITS =====
+* c4df361 (HEAD -> main, origin/main) 1
+* 135a6e0 clean old Pareto plotting scripts and keep fixed trajectory plotter
+* 248607f add no-GNN baseline Pareto trajectory sweep
+* ead2c14 add pareto analysis 1
+* 43014a9 relax GT MolCLR GNN selector filters
+* e4ad6d5 parameterize MolCLR GNN selector sweeps
+* 981f895 parameterize MolCLR GNN selector slurm sweep
+* 8f7338e fix skip invalid rows for MolCLR GNN embeddings
+* 502df85 add MolCLR GNN embedding selector pipeline
+* 49bac9f Sync HIV quick CAMC comparison outputs
+* 6b142c5 Add legacy CAMC evaluation for embedding selectors
+* 728fbd5 Add selected set sanity check for embedding selector
+* 387fb49 Add embedding selector wide grid and CAMC table evaluation
+* da13b03 fix embedding v1
+* 6618abe Add embedding redundancy selector sweep for GT baseline
+* 6bbce7f add embedding v2
+* 9bfcb5a Add embedding-based redundancy selector support
+* 4af0eb6 add embedding v1
+* ae31022 Replace eval Morgan fingerprints with MorganGenerator
+* c147a34 Add CAMC HIV quick comparison diagnostics
+
+===== UPSTREAM DIFF SUMMARY =====
+## main...origin/main
+?? diagnostics/
+--- commits local but not upstream ---
+--- commits upstream but not local ---
+--- changed files HEAD..upstream ---
+
+===== WORKTREE CHANGES =====
+--- staged ---
+
+===== UNTRACKED FILES =====
+diagnostics/git_sync_check/local_git_sync_20260626_164703.txt
+
+===== CLOSE-CF FILES IN WORKTREE =====
+scripts/__pycache__/evaluate_close_counterfactual_coverage.cpython-312.pyc
+scripts/__pycache__/plot_close_counterfactual_coverage.cpython-312.pyc
+scripts/__pycache__/run_close_cf_coverage_all.cpython-312.pyc
+scripts/__pycache__/select_class_counterfactual_subgraphs.cpython-310.pyc
+scripts/__pycache__/select_class_counterfactual_subgraphs.cpython-312.pyc
+scripts/__pycache__/select_gt_fullgraph_tanimoto_baseline_label1.cpython-312.pyc
+scripts/eval/__pycache__/collect_gcf_official_results.cpython-312.pyc
+scripts/eval/collect_gcf_official_results.py
+scripts/evaluate_close_counterfactual_coverage.py
+scripts/plot_close_counterfactual_coverage.py
+scripts/run_close_cf_coverage_all.py
+scripts/select_class_counterfactual_subgraphs.py
+scripts/select_gt_fullgraph_tanimoto_baseline_label1.py
+scripts/slurm/add_embeddings_camc_gt_fullgraph_label1_clean.sh
+scripts/slurm/convert_camc_gt_fullgraph_motif_pools_label1_clean.sh
+scripts/slurm/diagnose_camc_gt_fullgraph_pools_label1_clean.sh
+scripts/slurm/evaluate_close_cf_coverage_label1_ours_gcf_all.sh
+scripts/slurm/evaluate_close_counterfactual_coverage.sh
+scripts/slurm/gcfexplainer/reproduce_aids_all.sh
+scripts/slurm/gcfexplainer/reproduce_aids_summary.sh
+scripts/slurm/gcfexplainer/reproduce_aids_vrrw.sh
+scripts/slurm/gcfexplainer/run_hiv_quick_recourse_compare_label1.sh
+scripts/slurm/gcfexplainer/train_aids_gnn.sh
+scripts/slurm/plot_close_counterfactual_coverage.sh
+scripts/slurm/run_close_cf_coverage_all.sh
+scripts/slurm/select_camc_gt_fullgraph_embedding_cov20_label1_clean.sh
+scripts/slurm/select_camc_gt_fullgraph_embedding_cov20_label1_clean_relaxed.sh
+scripts/slurm/select_gt_fullgraph_embedding_widegrid_label1_relaxed.sh
+scripts/slurm/select_gt_fullgraph_tanimoto_baseline_label1.sh
+src/eval/__pycache__/class_counterfactual_selector.cpython-310.pyc
+src/eval/__pycache__/class_counterfactual_selector.cpython-312.pyc
+src/eval/__pycache__/close_counterfactual_coverage.cpython-312.pyc
+src/eval/class_counterfactual_selector.py
+src/eval/close_counterfactual_coverage.py
+src/rewards/__pycache__/counterfactual_oracle.cpython-310.pyc
+src/rewards/__pycache__/counterfactual_oracle.cpython-312.pyc
+src/rewards/__pycache__/counterfactual_reward.cpython-310.pyc
+src/rewards/__pycache__/counterfactual_reward.cpython-312.pyc
+src/rewards/counterfactual_oracle.py
+src/rewards/counterfactual_reward.py
+
+===== EXPECTED CLOSE-CF FILE EXISTENCE =====
+[FOUND] scripts/run_close_cf_coverage_all.py
+-rw-r--r--  1 cz0210  staff   9.3K  6 26 00:58 scripts/run_close_cf_coverage_all.py
+[FOUND] scripts/evaluate_close_counterfactual_coverage.py
+-rw-r--r--  1 cz0210  staff   5.2K  6 26 00:51 scripts/evaluate_close_counterfactual_coverage.py
+[FOUND] scripts/plot_close_counterfactual_coverage.py
+-rw-r--r--  1 cz0210  staff    11K  6 26 00:56 scripts/plot_close_counterfactual_coverage.py
+[FOUND] src/eval/close_counterfactual_coverage.py
+-rw-r--r--  1 cz0210  staff    56K  6 26 00:59 src/eval/close_counterfactual_coverage.py
+[MISSING] src/eval/gt_fullgraph_candidates.py
+[MISSING] scripts/slurm/evaluate_close_cf_coverage_label1_ours_gt_fullgraph_all.sh
+[FOUND] scripts/slurm/evaluate_close_cf_coverage_label1_ours_gcf_all.sh
+-rw-r--r--  1 cz0210  staff   4.2K  6 26 00:54 scripts/slurm/evaluate_close_cf_coverage_label1_ours_gcf_all.sh
+
+===== CLOSE-CF FILES IN GIT HISTORY =====
+--- git log --all -- scripts/run_close_cf_coverage_all.py ---
+c4df361 1
+--- git log --all -- scripts/evaluate_close_counterfactual_coverage.py ---
+c4df361 1
+--- git log --all -- scripts/plot_close_counterfactual_coverage.py ---
+c4df361 1
+--- git log --all -- src/eval/close_counterfactual_coverage.py ---
+c4df361 1
+--- git log --all -- src/eval/gt_fullgraph_candidates.py ---
+--- git log --all -- scripts/slurm/evaluate_close_cf_coverage_label1_ours_gt_fullgraph_all.sh ---
+--- git log --all -- scripts/slurm/evaluate_close_cf_coverage_label1_ours_gcf_all.sh ---
+c4df361 1
+
+===== DONE =====
