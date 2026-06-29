@@ -6,6 +6,38 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-29] Add GREED-GED and MolCLR distance lines for CCRCov
+
+### Background
+Fullgraph CCRCov evaluation cannot scale if every parent-candidate pair is sent
+to NetworkX GED. The current HIV comparison needs a distance protocol that can
+evaluate Ours and the GT-FullGraph proxy baseline without blocking on exact GED.
+
+### Decision
+Add two evaluation-only distance lines:
+
+- GREED-GED prepares HIV graph pairs, labels deletion pairs exactly, labels
+  fullgraph/random pairs with a scalable bounded approximation unless an
+  explicit debug mode is requested, trains a Siamese GIN-style distance model,
+  and evaluates CCRCov with predicted normalized GED;
+- MolCLR-Embedding precomputes parent, hard-deletion residual, and GT-FullGraph
+  candidate embeddings with an explicit runtime MolCLR checkpoint and evaluates
+  CCRCov using `1 - cosine_similarity`;
+- NetworkX GED remains only a small debug option and is not the default
+  fullgraph distance path;
+- GT-FullGraph is treated as a project proxy baseline, not as official
+  GCFExplainer.
+
+### Consequences
+Training PPO, selector logic, and candidate generation remain unchanged. The
+new files provide sbatch-first workflows for smoke/full GREED, smoke/full
+MolCLR, and final comparison plots under the native-action CCRCov convention.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-26] Add GlobalGCE baseline reproduction and unified evaluation wrappers
 
 ### Background
