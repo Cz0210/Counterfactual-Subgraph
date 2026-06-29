@@ -82,6 +82,23 @@ The Slurm entrypoint is:
 sbatch scripts/baselines/clear/slurm_clear.sbatch <dataset> <stage>
 ```
 
+On the current HPC, the CLEAR wrapper defaults to the shared conda environment
+`smiles_pip118`. Override it only when needed:
+
+```bash
+CLEAR_CONDA_ENV=smiles_pip118 sbatch scripts/baselines/clear/slurm_clear.sbatch community pred
+```
+
+CLEAR jobs should be submitted to the A800 GPU queue through this wrapper. The
+Slurm script requests one A800 GPU, 7 CPU cores, and 32G memory:
+
+```text
+#SBATCH --partition=A800
+#SBATCH --gres=gpu:a800:1
+#SBATCH --cpus-per-task=7
+#SBATCH --mem=32G
+```
+
 Supported datasets:
 
 ```text
@@ -127,6 +144,15 @@ OGBG-MolHIV:
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv pred
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv train
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv test
+```
+
+Dependency-submitted OGBG-MolHIV run:
+
+```bash
+jid_pred=$(sbatch --parsable scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv pred)
+jid_train=$(sbatch --parsable --dependency=afterok:${jid_pred} scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv train)
+jid_test=$(sbatch --parsable --dependency=afterok:${jid_train} scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv test)
+echo "pred=${jid_pred} train=${jid_train} test=${jid_test}"
 ```
 
 IMDB-M:
