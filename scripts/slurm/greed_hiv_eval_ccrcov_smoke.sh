@@ -26,8 +26,40 @@ GREED_CHECKPOINT=${GREED_CHECKPOINT:-outputs/hpc/greed_hiv/checkpoints/best_gree
 OUTPUT_ROOT=${OUTPUT_ROOT:-outputs/hpc/eval/ccrcov_greed_hiv_smoke}
 TEACHER_PATH=${TEACHER_PATH:-}
 
-if [ -z "${TEACHER_PATH}" ]; then
-  echo "[ERROR] TEACHER_PATH is required."
+resolve_teacher_path() {
+  if [ -n "${TEACHER_PATH:-}" ]; then
+    return
+  fi
+  local default_teacher="${PROJECT_ROOT}/outputs/hpc/oracle/aids_rf_model.pkl"
+  if [ -f "${default_teacher}" ]; then
+    TEACHER_PATH="${default_teacher}"
+    return
+  fi
+  local candidate
+  for candidate in "${PROJECT_ROOT}"/outputs/hpc/oracle/*.pkl; do
+    if [ -f "${candidate}" ]; then
+      TEACHER_PATH="${candidate}"
+      return
+    fi
+  done
+  if [ -d "${PROJECT_ROOT}/outputs/hpc" ]; then
+    while IFS= read -r candidate; do
+      if [ -f "${candidate}" ]; then
+        TEACHER_PATH="${candidate}"
+        return
+      fi
+    done < <(find "${PROJECT_ROOT}/outputs/hpc" -type f \( -iname "*rf*model*.pkl" -o -iname "*aids*model*.pkl" -o -iname "*hiv*model*.pkl" \) | sort)
+  fi
+}
+
+resolve_teacher_path
+
+echo "[TEACHER_CONFIG]"
+echo "TEACHER_PATH=${TEACHER_PATH:-}"
+
+if [ -z "${TEACHER_PATH:-}" ] || [ ! -f "${TEACHER_PATH}" ]; then
+  echo "[ERROR] TEACHER_PATH is required. Please submit with:"
+  echo "TEACHER_PATH=/path/to/aids_rf_model.pkl sbatch scripts/slurm/greed_hiv_eval_ccrcov_smoke.sh"
   exit 2
 fi
 

@@ -19,8 +19,54 @@ cd "${PROJECT_ROOT}"
 export PYTHONPATH=$PWD
 mkdir -p logs
 
-if [ -z "${MOLCLR_ROOT:-}" ] || [ -z "${MOLCLR_CKPT:-}" ]; then
-  echo "[ERROR] MOLCLR_ROOT and MOLCLR_CKPT are required."
+MOLCLR_ROOT=${MOLCLR_ROOT:-${PROJECT_ROOT}/pretrained_models/MolCLR}
+MOLCLR_CKPT=${MOLCLR_CKPT:-}
+MOLCLR_CANDIDATES=()
+
+resolve_molclr_checkpoint() {
+  if [ -n "${MOLCLR_CKPT:-}" ]; then
+    return
+  fi
+  local default_ckpt="${MOLCLR_ROOT}/ckpt/pretrained_gin/checkpoints/model.pth"
+  if [ -f "${default_ckpt}" ]; then
+    MOLCLR_CKPT="${default_ckpt}"
+    return
+  fi
+  local search_root
+  for search_root in "${MOLCLR_ROOT}/ckpt/pretrained_gin" "${MOLCLR_ROOT}/ckpt/pretrained_gcn"; do
+    if [ -d "${search_root}" ]; then
+      while IFS= read -r candidate; do
+        MOLCLR_CANDIDATES+=("${candidate}")
+      done < <(find "${search_root}" -type f \( -iname "*.pth" -o -iname "*.pt" -o -iname "*.ckpt" \) | sort)
+    fi
+  done
+  local candidate
+  for candidate in "${MOLCLR_CANDIDATES[@]}"; do
+    if [[ "${candidate}" == *pretrained_gin* ]]; then
+      MOLCLR_CKPT="${candidate}"
+      return
+    fi
+  done
+  if [ "${#MOLCLR_CANDIDATES[@]}" -gt 0 ]; then
+    MOLCLR_CKPT="${MOLCLR_CANDIDATES[0]}"
+  fi
+}
+
+resolve_molclr_checkpoint
+
+echo "[MOLCLR_CONFIG]"
+echo "MOLCLR_ROOT=${MOLCLR_ROOT}"
+echo "MOLCLR_CKPT=${MOLCLR_CKPT:-}"
+
+if [ ! -d "${MOLCLR_ROOT}" ] || [ -z "${MOLCLR_CKPT:-}" ] || [ ! -f "${MOLCLR_CKPT}" ]; then
+  echo "[MOLCLR_CANDIDATES]"
+  if [ "${#MOLCLR_CANDIDATES[@]}" -gt 0 ]; then
+    printf '%s\n' "${MOLCLR_CANDIDATES[@]}"
+  else
+    echo "(none found under ${MOLCLR_ROOT}/ckpt/pretrained_gin or ${MOLCLR_ROOT}/ckpt/pretrained_gcn)"
+  fi
+  echo "[ERROR] MOLCLR_ROOT and MOLCLR_CKPT are required. Please submit with:"
+  echo "MOLCLR_ROOT=/path/to/MolCLR MOLCLR_CKPT=/path/to/model.pth sbatch scripts/slurm/molclr_hiv_precompute_embeddings_full.sh"
   exit 2
 fi
 
