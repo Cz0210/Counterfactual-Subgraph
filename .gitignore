@@ -17,8 +17,17 @@ logs/
 wandb/
 tensorboard/
 
+baselines/clear_official/dataset/
+baselines/clear_official/models_save/
+baselines/clear_official/logs/
+logs/baselines/clear/
+outputs/
+
 *.pt
 *.pth
+*.pkl
+*.pickle
+*.mat
 *.bin
 *.safetensors
 *.ckpt

@@ -6,6 +6,38 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-06-29] Add CLEAR official baseline HPC wrappers
+
+### Background
+CLEAR / GraphCFE is kept as an official baseline under
+`baselines/clear_official`. Its official code relies on relative paths such as
+`../dataset` and `../models_save`, so project-owned wrappers must run from the
+official `src` directory while keeping datasets, checkpoints, logs, and outputs
+out of ordinary Git.
+
+### Decision
+Add project-owned CLEAR workflow files:
+
+- shared shell helpers for dataset checks, runtime directory creation, and
+  environment diagnostics;
+- a stage wrapper for `pred`, `train`, `test`, CLEAR baselines, and `all`;
+- a Slurm wrapper that activates the `clear` conda environment and delegates to
+  the stage wrapper;
+- an HPC pull helper that syncs submodules and prepares runtime directories
+  without downloading data;
+- documentation and `.gitignore` rules for CLEAR datasets, checkpoints, and
+  logs.
+
+### Consequences
+`baselines/clear_official/src/` remains untouched. CLEAR can be launched from
+HPC via `sbatch` after `git pull`, while large runtime artifacts remain outside
+normal Git history.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-29] Add GREED-GED and MolCLR distance lines for CCRCov
 
 ### Background
