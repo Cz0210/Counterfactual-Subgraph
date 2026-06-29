@@ -19,9 +19,42 @@ cd "${PROJECT_ROOT}"
 export PYTHONPATH=$PWD
 mkdir -p logs
 
-GREED_SUMMARY=${GREED_SUMMARY:-outputs/hpc/eval/ccrcov_greed_hiv_full/combined/combined_threshold_summary.csv}
-MOLCLR_SUMMARY=${MOLCLR_SUMMARY:-outputs/hpc/eval/ccrcov_molclr_hiv_full/combined/combined_threshold_summary.csv}
-OUTPUT_DIR=${OUTPUT_DIR:-outputs/hpc/eval/ccrcov_distance_comparison}
+COMPARE_MODE=${COMPARE_MODE:-smoke}
+case "${COMPARE_MODE}" in
+  smoke)
+    DEFAULT_GREED_SUMMARY="${PROJECT_ROOT}/outputs/hpc/eval/ccrcov_greed_hiv_smoke/combined/combined_threshold_summary.csv"
+    DEFAULT_MOLCLR_SUMMARY="${PROJECT_ROOT}/outputs/hpc/eval/ccrcov_molclr_hiv_smoke/combined/combined_threshold_summary.csv"
+    DEFAULT_OUTPUT_DIR="${PROJECT_ROOT}/outputs/hpc/eval/ccrcov_compare_smoke"
+    ;;
+  full)
+    DEFAULT_GREED_SUMMARY="${PROJECT_ROOT}/outputs/hpc/eval/ccrcov_greed_hiv_full/combined/combined_threshold_summary.csv"
+    DEFAULT_MOLCLR_SUMMARY="${PROJECT_ROOT}/outputs/hpc/eval/ccrcov_molclr_hiv_full/combined/combined_threshold_summary.csv"
+    DEFAULT_OUTPUT_DIR="${PROJECT_ROOT}/outputs/hpc/eval/ccrcov_compare_full"
+    ;;
+  *)
+    echo "[ERROR] COMPARE_MODE must be smoke or full, got: ${COMPARE_MODE}"
+    exit 2
+    ;;
+esac
+
+GREED_SUMMARY=${GREED_SUMMARY:-${DEFAULT_GREED_SUMMARY}}
+MOLCLR_SUMMARY=${MOLCLR_SUMMARY:-${DEFAULT_MOLCLR_SUMMARY}}
+OUTPUT_DIR=${OUTPUT_DIR:-${DEFAULT_OUTPUT_DIR}}
+
+echo "[COMPARE_CONFIG]"
+echo "COMPARE_MODE=${COMPARE_MODE}"
+echo "GREED_SUMMARY=${GREED_SUMMARY}"
+echo "MOLCLR_SUMMARY=${MOLCLR_SUMMARY}"
+echo "OUTPUT_DIR=${OUTPUT_DIR}"
+
+if [ ! -f "${GREED_SUMMARY}" ] || [ ! -f "${MOLCLR_SUMMARY}" ]; then
+  echo "[ERROR] Missing compare summary file."
+  echo "GREED_SUMMARY exists: $([ -f "${GREED_SUMMARY}" ] && echo yes || echo no)"
+  echo "MOLCLR_SUMMARY exists: $([ -f "${MOLCLR_SUMMARY}" ] && echo yes || echo no)"
+  echo "Hint:"
+  echo 'find outputs/hpc -type f \( -name "combined_threshold_summary.csv" -o -name "threshold_summary.csv" \) | grep -Ei "greed|molclr|ccrcov"'
+  exit 2
+fi
 
 echo "===== COMPARE GREED VS MOLCLR ====="
 echo "host: $(hostname)"
@@ -29,9 +62,6 @@ echo "pwd: $(pwd)"
 echo "git commit: $(git rev-parse HEAD || true)"
 echo "conda env: ${CONDA_DEFAULT_ENV:-unset}"
 python --version
-echo "GREED_SUMMARY=${GREED_SUMMARY}"
-echo "MOLCLR_SUMMARY=${MOLCLR_SUMMARY}"
-echo "OUTPUT_DIR=${OUTPUT_DIR}"
 
 python scripts/compare_greed_vs_molclr_ccrcov.py \
   --config configs/hpc.yaml \
