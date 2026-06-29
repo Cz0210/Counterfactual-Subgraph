@@ -21,8 +21,10 @@ Add project-owned CLEAR workflow files:
 - shared shell helpers for dataset checks, runtime directory creation, and
   environment diagnostics;
 - a stage wrapper for `pred`, `train`, `test`, CLEAR baselines, and `all`;
-- a Slurm wrapper that activates the `clear` conda environment and delegates to
-  the stage wrapper;
+- a Slurm wrapper that activates the HPC default `smiles_pip118` conda
+  environment by default, allows `CLEAR_CONDA_ENV` overrides, requests the A800
+  GPU queue with one `gpu:a800:1` allocation, and delegates to the stage
+  wrapper;
 - an HPC pull helper that syncs submodules and prepares runtime directories
   without downloading data;
 - documentation and `.gitignore` rules for CLEAR datasets, checkpoints, and
