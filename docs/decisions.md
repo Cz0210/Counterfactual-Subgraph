@@ -6,6 +6,37 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-01] Make GREED/MolCLR CCRCov default to strict flip
+
+### Background
+GREED-GED and MolCLR-Embedding CCRCov smoke outputs could report
+`close_cf_coverage > 0` while `flip_rate_among_covered = 0` because the
+counterfactual condition allowed probability-drop coverage through
+`cf_drop >= min_cf_drop`.
+
+### Decision
+For GREED/MolCLR distance-based CCRCov evaluation, add explicit `cf_mode`
+support:
+
+- `strict_flip`: `distance <= theta` and `pred_after != label`;
+- `drop_or_flip`: `distance <= theta` and either strict flip or
+  `cf_drop >= min_cf_drop`;
+- `drop_only`: `distance <= theta` and `cf_drop >= min_cf_drop`.
+
+The default is now `strict_flip`. `min_cf_drop` remains recorded and is used
+only by drop-based modes. Slurm wrappers expose `CF_MODE` and `MIN_CF_DROP`,
+and threshold summaries/reports record the selected mode.
+
+### Consequences
+The main GREED/MolCLR CCRCov result now matches the paper-facing
+`phi(G^a) != y` strict flip definition by default. GREED training, MolCLR
+encoding, PPO, selector, and candidate generation remain unchanged.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-29] Add CLEAR official baseline HPC wrappers
 
 ### Background

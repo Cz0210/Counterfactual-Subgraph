@@ -25,6 +25,8 @@ if [ -z "${GT_FULLGRAPH_CANDIDATES_PATH:-}" ] && [ -n "${GCF_CANDIDATES_PATH:-}"
 fi
 GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH:-${GT_FULLGRAPH_DEFAULT}}
 TEACHER_PATH=${TEACHER_PATH:-}
+CF_MODE=${CF_MODE:-strict_flip}
+MIN_CF_DROP=${MIN_CF_DROP:-0.0}
 
 resolve_teacher_path() {
   if [ -n "${TEACHER_PATH:-}" ]; then
@@ -71,6 +73,9 @@ echo "conda env: ${CONDA_DEFAULT_ENV:-unset}"
 python --version
 echo "[GT_FULLGRAPH_CONFIG]"
 echo "GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH}"
+echo "[CF_CONFIG]"
+echo "CF_MODE=${CF_MODE}"
+echo "MIN_CF_DROP=${MIN_CF_DROP}"
 
 python scripts/evaluate_ccrcov_with_molclr.py \
   --config configs/hpc.yaml \
@@ -82,6 +87,8 @@ python scripts/evaluate_ccrcov_with_molclr.py \
   --embedding-dir "${EMBEDDING_DIR:-outputs/hpc/molclr_ccrcov_embeddings_smoke}" \
   --label "${LABEL:-1}" \
   --embedding-thresholds "${EMBEDDING_THRESHOLDS:-0.02,0.05,0.10,0.15,0.20,0.25,0.30}" \
+  --cf-mode "${CF_MODE}" \
+  --min-cf-drop "${MIN_CF_DROP}" \
   --output-root "${OUTPUT_ROOT:-outputs/hpc/eval/ccrcov_molclr_hiv_smoke}" \
   --max-parents "${MAX_PARENTS:-25}" \
   --max-candidates "${MAX_CANDIDATES:-20}" \

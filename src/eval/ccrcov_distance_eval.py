@@ -14,13 +14,11 @@ from src.eval.close_counterfactual_coverage import (
     SUMMARY_FIELDS,
     CandidateRecord,
     ParentRecord,
-    build_threshold_summary,
     hard_delete_substructure_any_match,
     predict_with_teacher,
     render_report,
     _as_bool,
     _as_float,
-    _cf_condition,
     _load_candidate_records,
     _load_parent_records,
     _row_base,
@@ -41,13 +39,26 @@ except ImportError:  # pragma: no cover
 
 
 EXTRA_SUMMARY_FIELDS = [
+    "cf_mode",
+    "min_cf_drop",
     "SuppCov",
     "StructRed",
     "CovRed",
     "ValidRate",
     "avg_size_among_covered",
 ]
-DISTANCE_SUMMARY_FIELDS = list(SUMMARY_FIELDS) + [field for field in EXTRA_SUMMARY_FIELDS if field not in SUMMARY_FIELDS]
+DISTANCE_SUMMARY_FIELDS: list[str] = []
+for _field in SUMMARY_FIELDS:
+    DISTANCE_SUMMARY_FIELDS.append(_field)
+    if _field == "ged_mode":
+        for _extra in ("cf_mode", "min_cf_drop"):
+            if _extra not in DISTANCE_SUMMARY_FIELDS:
+                DISTANCE_SUMMARY_FIELDS.append(_extra)
+for _field in EXTRA_SUMMARY_FIELDS:
+    if _field not in DISTANCE_SUMMARY_FIELDS:
+        DISTANCE_SUMMARY_FIELDS.append(_field)
+
+CF_MODES = ("strict_flip", "drop_or_flip", "drop_only")
 GT_DIRECTORY_CANDIDATES = (
     "gt_selected_fullgraphs.csv",
     "selected_fullgraphs.csv",
@@ -91,6 +102,226 @@ class MolCLRDistanceProvider:
 
     def distance(self, smiles_a: str, smiles_b: str) -> dict[str, Any]:
         return self.lookup.distance(smiles_a, smiles_b)
+
+
+def normalize_cf_mode(cf_mode: str | None) -> str:
+    mode = str(cf_mode or "strict_flip").strip()
+    if mode not in CF_MODES:
+        raise ValueError(f"Unsupported cf_mode={mode!r}. Expected one of: {', '.join(CF_MODES)}")
+    return mode
+
+
+def _parse_int_label(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    return float(numerator / denominator) if denominator else 0.0
+
+
+def _mean(values: Sequence[float | None] | Any) -> float | None:
+    clean: list[float] = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            clean.append(number)
+    return float(sum(clean) / len(clean)) if clean else None
+
+
+def _median(values: Sequence[float | None] | Any) -> float | None:
+    clean: list[float] = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            clean.append(number)
+    if not clean:
+        return None
+    clean.sort()
+    midpoint = len(clean) // 2
+    if len(clean) % 2:
+        return float(clean[midpoint])
+    return float((clean[midpoint - 1] + clean[midpoint]) / 2.0)
+
+
+def _threshold_similarity_equivalent(distance_type: str, threshold: float) -> float | None:
+    if distance_type != "embedding":
+        return None
+    return max(-1.0, min(1.0, float(1.0 - threshold)))
+
+
+def _strict_flip(row: dict[str, Any], *, label: int) -> bool:
+    pred_after = _parse_int_label(row.get("pred_after"))
+    return bool(pred_after is not None and pred_after != int(label))
+
+
+def _row_flip_value(row: dict[str, Any]) -> float:
+    label = _parse_int_label(row.get("label"))
+    if label is None:
+        return 1.0 if _as_bool(row.get("cf_flip")) else 0.0
+    return 1.0 if _strict_flip(row, label=label) else 0.0
+
+
+def _cf_condition_for_mode(
+    row: dict[str, Any],
+    *,
+    label: int,
+    cf_mode: str,
+    min_cf_drop: float,
+) -> bool:
+    """Evaluate the counterfactual condition for an already-close action row."""
+
+    mode = normalize_cf_mode(cf_mode)
+    cf_drop = _as_float(row.get("cf_drop"))
+    cf_flip = _strict_flip(row, label=label)
+    drop_ok = cf_drop is not None and cf_drop >= float(min_cf_drop)
+    if mode == "strict_flip":
+        return bool(cf_flip)
+    if mode == "drop_or_flip":
+        return bool(cf_flip or drop_ok)
+    if mode == "drop_only":
+        return bool(drop_ok)
+    raise ValueError(f"Unsupported cf_mode={mode!r}")
+
+
+def _pick_best_row_for_mode(
+    rows: list[dict[str, Any]],
+    *,
+    threshold: float,
+    label: int,
+    cf_mode: str,
+    min_cf_drop: float,
+) -> tuple[dict[str, Any] | None, bool, bool]:
+    eligible: list[tuple[bool, float, float, dict[str, Any]]] = []
+    close_only = False
+    close_cf = False
+    for row in rows:
+        distance = _as_float(row.get("distance"))
+        if distance is None or distance > float(threshold):
+            continue
+        close_only = True
+        is_cf = _cf_condition_for_mode(row, label=label, cf_mode=cf_mode, min_cf_drop=min_cf_drop)
+        close_cf = close_cf or is_cf
+        cf_drop = _as_float(row.get("cf_drop"))
+        eligible.append((is_cf, distance, -(cf_drop if cf_drop is not None else -1e9), row))
+    if not eligible:
+        return None, close_only, close_cf
+    eligible.sort(key=lambda item: (not item[0], item[1], item[2]))
+    return eligible[0][3], close_only, close_cf
+
+
+def build_threshold_summary_for_cf_mode(
+    detail_rows: list[dict[str, Any]],
+    *,
+    method: str,
+    distance_type: str,
+    ged_mode: str,
+    thresholds: Sequence[float],
+    total_parents: int,
+    total_candidates: int,
+    cf_mode: str,
+    min_cf_drop: float,
+) -> list[dict[str, Any]]:
+    mode = normalize_cf_mode(cf_mode)
+    rows_by_parent: dict[str, list[dict[str, Any]]] = {}
+    labels_by_parent: dict[str, int] = {}
+    for row in detail_rows:
+        parent_id = str(row.get("parent_id") or "")
+        rows_by_parent.setdefault(parent_id, []).append(row)
+        parsed_label = _parse_int_label(row.get("label"))
+        if parsed_label is not None:
+            labels_by_parent[parent_id] = parsed_label
+
+    matched_parents = {
+        parent_id
+        for parent_id, rows in rows_by_parent.items()
+        if any(_as_bool(row.get("match")) for row in rows)
+    }
+    delete_valid_parents = {
+        parent_id
+        for parent_id, rows in rows_by_parent.items()
+        if any(_as_bool(row.get("delete_valid")) for row in rows)
+    }
+    embedding_ok_count = sum(1 for row in detail_rows if _as_bool(row.get("embedding_ok")))
+    ged_ok_count = sum(1 for row in detail_rows if _as_bool(row.get("ged_ok")))
+    total_detail_rows = len(detail_rows)
+    total_pairs = max(1, total_parents * max(1, total_candidates))
+
+    summaries: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        close_only_parents: set[str] = set()
+        close_cf_parents: set[str] = set()
+        best_rows: list[dict[str, Any]] = []
+        for parent_id, rows in rows_by_parent.items():
+            label = labels_by_parent.get(parent_id, 0)
+            best_row, close_only, close_cf = _pick_best_row_for_mode(
+                rows,
+                threshold=float(threshold),
+                label=label,
+                cf_mode=mode,
+                min_cf_drop=float(min_cf_drop),
+            )
+            if close_only:
+                close_only_parents.add(parent_id)
+            if close_cf:
+                close_cf_parents.add(parent_id)
+            if best_row is not None and close_cf:
+                best_rows.append(best_row)
+        summaries.append(
+            {
+                "method": method,
+                "distance_type": distance_type,
+                "ged_mode": ged_mode,
+                "cf_mode": mode,
+                "min_cf_drop": float(min_cf_drop),
+                "threshold": float(threshold),
+                "threshold_similarity_equivalent": _threshold_similarity_equivalent(distance_type, float(threshold)),
+                "num_parents": int(total_parents),
+                "num_candidates": int(total_candidates),
+                "num_matched_parents": len(matched_parents),
+                "match_rate": _safe_rate(len(matched_parents), total_parents),
+                "num_delete_valid_parents": len(delete_valid_parents),
+                "delete_valid_rate": _safe_rate(len(delete_valid_parents), total_parents),
+                "num_close_only_covered": len(close_only_parents),
+                "close_only_coverage": _safe_rate(len(close_only_parents), total_parents),
+                "num_close_cf_covered": len(close_cf_parents),
+                "close_cf_coverage": _safe_rate(len(close_cf_parents), total_parents),
+                "avg_best_distance": _mean(_as_float(row.get("distance")) for row in best_rows),
+                "median_best_distance": _median(_as_float(row.get("distance")) for row in best_rows),
+                "avg_cf_drop_among_covered": _mean(_as_float(row.get("cf_drop")) for row in best_rows),
+                "flip_rate_among_covered": _mean(_row_flip_value(row) for row in best_rows),
+                "avg_atom_delete_ratio_among_covered": _mean(
+                    _as_float(row.get("atom_delete_ratio")) for row in best_rows
+                ),
+                "avg_bond_delete_ratio_among_covered": _mean(
+                    _as_float(row.get("bond_delete_ratio")) for row in best_rows
+                ),
+                "cache_hit_rate": 0.0,
+                "embedding_ok_rate": _safe_rate(embedding_ok_count, total_detail_rows)
+                if distance_type == "embedding"
+                else None,
+                "ged_ok_rate": _safe_rate(ged_ok_count, total_detail_rows)
+                if distance_type == "ged"
+                else None,
+                "total_pairs": int(total_pairs),
+                "total_detail_rows": int(total_detail_rows),
+            }
+        )
+    return summaries
 
 
 def _write_csv(path: str | Path, rows: list[dict[str, Any]], fieldnames: Sequence[str]) -> None:
@@ -145,7 +376,7 @@ def _coverage_redundancy(
     detail_rows: list[dict[str, Any]],
     *,
     threshold: float,
-    require_flip_only: bool,
+    cf_mode: str,
     min_cf_drop: float,
 ) -> float | None:
     cover_sets: dict[str, set[str]] = {}
@@ -154,7 +385,7 @@ def _coverage_redundancy(
         if distance is None or distance > float(threshold):
             continue
         label = int(float(row.get("label") or 0))
-        if not _cf_condition(row, label=label, require_flip_only=require_flip_only, min_cf_drop=min_cf_drop):
+        if not _cf_condition_for_mode(row, label=label, cf_mode=cf_mode, min_cf_drop=min_cf_drop):
             continue
         cover_sets.setdefault(str(row.get("candidate_id")), set()).add(str(row.get("parent_id")))
     sets = [value for value in cover_sets.values() if value]
@@ -175,7 +406,7 @@ def _augment_summary(
     *,
     detail_rows: list[dict[str, Any]],
     candidates: list[CandidateRecord],
-    require_flip_only: bool,
+    cf_mode: str,
     min_cf_drop: float,
 ) -> list[dict[str, Any]]:
     struct_red = _structural_redundancy(candidates)
@@ -193,7 +424,7 @@ def _augment_summary(
         row["CovRed"] = _coverage_redundancy(
             detail_rows,
             threshold=threshold,
-            require_flip_only=require_flip_only,
+            cf_mode=cf_mode,
             min_cf_drop=min_cf_drop,
         )
         row["ValidRate"] = valid_rate
@@ -250,6 +481,8 @@ def _write_method_outputs(
     summaries: list[dict[str, Any]],
     total_parents: int,
     total_candidates: int,
+    cf_mode: str,
+    min_cf_drop: float,
 ) -> dict[str, str]:
     ensure_directory(output_dir)
     _write_csv(output_dir / "details.csv", details, DETAIL_FIELDS)
@@ -265,6 +498,8 @@ def _write_method_outputs(
         total_candidates=total_candidates,
         match_metric=method.startswith("ours"),
     )
+    report += f"\nCF mode: {cf_mode}\n"
+    report += f"Min CFDrop: {float(min_cf_drop):.6g}\n"
     report += "\nAdditional metrics: SuppCov, StructRed, CovRed, ValidRate are included in threshold_summary.csv.\n"
     (output_dir / "report.md").write_text(report, encoding="utf-8")
     _save_figures(summaries, output_dir / "figures", f"{method} {distance_name}")
@@ -433,12 +668,14 @@ def evaluate_ccrcov_with_distance(
     max_parents: int | None = None,
     max_candidates: int | None = None,
     require_flip_only: bool = False,
+    cf_mode: str = "strict_flip",
     min_cf_drop: float = 0.0,
     partial_every: int = 5000,
 ) -> dict[str, Any]:
     started = time.time()
+    mode = "strict_flip" if require_flip_only else normalize_cf_mode(cf_mode)
     output = ensure_directory(Path(output_root).expanduser().resolve())
-    print(f"[TASK_START] distance={distance_name} output_root={output}", flush=True)
+    print(f"[TASK_START] distance={distance_name} cf_mode={mode} output_root={output}", flush=True)
     _dataset_path, parents, _actual_label_col = _load_parent_records(
         dataset_csv,
         label=int(label),
@@ -479,7 +716,7 @@ def evaluate_ccrcov_with_distance(
             partial_path=ours_dir / "details.partial.csv",
             partial_every=int(partial_every),
         )
-        ours_summaries = build_threshold_summary(
+        ours_summaries = build_threshold_summary_for_cf_mode(
             ours_details,
             method="ours_selected_subgraphs",
             distance_type=distance_type,
@@ -487,14 +724,14 @@ def evaluate_ccrcov_with_distance(
             thresholds=thresholds,
             total_parents=len(parents),
             total_candidates=len(ours_candidates),
-            require_flip_only=require_flip_only,
+            cf_mode=mode,
             min_cf_drop=float(min_cf_drop),
         )
         ours_summaries = _augment_summary(
             ours_summaries,
             detail_rows=ours_details,
             candidates=ours_candidates,
-            require_flip_only=require_flip_only,
+            cf_mode=mode,
             min_cf_drop=float(min_cf_drop),
         )
         outputs["ours"] = _write_method_outputs(
@@ -507,6 +744,8 @@ def evaluate_ccrcov_with_distance(
             summaries=ours_summaries,
             total_parents=len(parents),
             total_candidates=len(ours_candidates),
+            cf_mode=mode,
+            min_cf_drop=float(min_cf_drop),
         )
         all_summaries.extend(ours_summaries)
 
@@ -522,7 +761,7 @@ def evaluate_ccrcov_with_distance(
             partial_path=gt_dir / "details.partial.csv",
             partial_every=int(partial_every),
         )
-        gt_summaries = build_threshold_summary(
+        gt_summaries = build_threshold_summary_for_cf_mode(
             gt_details,
             method="gt_fullgraph",
             distance_type=distance_type,
@@ -530,14 +769,14 @@ def evaluate_ccrcov_with_distance(
             thresholds=thresholds,
             total_parents=len(parents),
             total_candidates=len(gt_candidates),
-            require_flip_only=require_flip_only,
+            cf_mode=mode,
             min_cf_drop=float(min_cf_drop),
         )
         gt_summaries = _augment_summary(
             gt_summaries,
             detail_rows=gt_details,
             candidates=gt_candidates,
-            require_flip_only=require_flip_only,
+            cf_mode=mode,
             min_cf_drop=float(min_cf_drop),
         )
         outputs["gt_fullgraph"] = _write_method_outputs(
@@ -550,6 +789,8 @@ def evaluate_ccrcov_with_distance(
             summaries=gt_summaries,
             total_parents=len(parents),
             total_candidates=len(gt_candidates),
+            cf_mode=mode,
+            min_cf_drop=float(min_cf_drop),
         )
         all_summaries.extend(gt_summaries)
 
@@ -562,6 +803,8 @@ def evaluate_ccrcov_with_distance(
         "# CCRCov Distance Evaluation\n\n"
         f"- distance_name: {distance_name}\n"
         f"- distance_type: {distance_type}\n"
+        f"- CF mode: {mode}\n"
+        f"- min_cf_drop: {float(min_cf_drop):.6g}\n"
         f"- elapsed_sec: {elapsed:.2f}\n"
         "- fullgraph baseline distance source: learned/embedding provider, not NetworkX GED by default.\n\n"
         "See `combined_threshold_summary.csv` and per-method reports for metrics.\n",

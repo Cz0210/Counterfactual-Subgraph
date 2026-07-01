@@ -29,6 +29,8 @@ GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH:-${GT_FULLGRAPH_DEFA
 GREED_CHECKPOINT=${GREED_CHECKPOINT:-outputs/hpc/greed_hiv/checkpoints/best_greed_hiv_ged_smoke.pt}
 OUTPUT_ROOT=${OUTPUT_ROOT:-outputs/hpc/eval/ccrcov_greed_hiv_smoke}
 TEACHER_PATH=${TEACHER_PATH:-}
+CF_MODE=${CF_MODE:-strict_flip}
+MIN_CF_DROP=${MIN_CF_DROP:-0.0}
 
 resolve_teacher_path() {
   if [ -n "${TEACHER_PATH:-}" ]; then
@@ -75,6 +77,9 @@ echo "conda env: ${CONDA_DEFAULT_ENV:-unset}"
 python --version
 echo "[GT_FULLGRAPH_CONFIG]"
 echo "GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH}"
+echo "[CF_CONFIG]"
+echo "CF_MODE=${CF_MODE}"
+echo "MIN_CF_DROP=${MIN_CF_DROP}"
 python - <<'PY'
 import importlib.util, torch
 print("rdkit available:", importlib.util.find_spec("rdkit") is not None)
@@ -92,6 +97,8 @@ python scripts/evaluate_ccrcov_with_greed.py \
   --greed-checkpoint "${GREED_CHECKPOINT}" \
   --label "${LABEL:-1}" \
   --thresholds "${THRESHOLDS:-0.05,0.10,0.20}" \
+  --cf-mode "${CF_MODE}" \
+  --min-cf-drop "${MIN_CF_DROP}" \
   --output-root "${OUTPUT_ROOT}" \
   --max-parents "${MAX_PARENTS:-25}" \
   --max-candidates "${MAX_CANDIDATES:-20}" \
