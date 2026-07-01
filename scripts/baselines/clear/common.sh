@@ -20,6 +20,57 @@ ensure_clear_dirs() {
     "${CLEAR_LOG_DIR}"
 }
 
+ensure_clear_cfe_checkpoint_aliases() {
+  local dataset="$1"
+  local missing=0
+  local exp_id
+  local target
+  local candidate
+  local base
+  local epoch
+  local best_path
+  local best_epoch
+
+  echo "[CLEAR_CKPT_CHECK] dataset=${dataset}"
+  mkdir -p "${CLEAR_MODEL_DIR}"
+
+  for exp_id in 0 1 2; do
+    target="${CLEAR_MODEL_DIR}/weights_graphCFE_CLEAR_${dataset}_exp${exp_id}_epoch900.pt"
+    if [ -e "${target}" ]; then
+      echo "[CLEAR_CKPT_CHECK] ok: ${target}"
+      continue
+    fi
+
+    best_path=""
+    best_epoch=-1
+    for candidate in "${CLEAR_MODEL_DIR}/weights_graphCFE_CLEAR_${dataset}_exp${exp_id}_epoch"*.pt; do
+      [ -e "${candidate}" ] || continue
+      base="$(basename "${candidate}")"
+      epoch="${base##*_epoch}"
+      epoch="${epoch%.pt}"
+      if [[ "${epoch}" =~ ^[0-9]+$ ]] && [ "${epoch}" -gt "${best_epoch}" ]; then
+        best_epoch="${epoch}"
+        best_path="${candidate}"
+      fi
+    done
+
+    if [ -n "${best_path}" ]; then
+      ln -s "${best_path}" "${target}"
+      echo "[CLEAR_CKPT_ALIAS] target=${target} source=${best_path}"
+    else
+      echo "[CLEAR_CKPT_ERROR] Missing CLEAR CFE checkpoint for dataset=${dataset} exp${exp_id}." >&2
+      echo "[CLEAR_CKPT_ERROR] Expected: ${target}" >&2
+      missing=1
+    fi
+  done
+
+  if [ "${missing}" -ne 0 ]; then
+    echo "[CLEAR_CKPT_ERROR] Existing files under ${CLEAR_MODEL_DIR}:" >&2
+    find "${CLEAR_MODEL_DIR}" -maxdepth 2 -type f | sort >&2 || true
+    return 1
+  fi
+}
+
 _clear_dataset_files() {
   local dataset="$1"
   case "${dataset}" in

@@ -19,6 +19,8 @@ git submodule update --init --recursive
 
 echo "commit_after=$(git rev-parse HEAD)"
 
+bash scripts/baselines/clear/apply_clear_patches.sh
+
 # shellcheck source=scripts/baselines/clear/common.sh
 source scripts/baselines/clear/common.sh
 ensure_clear_dirs

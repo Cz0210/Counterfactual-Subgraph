@@ -29,6 +29,7 @@ else
 fi
 
 mkdir -p logs/baselines/clear
+bash scripts/baselines/clear/apply_clear_patches.sh
 
 echo "===== CLEAR SLURM ====="
 echo "host=$(hostname)"

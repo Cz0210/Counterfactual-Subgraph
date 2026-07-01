@@ -32,6 +32,9 @@ git submodule update --init --recursive
 ```
 
 It also creates CLEAR runtime directories and reports which dataset files are missing.
+It applies project-owned CLEAR compatibility patches from
+`patches/clear_official/` so that the official checkout saves the CFE generator
+checkpoints needed by the test stage.
 
 ## 3. Dataset Location
 
@@ -127,7 +130,39 @@ baselines/clear_official/src/
 
 This preserves CLEAR's official relative path assumptions.
 
-## 6. Examples
+## 6. Checkpoint Behavior
+
+The `pred` stage trains and saves the graph prediction model under:
+
+```text
+baselines/clear_official/models_save/prediction/weights_graphPred__<dataset>.pt
+```
+
+The `train` stage runs CLEAR and, through the project patch
+`patches/clear_official/001_save_cfe_checkpoints.patch`, saves CFE generator
+checkpoints under:
+
+```text
+baselines/clear_official/models_save/weights_graphCFE_CLEAR_<dataset>_exp0_epoch900.pt
+baselines/clear_official/models_save/weights_graphCFE_CLEAR_<dataset>_exp1_epoch900.pt
+baselines/clear_official/models_save/weights_graphCFE_CLEAR_<dataset>_exp2_epoch900.pt
+baselines/clear_official/models_save/weights_graphCFE_CLEAR_<dataset>_exp0_epoch<epochs>.pt
+baselines/clear_official/models_save/weights_graphCFE_CLEAR_<dataset>_exp1_epoch<epochs>.pt
+baselines/clear_official/models_save/weights_graphCFE_CLEAR_<dataset>_exp2_epoch<epochs>.pt
+```
+
+The official CLEAR test path loads epoch 900 by default. The wrapper checks for
+the three expected epoch-900 files before running `test`. If an exp-specific
+epoch-900 file is absent but another CFE checkpoint exists for that experiment,
+the wrapper creates a symlink from the highest available epoch to the epoch-900
+filename. If no CFE checkpoint exists, `test` fails early with a clear
+`[CLEAR_CKPT_ERROR]` message. In that case, rerun `train`.
+
+The patch is idempotent: `scripts/baselines/clear/apply_clear_patches.sh`
+checks for the marker `CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT` and skips if the
+patch is already present.
+
+## 7. Examples
 
 Community:
 
@@ -171,7 +206,7 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_IST
 sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_RM
 ```
 
-## 7. Direct Wrapper Use
+## 8. Direct Wrapper Use
 
 For lightweight interactive debugging on a compute node, the non-Slurm wrapper is:
 

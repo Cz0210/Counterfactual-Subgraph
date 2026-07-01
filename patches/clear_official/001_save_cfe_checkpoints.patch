@@ -1,0 +1,47 @@
+diff --git a/src/main.py b/src/main.py
+index 4e0b859..c4c0cfe 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -104,6 +104,15 @@ def proximity_feature(feat_1, feat_2, type='cos'):
+         output = torch.mean(output)
+     return output
+ 
++# CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT
++def clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch):
++    os.makedirs('../models_save/', exist_ok=True)
++    CFE_model_path = f'../models_save/weights_graphCFE_{variant}_{dataset}_exp' + str(exp_i) + '_epoch' + str(epoch) + '.pt'
++    torch.save(model.state_dict(), CFE_model_path)
++    print(f'[CLEAR_CKPT_SAVE] path={CFE_model_path}')
++    return CFE_model_path
++
++
+ 
+ def compute_loss(params):
+     model, pred_model, z_mu, z_logvar, adj_permuted, features_permuted, adj_reconst, features_reconst, \
+@@ -209,11 +218,12 @@ def train(params):
+ 
+             # save
+             if save_model:
+-                if epoch % 300 == 0 and epoch > 450:
+-                    CFE_model_path = f'../models_save/weights_graphCFE_{variant}_{args.dataset}_exp' + str(exp_i) + '_epoch'+str(epoch) + '.pt'
+-                    torch.save(model.state_dict(), CFE_model_path)
+-                    print('saved CFE model in: ', CFE_model_path)
+-
++                if epoch == 900:
++                    clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch)
++
++        if save_model and epoch == epochs:
++            clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch)
++
+         # if epoch % 2000 == 0 and args.dataset == 'imdb_m':
+         #     x_range = [0.0, 6]
+         #     y_range = [0.0, 5]
+@@ -664,7 +671,7 @@ def run_clear(args, exp_type):
+                             'y_cf': y_cf,
+                             'train_loader': train_loader, 'val_loader': val_loader, 'test_loader': test_loader,
+                             'exp_i': exp_i,
+-                            'dataset': args.dataset, 'metrics': metrics, 'save_model': False, 'variant': variant}
++                            'dataset': args.dataset, 'metrics': metrics, 'save_model': True, 'variant': variant}
+             train(train_params)
+         else:
+             # test

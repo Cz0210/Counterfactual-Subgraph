@@ -6,6 +6,41 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-01] Patch CLEAR to save CFE checkpoints for test
+
+### Background
+CLEAR `pred` successfully saves the graph prediction model, but the official
+`train` path in `baselines/clear_official/src/main.py` passes
+`save_model=False`, while the official `test` path always loads
+`../models_save/weights_graphCFE_CLEAR_<dataset>_exp<i>_epoch900.pt`. This can
+make a completed CLEAR train run unusable for test because no CFE generator
+checkpoint exists.
+
+### Decision
+Keep CLEAR algorithm code isolated and add a project-owned patch workflow:
+
+- `patches/clear_official/001_save_cfe_checkpoints.patch` enables CFE
+  checkpoint saving without changing model structure, losses, optimizer,
+  dataset loading, or metrics;
+- train now saves epoch 900 and final-epoch CFE `state_dict()` files with
+  `[CLEAR_CKPT_SAVE]` logs;
+- `scripts/baselines/clear/apply_clear_patches.sh` applies the patch
+  idempotently by checking the `CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT` marker;
+- `scripts/hpc_pull_clear.sh`, `scripts/baselines/clear/slurm_clear.sbatch`,
+  and `scripts/baselines/clear/run_clear.sh` apply the patch before CLEAR runs;
+- wrappers check for exp0/exp1/exp2 epoch-900 CFE checkpoints and create an
+  epoch-900 symlink from the highest available epoch when needed.
+
+### Consequences
+The submodule does not need to be committed dirty as the sole source of the
+fix. Runtime artifacts remain ignored. CLEAR test fails early with a clear
+checkpoint error if train has not produced any usable CFE checkpoint.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-01] Make GREED/MolCLR CCRCov default to strict flip
 
 ### Background

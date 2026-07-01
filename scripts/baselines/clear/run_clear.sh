@@ -45,6 +45,10 @@ echo "[CLEAR_RUN] log_file=${LOG_FILE}"
 check_clear_dataset "${DATASET}"
 print_clear_env
 
+if [ -f "${SCRIPT_DIR}/apply_clear_patches.sh" ]; then
+  bash "${SCRIPT_DIR}/apply_clear_patches.sh"
+fi
+
 if [ ! -f "${CLEAR_SRC_DIR}/train_pred.py" ] || [ ! -f "${CLEAR_SRC_DIR}/main.py" ]; then
   echo "[CLEAR_ERROR] CLEAR official source is incomplete under: ${CLEAR_SRC_DIR}" >&2
   exit 1
@@ -66,8 +70,10 @@ run_stage() {
       ;;
     train)
       run_command python main.py --dataset "${DATASET}" --experiment_type train --epochs 1000 --lr 0.001 --batch_size 500
+      ensure_clear_cfe_checkpoint_aliases "${DATASET}"
       ;;
     test)
+      ensure_clear_cfe_checkpoint_aliases "${DATASET}"
       run_command python main.py --dataset "${DATASET}" --experiment_type test --batch_size 500
       ;;
     baseline_random)
