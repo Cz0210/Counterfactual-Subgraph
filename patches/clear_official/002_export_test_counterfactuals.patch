@@ -1,0 +1,206 @@
+diff --git a/src/main.py b/src/main.py
+index 4e0b859..f8e4f1c 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -17,5 +17,6 @@ import utils
+ import plot
+ import pickle
++import json
+ 
+ sys.path.append('../')
+ 
+@@ -59,6 +60,14 @@ parser.add_argument('--experiment_type', default='train', choices=['train', 'test
+                     help='train: train CLEAR model; test: load CLEAR from file; baseline: run a baseline')
+ parser.add_argument('--baseline_type', default='random', choices=['IST', 'random', 'RM'],
+                     help='select baseline type: insert, random perturb, or remove edges')
++parser.add_argument('--export_counterfactuals', action='store_true',
++                    help='export per-instance CLEAR counterfactual outputs after test evaluation')
++parser.add_argument('--export_full_test', action='store_true',
++                    help='export the full test split instead of the official small test loader')
++parser.add_argument('--export_max_items', type=int, default=None,
++                    help='optional cap for exported counterfactual records')
++parser.add_argument('--export_dir', default='../../../outputs/hpc/baselines/clear',
++                    help='root directory for project-owned CLEAR exports')
+ 
+ args = parser.parse_args()
+ 
+@@ -351,6 +360,159 @@ def test(params):
+ 
+     return eval_results_all
+ 
++# CLEAR_WRAPPER_EXPORT_TEST_COUNTERFACTUALS
++def clear_wrapper_to_numpy(value):
++    if torch.is_tensor(value):
++        return value.detach().cpu().numpy()
++    if isinstance(value, np.ndarray):
++        return value
++    return np.asarray(value)
++
++
++def clear_wrapper_to_list(value):
++    return clear_wrapper_to_numpy(value).tolist()
++
++
++def clear_wrapper_scalar(value):
++    arr = clear_wrapper_to_numpy(value).reshape(-1)
++    if len(arr) == 0:
++        return None
++    item = arr[0]
++    if isinstance(item, np.generic):
++        item = item.item()
++    return item
++
++
++def clear_wrapper_int(value):
++    item = clear_wrapper_scalar(value)
++    if item is None:
++        return None
++    return int(item)
++
++
++def clear_wrapper_float(value):
++    item = clear_wrapper_scalar(value)
++    if item is None:
++        return None
++    return float(item)
++
++
++def clear_wrapper_metric_dict(eval_results):
++    result = {}
++    for key, value in eval_results.items():
++        if torch.is_tensor(value):
++            if value.numel() == 1:
++                result[key] = float(value.detach().cpu().item())
++            else:
++                result[key] = value.detach().cpu().numpy().tolist()
++        elif isinstance(value, np.ndarray):
++            result[key] = value.tolist()
++        elif isinstance(value, np.generic):
++            result[key] = value.item()
++        else:
++            result[key] = value
++    return result
++
++
++def clear_wrapper_export_counterfactuals(params, export_path, max_items=None):
++    model, data_loader, pred_model, y_cf_all, dataset, metrics = params['model'], params['data_loader'], params['pred_model'], params['y_cf'], params['dataset'], params['metrics']
++    exp_i = params['exp_i'] if 'exp_i' in params else -1
++    split = params['split'] if 'split' in params else 'test'
++    max_num_nodes = params['max_num_nodes'] if 'max_num_nodes' in params else None
++    model.eval()
++    pred_model.eval()
++
++    export_path = os.path.abspath(export_path)
++    export_dir = os.path.dirname(export_path)
++    os.makedirs(export_dir, exist_ok=True)
++    metadata_path = export_path.replace('.pkl', '.jsonl')
++
++    records = []
++    exported = 0
++    with open(metadata_path, 'w', encoding='utf-8') as jsonl_handle:
++        with torch.no_grad():
++            for batch_idx, data in enumerate(data_loader):
++                features = data['features'].float().to(device)
++                adj = data['adj'].float().to(device)
++                u = data['u'].float().to(device)
++                labels = data['labels'].float().to(device)
++                orin_index = data['index']
++                y_cf = y_cf_all[orin_index]
++
++                model_return = model(features, u, adj, y_cf)
++                features_reconst = model_return['features_reconst']
++                adj_reconst_prob = model_return['adj_reconst']
++                adj_reconst_binary = torch.where(adj_reconst_prob > 0.5, torch.ones_like(adj_reconst_prob), torch.zeros_like(adj_reconst_prob))
++                y_pred = pred_model(features, adj)['y_pred']
++                y_cf_pred = pred_model(features_reconst, adj_reconst_binary)['y_pred']
++
++                eval_params = model_return.copy()
++                eval_params.update({'y_cf': y_cf, 'metrics': metrics, 'y_cf_pred': y_cf_pred, 'dataset': dataset, 'adj_input': adj, 'features_input': features, 'labels': labels, 'u': u, 'y_pred': y_pred})
++                batch_metrics = clear_wrapper_metric_dict(evaluate(eval_params))
++
++                original_probs = F.softmax(y_pred, dim=-1).detach().cpu().numpy()
++                cf_probs = F.softmax(y_cf_pred, dim=-1).detach().cpu().numpy()
++                original_pred_labels = original_probs.argmax(axis=1)
++                cf_pred_labels = cf_probs.argmax(axis=1)
++                features_np = clear_wrapper_to_numpy(features)
++                adj_np = clear_wrapper_to_numpy(adj)
++                features_cf_np = clear_wrapper_to_numpy(features_reconst)
++                adj_cf_np = clear_wrapper_to_numpy(adj_reconst_binary)
++                adj_cf_prob_np = clear_wrapper_to_numpy(adj_reconst_prob)
++                labels_np = clear_wrapper_to_numpy(labels).reshape(-1)
++                y_cf_np = clear_wrapper_to_numpy(y_cf).reshape(-1)
++                orin_index_np = clear_wrapper_to_numpy(orin_index).reshape(-1)
++                if 'num_node_real' in data:
++                    num_nodes_np = clear_wrapper_to_numpy(data['num_node_real']).reshape(-1)
++                else:
++                    num_nodes_np = np.asarray([max_num_nodes for _ in range(len(labels_np))])
++
++                for i in range(len(labels_np)):
++                    if max_items is not None and exported >= max_items:
++                        break
++                    metadata = {
++                        'dataset': dataset,
++                        'exp_id': int(exp_i),
++                        'split': split,
++                        'instance_index': int(orin_index_np[i]),
++                        'orin_index': int(orin_index_np[i]),
++                        'original_label': int(labels_np[i]),
++                        'target_cf_label': int(y_cf_np[i]),
++                        'original_pred_label': int(original_pred_labels[i]),
++                        'cf_pred_label': int(cf_pred_labels[i]),
++                        'original_pred_prob': original_probs[i].tolist(),
++                        'cf_pred_prob': cf_probs[i].tolist(),
++                        'original_num_nodes': int(num_nodes_np[i]) if max_num_nodes is not None else clear_wrapper_int(num_nodes_np[i]),
++                        'max_num_nodes': int(max_num_nodes) if max_num_nodes is not None else None,
++                        'source': 'CLEAR',
++                        'batch_index': int(batch_idx),
++                        'record_index': int(exported),
++                    }
++                    metadata.update(batch_metrics)
++                    record = metadata.copy()
++                    record.update({
++                        'original_x': features_np[i],
++                        'original_features': features_np[i],
++                        'original_adj': adj_np[i],
++                        'cf_x': features_cf_np[i],
++                        'cf_features_reconst': features_cf_np[i],
++                        'cf_adj': adj_cf_np[i],
++                        'cf_adj_prob': adj_cf_prob_np[i],
++                    })
++                    records.append(record)
++                    jsonl_handle.write(json.dumps(metadata) + '\n')
++                    exported += 1
++                if max_items is not None and exported >= max_items:
++                    break
++
++    with open(export_path, 'wb') as handle:
++        pickle.dump({'records': records, 'num_records': len(records), 'dataset': dataset, 'exp_id': exp_i, 'split': split}, handle, protocol=pickle.HIGHEST_PROTOCOL)
++    print(f'[CLEAR_EXPORT] path={export_path}')
++    print(f'[CLEAR_EXPORT] metadata_path={metadata_path}')
++    print(f'[CLEAR_EXPORT] num_records={len(records)}')
++    return {'path': export_path, 'metadata_path': metadata_path, 'num_records': len(records)}
++
++
+ def evaluate(params):
+     adj_permuted, features_permuted, adj_reconst_prob, features_reconst, metrics, dataset, y_cf, y_cf_pred, labels, u, y_pred = \
+         params['adj_permuted'], params['features_permuted'], params['adj_reconst'], \
+@@ -680,10 +842,19 @@ def run_clear(args, exp_type):
+         time_begin = time.time()
+ 
+         eval_results = test(test_params)
+ 
+         time_end = time.time()
+         time_spent = time_end - time_begin
+         time_spent = time_spent / small_test
+         time_spent_all.append(time_spent)
++        if args.export_counterfactuals:
++            export_loader = test_loader
++            if args.export_full_test:
++                export_loader = utils.select_dataloader(data, idx_test, batch_size=args.batch_size, num_workers=args.num_workers)
++            export_root = os.path.abspath(args.export_dir)
++            export_path = os.path.join(export_root, args.dataset, 'test_exports', f'clear_{args.dataset}_exp{exp_i}_test_counterfactuals.pkl')
++            export_params = test_params.copy()
++            export_params.update({'data_loader': export_loader, 'exp_i': exp_i, 'split': 'test', 'max_num_nodes': max_num_nodes})
++            clear_wrapper_export_counterfactuals(export_params, export_path, max_items=args.export_max_items)
+ 
+         for k in metrics:

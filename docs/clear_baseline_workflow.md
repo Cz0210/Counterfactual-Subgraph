@@ -4,13 +4,13 @@ This document describes how to run the official CLEAR / GraphCFE baseline from t
 
 ## 1. Local Development Workflow
 
-Use VSCode + Codex locally to edit only project-owned wrapper scripts and documentation. Do not edit CLEAR official source files unless there is a separately documented reason.
+Use VSCode + Codex locally to edit only project-owned wrapper scripts, patch files, and documentation. Do not commit direct dirty changes under the CLEAR official submodule; project-owned compatibility changes should live under `patches/clear_official/`.
 
 Typical local Git workflow:
 
 ```bash
 git status
-git add scripts/baselines/clear scripts/hpc_pull_clear.sh docs/clear_baseline_workflow.md .gitignore docs/decisions.md
+git add patches/clear_official scripts/baselines/clear scripts/hpc_pull_clear.sh docs/clear_baseline_workflow.md .gitignore docs/decisions.md
 git commit -m "Add CLEAR baseline HPC wrappers"
 git push
 ```
@@ -116,6 +116,8 @@ Supported stages:
 pred
 train
 test
+export_test
+export_test_small
 baseline_random
 baseline_IST
 baseline_RM
@@ -162,7 +164,67 @@ The patch is idempotent: `scripts/baselines/clear/apply_clear_patches.sh`
 checks for the marker `CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT` and skips if the
 patch is already present.
 
-## 7. Examples
+## 7. Per-Instance Export
+
+`pred`, `train`, and `test` preserve the official CLEAR workflow and aggregate
+metrics. The project-owned `export_test` stage is added for unified
+CCRCov/action-rule evaluation. It keeps the official `test` aggregate metrics,
+then exports per-instance counterfactual graphs for the full test split.
+
+The export patch marker is:
+
+```text
+CLEAR_WRAPPER_EXPORT_TEST_COUNTERFACTUALS
+```
+
+Run:
+
+```bash
+sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
+```
+
+Default output path:
+
+```text
+outputs/hpc/baselines/clear/ogbg_molhiv/test_exports/
+```
+
+Per experiment, the export writes:
+
+```text
+clear_ogbg_molhiv_exp0_test_counterfactuals.pkl
+clear_ogbg_molhiv_exp0_test_counterfactuals.jsonl
+clear_ogbg_molhiv_exp1_test_counterfactuals.pkl
+clear_ogbg_molhiv_exp1_test_counterfactuals.jsonl
+clear_ogbg_molhiv_exp2_test_counterfactuals.pkl
+clear_ogbg_molhiv_exp2_test_counterfactuals.jsonl
+```
+
+The pickle files contain full arrays: original features/adjacency, reconstructed
+counterfactual features, thresholded counterfactual adjacency, and
+counterfactual adjacency probabilities. The JSONL files contain lightweight
+metadata such as labels, target labels, original/CF prediction probabilities,
+predicted labels, original node count, batch-level CLEAR metrics, and
+`source=CLEAR`.
+
+For small debug export:
+
+```bash
+sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test_small
+```
+
+or cap records:
+
+```bash
+CLEAR_EXPORT_MAX_ITEMS=20 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
+```
+
+Exported files under `outputs/hpc/baselines/clear/` are runtime artifacts and
+must not be committed. They are intended as the next input for building a CLEAR
+candidate/action pool and then running unified SuppCov, CCRCov, CFDrop,
+FlipRate, Cost, StructRed, and CovRed evaluation.
+
+## 8. Examples
 
 Community:
 
@@ -179,6 +241,7 @@ OGBG-MolHIV:
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv pred
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv train
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv test
+sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
 ```
 
 Dependency-submitted OGBG-MolHIV run:
@@ -206,7 +269,7 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_IST
 sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_RM
 ```
 
-## 8. Direct Wrapper Use
+## 9. Direct Wrapper Use
 
 For lightweight interactive debugging on a compute node, the non-Slurm wrapper is:
 

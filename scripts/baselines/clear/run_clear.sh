@@ -16,7 +16,7 @@ Datasets:
   community | ogbg_molhiv | imdb_m
 
 Stages:
-  pred | train | test | baseline_random | baseline_IST | baseline_RM | all
+  pred | train | test | export_test | export_test_small | baseline_random | baseline_IST | baseline_RM | all
 EOF
 }
 
@@ -27,6 +27,10 @@ fi
 
 DATASET="$1"
 STAGE="$2"
+CLEAR_BATCH_SIZE="${CLEAR_BATCH_SIZE:-500}"
+CLEAR_EXPORT_DIR="${CLEAR_EXPORT_DIR:-../../../outputs/hpc/baselines/clear}"
+CLEAR_EXPORT_FULL_TEST="${CLEAR_EXPORT_FULL_TEST:-1}"
+CLEAR_EXPORT_MAX_ITEMS="${CLEAR_EXPORT_MAX_ITEMS:-}"
 
 ensure_clear_dirs
 
@@ -66,24 +70,43 @@ run_stage() {
   local stage="$1"
   case "${stage}" in
     pred)
-      run_command python train_pred.py --dataset "${DATASET}" --epochs 600 --lr 0.001 --batch_size 500
+      run_command python train_pred.py --dataset "${DATASET}" --epochs 600 --lr 0.001 --batch_size "${CLEAR_BATCH_SIZE}"
       ;;
     train)
-      run_command python main.py --dataset "${DATASET}" --experiment_type train --epochs 1000 --lr 0.001 --batch_size 500
+      run_command python main.py --dataset "${DATASET}" --experiment_type train --epochs 1000 --lr 0.001 --batch_size "${CLEAR_BATCH_SIZE}"
       ensure_clear_cfe_checkpoint_aliases "${DATASET}"
       ;;
     test)
       ensure_clear_cfe_checkpoint_aliases "${DATASET}"
-      run_command python main.py --dataset "${DATASET}" --experiment_type test --batch_size 500
+      run_command python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}"
+      ;;
+    export_test)
+      ensure_clear_cfe_checkpoint_aliases "${DATASET}"
+      export_args=(python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --export_counterfactuals --export_dir "${CLEAR_EXPORT_DIR}")
+      if [ "${CLEAR_EXPORT_FULL_TEST}" != "0" ]; then
+        export_args+=(--export_full_test)
+      fi
+      if [ -n "${CLEAR_EXPORT_MAX_ITEMS}" ]; then
+        export_args+=(--export_max_items "${CLEAR_EXPORT_MAX_ITEMS}")
+      fi
+      run_command "${export_args[@]}"
+      ;;
+    export_test_small)
+      ensure_clear_cfe_checkpoint_aliases "${DATASET}"
+      export_args=(python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --export_counterfactuals --export_dir "${CLEAR_EXPORT_DIR}")
+      if [ -n "${CLEAR_EXPORT_MAX_ITEMS}" ]; then
+        export_args+=(--export_max_items "${CLEAR_EXPORT_MAX_ITEMS}")
+      fi
+      run_command "${export_args[@]}"
       ;;
     baseline_random)
-      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type random --batch_size 500
+      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type random --batch_size "${CLEAR_BATCH_SIZE}"
       ;;
     baseline_IST)
-      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type IST --batch_size 500
+      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type IST --batch_size "${CLEAR_BATCH_SIZE}"
       ;;
     baseline_RM)
-      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type RM --batch_size 500
+      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type RM --batch_size "${CLEAR_BATCH_SIZE}"
       ;;
     all)
       run_stage pred
