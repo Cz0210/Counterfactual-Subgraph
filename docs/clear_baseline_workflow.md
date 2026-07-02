@@ -47,6 +47,15 @@ baselines/clear_official/dataset/
 Required files:
 
 ```text
+AIDS main experiment:
+  source CSV: data/raw/AIDS/HIV.csv
+  SMILES_COLUMN=smiles
+  LABEL_COLUMN=HIV_active
+  TARGET_LABEL=1
+  prepared CLEAR files:
+    baselines/clear_official/dataset/aids_full.pickle
+    baselines/clear_official/dataset/aids_datasplit.pickle
+
 community:
   baselines/clear_official/dataset/community_3.pickle
   baselines/clear_official/dataset/community_datasplit.pickle
@@ -60,6 +69,29 @@ imdb_m:
   baselines/clear_official/dataset/imdb_m_datasplit.pickle
   baselines/clear_official/dataset/IMDBMULTI.mat
 ```
+
+`ogbg_molhiv` was used as a CLEAR engineering validation dataset. It is not the
+AIDS/HIV main result. The AIDS main baseline should use CLEAR dataset name
+`aids`, prepared from `data/raw/AIDS/HIV.csv`.
+
+Prepare the AIDS pickles on HPC with:
+
+```bash
+sbatch scripts/slurm/prepare_clear_aids_dataset.sh
+```
+
+This writes:
+
+```text
+baselines/clear_official/dataset/aids_full.pickle
+baselines/clear_official/dataset/aids_datasplit.pickle
+outputs/hpc/baselines/clear/aids/dataset/clear_aids_dataset_summary.json
+```
+
+The split is a deterministic stratified CLEAR-internal train/val/test split
+with default ratios `0.8/0.1/0.1` and seed `0`. This split is used for CLEAR's
+own prediction/CFE training. It is not the same thing as the historical
+`hiv_quick` full label-1 evaluation pool.
 
 ## 4. Why Data and Checkpoints Are Not Committed
 
@@ -107,6 +139,7 @@ Supported datasets:
 ```text
 community
 ogbg_molhiv
+aids
 imdb_m
 ```
 
@@ -180,24 +213,24 @@ CLEAR_WRAPPER_EXPORT_TEST_COUNTERFACTUALS
 Run:
 
 ```bash
-sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
+sbatch scripts/baselines/clear/slurm_clear.sbatch aids export_test
 ```
 
 Default output path:
 
 ```text
-outputs/hpc/baselines/clear/ogbg_molhiv/test_exports/
+outputs/hpc/baselines/clear/aids/test_exports/
 ```
 
 Per experiment, the export writes:
 
 ```text
-clear_ogbg_molhiv_exp0_test_counterfactuals.pkl
-clear_ogbg_molhiv_exp0_test_counterfactuals.jsonl
-clear_ogbg_molhiv_exp1_test_counterfactuals.pkl
-clear_ogbg_molhiv_exp1_test_counterfactuals.jsonl
-clear_ogbg_molhiv_exp2_test_counterfactuals.pkl
-clear_ogbg_molhiv_exp2_test_counterfactuals.jsonl
+clear_aids_exp0_test_counterfactuals.pkl
+clear_aids_exp0_test_counterfactuals.jsonl
+clear_aids_exp1_test_counterfactuals.pkl
+clear_aids_exp1_test_counterfactuals.jsonl
+clear_aids_exp2_test_counterfactuals.pkl
+clear_aids_exp2_test_counterfactuals.jsonl
 ```
 
 The pickle files contain full arrays: original features/adjacency, reconstructed
@@ -210,13 +243,13 @@ predicted labels, original node count, batch-level CLEAR metrics, and
 For small debug export:
 
 ```bash
-sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test_small
+sbatch scripts/baselines/clear/slurm_clear.sbatch aids export_test_small
 ```
 
 or cap records:
 
 ```bash
-CLEAR_EXPORT_MAX_ITEMS=20 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
+CLEAR_EXPORT_MAX_ITEMS=20 sbatch scripts/baselines/clear/slurm_clear.sbatch aids export_test
 ```
 
 Exported files under `outputs/hpc/baselines/clear/` are runtime artifacts and
@@ -231,15 +264,27 @@ into the project-owned unified candidate/action pool:
 
 ```bash
 python scripts/baselines/clear/convert_clear_exports_to_candidate_pool.py \
-  --export-dir outputs/hpc/baselines/clear/ogbg_molhiv/test_exports \
-  --dataset ogbg_molhiv \
-  --out-jsonl outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/clear_ogbg_molhiv_candidate_pool.jsonl \
-  --out-summary outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/clear_ogbg_molhiv_candidate_pool_summary.json
+  --export-dir outputs/hpc/baselines/clear/aids/test_exports \
+  --dataset aids \
+  --out-jsonl outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl \
+  --out-summary outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs_summary.json \
+  --include-full-graphs
 ```
 
 The Slurm wrapper is:
 
 ```bash
+sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
+```
+
+For AIDS with full graph arrays preserved:
+
+```bash
+DATASET=aids \
+EXPORT_DIR=outputs/hpc/baselines/clear/aids/test_exports \
+OUT_JSONL=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl \
+OUT_SUMMARY=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs_summary.json \
+INCLUDE_FULL_GRAPHS=1 \
 sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
 ```
 
@@ -273,14 +318,20 @@ teacher/oracle. CLEAR official `validity` and `official_flip` are retained only
 as diagnostics. In particular, an `official_flip_rate` of zero is allowed and
 should not be used to filter candidates before unified evaluation.
 
+For AIDS/HIV, the historical RF oracle at
+`outputs/hpc/oracle/aids_rf_model.pkl` is a SMILES/Morgan-fingerprint oracle.
+It cannot directly consume CLEAR's continuous reconstructed graph tensors.
+Final strict-flip CCRCov therefore requires a full-graph candidate pool and a
+graph-to-teacher adapter or another explicitly documented unified teacher path.
+
 Evaluation entrypoint:
 
 ```bash
 python scripts/baselines/clear/evaluate_clear_candidate_pool.py \
-  --candidate-pool outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/clear_ogbg_molhiv_candidate_pool.jsonl \
-  --dataset ogbg_molhiv \
+  --candidate-pool outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl \
+  --dataset aids \
   --teacher-path outputs/hpc/oracle/aids_rf_model.pkl \
-  --out-dir outputs/hpc/baselines/clear/ogbg_molhiv/eval \
+  --out-dir outputs/hpc/baselines/clear/aids/eval \
   --cf-mode strict_flip \
   --top-k 1,5,10,20 \
   --distance-method action
@@ -332,6 +383,34 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv test
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
 sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
 sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
+```
+
+AIDS/HIV main CLEAR run:
+
+```bash
+sbatch scripts/slurm/prepare_clear_aids_dataset.sh
+sbatch scripts/baselines/clear/slurm_clear.sbatch aids pred
+sbatch scripts/baselines/clear/slurm_clear.sbatch aids train
+sbatch scripts/baselines/clear/slurm_clear.sbatch aids test
+sbatch scripts/baselines/clear/slurm_clear.sbatch aids export_test
+DATASET=aids \
+EXPORT_DIR=outputs/hpc/baselines/clear/aids/test_exports \
+OUT_JSONL=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl \
+OUT_SUMMARY=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs_summary.json \
+INCLUDE_FULL_GRAPHS=1 \
+sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
+```
+
+Dependency-submitted AIDS/HIV run:
+
+```bash
+jid_prep=$(sbatch --parsable scripts/slurm/prepare_clear_aids_dataset.sh)
+jid_pred=$(sbatch --parsable --dependency=afterok:${jid_prep} scripts/baselines/clear/slurm_clear.sbatch aids pred)
+jid_train=$(sbatch --parsable --dependency=afterok:${jid_pred} scripts/baselines/clear/slurm_clear.sbatch aids train)
+jid_test=$(sbatch --parsable --dependency=afterok:${jid_train} scripts/baselines/clear/slurm_clear.sbatch aids test)
+jid_export=$(sbatch --parsable --dependency=afterok:${jid_test} scripts/baselines/clear/slurm_clear.sbatch aids export_test)
+jid_convert=$(DATASET=aids EXPORT_DIR=outputs/hpc/baselines/clear/aids/test_exports OUT_JSONL=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl OUT_SUMMARY=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs_summary.json INCLUDE_FULL_GRAPHS=1 sbatch --parsable --dependency=afterok:${jid_export} scripts/slurm/convert_clear_exports_to_candidate_pool.sh)
+echo "prep=${jid_prep} pred=${jid_pred} train=${jid_train} test=${jid_test} export=${jid_export} convert=${jid_convert}"
 ```
 
 Dependency-submitted OGBG-MolHIV run:

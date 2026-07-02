@@ -6,6 +6,44 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-02] Add CLEAR AIDS dataset support
+
+### Background
+The AIDS/HIV main experiment uses `data/raw/AIDS/HIV.csv` with
+`smiles` as the molecule column and `HIV_active` as the binary label. Previous
+CLEAR engineering smoke runs used `ogbg_molhiv`, but that dataset is not the
+AIDS/HIV main-result dataset. CLEAR official source only supports
+`community`, `ogbg_molhiv`, and `imdb_m` out of the box.
+
+### Decision
+Add a project-owned AIDS preparation and patch workflow:
+
+- `scripts/baselines/clear/prepare_clear_aids_dataset.py` converts
+  `data/raw/AIDS/HIV.csv` into CLEAR-compatible `aids_full.pickle` and
+  `aids_datasplit.pickle`;
+- `scripts/slurm/prepare_clear_aids_dataset.sh` provides the HPC sbatch
+  entrypoint for deterministic stratified CLEAR-internal split preparation;
+- `patches/clear_official/003_support_aids_dataset.patch` adds
+  `dataset=aids` support to CLEAR official loaders, CLI choices, molecular
+  evaluation branches, and graph prediction model behavior through the existing
+  idempotent patch mechanism;
+- CLEAR wrappers now recognize `aids` dataset files and keep all generated
+  pickles/checkpoints/exports under ignored runtime paths.
+
+### Consequences
+`ogbg_molhiv` remains only a CLEAR engineering validation dataset. AIDS
+baseline runs should use `dataset=aids`, `SMILES_COLUMN=smiles`, and
+`LABEL_COLUMN=HIV_active`. CLEAR official flip/validity remain diagnostic only.
+The historical AIDS RF oracle at `outputs/hpc/oracle/aids_rf_model.pkl` is a
+SMILES/Morgan-fingerprint oracle and cannot directly consume CLEAR continuous
+graph counterfactual tensors; final strict-flip CCRCov requires a full-graph
+candidate pool and an explicitly documented unified teacher/adapter path.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-02] Add CLEAR candidate/action pool unified evaluation entrypoint
 
 ### Background

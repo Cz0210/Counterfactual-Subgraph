@@ -45,3 +45,4 @@ apply_clear_patch() {
 
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/001_save_cfe_checkpoints.patch" "CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT"
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/002_export_test_counterfactuals.patch" "CLEAR_WRAPPER_EXPORT_TEST_COUNTERFACTUALS"
+apply_clear_patch "${ROOT_DIR}/patches/clear_official/003_support_aids_dataset.patch" "CLEAR_WRAPPER_SUPPORT_AIDS_DATASET"

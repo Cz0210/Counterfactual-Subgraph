@@ -32,7 +32,7 @@ mkdir -p \
   logs/baselines/clear
 
 missing_any=0
-for dataset in community ogbg_molhiv imdb_m; do
+for dataset in community ogbg_molhiv aids imdb_m; do
   if check_clear_dataset "${dataset}"; then
     echo "[CLEAR_HPC_PULL] dataset ${dataset}: ready"
   else

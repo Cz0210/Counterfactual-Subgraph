@@ -1,0 +1,106 @@
+diff --git a/src/data_preprocessing.py b/src/data_preprocessing.py
+index d4b2984..605a57d 100644
+--- a/src/data_preprocessing.py
++++ b/src/data_preprocessing.py
+@@ -132,6 +132,12 @@ def preprocess_ogbg(dataset, padded=True, save_flag=True):
+         print('saved data: ', path_save)
+     return data
+ 
++def load_aids(dataset, padded=True):
++    with open('../dataset/aids_full.pickle', 'rb') as handle:
++        data = pickle.load(handle)['data']
++    return data
++
++
+ def load_imdb(dataset, padded=False):
+     #data = preprocess_imdb(dataset, padded, save_flag=True)
+     with open('../dataset/imdb_m.pickle', 'rb') as handle:
+@@ -389,6 +395,19 @@ def load_data(path_root, dataset, exp_num=10):
+             idx_train_list, idx_val_list, idx_test_list = info_index['idx_train_list'], \
+                                                           info_index['idx_val_list'], info_index['idx_test_list']
+ 
++    elif dataset == 'aids':
++        data = load_aids(dataset, padded=True)
++        n = len(data)
++        path_data = path_root + 'aids_datasplit.pickle'
++        with open(path_data, 'rb') as handle:
++            info_index = pickle.load(handle)
++            idx_train_list, idx_val_list, idx_test_list = info_index['idx_train_list'], \
++                                                          info_index['idx_val_list'], info_index['idx_test_list']
++
++        if len(idx_train_list) < exp_num or len(idx_val_list) < exp_num or len(idx_test_list) < exp_num:
++            print('AIDS split file has fewer repetitions than requested exp_num: ', exp_num)
++            exit(0)
++
+     elif dataset == 'imdb_m':
+         data = load_imdb(dataset, padded=True)
+         n = len(data)
+diff --git a/src/main.py b/src/main.py
+index c05eae4..45fcf24 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -46,9 +46,10 @@ parser.add_argument('--disable_u', type=int, default=0, help='disable u in VAE')
+ parser.add_argument('--dim_z', type=int, default=16, metavar='N', help='dimension of z')
+ parser.add_argument('--dim_h', type=int, default=16, metavar='N', help='dimension of h')
+ parser.add_argument('--dropout', type=float, default=0.1)
++# CLEAR_WRAPPER_SUPPORT_AIDS_DATASET
+ 
+ parser.add_argument('--dataset', default='imdb_m', help='dataset to use',
+-                    choices=['community', 'ogbg_molhiv', 'imdb_m'])
++                    choices=['community', 'ogbg_molhiv', 'aids', 'imdb_m'])
+ parser.add_argument('--lr', type=float, default=1e-3,
+                     help='learning rate for optimizer')
+ parser.add_argument('--weight_decay', type=float, default=1e-5,
+@@ -573,7 +574,7 @@ def evaluate_causality(dataset, adj_permuted, features_permuted, adj_reconst, fe
+ 
+         score_causal = torch.mean(count_good)
+ 
+-    elif dataset == 'ogbg_molhiv':
++    elif dataset == 'ogbg_molhiv' or dataset == 'aids':
+         ave_x0 = torch.mean(features_permuted[:, :, 0], dim=-1)  # size
+         ave_x0_cf = torch.mean(features_reconst[:, :, 0], dim=-1)  # size
+         ave_x1 = torch.mean(features_permuted[:, :, 1], dim=-1)  # size
+@@ -645,7 +646,7 @@ def evaluate_correct(dataset, adj_permuted, features_permuted, adj_reconst, feat
+         if all.item() == 0:
+             return score / (all+1)
+         score = score / all
+-    elif dataset == 'ogbg_molhiv':
++    elif dataset == 'ogbg_molhiv' or dataset == 'aids':
+         ave_x1 = torch.mean(features_permuted[:, :, 1], dim=-1)  # size
+         ave_x1_cf = torch.mean(features_reconst[:, :, 1], dim=-1)  # size
+ 
+diff --git a/src/models.py b/src/models.py
+index f63c3ad..08f84be 100644
+--- a/src/models.py
++++ b/src/models.py
+@@ -220,7 +220,7 @@ class Graph_pred_model(nn.Module):
+     def forward(self, x, adj):
+         if self.dataset == 'synthetic' or self.dataset == 'community' or self.dataset == 'imdb_b':
+             x = torch.ones_like(x).to(device)
+-        elif self.dataset == 'ogbg_molhiv':
++        elif self.dataset == 'ogbg_molhiv' or self.dataset == 'aids':
+             x = x.clone()
+             x[:, :, 2:] = 0.
+             x[:, :, 0] = 0.
+diff --git a/src/train_pred.py b/src/train_pred.py
+index c904fa3..819a98e 100644
+--- a/src/train_pred.py
++++ b/src/train_pred.py
+@@ -43,7 +43,7 @@ parser.add_argument('--dim_h', type=int, default=32, metavar='N', help='dimensio
+ parser.add_argument('--dropout', type=float, default=0.1)
+ 
+ parser.add_argument('--dataset', default='ogbg_molhiv', help='dataset to use',
+-                    choices=['community', 'ogbg_molhiv', 'imdb_m'])
++                    choices=['community', 'ogbg_molhiv', 'aids', 'imdb_m'])
+ parser.add_argument('--lr', type=float, default=1e-3,
+                     help='learning rate for optimizer')  # community: 1e-3
+ parser.add_argument('--weight_decay', type=float, default=1e-5,
+@@ -215,7 +215,7 @@ if __name__ == '__main__':
+     print('running experiment: ', 'training prediction model')
+     data_path_root = '../dataset/'
+     model_path = '../models_save/'
+-    if args.dataset == 'synthetic' or args.dataset == 'ogbg_molhiv' or args.dataset == 'community' or args.dataset == 'imdb_m':
++    if args.dataset == 'synthetic' or args.dataset == 'ogbg_molhiv' or args.dataset == 'aids' or args.dataset == 'community' or args.dataset == 'imdb_m':
+         metrics = ['Accuracy', 'AUC-ROC', 'F1-score']
+     else:
+         metrics = ['Accuracy']

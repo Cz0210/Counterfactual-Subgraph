@@ -13,7 +13,7 @@ Usage:
   bash scripts/baselines/clear/run_clear.sh <dataset> <stage>
 
 Datasets:
-  community | ogbg_molhiv | imdb_m
+  community | ogbg_molhiv | aids | imdb_m
 
 Stages:
   pred | train | test | export_test | export_test_small | baseline_random | baseline_IST | baseline_RM | all
