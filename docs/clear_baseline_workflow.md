@@ -266,7 +266,53 @@ Use `--include-full-graphs` only for debugging. Files under
 `outputs/hpc/baselines/clear/` remain runtime artifacts and must not be
 committed.
 
-## 9. Examples
+## 9. Unified Evaluation
+
+The final CLEAR baseline metrics must be recomputed with the unified
+teacher/oracle. CLEAR official `validity` and `official_flip` are retained only
+as diagnostics. In particular, an `official_flip_rate` of zero is allowed and
+should not be used to filter candidates before unified evaluation.
+
+Evaluation entrypoint:
+
+```bash
+python scripts/baselines/clear/evaluate_clear_candidate_pool.py \
+  --candidate-pool outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/clear_ogbg_molhiv_candidate_pool.jsonl \
+  --dataset ogbg_molhiv \
+  --teacher-path outputs/hpc/oracle/aids_rf_model.pkl \
+  --out-dir outputs/hpc/baselines/clear/ogbg_molhiv/eval \
+  --cf-mode strict_flip \
+  --top-k 1,5,10,20 \
+  --distance-method action
+```
+
+Slurm entrypoint:
+
+```bash
+sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
+```
+
+Smoke diagnostics:
+
+```bash
+MAX_CANDIDATES=100 sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
+```
+
+The default candidate pool does not include full graph arrays in JSONL. If the
+unified teacher/evaluator needs full original and counterfactual graphs, rerun
+the conversion with `--include-full-graphs` or add a graph-teacher adapter for
+CLEAR/OGBG graph tensors. Until such a teacher prediction source is available,
+the evaluator refuses to report final strict `FlipRate`, `CFDrop`, or `CCRCov`
+from CLEAR official prediction fields. For cost-only pipeline smoke checks, use:
+
+```bash
+ALLOW_ACTION_ONLY=1 MAX_CANDIDATES=100 sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
+```
+
+Action-only output is diagnostic only and must not replace final
+native-action CCRCov results.
+
+## 10. Examples
 
 Community:
 
@@ -285,6 +331,7 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv train
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv test
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
 sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
+sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
 ```
 
 Dependency-submitted OGBG-MolHIV run:
@@ -312,7 +359,7 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_IST
 sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_RM
 ```
 
-## 10. Direct Wrapper Use
+## 11. Direct Wrapper Use
 
 For lightweight interactive debugging on a compute node, the non-Slurm wrapper is:
 

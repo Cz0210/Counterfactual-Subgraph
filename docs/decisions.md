@@ -6,6 +6,38 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-02] Add CLEAR candidate/action pool unified evaluation entrypoint
+
+### Background
+The CLEAR reproduction pipeline now produces a converted candidate/action pool
+under `outputs/hpc/baselines/clear/<dataset>/candidate_pool/`. The converted
+pool preserves CLEAR official prediction diagnostics, but final baseline
+comparison must use the project's unified teacher/oracle and native-action
+CCRCov convention.
+
+### Decision
+Add `scripts/baselines/clear/evaluate_clear_candidate_pool.py` and
+`scripts/slurm/evaluate_clear_candidate_pool.sh`. The evaluator reads CLEAR
+action-pool JSONL files, computes action-distance costs, writes
+`per_candidate_eval.jsonl`, `summary.json`, `summary.csv`, `threshold_summary.csv`,
+and `report.md`, and exposes `strict_flip`, `drop_or_flip`, and `drop_only`
+counterfactual modes. CLEAR official `official_flip` is diagnostic only and is
+never used as final strict flip. If the candidate pool lacks SMILES,
+precomputed unified-teacher fields, or full graph arrays needed by a graph
+teacher adapter, the evaluator fails clearly unless `--allow-action-only` is
+used for smoke diagnostics.
+
+### Consequences
+CLEAR official source and training remain unchanged. The current default CLEAR
+candidate pool can be smoke-checked for cost/action summaries, but final
+`FlipRate`, `CFDrop`, and `CCRCov` require a unified teacher prediction source
+for CLEAR original/counterfactual graph pairs.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-02] Convert CLEAR exports into unified candidate/action pools
 
 ### Background
