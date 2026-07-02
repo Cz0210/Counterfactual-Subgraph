@@ -6,6 +6,73 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-02] Convert CLEAR exports into unified candidate/action pools
+
+### Background
+CLEAR `export_test` now produces per-instance original/counterfactual graph
+pairs under `outputs/hpc/baselines/clear/<dataset>/test_exports/`. These files
+preserve full graph arrays and CLEAR official prediction diagnostics, but they
+are not yet in the action-pool format consumed by the project's unified
+CCRCov/action-rule evaluation.
+
+### Decision
+Add `scripts/baselines/clear/convert_clear_exports_to_candidate_pool.py` to
+convert CLEAR export pickles into a project-owned JSONL candidate/action pool.
+The conversion keeps official CLEAR flip and target-success diagnostics but
+does not filter non-flips by default, because final `FlipRate`, `CFDrop`, and
+`CCRCov` must be recomputed by the unified frozen teacher/oracle. Each
+candidate records edge additions/deletions and continuous node-feature changes
+from the original graph to the CLEAR counterfactual graph. A Slurm wrapper,
+`scripts/slurm/convert_clear_exports_to_candidate_pool.sh`, provides the HPC
+entrypoint.
+
+### Consequences
+CLEAR official source, model structure, training, and export logic remain
+unchanged. Runtime candidate pools stay under
+`outputs/hpc/baselines/clear/<dataset>/candidate_pool/` and must not be
+committed. The resulting JSONL can feed the next CLEAR adapter/evaluator stage
+for unified SuppCov, CCRCov, CFDrop, FlipRate, Cost, StructRed, and CovRed.
+
+### Status
+Accepted
+
+---
+
+## [2026-07-02] Add CLEAR per-instance counterfactual export
+
+### Background
+CLEAR official `test` loads trained CFE checkpoints and reports aggregate
+metrics, but it does not persist per-instance original/counterfactual graph
+outputs. The official entrypoint also maps `experiment_type == test` to
+`test_small`, so the default printed metrics cover a small test subset. Unified
+CCRCov/action-rule evaluation needs per-instance counterfactual graph records.
+
+### Decision
+Add a second project-owned CLEAR patch:
+
+- `patches/clear_official/002_export_test_counterfactuals.patch` adds the
+  marker `CLEAR_WRAPPER_EXPORT_TEST_COUNTERFACTUALS`;
+- the patch adds opt-in CLI flags `--export_counterfactuals`,
+  `--export_full_test`, `--export_max_items`, and `--export_dir`;
+- official aggregate test behavior is preserved unless export flags are
+  explicitly passed;
+- `scripts/baselines/clear/run_clear.sh` adds `export_test` for full test
+  split export and `export_test_small` for debugging;
+- export files are written under
+  `outputs/hpc/baselines/clear/<dataset>/test_exports/` as pickle arrays plus
+  JSONL metadata.
+
+### Consequences
+CLEAR model structure, loss, optimizer, training logic, dataset loading, and
+official aggregate metrics remain unchanged. The exported per-instance graph
+records can be converted into a CLEAR candidate/action pool for unified
+SuppCov, CCRCov, CFDrop, FlipRate, Cost, StructRed, and CovRed evaluation.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-01] Patch CLEAR to save CFE checkpoints for test
 
 ### Background

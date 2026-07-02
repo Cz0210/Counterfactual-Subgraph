@@ -224,7 +224,49 @@ must not be committed. They are intended as the next input for building a CLEAR
 candidate/action pool and then running unified SuppCov, CCRCov, CFDrop,
 FlipRate, Cost, StructRed, and CovRed evaluation.
 
-## 8. Examples
+## 8. Candidate/Action Pool Conversion
+
+After `export_test` finishes, convert CLEAR original/counterfactual graph pairs
+into the project-owned unified candidate/action pool:
+
+```bash
+python scripts/baselines/clear/convert_clear_exports_to_candidate_pool.py \
+  --export-dir outputs/hpc/baselines/clear/ogbg_molhiv/test_exports \
+  --dataset ogbg_molhiv \
+  --out-jsonl outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/clear_ogbg_molhiv_candidate_pool.jsonl \
+  --out-summary outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/clear_ogbg_molhiv_candidate_pool_summary.json
+```
+
+The Slurm wrapper is:
+
+```bash
+sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
+```
+
+For a smoke conversion:
+
+```bash
+MAX_RECORDS=100 sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
+```
+
+The conversion keeps CLEAR official diagnostic fields, including
+`official_flip`, `official_target_success`, `official_original_correct`, and
+the official prediction probabilities. CLEAR official flip rate may be zero;
+that is not used as the final paper-facing result. Final `FlipRate`, `CFDrop`,
+and `CCRCov` must be recomputed later by the unified frozen teacher/oracle.
+
+The candidate pool stores action-level graph differences:
+
+- edge additions and deletions from `original_adj` to `cf_adj`;
+- continuous node-feature changes from `original_x` to `cf_x`;
+- aggregate action costs such as edge cost, feature L1/L2 cost, and total cost.
+
+By default, full graph arrays are not written to JSONL to keep the pool small.
+Use `--include-full-graphs` only for debugging. Files under
+`outputs/hpc/baselines/clear/` remain runtime artifacts and must not be
+committed.
+
+## 9. Examples
 
 Community:
 
@@ -242,6 +284,7 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv pred
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv train
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv test
 sbatch scripts/baselines/clear/slurm_clear.sbatch ogbg_molhiv export_test
+sbatch scripts/slurm/convert_clear_exports_to_candidate_pool.sh
 ```
 
 Dependency-submitted OGBG-MolHIV run:
@@ -269,7 +312,7 @@ sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_IST
 sbatch scripts/baselines/clear/slurm_clear.sbatch community baseline_RM
 ```
 
-## 9. Direct Wrapper Use
+## 10. Direct Wrapper Use
 
 For lightweight interactive debugging on a compute node, the non-Slurm wrapper is:
 
