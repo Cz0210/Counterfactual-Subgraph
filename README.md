@@ -58,6 +58,8 @@ The project currently uses native-action Close Counterfactual Rule Coverage (CCR
 - `docs/EVALUATION_PROTOCOL.md`
 - `docs/BASELINE_ADAPTATION.md`
 - `docs/PROJECT_CONVENTIONS.md`
+- `docs/BASELINE_GLOBALGCE.md`
+- `docs/CCRCOV_DISTANCE_REPRODUCTION.md`
 
 ---
 

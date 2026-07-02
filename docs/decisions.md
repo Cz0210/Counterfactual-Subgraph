@@ -6,6 +6,177 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-01] Patch CLEAR to save CFE checkpoints for test
+
+### Background
+CLEAR `pred` successfully saves the graph prediction model, but the official
+`train` path in `baselines/clear_official/src/main.py` passes
+`save_model=False`, while the official `test` path always loads
+`../models_save/weights_graphCFE_CLEAR_<dataset>_exp<i>_epoch900.pt`. This can
+make a completed CLEAR train run unusable for test because no CFE generator
+checkpoint exists.
+
+### Decision
+Keep CLEAR algorithm code isolated and add a project-owned patch workflow:
+
+- `patches/clear_official/001_save_cfe_checkpoints.patch` enables CFE
+  checkpoint saving without changing model structure, losses, optimizer,
+  dataset loading, or metrics;
+- train now saves epoch 900 and final-epoch CFE `state_dict()` files with
+  `[CLEAR_CKPT_SAVE]` logs;
+- `scripts/baselines/clear/apply_clear_patches.sh` applies the patch
+  idempotently by checking the `CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT` marker;
+- `scripts/hpc_pull_clear.sh`, `scripts/baselines/clear/slurm_clear.sbatch`,
+  and `scripts/baselines/clear/run_clear.sh` apply the patch before CLEAR runs;
+- wrappers check for exp0/exp1/exp2 epoch-900 CFE checkpoints and create an
+  epoch-900 symlink from the highest available epoch when needed.
+
+### Consequences
+The submodule does not need to be committed dirty as the sole source of the
+fix. Runtime artifacts remain ignored. CLEAR test fails early with a clear
+checkpoint error if train has not produced any usable CFE checkpoint.
+
+### Status
+Accepted
+
+---
+
+## [2026-07-01] Make GREED/MolCLR CCRCov default to strict flip
+
+### Background
+GREED-GED and MolCLR-Embedding CCRCov smoke outputs could report
+`close_cf_coverage > 0` while `flip_rate_among_covered = 0` because the
+counterfactual condition allowed probability-drop coverage through
+`cf_drop >= min_cf_drop`.
+
+### Decision
+For GREED/MolCLR distance-based CCRCov evaluation, add explicit `cf_mode`
+support:
+
+- `strict_flip`: `distance <= theta` and `pred_after != label`;
+- `drop_or_flip`: `distance <= theta` and either strict flip or
+  `cf_drop >= min_cf_drop`;
+- `drop_only`: `distance <= theta` and `cf_drop >= min_cf_drop`.
+
+The default is now `strict_flip`. `min_cf_drop` remains recorded and is used
+only by drop-based modes. Slurm wrappers expose `CF_MODE` and `MIN_CF_DROP`,
+and threshold summaries/reports record the selected mode.
+
+### Consequences
+The main GREED/MolCLR CCRCov result now matches the paper-facing
+`phi(G^a) != y` strict flip definition by default. GREED training, MolCLR
+encoding, PPO, selector, and candidate generation remain unchanged.
+
+### Status
+Accepted
+
+---
+
+## [2026-06-29] Add CLEAR official baseline HPC wrappers
+
+### Background
+CLEAR / GraphCFE is kept as an official baseline under
+`baselines/clear_official`. Its official code relies on relative paths such as
+`../dataset` and `../models_save`, so project-owned wrappers must run from the
+official `src` directory while keeping datasets, checkpoints, logs, and outputs
+out of ordinary Git.
+
+### Decision
+Add project-owned CLEAR workflow files:
+
+- shared shell helpers for dataset checks, runtime directory creation, and
+  environment diagnostics;
+- a stage wrapper for `pred`, `train`, `test`, CLEAR baselines, and `all`;
+- a Slurm wrapper that activates the HPC default `smiles_pip118` conda
+  environment by default, allows `CLEAR_CONDA_ENV` overrides, requests the A800
+  GPU queue with one `gpu:a800:1` allocation, and delegates to the stage
+  wrapper;
+- an HPC pull helper that syncs submodules and prepares runtime directories
+  without downloading data;
+- documentation and `.gitignore` rules for CLEAR datasets, checkpoints, and
+  logs.
+
+### Consequences
+`baselines/clear_official/src/` remains untouched. CLEAR can be launched from
+HPC via `sbatch` after `git pull`, while large runtime artifacts remain outside
+normal Git history.
+
+### Status
+Accepted
+
+---
+
+## [2026-06-29] Add GREED-GED and MolCLR distance lines for CCRCov
+
+### Background
+Fullgraph CCRCov evaluation cannot scale if every parent-candidate pair is sent
+to NetworkX GED. The current HIV comparison needs a distance protocol that can
+evaluate Ours and the GT-FullGraph proxy baseline without blocking on exact GED.
+
+### Decision
+Add two evaluation-only distance lines:
+
+- GREED-GED prepares HIV graph pairs, labels deletion pairs exactly, labels
+  fullgraph/random pairs with a scalable bounded approximation unless an
+  explicit debug mode is requested, trains a Siamese GIN-style distance model,
+  and evaluates CCRCov with predicted normalized GED;
+- MolCLR-Embedding precomputes parent, hard-deletion residual, and GT-FullGraph
+  candidate embeddings with an explicit runtime MolCLR checkpoint and evaluates
+  CCRCov using `1 - cosine_similarity`;
+- NetworkX GED remains only a small debug option and is not the default
+  fullgraph distance path;
+- GT-FullGraph is treated as a project proxy baseline, not as official
+  GCFExplainer.
+
+### Consequences
+Training PPO, selector logic, and candidate generation remain unchanged. The
+new files provide sbatch-first workflows for smoke/full GREED, smoke/full
+MolCLR, and final comparison plots under the native-action CCRCov convention.
+
+### Status
+Accepted
+
+---
+
+## [2026-06-26] Add GlobalGCE baseline reproduction and unified evaluation wrappers
+
+### Background
+GlobalGCE is a relevant global counterfactual explanation baseline, but its
+official outputs and metrics are not directly comparable to the project's
+native-action CCRCov protocol. The official code should remain isolated under
+`baselines/globalgce_official`, while project-owned wrappers should control
+HPC execution, artifact export, and unified re-evaluation.
+
+### Decision
+Add GlobalGCE support without modifying official source code:
+
+- layout checking for `baselines/globalgce_official`;
+- a wrapper that copies official `src` into `outputs/hpc/globalgce/...` and runs
+  `main.py` from the copied tree;
+- an exporter that records official metrics, introspects rules/CF pickles, and
+  writes project-owned JSON/JSONL artifacts;
+- a `src.baselines.globalgce_adapter` module for AIDS label maps, CF graph
+  conversion, rule descriptors, structural redundancy, coverage redundancy, and
+  label-alignment warnings;
+- a unified evaluator that supports first-stage native-CF CCRCov and a
+  rule-action audit mode that reports SuppCov/StructRed/CovRed while explicitly
+  marking safe RHS replacement as unsupported;
+- Slurm wrappers for smoke, official top30, export, and label-specific CCRCov
+  evaluation;
+- baseline documentation in `docs/BASELINE_GLOBALGCE.md`.
+
+### Consequences
+GlobalGCE official code remains untouched. All generated GlobalGCE run outputs
+live under `outputs/hpc/globalgce/...`, and unified evaluation outputs live under
+`outputs/hpc/eval/globalgce/...`. Official validity/proximity metrics remain
+reproduction diagnostics, while final comparison metrics are recomputed by the
+project's frozen teacher and CCRCov protocol.
+
+### Status
+Accepted
+
+---
+
 ## [2026-06-26] Add Slurm experiment tracking entrypoint
 
 ### Background

@@ -1,0 +1,6 @@
+[submodule "baselines/globalgce_official"]
+	path = baselines/globalgce_official
+	url = https://github.com/YinhanHe123/GlobalGCE
+[submodule "baselines/clear_official"]
+	path = baselines/clear_official
+	url = https://github.com/jma712/GraphCFE.git
