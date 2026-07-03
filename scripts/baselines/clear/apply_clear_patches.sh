@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 CLEAR_DIR="${ROOT_DIR}/baselines/clear_official"
 CLEAR_MAIN="${CLEAR_DIR}/src/main.py"
+CLEAR_TRAIN_PRED="${CLEAR_DIR}/src/train_pred.py"
 
 if [ ! -d "${ROOT_DIR}/.git" ] || [ ! -f "${ROOT_DIR}/README.md" ]; then
   echo "[CLEAR_PATCH_ERROR] Could not locate project root: ${ROOT_DIR}" >&2
@@ -18,16 +19,22 @@ if [ ! -f "${CLEAR_MAIN}" ]; then
   exit 2
 fi
 
+if [ ! -f "${CLEAR_TRAIN_PRED}" ]; then
+  echo "[CLEAR_PATCH_ERROR] Missing CLEAR official train_pred.py: ${CLEAR_TRAIN_PRED}" >&2
+  exit 2
+fi
+
 apply_clear_patch() {
   local patch_file="$1"
   local patch_marker="$2"
+  local marker_file="${3:-${CLEAR_MAIN}}"
 
   if [ ! -f "${patch_file}" ]; then
     echo "[CLEAR_PATCH_ERROR] Missing CLEAR patch file: ${patch_file}" >&2
     exit 2
   fi
 
-  if grep -q "${patch_marker}" "${CLEAR_MAIN}"; then
+  if grep -q "${patch_marker}" "${marker_file}"; then
     echo "[CLEAR_PATCH] already_applied marker=${patch_marker}"
     return 0
   fi
@@ -35,7 +42,7 @@ apply_clear_patch() {
   echo "[CLEAR_PATCH] applying ${patch_file}"
   git -C "${CLEAR_DIR}" apply "${patch_file}"
 
-  if grep -q "${patch_marker}" "${CLEAR_MAIN}"; then
+  if grep -q "${patch_marker}" "${marker_file}"; then
     echo "[CLEAR_PATCH] applied marker=${patch_marker}"
   else
     echo "[CLEAR_PATCH_ERROR] Patch command finished but marker is still absent: ${patch_marker}" >&2
@@ -46,3 +53,4 @@ apply_clear_patch() {
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/001_save_cfe_checkpoints.patch" "CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT"
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/002_export_test_counterfactuals.patch" "CLEAR_WRAPPER_EXPORT_TEST_COUNTERFACTUALS"
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/003_support_aids_dataset.patch" "CLEAR_WRAPPER_SUPPORT_AIDS_DATASET"
+apply_clear_patch "${ROOT_DIR}/patches/clear_official/004_aids_weighted_graphpred.patch" "CLEAR_WRAPPER_AIDS_WEIGHTED_GRAPHPRED" "${CLEAR_TRAIN_PRED}"

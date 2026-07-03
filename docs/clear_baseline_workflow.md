@@ -101,6 +101,46 @@ historical `hiv_quick` full label-1 evaluation pool.
 Do not place `ogbg_molhiv` CLEAR metrics in the final AIDS/HIV baseline table.
 Those runs are engineering validation only.
 
+### AIDS Class Imbalance
+
+The canonical AIDS/HIV source is highly imbalanced:
+
+```text
+data/raw/AIDS/HIV.csv
+HIV_active=0: 39684
+HIV_active=1: 1443
+```
+
+The repository currently does not contain a ready-to-use balanced parent
+molecule classification dataset for CLEAR graph prediction. Existing
+`balanced`, `label01`, `sft_v3`, PPO prompt, candidate pool, selector, and
+`hiv_quick` artifacts are not CLEAR graphPred training datasets. They must not
+be used as a substitute for `aids_full.pickle` / `aids_datasplit.pickle`.
+
+For `dataset=aids`, the project patch
+`patches/clear_official/004_aids_weighted_graphpred.patch` keeps the same
+prepared AIDS max100 x10 dataset and fixes class imbalance inside CLEAR
+graphPred training by using class-weighted `CrossEntropyLoss`. The class weight
+is computed from the current training split:
+
+```text
+weight_c = total_train / (num_classes * count_c)
+```
+
+The patched pred run logs:
+
+```text
+[CLEAR_AIDS_CLASS_BALANCE]
+train_label_counts=...
+class_weights=...
+```
+
+It also computes prediction metrics over the full validation/test split rather
+than averaging batch-level AUC/F1 values. AIDS graphPred checkpoint selection
+uses validation F1 by default instead of only validation loss, and the logs
+include `y_true_counts`, `y_pred_counts`, `positive_pred_rate`,
+`balanced_accuracy`, `f1`, and `roc_auc`.
+
 ## 4. Why Data and Checkpoints Are Not Committed
 
 Datasets, checkpoints, model weights, generated logs, and experiment outputs can be large and machine-specific. They should not be committed to ordinary Git history.

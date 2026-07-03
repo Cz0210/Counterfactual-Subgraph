@@ -6,6 +6,59 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-03] Use weighted CLEAR graphPred training for AIDS/HIV imbalance
+
+### Background
+The canonical AIDS/HIV source is `data/raw/AIDS/HIV.csv` with
+`SMILES_COLUMN=smiles`, `LABEL_COLUMN=HIV_active`, and `TARGET_LABEL=1`.
+The raw distribution is strongly imbalanced (`HIV_active=0: 39684`,
+`HIV_active=1: 1443`). The CLEAR AIDS max100 x10 dataset preserves this
+natural imbalance, and the initial CLEAR graph prediction run degenerated into
+an almost majority-class predictor.
+
+An audit found no existing balanced parent molecule classification dataset that
+can be directly used for CLEAR `pred`. Existing balanced or label-conditioned
+artifacts are SFT/PPO prompt files, label-specific candidate pools, selector
+outputs, or `hiv_quick` evaluation outputs. They are not CLEAR graphPred
+training data and must not be used as a substitute for the prepared AIDS
+pickles.
+
+### Decision
+Keep the prepared CLEAR AIDS dataset:
+
+```text
+baselines/clear_official/dataset/aids_full.pickle
+baselines/clear_official/dataset/aids_datasplit.pickle
+```
+
+Add `patches/clear_official/004_aids_weighted_graphpred.patch` so the official
+CLEAR `train_pred.py` runtime copy uses class-weighted cross entropy only for
+`dataset=aids`. The class weights are computed from the current training split:
+
+```text
+weight_c = total_train / (num_classes * count_c)
+```
+
+The patch also changes graphPred metrics to be computed over the full
+validation/test split instead of averaging batch-level AUC/F1. AIDS pred logs
+now report training label counts, class weights, `y_true_counts`,
+`y_pred_counts`, `positive_pred_rate`, `balanced_accuracy`, F1, and ROC-AUC.
+For AIDS pred, checkpoint selection prefers validation F1 rather than validation
+loss alone.
+
+### Consequences
+The canonical AIDS/HIV raw dataset and CLEAR max100 x10 pickles remain the
+source for CLEAR AIDS pred. No new balanced evaluation dataset is introduced.
+SFT/PPO prompt files, label1 candidate pools, and `hiv_quick` evaluation
+outputs remain forbidden as CLEAR graphPred training data. The fix is isolated
+to the CLEAR patch workflow and does not change PPO, selector, candidate pool,
+or unified evaluation logic.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-03] Evaluate GlobalGCE on canonical AIDS/HIV labels
 
 ### Background

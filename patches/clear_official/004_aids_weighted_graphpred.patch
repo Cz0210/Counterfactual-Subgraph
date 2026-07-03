@@ -1,0 +1,312 @@
+--- a/src/train_pred.py
++++ b/src/train_pred.py
+@@ -12,6 +12,7 @@
+ import os
+ import sys
+ import scipy.io as scio
++from collections import Counter
+ 
+ import numpy as np
+ import data_preprocessing as dpp
+@@ -20,7 +21,7 @@
+ import random
+ from data_sampler import GraphData
+ from operator import itemgetter
+-from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
++from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, balanced_accuracy_score
+ 
+ sys.path.append('../')
+ torch.backends.cudnn.enabled = False
+@@ -43,6 +44,7 @@
+ parser.add_argument('--dropout', type=float, default=0.1)
+ 
+ parser.add_argument('--dataset', default='ogbg_molhiv', help='dataset to use',
++# CLEAR_WRAPPER_AIDS_WEIGHTED_GRAPHPRED
+                     choices=['community', 'ogbg_molhiv', 'aids', 'imdb_m'])
+ parser.add_argument('--lr', type=float, default=1e-3,
+                     help='learning rate for optimizer')  # community: 1e-3
+@@ -68,11 +70,69 @@
+ def compute_loss(params):
+     labels, y_pred = params['labels'], params['y_pred']
+ 
+-    loss = F.nll_loss(F.log_softmax(y_pred, dim=-1), labels.view(-1).long())
++    class_weights = params.get('class_weights')
++    if class_weights is not None:
++        class_weights = class_weights.to(y_pred.device)
++    loss = F.nll_loss(F.log_softmax(y_pred, dim=-1), labels.view(-1).long(), weight=class_weights)
+ 
+     loss_results = {'loss': loss}
+     return loss_results
+ 
++
++def _label_scalar(value):
++    arr = np.asarray(value).reshape(-1)
++    return int(arr[0])
++
++
++def _count_dict(values):
++    counter = Counter(int(v) for v in values)
++    return {str(label): int(counter.get(label, 0)) for label in sorted({0, 1, *counter.keys()})}
++
++
++def compute_class_weights_from_split(data, idx_train, num_class, dataset):
++    if dataset != 'aids':
++        return None
++    labels = [_label_scalar(data.labels_all[int(index)]) for index in idx_train]
++    counts = Counter(labels)
++    total = float(len(labels))
++    weights = []
++    for class_id in range(int(num_class)):
++        count = float(counts.get(class_id, 0))
++        if count <= 0:
++            weights.append(0.0)
++        else:
++            weights.append(total / (float(num_class) * count))
++    class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
++    print('[CLEAR_AIDS_CLASS_BALANCE]')
++    print('train_label_counts=', _count_dict(labels))
++    print('class_weights=', [float(value) for value in class_weights.detach().cpu().numpy().tolist()])
++    return class_weights
++
++
++def _safe_float(value):
++    if value is None:
++        return float('nan')
++    if isinstance(value, torch.Tensor):
++        return float(value.detach().cpu().item())
++    return float(value)
++
++
++def _format_float(value):
++    number = _safe_float(value)
++    if math.isnan(number):
++        return 'nan'
++    return f'{number:.4f}'
++
++
++def _checkpoint_is_better(value, best_value, checkpoint_metric):
++    number = _safe_float(value)
++    if math.isnan(number):
++        return False
++    if checkpoint_metric == 'loss':
++        return number < best_value
++    return number > best_value
++
++
+ def train(params):
+     epochs, model, optimizer, train_loader, val_loader, test_loader, dataset, metrics = \
+         params['epochs'], params['model'], params['optimizer'], \
+@@ -80,8 +140,10 @@
+     save_model = params['save_model'] if 'save_model' in params else True
+     print("start training!")
+ 
++    class_weights = params.get('class_weights')
++    checkpoint_metric = params.get('checkpoint_metric', 'loss')
+     time_begin = time.time()
+-    best_loss = float('inf')
++    best_checkpoint_value = float('inf') if checkpoint_metric == 'loss' else -float('inf')
+ 
+     for epoch in range(epochs + 1):
+         model.train()
+@@ -102,7 +164,7 @@
+             model_return = model(features, adj)
+ 
+             # compute loss
+-            loss_params = {'model': model, 'labels': labels}
++            loss_params = {'model': model, 'labels': labels, 'class_weights': class_weights}
+             loss_params.update(model_return)
+ 
+             loss_results = compute_loss(loss_params)
+@@ -116,8 +178,8 @@
+         # evaluate
+         if epoch % 100 == 0:
+             model.eval()
+-            eval_params_val = {'model': model, 'data_loader': val_loader, 'dataset': dataset, 'metrics': metrics}
+-            eval_params_tst = {'model': model, 'data_loader': test_loader, 'dataset': dataset, 'metrics': metrics}
++            eval_params_val = {'model': model, 'data_loader': val_loader, 'dataset': dataset, 'metrics': metrics, 'class_weights': class_weights}
++            eval_params_tst = {'model': model, 'data_loader': test_loader, 'dataset': dataset, 'metrics': metrics, 'class_weights': class_weights}
+             eval_results_val = test(eval_params_val)
+             eval_results_tst = test(eval_params_tst)
+             val_loss = eval_results_val['loss']
+@@ -125,21 +187,40 @@
+             metrics_results_val = ""
+             metrics_results_tst = ""
+             for k in metrics:
+-                metrics_results_val += f"{k}_val: {eval_results_val[k]:.4f} | "
+-                metrics_results_tst += f"{k}_tst: {eval_results_tst[k]:.4f} | "
++                metrics_results_val += f"{k}_val: {_format_float(eval_results_val[k])} | "
++                metrics_results_tst += f"{k}_tst: {_format_float(eval_results_tst[k])} | "
+ 
+-            print(f"[Train] Epoch {epoch}: train_loss: {(loss):.4f} |  "
+-                  f"val_loss: {(val_loss):.4f} |" + metrics_results_val + metrics_results_tst +
++            print(f"[Train] Epoch {epoch}: train_loss: {_format_float(loss)} |  "
++                  f"val_loss: {_format_float(val_loss)} |" + metrics_results_val + metrics_results_tst +
+                   f"time: {(time.time() - time_begin):.4f} |")
++            if dataset == 'aids':
++                print(
++                    f"[CLEAR_AIDS_PRED_METRICS] epoch={epoch} split=val "
++                    f"y_true_counts={eval_results_val['y_true_counts']} "
++                    f"y_pred_counts={eval_results_val['y_pred_counts']} "
++                    f"positive_pred_rate={_format_float(eval_results_val['positive_pred_rate'])} "
++                    f"balanced_accuracy={_format_float(eval_results_val['balanced_accuracy'])} "
++                    f"f1={_format_float(eval_results_val['F1-score'])} "
++                    f"roc_auc={_format_float(eval_results_val['AUC-ROC'])}"
++                )
++                print(
++                    f"[CLEAR_AIDS_PRED_METRICS] epoch={epoch} split=test "
++                    f"y_true_counts={eval_results_tst['y_true_counts']} "
++                    f"y_pred_counts={eval_results_tst['y_pred_counts']} "
++                    f"positive_pred_rate={_format_float(eval_results_tst['positive_pred_rate'])} "
++                    f"balanced_accuracy={_format_float(eval_results_tst['balanced_accuracy'])} "
++                    f"f1={_format_float(eval_results_tst['F1-score'])} "
++                    f"roc_auc={_format_float(eval_results_tst['AUC-ROC'])}"
++                )
+ 
+             # save
+             if save_model:
+-                val_loss = eval_results_val['loss']
+-                if val_loss < best_loss:
+-                    best_loss = val_loss
++                checkpoint_value = eval_results_val.get(checkpoint_metric, eval_results_val['loss'])
++                if _checkpoint_is_better(checkpoint_value, best_checkpoint_value, checkpoint_metric):
++                    best_checkpoint_value = _safe_float(checkpoint_value)
+                     path_model = f'../models_save/prediction/weights_graphPred__{args.dataset}.pt'
+                     torch.save(model.state_dict(), path_model)
+-                    print('model saved in ', path_model)
++                    print('model saved in ', path_model, 'checkpoint_metric=', checkpoint_metric, 'checkpoint_value=', _format_float(checkpoint_value))
+ 
+     return
+ 
+@@ -148,14 +229,15 @@
+     model, data_loader, dataset, metrics = params['model'], params['data_loader'], params['dataset'], params['metrics']
+     model.eval()
+ 
+-    eval_results_all = {k: 0.0 for k in metrics}
+-    size_all = 0
+     loss = 0.0
+     batch_num = 0
++    y_true_all = []
++    y_score_all = []
++    y_pred_all = []
++    class_weights = params.get('class_weights')
+     for batch_idx, data in enumerate(data_loader):
+         batch_num += 1
+         batch_size = len(data['labels'])
+-        size_all += batch_size
+ 
+         features = data['features'].float().to(device)
+         adj = data['adj'].float().to(device)
+@@ -170,44 +252,56 @@
+         y_pred = model_return['y_pred']
+ 
+         # compute loss
+-        loss_params = {'model': model, 'labels': labels}
++        loss_params = {'model': model, 'labels': labels, 'class_weights': class_weights}
+         loss_params.update(model_return)
+ 
+         loss_results = compute_loss(loss_params)
+         loss_batch = loss_results['loss']
+-        loss += loss_batch
++        loss += float(loss_batch.detach().cpu().item())
+ 
+-        # evaluate metrics
+-        eval_params = model_return.copy()
+-        eval_params.update({'y_true': labels, 'y_pred': y_pred, 'metrics': metrics})
++        y_prob = F.softmax(y_pred, dim=-1)
++        pred_label = y_prob.argmax(dim=1).view(-1)
++        y_true_all.extend(labels.detach().cpu().numpy().astype(int).reshape(-1).tolist())
++        y_pred_all.extend(pred_label.detach().cpu().numpy().astype(int).reshape(-1).tolist())
++        if y_prob.shape[1] > 1:
++            y_score_all.extend(y_prob[:, 1].detach().cpu().numpy().reshape(-1).tolist())
++        else:
++            y_score_all.extend(y_prob[:, 0].detach().cpu().numpy().reshape(-1).tolist())
+ 
+-        eval_results = evaluate(eval_params)
+-        # batch -> all, if the metrics is calculated by averaging over all instances
+-        for k in metrics:
+-            eval_results_all[k] += (batch_size * eval_results[k])
+-
+-    for k in metrics:
+-        eval_results_all[k] /= size_all
+-
+-    loss = loss / batch_num
++    eval_results_all = evaluate(
++        {
++            'y_true': np.asarray(y_true_all),
++            'y_score': np.asarray(y_score_all),
++            'y_pred_label': np.asarray(y_pred_all),
++            'metrics': metrics,
++        }
++    )
++    eval_results_all['y_true_counts'] = _count_dict(y_true_all)
++    eval_results_all['y_pred_counts'] = _count_dict(y_pred_all)
++    eval_results_all['positive_pred_rate'] = float(np.mean(np.asarray(y_pred_all) == 1)) if y_pred_all else 0.0
++    eval_results_all['balanced_accuracy'] = balanced_accuracy_score(y_true_all, y_pred_all) if y_true_all else float('nan')
++    loss = loss / max(1, batch_num)
+     eval_results_all['loss'] = loss
+     return eval_results_all
+ 
+ def evaluate(params):
+-    y_true, y_pred, metrics = params['y_true'], params['y_pred'], params['metrics']
+-    # y_pred_binary = torch.where(y_pred >= 0.5, torch.tensor(1.0).to(device), torch.tensor(0.0).to(device))
+-    y_pred = F.softmax(y_pred, dim=-1)
+-    pred_label = y_pred.argmax(dim=1).view(-1, 1)  # n x 1
++    y_true, y_score, pred_label, metrics = params['y_true'], params['y_score'], params['y_pred_label'], params['metrics']
++    y_true = np.asarray(y_true).astype(int).reshape(-1)
++    y_score = np.asarray(y_score).astype(float).reshape(-1)
++    pred_label = np.asarray(pred_label).astype(int).reshape(-1)
+ 
+     eval_results = {}
+     if 'Accuracy' in metrics:
+-        acc = accuracy_score(y_true.cpu().numpy(), pred_label.cpu().numpy())
++        acc = accuracy_score(y_true, pred_label)
+         eval_results['Accuracy'] = acc
+     if 'AUC-ROC' in metrics:
+-        auc_roc = roc_auc_score(y_true.cpu().numpy(), y_pred[:,1].detach().cpu().numpy())
++        if len(np.unique(y_true)) < 2:
++            auc_roc = float('nan')
++        else:
++            auc_roc = roc_auc_score(y_true, y_score)
+         eval_results['AUC-ROC'] = auc_roc
+     if 'F1-score' in metrics:
+-        f1 = f1_score(y_true.cpu().numpy(), pred_label.cpu().numpy())
++        f1 = f1_score(y_true, pred_label, zero_division=0)
+         eval_results['F1-score'] = f1
+     return eval_results
+ 
+@@ -245,6 +339,8 @@
+     idx_val = idx_val_list[0]
+     idx_test = idx_test_list[0]
+ 
++    class_weights = compute_class_weights_from_split(data, idx_train, num_class, args.dataset)
++    checkpoint_metric = 'F1-score' if args.dataset == 'aids' else 'loss'
+     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+ 
+     # data loader
+@@ -258,21 +354,22 @@
+     # train
+     train_params = {'epochs': args.epochs, 'model': model, 'optimizer': optimizer,
+                     'train_loader': train_loader, 'val_loader': val_loader, 'test_loader': test_loader,
+-                    'dataset': args.dataset, 'metrics': metrics, 'save_model': True}
++                    'dataset': args.dataset, 'metrics': metrics, 'save_model': True,
++                    'class_weights': class_weights, 'checkpoint_metric': checkpoint_metric}
+     train(train_params)
+ 
+     # test
+     # model = models.GraphCFE(init_params=init_params, args=args).to(device)
+     # model.load_state_dict(torch.load(model_path + f'weights_graphCFE_{args.dataset}_exp' + str(exp_i) + '.pt'))
+ 
+-    test_params = {'model': model, 'dataset': args.dataset, 'data_loader': test_loader, 'metrics': metrics}
++    test_params = {'model': model, 'dataset': args.dataset, 'data_loader': test_loader, 'metrics': metrics, 'class_weights': class_weights}
+     eval_results = test(test_params)
+ 
+     for k in eval_results:
+-        if isinstance(eval_results[k], list):
++        if isinstance(eval_results[k], list) or isinstance(eval_results[k], dict):
+             print(k, ": ", eval_results[k])
+         else:
+-            print(k, f": {eval_results[k]:.4f}")
++            print(k, f": {_format_float(eval_results[k])}")
+ 
+ 
+ 
