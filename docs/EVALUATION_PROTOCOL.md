@@ -16,6 +16,8 @@ Because of this heterogeneity, cross-baseline evaluation should not force every 
 
 SuppCov is temporarily reserved for subgraph-specific auxiliary analysis. It is not the current main cross-baseline metric. In future work, SuppCov may still be useful for methods whose outputs are explicitly subgraphs, fragments, or rule left-hand sides, but it should not be used as the final fair comparison metric across all baseline families.
 
+For AIDS/HIV experiments, every final CCRCOV / CFDrop / FlipRate / Cost / Redundancy table must follow `docs/DATASET_CONTRACT.md`. The canonical source is `data/raw/AIDS/HIV.csv` with `SMILES_COLUMN=smiles`, `LABEL_COLUMN=HIV_active`, and `TARGET_LABEL=1`. Legacy `hiv` / `hiv_quick` names and graph-baseline `aids` keys are internal names for that same source; `ogbg_molhiv` is engineering validation only.
+
 ## 2. Main Metric: CCRCov
 
 Given a selected set of global explanations or actions

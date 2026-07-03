@@ -96,6 +96,7 @@ The sync script uses `sacct` first and falls back to `squeue` when needed. If ne
 - `docs/EXPERIMENT_LOG.md` is a human-readable append-only experiment log and can be committed to git.
 - `outputs/hpc/experiment_registry/jobs.jsonl` is the machine-readable experiment registry.
 - Each experiment should at least fill `--name` and `--tags`.
+- Final AIDS/HIV baseline jobs should record the dataset contract metadata in `--notes` or environment variables: `DATASET_SOURCE=data/raw/AIDS/HIV.csv`, `SMILES_COLUMN=smiles`, `LABEL_COLUMN=HIV_active`, `TARGET_LABEL=1`, `BASELINE_DATASET_KEY=<hiv|aids|...>`, `TEACHER_PATH` or `TEACHER_KIND`, and `CF_MODE=strict_flip`.
 - `--expected-output-root` should be filled whenever the output root is known before submission.
 - Important result paths should be recorded in `--notes`.
 - After completion, append key result paths such as `selector_report`, `audit_report`, `combined_report`, figures, and final tables to a later status section or a follow-up note.

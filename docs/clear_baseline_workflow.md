@@ -72,7 +72,9 @@ imdb_m:
 
 `ogbg_molhiv` was used as a CLEAR engineering validation dataset. It is not the
 AIDS/HIV main result. The AIDS main baseline should use CLEAR dataset name
-`aids`, prepared from `data/raw/AIDS/HIV.csv`.
+`aids`, prepared from `data/raw/AIDS/HIV.csv` with `SMILES_COLUMN=smiles` and
+`LABEL_COLUMN=HIV_active`. This follows the repository-wide AIDS/HIV dataset
+contract in `docs/DATASET_CONTRACT.md`.
 
 Prepare the AIDS pickles on HPC with:
 
@@ -91,9 +93,13 @@ outputs/hpc/baselines/clear/aids/dataset/clear_aids_dataset_summary.json
 The split is a deterministic stratified CLEAR-internal train/val/test split
 with default ratios `0.8/0.1/0.1`, seed `0`, and `10` split repetitions so it
 matches CLEAR's official `exp_num=10` loader expectation. The AIDS preparation
-keeps molecules with at most `100` atoms by default. This split is used for
-CLEAR's own prediction/CFE training. It is not the same thing as the historical
-`hiv_quick` full label-1 evaluation pool.
+keeps molecules with at most `100` atoms by default (`MAX_NUM_NODES=100`) to
+reduce sample filtering caused by CLEAR's dense graph padding. This split is
+used for CLEAR's own prediction/CFE training. It is not the same thing as the
+historical `hiv_quick` full label-1 evaluation pool.
+
+Do not place `ogbg_molhiv` CLEAR metrics in the final AIDS/HIV baseline table.
+Those runs are engineering validation only.
 
 ## 4. Why Data and Checkpoints Are Not Committed
 

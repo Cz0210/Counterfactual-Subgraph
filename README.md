@@ -74,6 +74,14 @@ See:
 
 ---
 
+## Dataset Contract
+
+Final experiments use the canonical AIDS/HIV dataset: `data/raw/AIDS/HIV.csv` with `smiles` and `HIV_active` columns. Internal names `hiv`, `hiv_quick`, and `aids` may appear in scripts, but final results must trace back to this canonical CSV. `ogbg_molhiv` is engineering validation only.
+
+See `docs/DATASET_CONTRACT.md`.
+
+---
+
 ## 3. Planned Repository Layout
 
 ```text

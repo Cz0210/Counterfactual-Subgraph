@@ -28,6 +28,8 @@ All baseline comparisons must use:
 
 Original baseline paper metrics may be recorded as historical or diagnostic context, but the final cross-baseline comparison must be recomputed under the project CCRCov protocol.
 
+For AIDS/HIV results, the dataset contract in `docs/DATASET_CONTRACT.md` is mandatory metadata. Final tables must trace back to `data/raw/AIDS/HIV.csv` with `SMILES_COLUMN=smiles`, `LABEL_COLUMN=HIV_active`, and `TARGET_LABEL=1`. Internal names such as `hiv`, `hiv_quick`, and `aids` are adapter keys for the same canonical source. `ogbg_molhiv` is engineering validation only and must not be reported as the final AIDS/HIV result.
+
 ## Deletion-only Convention
 
 Ours is a deletion-only subgraph method. Its native intervention is hard deletion:

@@ -1,6 +1,6 @@
 # CCRCov Distance Reproduction: GREED-GED and MolCLR-Embedding
 
-This document defines the current distance-evaluation workflow for close counterfactual coverage on HIV. The goal is to evaluate Ours and the GT-FullGraph proxy baseline under the same CCRCov protocol without sending all fullgraph pairs to exact NetworkX GED.
+This document defines the current distance-evaluation workflow for close counterfactual coverage on the canonical AIDS/HIV dataset. The goal is to evaluate Ours and the GT-FullGraph proxy baseline under the same CCRCov protocol without sending all fullgraph pairs to exact NetworkX GED.
 
 ## Motivation
 
@@ -8,7 +8,7 @@ The previous close-CF sweep could become intractable when a fullgraph baseline w
 
 The project therefore keeps NetworkX GED only as a small debug option and adds two scalable distance lines:
 
-- **GREED-GED**: train a GREED-style neural graph distance model on HIV graph pairs and use its predicted normalized GED inside CCRCov.
+- **GREED-GED**: train a GREED-style neural graph distance model on AIDS/HIV graph pairs and use its predicted normalized GED inside CCRCov.
 - **MolCLR-Embedding**: encode parent, hard-deletion residual, and GT-FullGraph candidate molecules with a pretrained MolCLR GIN encoder; use \(1-\cos(h_G,h_{G^a})\) as distance.
 
 ## Why GREED
@@ -19,23 +19,27 @@ GCFExplainer cites a GREED-style neural GED approximation for scalable graph dis
 \hat d_{\mathrm{GREED}}(G_a,G_b)=\|Z_{G_a}-Z_{G_b}\|_2.
 \]
 
-The model is trained on HIV graph pairs with normalized GED-style labels. Deletion pairs use exact deletion edit cost. Fullgraph/random pairs avoid default NetworkX exact GED; when GEDLIB is unavailable, the current implementation uses a bounded atom/bond count approximation and records the label source.
+The model is trained on AIDS/HIV graph pairs with normalized GED-style labels. Deletion pairs use exact deletion edit cost. Fullgraph/random pairs avoid default NetworkX exact GED; when GEDLIB is unavailable, the current implementation uses a bounded atom/bond count approximation and records the label source.
 
-## HIV vs AIDS
+## AIDS/HIV Dataset Contract
 
-The current workflow targets HIV SMILES data used by this project. It is separate from the AIDS benchmark used by some official baseline repositories. Paths may include `data/raw/AIDS/HIV.csv` for historical reasons, but the label column is normally `HIV_active` in the raw CSV and `label` in project-generated prompt CSVs.
+The current workflow targets the canonical AIDS/HIV dataset defined in `docs/DATASET_CONTRACT.md`. In this project, `hiv` and `hiv_quick` are legacy internal names for the same raw CSV, while `aids` is the official graph-baseline dataset key used by CLEAR / GCF-style adapters. They must trace back to:
 
-Default project dataset:
-
-```text
-outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv
-```
-
-Raw HIV fallback:
+Canonical raw CSV:
 
 ```text
 data/raw/AIDS/HIV.csv
 ```
+
+Canonical columns:
+
+```text
+SMILES_COLUMN=smiles
+LABEL_COLUMN=HIV_active
+TARGET_LABEL=1
+```
+
+Project-generated prompt CSVs may use `label` after preprocessing, but final results must still record the canonical source and label column. `ogbg_molhiv` is engineering validation only and must not be reported as the final AIDS/HIV baseline result.
 
 ## GREED-GED Data Generation
 

@@ -6,6 +6,80 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-03] Evaluate GlobalGCE on canonical AIDS/HIV labels
+
+### Background
+GlobalGCE official AIDS top30 reproduction and export produce
+`globalgce_rules.jsonl` and `globalgce_cfs_graphs.jsonl`. The official AIDS
+graph format has its own preprocessing and label alignment caveats, so its
+internal graph labels must not be treated as final project labels.
+
+### Decision
+Add a project-facing GlobalGCE evaluator path for the canonical AIDS/HIV
+dataset:
+
+- final dataset display name is `AIDS/HIV`;
+- raw source is `data/raw/AIDS/HIV.csv`;
+- labels come from `HIV_active`;
+- target label is `1`;
+- GlobalGCE official graph outputs are treated as baseline-generated candidate
+  artifacts;
+- `native-cf-fullgraph` converts GlobalGCE CF graphs to RDKit molecules and
+  canonical SMILES, then evaluates them with the project teacher;
+- strict CCRCOV uses `distance <= threshold` and `pred_after != target_label`;
+- smoke distance is explicitly named `distance_type=tanimoto_fingerprint` and
+  must not be reported as GED.
+
+### Consequences
+SuppCov is skipped for `native-cf-fullgraph` because complete CF graph
+candidates are not support rules. `native-cf-delta-action` and `rule-action`
+remain safety/audit modes until reliable source-parent atom mapping and
+attachment-aware LHS/RHS replacement are available.
+
+### Status
+Accepted
+
+---
+
+## Decision: AIDS/HIV is the canonical main dataset
+
+### Background
+Project scripts and baseline adapters historically use several names around the
+same benchmark: `hiv`, `hiv_quick`, `aids`, and `ogbg_molhiv`. This creates a
+risk that engineering validation runs are mixed with final AIDS/HIV baseline
+results.
+
+### Decision
+AIDS and HIV are not two separate main datasets in this project. The canonical
+main dataset is the AIDS/HIV dataset backed by the single raw CSV:
+
+```text
+data/raw/AIDS/HIV.csv
+```
+
+The canonical columns are `SMILES_COLUMN=smiles`, `LABEL_COLUMN=HIV_active`,
+and `TARGET_LABEL=1`. Different modules may keep different internal dataset
+keys:
+
+- `hiv` / `hiv_quick` are legacy internal names for the same raw CSV;
+- `aids` is the official graph-baseline dataset key for CLEAR and GCF-style
+  graph-format adapters;
+- `ogbg_molhiv` is engineering validation only.
+
+Final comparison must be unified to `data/raw/AIDS/HIV.csv` and must record the
+metadata required by `docs/DATASET_CONTRACT.md`.
+
+### Consequences
+Do not report `ogbg_molhiv` CLEAR results as final AIDS/HIV baseline results.
+All final CCRCOV, CFDrop, FlipRate, Cost, and Redundancy tables must be
+traceable to the canonical CSV, label column, target label, baseline dataset
+key, teacher/oracle path or teacher kind, and `CF_MODE=strict_flip`.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-02] Add CLEAR AIDS dataset support
 
 ### Background
