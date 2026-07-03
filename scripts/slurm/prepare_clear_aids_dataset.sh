@@ -27,8 +27,9 @@ SEED="${SEED:-0}"
 TRAIN_RATIO="${TRAIN_RATIO:-0.8}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
 TEST_RATIO="${TEST_RATIO:-0.1}"
+NUM_SPLITS="${NUM_SPLITS:-10}"
 SUMMARY_PATH="${SUMMARY_PATH:-outputs/hpc/baselines/clear/${DATASET}/dataset/clear_${DATASET}_dataset_summary.json}"
-MAX_NUM_NODES="${MAX_NUM_NODES:-30}"
+MAX_NUM_NODES="${MAX_NUM_NODES:-100}"
 X_DIM="${X_DIM:-11}"
 
 mkdir -p logs outputs/hpc/baselines/clear/"${DATASET}"/dataset "${OUT_DIR}"
@@ -50,6 +51,7 @@ echo "SEED=${SEED}"
 echo "TRAIN_RATIO=${TRAIN_RATIO}"
 echo "VAL_RATIO=${VAL_RATIO}"
 echo "TEST_RATIO=${TEST_RATIO}"
+echo "NUM_SPLITS=${NUM_SPLITS}"
 echo "MAX_NUM_NODES=${MAX_NUM_NODES}"
 echo "X_DIM=${X_DIM}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
@@ -82,6 +84,7 @@ python scripts/baselines/clear/prepare_clear_aids_dataset.py \
   --train-ratio "${TRAIN_RATIO}" \
   --val-ratio "${VAL_RATIO}" \
   --test-ratio "${TEST_RATIO}" \
+  --num-splits "${NUM_SPLITS}" \
   --max-num-nodes "${MAX_NUM_NODES}" \
   --x-dim "${X_DIM}" \
   --summary-path "${SUMMARY_PATH}"

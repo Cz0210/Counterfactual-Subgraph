@@ -35,8 +35,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-ratio", type=float, default=0.8, help="Train split ratio.")
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation split ratio.")
     parser.add_argument("--test-ratio", type=float, default=0.1, help="Test split ratio.")
-    parser.add_argument("--exp-num", type=int, default=3, help="Number of CLEAR split repetitions.")
-    parser.add_argument("--max-num-nodes", type=int, default=30, help="Drop molecules larger than this node cap.")
+    parser.add_argument("--num-splits", type=int, default=10, help="Number of CLEAR split repetitions.")
+    parser.add_argument(
+        "--exp-num",
+        type=int,
+        dest="num_splits",
+        help="Backward-compatible alias for --num-splits.",
+    )
+    parser.add_argument("--max-num-nodes", type=int, default=100, help="Drop molecules larger than this node cap.")
     parser.add_argument("--x-dim", type=int, default=11, help="Node feature dimension. Default matches OGBG export shape.")
     parser.add_argument("--summary-path", default=DEFAULT_SUMMARY_PATH, help="Summary JSON path.")
     parser.add_argument("--config", default=None, help="Accepted for Slurm/config compatibility; not used.")
@@ -172,7 +178,7 @@ def make_splits(
     val_ratio: float,
     test_ratio: float,
     seed: int,
-    exp_num: int,
+    num_splits: int,
     np: Any,
 ) -> tuple[list[Any], list[Any], list[Any], str]:
     total = train_ratio + val_ratio + test_ratio
@@ -189,8 +195,8 @@ def make_splits(
         source = "sklearn_stratified_shuffle"
         labels_np = np.asarray(labels)
         indices = np.arange(len(labels_np))
-        for exp_i in range(exp_num):
-            split_seed = seed + exp_i
+        for split_id in range(num_splits):
+            split_seed = seed + split_id
             train_split = StratifiedShuffleSplit(n_splits=1, train_size=train_ratio, random_state=split_seed)
             train_idx, temp_idx = next(train_split.split(indices, labels_np))
             temp_labels = labels_np[temp_idx]
@@ -204,8 +210,8 @@ def make_splits(
     except Exception:
         pass
 
-    for exp_i in range(exp_num):
-        train, val, test = stratified_split_once(labels, train_ratio, val_ratio, seed + exp_i)
+    for split_id in range(num_splits):
+        train, val, test = stratified_split_once(labels, train_ratio, val_ratio, seed + split_id)
         idx_train_list.append(np.asarray(train, dtype=int))
         idx_val_list.append(np.asarray(val, dtype=int))
         idx_test_list.append(np.asarray(test, dtype=int))
@@ -311,7 +317,7 @@ def main() -> int:
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         seed=args.seed,
-        exp_num=args.exp_num,
+        num_splits=args.num_splits,
         np=np,
     )
 
@@ -339,6 +345,8 @@ def main() -> int:
                 "idx_test_list": idx_test_list,
                 "split_source": split_source,
                 "seed": args.seed,
+                "exp_num": args.num_splits,
+                "num_splits": args.num_splits,
                 "train_ratio": args.train_ratio,
                 "val_ratio": args.val_ratio,
                 "test_ratio": args.test_ratio,
@@ -367,7 +375,8 @@ def main() -> int:
         "train_size": int(len(idx_train_list[0])),
         "val_size": int(len(idx_val_list[0])),
         "test_size": int(len(idx_test_list[0])),
-        "exp_num": args.exp_num,
+        "exp_num": args.num_splits,
+        "num_splits": args.num_splits,
         "split_source": split_source,
         "seed": args.seed,
         "output_full_pickle": str(full_pickle),

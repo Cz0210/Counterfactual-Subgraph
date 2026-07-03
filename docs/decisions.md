@@ -20,7 +20,8 @@ Add a project-owned AIDS preparation and patch workflow:
 
 - `scripts/baselines/clear/prepare_clear_aids_dataset.py` converts
   `data/raw/AIDS/HIV.csv` into CLEAR-compatible `aids_full.pickle` and
-  `aids_datasplit.pickle`;
+  `aids_datasplit.pickle`, using `max_num_nodes=100` and `10` deterministic
+  stratified split repetitions by default;
 - `scripts/slurm/prepare_clear_aids_dataset.sh` provides the HPC sbatch
   entrypoint for deterministic stratified CLEAR-internal split preparation;
 - `patches/clear_official/003_support_aids_dataset.patch` adds

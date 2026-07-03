@@ -89,8 +89,10 @@ outputs/hpc/baselines/clear/aids/dataset/clear_aids_dataset_summary.json
 ```
 
 The split is a deterministic stratified CLEAR-internal train/val/test split
-with default ratios `0.8/0.1/0.1` and seed `0`. This split is used for CLEAR's
-own prediction/CFE training. It is not the same thing as the historical
+with default ratios `0.8/0.1/0.1`, seed `0`, and `10` split repetitions so it
+matches CLEAR's official `exp_num=10` loader expectation. The AIDS preparation
+keeps molecules with at most `100` atoms by default. This split is used for
+CLEAR's own prediction/CFE training. It is not the same thing as the historical
 `hiv_quick` full label-1 evaluation pool.
 
 ## 4. Why Data and Checkpoints Are Not Committed
