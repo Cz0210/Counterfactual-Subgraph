@@ -113,6 +113,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cfs-jsonl", default=None)
     parser.add_argument("--rules-jsonl", default=None)
     parser.add_argument("--distance-mode", choices=["tanimoto"], default="tanimoto")
+    parser.add_argument(
+        "--edge-label-mode",
+        choices=["auto", "raw_zero_based", "internal_one_based", "adjacency_only_single"],
+        default=None,
+        help="How to interpret exported GlobalGCE edge labels when converting CF graphs to RDKit.",
+    )
+    parser.add_argument(
+        "--fallback-zero-edge-to-single",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Treat edge label 0/None as SINGLE when adjacency indicates an edge in internal_one_based mode.",
+    )
     parser.add_argument("--cf-mode", choices=["strict_flip", "drop_or_flip", "drop_only"], default=STRICT_CF_MODE)
     parser.add_argument("--min-cf-drop", type=float, default=0.0)
     parser.add_argument("--selection-policy", default="first_valid_unique_top_k")
@@ -151,6 +163,7 @@ def normalize_args(args: argparse.Namespace) -> None:
     args.teacher_path = args.teacher_path or _env_first("TEACHER_PATH")
     args.cfs_jsonl = args.cfs_jsonl or _env_first("CFS_JSONL") or str(resolve_path(args.export_dir) / "globalgce_cfs_graphs.jsonl")
     args.rules_jsonl = args.rules_jsonl or _env_first("RULES_JSONL") or str(resolve_path(args.export_dir) / "globalgce_rules.jsonl")
+    args.edge_label_mode = args.edge_label_mode or _env_first("EDGE_LABEL_MODE") or "auto"
     if args.eval_mode == "native-cf":
         args.eval_mode = "native-cf-fullgraph"
 
@@ -441,9 +454,19 @@ def prepare_cf_candidates(
     invalid_rows: list[dict[str, Any]] = []
     candidates_by_smiles: dict[str, CandidateRecord] = {}
     invalid_reasons: Counter[str] = Counter()
+    edge_label_mode_used_counts: Counter[str] = Counter()
+    edge_label_values_seen_counts: Counter[str] = Counter()
+    conversion_ok_by_edge_label_mode: Counter[str] = Counter()
+    conversion_fail_by_error_type: Counter[str] = Counter()
 
     for raw_index, record in enumerate(cfs):
-        conversion = globalgce_graph_record_to_mol(record)
+        conversion = globalgce_graph_record_to_mol(
+            record,
+            edge_label_mode=args.edge_label_mode,
+            fallback_zero_edge_to_single=bool(args.fallback_zero_edge_to_single),
+        )
+        for value in conversion.edge_label_values_seen or []:
+            edge_label_values_seen_counts[str(value)] += 1
         base = {
             "method": "GlobalGCE",
             "dataset": args.dataset_display_name,
@@ -459,11 +482,22 @@ def prepare_cf_candidates(
             "error_type": conversion.error_type,
             "error_message": conversion.error_message,
             "invalid_reason": conversion.invalid_reason,
+            "edge_label_mode_requested": conversion.edge_label_mode_requested,
+            "edge_label_mode_used": conversion.edge_label_mode_used,
+            "edge_label_mode_attempts": conversion.edge_label_mode_attempts,
+            "edge_label_values_seen": conversion.edge_label_values_seen,
+            "adjacency_nonzero_count": conversion.adjacency_nonzero_count,
+            "edge_label_nonzero_count": conversion.edge_label_nonzero_count,
         }
         if not conversion.ok or not conversion.smiles:
-            invalid_reasons[str(conversion.invalid_reason or conversion.error_type or "unknown")] += 1
+            reason = str(conversion.invalid_reason or conversion.error_type or "unknown")
+            invalid_reasons[reason] += 1
+            conversion_fail_by_error_type[reason] += 1
             invalid_rows.append(base)
             continue
+        mode_used = str(conversion.edge_label_mode_used or "unknown")
+        edge_label_mode_used_counts[mode_used] += 1
+        conversion_ok_by_edge_label_mode[mode_used] += 1
         if conversion.smiles in candidates_by_smiles:
             row = dict(base)
             row.update(
@@ -493,27 +527,28 @@ def prepare_cf_candidates(
         row.update({"candidate_id": candidate_id, "canonical_smiles": conversion.smiles, "duplicate": False})
         valid_rows.append(row)
 
-    unique_candidates = list(candidates_by_smiles.values())
+    unique_candidates_all = list(candidates_by_smiles.values())
+    selection_pool = list(unique_candidates_all)
     if args.max_candidates is not None:
-        unique_candidates = unique_candidates[: int(args.max_candidates)]
+        selection_pool = selection_pool[: int(args.max_candidates)]
     if int(args.top_k) > 0:
-        selected_candidates = unique_candidates[: int(args.top_k)]
+        selected_candidates = selection_pool[: int(args.top_k)]
     else:
-        selected_candidates = unique_candidates
+        selected_candidates = selection_pool
     selected_ids = {candidate.candidate_id for candidate in selected_candidates}
 
     candidate_predictions = predict_teacher_proba_smiles(
         teacher,
-        [candidate.canonical_smiles for candidate in unique_candidates],
+        [candidate.canonical_smiles for candidate in unique_candidates_all],
         target_label=int(args.target_label),
     )
-    for candidate, pred in zip(unique_candidates, candidate_predictions):
+    for candidate, pred in zip(unique_candidates_all, candidate_predictions):
         candidate.teacher_ok = bool(pred.get("ok"))
         candidate.pred_label = pred.get("pred_label")
         candidate.p_target = pred.get("p_target")
         candidate.teacher_error = pred.get("error")
 
-    for candidate in unique_candidates:
+    for candidate in unique_candidates_all:
         for row in [item for item in valid_rows if item.get("candidate_id") == candidate.candidate_id]:
             row.update(
                 {
@@ -525,19 +560,37 @@ def prepare_cf_candidates(
                 }
             )
 
-    selected_candidates = [candidate for candidate in selected_candidates if candidate.teacher_ok]
+    selected_candidates_teacher_ok = [candidate for candidate in selected_candidates if candidate.teacher_ok]
+    cfs_conversion_ok_raw = len(valid_rows)
+    cfs_conversion_fail_raw = len(invalid_rows)
+    cfs_conversion_accounted = cfs_conversion_ok_raw + cfs_conversion_fail_raw
     stats = {
         "num_cfs_total": len(cfs),
         "num_candidates_raw": len(cfs),
-        "num_candidates_before_topk": len(unique_candidates),
+        "num_candidates_before_topk": len(unique_candidates_all),
+        "num_valid_unique_candidates_before_topk": len(unique_candidates_all),
+        "num_valid_unique_candidates_after_max_candidates": len(selection_pool),
         "num_candidates_after_topk": len(selected_ids),
         "num_candidates_valid": len(selected_candidates),
-        "cfs_conversion_ok": sum(1 for row in valid_rows if not row.get("duplicate")),
-        "cfs_conversion_fail": len(invalid_rows),
-        "cfs_smiles_ok_rate": safe_rate(sum(1 for row in valid_rows if not row.get("duplicate")), len(cfs)),
-        "cfs_teacher_ok": sum(1 for candidate in unique_candidates if candidate.teacher_ok),
-        "cfs_teacher_ok_rate": safe_rate(sum(1 for candidate in unique_candidates if candidate.teacher_ok), len(unique_candidates)),
+        "num_candidates_teacher_ok_after_topk": len(selected_candidates_teacher_ok),
+        "cfs_conversion_ok": cfs_conversion_ok_raw,
+        "cfs_conversion_fail": cfs_conversion_fail_raw,
+        "cfs_conversion_ok_raw": cfs_conversion_ok_raw,
+        "cfs_conversion_fail_raw": cfs_conversion_fail_raw,
+        "cfs_conversion_accounted": cfs_conversion_accounted,
+        "cfs_conversion_unaccounted": len(cfs) - cfs_conversion_accounted,
+        "cfs_smiles_ok_rate": safe_rate(cfs_conversion_ok_raw, len(cfs)),
+        "cfs_smiles_ok_rate_raw": safe_rate(cfs_conversion_ok_raw, len(cfs)),
+        "selected_valid_rate": safe_rate(len(selected_ids), len(cfs)),
+        "cfs_teacher_ok": sum(1 for candidate in unique_candidates_all if candidate.teacher_ok),
+        "cfs_teacher_ok_rate": safe_rate(sum(1 for candidate in unique_candidates_all if candidate.teacher_ok), len(unique_candidates_all)),
         "invalid_reason_counts": dict(sorted(invalid_reasons.items())),
+        "edge_label_mode_requested": args.edge_label_mode,
+        "fallback_zero_edge_to_single": bool(args.fallback_zero_edge_to_single),
+        "edge_label_mode_used_counts": dict(sorted(edge_label_mode_used_counts.items())),
+        "edge_label_values_seen_counts": dict(sorted(edge_label_values_seen_counts.items())),
+        "conversion_ok_by_edge_label_mode": dict(sorted(conversion_ok_by_edge_label_mode.items())),
+        "conversion_fail_by_error_type": dict(sorted(conversion_fail_by_error_type.items())),
         "selection_policy": args.selection_policy,
     }
     write_csv(
@@ -555,6 +608,10 @@ def prepare_cf_candidates(
             "conversion_ok",
             "conversion_num_nodes",
             "conversion_num_edges",
+            "edge_label_mode_used",
+            "edge_label_values_seen",
+            "adjacency_nonzero_count",
+            "edge_label_nonzero_count",
             "duplicate",
             "selected",
             "teacher_ok",
@@ -578,13 +635,18 @@ def prepare_cf_candidates(
             "conversion_smiles",
             "conversion_num_nodes",
             "conversion_num_edges",
+            "edge_label_mode_requested",
+            "edge_label_mode_attempts",
+            "edge_label_values_seen",
+            "adjacency_nonzero_count",
+            "edge_label_nonzero_count",
             "error_type",
             "error_message",
             "invalid_reason",
             "source_path",
         ],
     )
-    return selected_candidates, stats, valid_rows, invalid_rows
+    return selected_candidates_teacher_ok, stats, valid_rows, invalid_rows
 
 
 def cf_condition(pred_after: int | None, cf_drop: float | None, *, target_label: int, cf_mode: str, min_cf_drop: float) -> bool:
@@ -759,6 +821,9 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
         "cf_mode": args.cf_mode,
         "distance_mode": args.distance_mode,
         "distance_type": TANIMOTO_DISTANCE_TYPE,
+        "edge_label_mode": args.edge_label_mode,
+        "edge_label_mode_requested": candidate_stats.get("edge_label_mode_requested"),
+        "fallback_zero_edge_to_single": candidate_stats.get("fallback_zero_edge_to_single"),
         "top_k": int(args.top_k),
         "selection_policy": args.selection_policy,
         "num_parents": len(parents),
@@ -766,11 +831,20 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
         "num_candidates_raw": candidate_stats.get("num_candidates_raw"),
         "num_candidates_valid": candidate_stats.get("num_candidates_valid"),
         "num_candidates_before_topk": candidate_stats.get("num_candidates_before_topk"),
+        "num_valid_unique_candidates_before_topk": candidate_stats.get("num_valid_unique_candidates_before_topk"),
+        "num_valid_unique_candidates_after_max_candidates": candidate_stats.get("num_valid_unique_candidates_after_max_candidates"),
         "num_candidates_after_topk": candidate_stats.get("num_candidates_after_topk"),
+        "num_candidates_teacher_ok_after_topk": candidate_stats.get("num_candidates_teacher_ok_after_topk"),
         "cfs_conversion_ok": candidate_stats.get("cfs_conversion_ok"),
         "cfs_conversion_fail": candidate_stats.get("cfs_conversion_fail"),
+        "cfs_conversion_ok_raw": candidate_stats.get("cfs_conversion_ok_raw"),
+        "cfs_conversion_fail_raw": candidate_stats.get("cfs_conversion_fail_raw"),
+        "cfs_conversion_accounted": candidate_stats.get("cfs_conversion_accounted"),
+        "cfs_conversion_unaccounted": candidate_stats.get("cfs_conversion_unaccounted"),
         "valid_rate": safe_rate(int(candidate_stats.get("num_candidates_valid") or 0), int(candidate_stats.get("num_cfs_total") or 0)),
         "cfs_smiles_ok_rate": candidate_stats.get("cfs_smiles_ok_rate"),
+        "cfs_smiles_ok_rate_raw": candidate_stats.get("cfs_smiles_ok_rate_raw"),
+        "selected_valid_rate": candidate_stats.get("selected_valid_rate"),
         "cfs_teacher_ok": candidate_stats.get("cfs_teacher_ok"),
         "cfs_teacher_ok_rate": candidate_stats.get("cfs_teacher_ok_rate"),
         "parent_smiles_ok_rate": dataset_audit.get("parent_smiles_ok_rate"),
@@ -802,6 +876,10 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
         "StructRed": None,
         "CovRed": None,
         "invalid_reason_counts": candidate_stats.get("invalid_reason_counts"),
+        "edge_label_mode_used_counts": candidate_stats.get("edge_label_mode_used_counts"),
+        "edge_label_values_seen_counts": candidate_stats.get("edge_label_values_seen_counts"),
+        "conversion_ok_by_edge_label_mode": candidate_stats.get("conversion_ok_by_edge_label_mode"),
+        "conversion_fail_by_error_type": candidate_stats.get("conversion_fail_by_error_type"),
         "label_alignment_warning": label_alignment_audit()["label_alignment_warning"],
         "source_run_root": str(resolve_path(args.run_root)),
         "source_export_dir": str(resolve_path(args.export_dir)),
@@ -817,6 +895,14 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
         "teacher_availability_reason": teacher.availability_reason,
         "first_5_parent_predictions": summary["first_5_parent_predictions"],
         "candidate_conversion": candidate_stats,
+        "EDGE_LABEL_AUDIT": {
+            "edge_label_mode_requested": args.edge_label_mode,
+            "fallback_zero_edge_to_single": bool(args.fallback_zero_edge_to_single),
+            "edge_label_mode_used_counts": candidate_stats.get("edge_label_mode_used_counts"),
+            "edge_label_values_seen_counts": candidate_stats.get("edge_label_values_seen_counts"),
+            "conversion_ok_by_edge_label_mode": candidate_stats.get("conversion_ok_by_edge_label_mode"),
+            "conversion_fail_by_error_type": candidate_stats.get("conversion_fail_by_error_type"),
+        },
         "thresholds": thresholds,
         "LABEL_ALIGNMENT_AUDIT": {
             "globalgce_official_dataset": "AIDS graph format",
@@ -907,8 +993,16 @@ def evaluate_rule_action(args: argparse.Namespace, thresholds: list[float], out_
     cover_sets: dict[int, set[str]] = {}
     for rule_index, rule in enumerate(rules):
         rule_id = int(rule.get("rule_id", rule_index))
-        lhs_conversion = globalgce_graph_record_to_mol(rule.get("lhs") or {})
-        rhs_conversion = globalgce_graph_record_to_mol(rule.get("rhs") or {})
+        lhs_conversion = globalgce_graph_record_to_mol(
+            rule.get("lhs") or {},
+            edge_label_mode=args.edge_label_mode,
+            fallback_zero_edge_to_single=bool(args.fallback_zero_edge_to_single),
+        )
+        rhs_conversion = globalgce_graph_record_to_mol(
+            rule.get("rhs") or {},
+            edge_label_mode=args.edge_label_mode,
+            fallback_zero_edge_to_single=bool(args.fallback_zero_edge_to_single),
+        )
         matched: set[str] = set()
         unsupported_reason = "unsafe_lhs_rhs_replacement_without_attachment_mapping"
         if Chem is None:
@@ -1058,7 +1152,21 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
         f"CF mode: {summary.get('cf_mode')}",
         f"Distance mode: {summary.get('distance_mode')}",
         f"Distance type: {summary.get('distance_type')}",
+        f"Edge label mode: {summary.get('edge_label_mode_requested') or summary.get('edge_label_mode')}",
         f"Top K: {summary.get('top_k')}",
+        "",
+        "Edge label conversion audit:",
+        f"- requested mode: {summary.get('edge_label_mode_requested') or summary.get('edge_label_mode')}",
+        f"- mode used counts: {summary.get('edge_label_mode_used_counts')}",
+        f"- raw conversion ok: {summary.get('cfs_conversion_ok_raw')}",
+        f"- raw conversion fail: {summary.get('cfs_conversion_fail_raw')}",
+        f"- conversion accounted: {summary.get('cfs_conversion_accounted')}",
+        f"- conversion unaccounted: {summary.get('cfs_conversion_unaccounted')}",
+        f"- unique valid before top-k: {summary.get('num_valid_unique_candidates_before_topk')}",
+        f"- selected valid after top-k: {summary.get('num_candidates_after_topk')}",
+        f"- selected teacher-ok after top-k: {summary.get('num_candidates_teacher_ok_after_topk')}",
+        f"- edge label values seen counts: {summary.get('edge_label_values_seen_counts')}",
+        f"- conversion fail by error type: {summary.get('conversion_fail_by_error_type')}",
         "",
         f"CCRCov@0.05: {summary.get('CCRCov@0.05')}",
         f"CCRCov@0.10: {summary.get('CCRCov@0.10')}",
@@ -1170,6 +1278,8 @@ def main() -> int:
     print(f"eval_mode={args.eval_mode}")
     print(f"cf_mode={args.cf_mode}")
     print(f"distance_type={TANIMOTO_DISTANCE_TYPE}")
+    print(f"edge_label_mode={args.edge_label_mode}")
+    print(f"fallback_zero_edge_to_single={args.fallback_zero_edge_to_single}")
     print(f"output_dir={out_dir}")
 
     if args.eval_mode == "native-cf-fullgraph":

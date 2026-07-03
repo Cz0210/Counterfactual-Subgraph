@@ -39,6 +39,7 @@ OUT_DIR=${OUT_DIR:-outputs/hpc/eval/globalgce/aids_hiv_native_cf_fullgraph/label
 EVAL_MODE=${EVAL_MODE:-native-cf-fullgraph}
 CF_MODE=${CF_MODE:-strict_flip}
 DISTANCE_MODE=${DISTANCE_MODE:-tanimoto}
+EDGE_LABEL_MODE=${EDGE_LABEL_MODE:-auto}
 THRESHOLDS=${THRESHOLDS:-0.05,0.10,0.20}
 TOP_K=${TOP_K:-30}
 MIN_CF_DROP=${MIN_CF_DROP:-0.0}
@@ -79,6 +80,7 @@ echo "RULES_JSONL=${RULES_JSONL}"
 echo "EVAL_MODE=${EVAL_MODE}"
 echo "CF_MODE=${CF_MODE}"
 echo "DISTANCE_MODE=${DISTANCE_MODE}"
+echo "EDGE_LABEL_MODE=${EDGE_LABEL_MODE}"
 echo "OUT_DIR=${OUT_DIR}"
 echo "=========================================================="
 
@@ -98,6 +100,7 @@ python scripts/baselines/globalgce/evaluate_globalgce_ccrcov.py \
   --cfs-jsonl "$CFS_JSONL" \
   --rules-jsonl "$RULES_JSONL" \
   --distance-mode "$DISTANCE_MODE" \
+  --edge-label-mode "$EDGE_LABEL_MODE" \
   --cf-mode "$CF_MODE" \
   --min-cf-drop "$MIN_CF_DROP" \
   --thresholds "$THRESHOLDS" \

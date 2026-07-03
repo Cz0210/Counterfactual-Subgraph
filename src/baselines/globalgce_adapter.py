@@ -39,6 +39,11 @@ AIDS_EDGE_LABEL_TO_BOND_ORDER = {
     1: "double",
     2: "triple",
 }
+EDGE_LABEL_MODES = (
+    "internal_one_based",
+    "raw_zero_based",
+    "adjacency_only_single",
+)
 AIDS_CLASS_LABEL_MAP = {
     0: "a",
     1: "i",
@@ -57,6 +62,12 @@ class ConversionResult:
     num_nodes: int = 0
     num_edges: int = 0
     invalid_reason: str | None = None
+    edge_label_mode_requested: str | None = None
+    edge_label_mode_used: str | None = None
+    edge_label_mode_attempts: dict[str, dict[str, Any]] | None = None
+    edge_label_values_seen: list[int | str] | None = None
+    adjacency_nonzero_count: int = 0
+    edge_label_nonzero_count: int = 0
 
     def to_audit_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +78,12 @@ class ConversionResult:
             "num_nodes": self.num_nodes,
             "num_edges": self.num_edges,
             "invalid_reason": self.invalid_reason,
+            "edge_label_mode_requested": self.edge_label_mode_requested,
+            "edge_label_mode_used": self.edge_label_mode_used,
+            "edge_label_mode_attempts": self.edge_label_mode_attempts,
+            "edge_label_values_seen": self.edge_label_values_seen,
+            "adjacency_nonzero_count": self.adjacency_nonzero_count,
+            "edge_label_nonzero_count": self.edge_label_nonzero_count,
         }
 
 
@@ -372,47 +389,173 @@ def _edge_label_value(record: dict[str, Any], source: int, target: int) -> tuple
     matrix = _matrix_from_record(record.get("edge_labels_internal_matrix") or record.get("edge_labels"))
     if not matrix:
         return None, None
-    value = None
+    values: list[Any] = []
     if source < len(matrix) and isinstance(matrix[source], list) and target < len(matrix[source]):
-        value = matrix[source][target]
-    elif target < len(matrix) and isinstance(matrix[target], list) and source < len(matrix[target]):
-        value = matrix[target][source]
+        values.append(matrix[source][target])
+    if target < len(matrix) and isinstance(matrix[target], list) and source < len(matrix[target]):
+        values.append(matrix[target][source])
+    value = None
+    for candidate in values:
+        if candidate is None:
+            continue
+        try:
+            if int(float(candidate)) != 0:
+                value = candidate
+                break
+        except Exception:
+            value = candidate
+            break
+        if value is None:
+            value = candidate
     if value is None:
         return None, None
     try:
         label = int(float(value))
     except Exception:
         return None, f"unknown_edge_label:{value}"
-    if label in {0, 1, 2}:
-        return label, None
-    if label in {3}:  # tolerate 1/2/3 encodings by mapping 3 to triple.
-        return label - 1, None
+    return label, None
+
+
+def _edge_label_values_seen(record: dict[str, Any]) -> list[int | str]:
+    matrix = _matrix_from_record(record.get("edge_labels_internal_matrix") or record.get("edge_labels"))
+    values: set[int | str] = set()
+    for row_index, row in enumerate(matrix):
+        if not isinstance(row, list):
+            continue
+        for col_index, value in enumerate(row):
+            if col_index == row_index:
+                continue
+            if value is None:
+                continue
+            try:
+                values.add(int(float(value)))
+            except Exception:
+                text = str(value).strip()
+                if text:
+                    values.add(text)
+    return sorted(values, key=lambda item: (str(type(item)), str(item)))
+
+
+def _adjacency_nonzero_count(adjacency: list[list[Any]]) -> int:
+    count = 0
+    for row_index, row in enumerate(adjacency):
+        if not isinstance(row, list):
+            continue
+        for col_index, value in enumerate(row):
+            if col_index <= row_index:
+                continue
+            if _safe_float(value) > 0.0:
+                count += 1
+    return count
+
+
+def _edge_label_nonzero_count(record: dict[str, Any]) -> int:
+    count = 0
+    for value in _edge_label_values_seen_with_duplicates(record):
+        try:
+            if int(float(value)) != 0:
+                count += 1
+        except Exception:
+            count += 1
+    return count
+
+
+def _edge_label_values_seen_with_duplicates(record: dict[str, Any]) -> list[Any]:
+    matrix = _matrix_from_record(record.get("edge_labels_internal_matrix") or record.get("edge_labels"))
+    values: list[Any] = []
+    for row_index, row in enumerate(matrix):
+        if not isinstance(row, list):
+            continue
+        for col_index, value in enumerate(row):
+            if col_index == row_index:
+                continue
+            if value is not None:
+                values.append(value)
+    return values
+
+
+def _conversion_stats(record: dict[str, Any], adjacency: list[list[Any]] | None = None) -> dict[str, Any]:
+    adjacency = adjacency or []
+    return {
+        "edge_label_values_seen": _edge_label_values_seen(record),
+        "adjacency_nonzero_count": _adjacency_nonzero_count(adjacency),
+        "edge_label_nonzero_count": _edge_label_nonzero_count(record),
+    }
+
+
+def _bond_type_from_edge_label(
+    label: int | None,
+    *,
+    edge_label_mode: str,
+    fallback_zero_edge_to_single: bool,
+) -> tuple[Any | None, str | None]:
+    if Chem is None:
+        return None, "rdkit_unavailable"
+    if edge_label_mode == "adjacency_only_single":
+        return Chem.BondType.SINGLE, None
+
+    if edge_label_mode == "raw_zero_based":
+        if label is None:
+            raw_label = 0
+        else:
+            raw_label = int(label)
+        if raw_label not in {0, 1, 2}:
+            return None, f"unknown_edge_label:{raw_label}"
+        order = map_aids_edge_label_to_bond_order(raw_label)
+    elif edge_label_mode == "internal_one_based":
+        if label is None or int(label) == 0:
+            if fallback_zero_edge_to_single:
+                return Chem.BondType.SINGLE, None
+            return None, f"unknown_edge_label:{label}"
+        internal_label = int(label)
+        if internal_label not in {1, 2, 3}:
+            return None, f"unknown_edge_label:{internal_label}"
+        order = map_aids_edge_label_to_bond_order(internal_label - 1)
+    else:
+        return None, f"unknown_edge_label_mode:{edge_label_mode}"
+
+    if order == "single":
+        return Chem.BondType.SINGLE, None
+    if order == "double":
+        return Chem.BondType.DOUBLE, None
+    if order == "triple":
+        return Chem.BondType.TRIPLE, None
     return None, f"unknown_edge_label:{label}"
 
 
-def _bond_type_from_raw_edge_label(raw_label: int | None) -> Any:
-    if Chem is None:
-        return None
-    if raw_label is None:
-        raw_label = 0
-    order = map_aids_edge_label_to_bond_order(int(raw_label))
-    if order == "single":
-        return Chem.BondType.SINGLE
-    if order == "double":
-        return Chem.BondType.DOUBLE
-    if order == "triple":
-        return Chem.BondType.TRIPLE
-    return None
+def _attempt_summary(result: ConversionResult) -> dict[str, Any]:
+    return {
+        "ok": bool(result.ok),
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+        "invalid_reason": result.invalid_reason,
+        "smiles": result.smiles,
+    }
 
 
-def globalgce_graph_record_to_mol(record: dict[str, Any]) -> ConversionResult:
-    """Convert an exported GlobalGCE graph record to RDKit Mol and SMILES.
+def _attach_conversion_audit(
+    result: ConversionResult,
+    *,
+    edge_label_mode_requested: str,
+    edge_label_mode_used: str | None,
+    edge_label_mode_attempts: dict[str, dict[str, Any]],
+    stats: dict[str, Any],
+) -> ConversionResult:
+    result.edge_label_mode_requested = edge_label_mode_requested
+    result.edge_label_mode_used = edge_label_mode_used
+    result.edge_label_mode_attempts = edge_label_mode_attempts
+    result.edge_label_values_seen = list(stats.get("edge_label_values_seen") or [])
+    result.adjacency_nonzero_count = int(stats.get("adjacency_nonzero_count") or 0)
+    result.edge_label_nonzero_count = int(stats.get("edge_label_nonzero_count") or 0)
+    return result
 
-    The official AIDS preprocessing may store node labels as ``raw_label + 1``
-    with 0 reserved for padding. This converter therefore prefers explicit
-    ``node_symbols``, then raw AIDS labels, then shifted internal labels.
-    """
 
+def _globalgce_graph_record_to_mol_one_mode(
+    record: dict[str, Any],
+    *,
+    edge_label_mode: str,
+    fallback_zero_edge_to_single: bool,
+) -> ConversionResult:
     if Chem is None:
         return ConversionResult(
             ok=False,
@@ -422,23 +565,36 @@ def globalgce_graph_record_to_mol(record: dict[str, Any]) -> ConversionResult:
         )
 
     adjacency = _matrix_from_record(record.get("adjacency") or record.get("adj") or record.get("cf_adj"))
+    stats = _conversion_stats(record, adjacency)
     if not adjacency:
-        return ConversionResult(
-            ok=False,
-            error_type="malformed_record",
-            error_message="Missing adjacency matrix",
-            invalid_reason="malformed_record",
+        return _attach_conversion_audit(
+            ConversionResult(
+                ok=False,
+                error_type="malformed_record",
+                error_message="Missing adjacency matrix",
+                invalid_reason="malformed_record",
+            ),
+            edge_label_mode_requested=edge_label_mode,
+            edge_label_mode_used=None,
+            edge_label_mode_attempts={},
+            stats=stats,
         )
 
     active = _active_nodes_from_any_labels(record, adjacency)
     if not active:
-        return ConversionResult(
-            ok=False,
-            error_type="empty_graph",
-            error_message="No active atoms in graph record",
-            num_nodes=0,
-            num_edges=0,
-            invalid_reason="empty_graph",
+        return _attach_conversion_audit(
+            ConversionResult(
+                ok=False,
+                error_type="empty_graph",
+                error_message="No active atoms in graph record",
+                num_nodes=0,
+                num_edges=0,
+                invalid_reason="empty_graph",
+            ),
+            edge_label_mode_requested=edge_label_mode,
+            edge_label_mode_used=None,
+            edge_label_mode_attempts={},
+            stats=stats,
         )
 
     rw_mol = Chem.RWMol()
@@ -446,24 +602,36 @@ def globalgce_graph_record_to_mol(record: dict[str, Any]) -> ConversionResult:
     for node in active:
         symbol, error = _node_symbol_from_record(record, node)
         if error is not None or symbol is None:
-            return ConversionResult(
-                ok=False,
-                error_type="unknown_node_label",
-                error_message=error or f"Unknown label for node {node}",
-                num_nodes=len(active),
-                num_edges=0,
-                invalid_reason="unknown_node_label",
+            return _attach_conversion_audit(
+                ConversionResult(
+                    ok=False,
+                    error_type="unknown_node_label",
+                    error_message=error or f"Unknown label for node {node}",
+                    num_nodes=len(active),
+                    num_edges=0,
+                    invalid_reason="unknown_node_label",
+                ),
+                edge_label_mode_requested=edge_label_mode,
+                edge_label_mode_used=None,
+                edge_label_mode_attempts={},
+                stats=stats,
             )
         try:
             node_to_mol[node] = rw_mol.AddAtom(Chem.Atom(symbol))
         except Exception as exc:
-            return ConversionResult(
-                ok=False,
-                error_type="unknown_node_label",
-                error_message=str(exc),
-                num_nodes=len(active),
-                num_edges=0,
-                invalid_reason="unknown_node_label",
+            return _attach_conversion_audit(
+                ConversionResult(
+                    ok=False,
+                    error_type="unknown_node_label",
+                    error_message=str(exc),
+                    num_nodes=len(active),
+                    num_edges=0,
+                    invalid_reason="unknown_node_label",
+                ),
+                edge_label_mode_requested=edge_label_mode,
+                edge_label_mode_used=None,
+                edge_label_mode_attempts={},
+                stats=stats,
             )
 
     num_edges = 0
@@ -473,37 +641,59 @@ def globalgce_graph_record_to_mol(record: dict[str, Any]) -> ConversionResult:
                 continue
             if _safe_float(adjacency[source][target]) <= 0.0:
                 continue
-            raw_edge_label, edge_error = _edge_label_value(record, source, target)
+            edge_label, edge_error = _edge_label_value(record, source, target)
             if edge_error is not None:
-                return ConversionResult(
-                    ok=False,
-                    error_type="unknown_edge_label",
-                    error_message=edge_error,
-                    num_nodes=len(active),
-                    num_edges=num_edges,
-                    invalid_reason="unknown_edge_label",
+                return _attach_conversion_audit(
+                    ConversionResult(
+                        ok=False,
+                        error_type="unknown_edge_label",
+                        error_message=edge_error,
+                        num_nodes=len(active),
+                        num_edges=num_edges,
+                        invalid_reason="unknown_edge_label",
+                    ),
+                    edge_label_mode_requested=edge_label_mode,
+                    edge_label_mode_used=None,
+                    edge_label_mode_attempts={},
+                    stats=stats,
                 )
-            bond_type = _bond_type_from_raw_edge_label(raw_edge_label)
+            bond_type, bond_error = _bond_type_from_edge_label(
+                edge_label,
+                edge_label_mode=edge_label_mode,
+                fallback_zero_edge_to_single=fallback_zero_edge_to_single,
+            )
             if bond_type is None:
-                return ConversionResult(
-                    ok=False,
-                    error_type="unknown_edge_label",
-                    error_message=f"Unsupported raw edge label: {raw_edge_label}",
-                    num_nodes=len(active),
-                    num_edges=num_edges,
-                    invalid_reason="unknown_edge_label",
+                return _attach_conversion_audit(
+                    ConversionResult(
+                        ok=False,
+                        error_type="unknown_edge_label",
+                        error_message=bond_error or f"Unsupported edge label: {edge_label}",
+                        num_nodes=len(active),
+                        num_edges=num_edges,
+                        invalid_reason="unknown_edge_label",
+                    ),
+                    edge_label_mode_requested=edge_label_mode,
+                    edge_label_mode_used=None,
+                    edge_label_mode_attempts={},
+                    stats=stats,
                 )
             try:
                 rw_mol.AddBond(node_to_mol[source], node_to_mol[target], bond_type)
                 num_edges += 1
             except Exception as exc:
-                return ConversionResult(
-                    ok=False,
-                    error_type="rdkit_add_bond_error",
-                    error_message=str(exc),
-                    num_nodes=len(active),
-                    num_edges=num_edges,
-                    invalid_reason="rdkit_add_bond_error",
+                return _attach_conversion_audit(
+                    ConversionResult(
+                        ok=False,
+                        error_type="rdkit_add_bond_error",
+                        error_message=str(exc),
+                        num_nodes=len(active),
+                        num_edges=num_edges,
+                        invalid_reason="rdkit_add_bond_error",
+                    ),
+                    edge_label_mode_requested=edge_label_mode,
+                    edge_label_mode_used=None,
+                    edge_label_mode_attempts={},
+                    stats=stats,
                 )
 
     mol = rw_mol.GetMol()
@@ -512,33 +702,118 @@ def globalgce_graph_record_to_mol(record: dict[str, Any]) -> ConversionResult:
     except Exception as exc:
         message = str(exc)
         invalid_reason = "valence_error" if "valence" in message.lower() else "sanitize_error"
-        return ConversionResult(
-            ok=False,
-            mol=mol,
-            error_type=invalid_reason,
-            error_message=message,
-            num_nodes=len(active),
-            num_edges=num_edges,
-            invalid_reason=invalid_reason,
+        return _attach_conversion_audit(
+            ConversionResult(
+                ok=False,
+                mol=mol,
+                error_type=invalid_reason,
+                error_message=message,
+                num_nodes=len(active),
+                num_edges=num_edges,
+                invalid_reason=invalid_reason,
+            ),
+            edge_label_mode_requested=edge_label_mode,
+            edge_label_mode_used=None,
+            edge_label_mode_attempts={},
+            stats=stats,
         )
 
     smiles = Chem.MolToSmiles(mol, canonical=True)
     if not smiles:
-        return ConversionResult(
-            ok=False,
+        return _attach_conversion_audit(
+            ConversionResult(
+                ok=False,
+                mol=mol,
+                error_type="empty_graph",
+                error_message="RDKit returned empty SMILES",
+                num_nodes=len(active),
+                num_edges=num_edges,
+                invalid_reason="empty_graph",
+            ),
+            edge_label_mode_requested=edge_label_mode,
+            edge_label_mode_used=None,
+            edge_label_mode_attempts={},
+            stats=stats,
+        )
+    return _attach_conversion_audit(
+        ConversionResult(
+            ok=True,
             mol=mol,
-            error_type="empty_graph",
-            error_message="RDKit returned empty SMILES",
+            smiles=smiles,
             num_nodes=len(active),
             num_edges=num_edges,
-            invalid_reason="empty_graph",
+        ),
+        edge_label_mode_requested=edge_label_mode,
+        edge_label_mode_used=edge_label_mode,
+        edge_label_mode_attempts={},
+        stats=stats,
+    )
+
+
+def globalgce_graph_record_to_mol(
+    record: dict[str, Any],
+    *,
+    edge_label_mode: str = "auto",
+    fallback_zero_edge_to_single: bool = True,
+) -> ConversionResult:
+    """Convert an exported GlobalGCE graph record to RDKit Mol and SMILES.
+
+    The official AIDS preprocessing may store node labels as ``raw_label + 1``
+    with 0 reserved for padding. This converter therefore prefers explicit
+    ``node_symbols``, then raw AIDS labels, then shifted internal labels.
+
+    Edge labels are less stable across GlobalGCE export paths, so ``auto`` tries
+    internal one-based, raw zero-based, then adjacency-only single bonds and
+    records the result of each attempt.
+    """
+
+    requested_mode = str(edge_label_mode or "auto")
+    if requested_mode not in {"auto", *EDGE_LABEL_MODES}:
+        requested_mode = "auto"
+    modes = list(EDGE_LABEL_MODES) if requested_mode == "auto" else [requested_mode]
+    attempts: dict[str, dict[str, Any]] = {}
+    first_failure: ConversionResult | None = None
+    first_success: ConversionResult | None = None
+    first_success_mode: str | None = None
+    stats = _conversion_stats(
+        record,
+        _matrix_from_record(record.get("adjacency") or record.get("adj") or record.get("cf_adj")),
+    )
+
+    for mode in modes:
+        result = _globalgce_graph_record_to_mol_one_mode(
+            record,
+            edge_label_mode=mode,
+            fallback_zero_edge_to_single=fallback_zero_edge_to_single,
         )
-    return ConversionResult(
-        ok=True,
-        mol=mol,
-        smiles=smiles,
-        num_nodes=len(active),
-        num_edges=num_edges,
+        attempts[mode] = _attempt_summary(result)
+        if result.ok and first_success is None:
+            first_success = result
+            first_success_mode = mode
+        if first_failure is None:
+            first_failure = result
+
+    if first_success is not None:
+        return _attach_conversion_audit(
+            first_success,
+            edge_label_mode_requested=requested_mode,
+            edge_label_mode_used=first_success_mode,
+            edge_label_mode_attempts=attempts,
+            stats=stats,
+        )
+
+    failure = first_failure or ConversionResult(
+        ok=False,
+        error_type="malformed_record",
+        error_message="No edge-label conversion modes were attempted",
+        invalid_reason="malformed_record",
+    )
+    return _attach_conversion_audit(
+        failure,
+        edge_label_mode_requested=requested_mode,
+        edge_label_mode_used=None,
+        edge_label_mode_attempts=attempts,
+        stats=stats,
     )
 
 
