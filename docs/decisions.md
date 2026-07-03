@@ -6,6 +6,53 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-03] Train GCFExplainer-HIVCSV GNN with imbalance-aware metrics
+
+### Background
+The adapted GCFExplainer-HIVCSV path uses the canonical project source
+`data/raw/AIDS/HIV.csv` with `LABEL_COLUMN=HIV_active`. The label distribution
+is highly imbalanced (`0: 39684`, `1: 1443`), so overall accuracy can be
+misleading and can hide majority-class collapse.
+
+### Decision
+Add the adapted HIVCSV scaffold:
+
+- `scripts/gcf_hiv_csv_prepare_dataset.py` converts the canonical CSV into
+  RDKit/PyG `graphs.pt` without external graph benchmark downloads;
+- `scripts/gcf_hiv_csv_train_gnn.py` trains the adapted HIVCSV GNN teacher;
+- `scripts/gcf_hiv_csv_run_vrrw.py` runs a project-owned lightweight
+  GCF-style VRRW over the HIVCSV graphs;
+- `scripts/gcf_hiv_csv_export_summary.py` and
+  `scripts/evaluate_gcf_hiv_csv_native.py` produce top-K summaries and native
+  close-CF coverage;
+- `scripts/convert_gcf_hiv_csv_graphs_to_smiles.py` is a diagnostic conversion
+  path only.
+
+The training script uses deterministic stratified train/validation/test splits
+and enables class-weighted `CrossEntropyLoss` by default:
+
+```text
+weight_c = total_train / (num_classes * count_c)
+```
+
+Checkpoint selection defaults to macro-F1, and `gnn_train_summary.json`
+records overall accuracy, per-class precision/recall/F1, macro-F1, balanced
+accuracy, ROC-AUC, prediction counts, class weights, and split label counts.
+If test label-1 recall is below the configured threshold, the summary includes
+a warning.
+
+### Consequences
+The adapted HIVCSV path is separate from the official AIDS graph-benchmark
+reproduction and must be reported as `GCFExplainer-HIVCSV` or
+`GCFExplainer-adapted-HIVCSV`. Accuracy alone is not accepted as evidence that
+the HIVCSV GNN teacher is usable. The adapted path does not invoke external
+graph benchmark downloads; it reads only the project CSV-derived `graphs.pt`.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-03] Add official GCFExplainer native fullgraph baseline path
 
 ### Background

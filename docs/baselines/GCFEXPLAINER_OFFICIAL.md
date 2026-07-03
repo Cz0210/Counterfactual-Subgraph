@@ -90,6 +90,86 @@ distance(G, C) <= theta and official_gnn(C) != label
 This path uses the official GNN predictions and official NeuroSED distance. It
 does **not** use NetworkX GED for large fullgraph pairwise evaluation.
 
+## Adapted HIVCSV Path
+
+The project also maintains a separate adapted path named
+`GCFExplainer-HIVCSV` / `GCFExplainer-adapted-HIVCSV`. This is not the paper
+TUDataset AIDS reproduction. It uses the canonical project CSV:
+
+```text
+data/raw/AIDS/HIV.csv
+```
+
+with `SMILES_COLUMN=smiles`, `LABEL_COLUMN=HIV_active`, and
+`TARGET_LABEL=1`. The adapted path must not trigger TUDataset AIDS downloads.
+
+The adapted path is:
+
+```text
+HIV.csv -> RDKit -> PyG graphs.pt -> HIVCSV GNN teacher -> GCF-style VRRW -> native fullgraph close-CF evaluation
+```
+
+Prepare the graph dataset:
+
+```bash
+sbatch scripts/slurm/gcf_hiv_csv_prepare_dataset_smoke.sh
+sbatch scripts/slurm/gcf_hiv_csv_prepare_dataset_full.sh
+```
+
+The HIVCSV GNN teacher is trained by:
+
+```bash
+sbatch scripts/slurm/gcf_hiv_csv_train_gnn_smoke.sh
+sbatch scripts/slurm/gcf_hiv_csv_train_gnn_full.sh
+```
+
+Because `HIV_active` is highly imbalanced, the training script uses
+stratified train/validation/test splits and class-weighted cross entropy by
+default. The class weights are computed from the training split as inverse
+label frequency:
+
+```text
+weight_c = total_train / (num_classes * count_c)
+```
+
+`gnn_train_summary.json` reports overall accuracy, per-class
+precision/recall/F1, macro-F1, balanced accuracy, ROC-AUC, prediction counts,
+and a warning if label-1 recall is low. Accuracy alone is not sufficient for
+this baseline.
+
+Run the adapted VRRW and native evaluation:
+
+```bash
+sbatch scripts/slurm/gcf_hiv_csv_vrrw_smoke.sh
+sbatch scripts/slurm/gcf_hiv_csv_summary_eval_smoke.sh
+```
+
+Full run:
+
+```bash
+sbatch scripts/slurm/gcf_hiv_csv_vrrw_full.sh
+sbatch scripts/slurm/gcf_hiv_csv_summary_eval_full.sh
+```
+
+The adapted native evaluator records:
+
+- `method=GCFExplainer-HIVCSV`
+- `GCF_MODE=hiv_csv_adapted`
+- `DATASET_SOURCE=HIV_CSV`
+- `TEACHER_TYPE=hiv_csv_gnn`
+- `CF_MODE=strict_flip`
+
+It uses a lightweight normalized edit proxy for smoke/full plumbing and does
+not use NetworkX GED for large pairwise evaluation. GREED-GED can be connected
+later as the learned distance line.
+
+If `GCF_TOP_K_LIST` contains commas in an HPC submission, prefer:
+
+```bash
+export GCF_TOP_K_LIST=1,5,10,20,50,100
+sbatch --export=ALL scripts/slurm/gcf_hiv_csv_summary_eval_full.sh
+```
+
 ## Graph-to-SMILES Diagnostic
 
 The official AIDS graph format does not always preserve enough atom/bond
@@ -142,4 +222,3 @@ outputs/hpc/gcfexplainer_official/final/gcf_official_all_runs.csv
 - Final official-native results must record `CF_MODE=strict_flip`.
 - Graph-to-SMILES-to-RF is a diagnostic, not the native official result.
 - Do not use NetworkX GED for large fullgraph GCFExplainer evaluation.
-
