@@ -7,6 +7,7 @@ for unified baseline evaluation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import math
 import pickle
@@ -42,6 +43,31 @@ AIDS_CLASS_LABEL_MAP = {
     0: "a",
     1: "i",
 }
+
+
+@dataclass
+class ConversionResult:
+    """Result of converting a GlobalGCE graph record to an RDKit molecule."""
+
+    ok: bool
+    mol: Any | None = None
+    smiles: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    num_nodes: int = 0
+    num_edges: int = 0
+    invalid_reason: str | None = None
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "smiles": self.smiles,
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+            "num_nodes": self.num_nodes,
+            "num_edges": self.num_edges,
+            "invalid_reason": self.invalid_reason,
+        }
 
 
 def map_aids_node_label_to_atom_symbol(label: int) -> str | None:
@@ -262,60 +288,267 @@ def _bond_type_from_internal_edge_label(label: int | None) -> Any:
     return Chem.BondType.SINGLE
 
 
-def graph_record_to_smiles(record: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Convert an exported GlobalGCE graph record to a molecule SMILES if possible."""
+def _matrix_from_record(value: Any) -> list[list[Any]]:
+    values = _to_list(value)
+    if not isinstance(values, list):
+        return []
+    matrix: list[list[Any]] = []
+    for row in values:
+        if isinstance(row, list):
+            matrix.append(row)
+    return matrix
+
+
+def _label_list_from_record(value: Any) -> list[Any]:
+    values = _to_list(value)
+    return values if isinstance(values, list) else []
+
+
+def _is_present_symbol(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return text not in {"", "None", "none", "PAD", "pad", "0"}
+
+
+def _node_symbol_from_record(record: dict[str, Any], node_index: int) -> tuple[str | None, str | None]:
+    node_symbols = _label_list_from_record(record.get("node_symbols"))
+    if node_index < len(node_symbols) and _is_present_symbol(node_symbols[node_index]):
+        return str(node_symbols[node_index]), None
+
+    raw_labels = _label_list_from_record(record.get("node_labels_aids_raw"))
+    if node_index < len(raw_labels) and raw_labels[node_index] is not None:
+        try:
+            symbol = map_aids_node_label_to_atom_symbol(int(raw_labels[node_index]))
+        except Exception:
+            symbol = None
+        if symbol is not None:
+            return symbol, None
+        return None, f"unknown_node_label:{raw_labels[node_index]}"
+
+    internal_labels = _label_list_from_record(record.get("node_labels_internal") or record.get("node_labels"))
+    if node_index < len(internal_labels) and internal_labels[node_index] is not None:
+        try:
+            internal = int(float(internal_labels[node_index]))
+        except Exception:
+            return None, f"unknown_node_label:{internal_labels[node_index]}"
+        if internal <= 0:
+            return None, "unknown_node_label:padding"
+        raw_label = internal - 1
+        symbol = map_aids_node_label_to_atom_symbol(raw_label)
+        if symbol is not None:
+            return symbol, None
+        return None, f"unknown_node_label:{raw_label}"
+
+    return None, "unknown_node_label:missing"
+
+
+def _active_nodes_from_any_labels(record: dict[str, Any], adjacency: list[list[Any]]) -> list[int]:
+    n_nodes = len(adjacency)
+    node_symbols = _label_list_from_record(record.get("node_symbols"))
+    raw_labels = _label_list_from_record(record.get("node_labels_aids_raw"))
+    internal_labels = _label_list_from_record(record.get("node_labels_internal") or record.get("node_labels"))
+    active: list[int] = []
+    for index in range(n_nodes):
+        degree = 0
+        if index < len(adjacency):
+            for value in adjacency[index]:
+                if _safe_float(value) > 0.0:
+                    degree += 1
+        has_symbol = index < len(node_symbols) and _is_present_symbol(node_symbols[index])
+        has_raw_label = index < len(raw_labels) and raw_labels[index] is not None
+        has_internal_label = False
+        if index < len(internal_labels):
+            try:
+                has_internal_label = int(float(internal_labels[index])) > 0
+            except Exception:
+                has_internal_label = False
+        if has_symbol or has_raw_label or has_internal_label or degree > 0:
+            active.append(index)
+    return active
+
+
+def _edge_label_value(record: dict[str, Any], source: int, target: int) -> tuple[int | None, str | None]:
+    matrix = _matrix_from_record(record.get("edge_labels_internal_matrix") or record.get("edge_labels"))
+    if not matrix:
+        return None, None
+    value = None
+    if source < len(matrix) and isinstance(matrix[source], list) and target < len(matrix[source]):
+        value = matrix[source][target]
+    elif target < len(matrix) and isinstance(matrix[target], list) and source < len(matrix[target]):
+        value = matrix[target][source]
+    if value is None:
+        return None, None
+    try:
+        label = int(float(value))
+    except Exception:
+        return None, f"unknown_edge_label:{value}"
+    if label in {0, 1, 2}:
+        return label, None
+    if label in {3}:  # tolerate 1/2/3 encodings by mapping 3 to triple.
+        return label - 1, None
+    return None, f"unknown_edge_label:{label}"
+
+
+def _bond_type_from_raw_edge_label(raw_label: int | None) -> Any:
+    if Chem is None:
+        return None
+    if raw_label is None:
+        raw_label = 0
+    order = map_aids_edge_label_to_bond_order(int(raw_label))
+    if order == "single":
+        return Chem.BondType.SINGLE
+    if order == "double":
+        return Chem.BondType.DOUBLE
+    if order == "triple":
+        return Chem.BondType.TRIPLE
+    return None
+
+
+def globalgce_graph_record_to_mol(record: dict[str, Any]) -> ConversionResult:
+    """Convert an exported GlobalGCE graph record to RDKit Mol and SMILES.
+
+    The official AIDS preprocessing may store node labels as ``raw_label + 1``
+    with 0 reserved for padding. This converter therefore prefers explicit
+    ``node_symbols``, then raw AIDS labels, then shifted internal labels.
+    """
 
     if Chem is None:
-        return None, "rdkit_unavailable"
-    adjacency = record.get("adjacency") or []
-    internal_labels = record.get("node_labels_internal") or record.get("node_labels") or []
-    edge_labels = record.get("edge_labels_internal_matrix") or record.get("edge_labels") or []
-    if not adjacency or not internal_labels:
-        return None, "missing_graph_fields"
+        return ConversionResult(
+            ok=False,
+            error_type="rdkit_unavailable",
+            error_message="RDKit is not importable",
+            invalid_reason="malformed_record",
+        )
 
-    active = _active_nodes(adjacency, [int(x) for x in internal_labels])
+    adjacency = _matrix_from_record(record.get("adjacency") or record.get("adj") or record.get("cf_adj"))
+    if not adjacency:
+        return ConversionResult(
+            ok=False,
+            error_type="malformed_record",
+            error_message="Missing adjacency matrix",
+            invalid_reason="malformed_record",
+        )
+
+    active = _active_nodes_from_any_labels(record, adjacency)
     if not active:
-        return None, "empty_graph"
+        return ConversionResult(
+            ok=False,
+            error_type="empty_graph",
+            error_message="No active atoms in graph record",
+            num_nodes=0,
+            num_edges=0,
+            invalid_reason="empty_graph",
+        )
 
     rw_mol = Chem.RWMol()
     node_to_mol: dict[int, int] = {}
     for node in active:
-        internal_label = int(internal_labels[node])
-        if internal_label <= 0:
-            return None, f"active_node_has_padding_label:{node}"
-        raw_label = internal_label - 1
-        symbol = map_aids_node_label_to_atom_symbol(raw_label)
-        if symbol is None:
-            return None, f"unknown_aids_node_label:{raw_label}"
-        atom = Chem.Atom(symbol)
-        node_to_mol[node] = rw_mol.AddAtom(atom)
+        symbol, error = _node_symbol_from_record(record, node)
+        if error is not None or symbol is None:
+            return ConversionResult(
+                ok=False,
+                error_type="unknown_node_label",
+                error_message=error or f"Unknown label for node {node}",
+                num_nodes=len(active),
+                num_edges=0,
+                invalid_reason="unknown_node_label",
+            )
+        try:
+            node_to_mol[node] = rw_mol.AddAtom(Chem.Atom(symbol))
+        except Exception as exc:
+            return ConversionResult(
+                ok=False,
+                error_type="unknown_node_label",
+                error_message=str(exc),
+                num_nodes=len(active),
+                num_edges=0,
+                invalid_reason="unknown_node_label",
+            )
 
+    num_edges = 0
     for source_index, source in enumerate(active):
         for target in active[source_index + 1 :]:
             if source >= len(adjacency) or target >= len(adjacency[source]):
                 continue
-            if int(adjacency[source][target]) <= 0:
+            if _safe_float(adjacency[source][target]) <= 0.0:
                 continue
-            edge_label = None
-            if (
-                isinstance(edge_labels, list)
-                and source < len(edge_labels)
-                and isinstance(edge_labels[source], list)
-                and target < len(edge_labels[source])
-            ):
-                edge_label = edge_labels[source][target]
-            bond_type = _bond_type_from_internal_edge_label(edge_label)
+            raw_edge_label, edge_error = _edge_label_value(record, source, target)
+            if edge_error is not None:
+                return ConversionResult(
+                    ok=False,
+                    error_type="unknown_edge_label",
+                    error_message=edge_error,
+                    num_nodes=len(active),
+                    num_edges=num_edges,
+                    invalid_reason="unknown_edge_label",
+                )
+            bond_type = _bond_type_from_raw_edge_label(raw_edge_label)
+            if bond_type is None:
+                return ConversionResult(
+                    ok=False,
+                    error_type="unknown_edge_label",
+                    error_message=f"Unsupported raw edge label: {raw_edge_label}",
+                    num_nodes=len(active),
+                    num_edges=num_edges,
+                    invalid_reason="unknown_edge_label",
+                )
             try:
                 rw_mol.AddBond(node_to_mol[source], node_to_mol[target], bond_type)
+                num_edges += 1
             except Exception as exc:
-                return None, f"add_bond_failed:{exc}"
+                return ConversionResult(
+                    ok=False,
+                    error_type="rdkit_add_bond_error",
+                    error_message=str(exc),
+                    num_nodes=len(active),
+                    num_edges=num_edges,
+                    invalid_reason="rdkit_add_bond_error",
+                )
 
     mol = rw_mol.GetMol()
     try:
         Chem.SanitizeMol(mol)
-        return Chem.MolToSmiles(mol, canonical=True), None
     except Exception as exc:
-        return None, f"sanitize_failed:{exc}"
+        message = str(exc)
+        invalid_reason = "valence_error" if "valence" in message.lower() else "sanitize_error"
+        return ConversionResult(
+            ok=False,
+            mol=mol,
+            error_type=invalid_reason,
+            error_message=message,
+            num_nodes=len(active),
+            num_edges=num_edges,
+            invalid_reason=invalid_reason,
+        )
+
+    smiles = Chem.MolToSmiles(mol, canonical=True)
+    if not smiles:
+        return ConversionResult(
+            ok=False,
+            mol=mol,
+            error_type="empty_graph",
+            error_message="RDKit returned empty SMILES",
+            num_nodes=len(active),
+            num_edges=num_edges,
+            invalid_reason="empty_graph",
+        )
+    return ConversionResult(
+        ok=True,
+        mol=mol,
+        smiles=smiles,
+        num_nodes=len(active),
+        num_edges=num_edges,
+    )
+
+
+def graph_record_to_smiles(record: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Convert an exported GlobalGCE graph record to a molecule SMILES if possible."""
+
+    conversion = globalgce_graph_record_to_mol(record)
+    if conversion.ok:
+        return conversion.smiles, None
+    return None, conversion.invalid_reason or conversion.error_type or conversion.error_message
 
 
 def globalgce_cf_to_graph_record(cf: Any) -> dict[str, Any]:
@@ -610,9 +843,11 @@ __all__ = [
     "AIDS_CLASS_LABEL_MAP",
     "AIDS_EDGE_LABEL_TO_BOND_ORDER",
     "AIDS_NODE_LABEL_TO_ATOM",
+    "ConversionResult",
     "compute_globalgce_coverage_redundancy",
     "compute_globalgce_structural_redundancy",
     "globalgce_cf_to_graph_record",
+    "globalgce_graph_record_to_mol",
     "globalgce_rule_to_action",
     "graph_record_to_networkx",
     "graph_record_to_smiles",
