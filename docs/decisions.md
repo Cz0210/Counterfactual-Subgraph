@@ -6,6 +6,69 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-03] Add official GCFExplainer native fullgraph baseline path
+
+### Background
+The project already contains a GT-FullGraph proxy baseline, but that proxy is
+not the official GCFExplainer reproduction. Official GCFExplainer outputs a set
+of complete counterfactual graphs and writes to fixed relative paths inside its
+repository, which makes alpha sweeps unsafe unless each run is isolated.
+
+### Decision
+Add project-owned official GCFExplainer adapters and Slurm entrypoints without
+modifying the official source. The new path resolves the official checkout from
+`GCF_OFFICIAL_REPO`, `third_party/GCFExplainer`, or the legacy
+`baselines/gcfexplainer_official` directory. VRRW runs execute inside an
+isolated per-run workdir and write results under
+`outputs/hpc/gcfexplainer_official`. Native evaluation uses official GNN
+predictions, official NeuroSED distance, `GCF_MODE=official_native`,
+`TEACHER_TYPE=official_gnn`, `DISTANCE_TYPE=official_native`, and
+`CF_MODE=strict_flip`.
+
+### Consequences
+GT-FullGraph remains a project proxy and must not be named official
+GCFExplainer. Graph-to-SMILES-to-RF evaluation is available only as a diagnostic
+because official graph artifacts may not preserve safe atom/bond mapping.
+NetworkX GED is not used for large fullgraph GCFExplainer evaluation; GREED-GED
+and MolCLR diagnostics reuse the existing distance pipelines only when valid
+SMILES candidates are available.
+
+### Status
+Accepted
+
+---
+
+## [2026-07-03] Audit GlobalGCE AIDS/HIV edge-label conversion modes
+
+### Background
+The first `native-cf-fullgraph` GlobalGCE AIDS/HIV evaluation ran successfully,
+but graph-to-SMILES conversion produced very low validity and many sanitized
+SMILES with implausible cumulene-like double-bond chains. This indicated that
+the exported GlobalGCE edge labels may not always be raw zero-based bond labels;
+for example, an internal label value of `1` can mean a single bond rather than
+a double bond.
+
+### Decision
+Keep GlobalGCE official source unchanged and make the project adapter
+edge-label interpretation explicit and auditable. The converter now supports
+`raw_zero_based`, `internal_one_based`, `adjacency_only_single`, and default
+`auto`. In `auto`, each graph tries internal one-based labels, raw zero-based
+labels, and adjacency-only single bonds, then selects the first RDKit-sanitized
+result by that priority. The evaluator records raw conversion ok/fail counts,
+unique valid candidates before top-K, selected candidates after top-K, edge
+label values seen, and conversion success/failure by edge-label mode.
+
+### Consequences
+GlobalGCE `native-cf-fullgraph` remains a diagnostic fullgraph candidate
+evaluation. Strict CCRCOV is unchanged: `distance <= threshold` and
+`pred_after != target_label`. If `distance_mode=tanimoto`, reports continue to
+label the distance as `tanimoto_fingerprint`; it must not be presented as GED.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-03] Use weighted CLEAR graphPred training for AIDS/HIV imbalance
 
 ### Background
