@@ -6,6 +6,40 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-05] Evaluate CLEAR full-graph pools with explicit graphPred teacher adapter
+
+### Background
+CLEAR `export_test` and candidate-pool conversion now produce AIDS full-graph
+records with `original_adj`, `cf_adj`, `original_x`, and `cf_x`. The converted
+pool also preserves CLEAR official prediction diagnostics, but those fields are
+not the final unified metrics. The historical AIDS RF oracle is SMILES-based and
+cannot directly score CLEAR's continuous graph tensors.
+
+### Decision
+Extend `scripts/baselines/clear/evaluate_clear_candidate_pool.py` with
+`TEACHER_KIND=clear_graphpred`. This adapter loads the CLEAR graph prediction
+checkpoint:
+
+```text
+baselines/clear_official/models_save/prediction/weights_graphPred__aids.pt
+```
+
+and recomputes predictions for each original/counterfactual graph pair. The
+evaluator records `strict_flip_eval`, `strict_flip_vs_original_label_eval`, and
+`cf_drop_eval`, while keeping `official_flip` only as a diagnostic comparison.
+`TEACHER_KIND=none` / `action_only` remain cost-only diagnostics and must not be
+reported as final CLEAR FlipRate, CFDrop, or CCRCov.
+
+### Consequences
+Final CLEAR AIDS reporting must explicitly record `TEACHER_KIND=clear_graphpred`
+or another documented unified teacher path. Official CLEAR flip/validity values
+are never used as the final strict-flip condition.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-03] Train GCFExplainer-HIVCSV GNN with imbalance-aware metrics
 
 ### Background

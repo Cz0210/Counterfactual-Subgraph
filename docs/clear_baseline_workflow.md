@@ -361,9 +361,9 @@ committed.
 
 ## 9. Unified Evaluation
 
-The final CLEAR baseline metrics must be recomputed with the unified
-teacher/oracle. CLEAR official `validity` and `official_flip` are retained only
-as diagnostics. In particular, an `official_flip_rate` of zero is allowed and
+The final CLEAR baseline metrics must be recomputed with an explicitly recorded
+teacher path. CLEAR official `validity` and `official_flip` are retained only as
+diagnostics. In particular, an `official_flip_rate` of zero is allowed and
 should not be used to filter candidates before unified evaluation.
 
 For AIDS/HIV, the historical RF oracle at
@@ -371,6 +371,17 @@ For AIDS/HIV, the historical RF oracle at
 It cannot directly consume CLEAR's continuous reconstructed graph tensors.
 Final strict-flip CCRCov therefore requires a full-graph candidate pool and a
 graph-to-teacher adapter or another explicitly documented unified teacher path.
+The current graph-teacher path for CLEAR AIDS is:
+
+```text
+TEACHER_KIND=clear_graphpred
+TEACHER_PATH=baselines/clear_official/models_save/prediction/weights_graphPred__aids.pt
+```
+
+The evaluator recomputes `strict_flip_eval`, `cf_drop_eval`, and label
+probabilities from `original_adj`, `cf_adj`, `original_x`, and `cf_x`.
+`official_flip` remains a diagnostic comparison field and is not the final
+FlipRate.
 
 Evaluation entrypoint:
 
@@ -378,9 +389,11 @@ Evaluation entrypoint:
 python scripts/baselines/clear/evaluate_clear_candidate_pool.py \
   --candidate-pool outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl \
   --dataset aids \
-  --teacher-path outputs/hpc/oracle/aids_rf_model.pkl \
+  --teacher-kind clear_graphpred \
+  --teacher-path baselines/clear_official/models_save/prediction/weights_graphPred__aids.pt \
   --out-dir outputs/hpc/baselines/clear/aids/eval \
   --cf-mode strict_flip \
+  --batch-size 128 \
   --top-k 1,5,10,20 \
   --distance-method action
 ```
@@ -388,21 +401,29 @@ python scripts/baselines/clear/evaluate_clear_candidate_pool.py \
 Slurm entrypoint:
 
 ```bash
+DATASET=aids \
+CANDIDATE_POOL=outputs/hpc/baselines/clear/aids/candidate_pool/clear_aids_candidate_pool.with_graphs.jsonl \
+TEACHER_KIND=clear_graphpred \
+TEACHER_PATH=baselines/clear_official/models_save/prediction/weights_graphPred__aids.pt \
+OUT_DIR=outputs/hpc/baselines/clear/aids/eval_clear_graphpred \
 sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
 ```
 
 Smoke diagnostics:
 
 ```bash
-MAX_CANDIDATES=100 sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
+DATASET=aids \
+MAX_CANDIDATES=100 \
+TEACHER_KIND=clear_graphpred \
+TEACHER_PATH=baselines/clear_official/models_save/prediction/weights_graphPred__aids.pt \
+sbatch scripts/slurm/evaluate_clear_candidate_pool.sh
 ```
 
-The default candidate pool does not include full graph arrays in JSONL. If the
-unified teacher/evaluator needs full original and counterfactual graphs, rerun
-the conversion with `--include-full-graphs` or add a graph-teacher adapter for
-CLEAR/OGBG graph tensors. Until such a teacher prediction source is available,
-the evaluator refuses to report final strict `FlipRate`, `CFDrop`, or `CCRCov`
-from CLEAR official prediction fields. For cost-only pipeline smoke checks, use:
+The default non-graph candidate pool does not include full graph arrays in JSONL.
+For `TEACHER_KIND=clear_graphpred`, use the `.with_graphs.jsonl` pool produced
+with `INCLUDE_FULL_GRAPHS=1`. The evaluator refuses to report final strict
+`FlipRate`, `CFDrop`, or `CCRCov` from CLEAR official prediction fields. For
+cost-only pipeline smoke checks, use:
 
 ```bash
 ALLOW_ACTION_ONLY=1 MAX_CANDIDATES=100 sbatch scripts/slurm/evaluate_clear_candidate_pool.sh

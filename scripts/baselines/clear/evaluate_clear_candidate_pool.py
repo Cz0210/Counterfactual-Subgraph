@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import math
 import statistics
@@ -30,15 +31,17 @@ from src.rewards.teacher_semantic import TeacherSemanticScorer  # noqa: E402
 
 
 DEFAULT_CANDIDATE_POOL = (
-    "outputs/hpc/baselines/clear/ogbg_molhiv/candidate_pool/"
-    "clear_ogbg_molhiv_candidate_pool.jsonl"
+    "outputs/hpc/baselines/clear/aids/candidate_pool/"
+    "clear_aids_candidate_pool.with_graphs.jsonl"
 )
-DEFAULT_TEACHER_PATH = "outputs/hpc/oracle/aids_rf_model.pkl"
-DEFAULT_OUT_DIR = "outputs/hpc/baselines/clear/ogbg_molhiv/eval"
+DEFAULT_TEACHER_PATH = ""
+DEFAULT_CLEAR_GRAPHPRED_PATH = "baselines/clear_official/models_save/prediction/weights_graphPred__aids.pt"
+DEFAULT_OUT_DIR = "outputs/hpc/baselines/clear/aids/eval"
 
 SMILES_ORIGINAL_FIELDS = ("original_smiles", "parent_smiles", "smiles")
 SMILES_CF_FIELDS = ("cf_smiles", "counterfactual_smiles", "candidate_smiles", "action_smiles")
 FULL_GRAPH_FIELDS = ("original_adj", "cf_adj", "original_x", "cf_x")
+TEACHER_KINDS = ("none", "action_only", "smiles", "smiles_rf", "clear_graphpred")
 PRECOMPUTED_TEACHER_ORIG = ("teacher_original_pred", "teacher_original_pred_label", "teacher_pred_before")
 PRECOMPUTED_TEACHER_CF = ("teacher_cf_pred", "teacher_cf_pred_label", "teacher_pred_after")
 PRECOMPUTED_TEACHER_P_ORIG = ("teacher_original_p_label", "teacher_p_before", "teacher_original_prob_label")
@@ -51,11 +54,20 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--candidate-pool", default=DEFAULT_CANDIDATE_POOL)
-    parser.add_argument("--dataset", default="ogbg_molhiv")
+    parser.add_argument("--dataset", default="aids")
+    parser.add_argument("--teacher-kind", choices=TEACHER_KINDS, default="none")
     parser.add_argument("--teacher-path", default=DEFAULT_TEACHER_PATH)
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     parser.add_argument("--cf-mode", choices=CF_MODES, default="strict_flip")
     parser.add_argument("--min-cf-drop", type=float, default=0.0)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--device", default=None, help="Default: cuda if available else cpu.")
+    parser.add_argument(
+        "--clear-graphpred-h-dim",
+        type=int,
+        default=32,
+        help="Hidden dimension used by CLEAR train_pred.py for Graph_pred_model.",
+    )
     parser.add_argument("--top-k", default="1,5,10,20")
     parser.add_argument(
         "--thresholds",
@@ -261,6 +273,323 @@ def has_precomputed_teacher(row: dict[str, Any]) -> bool:
     return first_present(row, PRECOMPUTED_TEACHER_ORIG) is not None and first_present(row, PRECOMPUTED_TEACHER_CF) is not None
 
 
+def graph_array_shape(value: Any) -> tuple[int, ...] | None:
+    if not isinstance(value, list):
+        return None
+    if not value:
+        return (0,)
+    if isinstance(value[0], list):
+        inner = len(value[0])
+        return (len(value), inner)
+    return (len(value),)
+
+
+def collect_missing_field_counts(rows: list[dict[str, Any]], fields: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for field in fields:
+        counts[field] = sum(1 for row in rows if row.get(field) in (None, ""))
+    return counts
+
+
+def resolve_device(device_arg: str | None):
+    import torch
+
+    if device_arg:
+        return torch.device(device_arg)
+    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def load_clear_models_module() -> Any:
+    clear_src = REPO_ROOT / "baselines" / "clear_official" / "src"
+    models_path = clear_src / "models.py"
+    if not models_path.exists():
+        raise FileNotFoundError(f"CLEAR official models.py not found: {models_path}")
+    spec = importlib.util.spec_from_file_location("clear_official_models", models_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not import CLEAR models.py from {models_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        cleaned[key[7:] if key.startswith("module.") else key] = value
+    return cleaned
+
+
+def extract_state_dict(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        for key in ("state_dict", "model_state_dict", "model"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return strip_module_prefix(value)
+        return strip_module_prefix(payload)
+    raise TypeError(f"Unsupported CLEAR graphPred checkpoint payload type: {type(payload)!r}")
+
+
+def infer_num_classes_from_state_dict(state_dict: dict[str, Any]) -> int:
+    weight = state_dict.get("predictor.0.weight")
+    shape = getattr(weight, "shape", None)
+    if shape is not None and len(shape) >= 1:
+        return int(shape[0])
+    return 2
+
+
+def build_clear_graphpred_compat_model(
+    *,
+    x_dim: int,
+    h_dim: int,
+    num_classes: int,
+    max_num_nodes: int,
+    dataset: str,
+    device: Any,
+) -> Any:
+    import torch
+    import torch.nn as nn
+    from torch_geometric.nn import DenseGraphConv
+
+    class ClearGraphPredCompat(nn.Module):
+        """Project-side CPU-safe mirror of CLEAR Graph_pred_model for evaluation."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.num_graph_models = 3
+            self.dataset = dataset
+            self.graph_model = nn.ModuleList([DenseGraphConv(x_dim, h_dim) for _ in range(self.num_graph_models)])
+            self.encoder = nn.Sequential(nn.Linear(2 * h_dim, h_dim), nn.BatchNorm1d(h_dim), nn.ReLU())
+            self.predictor = nn.Sequential(nn.Linear(h_dim, num_classes))
+            self.max_num_nodes = max_num_nodes
+            self.mask = nn.Parameter(torch.ones(max_num_nodes), requires_grad=True)
+
+        @staticmethod
+        def graph_pooling(x: Any, pool_type: str = "mean", mask: Any = None) -> Any:
+            if mask is not None:
+                mask_feat = mask.unsqueeze(-1).repeat(1, 1, x.shape[-1])
+                x = x * mask_feat
+            if pool_type == "max":
+                out, _ = torch.max(x, dim=1, keepdim=False)
+                return out
+            return torch.sum(x, dim=1, keepdim=False)
+
+        def forward(self, x: Any, adj: Any) -> dict[str, Any]:
+            if self.dataset in {"synthetic", "community", "imdb_b"}:
+                x = torch.ones_like(x).to(device)
+            elif self.dataset in {"ogbg_molhiv", "aids"}:
+                x = x.clone()
+                x[:, :, 2:] = 0.0
+                x[:, :, 0] = 0.0
+            mask = None
+            rep_graphs = []
+            for graph_model in self.graph_model:
+                rep = graph_model(x, adj, mask=mask)
+                graph_rep = torch.cat(
+                    [self.graph_pooling(rep, "mean", mask=mask), self.graph_pooling(rep, "max", mask=mask)],
+                    dim=-1,
+                )
+                graph_rep = self.encoder(graph_rep)
+                rep_graphs.append(graph_rep.unsqueeze(0))
+            rep_graph_agg = torch.mean(torch.cat(rep_graphs, dim=0), dim=0)
+            y_pred = self.predictor(rep_graph_agg)
+            return {"y_pred": y_pred, "rep_graph": rep_graph_agg}
+
+    return ClearGraphPredCompat().to(device)
+
+
+def softmax_probabilities(logits: Any) -> list[list[float]]:
+    import torch
+
+    if not isinstance(logits, torch.Tensor):
+        logits = torch.as_tensor(logits)
+    probs = torch.softmax(logits.float(), dim=-1)
+    return [[float(item) for item in row] for row in probs.detach().cpu().tolist()]
+
+
+def load_clear_graphpred_model(
+    *,
+    teacher_path: Path,
+    dataset: str,
+    x_dim: int,
+    max_num_nodes: int,
+    h_dim: int,
+    device: Any,
+) -> tuple[Any, dict[str, Any]]:
+    import numpy as np
+    import torch
+
+    if not teacher_path.exists():
+        raise FileNotFoundError(f"CLEAR graphPred checkpoint not found: {teacher_path}")
+    torch.manual_seed(1)
+    np.random.seed(1)
+    state_payload = torch.load(str(teacher_path), map_location=device)
+    state_dict = extract_state_dict(state_payload)
+    num_classes = infer_num_classes_from_state_dict(state_dict)
+    model_class = "baselines.clear_official.src.models.Graph_pred_model"
+    try:
+        clear_models = load_clear_models_module()
+        model = clear_models.Graph_pred_model(x_dim, h_dim, num_classes, max_num_nodes, dataset)
+    except Exception as exc:  # noqa: BLE001 - keep CPU diagnostics usable without editing official source
+        model_class = "project_compat.ClearGraphPredCompat"
+        model = build_clear_graphpred_compat_model(
+            x_dim=x_dim,
+            h_dim=h_dim,
+            num_classes=num_classes,
+            max_num_nodes=max_num_nodes,
+            dataset=dataset,
+            device=device,
+        )
+        construction_warning = f"official_graphpred_constructor_failed:{type(exc).__name__}:{exc}"
+    else:
+        construction_warning = None
+    model = model.to(device)
+    load_result = model.load_state_dict(state_dict, strict=False)
+    model.eval()
+    info = {
+        "teacher_kind": "clear_graphpred",
+        "teacher_path": str(teacher_path),
+        "model_class": model_class,
+        "construction_warning": construction_warning,
+        "x_dim": int(x_dim),
+        "h_dim": int(h_dim),
+        "num_classes": int(num_classes),
+        "max_num_nodes": int(max_num_nodes),
+        "device": str(device),
+        "missing_state_keys": list(getattr(load_result, "missing_keys", [])),
+        "unexpected_state_keys": list(getattr(load_result, "unexpected_keys", [])),
+    }
+    return model, info
+
+
+def batched_indices(total: int, batch_size: int) -> Iterable[range]:
+    step = max(1, int(batch_size))
+    for start in range(0, total, step):
+        yield range(start, min(total, start + step))
+
+
+def predict_clear_graphpred_batch(
+    model: Any,
+    rows: list[dict[str, Any]],
+    *,
+    device: Any,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    import torch
+
+    results: list[dict[str, Any]] = [
+        {
+            "teacher_eval_ok": False,
+            "teacher_eval_source": "clear_graphpred",
+            "teacher_error": "not_evaluated",
+        }
+        for _ in rows
+    ]
+    for batch_range in batched_indices(len(rows), batch_size):
+        batch = [rows[index] for index in batch_range]
+        try:
+            orig_x = torch.tensor([row["original_x"] for row in batch], dtype=torch.float32, device=device)
+            cf_x = torch.tensor([row["cf_x"] for row in batch], dtype=torch.float32, device=device)
+            orig_adj = torch.tensor([row["original_adj"] for row in batch], dtype=torch.float32, device=device)
+            cf_adj = torch.tensor([row["cf_adj"] for row in batch], dtype=torch.float32, device=device)
+            with torch.no_grad():
+                orig_logits = model(orig_x, orig_adj)["y_pred"]
+                cf_logits = model(cf_x, cf_adj)["y_pred"]
+            orig_probs = softmax_probabilities(orig_logits)
+            cf_probs = softmax_probabilities(cf_logits)
+            orig_preds = [int(max(range(len(prob)), key=lambda idx: prob[idx])) for prob in orig_probs]
+            cf_preds = [int(max(range(len(prob)), key=lambda idx: prob[idx])) for prob in cf_probs]
+        except Exception as exc:  # noqa: BLE001 - per-batch diagnostics must not hide the reason
+            for index in batch_range:
+                results[index] = {
+                    "teacher_eval_ok": False,
+                    "teacher_eval_source": "clear_graphpred",
+                    "teacher_error": f"clear_graphpred_batch_failed:{type(exc).__name__}:{exc}",
+                }
+            continue
+
+        for offset, index in enumerate(batch_range):
+            row = rows[index]
+            label = as_int(row.get("original_label"))
+            original_prob_label = p_for_label(orig_probs[offset], label)
+            cf_prob_label = p_for_label(cf_probs[offset], label)
+            cf_drop = (
+                original_prob_label - cf_prob_label
+                if original_prob_label is not None and cf_prob_label is not None
+                else None
+            )
+            strict_flip_eval = bool(cf_preds[offset] != orig_preds[offset])
+            strict_flip_vs_label = bool(cf_preds[offset] != label) if label is not None else None
+            results[index] = {
+                "teacher_eval_ok": True,
+                "teacher_eval_source": "clear_graphpred",
+                "teacher_original_pred": orig_preds[offset],
+                "teacher_cf_pred": cf_preds[offset],
+                "teacher_p_before": original_prob_label,
+                "teacher_p_after": cf_prob_label,
+                "teacher_flip": strict_flip_eval,
+                "cf_drop": cf_drop,
+                "teacher_error": None,
+                "label_used_for_p_label": label,
+                "original_pred_label_eval": orig_preds[offset],
+                "cf_pred_label_eval": cf_preds[offset],
+                "original_pred_prob_eval": orig_probs[offset],
+                "cf_pred_prob_eval": cf_probs[offset],
+                "original_prob_label_eval": original_prob_label,
+                "cf_prob_label_eval": cf_prob_label,
+                "strict_flip_eval": strict_flip_eval,
+                "strict_flip_vs_original_label_eval": strict_flip_vs_label,
+                "cf_drop_eval": cf_drop,
+            }
+    return results
+
+
+def attach_clear_graphpred_predictions(
+    rows: list[dict[str, Any]],
+    *,
+    teacher_path: Path,
+    dataset: str,
+    batch_size: int,
+    device_arg: str | None,
+    h_dim: int,
+) -> dict[str, Any]:
+    missing = collect_missing_field_counts(rows, FULL_GRAPH_FIELDS)
+    if any(count > 0 for count in missing.values()):
+        raise RuntimeError(
+            "teacher-kind=clear_graphpred requires full graph arrays in every candidate. "
+            f"Missing counts: {missing}. Re-run CLEAR conversion with INCLUDE_FULL_GRAPHS=1."
+        )
+    first = rows[0]
+    x_shape = graph_array_shape(first.get("original_x"))
+    adj_shape = graph_array_shape(first.get("original_adj"))
+    if x_shape is None or len(x_shape) != 2 or adj_shape is None or len(adj_shape) != 2:
+        raise RuntimeError(
+            "teacher-kind=clear_graphpred could not infer graph tensor dimensions from original_x/original_adj."
+        )
+    max_num_nodes = int(adj_shape[0])
+    x_dim = int(x_shape[1])
+    device = resolve_device(device_arg)
+    model, info = load_clear_graphpred_model(
+        teacher_path=teacher_path,
+        dataset=dataset,
+        x_dim=x_dim,
+        max_num_nodes=max_num_nodes,
+        h_dim=h_dim,
+        device=device,
+    )
+    predictions = predict_clear_graphpred_batch(model, rows, device=device, batch_size=batch_size)
+    for row, prediction in zip(rows, predictions):
+        row["_clear_graphpred_eval"] = prediction
+    info.update(
+        {
+            "batch_size": int(batch_size),
+            "num_rows_evaluated": len(rows),
+            "teacher_eval_ok_count": sum(1 for item in predictions if item.get("teacher_eval_ok") is True),
+            "teacher_eval_error_count": sum(1 for item in predictions if item.get("teacher_eval_ok") is not True),
+        }
+    )
+    return info
+
+
 def teacher_eval_from_precomputed(row: dict[str, Any], label: int | None) -> dict[str, Any]:
     pred_before = as_int(first_present(row, PRECOMPUTED_TEACHER_ORIG))
     pred_after = as_int(first_present(row, PRECOMPUTED_TEACHER_CF))
@@ -332,6 +661,24 @@ def teacher_eval_from_smiles(
     }
 
 
+def teacher_eval_from_clear_graphpred(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("_clear_graphpred_eval")
+    if isinstance(value, dict):
+        return value
+    return {
+        "teacher_eval_ok": False,
+        "teacher_eval_source": "clear_graphpred",
+        "teacher_original_pred": None,
+        "teacher_cf_pred": None,
+        "teacher_p_before": None,
+        "teacher_p_after": None,
+        "teacher_flip": None,
+        "cf_drop": None,
+        "teacher_error": "missing_clear_graphpred_prediction",
+        "label_used_for_p_label": as_int(row.get("original_label")),
+    }
+
+
 def cf_condition(row: dict[str, Any], *, cf_mode: str, min_cf_drop: float) -> bool | None:
     mode = normalize_cf_mode(cf_mode)
     teacher_flip = as_bool(row.get("teacher_flip"))
@@ -352,6 +699,7 @@ def evaluate_candidate(
     row: dict[str, Any],
     *,
     teacher: TeacherSemanticScorer | None,
+    teacher_kind: str,
     distance_method: str,
 ) -> dict[str, Any]:
     label = as_int(row.get("original_label"))
@@ -377,14 +725,16 @@ def evaluate_candidate(
         raise ValueError(f"Unsupported distance_method={distance_method}")
 
     teacher_eval: dict[str, Any]
-    if has_precomputed_teacher(row):
+    if teacher_kind == "clear_graphpred":
+        teacher_eval = teacher_eval_from_clear_graphpred(row)
+    elif has_precomputed_teacher(row):
         teacher_eval = teacher_eval_from_precomputed(row, label)
-    elif has_smiles_pair(row) and teacher is not None and teacher.available and label is not None:
+    elif teacher_kind in {"smiles", "smiles_rf"} and has_smiles_pair(row) and teacher is not None and teacher.available and label is not None:
         teacher_eval = teacher_eval_from_smiles(row, teacher=teacher, label=label)
     else:
         teacher_eval = {
             "teacher_eval_ok": False,
-            "teacher_eval_source": "unavailable",
+            "teacher_eval_source": teacher_kind if teacher_kind in {"none", "action_only"} else "unavailable",
             "teacher_original_pred": None,
             "teacher_cf_pred": None,
             "teacher_p_before": None,
@@ -400,6 +750,7 @@ def evaluate_candidate(
 
     candidate = {
         "candidate_id": row.get("candidate_id"),
+        "record_index": row.get("_input_order"),
         "source": row.get("source", "CLEAR"),
         "dataset": row.get("dataset"),
         "exp_id": row.get("exp_id"),
@@ -412,6 +763,9 @@ def evaluate_candidate(
         "official_flip": row.get("official_flip"),
         "official_target_success": row.get("official_target_success"),
         "official_original_correct": row.get("official_original_correct"),
+        "official_original_pred_prob": row.get("official_original_pred_prob"),
+        "official_cf_pred_prob": row.get("official_cf_pred_prob"),
+        "teacher_kind": teacher_kind,
         "distance_method": distance_method,
         "distance": distance,
         "distance_ok": distance is not None,
@@ -421,6 +775,9 @@ def evaluate_candidate(
         "num_edge_added": row.get("num_edge_added"),
         "num_edge_deleted": row.get("num_edge_deleted"),
         "num_edge_changed": row.get("num_edge_changed"),
+        "edge_added_count": row.get("num_edge_added"),
+        "edge_deleted_count": row.get("num_edge_deleted"),
+        "edge_changed_count": row.get("num_edge_changed"),
         "action_edges_added": row.get("action_edges_added"),
         "action_edges_deleted": row.get("action_edges_deleted"),
         "feature_l1_cost": row.get("feature_l1_cost"),
@@ -522,6 +879,8 @@ def build_summary(
     min_cf_drop: float,
     dataset: str,
     distance_method: str,
+    teacher_kind: str,
+    teacher_path: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     parent_ids = {str(row.get("instance_index")) for row in evaluated_rows if row.get("instance_index") is not None}
     num_parents = len(parent_ids)
@@ -548,6 +907,8 @@ def build_summary(
                 {
                     "method": "CLEAR",
                     "dataset": dataset,
+                    "teacher_kind": teacher_kind,
+                    "teacher_path": teacher_path,
                     "distance_method": distance_method,
                     "cf_mode": cf_mode,
                     "min_cf_drop": float(min_cf_drop),
@@ -579,6 +940,8 @@ def build_summary(
     overall = {
         "method": "CLEAR",
         "dataset": dataset,
+        "teacher_kind": teacher_kind,
+        "teacher_path": teacher_path,
         "distance_method": distance_method,
         "cf_mode": cf_mode,
         "min_cf_drop": float(min_cf_drop),
@@ -589,10 +952,45 @@ def build_summary(
         "teacher_available_for_final_metrics": teacher_available,
         "official_flip_count": sum(1 for row in evaluated_rows if as_bool(row.get("official_flip")) is True),
         "official_flip_rate": mean(1.0 if as_bool(row.get("official_flip")) else 0.0 for row in evaluated_rows),
+        "official_target_success_rate": mean(
+            1.0 if as_bool(row.get("official_target_success")) else 0.0 for row in evaluated_rows
+        ),
+        "official_original_correct_rate": mean(
+            1.0 if as_bool(row.get("official_original_correct")) else 0.0 for row in evaluated_rows
+        ),
+        "eval_original_correct_rate": mean(
+            1.0
+            if as_int(row.get("original_pred_label_eval")) == as_int(row.get("original_label"))
+            else 0.0
+            for row in evaluated_rows
+            if as_int(row.get("original_pred_label_eval")) is not None and as_int(row.get("original_label")) is not None
+        ),
+        "strict_flip_rate_eval": mean(
+            1.0 if as_bool(row.get("strict_flip_eval")) else 0.0
+            for row in evaluated_rows
+            if as_bool(row.get("strict_flip_eval")) is not None
+        ),
+        "strict_flip_vs_original_label_rate_eval": mean(
+            1.0 if as_bool(row.get("strict_flip_vs_original_label_eval")) else 0.0
+            for row in evaluated_rows
+            if as_bool(row.get("strict_flip_vs_original_label_eval")) is not None
+        ),
+        "mean_cf_drop_eval": mean(row.get("cf_drop_eval") for row in evaluated_rows),
+        "mean_original_prob_label_eval": mean(row.get("original_prob_label_eval") for row in evaluated_rows),
+        "mean_cf_prob_label_eval": mean(row.get("cf_prob_label_eval") for row in evaluated_rows),
+        "eval_vs_official_flip_agreement": mean(
+            1.0 if as_bool(row.get("official_flip")) == as_bool(row.get("strict_flip_eval")) else 0.0
+            for row in evaluated_rows
+            if as_bool(row.get("official_flip")) is not None and as_bool(row.get("strict_flip_eval")) is not None
+        ),
         "mean_distance": mean(row.get("distance") for row in evaluated_rows),
         "median_distance": median(row.get("distance") for row in evaluated_rows),
         "mean_edge_changed": mean(row.get("num_edge_changed") for row in evaluated_rows),
+        "mean_edge_added": mean(row.get("num_edge_added") for row in evaluated_rows),
+        "mean_edge_deleted": mean(row.get("num_edge_deleted") for row in evaluated_rows),
         "mean_feature_l1_cost": mean(row.get("feature_l1_cost") for row in evaluated_rows),
+        "mean_total_cost": mean(row.get("total_cost") for row in evaluated_rows),
+        "missing_field_counts": collect_missing_field_counts(evaluated_rows, FULL_GRAPH_FIELDS),
         "note": (
             "Final FlipRate/CFDrop/CCRCov use unified teacher fields only. "
             "CLEAR official_flip is retained as a diagnostic and never used as final strict flip."
@@ -606,12 +1004,17 @@ def write_report(path: Path, *, overall: dict[str, Any], threshold_rows: list[di
         "# CLEAR Unified Candidate Pool Evaluation",
         "",
         f"- dataset: {overall.get('dataset')}",
+        f"- teacher_kind: {overall.get('teacher_kind')}",
+        f"- teacher_path: {overall.get('teacher_path')}",
         f"- distance_method: {overall.get('distance_method')}",
         f"- CF mode: {overall.get('cf_mode')}",
         f"- num_candidates: {overall.get('num_candidates')}",
         f"- num_parents: {overall.get('num_parents')}",
         f"- teacher_eval_ok_rate: {overall.get('teacher_eval_ok_rate')}",
         f"- official_flip_rate_diagnostic_only: {overall.get('official_flip_rate')}",
+        f"- strict_flip_rate_eval: {overall.get('strict_flip_rate_eval')}",
+        f"- strict_flip_vs_original_label_rate_eval: {overall.get('strict_flip_vs_original_label_rate_eval')}",
+        f"- mean_cf_drop_eval: {overall.get('mean_cf_drop_eval')}",
         "",
         "CLEAR official flip/validity fields are diagnostics only. Final FlipRate, CFDrop, and CCRCov must use the unified teacher/oracle.",
         "",
@@ -650,6 +1053,8 @@ def main() -> int:
     out_dir = Path(args.out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     cf_mode = normalize_cf_mode(args.cf_mode)
+    teacher_kind = str(args.teacher_kind).strip().lower()
+    action_only_mode = bool(args.allow_action_only or teacher_kind in {"none", "action_only"})
     top_ks = parse_csv_numbers(args.top_k, as_int=True)
     thresholds = parse_csv_numbers(args.thresholds)
     if not top_ks:
@@ -660,13 +1065,17 @@ def main() -> int:
     print("[CLEAR_EVAL_CONFIG]")
     print(f"candidate_pool={candidate_pool}")
     print(f"dataset={args.dataset}")
+    print(f"teacher_kind={teacher_kind}")
     print(f"teacher_path={args.teacher_path}")
+    print(f"batch_size={args.batch_size}")
+    print(f"device={args.device or 'auto'}")
     print(f"out_dir={out_dir}")
     print(f"cf_mode={cf_mode}")
     print(f"top_k={top_ks}")
     print(f"thresholds={thresholds}")
     print(f"distance_method={args.distance_method}")
     print(f"allow_action_only={args.allow_action_only}")
+    print(f"effective_action_only_mode={action_only_mode}")
 
     raw_rows = load_and_prepare_candidates(args)
     if not raw_rows:
@@ -677,7 +1086,20 @@ def main() -> int:
     has_any_precomputed_teacher = any(has_precomputed_teacher(row) for row in raw_rows)
 
     teacher = None
-    if has_any_smiles and args.teacher_path:
+    graphpred_info: dict[str, Any] = {}
+    if teacher_kind == "clear_graphpred":
+        teacher_path = Path(args.teacher_path or DEFAULT_CLEAR_GRAPHPRED_PATH).expanduser()
+        if not teacher_path.is_absolute():
+            teacher_path = REPO_ROOT / teacher_path
+        graphpred_info = attach_clear_graphpred_predictions(
+            raw_rows,
+            teacher_path=teacher_path,
+            dataset=args.dataset,
+            batch_size=int(args.batch_size),
+            device_arg=args.device,
+            h_dim=int(args.clear_graphpred_h_dim),
+        )
+    elif teacher_kind in {"smiles", "smiles_rf"} and has_any_smiles and args.teacher_path:
         teacher = TeacherSemanticScorer(args.teacher_path)
 
     if args.distance_method != "action" and not (has_any_smiles or has_any_full_graph):
@@ -686,7 +1108,17 @@ def main() -> int:
             "distance evaluation. Regenerate the pool with --include-full-graphs, or use --distance-method action."
         )
 
-    if not has_any_smiles and not has_any_precomputed_teacher and not args.allow_action_only:
+    if (
+        teacher_kind not in {"clear_graphpred", "smiles", "smiles_rf"}
+        and not has_any_precomputed_teacher
+        and not action_only_mode
+    ):
+        raise SystemExit(
+            "[CLEAR_EVAL_ERROR] teacher-kind must be clear_graphpred, smiles/smiles_rf, or a candidate pool must provide "
+            "precomputed teacher fields. Use --teacher-kind none or --allow-action-only for diagnostics only."
+        )
+
+    if not has_any_smiles and not has_any_precomputed_teacher and teacher_kind in {"smiles", "smiles_rf"} and not action_only_mode:
         raise SystemExit(
             "[CLEAR_EVAL_ERROR] Unified teacher/oracle evaluation cannot run on this CLEAR candidate pool because it lacks "
             "original_smiles/cf_smiles and precomputed teacher_* fields. The default conversion omits full graph arrays, "
@@ -697,11 +1129,11 @@ def main() -> int:
 
     evaluated: list[dict[str, Any]] = []
     for eval_order, row in enumerate(raw_rows):
-        result = evaluate_candidate(row, teacher=teacher, distance_method=args.distance_method)
+        result = evaluate_candidate(row, teacher=teacher, teacher_kind=teacher_kind, distance_method=args.distance_method)
         result["_eval_order"] = eval_order
         evaluated.append(result)
 
-    if not args.allow_action_only and not any(row.get("teacher_eval_ok") for row in evaluated):
+    if not action_only_mode and not any(row.get("teacher_eval_ok") for row in evaluated):
         raise SystemExit(
             "[CLEAR_EVAL_ERROR] No candidate received a successful unified teacher evaluation. This usually means the pool has no SMILES "
             "or the supplied teacher cannot score the candidate representation. Final CLEAR metrics are not available."
@@ -717,18 +1149,25 @@ def main() -> int:
         min_cf_drop=float(args.min_cf_drop),
         dataset=args.dataset,
         distance_method=args.distance_method,
+        teacher_kind=teacher_kind,
+        teacher_path=args.teacher_path or (DEFAULT_CLEAR_GRAPHPRED_PATH if teacher_kind == "clear_graphpred" else ""),
     )
     overall.update(
         {
             "candidate_pool": str(candidate_pool),
             "out_dir": str(out_dir),
+            "teacher_kind": teacher_kind,
+            "teacher_path": args.teacher_path or (DEFAULT_CLEAR_GRAPHPRED_PATH if teacher_kind == "clear_graphpred" else ""),
+            "clear_graphpred_info": graphpred_info,
             "rank_by": args.rank_by,
             "deduplicate_by": args.deduplicate_by,
             "max_candidates": args.max_candidates,
             "allow_action_only": args.allow_action_only,
+            "effective_action_only_mode": action_only_mode,
             "has_any_smiles_pair": has_any_smiles,
             "has_any_full_graph_arrays": has_any_full_graph,
             "has_any_precomputed_teacher": has_any_precomputed_teacher,
+            "missing_field_counts": collect_missing_field_counts(raw_rows, FULL_GRAPH_FIELDS),
         }
     )
 
@@ -754,7 +1193,10 @@ def main() -> int:
                     "official_flip": row.get("official_flip"),
                     "teacher_eval_ok": row.get("teacher_eval_ok"),
                     "teacher_flip": row.get("teacher_flip"),
+                    "strict_flip_eval": row.get("strict_flip_eval"),
+                    "strict_flip_vs_original_label_eval": row.get("strict_flip_vs_original_label_eval"),
                     "cf_drop": row.get("cf_drop"),
+                    "cf_drop_eval": row.get("cf_drop_eval"),
                 },
                 sort_keys=True,
             )

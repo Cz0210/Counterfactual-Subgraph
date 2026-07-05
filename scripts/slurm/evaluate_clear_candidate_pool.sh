@@ -18,12 +18,15 @@ conda activate smiles_pip118
 cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 
-DATASET="${DATASET:-ogbg_molhiv}"
-CANDIDATE_POOL="${CANDIDATE_POOL:-outputs/hpc/baselines/clear/${DATASET}/candidate_pool/clear_${DATASET}_candidate_pool.jsonl}"
+DATASET="${DATASET:-aids}"
+CANDIDATE_POOL="${CANDIDATE_POOL:-outputs/hpc/baselines/clear/${DATASET}/candidate_pool/clear_${DATASET}_candidate_pool.with_graphs.jsonl}"
 OUT_DIR="${OUT_DIR:-outputs/hpc/baselines/clear/${DATASET}/eval}"
-TEACHER_PATH="${TEACHER_PATH:-outputs/hpc/oracle/aids_rf_model.pkl}"
+TEACHER_KIND="${TEACHER_KIND:-none}"
+TEACHER_PATH="${TEACHER_PATH:-}"
 CF_MODE="${CF_MODE:-strict_flip}"
 MIN_CF_DROP="${MIN_CF_DROP:-0.0}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
+DEVICE="${DEVICE:-}"
 TOP_K="${TOP_K:-1,5,10,20}"
 THRESHOLDS="${THRESHOLDS:-5,10,20,50,100,200}"
 DISTANCE_METHOD="${DISTANCE_METHOD:-action}"
@@ -45,9 +48,12 @@ echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "DATASET=${DATASET}"
 echo "CANDIDATE_POOL=${CANDIDATE_POOL}"
 echo "OUT_DIR=${OUT_DIR}"
+echo "TEACHER_KIND=${TEACHER_KIND}"
 echo "TEACHER_PATH=${TEACHER_PATH}"
 echo "CF_MODE=${CF_MODE}"
 echo "MIN_CF_DROP=${MIN_CF_DROP}"
+echo "EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE}"
+echo "DEVICE=${DEVICE}"
 echo "TOP_K=${TOP_K}"
 echo "THRESHOLDS=${THRESHOLDS}"
 echo "DISTANCE_METHOD=${DISTANCE_METHOD}"
@@ -73,10 +79,12 @@ args=(
   --set inference.fallback_to_heuristic=false
   --candidate-pool "${CANDIDATE_POOL}"
   --dataset "${DATASET}"
+  --teacher-kind "${TEACHER_KIND}"
   --teacher-path "${TEACHER_PATH}"
   --out-dir "${OUT_DIR}"
   --cf-mode "${CF_MODE}"
   --min-cf-drop "${MIN_CF_DROP}"
+  --batch-size "${EVAL_BATCH_SIZE}"
   --top-k "${TOP_K}"
   --thresholds "${THRESHOLDS}"
   --distance-method "${DISTANCE_METHOD}"
@@ -89,6 +97,9 @@ if [ -n "${MAX_CANDIDATES}" ]; then
 fi
 if [ "${ALLOW_ACTION_ONLY}" = "1" ]; then
   args+=(--allow-action-only)
+fi
+if [ -n "${DEVICE}" ]; then
+  args+=(--device "${DEVICE}")
 fi
 
 python scripts/baselines/clear/evaluate_clear_candidate_pool.py "${args[@]}"
