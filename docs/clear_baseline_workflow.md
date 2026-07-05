@@ -464,6 +464,15 @@ Then convert valid CLEAR counterfactual full graphs:
 sbatch scripts/slurm/clear_aids_convert_rf_fullgraph_candidates.sh
 ```
 
+The conversion is intentionally conservative. CLEAR `cf_x` is a continuous
+decoder output, not a reliable atom vocabulary. The RF conversion therefore
+uses original node identities from the AIDS preparation descriptor slot
+`original_x[:, 2] = atomic_num / 100` and uses thresholded/symmetrized `cf_adj`
+as the counterfactual topology. The conversion summary records
+`original_x_onehot_like_rate`, `cf_x_onehot_like_rate`,
+`cf_x_continuous_rate`, argmax distributions, `cf_adj_min/max/mean`, and the
+node-mask source.
+
 This writes:
 
 ```text
@@ -471,6 +480,19 @@ outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.c
 outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.jsonl
 outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates_summary.json
 ```
+
+The conversion must pass a quality gate before downstream fair evaluation:
+
+```text
+MIN_VALID_CANDIDATES=20
+MIN_VALID_RATE=0.001
+ADJ_THRESHOLD=0.5
+```
+
+If the gate fails, the script prints
+`[CLEAR_RF_CONVERT_FAILED_QUALITY_GATE]` and exits non-zero. A completed job
+with only a few valid SMILES must not be treated as a successful fair-table
+candidate set.
 
 Run GREED-GED final-table evaluation:
 

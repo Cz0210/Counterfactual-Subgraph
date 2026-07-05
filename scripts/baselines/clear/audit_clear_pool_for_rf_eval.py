@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.baselines.clear_rf_adapter import (  # noqa: E402
     FULL_GRAPH_FIELDS,
+    analyze_clear_record_schema,
     convert_clear_record_graphs,
     read_jsonl,
     record_has_full_graph_fields,
@@ -35,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="outputs/hpc/baselines/clear/aids/rf_unified/audit_clear_rf_feasibility.json",
     )
     parser.add_argument("--max-records", type=int, default=None)
+    parser.add_argument("--adj-threshold", type=float, default=0.5)
+    parser.add_argument("--min-valid-candidates", type=int, default=20)
+    parser.add_argument("--min-valid-rate", type=float, default=0.001)
     parser.add_argument("--config", default=None)
     parser.add_argument("--set", action="append", default=[])
     return parser
@@ -53,6 +57,11 @@ def missing_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return {field: sum(1 for row in rows if row.get(field) in (None, "")) for field in required}
 
 
+def merge_counter(target: Counter[str], values: dict[str, int]) -> None:
+    for key, value in values.items():
+        target[str(key)] += int(value)
+
+
 def main() -> int:
     args = build_parser().parse_args()
     clear_pool = Path(args.clear_pool).expanduser()
@@ -68,6 +77,17 @@ def main() -> int:
     original_ok = 0
     cf_ok = 0
     examples: list[dict[str, Any]] = []
+    original_active = 0
+    original_onehot = 0
+    cf_active = 0
+    cf_onehot = 0
+    cf_continuous = 0
+    original_argmax: Counter[str] = Counter()
+    cf_argmax: Counter[str] = Counter()
+    node_mask_sources: Counter[str] = Counter()
+    cf_adj_mins: list[float] = []
+    cf_adj_maxs: list[float] = []
+    cf_adj_means: list[float] = []
 
     for index, row in enumerate(rows):
         if row.get("original_smiles"):
@@ -76,7 +96,25 @@ def main() -> int:
             has_cf_smiles += 1
         if record_has_full_graph_fields(row):
             full_graph_count += 1
-        converted = convert_clear_record_graphs(row)
+        schema = analyze_clear_record_schema(row, adjacency_threshold=float(args.adj_threshold))
+        node_mask_sources[str(schema.get("node_mask_source") or "unknown")] += 1
+        original_schema = schema.get("original_x") or {}
+        cf_schema = schema.get("cf_x") or {}
+        original_active += int(original_schema.get("active_rows") or 0)
+        original_onehot += int(original_schema.get("onehot_like_count") or 0)
+        cf_active += int(cf_schema.get("active_rows") or 0)
+        cf_onehot += int(cf_schema.get("onehot_like_count") or 0)
+        cf_continuous += int(cf_schema.get("continuous_count") or 0)
+        merge_counter(original_argmax, original_schema.get("argmax_distribution") or {})
+        merge_counter(cf_argmax, cf_schema.get("argmax_distribution") or {})
+        if isinstance(schema.get("cf_adj_min"), (int, float)):
+            cf_adj_mins.append(float(schema["cf_adj_min"]))
+        if isinstance(schema.get("cf_adj_max"), (int, float)):
+            cf_adj_maxs.append(float(schema["cf_adj_max"]))
+        if isinstance(schema.get("cf_adj_mean"), (int, float)):
+            cf_adj_means.append(float(schema["cf_adj_mean"]))
+
+        converted = convert_clear_record_graphs(row, adjacency_threshold=float(args.adj_threshold))
         original = converted["original"]
         cf = converted["cf"]
         if original.ok:
@@ -100,17 +138,21 @@ def main() -> int:
                     "cf_ok": cf.ok,
                     "cf_smiles": cf.smiles,
                     "cf_reason": cf.reason,
+                    "node_mask_source": cf.node_mask_source,
+                    "num_nodes_used": cf.num_nodes_used,
                 }
             )
 
     num_records = len(rows)
-    usable_count = has_cf_smiles + cf_ok if has_cf_smiles else cf_ok
-    usable = usable_count > 0
+    usable_count = cf_ok
+    valid_rate = (usable_count / num_records) if num_records else 0.0
+    quality_gate_pass = usable_count >= int(args.min_valid_candidates) and valid_rate >= float(args.min_valid_rate)
+    usable = quality_gate_pass
     if not usable:
-        reason = "no_cf_smiles_and_cf_graph_to_mol_failed"
+        reason = "quality_gate_failed_or_no_cf_smiles"
         next_step = (
-            "RF oracle evaluation is not currently usable. Keep clear_graphpred native diagnostics and inspect "
-            "CLEAR graph feature semantics before reporting RF-unified metrics."
+            "RF oracle evaluation is not currently usable. Inspect CLEAR graph feature semantics or adjust "
+            "the conservative graph-to-SMILES adapter before reporting RF-unified metrics."
         )
     else:
         reason = None
@@ -139,6 +181,20 @@ def main() -> int:
         "rf_oracle_usable": usable,
         "reason": reason,
         "recommended_next_step": next_step,
+        "adj_threshold": float(args.adj_threshold),
+        "min_valid_candidates": int(args.min_valid_candidates),
+        "min_valid_rate": float(args.min_valid_rate),
+        "quality_gate_pass": bool(quality_gate_pass),
+        "original_x_onehot_like_rate": (original_onehot / original_active) if original_active else 0.0,
+        "cf_x_onehot_like_rate": (cf_onehot / cf_active) if cf_active else 0.0,
+        "cf_x_continuous_rate": (cf_continuous / cf_active) if cf_active else 0.0,
+        "original_x_argmax_distribution": dict(original_argmax),
+        "cf_x_argmax_distribution": dict(cf_argmax),
+        "atom_type_argmax_counts": dict(cf_argmax),
+        "node_mask_source_counts": dict(node_mask_sources),
+        "cf_adj_min": min(cf_adj_mins) if cf_adj_mins else None,
+        "cf_adj_max": max(cf_adj_maxs) if cf_adj_maxs else None,
+        "cf_adj_mean": (sum(cf_adj_means) / len(cf_adj_means)) if cf_adj_means else None,
         "examples": examples,
     }
     write_json(args.out_json, summary)

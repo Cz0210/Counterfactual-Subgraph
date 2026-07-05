@@ -29,6 +29,9 @@ SMILES_COL=${SMILES_COL:-smiles}
 LABEL_COL=${LABEL_COL:-label}
 TARGET_LABEL=${TARGET_LABEL:-1}
 CF_MODE=${CF_MODE:-strict_flip}
+MIN_VALID_CANDIDATES=${MIN_VALID_CANDIDATES:-20}
+MIN_VALID_RATE=${MIN_VALID_RATE:-0.001}
+ADJ_THRESHOLD=${ADJ_THRESHOLD:-0.5}
 
 echo "===== CLEAR RF UNIFIED AUDIT ====="
 echo "hostname: $(hostname)"
@@ -46,6 +49,9 @@ echo "SMILES_COL=${SMILES_COL}"
 echo "LABEL_COL=${LABEL_COL}"
 echo "TARGET_LABEL=${TARGET_LABEL}"
 echo "CF_MODE=${CF_MODE}"
+echo "MIN_VALID_CANDIDATES=${MIN_VALID_CANDIDATES}"
+echo "MIN_VALID_RATE=${MIN_VALID_RATE}"
+echo "ADJ_THRESHOLD=${ADJ_THRESHOLD}"
 
 args=(
   --config configs/hpc.yaml
@@ -53,6 +59,9 @@ args=(
   --clear-pool "${CLEAR_POOL}"
   --dataset "${DATASET}"
   --out-json "${OUT_JSON}"
+  --min-valid-candidates "${MIN_VALID_CANDIDATES}"
+  --min-valid-rate "${MIN_VALID_RATE}"
+  --adj-threshold "${ADJ_THRESHOLD}"
 )
 if [ -n "${MAX_RECORDS:-}" ]; then
   args+=(--max-records "${MAX_RECORDS}")

@@ -66,6 +66,14 @@ method = CLEAR-RF-FullGraph
 If conversion is not reliable, the audit records `rf_oracle_usable=false` and
 the native `clear_graphpred` result remains diagnostic only.
 
+The converter treats CLEAR `cf_x` as a continuous decoder tensor rather than an
+atom vocabulary. Atom identity is recovered from the original AIDS descriptor
+slot `original_x[:, 2] = atomic_num / 100`, while counterfactual topology comes
+from symmetrized/thresholded `cf_adj`. The converter records feature-schema
+statistics and enforces a quality gate (`MIN_VALID_CANDIDATES=20`,
+`MIN_VALID_RATE=0.001` by default); failing the gate exits non-zero and blocks
+downstream fair evaluation.
+
 ### Consequences
 The final fair table must not substitute CLEAR native graphPred/action-distance
 metrics for RF-oracle CCRCov. CLEAR can enter the final table only through
