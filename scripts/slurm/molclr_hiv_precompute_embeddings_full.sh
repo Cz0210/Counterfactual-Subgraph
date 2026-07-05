@@ -27,6 +27,7 @@ if [ -z "${GT_FULLGRAPH_CANDIDATES_PATH:-}" ] && [ -n "${GCF_CANDIDATES_PATH:-}"
   GT_FULLGRAPH_CANDIDATES_PATH="${GCF_CANDIDATES_PATH}"
 fi
 GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH:-${GT_FULLGRAPH_DEFAULT}}
+CLEAR_FULLGRAPH_CANDIDATES_PATH=${CLEAR_FULLGRAPH_CANDIDATES_PATH:-}
 
 resolve_molclr_checkpoint() {
   if [ -n "${MOLCLR_CKPT:-}" ]; then
@@ -64,6 +65,8 @@ echo "MOLCLR_ROOT=${MOLCLR_ROOT}"
 echo "MOLCLR_CKPT=${MOLCLR_CKPT:-}"
 echo "[GT_FULLGRAPH_CONFIG]"
 echo "GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH}"
+echo "[CLEAR_RF_FULLGRAPH_CONFIG]"
+echo "CLEAR_FULLGRAPH_CANDIDATES_PATH=${CLEAR_FULLGRAPH_CANDIDATES_PATH:-}"
 
 if [ ! -d "${MOLCLR_ROOT}" ] || [ -z "${MOLCLR_CKPT:-}" ] || [ ! -f "${MOLCLR_CKPT}" ]; then
   echo "[MOLCLR_CANDIDATES]"
@@ -77,18 +80,24 @@ if [ ! -d "${MOLCLR_ROOT}" ] || [ -z "${MOLCLR_CKPT:-}" ] || [ ! -f "${MOLCLR_CK
   exit 2
 fi
 
-python scripts/precompute_molclr_embeddings_for_ccrcov.py \
-  --config configs/hpc.yaml \
-  --set inference.fallback_to_heuristic=false \
-  --dataset-csv "${DATASET_CSV:-outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv}" \
-  --ours-selected-path "${OURS_SELECTED_PATH:-outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20}" \
-  --gt-fullgraph-candidates-path "${GT_FULLGRAPH_CANDIDATES_PATH}" \
-  --molclr-root "${MOLCLR_ROOT}" \
-  --molclr-checkpoint "${MOLCLR_CKPT}" \
-  --output-dir "${OUTPUT_DIR:-outputs/hpc/molclr_ccrcov_embeddings}" \
-  --label "${LABEL:-1}" \
-  --batch-size "${BATCH_SIZE:-64}" \
-  --device "${DEVICE:-cuda}" \
+args=(
+  --config configs/hpc.yaml
+  --set inference.fallback_to_heuristic=false
+  --dataset-csv "${DATASET_CSV:-outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv}"
+  --ours-selected-path "${OURS_SELECTED_PATH:-outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20}"
+  --gt-fullgraph-candidates-path "${GT_FULLGRAPH_CANDIDATES_PATH}"
+  --molclr-root "${MOLCLR_ROOT}"
+  --molclr-checkpoint "${MOLCLR_CKPT}"
+  --output-dir "${OUTPUT_DIR:-outputs/hpc/molclr_ccrcov_embeddings}"
+  --label "${LABEL:-1}"
+  --batch-size "${BATCH_SIZE:-64}"
+  --device "${DEVICE:-cuda}"
   --invalid-policy skip
+)
+if [ -n "${CLEAR_FULLGRAPH_CANDIDATES_PATH:-}" ]; then
+  args+=(--clear-fullgraph-candidates-path "${CLEAR_FULLGRAPH_CANDIDATES_PATH}")
+fi
+
+python scripts/precompute_molclr_embeddings_for_ccrcov.py "${args[@]}"
 
 echo "===== MOLCLR CCRCov PRECOMPUTE FULL DONE ====="

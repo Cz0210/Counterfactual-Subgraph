@@ -23,8 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=None)
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--dataset-csv", required=True)
-    parser.add_argument("--ours-selected-path", required=True)
-    parser.add_argument("--gt-fullgraph-candidates-path", required=True)
+    parser.add_argument("--ours-selected-path", default=None)
+    parser.add_argument("--gt-fullgraph-candidates-path", default=None)
+    parser.add_argument("--clear-fullgraph-candidates-path", default=None)
     parser.add_argument("--teacher-path", required=True)
     parser.add_argument("--greed-checkpoint", required=True)
     parser.add_argument("--label", type=int, default=1)
@@ -57,6 +58,7 @@ def main() -> None:
         label=args.label,
         thresholds=_thresholds(args.thresholds),
         output_root=args.output_root,
+        clear_fullgraph_candidates_path=args.clear_fullgraph_candidates_path,
         smiles_col=args.smiles_col,
         label_col=args.label_col,
         max_parents=args.max_parents,

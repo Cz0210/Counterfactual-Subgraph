@@ -85,8 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=None)
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--dataset-csv", required=True)
-    parser.add_argument("--ours-selected-path", required=True)
-    parser.add_argument("--gt-fullgraph-candidates-path", required=True)
+    parser.add_argument("--ours-selected-path", default=None)
+    parser.add_argument("--gt-fullgraph-candidates-path", default=None)
+    parser.add_argument("--clear-fullgraph-candidates-path", default=None)
     parser.add_argument("--molclr-root", default=None)
     parser.add_argument("--molclr-checkpoint", default=None)
     parser.add_argument("--output-dir", default="outputs/hpc/molclr_ccrcov_embeddings")
@@ -115,6 +116,7 @@ def main() -> None:
         molclr_root=molclr_root,
         molclr_checkpoint=molclr_checkpoint,
         output_dir=args.output_dir,
+        clear_fullgraph_candidates_path=args.clear_fullgraph_candidates_path,
         label=args.label,
         smiles_col=args.smiles_col,
         label_col=args.label_col,

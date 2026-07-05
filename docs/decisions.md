@@ -40,6 +40,44 @@ Accepted
 
 ---
 
+## [2026-07-05] Add CLEAR-RF-FullGraph path for final fair CCRCOV tables
+
+### Background
+The CLEAR AIDS pipeline now produces a full-graph candidate pool and can be
+evaluated with `TEACHER_KIND=clear_graphpred`. That native diagnostic uses
+CLEAR's own graph prediction checkpoint and action-distance costs. It is not
+directly comparable to Ours and GT-FullGraph when those methods are evaluated
+with the shared AIDS/HIV RF oracle and learned/embedding distances.
+
+### Decision
+Add a separate `CLEAR-RF-FullGraph` adaptation path. The path first audits
+whether CLEAR's `original_adj`, `cf_adj`, `original_x`, and `cf_x` arrays can be
+conservatively converted into valid RDKit SMILES. If conversion is feasible, it
+writes RF-readable fullgraph candidates and evaluates them through the same
+GREED-GED / MolCLR CCRCov pipeline used by Ours and GT-FullGraph:
+
+```text
+parent set = outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv
+teacher = outputs/hpc/oracle/aids_rf_model.pkl
+CF_MODE = strict_flip
+method = CLEAR-RF-FullGraph
+```
+
+If conversion is not reliable, the audit records `rf_oracle_usable=false` and
+the native `clear_graphpred` result remains diagnostic only.
+
+### Consequences
+The final fair table must not substitute CLEAR native graphPred/action-distance
+metrics for RF-oracle CCRCov. CLEAR can enter the final table only through
+`CLEAR-RF-FullGraph` or another explicitly documented adapter that shares the
+same parent set, teacher, distance system, thresholds, and strict-flip mode as
+the other methods.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-03] Train GCFExplainer-HIVCSV GNN with imbalance-aware metrics
 
 ### Background

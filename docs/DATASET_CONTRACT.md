@@ -64,3 +64,20 @@ outputs/hpc/oracle/aids_rf_model.pkl
 ```
 
 CLEAR full-graph strict evaluation may use `TEACHER_KIND=clear_graphpred` or another graph teacher adapter when the counterfactual output is a continuous graph tensor rather than a SMILES molecule. That teacher must be explicitly recorded and must not be described as the SMILES/RF oracle.
+
+For the final fair cross-baseline table, CLEAR must additionally provide a
+`CLEAR-RF-FullGraph` path whenever its graph arrays can be conservatively
+converted back to valid SMILES. That path uses:
+
+```text
+TEACHER_PATH=outputs/hpc/oracle/aids_rf_model.pkl
+PARENT_DATASET_CSV=outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv
+SMILES_COLUMN=smiles
+LABEL_COLUMN=label
+TARGET_LABEL=1
+CF_MODE=strict_flip
+```
+
+If CLEAR graph arrays cannot be reliably converted to RF-readable SMILES, the
+audit must report `rf_oracle_usable=false`; `clear_graphpred` native diagnostics
+must not be substituted for the RF-oracle final table.

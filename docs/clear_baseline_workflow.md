@@ -432,6 +432,67 @@ ALLOW_ACTION_ONLY=1 MAX_CANDIDATES=100 sbatch scripts/slurm/evaluate_clear_candi
 Action-only output is diagnostic only and must not replace final
 native-action CCRCov results.
 
+## 9.1 CLEAR-RF Unified Fair-Table Evaluation
+
+`TEACHER_KIND=clear_graphpred` with action distance is a CLEAR native diagnostic.
+It is useful for checking whether CLEAR changed its own graph classifier, but it
+is not the final fair main-table result when Ours and GT-FullGraph are evaluated
+with the shared RF oracle.
+
+For the final fair table, use `CLEAR-RF-FullGraph`:
+
+```text
+parent set: outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv
+SMILES_COL=smiles
+LABEL_COL=label
+TARGET_LABEL=1
+teacher: outputs/hpc/oracle/aids_rf_model.pkl
+distance: GREED-GED primary, MolCLR embedding supplementary
+CF_MODE=strict_flip
+```
+
+First audit whether CLEAR full graph arrays can be conservatively converted to
+RF-readable SMILES:
+
+```bash
+sbatch scripts/slurm/clear_aids_audit_rf_unified.sh
+```
+
+Then convert valid CLEAR counterfactual full graphs:
+
+```bash
+sbatch scripts/slurm/clear_aids_convert_rf_fullgraph_candidates.sh
+```
+
+This writes:
+
+```text
+outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.csv
+outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.jsonl
+outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates_summary.json
+```
+
+Run GREED-GED final-table evaluation:
+
+```bash
+sbatch scripts/slurm/clear_aids_eval_rf_greed_full.sh
+```
+
+Run MolCLR embedding evaluation after the embedding directory includes CLEAR
+candidate SMILES. The existing precompute script accepts
+`CLEAR_FULLGRAPH_CANDIDATES_PATH`:
+
+```bash
+CLEAR_FULLGRAPH_CANDIDATES_PATH=outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.csv \
+sbatch scripts/slurm/molclr_hiv_precompute_embeddings_full.sh
+
+sbatch scripts/slurm/clear_aids_eval_rf_molclr_full.sh
+```
+
+If the audit reports `rf_oracle_usable=false`, do not report CLEAR as an
+RF-unified final-table method. Keep the clear_graphpred/action-distance result
+as diagnostic only.
+
 ## 10. Examples
 
 Community:

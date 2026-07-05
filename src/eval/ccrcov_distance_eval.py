@@ -608,6 +608,7 @@ def _evaluate_gt_fullgraph(
     provider: DistanceProvider,
     distance_type: str,
     distance_name: str,
+    method: str,
     partial_path: Path,
     partial_every: int,
 ) -> list[dict[str, Any]]:
@@ -619,7 +620,7 @@ def _evaluate_gt_fullgraph(
         before = before_cache.setdefault(parent.smiles, predict_with_teacher(teacher, parent.smiles, parent.label))
         for candidate in candidates:
             work_done += 1
-            row = _row_base(method="gt_fullgraph", distance_type=distance_type, ged_mode=distance_name, parent=parent, candidate=candidate)
+            row = _row_base(method=method, distance_type=distance_type, ged_mode=distance_name, parent=parent, candidate=candidate)
             row.update(
                 {
                     "fragment_smiles": "",
@@ -646,16 +647,79 @@ def _evaluate_gt_fullgraph(
             details.append(row)
             if partial_every > 0 and work_done % int(partial_every) == 0:
                 _write_csv(partial_path, details, DETAIL_FIELDS)
-                print(f"[PROGRESS] gt_fullgraph pairs={work_done}/{total_work} detail_rows={len(details)}", flush=True)
+                print(f"[PROGRESS] {method} pairs={work_done}/{total_work} detail_rows={len(details)}", flush=True)
     _write_csv(partial_path, details, DETAIL_FIELDS)
     return details
+
+
+def _evaluate_fullgraph_method(
+    *,
+    output: Path,
+    output_key: str,
+    output_dir_name: str,
+    method: str,
+    parents: list[ParentRecord],
+    candidates: list[CandidateRecord],
+    teacher: Any,
+    provider: DistanceProvider,
+    distance_type: str,
+    distance_name: str,
+    thresholds: Sequence[float],
+    cf_mode: str,
+    min_cf_drop: float,
+    partial_every: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    method_dir = ensure_directory(output / output_dir_name)
+    details = _evaluate_gt_fullgraph(
+        parents=parents,
+        candidates=candidates,
+        teacher=teacher,
+        provider=provider,
+        distance_type=distance_type,
+        distance_name=distance_name,
+        method=method,
+        partial_path=method_dir / "details.partial.csv",
+        partial_every=int(partial_every),
+    )
+    summaries = build_threshold_summary_for_cf_mode(
+        details,
+        method=method,
+        distance_type=distance_type,
+        ged_mode=distance_name,
+        thresholds=thresholds,
+        total_parents=len(parents),
+        total_candidates=len(candidates),
+        cf_mode=cf_mode,
+        min_cf_drop=float(min_cf_drop),
+    )
+    summaries = _augment_summary(
+        summaries,
+        detail_rows=details,
+        candidates=candidates,
+        cf_mode=cf_mode,
+        min_cf_drop=float(min_cf_drop),
+    )
+    output_paths = _write_method_outputs(
+        output_dir=method_dir,
+        method=method,
+        distance_type=distance_type,
+        distance_name=distance_name,
+        thresholds=thresholds,
+        details=details,
+        summaries=summaries,
+        total_parents=len(parents),
+        total_candidates=len(candidates),
+        cf_mode=cf_mode,
+        min_cf_drop=float(min_cf_drop),
+    )
+    return summaries, {output_key: output_paths}
 
 
 def evaluate_ccrcov_with_distance(
     *,
     dataset_csv: str | Path,
-    ours_selected_path: str | Path,
-    gt_fullgraph_candidates_path: str | Path,
+    ours_selected_path: str | Path | None,
+    gt_fullgraph_candidates_path: str | Path | None,
     teacher_path: str | Path,
     provider: DistanceProvider,
     distance_type: str,
@@ -663,6 +727,7 @@ def evaluate_ccrcov_with_distance(
     label: int,
     thresholds: Sequence[float],
     output_root: str | Path,
+    clear_fullgraph_candidates_path: str | Path | None = None,
     smiles_col: str = "smiles",
     label_col: str = "label",
     max_parents: int | None = None,
@@ -683,23 +748,38 @@ def evaluate_ccrcov_with_distance(
         label_col=label_col,
         max_parents=max_parents,
     )
-    _ours_path, ours_candidates = _load_candidate_records(
-        ours_selected_path,
-        fields=OURS_FRAGMENT_FIELDS,
-        directory_candidates=OURS_DIRECTORY_CANDIDATES,
-    )
-    _gt_path, gt_candidates = _load_candidate_records(
-        gt_fullgraph_candidates_path,
-        fields=GT_FULLGRAPH_FIELDS,
-        directory_candidates=GT_DIRECTORY_CANDIDATES,
-    )
+    ours_candidates: list[CandidateRecord] = []
+    gt_candidates: list[CandidateRecord] = []
+    clear_candidates: list[CandidateRecord] = []
+    if ours_selected_path:
+        _ours_path, ours_candidates = _load_candidate_records(
+            ours_selected_path,
+            fields=OURS_FRAGMENT_FIELDS,
+            directory_candidates=OURS_DIRECTORY_CANDIDATES,
+        )
+    if gt_fullgraph_candidates_path:
+        _gt_path, gt_candidates = _load_candidate_records(
+            gt_fullgraph_candidates_path,
+            fields=GT_FULLGRAPH_FIELDS,
+            directory_candidates=GT_DIRECTORY_CANDIDATES,
+        )
+    if clear_fullgraph_candidates_path:
+        _clear_path, clear_candidates = _load_candidate_records(
+            clear_fullgraph_candidates_path,
+            fields=GT_FULLGRAPH_FIELDS,
+            directory_candidates=GT_DIRECTORY_CANDIDATES,
+        )
     if max_candidates is not None:
         ours_candidates = ours_candidates[: int(max_candidates)]
         gt_candidates = gt_candidates[: int(max_candidates)]
+        clear_candidates = clear_candidates[: int(max_candidates)]
     print(
-        f"[PROGRESS] parents={len(parents)} ours_candidates={len(ours_candidates)} gt_fullgraph_candidates={len(gt_candidates)}",
+        f"[PROGRESS] parents={len(parents)} ours_candidates={len(ours_candidates)} "
+        f"gt_fullgraph_candidates={len(gt_candidates)} clear_rf_fullgraph_candidates={len(clear_candidates)}",
         flush=True,
     )
+    if not ours_candidates and not gt_candidates and not clear_candidates:
+        raise ValueError("No candidates loaded for any method.")
     teacher = TeacherSemanticScorer(teacher_path)
 
     all_summaries: list[dict[str, Any]] = []
@@ -750,49 +830,44 @@ def evaluate_ccrcov_with_distance(
         all_summaries.extend(ours_summaries)
 
     if gt_candidates:
-        gt_dir = ensure_directory(output / f"gt_fullgraph_{distance_name}")
-        gt_details = _evaluate_gt_fullgraph(
+        gt_summaries, gt_outputs = _evaluate_fullgraph_method(
+            output=output,
+            output_key="gt_fullgraph",
+            output_dir_name=f"gt_fullgraph_{distance_name}",
+            method="gt_fullgraph",
             parents=parents,
             candidates=gt_candidates,
             teacher=teacher,
             provider=provider,
             distance_type=distance_type,
             distance_name=distance_name,
-            partial_path=gt_dir / "details.partial.csv",
+            thresholds=thresholds,
+            cf_mode=mode,
+            min_cf_drop=float(min_cf_drop),
             partial_every=int(partial_every),
         )
-        gt_summaries = build_threshold_summary_for_cf_mode(
-            gt_details,
-            method="gt_fullgraph",
-            distance_type=distance_type,
-            ged_mode=distance_name,
-            thresholds=thresholds,
-            total_parents=len(parents),
-            total_candidates=len(gt_candidates),
-            cf_mode=mode,
-            min_cf_drop=float(min_cf_drop),
-        )
-        gt_summaries = _augment_summary(
-            gt_summaries,
-            detail_rows=gt_details,
-            candidates=gt_candidates,
-            cf_mode=mode,
-            min_cf_drop=float(min_cf_drop),
-        )
-        outputs["gt_fullgraph"] = _write_method_outputs(
-            output_dir=gt_dir,
-            method="gt_fullgraph",
+        outputs.update(gt_outputs)
+        all_summaries.extend(gt_summaries)
+
+    if clear_candidates:
+        clear_summaries, clear_outputs = _evaluate_fullgraph_method(
+            output=output,
+            output_key="clear_rf_fullgraph",
+            output_dir_name=f"clear_rf_fullgraph_{distance_name}",
+            method="CLEAR-RF-FullGraph",
+            parents=parents,
+            candidates=clear_candidates,
+            teacher=teacher,
+            provider=provider,
             distance_type=distance_type,
             distance_name=distance_name,
             thresholds=thresholds,
-            details=gt_details,
-            summaries=gt_summaries,
-            total_parents=len(parents),
-            total_candidates=len(gt_candidates),
             cf_mode=mode,
             min_cf_drop=float(min_cf_drop),
+            partial_every=int(partial_every),
         )
-        all_summaries.extend(gt_summaries)
+        outputs.update(clear_outputs)
+        all_summaries.extend(clear_summaries)
 
     combined_dir = ensure_directory(output / "combined")
     _write_csv(combined_dir / "combined_threshold_summary.csv", all_summaries, DISTANCE_SUMMARY_FIELDS)

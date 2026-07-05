@@ -81,7 +81,13 @@ class MolCLREmbeddingDistanceLookup:
         root = Path(embedding_dir).expanduser().resolve()
         self.embedding_dir = root
         rows: list[dict[str, Any]] = []
-        for name in ("parents.jsonl", "ours_residuals.jsonl", "gt_fullgraph_candidates.jsonl", "all_embeddings.jsonl"):
+        for name in (
+            "parents.jsonl",
+            "ours_residuals.jsonl",
+            "gt_fullgraph_candidates.jsonl",
+            "clear_rf_fullgraph_candidates.jsonl",
+            "all_embeddings.jsonl",
+        ):
             rows.extend(_load_embedding_rows(root / name))
         self.embeddings: dict[str, list[float]] = {}
         for row in rows:
@@ -116,11 +122,12 @@ def _collect_unique_smiles(rows: Iterable[dict[str, Any]]) -> list[str]:
 def precompute_molclr_embeddings_for_ccrcov(
     *,
     dataset_csv: str | Path,
-    ours_selected_path: str | Path,
-    gt_fullgraph_candidates_path: str | Path,
+    ours_selected_path: str | Path | None,
+    gt_fullgraph_candidates_path: str | Path | None,
     molclr_root: str | Path,
     molclr_checkpoint: str | Path,
     output_dir: str | Path,
+    clear_fullgraph_candidates_path: str | Path | None = None,
     label: int = 1,
     smiles_col: str = "smiles",
     label_col: str = "label",
@@ -139,19 +146,31 @@ def precompute_molclr_embeddings_for_ccrcov(
         label_col=label_col,
         max_parents=max_parents,
     )
-    _ours_path, ours_candidates = _load_candidate_records(
-        ours_selected_path,
-        fields=OURS_FRAGMENT_FIELDS,
-        directory_candidates=("selected_subgraphs.csv", "selected_subgraphs.json", "selected_subgraphs.jsonl", "candidate_pool.jsonl"),
-    )
-    _gt_path, gt_candidates = _load_candidate_records(
-        gt_fullgraph_candidates_path,
-        fields=GT_FULLGRAPH_FIELDS,
-        directory_candidates=("gt_selected_fullgraphs.csv", "selected_fullgraphs.csv", "selected_subgraphs.csv", "candidate_pool.jsonl", "candidate_pool.csv"),
-    )
+    ours_candidates = []
+    gt_candidates = []
+    clear_candidates = []
+    if ours_selected_path:
+        _ours_path, ours_candidates = _load_candidate_records(
+            ours_selected_path,
+            fields=OURS_FRAGMENT_FIELDS,
+            directory_candidates=("selected_subgraphs.csv", "selected_subgraphs.json", "selected_subgraphs.jsonl", "candidate_pool.jsonl"),
+        )
+    if gt_fullgraph_candidates_path:
+        _gt_path, gt_candidates = _load_candidate_records(
+            gt_fullgraph_candidates_path,
+            fields=GT_FULLGRAPH_FIELDS,
+            directory_candidates=("gt_selected_fullgraphs.csv", "selected_fullgraphs.csv", "selected_subgraphs.csv", "candidate_pool.jsonl", "candidate_pool.csv"),
+        )
+    if clear_fullgraph_candidates_path:
+        _clear_path, clear_candidates = _load_candidate_records(
+            clear_fullgraph_candidates_path,
+            fields=GT_FULLGRAPH_FIELDS,
+            directory_candidates=("gt_selected_fullgraphs.csv", "selected_fullgraphs.csv", "selected_subgraphs.csv", "candidate_pool.jsonl", "candidate_pool.csv"),
+        )
     if max_candidates is not None:
         ours_candidates = ours_candidates[: int(max_candidates)]
         gt_candidates = gt_candidates[: int(max_candidates)]
+        clear_candidates = clear_candidates[: int(max_candidates)]
 
     parent_rows = [{"graph_id": parent.parent_id, "smiles": parent.smiles, "kind": "parent"} for parent in parents]
     residual_rows: list[dict[str, Any]] = []
@@ -170,7 +189,11 @@ def precompute_molclr_embeddings_for_ccrcov(
         {"graph_id": candidate.candidate_id, "smiles": candidate.smiles, "kind": "gt_fullgraph_candidate"}
         for candidate in gt_candidates
     ]
-    all_smiles = _collect_unique_smiles(parent_rows + residual_rows + gt_rows)
+    clear_rows = [
+        {"graph_id": candidate.candidate_id, "smiles": candidate.smiles, "kind": "clear_rf_fullgraph_candidate"}
+        for candidate in clear_candidates
+    ]
+    all_smiles = _collect_unique_smiles(parent_rows + residual_rows + gt_rows + clear_rows)
     result = encode_smiles_list_with_failures(
         all_smiles,
         molclr_root=molclr_root,
@@ -199,10 +222,12 @@ def precompute_molclr_embeddings_for_ccrcov(
     parent_out = attach_embeddings(parent_rows)
     residual_out = attach_embeddings(residual_rows)
     gt_out = attach_embeddings(gt_rows)
+    clear_out = attach_embeddings(clear_rows)
     all_out = attach_embeddings([{"graph_id": smiles, "smiles": smiles, "kind": "unique"} for smiles in all_smiles])
     _write_jsonl(output_root / "parents.jsonl", parent_out)
     _write_jsonl(output_root / "ours_residuals.jsonl", residual_out)
     _write_jsonl(output_root / "gt_fullgraph_candidates.jsonl", gt_out)
+    _write_jsonl(output_root / "clear_rf_fullgraph_candidates.jsonl", clear_out)
     _write_jsonl(output_root / "all_embeddings.jsonl", all_out)
     failed_rows = [{"smiles": item.smiles, "error": item.error, "failure_reason": item.failure_reason} for item in result.failed_smiles]
     _write_jsonl(output_root / "failed_smiles.jsonl", failed_rows)
@@ -211,6 +236,7 @@ def precompute_molclr_embeddings_for_ccrcov(
         "num_parents": len(parent_rows),
         "num_ours_residuals": len(residual_rows),
         "num_gt_fullgraph_candidates": len(gt_rows),
+        "num_clear_rf_fullgraph_candidates": len(clear_rows),
         "num_unique_smiles": len(all_smiles),
         "num_embeddings": len(result.embeddings),
         "embedding_dim": result.embedding_dim,
