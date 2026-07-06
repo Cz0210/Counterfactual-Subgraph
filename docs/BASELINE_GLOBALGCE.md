@@ -143,7 +143,7 @@ GlobalGCE graph -> RDKit Mol -> canonical SMILES -> project teacher
 The converted full counterfactual graphs are treated as baseline-generated
 candidate molecules. The project teacher then recomputes:
 
-- flip;
+- teacher-strict flip;
 - CFDrop;
 - cost;
 - CCRCov@0.05;
@@ -164,6 +164,20 @@ distance_type = tanimoto_fingerprint
 ```
 
 This is a smoke/diagnostic distance, not the final GREED-GED main line.
+
+For `CF_MODE=strict_flip`, GlobalGCE project-facing CCRCOV uses the
+teacher-strict definition:
+
+```text
+distance <= threshold
+and pred_before == target_label
+and pred_after != target_label
+```
+
+The weaker diagnostic `pred_after != target_label` is retained only as
+`old_weak_CCRCOV` / `old_weak_flip` audit output. It must not be used as the
+main GlobalGCE CCRCOV because a parent that the teacher already predicts as
+non-target before intervention is not a valid strict counterfactual flip.
 
 ### native-cf-delta-action
 

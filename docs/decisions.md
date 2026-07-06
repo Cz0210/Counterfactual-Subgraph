@@ -187,8 +187,11 @@ label values seen, and conversion success/failure by edge-label mode.
 
 ### Consequences
 GlobalGCE `native-cf-fullgraph` remains a diagnostic fullgraph candidate
-evaluation. Strict CCRCOV is unchanged: `distance <= threshold` and
-`pred_after != target_label`. If `distance_mode=tanimoto`, reports continue to
+evaluation. Strict CCRCOV now requires teacher-strict flipping:
+`distance <= threshold`, `pred_before == target_label`, and
+`pred_after != target_label`. The old weaker condition
+`pred_after != target_label` is retained only as `old_weak_CCRCOV` /
+`old_weak_flip` audit output. If `distance_mode=tanimoto`, reports continue to
 label the distance as `tanimoto_fingerprint`; it must not be presented as GED.
 
 ### Status
@@ -269,7 +272,8 @@ dataset:
   artifacts;
 - `native-cf-fullgraph` converts GlobalGCE CF graphs to RDKit molecules and
   canonical SMILES, then evaluates them with the project teacher;
-- strict CCRCOV uses `distance <= threshold` and `pred_after != target_label`;
+- strict CCRCOV uses `distance <= threshold`,
+  `pred_before == target_label`, and `pred_after != target_label`;
 - smoke distance is explicitly named `distance_type=tanimoto_fingerprint` and
   must not be reported as GED.
 

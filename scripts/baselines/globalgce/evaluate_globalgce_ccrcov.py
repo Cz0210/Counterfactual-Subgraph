@@ -43,6 +43,7 @@ DEFAULT_THRESHOLDS = "0.05,0.10,0.20"
 DEFAULT_TASK = "binary classification of HIV replication inhibition"
 STRICT_CF_MODE = "strict_flip"
 TANIMOTO_DISTANCE_TYPE = "tanimoto_fingerprint"
+TEACHER_STRICT_FLIP_DEFINITION = "pred_before == target_label and pred_after != target_label"
 
 
 @dataclass
@@ -649,8 +650,29 @@ def prepare_cf_candidates(
     return selected_candidates_teacher_ok, stats, valid_rows, invalid_rows
 
 
-def cf_condition(pred_after: int | None, cf_drop: float | None, *, target_label: int, cf_mode: str, min_cf_drop: float) -> bool:
-    strict_flip = pred_after is not None and int(pred_after) != int(target_label)
+def teacher_strict_flip(pred_before: int | None, pred_after: int | None, *, target_label: int) -> bool:
+    return (
+        pred_before is not None
+        and pred_after is not None
+        and int(pred_before) == int(target_label)
+        and int(pred_after) != int(target_label)
+    )
+
+
+def old_weak_flip(pred_after: int | None, *, target_label: int) -> bool:
+    return pred_after is not None and int(pred_after) != int(target_label)
+
+
+def cf_condition(
+    pred_before: int | None,
+    pred_after: int | None,
+    cf_drop: float | None,
+    *,
+    target_label: int,
+    cf_mode: str,
+    min_cf_drop: float,
+) -> bool:
+    strict_flip = teacher_strict_flip(pred_before, pred_after, target_label=target_label)
     drop_ok = cf_drop is not None and float(cf_drop) >= float(min_cf_drop)
     if cf_mode == "strict_flip":
         return strict_flip
@@ -665,8 +687,10 @@ def build_details(
     parents: list[ParentRecord],
     candidates: list[CandidateRecord],
     args: argparse.Namespace,
+    thresholds: Sequence[float] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    max_threshold = max([float(item) for item in thresholds], default=None) if thresholds else None
     for parent in parents:
         if not parent.parse_ok or not parent.teacher_ok:
             continue
@@ -678,7 +702,15 @@ def build_details(
                 if parent.p_target is not None and p_after is not None
                 else None
             )
-            cf_flip = candidate.pred_label is not None and int(candidate.pred_label) != int(args.target_label)
+            strict_flip = teacher_strict_flip(parent.pred_label, candidate.pred_label, target_label=int(args.target_label))
+            weak_flip = old_weak_flip(candidate.pred_label, target_label=int(args.target_label))
+            distance_value = distance.get("distance")
+            close_cf_at_max_threshold = (
+                max_threshold is not None
+                and distance_value not in (None, "")
+                and float(distance_value) <= float(max_threshold)
+                and strict_flip
+            )
             rows.append(
                 {
                     "method": "GlobalGCE",
@@ -702,10 +734,13 @@ def build_details(
                     "pred_before": parent.pred_label,
                     "pred_after": candidate.pred_label,
                     "cf_drop": cf_drop,
-                    "cf_flip": cf_flip,
+                    "old_weak_flip": weak_flip,
+                    "cf_flip_teacher_strict": strict_flip,
+                    "cf_flip": strict_flip,
                     "distance": distance.get("distance"),
                     "tanimoto_similarity": distance.get("similarity"),
                     "distance_ok": distance.get("ok"),
+                    "close_cf_covered": close_cf_at_max_threshold,
                     "error": distance.get("error") or candidate.teacher_error or parent.teacher_error,
                 }
             )
@@ -722,8 +757,12 @@ def summarize_thresholds(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     total_parent_count = len(parents)
+    num_teacher_target_parents = sum(
+        1 for parent in parents if parent.teacher_ok and parent.pred_label is not None and int(parent.pred_label) == int(args.target_label)
+    )
     for threshold in thresholds:
         best_by_parent: dict[str, dict[str, Any]] = {}
+        old_weak_best_by_parent: dict[str, dict[str, Any]] = {}
         close_only: set[str] = set()
         for detail in details:
             distance = detail.get("distance")
@@ -733,7 +772,17 @@ def summarize_thresholds(
                 continue
             parent_id = str(detail.get("parent_id"))
             close_only.add(parent_id)
+            if bool(detail.get("old_weak_flip")):
+                current_weak = old_weak_best_by_parent.get(parent_id)
+                if current_weak is None:
+                    old_weak_best_by_parent[parent_id] = detail
+                else:
+                    current_weak_key = (float(current_weak.get("distance") or 999.0), -float(current_weak.get("cf_drop") or 0.0))
+                    candidate_weak_key = (float(detail.get("distance") or 999.0), -float(detail.get("cf_drop") or 0.0))
+                    if candidate_weak_key < current_weak_key:
+                        old_weak_best_by_parent[parent_id] = detail
             if not cf_condition(
+                detail.get("pred_before"),
                 detail.get("pred_after"),
                 detail.get("cf_drop"),
                 target_label=int(args.target_label),
@@ -767,6 +816,9 @@ def summarize_thresholds(
                 "distance_mode": args.distance_mode,
                 "distance_type": TANIMOTO_DISTANCE_TYPE,
                 "num_parents": total_parent_count,
+                "num_label_parents": total_parent_count,
+                "num_teacher_target_parents": num_teacher_target_parents,
+                "teacher_target_parent_rate": safe_rate(num_teacher_target_parents, total_parent_count),
                 "num_candidates": len(candidates),
                 "num_valid_candidates": candidate_stats.get("num_candidates_valid"),
                 "num_close_only_covered": len(close_only),
@@ -774,6 +826,11 @@ def summarize_thresholds(
                 "num_close_cf_covered": len(covered),
                 "close_cf_coverage": safe_rate(len(covered), total_parent_count),
                 "CCRCov": safe_rate(len(covered), total_parent_count),
+                "CCRCov_teacher_strict": safe_rate(len(covered), total_parent_count),
+                "old_weak_num_close_cf_covered": len(old_weak_best_by_parent),
+                "old_weak_close_cf_coverage": safe_rate(len(old_weak_best_by_parent), total_parent_count),
+                "old_weak_CCRCOV": safe_rate(len(old_weak_best_by_parent), total_parent_count),
+                "flip_definition": TEACHER_STRICT_FLIP_DEFINITION,
                 "avg_best_distance": safe_mean(best_distances),
                 "median_best_distance": safe_median(best_distances),
                 "avg_cf_drop_among_covered": safe_mean(cf_drops),
@@ -793,10 +850,13 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
     teacher = load_teacher(args.teacher_path)
     evaluate_parent_teacher(parents, teacher, int(args.target_label))
     selected_candidates, candidate_stats, _valid_rows, _invalid_rows = prepare_cf_candidates(args, teacher, out_dir)
-    details = build_details(parents, selected_candidates, args)
+    details = build_details(parents, selected_candidates, args, thresholds)
     summary_rows = summarize_thresholds(details, parents, selected_candidates, thresholds, args, candidate_stats)
 
     parent_teacher_ok = sum(1 for parent in parents if parent.teacher_ok)
+    num_teacher_target_parents = sum(
+        1 for parent in parents if parent.teacher_ok and parent.pred_label is not None and int(parent.pred_label) == int(args.target_label)
+    )
     teacher_attempts = len(parents) + int(candidate_stats.get("num_candidates_before_topk") or 0)
     teacher_ok = parent_teacher_ok + int(candidate_stats.get("cfs_teacher_ok") or 0)
     teacher_success_rate = safe_rate(teacher_ok, teacher_attempts)
@@ -827,6 +887,9 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
         "top_k": int(args.top_k),
         "selection_policy": args.selection_policy,
         "num_parents": len(parents),
+        "num_label_parents": len(parents),
+        "num_teacher_target_parents": num_teacher_target_parents,
+        "teacher_target_parent_rate": safe_rate(num_teacher_target_parents, len(parents)),
         "num_cfs_total": candidate_stats.get("num_cfs_total"),
         "num_candidates_raw": candidate_stats.get("num_candidates_raw"),
         "num_candidates_valid": candidate_stats.get("num_candidates_valid"),
@@ -867,6 +930,13 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
         "CCRCov@0.05": _summary_value(summary_rows, 0.05, "close_cf_coverage"),
         "CCRCov@0.10": _summary_value(summary_rows, 0.10, "close_cf_coverage"),
         "CCRCov@0.20": _summary_value(summary_rows, 0.20, "close_cf_coverage"),
+        "CCRCov_teacher_strict@0.05": _summary_value(summary_rows, 0.05, "CCRCov_teacher_strict"),
+        "CCRCov_teacher_strict@0.10": _summary_value(summary_rows, 0.10, "CCRCov_teacher_strict"),
+        "CCRCov_teacher_strict@0.20": _summary_value(summary_rows, 0.20, "CCRCov_teacher_strict"),
+        "old_weak_CCRCOV@0.05": _summary_value(summary_rows, 0.05, "old_weak_CCRCOV"),
+        "old_weak_CCRCOV@0.10": _summary_value(summary_rows, 0.10, "old_weak_CCRCOV"),
+        "old_weak_CCRCOV@0.20": _summary_value(summary_rows, 0.20, "old_weak_CCRCOV"),
+        "flip_definition": TEACHER_STRICT_FLIP_DEFINITION,
         "CFDrop": key_row.get("avg_cf_drop_among_covered"),
         "FlipRate": key_row.get("flip_rate_among_covered"),
         "CostMean": key_row.get("avg_best_distance"),
@@ -904,6 +974,12 @@ def evaluate_native_cf_fullgraph(args: argparse.Namespace, thresholds: list[floa
             "conversion_fail_by_error_type": candidate_stats.get("conversion_fail_by_error_type"),
         },
         "thresholds": thresholds,
+        "FLIP_DEFINITION_AUDIT": {
+            "main_flip_definition": TEACHER_STRICT_FLIP_DEFINITION,
+            "old_weak_flip_definition": "pred_after != target_label",
+            "main_ccrcov_uses": "teacher_strict_flip",
+            "old_weak_ccrcov_status": "audit_only",
+        },
         "LABEL_ALIGNMENT_AUDIT": {
             "globalgce_official_dataset": "AIDS graph format",
             "project_dataset": args.dataset_display_name,
@@ -1154,6 +1230,10 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
         f"Distance type: {summary.get('distance_type')}",
         f"Edge label mode: {summary.get('edge_label_mode_requested') or summary.get('edge_label_mode')}",
         f"Top K: {summary.get('top_k')}",
+        f"Flip definition: {summary.get('flip_definition')}",
+        f"Label parents: {summary.get('num_label_parents')}",
+        f"Teacher-target parents: {summary.get('num_teacher_target_parents')}",
+        f"Teacher-target parent rate: {summary.get('teacher_target_parent_rate')}",
         "",
         "Edge label conversion audit:",
         f"- requested mode: {summary.get('edge_label_mode_requested') or summary.get('edge_label_mode')}",
@@ -1171,6 +1251,12 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
         f"CCRCov@0.05: {summary.get('CCRCov@0.05')}",
         f"CCRCov@0.10: {summary.get('CCRCov@0.10')}",
         f"CCRCov@0.20: {summary.get('CCRCov@0.20')}",
+        f"CCRCov_teacher_strict@0.05: {summary.get('CCRCov_teacher_strict@0.05')}",
+        f"CCRCov_teacher_strict@0.10: {summary.get('CCRCov_teacher_strict@0.10')}",
+        f"CCRCov_teacher_strict@0.20: {summary.get('CCRCov_teacher_strict@0.20')}",
+        f"old_weak_CCRCOV@0.05: {summary.get('old_weak_CCRCOV@0.05')}",
+        f"old_weak_CCRCOV@0.10: {summary.get('old_weak_CCRCOV@0.10')}",
+        f"old_weak_CCRCOV@0.20: {summary.get('old_weak_CCRCOV@0.20')}",
         f"CFDrop: {summary.get('CFDrop')}",
         f"FlipRate: {summary.get('FlipRate')}",
         f"CostMean: {summary.get('CostMean')}",
@@ -1185,6 +1271,8 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
         "SuppCov is skipped for this mode because fullgraph candidates are not LHS/RHS support rules.",
         "If distance_type=tanimoto_fingerprint, this is a smoke/diagnostic distance and not the final GREED-GED line.",
         "GlobalGCE official AIDS graph/export artifacts are baseline raw outputs; final labels come from HIV_active in the AIDS/HIV CSV.",
+        "strict_flip requires the teacher to predict the original parent as target_label before intervention and non-target after intervention.",
+        "old_weak_CCRCOV uses only pred_after != target_label and is retained as an audit/debug field, not as the main CCRCOV.",
         "",
         "Label alignment warning:",
         str(summary.get("label_alignment_warning")),
@@ -1222,10 +1310,13 @@ DETAILS_FIELDS = [
     "pred_before",
     "pred_after",
     "cf_drop",
+    "old_weak_flip",
+    "cf_flip_teacher_strict",
     "cf_flip",
     "distance",
     "tanimoto_similarity",
     "distance_ok",
+    "close_cf_covered",
     "error",
 ]
 
@@ -1242,6 +1333,9 @@ THRESHOLD_FIELDS = [
     "distance_mode",
     "distance_type",
     "num_parents",
+    "num_label_parents",
+    "num_teacher_target_parents",
+    "teacher_target_parent_rate",
     "num_candidates",
     "num_valid_candidates",
     "num_close_only_covered",
@@ -1249,6 +1343,11 @@ THRESHOLD_FIELDS = [
     "num_close_cf_covered",
     "close_cf_coverage",
     "CCRCov",
+    "CCRCov_teacher_strict",
+    "old_weak_num_close_cf_covered",
+    "old_weak_close_cf_coverage",
+    "old_weak_CCRCOV",
+    "flip_definition",
     "avg_best_distance",
     "median_best_distance",
     "avg_cf_drop_among_covered",
