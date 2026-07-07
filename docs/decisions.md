@@ -6,6 +6,48 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-07] Add MolCLR Node-FGW as evaluation-only CCRCOV distance line
+
+### Background
+Graph-level MolCLR cosine distance can be too coarse for some AIDS/HIV CCRCOV
+threshold sweeps. A node-level distance can preserve more local molecular
+structure without changing the generator, selector, or training objective.
+
+### Decision
+Add `molclr_node_fgw` as an auxiliary CCRCOV evaluation distance line. The line
+uses the existing MolCLR pretrained GIN checkpoint but extracts node-level
+embeddings before graph pooling. Molecules are compared with Fused
+Gromov-Wasserstein distance using normalized unweighted shortest-path structure
+matrices and cosine node feature cost:
+
+```text
+distance_line = MolCLR-Node-FGW
+distance_type = node_fgw
+FGW_LAMBDA = 0.5
+```
+
+The implementation caches both SMILES-level node artifacts and pairwise FGW
+distances:
+
+```text
+outputs/hpc/cache/molclr_node_embeddings/
+outputs/hpc/cache/distance_cache/molclr_node_fgw_v1.sqlite
+```
+
+Thresholds default to auto quantiles instead of graph-level MolCLR cosine
+thresholds because FGW has a different scale.
+
+### Consequences
+`molclr_node_fgw` is evaluation-only. It does not modify loss functions, PPO,
+candidate generation, or selector logic. It also skips `StructRed`, `CovRed`,
+and pairwise candidate redundancy. GREED-GED remains the main GED-style
+distance line; MolCLR Node-FGW is an embedding-matrix auxiliary CCRCOV line.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-05] Evaluate CLEAR full-graph pools with explicit graphPred teacher adapter
 
 ### Background
