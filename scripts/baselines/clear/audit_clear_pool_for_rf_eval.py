@@ -127,35 +127,39 @@ def main() -> int:
         converted = convert_clear_record_graphs(row, adjacency_threshold=float(args.adj_threshold))
         original = converted["original"]
         cf = converted["cf"]
-        if original.ok:
+        original_ok_value = bool(getattr(original, "valid", getattr(original, "ok", False)))
+        cf_ok_value = bool(getattr(cf, "valid", getattr(cf, "ok", False)))
+        original_reason = getattr(original, "invalid_reason", getattr(original, "reason", None))
+        cf_reason = getattr(cf, "invalid_reason", getattr(cf, "reason", None))
+        if original_ok_value:
             original_ok += 1
         else:
-            original_reason_counts[original.reason or "unknown"] += 1
-        if cf.ok:
+            original_reason_counts[original_reason or "unknown"] += 1
+        if cf_ok_value:
             cf_ok += 1
         else:
-            cf_reason_counts[cf.reason or "unknown"] += 1
-            reason_counts[cf.reason or "unknown"] += 1
-        total_attempted_bonds += int(cf.attempted_bonds or 0)
-        total_skipped_bonds_for_valence += int(cf.skipped_bonds_for_valence or 0)
+            cf_reason_counts[cf_reason or "unknown"] += 1
+            reason_counts[cf_reason or "unknown"] += 1
+        total_attempted_bonds += int(getattr(cf, "attempted_bonds", 0) or 0)
+        total_skipped_bonds_for_valence += int(getattr(cf, "skipped_bonds_for_valence", 0) or 0)
         if len(examples) < 5:
             examples.append(
                 {
                     "record_index": index,
                     "candidate_id": row.get("candidate_id"),
                     "instance_index": row.get("instance_index"),
-                    "original_ok": original.ok,
-                    "original_smiles": original.smiles,
-                    "original_reason": original.reason,
-                    "cf_ok": cf.ok,
-                    "cf_smiles": cf.smiles,
-                    "cf_reason": cf.reason,
-                    "node_mask_source": cf.node_mask_source,
-                    "num_nodes_used": cf.num_nodes_used,
-                    "atom_decode_source": cf.atom_decode_source,
-                    "atom_decode_mode": cf.atom_decode_mode,
-                    "attempted_bonds": cf.attempted_bonds,
-                    "skipped_bonds_for_valence": cf.skipped_bonds_for_valence,
+                    "original_ok": original_ok_value,
+                    "original_smiles": getattr(original, "smiles", None),
+                    "original_reason": original_reason,
+                    "cf_ok": cf_ok_value,
+                    "cf_smiles": getattr(cf, "smiles", None),
+                    "cf_reason": cf_reason,
+                    "node_mask_source": getattr(cf, "node_mask_source", "unknown"),
+                    "num_nodes_used": getattr(cf, "num_nodes_used", None),
+                    "atom_decode_source": getattr(cf, "atom_decode_source", "unknown"),
+                    "atom_decode_mode": getattr(cf, "atom_decode_mode", "unknown"),
+                    "attempted_bonds": getattr(cf, "attempted_bonds", 0),
+                    "skipped_bonds_for_valence": getattr(cf, "skipped_bonds_for_valence", 0),
                 }
             )
 

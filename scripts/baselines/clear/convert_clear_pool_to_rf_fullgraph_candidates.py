@@ -120,17 +120,20 @@ def candidate_from_record(row: dict[str, Any], *, dataset: str, record_index: in
     original = converted["original"]
     cf = converted["cf"]
     candidate_id = str(row.get("candidate_id") or f"CLEAR_RF_{dataset}_{record_index:06d}")
-    valid = bool(cf.ok and cf.smiles)
+    cf_valid = bool(getattr(cf, "valid", getattr(cf, "ok", False)))
+    original_valid = bool(getattr(original, "valid", getattr(original, "ok", False)))
+    cf_reason = getattr(cf, "invalid_reason", getattr(cf, "reason", None))
+    valid = bool(cf_valid and getattr(cf, "smiles", None))
     return {
         "candidate_id": candidate_id,
         "source_method": "CLEAR",
         "method": "CLEAR-RF-FullGraph",
         "dataset": dataset,
-        "candidate_smiles": cf.smiles,
-        "smiles": cf.smiles,
+        "candidate_smiles": getattr(cf, "smiles", None),
+        "smiles": getattr(cf, "smiles", None),
         "candidate_valid": valid,
-        "candidate_num_atoms": cf.num_atoms,
-        "candidate_num_bonds": cf.num_bonds,
+        "candidate_num_atoms": getattr(cf, "num_atoms", None),
+        "candidate_num_bonds": getattr(cf, "num_bonds", None),
         "source_exp_id": as_int(row.get("exp_id")),
         "source_instance_index": as_int(row.get("instance_index")),
         "source_record_index": record_index,
@@ -143,17 +146,17 @@ def candidate_from_record(row: dict[str, Any], *, dataset: str, record_index: in
         "edge_changed_count": as_int(row.get("num_edge_changed")),
         "feature_l1_cost": as_float(row.get("feature_l1_cost")),
         "total_action_cost": as_float(row.get("total_cost")),
-        "source_original_smiles": original.smiles,
+        "source_original_smiles": getattr(original, "smiles", None),
         "source_original_label": as_int(row.get("original_label")),
-        "source_original_valid": bool(original.ok),
-        "invalid_reason": None if valid else (cf.reason or "unknown_conversion_failure"),
-        "invalid_error": cf.error,
-        "node_mask_source": cf.node_mask_source,
-        "num_nodes_used": cf.num_nodes_used,
-        "atom_decode_source": cf.atom_decode_source,
-        "atom_decode_mode": cf.atom_decode_mode,
-        "skipped_bonds_for_valence": cf.skipped_bonds_for_valence,
-        "attempted_bonds": cf.attempted_bonds,
+        "source_original_valid": original_valid,
+        "invalid_reason": None if valid else (cf_reason or "unknown_conversion_failure"),
+        "invalid_error": getattr(cf, "error", None),
+        "node_mask_source": getattr(cf, "node_mask_source", "unknown"),
+        "num_nodes_used": getattr(cf, "num_nodes_used", None),
+        "atom_decode_source": getattr(cf, "atom_decode_source", "unknown"),
+        "atom_decode_mode": getattr(cf, "atom_decode_mode", "unknown"),
+        "skipped_bonds_for_valence": getattr(cf, "skipped_bonds_for_valence", 0),
+        "attempted_bonds": getattr(cf, "attempted_bonds", 0),
     }
 
 
