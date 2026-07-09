@@ -465,13 +465,22 @@ sbatch scripts/slurm/clear_aids_convert_rf_fullgraph_candidates.sh
 ```
 
 The conversion is intentionally conservative. CLEAR `cf_x` is a continuous
-decoder output, not a reliable atom vocabulary. The RF conversion therefore
-uses original node identities from the AIDS preparation descriptor slot
-`original_x[:, 2] = atomic_num / 100` and uses thresholded/symmetrized `cf_adj`
-as the counterfactual topology. The conversion summary records
+decoder output, not a reliable atom vocabulary. The adapter never treats raw
+float feature values as atom labels. It reuses the AIDS feature schema from
+`prepare_clear_aids_dataset.py`: current AIDS nodes are descriptor vectors with
+`original_x[:, 2] = atomic_num / 100`. If a future export contains true
+one-hot or soft categorical atom rows, the adapter can decode them with row-wise
+argmax using the fixed AIDS atom vocabulary (`C`, `N`, `O`, `F`, `S`, `Cl`).
+For the current CLEAR AIDS pool, atom identity is recovered from the descriptor
+slot and `cf_adj` provides the counterfactual topology.
+
+`cf_adj` is symmetrized, its diagonal is removed, and edges above
+`ADJ_THRESHOLD=0.5` are considered as single bonds. During RDKit conversion the
+adapter adds candidate bonds in descending `cf_adj` score and skips edges that
+would exceed simple single-bond valence limits. The conversion summary records
 `original_x_onehot_like_rate`, `cf_x_onehot_like_rate`,
-`cf_x_continuous_rate`, argmax distributions, `cf_adj_min/max/mean`, and the
-node-mask source.
+`cf_x_continuous_rate`, argmax distributions, decode-mode counts,
+`cf_adj_min/max/mean`, skipped-valence information, and the node-mask source.
 
 This writes:
 
@@ -494,6 +503,18 @@ If the gate fails, the script prints
 with only a few valid SMILES must not be treated as a successful fair-table
 candidate set.
 
+The converter also validates the written CSV by re-reading `candidate_smiles`
+with RDKit. To run only this quick validation on an existing CSV:
+
+```bash
+VALIDATE_ONLY=1 sbatch scripts/slurm/clear_aids_convert_rf_fullgraph_candidates.sh
+```
+
+The validation reports whether the `candidate_smiles` column exists, RDKit
+valid count/rate, and min/max atom count. The CSV check is part of the quality
+gate, so a file with fewer than `MIN_VALID_CANDIDATES` RDKit-valid candidates
+fails even if the conversion process itself did not crash.
+
 Run GREED-GED final-table evaluation:
 
 ```bash
@@ -509,6 +530,17 @@ CLEAR_FULLGRAPH_CANDIDATES_PATH=outputs/hpc/baselines/clear/aids/rf_unified/clea
 sbatch scripts/slurm/molclr_hiv_precompute_embeddings_full.sh
 
 sbatch scripts/slurm/clear_aids_eval_rf_molclr_full.sh
+```
+
+For the MolCLR-Node-FGW auxiliary line, use fullgraph-only mode so CLEAR is
+scored as a candidate set without re-running ours in the same job:
+
+```bash
+RUN_OURS=0 RUN_FULLGRAPH=1 RUN_GT_FULLGRAPH=0 \
+CLEAR_FULLGRAPH_CANDIDATES_PATH=outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.csv \
+FULLGRAPH_METHOD_NAME=CLEAR-RF-FullGraph \
+OUTPUT_DIR=outputs/hpc/eval/ccrcov_molclr_node_fgw_clear_smoke \
+sbatch scripts/slurm/molclr_node_fgw_eval_ccrcov_smoke.sh
 ```
 
 If the audit reports `rf_oracle_usable=false`, do not report CLEAR as an

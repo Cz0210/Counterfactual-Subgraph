@@ -109,12 +109,29 @@ If conversion is not reliable, the audit records `rf_oracle_usable=false` and
 the native `clear_graphpred` result remains diagnostic only.
 
 The converter treats CLEAR `cf_x` as a continuous decoder tensor rather than an
-atom vocabulary. Atom identity is recovered from the original AIDS descriptor
-slot `original_x[:, 2] = atomic_num / 100`, while counterfactual topology comes
-from symmetrized/thresholded `cf_adj`. The converter records feature-schema
-statistics and enforces a quality gate (`MIN_VALID_CANDIDATES=20`,
-`MIN_VALID_RATE=0.001` by default); failing the gate exits non-zero and blocks
-downstream fair evaluation.
+atom vocabulary. It must never use a raw float value as an atom-type key. For
+the current AIDS pickles, atom identity is recovered from the AIDS descriptor
+slot `original_x[:, 2] = atomic_num / 100`; true one-hot or soft categorical
+rows, if introduced later, are decoded by row-wise argmax over the fixed AIDS
+atom vocabulary (`C`, `N`, `O`, `F`, `S`, `Cl`). Counterfactual topology comes
+from symmetrized/thresholded `cf_adj`, with single-bond valence checks used to
+avoid obviously invalid RDKit molecules. The converter records feature-schema
+statistics, argmax distributions, decode-mode counts, `cf_adj` statistics, and
+CSV-level RDKit validation. It enforces a quality gate
+(`MIN_VALID_CANDIDATES=20`, `MIN_VALID_RATE=0.001` by default); failing either
+the conversion gate or CSV validation exits non-zero and blocks downstream fair
+evaluation.
+
+MolCLR-Node-FGW can run CLEAR fullgraph candidates without re-running ours by
+setting:
+
+```text
+RUN_OURS=0
+RUN_FULLGRAPH=1
+RUN_GT_FULLGRAPH=0
+CLEAR_FULLGRAPH_CANDIDATES_PATH=<clear_rf_fullgraph_candidates.csv>
+FULLGRAPH_METHOD_NAME=CLEAR-RF-FullGraph
+```
 
 ### Consequences
 The final fair table must not substitute CLEAR native graphPred/action-distance

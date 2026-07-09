@@ -85,6 +85,13 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value not in (None, "") else default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return bool(default)
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _parse_float_list(raw: str | None) -> list[float]:
     if raw is None:
         return []
@@ -354,6 +361,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fgw-tol", type=float, default=float(_env("FGW_TOL", "1e-7") or 1e-7))
     parser.add_argument("--partial-every", type=int, default=int(_env("PARTIAL_EVERY", "500") or 500))
     parser.add_argument("--skip-redundancy", action="store_true", default=True)
+    parser.add_argument(
+        "--run-ours",
+        type=int,
+        choices=(0, 1),
+        default=1 if _env_bool("RUN_OURS", True) else 0,
+        help="Evaluate ours selected-subgraph deletion candidates.",
+    )
+    parser.add_argument(
+        "--run-fullgraph",
+        type=int,
+        choices=(0, 1),
+        default=1 if _env_bool("RUN_FULLGRAPH", True) else 0,
+        help="Evaluate fullgraph candidates, including GT/GCF/CLEAR fullgraph paths.",
+    )
     return parser
 
 
@@ -378,6 +399,8 @@ def main() -> int:
     print(f"molclr_checkpoint={args.molclr_checkpoint}", flush=True)
     print(f"fgw_lambda={args.fgw_lambda}", flush=True)
     print(f"skip_redundancy={args.skip_redundancy}", flush=True)
+    print(f"run_ours={bool(args.run_ours)}", flush=True)
+    print(f"run_fullgraph={bool(args.run_fullgraph)}", flush=True)
 
     provider = MolCLRNodeFGWDistanceProvider(
         NodeFGWConfig(
@@ -406,7 +429,7 @@ def main() -> int:
     all_details: list[dict[str, Any]] = []
     detail_groups: list[tuple[str, list[dict[str, Any]], int]] = []
 
-    if args.ours_selected_path:
+    if bool(args.run_ours) and args.ours_selected_path:
         _ours_path, ours_candidates = _load_candidate_records(
             args.ours_selected_path,
             fields=OURS_FRAGMENT_FIELDS,
@@ -427,7 +450,7 @@ def main() -> int:
         detail_groups.append(("ours_selected_subgraphs", ours_details, len(ours_candidates)))
         all_details.extend(ours_details)
 
-    if fullgraph_path:
+    if bool(args.run_fullgraph) and fullgraph_path:
         _full_path, full_candidates = _load_candidate_records(
             fullgraph_path,
             fields=GT_FULLGRAPH_FIELDS,
@@ -449,7 +472,7 @@ def main() -> int:
         detail_groups.append((fullgraph_method, full_details, len(full_candidates)))
         all_details.extend(full_details)
 
-    if args.clear_fullgraph_candidates_path:
+    if bool(args.run_fullgraph) and args.clear_fullgraph_candidates_path:
         _clear_path, clear_candidates = _load_candidate_records(
             args.clear_fullgraph_candidates_path,
             fields=GT_FULLGRAPH_FIELDS,
@@ -526,6 +549,8 @@ def main() -> int:
         "threshold_source": "explicit" if args.fgw_thresholds not in {None, "", "auto", "auto_quantile"} else "auto_quantile",
         "fgw_quantiles": _parse_float_list(args.fgw_quantiles),
         "skip_redundancy": bool(args.skip_redundancy),
+        "run_ours": bool(args.run_ours),
+        "run_fullgraph": bool(args.run_fullgraph),
         "max_parents": args.max_parents,
         "max_candidates": args.max_candidates,
         "cf_mode": args.cf_mode,

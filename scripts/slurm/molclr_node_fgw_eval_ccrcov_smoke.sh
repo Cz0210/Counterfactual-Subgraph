@@ -43,6 +43,9 @@ ATOM_PENALTY=${ATOM_PENALTY:-0.0}
 MAX_PARENTS=${MAX_PARENTS:-50}
 MAX_CANDIDATES=${MAX_CANDIDATES:-20}
 SKIP_REDUNDANCY=${SKIP_REDUNDANCY:-1}
+RUN_OURS=${RUN_OURS:-1}
+RUN_FULLGRAPH=${RUN_FULLGRAPH:-1}
+RUN_GT_FULLGRAPH=${RUN_GT_FULLGRAPH:-1}
 
 echo "===== MOLCLR NODE FGW CCRCov SMOKE ====="
 echo "hostname: $(hostname)"
@@ -68,6 +71,9 @@ echo "MAX_PARENTS=${MAX_PARENTS}"
 echo "MAX_CANDIDATES=${MAX_CANDIDATES}"
 echo "CF_MODE=${CF_MODE}"
 echo "SKIP_REDUNDANCY=${SKIP_REDUNDANCY}"
+echo "RUN_OURS=${RUN_OURS}"
+echo "RUN_FULLGRAPH=${RUN_FULLGRAPH}"
+echo "RUN_GT_FULLGRAPH=${RUN_GT_FULLGRAPH}"
 
 python - <<'PY'
 import importlib.util
@@ -101,12 +107,10 @@ if [ ! -f "${MOLCLR_CKPT}" ]; then
   exit 2
 fi
 
-python scripts/evaluate_ccrcov_with_molclr_node_fgw.py \
+args=(
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
   --dataset-csv "${HIV_CSV}" \
-  --ours-selected-path "${OURS_SELECTED_PATH}" \
-  --gt-fullgraph-candidates-path "${GT_FULLGRAPH_CANDIDATES_PATH}" \
   --teacher-path "${TEACHER_PATH}" \
   --molclr-root "${MOLCLR_ROOT}" \
   --molclr-checkpoint "${MOLCLR_CKPT}" \
@@ -127,6 +131,23 @@ python scripts/evaluate_ccrcov_with_molclr_node_fgw.py \
   --atom-penalty "${ATOM_PENALTY}" \
   --skip-redundancy \
   --partial-every 500
+  --run-ours "${RUN_OURS}"
+  --run-fullgraph "${RUN_FULLGRAPH}"
+)
+if [ "${RUN_OURS}" = "1" ]; then
+  args+=(--ours-selected-path "${OURS_SELECTED_PATH}")
+fi
+if [ "${RUN_FULLGRAPH}" = "1" ] && [ "${RUN_GT_FULLGRAPH}" = "1" ]; then
+  args+=(--gt-fullgraph-candidates-path "${GT_FULLGRAPH_CANDIDATES_PATH}")
+fi
+if [ -n "${CLEAR_FULLGRAPH_CANDIDATES_PATH:-}" ]; then
+  args+=(--clear-fullgraph-candidates-path "${CLEAR_FULLGRAPH_CANDIDATES_PATH}")
+fi
+if [ -n "${FULLGRAPH_METHOD_NAME:-}" ]; then
+  args+=(--fullgraph-method-name "${FULLGRAPH_METHOD_NAME}")
+fi
+
+python scripts/evaluate_ccrcov_with_molclr_node_fgw.py "${args[@]}"
 
 echo "===== MOLCLR NODE FGW CCRCov SMOKE DONE ====="
 find "${OUTPUT_DIR}" -maxdepth 3 -type f | sort

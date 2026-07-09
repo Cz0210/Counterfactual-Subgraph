@@ -84,10 +84,16 @@ def main() -> int:
     cf_continuous = 0
     original_argmax: Counter[str] = Counter()
     cf_argmax: Counter[str] = Counter()
+    original_decode_modes: Counter[str] = Counter()
+    cf_decode_modes: Counter[str] = Counter()
+    original_decoded_atomic_nums: Counter[str] = Counter()
+    cf_decoded_atomic_nums: Counter[str] = Counter()
     node_mask_sources: Counter[str] = Counter()
     cf_adj_mins: list[float] = []
     cf_adj_maxs: list[float] = []
     cf_adj_means: list[float] = []
+    total_attempted_bonds = 0
+    total_skipped_bonds_for_valence = 0
 
     for index, row in enumerate(rows):
         if row.get("original_smiles"):
@@ -107,6 +113,10 @@ def main() -> int:
         cf_continuous += int(cf_schema.get("continuous_count") or 0)
         merge_counter(original_argmax, original_schema.get("argmax_distribution") or {})
         merge_counter(cf_argmax, cf_schema.get("argmax_distribution") or {})
+        merge_counter(original_decode_modes, original_schema.get("decode_mode_counts") or {})
+        merge_counter(cf_decode_modes, cf_schema.get("decode_mode_counts") or {})
+        merge_counter(original_decoded_atomic_nums, original_schema.get("decoded_atomic_num_counts") or {})
+        merge_counter(cf_decoded_atomic_nums, cf_schema.get("decoded_atomic_num_counts") or {})
         if isinstance(schema.get("cf_adj_min"), (int, float)):
             cf_adj_mins.append(float(schema["cf_adj_min"]))
         if isinstance(schema.get("cf_adj_max"), (int, float)):
@@ -126,6 +136,8 @@ def main() -> int:
         else:
             cf_reason_counts[cf.reason or "unknown"] += 1
             reason_counts[cf.reason or "unknown"] += 1
+        total_attempted_bonds += int(cf.attempted_bonds or 0)
+        total_skipped_bonds_for_valence += int(cf.skipped_bonds_for_valence or 0)
         if len(examples) < 5:
             examples.append(
                 {
@@ -140,6 +152,10 @@ def main() -> int:
                     "cf_reason": cf.reason,
                     "node_mask_source": cf.node_mask_source,
                     "num_nodes_used": cf.num_nodes_used,
+                    "atom_decode_source": cf.atom_decode_source,
+                    "atom_decode_mode": cf.atom_decode_mode,
+                    "attempted_bonds": cf.attempted_bonds,
+                    "skipped_bonds_for_valence": cf.skipped_bonds_for_valence,
                 }
             )
 
@@ -191,10 +207,16 @@ def main() -> int:
         "original_x_argmax_distribution": dict(original_argmax),
         "cf_x_argmax_distribution": dict(cf_argmax),
         "atom_type_argmax_counts": dict(cf_argmax),
+        "original_x_decode_mode_counts": dict(original_decode_modes),
+        "cf_x_decode_mode_counts": dict(cf_decode_modes),
+        "original_x_decoded_atomic_num_counts": dict(original_decoded_atomic_nums),
+        "cf_x_decoded_atomic_num_counts": dict(cf_decoded_atomic_nums),
         "node_mask_source_counts": dict(node_mask_sources),
         "cf_adj_min": min(cf_adj_mins) if cf_adj_mins else None,
         "cf_adj_max": max(cf_adj_maxs) if cf_adj_maxs else None,
         "cf_adj_mean": (sum(cf_adj_means) / len(cf_adj_means)) if cf_adj_means else None,
+        "total_attempted_bonds": total_attempted_bonds,
+        "total_skipped_bonds_for_valence": total_skipped_bonds_for_valence,
         "examples": examples,
     }
     write_json(args.out_json, summary)

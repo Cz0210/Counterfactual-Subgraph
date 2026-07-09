@@ -35,6 +35,7 @@ CF_MODE=${CF_MODE:-strict_flip}
 MIN_VALID_CANDIDATES=${MIN_VALID_CANDIDATES:-20}
 MIN_VALID_RATE=${MIN_VALID_RATE:-0.001}
 ADJ_THRESHOLD=${ADJ_THRESHOLD:-0.5}
+VALIDATE_ONLY=${VALIDATE_ONLY:-0}
 
 echo "===== CLEAR RF FULLGRAPH CONVERT ====="
 echo "hostname: $(hostname)"
@@ -55,6 +56,7 @@ echo "CF_MODE=${CF_MODE}"
 echo "MIN_VALID_CANDIDATES=${MIN_VALID_CANDIDATES}"
 echo "MIN_VALID_RATE=${MIN_VALID_RATE}"
 echo "ADJ_THRESHOLD=${ADJ_THRESHOLD}"
+echo "VALIDATE_ONLY=${VALIDATE_ONLY}"
 
 args=(
   --config configs/hpc.yaml
@@ -73,6 +75,9 @@ if [ -n "${MAX_RECORDS:-}" ]; then
 fi
 if [ "${INCLUDE_INVALID:-0}" = "1" ]; then
   args+=(--include-invalid)
+fi
+if [ "${VALIDATE_ONLY}" = "1" ]; then
+  args+=(--validate-only --input-csv "${OUT_CSV}")
 fi
 
 python scripts/baselines/clear/convert_clear_pool_to_rf_fullgraph_candidates.py "${args[@]}"

@@ -52,6 +52,10 @@ CSV_FIELDS = [
     "invalid_reason",
     "node_mask_source",
     "num_nodes_used",
+    "atom_decode_source",
+    "atom_decode_mode",
+    "skipped_bonds_for_valence",
+    "attempted_bonds",
 ]
 
 
@@ -79,6 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-valid-candidates", type=int, default=20)
     parser.add_argument("--min-valid-rate", type=float, default=0.001)
     parser.add_argument("--adj-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Only validate an existing candidate CSV and exit without reading the CLEAR pool.",
+    )
+    parser.add_argument(
+        "--input-csv",
+        default=None,
+        help="Candidate CSV to validate when --validate-only is set. Defaults to --out-csv.",
+    )
     parser.add_argument("--config", default=None)
     parser.add_argument("--set", action="append", default=[])
     return parser
@@ -136,6 +150,10 @@ def candidate_from_record(row: dict[str, Any], *, dataset: str, record_index: in
         "invalid_error": cf.error,
         "node_mask_source": cf.node_mask_source,
         "num_nodes_used": cf.num_nodes_used,
+        "atom_decode_source": cf.atom_decode_source,
+        "atom_decode_mode": cf.atom_decode_mode,
+        "skipped_bonds_for_valence": cf.skipped_bonds_for_valence,
+        "attempted_bonds": cf.attempted_bonds,
     }
 
 
@@ -156,6 +174,10 @@ def summarize_schema(rows: list[dict[str, Any]], *, adj_threshold: float) -> dic
     cf_continuous = 0
     original_argmax: Counter[str] = Counter()
     cf_argmax: Counter[str] = Counter()
+    original_decode_modes: Counter[str] = Counter()
+    cf_decode_modes: Counter[str] = Counter()
+    original_decoded_atomic_nums: Counter[str] = Counter()
+    cf_decoded_atomic_nums: Counter[str] = Counter()
     node_mask_sources: Counter[str] = Counter()
     cf_adj_mins: list[float] = []
     cf_adj_maxs: list[float] = []
@@ -175,6 +197,10 @@ def summarize_schema(rows: list[dict[str, Any]], *, adj_threshold: float) -> dic
         cf_continuous += int(cf_schema.get("continuous_count") or 0)
         merge_counter(original_argmax, original_schema.get("argmax_distribution") or {})
         merge_counter(cf_argmax, cf_schema.get("argmax_distribution") or {})
+        merge_counter(original_decode_modes, original_schema.get("decode_mode_counts") or {})
+        merge_counter(cf_decode_modes, cf_schema.get("decode_mode_counts") or {})
+        merge_counter(original_decoded_atomic_nums, original_schema.get("decoded_atomic_num_counts") or {})
+        merge_counter(cf_decoded_atomic_nums, cf_schema.get("decoded_atomic_num_counts") or {})
         if isinstance(schema.get("cf_adj_min"), (int, float)):
             cf_adj_mins.append(float(schema["cf_adj_min"]))
         if isinstance(schema.get("cf_adj_max"), (int, float)):
@@ -188,6 +214,10 @@ def summarize_schema(rows: list[dict[str, Any]], *, adj_threshold: float) -> dic
         "original_x_argmax_distribution": dict(original_argmax),
         "cf_x_argmax_distribution": dict(cf_argmax),
         "atom_type_argmax_counts": dict(cf_argmax),
+        "original_x_decode_mode_counts": dict(original_decode_modes),
+        "cf_x_decode_mode_counts": dict(cf_decode_modes),
+        "original_x_decoded_atomic_num_counts": dict(original_decoded_atomic_nums),
+        "cf_x_decoded_atomic_num_counts": dict(cf_decoded_atomic_nums),
         "node_mask_source_counts": dict(node_mask_sources),
         "num_nodes_used_mean": mean(num_nodes_values),
         "cf_adj_min": min(cf_adj_mins) if cf_adj_mins else None,
@@ -197,8 +227,70 @@ def summarize_schema(rows: list[dict[str, Any]], *, adj_threshold: float) -> dic
     }
 
 
+def validate_candidate_csv(path: str | Path, *, min_valid_candidates: int) -> dict[str, Any]:
+    candidate_path = Path(path).expanduser()
+    result: dict[str, Any] = {
+        "candidate_csv": str(candidate_path),
+        "candidate_csv_exists": candidate_path.exists(),
+        "candidate_smiles_column_present": False,
+        "num_rows": 0,
+        "rdkit_valid_count": 0,
+        "rdkit_valid_rate": 0.0,
+        "atom_count_min": None,
+        "atom_count_max": None,
+        "validation_pass": False,
+        "validation_error": None,
+    }
+    if not candidate_path.exists():
+        result["validation_error"] = "candidate_csv_missing"
+        return result
+    try:
+        from rdkit import Chem
+    except Exception as exc:  # pragma: no cover - environment dependent
+        result["validation_error"] = f"rdkit_unavailable:{exc}"
+        return result
+    atom_counts: list[int] = []
+    with candidate_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        result["candidate_smiles_column_present"] = "candidate_smiles" in (reader.fieldnames or [])
+        if not result["candidate_smiles_column_present"]:
+            result["validation_error"] = "candidate_smiles_column_missing"
+            return result
+        for row in reader:
+            result["num_rows"] += 1
+            smiles = (row.get("candidate_smiles") or "").strip()
+            mol = Chem.MolFromSmiles(smiles) if smiles else None
+            if mol is None:
+                continue
+            try:
+                Chem.SanitizeMol(mol)
+            except Exception:
+                continue
+            result["rdkit_valid_count"] += 1
+            atom_counts.append(int(mol.GetNumAtoms()))
+    result["rdkit_valid_rate"] = (result["rdkit_valid_count"] / result["num_rows"]) if result["num_rows"] else 0.0
+    result["atom_count_min"] = min(atom_counts) if atom_counts else None
+    result["atom_count_max"] = max(atom_counts) if atom_counts else None
+    result["validation_pass"] = bool(
+        result["candidate_smiles_column_present"]
+        and result["rdkit_valid_count"] >= int(min_valid_candidates)
+    )
+    return result
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    if args.validate_only:
+        validation = validate_candidate_csv(
+            args.input_csv or args.out_csv,
+            min_valid_candidates=int(args.min_valid_candidates),
+        )
+        if args.out_summary:
+            write_json(args.out_summary, {"csv_validation": validation})
+        print("[CLEAR_RF_CSV_VALIDATION]")
+        print(json.dumps(to_jsonable(validation), indent=2, sort_keys=True))
+        return 0 if validation.get("validation_pass") else 2
+
     pool_path = Path(args.clear_pool).expanduser()
     if not pool_path.exists():
         raise FileNotFoundError(f"CLEAR pool not found: {pool_path}")
@@ -212,12 +304,15 @@ def main() -> int:
     csv_rows = candidates if args.include_invalid else valid_rows
     invalid_reasons = Counter(str(row.get("invalid_reason")) for row in candidates if row.get("candidate_valid") is not True)
     valid_rate = (len(valid_rows) / len(candidates)) if candidates else 0.0
-    quality_gate_pass = (
+    conversion_quality_gate_pass = (
         len(valid_rows) >= int(args.min_valid_candidates)
         and valid_rate >= float(args.min_valid_rate)
     )
     write_csv(args.out_csv, csv_rows)
     write_jsonl(args.out_jsonl, candidates)
+    csv_validation = validate_candidate_csv(args.out_csv, min_valid_candidates=int(args.min_valid_candidates))
+    validation_gate_pass = bool(csv_validation.get("validation_pass"))
+    quality_gate_pass = bool(conversion_quality_gate_pass and validation_gate_pass)
     summary = {
         "dataset": args.dataset,
         "clear_pool": str(pool_path),
@@ -234,12 +329,17 @@ def main() -> int:
         "invalid_reason_counts": dict(invalid_reasons),
         "min_valid_candidates": int(args.min_valid_candidates),
         "min_valid_rate": float(args.min_valid_rate),
+        "conversion_quality_gate_pass": bool(conversion_quality_gate_pass),
         "quality_gate_pass": bool(quality_gate_pass),
+        "csv_validation": csv_validation,
+        "csv_validation_pass": validation_gate_pass,
         "adj_threshold": float(args.adj_threshold),
         **schema_summary,
         "mean_edge_changed": mean([float(row["edge_changed_count"]) for row in candidates if row.get("edge_changed_count") is not None]),
         "mean_feature_l1_cost": mean([float(row["feature_l1_cost"]) for row in candidates if row.get("feature_l1_cost") is not None]),
         "mean_total_action_cost": mean([float(row["total_action_cost"]) for row in candidates if row.get("total_action_cost") is not None]),
+        "total_attempted_bonds": sum(int(row.get("attempted_bonds") or 0) for row in candidates),
+        "total_skipped_bonds_for_valence": sum(int(row.get("skipped_bonds_for_valence") or 0) for row in candidates),
         "source_method": "CLEAR",
         "method": "CLEAR-RF-FullGraph",
         "note": "CSV defaults to candidate_valid=true rows only. JSONL keeps invalid rows for audit.",
@@ -250,7 +350,7 @@ def main() -> int:
     print("[CLEAR_RF_CONVERT_PREVIEW]")
     for row in candidates[:3]:
         print(json.dumps({key: row.get(key) for key in CSV_FIELDS}, sort_keys=True))
-    if not quality_gate_pass:
+    if not (quality_gate_pass and validation_gate_pass):
         print("[CLEAR_RF_CONVERT_FAILED_QUALITY_GATE]")
         return 2
     print("[CLEAR_RF_CONVERT_QUALITY_GATE_OK]")
