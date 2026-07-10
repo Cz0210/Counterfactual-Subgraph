@@ -6,6 +6,45 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-10] Select GlobalGCE fullgraphs by strict-flip MolCLR Node-FGW coverage
+
+### Background
+The MolCLR Node-FGW evaluator can write pair-level distance and teacher-flip
+details for both `ours_selected_subgraphs` and `globalgce` in one CSV. A
+GlobalGCE top2000 fullgraph pool needs a project-owned top-K selection step
+that reflects its actual strict-flip explanatory coverage, rather than a
+frequency-only or arbitrary first-K choice.
+
+### Decision
+Add `scripts/select_fullgraph_candidates_by_fgw_coverage.py`. The selector
+filters the input detail table by exact `method=globalgce` before computing any
+distance quantile or coverage. A candidate covers a parent only when:
+
+```text
+cf_flip == true and Node-FGW distance <= threshold
+```
+
+It greedily maximizes marginal parent coverage, breaking ties by lower mean
+distance on newly covered parents, shorter SMILES, and earlier source-candidate
+order. The resulting `selected_top20_for_eval.csv` uses:
+
+```text
+method = GlobalGCE
+fullgraph_method = globalgce_selected20
+```
+
+and can be supplied as a fullgraph candidate input to the Node-FGW evaluator.
+
+### Consequences
+Ours rows are never used to select GlobalGCE fullgraph candidates. The
+selection remains evaluation-only: it does not modify GlobalGCE, the teacher,
+PPO, selector training, or the existing Node-FGW distance calculation.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-07] Add MolCLR Node-FGW as evaluation-only CCRCOV distance line
 
 ### Background

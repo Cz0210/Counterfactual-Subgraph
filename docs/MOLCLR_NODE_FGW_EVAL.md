@@ -98,6 +98,29 @@ Explicit thresholds are also supported:
 FGW_THRESHOLDS=0.01,0.02,0.05 sbatch scripts/slurm/molclr_node_fgw_eval_ccrcov_smoke.sh
 ```
 
+## GlobalGCE Fullgraph Selection
+
+When a Node-FGW evaluation contains both ours and a GlobalGCE fullgraph pool,
+select GlobalGCE candidates only from rows with `method=globalgce`:
+
+```bash
+python3 scripts/select_fullgraph_candidates_by_fgw_coverage.py \
+  --pair-details outputs/hpc/eval/ccrcov_molclr_node_fgw_medium_globalgce_lam05/details/pair_details.csv \
+  --candidates-csv /path/to/globalgce_top2000_candidates.csv \
+  --out-dir outputs/hpc/selectors/globalgce_node_fgw_top20 \
+  --top-k 20 \
+  --threshold-quantile 0.2 \
+  --method-name globalgce
+```
+
+The selector uses strict-flip close pairs only (`cf_flip=true` and
+`distance <= threshold`) and greedily maximizes marginal parent coverage. It
+prefers the evaluator's saved `distance_quantiles.csv` for a requested
+quantile, then computes the quantile from valid GlobalGCE distances if needed.
+`selected_top20_for_eval.csv` is directly usable as a fullgraph-candidate CSV
+for the Node-FGW evaluator; it labels the method as `GlobalGCE` and
+`fullgraph_method=globalgce_selected20`.
+
 ## Outputs
 
 Default smoke output root:
