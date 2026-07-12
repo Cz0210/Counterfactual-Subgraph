@@ -561,6 +561,35 @@ used by final Node-FGW evaluation is:
 outputs/hpc/baselines/clear/aids/selected/clear_aids_rf_strict_flip_top20_greedy_mmr.csv
 ```
 
+An independent Parent-Frequency Top20 route is also available. It reuses the
+same RDKit canonicalization and RF strict-flip filter, then aggregates each
+canonical molecule by distinct `source_instance_index`. The parent key never
+includes `source_exp_id`, so one source parent generated in several CLEAR
+experiments is counted once. Ranking is deterministic:
+
+```text
+parent_frequency descending
+raw_frequency descending
+rf_prob_label0 descending
+min_total_action_cost ascending
+canonical_smiles ascending
+```
+
+Run it with:
+
+```bash
+sbatch scripts/slurm/clear_aids_select_top20_parent_frequency.sh
+```
+
+Its preselected evaluation input is:
+
+```text
+outputs/hpc/baselines/clear/aids/selected_parent_frequency/clear_aids_rf_strict_flip_top20_parent_frequency.csv
+```
+
+This route is named `CLEAR Parent-Frequency Top20`. It is not Greedy-MMR and
+does not use MolCLR, Node-FGW, or GED during selection.
+
 Evaluate all label-1 parents against exactly those 20 preselected candidates:
 
 ```bash
@@ -583,6 +612,24 @@ RDKit-valid canonical SMILES, preserves their CSV order, and records
 The expensive distance workload is reduced from `parents x 9184` to
 `parents x 20`. CLEAR native total-cost ordering remains diagnostic and is not
 the selector used for the final fair table.
+
+Evaluate the Parent-Frequency Top20 without evaluator-side truncation or
+sorting:
+
+```bash
+RUN_OURS=0 RUN_FULLGRAPH=1 RUN_GT_FULLGRAPH=1 \
+GT_FULLGRAPH_CANDIDATES_PATH=outputs/hpc/baselines/clear/aids/selected_parent_frequency/clear_aids_rf_strict_flip_top20_parent_frequency.csv \
+HIV_CSV=outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv \
+SMILES_COL=smiles LABEL_COL=label TARGET_LABEL=1 \
+FULLGRAPH_METHOD_NAME=CLEAR-Parent-Frequency-Top20 \
+PRESELECTED_TOPK=20 REQUIRE_PRESELECTED_TOPK=1 \
+OUTPUT_DIR=outputs/hpc/eval/ccrcov_molclr_node_fgw_clear_parent_frequency_top20 \
+sbatch scripts/slurm/molclr_node_fgw_eval_ccrcov_smoke.sh
+```
+
+The evaluator reads `selection_mode` from the Top20 CSV and reports
+`selection_method=parent_frequency`, `selection_performed_in_eval=false`, and
+`candidate_set_preselected=true`.
 
 If the audit reports `rf_oracle_usable=false`, do not report CLEAR as an
 RF-unified final-table method. Keep the clear_graphpred/action-distance result

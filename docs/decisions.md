@@ -6,6 +6,39 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-12] Add CLEAR Parent-Frequency Top20 as a parallel selector
+
+### Background
+CLEAR full-molecule generation yields repeated canonical candidates across
+source parents and experiment repetitions. Greedy-MMR is one valid global
+selection protocol, but a direct frequency baseline is useful for separating
+generation recurrence from coverage-proxy optimization.
+
+### Decision
+Add `selection_mode=parent_frequency` to the shared CLEAR selector. It reuses
+RDKit validation, canonical deduplication, and the AIDS/HIV RF strict-flip
+filter. For each canonical candidate it records raw row frequency, distinct
+`source_instance_index` frequency, distinct experiment frequency, minimum
+action cost, and mean action cost. Parent frequency intentionally excludes
+`source_exp_id` from its key.
+
+The exact ranking is parent frequency descending, raw frequency descending,
+RF label-0 probability descending, minimum total action cost ascending, then
+canonical SMILES ascending. Node-FGW, GED, MolCLR embeddings, and iterative
+coverage gain do not participate in this ranking.
+
+### Consequences
+`CLEAR Parent-Frequency Top20` is reported separately from CLEAR Greedy-MMR.
+Its Top20 CSV is a preselected candidate set: Node-FGW preserves row order,
+requires exactly 20 unique RDKit-valid strict-flip molecules, and records
+`selection_method=parent_frequency`, `selection_performed_in_eval=false`, and
+`candidate_set_preselected=true`.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-12] Preselect CLEAR Top20 before MolCLR Node-FGW evaluation
 
 ### Background

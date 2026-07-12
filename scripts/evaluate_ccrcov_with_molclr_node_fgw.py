@@ -80,6 +80,7 @@ SUMMARY_FIELDS = [
     "skip_redundancy",
     "selection_performed_in_eval",
     "candidate_set_preselected",
+    "selection_method",
 ]
 
 
@@ -141,6 +142,7 @@ def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: in
     canonical: list[str] = []
     strict_flip_values: list[bool] = []
     ranks: list[int] = []
+    selection_modes: set[str] = set()
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         has_strict_flip_field = "rf_strict_flip" in (reader.fieldnames or [])
@@ -160,6 +162,9 @@ def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: in
                 if rank is None:
                     raise ValueError(f"Preselected candidate row {row_index} has an invalid rank: {path}")
                 ranks.append(int(rank))
+            selection_mode = str(row.get("selection_mode") or "").strip()
+            if selection_mode:
+                selection_modes.add(selection_mode)
     if len(canonical) != int(expected_top_k):
         raise ValueError(
             f"Preselected candidate CSV must contain exactly {expected_top_k} rows; "
@@ -174,6 +179,8 @@ def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: in
         raise ValueError(f"Preselected candidate CSV contains rf_strict_flip=false rows: {path}")
     if ranks and ranks != list(range(1, int(expected_top_k) + 1)):
         raise ValueError(f"Preselected candidate ranks must be exactly 1..{expected_top_k}: {path}")
+    if len(selection_modes) > 1:
+        raise ValueError(f"Preselected candidate CSV contains mixed selection_mode values: {path}")
     return {
         "path": str(path),
         "expected_top_k": int(expected_top_k),
@@ -182,6 +189,7 @@ def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: in
         "rf_strict_flip_validated": bool(strict_flip_values),
         "rank_order_validated": bool(ranks),
         "order_preserved": True,
+        "selection_method": next(iter(selection_modes), "preselected_external"),
     }
 
 
@@ -298,6 +306,7 @@ def summarize_method(
     skip_redundancy: bool,
     selection_performed_in_eval: bool,
     candidate_set_preselected: bool,
+    selection_method: str,
 ) -> list[dict[str, Any]]:
     rows_by_parent: dict[str, list[dict[str, Any]]] = {}
     labels_by_parent: dict[str, int] = {}
@@ -359,6 +368,7 @@ def summarize_method(
                 "skip_redundancy": bool(skip_redundancy),
                 "selection_performed_in_eval": bool(selection_performed_in_eval),
                 "candidate_set_preselected": bool(candidate_set_preselected),
+                "selection_method": selection_method,
             }
         )
     return output
@@ -498,6 +508,15 @@ def main() -> int:
             ]
         except ValueError as exc:
             raise SystemExit(f"[ERROR] preselected candidate validation failed: {exc}") from exc
+    selection_methods = {
+        str(audit.get("selection_method") or "preselected_external")
+        for audit in preselected_audits
+    }
+    selection_method = (
+        next(iter(selection_methods))
+        if len(selection_methods) == 1
+        else ("mixed_preselected" if selection_methods else "not_preselected")
+    )
 
     print("[MOLCLR_NODE_FGW_CONFIG]", flush=True)
     print(f"distance_line={DISTANCE_LINE}", flush=True)
@@ -512,6 +531,7 @@ def main() -> int:
     print(f"preselected_topk={args.preselected_topk}", flush=True)
     print(f"require_preselected_topk={bool(args.require_preselected_topk)}", flush=True)
     print(f"candidate_set_preselected={candidate_set_preselected}", flush=True)
+    print(f"selection_method={selection_method}", flush=True)
 
     provider = MolCLRNodeFGWDistanceProvider(
         NodeFGWConfig(
@@ -655,6 +675,7 @@ def main() -> int:
                 skip_redundancy=bool(args.skip_redundancy),
                 selection_performed_in_eval=False if candidate_set_preselected else bool(args.max_candidates),
                 candidate_set_preselected=candidate_set_preselected,
+                selection_method=selection_method,
             )
         )
     _write_csv(details_dir / "pair_details.csv", all_details, _detail_fields(all_details))
@@ -676,6 +697,7 @@ def main() -> int:
         "run_fullgraph": bool(args.run_fullgraph),
         "selection_performed_in_eval": False if candidate_set_preselected else bool(args.max_candidates),
         "candidate_set_preselected": candidate_set_preselected,
+        "selection_method": selection_method,
         "preselected_topk": int(args.preselected_topk),
         "require_preselected_topk": bool(args.require_preselected_topk),
         "preselected_candidate_audits": preselected_audits,
