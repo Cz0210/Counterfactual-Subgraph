@@ -151,6 +151,29 @@ sbatch scripts/slurm/gcf_hiv_csv_vrrw_full.sh
 sbatch scripts/slurm/gcf_hiv_csv_summary_eval_full.sh
 ```
 
+### Valid-candidate greedy Top-K
+
+The historical summary export performs native greedy coverage selection before
+RDKit legality filtering. For SMILES-based downstream evaluation, use the
+separate validity-first export:
+
+```bash
+sbatch scripts/slurm/gcf_hiv_csv_export_valid_greedy_topk.sh
+```
+
+This job converts every raw VRRW candidate to SMILES, rejects empty,
+unsanitizable, or zero-atom molecules, and only then reruns the same greedy key:
+
+```text
+(marginal_coverage_gain, frequency, -min_distance_seen)
+```
+
+The default output directory is `<run_dir>/valid_greedy_export/`. Its Top20
+metadata, graph, and FGW-ready SMILES files share exactly the same rank order.
+These files are new artifacts and do not overwrite the historical
+`summary_export/` results. `min_distance_seen=0.0` is preserved as a real zero,
+while missing or non-finite values receive the fallback distance.
+
 The adapted native evaluator records:
 
 - `method=GCFExplainer-HIVCSV`

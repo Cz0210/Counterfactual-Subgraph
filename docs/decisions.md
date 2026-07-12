@@ -6,6 +6,32 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-12] Filter legal GCF-HIVCSV molecules before greedy Top-K export
+
+### Background
+The original HIVCSV summary export ranked all generated graphs before the
+graph-to-SMILES legality audit. Invalid graphs could therefore consume ranks
+and update the covered-parent set. Its fallback expression also interpreted a
+real `min_distance_seen=0.0` as missing.
+
+### Decision
+Keep the historical export unchanged as an experiment artifact, but add a
+validity-first export path. Convert and sanitize the complete raw candidate
+pool, discard illegal or empty molecules, and then apply the existing greedy
+key `(marginal_coverage_gain, frequency, -min_distance_seen)`. Preserve one
+shared order across metadata, graph tensors, and FGW-ready SMILES.
+
+### Consequences
+- Invalid candidates cannot influence native coverage selection.
+- A real zero distance wins the expected tie-break instead of becoming 999.
+- The valid Top-K export is deterministic and written beside, rather than over,
+  the historical `summary_export` files.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-12] Treat Ours Top20 as externally preselected in Node-FGW
 
 ### Background

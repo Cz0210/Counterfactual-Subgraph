@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 from statistics import median
@@ -48,6 +49,16 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) ->
         writer.writerows(rows)
 
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if value is None or value == "":
+        return float(default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if math.isfinite(parsed) else float(default)
+
+
 def _greedy(records: list[dict[str, Any]], max_k: int) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     covered: set[int] = set()
@@ -59,13 +70,19 @@ def _greedy(records: list[dict[str, Any]], max_k: int) -> list[dict[str, Any]]:
         best_key: tuple[int, int, float] | None = None
         for idx, row in enumerate(remaining):
             gain = len(set(row["covered_indices"]) - covered)
-            key = (gain, int(row.get("frequency") or 0), -float(row.get("min_distance_seen") or 999.0))
+            key = (
+                gain,
+                int(row.get("frequency") or 0),
+                -_finite_float_or_default(row.get("min_distance_seen"), 999.0),
+            )
             if best_key is None or key > best_key:
                 best_key = key
                 best_i = idx
         chosen = dict(remaining.pop(best_i))
+        previous_covered = len(covered)
         covered.update(chosen["covered_indices"])
         chosen["selected_rank"] = rank
+        chosen["marginal_coverage_gain"] = len(covered) - previous_covered
         chosen["covered_count_at_rank"] = len(covered)
         selected.append(chosen)
     return selected
@@ -111,7 +128,7 @@ def main() -> int:
                 "graph_hash": graph_hash,
                 "frequency": int(row.get("frequency") or 0),
                 "covered_indices": _indices_from_sparse(row.get("input_graphs_covering_list")),
-                "min_distance_seen": float(row.get("min_distance_seen") or 999.0),
+                "min_distance_seen": _finite_float_or_default(row.get("min_distance_seen"), 999.0),
                 "candidate_pred": row.get("candidate_pred", ""),
                 "candidate_score_label1": row.get("candidate_score_label1", ""),
                 "graph": graph,
@@ -208,4 +225,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

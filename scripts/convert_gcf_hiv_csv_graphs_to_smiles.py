@@ -75,6 +75,30 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) ->
         writer.writerows(rows)
 
 
+def _graph_entries(payload: dict[str, Any]) -> list[tuple[Any | None, dict[str, Any]]]:
+    """Return graph/record pairs from selected exports or raw VRRW payloads."""
+
+    selected_graphs = list(payload.get("selected_graphs") or [])
+    if selected_graphs:
+        selected_records = [
+            dict(row) for row in payload.get("selected_records") or [] if isinstance(row, dict)
+        ]
+        return [
+            (graph, selected_records[index] if index < len(selected_records) else {})
+            for index, graph in enumerate(selected_graphs)
+        ]
+
+    candidates = list(payload.get("counterfactual_candidates") or [])
+    graph_map = payload.get("graph_map") if isinstance(payload.get("graph_map"), dict) else {}
+    entries: list[tuple[Any | None, dict[str, Any]]] = []
+    for index, candidate in enumerate(candidates):
+        record = dict(candidate) if isinstance(candidate, dict) else {}
+        graph_hash = str(record.get("graph_hash") or "")
+        record.setdefault("candidate_id", f"gcf_hiv_csv_{index}")
+        entries.append((graph_map.get(graph_hash), record))
+    return entries
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None)
@@ -88,20 +112,23 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     payload = torch_load(str(Path(args.selected_graphs).expanduser().resolve()), map_location="cpu")
-    graphs = list(payload.get("selected_graphs") or [])
-    records = [dict(row) for row in payload.get("selected_records") or [] if isinstance(row, dict)]
+    entries = _graph_entries(payload)
     rows: list[dict[str, Any]] = []
     reasons: Counter[str] = Counter()
-    for idx, graph in enumerate(graphs):
-        record = records[idx] if idx < len(records) else {}
-        smiles, convert_ok, sanitize_ok, reason = _graph_to_smiles(graph)
+    for idx, (graph, record) in enumerate(entries):
+        if graph is None:
+            smiles, convert_ok, sanitize_ok, reason = "", False, False, "missing_graph"
+        else:
+            smiles, convert_ok, sanitize_ok, reason = _graph_to_smiles(graph)
         reasons[reason.split(":", 1)[0]] += 1
         rows.append(
             {
                 "candidate_id": record.get("candidate_id", f"gcf_hiv_csv_{idx}"),
+                "graph_hash": record.get("graph_hash", ""),
                 "smiles": smiles,
                 "convert_ok": bool(convert_ok),
                 "sanitize_ok": bool(sanitize_ok),
+                "num_atoms": int(getattr(graph, "num_nodes", 0) or 0) if graph is not None else 0,
                 "reason": reason,
                 "GCF_MODE": "hiv_csv_adapted",
                 "DATASET_SOURCE": "HIV_CSV",
@@ -109,7 +136,22 @@ def main() -> int:
             }
         )
     out_csv = Path(args.out_csv).expanduser().resolve()
-    _write_csv(out_csv, rows, ["candidate_id", "smiles", "convert_ok", "sanitize_ok", "reason", "GCF_MODE", "DATASET_SOURCE", "CF_MODE"])
+    _write_csv(
+        out_csv,
+        rows,
+        [
+            "candidate_id",
+            "graph_hash",
+            "smiles",
+            "convert_ok",
+            "sanitize_ok",
+            "num_atoms",
+            "reason",
+            "GCF_MODE",
+            "DATASET_SOURCE",
+            "CF_MODE",
+        ],
+    )
     total = len(rows)
     report = {
         "method": "GCFExplainer-HIVCSV",
@@ -135,4 +177,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
