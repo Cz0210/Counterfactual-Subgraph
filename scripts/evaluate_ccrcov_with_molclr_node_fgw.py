@@ -35,6 +35,7 @@ from src.eval.close_counterfactual_coverage import (  # noqa: E402
     _as_float,
     _load_candidate_records,
     _load_parent_records,
+    canonicalize_smiles,
 )
 from src.eval.greed_distance.pair_generation import GT_FULLGRAPH_FIELDS, OURS_FRAGMENT_FIELDS  # noqa: E402
 from src.eval.node_fgw_distance import (  # noqa: E402
@@ -77,6 +78,8 @@ SUMMARY_FIELDS = [
     "cache_hit_rate",
     "node_embedding_cache_hit_rate",
     "skip_redundancy",
+    "selection_performed_in_eval",
+    "candidate_set_preselected",
 ]
 
 
@@ -119,6 +122,67 @@ def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
     destination = Path(path).expanduser()
     ensure_directory(destination.parent)
     destination.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _candidate_smiles_from_row(row: dict[str, Any]) -> str:
+    for field in GT_FULLGRAPH_FIELDS:
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: int) -> dict[str, Any]:
+    """Require an exact, ordered, RDKit-valid unique candidate CSV."""
+
+    path = Path(path_like).expanduser().resolve()
+    if not path.is_file() or path.suffix.lower() != ".csv":
+        raise ValueError(f"Preselected fullgraph input must be a CSV file: {path}")
+    canonical: list[str] = []
+    strict_flip_values: list[bool] = []
+    ranks: list[int] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        has_strict_flip_field = "rf_strict_flip" in (reader.fieldnames or [])
+        has_rank_field = "rank" in (reader.fieldnames or [])
+        for row_index, row in enumerate(reader):
+            smiles = _candidate_smiles_from_row(row)
+            if not smiles:
+                raise ValueError(f"Preselected candidate row {row_index} has no recognized SMILES field: {path}")
+            normalized = canonicalize_smiles(smiles)
+            if not normalized:
+                raise ValueError(f"Preselected candidate row {row_index} is not RDKit-valid: {smiles!r}")
+            canonical.append(normalized)
+            if has_strict_flip_field:
+                strict_flip_values.append(_as_bool(row.get("rf_strict_flip")))
+            if has_rank_field:
+                rank = _parse_int_label(row.get("rank"))
+                if rank is None:
+                    raise ValueError(f"Preselected candidate row {row_index} has an invalid rank: {path}")
+                ranks.append(int(rank))
+    if len(canonical) != int(expected_top_k):
+        raise ValueError(
+            f"Preselected candidate CSV must contain exactly {expected_top_k} rows; "
+            f"found {len(canonical)}: {path}"
+        )
+    if len(set(canonical)) != int(expected_top_k):
+        raise ValueError(
+            f"Preselected candidate CSV must contain {expected_top_k} unique canonical SMILES; "
+            f"found {len(set(canonical))}: {path}"
+        )
+    if strict_flip_values and not all(strict_flip_values):
+        raise ValueError(f"Preselected candidate CSV contains rf_strict_flip=false rows: {path}")
+    if ranks and ranks != list(range(1, int(expected_top_k) + 1)):
+        raise ValueError(f"Preselected candidate ranks must be exactly 1..{expected_top_k}: {path}")
+    return {
+        "path": str(path),
+        "expected_top_k": int(expected_top_k),
+        "num_rows": len(canonical),
+        "num_unique_canonical_smiles": len(set(canonical)),
+        "rf_strict_flip_validated": bool(strict_flip_values),
+        "rank_order_validated": bool(ranks),
+        "order_preserved": True,
+    }
 
 
 def _finite_distance(row: dict[str, Any]) -> float | None:
@@ -232,6 +296,8 @@ def summarize_method(
     cache_hit_rate: float,
     node_embedding_cache_hit_rate: float,
     skip_redundancy: bool,
+    selection_performed_in_eval: bool,
+    candidate_set_preselected: bool,
 ) -> list[dict[str, Any]]:
     rows_by_parent: dict[str, list[dict[str, Any]]] = {}
     labels_by_parent: dict[str, int] = {}
@@ -291,6 +357,8 @@ def summarize_method(
                 "cache_hit_rate": float(cache_hit_rate),
                 "node_embedding_cache_hit_rate": float(node_embedding_cache_hit_rate),
                 "skip_redundancy": bool(skip_redundancy),
+                "selection_performed_in_eval": bool(selection_performed_in_eval),
+                "candidate_set_preselected": bool(candidate_set_preselected),
             }
         )
     return output
@@ -375,6 +443,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=1 if _env_bool("RUN_FULLGRAPH", True) else 0,
         help="Evaluate fullgraph candidates, including GT/GCF/CLEAR fullgraph paths.",
     )
+    parser.add_argument(
+        "--preselected-topk",
+        type=int,
+        default=int(_env("PRESELECTED_TOPK", "0") or 0),
+        help="Expected size of a preselected fullgraph set; 0 disables the check.",
+    )
+    parser.add_argument(
+        "--require-preselected-topk",
+        type=int,
+        choices=(0, 1),
+        default=1 if _env_bool("REQUIRE_PRESELECTED_TOPK", False) else 0,
+        help="Fail unless fullgraph inputs are exact preselected sets of --preselected-topk candidates.",
+    )
     return parser
 
 
@@ -390,6 +471,33 @@ def main() -> int:
     combined_dir = ensure_directory(output / "combined")
     fullgraph_path = args.gt_fullgraph_candidates_path or args.gcf_candidates_path
     fullgraph_method = infer_fullgraph_method(fullgraph_path, args.fullgraph_method_name)
+    candidate_set_preselected = int(args.preselected_topk) > 0
+    if bool(args.require_preselected_topk) and not candidate_set_preselected:
+        raise SystemExit("[ERROR] REQUIRE_PRESELECTED_TOPK=1 requires PRESELECTED_TOPK > 0.")
+    if bool(args.require_preselected_topk) and bool(args.run_ours):
+        raise SystemExit("[ERROR] Preselected fullgraph-only evaluation requires RUN_OURS=0.")
+    if bool(args.require_preselected_topk) and args.cf_mode != "strict_flip":
+        raise SystemExit("[ERROR] Preselected final evaluation requires CF_MODE=strict_flip.")
+    preselected_audits: list[dict[str, Any]] = []
+    if candidate_set_preselected:
+        active_fullgraph_paths: list[str | Path] = []
+        if bool(args.run_fullgraph) and fullgraph_path:
+            active_fullgraph_paths.append(fullgraph_path)
+        if bool(args.run_fullgraph) and args.clear_fullgraph_candidates_path:
+            active_fullgraph_paths.append(args.clear_fullgraph_candidates_path)
+        if bool(args.require_preselected_topk) and not active_fullgraph_paths:
+            raise SystemExit("[ERROR] Preselected mode requires an active fullgraph candidate CSV.")
+        if bool(args.require_preselected_topk) and len(active_fullgraph_paths) != 1:
+            raise SystemExit(
+                "[ERROR] Preselected final evaluation requires exactly one active fullgraph candidate CSV."
+            )
+        try:
+            preselected_audits = [
+                validate_preselected_candidate_csv(path, int(args.preselected_topk))
+                for path in active_fullgraph_paths
+            ]
+        except ValueError as exc:
+            raise SystemExit(f"[ERROR] preselected candidate validation failed: {exc}") from exc
 
     print("[MOLCLR_NODE_FGW_CONFIG]", flush=True)
     print(f"distance_line={DISTANCE_LINE}", flush=True)
@@ -401,6 +509,9 @@ def main() -> int:
     print(f"skip_redundancy={args.skip_redundancy}", flush=True)
     print(f"run_ours={bool(args.run_ours)}", flush=True)
     print(f"run_fullgraph={bool(args.run_fullgraph)}", flush=True)
+    print(f"preselected_topk={args.preselected_topk}", flush=True)
+    print(f"require_preselected_topk={bool(args.require_preselected_topk)}", flush=True)
+    print(f"candidate_set_preselected={candidate_set_preselected}", flush=True)
 
     provider = MolCLRNodeFGWDistanceProvider(
         NodeFGWConfig(
@@ -423,7 +534,7 @@ def main() -> int:
         label=int(args.label),
         smiles_col=args.smiles_col,
         label_col=args.label_col,
-        max_parents=args.max_parents,
+        max_parents=(int(args.max_parents) if args.max_parents is not None and int(args.max_parents) > 0 else None),
     )
     teacher = TeacherSemanticScorer(args.teacher_path)
     all_details: list[dict[str, Any]] = []
@@ -435,7 +546,7 @@ def main() -> int:
             fields=OURS_FRAGMENT_FIELDS,
             directory_candidates=OURS_DIRECTORY_CANDIDATES,
         )
-        if args.max_candidates is not None:
+        if args.max_candidates is not None and int(args.max_candidates) > 0:
             ours_candidates = ours_candidates[: int(args.max_candidates)]
         ours_details = _evaluate_ours(
             parents=parents,
@@ -456,8 +567,13 @@ def main() -> int:
             fields=GT_FULLGRAPH_FIELDS,
             directory_candidates=GT_DIRECTORY_CANDIDATES,
         )
-        if args.max_candidates is not None:
+        if not candidate_set_preselected and args.max_candidates is not None and int(args.max_candidates) > 0:
             full_candidates = full_candidates[: int(args.max_candidates)]
+        if candidate_set_preselected and len(full_candidates) != int(args.preselected_topk):
+            raise SystemExit(
+                f"[ERROR] Loaded fullgraph candidate count changed after CSV validation: "
+                f"expected={args.preselected_topk} loaded={len(full_candidates)}"
+            )
         full_details = _evaluate_gt_fullgraph(
             parents=parents,
             candidates=full_candidates,
@@ -478,8 +594,13 @@ def main() -> int:
             fields=GT_FULLGRAPH_FIELDS,
             directory_candidates=GT_DIRECTORY_CANDIDATES,
         )
-        if args.max_candidates is not None:
+        if not candidate_set_preselected and args.max_candidates is not None and int(args.max_candidates) > 0:
             clear_candidates = clear_candidates[: int(args.max_candidates)]
+        if candidate_set_preselected and len(clear_candidates) != int(args.preselected_topk):
+            raise SystemExit(
+                f"[ERROR] Loaded CLEAR candidate count changed after CSV validation: "
+                f"expected={args.preselected_topk} loaded={len(clear_candidates)}"
+            )
         clear_details = _evaluate_gt_fullgraph(
             parents=parents,
             candidates=clear_candidates,
@@ -532,6 +653,8 @@ def main() -> int:
                 cache_hit_rate=cache_hit_rate,
                 node_embedding_cache_hit_rate=node_hit_rate,
                 skip_redundancy=bool(args.skip_redundancy),
+                selection_performed_in_eval=False if candidate_set_preselected else bool(args.max_candidates),
+                candidate_set_preselected=candidate_set_preselected,
             )
         )
     _write_csv(details_dir / "pair_details.csv", all_details, _detail_fields(all_details))
@@ -551,6 +674,11 @@ def main() -> int:
         "skip_redundancy": bool(args.skip_redundancy),
         "run_ours": bool(args.run_ours),
         "run_fullgraph": bool(args.run_fullgraph),
+        "selection_performed_in_eval": False if candidate_set_preselected else bool(args.max_candidates),
+        "candidate_set_preselected": candidate_set_preselected,
+        "preselected_topk": int(args.preselected_topk),
+        "require_preselected_topk": bool(args.require_preselected_topk),
+        "preselected_candidate_audits": preselected_audits,
         "max_parents": args.max_parents,
         "max_candidates": args.max_candidates,
         "cf_mode": args.cf_mode,

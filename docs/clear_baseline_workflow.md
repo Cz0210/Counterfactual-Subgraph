@@ -532,16 +532,57 @@ sbatch scripts/slurm/molclr_hiv_precompute_embeddings_full.sh
 sbatch scripts/slurm/clear_aids_eval_rf_molclr_full.sh
 ```
 
-For the MolCLR-Node-FGW auxiliary line, use fullgraph-only mode so CLEAR is
-scored as a candidate set without re-running ours in the same job:
+Before the MolCLR-Node-FGW auxiliary line, select a global CLEAR Top20 with the
+shared AIDS/HIV RF oracle. The selector performs RDKit validation, canonical
+deduplication, RF strict-flip filtering, and greedy MMR selection. It uses
+Morgan/Tanimoto for the selection-stage parent coverage proxy and candidate
+redundancy; Node-FGW is not used during selection:
 
 ```bash
-RUN_OURS=0 RUN_FULLGRAPH=1 RUN_GT_FULLGRAPH=0 \
-CLEAR_FULLGRAPH_CANDIDATES_PATH=outputs/hpc/baselines/clear/aids/rf_unified/clear_aids_rf_fullgraph_candidates.csv \
-FULLGRAPH_METHOD_NAME=CLEAR-RF-FullGraph \
-OUTPUT_DIR=outputs/hpc/eval/ccrcov_molclr_node_fgw_clear_smoke \
+COVERAGE_THRESHOLD=<explicit_morgan_tanimoto_threshold> \
+sbatch scripts/slurm/clear_aids_select_top20_greedy_mmr.sh
+```
+
+The selector reuses the coverage-heavy Ours weights from
+`stable300_label1_merged_base_temp07_top20_mmr_cov20/selector_summary.json`:
+
+```text
+w_cf=0.8
+w_cov=20.0
+w_cost=0.3
+w_red=0.7
+```
+
+The full-molecule Tanimoto coverage threshold has no equivalent in the Ours
+exact-fragment support selector, so it must be explicitly supplied. The output
+used by final Node-FGW evaluation is:
+
+```text
+outputs/hpc/baselines/clear/aids/selected/clear_aids_rf_strict_flip_top20_greedy_mmr.csv
+```
+
+Evaluate all label-1 parents against exactly those 20 preselected candidates:
+
+```bash
+RUN_OURS=0 RUN_FULLGRAPH=1 FULLGRAPH_METHOD=clear \
+PRESELECTED_TOPK=20 REQUIRE_PRESELECTED_TOPK=1 \
+OUTPUT_DIR=outputs/hpc/eval/ccrcov_molclr_node_fgw_clear_top20_full \
 sbatch scripts/slurm/molclr_node_fgw_eval_ccrcov_smoke.sh
 ```
+
+For `FULLGRAPH_METHOD=clear`, the wrapper uses the same label-1 parent CSV as
+the selector and Ours protocol:
+
+```text
+outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv
+```
+
+In this mode the evaluator validates that the CSV contains exactly 20 unique,
+RDKit-valid canonical SMILES, preserves their CSV order, and records
+`selection_performed_in_eval=false` and `candidate_set_preselected=true`.
+The expensive distance workload is reduced from `parents x 9184` to
+`parents x 20`. CLEAR native total-cost ordering remains diagnostic and is not
+the selector used for the final fair table.
 
 If the audit reports `rf_oracle_usable=false`, do not report CLEAR as an
 RF-unified final-table method. Keep the clear_graphpred/action-distance result

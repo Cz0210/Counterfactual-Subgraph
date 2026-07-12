@@ -6,6 +6,48 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-12] Preselect CLEAR Top20 before MolCLR Node-FGW evaluation
+
+### Background
+CLEAR produces 9,184 RDKit-valid full-molecule candidates after RF-unified
+conversion. Evaluating all label-1 parents against the entire pool with
+MolCLR-Node-FGW is computationally impractical and would also conflate global
+candidate selection with final distance evaluation.
+
+### Decision
+Add a dedicated CLEAR fullgraph selector with the following pipeline:
+
+```text
+CLEAR candidate generation
+-> RDKit validation and canonical deduplication
+-> shared RF strict-flip filter
+-> Morgan/Tanimoto greedy MMR Top20
+-> MolCLR-Node-FGW final evaluation
+```
+
+The selector reuses the accepted coverage-heavy Ours weights
+(`w_cf=0.8`, `w_cov=20.0`, `w_cost=0.3`, `w_red=0.7`) and the same weighted MMR
+score helper. Full-molecule coverage is represented by packed Morgan/Tanimoto
+parent bitsets; candidate redundancy is Morgan Tanimoto. Because the Ours
+selector uses exact fragment support and defines no full-molecule similarity
+threshold, `COVERAGE_THRESHOLD` must be supplied explicitly.
+
+Node-FGW preselected mode requires exactly 20 unique RDKit-valid candidates,
+preserves CSV order, performs no in-evaluator selection, and evaluates every
+target parent against those 20 candidates. It records
+`selection_performed_in_eval=false` and `candidate_set_preselected=true`.
+
+### Consequences
+The final CLEAR Node-FGW workload decreases from `parents x 9184` to
+`parents x 20`. Node-FGW remains an evaluation-only distance and never enters
+the CLEAR selector. CLEAR native total-action-cost ordering is diagnostic and
+does not replace RF strict-flip greedy MMR selection in the fair table.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-10] Select GlobalGCE fullgraphs by strict-flip MolCLR Node-FGW coverage
 
 ### Background

@@ -500,6 +500,27 @@ def _cf_score(aggregate: FragmentAggregate) -> float:
     return float(aggregate.mean_cf_drop) + 0.2 * float(aggregate.cf_flip_rate)
 
 
+def compute_weighted_mmr_score(
+    *,
+    cf_score: float,
+    coverage_gain: float,
+    cost_penalty: float,
+    max_similarity: float,
+    w_cf: float,
+    w_cov: float,
+    w_cost: float,
+    w_red: float,
+) -> float:
+    """Shared weighted MMR objective used by fragment and fullgraph adapters."""
+
+    return float(
+        float(w_cf) * float(cf_score)
+        + float(w_cov) * float(coverage_gain)
+        - float(w_red) * float(max_similarity)
+        - float(w_cost) * float(cost_penalty)
+    )
+
+
 def _select_fragments(
     aggregates: list[FragmentAggregate],
     *,
@@ -528,11 +549,15 @@ def _select_fragments(
                 )
             size_penalty = _size_penalty(aggregate.mean_atom_ratio)
             cf_score = _cf_score(aggregate)
-            score = (
-                float(config.alpha_cf) * cf_score
-                + float(config.beta_coverage) * coverage_gain
-                - float(config.gamma_redundancy) * max_similarity
-                - float(config.eta_size) * size_penalty
+            score = compute_weighted_mmr_score(
+                cf_score=cf_score,
+                coverage_gain=coverage_gain,
+                cost_penalty=size_penalty,
+                max_similarity=max_similarity,
+                w_cf=float(config.alpha_cf),
+                w_cov=float(config.beta_coverage),
+                w_cost=float(config.eta_size),
+                w_red=float(config.gamma_redundancy),
             )
             choice = {
                 "fragment": aggregate.fragment,

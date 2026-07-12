@@ -27,6 +27,7 @@ OURS_SELECTED_PATH=${OURS_SELECTED_PATH:-${PROJECT_ROOT}/outputs/hpc/selectors/s
 GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH:-${PROJECT_ROOT}/outputs/hpc/baselines/gt_fullgraph/label1_opposite_fullgraph_candidates_max2000_seed0.csv}
 GCF_CANDIDATES_PATH=${GCF_CANDIDATES_PATH:-${GT_FULLGRAPH_CANDIDATES_PATH}}
 HIV_CSV=${HIV_CSV:-${PROJECT_ROOT}/data/raw/AIDS/HIV.csv}
+CLEAR_PARENT_CSV=${CLEAR_PARENT_CSV:-${PROJECT_ROOT}/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv}
 SMILES_COL=${SMILES_COL:-smiles}
 LABEL_COL=${LABEL_COL:-HIV_active}
 TARGET_LABEL=${TARGET_LABEL:-1}
@@ -46,6 +47,22 @@ SKIP_REDUNDANCY=${SKIP_REDUNDANCY:-1}
 RUN_OURS=${RUN_OURS:-1}
 RUN_FULLGRAPH=${RUN_FULLGRAPH:-1}
 RUN_GT_FULLGRAPH=${RUN_GT_FULLGRAPH:-1}
+FULLGRAPH_METHOD=${FULLGRAPH_METHOD:-}
+PRESELECTED_TOPK=${PRESELECTED_TOPK:-0}
+REQUIRE_PRESELECTED_TOPK=${REQUIRE_PRESELECTED_TOPK:-0}
+
+if [ "${FULLGRAPH_METHOD}" = "clear" ]; then
+  RUN_GT_FULLGRAPH=0
+  HIV_CSV=${CLEAR_PARENT_CSV}
+  SMILES_COL=smiles
+  LABEL_COL=label
+  CLEAR_FULLGRAPH_CANDIDATES_PATH=${CLEAR_FULLGRAPH_CANDIDATES_PATH:-${PROJECT_ROOT}/outputs/hpc/baselines/clear/aids/selected/clear_aids_rf_strict_flip_top20_greedy_mmr.csv}
+  FULLGRAPH_METHOD_NAME=${FULLGRAPH_METHOD_NAME:-CLEAR-RF-FullGraph}
+  if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ]; then
+    MAX_PARENTS=0
+    MAX_CANDIDATES=${PRESELECTED_TOPK}
+  fi
+fi
 
 echo "===== MOLCLR NODE FGW CCRCov SMOKE ====="
 echo "hostname: $(hostname)"
@@ -63,6 +80,7 @@ echo "OURS_SELECTED_PATH=${OURS_SELECTED_PATH}"
 echo "GT_FULLGRAPH_CANDIDATES_PATH=${GT_FULLGRAPH_CANDIDATES_PATH}"
 echo "GCF_CANDIDATES_PATH=${GCF_CANDIDATES_PATH}"
 echo "HIV_CSV=${HIV_CSV}"
+echo "CLEAR_PARENT_CSV=${CLEAR_PARENT_CSV}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "FGW_LAMBDA=${FGW_LAMBDA}"
 echo "FGW_THRESHOLDS=${FGW_THRESHOLDS}"
@@ -74,6 +92,10 @@ echo "SKIP_REDUNDANCY=${SKIP_REDUNDANCY}"
 echo "RUN_OURS=${RUN_OURS}"
 echo "RUN_FULLGRAPH=${RUN_FULLGRAPH}"
 echo "RUN_GT_FULLGRAPH=${RUN_GT_FULLGRAPH}"
+echo "FULLGRAPH_METHOD=${FULLGRAPH_METHOD:-unset}"
+echo "PRESELECTED_TOPK=${PRESELECTED_TOPK}"
+echo "REQUIRE_PRESELECTED_TOPK=${REQUIRE_PRESELECTED_TOPK}"
+echo "CLEAR_FULLGRAPH_CANDIDATES_PATH=${CLEAR_FULLGRAPH_CANDIDATES_PATH:-unset}"
 
 python - <<'PY'
 import importlib.util
@@ -98,12 +120,32 @@ if [ ! -f "${TEACHER_PATH}" ]; then
   echo "[ERROR] TEACHER_PATH not found: ${TEACHER_PATH}"
   exit 2
 fi
+if [ ! -f "${HIV_CSV}" ]; then
+  echo "[ERROR] Dataset CSV not found: ${HIV_CSV}"
+  exit 2
+fi
 if [ ! -d "${MOLCLR_ROOT}" ]; then
   echo "[ERROR] MOLCLR_ROOT not found: ${MOLCLR_ROOT}"
   exit 2
 fi
 if [ ! -f "${MOLCLR_CKPT}" ]; then
   echo "[ERROR] MOLCLR_CKPT not found: ${MOLCLR_CKPT}"
+  exit 2
+fi
+if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ] && [ "${PRESELECTED_TOPK}" -le 0 ]; then
+  echo "[ERROR] REQUIRE_PRESELECTED_TOPK=1 requires PRESELECTED_TOPK > 0."
+  exit 2
+fi
+if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ] && [ "${RUN_OURS}" != "0" ]; then
+  echo "[ERROR] Preselected CLEAR fullgraph evaluation requires RUN_OURS=0."
+  exit 2
+fi
+if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ] && [ "${CF_MODE}" != "strict_flip" ]; then
+  echo "[ERROR] Preselected final evaluation requires CF_MODE=strict_flip."
+  exit 2
+fi
+if [ "${FULLGRAPH_METHOD}" = "clear" ] && [ ! -f "${CLEAR_FULLGRAPH_CANDIDATES_PATH}" ]; then
+  echo "[ERROR] Preselected CLEAR candidate CSV not found: ${CLEAR_FULLGRAPH_CANDIDATES_PATH}"
   exit 2
 fi
 
@@ -133,6 +175,8 @@ args=(
   --partial-every 500
   --run-ours "${RUN_OURS}"
   --run-fullgraph "${RUN_FULLGRAPH}"
+  --preselected-topk "${PRESELECTED_TOPK}"
+  --require-preselected-topk "${REQUIRE_PRESELECTED_TOPK}"
 )
 if [ "${RUN_OURS}" = "1" ]; then
   args+=(--ours-selected-path "${OURS_SELECTED_PATH}")
