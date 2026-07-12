@@ -6,6 +6,57 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-12] Treat Ours Top20 as externally preselected in Node-FGW
+
+### Background
+One selected fragment can match a parent molecule at several atom mappings.
+The Node-FGW evaluator expands those mappings into multiple detail rows, but
+that expansion is evaluation work and is not a new candidate-selection step.
+
+### Decision
+When `PRESELECTED_TOPK` is enabled, validate Ours selector directories using
+`selected_subgraphs.csv` or `selected_subgraphs.json`, preserve their rank
+order, and record the external selector identity from `selector_summary.json`
+or directory metadata. Ours evaluation rows use
+`evaluation_row_unit=match_instance`, while candidate provenance remains
+`candidate_set_preselected=true` and `selection_performed_in_eval=false`.
+
+### Consequences
+Run summaries separately report unique parent-candidate pairs, detail rows, and
+valid match instances. Multiple `match_index` values no longer imply that the
+evaluator optimized or reordered the selected Top20. Fullgraph preselection
+validation remains unchanged.
+
+### Status
+Accepted
+
+---
+
+## [2026-07-12] Audit absolute Node-FGW radii across methods
+
+### Background
+Method-local `auto_quantile` sweeps can use the same quantile labels while
+producing different absolute MolCLR-Node-FGW thresholds. Coverage at equal
+quantile labels is therefore not necessarily coverage at an equal distance
+radius.
+
+### Decision
+Add a read-only Node-FGW threshold consistency audit. Each `run_dir + method`
+is treated as a distinct run. The audit compares FGW definition, teacher and
+parent protocol, quantile grid, and absolute thresholds independently. A pair
+is directly comparable only when FGW configuration, evaluation protocol,
+parent count, and absolute thresholds all match.
+
+### Consequences
+Auto-quantile remains suitable for method-local diagnostics. Final fair tables
+must use shared explicit absolute FGW thresholds. Ours is never selected as an
+implicit reference; reference comparison requires an explicit run id.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-12] Add CLEAR Parent-Frequency Top20 as a parallel selector
 
 ### Background

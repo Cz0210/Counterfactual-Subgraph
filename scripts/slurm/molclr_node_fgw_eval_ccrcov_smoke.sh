@@ -136,10 +136,6 @@ if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ] && [ "${PRESELECTED_TOPK}" -le 0 ]; t
   echo "[ERROR] REQUIRE_PRESELECTED_TOPK=1 requires PRESELECTED_TOPK > 0."
   exit 2
 fi
-if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ] && [ "${RUN_OURS}" != "0" ]; then
-  echo "[ERROR] Preselected CLEAR fullgraph evaluation requires RUN_OURS=0."
-  exit 2
-fi
 if [ "${REQUIRE_PRESELECTED_TOPK}" = "1" ] && [ "${CF_MODE}" != "strict_flip" ]; then
   echo "[ERROR] Preselected final evaluation requires CF_MODE=strict_flip."
   exit 2

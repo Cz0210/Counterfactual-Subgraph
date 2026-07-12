@@ -12,6 +12,7 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -81,6 +82,10 @@ SUMMARY_FIELDS = [
     "selection_performed_in_eval",
     "candidate_set_preselected",
     "selection_method",
+    "evaluation_row_unit",
+    "num_unique_parent_candidate_pairs",
+    "num_detail_rows",
+    "num_valid_match_instances",
 ]
 
 
@@ -182,6 +187,7 @@ def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: in
     if len(selection_modes) > 1:
         raise ValueError(f"Preselected candidate CSV contains mixed selection_mode values: {path}")
     return {
+        "input_kind": "fullgraph",
         "path": str(path),
         "expected_top_k": int(expected_top_k),
         "num_rows": len(canonical),
@@ -190,6 +196,160 @@ def validate_preselected_candidate_csv(path_like: str | Path, expected_top_k: in
         "rank_order_validated": bool(ranks),
         "order_preserved": True,
         "selection_method": next(iter(selection_modes), "preselected_external"),
+    }
+
+
+def _read_selected_subgraph_rows(path: Path) -> list[dict[str, Any]]:
+    if path.suffix.lower() == ".csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return [dict(row) for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict):
+        for key in ("selected_subgraphs", "selected_rows", "rows"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [dict(row) for row in rows if isinstance(row, dict)]
+    raise ValueError(f"Unsupported selected-subgraph JSON schema: {path}")
+
+
+def _selected_fragment_from_row(row: dict[str, Any]) -> str:
+    for field in OURS_FRAGMENT_FIELDS:
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _fragment_identity(smiles: str) -> str:
+    return canonicalize_smiles(smiles) or str(smiles or "").strip()
+
+
+def _infer_ours_selection_method(directory: Path, summary: dict[str, Any]) -> str:
+    for container in (summary, summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}):
+        for key in ("selection_method", "selector_name", "selector_version"):
+            value = str(container.get(key) or "").strip()
+            if value:
+                return value
+    match = re.search(r"mmr_cov([0-9]+(?:p[0-9]+)?)", directory.name.lower())
+    if match:
+        return f"greedy_mmr_cov{match.group(1).replace('p', '.')}"
+    metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
+    beta_coverage = _as_float(metadata.get("beta_coverage"))
+    if beta_coverage is not None:
+        rendered = str(int(beta_coverage)) if float(beta_coverage).is_integer() else str(beta_coverage)
+        return f"greedy_mmr_cov{rendered}"
+    return "ours_external_selector"
+
+
+def validate_preselected_ours_directory(path_like: str | Path, expected_top_k: int) -> dict[str, Any]:
+    """Validate an externally selected Ours fragment directory without reordering it."""
+
+    directory = Path(path_like).expanduser().resolve()
+    if not directory.is_dir():
+        raise ValueError(f"Ours preselected input must be a directory: {directory}")
+    selected_path = next(
+        (candidate for candidate in (directory / "selected_subgraphs.csv", directory / "selected_subgraphs.json") if candidate.is_file()),
+        None,
+    )
+    if selected_path is None:
+        raise ValueError(
+            f"Ours preselected directory is missing selected_subgraphs.csv or selected_subgraphs.json: {directory}"
+        )
+    rows = _read_selected_subgraph_rows(selected_path)
+    fragments: list[str] = []
+    fragment_keys: list[str] = []
+    candidate_ids: list[str] = []
+    ranks: list[int] = []
+    has_rank = bool(rows) and any(str(row.get("rank") or "").strip() for row in rows)
+    for row_index, row in enumerate(rows):
+        fragment = _selected_fragment_from_row(row)
+        if not fragment:
+            raise ValueError(f"Ours selected row {row_index} has no recognized fragment field: {selected_path}")
+        fragments.append(fragment)
+        fragment_keys.append(_fragment_identity(fragment))
+        rank_value = _parse_int_label(row.get("rank")) if has_rank else None
+        if has_rank:
+            if rank_value is None:
+                raise ValueError(f"Ours selected row {row_index} has an invalid or missing rank: {selected_path}")
+            ranks.append(int(rank_value))
+        candidate_id = str(
+            row.get("candidate_id")
+            or row.get("id")
+            or row.get("rank")
+            or row.get("selected_step")
+            or row_index
+        ).strip()
+        candidate_ids.append(candidate_id)
+    if len(rows) != int(expected_top_k):
+        raise ValueError(
+            f"Ours selected directory must contain exactly {expected_top_k} rows; found {len(rows)}: {selected_path}"
+        )
+    if len(set(fragment_keys)) != int(expected_top_k):
+        raise ValueError(
+            f"Ours selected directory must contain {expected_top_k} unique fragments; "
+            f"found {len(set(fragment_keys))}: {selected_path}"
+        )
+    if len(set(candidate_ids)) != int(expected_top_k):
+        raise ValueError(
+            f"Ours selected directory contains duplicate candidate identifiers: {selected_path}"
+        )
+    if ranks and ranks != list(range(1, int(expected_top_k) + 1)):
+        raise ValueError(f"Ours selected ranks must be exactly 1..{expected_top_k} in file order: {selected_path}")
+    selector_summary_path = directory / "selector_summary.json"
+    selector_summary: dict[str, Any] = {}
+    summary_warning: str | None = None
+    if selector_summary_path.is_file():
+        try:
+            payload = json.loads(selector_summary_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                selector_summary = payload
+            else:
+                summary_warning = "selector_summary_root_not_object"
+        except Exception as exc:
+            summary_warning = f"selector_summary_read_failed:{exc}"
+    selection_method = _infer_ours_selection_method(directory, selector_summary)
+    return {
+        "input_kind": "ours_selected_subgraphs",
+        "path": str(directory),
+        "selected_file": str(selected_path),
+        "selector_summary_path": str(selector_summary_path) if selector_summary_path.is_file() else None,
+        "selector_summary_warning": summary_warning,
+        "expected_top_k": int(expected_top_k),
+        "num_rows": len(rows),
+        "num_unique_candidate_ids": len(set(candidate_ids)),
+        "num_unique_fragments": len(set(fragment_keys)),
+        "rank_order_validated": bool(ranks),
+        "order_preserved": True,
+        "selection_method": selection_method,
+        "ordered_fragments": fragments,
+        "candidate_selection_stage": "external_before_evaluation",
+        "subgraph_matching_stage": "inside_evaluation_not_candidate_selection",
+    }
+
+
+def build_evaluation_row_audit(
+    details: Sequence[dict[str, Any]],
+    *,
+    evaluation_row_unit: str,
+) -> dict[str, Any]:
+    unique_pairs = {
+        (str(row.get("parent_id") or ""), str(row.get("candidate_id") or ""))
+        for row in details
+    }
+    valid_match_instances: int | None = None
+    if evaluation_row_unit == "match_instance":
+        valid_match_instances = sum(
+            1
+            for row in details
+            if _as_bool(row.get("match")) and _as_bool(row.get("delete_valid"))
+        )
+    return {
+        "evaluation_row_unit": evaluation_row_unit,
+        "num_unique_parent_candidate_pairs": len(unique_pairs),
+        "num_detail_rows": len(details),
+        "num_valid_match_instances": valid_match_instances,
     }
 
 
@@ -307,6 +467,10 @@ def summarize_method(
     selection_performed_in_eval: bool,
     candidate_set_preselected: bool,
     selection_method: str,
+    evaluation_row_unit: str,
+    num_unique_parent_candidate_pairs: int,
+    num_detail_rows: int,
+    num_valid_match_instances: int | None,
 ) -> list[dict[str, Any]]:
     rows_by_parent: dict[str, list[dict[str, Any]]] = {}
     labels_by_parent: dict[str, int] = {}
@@ -369,6 +533,10 @@ def summarize_method(
                 "selection_performed_in_eval": bool(selection_performed_in_eval),
                 "candidate_set_preselected": bool(candidate_set_preselected),
                 "selection_method": selection_method,
+                "evaluation_row_unit": evaluation_row_unit,
+                "num_unique_parent_candidate_pairs": int(num_unique_parent_candidate_pairs),
+                "num_detail_rows": int(num_detail_rows),
+                "num_valid_match_instances": num_valid_match_instances,
             }
         )
     return output
@@ -457,14 +625,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--preselected-topk",
         type=int,
         default=int(_env("PRESELECTED_TOPK", "0") or 0),
-        help="Expected size of a preselected fullgraph set; 0 disables the check.",
+        help="Expected size of each preselected fullgraph or Ours selected-subgraph set; 0 disables the check.",
     )
     parser.add_argument(
         "--require-preselected-topk",
         type=int,
         choices=(0, 1),
         default=1 if _env_bool("REQUIRE_PRESELECTED_TOPK", False) else 0,
-        help="Fail unless fullgraph inputs are exact preselected sets of --preselected-topk candidates.",
+        help="Fail unless active fullgraph/Ours inputs are exact preselected sets of --preselected-topk candidates.",
     )
     return parser
 
@@ -481,33 +649,43 @@ def main() -> int:
     combined_dir = ensure_directory(output / "combined")
     fullgraph_path = args.gt_fullgraph_candidates_path or args.gcf_candidates_path
     fullgraph_method = infer_fullgraph_method(fullgraph_path, args.fullgraph_method_name)
-    candidate_set_preselected = int(args.preselected_topk) > 0
-    if bool(args.require_preselected_topk) and not candidate_set_preselected:
+    preselected_requested = int(args.preselected_topk) > 0
+    if bool(args.require_preselected_topk) and not preselected_requested:
         raise SystemExit("[ERROR] REQUIRE_PRESELECTED_TOPK=1 requires PRESELECTED_TOPK > 0.")
-    if bool(args.require_preselected_topk) and bool(args.run_ours):
-        raise SystemExit("[ERROR] Preselected fullgraph-only evaluation requires RUN_OURS=0.")
     if bool(args.require_preselected_topk) and args.cf_mode != "strict_flip":
         raise SystemExit("[ERROR] Preselected final evaluation requires CF_MODE=strict_flip.")
     preselected_audits: list[dict[str, Any]] = []
-    if candidate_set_preselected:
-        active_fullgraph_paths: list[str | Path] = []
-        if bool(args.run_fullgraph) and fullgraph_path:
-            active_fullgraph_paths.append(fullgraph_path)
-        if bool(args.run_fullgraph) and args.clear_fullgraph_candidates_path:
-            active_fullgraph_paths.append(args.clear_fullgraph_candidates_path)
-        if bool(args.require_preselected_topk) and not active_fullgraph_paths:
-            raise SystemExit("[ERROR] Preselected mode requires an active fullgraph candidate CSV.")
-        if bool(args.require_preselected_topk) and len(active_fullgraph_paths) != 1:
-            raise SystemExit(
-                "[ERROR] Preselected final evaluation requires exactly one active fullgraph candidate CSV."
-            )
+    preselected_audit_by_input: dict[str, dict[str, Any]] = {}
+    if preselected_requested:
+        if bool(args.run_ours) and not args.ours_selected_path and bool(args.require_preselected_topk):
+            raise SystemExit("[ERROR] Preselected Ours evaluation requires OURS_SELECTED_PATH.")
         try:
-            preselected_audits = [
-                validate_preselected_candidate_csv(path, int(args.preselected_topk))
-                for path in active_fullgraph_paths
-            ]
+            if bool(args.run_ours) and args.ours_selected_path:
+                ours_audit = validate_preselected_ours_directory(
+                    args.ours_selected_path,
+                    int(args.preselected_topk),
+                )
+                preselected_audits.append(ours_audit)
+                preselected_audit_by_input["ours"] = ours_audit
+            if bool(args.run_fullgraph) and fullgraph_path:
+                fullgraph_audit = validate_preselected_candidate_csv(
+                    fullgraph_path,
+                    int(args.preselected_topk),
+                )
+                preselected_audits.append(fullgraph_audit)
+                preselected_audit_by_input["fullgraph"] = fullgraph_audit
+            if bool(args.run_fullgraph) and args.clear_fullgraph_candidates_path:
+                clear_audit = validate_preselected_candidate_csv(
+                    args.clear_fullgraph_candidates_path,
+                    int(args.preselected_topk),
+                )
+                preselected_audits.append(clear_audit)
+                preselected_audit_by_input["clear"] = clear_audit
         except ValueError as exc:
             raise SystemExit(f"[ERROR] preselected candidate validation failed: {exc}") from exc
+        if bool(args.require_preselected_topk) and not preselected_audits:
+            raise SystemExit("[ERROR] Preselected mode requires at least one active candidate input.")
+    candidate_set_preselected = bool(preselected_audits)
     selection_methods = {
         str(audit.get("selection_method") or "preselected_external")
         for audit in preselected_audits
@@ -558,7 +736,7 @@ def main() -> int:
     )
     teacher = TeacherSemanticScorer(args.teacher_path)
     all_details: list[dict[str, Any]] = []
-    detail_groups: list[tuple[str, list[dict[str, Any]], int]] = []
+    detail_groups: list[dict[str, Any]] = []
 
     if bool(args.run_ours) and args.ours_selected_path:
         _ours_path, ours_candidates = _load_candidate_records(
@@ -566,8 +744,23 @@ def main() -> int:
             fields=OURS_FRAGMENT_FIELDS,
             directory_candidates=OURS_DIRECTORY_CANDIDATES,
         )
-        if args.max_candidates is not None and int(args.max_candidates) > 0:
+        ours_count_before_limit = len(ours_candidates)
+        ours_preselected_audit = preselected_audit_by_input.get("ours")
+        if ours_preselected_audit is None and args.max_candidates is not None and int(args.max_candidates) > 0:
             ours_candidates = ours_candidates[: int(args.max_candidates)]
+        if ours_preselected_audit is not None:
+            if len(ours_candidates) != int(args.preselected_topk):
+                raise SystemExit(
+                    f"[ERROR] Loaded Ours candidate count changed after directory validation: "
+                    f"expected={args.preselected_topk} loaded={len(ours_candidates)}"
+                )
+            expected_fragments = [
+                _fragment_identity(value)
+                for value in ours_preselected_audit.get("ordered_fragments", [])
+            ]
+            loaded_fragments = [_fragment_identity(candidate.smiles) for candidate in ours_candidates]
+            if loaded_fragments != expected_fragments:
+                raise SystemExit("[ERROR] Ours candidate loader did not preserve selected-subgraph order.")
         ours_details = _evaluate_ours(
             parents=parents,
             candidates=ours_candidates,
@@ -578,7 +771,27 @@ def main() -> int:
             partial_path=details_dir / "ours.partial.csv",
             partial_every=int(args.partial_every),
         )
-        detail_groups.append(("ours_selected_subgraphs", ours_details, len(ours_candidates)))
+        ours_row_audit = build_evaluation_row_audit(
+            ours_details,
+            evaluation_row_unit="match_instance",
+        )
+        detail_groups.append(
+            {
+                "method": "ours_selected_subgraphs",
+                "details": ours_details,
+                "num_candidates": len(ours_candidates),
+                "candidate_set_preselected": ours_preselected_audit is not None,
+                "selection_performed_in_eval": (
+                    False if ours_preselected_audit is not None else len(ours_candidates) < ours_count_before_limit
+                ),
+                "selection_method": (
+                    str(ours_preselected_audit.get("selection_method"))
+                    if ours_preselected_audit is not None
+                    else "not_preselected"
+                ),
+                **ours_row_audit,
+            }
+        )
         all_details.extend(ours_details)
 
     if bool(args.run_fullgraph) and fullgraph_path:
@@ -587,9 +800,11 @@ def main() -> int:
             fields=GT_FULLGRAPH_FIELDS,
             directory_candidates=GT_DIRECTORY_CANDIDATES,
         )
-        if not candidate_set_preselected and args.max_candidates is not None and int(args.max_candidates) > 0:
+        full_count_before_limit = len(full_candidates)
+        full_preselected_audit = preselected_audit_by_input.get("fullgraph")
+        if full_preselected_audit is None and args.max_candidates is not None and int(args.max_candidates) > 0:
             full_candidates = full_candidates[: int(args.max_candidates)]
-        if candidate_set_preselected and len(full_candidates) != int(args.preselected_topk):
+        if full_preselected_audit is not None and len(full_candidates) != int(args.preselected_topk):
             raise SystemExit(
                 f"[ERROR] Loaded fullgraph candidate count changed after CSV validation: "
                 f"expected={args.preselected_topk} loaded={len(full_candidates)}"
@@ -605,7 +820,27 @@ def main() -> int:
             partial_path=details_dir / "fullgraph.partial.csv",
             partial_every=int(args.partial_every),
         )
-        detail_groups.append((fullgraph_method, full_details, len(full_candidates)))
+        full_row_audit = build_evaluation_row_audit(
+            full_details,
+            evaluation_row_unit="parent_candidate_pair",
+        )
+        detail_groups.append(
+            {
+                "method": fullgraph_method,
+                "details": full_details,
+                "num_candidates": len(full_candidates),
+                "candidate_set_preselected": full_preselected_audit is not None,
+                "selection_performed_in_eval": (
+                    False if full_preselected_audit is not None else len(full_candidates) < full_count_before_limit
+                ),
+                "selection_method": (
+                    str(full_preselected_audit.get("selection_method"))
+                    if full_preselected_audit is not None
+                    else "not_preselected"
+                ),
+                **full_row_audit,
+            }
+        )
         all_details.extend(full_details)
 
     if bool(args.run_fullgraph) and args.clear_fullgraph_candidates_path:
@@ -614,9 +849,11 @@ def main() -> int:
             fields=GT_FULLGRAPH_FIELDS,
             directory_candidates=GT_DIRECTORY_CANDIDATES,
         )
-        if not candidate_set_preselected and args.max_candidates is not None and int(args.max_candidates) > 0:
+        clear_count_before_limit = len(clear_candidates)
+        clear_preselected_audit = preselected_audit_by_input.get("clear")
+        if clear_preselected_audit is None and args.max_candidates is not None and int(args.max_candidates) > 0:
             clear_candidates = clear_candidates[: int(args.max_candidates)]
-        if candidate_set_preselected and len(clear_candidates) != int(args.preselected_topk):
+        if clear_preselected_audit is not None and len(clear_candidates) != int(args.preselected_topk):
             raise SystemExit(
                 f"[ERROR] Loaded CLEAR candidate count changed after CSV validation: "
                 f"expected={args.preselected_topk} loaded={len(clear_candidates)}"
@@ -632,7 +869,27 @@ def main() -> int:
             partial_path=details_dir / "clear_rf_fullgraph.partial.csv",
             partial_every=int(args.partial_every),
         )
-        detail_groups.append(("CLEAR-RF-FullGraph", clear_details, len(clear_candidates)))
+        clear_row_audit = build_evaluation_row_audit(
+            clear_details,
+            evaluation_row_unit="parent_candidate_pair",
+        )
+        detail_groups.append(
+            {
+                "method": "CLEAR-RF-FullGraph",
+                "details": clear_details,
+                "num_candidates": len(clear_candidates),
+                "candidate_set_preselected": clear_preselected_audit is not None,
+                "selection_performed_in_eval": (
+                    False if clear_preselected_audit is not None else len(clear_candidates) < clear_count_before_limit
+                ),
+                "selection_method": (
+                    str(clear_preselected_audit.get("selection_method"))
+                    if clear_preselected_audit is not None
+                    else "not_preselected"
+                ),
+                **clear_row_audit,
+            }
+        )
         all_details.extend(clear_details)
 
     if not detail_groups:
@@ -656,7 +913,10 @@ def main() -> int:
     cache_hit_rate = float(pair_stats.get("pair_distance_cache_hit_rate") or 0.0)
     node_hit_rate = float(provider.stats_dict().get("node_embedding_cache_hit_rate") or 0.0)
     summaries: list[dict[str, Any]] = []
-    for method, details, num_candidates in detail_groups:
+    for group in detail_groups:
+        method = str(group["method"])
+        details = list(group["details"])
+        num_candidates = int(group["num_candidates"])
         summaries.extend(
             summarize_method(
                 method=method,
@@ -673,15 +933,35 @@ def main() -> int:
                 cache_hit_rate=cache_hit_rate,
                 node_embedding_cache_hit_rate=node_hit_rate,
                 skip_redundancy=bool(args.skip_redundancy),
-                selection_performed_in_eval=False if candidate_set_preselected else bool(args.max_candidates),
-                candidate_set_preselected=candidate_set_preselected,
-                selection_method=selection_method,
+                selection_performed_in_eval=bool(group["selection_performed_in_eval"]),
+                candidate_set_preselected=bool(group["candidate_set_preselected"]),
+                selection_method=str(group["selection_method"]),
+                evaluation_row_unit=str(group["evaluation_row_unit"]),
+                num_unique_parent_candidate_pairs=int(group["num_unique_parent_candidate_pairs"]),
+                num_detail_rows=int(group["num_detail_rows"]),
+                num_valid_match_instances=group["num_valid_match_instances"],
             )
         )
     _write_csv(details_dir / "pair_details.csv", all_details, _detail_fields(all_details))
     _write_csv(combined_dir / "combined_threshold_summary.csv", summaries, SUMMARY_FIELDS)
     _write_json(combined_dir / "combined_threshold_summary.json", {"threshold_summary": summaries})
 
+    all_groups_preselected = bool(detail_groups) and all(
+        bool(group["candidate_set_preselected"]) for group in detail_groups
+    )
+    any_selection_in_eval = any(bool(group["selection_performed_in_eval"]) for group in detail_groups)
+    group_selection_methods = {str(group["selection_method"]) for group in detail_groups}
+    run_selection_method = (
+        next(iter(group_selection_methods))
+        if len(group_selection_methods) == 1
+        else "mixed"
+    )
+    row_units = {str(group["evaluation_row_unit"]) for group in detail_groups}
+    valid_match_counts = [
+        int(group["num_valid_match_instances"])
+        for group in detail_groups
+        if group["num_valid_match_instances"] is not None
+    ]
     run_config = {
         "distance_line": DISTANCE_LINE,
         "distance_type": DISTANCE_TYPE,
@@ -695,12 +975,30 @@ def main() -> int:
         "skip_redundancy": bool(args.skip_redundancy),
         "run_ours": bool(args.run_ours),
         "run_fullgraph": bool(args.run_fullgraph),
-        "selection_performed_in_eval": False if candidate_set_preselected else bool(args.max_candidates),
-        "candidate_set_preselected": candidate_set_preselected,
-        "selection_method": selection_method,
+        "selection_performed_in_eval": any_selection_in_eval,
+        "candidate_set_preselected": all_groups_preselected,
+        "selection_method": run_selection_method,
         "preselected_topk": int(args.preselected_topk),
         "require_preselected_topk": bool(args.require_preselected_topk),
         "preselected_candidate_audits": preselected_audits,
+        "evaluation_row_unit": next(iter(row_units)) if len(row_units) == 1 else "mixed",
+        "num_unique_parent_candidate_pairs": sum(
+            int(group["num_unique_parent_candidate_pairs"]) for group in detail_groups
+        ),
+        "num_detail_rows": sum(int(group["num_detail_rows"]) for group in detail_groups),
+        "num_valid_match_instances": sum(valid_match_counts) if valid_match_counts else None,
+        "method_evaluation_audits": {
+            str(group["method"]): {
+                "candidate_set_preselected": bool(group["candidate_set_preselected"]),
+                "selection_performed_in_eval": bool(group["selection_performed_in_eval"]),
+                "selection_method": str(group["selection_method"]),
+                "evaluation_row_unit": str(group["evaluation_row_unit"]),
+                "num_unique_parent_candidate_pairs": int(group["num_unique_parent_candidate_pairs"]),
+                "num_detail_rows": int(group["num_detail_rows"]),
+                "num_valid_match_instances": group["num_valid_match_instances"],
+            }
+            for group in detail_groups
+        },
         "max_parents": args.max_parents,
         "max_candidates": args.max_candidates,
         "cf_mode": args.cf_mode,

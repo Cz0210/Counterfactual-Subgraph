@@ -121,6 +121,44 @@ quantile, then computes the quantile from valid GlobalGCE distances if needed.
 for the Node-FGW evaluator; it labels the method as `GlobalGCE` and
 `fullgraph_method=globalgce_selected20`.
 
+## Preselected Ours Subgraphs
+
+`REQUIRE_PRESELECTED_TOPK=1` supports both fullgraph CSV inputs and an Ours
+selector directory containing `selected_subgraphs.csv` or
+`selected_subgraphs.json`. For Ours, the evaluator validates the exact unique
+fragment count and rank order, reads `selector_summary.json` when available,
+and preserves selector output order.
+
+Candidate selection and subgraph matching are separate stages:
+
+```text
+external selector -> fixed Top20 fragments
+Node-FGW evaluation -> parent matching -> residual construction -> match-instance distances
+```
+
+Multiple valid `match_index` rows for one parent-fragment pair do not mean that
+the evaluator selected candidates. Ours summaries therefore record:
+
+```text
+candidate_set_preselected=true
+selection_performed_in_eval=false
+evaluation_row_unit=match_instance
+```
+
+They also distinguish `num_unique_parent_candidate_pairs`, `num_detail_rows`,
+and `num_valid_match_instances`, while retaining `total_pairs` for backwards
+compatibility.
+
+For an Ours-only full calibration, set:
+
+```bash
+RUN_OURS=1 RUN_FULLGRAPH=0 \
+OURS_SELECTED_PATH=outputs/hpc/selectors/stable300_label1_merged_base_temp07_top20_mmr_cov20 \
+PRESELECTED_TOPK=20 REQUIRE_PRESELECTED_TOPK=1 \
+MAX_PARENTS=0 MAX_CANDIDATES=20 \
+sbatch scripts/slurm/molclr_node_fgw_eval_ccrcov_smoke.sh
+```
+
 ## Outputs
 
 Default smoke output root:
