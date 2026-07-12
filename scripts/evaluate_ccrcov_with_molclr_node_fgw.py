@@ -39,6 +39,12 @@ from src.eval.close_counterfactual_coverage import (  # noqa: E402
     canonicalize_smiles,
 )
 from src.eval.greed_distance.pair_generation import GT_FULLGRAPH_FIELDS, OURS_FRAGMENT_FIELDS  # noqa: E402
+from src.eval.flip_semantics import (  # noqa: E402
+    OLD_WEAK_FLIP_DEFINITION,
+    TEACHER_STRICT_FLIP_DEFINITION,
+    old_weak_flip,
+    teacher_strict_flip,
+)
 from src.eval.node_fgw_distance import (  # noqa: E402
     DEFAULT_NODE_EMB_CACHE_DIR,
     MolCLRNodeFGWDistanceProvider,
@@ -64,13 +70,21 @@ SUMMARY_FIELDS = [
     "threshold",
     "threshold_source",
     "quantile",
+    "cf_mode",
+    "main_ccrcov_uses",
+    "teacher_strict_flip_definition",
+    "old_weak_flip_definition",
+    "old_weak_ccrcov_status",
     "num_parents",
+    "num_teacher_target_parents",
     "num_candidates",
     "num_valid_pairs",
     "num_close_only_covered",
     "close_only_coverage",
     "num_close_cf_covered",
     "close_cf_coverage",
+    "old_weak_num_close_cf_covered",
+    "old_weak_close_cf_coverage",
     "avg_best_distance",
     "median_best_distance",
     "avg_cf_drop_among_covered",
@@ -380,8 +394,7 @@ def _rate(numerator: int, denominator: int) -> float:
 
 
 def _cf_condition(row: dict[str, Any], *, label: int, cf_mode: str, min_cf_drop: float) -> bool:
-    pred_after = _parse_int_label(row.get("pred_after"))
-    strict_flip = pred_after is not None and int(pred_after) != int(label)
+    strict_flip = teacher_strict_flip(row.get("pred_before"), row.get("pred_after"), label)
     cf_drop = _as_float(row.get("cf_drop"))
     drop_ok = cf_drop is not None and float(cf_drop) >= float(min_cf_drop)
     if cf_mode == "strict_flip":
@@ -393,8 +406,8 @@ def _cf_condition(row: dict[str, Any], *, label: int, cf_mode: str, min_cf_drop:
     raise ValueError(f"Unsupported cf_mode={cf_mode!r}")
 
 
-def _row_flip(row: dict[str, Any]) -> float:
-    return 1.0 if _as_bool(row.get("cf_flip")) else 0.0
+def _row_flip(row: dict[str, Any], *, label: int) -> float:
+    return 1.0 if teacher_strict_flip(row.get("pred_before"), row.get("pred_after"), label) else 0.0
 
 
 def _best_row(rows: list[dict[str, Any]], *, threshold: float, label: int, cf_mode: str, min_cf_drop: float) -> tuple[dict[str, Any] | None, bool, bool]:
@@ -480,6 +493,15 @@ def summarize_method(
         label = _parse_int_label(row.get("label"))
         if label is not None:
             labels_by_parent[parent_id] = label
+    teacher_target_parents = {
+        parent_id
+        for parent_id, rows in rows_by_parent.items()
+        if any(
+            _parse_int_label(row.get("pred_before")) == labels_by_parent.get(parent_id)
+            for row in rows
+            if labels_by_parent.get(parent_id) is not None
+        )
+    }
     num_valid_pairs = sum(1 for row in details if _finite_distance(row) is not None)
     output: list[dict[str, Any]] = []
     for threshold_row in threshold_rows:
@@ -488,15 +510,24 @@ def summarize_method(
             continue
         close_only: set[str] = set()
         close_cf: set[str] = set()
+        old_weak_close_cf: set[str] = set()
         best_rows: list[dict[str, Any]] = []
         for parent_id, rows in rows_by_parent.items():
+            label = labels_by_parent.get(parent_id, 0)
             best, is_close, is_cf = _best_row(
                 rows,
                 threshold=float(threshold),
-                label=labels_by_parent.get(parent_id, 0),
+                label=label,
                 cf_mode=cf_mode,
                 min_cf_drop=float(min_cf_drop),
             )
+            if any(
+                (distance := _finite_distance(row)) is not None
+                and distance <= float(threshold)
+                and old_weak_flip(row.get("pred_after"), label)
+                for row in rows
+            ):
+                old_weak_close_cf.add(parent_id)
             if is_close:
                 close_only.add(parent_id)
             if is_cf:
@@ -515,17 +546,28 @@ def summarize_method(
                 "threshold": float(threshold),
                 "threshold_source": threshold_row.get("threshold_source"),
                 "quantile": threshold_row.get("quantile"),
+                "cf_mode": cf_mode,
+                "main_ccrcov_uses": "teacher_strict_flip" if cf_mode == "strict_flip" else cf_mode,
+                "teacher_strict_flip_definition": TEACHER_STRICT_FLIP_DEFINITION,
+                "old_weak_flip_definition": OLD_WEAK_FLIP_DEFINITION,
+                "old_weak_ccrcov_status": "audit_only",
                 "num_parents": int(total_parents),
+                "num_teacher_target_parents": len(teacher_target_parents),
                 "num_candidates": int(total_candidates),
                 "num_valid_pairs": int(num_valid_pairs),
                 "num_close_only_covered": len(close_only),
                 "close_only_coverage": _rate(len(close_only), total_parents),
                 "num_close_cf_covered": len(close_cf),
                 "close_cf_coverage": _rate(len(close_cf), total_parents),
+                "old_weak_num_close_cf_covered": len(old_weak_close_cf),
+                "old_weak_close_cf_coverage": _rate(len(old_weak_close_cf), total_parents),
                 "avg_best_distance": _mean(_finite_distance(row) for row in best_rows),
                 "median_best_distance": _median(_finite_distance(row) for row in best_rows),
                 "avg_cf_drop_among_covered": _mean(_as_float(row.get("cf_drop")) for row in best_rows),
-                "flip_rate_among_covered": _mean(_row_flip(row) for row in best_rows),
+                "flip_rate_among_covered": _mean(
+                    _row_flip(row, label=_parse_int_label(row.get("label")) or 0)
+                    for row in best_rows
+                ),
                 "total_pairs": len(details),
                 "cache_hit_rate": float(cache_hit_rate),
                 "node_embedding_cache_hit_rate": float(node_embedding_cache_hit_rate),
@@ -1002,6 +1044,10 @@ def main() -> int:
         "max_parents": args.max_parents,
         "max_candidates": args.max_candidates,
         "cf_mode": args.cf_mode,
+        "main_ccrcov_uses": "teacher_strict_flip" if args.cf_mode == "strict_flip" else args.cf_mode,
+        "teacher_strict_flip_definition": TEACHER_STRICT_FLIP_DEFINITION,
+        "old_weak_flip_definition": OLD_WEAK_FLIP_DEFINITION,
+        "old_weak_ccrcov_status": "audit_only",
         "dataset_csv": args.dataset_csv,
         "ours_selected_path": args.ours_selected_path,
         "fullgraph_candidates_path": fullgraph_path,

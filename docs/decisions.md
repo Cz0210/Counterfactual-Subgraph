@@ -32,6 +32,36 @@ Accepted
 
 ---
 
+## [2026-07-12] Require a teacher transition for strict-flip CCRCOV
+
+### Background
+The MolCLR-Node-FGW evaluator treated every candidate whose post-intervention
+prediction differed from the dataset target label as a flip. This counted
+parents that the teacher already classified as non-target before intervention,
+inflating CCRCOV without an actual prediction transition.
+
+### Decision
+Define the main strict-flip condition consistently across shared CCRCov pair
+generation, MolCLR-Node-FGW aggregation, and baseline comparison as:
+
+`pred_before == target_label and pred_after != target_label`.
+
+The earlier condition, `pred_after != target_label`, is retained only as an
+explicit `old_weak_flip` audit field. Main CCRCOV continues to use all evaluated
+parents as its denominator, while `num_teacher_target_parents` is reported
+separately.
+
+### Consequences
+- Parents already predicted as non-target cannot create strict-flip coverage.
+- Pair details and summaries expose both definitions without mixing them.
+- Existing FGW distances, caches, thresholds, and candidate selection remain
+  unchanged; affected evaluations must be rerun to refresh their metrics.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-12] Audit absolute Node-FGW radii across methods
 
 ### Background

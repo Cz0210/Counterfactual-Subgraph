@@ -25,6 +25,7 @@ from src.eval.close_counterfactual_coverage import (
 )
 from src.eval.greed_distance.infer import GreedDistancePredictor
 from src.eval.greed_distance.pair_generation import GT_FULLGRAPH_FIELDS, OURS_FRAGMENT_FIELDS
+from src.eval.flip_semantics import teacher_flip_audit_fields, teacher_strict_flip
 from src.eval.molclr_distance import MolCLREmbeddingDistanceLookup
 from src.rewards.teacher_semantic import TeacherSemanticScorer
 from src.utils.io import ensure_directory
@@ -165,8 +166,7 @@ def _threshold_similarity_equivalent(distance_type: str, threshold: float) -> fl
 
 
 def _strict_flip(row: dict[str, Any], *, label: int) -> bool:
-    pred_after = _parse_int_label(row.get("pred_after"))
-    return bool(pred_after is not None and pred_after != int(label))
+    return teacher_strict_flip(row.get("pred_before"), row.get("pred_after"), label)
 
 
 def _row_flip_value(row: dict[str, Any]) -> float:
@@ -588,8 +588,14 @@ def _evaluate_ours(
                             "cf_drop": (before.get("p_label") - after.get("p_label"))
                             if before.get("p_label") is not None and after.get("p_label") is not None
                             else None,
-                            "cf_flip": after.get("pred_label") is not None and int(after.get("pred_label")) != int(parent.label),
                         }
+                    )
+                    row.update(
+                        teacher_flip_audit_fields(
+                            before.get("pred_label"),
+                            after.get("pred_label"),
+                            parent.label,
+                        )
                     )
                     _distance_row_update(row, provider=provider, parent_smiles=parent.smiles, action_smiles=residual, distance_type=distance_type)
                 details.append(row)
@@ -639,9 +645,15 @@ def _evaluate_gt_fullgraph(
                     "cf_drop": (before.get("p_label") - after.get("p_label"))
                     if before.get("p_label") is not None and after.get("p_label") is not None
                     else None,
-                    "cf_flip": after.get("pred_label") is not None and int(after.get("pred_label")) != int(parent.label),
                     "error": after.get("error"),
                 }
+            )
+            row.update(
+                teacher_flip_audit_fields(
+                    before.get("pred_label"),
+                    after.get("pred_label"),
+                    parent.label,
+                )
             )
             _distance_row_update(row, provider=provider, parent_smiles=parent.smiles, action_smiles=candidate.smiles, distance_type=distance_type)
             details.append(row)

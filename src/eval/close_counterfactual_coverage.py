@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from src.eval.flip_semantics import teacher_flip_audit_fields, teacher_strict_flip
 from src.rewards.teacher_semantic import TeacherSemanticScorer
 from src.utils.io import ensure_directory
 
@@ -74,6 +75,9 @@ DETAIL_FIELDS = [
     "pred_after",
     "cf_drop",
     "cf_flip",
+    "teacher_strict_flip",
+    "old_weak_flip",
+    "flip_definition",
     "distance",
     "cosine_similarity",
     "embedding_ok",
@@ -899,11 +903,11 @@ def _cf_condition(
 ) -> bool:
     pred_after = _parse_int_label(row.get("pred_after"))
     cf_drop = _as_float(row.get("cf_drop"))
-    cf_flip = _as_bool(row.get("cf_flip"))
+    cf_flip = teacher_strict_flip(row.get("pred_before"), pred_after, label)
     if desired_label is not None:
         return pred_after == int(desired_label)
     if require_flip_only:
-        return cf_flip or (pred_after is not None and pred_after != int(label))
+        return cf_flip
     return bool(cf_flip or (cf_drop is not None and cf_drop >= float(min_cf_drop)))
 
 
@@ -1212,6 +1216,9 @@ def _row_base(
         "pred_after": None,
         "cf_drop": None,
         "cf_flip": False,
+        "teacher_strict_flip": False,
+        "old_weak_flip": False,
+        "flip_definition": "pred_before == target_label and pred_after != target_label",
         "distance": None,
         "cosine_similarity": None,
         "embedding_ok": None,
@@ -1343,9 +1350,15 @@ def evaluate_ours_selected_subgraphs(
                             if before.get("ok") and after.get("ok")
                             else None
                         ),
-                        "cf_flip": bool(after.get("pred_label") is not None and int(after["pred_label"]) != parent.label),
                         "error": after.get("error") if not after.get("ok") else row.get("error"),
                     }
+                )
+                row.update(
+                    teacher_flip_audit_fields(
+                        before.get("pred_label"),
+                        after.get("pred_label"),
+                        parent.label,
+                    )
                 )
                 distance_result = _compute_pair_distance(
                     teacher=teacher,
@@ -1495,9 +1508,15 @@ def evaluate_gcf_counterfactual_graphs(
                         if before.get("ok") and after.get("ok")
                         else None
                     ),
-                    "cf_flip": bool(after.get("pred_label") is not None and int(after["pred_label"]) != parent.label),
                     "error": after.get("error") if not after.get("ok") else None,
                 }
+            )
+            row.update(
+                teacher_flip_audit_fields(
+                    before.get("pred_label"),
+                    after.get("pred_label"),
+                    parent.label,
+                )
             )
             distance_result = _compute_pair_distance(
                 teacher=teacher,

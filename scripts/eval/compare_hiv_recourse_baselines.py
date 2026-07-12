@@ -29,6 +29,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.chem.deletion import delete_fragment_from_parent  # noqa: E402
 from src.chem.substructure import is_parent_substructure  # noqa: E402
+from src.eval.flip_semantics import teacher_strict_flip  # noqa: E402
 from src.rewards.reward_calculator import (  # noqa: E402
     load_oracle_bundle,
     prepare_smiles_for_oracle,
@@ -1001,7 +1002,11 @@ def evaluate_ours_action_candidates(
             row["p_after"] = float(score_after.p_target)
             row["after_teacher_label"] = score_after.teacher_label
             row["cf_drop"] = float(record.p_target) - float(score_after.p_target)
-            row["cf_flip"] = bool(score_after.teacher_label != int(target_label))
+            row["cf_flip"] = teacher_strict_flip(
+                record.teacher_label,
+                score_after.teacher_label,
+                target_label,
+            )
             input_valid = True
             if row["cf_flip"]:
                 input_flip = True
@@ -1269,7 +1274,11 @@ def build_gt_candidate_matrix(
                 "cost": float(distance["cost"]),
                 "proxy_edit": float(distance["proxy_edit"]),
                 "cf_drop": float(record.p_target) - float(candidate.p_target),
-                "cf_flip": True,
+                "cf_flip": teacher_strict_flip(
+                    record.teacher_label,
+                    candidate.teacher_label,
+                    target_label,
+                ),
             }
     return matrix, eligible_candidate_indices
 
@@ -1292,6 +1301,7 @@ def greedy_select_gt_fullgraphs(
             input_idx
             for input_idx in range(len(records))
             if (input_idx, candidate_index) in candidate_matrix
+            and bool(candidate_matrix[(input_idx, candidate_index)].get("cf_flip"))
             and float(candidate_matrix[(input_idx, candidate_index)]["cost"]) <= float(selection_theta)
         }
 
@@ -1339,6 +1349,7 @@ def greedy_select_gt_fullgraphs(
                 for input_idx in range(len(records))
                 for selected_index in selected
                 if (input_idx, selected_index) in candidate_matrix
+                and bool(candidate_matrix[(input_idx, selected_index)].get("cf_flip"))
                 and float(candidate_matrix[(input_idx, selected_index)]["cost"]) <= float(theta)
             }
             previous_prefix = selected[:-1]
@@ -1347,6 +1358,7 @@ def greedy_select_gt_fullgraphs(
                 for input_idx in range(len(records))
                 for selected_index in previous_prefix
                 if (input_idx, selected_index) in candidate_matrix
+                and bool(candidate_matrix[(input_idx, selected_index)].get("cf_flip"))
                 and float(candidate_matrix[(input_idx, selected_index)]["cost"]) <= float(theta)
             }
             new_covered = theta_covered - prev_covered
@@ -1436,13 +1448,15 @@ def aggregate_gt_recourse_rows(
                         "p_after": candidate.p_target if candidate else None,
                         "after_teacher_label": candidate.teacher_label if candidate else None,
                         "cf_drop": cf_drop if cf_drop is not None else (entry.get("cf_drop") if entry else None),
-                        "cf_flip": bool(valid_entries),
+                        "cf_flip": any(bool(item.get("cf_flip")) for _, item in valid_entries),
                         "cost": cost,
                         "proxy_edit": proxy_edit,
                         "valid_recourse": bool(valid_entries),
                         "covered": covered,
                         "coverage_theta": covered,
-                        "coverage_unconstrained_flip": bool(valid_entries),
+                        "coverage_unconstrained_flip": any(
+                            bool(item.get("cf_flip")) for _, item in valid_entries
+                        ),
                         "reason": "ok" if covered else ("no_theta_feasible_fullgraph" if valid_entries else "no_selected_candidate"),
                     }
                 )
@@ -1911,7 +1925,11 @@ def extract_fullgraph_action_motif_pool(
                 "nearest_fullgraph_rank": rank,
                 "nearest_fullgraph_smiles": fullgraph.canonical_smiles,
                 "nearest_distance_proxy": cost,
-                "fullgraph_cf_flip": bool(fullgraph.teacher_label != int(target_label)),
+                "fullgraph_cf_flip": teacher_strict_flip(
+                    record.teacher_label,
+                    fullgraph.teacher_label,
+                    target_label,
+                ),
                 "mcs_num_atoms": motif.get("mcs_num_atoms"),
                 "mcs_num_bonds": motif.get("mcs_num_bonds"),
                 "deleted_motif_smiles": motif.get("deleted_motif_smiles"),
@@ -2275,7 +2293,11 @@ def evaluate_single_motif_on_record(
         "before_teacher_label": record.teacher_label,
         "after_teacher_label": score_after.teacher_label,
         "cf_drop": cf_drop,
-        "cf_flip": bool(score_after.teacher_label != int(target_label)),
+        "cf_flip": teacher_strict_flip(
+            record.teacher_label,
+            score_after.teacher_label,
+            target_label,
+        ),
         "motif_atom_ratio": atom_ratio,
         "failure_reason": "ok",
     }
