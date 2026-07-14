@@ -6,6 +6,40 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-14] Use one explicit parent-ID cohort and corrected strict flip for final FGW reports
+
+### Background
+The raw GlobalGCE Frequency-Top20 run contains 1443 label parents, while the
+final Ours reference cohort contains 1283 parents. Historical GlobalGCE pair
+details also recorded the old weak flip (`pred_after != target_label`). Counting
+mismatches before filtering by method mixed unrelated rows into the audit.
+
+### Decision
+Define the final comparison cohort by the exact `parent_id` set from the final
+Ours run's `details/pair_details.csv`, or by an explicit reference-parent CSV.
+Filter every method by this set before strict-flip, cost, prefix-K, threshold,
+or bootstrap aggregation. Extra raw parents may be discarded by ID; missing
+reference IDs are fatal, even when the raw parent count happens to match.
+
+Recompute teacher-strict flip from saved `label`, `pred_before`, and
+`pred_after`, retaining the old weak field only for audit. This correction is
+post-processing only and reuses every saved Node-FGW distance. Final Table 2
+reports only coverage and theta-covered conditional median cost at the exact
+requested theta; the latter is asserted not to exceed theta.
+
+### Consequences
+- Raw 1443-parent GlobalGCE output remains an all-label-parent diagnostic.
+- Final figures and tables use the same 1283 parent IDs across all methods.
+- Historical weak-flip pair details can be corrected without loading MolCLR,
+  running POT, or changing the distance cache.
+- Applicable-parent median cost remains available as an audit metric but is not
+  presented as theta-conditional cost in the final table.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-14] Audit GlobalGCE Frequency-Top20 from saved Node-FGW artifacts
 
 ### Background

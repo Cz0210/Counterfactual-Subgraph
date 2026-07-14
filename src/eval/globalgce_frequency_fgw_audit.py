@@ -32,9 +32,9 @@ DEFAULT_SELECTED = (
     "outputs/hpc/selectors/globalgce_fullgraph_frequency_top20/"
     "selected_top20_for_eval.csv"
 )
-DEFAULT_OUTPUT = "outputs/hpc/audits/globalgce_frequency_top20_fgw"
+DEFAULT_OUTPUT = "outputs/hpc/audits/globalgce_frequency_top20_fgw_v2"
 DEFAULT_REPORT_DIR = "outputs/hpc/eval/paper/molclr_node_fgw_gcf_style"
-DEFAULT_THETA = 0.0328363645853374
+DEFAULT_THETA = 0.0328
 DEFAULT_COMPARISON_RUNS = {
     "Ours": (
         "outputs/hpc/eval/"
@@ -69,11 +69,19 @@ class PairAudit:
     method: str
     rows: list[dict[str, str]]
     parents: set[str]
+    raw_method_parents: set[str]
     teacher_target_parents: set[str]
     recorded_flip_pairs: int
     expected_flip_pairs: int
     mismatch_rows: list[dict[str, Any]]
     mismatch_by_method: dict[str, int]
+    confusion: dict[str, int]
+    rows_before_method_filter: int
+    rows_after_method_filter: int
+    rows_after_reference_filter: int
+    invalid_pred_before_rows: int
+    invalid_pred_after_rows: int
+    duplicate_parent_candidate_rows: int
     first_candidate_order: list[str]
     finite_strict_by_candidate_parent: dict[str, dict[str, tuple[float, float | None]]]
 
@@ -134,6 +142,60 @@ def _read_json(path: Path, *, required: bool = True) -> dict[str, Any]:
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     return payload if isinstance(payload, dict) else {}
+
+
+def _natural_key(value: str) -> tuple[Any, ...]:
+    try:
+        return (0, int(value))
+    except ValueError:
+        return (1, value)
+
+
+def load_reference_parent_ids(
+    path: Path,
+    *,
+    parent_id_col: str = "parent_id",
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    fields, rows = _read_csv(path)
+    if parent_id_col not in fields:
+        raise ValueError(
+            f"Reference parent file lacks {parent_id_col!r}; fields={fields} path={path}"
+        )
+    values = [_text(row.get(parent_id_col)) for row in rows]
+    if any(not value for value in values):
+        raise ValueError(f"Reference parent file contains empty IDs: {path}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"Reference parent file contains duplicate IDs: {path}")
+    ordered = tuple(sorted(values, key=_natural_key))
+    return ordered, {
+        "source_path": str(path),
+        "parent_id_column": parent_id_col,
+        "source_kind": "explicit_reference_parent_ids",
+    }
+
+
+def load_reference_from_ours_run(run_dir: Path) -> tuple[tuple[str, ...], dict[str, Any]]:
+    detail_path = run_dir / "details" / "pair_details.csv"
+    fields, rows = _read_csv(detail_path)
+    if "parent_id" not in fields:
+        raise ValueError(f"Ours reference pair details lacks parent_id: {detail_path}")
+    methods = sorted({_text(row.get("method")) for row in rows if _text(row.get("method"))})
+    ours_methods = [method for method in methods if "ours" in method.lower()]
+    selected_method = ours_methods[0] if len(ours_methods) == 1 else (methods[0] if len(methods) == 1 else None)
+    if selected_method is None:
+        raise ValueError(f"Cannot identify Ours method in reference run: methods={methods}")
+    parent_ids = {
+        _text(row.get("parent_id"))
+        for row in rows
+        if _text(row.get("method")) == selected_method and _text(row.get("parent_id"))
+    }
+    ordered = tuple(sorted(parent_ids, key=_natural_key))
+    return ordered, {
+        "source_path": str(detail_path),
+        "parent_id_column": "parent_id",
+        "source_kind": "auto_from_final_ours_reference_run",
+        "method_filter": selected_method,
+    }
 
 
 def _write_csv(path: Path, rows: Iterable[dict[str, Any]], fields: Sequence[str]) -> None:
@@ -290,61 +352,79 @@ def audit_pairs(
     method: str,
     selected: Sequence[SelectedCandidate],
     target_label: int,
+    reference_parent_ids: set[str] | None = None,
 ) -> PairAudit:
     selected_by_id = {candidate.candidate_id: candidate for candidate in selected}
     selected_by_smiles = {candidate.canonical_smiles: candidate for candidate in selected}
-    method_rows: list[dict[str, str]] = []
+    rows_after_method = [row for row in rows if _text(row.get("method")) == method]
+    raw_method_parents = {
+        _text(row.get("parent_id"))
+        for row in rows_after_method
+        if _text(row.get("parent_id"))
+    }
+    method_rows = [
+        row
+        for row in rows_after_method
+        if reference_parent_ids is None or _text(row.get("parent_id")) in reference_parent_ids
+    ]
     parents: set[str] = set()
     teacher_target_parents: set[str] = set()
     recorded_flip_pairs = 0
     expected_flip_pairs = 0
     mismatch_rows: list[dict[str, Any]] = []
-    mismatch_by_method: Counter[str] = Counter()
+    confusion: Counter[str] = Counter()
     first_candidate_order: list[str] = []
     seen_candidate_order: set[str] = set()
     finite_strict: dict[str, dict[str, tuple[float, float | None]]] = defaultdict(dict)
-    for row_index, row in enumerate(rows):
-        row_method = _text(row.get("method"))
+    invalid_pred_before_rows = 0
+    invalid_pred_after_rows = 0
+    pair_keys: list[tuple[str, str]] = []
+    for row_index, row in enumerate(method_rows):
         expected = _expected_strict_flip(row, target_label)
         recorded = _as_bool(row.get("cf_flip"))
-        teacher_recorded = (
-            _as_bool(row.get("teacher_strict_flip"))
-            if _text(row.get("teacher_strict_flip"))
-            else recorded
-        )
-        if recorded != expected or teacher_recorded != expected:
-            mismatch_by_method[row_method] += 1
+        confusion[
+            f"recorded_{str(recorded).lower()}_expected_{str(expected).lower()}"
+        ] += 1
+        pred_before = _as_int(row.get("pred_before"))
+        pred_after = _as_int(row.get("pred_after"))
+        invalid_pred_before_rows += int(pred_before is None)
+        invalid_pred_after_rows += int(pred_after is None)
+        if recorded != expected:
             mismatch_rows.append(
                 {
                     "row_index": row_index,
-                    "method": row_method,
+                    "method": method,
                     "parent_id": row.get("parent_id"),
                     "candidate_id": row.get("candidate_id"),
                     "label": row.get("label"),
                     "pred_before": row.get("pred_before"),
                     "pred_after": row.get("pred_after"),
                     "recorded_cf_flip": recorded,
-                    "recorded_teacher_strict_flip": teacher_recorded,
+                    "recorded_teacher_strict_flip": row.get("teacher_strict_flip"),
                     "expected_teacher_strict_flip": expected,
                     "old_weak_flip": (
-                        _as_int(row.get("pred_after"))
-                        is not None
-                        and _as_int(row.get("pred_after")) != int(target_label)
+                        pred_after is not None
+                        and pred_after
+                        != int(
+                            _as_int(row.get("label"))
+                            if _as_int(row.get("label")) is not None
+                            else target_label
+                        )
                     ),
                 }
             )
-        if row_method != method:
-            continue
-        method_rows.append(row)
         parent_id = _text(row.get("parent_id"))
-        parents.add(parent_id)
+        if parent_id:
+            parents.add(parent_id)
         label = _as_int(row.get("label"))
         target = int(target_label if label is None else label)
-        if _as_int(row.get("pred_before")) == target:
+        if pred_before == target and parent_id:
             teacher_target_parents.add(parent_id)
         recorded_flip_pairs += int(recorded)
         expected_flip_pairs += int(expected)
         raw_id = _normalize_id(row.get("candidate_id"))
+        pair_identity = raw_id or _canonicalize(_text(row.get("candidate_smiles")))
+        pair_keys.append((parent_id, pair_identity))
         candidate = selected_by_id.get(raw_id)
         if candidate is None:
             candidate = selected_by_smiles.get(
@@ -362,15 +442,42 @@ def audit_pairs(
         previous = finite_strict[candidate.candidate_id].get(parent_id)
         if previous is None or distance < previous[0]:
             finite_strict[candidate.candidate_id][parent_id] = (distance, cf_drop)
+    strict_confusion = {
+        key: int(confusion.get(key, 0))
+        for key in (
+            "recorded_true_expected_true",
+            "recorded_true_expected_false",
+            "recorded_false_expected_true",
+            "recorded_false_expected_false",
+        )
+    }
+    true_true = strict_confusion["recorded_true_expected_true"]
+    true_false = strict_confusion["recorded_true_expected_false"]
+    false_true = strict_confusion["recorded_false_expected_true"]
+    false_false = strict_confusion["recorded_false_expected_false"]
+    assert recorded_flip_pairs == true_true + true_false
+    assert expected_flip_pairs == true_true + false_true
+    assert len(mismatch_rows) == true_false + false_true
+    assert len(method_rows) == true_true + true_false + false_true + false_false
+    if recorded_flip_pairs == len(method_rows):
+        assert len(mismatch_rows) == len(method_rows) - expected_flip_pairs
     return PairAudit(
         method=method,
         rows=method_rows,
         parents=parents,
+        raw_method_parents=raw_method_parents,
         teacher_target_parents=teacher_target_parents,
         recorded_flip_pairs=recorded_flip_pairs,
         expected_flip_pairs=expected_flip_pairs,
         mismatch_rows=mismatch_rows,
-        mismatch_by_method=dict(mismatch_by_method),
+        mismatch_by_method={method: len(mismatch_rows)},
+        confusion=strict_confusion,
+        rows_before_method_filter=len(rows),
+        rows_after_method_filter=len(rows_after_method),
+        rows_after_reference_filter=len(method_rows),
+        invalid_pred_before_rows=invalid_pred_before_rows,
+        invalid_pred_after_rows=invalid_pred_after_rows,
+        duplicate_parent_candidate_rows=len(pair_keys) - len(set(pair_keys)),
         first_candidate_order=first_candidate_order,
         finite_strict_by_candidate_parent=dict(finite_strict),
     )
@@ -516,6 +623,147 @@ def _prefix_metrics(
         "covered_distance_min": min(covered) if covered else None,
         "covered_distance_max": max(covered) if covered else None,
         "covered_distance_mean": statistics.mean(covered) if covered else None,
+    }
+
+
+def corrected_pair_rows(
+    pair_audit: PairAudit,
+    *,
+    target_label: int,
+) -> list[dict[str, Any]]:
+    corrected: list[dict[str, Any]] = []
+    definition = "pred_before == target_label and pred_after != target_label"
+    for row in pair_audit.rows:
+        output = dict(row)
+        label = _as_int(row.get("label"))
+        target = int(target_label if label is None else label)
+        pred_before = _as_int(row.get("pred_before"))
+        pred_after = _as_int(row.get("pred_after"))
+        strict = pred_before == target and pred_after is not None and pred_after != target
+        weak = pred_after is not None and pred_after != target
+        output.update(
+            {
+                "teacher_strict_flip": strict,
+                "old_weak_flip": weak,
+                "cf_flip": strict,
+                "flip_definition": definition,
+            }
+        )
+        corrected.append(output)
+    return corrected
+
+
+def _threshold_summary_rows(
+    pair_audit: PairAudit,
+    selected: Sequence[SelectedCandidate],
+    *,
+    thresholds: Sequence[float],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for threshold in sorted(set(float(value) for value in thresholds)):
+        metrics = _prefix_metrics(
+            pair_audit,
+            selected,
+            k=len(selected),
+            theta=threshold,
+        )
+        rows.append(
+            {
+                "method": pair_audit.method,
+                "distance_type": "node_fgw",
+                "distance_line": "MolCLR-Node-FGW",
+                "cf_mode": "strict_flip",
+                "main_ccrcov_uses": "teacher_strict_flip",
+                "threshold": threshold,
+                "num_parents": len(pair_audit.parents),
+                "num_teacher_target_parents": len(pair_audit.teacher_target_parents),
+                "num_candidates": len(selected),
+                "num_close_cf_covered": metrics["num_covered"],
+                "close_cf_coverage": metrics["coverage"],
+                "theta_covered_conditional_median_cost": metrics[
+                    "covered_parent_median_cost"
+                ],
+                "applicable_parent_median_cost": metrics[
+                    "applicable_parent_median_cost"
+                ],
+                "strict_recourse_applicable_rate": metrics[
+                    "strict_recourse_applicable_rate"
+                ],
+                "flip_definition": (
+                    "pred_before == target_label and pred_after != target_label"
+                ),
+            }
+        )
+    return rows
+
+
+def write_corrected_teacher_strict_outputs(
+    *,
+    output_dir: Path,
+    source_fields: Sequence[str],
+    pair_audit: PairAudit,
+    selected: Sequence[SelectedCandidate],
+    source_config: dict[str, Any],
+    source_pair_details: Path,
+    target_label: int,
+    thresholds: Sequence[float],
+    reference_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    corrected = corrected_pair_rows(pair_audit, target_label=target_label)
+    corrected_fields = list(source_fields)
+    for field in ("teacher_strict_flip", "old_weak_flip", "cf_flip", "flip_definition"):
+        if field not in corrected_fields:
+            corrected_fields.append(field)
+    _write_csv(
+        output_dir / "pair_details_teacher_strict.csv",
+        corrected,
+        corrected_fields,
+    )
+    summary_rows = _threshold_summary_rows(
+        pair_audit,
+        selected,
+        thresholds=thresholds,
+    )
+    _write_csv(
+        output_dir / "combined_threshold_summary.csv",
+        summary_rows,
+        list(summary_rows[0]) if summary_rows else [],
+    )
+    strict_audit = {
+        "method_filter": pair_audit.method,
+        "target_label": int(target_label),
+        "rows_before_method_filter": pair_audit.rows_before_method_filter,
+        "rows_after_method_filter": pair_audit.rows_after_method_filter,
+        "rows_after_reference_filter": pair_audit.rows_after_reference_filter,
+        "recorded_cf_flip_pairs": pair_audit.recorded_flip_pairs,
+        "expected_strict_flip_pairs": pair_audit.expected_flip_pairs,
+        "mismatch_rows": len(pair_audit.mismatch_rows),
+        "confusion": pair_audit.confusion,
+        "invalid_pred_before_rows": pair_audit.invalid_pred_before_rows,
+        "invalid_pred_after_rows": pair_audit.invalid_pred_after_rows,
+        "duplicate_parent_candidate_rows": pair_audit.duplicate_parent_candidate_rows,
+        "reference_cohort": reference_metadata,
+    }
+    _write_json(output_dir / "strict_flip_audit.json", strict_audit)
+    corrected_config = {
+        **source_config,
+        "source_pair_details": str(source_pair_details),
+        "corrected_pair_details": str(output_dir / "pair_details_teacher_strict.csv"),
+        "cf_mode": "strict_flip",
+        "main_ccrcov_uses": "teacher_strict_flip",
+        "teacher_strict_flip_definition": (
+            "pred_before == target_label and pred_after != target_label"
+        ),
+        "old_weak_flip_status": "audit_only",
+        "distance_recomputed": False,
+        "reference_cohort": reference_metadata,
+    }
+    _write_json(output_dir / "run_config.json", corrected_config)
+    return {
+        "output_dir": str(output_dir),
+        "num_corrected_rows": len(corrected),
+        "num_threshold_rows": len(summary_rows),
     }
 
 
@@ -933,6 +1181,72 @@ def build_applicable_rows(
     return rows
 
 
+def _raw_parent_ids_for_run(run_dir: Path, display_name: str) -> tuple[set[str], str, Path]:
+    detail_path = run_dir / "details" / "pair_details.csv"
+    _fields, rows = _read_csv(detail_path)
+    methods = sorted({_text(row.get("method")) for row in rows if _text(row.get("method"))})
+    preferred = [method for method in methods if display_name.lower() in method.lower()]
+    if display_name == "Ours":
+        preferred = [method for method in methods if "ours" in method.lower()]
+    method = preferred[0] if len(preferred) == 1 else (methods[0] if len(methods) == 1 else "")
+    if not method:
+        raise ValueError(f"Cannot choose method for {display_name}: methods={methods} path={detail_path}")
+    parent_ids = {
+        _text(row.get("parent_id"))
+        for row in rows
+        if _text(row.get("method")) == method and _text(row.get("parent_id"))
+    }
+    return parent_ids, method, detail_path
+
+
+def build_parent_cohort_audit(
+    *,
+    pair_audit: PairAudit,
+    current_run_dir: Path,
+    reference_parent_ids: Sequence[str] | None,
+    comparison_specs: dict[str, str],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    reference = set(reference_parent_ids or ())
+    cohorts: list[tuple[str, Path, str, set[str]]] = [
+        ("GlobalGCE", current_run_dir, pair_audit.method, set(pair_audit.raw_method_parents))
+    ]
+    for display_name, path_like in comparison_specs.items():
+        run_dir = _resolve(path_like)
+        if not (run_dir / "details" / "pair_details.csv").is_file():
+            warnings.append(f"missing_parent_cohort_run:{display_name}:{run_dir}")
+            continue
+        try:
+            parent_ids, method, _detail_path = _raw_parent_ids_for_run(run_dir, display_name)
+            cohorts.append((display_name, run_dir, method, parent_ids))
+        except Exception as exc:
+            warnings.append(f"parent_cohort_audit_failed:{display_name}:{exc}")
+    rows: list[dict[str, Any]] = []
+    for display_name, run_dir, method, parent_ids in cohorts:
+        missing = sorted(reference - parent_ids, key=_natural_key) if reference else []
+        extra = sorted(parent_ids - reference, key=_natural_key) if reference else []
+        intersection = parent_ids & reference if reference else set(parent_ids)
+        rows.append(
+            {
+                "method_display": display_name,
+                "evaluator_method": method,
+                "run_dir": str(run_dir),
+                "num_parent_ids_raw": len(parent_ids),
+                "num_reference_parent_ids": len(reference) if reference else None,
+                "intersection_size": len(intersection),
+                "missing_id_count": len(missing),
+                "extra_id_count": len(extra),
+                "missing_ids": missing,
+                "extra_ids": extra,
+                "exact_set_match": parent_ids == reference if reference else None,
+                "reference_filter_applied": bool(reference),
+                "num_parent_ids_after_reference_filter": len(intersection),
+                "final_cohort_usable": (not missing) if reference else False,
+            }
+        )
+    return rows
+
+
 def render_report(summary: dict[str, Any]) -> str:
     strict = summary["strict_flip_audit"]
     order = summary["candidate_order_audit"]
@@ -942,6 +1256,7 @@ def render_report(summary: dict[str, Any]) -> str:
     fullgraph = summary["fullgraph_semantics_audit"]
     applicable_rows = summary["applicable_rate_audit"]
     marginal_rows = summary["prefix_marginal_audit"]
+    cohort_rows = summary["parent_cohort_audit"]
     lines = [
         "GlobalGCE Frequency-Top20 MolCLR-Node-FGW audit",
         "=" * 54,
@@ -953,11 +1268,31 @@ def render_report(summary: dict[str, Any]) -> str:
         "",
         "2. Strict flip",
         f"- Pair rows: {strict['num_pair_rows']}",
+        f"- Method filter: {strict['method_filter']}",
+        f"- Target label: {strict['target_label']}",
+        f"- Rows before method filter: {strict['rows_before_method_filter']}",
+        f"- Rows after method filter: {strict['rows_after_method_filter']}",
+        f"- Rows after reference filter: {strict['rows_after_reference_filter']}",
         f"- Teacher-target parents: {strict['num_teacher_target_parents']}",
         f"- Recorded cf_flip pairs: {strict['recorded_cf_flip_pairs']}",
         f"- Expected teacher-strict pairs: {strict['expected_strict_flip_pairs']}",
         f"- Mismatch rows: {strict['mismatch_rows']}",
+        f"- Confusion: {strict['confusion']}",
+        f"- Invalid pred_before rows: {strict['invalid_pred_before_rows']}",
+        f"- Invalid pred_after rows: {strict['invalid_pred_after_rows']}",
+        f"- Duplicate parent-candidate rows: {strict['duplicate_parent_candidate_rows']}",
         "- Definition: pred_before == target_label and pred_after != target_label.",
+        f"- Cohort mode: {summary['cohort_mode']}",
+        f"- Reference source: {summary['reference_cohort']}",
+        "- Parent cohort rows:",
+        *[
+            (
+                f"  {row['method_display']}: raw={row['num_parent_ids_raw']} "
+                f"intersection={row['intersection_size']} missing={row['missing_id_count']} "
+                f"extra={row['extra_id_count']} exact={row['exact_set_match']}"
+            )
+            for row in cohort_rows
+        ],
         "",
         "3. Candidate order",
         f"- Unique candidates: {order['unique_candidates']}",
@@ -989,6 +1324,7 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Applicable-parent median: {metric['metrics']['applicable_parent_median_cost']}",
         f"- Covered-parent median: {metric['metrics']['covered_parent_median_cost']}",
         f"- Covered-parent median <= theta: {metric['covered_parent_median_le_theta']}",
+        f"- Corrected Table 2 metrics: {summary['corrected_table2_metrics']}",
         "",
         "7. Applicable rate",
         *[
@@ -1066,12 +1402,50 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         expected_top_k=int(args.max_k),
     )
     method = choose_method(all_pair_rows, args.method_name, config)
+    comparison_specs = _parse_specs(args.comparison_run)
+    reference_parent_ids: tuple[str, ...] | None = None
+    reference_metadata: dict[str, Any] = {
+        "source_kind": "all_label_parent_diagnostic",
+        "source_path": None,
+        "parent_id_column": "parent_id",
+        "num_reference_parents": None,
+    }
+    if args.reference_parent_ids:
+        reference_parent_ids, reference_metadata = load_reference_parent_ids(
+            _resolve(args.reference_parent_ids),
+            parent_id_col=args.reference_parent_id_col,
+        )
+    else:
+        ours_run = _resolve(comparison_specs["Ours"])
+        if (ours_run / "details" / "pair_details.csv").is_file():
+            reference_parent_ids, reference_metadata = load_reference_from_ours_run(ours_run)
+        else:
+            warnings.append(
+                "reference_parent_cohort_unavailable_running_all_label_parent_diagnostic"
+            )
+    if reference_parent_ids is not None:
+        reference_metadata["num_reference_parents"] = len(reference_parent_ids)
+        expected_reference = int(args.expected_reference_parents)
+        if expected_reference > 0 and len(reference_parent_ids) != expected_reference:
+            raise ValueError(
+                f"Expected {expected_reference} reference parents, found "
+                f"{len(reference_parent_ids)} from {reference_metadata['source_path']}"
+            )
+    reference_set = set(reference_parent_ids) if reference_parent_ids is not None else None
     pair_audit = audit_pairs(
         all_pair_rows,
         method=method,
         selected=selected,
         target_label=int(args.target_label),
+        reference_parent_ids=reference_set,
     )
+    if reference_set is not None:
+        missing_current = sorted(reference_set - pair_audit.raw_method_parents, key=_natural_key)
+        if missing_current:
+            raise ValueError(
+                f"GlobalGCE run is missing {len(missing_current)} reference parent IDs: "
+                f"sample={missing_current[:10]}"
+            )
     valid_path = _auto_valid_candidates(selector_dir, args.valid_candidates)
     frequency_groups: dict[str, dict[str, Any]] = {}
     frequency_summary: dict[str, Any] = {
@@ -1186,9 +1560,16 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         pair_audit,
         selected,
         current_run_dir=run_dir,
-        comparison_specs=_parse_specs(args.comparison_run),
+        comparison_specs=comparison_specs,
         expected_top_k=int(args.max_k),
         expected_parents=len(pair_audit.parents),
+        warnings=warnings,
+    )
+    parent_cohort_rows = build_parent_cohort_audit(
+        pair_audit=pair_audit,
+        current_run_dir=run_dir,
+        reference_parent_ids=reference_parent_ids,
+        comparison_specs=comparison_specs,
         warnings=warnings,
     )
     fullgraph_semantics = {
@@ -1247,6 +1628,24 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "A plateau or jump is accepted as data-driven only when strict flip, candidate order, and metric consistency checks pass. "
         "The historical conditional-median label is ambiguous because it conditions on strict-recourse applicability, not theta coverage."
     )
+    table_metrics = _prefix_metrics(
+        pair_audit,
+        selected,
+        k=int(args.table_k),
+        theta=float(args.theta),
+    )
+    theta_covered_median = table_metrics["covered_parent_median_cost"]
+    assert theta_covered_median is None or theta_covered_median <= float(args.theta) + 1e-12
+    corrected_table_rows = [
+        {
+            "Method": "GlobalGCE",
+            "K": int(args.table_k),
+            "Theta": float(args.theta),
+            "Coverage": table_metrics["coverage"],
+            "Num covered": table_metrics["num_covered"],
+            "Theta-covered conditional median cost": theta_covered_median,
+        }
+    ]
     summary = {
         "run_dir": str(run_dir),
         "pair_details": str(pair_details),
@@ -1257,6 +1656,10 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "table_k": int(args.table_k),
         "max_k": int(args.max_k),
         "distance_recomputed": False,
+        "cohort_mode": (
+            "reference_parent_ids" if reference_parent_ids is not None else "all_label_parent_diagnostic"
+        ),
+        "reference_cohort": reference_metadata,
         "code_provenance": {
             "node_fgw_evaluator": "scripts/evaluate_ccrcov_with_molclr_node_fgw.py",
             "fullgraph_pair_evaluator": "src/eval/ccrcov_distance_eval.py::_evaluate_gt_fullgraph",
@@ -1272,6 +1675,11 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "strict_flip_audit": {
             "num_pair_rows": len(pair_audit.rows),
             "num_all_pair_rows_in_file": len(all_pair_rows),
+            "method_filter": method,
+            "target_label": int(args.target_label),
+            "rows_before_method_filter": pair_audit.rows_before_method_filter,
+            "rows_after_method_filter": pair_audit.rows_after_method_filter,
+            "rows_after_reference_filter": pair_audit.rows_after_reference_filter,
             "num_parents": len(pair_audit.parents),
             "num_teacher_target_parents": len(pair_audit.teacher_target_parents),
             "teacher_target_parent_rate": (
@@ -1283,14 +1691,20 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "expected_strict_flip_pairs": pair_audit.expected_flip_pairs,
             "mismatch_rows": len(pair_audit.mismatch_rows),
             "mismatch_rows_by_method": pair_audit.mismatch_by_method,
+            "confusion": pair_audit.confusion,
+            "invalid_pred_before_rows": pair_audit.invalid_pred_before_rows,
+            "invalid_pred_after_rows": pair_audit.invalid_pred_after_rows,
+            "duplicate_parent_candidate_rows": pair_audit.duplicate_parent_candidate_rows,
             "definition": "pred_before == target_label and pred_after != target_label",
         },
+        "parent_cohort_audit": parent_cohort_rows,
         "candidate_order_audit": order_summary,
         "frequency_audit": frequency_summary,
         "metric_consistency_audit": consistency,
         "metric_definition_audit": metric_definitions,
         "applicable_rate_audit": applicable_rows,
         "prefix_marginal_audit": prefix_rows,
+        "corrected_table2_metrics": corrected_table_rows,
         "fullgraph_semantics_audit": fullgraph_semantics,
         "implementation_findings": implementation_findings,
         "adaptation_findings": adaptation_findings,
@@ -1299,6 +1713,14 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "warnings": warnings,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
+    if reference_parent_ids is not None:
+        _write_csv(
+            output_dir / "reference_parent_ids.csv",
+            ({"parent_id": parent_id} for parent_id in reference_parent_ids),
+            ["parent_id"],
+        )
+    else:
+        _write_csv(output_dir / "reference_parent_ids.csv", [], ["parent_id"])
     _write_csv(
         output_dir / "globalgce_prefix_marginal_coverage.csv",
         prefix_rows,
@@ -1323,11 +1745,65 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "old_weak_flip",
     ]
     _write_csv(output_dir / "strict_flip_mismatches.csv", pair_audit.mismatch_rows, mismatch_fields)
+    strict_confusion_payload = {
+        "method_filter": method,
+        "target_label": int(args.target_label),
+        "rows_before_method_filter": pair_audit.rows_before_method_filter,
+        "rows_after_method_filter": pair_audit.rows_after_method_filter,
+        "rows_after_reference_filter": pair_audit.rows_after_reference_filter,
+        "recorded_cf_flip_pairs": pair_audit.recorded_flip_pairs,
+        "expected_strict_flip_pairs": pair_audit.expected_flip_pairs,
+        "mismatch_rows": len(pair_audit.mismatch_rows),
+        "invalid_pred_before_rows": pair_audit.invalid_pred_before_rows,
+        "invalid_pred_after_rows": pair_audit.invalid_pred_after_rows,
+        "duplicate_parent_candidate_rows": pair_audit.duplicate_parent_candidate_rows,
+        "arithmetic_definitions": {
+            "recorded_cf_flip_pairs": "recorded_true_expected_true + recorded_true_expected_false",
+            "expected_strict_flip_pairs": "recorded_true_expected_true + recorded_false_expected_true",
+            "mismatch_rows": "recorded_true_expected_false + recorded_false_expected_true",
+        },
+        **pair_audit.confusion,
+    }
+    _write_json(output_dir / "strict_flip_confusion.json", strict_confusion_payload)
+    _write_csv(
+        output_dir / "parent_cohort_audit.csv",
+        parent_cohort_rows,
+        list(parent_cohort_rows[0]) if parent_cohort_rows else [],
+    )
+    _write_csv(
+        output_dir / "corrected_table2_metrics.csv",
+        corrected_table_rows,
+        list(corrected_table_rows[0]),
+    )
     _write_json(output_dir / "metric_definition_audit.json", metric_definitions)
     applicable_fields = list(applicable_rows[0]) if applicable_rows else []
     _write_csv(output_dir / "applicable_rate_audit.csv", applicable_rows, applicable_fields)
     _write_json(output_dir / "audit_summary.json", summary)
     (output_dir / "audit_report.txt").write_text(render_report(summary), encoding="utf-8")
+    corrected_output_dir = (
+        _resolve(args.corrected_output_dir)
+        if args.corrected_output_dir
+        else run_dir / "corrected_teacher_strict"
+    )
+    corrected_thresholds = [
+        float(row["threshold"])
+        for row in combined_rows
+        if _as_float(row.get("threshold")) is not None
+    ]
+    corrected_thresholds.append(float(args.theta))
+    corrected_outputs = write_corrected_teacher_strict_outputs(
+        output_dir=corrected_output_dir,
+        source_fields=_pair_fields,
+        pair_audit=pair_audit,
+        selected=selected,
+        source_config=config,
+        source_pair_details=pair_details,
+        target_label=int(args.target_label),
+        thresholds=corrected_thresholds,
+        reference_metadata=reference_metadata,
+    )
+    summary["corrected_teacher_strict_outputs"] = corrected_outputs
+    _write_json(output_dir / "audit_summary.json", summary)
     if args.fail_on_critical and implementation_findings:
         raise RuntimeError(f"Critical audit findings: {implementation_findings}")
     return summary
@@ -1347,6 +1823,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--valid-candidates", default=None)
     parser.add_argument("--report-dir", default=DEFAULT_REPORT_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--corrected-output-dir",
+        default=None,
+        help="Defaults to RUN_DIR/corrected_teacher_strict.",
+    )
+    parser.add_argument(
+        "--reference-parent-ids",
+        default=None,
+        help="CSV containing the exact final comparison parent IDs.",
+    )
+    parser.add_argument("--reference-parent-id-col", default="parent_id")
+    parser.add_argument("--expected-reference-parents", type=int, default=1283)
     parser.add_argument("--method-name", default=None)
     parser.add_argument("--target-label", type=int, default=1)
     parser.add_argument("--theta", type=float, default=DEFAULT_THETA)

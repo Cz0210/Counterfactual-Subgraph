@@ -75,6 +75,109 @@ class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
         self.assertEqual(result.expected_flip_pairs, 0)
         self.assertEqual(len(result.mismatch_rows), 1)
         self.assertTrue(result.mismatch_rows[0]["old_weak_flip"])
+        self.assertEqual(result.confusion["recorded_true_expected_false"], 1)
+        self.assertEqual(result.recorded_flip_pairs, sum(
+            result.confusion[key]
+            for key in ("recorded_true_expected_true", "recorded_true_expected_false")
+        ))
+
+    def test_confusion_matrix_counts_false_positive_and_false_negative(self) -> None:
+        selected = [_candidate(1, "C")]
+        rows = [
+            _row("tp", selected[0], pred_before=1, pred_after=0, distance=0.1, recorded_flip=True),
+            _row("fp", selected[0], pred_before=0, pred_after=0, distance=0.1, recorded_flip=True),
+            _row("fn", selected[0], pred_before=1, pred_after=0, distance=0.1, recorded_flip=False),
+            _row("tn", selected[0], pred_before=1, pred_after=1, distance=0.1, recorded_flip=False),
+        ]
+        result = audit.audit_pairs(
+            rows,
+            method="globalgce_frequency_top20",
+            selected=selected,
+            target_label=1,
+        )
+        self.assertEqual(
+            result.confusion,
+            {
+                "recorded_true_expected_true": 1,
+                "recorded_true_expected_false": 1,
+                "recorded_false_expected_true": 1,
+                "recorded_false_expected_false": 1,
+            },
+        )
+        self.assertEqual(len(result.mismatch_rows), 2)
+
+    def test_recorded_all_true_mismatch_equals_total_minus_expected(self) -> None:
+        selected = [_candidate(1, "C")]
+        rows = [
+            _row(f"p{index}", selected[0], pred_before=before, pred_after=0, distance=0.1, recorded_flip=True)
+            for index, before in enumerate((1, 1, 0, 0))
+        ]
+        result = audit.audit_pairs(
+            rows,
+            method="globalgce_frequency_top20",
+            selected=selected,
+            target_label=1,
+        )
+        self.assertEqual(result.recorded_flip_pairs, 4)
+        self.assertEqual(result.expected_flip_pairs, 2)
+        self.assertEqual(len(result.mismatch_rows), 2)
+        self.assertEqual(len(result.mismatch_rows), len(rows) - result.expected_flip_pairs)
+
+    def test_corrected_pair_rows_replace_weak_flip_without_recomputing_distance(self) -> None:
+        selected = [_candidate(1, "C")]
+        rows = [
+            _row("p0", selected[0], pred_before=0, pred_after=0, distance=0.0123, recorded_flip=True)
+        ]
+        result = audit.audit_pairs(
+            rows,
+            method="globalgce_frequency_top20",
+            selected=selected,
+            target_label=1,
+        )
+        corrected = audit.corrected_pair_rows(result, target_label=1)[0]
+        self.assertFalse(corrected["teacher_strict_flip"])
+        self.assertFalse(corrected["cf_flip"])
+        self.assertTrue(corrected["old_weak_flip"])
+        self.assertEqual(corrected["distance"], "0.0123")
+
+    def test_method_and_reference_parent_filters_define_one_consistent_cohort(self) -> None:
+        selected = [_candidate(1, "C")]
+        rows = [
+            _row("keep1", selected[0], pred_before=1, pred_after=0, distance=0.01, recorded_flip=True),
+            _row("keep2", selected[0], pred_before=0, pred_after=0, distance=0.01, recorded_flip=True),
+            _row("extra", selected[0], pred_before=0, pred_after=0, distance=0.01, recorded_flip=True),
+            _row("other", selected[0], pred_before=0, pred_after=0, distance=0.01, recorded_flip=True, method="ours_selected_subgraphs"),
+        ]
+        result = audit.audit_pairs(
+            rows,
+            method="globalgce_frequency_top20",
+            selected=selected,
+            target_label=1,
+            reference_parent_ids={"keep1", "keep2"},
+        )
+        self.assertEqual(result.rows_before_method_filter, 4)
+        self.assertEqual(result.rows_after_method_filter, 3)
+        self.assertEqual(result.rows_after_reference_filter, 2)
+        self.assertEqual(result.parents, {"keep1", "keep2"})
+        self.assertEqual(len(result.mismatch_rows), 1)
+        self.assertEqual({row["method"] for row in result.mismatch_rows}, {"globalgce_frequency_top20"})
+
+    def test_reference_filter_keeps_exactly_1283_parent_ids(self) -> None:
+        selected = [_candidate(1, "C")]
+        reference = {str(index) for index in range(1283)}
+        rows = [
+            _row(parent, selected[0], pred_before=1, pred_after=0, distance=0.01, recorded_flip=True)
+            for parent in [*sorted(reference, key=int), "extra"]
+        ]
+        result = audit.audit_pairs(
+            rows,
+            method="globalgce_frequency_top20",
+            selected=selected,
+            target_label=1,
+            reference_parent_ids=reference,
+        )
+        self.assertEqual(len(result.parents), 1283)
+        self.assertNotIn("extra", result.parents)
 
     def test_strict_flip_and_prefix_marginal_coverage(self) -> None:
         selected = [_candidate(1, "C"), _candidate(2, "N"), _candidate(3, "O")]
@@ -252,6 +355,10 @@ class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
                 "globalgce_prefix_marginal_coverage.csv",
                 "candidate_order_audit.csv",
                 "strict_flip_mismatches.csv",
+                "strict_flip_confusion.json",
+                "parent_cohort_audit.csv",
+                "reference_parent_ids.csv",
+                "corrected_table2_metrics.csv",
                 "metric_definition_audit.json",
                 "applicable_rate_audit.csv",
             ):

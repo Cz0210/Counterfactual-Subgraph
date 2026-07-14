@@ -102,6 +102,9 @@ class MethodRun:
     num_unique_parent_candidate_pairs: int
     num_valid_parent_candidate_pairs: int
     num_multi_match_parent_candidate_pairs: int
+    raw_parent_ids: tuple[str, ...] = ()
+    parent_filter_applied: bool = False
+    strict_flip_mismatch_rows: int = 0
 
 
 def _text(value: Any) -> str:
@@ -358,12 +361,9 @@ def _strict_flip_from_row(row: dict[str, Any], *, source: Path, row_number: int)
         recorded = _as_bool(teacher_field)
     elif cf_field:
         recorded = _as_bool(cf_field)
-    if computed is not None and recorded is not None and computed != recorded:
-        raise ValueError(
-            "Strict-flip audit failed in "
-            f"{source} row={row_number}: label={label} pred_before={pred_before} "
-            f"pred_after={pred_after} recorded={recorded} computed={computed}"
-        )
+    # Historical pair_details may contain the old weak flip in ``cf_flip``.
+    # Reporting always recomputes teacher-strict flip from the saved labels and
+    # predictions; it never trusts a contradictory legacy boolean.
     if computed is not None:
         return computed
     return bool(recorded)
@@ -374,6 +374,7 @@ def aggregate_detail_rows(
     *,
     candidates: Sequence[CandidateRank],
     source: Path = Path("pair_details.csv"),
+    allowed_parent_ids: set[str] | None = None,
 ) -> tuple[
     tuple[str, ...],
     dict[tuple[str, str], PairRecourse],
@@ -391,14 +392,17 @@ def aggregate_detail_rows(
     methods: set[str] = set()
     observed_candidate_ids: set[str] = set()
     detail_count = 0
+    strict_flip_mismatch_rows = 0
     for row_number, row in enumerate(rows, start=2):
-        detail_count += 1
         method = _text(row.get("method"))
         if method:
             methods.add(method)
         parent_id = _text(row.get("parent_id"))
         if not parent_id:
             raise ValueError(f"Missing parent_id in {source} row={row_number}")
+        if allowed_parent_ids is not None and parent_id not in allowed_parent_ids:
+            continue
+        detail_count += 1
         parent_ids.add(parent_id)
         raw_candidate_id = _normalize_candidate_id(row.get("candidate_id"))
         candidate = by_id.get(raw_candidate_id)
@@ -417,7 +421,11 @@ def aggregate_detail_rows(
         if distance is None:
             continue
         group_has_finite.add(key)
-        if not _strict_flip_from_row(row, source=source, row_number=row_number):
+        strict_flip = _strict_flip_from_row(row, source=source, row_number=row_number)
+        recorded_value = _text(row.get("teacher_strict_flip")) or _text(row.get("cf_flip"))
+        if recorded_value and _as_bool(recorded_value) != strict_flip:
+            strict_flip_mismatch_rows += 1
+        if not strict_flip:
             continue
         cf_drop = _as_float(row.get("cf_drop"))
         previous = recourse.get(key)
@@ -439,6 +447,7 @@ def aggregate_detail_rows(
         "num_multi_match_parent_candidate_pairs": sum(
             count > 1 for count in group_row_counts.values()
         ),
+        "strict_flip_mismatch_rows": strict_flip_mismatch_rows,
     }
     return tuple(sorted(parent_ids, key=_natural_key)), recourse, audit, methods
 
@@ -448,6 +457,30 @@ def _natural_key(value: str) -> tuple[Any, ...]:
         return (0, int(value))
     except ValueError:
         return (1, value)
+
+
+def validate_reference_parent_set(
+    observed_parent_ids: Sequence[str],
+    reference_parent_ids: Sequence[str],
+    *,
+    source: Path = Path("pair_details.csv"),
+) -> dict[str, Any]:
+    observed = set(observed_parent_ids)
+    reference = set(reference_parent_ids)
+    missing = sorted(reference - observed, key=_natural_key)
+    extra = sorted(observed - reference, key=_natural_key)
+    if missing:
+        raise ValueError(
+            f"Run is missing {len(missing)} reference parent IDs: "
+            f"sample={missing[:10]} source={source}"
+        )
+    return {
+        "num_observed": len(observed),
+        "num_reference": len(reference),
+        "missing_ids": missing,
+        "extra_ids": extra,
+        "exact_set_match": observed == reference,
+    }
 
 
 def _validate_external_selection(config: dict[str, Any], *, run_dir: Path, expected_top_k: int) -> None:
@@ -473,6 +506,7 @@ def load_method_run(
     *,
     expected_top_k: int = 20,
     expected_num_parents: int = 1283,
+    reference_parent_ids: Sequence[str] | None = None,
 ) -> MethodRun:
     run_dir = Path(run_dir_like).expanduser()
     if not run_dir.is_absolute():
@@ -494,10 +528,20 @@ def load_method_run(
     )
     detail_path = run_dir / "details" / "pair_details.csv"
     _fields, detail_rows = _read_csv(detail_path)
+    raw_parent_ids = tuple(
+        sorted(
+            {_text(row.get("parent_id")) for row in detail_rows if _text(row.get("parent_id"))},
+            key=_natural_key,
+        )
+    )
+    reference_set = set(reference_parent_ids) if reference_parent_ids is not None else None
+    if reference_set is not None:
+        validate_reference_parent_set(raw_parent_ids, reference_parent_ids, source=detail_path)
     parent_ids, recourse, audit, methods = aggregate_detail_rows(
         detail_rows,
         candidates=candidates,
         source=detail_path,
+        allowed_parent_ids=reference_set,
     )
     if len(methods) != 1:
         raise ValueError(f"Expected one evaluator method in {detail_path}, found {sorted(methods)}")
@@ -532,6 +576,9 @@ def load_method_run(
         num_unique_parent_candidate_pairs=audit["num_unique_parent_candidate_pairs"],
         num_valid_parent_candidate_pairs=audit["num_valid_parent_candidate_pairs"],
         num_multi_match_parent_candidate_pairs=audit["num_multi_match_parent_candidate_pairs"],
+        raw_parent_ids=raw_parent_ids,
+        parent_filter_applied=reference_set is not None,
+        strict_flip_mismatch_rows=audit["strict_flip_mismatch_rows"],
     )
 
 
@@ -595,6 +642,7 @@ def compute_prefix_metrics(run: MethodRun, *, k: int, threshold: float) -> dict[
         "conditional_median_cost": applicable_parent_median_cost,
         "applicable_parent_median_cost": applicable_parent_median_cost,
         "covered_parent_median_cost": covered_parent_median_cost,
+        "theta_covered_conditional_median_cost": covered_parent_median_cost,
         "applicable_rate": len(finite) / denominator if denominator else 0.0,
         "strict_recourse_applicable_rate": len(finite) / denominator if denominator else 0.0,
         "mean_cf_drop_among_covered": (
@@ -634,6 +682,14 @@ def build_threshold_grid(raw: str | None, *, minimum: float, maximum: float, poi
     if np.any(np.diff(grid) <= 0):
         raise ValueError("Threshold grid must be strictly increasing and duplicate-free.")
     return grid
+
+
+def include_exact_threshold(grid: Sequence[float], threshold: float) -> np.ndarray:
+    values = np.asarray(grid, dtype=float)
+    target = float(threshold)
+    if not np.any(values == target):
+        values = np.sort(np.concatenate((values, np.asarray([target], dtype=float))))
+    return values
 
 
 def bootstrap_coverage_curve(
@@ -714,12 +770,9 @@ def _table_rows(runs: Sequence[MethodRun], *, k: int, theta: float) -> list[dict
             "Theta": float(theta),
             "Coverage": metrics["coverage"],
             "Num covered": metrics["num_covered"],
-            "Median cost": metrics["median_cost"],
-            "Applicable-parent median cost": metrics["applicable_parent_median_cost"],
-            "Covered-parent median cost": metrics["covered_parent_median_cost"],
-            "Strict-recourse applicable rate": metrics["strict_recourse_applicable_rate"],
-            "Mean CFDrop among covered": metrics["mean_cf_drop_among_covered"],
-            "Flip rate among covered": metrics["flip_rate_among_covered"],
+            "Theta-covered conditional median cost": metrics[
+                "theta_covered_conditional_median_cost"
+            ],
         }
         for run in runs
         for metrics in [compute_prefix_metrics(run, k=k, threshold=theta)]
@@ -866,41 +919,91 @@ def _parse_run_specs(raw_specs: Sequence[str]) -> dict[str, str]:
     return runs
 
 
+def load_reference_parent_ids(path_like: str | Path, *, parent_id_col: str = "parent_id") -> tuple[str, ...]:
+    path = Path(path_like).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    fields, rows = _read_csv(path.resolve())
+    if parent_id_col not in fields:
+        raise ValueError(
+            f"Reference parent file lacks {parent_id_col!r}; fields={fields} path={path}"
+        )
+    values = [_text(row.get(parent_id_col)) for row in rows]
+    if any(not value for value in values):
+        raise ValueError(f"Reference parent file contains empty IDs: {path}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"Reference parent file contains duplicate IDs: {path}")
+    return tuple(sorted(values, key=_natural_key))
+
+
 def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     run_specs = _parse_run_specs(args.run)
     if len(run_specs) != 4:
         raise ValueError(f"Exactly four method runs are required, found {len(run_specs)}")
-    runs = [
-        load_method_run(
-            name,
-            path,
-            expected_top_k=int(args.max_k),
-            expected_num_parents=int(args.expected_num_parents),
-        )
-        for name, path in run_specs.items()
-    ]
-    reference_parents = runs[0].parent_ids
-    for run in runs[1:]:
-        if run.parent_ids != reference_parents:
-            raise ValueError(
-                f"Parent set mismatch between {runs[0].display_name} and {run.display_name}."
-            )
     output_dir = Path(args.output_dir).expanduser()
     if not output_dir.is_absolute():
         output_dir = REPO_ROOT / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    preloaded_ours: MethodRun | None = None
+    if args.reference_parent_ids:
+        reference_parents = load_reference_parent_ids(
+            args.reference_parent_ids,
+            parent_id_col=args.reference_parent_id_col,
+        )
+        reference_source = str(Path(args.reference_parent_ids).expanduser())
+        reference_column = args.reference_parent_id_col
+    else:
+        if "Ours" not in run_specs:
+            raise ValueError(
+                "Automatic reference cohort requires a run named 'Ours'; "
+                "otherwise pass --reference-parent-ids."
+            )
+        preloaded_ours = load_method_run(
+            "Ours",
+            run_specs["Ours"],
+            expected_top_k=int(args.max_k),
+            expected_num_parents=int(args.expected_num_parents),
+        )
+        reference_parents = preloaded_ours.parent_ids
+        reference_source = str(preloaded_ours.run_dir / "details" / "pair_details.csv")
+        reference_column = "parent_id"
+    if len(reference_parents) != int(args.expected_num_parents):
+        raise ValueError(
+            f"Reference cohort must contain {args.expected_num_parents} parent IDs, "
+            f"found {len(reference_parents)}: {reference_source}"
+        )
+
+    runs: list[MethodRun] = []
+    for name, path in run_specs.items():
+        if name == "Ours" and preloaded_ours is not None:
+            run = preloaded_ours
+        else:
+            run = load_method_run(
+                name,
+                path,
+                expected_top_k=int(args.max_k),
+                expected_num_parents=len(reference_parents),
+                reference_parent_ids=reference_parents,
+            )
+        runs.append(run)
+    for run in runs:
+        if run.parent_ids != reference_parents:
+            raise ValueError(
+                f"Parent set mismatch between reference cohort and {run.display_name}."
+            )
+    _write_csv(
+        output_dir / "reference_parent_ids.csv",
+        ({"parent_id": parent_id} for parent_id in reference_parents),
+        ["parent_id"],
+    )
     table_fields = [
         "Method",
         "K",
         "Theta",
         "Coverage",
         "Num covered",
-        "Median cost",
-        "Applicable-parent median cost",
-        "Covered-parent median cost",
-        "Strict-recourse applicable rate",
-        "Mean CFDrop among covered",
-        "Flip rate among covered",
+        "Theta-covered conditional median cost",
     ]
     table_rows = _table_rows(runs, k=int(args.k), theta=float(args.theta_star))
     table_base = _prefixed(args.table_prefix, "table2_gcf_style_fgw")
@@ -923,6 +1026,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "conditional_median_cost",
         "applicable_parent_median_cost",
         "covered_parent_median_cost",
+        "theta_covered_conditional_median_cost",
         "applicable_rate",
         "strict_recourse_applicable_rate",
         "mean_cf_drop_among_covered",
@@ -944,6 +1048,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         maximum=float(args.threshold_max),
         points=int(args.threshold_points),
     )
+    threshold_grid = include_exact_threshold(threshold_grid, float(args.theta_star))
     rng = np.random.default_rng(int(args.seed))
     bootstrap_indices = rng.integers(
         0,
@@ -1064,6 +1169,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_ranking_uses_distance": False,
         "selection_performed_in_report": False,
         "expected_num_parents": int(args.expected_num_parents),
+        "reference_parent_source": reference_source,
+        "reference_parent_id_column": reference_column,
+        "reference_parent_count": len(reference_parents),
         "expected_top_k": int(args.max_k),
         "table_k": int(args.k),
         "theta_star": float(args.theta_star),
@@ -1082,6 +1190,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 "selection_performed_in_eval": run.config.get("selection_performed_in_eval"),
                 "num_candidates": len(run.candidates),
                 "num_parents": len(run.parent_ids),
+                "num_raw_parents": len(run.raw_parent_ids),
+                "parent_filter_applied": run.parent_filter_applied,
+                "raw_extra_parent_count": len(set(run.raw_parent_ids) - set(reference_parents)),
+                "raw_missing_parent_count": len(set(reference_parents) - set(run.raw_parent_ids)),
+                "strict_flip_mismatch_rows_in_source": run.strict_flip_mismatch_rows,
                 "num_detail_rows": run.num_detail_rows,
                 "num_unique_parent_candidate_pairs": run.num_unique_parent_candidate_pairs,
                 "num_valid_parent_candidate_pairs": run.num_valid_parent_candidate_pairs,
@@ -1120,7 +1233,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--max-k", type=int, default=20)
     parser.add_argument("--expected-num-parents", type=int, default=1283)
-    parser.add_argument("--theta-star", type=float, default=0.0545395671276376)
+    parser.add_argument(
+        "--reference-parent-ids",
+        default=None,
+        help="Optional CSV defining the exact final cohort; defaults to Ours pair_details parent_id.",
+    )
+    parser.add_argument("--reference-parent-id-col", default="parent_id")
+    parser.add_argument("--theta-star", type=float, default=0.0328)
     parser.add_argument("--threshold-grid", default=None, help="Comma-separated absolute thresholds.")
     parser.add_argument("--threshold-min", type=float, default=0.0)
     parser.add_argument("--threshold-max", type=float, default=0.0985011840378189)

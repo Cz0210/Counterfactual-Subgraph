@@ -24,11 +24,13 @@ OUTPUT_DIR=${OUTPUT_DIR:-outputs/hpc/eval/reports/gcf_style_molclr_node_fgw_fina
 DISTANCE_LABEL=${DISTANCE_LABEL:-MolCLR-Node-FGW}
 TABLE_PREFIX=${TABLE_PREFIX:-}
 K=${K:-10}
-THETA_STAR=${THETA_STAR:-0.0545395671276376}
+THETA_STAR=${THETA_STAR:-0.0328}
 BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES:-1000}
 BOOTSTRAP_SEED=${BOOTSTRAP_SEED:-0}
 THRESHOLD_GRID=${THRESHOLD_GRID:-}
 INSET_MAX_K=${INSET_MAX_K:-}
+REFERENCE_PARENT_IDS=${REFERENCE_PARENT_IDS:-}
+REFERENCE_PARENT_ID_COL=${REFERENCE_PARENT_ID_COL:-parent_id}
 
 echo "===== GCF-STYLE RECOURSE REPORT ====="
 echo "hostname=$(hostname)"
@@ -46,6 +48,8 @@ echo "THETA_STAR=${THETA_STAR}"
 echo "BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES}"
 echo "BOOTSTRAP_SEED=${BOOTSTRAP_SEED}"
 echo "THRESHOLD_GRID=${THRESHOLD_GRID:-default_101_point_grid}"
+echo "REFERENCE_PARENT_IDS=${REFERENCE_PARENT_IDS:-auto_from_ours_pair_details}"
+echo "REFERENCE_PARENT_ID_COL=${REFERENCE_PARENT_ID_COL}"
 
 args=(
   --config configs/hpc.yaml
@@ -64,6 +68,9 @@ if [ -n "${THRESHOLD_GRID}" ]; then
 fi
 if [ -n "${INSET_MAX_K}" ]; then
   args+=(--inset-max-k "${INSET_MAX_K}")
+fi
+if [ -n "${REFERENCE_PARENT_IDS}" ]; then
+  args+=(--reference-parent-ids "${REFERENCE_PARENT_IDS}" --reference-parent-id-col "${REFERENCE_PARENT_ID_COL}")
 fi
 
 python scripts/generate_gcf_style_recourse_report.py "${args[@]}"

@@ -105,6 +105,26 @@ class PairAggregationTests(unittest.TestCase):
         self.assertEqual(audit["num_valid_parent_candidate_pairs"], 1)
         self.assertEqual(audit["num_multi_match_parent_candidate_pairs"], 1)
 
+    def test_legacy_weak_flip_is_recomputed_as_teacher_strict(self) -> None:
+        candidates = [_candidate(1)]
+        rows = [
+            {
+                "method": "globalgce_frequency_top20",
+                "parent_id": "p1",
+                "candidate_id": "1",
+                "label": "1",
+                "pred_before": "0",
+                "pred_after": "0",
+                "cf_flip": "true",
+                "distance": "0.01",
+            }
+        ]
+        _parents, recourse, audit, _methods = report.aggregate_detail_rows(
+            rows, candidates=candidates
+        )
+        self.assertEqual(recourse, {})
+        self.assertEqual(audit["strict_flip_mismatch_rows"], 1)
+
 
 class CandidateRankingTests(unittest.TestCase):
     def test_rank_column_controls_order_instead_of_file_order(self) -> None:
@@ -158,6 +178,43 @@ class PrefixMetricTests(unittest.TestCase):
         metrics = report.compute_prefix_metrics(self.run, k=2, threshold=0.12)
         self.assertAlmostEqual(metrics["covered_parent_median_cost"], 0.1)
         self.assertLessEqual(metrics["covered_parent_median_cost"], 0.12)
+        self.assertEqual(
+            metrics["theta_covered_conditional_median_cost"],
+            metrics["covered_parent_median_cost"],
+        )
+
+    def test_table_uses_exact_theta_even_when_plot_grid_does_not_contain_it(self) -> None:
+        theta = 0.12
+        grid = report.build_threshold_grid("0,0.1,0.2", minimum=0.0, maximum=1.0, points=2)
+        self.assertNotIn(theta, grid.tolist())
+        plotting_grid = report.include_exact_threshold(grid, theta)
+        self.assertIn(theta, plotting_grid.tolist())
+        table = report._table_rows([self.run], k=2, theta=theta)[0]
+        direct = report.compute_prefix_metrics(self.run, k=2, threshold=theta)
+        self.assertEqual(table["Coverage"], direct["coverage"])
+        self.assertEqual(
+            table["Theta-covered conditional median cost"],
+            direct["covered_parent_median_cost"],
+        )
+
+
+class ParentCohortTests(unittest.TestCase):
+    def test_same_count_but_different_parent_ids_fails(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing 1 reference parent IDs"):
+            report.validate_reference_parent_set(
+                ["p1", "p3"],
+                ["p1", "p2"],
+                source=Path("synthetic.csv"),
+            )
+
+    def test_extra_parent_ids_are_allowed_for_explicit_reference_filter(self) -> None:
+        result = report.validate_reference_parent_set(
+            ["p1", "p2", "extra"],
+            ["p1", "p2"],
+            source=Path("synthetic.csv"),
+        )
+        self.assertEqual(result["extra_ids"], ["extra"])
+        self.assertFalse(result["exact_set_match"])
 
 
 class ThresholdAndBootstrapTests(unittest.TestCase):
