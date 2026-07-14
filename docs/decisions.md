@@ -6,6 +6,43 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-14] Audit GlobalGCE Frequency-Top20 from saved Node-FGW artifacts
+
+### Background
+GlobalGCE Frequency-Top20 shows plateaus and jumps in prefix-K coverage. Such a
+shape can be caused by candidate marginal coverage, but it can also expose a
+stale weak-flip artifact, rank drift, or inconsistent post-processing. The
+saved pair details already contain all required Node-FGW distances, so an audit
+must not recompute MolCLR embeddings or FGW transport.
+
+### Decision
+Add a read-only audit that verifies teacher-strict flip, candidate order,
+frequency provenance, prefix/threshold monotonicity, exact-theta consistency,
+fullgraph evaluation semantics, and per-rank marginal coverage. It reads the
+external Frequency-Top20 order and never ranks candidates by FGW.
+
+The report metric previously called `Conditional median cost` is the median
+best strict-recourse distance over parents with any finite strict recourse; it
+is not conditioned on `distance <= theta`. Keep its compatibility field, but
+label it `Applicable-parent median cost`, add a distinct
+`Covered-parent median cost`, and assert that the latter cannot exceed theta.
+Likewise, label applicability as `Strict-recourse applicable rate` so it is not
+confused with subgraph match applicability or teacher-target parent rate.
+
+### Consequences
+- Existing evaluator outputs, Node-FGW distances, caches, and candidate ranks
+  remain unchanged.
+- Historical tables using the ambiguous labels remain reproducible but are
+  identified by the audit as reporting-label issues.
+- Frequency-ranked candidates may legitimately produce coverage plateaus;
+  they are accepted as data-driven only after strict-flip, order, and summary
+  consistency checks pass.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-14] Generate paper-style recourse reports without reevaluating candidates
 
 ### Background

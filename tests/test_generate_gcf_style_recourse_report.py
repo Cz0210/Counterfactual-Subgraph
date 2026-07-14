@@ -151,7 +151,13 @@ class PrefixMetricTests(unittest.TestCase):
         metrics = report.compute_prefix_metrics(self.run, k=2, threshold=1.0)
         self.assertTrue(math.isinf(metrics["median_cost"]))
         self.assertAlmostEqual(metrics["conditional_median_cost"], 0.15)
+        self.assertAlmostEqual(metrics["applicable_parent_median_cost"], 0.15)
         self.assertAlmostEqual(metrics["applicable_rate"], 0.5)
+
+    def test_covered_parent_median_is_conditioned_by_threshold(self) -> None:
+        metrics = report.compute_prefix_metrics(self.run, k=2, threshold=0.12)
+        self.assertAlmostEqual(metrics["covered_parent_median_cost"], 0.1)
+        self.assertLessEqual(metrics["covered_parent_median_cost"], 0.12)
 
 
 class ThresholdAndBootstrapTests(unittest.TestCase):

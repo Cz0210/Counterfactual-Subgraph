@@ -572,8 +572,16 @@ def compute_prefix_metrics(run: MethodRun, *, k: int, threshold: float) -> dict[
     all_distances = list(distances.values())
     finite = [distance for distance in all_distances if math.isfinite(distance)]
     covered = [parent_id for parent_id, distance in distances.items() if distance <= float(threshold)]
+    covered_distances = [distances[parent_id] for parent_id in covered]
     covered_drops = [drops[parent_id] for parent_id in covered if drops[parent_id] is not None]
     denominator = len(run.parent_ids)
+    applicable_parent_median_cost = _median(finite)
+    covered_parent_median_cost = _median(covered_distances)
+    if covered_distances and covered_parent_median_cost > float(threshold) + 1e-12:
+        raise AssertionError(
+            "Covered-parent median cost exceeds its conditioning threshold: "
+            f"method={run.display_name} median={covered_parent_median_cost} threshold={threshold}"
+        )
     return {
         "method": run.display_name,
         "k": int(k),
@@ -581,8 +589,14 @@ def compute_prefix_metrics(run: MethodRun, *, k: int, threshold: float) -> dict[
         "coverage": len(covered) / denominator if denominator else 0.0,
         "num_covered": len(covered),
         "median_cost": _median(all_distances),
-        "conditional_median_cost": _median(finite),
+        # Compatibility alias retained for existing readers. Its historical
+        # conditioning set is all strict-recourse-applicable parents, not only
+        # parents covered at the current threshold.
+        "conditional_median_cost": applicable_parent_median_cost,
+        "applicable_parent_median_cost": applicable_parent_median_cost,
+        "covered_parent_median_cost": covered_parent_median_cost,
         "applicable_rate": len(finite) / denominator if denominator else 0.0,
+        "strict_recourse_applicable_rate": len(finite) / denominator if denominator else 0.0,
         "mean_cf_drop_among_covered": (
             float(sum(covered_drops) / len(covered_drops)) if covered_drops else float("nan")
         ),
@@ -701,8 +715,9 @@ def _table_rows(runs: Sequence[MethodRun], *, k: int, theta: float) -> list[dict
             "Coverage": metrics["coverage"],
             "Num covered": metrics["num_covered"],
             "Median cost": metrics["median_cost"],
-            "Conditional median cost": metrics["conditional_median_cost"],
-            "Applicable rate": metrics["applicable_rate"],
+            "Applicable-parent median cost": metrics["applicable_parent_median_cost"],
+            "Covered-parent median cost": metrics["covered_parent_median_cost"],
+            "Strict-recourse applicable rate": metrics["strict_recourse_applicable_rate"],
             "Mean CFDrop among covered": metrics["mean_cf_drop_among_covered"],
             "Flip rate among covered": metrics["flip_rate_among_covered"],
         }
@@ -881,8 +896,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "Coverage",
         "Num covered",
         "Median cost",
-        "Conditional median cost",
-        "Applicable rate",
+        "Applicable-parent median cost",
+        "Covered-parent median cost",
+        "Strict-recourse applicable rate",
         "Mean CFDrop among covered",
         "Flip rate among covered",
     ]
@@ -905,7 +921,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "num_covered",
         "median_cost",
         "conditional_median_cost",
+        "applicable_parent_median_cost",
+        "covered_parent_median_cost",
         "applicable_rate",
+        "strict_recourse_applicable_rate",
         "mean_cf_drop_among_covered",
         "flip_rate_among_covered",
     ]
