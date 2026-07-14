@@ -6,6 +6,38 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-14] Generate paper-style recourse reports without reevaluating candidates
+
+### Background
+The four final MolCLR-Node-FGW runs already contain teacher-strict pair details
+for externally selected Top20 candidate sets. Reusing evaluator summaries alone
+cannot produce prefix-K curves, and ranking candidates by their measured FGW
+distance during reporting would leak the evaluation metric back into selection.
+
+### Decision
+Add a read-only GCFExplainer-style reporting entrypoint that restores each
+candidate order from its recorded external selector file, validates exactly 20
+unique ranked candidates and no evaluator-side selection, and aggregates Ours
+match instances to the minimum finite strict-flip distance for each
+parent-candidate pair. The report uses all 1283 parents as the denominator,
+represents unavailable unconditional recourse cost as positive infinity, and
+uses one shared absolute-threshold grid and paired parent-bootstrap indices for
+all four methods.
+
+### Consequences
+- Existing MolCLR embeddings, FGW distances, caches, strict-flip semantics, and
+  candidate sets remain untouched.
+- Prefix-K and threshold curves are reproducible from final artifacts alone.
+- Candidate selection remains external to evaluation and reporting; FGW values
+  never determine candidate rank.
+- The same reporting implementation can be reused for another distance line by
+  supplying four run paths, a distance label, and a table prefix.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-12] Filter legal GCF-HIVCSV molecules before greedy Top-K export
 
 ### Background
