@@ -333,6 +333,100 @@ def _canonicalize(smiles: str) -> str:
     return normalized
 
 
+def _parent_smiles_by_id(
+    rows: Sequence[dict[str, str]],
+    *,
+    method: str,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for row in rows:
+        if _text(row.get("method")) != method:
+            continue
+        parent_id = _text(row.get("parent_id"))
+        canonical = _canonicalize(_text(row.get("parent_smiles")))
+        if not parent_id or not canonical:
+            continue
+        previous = result.get(parent_id)
+        if previous is not None and previous != canonical:
+            raise ValueError(
+                f"Parent {parent_id!r} has inconsistent SMILES for method {method!r}"
+            )
+        result[parent_id] = canonical
+    return result
+
+
+def load_reference_from_ours_run_with_crosswalk(
+    run_dir: Path,
+    *,
+    current_rows: Sequence[dict[str, str]],
+    current_method: str,
+) -> tuple[tuple[str, ...], dict[str, Any], list[dict[str, Any]]]:
+    """Load an explicitly requested Ours cohort into the current ID namespace."""
+
+    source_ids, metadata = load_reference_from_ours_run(run_dir)
+    source_path = Path(metadata["source_path"])
+    _source_fields, source_rows = _read_csv(source_path)
+    source_method = str(metadata["method_filter"])
+    source_smiles = _parent_smiles_by_id(source_rows, method=source_method)
+    current_smiles = _parent_smiles_by_id(current_rows, method=current_method)
+    current_ids = {
+        _text(row.get("parent_id"))
+        for row in current_rows
+        if _text(row.get("method")) == current_method and _text(row.get("parent_id"))
+    }
+    current_by_smiles: dict[str, set[str]] = defaultdict(set)
+    for parent_id, canonical in current_smiles.items():
+        current_by_smiles[canonical].add(parent_id)
+
+    mapped_ids: list[str] = []
+    crosswalk_rows: list[dict[str, Any]] = []
+    for source_id in source_ids:
+        canonical = source_smiles.get(source_id, "")
+        matches = sorted(current_by_smiles.get(canonical, ()), key=_natural_key) if canonical else []
+        if len(matches) == 1:
+            target_id = matches[0]
+            match_type = "canonical_smiles"
+        elif len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous parent crosswalk for Ours parent {source_id!r}: "
+                f"canonical_smiles={canonical!r} current_ids={matches[:10]}"
+            )
+        elif not canonical and source_id in current_ids:
+            target_id = source_id
+            match_type = "exact_parent_id_without_smiles"
+        else:
+            raise ValueError(
+                f"Cannot map Ours parent {source_id!r} into current GlobalGCE namespace; "
+                f"canonical_smiles={canonical!r}"
+            )
+        mapped_ids.append(target_id)
+        crosswalk_rows.append(
+            {
+                "parent_id": target_id,
+                "source_ours_parent_id": source_id,
+                "parent_smiles": canonical,
+                "canonical_smiles": canonical,
+                "match_type": match_type,
+            }
+        )
+
+    if len(set(mapped_ids)) != len(mapped_ids):
+        raise ValueError("Ours-to-GlobalGCE parent crosswalk is not one-to-one")
+    ordered = tuple(sorted(mapped_ids, key=_natural_key))
+    metadata.update(
+        {
+            "source_kind": "explicit_auto_reference_from_ours_with_crosswalk",
+            "source_ours_run": str(run_dir),
+            "target_parent_id_namespace": "current_globalgce_run",
+            "crosswalk_applied": True,
+            "crosswalk_match_counts": dict(
+                Counter(row["match_type"] for row in crosswalk_rows)
+            ),
+        }
+    )
+    return ordered, metadata, crosswalk_rows
+
+
 def _smiles_from_row(row: dict[str, Any]) -> str:
     for field in (
         "candidate_smiles",
@@ -1459,7 +1553,9 @@ def render_report(summary: dict[str, Any]) -> str:
 
 
 def _parse_specs(raw_specs: Sequence[str]) -> dict[str, str]:
-    specs = dict(DEFAULT_COMPARISON_RUNS)
+    # These are data inputs, not display defaults. Only paths explicitly
+    # supplied by the caller may be opened by the audit.
+    specs: dict[str, str] = {}
     for raw in raw_specs:
         if "=" not in raw:
             raise ValueError(f"--comparison-run requires METHOD=PATH, got {raw!r}")
@@ -1495,25 +1591,52 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     method = choose_method(all_pair_rows, args.method_name, config)
     comparison_specs = _parse_specs(args.comparison_run)
     reference_parent_ids: tuple[str, ...] | None = None
+    reference_crosswalk_rows: list[dict[str, Any]] = []
     reference_metadata: dict[str, Any] = {
         "source_kind": "all_label_parent_diagnostic",
         "source_path": None,
         "parent_id_column": "parent_id",
         "num_reference_parents": None,
     }
-    if args.reference_parent_ids:
+    reference_parent_arg = _text(args.reference_parent_ids)
+    auto_reference_sentinel = "auto_from_final_ours_reference_run"
+    explicit_reference_path = bool(
+        reference_parent_arg and reference_parent_arg != auto_reference_sentinel
+    )
+    explicit_ours_comparison = "Ours" in comparison_specs
+    explicit_auto_reference = bool(
+        reference_parent_arg == auto_reference_sentinel
+        or args.auto_reference_from_ours
+        or args.reference_ours_run
+        or explicit_ours_comparison
+    )
+    if explicit_reference_path and (args.auto_reference_from_ours or args.reference_ours_run):
+        raise ValueError(
+            "Use either an explicit --reference-parent-ids CSV or an Ours auto-reference option, not both"
+        )
+    if explicit_reference_path:
         reference_parent_ids, reference_metadata = load_reference_parent_ids(
-            _resolve(args.reference_parent_ids),
+            _resolve(reference_parent_arg),
             parent_id_col=args.reference_parent_id_col,
         )
-    else:
-        ours_run = _resolve(comparison_specs["Ours"])
-        if (ours_run / "details" / "pair_details.csv").is_file():
-            reference_parent_ids, reference_metadata = load_reference_from_ours_run(ours_run)
-        else:
-            warnings.append(
-                "reference_parent_cohort_unavailable_running_all_label_parent_diagnostic"
+    elif explicit_auto_reference:
+        ours_path = (
+            _text(args.reference_ours_run)
+            or comparison_specs.get("Ours")
+            or DEFAULT_COMPARISON_RUNS["Ours"]
+        )
+        ours_run = _resolve(ours_path)
+        reference_parent_ids, reference_metadata, reference_crosswalk_rows = (
+            load_reference_from_ours_run_with_crosswalk(
+                ours_run,
+                current_rows=all_pair_rows,
+                current_method=method,
             )
+        )
+    else:
+        warnings.append(
+            "reference_parent_cohort_unavailable_running_all_label_parent_diagnostic"
+        )
     if reference_parent_ids is not None:
         reference_metadata["num_reference_parents"] = len(reference_parent_ids)
         expected_reference = int(args.expected_reference_parents)
@@ -1813,6 +1936,17 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     else:
         _write_csv(output_dir / "reference_parent_ids.csv", [], ["parent_id"])
     _write_csv(
+        output_dir / "reference_parent_crosswalk.csv",
+        reference_crosswalk_rows,
+        [
+            "parent_id",
+            "source_ours_parent_id",
+            "parent_smiles",
+            "canonical_smiles",
+            "match_type",
+        ],
+    )
+    _write_csv(
         output_dir / "globalgce_prefix_marginal_coverage.csv",
         prefix_rows,
         list(prefix_rows[0]) if prefix_rows else [],
@@ -1933,9 +2067,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reference-parent-ids",
         default=None,
-        help="CSV containing the exact final comparison parent IDs.",
+        help=(
+            "CSV containing exact current-namespace parent IDs, or the explicit "
+            "sentinel auto_from_final_ours_reference_run."
+        ),
     )
     parser.add_argument("--reference-parent-id-col", default="parent_id")
+    parser.add_argument(
+        "--auto-reference-from-ours",
+        action="store_true",
+        help="Explicitly request an Ours-run cohort and SMILES-based ID crosswalk.",
+    )
+    parser.add_argument(
+        "--reference-ours-run",
+        default=None,
+        help="Explicit Ours run used for reference cohort construction and crosswalk.",
+    )
     parser.add_argument("--expected-reference-parents", type=int, default=1283)
     parser.add_argument("--method-name", default=None)
     parser.add_argument("--target-label", type=int, default=1)

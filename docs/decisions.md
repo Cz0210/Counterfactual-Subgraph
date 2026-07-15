@@ -6,6 +6,35 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-15] Require explicit parent-cohort inputs in saved FGW audits
+
+### Background
+The GlobalGCE Frequency-Top20 audit populated an empty `--comparison-run`
+list with production output paths. As a result, an otherwise self-contained
+unit test could discover an unrelated 1283-parent Ours run and fail before it
+audited its two temporary parents.
+
+### Decision
+Treat comparison runs and reference cohorts strictly as data inputs: only open
+them when supplied explicitly through `--reference-parent-ids`,
+`--comparison-run Ours=...`, `--reference-ours-run`, or
+`--auto-reference-from-ours`. Without one of these inputs, audit the current
+run as an all-label-parent diagnostic and emit a warning. Explicit reference
+CSVs are already in the current GlobalGCE ID namespace; explicit Ours-run
+references are mapped into that namespace by a one-to-one canonical-SMILES
+crosswalk before missing-ID validation.
+
+### Consequences
+- Unit tests and ad hoc audits no longer depend on files under `outputs/hpc`.
+- Final 1283-parent audits retain their exact explicit crosswalk behavior.
+- No MolCLR embedding, FGW distance, strict-flip, ranking, coverage, or Table 2
+  calculation changes.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-14] Use one explicit parent-ID cohort and corrected strict flip for final FGW reports
 
 ### Background

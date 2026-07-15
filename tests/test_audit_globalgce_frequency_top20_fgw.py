@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,10 +37,12 @@ def _row(
     distance: float,
     recorded_flip: bool,
     method: str = "globalgce_frequency_top20",
+    parent_smiles: str | None = None,
 ) -> dict[str, str]:
     return {
         "method": method,
         "parent_id": parent,
+        "parent_smiles": parent_smiles or "",
         "candidate_id": candidate.candidate_id,
         "candidate_smiles": candidate.candidate_smiles,
         "label": "1",
@@ -50,6 +53,134 @@ def _row(
         "cf_drop": "0.4",
         "distance": str(distance),
     }
+
+
+def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _build_audit_fixture(
+    root: Path,
+    *,
+    parents: list[tuple[str, str]],
+) -> dict[str, Path]:
+    run_dir = root / "eval"
+    selector_dir = root / "selector"
+    report_dir = root / "report"
+    output_dir = root / "audit"
+    (run_dir / "details").mkdir(parents=True)
+    (run_dir / "combined").mkdir(parents=True)
+    selector_dir.mkdir()
+    report_dir.mkdir()
+    selected_rows = [
+        {
+            "rank": rank,
+            "candidate_id": f"c{rank}",
+            "candidate_smiles": "C" * rank,
+            "frequency": 21 - rank,
+            "graph_support": rank,
+        }
+        for rank in range(1, 21)
+    ]
+    selected_path = selector_dir / "selected_top20_for_eval.csv"
+    _write_csv(selected_path, selected_rows)
+    _write_csv(selector_dir / "selected_top20.csv", selected_rows)
+    _write_csv(selector_dir / "frequency_ranked_candidates.csv", selected_rows)
+    valid_rows: list[dict[str, object]] = []
+    for row in selected_rows:
+        for _occurrence in range(int(row["frequency"])):
+            valid_rows.append(
+                {
+                    "candidate_id": row["candidate_id"],
+                    "canonical_smiles": row["candidate_smiles"],
+                    "raw_index": len(valid_rows),
+                    "source_path": str(root / "globalgce_cfs_graphs.jsonl"),
+                }
+            )
+    valid_path = root / "valid_candidates.csv"
+    _write_csv(valid_path, valid_rows)
+    pair_rows = [
+        _row(
+            parent_id,
+            _candidate(rank, "C" * rank),
+            pred_before=1,
+            pred_after=0,
+            distance=rank / 1000.0,
+            recorded_flip=True,
+            parent_smiles=parent_smiles,
+        )
+        for parent_id, parent_smiles in parents
+        for rank in range(1, 21)
+    ]
+    _write_csv(run_dir / "details" / "pair_details.csv", pair_rows)
+    _write_csv(
+        run_dir / "combined" / "combined_threshold_summary.csv",
+        [
+            {
+                "method": "globalgce_frequency_top20",
+                "threshold": 0.0328,
+                "close_cf_coverage": 1.0,
+            }
+        ],
+    )
+    (run_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "fullgraph_method": "globalgce_frequency_top20",
+                "fullgraph_candidates_path": str(selected_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "cache_stats.json").write_text("{}", encoding="utf-8")
+    return {
+        "run_dir": run_dir,
+        "selected_path": selected_path,
+        "valid_path": valid_path,
+        "report_dir": report_dir,
+        "output_dir": output_dir,
+    }
+
+
+def _fixture_args(paths: dict[str, Path], *extra: str) -> object:
+    return audit.build_parser().parse_args(
+        [
+            "--run-dir",
+            str(paths["run_dir"]),
+            "--selected-top20",
+            str(paths["selected_path"]),
+            "--valid-candidates",
+            str(paths["valid_path"]),
+            "--report-dir",
+            str(paths["report_dir"]),
+            "--output-dir",
+            str(paths["output_dir"]),
+            "--method-name",
+            "globalgce_frequency_top20",
+            "--theta",
+            "0.0328",
+            *extra,
+        ]
+    )
+
+
+def _write_ours_reference_run(
+    run_dir: Path,
+    parents: list[tuple[str, str]],
+) -> None:
+    rows = [
+        {
+            "method": "ours_selected_subgraphs",
+            "parent_id": parent_id,
+            "parent_smiles": parent_smiles,
+        }
+        for parent_id, parent_smiles in parents
+    ]
+    _write_csv(run_dir / "details" / "pair_details.csv", rows)
 
 
 class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
@@ -287,6 +418,157 @@ class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["applicable_parent_median_cost"], 0.05)
         self.assertTrue(math.isinf(metrics["unconditional_median_cost"]))
 
+    def test_default_production_ours_path_is_not_read_without_explicit_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _build_audit_fixture(
+                root,
+                parents=[("p1", "CCO"), ("p2", "CCN")],
+            )
+            fake_production = root / "production_ours"
+            _write_ours_reference_run(fake_production, [("0", "CCC")])
+            with mock.patch.object(
+                audit,
+                "DEFAULT_COMPARISON_RUNS",
+                {"Ours": str(fake_production)},
+            ):
+                summary = audit.run_audit(_fixture_args(paths))
+            self.assertEqual(
+                summary["reference_cohort"]["source_kind"],
+                "all_label_parent_diagnostic",
+            )
+            self.assertIsNone(summary["reference_cohort"]["source_path"])
+            self.assertEqual(summary["strict_flip_audit"]["num_parents"], 2)
+
+    def test_explicit_ours_comparison_enables_reference_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _build_audit_fixture(
+                root,
+                parents=[("g1", "CCO"), ("g2", "CCN")],
+            )
+            ours_run = root / "ours"
+            _write_ours_reference_run(ours_run, [("g1", "CCO"), ("g2", "CCN")])
+            summary = audit.run_audit(
+                _fixture_args(
+                    paths,
+                    "--comparison-run",
+                    f"Ours={ours_run}",
+                    "--expected-reference-parents",
+                    "2",
+                )
+            )
+            self.assertEqual(
+                summary["reference_cohort"]["source_kind"],
+                "explicit_auto_reference_from_ours_with_crosswalk",
+            )
+            self.assertEqual(summary["reference_cohort"]["num_reference_parents"], 2)
+
+    def test_explicit_reference_parent_csv_uses_target_namespace_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _build_audit_fixture(
+                root,
+                parents=[("g1", "CCO"), ("g2", "CCN")],
+            )
+            reference_path = root / "reference_parent_ids_globalgce_namespace.csv"
+            _write_csv(
+                reference_path,
+                [
+                    {
+                        "parent_id": "g1",
+                        "source_ours_parent_id": "0",
+                        "parent_smiles": "CCO",
+                        "canonical_smiles": "CCO",
+                        "match_type": "canonical_smiles",
+                    },
+                    {
+                        "parent_id": "g2",
+                        "source_ours_parent_id": "1",
+                        "parent_smiles": "CCN",
+                        "canonical_smiles": "CCN",
+                        "match_type": "canonical_smiles",
+                    },
+                ],
+            )
+            summary = audit.run_audit(
+                _fixture_args(
+                    paths,
+                    "--reference-parent-ids",
+                    str(reference_path),
+                    "--reference-parent-id-col",
+                    "parent_id",
+                    "--expected-reference-parents",
+                    "2",
+                )
+            )
+            self.assertEqual(
+                summary["reference_cohort"]["source_kind"],
+                "explicit_reference_parent_ids",
+            )
+            self.assertNotIn("crosswalk_applied", summary["reference_cohort"])
+            written = (paths["output_dir"] / "reference_parent_ids.csv").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("g1", written)
+            self.assertIn("g2", written)
+
+    def test_explicit_auto_reference_crosswalks_different_id_namespaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _build_audit_fixture(
+                root,
+                parents=[("raw10", "CCO"), ("raw20", "CCN")],
+            )
+            ours_run = root / "ours"
+            _write_ours_reference_run(ours_run, [("0", "CCO"), ("1", "CCN")])
+            summary = audit.run_audit(
+                _fixture_args(
+                    paths,
+                    "--auto-reference-from-ours",
+                    "--reference-ours-run",
+                    str(ours_run),
+                    "--expected-reference-parents",
+                    "2",
+                )
+            )
+            self.assertTrue(summary["reference_cohort"]["crosswalk_applied"])
+            self.assertEqual(summary["strict_flip_audit"]["num_parents"], 2)
+            crosswalk_rows = audit._read_csv(
+                paths["output_dir"] / "reference_parent_crosswalk.csv"
+            )[1]
+            self.assertEqual(
+                {row["parent_id"] for row in crosswalk_rows},
+                {"raw10", "raw20"},
+            )
+            self.assertEqual(
+                {row["source_ours_parent_id"] for row in crosswalk_rows},
+                {"0", "1"},
+            )
+
+    def test_no_reference_summary_source_paths_stay_inside_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = _build_audit_fixture(
+                root,
+                parents=[("p1", "CCO"), ("p2", "CCN")],
+            )
+            summary = audit.run_audit(_fixture_args(paths))
+            source_paths: list[str] = []
+
+            def collect(value: object) -> None:
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if key == "source_path" and isinstance(item, str) and item:
+                            source_paths.append(item)
+                        collect(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        collect(item)
+
+            collect(summary)
+            self.assertTrue(all(Path(path).is_relative_to(root) for path in source_paths))
+
     def test_end_to_end_audit_writes_required_outputs_without_distance_recompute(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -387,6 +669,16 @@ class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
             )
             summary = audit.run_audit(args)
             self.assertFalse(summary["distance_recomputed"])
+            self.assertEqual(summary["strict_flip_audit"]["num_parents"], 2)
+            self.assertEqual(summary["strict_flip_audit"]["num_pair_rows"], 40)
+            self.assertEqual(
+                summary["reference_cohort"]["source_kind"],
+                "all_label_parent_diagnostic",
+            )
+            self.assertIn(
+                "reference_parent_cohort_unavailable_running_all_label_parent_diagnostic",
+                summary["warnings"],
+            )
             self.assertTrue(summary["candidate_order_audit"]["rank_order_preserved"])
             confusion = json.loads(
                 (output_dir / "strict_flip_confusion.json").read_text(encoding="utf-8")
@@ -415,6 +707,7 @@ class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
                 "strict_flip_confusion.json",
                 "parent_cohort_audit.csv",
                 "reference_parent_ids.csv",
+                "reference_parent_crosswalk.csv",
                 "corrected_table2_metrics.csv",
                 "metric_definition_audit.json",
                 "applicable_rate_audit.csv",
