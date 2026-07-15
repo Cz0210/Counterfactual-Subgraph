@@ -6,6 +6,36 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-15] Plot and report theta-covered conditional FGW cost by default
+
+### Background
+The GCF-style report CSV already contained the correct theta-covered
+conditional median cost, but Figure 3 still plotted the unconditional
+`median_cost`. This made the plotted GlobalGCE K=10 cost exceed the displayed
+theta even though the correctly conditioned value was available.
+
+### Decision
+Make `theta_covered_conditional_median_cost` the explicit default for Figure 3
+and final Table 2. Record the selected Figure 3 value as `plotted_cost`, leave
+zero-coverage points as NaN, and assert that every finite default plotted/table
+cost is no greater than theta. Emit separate K=1..10 and K=1..20 Figure 3 files.
+The final `table2_global_recourse` artifact contains only method, coverage, and
+theta-covered conditional median cost; legacy audit-oriented fields remain in
+the compatibility CSV.
+
+### Consequences
+- Figure 3 and Table 2 now use the same strict-close conditioning event as
+  coverage at the stated theta.
+- Applicable-parent and unconditional medians remain available only through
+  explicit metric parameters or audit columns.
+- Figure 4 coverage, strict flip, parent cohort, candidate order, and all saved
+  Node-FGW distances are unchanged.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-15] Require explicit parent-cohort inputs in saved FGW audits
 
 ### Background

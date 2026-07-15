@@ -198,6 +198,145 @@ class PrefixMetricTests(unittest.TestCase):
         )
 
 
+class Figure3CostSelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source_row = {
+            "method": "GlobalGCE",
+            "k": 10,
+            "theta": 0.0328,
+            "coverage": 0.042868277474668745,
+            "num_covered": 55,
+            "median_cost": 0.04677763864948642,
+            "applicable_parent_median_cost": 0.04504489141648487,
+            "theta_covered_conditional_median_cost": 0.030951724750759534,
+        }
+
+    def test_default_figure3_cost_is_theta_covered_conditional_median(self) -> None:
+        row = report.add_figure3_plotted_cost([self.source_row])[0]
+        self.assertEqual(
+            row["plotted_cost_metric"],
+            "theta_covered_conditional_median_cost",
+        )
+        self.assertAlmostEqual(row["plotted_cost"], 0.030951724750759534)
+
+    def test_explicit_median_cost_is_used_only_when_requested(self) -> None:
+        row = report.add_figure3_plotted_cost(
+            [self.source_row],
+            cost_metric="median_cost",
+        )[0]
+        self.assertEqual(row["plotted_cost_metric"], "median_cost")
+        self.assertAlmostEqual(row["plotted_cost"], 0.04677763864948642)
+
+    def test_no_covered_parent_produces_nan_without_fallback(self) -> None:
+        source = {**self.source_row, "num_covered": 0}
+        row = report.add_figure3_plotted_cost(
+            [source],
+            cost_metric="median_cost",
+        )[0]
+        self.assertTrue(math.isnan(row["plotted_cost"]))
+
+    def test_default_finite_cost_must_not_exceed_theta(self) -> None:
+        source = {
+            **self.source_row,
+            "theta_covered_conditional_median_cost": 0.04,
+        }
+        with self.assertRaisesRegex(AssertionError, "exceeds theta"):
+            report.add_figure3_plotted_cost([source])
+
+    def test_figure3_writes_explicit_k10_and_k20_versions(self) -> None:
+        rows = report.add_figure3_plotted_cost(
+            [
+                {
+                    **self.source_row,
+                    "method": "Ours",
+                    "k": k,
+                    "num_covered": 1,
+                    "coverage": k / 20.0,
+                    "theta_covered_conditional_median_cost": 0.02,
+                }
+                for k in range(1, 21)
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            report.write_figure3_plots(
+                rows,
+                output_dir=output,
+                bases=["figure3_fgw_coverage_cost_vs_k"],
+                distance_label="MolCLR-Node-FGW",
+                theta=0.0328,
+                cost_metric="theta_covered_conditional_median_cost",
+                inset_max_k=10,
+            )
+            for suffix in ("1_10", "1_20"):
+                self.assertTrue(
+                    (output / f"figure3_fgw_coverage_cost_vs_k_{suffix}.png").is_file()
+                )
+                self.assertTrue(
+                    (output / f"figure3_fgw_coverage_cost_vs_k_{suffix}.pdf").is_file()
+                )
+
+
+class Table2SelectionTests(unittest.TestCase):
+    def test_default_table_contains_only_final_three_columns(self) -> None:
+        run = _run({("0", "1"): (0.01, 0.4)}, num_candidates=10)
+        rows = report._table_rows([run], k=10, theta=0.0328)
+        fields = report._table_fields(
+            cost_metric="theta_covered_conditional_median_cost",
+            include_applicable_rate=False,
+            include_median_cost=False,
+        )
+        self.assertEqual(
+            fields,
+            [
+                "Method",
+                "Coverage",
+                "Theta-covered conditional median cost",
+            ],
+        )
+        self.assertEqual(set(rows[0]), set(fields))
+        self.assertNotIn("Median cost", rows[0])
+        self.assertNotIn("Applicable rate", rows[0])
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            report._plot_table2(
+                rows,
+                fields=fields,
+                png=output / "table2_global_recourse.png",
+                pdf=output / "table2_global_recourse.pdf",
+            )
+            self.assertTrue((output / "table2_global_recourse.png").is_file())
+            self.assertTrue((output / "table2_global_recourse.pdf").is_file())
+
+    def test_globalgce_k10_regression_values(self) -> None:
+        expected_cost = 0.030951724750759534
+        recourse = {
+            (str(parent_index), "1"): (expected_cost, 0.2)
+            for parent_index in range(55)
+        }
+        run = _run(recourse, num_parents=1283, num_candidates=10)
+        run.display_name = "GlobalGCE"
+        row = report._table_rows([run], k=10, theta=0.0328)[0]
+        self.assertAlmostEqual(row["Coverage"], 0.042868277474668745)
+        self.assertAlmostEqual(
+            row["Theta-covered conditional median cost"],
+            expected_cost,
+        )
+
+    def test_default_cli_metrics_are_theta_covered(self) -> None:
+        args = report.build_parser().parse_args([])
+        self.assertEqual(
+            args.figure3_cost_metric,
+            "theta_covered_conditional_median_cost",
+        )
+        self.assertEqual(
+            args.table_cost_metric,
+            "theta_covered_conditional_median_cost",
+        )
+        self.assertEqual(args.table_include_applicable_rate, 0)
+        self.assertEqual(args.table_include_median_cost, 0)
+
+
 class ParentCohortTests(unittest.TestCase):
     def test_same_count_but_different_parent_ids_fails(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing 1 reference parent IDs"):
