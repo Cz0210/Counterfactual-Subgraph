@@ -47,6 +47,25 @@ def canonical_pair_key(
     return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
 
 
+def canonical_symmetric_distance_key(
+    *,
+    distance_namespace: str,
+    canonical_smiles_a: str,
+    canonical_smiles_b: str,
+    parameters: dict[str, Any],
+) -> str:
+    """Build a symmetric key for a distance-specific parameter namespace."""
+
+    left, right = sorted((str(canonical_smiles_a), str(canonical_smiles_b)))
+    payload = {
+        "distance_namespace": str(distance_namespace),
+        "canonical_smiles_a": left,
+        "canonical_smiles_b": right,
+        "parameters": dict(parameters),
+    }
+    return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
 @dataclass
 class DistanceCacheStats:
     hits: int = 0
@@ -64,8 +83,12 @@ class SQLiteDistanceCache:
     def __init__(self, path: str | Path = DEFAULT_DISTANCE_CACHE_PATH) -> None:
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
-        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn = sqlite3.connect(str(self.path), timeout=60.0)
+        self.conn.execute("PRAGMA busy_timeout=60000;")
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.DatabaseError:
+            self.conn.execute("PRAGMA journal_mode=DELETE;")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS distances (
@@ -109,18 +132,22 @@ class SQLiteDistanceCache:
         now = datetime.now(timezone.utc).isoformat()
         payload = dict(metadata or {})
         payload.setdefault("created_at", now)
-        self.conn.execute(
-            """
-            INSERT INTO distances(key, distance_type, value, metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                metadata_json = excluded.metadata_json,
-                updated_at = excluded.updated_at
-            """,
-            (str(key), str(distance_type), float(value), _json_dumps(payload), now, now),
-        )
-        self.conn.commit()
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO distances(key, distance_type, value, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (str(key), str(distance_type), float(value), _json_dumps(payload), now, now),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def stats_dict(self) -> dict[str, Any]:
         return {
@@ -136,4 +163,5 @@ __all__ = [
     "DistanceCacheStats",
     "SQLiteDistanceCache",
     "canonical_pair_key",
+    "canonical_symmetric_distance_key",
 ]

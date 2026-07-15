@@ -4800,3 +4800,32 @@ generated fragment itself looks label-associated.
 
 ### Status
 Accepted
+## [2026-07-15] Use exact MolCLR node Wasserstein as the primary learned CCRCov distance
+
+### Background
+Graph-level pooled MolCLR distance can hide local correspondence, while the
+existing Node-FGW line mixes learned node features with an explicit
+shortest-path structure term. The final comparison needs a primary node-feature
+transport line and a separately named structure-aware ablation.
+
+### Decision
+Use exact uniform-mass `ot.emd2` over MolCLR node cosine costs as
+`MolCLR-Node-Wasserstein`. Keep Node-FGW (`lambda=0.5`) as an ablation. Share a
+structure-independent v2 node embedding cache, but use independent symmetric
+pair-cache namespaces. Calibrate thresholds from Ours only and use the resulting
+absolute thresholds unchanged for every final baseline. Candidate selection is
+external; the evaluator never changes Top20 order and does not compute
+redundancy.
+
+### Consequences
+- WNode does not call shortest-path, GW/FGW, Sinkhorn, or networkx GED.
+- Partial output now has a fingerprinted completed-pair resume contract.
+- GCF-style reporting continues to aggregate match instances before Top-K
+  prefix evaluation and can explicitly plot finite strict-recourse conditional
+  median cost.
+- Baseline training and candidate generation remain unchanged.
+
+### Status
+Accepted
+
+---

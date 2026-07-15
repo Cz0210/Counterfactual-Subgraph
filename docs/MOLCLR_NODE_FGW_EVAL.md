@@ -59,8 +59,10 @@ scripts/slurm/molclr_node_fgw_eval_ccrcov_smoke.sh
 
 The evaluator caches:
 
-- SMILES -> MolCLR node embedding matrix `H`;
-- SMILES -> normalized structure distance matrix `D`;
+- SMILES -> MolCLR node embedding matrix `H` in the shared, structure-independent
+  v2 node cache;
+- normalized structure distance matrix `D` in process memory for the selected
+  `structure_mode`;
 - pairwise MolCLR Node-FGW distances.
 
 Default cache paths:
@@ -70,6 +72,7 @@ outputs/hpc/cache/molclr_node_embeddings/
 outputs/hpc/cache/distance_cache/molclr_node_fgw_v1.sqlite
 ```
 
+The shared node embedding key does not contain `structure_mode` or FGW lambda.
 The SQLite pairwise cache uses symmetric sha256 keys, so `(A,B)` and `(B,A)`
 share one cached distance.
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import time
 from dataclasses import dataclass
@@ -12,21 +10,18 @@ from typing import Any
 
 import numpy as np
 
-from src.embeddings.molclr_gnn_embedding import (
-    MolCLREmbeddingError,
-    load_molclr_model,
-    smiles_to_molclr_data,
-)
+from src.embeddings.molclr_gnn_embedding import MolCLREmbeddingError
 from src.eval.distance_cache import DEFAULT_DISTANCE_CACHE_PATH, SQLiteDistanceCache, canonical_pair_key
-
-try:  # pragma: no cover - runtime dependency
-    from rdkit import Chem
-except Exception:  # pragma: no cover
-    Chem = None
+from src.eval.molclr_node_embeddings import (
+    DEFAULT_NODE_EMB_CACHE_DIR,
+    MolCLRNodeEmbedder as _SharedMolCLRNodeEmbedder,
+    MolCLRNodeEmbeddingStats,
+    atom_numbers_for_smiles,
+    canonicalize_smiles,
+)
 
 
 NODE_FGW_VERSION = "molclr_node_fgw_v1"
-DEFAULT_NODE_EMB_CACHE_DIR = "outputs/hpc/cache/molclr_node_embeddings"
 
 
 @dataclass(frozen=True)
@@ -45,17 +40,7 @@ class NodeFGWConfig:
     node_emb_cache_dir: str | Path = DEFAULT_NODE_EMB_CACHE_DIR
 
 
-@dataclass
-class NodeFGWStats:
-    node_embedding_cache_hits: int = 0
-    node_embedding_cache_misses: int = 0
-    num_nan_distances: int = 0
-    num_invalid_smiles: int = 0
-
-    @property
-    def node_embedding_cache_hit_rate(self) -> float:
-        total = self.node_embedding_cache_hits + self.node_embedding_cache_misses
-        return float(self.node_embedding_cache_hits / total) if total else 0.0
+NodeFGWStats = MolCLRNodeEmbeddingStats
 
 
 @dataclass
@@ -70,38 +55,15 @@ class MoleculeNodeData:
         return int(self.H.shape[0])
 
 
-def canonicalize_smiles(smiles: str) -> str | None:
-    if Chem is None:
-        return None
-    text = str(smiles or "").strip()
-    if not text:
-        return None
-    mol = Chem.MolFromSmiles(text)
-    if mol is None or mol.GetNumAtoms() <= 0:
-        return None
-    try:
-        Chem.SanitizeMol(mol)
-    except Exception:
-        return None
-    return Chem.MolToSmiles(mol, canonical=True)
-
-
-def atom_numbers_for_smiles(smiles: str) -> np.ndarray:
-    if Chem is None:
-        raise MolCLREmbeddingError("RDKit is required for atom-number extraction.")
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
-    return np.asarray([int(atom.GetAtomicNum()) for atom in mol.GetAtoms()], dtype=np.int64)
-
-
 def mol_to_structure_matrix(smiles: str, structure_mode: str = "shortest_path_unweighted") -> np.ndarray:
     """Return a normalized topological shortest-path distance matrix."""
 
     if structure_mode != "shortest_path_unweighted":
         raise ValueError(f"Unsupported structure_mode={structure_mode!r}")
-    if Chem is None:
-        raise MolCLREmbeddingError("RDKit is required to build structure distance matrices.")
+    try:
+        from rdkit import Chem
+    except ImportError as exc:  # pragma: no cover
+        raise MolCLREmbeddingError("RDKit is required to build structure distance matrices.") from exc
     mol = Chem.MolFromSmiles(str(smiles or "").strip())
     if mol is None:
         raise ValueError(f"RDKit could not parse SMILES: {smiles!r}")
@@ -140,137 +102,25 @@ def mol_to_structure_matrix(smiles: str, structure_mode: str = "shortest_path_un
     return matrix.astype(np.float32, copy=False)
 
 
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+class MolCLRNodeEmbedder(_SharedMolCLRNodeEmbedder):
+    """Backward-compatible FGW view that adds ``D`` to shared node embeddings."""
 
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    return str(value)
-
-
-class MolCLRNodeEmbedder:
-    """MolCLR GIN node embedding extractor with per-molecule NPZ cache."""
-
-    def __init__(
-        self,
-        *,
-        molclr_root: str | Path,
-        molclr_ckpt: str | Path,
-        node_emb_cache_dir: str | Path = DEFAULT_NODE_EMB_CACHE_DIR,
-        structure_mode: str = "shortest_path_unweighted",
-        encoder_type: str = "gin",
-        device: str = "cuda",
-    ) -> None:
-        self.molclr_root = Path(molclr_root).expanduser()
-        self.molclr_ckpt = Path(molclr_ckpt).expanduser()
-        self.node_emb_cache_dir = Path(node_emb_cache_dir).expanduser()
-        self.node_emb_cache_dir.mkdir(parents=True, exist_ok=True)
-        self.structure_mode = str(structure_mode)
-        self.encoder_type = str(encoder_type)
-        self.loaded = load_molclr_model(
-            molclr_root=self.molclr_root,
-            molclr_ckpt=self.molclr_ckpt,
-            encoder_type=self.encoder_type,
-            device=device,
-        )
-        self.stats = NodeFGWStats()
-
-    def cache_path(self, canonical_smiles: str) -> Path:
-        payload = json.dumps(
-            {
-                "canonical_smiles": canonical_smiles,
-                "molclr_ckpt": str(self.loaded.checkpoint_path),
-                "version": NODE_FGW_VERSION,
-                "structure_mode": self.structure_mode,
-                "encoder_type": self.encoder_type,
-            },
-            sort_keys=True,
-        )
-        return self.node_emb_cache_dir / f"{_sha256_text(payload)}.npz"
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._fgw_structure_cache: dict[str, np.ndarray] = {}
 
     def get(self, smiles: str) -> MoleculeNodeData:
-        canonical = canonicalize_smiles(smiles)
-        if canonical is None:
-            self.stats.num_invalid_smiles += 1
-            raise ValueError(f"Invalid SMILES for MolCLR node FGW: {smiles!r}")
-        path = self.cache_path(canonical)
-        if path.exists():
-            try:
-                loaded = np.load(path, allow_pickle=False)
-                self.stats.node_embedding_cache_hits += 1
-                return MoleculeNodeData(
-                    canonical_smiles=str(loaded["canonical_smiles"].item()),
-                    H=np.asarray(loaded["H"], dtype=np.float32),
-                    D=np.asarray(loaded["D"], dtype=np.float32),
-                    atom_numbers=np.asarray(loaded["atom_numbers"], dtype=np.int64),
-                )
-            except Exception:
-                path.unlink(missing_ok=True)
-
-        self.stats.node_embedding_cache_misses += 1
-        H = self._compute_node_embeddings(canonical)
-        D = mol_to_structure_matrix(canonical, self.structure_mode)
-        atoms = atom_numbers_for_smiles(canonical)
-        if H.shape[0] != atoms.shape[0] or D.shape != (atoms.shape[0], atoms.shape[0]):
-            raise MolCLREmbeddingError(
-                "MolCLR node embedding order/count does not align with RDKit atom order: "
-                f"H={H.shape}, D={D.shape}, atoms={atoms.shape}"
-            )
-        np.savez_compressed(
-            path,
-            H=H.astype(np.float32, copy=False),
-            D=D.astype(np.float32, copy=False),
-            atom_numbers=atoms.astype(np.int64, copy=False),
-            canonical_smiles=np.asarray(canonical),
-            n_atoms=np.asarray(atoms.shape[0]),
+        embedding = super().get(smiles)
+        matrix = self._fgw_structure_cache.get(embedding.canonical_smiles)
+        if matrix is None:
+            matrix = mol_to_structure_matrix(embedding.canonical_smiles, self.legacy_structure_mode)
+            self._fgw_structure_cache[embedding.canonical_smiles] = matrix
+        return MoleculeNodeData(
+            canonical_smiles=embedding.canonical_smiles,
+            H=embedding.H,
+            D=matrix,
+            atom_numbers=embedding.atom_numbers,
         )
-        return MoleculeNodeData(canonical_smiles=canonical, H=H, D=D, atom_numbers=atoms)
-
-    def _compute_node_embeddings(self, canonical_smiles: str) -> np.ndarray:
-        torch = _require_torch()
-        Batch = _require_batch()
-        data = smiles_to_molclr_data(canonical_smiles)
-        batch = Batch.from_data_list([data]).to(self.loaded.device)
-        model = self.loaded.model
-        if not all(hasattr(model, name) for name in ("x_embedding1", "x_embedding2", "gnns", "batch_norms")):
-            raise MolCLREmbeddingError(
-                "Node-level MolCLR extraction currently requires a GIN/GINet-style model "
-                "with x_embedding1/x_embedding2/gnns/batch_norms. Graph-level embedding "
-                "fallback is intentionally not used for molclr_node_fgw."
-            )
-        with torch.inference_mode():
-            x = batch.x
-            edge_index = batch.edge_index
-            edge_attr = batch.edge_attr
-            h = model.x_embedding1(x[:, 0]) + model.x_embedding2(x[:, 1])
-            num_layer = int(getattr(model, "num_layer", len(model.gnns)))
-            for layer in range(num_layer):
-                h = model.gnns[layer](h, edge_index, edge_attr)
-                h = model.batch_norms[layer](h)
-                if layer != num_layer - 1:
-                    h = torch.relu(h)
-            h = h.detach().to(torch.float32)
-            if not torch.all(torch.isfinite(h)):
-                raise MolCLREmbeddingError("MolCLR node embeddings contained NaN or Inf.")
-            return h.cpu().numpy().astype(np.float32, copy=False)
-
-
-def _require_torch() -> Any:
-    try:
-        import torch
-    except ImportError as exc:  # pragma: no cover
-        raise MolCLREmbeddingError("MolCLR node FGW requires PyTorch.") from exc
-    return torch
-
-
-def _require_batch() -> Any:
-    try:
-        from torch_geometric.data import Batch
-    except ImportError as exc:  # pragma: no cover
-        raise MolCLREmbeddingError("MolCLR node FGW requires torch_geometric.") from exc
-    return Batch
 
 
 def compute_feature_cost_matrix(
@@ -359,7 +209,7 @@ class MolCLRNodeFGWDistanceProvider:
 
     def __init__(self, config: NodeFGWConfig) -> None:
         self.config = config
-        self.embedder = MolCLRNodeEmbedder(
+        self.embedder = _SharedMolCLRNodeEmbedder(
             molclr_root=config.molclr_root,
             molclr_ckpt=config.molclr_ckpt,
             node_emb_cache_dir=config.node_emb_cache_dir,
@@ -368,7 +218,15 @@ class MolCLRNodeFGWDistanceProvider:
             device=config.device,
         )
         self.cache = SQLiteDistanceCache(config.cache_db)
+        self._structure_cache: dict[str, np.ndarray] = {}
         self.started_at = time.time()
+
+    def _structure_matrix(self, canonical_smiles: str) -> np.ndarray:
+        matrix = self._structure_cache.get(canonical_smiles)
+        if matrix is None:
+            matrix = mol_to_structure_matrix(canonical_smiles, self.config.structure_mode)
+            self._structure_cache[canonical_smiles] = matrix
+        return matrix
 
     def distance(self, smiles_a: str, smiles_b: str) -> dict[str, Any]:
         result = self.compute_cached_fgw_distance(smiles_a, smiles_b)
@@ -402,8 +260,20 @@ class MolCLRNodeFGWDistanceProvider:
         if cached is not None:
             return {"distance": float(cached), "ok": True, "cache_hit": True, "metadata": metadata, "error": None}
         try:
-            left = self.embedder.get(canonical_a)
-            right = self.embedder.get(canonical_b)
+            left_embedding = self.embedder.get(canonical_a)
+            right_embedding = self.embedder.get(canonical_b)
+            left = MoleculeNodeData(
+                canonical_smiles=canonical_a,
+                H=left_embedding.H,
+                D=self._structure_matrix(canonical_a),
+                atom_numbers=left_embedding.atom_numbers,
+            )
+            right = MoleculeNodeData(
+                canonical_smiles=canonical_b,
+                H=right_embedding.H,
+                D=self._structure_matrix(canonical_b),
+                atom_numbers=right_embedding.atom_numbers,
+            )
             distance = compute_fgw_distance(
                 H1=left.H,
                 D1=left.D,
@@ -431,6 +301,9 @@ class MolCLRNodeFGWDistanceProvider:
         self.cache.set_distance(key, distance, metadata, distance_type="molclr_node_fgw")
         return {"distance": distance, "ok": True, "cache_hit": False, "metadata": metadata, "error": None}
 
+    def close(self) -> None:
+        self.cache.close()
+
     def stats_dict(self) -> dict[str, Any]:
         pair = self.cache.stats_dict()
         node = self.embedder.stats
@@ -439,6 +312,8 @@ class MolCLRNodeFGWDistanceProvider:
             "node_embedding_cache_hits": node.node_embedding_cache_hits,
             "node_embedding_cache_misses": node.node_embedding_cache_misses,
             "node_embedding_cache_hit_rate": node.node_embedding_cache_hit_rate,
+            "node_embedding_cache_legacy_hits": node.node_embedding_cache_legacy_hits,
+            "node_embedding_cache_migrations": node.node_embedding_cache_migrations,
             "num_nan_distances": node.num_nan_distances,
             "num_invalid_smiles": node.num_invalid_smiles,
             "runtime_seconds": float(time.time() - self.started_at),
@@ -459,6 +334,7 @@ __all__ = [
     "DEFAULT_NODE_EMB_CACHE_DIR",
     "NODE_FGW_VERSION",
     "MolCLRNodeEmbedder",
+    "MolCLRNodeEmbeddingStats",
     "MolCLRNodeFGWDistanceProvider",
     "MoleculeNodeData",
     "NodeFGWConfig",

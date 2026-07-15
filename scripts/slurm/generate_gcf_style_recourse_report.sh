@@ -30,11 +30,17 @@ BOOTSTRAP_SEED=${BOOTSTRAP_SEED:-0}
 THRESHOLD_GRID=${THRESHOLD_GRID:-}
 INSET_MAX_K=${INSET_MAX_K:-}
 FIGURE3_COST_METRIC=${FIGURE3_COST_METRIC:-theta_covered_conditional_median_cost}
+FIGURE3_COST_STAT=${FIGURE3_COST_STAT:-}
 TABLE_COST_METRIC=${TABLE_COST_METRIC:-theta_covered_conditional_median_cost}
+TABLE_COST_STAT=${TABLE_COST_STAT:-}
 TABLE_INCLUDE_APPLICABLE_RATE=${TABLE_INCLUDE_APPLICABLE_RATE:-0}
 TABLE_INCLUDE_MEDIAN_COST=${TABLE_INCLUDE_MEDIAN_COST:-0}
 REFERENCE_PARENT_IDS=${REFERENCE_PARENT_IDS:-}
 REFERENCE_PARENT_ID_COL=${REFERENCE_PARENT_ID_COL:-parent_id}
+OURS_RUN=${OURS_RUN:-}
+GLOBALGCE_RUN=${GLOBALGCE_RUN:-}
+CLEAR_RUN=${CLEAR_RUN:-}
+GCFEXPLAINER_RUN=${GCFEXPLAINER_RUN:-}
 
 echo "===== GCF-STYLE RECOURSE REPORT ====="
 echo "hostname=$(hostname)"
@@ -53,11 +59,17 @@ echo "BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES}"
 echo "BOOTSTRAP_SEED=${BOOTSTRAP_SEED}"
 echo "THRESHOLD_GRID=${THRESHOLD_GRID:-default_101_point_grid}"
 echo "FIGURE3_COST_METRIC=${FIGURE3_COST_METRIC}"
+echo "FIGURE3_COST_STAT=${FIGURE3_COST_STAT:-not_set}"
 echo "TABLE_COST_METRIC=${TABLE_COST_METRIC}"
+echo "TABLE_COST_STAT=${TABLE_COST_STAT:-not_set}"
 echo "TABLE_INCLUDE_APPLICABLE_RATE=${TABLE_INCLUDE_APPLICABLE_RATE}"
 echo "TABLE_INCLUDE_MEDIAN_COST=${TABLE_INCLUDE_MEDIAN_COST}"
 echo "REFERENCE_PARENT_IDS=${REFERENCE_PARENT_IDS:-auto_from_ours_pair_details}"
 echo "REFERENCE_PARENT_ID_COL=${REFERENCE_PARENT_ID_COL}"
+echo "OURS_RUN=${OURS_RUN:-built_in_default}"
+echo "GLOBALGCE_RUN=${GLOBALGCE_RUN:-built_in_default}"
+echo "CLEAR_RUN=${CLEAR_RUN:-built_in_default}"
+echo "GCFEXPLAINER_RUN=${GCFEXPLAINER_RUN:-built_in_default}"
 
 args=(
   --config configs/hpc.yaml
@@ -81,8 +93,24 @@ fi
 if [ -n "${INSET_MAX_K}" ]; then
   args+=(--inset-max-k "${INSET_MAX_K}")
 fi
+if [ -n "${FIGURE3_COST_STAT}" ]; then
+  args+=(--figure3-cost-stat "${FIGURE3_COST_STAT}")
+fi
+if [ -n "${TABLE_COST_STAT}" ]; then
+  args+=(--table-cost-stat "${TABLE_COST_STAT}")
+fi
 if [ -n "${REFERENCE_PARENT_IDS}" ]; then
   args+=(--reference-parent-ids "${REFERENCE_PARENT_IDS}" --reference-parent-id-col "${REFERENCE_PARENT_ID_COL}")
+fi
+if [ -n "${OURS_RUN}" ] || [ -n "${GLOBALGCE_RUN}" ] || [ -n "${CLEAR_RUN}" ] || [ -n "${GCFEXPLAINER_RUN}" ]; then
+  if [ -z "${OURS_RUN}" ] || [ -z "${GLOBALGCE_RUN}" ] || [ -z "${CLEAR_RUN}" ] || [ -z "${GCFEXPLAINER_RUN}" ]; then
+    echo "[ERROR] Set all four run directories when overriding built-in report runs." >&2
+    exit 1
+  fi
+  args+=(--run "Ours=${OURS_RUN}")
+  args+=(--run "GlobalGCE=${GLOBALGCE_RUN}")
+  args+=(--run "CLEAR=${CLEAR_RUN}")
+  args+=(--run "GCFExplainer=${GCFEXPLAINER_RUN}")
 fi
 
 python scripts/generate_gcf_style_recourse_report.py "${args[@]}"

@@ -290,11 +290,18 @@ def load_candidate_ranking(
             f"Selected candidate file must contain exactly {expected_top_k} rows; "
             f"found {len(rows)}: {path}"
         )
-    rank_present = any(_text(row.get("rank")) for row in rows)
+    rank_field = next(
+        (
+            field
+            for field in ("rank", "selection_rank", "candidate_rank")
+            if any(_text(row.get(field)) for row in rows)
+        ),
+        None,
+    )
     ranked: list[CandidateRank] = []
     smiles_fields = OURS_SMILES_FIELDS if ours else FULLGRAPH_SMILES_FIELDS
     for row_index, row in enumerate(rows):
-        rank = _as_int(row.get("rank")) if rank_present else row_index + 1
+        rank = _as_int(row.get(rank_field)) if rank_field else row_index + 1
         if rank is None:
             raise ValueError(f"Missing or invalid rank in selected candidate row {row_index}: {path}")
         smiles = next((_text(row.get(field)) for field in smiles_fields if _text(row.get(field))), "")
@@ -318,9 +325,9 @@ def load_candidate_ranking(
                 row_index=row_index,
             )
         )
-    if rank_present:
+    if rank_field:
         ranked.sort(key=lambda candidate: candidate.rank)
-        rank_source = "rank"
+        rank_source = rank_field
     else:
         rank_source = "row_order"
     expected_ranks = list(range(1, int(expected_top_k) + 1))
@@ -866,6 +873,26 @@ def _table_fields(
     return fields
 
 
+def _full_table2_rows(runs: Sequence[MethodRun], *, k: int, theta: float) -> list[dict[str, Any]]:
+    """Return the complete GCF-style audit table with explicit metric semantics."""
+
+    output: list[dict[str, Any]] = []
+    for run in runs:
+        metrics = compute_prefix_metrics(run, k=k, threshold=theta)
+        output.append(
+            {
+                "Method": run.display_name,
+                "K": int(k),
+                "Theta": float(theta),
+                "Coverage": metrics["coverage"],
+                "Median Cost": metrics["median_cost"],
+                "Conditional Median Cost": metrics["conditional_median_cost"],
+                "Applicable Rate": metrics["applicable_rate"],
+            }
+        )
+    return output
+
+
 def _display_number(value: Any, *, digits: int = 6) -> str:
     if isinstance(value, (int, np.integer)):
         return str(int(value))
@@ -998,6 +1025,8 @@ def _plot_figure3(
             f"Conditional median cost\n({distance_label}, distance <= theta)"
         )
         axes[1].axhline(float(theta), color="#666666", linestyle="--", linewidth=1.0)
+    elif cost_metric == "applicable_parent_median_cost":
+        axes[1].set_ylabel(f"Conditional median cost\n({distance_label})")
     else:
         axes[1].set_ylabel(f"{COST_METRIC_LABELS[cost_metric]}\n({distance_label})")
     axes[1].set_xlabel("Prefix K")
@@ -1138,6 +1167,18 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     if not output_dir.is_absolute():
         output_dir = REPO_ROOT / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    figure3_cost_metric = args.figure3_cost_metric
+    figure3_cost_stat = getattr(args, "figure3_cost_stat", None)
+    if figure3_cost_stat == "median":
+        figure3_cost_metric = "median_cost"
+    elif figure3_cost_stat == "conditional_median":
+        figure3_cost_metric = "applicable_parent_median_cost"
+    table_cost_metric = args.table_cost_metric
+    table_cost_stat = getattr(args, "table_cost_stat", None)
+    if table_cost_stat == "median":
+        table_cost_metric = "median_cost"
+    elif table_cost_stat == "conditional_median":
+        table_cost_metric = "applicable_parent_median_cost"
 
     preloaded_ours: MethodRun | None = None
     if args.reference_parent_ids:
@@ -1197,15 +1238,23 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         runs,
         k=int(args.k),
         theta=float(args.theta_star),
-        cost_metric=args.table_cost_metric,
+        cost_metric=table_cost_metric,
         include_applicable_rate=table_include_applicable_rate,
         include_median_cost=table_include_median_cost,
     )
     table_fields = _table_fields(
-        cost_metric=args.table_cost_metric,
+        cost_metric=table_cost_metric,
         include_applicable_rate=table_include_applicable_rate,
         include_median_cost=table_include_median_cost,
     )
+    if table_cost_stat == "conditional_median":
+        source_label = COST_METRIC_LABELS["applicable_parent_median_cost"]
+        for row in table_rows:
+            row["Conditional Median Cost"] = row.pop(source_label)
+        table_fields = [
+            "Conditional Median Cost" if field == source_label else field
+            for field in table_fields
+        ]
     table_global_bases = list(
         dict.fromkeys(
             (
@@ -1229,32 +1278,56 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         runs,
         k=int(args.k),
         theta=float(args.theta_star),
-        cost_metric=args.table_cost_metric,
+        cost_metric=table_cost_metric,
         include_applicable_rate=table_include_applicable_rate,
         include_median_cost=table_include_median_cost,
         include_audit_fields=True,
     )
     table_audit_fields = _table_fields(
-        cost_metric=args.table_cost_metric,
+        cost_metric=table_cost_metric,
         include_applicable_rate=table_include_applicable_rate,
         include_median_cost=table_include_median_cost,
         include_audit_fields=True,
     )
     table_compat_base = _prefixed(args.table_prefix, "table2_gcf_style_fgw")
+    full_table_rows = _full_table2_rows(runs, k=int(args.k), theta=float(args.theta_star))
+    full_table_fields = [
+        "Method", "K", "Theta", "Coverage", "Median Cost",
+        "Conditional Median Cost", "Applicable Rate",
+    ]
     _write_csv(
         output_dir / f"{table_compat_base}.csv",
-        table_audit_rows,
-        table_audit_fields,
+        full_table_rows,
+        full_table_fields,
     )
     _write_markdown_table(
         output_dir / f"{table_compat_base}.md",
-        table_rows,
-        table_fields,
+        full_table_rows,
+        full_table_fields,
     )
     _write_latex_table(
         output_dir / f"{table_compat_base}.tex",
-        table_rows,
-        table_fields,
+        full_table_rows,
+        full_table_fields,
+    )
+    compact_rows = [
+        {
+            "Method": row["Method"],
+            "Coverage": row["Coverage"],
+            "Conditional Median Cost": row["Conditional Median Cost"],
+        }
+        for row in full_table_rows
+    ]
+    compact_fields = ["Method", "Coverage", "Conditional Median Cost"]
+    compact_base = _prefixed(args.table_prefix, "table2_gcf_style_compact")
+    _write_csv(output_dir / f"{compact_base}.csv", compact_rows, compact_fields)
+    _write_markdown_table(output_dir / f"{compact_base}.md", compact_rows, compact_fields)
+    _write_latex_table(output_dir / f"{compact_base}.tex", compact_rows, compact_fields)
+    _plot_table2(
+        compact_rows,
+        fields=compact_fields,
+        png=output_dir / f"{compact_base}.png",
+        pdf=output_dir / f"{compact_base}.pdf",
     )
 
     k_rows: list[dict[str, Any]] = []
@@ -1263,7 +1336,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             k_rows.append({"distance_label": args.distance_label, **row})
     k_rows = add_figure3_plotted_cost(
         k_rows,
-        cost_metric=args.figure3_cost_metric,
+        cost_metric=figure3_cost_metric,
     )
     figure3_fields = [
         "method",
@@ -1295,7 +1368,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         bases=figure3_bases,
         distance_label=args.distance_label,
         theta=float(args.theta_star),
-        cost_metric=args.figure3_cost_metric,
+        cost_metric=figure3_cost_metric,
         inset_max_k=args.inset_max_k,
     )
 
@@ -1432,8 +1505,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "expected_top_k": int(args.max_k),
         "table_k": int(args.k),
         "theta_star": float(args.theta_star),
-        "figure3_cost_metric": args.figure3_cost_metric,
-        "table_cost_metric": args.table_cost_metric,
+        "figure3_cost_metric": figure3_cost_metric,
+        "figure3_cost_stat": figure3_cost_stat,
+        "table_cost_metric": table_cost_metric,
+        "table_cost_stat": table_cost_stat,
         "table_include_applicable_rate": table_include_applicable_rate,
         "table_include_median_cost": table_include_median_cost,
         "threshold_grid": threshold_grid.tolist(),
@@ -1515,9 +1590,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_THETA_COVERED_COST_METRIC,
     )
     parser.add_argument(
+        "--figure3-cost-stat",
+        choices=("median", "conditional_median"),
+        default=None,
+        help=(
+            "Compatibility selector: median maps to unconditional median_cost; "
+            "conditional_median maps to finite strict-recourse parents. When omitted, "
+            "--figure3-cost-metric retains its existing behavior."
+        ),
+    )
+    parser.add_argument(
         "--table-cost-metric",
         choices=tuple(COST_METRIC_LABELS),
         default=DEFAULT_THETA_COVERED_COST_METRIC,
+    )
+    parser.add_argument(
+        "--table-cost-stat",
+        choices=("median", "conditional_median"),
+        default=None,
+        help="Optional compatibility alias for the compact paper table cost statistic.",
     )
     parser.add_argument(
         "--table-include-applicable-rate",
@@ -1545,7 +1636,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"k={args.k}", flush=True)
     print(f"theta_star={args.theta_star}", flush=True)
     print(f"figure3_cost_metric={args.figure3_cost_metric}", flush=True)
+    print(f"figure3_cost_stat={args.figure3_cost_stat}", flush=True)
     print(f"table_cost_metric={args.table_cost_metric}", flush=True)
+    print(f"table_cost_stat={args.table_cost_stat}", flush=True)
     print(f"table_include_applicable_rate={args.table_include_applicable_rate}", flush=True)
     print(f"table_include_median_cost={args.table_include_median_cost}", flush=True)
     print(f"bootstrap_samples={args.bootstrap_samples}", flush=True)

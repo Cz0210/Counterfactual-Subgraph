@@ -7,7 +7,7 @@ import json
 import math
 import time
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from src.eval.close_counterfactual_coverage import (
     DETAIL_FIELDS,
@@ -540,14 +540,22 @@ def _evaluate_ours(
     distance_name: str,
     partial_path: Path,
     partial_every: int,
+    initial_details: Sequence[dict[str, Any]] | None = None,
+    completed_pair_keys: set[tuple[str, str]] | None = None,
+    checkpoint_callback: Callable[[list[dict[str, Any]], set[tuple[str, str]]], None] | None = None,
+    write_builtin_partial: bool = True,
 ) -> list[dict[str, Any]]:
-    details: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = [dict(row) for row in (initial_details or [])]
+    completed = set(completed_pair_keys or set())
     before_cache: dict[str, dict[str, Any]] = {}
     total_work = max(1, len(parents) * max(1, len(candidates)))
     work_done = 0
     for parent in parents:
         before = before_cache.setdefault(parent.smiles, predict_with_teacher(teacher, parent.smiles, parent.label))
         for candidate in candidates:
+            pair_key = (str(parent.parent_id), str(candidate.candidate_id))
+            if pair_key in completed:
+                continue
             work_done += 1
             base = _row_base(method="ours_selected_subgraphs", distance_type=distance_type, ged_mode=distance_name, parent=parent, candidate=candidate)
             deletions = hard_delete_substructure_any_match(parent.smiles, candidate.smiles)
@@ -555,11 +563,11 @@ def _evaluate_ours(
                 row = dict(base)
                 row.update({"p_before": before.get("p_label"), "pred_before": before.get("pred_label"), "error": "no_substructure_match"})
                 details.append(row)
-                continue
-            for deletion in deletions:
-                row = dict(base)
-                row.update(
-                    {
+            else:
+                for deletion in deletions:
+                    row = dict(base)
+                    row.update(
+                        {
                         "match": True,
                         "match_index": deletion.get("match_index"),
                         "match_atoms": deletion.get("match_atoms") or [],
@@ -576,33 +584,40 @@ def _evaluate_ours(
                         "atom_delete_ratio": deletion.get("atom_delete_ratio"),
                         "bond_delete_ratio": deletion.get("bond_delete_ratio"),
                         "error": deletion.get("error"),
-                    }
-                )
-                residual = str(deletion.get("residual_smiles") or "")
-                if deletion.get("delete_valid") and residual:
-                    after = predict_with_teacher(teacher, residual, parent.label)
-                    row.update(
-                        {
+                        }
+                    )
+                    residual = str(deletion.get("residual_smiles") or "")
+                    if deletion.get("delete_valid") and residual:
+                        after = predict_with_teacher(teacher, residual, parent.label)
+                        row.update(
+                            {
                             "p_after": after.get("p_label"),
                             "pred_after": after.get("pred_label"),
                             "cf_drop": (before.get("p_label") - after.get("p_label"))
                             if before.get("p_label") is not None and after.get("p_label") is not None
                             else None,
-                        }
-                    )
-                    row.update(
-                        teacher_flip_audit_fields(
-                            before.get("pred_label"),
-                            after.get("pred_label"),
-                            parent.label,
+                            }
                         )
-                    )
-                    _distance_row_update(row, provider=provider, parent_smiles=parent.smiles, action_smiles=residual, distance_type=distance_type)
-                details.append(row)
+                        row.update(
+                            teacher_flip_audit_fields(
+                                before.get("pred_label"),
+                                after.get("pred_label"),
+                                parent.label,
+                            )
+                        )
+                        _distance_row_update(row, provider=provider, parent_smiles=parent.smiles, action_smiles=residual, distance_type=distance_type)
+                    details.append(row)
+            completed.add(pair_key)
             if partial_every > 0 and work_done % int(partial_every) == 0:
-                _write_csv(partial_path, details, DETAIL_FIELDS)
+                if write_builtin_partial:
+                    _write_csv(partial_path, details, DETAIL_FIELDS)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(details, completed)
                 print(f"[PROGRESS] ours pairs={work_done}/{total_work} detail_rows={len(details)}", flush=True)
-    _write_csv(partial_path, details, DETAIL_FIELDS)
+    if write_builtin_partial:
+        _write_csv(partial_path, details, DETAIL_FIELDS)
+    if checkpoint_callback is not None:
+        checkpoint_callback(details, completed)
     return details
 
 
@@ -617,14 +632,22 @@ def _evaluate_gt_fullgraph(
     method: str,
     partial_path: Path,
     partial_every: int,
+    initial_details: Sequence[dict[str, Any]] | None = None,
+    completed_pair_keys: set[tuple[str, str]] | None = None,
+    checkpoint_callback: Callable[[list[dict[str, Any]], set[tuple[str, str]]], None] | None = None,
+    write_builtin_partial: bool = True,
 ) -> list[dict[str, Any]]:
-    details: list[dict[str, Any]] = []
+    details: list[dict[str, Any]] = [dict(row) for row in (initial_details or [])]
+    completed = set(completed_pair_keys or set())
     before_cache: dict[str, dict[str, Any]] = {}
     total_work = max(1, len(parents) * max(1, len(candidates)))
     work_done = 0
     for parent in parents:
         before = before_cache.setdefault(parent.smiles, predict_with_teacher(teacher, parent.smiles, parent.label))
         for candidate in candidates:
+            pair_key = (str(parent.parent_id), str(candidate.candidate_id))
+            if pair_key in completed:
+                continue
             work_done += 1
             row = _row_base(method=method, distance_type=distance_type, ged_mode=distance_name, parent=parent, candidate=candidate)
             row.update(
@@ -657,10 +680,17 @@ def _evaluate_gt_fullgraph(
             )
             _distance_row_update(row, provider=provider, parent_smiles=parent.smiles, action_smiles=candidate.smiles, distance_type=distance_type)
             details.append(row)
+            completed.add(pair_key)
             if partial_every > 0 and work_done % int(partial_every) == 0:
-                _write_csv(partial_path, details, DETAIL_FIELDS)
+                if write_builtin_partial:
+                    _write_csv(partial_path, details, DETAIL_FIELDS)
+                if checkpoint_callback is not None:
+                    checkpoint_callback(details, completed)
                 print(f"[PROGRESS] {method} pairs={work_done}/{total_work} detail_rows={len(details)}", flush=True)
-    _write_csv(partial_path, details, DETAIL_FIELDS)
+    if write_builtin_partial:
+        _write_csv(partial_path, details, DETAIL_FIELDS)
+    if checkpoint_callback is not None:
+        checkpoint_callback(details, completed)
     return details
 
 
