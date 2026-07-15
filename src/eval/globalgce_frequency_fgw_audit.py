@@ -52,6 +52,12 @@ DEFAULT_COMPARISON_RUNS = {
     ),
 }
 TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
+STRICT_CONFUSION_KEYS = (
+    "recorded_true_expected_true",
+    "recorded_true_expected_false",
+    "recorded_false_expected_true",
+    "recorded_false_expected_false",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +120,96 @@ def _as_int(value: Any) -> int | None:
     if number is None or not number.is_integer():
         return None
     return int(number)
+
+
+def normalize_strict_flip_confusion_payload(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one arithmetic-checked strict-flip confusion summary.
+
+    Historical audit JSONs stored the four confusion cells under ``confusion``
+    and sometimes omitted redundant totals. A complete matrix is sufficient to
+    recover those totals; callers should not treat the missing aliases as a
+    failed core experiment.
+    """
+
+    nested = payload.get("confusion")
+    nested_confusion = nested if isinstance(nested, dict) else {}
+    confusion: dict[str, int] = {}
+    for key in STRICT_CONFUSION_KEYS:
+        value = payload.get(key, nested_confusion.get(key))
+        parsed = _as_int(value)
+        if parsed is None or parsed < 0:
+            raise ValueError(f"Missing or invalid strict-flip confusion field: {key}")
+        confusion[key] = parsed
+
+    true_true = confusion["recorded_true_expected_true"]
+    true_false = confusion["recorded_true_expected_false"]
+    false_true = confusion["recorded_false_expected_true"]
+    false_false = confusion["recorded_false_expected_false"]
+    derived_total = true_true + true_false + false_true + false_false
+    derived_recorded_true = true_true + true_false
+    derived_expected_strict = true_true + false_true
+    derived_mismatch = true_false + false_true
+
+    aliases = {
+        "total_pair_rows": ("total_pair_rows", "num_pair_rows", "rows_after_reference_filter"),
+        "recorded_true_pairs": ("recorded_true_pairs", "recorded_cf_flip_pairs"),
+        "expected_strict_pairs": ("expected_strict_pairs", "expected_strict_flip_pairs"),
+        "mismatch_rows": ("mismatch_rows",),
+    }
+    derived = {
+        "total_pair_rows": derived_total,
+        "recorded_true_pairs": derived_recorded_true,
+        "expected_strict_pairs": derived_expected_strict,
+        "mismatch_rows": derived_mismatch,
+    }
+    warnings: list[str] = []
+    errors: list[str] = []
+    normalized_totals: dict[str, int] = {}
+    for canonical, candidate_keys in aliases.items():
+        provided_key = next((key for key in candidate_keys if key in payload), None)
+        provided_value = payload.get(provided_key) if provided_key is not None else None
+        if provided_key is None:
+            provided_key = next(
+                (key for key in candidate_keys if key in nested_confusion),
+                None,
+            )
+            provided_value = (
+                nested_confusion.get(provided_key) if provided_key is not None else None
+            )
+        if provided_key is None:
+            normalized_totals[canonical] = derived[canonical]
+            warnings.append(f"inferred_missing_field:{canonical}")
+            continue
+        parsed = _as_int(provided_value)
+        if parsed is None:
+            errors.append(f"invalid_field:{provided_key}")
+            normalized_totals[canonical] = derived[canonical]
+        else:
+            normalized_totals[canonical] = parsed
+            if parsed != derived[canonical]:
+                errors.append(
+                    f"arithmetic_mismatch:{provided_key}:provided={parsed}:derived={derived[canonical]}"
+                )
+
+    status = "FAIL" if errors else ("PASS_WITH_WARNINGS" if warnings else "PASS")
+    result = {
+        **confusion,
+        **normalized_totals,
+        # Preserve legacy names while making the canonical names unambiguous.
+        "recorded_cf_flip_pairs": normalized_totals["recorded_true_pairs"],
+        "expected_strict_flip_pairs": normalized_totals["expected_strict_pairs"],
+        "consistency_status": status,
+        "consistency_warnings": warnings,
+        "consistency_errors": errors,
+    }
+    if not errors:
+        assert true_true + true_false + false_true + false_false == result["total_pair_rows"]
+        assert true_true + true_false == result["recorded_true_pairs"]
+        assert true_true + false_true == result["expected_strict_pairs"]
+        assert true_false + false_true == result["mismatch_rows"]
+    return result
 
 
 def _normalize_id(value: Any) -> str:
@@ -444,12 +540,7 @@ def audit_pairs(
             finite_strict[candidate.candidate_id][parent_id] = (distance, cf_drop)
     strict_confusion = {
         key: int(confusion.get(key, 0))
-        for key in (
-            "recorded_true_expected_true",
-            "recorded_true_expected_false",
-            "recorded_false_expected_true",
-            "recorded_false_expected_false",
-        )
+        for key in STRICT_CONFUSION_KEYS
     }
     true_true = strict_confusion["recorded_true_expected_true"]
     true_false = strict_confusion["recorded_true_expected_false"]
@@ -1745,24 +1836,35 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "old_weak_flip",
     ]
     _write_csv(output_dir / "strict_flip_mismatches.csv", pair_audit.mismatch_rows, mismatch_fields)
+    strict_confusion_totals = normalize_strict_flip_confusion_payload(
+        {
+            **pair_audit.confusion,
+            "total_pair_rows": len(pair_audit.rows),
+            "recorded_true_pairs": pair_audit.recorded_flip_pairs,
+            "expected_strict_pairs": pair_audit.expected_flip_pairs,
+            "mismatch_rows": len(pair_audit.mismatch_rows),
+        }
+    )
+    assert strict_confusion_totals["consistency_status"] == "PASS"
     strict_confusion_payload = {
         "method_filter": method,
         "target_label": int(args.target_label),
         "rows_before_method_filter": pair_audit.rows_before_method_filter,
         "rows_after_method_filter": pair_audit.rows_after_method_filter,
         "rows_after_reference_filter": pair_audit.rows_after_reference_filter,
-        "recorded_cf_flip_pairs": pair_audit.recorded_flip_pairs,
-        "expected_strict_flip_pairs": pair_audit.expected_flip_pairs,
-        "mismatch_rows": len(pair_audit.mismatch_rows),
         "invalid_pred_before_rows": pair_audit.invalid_pred_before_rows,
         "invalid_pred_after_rows": pair_audit.invalid_pred_after_rows,
         "duplicate_parent_candidate_rows": pair_audit.duplicate_parent_candidate_rows,
+        # Duplicate the normalized summary under ``confusion`` for readers that
+        # historically descend into that object before looking up totals.
+        "confusion": strict_confusion_totals,
         "arithmetic_definitions": {
-            "recorded_cf_flip_pairs": "recorded_true_expected_true + recorded_true_expected_false",
-            "expected_strict_flip_pairs": "recorded_true_expected_true + recorded_false_expected_true",
+            "total_pair_rows": "TT + TF + FT + FF",
+            "recorded_true_pairs": "recorded_true_expected_true + recorded_true_expected_false",
+            "expected_strict_pairs": "recorded_true_expected_true + recorded_false_expected_true",
             "mismatch_rows": "recorded_true_expected_false + recorded_false_expected_true",
         },
-        **pair_audit.confusion,
+        **strict_confusion_totals,
     }
     _write_json(output_dir / "strict_flip_confusion.json", strict_confusion_payload)
     _write_csv(

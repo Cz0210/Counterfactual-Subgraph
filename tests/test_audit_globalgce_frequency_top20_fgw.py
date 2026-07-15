@@ -53,6 +53,45 @@ def _row(
 
 
 class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
+    def test_confusion_payload_exposes_canonical_totals(self) -> None:
+        normalized = audit.normalize_strict_flip_confusion_payload(
+            {
+                "recorded_true_expected_true": 21940,
+                "recorded_true_expected_false": 3720,
+                "recorded_false_expected_true": 0,
+                "recorded_false_expected_false": 0,
+                "total_pair_rows": 25660,
+                "recorded_true_pairs": 25660,
+                "expected_strict_pairs": 21940,
+                "mismatch_rows": 3720,
+            }
+        )
+        self.assertEqual(normalized["mismatch_rows"], 3720)
+        self.assertEqual(normalized["recorded_true_pairs"], 25660)
+        self.assertEqual(normalized["expected_strict_pairs"], 21940)
+        self.assertEqual(normalized["consistency_status"], "PASS")
+
+    def test_historical_confusion_payload_infers_missing_mismatch(self) -> None:
+        normalized = audit.normalize_strict_flip_confusion_payload(
+            {
+                "confusion": {
+                    "recorded_true_expected_true": 21940,
+                    "recorded_true_expected_false": 3720,
+                    "recorded_false_expected_true": 0,
+                    "recorded_false_expected_false": 0,
+                },
+                "rows_after_reference_filter": 25660,
+                "recorded_cf_flip_pairs": 25660,
+                "expected_strict_flip_pairs": 21940,
+            }
+        )
+        self.assertEqual(normalized["mismatch_rows"], 3720)
+        self.assertEqual(normalized["consistency_status"], "PASS_WITH_WARNINGS")
+        self.assertIn(
+            "inferred_missing_field:mismatch_rows",
+            normalized["consistency_warnings"],
+        )
+
     def test_weak_flip_saved_row_is_reported_as_mismatch(self) -> None:
         selected = [_candidate(1, "C")]
         rows = [
@@ -349,6 +388,24 @@ class GlobalGCEFrequencyFGWAuditTests(unittest.TestCase):
             summary = audit.run_audit(args)
             self.assertFalse(summary["distance_recomputed"])
             self.assertTrue(summary["candidate_order_audit"]["rank_order_preserved"])
+            confusion = json.loads(
+                (output_dir / "strict_flip_confusion.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(confusion["consistency_status"], "PASS")
+            self.assertEqual(
+                confusion["confusion"]["mismatch_rows"],
+                confusion["mismatch_rows"],
+            )
+            for field in (
+                "recorded_true_expected_true",
+                "recorded_true_expected_false",
+                "recorded_false_expected_true",
+                "recorded_false_expected_false",
+                "recorded_true_pairs",
+                "expected_strict_pairs",
+                "mismatch_rows",
+            ):
+                self.assertIn(field, confusion)
             for name in (
                 "audit_summary.json",
                 "audit_report.txt",

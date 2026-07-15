@@ -40,6 +40,36 @@ Accepted
 
 ---
 
+## [2026-07-14] Keep strict-flip confusion summaries self-contained and backward compatible
+
+### Background
+The GlobalGCE Frequency-Top20 FGW audit computed the historical strict-flip
+confusion matrix correctly, but downstream automation could report a null
+mismatch count when a JSON reader expected one exact top-level field name.
+Older audit files may also contain the complete four-cell matrix without the
+redundant totals.
+
+### Decision
+Write the four confusion cells, `recorded_true_pairs`,
+`expected_strict_pairs`, and `mismatch_rows` at the top level of
+`strict_flip_confusion.json`. Preserve the previous field aliases, and allow
+readers to infer missing redundant totals from an arithmetically consistent
+four-cell matrix. Such legacy inputs are `PASS_WITH_WARNINGS`; contradictory
+provided totals remain failures.
+
+### Consequences
+- Automated checks no longer interpret a missing redundant field as a failed
+  core experiment.
+- The mismatch count is always `TF + FT` and is guarded by explicit arithmetic
+  assertions.
+- Corrected pair details, parent cohorts, FGW distances, coverage, candidate
+  ranking, and corrected Table 2 metrics are unchanged.
+
+### Status
+Accepted
+
+---
+
 ## [2026-07-14] Audit GlobalGCE Frequency-Top20 from saved Node-FGW artifacts
 
 ### Background
