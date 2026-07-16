@@ -15,7 +15,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -41,6 +41,15 @@ CONDITIONAL_COST_FIELD_CANDIDATES = (
     "conditional_median_cost_covered",
 )
 EPS = 1e-12
+REQUIRED_AUC_KEYS = frozenset(
+    {
+        "method",
+        "auc_min",
+        "auc_max",
+        "low_cost_normalized_auc",
+        "coverage_at_q30",
+    }
+)
 
 
 def _normalize_key(value: Any) -> str:
@@ -376,10 +385,11 @@ def _interval_curve(rows: Sequence[Figure4Row], lower: float, upper: float) -> t
 
 def _normalized_auc(rows: Sequence[Figure4Row], *, q30: float) -> dict[str, float]:
     x, y = _interval_curve(rows, 0.0, q30)
-    area = float(np.trapz(y, x))
+    area = float(np.trapezoid(y, x))
     return {
-        "auc_0_q30": area,
-        "normalized_auc_0_q30": area / q30,
+        "auc_min": 0.0,
+        "auc_max": q30,
+        "low_cost_normalized_auc": area / q30,
     }
 
 
@@ -441,11 +451,11 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
     min_cost = min(row.conditional_median_cost for row in k10.values())
     table_rows = [
         {
-            "Method": method,
-            "Coverage": k10[method].coverage,
-            "Conditional median cost": k10[method].conditional_median_cost,
-            "K": 10,
-            "Theta": q30,
+            "method": method,
+            "coverage": k10[method].coverage,
+            "conditional_median_cost": k10[method].conditional_median_cost,
+            "k": 10,
+            "theta": q30,
             "coverage_is_best": k10[method].coverage >= max_coverage - EPS,
             "cost_is_best": k10[method].conditional_median_cost <= min_cost + EPS,
         }
@@ -454,9 +464,9 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
     display_fields = ("Method", "Coverage \u2191", "Conditional median cost \u2193")
     display_rows = [
         {
-            "Method": row["Method"],
-            "Coverage \u2191": row["Coverage"],
-            "Conditional median cost \u2193": row["Conditional median cost"],
+            "Method": row["method"],
+            "Coverage \u2191": row["coverage"],
+            "Conditional median cost \u2193": row["conditional_median_cost"],
         }
         for row in table_rows
     ]
@@ -466,13 +476,13 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
         "| --- | ---: | ---: |",
     ]
     for row in table_rows:
-        coverage = f"{row['Coverage']:.4f}"
-        cost = f"{row['Conditional median cost']:.4f}"
-        if row["Method"] == "Ours" and row["coverage_is_best"]:
+        coverage = f"{row['coverage']:.4f}"
+        cost = f"{row['conditional_median_cost']:.4f}"
+        if row["method"] == "Ours" and row["coverage_is_best"]:
             coverage = f"**{coverage}**"
-        if row["Method"] == "Ours" and row["cost_is_best"]:
+        if row["method"] == "Ours" and row["cost_is_best"]:
             cost = f"**{cost}**"
-        markdown.append(f"| {row['Method']} | {coverage} | {cost} |")
+        markdown.append(f"| {row['method']} | {coverage} | {cost} |")
     markdown.extend(("", "MolCLR-Node-FGW, lambda=0.5, strict-flip evaluation."))
     (output_dir / "table2_main_k10_q30_compact.md").write_text("\n".join(markdown) + "\n", encoding="utf-8")
 
@@ -480,7 +490,14 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
     figure, axis = plt.subplots(figsize=(7.4, 2.6))
     axis.axis("off")
     table = axis.table(
-        cellText=[[row["Method"], f"{row['Coverage']:.4f}", f"{row['Conditional median cost']:.4f}"] for row in table_rows],
+        cellText=[
+            [
+                row["method"],
+                f"{row['coverage']:.4f}",
+                f"{row['conditional_median_cost']:.4f}",
+            ]
+            for row in table_rows
+        ],
         colLabels=list(display_fields),
         cellLoc="center",
         loc="center",
@@ -492,7 +509,7 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
         if row_index == 0:
             cell.set_text_props(weight="bold")
             cell.set_facecolor("#eeeeee")
-        elif table_rows[row_index - 1]["Method"] == "Ours":
+        elif table_rows[row_index - 1]["method"] == "Ours":
             if col_index == 1 and table_rows[row_index - 1]["coverage_is_best"]:
                 cell.set_text_props(weight="bold")
             if col_index == 2 and table_rows[row_index - 1]["cost_is_best"]:
@@ -505,10 +522,37 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
     return table_rows
 
 
-def _sota_bool(value: float, values: Iterable[float], *, higher: bool) -> bool:
-    values = list(values)
-    best = max(values) if higher else min(values)
-    return value >= best - EPS if higher else value <= best + EPS
+def _validate_auc_rows(auc_rows: Sequence[dict[str, Any]]) -> None:
+    if not auc_rows:
+        raise ValueError("AUC audit rows are empty.")
+    seen_methods: set[str] = set()
+    numeric_keys = REQUIRED_AUC_KEYS - {"method"}
+    for row_index, row in enumerate(auc_rows):
+        missing = REQUIRED_AUC_KEYS - set(row)
+        if missing:
+            raise ValueError(
+                f"AUC row {row_index} is missing required keys {sorted(missing)}; "
+                f"actual keys={sorted(row)}"
+            )
+        method = str(row["method"])
+        if not method:
+            raise ValueError(f"AUC row {row_index} has an empty method.")
+        if method in seen_methods:
+            raise ValueError(f"AUC rows contain duplicate method={method!r}.")
+        seen_methods.add(method)
+        for key in numeric_keys:
+            try:
+                value = float(row[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"AUC row {row_index} has non-numeric {key}={row[key]!r}."
+                ) from exc
+            if not math.isfinite(value):
+                raise ValueError(f"AUC row {row_index} has non-finite {key}={value!r}.")
+    if "Ours" not in seen_methods:
+        raise ValueError(f"AUC rows do not contain method='Ours'; methods={sorted(seen_methods)}")
+    if len(seen_methods) < 2:
+        raise ValueError("AUC SOTA audit requires Ours and at least one baseline method.")
 
 
 def _write_audit(
@@ -522,11 +566,28 @@ def _write_audit(
     q30: float,
     figure4_display_min: float,
 ) -> None:
-    ours_table = next(row for row in table_rows if row["Method"] == "Ours")
-    ours_auc = next(row for row in auc_rows if row["Method"] == "Ours")
-    coverage_sota = _sota_bool(ours_table["Coverage"], (row["Coverage"] for row in table_rows), higher=True)
-    cost_sota = _sota_bool(ours_table["Conditional median cost"], (row["Conditional median cost"] for row in table_rows), higher=False)
-    auc_sota = _sota_bool(ours_auc["normalized_auc_0_q30"], (row["normalized_auc_0_q30"] for row in auc_rows), higher=True)
+    _validate_auc_rows(auc_rows)
+    ours_table = next(row for row in table_rows if row["method"] == "Ours")
+    baseline_table_rows = [row for row in table_rows if row["method"] != "Ours"]
+    if not baseline_table_rows:
+        raise ValueError("SOTA audit requires at least one baseline Table 2 row.")
+    ours_auc_row = next(row for row in auc_rows if row["method"] == "Ours")
+    baseline_auc_rows = [row for row in auc_rows if row["method"] != "Ours"]
+
+    ours_coverage = float(ours_table["coverage"])
+    best_baseline_coverage = max(float(row["coverage"]) for row in baseline_table_rows)
+    ours_cost = float(ours_table["conditional_median_cost"])
+    best_baseline_cost = min(
+        float(row["conditional_median_cost"]) for row in baseline_table_rows
+    )
+    ours_auc = float(ours_auc_row["low_cost_normalized_auc"])
+    best_baseline_auc = max(
+        float(row["low_cost_normalized_auc"]) for row in baseline_auc_rows
+    )
+
+    coverage_sota = ours_coverage >= best_baseline_coverage - EPS
+    cost_sota = ours_cost <= best_baseline_cost + EPS
+    auc_sota = ours_auc >= best_baseline_auc - EPS
     claim_allowed = coverage_sota and cost_sota and auc_sota
     content = f"""FGW SOTA presentation audit
 
@@ -544,6 +605,12 @@ Low-cost AUC interval: [0, {q30:.16g}]
 K=10 q30 coverage SOTA: {coverage_sota}
 K=10 q30 conditional cost SOTA: {cost_sota}
 [0,q30] normalized AUC SOTA: {auc_sota}
+Ours K=10 coverage: {ours_coverage:.16g}
+Best baseline K=10 coverage: {best_baseline_coverage:.16g}
+Ours K=10 conditional cost: {ours_cost:.16g}
+Best baseline K=10 conditional cost: {best_baseline_cost:.16g}
+Ours low-cost normalized AUC: {ours_auc:.16g}
+Best baseline low-cost normalized AUC: {best_baseline_auc:.16g}
 low-cost and compact-budget SOTA claim allowed: {claim_allowed}
 
 Permitted claim only when all three statements above are True:
@@ -653,9 +720,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         auc_rows.append(
             {
                 "method": method,
-                "q20": float(args.q20),
-                "q30": float(args.q30),
-                "coverage_at_q20": _interpolated_coverage(method_rows, float(args.q20)),
                 "coverage_at_q30": _interpolated_coverage(method_rows, float(args.q30)),
                 **_normalized_auc(method_rows, q30=float(args.q30)),
             }
@@ -663,7 +727,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _write_csv(
         output_dir / "figure4_low_cost_auc_0_q30.csv",
         auc_rows,
-        ("method", "q20", "q30", "coverage_at_q20", "coverage_at_q30", "auc_0_q30", "normalized_auc_0_q30"),
+        (
+            "method",
+            "auc_min",
+            "auc_max",
+            "low_cost_normalized_auc",
+            "coverage_at_q30",
+        ),
     )
     _write_audit(
         output_dir,
