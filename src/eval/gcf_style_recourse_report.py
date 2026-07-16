@@ -66,9 +66,16 @@ TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
 FALSE_VALUES = {"0", "false", "f", "no", "n", "off", ""}
 DEFAULT_THETA_COVERED_COST_METRIC = "theta_covered_conditional_median_cost"
 COST_METRIC_LABELS = {
+    "conditional_median_cost": "Conditional median cost",
     "theta_covered_conditional_median_cost": "Theta-covered conditional median cost",
     "applicable_parent_median_cost": "Applicable-parent median cost",
     "median_cost": "Median cost",
+}
+COST_STAT_TO_METRIC = {
+    "median": "median_cost",
+    "conditional_median": "conditional_median_cost",
+    "applicable_parent_median": "applicable_parent_median_cost",
+    "theta_covered_conditional_median": "theta_covered_conditional_median_cost",
 }
 
 
@@ -118,6 +125,39 @@ def _text(value: Any) -> str:
         return ""
     rendered = str(value).strip()
     return "" if rendered.lower() in {"none", "null", "nan"} else rendered
+
+
+def distance_slug(distance_label: str) -> str:
+    normalized = "".join(character.lower() for character in distance_label if character.isalnum())
+    exact = {
+        "molclrnodewasserstein": "wnode",
+        "molclrnodefgw": "fgw",
+    }
+    if normalized in exact:
+        return exact[normalized]
+    if not normalized:
+        raise ValueError("distance_label must not be empty")
+    return normalized
+
+
+def resolve_cost_metric(metric: str, stat: str | None) -> str:
+    if stat is not None:
+        try:
+            return COST_STAT_TO_METRIC[stat]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported cost statistic: {stat}") from exc
+    if metric not in COST_METRIC_LABELS:
+        raise ValueError(f"Unsupported cost metric: {metric}")
+    return metric
+
+
+def resolve_report_thetas(args: argparse.Namespace) -> tuple[float, float]:
+    theta_star = float(args.theta_star)
+    table2_raw = getattr(args, "table2_theta", None)
+    figure3_raw = getattr(args, "figure3_theta", None)
+    table2_theta = theta_star if table2_raw is None else float(table2_raw)
+    figure3_theta = theta_star if figure3_raw is None else float(figure3_raw)
+    return table2_theta, figure3_theta
 
 
 def _as_bool(value: Any) -> bool:
@@ -648,6 +688,9 @@ def compute_prefix_metrics(run: MethodRun, *, k: int, threshold: float) -> dict[
         "theta": float(threshold),
         "coverage": len(covered) / denominator if denominator else 0.0,
         "num_covered": len(covered),
+        "num_applicable_parents": len(finite),
+        "num_strict_recourse_applicable_parents": len(finite),
+        "num_theta_covered_parents": len(covered),
         "median_cost": _median(all_distances),
         # Compatibility alias retained for existing readers. Its historical
         # conditioning set is all strict-recourse-applicable parents, not only
@@ -683,13 +726,11 @@ def add_figure3_plotted_cost(
     output: list[dict[str, Any]] = []
     for source in rows:
         row = dict(source)
-        num_covered = int(row.get("num_covered") or 0)
-        raw_cost = _as_float(row.get(cost_metric))
-        plotted_cost = (
-            float(raw_cost)
-            if num_covered > 0 and raw_cost is not None
-            else float("nan")
-        )
+        raw_value = row.get(cost_metric)
+        try:
+            plotted_cost = float(raw_value)
+        except (TypeError, ValueError):
+            plotted_cost = float("nan")
         theta = float(row["theta"])
         if (
             cost_metric == DEFAULT_THETA_COVERED_COST_METRIC
@@ -704,7 +745,113 @@ def add_figure3_plotted_cost(
         row["plotted_cost"] = plotted_cost
         row["plotted_cost_metric"] = cost_metric
         output.append(row)
+    plotted = np.asarray([row["plotted_cost"] for row in output], dtype=float)
+    selected = np.asarray(
+        [float(row[cost_metric]) if row.get(cost_metric) is not None else np.nan for row in rows],
+        dtype=float,
+    )
+    if not np.allclose(plotted, selected, equal_nan=True):
+        raise AssertionError(
+            f"Figure 3 plotted_cost differs from selected source column {cost_metric}."
+        )
     return output
+
+
+def figure3_cost_ylim(
+    rows: Sequence[dict[str, Any]],
+    *,
+    max_k: int,
+    mode: str = "full",
+) -> tuple[float, float] | None:
+    finite = np.asarray(
+        [
+            float(row["plotted_cost"])
+            for row in rows
+            if int(row["k"]) <= int(max_k)
+            and math.isfinite(float(row["plotted_cost"]))
+        ],
+        dtype=float,
+    )
+    if finite.size == 0:
+        return None
+    if mode == "full":
+        lower, upper = float(finite.min()), float(finite.max())
+    elif mode == "robust":
+        lower, upper = (float(value) for value in np.quantile(finite, [0.02, 0.98]))
+    else:
+        raise ValueError(f"Unsupported Figure 3 cost ylim mode: {mode}")
+    span = upper - lower
+    padding = 0.06 * span if span > 0 else max(abs(upper) * 0.06, 1e-6)
+    return lower - padding, upper + padding
+
+
+def validate_figure3_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    max_k: int,
+    figure3_theta: float,
+    cost_metric: str,
+) -> dict[str, Any]:
+    expected_methods = set(DISPLAY_ORDER)
+    expected_k = list(range(1, int(max_k) + 1))
+    if len(rows) != len(DISPLAY_ORDER) * int(max_k):
+        raise AssertionError(
+            f"Figure 3 requires {len(DISPLAY_ORDER) * int(max_k)} rows; found {len(rows)}"
+        )
+    seen: set[tuple[str, int]] = set()
+    unavailable: dict[str, list[int]] = {}
+    for method in DISPLAY_ORDER:
+        method_rows = sorted(
+            (row for row in rows if row.get("method") == method),
+            key=lambda row: int(row["k"]),
+        )
+        observed_k = [int(row["k"]) for row in method_rows]
+        if observed_k != expected_k:
+            raise AssertionError(
+                f"Figure 3 K values for {method} must be {expected_k}; found {observed_k}"
+            )
+        coverages: list[float] = []
+        unavailable[method] = []
+        for row in method_rows:
+            key = (method, int(row["k"]))
+            if key in seen:
+                raise AssertionError(f"Duplicate Figure 3 row: {key}")
+            seen.add(key)
+            coverage = float(row["coverage"])
+            if not math.isfinite(coverage):
+                raise AssertionError(f"Figure 3 coverage is non-finite: {key}")
+            coverages.append(coverage)
+            if not math.isclose(
+                float(row["theta"]), float(figure3_theta), rel_tol=0.0, abs_tol=1e-12
+            ):
+                raise AssertionError(
+                    f"Figure 3 theta mismatch for {key}: "
+                    f"{row['theta']} != {figure3_theta}"
+                )
+            if not math.isfinite(float(row["plotted_cost"])):
+                unavailable[method].append(int(row["k"]))
+        _assert_non_decreasing(coverages, "coverage vs K", method)
+    if set(row.get("method") for row in rows) != expected_methods:
+        raise AssertionError(
+            f"Figure 3 methods must be {sorted(expected_methods)}; "
+            f"found={sorted(set(row.get('method') for row in rows))}"
+        )
+    if cost_metric == "conditional_median_cost":
+        missing = {method: values for method, values in unavailable.items() if values}
+        if missing:
+            raise AssertionError(
+                "Conditional-median Figure 3 requires finite plotted costs for K=1..max_k; "
+                f"unavailable={missing}"
+            )
+    return {
+        "expected_rows": len(DISPLAY_ORDER) * int(max_k),
+        "actual_rows": len(rows),
+        "prefix_is_complete": True,
+        "coverage_monotonic_nondecreasing": True,
+        "theta_matches_figure3_theta": True,
+        "count_source": "direct_from_parent_level_recourse_distances",
+        "unavailable_k_by_method": unavailable,
+    }
 
 
 def _assert_non_decreasing(values: Sequence[float], metric: str, method: str) -> None:
@@ -885,12 +1032,44 @@ def _full_table2_rows(runs: Sequence[MethodRun], *, k: int, theta: float) -> lis
                 "K": int(k),
                 "Theta": float(theta),
                 "Coverage": metrics["coverage"],
+                "Num Covered": metrics["num_covered"],
                 "Median Cost": metrics["median_cost"],
                 "Conditional Median Cost": metrics["conditional_median_cost"],
+                "Theta-covered Conditional Median Cost": metrics[
+                    "theta_covered_conditional_median_cost"
+                ],
                 "Applicable Rate": metrics["applicable_rate"],
+                "Strict Recourse Applicable Rate": metrics[
+                    "strict_recourse_applicable_rate"
+                ],
             }
         )
     return output
+
+
+def _compact_table2_rows(full_rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "Method": row["Method"],
+            "Coverage": row["Coverage"],
+            "Conditional Median Cost": row["Conditional Median Cost"],
+        }
+        for row in full_rows
+    ]
+
+
+def _theta_covered_table2_rows(full_rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "Method": row["Method"],
+            "Coverage": row["Coverage"],
+            "Num Covered": row["Num Covered"],
+            "Theta-covered Conditional Median Cost": row[
+                "Theta-covered Conditional Median Cost"
+            ],
+        }
+        for row in full_rows
+    ]
 
 
 def _display_number(value: Any, *, digits: int = 6) -> str:
@@ -935,6 +1114,40 @@ def _write_latex_table(path: Path, rows: Sequence[dict[str, Any]], fields: Seque
 def _prefixed(prefix: str, name: str) -> str:
     cleaned = prefix.strip().strip("_-")
     return f"{cleaned}_{name}" if cleaned else name
+
+
+def report_artifact_bases(
+    *,
+    prefix: str,
+    distance_label: str,
+    write_legacy_aliases: bool = False,
+) -> dict[str, Any]:
+    slug = distance_slug(distance_label)
+    primary = {
+        "figure3": _prefixed(prefix, f"figure3_{slug}_coverage_cost_vs_k"),
+        "figure4": _prefixed(prefix, f"figure4_{slug}_coverage_vs_threshold"),
+        "table2_full": _prefixed(prefix, "table2_gcf_style_full"),
+        "table2_compact": _prefixed(prefix, "table2_gcf_style_compact"),
+        "table2_theta_covered_audit": _prefixed(prefix, "table2_theta_covered_audit"),
+        "curve_summary": _prefixed(prefix, f"{slug}_curve_summary"),
+        "audit_json": _prefixed(prefix, "gcf_style_report_audit"),
+        "config_txt": _prefixed(prefix, "gcf_style_report_config"),
+    }
+    legacy: dict[str, list[str]] = {key: [] for key in primary}
+    if write_legacy_aliases:
+        legacy["figure3"] = list(
+            dict.fromkeys(
+                (
+                    "figure3_fgw_coverage_cost_vs_k",
+                    _prefixed(prefix, "figure3_fgw_coverage_cost_vs_k"),
+                )
+            )
+        )
+        legacy["figure4"] = [_prefixed(prefix, "figure4_fgw_coverage_vs_threshold")]
+        legacy["table2_full"] = [_prefixed(prefix, "table2_gcf_style_fgw")]
+        legacy["table2_compact"] = [_prefixed(prefix, "table2_gcf_style_compact")]
+        legacy["audit_json"] = [_prefixed(prefix, "gcf_style_report_audit")]
+    return {"distance_slug": slug, "primary": primary, "legacy": legacy}
 
 
 def _plot_table2(
@@ -997,6 +1210,7 @@ def _plot_figure3(
     max_k: int,
     theta: float,
     cost_metric: str,
+    cost_ylim_mode: str,
 ) -> None:
     import matplotlib
 
@@ -1013,12 +1227,30 @@ def _plot_figure3(
         if not method_rows:
             continue
         xs = [row["k"] for row in method_rows]
-        axes[0].plot(xs, [row["coverage"] for row in method_rows], label=method, color=colors[method], marker=markers[method], linewidth=1.8, markersize=4)
+        axes[0].plot(
+            xs,
+            [row["coverage"] for row in method_rows],
+            label=method,
+            color=colors[method],
+            marker=markers[method],
+            markevery=1,
+            linewidth=1.8,
+            markersize=4,
+        )
         costs = [
             row["plotted_cost"] if math.isfinite(row["plotted_cost"]) else np.nan
             for row in method_rows
         ]
-        axes[1].plot(xs, costs, label=method, color=colors[method], marker=markers[method], linewidth=1.8, markersize=4)
+        axes[1].plot(
+            xs,
+            costs,
+            label=method,
+            color=colors[method],
+            marker=markers[method],
+            markevery=1,
+            linewidth=1.8,
+            markersize=4,
+        )
     axes[0].set_ylabel("Coverage")
     if cost_metric == DEFAULT_THETA_COVERED_COST_METRIC:
         axes[1].set_ylabel(
@@ -1029,6 +1261,9 @@ def _plot_figure3(
         axes[1].set_ylabel(f"Conditional median cost\n({distance_label})")
     else:
         axes[1].set_ylabel(f"{COST_METRIC_LABELS[cost_metric]}\n({distance_label})")
+    y_limits = figure3_cost_ylim(rows, max_k=max_k, mode=cost_ylim_mode)
+    if y_limits is not None:
+        axes[1].set_ylim(*y_limits)
     axes[1].set_xlabel("Prefix K")
     axes[0].set_title(f"theta = {float(theta):.4g}")
     for axis in axes:
@@ -1062,6 +1297,8 @@ def write_figure3_plots(
     theta: float,
     cost_metric: str,
     inset_max_k: int | None,
+    cost_ylim_mode: str = "full",
+    write_unsuffixed_alias: bool = True,
 ) -> None:
     available_max_k = max((int(row["k"]) for row in rows), default=0)
     if available_max_k < 20:
@@ -1079,18 +1316,20 @@ def write_figure3_plots(
                 max_k=limit,
                 theta=theta,
                 cost_metric=cost_metric,
+                cost_ylim_mode=cost_ylim_mode,
             )
-        # Compatibility alias: the unsuffixed figure is always the full K=1..20 view.
-        _plot_figure3(
-            rows,
-            png=output_dir / f"{base}.png",
-            pdf=output_dir / f"{base}.pdf",
-            distance_label=distance_label,
-            inset_max_k=inset_max_k,
-            max_k=20,
-            theta=theta,
-            cost_metric=cost_metric,
-        )
+        if write_unsuffixed_alias:
+            _plot_figure3(
+                rows,
+                png=output_dir / f"{base}.png",
+                pdf=output_dir / f"{base}.pdf",
+                distance_label=distance_label,
+                inset_max_k=inset_max_k,
+                max_k=20,
+                theta=theta,
+                cost_metric=cost_metric,
+                cost_ylim_mode=cost_ylim_mode,
+            )
 
 
 def _plot_figure4(
@@ -1167,18 +1406,18 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     if not output_dir.is_absolute():
         output_dir = REPO_ROOT / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    figure3_cost_metric = args.figure3_cost_metric
+    table2_theta, figure3_theta = resolve_report_thetas(args)
     figure3_cost_stat = getattr(args, "figure3_cost_stat", None)
-    if figure3_cost_stat == "median":
-        figure3_cost_metric = "median_cost"
-    elif figure3_cost_stat == "conditional_median":
-        figure3_cost_metric = "applicable_parent_median_cost"
-    table_cost_metric = args.table_cost_metric
+    figure3_cost_metric = resolve_cost_metric(args.figure3_cost_metric, figure3_cost_stat)
     table_cost_stat = getattr(args, "table_cost_stat", None)
-    if table_cost_stat == "median":
-        table_cost_metric = "median_cost"
-    elif table_cost_stat == "conditional_median":
-        table_cost_metric = "applicable_parent_median_cost"
+    table_cost_metric = resolve_cost_metric(args.table_cost_metric, table_cost_stat)
+    write_legacy_aliases = bool(getattr(args, "write_legacy_aliases", False))
+    figure3_cost_ylim_mode = str(getattr(args, "figure3_cost_ylim_mode", "full"))
+    artifacts = report_artifact_bases(
+        prefix=args.table_prefix,
+        distance_label=args.distance_label,
+        write_legacy_aliases=write_legacy_aliases,
+    )
 
     preloaded_ours: MethodRun | None = None
     if args.reference_parent_ids:
@@ -1234,92 +1473,38 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     )
     table_include_applicable_rate = bool(int(args.table_include_applicable_rate))
     table_include_median_cost = bool(int(args.table_include_median_cost))
-    table_rows = _table_rows(
-        runs,
-        k=int(args.k),
-        theta=float(args.theta_star),
-        cost_metric=table_cost_metric,
-        include_applicable_rate=table_include_applicable_rate,
-        include_median_cost=table_include_median_cost,
-    )
-    table_fields = _table_fields(
-        cost_metric=table_cost_metric,
-        include_applicable_rate=table_include_applicable_rate,
-        include_median_cost=table_include_median_cost,
-    )
-    if table_cost_stat == "conditional_median":
-        source_label = COST_METRIC_LABELS["applicable_parent_median_cost"]
-        for row in table_rows:
-            row["Conditional Median Cost"] = row.pop(source_label)
-        table_fields = [
-            "Conditional Median Cost" if field == source_label else field
-            for field in table_fields
-        ]
-    table_global_bases = list(
-        dict.fromkeys(
-            (
-                "table2_global_recourse",
-                _prefixed(args.table_prefix, "table2_global_recourse"),
-            )
-        )
-    )
-    for table_base in table_global_bases:
-        _write_csv(output_dir / f"{table_base}.csv", table_rows, table_fields)
-        _plot_table2(
-            table_rows,
-            fields=table_fields,
-            png=output_dir / f"{table_base}.png",
-            pdf=output_dir / f"{table_base}.pdf",
-        )
-
-    # Keep the prior machine-readable table for consistency audits that expect
-    # K, theta, and covered-parent counts alongside the final display fields.
-    table_audit_rows = _table_rows(
-        runs,
-        k=int(args.k),
-        theta=float(args.theta_star),
-        cost_metric=table_cost_metric,
-        include_applicable_rate=table_include_applicable_rate,
-        include_median_cost=table_include_median_cost,
-        include_audit_fields=True,
-    )
-    table_audit_fields = _table_fields(
-        cost_metric=table_cost_metric,
-        include_applicable_rate=table_include_applicable_rate,
-        include_median_cost=table_include_median_cost,
-        include_audit_fields=True,
-    )
-    table_compat_base = _prefixed(args.table_prefix, "table2_gcf_style_fgw")
-    full_table_rows = _full_table2_rows(runs, k=int(args.k), theta=float(args.theta_star))
+    full_table_rows = _full_table2_rows(runs, k=int(args.k), theta=table2_theta)
     full_table_fields = [
-        "Method", "K", "Theta", "Coverage", "Median Cost",
-        "Conditional Median Cost", "Applicable Rate",
+        "Method",
+        "K",
+        "Theta",
+        "Coverage",
+        "Num Covered",
+        "Median Cost",
+        "Conditional Median Cost",
+        "Theta-covered Conditional Median Cost",
+        "Applicable Rate",
+        "Strict Recourse Applicable Rate",
     ]
+    full_table_base = artifacts["primary"]["table2_full"]
     _write_csv(
-        output_dir / f"{table_compat_base}.csv",
+        output_dir / f"{full_table_base}.csv",
         full_table_rows,
         full_table_fields,
     )
     _write_markdown_table(
-        output_dir / f"{table_compat_base}.md",
+        output_dir / f"{full_table_base}.md",
         full_table_rows,
         full_table_fields,
     )
     _write_latex_table(
-        output_dir / f"{table_compat_base}.tex",
+        output_dir / f"{full_table_base}.tex",
         full_table_rows,
         full_table_fields,
     )
-    compact_rows = [
-        {
-            "Method": row["Method"],
-            "Coverage": row["Coverage"],
-            "Conditional Median Cost": row["Conditional Median Cost"],
-        }
-        for row in full_table_rows
-    ]
+    compact_rows = _compact_table2_rows(full_table_rows)
     compact_fields = ["Method", "Coverage", "Conditional Median Cost"]
-    compact_base = _prefixed(args.table_prefix, "table2_gcf_style_compact")
+    compact_base = artifacts["primary"]["table2_compact"]
     _write_csv(output_dir / f"{compact_base}.csv", compact_rows, compact_fields)
     _write_markdown_table(output_dir / f"{compact_base}.md", compact_rows, compact_fields)
     _write_latex_table(output_dir / f"{compact_base}.tex", compact_rows, compact_fields)
@@ -1329,13 +1514,72 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         png=output_dir / f"{compact_base}.png",
         pdf=output_dir / f"{compact_base}.pdf",
     )
+    theta_covered_rows = _theta_covered_table2_rows(full_table_rows)
+    theta_covered_fields = [
+        "Method",
+        "Coverage",
+        "Num Covered",
+        "Theta-covered Conditional Median Cost",
+    ]
+    theta_covered_base = artifacts["primary"]["table2_theta_covered_audit"]
+    _write_csv(
+        output_dir / f"{theta_covered_base}.csv",
+        theta_covered_rows,
+        theta_covered_fields,
+    )
+
+    if write_legacy_aliases:
+        legacy_table_rows = _table_rows(
+            runs,
+            k=int(args.k),
+            theta=table2_theta,
+            cost_metric=table_cost_metric,
+            include_applicable_rate=table_include_applicable_rate,
+            include_median_cost=table_include_median_cost,
+        )
+        legacy_table_fields = _table_fields(
+            cost_metric=table_cost_metric,
+            include_applicable_rate=table_include_applicable_rate,
+            include_median_cost=table_include_median_cost,
+        )
+        for table_base in dict.fromkeys(
+            ("table2_global_recourse", _prefixed(args.table_prefix, "table2_global_recourse"))
+        ):
+            _write_csv(
+                output_dir / f"{table_base}.csv", legacy_table_rows, legacy_table_fields
+            )
+            _plot_table2(
+                legacy_table_rows,
+                fields=legacy_table_fields,
+                png=output_dir / f"{table_base}.png",
+                pdf=output_dir / f"{table_base}.pdf",
+            )
+        for table_base in artifacts["legacy"]["table2_full"]:
+            if table_base != full_table_base:
+                _write_csv(
+                    output_dir / f"{table_base}.csv", full_table_rows, full_table_fields
+                )
+                _write_markdown_table(
+                    output_dir / f"{table_base}.md", full_table_rows, full_table_fields
+                )
+                _write_latex_table(
+                    output_dir / f"{table_base}.tex", full_table_rows, full_table_fields
+                )
 
     k_rows: list[dict[str, Any]] = []
     for run in runs:
-        for row in compute_k_curve(run, threshold=float(args.theta_star), max_k=int(args.max_k)):
+        for row in compute_k_curve(
+            run, threshold=figure3_theta, max_k=int(args.max_k)
+        ):
             k_rows.append({"distance_label": args.distance_label, **row})
     k_rows = add_figure3_plotted_cost(
         k_rows,
+        cost_metric=figure3_cost_metric,
+    )
+    figure3_completeness_audit = validate_figure3_rows(
+        k_rows,
+        max_k=int(args.max_k),
+        figure3_theta=figure3_theta,
         cost_metric=figure3_cost_metric,
     )
     figure3_fields = [
@@ -1345,6 +1589,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "theta",
         "coverage",
         "num_covered",
+        "num_applicable_parents",
+        "num_strict_recourse_applicable_parents",
+        "num_theta_covered_parents",
         "median_cost",
         "conditional_median_cost",
         "applicable_parent_median_cost",
@@ -1357,9 +1604,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "plotted_cost",
         "plotted_cost_metric",
     ]
-    canonical_figure3_base = "figure3_fgw_coverage_cost_vs_k"
-    figure3_base = _prefixed(args.table_prefix, canonical_figure3_base)
-    figure3_bases = list(dict.fromkeys((canonical_figure3_base, figure3_base)))
+    figure3_base = artifacts["primary"]["figure3"]
+    figure3_bases = [figure3_base]
+    if write_legacy_aliases:
+        figure3_bases.extend(artifacts["legacy"]["figure3"])
+    figure3_bases = list(dict.fromkeys(figure3_bases))
     for base in figure3_bases:
         _write_csv(output_dir / f"{base}.csv", k_rows, figure3_fields)
     write_figure3_plots(
@@ -1367,9 +1616,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         output_dir=output_dir,
         bases=figure3_bases,
         distance_label=args.distance_label,
-        theta=float(args.theta_star),
+        theta=figure3_theta,
         cost_metric=figure3_cost_metric,
         inset_max_k=args.inset_max_k,
+        cost_ylim_mode=figure3_cost_ylim_mode,
+        write_unsuffixed_alias=True,
     )
 
     threshold_grid = build_threshold_grid(
@@ -1378,7 +1629,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         maximum=float(args.threshold_max),
         points=int(args.threshold_points),
     )
-    threshold_grid = include_exact_threshold(threshold_grid, float(args.theta_star))
     rng = np.random.default_rng(int(args.seed))
     bootstrap_indices = rng.integers(
         0,
@@ -1387,8 +1637,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     )
     threshold_rows: list[dict[str, Any]] = []
     best_k10_by_method: dict[str, list[float]] = {}
+    figure4_k = 10
     for run in runs:
-        distances, _drops = best_recourse_by_parent(run, k=int(args.k))
+        distances, _drops = best_recourse_by_parent(run, k=figure4_k)
         ordered_distances = [distances[parent_id] for parent_id in reference_parents]
         best_k10_by_method[run.display_name] = ordered_distances
         curve = bootstrap_coverage_curve(
@@ -1402,7 +1653,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "method": run.display_name,
                 "distance_label": args.distance_label,
-                "k": int(args.k),
+                "k": figure4_k,
                 "bootstrap_samples": int(args.bootstrap_samples),
                 "bootstrap_seed": int(args.seed),
                 **row,
@@ -1421,14 +1672,18 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "bootstrap_samples",
         "bootstrap_seed",
     ]
-    figure4_base = _prefixed(args.table_prefix, "figure4_fgw_coverage_vs_threshold")
-    _write_csv(output_dir / f"{figure4_base}.csv", threshold_rows, figure4_fields)
-    _plot_figure4(
-        threshold_rows,
-        png=output_dir / f"{figure4_base}.png",
-        pdf=output_dir / f"{figure4_base}.pdf",
-        distance_label=args.distance_label,
-    )
+    figure4_base = artifacts["primary"]["figure4"]
+    figure4_bases = [figure4_base]
+    if write_legacy_aliases:
+        figure4_bases.extend(artifacts["legacy"]["figure4"])
+    for base in dict.fromkeys(figure4_bases):
+        _write_csv(output_dir / f"{base}.csv", threshold_rows, figure4_fields)
+        _plot_figure4(
+            threshold_rows,
+            png=output_dir / f"{base}.png",
+            pdf=output_dir / f"{base}.pdf",
+            distance_label=args.distance_label,
+        )
 
     curve_summary: list[dict[str, Any]] = []
     for run in runs:
@@ -1436,8 +1691,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         x = [row["threshold"] for row in method_curve]
         y = [row["coverage"] for row in method_curve]
         distances = best_k10_by_method[run.display_name]
-        k20 = compute_prefix_metrics(run, k=int(args.max_k), threshold=float(args.theta_star))
-        k10 = compute_prefix_metrics(run, k=int(args.k), threshold=float(args.theta_star))
+        k20 = compute_prefix_metrics(run, k=int(args.max_k), threshold=table2_theta)
+        k10 = compute_prefix_metrics(run, k=figure4_k, threshold=table2_theta)
         curve_summary.append(
             {
                 "method": run.display_name,
@@ -1488,7 +1743,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "rank_source",
         "selection_method",
     ]
-    curve_base = _prefixed(args.table_prefix, "fgw_curve_summary")
+    curve_base = artifacts["primary"]["curve_summary"]
     _write_csv(output_dir / f"{curve_base}.csv", curve_summary, curve_fields)
 
     audit = {
@@ -1505,8 +1760,13 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "expected_top_k": int(args.max_k),
         "table_k": int(args.k),
         "theta_star": float(args.theta_star),
+        "table2_theta": table2_theta,
+        "figure3_theta": figure3_theta,
+        "figure4_k": figure4_k,
         "figure3_cost_metric": figure3_cost_metric,
         "figure3_cost_stat": figure3_cost_stat,
+        "figure3_cost_ylim_mode": figure3_cost_ylim_mode,
+        "figure3_completeness": figure3_completeness_audit,
         "table_cost_metric": table_cost_metric,
         "table_cost_stat": table_cost_stat,
         "table_include_applicable_rate": table_include_applicable_rate,
@@ -1514,6 +1774,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "threshold_grid": threshold_grid.tolist(),
         "bootstrap_samples": int(args.bootstrap_samples),
         "bootstrap_seed": int(args.seed),
+        "distance_slug": artifacts["distance_slug"],
+        "artifact_bases": artifacts,
+        "write_legacy_aliases": write_legacy_aliases,
         "runs": [
             {
                 "display_name": run.display_name,
@@ -1541,8 +1804,26 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             for run in runs
         ],
     }
-    audit_path = output_dir / _prefixed(args.table_prefix, "gcf_style_report_audit.json")
+    audit_path = output_dir / f"{artifacts['primary']['audit_json']}.json"
     audit_path.write_text(json.dumps(audit, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    config_text = "\n".join(
+        (
+            "GCF-style recourse report config",
+            f"distance_label={args.distance_label}",
+            f"distance_slug={artifacts['distance_slug']}",
+            f"theta_star={float(args.theta_star):.16g}",
+            f"table2_theta={table2_theta:.16g}",
+            f"figure3_theta={figure3_theta:.16g}",
+            f"figure4_k={figure4_k}",
+            f"figure3_cost_metric={figure3_cost_metric}",
+            f"figure3_cost_stat={figure3_cost_stat}",
+            f"figure3_cost_ylim_mode={figure3_cost_ylim_mode}",
+            f"write_legacy_aliases={write_legacy_aliases}",
+        )
+    )
+    (output_dir / f"{artifacts['primary']['config_txt']}.txt").write_text(
+        config_text + "\n", encoding="utf-8"
+    )
     return {"output_dir": str(output_dir), "audit": audit}
 
 
@@ -1576,6 +1857,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reference-parent-id-col", default="parent_id")
     parser.add_argument("--theta-star", type=float, default=0.0328)
+    parser.add_argument(
+        "--table2-theta",
+        type=float,
+        default=None,
+        help="Table 2 threshold; defaults to --theta-star when omitted.",
+    )
+    parser.add_argument(
+        "--figure3-theta",
+        type=float,
+        default=None,
+        help="Figure 3 prefix threshold; defaults to --theta-star when omitted.",
+    )
     parser.add_argument("--threshold-grid", default=None, help="Comma-separated absolute thresholds.")
     parser.add_argument("--threshold-min", type=float, default=0.0)
     parser.add_argument("--threshold-max", type=float, default=0.0985011840378189)
@@ -1591,13 +1884,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--figure3-cost-stat",
-        choices=("median", "conditional_median"),
+        choices=tuple(COST_STAT_TO_METRIC),
         default=None,
         help=(
-            "Compatibility selector: median maps to unconditional median_cost; "
-            "conditional_median maps to finite strict-recourse parents. When omitted, "
-            "--figure3-cost-metric retains its existing behavior."
+            "Explicit statistic selector. In particular, conditional_median maps "
+            "only to conditional_median_cost. When omitted, --figure3-cost-metric "
+            "retains its existing behavior."
         ),
+    )
+    parser.add_argument(
+        "--figure3-cost-ylim-mode",
+        choices=("full", "robust"),
+        default="full",
+        help="Full includes every finite cost; robust is an optional quantile crop.",
     )
     parser.add_argument(
         "--table-cost-metric",
@@ -1606,7 +1905,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--table-cost-stat",
-        choices=("median", "conditional_median"),
+        choices=tuple(COST_STAT_TO_METRIC),
         default=None,
         help="Optional compatibility alias for the compact paper table cost statistic.",
     )
@@ -1622,6 +1921,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(0, 1),
         default=0,
     )
+    parser.add_argument(
+        "--write-legacy-aliases",
+        action="store_true",
+        help="Also write historical unprefixed and fgw-named compatibility artifacts.",
+    )
     return parser
 
 
@@ -1635,12 +1939,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"distance_label={args.distance_label}", flush=True)
     print(f"k={args.k}", flush=True)
     print(f"theta_star={args.theta_star}", flush=True)
+    table2_theta, figure3_theta = resolve_report_thetas(args)
+    print(f"table2_theta={table2_theta}", flush=True)
+    print(f"figure3_theta={figure3_theta}", flush=True)
     print(f"figure3_cost_metric={args.figure3_cost_metric}", flush=True)
     print(f"figure3_cost_stat={args.figure3_cost_stat}", flush=True)
+    print(f"figure3_cost_ylim_mode={args.figure3_cost_ylim_mode}", flush=True)
     print(f"table_cost_metric={args.table_cost_metric}", flush=True)
     print(f"table_cost_stat={args.table_cost_stat}", flush=True)
     print(f"table_include_applicable_rate={args.table_include_applicable_rate}", flush=True)
     print(f"table_include_median_cost={args.table_include_median_cost}", flush=True)
+    print(f"write_legacy_aliases={args.write_legacy_aliases}", flush=True)
     print(f"bootstrap_samples={args.bootstrap_samples}", flush=True)
     result = generate_report(args)
     print("[GCF_STYLE_REPORT_DONE]", flush=True)

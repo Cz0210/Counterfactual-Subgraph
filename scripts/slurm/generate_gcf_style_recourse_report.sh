@@ -25,12 +25,15 @@ DISTANCE_LABEL=${DISTANCE_LABEL:-MolCLR-Node-FGW}
 TABLE_PREFIX=${TABLE_PREFIX:-}
 K=${K:-10}
 THETA_STAR=${THETA_STAR:-0.0328}
+TABLE2_THETA=${TABLE2_THETA:-${THETA_STAR}}
+FIGURE3_THETA=${FIGURE3_THETA:-${THETA_STAR}}
 BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES:-1000}
 BOOTSTRAP_SEED=${BOOTSTRAP_SEED:-0}
 THRESHOLD_GRID=${THRESHOLD_GRID:-}
 INSET_MAX_K=${INSET_MAX_K:-}
 FIGURE3_COST_METRIC=${FIGURE3_COST_METRIC:-theta_covered_conditional_median_cost}
 FIGURE3_COST_STAT=${FIGURE3_COST_STAT:-}
+FIGURE3_COST_YLIM_MODE=${FIGURE3_COST_YLIM_MODE:-full}
 TABLE_COST_METRIC=${TABLE_COST_METRIC:-theta_covered_conditional_median_cost}
 TABLE_COST_STAT=${TABLE_COST_STAT:-}
 TABLE_INCLUDE_APPLICABLE_RATE=${TABLE_INCLUDE_APPLICABLE_RATE:-0}
@@ -41,6 +44,7 @@ OURS_RUN=${OURS_RUN:-}
 GLOBALGCE_RUN=${GLOBALGCE_RUN:-}
 CLEAR_RUN=${CLEAR_RUN:-}
 GCFEXPLAINER_RUN=${GCFEXPLAINER_RUN:-}
+WRITE_LEGACY_ALIASES=${WRITE_LEGACY_ALIASES:-0}
 
 echo "===== GCF-STYLE RECOURSE REPORT ====="
 echo "hostname=$(hostname)"
@@ -55,11 +59,14 @@ echo "DISTANCE_LABEL=${DISTANCE_LABEL}"
 echo "TABLE_PREFIX=${TABLE_PREFIX}"
 echo "K=${K}"
 echo "THETA_STAR=${THETA_STAR}"
+echo "TABLE2_THETA=${TABLE2_THETA}"
+echo "FIGURE3_THETA=${FIGURE3_THETA}"
 echo "BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES}"
 echo "BOOTSTRAP_SEED=${BOOTSTRAP_SEED}"
 echo "THRESHOLD_GRID=${THRESHOLD_GRID:-default_101_point_grid}"
 echo "FIGURE3_COST_METRIC=${FIGURE3_COST_METRIC}"
 echo "FIGURE3_COST_STAT=${FIGURE3_COST_STAT:-not_set}"
+echo "FIGURE3_COST_YLIM_MODE=${FIGURE3_COST_YLIM_MODE}"
 echo "TABLE_COST_METRIC=${TABLE_COST_METRIC}"
 echo "TABLE_COST_STAT=${TABLE_COST_STAT:-not_set}"
 echo "TABLE_INCLUDE_APPLICABLE_RATE=${TABLE_INCLUDE_APPLICABLE_RATE}"
@@ -70,6 +77,7 @@ echo "OURS_RUN=${OURS_RUN:-built_in_default}"
 echo "GLOBALGCE_RUN=${GLOBALGCE_RUN:-built_in_default}"
 echo "CLEAR_RUN=${CLEAR_RUN:-built_in_default}"
 echo "GCFEXPLAINER_RUN=${GCFEXPLAINER_RUN:-built_in_default}"
+echo "WRITE_LEGACY_ALIASES=${WRITE_LEGACY_ALIASES}"
 
 args=(
   --config configs/hpc.yaml
@@ -79,7 +87,10 @@ args=(
   --table-prefix "${TABLE_PREFIX}"
   --k "${K}"
   --theta-star "${THETA_STAR}"
+  --table2-theta "${TABLE2_THETA}"
+  --figure3-theta "${FIGURE3_THETA}"
   --figure3-cost-metric "${FIGURE3_COST_METRIC}"
+  --figure3-cost-ylim-mode "${FIGURE3_COST_YLIM_MODE}"
   --table-cost-metric "${TABLE_COST_METRIC}"
   --table-include-applicable-rate "${TABLE_INCLUDE_APPLICABLE_RATE}"
   --table-include-median-cost "${TABLE_INCLUDE_MEDIAN_COST}"
@@ -95,6 +106,9 @@ if [ -n "${INSET_MAX_K}" ]; then
 fi
 if [ -n "${FIGURE3_COST_STAT}" ]; then
   args+=(--figure3-cost-stat "${FIGURE3_COST_STAT}")
+fi
+if [ "${WRITE_LEGACY_ALIASES}" = "1" ]; then
+  args+=(--write-legacy-aliases)
 fi
 if [ -n "${TABLE_COST_STAT}" ]; then
   args+=(--table-cost-stat "${TABLE_COST_STAT}")

@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import argparse
 import math
 from pathlib import Path
+
+import numpy as np
 
 from src.eval.gcf_style_recourse_report import (
     CandidateRank,
     MethodRun,
     PairRecourse,
+    _compact_table2_rows,
+    _theta_covered_table2_rows,
+    add_figure3_plotted_cost,
     aggregate_detail_rows,
     best_recourse_by_parent,
     compute_prefix_metrics,
+    figure3_cost_ylim,
+    report_artifact_bases,
+    resolve_cost_metric,
+    resolve_report_thetas,
+    validate_figure3_rows,
 )
 
 
@@ -66,3 +77,124 @@ def test_candidate_prefix_uses_rank_not_distance() -> None:
         for threshold in (0.05, 0.1, 0.2)
     ]
     assert threshold_coverages == sorted(threshold_coverages)
+
+
+def _complete_figure3_rows(*, theta: float = 0.2) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for method_index, method in enumerate(("Ours", "GlobalGCE", "CLEAR", "GCFExplainer")):
+        for k in range(1, 21):
+            conditional = 0.6 - 0.01 * k + 0.05 * method_index
+            rows.append(
+                {
+                    "method": method,
+                    "k": k,
+                    "theta": theta,
+                    "coverage": k / 20.0,
+                    "num_covered": k,
+                    "num_applicable_parents": 20,
+                    "num_strict_recourse_applicable_parents": 20,
+                    "num_theta_covered_parents": k,
+                    "median_cost": conditional + 0.2,
+                    "conditional_median_cost": conditional,
+                    "applicable_parent_median_cost": conditional,
+                    "theta_covered_conditional_median_cost": min(theta, conditional),
+                }
+            )
+    return rows
+
+
+def test_conditional_median_maps_only_to_conditional_median_cost() -> None:
+    assert resolve_cost_metric("median_cost", "conditional_median") == "conditional_median_cost"
+    rows = add_figure3_plotted_cost(
+        _complete_figure3_rows(), cost_metric="conditional_median_cost"
+    )
+    source = np.asarray([row["conditional_median_cost"] for row in rows], dtype=float)
+    plotted = np.asarray([row["plotted_cost"] for row in rows], dtype=float)
+    assert np.allclose(plotted, source, equal_nan=True)
+
+
+def test_globalgce_first_six_conditional_medians_remain_finite() -> None:
+    rows = add_figure3_plotted_cost(
+        _complete_figure3_rows(), cost_metric="conditional_median_cost"
+    )
+    first_six = [
+        row["plotted_cost"]
+        for row in rows
+        if row["method"] == "GlobalGCE" and int(row["k"]) <= 6
+    ]
+    assert len(first_six) == 6
+    assert all(math.isfinite(float(value)) for value in first_six)
+
+
+def test_theta_covered_cost_remains_nan_when_no_parent_is_covered() -> None:
+    source = _complete_figure3_rows()[0]
+    source["num_covered"] = 0
+    source["num_theta_covered_parents"] = 0
+    source["theta_covered_conditional_median_cost"] = float("nan")
+    row = add_figure3_plotted_cost(
+        [source], cost_metric="theta_covered_conditional_median_cost"
+    )[0]
+    assert math.isnan(float(row["plotted_cost"]))
+
+
+def test_figure3_complete_prefix_and_full_ylim_cover_every_finite_cost() -> None:
+    rows = add_figure3_plotted_cost(
+        _complete_figure3_rows(), cost_metric="conditional_median_cost"
+    )
+    audit = validate_figure3_rows(
+        rows,
+        max_k=20,
+        figure3_theta=0.2,
+        cost_metric="conditional_median_cost",
+    )
+    assert audit["actual_rows"] == 80
+    for method in ("Ours", "GlobalGCE", "CLEAR", "GCFExplainer"):
+        assert [row["k"] for row in rows if row["method"] == method] == list(range(1, 21))
+    y_min, y_max = figure3_cost_ylim(rows, max_k=20, mode="full")
+    finite = [float(row["plotted_cost"]) for row in rows]
+    assert y_min <= min(finite)
+    assert y_max >= max(finite)
+
+
+def test_table2_and_figure3_thetas_are_independent_with_legacy_fallback() -> None:
+    explicit = argparse.Namespace(theta_star=0.1, table2_theta=0.2, figure3_theta=0.3)
+    assert resolve_report_thetas(explicit) == (0.2, 0.3)
+    legacy = argparse.Namespace(theta_star=0.1, table2_theta=None, figure3_theta=None)
+    assert resolve_report_thetas(legacy) == (0.1, 0.1)
+
+
+def test_wnode_primary_names_have_no_fgw_and_default_has_no_legacy_aliases() -> None:
+    artifacts = report_artifact_bases(
+        prefix="final",
+        distance_label="MolCLR-Node-Wasserstein",
+        write_legacy_aliases=False,
+    )
+    assert artifacts["primary"]["figure3"] == "final_figure3_wnode_coverage_cost_vs_k"
+    assert artifacts["primary"]["figure4"] == "final_figure4_wnode_coverage_vs_threshold"
+    assert all("fgw" not in value for value in artifacts["primary"].values())
+    assert all(not aliases for aliases in artifacts["legacy"].values())
+
+
+def test_compact_and_theta_covered_tables_use_distinct_cost_columns() -> None:
+    full_rows = [
+        {
+            "Method": "Ours",
+            "Coverage": 0.4,
+            "Num Covered": 40,
+            "Conditional Median Cost": 0.3,
+            "Theta-covered Conditional Median Cost": 0.1,
+        }
+    ]
+    compact = _compact_table2_rows(full_rows)
+    theta_audit = _theta_covered_table2_rows(full_rows)
+    assert compact == [
+        {"Method": "Ours", "Coverage": 0.4, "Conditional Median Cost": 0.3}
+    ]
+    assert theta_audit == [
+        {
+            "Method": "Ours",
+            "Coverage": 0.4,
+            "Num Covered": 40,
+            "Theta-covered Conditional Median Cost": 0.1,
+        }
+    ]
