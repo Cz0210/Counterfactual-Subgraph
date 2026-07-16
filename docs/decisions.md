@@ -4829,3 +4829,37 @@ redundancy.
 Accepted
 
 ---
+
+## [2026-07-16] Make FGW presentation figures read-only and use the reported conditional-cost field
+
+### Background
+FGW final evaluation outputs already contain the Figure 3 prefix curve and
+the dense Figure 4 threshold curve. Recomputing them merely to create paper
+figures risks changing an evaluation artifact and is not permitted on an HPC
+login node. Earlier ad hoc plotting also failed to recognize the actual
+`conditional_median_cost` column.
+
+### Decision
+Use `scripts/plot_fgw_sota_figures.py` as a read-only post-processing tool.
+It prioritizes `conditional_median_cost` (with documented compatibility
+aliases), draws Figure 3 at the fixed q30 threshold, and emits separate
+`K=1..10` and `K=1..20` figures. Figure 4 is read only from a dense `K=20`
+curve; its normalized low-cost AUC always integrates over `[0, q30]`.
+
+Submit plotting through `scripts/slurm/plot_fgw_sota_figures_gpu.sh`, which
+uses the confirmed `A800` and `gpu:a800:1` resource combination from the
+successful CLEAR Slurm template. No account, qos, or constraint is invented
+because none is present in the verified project allocation pattern.
+
+### Consequences
+- The figure layer cannot alter strict-flip semantics, candidates, distances,
+  or evaluator output.
+- The displayed cost is explicitly described as the unified evaluator's
+  conditional cost, not as original-paper unconditional GCFExplainer cost.
+- A presentation audit permits only the narrowly scoped low-cost,
+  compact-budget SOTA statement when all three configured checks pass.
+
+### Status
+Accepted
+
+---
