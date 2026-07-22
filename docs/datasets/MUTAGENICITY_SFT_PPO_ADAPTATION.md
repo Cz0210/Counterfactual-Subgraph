@@ -100,6 +100,33 @@ outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/
   val_source_label1_teacher_correct.csv
 ```
 
+These views are reproducibly built by:
+
+```text
+scripts/data/build_mutagenicity_teacher_consistent_views.py
+```
+
+For each split, the builder uses
+`outputs/hpc/datasets/final/mutagenicity_v1_processed/<split>.csv` as the
+authoritative metadata table and strictly joins
+`outputs/hpc/oracle/final/mutagenicity_rf_v1/predictions_<split>.csv` by unique
+`molecule_id`. It verifies equal row and ID sets, exact SMILES and label
+agreement, and the processed `split` value. The processed `semantic_label` and
+`scaffold_smiles` are preserved rather than reconstructed from prediction
+files. Both SFT/PPO Slurm wrappers run this builder before consuming the views.
+
+The builder writes three views per split:
+
+```text
+<split>_source_label1_all.csv
+<split>_source_label1_teacher_correct.csv
+<split>_target_label0_teacher_correct.csv
+```
+
+along with `teacher_consistent_summary.json` and
+`teacher_consistent_report.md`. The source teacher-correct view requires
+`label=1`, `teacher_pred=1`, and `teacher_correct=true`.
+
 The calibration and test teacher-consistent files are read only as exclusion
 manifests. They never enter candidate generation, SFT, or PPO output.
 

@@ -4970,3 +4970,37 @@ manifests and fail on molecule, canonical-SMILES, or scaffold leakage.
 Accepted
 
 ---
+## [2026-07-22] Rebuild Mutagenicity teacher views from processed metadata
+
+### Background
+
+The first teacher-consistent Mutagenicity files were filtered directly from RF
+prediction CSVs. Those files contain IDs, SMILES, labels, and predictions but
+not the processed benchmark's `semantic_label`, `scaffold_smiles`, or `split`,
+so they cannot satisfy the SFT/PPO parent and leakage-audit contract.
+
+### Decision
+
+Treat each fixed processed split as the authoritative metadata source and
+strictly one-to-one join its corresponding RF prediction CSV by
+`molecule_id`. Reject duplicate or missing IDs, row-set differences, SMILES or
+label mismatches, and split mismatches. Preserve all processed columns, append
+teacher fields and the fixed `source_label=1,target_label=0` direction, then
+derive source-all, source teacher-correct, and target teacher-correct views.
+The SFT/PPO smoke and full wrappers rebuild these views before data generation.
+
+### Consequences
+
+- Scaffold and semantic metadata are preserved from the fixed benchmark; they
+  are never fabricated or recomputed from prediction-only files.
+- No inner join may silently discard a molecule.
+- Calibration and test source views remain exclusion manifests and do not
+  become SFT/PPO training inputs.
+- Existing teacher, ChemLLM, stable PPO, selector, WNode, and baseline logic is
+  unchanged.
+
+### Status
+
+Accepted
+
+---

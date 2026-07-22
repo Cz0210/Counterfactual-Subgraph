@@ -18,6 +18,11 @@ from src.data.mutagenicity_sft_ppo import (  # noqa: E402
     load_teacher_consistent_parents,
     validate_source_isolation,
 )
+from src.data.mutagenicity_teacher_views import (  # noqa: E402
+    TeacherViewConfig,
+    build_teacher_consistent_views,
+    merge_processed_and_predictions,
+)
 
 
 FIELDNAMES = [
@@ -73,6 +78,253 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> Path:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _write_table(
+    path: Path,
+    fieldnames: tuple[str, ...],
+    rows: list[dict[str, object]],
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+PROCESSED_FIELDS = (
+    "molecule_id",
+    "smiles",
+    "label",
+    "semantic_label",
+    "scaffold_smiles",
+    "split",
+    "source_dataset",
+)
+PREDICTION_FIELDS = (
+    "molecule_id",
+    "smiles",
+    "label",
+    "teacher_pred",
+    "teacher_prob_0",
+    "teacher_prob_1",
+    "teacher_correct",
+)
+
+
+def _processed_row(
+    molecule_id: str,
+    smiles: str,
+    label: int,
+    split: str,
+) -> dict[str, object]:
+    return {
+        "molecule_id": molecule_id,
+        "smiles": smiles,
+        "label": label,
+        "semantic_label": "mutagenic" if label == 1 else "non_mutagenic",
+        "scaffold_smiles": _scaffold(smiles),
+        "split": split,
+        "source_dataset": "curated_fixture",
+    }
+
+
+def _prediction_row(
+    molecule_id: str,
+    smiles: str,
+    label: int,
+    teacher_pred: int,
+) -> dict[str, object]:
+    return {
+        "molecule_id": molecule_id,
+        "smiles": smiles,
+        "label": label,
+        "teacher_pred": teacher_pred,
+        "teacher_prob_0": 0.9 if teacher_pred == 0 else 0.1,
+        "teacher_prob_1": 0.1 if teacher_pred == 0 else 0.9,
+        "teacher_correct": teacher_pred == label,
+    }
+
+
+def _teacher_view_split_rows(
+    split: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    molecules = (
+        (f"{split}_SOURCE_OK", "Cc1ccccc1", 1, 1),
+        (f"{split}_SOURCE_WRONG", "CCN", 1, 0),
+        (f"{split}_TARGET_OK", "C1CCOCC1", 0, 0),
+    )
+    processed = [
+        _processed_row(molecule_id, smiles, label, split)
+        for molecule_id, smiles, label, _prediction in molecules
+    ]
+    predictions = [
+        _prediction_row(molecule_id, smiles, label, prediction)
+        for molecule_id, smiles, label, prediction in molecules
+    ]
+    return processed, predictions
+
+
+def _write_teacher_view_roots(tmp_path: Path) -> tuple[Path, Path]:
+    processed_root = tmp_path / "processed"
+    teacher_root = tmp_path / "teacher"
+    for split in ("train", "val", "calibration", "test"):
+        processed, predictions = _teacher_view_split_rows(split)
+        _write_table(processed_root / f"{split}.csv", PROCESSED_FIELDS, processed)
+        _write_table(
+            teacher_root / f"predictions_{split}.csv", PREDICTION_FIELDS, predictions
+        )
+    return processed_root, teacher_root
+
+
+def test_teacher_view_one_to_one_merge_preserves_processed_metadata(tmp_path: Path) -> None:
+    processed, predictions = _teacher_view_split_rows("train")
+    processed_path = _write_table(
+        tmp_path / "train.csv", PROCESSED_FIELDS, processed
+    )
+    prediction_path = _write_table(
+        tmp_path / "predictions_train.csv", PREDICTION_FIELDS, predictions
+    )
+    rows, fields, audit = merge_processed_and_predictions(
+        processed_path, prediction_path, split="train"
+    )
+    assert len(rows) == 3
+    assert audit["merged_rows"] == audit["source_rows"] == 3
+    assert audit["missing_merge_count"] == 0
+    assert {"scaffold_smiles", "semantic_label", "split", "source_dataset"}.issubset(fields)
+    assert rows[0]["source_dataset"] == "curated_fixture"
+    assert rows[0]["source_label"] == 1
+    assert rows[0]["target_label"] == 0
+
+
+def test_teacher_view_missing_molecule_id_on_either_side_is_rejected(tmp_path: Path) -> None:
+    processed, predictions = _teacher_view_split_rows("train")
+    predictions.pop()
+    processed_path = _write_table(tmp_path / "train.csv", PROCESSED_FIELDS, processed)
+    prediction_path = _write_table(
+        tmp_path / "predictions_train.csv", PREDICTION_FIELDS, predictions
+    )
+    with pytest.raises(ValueError, match="not one-to-one"):
+        merge_processed_and_predictions(processed_path, prediction_path, split="train")
+
+
+def test_teacher_view_empty_molecule_id_is_rejected(tmp_path: Path) -> None:
+    processed, predictions = _teacher_view_split_rows("train")
+    predictions[0]["molecule_id"] = ""
+    processed_path = _write_table(tmp_path / "train.csv", PROCESSED_FIELDS, processed)
+    prediction_path = _write_table(
+        tmp_path / "predictions_train.csv", PREDICTION_FIELDS, predictions
+    )
+    with pytest.raises(ValueError, match="missing molecule_id"):
+        merge_processed_and_predictions(processed_path, prediction_path, split="train")
+
+
+def test_teacher_view_duplicate_molecule_id_is_rejected(tmp_path: Path) -> None:
+    processed, predictions = _teacher_view_split_rows("train")
+    predictions.append(dict(predictions[0]))
+    processed_path = _write_table(tmp_path / "train.csv", PROCESSED_FIELDS, processed)
+    prediction_path = _write_table(
+        tmp_path / "predictions_train.csv", PREDICTION_FIELDS, predictions
+    )
+    with pytest.raises(ValueError, match="duplicate molecule_id"):
+        merge_processed_and_predictions(processed_path, prediction_path, split="train")
+
+
+def test_teacher_view_smiles_mismatch_is_rejected(tmp_path: Path) -> None:
+    processed, predictions = _teacher_view_split_rows("train")
+    predictions[0]["smiles"] = "CCO"
+    processed_path = _write_table(tmp_path / "train.csv", PROCESSED_FIELDS, processed)
+    prediction_path = _write_table(
+        tmp_path / "predictions_train.csv", PREDICTION_FIELDS, predictions
+    )
+    with pytest.raises(ValueError, match="SMILES mismatch"):
+        merge_processed_and_predictions(processed_path, prediction_path, split="train")
+
+
+def test_teacher_view_label_mismatch_is_rejected(tmp_path: Path) -> None:
+    processed, predictions = _teacher_view_split_rows("train")
+    predictions[0]["label"] = 0
+    processed_path = _write_table(tmp_path / "train.csv", PROCESSED_FIELDS, processed)
+    prediction_path = _write_table(
+        tmp_path / "predictions_train.csv", PREDICTION_FIELDS, predictions
+    )
+    with pytest.raises(ValueError, match="Label mismatch"):
+        merge_processed_and_predictions(processed_path, prediction_path, split="train")
+
+
+def test_teacher_view_outputs_apply_exact_filters_and_complete_schema(tmp_path: Path) -> None:
+    processed_root, teacher_root = _write_teacher_view_roots(tmp_path)
+    output_dir = tmp_path / "views"
+    summary = build_teacher_consistent_views(
+        processed_root=processed_root,
+        teacher_root=teacher_root,
+        output_dir=output_dir,
+        config=TeacherViewConfig(
+            expected_source_correct_counts={
+                split: 1 for split in ("train", "val", "calibration", "test")
+            }
+        ),
+    )
+    assert summary["build_passed"] is True
+    assert summary["source_label_teacher_correct_rows"] == 4
+    for split in ("train", "val", "calibration", "test"):
+        source_all = _read_csv(output_dir / f"{split}_source_label1_all.csv")
+        source_correct = _read_csv(
+            output_dir / f"{split}_source_label1_teacher_correct.csv"
+        )
+        target_correct = _read_csv(
+            output_dir / f"{split}_target_label0_teacher_correct.csv"
+        )
+        assert len(source_all) == 2
+        assert len(source_correct) == len(target_correct) == 1
+        assert source_correct[0]["label"] == source_correct[0]["teacher_pred"] == "1"
+        assert source_correct[0]["teacher_correct"] == "True"
+        assert target_correct[0]["label"] == target_correct[0]["teacher_pred"] == "0"
+        for field in (
+            "molecule_id",
+            "smiles",
+            "label",
+            "semantic_label",
+            "scaffold_smiles",
+            "split",
+            "teacher_pred",
+            "teacher_prob_0",
+            "teacher_prob_1",
+            "teacher_correct",
+            "source_label",
+            "target_label",
+        ):
+            assert field in source_correct[0]
+
+
+def test_teacher_views_do_not_put_calibration_or_test_into_sft_sources(tmp_path: Path) -> None:
+    processed_root, teacher_root = _write_teacher_view_roots(tmp_path)
+    output_dir = tmp_path / "views"
+    build_teacher_consistent_views(
+        processed_root=processed_root,
+        teacher_root=teacher_root,
+        output_dir=output_dir,
+        config=TeacherViewConfig(
+            expected_source_correct_counts={
+                split: 1 for split in ("train", "val", "calibration", "test")
+            }
+        ),
+    )
+    train_ids = {
+        row["molecule_id"]
+        for row in _read_csv(output_dir / "train_source_label1_teacher_correct.csv")
+    }
+    val_ids = {
+        row["molecule_id"]
+        for row in _read_csv(output_dir / "val_source_label1_teacher_correct.csv")
+    }
+    exclusion_ids = {
+        row["molecule_id"]
+        for split in ("calibration", "test")
+        for row in _read_csv(output_dir / f"{split}_source_label1_teacher_correct.csv")
+    }
+    assert not (train_ids | val_ids) & exclusion_ids
 
 
 def _valid_four_split_inputs(root: Path) -> dict[str, Path]:
@@ -257,6 +509,7 @@ def test_end_to_end_outputs_unique_ppo_parents_targets_and_correct_summary(tmp_p
     )
 
     train_ppo = _read_csv(output_dir / "mutagenicity_ppo_prompts_train_label1.csv")
+    val_ppo = _read_csv(output_dir / "mutagenicity_ppo_prompts_val_label1.csv")
     train_sft = _read_csv(output_dir / "mutagenicity_sft_train.csv")
     assert len(train_ppo) == len({row["molecule_id"] for row in train_ppo}) == 1
     assert train_ppo[0]["molecule_id"] == "MUT_TRAIN"
@@ -268,5 +521,7 @@ def test_end_to_end_outputs_unique_ppo_parents_targets_and_correct_summary(tmp_p
     assert summary["splits"]["train"]["num_ppo_rows"] == 1
     assert summary["splits"]["train"]["num_sft_rows"] == 1
     assert summary["leakage_audit_passed"] is True
+    output_parent_ids = {row["molecule_id"] for row in train_ppo + val_ppo}
+    assert output_parent_ids.isdisjoint({"MUT_CAL", "MUT_TEST"})
     leakage = json.loads((output_dir / "leakage_audit.json").read_text(encoding="utf-8"))
     assert leakage["calibration_and_test_usage"] == "exclusion_audit_only"
