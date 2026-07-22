@@ -4863,3 +4863,73 @@ because none is present in the verified project allocation pattern.
 Accepted
 
 ---
+## Decision: GCF-style reports separate table and prefix thresholds
+
+**Date:** 2026-07-16
+
+GCF-style recourse post-processing now treats the Table 2 threshold and the
+Figure 3 prefix threshold as separate report parameters. Both continue to fall
+back to `--theta-star` for command compatibility, while `--table2-theta` and
+`--figure3-theta` make the intended protocol explicit.
+
+Figure 3 cost statistics use a fixed one-to-one mapping. In particular,
+`conditional_median` means `conditional_median_cost`; it is not an alias for a
+theta-covered cost. Full-range cost axes are the default, WNode artifacts use a
+`wnode` filename slug, and historical unprefixed or `fgw` aliases are written
+only when `--write-legacy-aliases` is requested. The compact Table 2 reports
+overall conditional median cost, while theta-covered cost remains in a
+separately named audit table.
+## [2026-07-22] Use one curated SMILES benchmark for Mutagenicity baselines
+
+### Background
+Mutagenicity is available both as a raw/TU graph dataset and as raw, removed,
+and curated SMILES tables. Allowing each baseline to choose its own source or
+label encoding would make cross-method recourse results incomparable.
+
+### Decision
+Use the 4,247-row curated SMILES CSV as the primary v1 benchmark source, with
+`1=mutagenic`, `0=non_mutagenic`, and main recourse direction `1 -> 0`. Audit
+the 4,337-row raw CSV against TU graph order using the uniquely verified
+inverse TU mapping. Preserve isomeric chemistry, reject invalid or disconnected
+molecules, deduplicate canonical isomeric SMILES, exclude label conflicts, and
+build one deterministic label-aware 70/10/10/10 scaffold-group split shared by
+all methods.
+
+### Consequences
+- Raw files remain immutable provenance inputs.
+- No neutralization, tautomer canonicalization, or stereochemistry removal is
+  performed in v1.
+- Ours and every baseline must use the same processed benchmark and split
+  manifest for final Mutagenicity comparisons.
+- Smoke outputs are isolated from the canonical full processed directory.
+
+### Status
+Accepted
+
+---
+## [2026-07-22] Fit the Mutagenicity RF teacher on train only
+
+### Background
+The unified Mutagenicity benchmark provides fixed train, validation,
+calibration, and test splits. Reusing the older AIDS script's random holdout
+would break this dataset contract and risk calibration/test leakage.
+
+### Decision
+Train a Morgan fingerprint RandomForest only on the fixed train split, select
+its hyperparameters only on validation balanced accuracy, and reserve the
+calibration and test splits for probability/threshold calibration and final
+teacher-quality reporting respectively. Persist the model in the existing
+oracle bundle format so shared teacher consumers can read it without changing
+their core logic.
+
+### Consequences
+- The teacher data root is
+  `outputs/hpc/datasets/final/mutagenicity_v1_processed`, not the parent full
+  run directory.
+- Every split receives the same probability and classification metric audit.
+- Calibration and test metrics cannot influence model selection.
+
+### Status
+Accepted
+
+---
