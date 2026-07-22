@@ -1,0 +1,44 @@
+dataset_name: Mutagenicity
+dataset_version: v1
+source_label: 1
+target_label: 0
+source_semantics: mutagenic
+target_semantics: non_mutagenic
+seed: 42
+
+inputs:
+  teacher_consistent_root: outputs/hpc/datasets/mutagenicity_v1_teacher_consistent
+  teacher_path: outputs/hpc/oracle/final/mutagenicity_rf_v1/mutagenicity_rf_model.pkl
+
+outputs:
+  root: outputs/hpc/mutagenicity/sft_ppo_data_v1
+
+expected_parent_counts:
+  train: 1448
+  val: 260
+  calibration: 235
+  test: 217
+
+sampling:
+  max_train_parents: 0
+  max_val_parents: 0
+  smoke_max_train_parents: 100
+  smoke_max_val_parents: 40
+  method: scaffold_size_stratified
+
+sft_target:
+  implementation: src.data.sft_v3_builder.select_reference_candidate_for_parent
+  min_atom_ratio: 0.10
+  max_atom_ratio: 0.55
+  min_frag_atoms: 3
+  max_frag_atoms: 30
+  max_candidates_per_parent: 160
+  use_teacher_ranking: true
+  completion_format: core_no_dummy
+  raw_fragment_format: attachment_point_audit
+
+ppo:
+  one_row_per_parent: true
+  stable_parent_id_column: molecule_id
+  smiles_column: parent_smiles
+  label_column: label

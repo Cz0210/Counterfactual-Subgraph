@@ -1,0 +1,106 @@
+#!/bin/bash
+#SBATCH --partition=A800
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=7
+#SBATCH --gres=gpu:a800:1
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
+#SBATCH --job-name=mut_sftppo_full
+#SBATCH --output=logs/%j.out
+#SBATCH --error=logs/%j.err
+
+set -euo pipefail
+
+PWD_BEFORE_CD="$PWD"
+PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-}}"
+if [[ -z "$PROJECT_ROOT" ]]; then
+  PROJECT_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "$PROJECT_ROOT" ]]; then
+  echo "[ERROR] Could not determine PROJECT_ROOT" >&2
+  exit 2
+fi
+PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd)"
+if [[ ! -f "$PROJECT_ROOT/scripts/data/build_mutagenicity_sft_ppo_data.py" ]]; then
+  echo "[ERROR] Invalid PROJECT_ROOT: $PROJECT_ROOT" >&2
+  exit 2
+fi
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+set +u
+source ~/.bashrc
+conda activate smiles_pip118
+set -u
+
+LOG_DIR="$PROJECT_ROOT/logs"
+TEACHER_CONSISTENT_ROOT="${TEACHER_CONSISTENT_ROOT:-$PROJECT_ROOT/outputs/hpc/datasets/mutagenicity_v1_teacher_consistent}"
+TEACHER_PATH="${TEACHER_PATH:-$PROJECT_ROOT/outputs/hpc/oracle/final/mutagenicity_rf_v1/mutagenicity_rf_model.pkl}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/hpc/mutagenicity/sft_ppo_data_v1}"
+
+resolve_project_path() {
+  local path_value="$1"
+  if [[ "$path_value" = /* ]]; then
+    printf '%s\n' "$path_value"
+  else
+    printf '%s\n' "$PROJECT_ROOT/$path_value"
+  fi
+}
+
+TEACHER_CONSISTENT_ROOT="$(resolve_project_path "$TEACHER_CONSISTENT_ROOT")"
+TEACHER_PATH="$(resolve_project_path "$TEACHER_PATH")"
+OUTPUT_ROOT="$(resolve_project_path "$OUTPUT_ROOT")"
+TRAIN_INPUT="$TEACHER_CONSISTENT_ROOT/train_source_label1_teacher_correct.csv"
+VAL_INPUT="$TEACHER_CONSISTENT_ROOT/val_source_label1_teacher_correct.csv"
+CALIBRATION_INPUT="$TEACHER_CONSISTENT_ROOT/calibration_source_label1_teacher_correct.csv"
+TEST_INPUT="$TEACHER_CONSISTENT_ROOT/test_source_label1_teacher_correct.csv"
+SEED="${SEED:-42}"
+
+mkdir -p "$LOG_DIR" "$OUTPUT_ROOT"
+
+echo "===== MUTAGENICITY SFT/PPO DATA FULL ====="
+echo "hostname=$(hostname)"
+echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-}"
+echo "PWD before cd=$PWD_BEFORE_CD"
+echo "PROJECT_ROOT=$PROJECT_ROOT"
+echo "PWD after cd=$PWD"
+echo "PYTHONPATH=$PYTHONPATH"
+echo "git_commit=$(git rev-parse HEAD || true)"
+echo "python=$(which python)"
+python --version
+echo "conda_env=${CONDA_DEFAULT_ENV:-unset}"
+echo "TEACHER_CONSISTENT_ROOT=$TEACHER_CONSISTENT_ROOT"
+echo "TRAIN_INPUT=$TRAIN_INPUT"
+echo "VAL_INPUT=$VAL_INPUT"
+echo "CALIBRATION_INPUT=$CALIBRATION_INPUT"
+echo "TEST_INPUT=$TEST_INPUT"
+echo "TEACHER_PATH=$TEACHER_PATH"
+echo "OUTPUT_ROOT=$OUTPUT_ROOT"
+echo "SOURCE_LABEL=1"
+echo "TARGET_LABEL=0"
+
+for required_file in \
+  "$TRAIN_INPUT" \
+  "$VAL_INPUT" \
+  "$CALIBRATION_INPUT" \
+  "$TEST_INPUT" \
+  "$TEACHER_PATH"; do
+  if [[ ! -s "$required_file" ]]; then
+    echo "[ERROR] Required input is missing or empty: $required_file" >&2
+    exit 2
+  fi
+done
+
+python scripts/data/build_mutagenicity_sft_ppo_data.py \
+  --config configs/hpc.yaml \
+  --config configs/data/mutagenicity_sft_ppo.yaml \
+  --teacher-consistent-root "$TEACHER_CONSISTENT_ROOT" \
+  --teacher-path "$TEACHER_PATH" \
+  --output-dir "$OUTPUT_ROOT" \
+  --max-train-parents 0 \
+  --max-val-parents 0 \
+  --seed "$SEED" \
+  --use-teacher-ranking
+
+echo "[MUTAGENICITY_SFT_PPO_FULL_OK]"

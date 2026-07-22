@@ -4933,3 +4933,40 @@ their core logic.
 Accepted
 
 ---
+## [2026-07-22] Reuse the AIDS SFT v3 target constructor for Mutagenicity
+
+### Background
+
+The processed Mutagenicity benchmark and RF teacher now provide fixed,
+teacher-consistent source-label train and validation views. A new ChemLLM SFT
+and stable-PPO data path must preserve the existing counterfactual-fragment
+objective without inventing molecule-level pseudo-targets or admitting
+calibration/test examples.
+
+### Decision
+
+Build Mutagenicity SFT targets by directly reusing
+`select_reference_candidate_for_parent()` from the AIDS SFT v3 implementation.
+This preserves the existing projection and Murcko candidate sources, core
+normalization, dummy-atom audit representation, exact parent matching, size and
+non-empty-residual filters, and optional deletion-based RF ranking. Build PPO
+prompts one-to-one from every validated teacher-correct source parent and retain
+the stable `molecule_id`. Read calibration/test files only as exclusion
+manifests and fail on molecule, canonical-SMILES, or scaffold leakage.
+
+### Consequences
+
+- Mutagenicity uses the same weak target semantics as AIDS SFT v3 rather than a
+  newly invented fragment label.
+- Parents for which that constructor finds no target are explicit SFT misses;
+  they are not assigned fallback pseudo-fragments.
+- The PPO prompt set can cover all valid source parents independently of SFT
+  target coverage.
+- Existing AIDS, SFT trainer, stable PPO, selector, WNode, and CCRCov code paths
+  remain unchanged.
+
+### Status
+
+Accepted
+
+---
