@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+import re
 
 import pytest
 
 pytest.importorskip("rdkit")
 
+from scripts.train_mutagenicity_continued_sft import _nested, build_parser
 from src.data.mutagenicity_continued_sft import (
     ContinuedSFTRecord,
     ParentCoverageTracker,
@@ -18,6 +20,7 @@ from src.data.mutagenicity_continued_sft import (
     validate_peft_checkpoint,
     validate_train_val_isolation,
 )
+from src.utils.env import load_and_merge_config_files
 
 
 FIELDS = (
@@ -263,3 +266,93 @@ def test_output_root_never_overwrites_existing_result(tmp_path: Path) -> None:
         ensure_new_output_root(output)
     fresh = ensure_new_output_root(tmp_path / "fresh")
     assert fresh.is_dir()
+
+
+def test_continued_sft_config_uses_supported_yaml_and_expected_types() -> None:
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "train"
+        / "mutagenicity_continued_sft.yaml"
+    )
+    config = load_and_merge_config_files([config_path])
+
+    assert config["data.preferred_root"].endswith("sft_ppo_data_v1")
+    assert config["data.expected_train_rows"] == 1317
+    assert config["data.expected_val_rows"] == 250
+    assert config["data.forbidden_splits"] == "calibration,test"
+    assert config["model.initialization"] == "continued_peft_adapter"
+    assert config["training.max_sequence_length"] == 1024
+    assert config["training.max_steps"] == 500
+    assert config["training.per_device_train_batch_size"] == 4
+    assert config["training.gradient_accumulation_steps"] == 4
+    assert config["training.learning_rate"] == pytest.approx(0.0002)
+    assert config["training.warmup_ratio"] == pytest.approx(0.03)
+    assert config["training.bf16"] is True
+    assert config["training.fp16"] is False
+    assert config["training.report_to"] == "none"
+    assert config["smoke.max_steps"] == 3
+    assert config["full.output_root"].endswith("sft_continued_v1")
+
+    assert _nested(config, "training", "max_steps") == 500
+    assert _nested(config, "smoke", "max_steps") == 3
+    assert _nested(config, "model", "base_model_path") == (
+        "pretrained_models/ChemLLM-7B-Chat"
+    )
+
+    source_lines = config_path.read_text(encoding="utf-8").splitlines()
+    config_lines = [
+        line for line in source_lines if line.strip() and not line.startswith("#")
+    ]
+    assert all(line == line.lstrip() for line in config_lines)
+    assert all(":" in line and line.partition(":")[2].strip() for line in config_lines)
+    assert not any(line.startswith(("- ", "|", ">")) for line in config_lines)
+
+
+def test_slurm_config_overrides_are_recognized_by_training_cli() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    parser_options = {
+        option
+        for action in build_parser()._actions
+        for option in action.option_strings
+        if option.startswith("--")
+    }
+    expected_overrides = {
+        "--config",
+        "--mode",
+        "--data-root",
+        "--train-csv",
+        "--val-csv",
+        "--base-model-path",
+        "--base-checkpoint",
+        "--tokenizer-path",
+        "--output-root",
+        "--max-train-rows",
+        "--max-val-rows",
+        "--max-steps",
+        "--max-sequence-length",
+        "--per-device-train-batch-size",
+        "--per-device-eval-batch-size",
+        "--gradient-accumulation-steps",
+        "--learning-rate",
+        "--logging-steps",
+        "--save-steps",
+        "--eval-steps",
+        "--save-total-limit",
+        "--generation-samples",
+        "--seed",
+    }
+
+    for wrapper_name in (
+        "train_mutagenicity_sft_smoke.sh",
+        "train_mutagenicity_sft_full.sh",
+    ):
+        wrapper = (
+            repo_root / "scripts" / "slurm" / wrapper_name
+        ).read_text(encoding="utf-8")
+        command = wrapper.split(
+            "python scripts/train_mutagenicity_continued_sft.py", maxsplit=1
+        )[1].split("\n\n", maxsplit=1)[0]
+        wrapper_options = set(re.findall(r"--[a-z][a-z0-9-]*", command))
+        assert wrapper_options == expected_overrides
+        assert wrapper_options <= parser_options

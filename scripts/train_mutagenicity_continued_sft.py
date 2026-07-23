@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _nested(payload: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    dotted_key = ".".join(keys)
+    if dotted_key in payload:
+        value = payload[dotted_key]
+        return default if value is None else value
+
     current: Any = payload
     for key in keys:
         if not isinstance(current, Mapping) or key not in current:
