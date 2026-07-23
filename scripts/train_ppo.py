@@ -115,14 +115,18 @@ class PromptExample:
     prompt: str
     parent_smiles: str
     original_label: int
+    molecule_id: str | None = None
 
     def to_dataset_row(self) -> dict[str, Any]:
-        return {
+        row = {
             "index": self.index,
             "query": self.prompt,
             "parent_smiles": self.parent_smiles,
             "original_label": int(self.original_label),
         }
+        if self.molecule_id is not None:
+            row["molecule_id"] = str(self.molecule_id)
+        return row
 
 
 @dataclass(frozen=True, slots=True)

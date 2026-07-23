@@ -40,6 +40,46 @@ training log and report.
 Accepted
 
 ---
+## [2026-07-23] Adapt the shared stable PPO loop to Mutagenicity 1 -> 0
+
+### Background
+
+The AIDS stable decoded-chemistry PPO loop already implements generation,
+chemistry validation, parent projection, deletion-based RF scoring, PPO
+clipping, adaptive KL, and value-head updates. Its update counter is
+DataLoader-batch based, however, and its generic counterfactual scorer defines
+a flip only from the post-intervention prediction. Mutagenicity requires an
+auditable source-label `1` to target-label `0` direction and one complete
+no-replacement pass over 1,448 train parents.
+
+### Decision
+
+Keep `run_stable_decoded_chem_ppo_loop()` as the only PPO algorithm and add an
+optional run observer plus stable `molecule_id` propagation. The
+Mutagenicity adapter deterministically orders the teacher-correct train view,
+uses a nominal rollout batch of 64, derives `ceil(1448 / 64) = 23` updates,
+and stops after the first exhausted DataLoader pass. Load the pure ChemLLM
+base plus exactly one continued-SFT `checkpoint-200` LoRA for both policy and
+frozen reference policy. Use a Mutagenicity-specific scorer with strict flip
+`pred_before == 1 and pred_after == 0` and `cf_drop = p1_before - p1_after`.
+
+### Consequences
+
+- Existing AIDS callers do not pass the observer and retain their current
+  sampling and reward behavior.
+- The decoded stable loop still does one optimizer update per PPO epoch for
+  each rollout batch; its legacy mini-batch and gradient-accumulation CLI
+  values do not subdivide this local loop.
+- Parent coverage, update metrics, candidates, validation samples, model
+  freezing, teacher direction, and checkpoint selection are persisted as
+  first-class run artifacts.
+- Calibration and test data are rejected before model loading.
+
+### Status
+
+Accepted
+
+---
 
 ## [2026-07-15] Plot and report theta-covered conditional FGW cost by default
 

@@ -372,9 +372,111 @@ def load_stable_prompt_examples(
             prompt=record.prompt,
             parent_smiles=record.parent_smiles,
             original_label=int(record.label if record.label in (0, 1) else default_parent_label),
+            molecule_id=(
+                str(record.raw_payload.get("molecule_id")).strip()
+                if record.raw_payload.get("molecule_id") not in (None, "")
+                else None
+            ),
         )
         for record in records
     ]
+
+
+def _call_run_observer(
+    run_observer: Any | None,
+    method_name: str,
+    **kwargs: Any,
+) -> Any:
+    if run_observer is None:
+        return None
+    method = getattr(run_observer, method_name, None)
+    if not callable(method):
+        return None
+    return method(**kwargs)
+
+
+def build_stable_reward_wrapper(
+    *,
+    args: argparse.Namespace,
+    stable_config: StablePPOConfig,
+    teacher_scorer: TeacherSemanticScorer,
+    counterfactual_teacher_scorer: CounterfactualTeacherScorer | None,
+    oracle_path: Path,
+    projected_cf_reward_enabled: bool,
+    logger: Any,
+) -> StableChemRLRewardWrapper:
+    """Build the shared decoded-chemistry reward stack for stable PPO routes."""
+
+    rewarder = ChemRLRewarder(
+        oracle_path=oracle_path,
+        default_parent_label=args.default_parent_label,
+        teacher_scorer=teacher_scorer,
+        counterfactual_teacher_scorer=counterfactual_teacher_scorer,
+        teacher_sem_scale=args.teacher_sem_scale,
+        teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
+        full_parent_penalty=args.full_parent_penalty,
+        empty_residual_penalty=args.empty_residual_penalty,
+        enable_parent_aware_repair=args.enable_parent_aware_repair,
+        repair_min_similarity=args.repair_min_similarity,
+        repair_max_candidates=args.repair_max_candidates,
+        enable_parent_projection=args.enable_parent_projection,
+        projection_min_score=args.projection_min_score,
+        projection_max_candidates=args.projection_max_candidates,
+        projection_min_atoms=args.projection_min_atoms,
+        projection_max_atom_ratio=args.projection_max_atom_ratio,
+        projection_penalty=args.projection_penalty,
+        projection_enable_khop3=args.projection_enable_khop3,
+        projection_mcs_timeout=args.projection_mcs_timeout,
+        enable_substructure_distance_reward=args.enable_substructure_distance_reward,
+        substructure_distance_reward_weight=args.substructure_distance_reward_weight,
+        substructure_distance_min_atom_ratio=args.substructure_distance_min_atom_ratio,
+        substructure_distance_max_atom_ratio=args.substructure_distance_max_atom_ratio,
+        substructure_distance_topk=args.substructure_distance_topk,
+        substructure_distance_mcs_timeout=args.substructure_distance_mcs_timeout,
+        substructure_distance_sim_threshold=args.substructure_distance_sim_threshold,
+        enable_projected_cf_reward=projected_cf_reward_enabled,
+        disable_projected_cf_reward=args.disable_projected_cf_reward,
+        enable_minimal_syntax_repair=args.enable_minimal_syntax_repair,
+        syntax_repair_max_edits=args.repair_max_edits,
+        syntax_repair_min_atoms=args.repair_min_atoms,
+        syntax_repair_allow_parentheses_fix=args.repair_allow_parentheses_fix,
+        syntax_repair_allow_ring_fix=args.repair_allow_ring_fix,
+        syntax_repair_allow_tail_trim=args.repair_allow_tail_trim,
+        syntax_repair_allow_balanced_prefix_salvage=args.repair_allow_balanced_prefix_salvage,
+        syntax_repair_prefer_prefix_salvage=args.repair_prefer_prefix_salvage,
+        syntax_repair_max_suffix_trim=args.repair_max_suffix_trim,
+        syntax_repair_max_added_closures=args.repair_max_added_closures,
+        enable_component_salvage=args.enable_component_salvage,
+        component_salvage_method=args.component_salvage_method,
+        component_salvage_min_atoms=args.component_salvage_min_atoms,
+        multi_dummy_hard_fail_threshold=args.multi_dummy_hard_fail_threshold,
+        enable_light_dummy_salvage=args.enable_light_dummy_salvage,
+        near_parent_hard_ratio=args.near_parent_hard_ratio,
+        min_residual_atoms=args.min_residual_atoms,
+        min_residual_ratio=args.min_residual_ratio,
+        min_fragment_atoms=args.min_fragment_atoms,
+        tiny_fragment_hard_fail_penalty=args.tiny_fragment_hard_fail_penalty,
+        enable_size_window_reward=args.enable_size_window_reward,
+        size_window_low=args.size_window_low,
+        size_window_high=args.size_window_high,
+        size_window_bonus=args.size_window_bonus,
+        size_window_small_penalty=args.size_window_small_penalty,
+        size_window_large_penalty=args.size_window_large_penalty,
+        max_generation_chars=args.reward_max_fragment_chars,
+        core_output_mode=args.core_output_mode,
+        dummy_output_penalty=args.dummy_output_penalty,
+        require_teacher_sem=args.require_teacher_sem,
+        disable_counterfactual_teacher=args.disable_counterfactual_teacher,
+    )
+    return StableChemRLRewardWrapper(
+        base_rewarder=rewarder,
+        teacher_conf_gate=StableTeacherConfidenceGateConfig(
+            enabled=stable_config.enable_teacher_confidence_gate,
+            min_teacher_p_before=stable_config.min_teacher_p_before,
+            low_conf_cf_weight=stable_config.low_conf_cf_weight,
+        ),
+        logger=logger,
+    )
 
 
 def _resolve_final_fragment_for_metrics(row: dict[str, Any]) -> str | None:
@@ -714,6 +816,7 @@ def _evaluate_validation_set(
     reward_wrapper: StableChemRLRewardWrapper,
     step_index: int,
     logger: Any,
+    run_observer: Any | None = None,
 ) -> dict[str, float] | None:
     if not stable_config.val_dataset_path:
         return None
@@ -813,14 +916,16 @@ def _evaluate_validation_set(
         del reward_tensor
 
         for index, reward_log in enumerate(reward_logs):
-            eval_rows.append(
-                _enrich_reward_log(
-                    reward_log,
-                    record=batch_records[index],
-                    candidate_index=0,
-                    raw_response=response_texts[index],
-                )
+            enriched = _enrich_reward_log(
+                reward_log,
+                record=batch_records[index],
+                candidate_index=0,
+                raw_response=response_texts[index],
             )
+            molecule_id = batch_records[index].raw_payload.get("molecule_id")
+            if molecule_id not in (None, ""):
+                enriched["molecule_id"] = str(molecule_id)
+            eval_rows.append(enriched)
 
     policy_model.train()
     summary = _build_eval_summary(eval_rows)
@@ -839,6 +944,13 @@ def _evaluate_validation_set(
         summary["core_unusable_rate"],
         summary["atom_ratio_mean"],
         summary["val_score"],
+    )
+    _call_run_observer(
+        run_observer,
+        "on_validation",
+        step_index=step_index,
+        summary=dict(summary),
+        rows=[dict(row) for row in eval_rows],
     )
     return summary
 
@@ -923,6 +1035,8 @@ def run_stable_decoded_chem_ppo_loop(
     stable_reward_wrapper: StableChemRLRewardWrapper,
     output_dir: Path,
     logger: Any,
+    run_observer: Any | None = None,
+    stop_after_dataset_exhausted: bool = False,
 ) -> Path:
     torch = deps["torch"]
 
@@ -1010,11 +1124,20 @@ def run_stable_decoded_chem_ppo_loop(
     early_stop_reason = None
     chemistry_reward_called = False
     chemistry_reward_update_called = False
+    completed_steps = 0
+    last_validation_step: int | None = None
 
     for step_index in range(1, int(args.max_steps) + 1):
         try:
             batch = next(dataloader_iterator)
         except StopIteration:
+            if stop_after_dataset_exhausted:
+                logger.info(
+                    "[STABLE_PPO_DATASET_EXHAUSTED] step=%s action=stop_without_replacement",
+                    step_index,
+                )
+                early_stop_reason = "dataset_exhausted"
+                break
             dataloader_iterator = iter(dataloader)
             batch = next(dataloader_iterator)
 
@@ -1025,7 +1148,15 @@ def run_stable_decoded_chem_ppo_loop(
         ]
         parent_labels = [int(label) for label in _resolve_batch_list_field(batch, "original_label", "label")]
         try:
-            batch_ids = list(_resolve_batch_list_field(batch, "index", "id", "graph_id"))
+            batch_ids = list(
+                _resolve_batch_list_field(
+                    batch,
+                    "molecule_id",
+                    "index",
+                    "id",
+                    "graph_id",
+                )
+            )
         except KeyError:
             batch_ids = list(range(len(parent_smiles_batch)))
 
@@ -1099,6 +1230,19 @@ def run_stable_decoded_chem_ppo_loop(
             device=rollout_device,
             step_index=step_index,
         )
+        enriched_reward_logs = _call_run_observer(
+            run_observer,
+            "enrich_reward_logs",
+            step_index=step_index,
+            batch_ids=[str(value) for value in batch_ids],
+            parent_smiles=list(parent_smiles_batch),
+            prompts=list(prompt_texts),
+            generated_texts=list(response_texts),
+            fragments=list(fragments),
+            reward_logs=[dict(row) for row in reward_logs],
+        )
+        if enriched_reward_logs is not None:
+            reward_logs = list(enriched_reward_logs)
         chemistry_reward_called = True
         raw_reward_tensor = reward_tensor.clone().detach()
         raw_step_metrics = _summarize_step_metrics(reward_logs)
@@ -1322,6 +1466,29 @@ def run_stable_decoded_chem_ppo_loop(
             int(raw_step_metrics["parse_failed_count"]),
             raw_step_metrics["atom_ratio_mean"],
         )
+        completed_steps = step_index
+        update_metrics = {
+            "global_step": int(step_index),
+            "rollout_batch_size": len(parent_smiles_batch),
+            "reward_mean": float(raw_reward_tensor.mean().detach().cpu().item()),
+            "reward_min": float(raw_reward_tensor.min().detach().cpu().item()),
+            "reward_max": float(raw_reward_tensor.max().detach().cpu().item()),
+            "ppo_reward_mean": float(reward_tensor.mean().detach().cpu().item()),
+            "policy_loss": last_policy_loss,
+            "value_loss": last_value_loss,
+            "total_loss": last_total_loss,
+            "approx_kl": last_approx_kl,
+            "kl_penalty": float(current_kl_penalty),
+            **raw_step_metrics,
+        }
+        _call_run_observer(
+            run_observer,
+            "on_update",
+            step_index=step_index,
+            batch_ids=[str(value) for value in batch_ids],
+            reward_logs=[dict(row) for row in reward_logs],
+            metrics=update_metrics,
+        )
 
         if step_index % max(1, int(args.save_steps)) == 0:
             checkpoint_dir = output_dir / f"checkpoint-{step_index}"
@@ -1331,6 +1498,13 @@ def run_stable_decoded_chem_ppo_loop(
                 tokenizer=tokenizer,
                 output_dir=checkpoint_dir,
                 torch=torch,
+            )
+            _call_run_observer(
+                run_observer,
+                "on_checkpoint",
+                step_index=step_index,
+                checkpoint_dir=checkpoint_dir,
+                checkpoint_kind="periodic",
             )
 
         if (
@@ -1347,7 +1521,9 @@ def run_stable_decoded_chem_ppo_loop(
                 reward_wrapper=stable_reward_wrapper,
                 step_index=step_index,
                 logger=logger,
+                run_observer=run_observer,
             )
+            previous_best_step = validation_state.best_step
             validation_state, stop_from_eval = _maybe_save_best_checkpoint(
                 deps=deps,
                 stable_config=stable_config,
@@ -1360,6 +1536,19 @@ def run_stable_decoded_chem_ppo_loop(
                 output_dir=output_dir,
                 logger=logger,
             )
+            last_validation_step = step_index
+            if (
+                validation_state.best_step == step_index
+                and validation_state.best_step != previous_best_step
+                and stable_config.save_best_checkpoint
+            ):
+                _call_run_observer(
+                    run_observer,
+                    "on_checkpoint",
+                    step_index=step_index,
+                    checkpoint_dir=output_dir / "best_val_checkpoint",
+                    checkpoint_kind="best_validation",
+                )
             if stop_from_eval:
                 should_stop = True
                 early_stop_reason = "validation_patience"
@@ -1374,6 +1563,49 @@ def run_stable_decoded_chem_ppo_loop(
             )
             break
 
+    if (
+        stable_config.val_dataset_path
+        and stable_config.eval_every_steps > 0
+        and completed_steps > 0
+        and last_validation_step != completed_steps
+    ):
+        summary = _evaluate_validation_set(
+            deps=deps,
+            args=args,
+            stable_config=stable_config,
+            policy_model=policy_model,
+            tokenizer=tokenizer,
+            reward_wrapper=stable_reward_wrapper,
+            step_index=completed_steps,
+            logger=logger,
+            run_observer=run_observer,
+        )
+        previous_best_step = validation_state.best_step
+        validation_state, _stop_from_eval = _maybe_save_best_checkpoint(
+            deps=deps,
+            stable_config=stable_config,
+            summary=summary,
+            validation_state=validation_state,
+            step_index=completed_steps,
+            policy_model=policy_model,
+            value_model=value_model,
+            tokenizer=tokenizer,
+            output_dir=output_dir,
+            logger=logger,
+        )
+        if (
+            validation_state.best_step == completed_steps
+            and validation_state.best_step != previous_best_step
+            and stable_config.save_best_checkpoint
+        ):
+            _call_run_observer(
+                run_observer,
+                "on_checkpoint",
+                step_index=completed_steps,
+                checkpoint_dir=output_dir / "best_val_checkpoint",
+                checkpoint_kind="best_validation",
+            )
+
     if args.require_chemistry_reward_path and not chemistry_reward_called:
         raise RuntimeError("Stable decoded chemistry PPO did not call the chemistry reward path.")
     if args.require_chemistry_reward_path and not chemistry_reward_update_called:
@@ -1384,13 +1616,24 @@ def run_stable_decoded_chem_ppo_loop(
         candidate_pool_path,
         len(candidate_pool_rows),
     )
-    return save_decoded_chem_checkpoint(
+    final_output_dir = save_decoded_chem_checkpoint(
         policy_model=policy_model,
         value_model=value_model,
         tokenizer=tokenizer,
         output_dir=output_dir,
         torch=torch,
     )
+    _call_run_observer(
+        run_observer,
+        "on_finish",
+        final_output_dir=final_output_dir,
+        candidate_pool_path=candidate_pool_path,
+        candidate_count=len(candidate_pool_rows),
+        global_step=completed_steps,
+        validation_state=validation_state,
+        early_stop_reason=early_stop_reason,
+    )
+    return final_output_dir
 
 
 def main() -> None:
@@ -1518,74 +1761,13 @@ def main() -> None:
             teacher_scorer=teacher_scorer,
         )
 
-    rewarder = ChemRLRewarder(
-        oracle_path=oracle_path,
-        default_parent_label=args.default_parent_label,
+    stable_reward_wrapper = build_stable_reward_wrapper(
+        args=args,
+        stable_config=stable_config,
         teacher_scorer=teacher_scorer,
         counterfactual_teacher_scorer=counterfactual_teacher_scorer,
-        teacher_sem_scale=args.teacher_sem_scale,
-        teacher_sem_missing_penalty=args.teacher_sem_missing_penalty,
-        full_parent_penalty=args.full_parent_penalty,
-        empty_residual_penalty=args.empty_residual_penalty,
-        enable_parent_aware_repair=args.enable_parent_aware_repair,
-        repair_min_similarity=args.repair_min_similarity,
-        repair_max_candidates=args.repair_max_candidates,
-        enable_parent_projection=args.enable_parent_projection,
-        projection_min_score=args.projection_min_score,
-        projection_max_candidates=args.projection_max_candidates,
-        projection_min_atoms=args.projection_min_atoms,
-        projection_max_atom_ratio=args.projection_max_atom_ratio,
-        projection_penalty=args.projection_penalty,
-        projection_enable_khop3=args.projection_enable_khop3,
-        projection_mcs_timeout=args.projection_mcs_timeout,
-        enable_substructure_distance_reward=args.enable_substructure_distance_reward,
-        substructure_distance_reward_weight=args.substructure_distance_reward_weight,
-        substructure_distance_min_atom_ratio=args.substructure_distance_min_atom_ratio,
-        substructure_distance_max_atom_ratio=args.substructure_distance_max_atom_ratio,
-        substructure_distance_topk=args.substructure_distance_topk,
-        substructure_distance_mcs_timeout=args.substructure_distance_mcs_timeout,
-        substructure_distance_sim_threshold=args.substructure_distance_sim_threshold,
-        enable_projected_cf_reward=projected_cf_reward_enabled,
-        disable_projected_cf_reward=args.disable_projected_cf_reward,
-        enable_minimal_syntax_repair=args.enable_minimal_syntax_repair,
-        syntax_repair_max_edits=args.repair_max_edits,
-        syntax_repair_min_atoms=args.repair_min_atoms,
-        syntax_repair_allow_parentheses_fix=args.repair_allow_parentheses_fix,
-        syntax_repair_allow_ring_fix=args.repair_allow_ring_fix,
-        syntax_repair_allow_tail_trim=args.repair_allow_tail_trim,
-        syntax_repair_allow_balanced_prefix_salvage=args.repair_allow_balanced_prefix_salvage,
-        syntax_repair_prefer_prefix_salvage=args.repair_prefer_prefix_salvage,
-        syntax_repair_max_suffix_trim=args.repair_max_suffix_trim,
-        syntax_repair_max_added_closures=args.repair_max_added_closures,
-        enable_component_salvage=args.enable_component_salvage,
-        component_salvage_method=args.component_salvage_method,
-        component_salvage_min_atoms=args.component_salvage_min_atoms,
-        multi_dummy_hard_fail_threshold=args.multi_dummy_hard_fail_threshold,
-        enable_light_dummy_salvage=args.enable_light_dummy_salvage,
-        near_parent_hard_ratio=args.near_parent_hard_ratio,
-        min_residual_atoms=args.min_residual_atoms,
-        min_residual_ratio=args.min_residual_ratio,
-        min_fragment_atoms=args.min_fragment_atoms,
-        tiny_fragment_hard_fail_penalty=args.tiny_fragment_hard_fail_penalty,
-        enable_size_window_reward=args.enable_size_window_reward,
-        size_window_low=args.size_window_low,
-        size_window_high=args.size_window_high,
-        size_window_bonus=args.size_window_bonus,
-        size_window_small_penalty=args.size_window_small_penalty,
-        size_window_large_penalty=args.size_window_large_penalty,
-        max_generation_chars=args.reward_max_fragment_chars,
-        core_output_mode=args.core_output_mode,
-        dummy_output_penalty=args.dummy_output_penalty,
-        require_teacher_sem=args.require_teacher_sem,
-        disable_counterfactual_teacher=args.disable_counterfactual_teacher,
-    )
-    stable_reward_wrapper = StableChemRLRewardWrapper(
-        base_rewarder=rewarder,
-        teacher_conf_gate=StableTeacherConfidenceGateConfig(
-            enabled=stable_config.enable_teacher_confidence_gate,
-            min_teacher_p_before=stable_config.min_teacher_p_before,
-            low_conf_cf_weight=stable_config.low_conf_cf_weight,
-        ),
+        oracle_path=oracle_path,
+        projected_cf_reward_enabled=projected_cf_reward_enabled,
         logger=logger,
     )
     final_output_dir = run_stable_decoded_chem_ppo_loop(
