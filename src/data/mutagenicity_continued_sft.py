@@ -215,6 +215,220 @@ class CompletionOnlyDataCollator:
         }
 
 
+def _normalize_active_adapters(model: Any) -> list[str]:
+    active = getattr(model, "active_adapters", None)
+    if callable(active):
+        active = active()
+    if active is None:
+        active = getattr(model, "active_adapter", None)
+        if callable(active):
+            active = active()
+    if active is None:
+        return []
+    if isinstance(active, str):
+        return [active]
+    return [str(value) for value in active]
+
+
+def _assert_unwrapped_base_model(model: Any) -> dict[str, Any]:
+    """Reject an adapted base and remove only an empty PEFT marker."""
+
+    peft_config = getattr(model, "peft_config", None)
+    hf_peft_loaded = bool(getattr(model, "_hf_peft_config_loaded", False))
+    if hf_peft_loaded or peft_config:
+        adapter_names = (
+            sorted(str(value) for value in peft_config)
+            if isinstance(peft_config, Mapping)
+            else []
+        )
+        raise ValueError(
+            "Base model already contains a PEFT adapter; refusing to stack the "
+            f"AIDS adapter. existing_adapters={adapter_names}"
+        )
+
+    existing_lora_parameters = [
+        name for name, _ in model.named_parameters() if "lora_" in name.lower()
+    ]
+    if existing_lora_parameters:
+        raise ValueError(
+            "Base model already contains LoRA parameters; refusing a second adapter: "
+            f"{existing_lora_parameters[:10]}"
+        )
+
+    empty_peft_config_removed = False
+    if hasattr(model, "peft_config"):
+        try:
+            delattr(model, "peft_config")
+        except AttributeError as exc:
+            raise ValueError(
+                "Base model exposes an empty peft_config that cannot be removed safely"
+            ) from exc
+        empty_peft_config_removed = True
+    return {
+        "base_model_was_unwrapped": True,
+        "empty_peft_config_removed": empty_peft_config_removed,
+    }
+
+
+def load_single_trainable_peft_adapter(
+    *,
+    base_model_path: str | Path,
+    adapter_checkpoint: str | Path,
+    project_root: str | Path,
+    base_model_loader: Any,
+    peft_config_class: Any | None = None,
+    peft_model_class: Any | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Load one existing LoRA adapter onto a pure base model for continued SFT."""
+
+    if peft_config_class is None or peft_model_class is None:
+        try:
+            from peft import PeftConfig, PeftModel
+        except ImportError as exc:  # pragma: no cover - HPC runtime dependency
+            raise RuntimeError("Continued SFT adapter loading requires peft") from exc
+        peft_config_class = peft_config_class or PeftConfig
+        peft_model_class = peft_model_class or PeftModel
+
+    root = Path(project_root).expanduser().resolve()
+    requested_base = Path(base_model_path).expanduser()
+    requested_base = (
+        requested_base.resolve()
+        if requested_base.is_absolute()
+        else (root / requested_base).resolve()
+    )
+    checkpoint = Path(adapter_checkpoint).expanduser().resolve()
+    peft_config = peft_config_class.from_pretrained(str(checkpoint))
+    declared_base_raw = getattr(peft_config, "base_model_name_or_path", None)
+    if not declared_base_raw:
+        raise ValueError(
+            f"Adapter config does not declare base_model_name_or_path: {checkpoint}"
+        )
+    declared_base = Path(str(declared_base_raw)).expanduser()
+    declared_base = (
+        declared_base.resolve()
+        if declared_base.is_absolute()
+        else (root / declared_base).resolve()
+    )
+    if declared_base != requested_base:
+        raise ValueError(
+            "Adapter/base model mismatch: "
+            f"adapter_declares={declared_base} requested={requested_base}"
+        )
+
+    base_model = base_model_loader(requested_base)
+    base_audit = _assert_unwrapped_base_model(base_model)
+    model = peft_model_class.from_pretrained(
+        base_model,
+        str(checkpoint),
+        adapter_name="default",
+        config=peft_config,
+        is_trainable=True,
+    )
+    return model, {
+        "loading_route": "PeftConfig_then_base_model_then_PeftModel_from_pretrained",
+        "base_model_name_or_path_from_adapter": str(declared_base_raw),
+        "resolved_base_model_path": str(requested_base),
+        "source_adapter_checkpoint": str(checkpoint),
+        "adapter_name_requested": "default",
+        "is_trainable": True,
+        **base_audit,
+    }
+
+
+def audit_single_trainable_lora_adapter(
+    model: Any,
+    *,
+    base_model_name_or_path: str | Path,
+    source_adapter_checkpoint: str | Path,
+    parameter_name_example_limit: int = 20,
+) -> dict[str, Any]:
+    """Verify one active LoRA adapter and a fully frozen non-LoRA base."""
+
+    peft_config = getattr(model, "peft_config", None)
+    if not isinstance(peft_config, Mapping):
+        raise ValueError("Continued SFT model has no mapping-valued peft_config")
+    adapter_names = [str(value) for value in peft_config.keys()]
+    if len(adapter_names) != 1:
+        raise ValueError(
+            "Continued SFT requires exactly one PEFT adapter; "
+            f"found={adapter_names}"
+        )
+
+    active_adapters = _normalize_active_adapters(model)
+    if len(active_adapters) != 1 or active_adapters[0] != adapter_names[0]:
+        raise ValueError(
+            "Exactly one configured PEFT adapter must be active; "
+            f"configured={adapter_names} active={active_adapters}"
+        )
+
+    adapter_config = peft_config[adapter_names[0]]
+    peft_type = (
+        adapter_config.get("peft_type")
+        if isinstance(adapter_config, Mapping)
+        else getattr(adapter_config, "peft_type", None)
+    )
+    if peft_type is not None and "LORA" not in str(peft_type).upper():
+        raise ValueError(f"Continued SFT adapter is not LoRA: peft_type={peft_type}")
+
+    named_parameters = list(model.named_parameters())
+    total_parameter_count = sum(int(parameter.numel()) for _, parameter in named_parameters)
+    trainable = [
+        (name, parameter)
+        for name, parameter in named_parameters
+        if bool(parameter.requires_grad)
+    ]
+    trainable_parameter_count = sum(
+        int(parameter.numel()) for _, parameter in trainable
+    )
+    trainable_lora = [
+        (name, parameter) for name, parameter in trainable if "lora_" in name.lower()
+    ]
+    trainable_lora_count = sum(
+        int(parameter.numel()) for _, parameter in trainable_lora
+    )
+    base_trainable = [
+        (name, parameter) for name, parameter in trainable if "lora_" not in name.lower()
+    ]
+    base_parameter_trainable_count = sum(
+        int(parameter.numel()) for _, parameter in base_trainable
+    )
+
+    if trainable_parameter_count <= 0 or trainable_lora_count <= 0:
+        raise ValueError("Continued SFT loaded no trainable LoRA parameters")
+    if base_parameter_trainable_count:
+        raise ValueError(
+            "Base model parameters are unexpectedly trainable: "
+            f"count={base_parameter_trainable_count} "
+            f"examples={[name for name, _ in base_trainable[:10]]}"
+        )
+    if total_parameter_count <= 0:
+        raise ValueError("Continued SFT model has no parameters")
+
+    return {
+        "base_model_name_or_path": str(Path(base_model_name_or_path).expanduser().resolve()),
+        "source_adapter_checkpoint": str(
+            Path(source_adapter_checkpoint).expanduser().resolve()
+        ),
+        "adapter_names": adapter_names,
+        "active_adapters": active_adapters,
+        "peft_type": str(peft_type) if peft_type is not None else None,
+        "trainable_parameter_count": trainable_parameter_count,
+        "trainable_lora_parameter_count": trainable_lora_count,
+        "total_parameter_count": total_parameter_count,
+        "trainable_percent": 100.0
+        * trainable_parameter_count
+        / total_parameter_count,
+        "trainable_parameter_name_examples": [
+            name for name, _ in trainable[: int(parameter_name_example_limit)]
+        ],
+        "base_parameter_trainable_count": base_parameter_trainable_count,
+        "base_parameter_trainable_name_examples": [
+            name for name, _ in base_trainable[: int(parameter_name_example_limit)]
+        ],
+        "adapter_audit_passed": True,
+    }
+
+
 def _binary_int(value: Any, *, field: str, row_index: int) -> int:
     try:
         parsed = int(str(value).strip())
@@ -773,11 +987,13 @@ __all__ = [
     "SupervisedTokenDataset",
     "TARGET_LABEL",
     "TokenizedSFTExample",
+    "audit_single_trainable_lora_adapter",
     "build_checkpoint_manifest",
     "dataset_manifest",
     "deterministic_smoke_sample",
     "ensure_new_output_root",
     "load_continued_sft_records",
+    "load_single_trainable_peft_adapter",
     "score_generated_fragment",
     "sha256_file",
     "tokenize_completion_only",

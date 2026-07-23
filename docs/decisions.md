@@ -6,6 +6,41 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-23] Continue exactly one existing PEFT adapter on Mutagenicity
+
+### Background
+
+The Mutagenicity continued-SFT smoke run completed successfully, but PEFT
+warned that the model already had a `peft_config` and could receive multiple
+adapters. The previous runtime check only required at least one trainable
+parameter, so it could not prove that the ChemLLM base was unwrapped or that
+exactly one existing AIDS adapter was active.
+
+### Decision
+
+Load the adapter configuration from the AIDS `checkpoint-500`, verify that its
+declared ChemLLM base matches the requested base model, load that base without
+an adapter, and invoke `PeftModel.from_pretrained(..., is_trainable=True)`
+exactly once. Before training, require exactly one configured and active LoRA
+adapter, positive trainable LoRA parameters, and zero trainable non-LoRA base
+parameters. Persist this result as `adapter_audit.json` and include it in the
+training log and report.
+
+### Consequences
+
+- Continued SFT updates the recovered AIDS LoRA weights rather than creating a
+  second random adapter.
+- Existing or ambiguous adapter state on the requested base fails before
+  Trainer construction.
+- Data, optimization hyperparameters, PPO, selectors, WNode, baselines, and
+  evaluation semantics are unchanged.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-07-15] Plot and report theta-covered conditional FGW cost by default
 
 ### Background

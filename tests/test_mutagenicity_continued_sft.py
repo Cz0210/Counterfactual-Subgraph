@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import inspect
+import json
 from pathlib import Path
 import re
 
@@ -12,13 +14,16 @@ from scripts.train_mutagenicity_continued_sft import _nested, build_parser
 from src.data.mutagenicity_continued_sft import (
     ContinuedSFTRecord,
     ParentCoverageTracker,
+    audit_single_trainable_lora_adapter,
     build_checkpoint_manifest,
     deterministic_smoke_sample,
     ensure_new_output_root,
     load_continued_sft_records,
+    load_single_trainable_peft_adapter,
     tokenize_completion_only,
     validate_peft_checkpoint,
     validate_train_val_isolation,
+    write_json_atomic,
 )
 from src.utils.env import load_and_merge_config_files
 
@@ -49,6 +54,64 @@ class FakeTokenizer:
     def __call__(self, text: str, add_special_tokens: bool = False):
         del add_special_tokens
         return {"input_ids": [10 + (ord(character) % 71) for character in text]}
+
+
+class FakeParameter:
+    def __init__(self, size: int, *, requires_grad: bool) -> None:
+        self.size = int(size)
+        self.requires_grad = bool(requires_grad)
+
+    def numel(self) -> int:
+        return self.size
+
+
+class FakeAdapterConfig:
+    base_model_name_or_path = "pretrained_models/ChemLLM-7B-Chat"
+    peft_type = "LORA"
+
+
+class FakeAdapterModel:
+    def __init__(
+        self,
+        *,
+        adapter_names: tuple[str, ...] = ("default",),
+        active_adapters: tuple[str, ...] = ("default",),
+        lora_trainable: bool = True,
+        base_trainable: bool = False,
+    ) -> None:
+        self.peft_config = {
+            name: FakeAdapterConfig() for name in adapter_names
+        }
+        self.active_adapters = list(active_adapters)
+        self._parameters = [
+            (
+                "base_model.model.layers.0.self_attn.q_proj.base_layer.weight",
+                FakeParameter(1000, requires_grad=base_trainable),
+            ),
+            (
+                "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight",
+                FakeParameter(16, requires_grad=lora_trainable),
+            ),
+            (
+                "base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight",
+                FakeParameter(16, requires_grad=lora_trainable),
+            ),
+        ]
+
+    def named_parameters(self):
+        return iter(self._parameters)
+
+
+class FakePureBaseModel:
+    def __init__(self, *, peft_config: object = None) -> None:
+        if peft_config is not None:
+            self.peft_config = peft_config
+        self._parameters = [
+            ("model.layers.0.weight", FakeParameter(1000, requires_grad=False))
+        ]
+
+    def named_parameters(self):
+        return iter(self._parameters)
 
 
 def _row(
@@ -356,3 +419,141 @@ def test_slurm_config_overrides_are_recognized_by_training_cli() -> None:
         wrapper_options = set(re.findall(r"--[a-z][a-z0-9-]*", command))
         assert wrapper_options == expected_overrides
         assert wrapper_options <= parser_options
+
+
+def test_adapter_loader_uses_one_peft_route_without_random_adapter(
+    tmp_path: Path,
+) -> None:
+    base_path = tmp_path / "pretrained_models" / "ChemLLM-7B-Chat"
+    checkpoint = tmp_path / "checkpoint-500"
+    base_path.mkdir(parents=True)
+    checkpoint.mkdir()
+    calls: dict[str, list[object]] = {
+        "config": [],
+        "base": [],
+        "peft": [],
+    }
+
+    class ConfigLoader:
+        @classmethod
+        def from_pretrained(cls, path: str):
+            calls["config"].append(path)
+            config = FakeAdapterConfig()
+            config.base_model_name_or_path = str(base_path)
+            return config
+
+    class PeftLoader:
+        @classmethod
+        def from_pretrained(cls, base_model, path: str, **kwargs):
+            calls["peft"].append((base_model, path, kwargs))
+            return FakeAdapterModel()
+
+    def load_base(path: Path):
+        calls["base"].append(path)
+        return FakePureBaseModel()
+
+    model, loading = load_single_trainable_peft_adapter(
+        base_model_path=base_path,
+        adapter_checkpoint=checkpoint,
+        project_root=tmp_path,
+        base_model_loader=load_base,
+        peft_config_class=ConfigLoader,
+        peft_model_class=PeftLoader,
+    )
+
+    assert isinstance(model, FakeAdapterModel)
+    assert len(calls["config"]) == len(calls["base"]) == len(calls["peft"]) == 1
+    assert calls["peft"][0][2]["is_trainable"] is True
+    assert calls["peft"][0][2]["adapter_name"] == "default"
+    assert loading["base_model_was_unwrapped"] is True
+    source = inspect.getsource(load_single_trainable_peft_adapter)
+    assert "AutoPeftModelForCausalLM" not in source
+    assert "get_peft_model" not in source
+    assert ".add_adapter" not in source
+
+
+def test_adapter_loader_rejects_an_already_adapted_base(tmp_path: Path) -> None:
+    base_path = tmp_path / "pretrained_models" / "ChemLLM-7B-Chat"
+    checkpoint = tmp_path / "checkpoint-500"
+    base_path.mkdir(parents=True)
+    checkpoint.mkdir()
+    peft_calls: list[object] = []
+
+    class ConfigLoader:
+        @classmethod
+        def from_pretrained(cls, path: str):
+            del path
+            config = FakeAdapterConfig()
+            config.base_model_name_or_path = str(base_path)
+            return config
+
+    class PeftLoader:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            peft_calls.append((args, kwargs))
+            return FakeAdapterModel()
+
+    with pytest.raises(ValueError, match="already contains a PEFT adapter"):
+        load_single_trainable_peft_adapter(
+            base_model_path=base_path,
+            adapter_checkpoint=checkpoint,
+            project_root=tmp_path,
+            base_model_loader=lambda _: FakePureBaseModel(
+                peft_config={"existing": FakeAdapterConfig()}
+            ),
+            peft_config_class=ConfigLoader,
+            peft_model_class=PeftLoader,
+        )
+    assert peft_calls == []
+
+
+def test_adapter_audit_rejects_multiple_adapters() -> None:
+    with pytest.raises(ValueError, match="exactly one PEFT adapter"):
+        audit_single_trainable_lora_adapter(
+            FakeAdapterModel(
+                adapter_names=("default", "second"),
+                active_adapters=("default",),
+            ),
+            base_model_name_or_path="base",
+            source_adapter_checkpoint="checkpoint",
+        )
+
+
+def test_adapter_audit_rejects_zero_trainable_lora_parameters() -> None:
+    with pytest.raises(ValueError, match="no trainable LoRA parameters"):
+        audit_single_trainable_lora_adapter(
+            FakeAdapterModel(lora_trainable=False),
+            base_model_name_or_path="base",
+            source_adapter_checkpoint="checkpoint",
+        )
+
+
+def test_adapter_audit_rejects_trainable_base_parameters() -> None:
+    with pytest.raises(ValueError, match="Base model parameters are unexpectedly trainable"):
+        audit_single_trainable_lora_adapter(
+            FakeAdapterModel(base_trainable=True),
+            base_model_name_or_path="base",
+            source_adapter_checkpoint="checkpoint",
+        )
+
+
+def test_single_trainable_adapter_audit_is_saved_as_json(tmp_path: Path) -> None:
+    audit = audit_single_trainable_lora_adapter(
+        FakeAdapterModel(),
+        base_model_name_or_path=tmp_path / "base",
+        source_adapter_checkpoint=tmp_path / "checkpoint-500",
+    )
+    output = tmp_path / "adapter_audit.json"
+    write_json_atomic(output, audit)
+    saved = json.loads(output.read_text(encoding="utf-8"))
+
+    assert saved["adapter_names"] == ["default"]
+    assert saved["active_adapters"] == ["default"]
+    assert saved["trainable_parameter_count"] == 32
+    assert saved["total_parameter_count"] == 1032
+    assert saved["base_parameter_trainable_count"] == 0
+    assert saved["adapter_audit_passed"] is True
+    assert all(
+        "lora_" in name.lower()
+        for name in saved["trainable_parameter_name_examples"]
+    )

@@ -24,11 +24,13 @@ from src.data.mutagenicity_continued_sft import (  # noqa: E402
     GENERATION_FIELDS,
     ParentCoverageTracker,
     SupervisedTokenDataset,
+    audit_single_trainable_lora_adapter,
     build_checkpoint_manifest,
     dataset_manifest,
     deterministic_smoke_sample,
     ensure_new_output_root,
     load_continued_sft_records,
+    load_single_trainable_peft_adapter,
     score_generated_fragment,
     tokenize_records,
     validate_peft_checkpoint,
@@ -232,6 +234,7 @@ def _training_report(
     train_metrics: Mapping[str, Any],
     eval_metrics: Mapping[str, Any],
     checkpoint_manifest: Mapping[str, Any],
+    adapter_audit: Mapping[str, Any],
 ) -> str:
     lines = [
         "# Mutagenicity Continued SFT Report",
@@ -242,6 +245,16 @@ def _training_report(
         f"- Initial AIDS SFT-v3 adapter: `{resolved['base_checkpoint']}`",
         f"- Tokenizer: `{resolved['tokenizer_path']}`",
         "- Continued training starts a new optimizer/scheduler state; it does not resume the AIDS global step.",
+        "",
+        "## Adapter Audit",
+        "",
+        f"- Adapter names: {adapter_audit['adapter_names']}",
+        f"- Active adapters: {adapter_audit['active_adapters']}",
+        f"- Trainable parameters: {adapter_audit['trainable_parameter_count']}",
+        f"- Total parameters: {adapter_audit['total_parameter_count']}",
+        f"- Trainable percent: {adapter_audit['trainable_percent']:.8f}",
+        f"- Base parameters trainable: {adapter_audit['base_parameter_trainable_count']}",
+        f"- Audit passed: {str(adapter_audit['adapter_audit_passed']).lower()}",
         "",
         "## Data",
         "",
@@ -532,7 +545,6 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         import torch
-        from peft import PeftModel
         from transformers import Trainer, TrainingArguments, set_seed
         from scripts.train_sft import (
             build_quantized_model,
@@ -584,19 +596,41 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(resolved, indent=2, ensure_ascii=False, sort_keys=True), flush=True)
     print(f"train_rows={len(train_records)} val_rows={len(val_records)}", flush=True)
 
-    model = build_quantized_model(base_model_path)
-    model = PeftModel.from_pretrained(
+    model, adapter_load_audit = load_single_trainable_peft_adapter(
+        base_model_path=base_model_path,
+        adapter_checkpoint=base_checkpoint,
+        project_root=REPO_ROOT,
+        base_model_loader=build_quantized_model,
+    )
+    adapter_audit = audit_single_trainable_lora_adapter(
         model,
-        str(base_checkpoint),
-        is_trainable=True,
+        base_model_name_or_path=base_model_path,
+        source_adapter_checkpoint=base_checkpoint,
     )
-    trainable_parameters = sum(
-        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    adapter_audit["loading"] = adapter_load_audit
+    resolved["trainable_parameters"] = int(
+        adapter_audit["trainable_parameter_count"]
     )
-    if trainable_parameters <= 0:
-        raise ValueError("Continued SFT loaded no trainable PEFT parameters")
-    resolved["trainable_parameters"] = int(trainable_parameters)
+    resolved["adapter_loading"] = adapter_load_audit
+    write_json_atomic(output_root / "adapter_audit.json", adapter_audit)
     write_json_atomic(output_root / "resolved_config.json", resolved)
+    print("[MUTAGENICITY_SFT_ADAPTER_AUDIT]", flush=True)
+    print(f"adapter_names={adapter_audit['adapter_names']}", flush=True)
+    print(f"active_adapters={adapter_audit['active_adapters']}", flush=True)
+    print(
+        f"trainable_params={adapter_audit['trainable_parameter_count']}",
+        flush=True,
+    )
+    print(f"all_params={adapter_audit['total_parameter_count']}", flush=True)
+    print(
+        f"trainable_percent={adapter_audit['trainable_percent']:.8f}",
+        flush=True,
+    )
+    print(
+        f"base_params_trainable={adapter_audit['base_parameter_trainable_count']}",
+        flush=True,
+    )
+    print("adapter_audit_passed=true", flush=True)
 
     coverage_tracker = ParentCoverageTracker(
         [record.molecule_id for record in train_records]
@@ -714,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
             train_metrics,
             eval_metrics,
             checkpoint_manifest,
+            adapter_audit,
         ),
         encoding="utf-8",
     )
