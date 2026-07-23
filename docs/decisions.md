@@ -35,6 +35,43 @@ the compatibility CSV.
 Accepted
 
 ---
+## [2026-07-23] Continue the AIDS SFT-v3 adapter on Mutagenicity
+
+### Background
+
+Mutagenicity now has fixed teacher-consistent SFT train/validation data, but
+the repository had no training entrypoint for it. The stable AIDS
+`checkpoint-500` is a PEFT LoRA adapter; treating it as a complete base model
+or resuming its completed optimizer/global step would give incorrect
+continued-training semantics.
+
+### Decision
+
+Load the same 4-bit ChemLLM base used by AIDS SFT-v3, attach the stable AIDS
+adapter with `is_trainable=True`, and start a fresh Mutagenicity Trainer state.
+Retain the AIDS learning rate, batch/accumulation, scheduler, warmup, bf16, and
+500-step full schedule. Make the previously implicit prompt/completion
+supervision explicit: prompt tokens are masked with `-100`, while completion
+and retained EOS tokens participate in causal-LM loss. Validate the complete
+1,317/250 train/validation contract before any smoke sampling and never load
+calibration or test.
+
+### Consequences
+
+- Continued SFT inherits learned AIDS adapter weights without silently falling
+  back to another model or random LoRA initialization.
+- Tokenization, truncation, parent coverage, checkpoint selection, and
+  generation sanity checks are persisted as auditable artifacts.
+- Validation loss selects checkpoints; calibration and test cannot influence
+  training or selection.
+- PPO, reward, selector, teacher, WNode, baselines, and unified evaluation code
+  remain unchanged.
+
+### Status
+
+Accepted
+
+---
 
 ## [2026-07-15] Require explicit parent-cohort inputs in saved FGW audits
 
