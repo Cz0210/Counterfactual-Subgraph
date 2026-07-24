@@ -479,6 +479,7 @@ def load_continued_sft_records(
     *,
     expected_split: str,
     expected_count: int | None,
+    allow_duplicate_parents: bool = False,
 ) -> list[ContinuedSFTRecord]:
     """Load one fixed train/val CSV and enforce the source-parent contract."""
 
@@ -507,7 +508,7 @@ def load_continued_sft_records(
         molecule_id = str(row.get("molecule_id") or "").strip()
         if not molecule_id:
             raise ValueError(f"row={row_index} has an empty molecule_id")
-        if molecule_id in seen_ids:
+        if molecule_id in seen_ids and not allow_duplicate_parents:
             raise ValueError(f"duplicate molecule_id in {path}: {molecule_id}")
         parent_smiles = str(row.get("parent_smiles") or "").strip()
         molecule = Chem.MolFromSmiles(parent_smiles)
@@ -518,7 +519,7 @@ def load_continued_sft_records(
         canonical_smiles = Chem.MolToSmiles(
             molecule, canonical=True, isomericSmiles=True
         )
-        if canonical_smiles in seen_smiles:
+        if canonical_smiles in seen_smiles and not allow_duplicate_parents:
             raise ValueError(f"duplicate canonical parent SMILES in {path}: {canonical_smiles}")
 
         split = str(row.get("split") or "").strip().lower()

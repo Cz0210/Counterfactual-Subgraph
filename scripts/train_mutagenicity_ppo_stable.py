@@ -33,6 +33,7 @@ from scripts.train_ppo import (  # noqa: E402
 from scripts.train_ppo_stable import (  # noqa: E402
     build_parser as build_stable_parser,
     build_stable_reward_wrapper,
+    resolve_flip_dominant_reward_config,
     resolve_stable_config,
     run_stable_decoded_chem_ppo_loop,
 )
@@ -99,17 +100,24 @@ CONFIG_PRIORITY_DESTINATIONS = (
     "teacher_path",
     "base_model_path",
     "policy_adapter_checkpoint",
+    "expected_policy_checkpoint_step",
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = build_stable_parser()
     parser.description = __doc__
-    parser.add_argument("--mode", choices=("smoke", "full"), default="full")
+    parser.add_argument("--mode", choices=("smoke", "medium", "full"), default="full")
     parser.add_argument("--train-csv", type=Path, default=None)
     parser.add_argument("--val-csv", type=Path, default=None)
     parser.add_argument("--base-model-path", type=Path, default=None)
     parser.add_argument("--policy-adapter-checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--expected-policy-checkpoint-step",
+        type=int,
+        default=200,
+        help="Expected adapter checkpoint step. Use 0 for audited fresh-SFT checkpoints.",
+    )
     parser.add_argument("--tokenizer-path", type=Path, default=None)
     parser.add_argument(
         "--tokenizer-fallback-path",
@@ -475,7 +483,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     print_and_validate_output_root_audit(output_root_audit)
 
-    validate_policy_adapter_checkpoint(policy_adapter_checkpoint)
+    policy_checkpoint_audit = validate_policy_adapter_checkpoint(
+        policy_adapter_checkpoint,
+        expected_step=(
+            int(args.expected_policy_checkpoint_step)
+            if int(args.expected_policy_checkpoint_step) > 0
+            else None
+        ),
+    )
     if not base_model_path.is_dir():
         raise FileNotFoundError(f"ChemLLM base model is missing: {base_model_path}")
     if not teacher_path.is_file():
@@ -507,6 +522,19 @@ def main(argv: list[str] | None = None) -> int:
         rollout_batch_size = int(args.rollout_batch_size or 1)
         if rollout_batch_size != 1:
             raise ValueError("Mutagenicity PPO smoke requires rollout_batch_size=1")
+    elif mode == "medium":
+        requested_parents = int(args.max_parents or min(256, len(train_all)))
+        if not 1 <= requested_parents <= len(train_all):
+            raise ValueError(
+                f"Mutagenicity PPO medium max_parents is invalid: {requested_parents}"
+            )
+        train_selected = deterministically_order_records(
+            train_all, seed=int(args.seed), limit=requested_parents
+        )
+        val_selected = deterministically_order_records(
+            val_all, seed=int(args.seed) + 1
+        )
+        rollout_batch_size = int(args.rollout_batch_size or args.batch_size or 16)
     else:
         requested_parents = int(args.max_parents or len(train_all))
         if requested_parents != EXPECTED_TRAIN_ROWS:
@@ -551,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     if int(args.save_steps) <= 0 or int(args.save_steps) > coverage_plan.max_updates:
         args.save_steps = 1 if mode == "smoke" else 5
     stable_config = resolve_stable_config(args)
+    reward_profile_config = resolve_flip_dominant_reward_config(args)
 
     tokenizer_path, tokenizer_source = resolve_tokenizer_path(
         explicit_path=args.tokenizer_path,
@@ -563,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         "git_commit": _safe_git_commit(),
         "base_model_path": str(base_model_path),
         "policy_adapter_checkpoint": str(policy_adapter_checkpoint),
+        "policy_checkpoint_audit": policy_checkpoint_audit,
         "tokenizer_path": str(tokenizer_path),
         "tokenizer_source": tokenizer_source,
         "teacher_path": str(teacher_path),
@@ -587,6 +617,8 @@ def main(argv: list[str] | None = None) -> int:
         "adaptive_kl": stable_config.enable_adaptive_kl,
         "reward_clip_min": stable_config.reward_clip_min,
         "reward_clip_max": stable_config.reward_clip_max,
+        "reward_profile": reward_profile_config.profile_name,
+        "reward_config": asdict(reward_profile_config),
         "eval_every_steps": stable_config.eval_every_steps,
         "save_steps": int(args.save_steps),
         "sampler_seed": int(args.seed),
@@ -615,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
         "test_loaded": False,
     }
     write_json_atomic(output_root / "resolved_config.json", resolved_config)
+    write_json_atomic(output_root / "reward_config.json", asdict(reward_profile_config))
     write_json_atomic(output_root / "dataset_manifest.json", dataset_manifest)
     write_runtime_manifest(
         output_root / "runtime_manifest.json",
@@ -780,11 +813,11 @@ def main(argv: list[str] | None = None) -> int:
         final_output_dir,
         len(candidate_rows),
     )
-    marker = (
-        "[MUTAGENICITY_STABLE_PPO_SMOKE_OK]"
-        if mode == "smoke"
-        else "[MUTAGENICITY_STABLE_PPO_FULL_OK]"
-    )
+    marker = {
+        "smoke": "[MUTAGENICITY_STABLE_PPO_SMOKE_OK]",
+        "medium": "[MUTAGENICITY_STABLE_PPO_MEDIUM_OK]",
+        "full": "[MUTAGENICITY_STABLE_PPO_FULL_OK]",
+    }[mode]
     print(marker, flush=True)
     return 0
 

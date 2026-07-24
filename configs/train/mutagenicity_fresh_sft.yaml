@@ -1,0 +1,56 @@
+dataset_name: Mutagenicity
+dataset_version: fresh_sft_v1
+source_label: 1
+target_label: 0
+
+data.dataset_variant: strict_v2
+data.root: outputs/hpc/mutagenicity/final/sft_ppo_data_v2
+data.expected_train_rows: 0
+data.expected_val_rows: 0
+data.forbidden_splits: calibration,test
+
+model.base_model_path: pretrained_models/ChemLLM-7B-Chat
+model.tokenizer_path: pretrained_models/ChemLLM-7B-Chat
+model.tokenizer_fallback_path: outputs/hpc/sft_checkpoints/sft_v3_hiv_20260508_resplit_lr2e4_seed7_fix_columns/checkpoint-500
+model.initialization: pure_chemlm_plus_random_fresh_lora
+model.source_adapter_checkpoint: null
+
+lora.rank: 8
+lora.alpha: 16
+lora.dropout: 0.05
+lora.target_modules: wqkv,wo,w1,w2,w3
+
+training.seed: 7
+training.max_train_rows: 0
+training.max_val_rows: 0
+training.max_sequence_length: 1024
+training.max_steps: 300
+training.per_device_train_batch_size: 4
+training.per_device_eval_batch_size: 4
+training.gradient_accumulation_steps: 4
+training.learning_rate: 0.0002
+training.logging_steps: 10
+training.save_steps: 50
+training.eval_steps: 50
+training.save_total_limit: 8
+training.warmup_ratio: 0.03
+training.lr_scheduler_type: cosine
+training.early_stopping_patience: 2
+training.bf16: true
+training.fp16: false
+training.report_to: "none"
+
+generation.generation_samples: 32
+generation.generation_max_new_tokens: 64
+
+smoke.output_root: outputs/hpc/mutagenicity/sft_fresh_v1_smoke
+smoke.max_train_rows: 64
+smoke.max_val_rows: 32
+smoke.max_steps: 3
+smoke.logging_steps: 1
+smoke.save_steps: 1
+smoke.eval_steps: 1
+smoke.save_total_limit: 3
+smoke.generation_samples: 16
+
+full.output_root: outputs/hpc/mutagenicity/sft_fresh_strict_v2

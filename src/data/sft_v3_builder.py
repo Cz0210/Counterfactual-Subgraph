@@ -119,6 +119,10 @@ class SFTV3ReferenceCandidate:
     cf_drop: float | None = None
     cf_flip: bool | None = None
     oracle_ok: bool = False
+    pred_before: int | None = None
+    pred_after: int | None = None
+    p_before: float | None = None
+    p_after: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +166,18 @@ class ParentBuildResult:
     selected_candidate: SFTV3ReferenceCandidate | None
     candidate_count: int
     valid_candidate_count: int
+    candidate_strategy_counts: dict[str, int]
+    candidate_drop_counts: dict[str, int]
+    drop_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SFTV3CandidateEnumeration:
+    """All structurally valid candidates considered for one parent."""
+
+    record: HIVParentRecord
+    candidates: tuple[SFTV3ReferenceCandidate, ...]
+    candidate_count: int
     candidate_strategy_counts: dict[str, int]
     candidate_drop_counts: dict[str, int]
     drop_reason: str | None = None
@@ -332,6 +348,45 @@ def select_reference_candidate_for_parent(
 ) -> ParentBuildResult:
     """Select the best filtered reference candidate for one parent molecule."""
 
+    enumeration = enumerate_reference_candidates_for_parent(
+        record,
+        config=config,
+        oracle_scorer=oracle_scorer,
+    )
+    if not enumeration.candidates:
+        return ParentBuildResult(
+            record=record,
+            selected_candidate=None,
+            candidate_count=enumeration.candidate_count,
+            valid_candidate_count=0,
+            candidate_strategy_counts=enumeration.candidate_strategy_counts,
+            candidate_drop_counts=enumeration.candidate_drop_counts,
+            drop_reason=enumeration.drop_reason,
+        )
+
+    best_candidate = max(
+        enumeration.candidates,
+        key=lambda candidate: _candidate_ranking_key(candidate, config=config),
+    )
+    return ParentBuildResult(
+        record=record,
+        selected_candidate=best_candidate,
+        candidate_count=enumeration.candidate_count,
+        valid_candidate_count=len(enumeration.candidates),
+        candidate_strategy_counts=enumeration.candidate_strategy_counts,
+        candidate_drop_counts=enumeration.candidate_drop_counts,
+        drop_reason=None,
+    )
+
+
+def enumerate_reference_candidates_for_parent(
+    record: HIVParentRecord,
+    *,
+    config: SFTV3BuilderConfig,
+    oracle_scorer: CounterfactualTeacherScorer | None = None,
+) -> SFTV3CandidateEnumeration:
+    """Enumerate the exact candidate set consumed by the v1 selector."""
+
     parent = parse_smiles(
         record.parent_smiles,
         sanitize=True,
@@ -339,11 +394,10 @@ def select_reference_candidate_for_parent(
         allow_capped_fragments=False,
     )
     if not parent.sanitized or parent.mol is None:
-        return ParentBuildResult(
+        return SFTV3CandidateEnumeration(
             record=record,
-            selected_candidate=None,
+            candidates=(),
             candidate_count=0,
-            valid_candidate_count=0,
             candidate_strategy_counts={},
             candidate_drop_counts={},
             drop_reason="parent_parse_failed",
@@ -355,11 +409,10 @@ def select_reference_candidate_for_parent(
         config=config,
     )
     if not proposals:
-        return ParentBuildResult(
+        return SFTV3CandidateEnumeration(
             record=record,
-            selected_candidate=None,
+            candidates=(),
             candidate_count=0,
-            valid_candidate_count=0,
             candidate_strategy_counts={},
             candidate_drop_counts={},
             drop_reason="no_candidate_proposals",
@@ -383,25 +436,19 @@ def select_reference_candidate_for_parent(
         valid_candidates.append(candidate)
 
     if not valid_candidates:
-        return ParentBuildResult(
+        return SFTV3CandidateEnumeration(
             record=record,
-            selected_candidate=None,
+            candidates=(),
             candidate_count=len(proposals),
-            valid_candidate_count=0,
             candidate_strategy_counts=dict(sorted(candidate_strategy_counts.items())),
             candidate_drop_counts=dict(sorted(candidate_drop_counts.items())),
             drop_reason="no_candidates_after_filter",
         )
 
-    best_candidate = max(
-        valid_candidates,
-        key=lambda candidate: _candidate_ranking_key(candidate, config=config),
-    )
-    return ParentBuildResult(
+    return SFTV3CandidateEnumeration(
         record=record,
-        selected_candidate=best_candidate,
+        candidates=tuple(valid_candidates),
         candidate_count=len(proposals),
-        valid_candidate_count=len(valid_candidates),
         candidate_strategy_counts=dict(sorted(candidate_strategy_counts.items())),
         candidate_drop_counts=dict(sorted(candidate_drop_counts.items())),
         drop_reason=None,
@@ -929,6 +976,26 @@ def _build_candidate(
         if oracle_result.get("teacher_result_ok")
         else None,
         oracle_ok=bool(oracle_result.get("teacher_result_ok")),
+        pred_before=(
+            int(oracle_result["pred_before"])
+            if oracle_result.get("pred_before") is not None
+            else None
+        ),
+        pred_after=(
+            int(oracle_result["pred_after"])
+            if oracle_result.get("pred_after") is not None
+            else None
+        ),
+        p_before=(
+            float(oracle_result["p_before"])
+            if oracle_result.get("p_before") is not None
+            else None
+        ),
+        p_after=(
+            float(oracle_result["p_after"])
+            if oracle_result.get("p_after") is not None
+            else None
+        ),
     )
     return candidate, None
 
@@ -938,6 +1005,16 @@ def _candidate_ranking_key(
     *,
     config: SFTV3BuilderConfig,
 ) -> tuple[float, ...]:
+    return candidate_ranking_key(candidate, config=config)
+
+
+def candidate_ranking_key(
+    candidate: SFTV3ReferenceCandidate,
+    *,
+    config: SFTV3BuilderConfig,
+) -> tuple[float, ...]:
+    """Return the legacy v1 ranking key for audits and reproducibility."""
+
     strategy_priority = float(_CANDIDATE_SOURCE_PRIORITY.get(candidate.candidate_strategy, 0))
     ratio_distance = abs(candidate.atom_ratio - config.target_atom_ratio)
     heuristic_key = (
@@ -1393,11 +1470,15 @@ def _mol_to_smiles(mol: object | None) -> str | None:
 
 
 __all__ = [
+    "ParentBuildResult",
+    "SFTV3CandidateEnumeration",
     "SFTV3BuildArtifacts",
     "SFTV3BuilderConfig",
     "SFTV3Example",
     "SFTV3ReferenceCandidate",
     "build_and_write_sft_v3_dataset",
+    "candidate_ranking_key",
+    "enumerate_reference_candidates_for_parent",
     "label_stratified_scaffold_split",
     "select_reference_candidate_for_parent",
     "split_examples_scaffold_aware",

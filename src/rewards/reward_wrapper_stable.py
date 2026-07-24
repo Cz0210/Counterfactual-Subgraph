@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import math
 from typing import Any, Sequence
 
 from src.chem import is_parent_substructure, parse_smiles
@@ -30,6 +31,64 @@ class StableTeacherConfidenceGateConfig:
     enabled: bool = False
     min_teacher_p_before: float = 0.5
     low_conf_cf_weight: float = 0.3
+
+
+@dataclass(frozen=True, slots=True)
+class FlipDominantRewardConfig:
+    """Explicit Mutagenicity 1->0 reward profile applied after chemistry repair."""
+
+    enabled: bool = False
+    strict_flip_bonus: float = 0.0
+    non_flip_penalty: float = 0.0
+    cf_drop_weight: float = 0.0
+    validity_weight: float = 0.0
+    substructure_weight: float = 0.0
+    size_weight: float = 0.0
+    projection_penalty: float = 0.0
+    non_flip_aux_reward_cap: float = 0.0
+    strict_flip_reward_margin: float = 0.5
+    reward_clip_min: float = -5.0
+    reward_clip_max: float = 8.0
+    profile_name: str = "legacy"
+
+    def validate(self) -> None:
+        values = {
+            field: float(getattr(self, field))
+            for field in (
+                "strict_flip_bonus",
+                "non_flip_penalty",
+                "cf_drop_weight",
+                "validity_weight",
+                "substructure_weight",
+                "size_weight",
+                "projection_penalty",
+                "non_flip_aux_reward_cap",
+                "strict_flip_reward_margin",
+                "reward_clip_min",
+                "reward_clip_max",
+            )
+        }
+        if not all(math.isfinite(value) for value in values.values()):
+            raise ValueError(f"Flip-dominant reward config must be finite: {values}")
+        if self.reward_clip_min >= self.reward_clip_max:
+            raise ValueError("reward_clip_min must be less than reward_clip_max")
+        if self.non_flip_aux_reward_cap < 0.0:
+            raise ValueError("non_flip_aux_reward_cap must be non-negative")
+        if self.strict_flip_bonus < 0.0:
+            raise ValueError("strict_flip_bonus must be non-negative")
+        if self.non_flip_penalty > 0.0:
+            raise ValueError("non_flip_penalty must be non-positive")
+        if self.strict_flip_reward_margin < 0.0:
+            raise ValueError("strict_flip_reward_margin must be non-negative")
+        for field in (
+            "cf_drop_weight",
+            "validity_weight",
+            "substructure_weight",
+            "size_weight",
+            "projection_penalty",
+        ):
+            if values[field] < 0.0:
+                raise ValueError(f"{field} must be non-negative")
 
 
 def _heavy_atom_count(smiles: Any, *, allow_capped_fragments: bool = False) -> int | None:
@@ -267,6 +326,164 @@ def apply_teacher_confidence_gate_to_reward_logs(
     return updated_logs, adjusted_rewards
 
 
+def _component(
+    row: dict[str, Any],
+    components: dict[str, Any],
+    *names: str,
+) -> float:
+    for name in names:
+        value = _safe_float(row.get(name))
+        if value is None:
+            value = _safe_float(components.get(name))
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def apply_flip_dominant_profile_to_reward_logs(
+    reward_logs: Sequence[dict[str, Any]],
+    *,
+    config: FlipDominantRewardConfig,
+) -> tuple[list[dict[str, Any]], list[float]]:
+    """Reweight repaired candidates so strict 1->0 flip is the dominant signal."""
+
+    if not config.enabled:
+        return [dict(row) for row in reward_logs], [
+            float(_safe_float(row.get("reward_total", row.get("total"))) or 0.0)
+            for row in reward_logs
+        ]
+    config.validate()
+    output: list[dict[str, Any]] = []
+    rewards: list[float] = []
+    for reward_log in reward_logs:
+        row = dict(reward_log)
+        components = dict(row.get("reward_components") or row.get("breakdown") or {})
+        pred_before = row.get("pred_before")
+        pred_after = row.get("pred_after")
+        strict_flip = bool(
+            pred_before is not None
+            and pred_after is not None
+            and int(pred_before) == 1
+            and int(pred_after) == 0
+        )
+        final_fragment = str(row.get("final_fragment") or "").strip()
+        final_substructure = bool(row.get("final_substructure"))
+        if strict_flip and (not final_fragment or not final_substructure):
+            raise RuntimeError(
+                "Flip-dominant reward received strict flip without an applicable "
+                "final_fragment"
+            )
+
+        format_raw = _component(row, components, "format_r", "format_component")
+        valid_raw = _component(row, components, "valid_r", "valid_component")
+        subgraph_raw = _component(
+            row, components, "subgraph_r", "substructure_component"
+        )
+        subdist_raw = _component(
+            row, components, "subdist_contribution"
+        )
+        size_raw = _component(
+            row, components, "size_window_r", "size_window_reward"
+        )
+        syntax_raw = _component(row, components, "length_r", "length_component")
+        dummy_raw = _component(row, components, "dummy_r", "dummy_penalty")
+        cf_drop = _safe_float(row.get("cf_drop")) or 0.0
+
+        weighted_terms = {
+            "validity_component": float(config.validity_weight)
+            * (format_raw + valid_raw),
+            "substructure_component": float(config.substructure_weight)
+            * (subgraph_raw + subdist_raw),
+            "size_component": float(config.size_weight) * size_raw,
+            "cf_drop_component": float(config.cf_drop_weight) * max(cf_drop, 0.0),
+        }
+        positive_aux_before_cap = sum(
+            max(0.0, value) for value in weighted_terms.values()
+        )
+        negative_aux = sum(min(0.0, value) for value in weighted_terms.values())
+        # Preserve syntax/dummy penalties as safety signals without turning their
+        # legacy positive values into another route around the non-flip cap.
+        negative_aux += min(0.0, syntax_raw) + min(0.0, dummy_raw)
+        positive_aux_after_cap = (
+            positive_aux_before_cap
+            if strict_flip
+            else min(
+                positive_aux_before_cap,
+                float(config.non_flip_aux_reward_cap),
+            )
+        )
+        projection_component = (
+            -float(config.projection_penalty)
+            if bool(row.get("projection_used"))
+            else 0.0
+        )
+        class_component = (
+            float(config.strict_flip_bonus)
+            if strict_flip
+            else float(config.non_flip_penalty)
+        )
+        unclipped = (
+            positive_aux_after_cap
+            + negative_aux
+            + projection_component
+            + class_component
+        )
+        clipped = min(
+            max(float(unclipped), float(config.reward_clip_min)),
+            float(config.reward_clip_max),
+        )
+        profile_components = {
+            **components,
+            "flip_dominant_validity_component": weighted_terms[
+                "validity_component"
+            ],
+            "flip_dominant_substructure_component": weighted_terms[
+                "substructure_component"
+            ],
+            "flip_dominant_size_component": weighted_terms["size_component"],
+            "flip_dominant_cf_drop_component": weighted_terms[
+                "cf_drop_component"
+            ],
+            "flip_dominant_projection_component": projection_component,
+            "flip_dominant_class_component": class_component,
+            "flip_dominant_negative_aux": negative_aux,
+            "flip_dominant_positive_aux_before_cap": positive_aux_before_cap,
+            "flip_dominant_positive_aux_after_cap": positive_aux_after_cap,
+        }
+        row.update(
+            {
+                "cf_flip": strict_flip,
+                "strict_flip_definition": "pred_before==1_and_pred_after==0",
+                "reward_profile": config.profile_name,
+                "reward_before_flip_dominant_profile": _safe_float(
+                    row.get("reward_total", row.get("total"))
+                ),
+                "strict_flip_bonus": (
+                    float(config.strict_flip_bonus) if strict_flip else 0.0
+                ),
+                "non_flip_penalty": (
+                    0.0 if strict_flip else float(config.non_flip_penalty)
+                ),
+                "non_flip_aux_cap_applied": bool(
+                    not strict_flip
+                    and positive_aux_before_cap
+                    > float(config.non_flip_aux_reward_cap) + 1e-12
+                ),
+                "positive_aux_reward_before_cap": positive_aux_before_cap,
+                "positive_aux_reward_after_cap": positive_aux_after_cap,
+                "flip_dominant_unclipped_reward": unclipped,
+                "reward_clipped": not math.isclose(clipped, unclipped, abs_tol=1e-12),
+                "total": clipped,
+                "reward_total": clipped,
+                "reward_components": profile_components,
+                "breakdown": profile_components,
+            }
+        )
+        output.append(row)
+        rewards.append(clipped)
+    return output, rewards
+
+
 class StableChemRLRewardWrapper:
     """Thin wrapper that keeps stable-only reward adjustments out of base PPO."""
 
@@ -275,10 +492,14 @@ class StableChemRLRewardWrapper:
         *,
         base_rewarder: ChemRLRewarder,
         teacher_conf_gate: StableTeacherConfidenceGateConfig | None = None,
+        flip_dominant_reward: FlipDominantRewardConfig | None = None,
         logger: Any | None = None,
     ) -> None:
         self.base_rewarder = base_rewarder
         self.teacher_conf_gate = teacher_conf_gate or StableTeacherConfidenceGateConfig()
+        self.flip_dominant_reward = (
+            flip_dominant_reward or FlipDominantRewardConfig()
+        )
         self.logger = logger or _LOGGER
 
     def compute_rewards_from_decoded(
@@ -320,4 +541,19 @@ class StableChemRLRewardWrapper:
             reward_tensor = reward_tensor.clone()
             for index, reward_value in enumerate(adjusted_rewards):
                 reward_tensor[index] = float(reward_value)
+        if self.flip_dominant_reward.enabled:
+            # The confidence gate annotates the repaired rows first. The explicit
+            # profile must be the final reward producer; applying the legacy gate
+            # afterward would subtract a stale legacy counterfactual component
+            # from the newly composed reward.
+            updated_logs, profile_adjusted_rewards = (
+                apply_flip_dominant_profile_to_reward_logs(
+                    updated_logs,
+                    config=self.flip_dominant_reward,
+                )
+            )
+            if profile_adjusted_rewards:
+                reward_tensor = reward_tensor.clone()
+                for index, reward_value in enumerate(profile_adjusted_rewards):
+                    reward_tensor[index] = float(reward_value)
         return reward_tensor, updated_logs

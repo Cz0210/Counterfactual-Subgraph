@@ -485,6 +485,19 @@ def test_checkpoint_200_is_required_and_checkpoint_500_is_rejected(
     (checkpoint_500 / "adapter_model.bin").write_bytes(b"adapter")
     with pytest.raises(ValueError, match="checkpoint-200"):
         validate_policy_adapter_checkpoint(checkpoint_500)
+    fresh_named_checkpoint = tmp_path / "task-best-fresh-adapter"
+    fresh_named_checkpoint.mkdir()
+    (fresh_named_checkpoint / "adapter_config.json").write_text(
+        (checkpoint_200 / "adapter_config.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (fresh_named_checkpoint / "adapter_model.bin").write_bytes(b"fresh")
+    fresh_audit = validate_policy_adapter_checkpoint(
+        fresh_named_checkpoint,
+        expected_step=None,
+    )
+    assert fresh_audit["checkpoint_step_verified"] is False
+    assert fresh_audit["expected_checkpoint_step"] is None
 
 
 def test_model_audit_accepts_one_policy_adapter_and_frozen_reference() -> None:

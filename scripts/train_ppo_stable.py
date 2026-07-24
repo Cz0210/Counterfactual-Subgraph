@@ -23,6 +23,7 @@ from src.eval.full_candidate_pool import _enrich_reward_log
 from src.reward.reward_wrapper import ChemRLRewarder
 from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
 from src.rewards.reward_wrapper_stable import (
+    FlipDominantRewardConfig,
     StableChemRLRewardWrapper,
     StableTeacherConfidenceGateConfig,
 )
@@ -246,6 +247,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional maximum reward clip applied before PPO update.",
     )
     parser.add_argument(
+        "--reward-profile",
+        choices=("legacy", "mutagenicity_flip_dominant"),
+        default=_first_non_empty_env_value("REWARD_PROFILE") or "legacy",
+        help="Reward post-processing profile. legacy preserves all prior runs.",
+    )
+    parser.add_argument(
+        "--strict-flip-bonus",
+        type=float,
+        default=_env_float("STRICT_FLIP_BONUS", None),
+    )
+    parser.add_argument(
+        "--non-flip-penalty",
+        type=float,
+        default=_env_float("NON_FLIP_PENALTY", None),
+    )
+    parser.add_argument(
+        "--cf-drop-weight",
+        type=float,
+        default=_env_float("CF_DROP_WEIGHT", None),
+    )
+    parser.add_argument(
+        "--validity-weight",
+        type=float,
+        default=_env_float("VALIDITY_WEIGHT", None),
+    )
+    parser.add_argument(
+        "--substructure-weight",
+        type=float,
+        default=_env_float("SUBSTRUCTURE_WEIGHT", None),
+    )
+    parser.add_argument(
+        "--size-weight",
+        type=float,
+        default=_env_float("SIZE_WEIGHT", None),
+    )
+    parser.add_argument(
+        "--non-flip-aux-reward-cap",
+        type=float,
+        default=_env_float("NON_FLIP_AUX_REWARD_CAP", None),
+    )
+    parser.add_argument(
+        "--strict-flip-reward-margin",
+        type=float,
+        default=_env_float("STRICT_FLIP_REWARD_MARGIN", None),
+    )
+    parser.add_argument(
         "--normalize-reward",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("NORMALIZE_REWARD", False),
@@ -323,6 +370,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit per-sample label-conditioned reward logs for unified label01 PPO runs.",
     )
     return parser
+
+
+def resolve_flip_dominant_reward_config(
+    args: argparse.Namespace,
+) -> FlipDominantRewardConfig:
+    """Resolve an explicit profile while keeping legacy bit-for-bit disabled."""
+
+    profile = str(getattr(args, "reward_profile", "legacy") or "legacy")
+    if profile == "legacy":
+        return FlipDominantRewardConfig(enabled=False, profile_name="legacy")
+    required = {
+        "strict_flip_bonus": getattr(args, "strict_flip_bonus", None),
+        "non_flip_penalty": getattr(args, "non_flip_penalty", None),
+        "cf_drop_weight": getattr(args, "cf_drop_weight", None),
+        "validity_weight": getattr(args, "validity_weight", None),
+        "substructure_weight": getattr(args, "substructure_weight", None),
+        "size_weight": getattr(args, "size_weight", None),
+        "non_flip_aux_reward_cap": getattr(
+            args, "non_flip_aux_reward_cap", None
+        ),
+        "strict_flip_reward_margin": getattr(
+            args, "strict_flip_reward_margin", None
+        ),
+        "reward_clip_min": getattr(args, "reward_clip_min", None),
+        "reward_clip_max": getattr(args, "reward_clip_max", None),
+    }
+    missing = sorted(key for key, value in required.items() if value is None)
+    if missing:
+        raise ValueError(
+            "mutagenicity_flip_dominant requires explicit audited values for: "
+            f"{missing}. Supply recommended_reward_config.json through the fresh "
+            "PPO adapter or pass every CLI option."
+        )
+    config = FlipDominantRewardConfig(
+        enabled=True,
+        strict_flip_bonus=float(required["strict_flip_bonus"]),
+        non_flip_penalty=float(required["non_flip_penalty"]),
+        cf_drop_weight=float(required["cf_drop_weight"]),
+        validity_weight=float(required["validity_weight"]),
+        substructure_weight=float(required["substructure_weight"]),
+        size_weight=float(required["size_weight"]),
+        projection_penalty=float(getattr(args, "projection_penalty", 0.0)),
+        non_flip_aux_reward_cap=float(required["non_flip_aux_reward_cap"]),
+        strict_flip_reward_margin=float(required["strict_flip_reward_margin"]),
+        reward_clip_min=float(required["reward_clip_min"]),
+        reward_clip_max=float(required["reward_clip_max"]),
+        profile_name=profile,
+    )
+    config.validate()
+    return config
 
 
 def resolve_stable_config(args: argparse.Namespace) -> StablePPOConfig:
@@ -479,6 +576,7 @@ def build_stable_reward_wrapper(
             min_teacher_p_before=stable_config.min_teacher_p_before,
             low_conf_cf_weight=stable_config.low_conf_cf_weight,
         ),
+        flip_dominant_reward=resolve_flip_dominant_reward_config(args),
         logger=logger,
     )
 

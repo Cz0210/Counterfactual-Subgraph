@@ -359,18 +359,26 @@ def build_parent_coverage_plan(
 def validate_policy_adapter_checkpoint(
     path: str | Path,
     *,
-    expected_step: int = EXPECTED_POLICY_CHECKPOINT_STEP,
+    expected_step: int | None = EXPECTED_POLICY_CHECKPOINT_STEP,
 ) -> dict[str, Any]:
     checkpoint = Path(path).expanduser().resolve()
-    expected_name = f"checkpoint-{int(expected_step)}"
-    if checkpoint.name != expected_name:
+    expected_name = (
+        f"checkpoint-{int(expected_step)}"
+        if expected_step is not None and int(expected_step) > 0
+        else None
+    )
+    if expected_name is not None and checkpoint.name != expected_name:
         raise ValueError(
             "Mutagenicity PPO policy must initialize from continued-SFT "
             f"{expected_name}; resolved={checkpoint}"
         )
     payload = validate_peft_checkpoint(checkpoint)
-    payload["expected_checkpoint_step"] = int(expected_step)
-    payload["checkpoint_step_verified"] = True
+    payload["expected_checkpoint_step"] = (
+        int(expected_step)
+        if expected_step is not None and int(expected_step) > 0
+        else None
+    )
+    payload["checkpoint_step_verified"] = expected_name is not None
     return payload
 
 
@@ -562,6 +570,20 @@ def enrich_mutagenicity_candidate_row(
         or output.get("counterfactual_teacher_called")
         or output.get("counterfactual_called")
     )
+    projection_used = bool(
+        output.get("projection_used")
+        or output.get("used_projected_subgraph_for_reward")
+    )
+    final_fragment = output.get("final_fragment")
+    if not final_fragment and projection_used:
+        final_fragment = output.get("projected_fragment") or output.get(
+            "nearest_parent_subgraph_smiles"
+        )
+    if not final_fragment and bool(
+        output.get("direct_substructure")
+        or output.get("direct_substructure_success")
+    ):
+        final_fragment = output.get("core_fragment")
     strict_flip = bool(
         teacher_ok
         and pred_before is not None
@@ -585,11 +607,7 @@ def enrich_mutagenicity_candidate_row(
             ),
             "raw_fragment": output.get("raw_fragment") or generated_fragment,
             "core_fragment": output.get("core_fragment"),
-            "final_fragment": (
-                output.get("final_fragment")
-                or output.get("projected_fragment")
-                or output.get("core_fragment")
-            ),
+            "final_fragment": final_fragment,
             "residual_smiles": output.get("parent_without_fragment_smiles"),
             "parse_ok": bool(
                 output.get("parse_ok")
@@ -607,10 +625,7 @@ def enrich_mutagenicity_candidate_row(
                 output.get("final_substructure")
                 or output.get("is_subgraph")
             ),
-            "projection_used": bool(
-                output.get("projection_used")
-                or output.get("used_projected_subgraph_for_reward")
-            ),
+            "projection_used": projection_used,
             "projection_failed": bool(
                 output.get("projection_attempted")
                 and not output.get("projection_success")
@@ -648,8 +663,17 @@ def enrich_mutagenicity_candidate_row(
                 if p_before_1 is not None and p_after_1 is not None
                 else None
             ),
+            "parent_heavy_atoms": output.get("parent_heavy_atoms"),
+            "raw_fragment_heavy_atoms": output.get("raw_fragment_heavy_atoms"),
+            "final_fragment_heavy_atoms": output.get(
+                "final_fragment_heavy_atoms"
+            ),
+            "raw_atom_ratio": output.get("raw_atom_ratio"),
             "atom_ratio": output.get(
                 "atom_ratio", output.get("final_fragment_atom_ratio")
+            ),
+            "atom_ratio_source": output.get(
+                "atom_ratio_source", "final_fragment"
             ),
             "reward_total": output.get("reward_total", output.get("total")),
             "reward_components": output.get(
