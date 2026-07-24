@@ -10,10 +10,17 @@ from unittest.mock import patch
 import pytest
 
 from scripts.train_mutagenicity_ppo_stable import (
+    DEFAULT_FULL_OUTPUT,
     DEFAULT_POLICY_ADAPTER,
+    DEFAULT_SMOKE_OUTPUT,
     DEFAULT_TEACHER,
+    LEGACY_SHARED_OUTPUT,
     build_parser,
+    parse_args_with_config_precedence,
+    print_and_validate_output_root_audit,
+    resolve_output_root_audit,
 )
+from scripts.train_ppo import apply_config_overrides
 from scripts.train_ppo_stable import (
     _evaluate_validation_set,
     _should_run_final_validation,
@@ -329,6 +336,126 @@ def test_default_policy_is_mutagenicity_checkpoint_and_teacher() -> None:
     assert args.default_parent_label == 1
 
 
+def _write_ppo_config(path: Path, output_root: Path) -> None:
+    path.write_text(
+        f"paths:\n  output_root: {output_root}\n"
+        "training:\n  batch_size: 16\n",
+        encoding="utf-8",
+    )
+
+
+def test_explicit_cli_values_win_over_config_even_when_equal_to_defaults(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_root = tmp_path / "configured"
+    _write_ppo_config(config_path, config_root)
+    explicit_values = {
+        "output_dir": str(DEFAULT_FULL_OUTPUT),
+        "mode": "full",
+        "max_parents": 1448,
+        "rollout_batch_size": 64,
+        "max_updates": 23,
+        "eval_every_steps": 5,
+        "train_csv": Path("train.csv"),
+        "val_csv": Path("val.csv"),
+        "teacher_path": "teacher.pkl",
+        "base_model_path": Path("base"),
+        "policy_adapter_checkpoint": Path("checkpoint-200"),
+    }
+    argv = [
+        "--config",
+        str(config_path),
+        "--output-dir",
+        explicit_values["output_dir"],
+        "--mode",
+        explicit_values["mode"],
+        "--max-parents",
+        str(explicit_values["max_parents"]),
+        "--rollout-batch-size",
+        str(explicit_values["rollout_batch_size"]),
+        "--max-updates",
+        str(explicit_values["max_updates"]),
+        "--eval-every-steps",
+        str(explicit_values["eval_every_steps"]),
+        "--train-csv",
+        str(explicit_values["train_csv"]),
+        "--val-csv",
+        str(explicit_values["val_csv"]),
+        "--teacher-path",
+        explicit_values["teacher_path"],
+        "--base-model-path",
+        str(explicit_values["base_model_path"]),
+        "--policy-adapter-checkpoint",
+        str(explicit_values["policy_adapter_checkpoint"]),
+    ]
+
+    _, args, audit = parse_args_with_config_precedence(argv)
+
+    for destination, expected in explicit_values.items():
+        assert getattr(args, destination) == expected
+    assert audit["explicit_cli_preserved"] is True
+    assert audit["config_candidates"]["output_dir"] == str(
+        config_root / "rl_checkpoints"
+    )
+
+
+def test_config_output_applies_only_without_explicit_cli(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_root = tmp_path / "configured"
+    _write_ppo_config(config_path, config_root)
+
+    _, args, audit = parse_args_with_config_precedence(
+        ["--config", str(config_path)]
+    )
+
+    assert args.output_dir == str(config_root / "rl_checkpoints")
+    assert "output_dir" not in audit["explicit_cli_destinations"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "output_path"),
+    [
+        ("full", DEFAULT_FULL_OUTPUT),
+        ("smoke", DEFAULT_SMOKE_OUTPUT),
+    ],
+)
+def test_mutagenicity_output_root_preserves_explicit_task_path(
+    mode: str,
+    output_path: Path,
+) -> None:
+    _, args, priority_audit = parse_args_with_config_precedence(
+        [
+            "--config",
+            "configs/hpc.yaml",
+            "--mode",
+            mode,
+            "--output-dir",
+            str(output_path),
+        ]
+    )
+    resolved, output_audit = resolve_output_root_audit(args, priority_audit)
+
+    assert resolved == output_path.resolve()
+    assert output_audit["explicit_cli_preserved"] is True
+    assert output_audit["output_root_audit_passed"] is True
+
+
+def test_legacy_rl_output_cannot_replace_explicit_mutagenicity_output() -> None:
+    _, args, priority_audit = parse_args_with_config_precedence(
+        [
+            "--mode",
+            "full",
+            "--output-dir",
+            str(LEGACY_SHARED_OUTPUT),
+        ]
+    )
+    _, output_audit = resolve_output_root_audit(args, priority_audit)
+
+    with pytest.raises(AssertionError, match="legacy shared"):
+        print_and_validate_output_root_audit(output_audit)
+
+
 def test_checkpoint_200_is_required_and_checkpoint_500_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -516,6 +643,15 @@ def test_full_updates_per_epoch_uses_real_rollout_batch() -> None:
     assert plan.samples_per_update == 64
     assert plan.updates_per_epoch == math.ceil(1448 / 64) == 23
 
+    explicit = build_parent_coverage_plan(
+        num_dataset_rows=1448,
+        rollout_batch_size=64,
+        sampler_seed=7,
+        max_updates=29,
+    )
+    assert explicit.updates_per_epoch == 23
+    assert explicit.max_updates == 29
+
 
 def test_candidate_enrichment_contains_directional_teacher_fields() -> None:
     row = enrich_mutagenicity_candidate_row(
@@ -588,6 +724,26 @@ def test_aids_stable_entry_remains_available() -> None:
     args = build_aids_stable_parser().parse_args([])
     assert args.ppo_loop in {"decoded_chem", "trl_experimental"}
     assert hasattr(args, "teacher_path")
+
+
+def test_aids_stable_config_merge_preserves_explicit_cli(
+    tmp_path: Path,
+) -> None:
+    parser = build_aids_stable_parser()
+    explicit_output = parser.get_default("output_dir")
+    config_path = tmp_path / "config.yaml"
+    _write_ppo_config(config_path, tmp_path / "configured")
+    argv = [
+        "--config",
+        str(config_path),
+        "--output-dir",
+        explicit_output,
+    ]
+    args = parser.parse_args(argv)
+
+    merged = apply_config_overrides(args, parser, argv=argv)
+
+    assert merged.output_dir == explicit_output
 
 
 def test_validation_generation_is_reproducible_without_generator_kwarg(
@@ -824,4 +980,5 @@ def test_full_wrapper_defaults_to_eval_every_100_and_smoke_remains_every_step() 
     ).read_text(encoding="utf-8")
 
     assert 'EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-100}"' in full_script
+    assert 'MAX_UPDATES="${MAX_UPDATES:-$UPDATES_PER_EPOCH}"' in full_script
     assert "--eval-every-steps 1" in smoke_script

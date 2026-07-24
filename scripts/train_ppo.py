@@ -709,13 +709,52 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def apply_config_overrides(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
+def _cli_flag_present(argv: Sequence[str], flag: str) -> bool:
+    """Return whether one CLI flag was supplied explicitly."""
+
+    normalized_flag = str(flag).strip()
+    return any(
+        argument == normalized_flag or argument.startswith(f"{normalized_flag}=")
+        for argument in argv
+    )
+
+
+def _explicit_cli_destinations(
+    parser: argparse.ArgumentParser,
+    argv: Sequence[str],
+) -> frozenset[str]:
+    """Return argparse destinations explicitly represented in ``argv``."""
+
+    return frozenset(
+        action.dest
+        for action in parser._actions
+        if action.option_strings
+        and any(
+            _cli_flag_present(argv, option)
+            for option in action.option_strings
+        )
+    )
+
+
+def apply_config_overrides(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    argv: Sequence[str] | None = None,
+    audit: dict[str, Any] | None = None,
+) -> argparse.Namespace:
     """Apply lightweight YAML config overrides to the PPO CLI args.
 
     The rule is:
     - explicit CLI values always win;
     - config values fill in fields that are still using parser defaults.
     """
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    explicit_destinations = _explicit_cli_destinations(parser, raw_argv)
+    if audit is not None:
+        audit["explicit_cli_destinations"] = sorted(explicit_destinations)
+        audit["config_candidates"] = {}
 
     config_files = [REPO_ROOT / "configs" / "base.yaml"]
     config_files.extend(Path(path).expanduser().resolve() for path in args.config)
@@ -727,7 +766,10 @@ def apply_config_overrides(args: argparse.Namespace, parser: argparse.ArgumentPa
         config = apply_dotlist_overrides(config, args.set)
 
     def _is_default(name: str) -> bool:
-        return getattr(args, name) == parser.get_default(name)
+        return (
+            name not in explicit_destinations
+            and getattr(args, name) == parser.get_default(name)
+        )
 
     model_cfg = config.get("model", {})
     data_cfg = config.get("data", {})
@@ -745,10 +787,16 @@ def apply_config_overrides(args: argparse.Namespace, parser: argparse.ArgumentPa
         if configured_dataset_path:
             args.dataset_path = str(configured_dataset_path)
 
-    if _is_default("output_dir"):
-        configured_output_root = paths_cfg.get("output_root")
-        if configured_output_root:
-            args.output_dir = str(Path(str(configured_output_root)) / "rl_checkpoints")
+    configured_output_root = paths_cfg.get("output_root")
+    configured_output_dir = (
+        str(Path(str(configured_output_root)) / "rl_checkpoints")
+        if configured_output_root
+        else None
+    )
+    if audit is not None:
+        audit["config_candidates"]["output_dir"] = configured_output_dir
+    if _is_default("output_dir") and configured_output_dir:
+        args.output_dir = configured_output_dir
 
     if _is_default("seed") and runtime_cfg.get("seed") is not None:
         args.seed = int(runtime_cfg["seed"])
@@ -775,16 +823,6 @@ def apply_config_overrides(args: argparse.Namespace, parser: argparse.ArgumentPa
         args.trust_remote_code = bool(model_cfg["trust_remote_code"])
 
     return args
-
-
-def _cli_flag_present(argv: Sequence[str], flag: str) -> bool:
-    """Return whether one CLI flag was supplied explicitly."""
-
-    normalized_flag = str(flag).strip()
-    return any(
-        argument == normalized_flag or argument.startswith(f"{normalized_flag}=")
-        for argument in argv
-    )
 
 
 def apply_decoded_chem_generation_defaults(

@@ -86,6 +86,20 @@ DEFAULT_TEACHER = (
 )
 DEFAULT_SMOKE_OUTPUT = REPO_ROOT / "outputs/hpc/mutagenicity/ppo_stable_v1_smoke"
 DEFAULT_FULL_OUTPUT = REPO_ROOT / "outputs/hpc/mutagenicity/ppo_stable_v1"
+LEGACY_SHARED_OUTPUT = REPO_ROOT / "outputs/hpc/rl_checkpoints"
+CONFIG_PRIORITY_DESTINATIONS = (
+    "output_dir",
+    "mode",
+    "max_parents",
+    "rollout_batch_size",
+    "max_updates",
+    "eval_every_steps",
+    "train_csv",
+    "val_csv",
+    "teacher_path",
+    "base_model_path",
+    "policy_adapter_checkpoint",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,6 +171,150 @@ def build_parser() -> argparse.ArgumentParser:
 def _resolve(path: str | Path) -> Path:
     value = Path(path).expanduser()
     return value.resolve() if value.is_absolute() else (REPO_ROOT / value).resolve()
+
+
+def parse_args_with_config_precedence(
+    argv: list[str] | None = None,
+) -> tuple[argparse.ArgumentParser, argparse.Namespace, dict[str, Any]]:
+    """Parse Mutagenicity PPO arguments with explicit CLI values preserved."""
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    parsed_args = parser.parse_args(raw_argv)
+    pre_config_values = {
+        destination: getattr(parsed_args, destination)
+        for destination in CONFIG_PRIORITY_DESTINATIONS
+    }
+    config_merge_audit: dict[str, Any] = {}
+    args = apply_config_overrides(
+        parsed_args,
+        parser,
+        argv=raw_argv,
+        audit=config_merge_audit,
+    )
+    explicit_destinations = set(
+        config_merge_audit.get("explicit_cli_destinations", [])
+    )
+    mismatched_destinations = [
+        destination
+        for destination in CONFIG_PRIORITY_DESTINATIONS
+        if destination in explicit_destinations
+        and getattr(args, destination) != pre_config_values[destination]
+    ]
+    if mismatched_destinations:
+        raise AssertionError(
+            "Explicit Mutagenicity PPO CLI values were overwritten by config: "
+            f"{mismatched_destinations}"
+        )
+    priority_audit = {
+        "raw_argv": raw_argv,
+        "explicit_cli_destinations": sorted(explicit_destinations),
+        "explicit_cli_values": {
+            destination: (
+                str(pre_config_values[destination])
+                if isinstance(pre_config_values[destination], Path)
+                else pre_config_values[destination]
+            )
+            for destination in CONFIG_PRIORITY_DESTINATIONS
+            if destination in explicit_destinations
+        },
+        "config_candidates": dict(
+            config_merge_audit.get("config_candidates", {})
+        ),
+        "post_config_values": {
+            destination: (
+                str(getattr(args, destination))
+                if isinstance(getattr(args, destination), Path)
+                else getattr(args, destination)
+            )
+            for destination in CONFIG_PRIORITY_DESTINATIONS
+        },
+        "mismatched_explicit_destinations": mismatched_destinations,
+        "explicit_cli_preserved": not mismatched_destinations,
+    }
+    return parser, args, priority_audit
+
+
+def resolve_output_root_audit(
+    args: argparse.Namespace,
+    priority_audit: dict[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve and audit the output path before creating any directory."""
+
+    mode = str(args.mode)
+    explicit_destinations = set(
+        priority_audit.get("explicit_cli_destinations", [])
+    )
+    cli_output_dir = priority_audit.get("explicit_cli_values", {}).get(
+        "output_dir"
+    )
+    post_config_output_dir = str(args.output_dir)
+    selected_output_dir: str | Path = args.output_dir
+    if (
+        mode == "smoke"
+        and "output_dir" not in explicit_destinations
+        and str(args.output_dir) == str(DEFAULT_FULL_OUTPUT)
+    ):
+        selected_output_dir = DEFAULT_SMOKE_OUTPUT
+    resolved_output_root = _resolve(selected_output_dir)
+
+    explicit_output_preserved = True
+    if cli_output_dir is not None:
+        explicit_output_preserved = (
+            resolved_output_root == _resolve(str(cli_output_dir))
+        )
+    legacy_output_collision = bool(
+        cli_output_dir is not None
+        and resolved_output_root == LEGACY_SHARED_OUTPUT.resolve()
+    )
+    explicit_cli_preserved = bool(
+        priority_audit.get("explicit_cli_preserved", False)
+        and explicit_output_preserved
+    )
+    output_root_audit_passed = bool(
+        explicit_cli_preserved and not legacy_output_collision
+    )
+    audit = {
+        "mode": mode,
+        "cli_output_dir": cli_output_dir,
+        "config_output_dir": priority_audit.get(
+            "config_candidates", {}
+        ).get("output_dir"),
+        "post_config_output_dir": post_config_output_dir,
+        "resolved_output_root": str(resolved_output_root),
+        "explicit_cli_preserved": explicit_cli_preserved,
+        "legacy_output_collision": legacy_output_collision,
+        "output_root_audit_passed": output_root_audit_passed,
+    }
+    return resolved_output_root, audit
+
+
+def print_and_validate_output_root_audit(audit: dict[str, Any]) -> None:
+    print("[MUTAGENICITY_PPO_OUTPUT_ROOT_AUDIT]")
+    for field in (
+        "mode",
+        "cli_output_dir",
+        "config_output_dir",
+        "post_config_output_dir",
+        "resolved_output_root",
+        "explicit_cli_preserved",
+        "output_root_audit_passed",
+    ):
+        value = audit.get(field)
+        if isinstance(value, bool):
+            value = str(value).lower()
+        print(f"{field}={value}")
+    if not audit.get("output_root_audit_passed"):
+        if audit.get("legacy_output_collision"):
+            raise AssertionError(
+                "Explicit Mutagenicity PPO --output-dir resolved to the legacy "
+                "shared outputs/hpc/rl_checkpoints path. Config must not "
+                "override the task-specific output root."
+            )
+        raise AssertionError(
+            "Mutagenicity PPO output-root audit failed because an explicit CLI "
+            "value was not preserved."
+        )
 
 
 def _has_tokenizer_assets(path: Path) -> bool:
@@ -286,9 +444,7 @@ def _load_single_adapter(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    args = apply_config_overrides(args, parser)
+    _parser, args, priority_audit = parse_args_with_config_precedence(argv)
     args = apply_decoded_chem_generation_defaults(args)
     (
         args.enable_substructure_distance_reward,
@@ -313,13 +469,11 @@ def main(argv: list[str] | None = None) -> int:
         args.policy_adapter_checkpoint or DEFAULT_POLICY_ADAPTER
     )
     teacher_path = _resolve(args.teacher_path)
-    output_root = _resolve(
-        args.output_dir
-        if args.output_dir != str(DEFAULT_FULL_OUTPUT) or mode == "full"
-        else DEFAULT_SMOKE_OUTPUT
+    output_root, output_root_audit = resolve_output_root_audit(
+        args,
+        priority_audit,
     )
-    if mode == "smoke" and args.output_dir == str(DEFAULT_FULL_OUTPUT):
-        output_root = DEFAULT_SMOKE_OUTPUT.resolve()
+    print_and_validate_output_root_audit(output_root_audit)
 
     validate_policy_adapter_checkpoint(policy_adapter_checkpoint)
     if not base_model_path.is_dir():
@@ -375,12 +529,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     if mode == "smoke" and coverage_plan.max_updates != 5:
         raise ValueError("Mutagenicity PPO smoke requires max_updates=5")
-    if mode == "full" and coverage_plan.max_updates != coverage_plan.updates_per_epoch:
-        raise ValueError(
-            "First Mutagenicity PPO full run is fixed to one equivalent epoch: "
-            f"max_updates={coverage_plan.max_updates} "
-            f"updates_per_epoch={coverage_plan.updates_per_epoch}"
-        )
 
     args.dataset_path = str(train_csv)
     args.output_dir = str(output_root)

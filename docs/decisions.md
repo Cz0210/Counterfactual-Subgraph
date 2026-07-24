@@ -6,6 +6,83 @@ It should be updated whenever a meaningful implementation, algorithmic, or inter
 
 ---
 
+## [2026-07-24] Preserve explicit PPO CLI values during config merge
+
+### Background
+
+The PPO config adapter inferred whether an argument was explicit by comparing
+its parsed value with the parser default. Mutagenicity full PPO explicitly
+passed its task output directory, but that value equaled the Mutagenicity
+parser default and was therefore replaced by the generic HPC
+`outputs/hpc/rl_checkpoints` config path.
+
+### Decision
+
+Determine explicit arguments from the actual argv option strings. Config values
+may only replace destinations absent from argv and still at their parser
+defaults. The Mutagenicity adapter additionally audits all task-critical CLI
+fields and prints the CLI, config candidate, post-config, and resolved output
+paths before creating the output directory. An explicit Mutagenicity output
+that resolves to the legacy shared RL directory is rejected.
+
+Keep one full epoch as the wrapper default by deriving
+`ceil(1448 / 64) = 23` updates. An explicitly supplied `MAX_UPDATES` remains an
+override rather than being rejected by the Python adapter.
+
+### Consequences
+
+- Parameter precedence is now CLI, then config, then parser default.
+- Existing AIDS/HIV PPO entrypoints retain their CLI and config interfaces.
+- Mutagenicity full and smoke paths cannot be silently redirected by
+  `configs/hpc.yaml`.
+- Reward, teacher, policy initialization, sampling order, and optimizer
+  semantics are unchanged.
+
+### Status
+
+Accepted
+
+---
+
+## [2026-07-24] Define stable-PPO size ratio from the deleted fragment
+
+### Background
+
+The stable decoded-chemistry reward computed its size-window term from the
+normalized raw/core fragment before parent-subgraph projection. When projection
+replaced an oversized generation with the fragment actually used for hard
+deletion, the reward log and candidate pool still reported the raw/core ratio.
+
+### Decision
+
+After direct matching or projection is resolved, compute the stable-PPO
+`atom_ratio` as final-fragment heavy atoms divided by parent heavy atoms.
+Recompute the size-window reward from that same ratio before the teacher
+confidence gate and PPO update. Preserve `raw_atom_ratio` only as a diagnostic,
+record both atom counts and `atom_ratio_source=final_fragment`, and fail if a
+claimed final parent substructure produces a ratio outside `(0, 1]`.
+
+For Mutagenicity full PPO, validate every 100 updates by default instead of
+every 5 updates. Keep the existing final validation pass so a non-divisible
+last update is still evaluated and considered for best-checkpoint selection.
+
+### Consequences
+
+- Candidate-pool rows, stable update metrics, and the size reward now use one
+  final-fragment ratio.
+- Oversized raw generations can retain `raw_atom_ratio > 1` for diagnosis
+  without corrupting the PPO size term.
+- The shared stable wrapper applies the corrected semantics to Mutagenicity and
+  remains compatible with AIDS/HIV callers.
+- Teacher scoring, strict flip, CFDrop, PPO loss, KL control, learning rate,
+  parent sampling, and policy initialization are unchanged.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-07-23] Continue exactly one existing PEFT adapter on Mutagenicity
 
 ### Background
