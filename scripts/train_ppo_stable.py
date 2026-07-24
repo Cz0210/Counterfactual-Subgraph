@@ -1088,6 +1088,22 @@ def _maybe_save_best_checkpoint(
     return new_state, should_stop
 
 
+def _should_run_final_validation(
+    *,
+    stable_config: StablePPOConfig,
+    completed_steps: int,
+    last_validation_step: int | None,
+) -> bool:
+    """Return whether training completion needs one final validation pass."""
+
+    return bool(
+        stable_config.val_dataset_path
+        and stable_config.eval_every_steps > 0
+        and completed_steps > 0
+        and last_validation_step != completed_steps
+    )
+
+
 def run_stable_decoded_chem_ppo_loop(
     *,
     deps: dict[str, Any],
@@ -1630,11 +1646,10 @@ def run_stable_decoded_chem_ppo_loop(
             )
             break
 
-    if (
-        stable_config.val_dataset_path
-        and stable_config.eval_every_steps > 0
-        and completed_steps > 0
-        and last_validation_step != completed_steps
+    if _should_run_final_validation(
+        stable_config=stable_config,
+        completed_steps=completed_steps,
+        last_validation_step=last_validation_step,
     ):
         summary = _evaluate_validation_set(
             deps=deps,

@@ -49,7 +49,7 @@ UPDATES_PER_EPOCH=$(( (MAX_PARENTS + SAMPLES_PER_UPDATE - 1) / SAMPLES_PER_UPDAT
 MAX_UPDATES="${MAX_UPDATES:-$UPDATES_PER_EPOCH}"
 SEED="${SEED:-7}"
 SAVE_STEPS="${SAVE_STEPS:-5}"
-EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-5}"
+EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-100}"
 
 mkdir -p "$LOG_DIR"
 for path in "$TRAIN_CSV" "$VAL_CSV" "$TEACHER_PATH"; do
@@ -87,6 +87,7 @@ echo "MAX_PARENTS=$MAX_PARENTS"
 echo "MAX_UPDATES=$MAX_UPDATES"
 echo "samples_per_update=$SAMPLES_PER_UPDATE"
 echo "updates_per_epoch=$UPDATES_PER_EPOCH"
+echo "EVAL_EVERY_STEPS=$EVAL_EVERY_STEPS"
 echo "git commit=$(git rev-parse HEAD)"
 echo "python path=$(which python)"
 echo "conda env=${CONDA_DEFAULT_ENV:-}"
@@ -143,4 +144,3 @@ python scripts/train_mutagenicity_ppo_stable.py \
 python scripts/audit_mutagenicity_ppo_run.py \
   --run-dir "$OUTPUT_ROOT" \
   --require-full-coverage
-

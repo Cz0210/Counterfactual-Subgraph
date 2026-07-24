@@ -16,11 +16,17 @@ from scripts.train_mutagenicity_ppo_stable import (
 )
 from scripts.train_ppo_stable import (
     _evaluate_validation_set,
+    _should_run_final_validation,
+    _summarize_step_metrics,
     build_parser as build_aids_stable_parser,
     isolated_generation_rng,
     resolve_stable_config,
 )
 from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
+from src.rewards.reward_wrapper_stable import (
+    StableChemRLRewardWrapper,
+    StableTeacherConfidenceGateConfig,
+)
 from src.train.mutagenicity_stable_ppo import (
     REQUIRED_CANDIDATE_FIELDS,
     MutagenicityCounterfactualTeacherScorer,
@@ -237,6 +243,30 @@ class _ValidationLogger:
 
     def warning(self, message: str, *args) -> None:
         self.messages.append(message % args if args else message)
+
+
+class _AtomRatioBaseRewarder:
+    enable_size_window_reward = True
+    size_window_low = 0.15
+    size_window_high = 0.65
+
+    def __init__(self, torch, row: dict[str, object]) -> None:
+        self._torch = torch
+        self._row = dict(row)
+
+    def _compute_size_window_reward(self, *, atom_ratio):
+        if atom_ratio is None:
+            return 0.0, "unknown"
+        if atom_ratio < self.size_window_low:
+            return -0.4, "too_small"
+        if atom_ratio > self.size_window_high:
+            return -0.4, "too_large"
+        return 0.4, "in_window"
+
+    def compute_rewards_from_decoded(self, **kwargs):
+        device = kwargs.get("device")
+        reward = float(self._row["reward_total"])
+        return self._torch.tensor([reward], device=device), [dict(self._row)]
 
 
 def _validation_args(path: Path, *, seed: int, do_sample: bool):
@@ -646,3 +676,152 @@ def test_greedy_validation_does_not_forward_generator(tmp_path: Path) -> None:
 
     assert generated == [[[3, 3, 3, 3]]]
     assert summary is not None
+
+
+def test_direct_substructure_uses_final_fragment_atom_ratio() -> None:
+    torch = pytest.importorskip("torch")
+    row = {
+        "parent_smiles": "CCCCCC",
+        "raw_fragment": "CCC",
+        "core_fragment": "CCC",
+        "direct_substructure": True,
+        "used_projected_subgraph_for_reward": False,
+        "size_window_reward": 0.4,
+        "reward_total": 2.0,
+        "total": 2.0,
+        "reward_components": {"size_window_r": 0.4},
+    }
+    wrapper = StableChemRLRewardWrapper(
+        base_rewarder=_AtomRatioBaseRewarder(torch, row),
+        teacher_conf_gate=StableTeacherConfidenceGateConfig(enabled=False),
+    )
+
+    reward_tensor, logs = wrapper.compute_rewards_from_decoded(
+        parent_smiles=["CCCCCC"],
+        generated_fragments=["CCC"],
+        device=torch.device("cpu"),
+    )
+
+    assert reward_tensor.item() == pytest.approx(2.0)
+    assert logs[0]["final_fragment"] == "CCC"
+    assert logs[0]["parent_heavy_atoms"] == 6
+    assert logs[0]["final_fragment_heavy_atoms"] == 3
+    assert logs[0]["atom_ratio"] == pytest.approx(0.5)
+    assert logs[0]["atom_ratio_source"] == "final_fragment"
+    assert logs[0]["reward_components"]["size_window_r"] == pytest.approx(0.4)
+
+
+def test_projection_ratio_drives_reward_candidate_and_update_metrics() -> None:
+    torch = pytest.importorskip("torch")
+    parent = "CCCCCCCCCC"
+    raw_fragment = "CCCCCCCCCCCCCCC"
+    projected_fragment = "CCCC"
+    row = {
+        "parent_smiles": parent,
+        "raw_fragment": raw_fragment,
+        "core_fragment": raw_fragment,
+        "projected_fragment": projected_fragment,
+        "nearest_parent_subgraph_smiles": projected_fragment,
+        "projection_method": "nearest_parent_subgraph",
+        "projection_success": True,
+        "used_projected_subgraph_for_reward": True,
+        "direct_substructure": False,
+        "size_window_reward": -0.4,
+        "reward_total": 1.0,
+        "total": 1.0,
+        "reward_components": {"size_window_r": -0.4},
+    }
+    wrapper = StableChemRLRewardWrapper(
+        base_rewarder=_AtomRatioBaseRewarder(torch, row),
+        teacher_conf_gate=StableTeacherConfidenceGateConfig(enabled=False),
+    )
+
+    reward_tensor, logs = wrapper.compute_rewards_from_decoded(
+        parent_smiles=[parent],
+        generated_fragments=[raw_fragment],
+        device=torch.device("cpu"),
+    )
+    log = logs[0]
+    candidate = enrich_mutagenicity_candidate_row(
+        log,
+        molecule_id="m1",
+        prompt="prompt",
+        generated_text=raw_fragment,
+        generated_fragment=raw_fragment,
+        global_step=1,
+        parent_smiles=parent,
+    )
+    metrics = _summarize_step_metrics([candidate])
+
+    assert log["raw_fragment_heavy_atoms"] == 15
+    assert log["raw_atom_ratio"] == pytest.approx(1.5)
+    assert log["final_fragment"] == projected_fragment
+    assert log["final_fragment_heavy_atoms"] == 4
+    assert log["atom_ratio"] == pytest.approx(0.4)
+    assert log["atom_ratio"] <= 1.0
+    assert log["atom_ratio_source"] == "final_fragment"
+    assert log["size_window_reward"] == pytest.approx(0.4)
+    assert log["reward_components"]["size_window_r"] == pytest.approx(0.4)
+    assert reward_tensor.item() == pytest.approx(1.8)
+    assert candidate["atom_ratio"] == pytest.approx(0.4)
+    assert candidate["raw_atom_ratio"] == pytest.approx(1.5)
+    assert candidate["atom_ratio_source"] == "final_fragment"
+    assert candidate["reward_components"]["size_window_r"] == pytest.approx(0.4)
+    assert metrics["atom_ratio_mean"] == pytest.approx(0.4)
+
+
+def test_final_substructure_atom_ratio_above_one_fails_audit() -> None:
+    torch = pytest.importorskip("torch")
+    row = {
+        "parent_smiles": "C",
+        "raw_fragment": "CC",
+        "core_fragment": "CC",
+        "direct_substructure": True,
+        "size_window_reward": -0.4,
+        "reward_total": 1.0,
+        "total": 1.0,
+    }
+    wrapper = StableChemRLRewardWrapper(
+        base_rewarder=_AtomRatioBaseRewarder(torch, row),
+        teacher_conf_gate=StableTeacherConfidenceGateConfig(enabled=False),
+    )
+
+    with patch(
+        "src.rewards.reward_wrapper_stable.is_parent_substructure",
+        return_value=True,
+    ), pytest.raises(RuntimeError, match="STABLE_PPO_ATOM_RATIO_AUDIT_FAILED"):
+        wrapper.compute_rewards_from_decoded(
+            parent_smiles=["C"],
+            generated_fragments=["CC"],
+            device=torch.device("cpu"),
+        )
+
+
+def test_full_validation_runs_at_last_non_interval_step(tmp_path: Path) -> None:
+    args = _validation_args(tmp_path / "val.csv", seed=7, do_sample=False)
+    args.eval_every_steps = 100
+    config = resolve_stable_config(args)
+
+    assert _should_run_final_validation(
+        stable_config=config,
+        completed_steps=1448,
+        last_validation_step=1400,
+    )
+    assert not _should_run_final_validation(
+        stable_config=config,
+        completed_steps=1400,
+        last_validation_step=1400,
+    )
+
+
+def test_full_wrapper_defaults_to_eval_every_100_and_smoke_remains_every_step() -> None:
+    root = Path(__file__).resolve().parents[1]
+    full_script = (
+        root / "scripts/slurm/train_mutagenicity_ppo_stable_full.sh"
+    ).read_text(encoding="utf-8")
+    smoke_script = (
+        root / "scripts/slurm/train_mutagenicity_ppo_stable_smoke.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'EVAL_EVERY_STEPS="${EVAL_EVERY_STEPS:-100}"' in full_script
+    assert "--eval-every-steps 1" in smoke_script

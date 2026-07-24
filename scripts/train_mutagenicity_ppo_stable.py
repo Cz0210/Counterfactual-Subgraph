@@ -399,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
     args.val_dataset_path = str(selected_val_path)
     args.eval_num_samples = len(val_selected)
     if int(args.eval_every_steps) <= 0:
-        args.eval_every_steps = 1 if mode == "smoke" else 5
+        args.eval_every_steps = 1 if mode == "smoke" else 100
     if int(args.save_steps) <= 0 or int(args.save_steps) > coverage_plan.max_updates:
         args.save_steps = 1 if mode == "smoke" else 5
     stable_config = resolve_stable_config(args)
