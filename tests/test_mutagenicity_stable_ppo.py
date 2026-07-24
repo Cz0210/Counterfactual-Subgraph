@@ -14,7 +14,12 @@ from scripts.train_mutagenicity_ppo_stable import (
     DEFAULT_TEACHER,
     build_parser,
 )
-from scripts.train_ppo_stable import build_parser as build_aids_stable_parser
+from scripts.train_ppo_stable import (
+    _evaluate_validation_set,
+    build_parser as build_aids_stable_parser,
+    isolated_generation_rng,
+    resolve_stable_config,
+)
 from src.rewards.counterfactual_oracle import CounterfactualTeacherScorer
 from src.train.mutagenicity_stable_ppo import (
     REQUIRED_CANDIDATE_FIELDS,
@@ -122,6 +127,166 @@ class _FakeValueModel:
 
     def named_parameters(self):
         return iter(self._parameters)
+
+
+class _ValidationTokenizer:
+    pad_token_id = 0
+    eos_token_id = 2
+
+    def __call__(
+        self,
+        prompts,
+        *,
+        return_tensors: str,
+        padding: bool,
+        truncation: bool,
+    ):
+        del return_tensors, padding, truncation
+        import torch
+
+        input_ids = torch.tensor([[1, 2] for _ in prompts], dtype=torch.long)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+        }
+
+    def batch_decode(self, payload, *, skip_special_tokens: bool):
+        del skip_special_tokens
+        return ["C" for _ in payload]
+
+
+class _ValidationPolicy:
+    def __init__(self, torch) -> None:
+        self._torch = torch
+        self._parameter = torch.nn.Parameter(torch.zeros(1))
+        self.generated_batches: list[list[list[int]]] = []
+        self.training = True
+
+    def parameters(self):
+        return iter([self._parameter])
+
+    def eval(self):
+        self.training = False
+        return self
+
+    def train(self):
+        self.training = True
+        return self
+
+    def generate(self, **kwargs):
+        if "generator" in kwargs:
+            raise AssertionError("generator must not be forwarded to model.generate")
+        input_ids = kwargs["input_ids"]
+        if bool(kwargs.get("do_sample")):
+            response = self._torch.randint(
+                3,
+                10_000,
+                (input_ids.shape[0], 4),
+                device=input_ids.device,
+            )
+        else:
+            response = self._torch.full(
+                (input_ids.shape[0], 4),
+                3,
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
+        self.generated_batches.append(response.detach().cpu().tolist())
+        return self._torch.cat([input_ids, response], dim=1)
+
+
+class _ValidationRewardWrapper:
+    def __init__(self, torch) -> None:
+        self._torch = torch
+
+    def compute_rewards_from_decoded(
+        self,
+        *,
+        parent_smiles,
+        generated_fragments,
+        raw_outputs,
+        labels,
+        metas,
+        device,
+        step_index,
+    ):
+        del generated_fragments, raw_outputs, labels, metas, step_index
+        rows = [
+            {
+                "parse_ok": True,
+                "valid": True,
+                "direct_substructure": True,
+                "oracle_ok": True,
+                "cf_flip": False,
+                "cf_drop": 0.0,
+                "total": 0.0,
+                "atom_ratio": 0.25,
+                "fragment": "C",
+            }
+            for _ in parent_smiles
+        ]
+        return self._torch.zeros(len(rows), device=device), rows
+
+
+class _ValidationLogger:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def info(self, message: str, *args) -> None:
+        self.messages.append(message % args if args else message)
+
+    def warning(self, message: str, *args) -> None:
+        self.messages.append(message % args if args else message)
+
+
+def _validation_args(path: Path, *, seed: int, do_sample: bool):
+    parser = build_aids_stable_parser()
+    sample_flag = "--gen-do-sample" if do_sample else "--no-gen-do-sample"
+    return parser.parse_args(
+        [
+            "--val-dataset-path",
+            str(path),
+            "--eval-num-samples",
+            "2",
+            "--batch-size",
+            "2",
+            "--seed",
+            str(seed),
+            "--gen-max-new-tokens",
+            "4",
+            "--gen-temperature",
+            "1.0",
+            "--gen-top-p",
+            "1.0",
+            sample_flag,
+            "--default-parent-label",
+            "1",
+        ]
+    )
+
+
+def _run_fake_validation(
+    path: Path,
+    *,
+    seed: int,
+    do_sample: bool,
+    step_index: int = 1,
+):
+    torch = pytest.importorskip("torch")
+    args = _validation_args(path, seed=seed, do_sample=do_sample)
+    policy = _ValidationPolicy(torch)
+    logger = _ValidationLogger()
+    summary = _evaluate_validation_set(
+        deps={"torch": torch},
+        args=args,
+        stable_config=resolve_stable_config(args),
+        policy_model=policy,
+        tokenizer=_ValidationTokenizer(),
+        reward_wrapper=_ValidationRewardWrapper(torch),
+        step_index=step_index,
+        logger=logger,
+    )
+    return policy.generated_batches, summary, logger.messages
 
 
 def test_default_policy_is_mutagenicity_checkpoint_and_teacher() -> None:
@@ -393,3 +558,91 @@ def test_aids_stable_entry_remains_available() -> None:
     args = build_aids_stable_parser().parse_args([])
     assert args.ppo_loop in {"decoded_chem", "trl_experimental"}
     assert hasattr(args, "teacher_path")
+
+
+def test_validation_generation_is_reproducible_without_generator_kwarg(
+    tmp_path: Path,
+) -> None:
+    val_path = tmp_path / "val.csv"
+    _write_prompt_csv(
+        val_path,
+        [
+            _row("m1", "CCO", "val", "scaf1"),
+            _row("m2", "CCN", "val", "scaf2"),
+        ],
+    )
+
+    first, first_summary, messages = _run_fake_validation(
+        val_path,
+        seed=17,
+        do_sample=True,
+    )
+    second, second_summary, _ = _run_fake_validation(
+        val_path,
+        seed=17,
+        do_sample=True,
+    )
+    different, _, _ = _run_fake_validation(
+        val_path,
+        seed=18,
+        do_sample=True,
+    )
+
+    assert first == second
+    assert first != different
+    assert first_summary == second_summary
+    assert any(
+        "rng_isolated=true" in message
+        and "generator_kwarg_forwarded=false" in message
+        for message in messages
+    )
+
+
+def test_validation_generation_restores_global_cpu_rng_state(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    val_path = tmp_path / "val.csv"
+    _write_prompt_csv(val_path, [_row("m1", "CCO", "val", "scaf1")])
+    torch.manual_seed(12345)
+    state_before = torch.random.get_rng_state().clone()
+
+    _run_fake_validation(val_path, seed=17, do_sample=True)
+
+    assert torch.equal(state_before, torch.random.get_rng_state())
+
+
+def test_isolated_generation_rng_restores_cuda_rng_state_when_available() -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    torch.cuda.manual_seed_all(12345)
+    states_before = [state.clone() for state in torch.cuda.get_rng_state_all()]
+
+    with isolated_generation_rng(
+        torch=torch,
+        seed=17,
+        model_device=torch.device("cuda", torch.cuda.current_device()),
+    ):
+        torch.rand(8, device="cuda")
+
+    states_after = torch.cuda.get_rng_state_all()
+    assert len(states_before) == len(states_after)
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(states_before, states_after, strict=True)
+    )
+
+
+def test_greedy_validation_does_not_forward_generator(tmp_path: Path) -> None:
+    val_path = tmp_path / "val.csv"
+    _write_prompt_csv(val_path, [_row("m1", "CCO", "val", "scaf1")])
+
+    generated, summary, _ = _run_fake_validation(
+        val_path,
+        seed=17,
+        do_sample=False,
+    )
+
+    assert generated == [[[3, 3, 3, 3]]]
+    assert summary is not None

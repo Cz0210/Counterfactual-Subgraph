@@ -40,6 +40,36 @@ training log and report.
 Accepted
 
 ---
+## [2026-07-24] Isolate stable-PPO validation generation RNG
+
+### Background
+
+The ChemLLM/InternLM2 PEFT stack rejects a `torch.Generator` passed through
+`model.generate()`, because this Transformers version validates it as an
+unused model keyword. Mutagenicity stable-PPO therefore failed during its
+first validation pass after completing a successful rollout and update.
+
+### Decision
+
+Do not forward `generator` to validation `generate()`. Derive a deterministic
+seed from the run seed, validation step, and batch index, then run only that
+validation batch inside `torch.random.fork_rng`. Seed CPU and available CUDA
+generators inside the context so their previous states are restored afterward.
+Leave PPO rollout generation and all training, reward, teacher, sampling, and
+optimization logic unchanged.
+
+### Consequences
+
+- Validation remains reproducible for the same seed, step, and batch order.
+- Validation sampling does not advance the RNG state used by later PPO
+  rollouts.
+- The fix is shared by Mutagenicity and AIDS/HIV stable-PPO validation.
+
+### Status
+
+Accepted
+
+---
 ## [2026-07-23] Adapt the shared stable PPO loop to Mutagenicity 1 -> 0
 
 ### Background

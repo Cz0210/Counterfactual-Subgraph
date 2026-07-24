@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import math
@@ -72,6 +73,9 @@ from scripts.train_ppo import (
 
 
 DEFAULT_VAL_SCORE_ATOM_RATIO_TARGET = 0.35
+_VALIDATION_SEED_STEP_MULTIPLIER = 1_000_003
+_VALIDATION_SEED_BATCH_MULTIPLIER = 9_973
+_TORCH_SEED_MODULUS = (1 << 63) - 1
 
 
 def _first_non_empty_env_value(name: str, aliases: Sequence[str] = ()) -> str | None:
@@ -806,6 +810,51 @@ def _compute_val_score(summary: dict[str, float]) -> float:
     )
 
 
+def _validation_batch_seed(
+    *,
+    base_seed: int,
+    validation_call_index: int,
+    batch_index: int,
+) -> int:
+    """Derive a stable per-validation-batch seed."""
+
+    return int(
+        (
+            int(base_seed)
+            + int(validation_call_index) * _VALIDATION_SEED_STEP_MULTIPLIER
+            + int(batch_index) * _VALIDATION_SEED_BATCH_MULTIPLIER
+        )
+        % _TORCH_SEED_MODULUS
+    )
+
+
+@contextmanager
+def isolated_generation_rng(
+    *,
+    torch: Any,
+    seed: int,
+    model_device: Any,
+):
+    """Seed validation generation without perturbing PPO rollout RNG state."""
+
+    device = torch.device(model_device)
+    cuda_devices: list[int] = []
+    if device.type == "cuda" and torch.cuda.is_available():
+        cuda_devices = list(range(int(torch.cuda.device_count())))
+        if not cuda_devices:
+            cuda_devices = [
+                int(device.index)
+                if device.index is not None
+                else int(torch.cuda.current_device())
+            ]
+
+    with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+        torch.manual_seed(int(seed))
+        if cuda_devices:
+            torch.cuda.manual_seed_all(int(seed))
+        yield
+
+
 def _evaluate_validation_set(
     *,
     deps: dict[str, Any],
@@ -839,14 +888,18 @@ def _evaluate_validation_set(
     torch = deps["torch"]
     generation_config = resolve_decoded_chem_generation_config(args)
     model_device = next(policy_model.parameters()).device
-    generator = torch.Generator(device=model_device)
-    generator.manual_seed(int(args.seed))
 
     policy_model.eval()
     eval_rows: list[dict[str, Any]] = []
     batch_size = max(1, min(int(args.batch_size), len(val_records)))
 
     for batch_start in range(0, len(val_records), batch_size):
+        batch_index = batch_start // batch_size
+        eval_seed = _validation_batch_seed(
+            base_seed=int(args.seed),
+            validation_call_index=int(step_index),
+            batch_index=batch_index,
+        )
         batch_records = val_records[batch_start : batch_start + batch_size]
         encoded = tokenizer(
             [record.prompt for record in batch_records],
@@ -862,14 +915,28 @@ def _evaluate_validation_set(
             "pad_token_id": tokenizer.pad_token_id,
             "eos_token_id": tokenizer.eos_token_id,
             "use_cache": False,
-            "generator": generator,
         }
         if generation_config.do_sample:
             generation_kwargs["temperature"] = generation_config.temperature
             generation_kwargs["top_p"] = generation_config.top_p
 
-        with torch.no_grad():
-            generated_ids = policy_model.generate(**generation_kwargs)
+        if batch_index == 0:
+            logger.info(
+                "[STABLE_PPO_VALIDATION_GENERATION_CONFIG] eval_seed=%s rng_isolated=true generator_kwarg_forwarded=false device=%s do_sample=%s temperature=%s top_p=%s",
+                eval_seed,
+                model_device,
+                generation_config.do_sample,
+                generation_config.temperature,
+                generation_config.top_p,
+            )
+
+        with isolated_generation_rng(
+            torch=torch,
+            seed=eval_seed,
+            model_device=model_device,
+        ):
+            with torch.no_grad():
+                generated_ids = policy_model.generate(**generation_kwargs)
 
         response_ids = generated_ids[:, encoded["input_ids"].shape[1] :]
         response_texts = _decode_text_batch(
