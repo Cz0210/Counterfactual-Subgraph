@@ -288,3 +288,65 @@ def test_dataset_variant_files_are_explicit(
     train, val = resolve_variant_csvs(tmp_path, variant)
     assert train.name == train_name
     assert val.parent == tmp_path.resolve()
+
+
+def _wrapper_text(name: str) -> str:
+    root = Path(__file__).resolve().parents[1]
+    return (root / "scripts" / "slurm" / name).read_text(encoding="utf-8")
+
+
+def _resource_directives(text: str) -> set[str]:
+    return {
+        line
+        for line in text.splitlines()
+        if line.startswith("#SBATCH ") and "--job-name=" not in line
+    }
+
+
+def test_strict_v2_smoke_wrapper_has_isolated_dataset_and_output() -> None:
+    text = _wrapper_text("train_mutagenicity_sft_fresh_strict_v2_smoke.sh")
+
+    assert "current_v1" not in text
+    assert "sft_ppo_data_v1" not in text
+    assert "sft_ppo_data_v2" in text
+    assert "DATASET_VARIANT=strict_v2" in text
+    assert "--dataset-variant strict_v2" in text
+    assert "sft_fresh_strict_v2_smoke" in text
+    assert "[MUTAGENICITY_FRESH_SFT_STRICT_V2_SMOKE_OK]" in text
+    assert 'test -s "$OUTPUT_ROOT/_RUN_COMPLETE.json"' in text
+
+
+def test_strict_v2_smoke_wrapper_reuses_current_resource_contract() -> None:
+    current = _wrapper_text("train_mutagenicity_sft_fresh_smoke.sh")
+    strict_v2 = _wrapper_text(
+        "train_mutagenicity_sft_fresh_strict_v2_smoke.sh"
+    )
+
+    assert _resource_directives(strict_v2) == _resource_directives(current)
+    assert 'PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-}}"' in strict_v2
+
+
+def test_strict_v2_tokenizer_fallback_is_never_loaded_as_adapter() -> None:
+    text = _wrapper_text("train_mutagenicity_sft_fresh_strict_v2_smoke.sh")
+    train_block, audit_block = text.split(
+        "python scripts/audit_mutagenicity_sft_fresh.py", maxsplit=1
+    )
+
+    assert (
+        '--tokenizer-fallback-path "$TOKENIZER_FALLBACK_PATH"' in train_block
+    )
+    assert "--adapter-checkpoint" not in train_block
+    assert "--source-adapter-checkpoint" not in train_block
+    assert (
+        '--forbidden-adapter-checkpoint "$TOKENIZER_FALLBACK_PATH"'
+        in audit_block
+    )
+
+
+def test_current_v1_smoke_wrapper_contract_remains_separate() -> None:
+    text = _wrapper_text("train_mutagenicity_sft_fresh_smoke.sh")
+
+    assert "--dataset-variant current_v1" in text
+    assert "sft_ppo_data_v1" in text
+    assert "sft_fresh_v1_smoke" in text
+    assert "strict_v2" not in text
