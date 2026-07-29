@@ -58,8 +58,15 @@ def main() -> None:
         ),
     )
     print(f"out_jsonl: {Path(args.out_jsonl).expanduser().resolve()}")
+    print(f"input_rows: {summary['input_rows']}")
+    print(f"raw_unique_key_count: {summary['raw_unique_key_count']}")
+    print(f"eligible_unique_key_count: {summary['eligible_unique_key_count']}")
+    print(f"skipped_empty_key_rows: {summary['skipped_empty_key_rows']}")
+    print(f"non_numeric_keep_best_rows: {summary['non_numeric_keep_best_rows']}")
     print(f"merged_count_after_dedup: {summary['merged_count_after_dedup']}")
     print(f"dedup_removed_count: {summary['dedup_removed_count']}")
+    print(f"missing_eligible_key_count: {summary['missing_eligible_key_count']}")
+    print(f"unexpected_key_count: {summary['unexpected_key_count']}")
     print(f"unique_parent_count: {summary['unique_parent_count']}")
     print(f"unique_final_fragment_count: {summary['unique_final_fragment_count']}")
 
