@@ -37,3 +37,19 @@ def test_wrapper_has_no_sampling_or_selection_limits():
     assert "--candidate-limit" not in text
     assert "numpy.quantile" not in text
     assert "select_mutagenicity_wnode_prefix.py" not in text
+
+
+def test_wrapper_temporarily_disables_nounset_for_shell_and_conda_init():
+    subprocess.run(["bash", "-n", str(WRAPPER)], check=True)
+    text = WRAPPER.read_text(encoding="utf-8")
+    lines = [line.strip() for line in text.splitlines()]
+
+    source_index = lines.index("source ~/.bashrc")
+    conda_index = lines.index("conda activate smiles_pip118")
+    restore_index = lines.index("set -u", conda_index + 1)
+
+    assert lines[source_index - 1] == "set +u"
+    assert conda_index == source_index + 1
+    assert restore_index == conda_index + 1
+    assert "set -euo pipefail" in lines
+    assert "BASHRCSOURCED" not in text

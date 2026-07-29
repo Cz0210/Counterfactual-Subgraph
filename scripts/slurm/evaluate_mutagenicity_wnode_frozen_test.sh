@@ -88,8 +88,10 @@ done
 mkdir -p "$PROJECT_ROOT/logs" "$(dirname "$WNODE_CACHE_DB")" "$OUTPUT_DIR"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+set +u
 source ~/.bashrc
 conda activate smiles_pip118
+set -u
 
 echo "===== MUTAGENICITY FROZEN WNODE TEST EVALUATION ====="
 echo "hostname=$(hostname)"
