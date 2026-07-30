@@ -62,6 +62,36 @@ def _write_train(path: Path) -> None:
         writer.writerows(rows)
 
 
+def _write_ten_parent_train(path: Path) -> None:
+    smiles_values = [
+        "CC",
+        "CCC",
+        "CCCC",
+        "CCO",
+        "CCN",
+        "CCCl",
+        "CCBr",
+        "COC",
+        "CNC",
+        "CCF",
+    ]
+    rows = [
+        {
+            "molecule_id": f"p{index:02d}",
+            "smiles": smiles,
+            "label": 1,
+            "split": "train",
+            "teacher_pred": 1,
+            "teacher_correct": "true",
+        }
+        for index, smiles in enumerate(smiles_values)
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _write_official_root(root: Path) -> None:
     for relative in ("main.py", "models/GlobalGCE.py", "data/data_preprocess.py"):
         path = root / relative
@@ -75,6 +105,13 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 class _FakeTeacher:
@@ -159,6 +196,43 @@ class _FakeGenerator:
                 "internal_train_ids_hash": "train-hash",
                 "internal_val_ids_hash": "val-hash",
                 "native_gnn_required": True,
+                "source_codec_checked_rows": len(parents),
+                "source_codec_rdkit_valid_rows": len(parents),
+                "source_codec_structure_match_rows": len(parents),
+                "source_codec_invalid_valence_rows": 0,
+                "source_codec_attribute_mapping_failed_rows": 0,
+                "source_codec_passed": True,
+                "source_codec_failure_examples": [],
+                "atom_attribute_source": "source_anchored",
+                "formal_charge_encoded_by_native": False,
+                "source_atom_mapping_method": (
+                    "rdkit_atom_index_preserved_by_dense_builder"
+                ),
+                "source_atom_mapping_unique": True,
+                "source_formal_charge_nonzero_atom_count": 0,
+            },
+        )
+
+
+class _LimitedCoverageGenerator:
+    def generate(self, parents, **_kwargs):
+        records = [
+            {
+                "source_parent_id": parent.parent_id,
+                "source_parent_smiles": parent.smiles,
+                "source_split": "train",
+                "raw_smiles": "C",
+                "generator_rank": 1,
+                "native_codec_decoded": True,
+                "native_conversion_ok": True,
+            }
+            for parent in parents[:2]
+        ]
+        return NativeGenerationResult(
+            records,
+            {
+                "internal_train_ids_hash": "train-hash",
+                "internal_val_ids_hash": "val-hash",
                 "source_codec_checked_rows": len(parents),
                 "source_codec_rdkit_valid_rows": len(parents),
                 "source_codec_structure_match_rows": len(parents),
@@ -292,6 +366,38 @@ def _build(paths: dict[str, Path], **config_overrides):
         generator=_FakeGenerator(),
         config=PoolBuildConfig(**defaults),
     )
+
+
+def _build_ten_parent_run(
+    tmp_path: Path,
+    *,
+    parent_limit: int,
+) -> dict[str, Path]:
+    paths = {
+        "train": tmp_path / "train_10.csv",
+        "teacher": tmp_path / "teacher.pkl",
+        "official": tmp_path / "official",
+        "output": tmp_path / "output",
+    }
+    _write_ten_parent_train(paths["train"])
+    paths["teacher"].write_bytes(b"fake-teacher")
+    _write_official_root(paths["official"])
+    build_mutagenicity_train_pool(
+        train_csv=paths["train"],
+        teacher_path=paths["teacher"],
+        official_root=paths["official"],
+        output_dir=paths["output"],
+        teacher=_FakeTeacher(),
+        generator=_LimitedCoverageGenerator(),
+        config=PoolBuildConfig(
+            parent_limit=parent_limit,
+            expected_parent_count=10,
+            device="cpu",
+            epochs=1,
+            top_k_native=2,
+        ),
+    )
+    return paths
 
 
 def test_train_only_parent_loading_and_deterministic_parent_limit(
@@ -881,6 +987,140 @@ def test_build_isolates_invalid_and_non_target_and_deduplicates(
         expected_parent_count=3,
     )
     assert audit["audit_passed"] is True
+
+
+def test_audit_distinguishes_input_train_from_selected_cohort(
+    tmp_path: Path,
+) -> None:
+    paths = _build_ten_parent_run(tmp_path, parent_limit=3)
+
+    all_parents, selected_parents = load_strict_train_parents(
+        paths["train"],
+        parent_limit=3,
+        expected_parent_count=10,
+    )
+    assert len(all_parents) == 10
+    assert [parent.parent_id for parent in selected_parents] == [
+        "p00",
+        "p01",
+        "p02",
+    ]
+
+    audit = audit_mutagenicity_train_pool(
+        paths["output"],
+        train_csv=paths["train"],
+        expected_parent_count=3,
+        expected_input_train_count=10,
+    )
+
+    assert audit["input_train_rows"] == 10
+    assert audit["expected_input_train_rows"] == 10
+    assert audit["selected_train_rows"] == 3
+    assert audit["expected_selected_parent_rows"] == 3
+    assert audit["selected_cohort_hash_matches"] is True
+    assert audit["candidate_source_parent_rows"] == 2
+    assert audit["candidate_source_parent_subset_of_selected"] is True
+    assert audit["source_parent_coverage_recomputed"] == pytest.approx(2 / 3)
+    assert audit["parent_limit"] == 3
+    assert (
+        audit["deterministic_parent_selection_method"]
+        == "parent_id_ascending_prefix_v1"
+    )
+
+
+def test_audit_rejects_wrong_complete_input_train_count(
+    tmp_path: Path,
+) -> None:
+    paths = _build_ten_parent_run(tmp_path, parent_limit=3)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Strict train row count mismatch: expected=9, found=10",
+    ):
+        audit_mutagenicity_train_pool(
+            paths["output"],
+            train_csv=paths["train"],
+            expected_parent_count=3,
+            expected_input_train_count=9,
+        )
+
+
+def test_audit_rejects_selected_cohort_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    paths = _build_ten_parent_run(tmp_path, parent_limit=3)
+    summary_path = paths["output"] / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["selected_train_cohort_hash"] = "incorrect-hash"
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="Selected train cohort hash mismatch"):
+        audit_mutagenicity_train_pool(
+            paths["output"],
+            train_csv=paths["train"],
+            expected_parent_count=3,
+            expected_input_train_count=10,
+        )
+
+
+def test_audit_rejects_candidate_parent_outside_selected_cohort(
+    tmp_path: Path,
+) -> None:
+    paths = _build_ten_parent_run(tmp_path, parent_limit=3)
+    pool_path = paths["output"] / "candidate_pool.jsonl"
+    rows = _read_jsonl(pool_path)
+    rows[0]["source_parent_id"] = "p09"
+    _write_jsonl(pool_path, rows)
+
+    with pytest.raises(
+        AssertionError,
+        match="outside the deterministically selected cohort",
+    ):
+        audit_mutagenicity_train_pool(
+            paths["output"],
+            train_csv=paths["train"],
+            expected_parent_count=3,
+            expected_input_train_count=10,
+        )
+
+
+def test_audit_rejects_candidate_parent_outside_complete_train(
+    tmp_path: Path,
+) -> None:
+    paths = _build_ten_parent_run(tmp_path, parent_limit=3)
+    pool_path = paths["output"] / "candidate_pool.jsonl"
+    rows = _read_jsonl(pool_path)
+    rows[0]["source_parent_id"] = "not-in-train"
+    _write_jsonl(pool_path, rows)
+
+    with pytest.raises(AssertionError, match="non-train parent"):
+        audit_mutagenicity_train_pool(
+            paths["output"],
+            train_csv=paths["train"],
+            expected_parent_count=3,
+            expected_input_train_count=10,
+        )
+
+
+def test_audit_full_mode_uses_complete_train_as_selected_cohort(
+    tmp_path: Path,
+) -> None:
+    paths = _build_ten_parent_run(tmp_path, parent_limit=0)
+
+    audit = audit_mutagenicity_train_pool(
+        paths["output"],
+        train_csv=paths["train"],
+        expected_parent_count=10,
+        expected_input_train_count=10,
+    )
+
+    assert audit["input_train_rows"] == 10
+    assert audit["selected_train_rows"] == 10
+    assert audit["candidate_source_parent_rows"] == 2
+    assert audit["source_parent_coverage_recomputed"] == pytest.approx(0.2)
 
 
 def test_generated_attribute_ambiguity_is_excluded_from_candidate_pool(

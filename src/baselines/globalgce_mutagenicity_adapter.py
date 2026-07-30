@@ -2467,6 +2467,7 @@ def audit_mutagenicity_train_pool(
     *,
     train_csv: str | Path,
     expected_parent_count: int = DEFAULT_EXPECTED_PARENT_COUNT,
+    expected_input_train_count: int | None = None,
     require_target_label_zero: bool = True,
     require_unique_universe: bool = True,
     forbid_calibration_test: bool = True,
@@ -2483,32 +2484,85 @@ def audit_mutagenicity_train_pool(
             and path.stat().st_size <= 0
         ):
             raise FileNotFoundError(f"Empty GlobalGCE train-pool artifact: {path}")
-    parents, _ = load_strict_train_parents(
-        train_csv,
-        expected_parent_count=int(expected_parent_count),
-        forbid_calibration_test=bool(forbid_calibration_test),
-    )
     summary = _read_json(root / "summary.json")
     manifest = _read_json(root / "run_manifest.json")
+    manifest_inputs = dict(manifest.get("inputs") or {})
     parent_limit = int(
-        (manifest.get("inputs") or {}).get("parent_limit")
-        or 0
+        manifest_inputs.get("parent_limit") or 0
     )
-    selected_parents = parents[:parent_limit] if parent_limit else list(parents)
-    parent_ids = {parent.parent_id for parent in selected_parents}
+    if parent_limit < 0:
+        raise AssertionError(
+            f"Manifest parent_limit must be non-negative, got {parent_limit}."
+        )
+    selection_seed = int(manifest_inputs.get("seed") or 0)
+    selection_method = str(
+        manifest_inputs.get("deterministic_parent_selection_method")
+        or "parent_id_ascending_prefix_v1"
+    )
+    parents, selected_parents = load_strict_train_parents(
+        train_csv,
+        parent_limit=parent_limit,
+        expected_parent_count=(
+            int(expected_input_train_count)
+            if expected_input_train_count is not None
+            else 0
+        ),
+        forbid_calibration_test=bool(forbid_calibration_test),
+    )
+    if int(expected_parent_count) > 0 and len(selected_parents) != int(
+        expected_parent_count
+    ):
+        raise ValueError(
+            "Selected strict train parent count mismatch: "
+            f"expected={expected_parent_count}, "
+            f"found={len(selected_parents)}, "
+            f"input_train_rows={len(parents)}, parent_limit={parent_limit}."
+        )
+    if int(summary.get("selected_train_rows") or -1) != len(selected_parents):
+        raise AssertionError(
+            "Summary selected_train_rows does not match the cohort rebuilt "
+            "with load_strict_train_parents: "
+            f"summary={summary.get('selected_train_rows')!r}, "
+            f"rebuilt={len(selected_parents)}."
+        )
+    full_parent_ids = {parent.parent_id for parent in parents}
+    selected_parent_ids = {parent.parent_id for parent in selected_parents}
+    rebuilt_selected_hash = train_cohort_hash(selected_parents)
+    selected_hash_matches = (
+        summary.get("selected_train_cohort_hash")
+        == rebuilt_selected_hash
+    )
+    if not selected_hash_matches:
+        raise AssertionError(
+            "Selected train cohort hash mismatch: "
+            f"summary={summary.get('selected_train_cohort_hash')!r}, "
+            f"rebuilt={rebuilt_selected_hash!r}."
+        )
     raw_rows = _read_jsonl(root / "raw_generated_candidates.jsonl")
     pool_rows = _read_jsonl(root / "candidate_pool.jsonl")
     universe = _read_jsonl(root / "candidate_universe.jsonl")
     invalid = _read_jsonl(root / "invalid_candidates.jsonl")
     non_target = _read_jsonl(root / "non_target_candidates.jsonl")
     for row in raw_rows:
-        if str(row.get("source_parent_id") or "") not in parent_ids:
+        parent_id = str(row.get("source_parent_id") or "")
+        if parent_id not in full_parent_ids:
             raise AssertionError("Raw candidate references a non-train parent.")
+        if parent_id not in selected_parent_ids:
+            raise AssertionError(
+                "Raw candidate references a train parent outside the "
+                "deterministically selected cohort."
+            )
         if str(row.get("source_split") or "").lower() != "train":
             raise AssertionError("Raw candidate source_split is not train.")
     for row in pool_rows:
-        if str(row.get("source_parent_id") or "") not in parent_ids:
+        parent_id = str(row.get("source_parent_id") or "")
+        if parent_id not in full_parent_ids:
             raise AssertionError("Candidate pool references a non-train parent.")
+        if parent_id not in selected_parent_ids:
+            raise AssertionError(
+                "Candidate pool references a train parent outside the "
+                "deterministically selected cohort."
+            )
         if str(row.get("source_split") or "").lower() != "train":
             raise AssertionError("Candidate pool source_split is not train.")
         canonical = str(row.get("canonical_smiles") or "")
@@ -2552,6 +2606,16 @@ def audit_mutagenicity_train_pool(
     unique_source_parents = {
         str(row["source_parent_id"]) for row in pool_rows
     }
+    candidate_sources_subset = unique_source_parents <= selected_parent_ids
+    if not candidate_sources_subset:
+        raise AssertionError(
+            "Candidate source parents are not a subset of the selected cohort."
+        )
+    source_parent_coverage_recomputed = (
+        len(unique_source_parents) / len(selected_parents)
+        if selected_parents
+        else 0.0
+    )
     recalculated = {
         "input_train_rows": len(parents),
         "selected_train_rows": len(selected_parents),
@@ -2566,9 +2630,7 @@ def audit_mutagenicity_train_pool(
         "train_cohort_hash": train_cohort_hash(parents),
         "selected_train_cohort_hash": train_cohort_hash(selected_parents),
         "source_parent_coverage": (
-            len(unique_source_parents) / len(selected_parents)
-            if selected_parents
-            else 0.0
+            source_parent_coverage_recomputed
         ),
         "generated_graph_rows": len(raw_rows),
         "generated_codec_decoded_rows": sum(
@@ -2628,6 +2690,16 @@ def audit_mutagenicity_train_pool(
         raise AssertionError("Manifest incorrectly reports candidate selection.")
     if manifest.get("teacher_used_only_for_target_validation") is not True:
         raise AssertionError("Manifest teacher role is incorrect.")
+    if manifest_inputs.get("train_cohort_hash") not in {
+        None,
+        train_cohort_hash(parents),
+    }:
+        raise AssertionError("Manifest full train cohort hash mismatch.")
+    if manifest_inputs.get("selected_train_cohort_hash") not in {
+        None,
+        rebuilt_selected_hash,
+    }:
+        raise AssertionError("Manifest selected train cohort hash mismatch.")
     if summary.get("source_codec_passed") is not True:
         raise AssertionError(
             "Summary does not prove that the source graph codec round-trip "
@@ -2669,6 +2741,24 @@ def audit_mutagenicity_train_pool(
     return {
         "audit_passed": True,
         "input_train_rows": len(parents),
+        "expected_input_train_rows": (
+            int(expected_input_train_count)
+            if expected_input_train_count is not None
+            else None
+        ),
+        "selected_train_rows": len(selected_parents),
+        "expected_selected_parent_rows": int(expected_parent_count),
+        "selected_cohort_hash_matches": selected_hash_matches,
+        "candidate_source_parent_rows": len(unique_source_parents),
+        "candidate_source_parent_subset_of_selected": (
+            candidate_sources_subset
+        ),
+        "source_parent_coverage_recomputed": (
+            source_parent_coverage_recomputed
+        ),
+        "parent_limit": parent_limit,
+        "selection_seed": selection_seed,
+        "deterministic_parent_selection_method": selection_method,
         "raw_generated_rows": len(raw_rows),
         "candidate_pool_rows": len(pool_rows),
         "canonical_unique_candidates": len(universe),

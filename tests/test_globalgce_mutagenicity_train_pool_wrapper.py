@@ -77,3 +77,24 @@ def test_wrapper_has_deterministic_defaults_and_resume_guards() -> None:
         assert setting in text
     assert "Completed OUTPUT_DIR cannot be rerun" in text
     assert "Resume requires" in text
+
+
+def test_wrapper_separates_input_and_selected_parent_expectations() -> None:
+    text = _text()
+    assert (
+        'EXPECTED_INPUT_TRAIN_COUNT="${EXPECTED_INPUT_TRAIN_COUNT:-'
+        '$EXPECTED_PARENT_COUNT}"'
+    ) in text
+    assert (
+        'EXPECTED_SELECTED_PARENT_COUNT="${EXPECTED_SELECTED_PARENT_COUNT:-'
+        '$PARENT_LIMIT}"'
+    ) in text
+    assert (
+        'EXPECTED_SELECTED_PARENT_COUNT="${EXPECTED_SELECTED_PARENT_COUNT:-'
+        '$EXPECTED_INPUT_TRAIN_COUNT}"'
+    ) in text
+    assert '--expected-parent-count "$EXPECTED_INPUT_TRAIN_COUNT"' in text
+    assert '--expected-parent-count "$EXPECTED_SELECTED_PARENT_COUNT"' in text
+    assert (
+        '--expected-input-train-count "$EXPECTED_INPUT_TRAIN_COUNT"' in text
+    )

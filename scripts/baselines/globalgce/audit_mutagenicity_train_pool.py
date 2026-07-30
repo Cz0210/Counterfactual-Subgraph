@@ -26,6 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-parent-count",
         type=int,
         default=DEFAULT_EXPECTED_PARENT_COUNT,
+        help="Expected deterministic source-parent cohort size for this run.",
+    )
+    parser.add_argument(
+        "--expected-input-train-count",
+        type=int,
+        default=None,
+        help="Optional expected row count of the complete strict train CSV.",
     )
     parser.add_argument(
         "--require-target-label-zero",
@@ -58,6 +65,11 @@ def main(argv: list[str] | None = None) -> int:
         args.run_dir,
         train_csv=args.train_csv,
         expected_parent_count=int(args.expected_parent_count),
+        expected_input_train_count=(
+            int(args.expected_input_train_count)
+            if args.expected_input_train_count is not None
+            else None
+        ),
         require_target_label_zero=bool(args.require_target_label_zero),
         require_unique_universe=bool(args.require_unique_universe),
         forbid_calibration_test=bool(args.forbid_calibration_test),
