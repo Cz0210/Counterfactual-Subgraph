@@ -28,13 +28,33 @@ try:
 except ImportError:  # pragma: no cover - runtime dependency
     Chem = None
 
-from src.baselines.globalgce_adapter import globalgce_graph_record_to_mol
-
-
 SOURCE_LABEL = 1
 TARGET_LABEL = 0
 GENERATOR_METHOD = "GlobalGCE"
 DATASET_NAME = "Mutagenicity"
+# Raw TU labels from Mutagenicity_label_readme.txt. Official preprocessing
+# shifts both node and edge labels by +1 so internal class 0 stays padding.
+OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL = {
+    0: "C",
+    1: "O",
+    2: "Cl",
+    3: "H",
+    4: "N",
+    5: "F",
+    6: "Br",
+    7: "S",
+    8: "P",
+    9: "I",
+    10: "Na",
+    11: "K",
+    12: "Li",
+    13: "Ca",
+}
+OFFICIAL_MUTAGENICITY_EDGE_LABEL_TO_BOND = {
+    0: "single",
+    1: "double",
+    2: "triple",
+}
 DEFAULT_EXPECTED_PARENT_COUNT = 1448
 DEFAULT_NATIVE_TRAIN_CSV = (
     "outputs/hpc/datasets/final/mutagenicity_v1_processed/train.csv"
@@ -51,6 +71,73 @@ REQUIRED_OUTPUT_FILES = (
     "resume_checkpoint.json",
     "_RUN_COMPLETE.json",
 )
+
+
+class GlobalGCEMutagenicityCodecError(RuntimeError):
+    """Raised when the native source graph codec fails its round-trip gate."""
+
+
+class GlobalGCEEmptyCandidateUniverseError(RuntimeError):
+    """Raised when native generation yields no valid target candidates."""
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalGCECodecMetadata:
+    """Internal label metadata used by the current native GlobalGCE tensors."""
+
+    atom_symbols: tuple[str, ...]
+    bond_names: tuple[str, ...]
+
+    @classmethod
+    def from_dataset(cls, dataset: Any) -> "GlobalGCECodecMetadata":
+        atom_symbols = tuple(str(value) for value in dataset.atom_symbols)
+        bond_names = tuple(str(value) for value in dataset.bond_names)
+        if not atom_symbols:
+            raise GlobalGCEMutagenicityCodecError(
+                "Native dataset has no atom label metadata."
+            )
+        if not bond_names or bond_names[0] not in {"padding", "no_edge"}:
+            raise GlobalGCEMutagenicityCodecError(
+                "Native dataset bond metadata must explicitly reserve internal "
+                "label 0 for no-edge/padding."
+            )
+        return cls(atom_symbols=atom_symbols, bond_names=bond_names)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "node_label_mapping": {
+                "0": "padding",
+                **{
+                    str(index + 1): symbol
+                    for index, symbol in enumerate(self.atom_symbols)
+                },
+            },
+            "edge_label_mapping": {
+                str(index): ("no_edge" if index == 0 else name)
+                for index, name in enumerate(self.bond_names)
+            },
+            "official_raw_node_label_mapping": {
+                str(index): symbol
+                for index, symbol in OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL.items()
+            },
+            "official_raw_edge_label_mapping": {
+                str(index): name
+                for index, name in OFFICIAL_MUTAGENICITY_EDGE_LABEL_TO_BOND.items()
+            },
+        }
+
+
+@dataclass(slots=True)
+class GlobalGCEGraphDecodeResult:
+    ok: bool
+    smiles: str | None
+    mol: Any | None
+    codec_decoded: bool
+    error_type: str | None
+    error_message: str | None
+    num_atoms: int
+    num_bonds: int
+    graph_record: dict[str, Any]
 
 
 class TeacherProtocol(Protocol):
@@ -492,10 +579,24 @@ def _build_dense_dataset(
     molecules = [_kekulized_molecule(parent.smiles) for parent in parents]
     symbols = list(atom_symbols or ())
     if not symbols:
-        symbols = sorted(
-            {atom.GetSymbol() for molecule in molecules for atom in molecule.GetAtoms()},
-            key=lambda symbol: (Chem.GetPeriodicTable().GetAtomicNumber(symbol), symbol),
+        present_symbols = {
+            atom.GetSymbol()
+            for molecule in molecules
+            for atom in molecule.GetAtoms()
+        }
+        official_symbols = tuple(
+            OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL.values()
         )
+        unknown_symbols = present_symbols - set(official_symbols)
+        if unknown_symbols:
+            raise GlobalGCEMutagenicityCodecError(
+                "Current native train molecules contain atom symbols absent "
+                "from official Mutagenicity node metadata: "
+                f"{sorted(unknown_symbols)}"
+            )
+        symbols = [
+            symbol for symbol in official_symbols if symbol in present_symbols
+        ]
     symbol_index = {symbol: index + 1 for index, symbol in enumerate(symbols)}
     for molecule in molecules:
         unknown = {
@@ -563,7 +664,7 @@ def _build_dense_dataset(
         val_idx=val_idx,
         test_idx=test_idx,
         atom_symbols=symbols,
-        bond_names=("padding", "single", "double", "triple"),
+        bond_names=("no_edge", "single", "double", "triple"),
     )
 
 
@@ -645,56 +746,385 @@ def _train_native_gnn(
     }
 
 
-def _generated_graph_record(
+def _to_builtin(value: Any) -> Any:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+def _argmax_index(values: Any) -> int:
+    row = _to_builtin(values)
+    if not isinstance(row, list) or not row:
+        return int(row)
+    return max(range(len(row)), key=lambda index: float(row[index]))
+
+
+def _edge_vector_position(left: int, right: int) -> int:
+    high, low = max(int(left), int(right)), min(int(left), int(right))
+    return (high - 1) * high // 2 + low
+
+
+def globalgce_tensors_to_graph_record(
     feature: Any,
     adjacency: Any,
     edge_attr: Any,
     *,
-    atom_symbols: Sequence[str],
+    metadata: GlobalGCECodecMetadata,
+    num_nodes: int | None = None,
 ) -> dict[str, Any]:
-    feature_values = feature.detach().cpu()
-    adjacency_values = (adjacency.detach().cpu() > 0.5).to(dtype=feature.dtype)
-    feature_labels_tensor = feature_values.argmax(-1)
-    # This is the per-record portion of official ``process_cfs``. Its final
-    # graph-hash deduplication is deliberately not applied here because source
-    # support requires retaining the same molecule when generated by different
-    # train parents.
-    feature_labels_tensor = (
-        (adjacency_values.sum(-1) > 0).to(dtype=feature_labels_tensor.dtype)
-        * feature_labels_tensor
+    """Convert native tensors to discrete labels without doing chemistry repair."""
+
+    feature_rows = _to_builtin(feature)
+    adjacency_rows = _to_builtin(adjacency)
+    if not isinstance(feature_rows, list) or not isinstance(adjacency_rows, list):
+        raise GlobalGCEMutagenicityCodecError(
+            "GlobalGCE feature/adjacency tensors are not matrix-like."
+        )
+    matrix_size = min(len(feature_rows), len(adjacency_rows))
+    if matrix_size <= 0:
+        raise GlobalGCEMutagenicityCodecError("GlobalGCE graph tensor is empty.")
+    node_labels = [_argmax_index(feature_rows[index]) for index in range(matrix_size)]
+    raw_edge_mask = [[False] * matrix_size for _ in range(matrix_size)]
+    self_loop_count = 0
+    asymmetric_pairs: list[list[int]] = []
+    for left in range(matrix_size):
+        row = adjacency_rows[left]
+        if not isinstance(row, list) or len(row) < matrix_size:
+            raise GlobalGCEMutagenicityCodecError(
+                f"GlobalGCE adjacency row {left} has invalid shape."
+            )
+        if float(row[left]) > 0.5:
+            self_loop_count += 1
+        for right in range(left + 1, matrix_size):
+            forward = float(row[right]) > 0.5
+            reverse = float(adjacency_rows[right][left]) > 0.5
+            if forward != reverse:
+                asymmetric_pairs.append([left, right])
+            # Official inputs and decoder outputs are symmetric. An asymmetric
+            # result is retained for audit and rejected by the molecule codec.
+            raw_edge_mask[left][right] = forward and reverse
+            raw_edge_mask[right][left] = forward and reverse
+
+    requested_num_nodes = (
+        int(num_nodes) if num_nodes is not None else None
     )
-    active = feature_labels_tensor > 0
-    adjacency_values = (
-        active.to(dtype=adjacency_values.dtype).unsqueeze(-1)
-        * adjacency_values
-        * active.to(dtype=adjacency_values.dtype).unsqueeze(0)
-    )
-    feature_labels = feature_labels_tensor.tolist()
-    adjacency_list = adjacency_values.tolist()
-    node_symbols = [
-        atom_symbols[label - 1] if 0 < int(label) <= len(atom_symbols) else None
-        for label in feature_labels
+    if requested_num_nodes is not None and not 0 < requested_num_nodes <= matrix_size:
+        raise GlobalGCEMutagenicityCodecError(
+            f"Invalid native num_nodes={requested_num_nodes} for size={matrix_size}."
+        )
+    if requested_num_nodes is None:
+        active_nodes = [
+            index
+            for index, label in enumerate(node_labels)
+            if label > 0 and any(raw_edge_mask[index])
+        ]
+    else:
+        active_nodes = [
+            index
+            for index in range(requested_num_nodes)
+            if node_labels[index] > 0
+        ]
+    active_set = set(active_nodes)
+    padding_nodes = [
+        index for index in range(matrix_size) if index not in active_set
     ]
-    edge_matrix = [
-        [0 for _ in range(len(adjacency_list))]
-        for _ in range(len(adjacency_list))
-    ]
+    edge_mask = [[0] * matrix_size for _ in range(matrix_size)]
+    for left in active_nodes:
+        for right in active_nodes:
+            if left != right and raw_edge_mask[left][right]:
+                edge_mask[left][right] = 1
+
+    edge_labels = [0] * (matrix_size * (matrix_size - 1) // 2)
     if edge_attr is not None:
-        edge_labels = edge_attr.detach().cpu().argmax(-1).tolist()
-        for high in range(1, len(adjacency_list)):
-            for low in range(high):
-                position = (high - 1) * high // 2 + low
-                if (
-                    position < len(edge_labels)
-                    and adjacency_list[high][low] > 0
-                ):
-                    edge_matrix[high][low] = int(edge_labels[position])
-                    edge_matrix[low][high] = int(edge_labels[position])
+        edge_rows = _to_builtin(edge_attr)
+        if not isinstance(edge_rows, list):
+            raise GlobalGCEMutagenicityCodecError(
+                "GlobalGCE edge tensor is not vector-like."
+            )
+        for position in range(min(len(edge_labels), len(edge_rows))):
+            edge_labels[position] = _argmax_index(edge_rows[position])
+
+    edge_matrix = [[0] * matrix_size for _ in range(matrix_size)]
+    for left in active_nodes:
+        for right in active_nodes:
+            if left >= right or not edge_mask[left][right]:
+                continue
+            position = _edge_vector_position(left, right)
+            label = int(edge_labels[position]) if position < len(edge_labels) else 0
+            edge_matrix[left][right] = label
+            edge_matrix[right][left] = label
+    node_symbols = [
+        (
+            metadata.atom_symbols[label - 1]
+            if index in active_set and 0 < label <= len(metadata.atom_symbols)
+            else None
+        )
+        for index, label in enumerate(node_labels)
+    ]
     return {
-        "adjacency": adjacency_list,
+        "adjacency": edge_mask,
+        "node_labels_internal": node_labels,
         "node_symbols": node_symbols,
         "edge_labels_internal_matrix": edge_matrix,
+        "active_node_indices": active_nodes,
+        "padding_node_indices": padding_nodes,
+        "self_loop_count_ignored": self_loop_count,
+        "asymmetric_adjacency_pairs": asymmetric_pairs,
+        "codec_metadata": metadata.to_dict(),
     }
+
+
+def _bond_type_from_metadata(name: str) -> Any:
+    normalized = str(name).strip().lower()
+    mapping = {
+        "single": Chem.BondType.SINGLE,
+        "double": Chem.BondType.DOUBLE,
+        "triple": Chem.BondType.TRIPLE,
+        "aromatic": Chem.BondType.AROMATIC,
+    }
+    if normalized not in mapping:
+        raise GlobalGCEMutagenicityCodecError(
+            f"Unsupported native bond label metadata: {name!r}"
+        )
+    return mapping[normalized]
+
+
+def _add_bond_once(
+    molecule: Any,
+    left: int,
+    right: int,
+    bond_type: Any,
+    seen_pairs: set[tuple[int, int]],
+) -> None:
+    pair = tuple(sorted((int(left), int(right))))
+    if pair[0] == pair[1]:
+        return
+    if pair in seen_pairs or molecule.GetBondBetweenAtoms(*pair) is not None:
+        raise GlobalGCEMutagenicityCodecError(
+            f"Duplicate native bond for atom pair={pair}."
+        )
+    molecule.AddBond(pair[0], pair[1], bond_type)
+    seen_pairs.add(pair)
+
+
+def decode_globalgce_molecule(
+    feature: Any,
+    adjacency: Any,
+    edge_attr: Any,
+    *,
+    metadata: GlobalGCECodecMetadata,
+    num_nodes: int | None = None,
+) -> GlobalGCEGraphDecodeResult:
+    """Decode one native graph using its explicit node/edge metadata."""
+
+    try:
+        record = globalgce_tensors_to_graph_record(
+            feature,
+            adjacency,
+            edge_attr,
+            metadata=metadata,
+            num_nodes=num_nodes,
+        )
+    except Exception as exc:
+        return GlobalGCEGraphDecodeResult(
+            False, None, None, False, "codec_tensor_error", str(exc), 0, 0, {}
+        )
+    if record["asymmetric_adjacency_pairs"]:
+        return GlobalGCEGraphDecodeResult(
+            False,
+            None,
+            None,
+            False,
+            "asymmetric_adjacency",
+            f"pairs={record['asymmetric_adjacency_pairs'][:5]}",
+            0,
+            0,
+            record,
+        )
+    active_nodes = list(record["active_node_indices"])
+    if not active_nodes:
+        return GlobalGCEGraphDecodeResult(
+            False, None, None, False, "empty_graph", "No real nodes.", 0, 0, record
+        )
+    editable = Chem.RWMol()
+    old_to_new: dict[int, int] = {}
+    try:
+        for old_index in active_nodes:
+            internal_label = int(record["node_labels_internal"][old_index])
+            if not 0 < internal_label <= len(metadata.atom_symbols):
+                raise GlobalGCEMutagenicityCodecError(
+                    f"Unknown internal atom label={internal_label}."
+                )
+            symbol = metadata.atom_symbols[internal_label - 1]
+            old_to_new[old_index] = editable.AddAtom(Chem.Atom(symbol))
+        seen_pairs: set[tuple[int, int]] = set()
+        for left_position, left in enumerate(active_nodes):
+            for right in active_nodes[left_position + 1 :]:
+                if not record["adjacency"][left][right]:
+                    continue
+                edge_label = int(
+                    record["edge_labels_internal_matrix"][left][right]
+                )
+                if edge_label == 0:
+                    raise GlobalGCEMutagenicityCodecError(
+                        "Adjacency contains an edge whose native edge class is "
+                        "the explicit no-edge class."
+                    )
+                if not 0 < edge_label < len(metadata.bond_names):
+                    raise GlobalGCEMutagenicityCodecError(
+                        f"Unknown internal edge label={edge_label}."
+                    )
+                bond_type = _bond_type_from_metadata(
+                    metadata.bond_names[edge_label]
+                )
+                _add_bond_once(
+                    editable,
+                    old_to_new[left],
+                    old_to_new[right],
+                    bond_type,
+                    seen_pairs,
+                )
+                if bond_type == Chem.BondType.AROMATIC:
+                    editable.GetAtomWithIdx(old_to_new[left]).SetIsAromatic(True)
+                    editable.GetAtomWithIdx(old_to_new[right]).SetIsAromatic(True)
+        molecule = editable.GetMol()
+    except Exception as exc:
+        return GlobalGCEGraphDecodeResult(
+            False,
+            None,
+            None,
+            False,
+            "codec_graph_error",
+            str(exc),
+            editable.GetNumAtoms(),
+            editable.GetNumBonds(),
+            record,
+        )
+    try:
+        Chem.SanitizeMol(molecule)
+        smiles = Chem.MolToSmiles(
+            molecule,
+            canonical=True,
+            isomericSmiles=True,
+        )
+    except Exception as exc:
+        error_message = str(exc)
+        error_type = (
+            "native_generated_invalid_valence"
+            if "valence" in error_message.lower()
+            else "native_generated_invalid_sanitize"
+        )
+        return GlobalGCEGraphDecodeResult(
+            False,
+            None,
+            molecule,
+            True,
+            error_type,
+            error_message,
+            molecule.GetNumAtoms(),
+            molecule.GetNumBonds(),
+            record,
+        )
+    return GlobalGCEGraphDecodeResult(
+        True,
+        smiles,
+        molecule,
+        True,
+        None,
+        None,
+        molecule.GetNumAtoms(),
+        molecule.GetNumBonds(),
+        record,
+    )
+
+
+def _molecules_structure_match(left: Any, right: Any) -> bool:
+    try:
+        left_smiles = Chem.MolToSmiles(
+            left,
+            canonical=True,
+            isomericSmiles=False,
+        )
+        right_smiles = Chem.MolToSmiles(
+            right,
+            canonical=True,
+            isomericSmiles=False,
+        )
+    except Exception:
+        return False
+    return left_smiles == right_smiles
+
+
+def probe_source_graph_codec(
+    dataset: Any,
+    parents: Sequence[TrainParent],
+) -> dict[str, Any]:
+    """Round-trip every selected source graph through the production codec."""
+
+    if len(dataset) != len(parents):
+        raise GlobalGCEMutagenicityCodecError(
+            "Source codec dataset/parent length mismatch: "
+            f"dataset={len(dataset)}, parents={len(parents)}."
+        )
+    metadata = GlobalGCECodecMetadata.from_dataset(dataset)
+    valid_count = 0
+    structure_count = 0
+    failures: list[dict[str, Any]] = []
+    for index, parent in enumerate(parents):
+        graph = dataset[index]
+        result = decode_globalgce_molecule(
+            graph["feature"],
+            graph["adj"],
+            graph.get("edge_attr"),
+            metadata=metadata,
+            num_nodes=int(_to_builtin(graph["num_nodes"])),
+        )
+        structure_match = False
+        parent_molecule = Chem.MolFromSmiles(parent.smiles)
+        if result.ok and result.mol is not None and parent_molecule is not None:
+            valid_count += 1
+            structure_match = (
+                result.smiles == parent.smiles
+                or _molecules_structure_match(result.mol, parent_molecule)
+            )
+            if structure_match:
+                structure_count += 1
+        if not result.ok or not structure_match:
+            failures.append(
+                {
+                    "parent_id": parent.parent_id,
+                    "parent_smiles": parent.smiles,
+                    "decoded_smiles": result.smiles,
+                    "codec_ok": result.ok,
+                    "structure_match": structure_match,
+                    "error_type": result.error_type,
+                    "error_message": result.error_message,
+                }
+            )
+    checked = len(parents)
+    summary = {
+        "source_codec_checked_rows": checked,
+        "source_codec_rdkit_valid_rows": valid_count,
+        "source_codec_structure_match_rows": structure_count,
+        "source_codec_passed": (
+            checked > 0
+            and valid_count == checked
+            and structure_count == checked
+        ),
+        "source_codec_failure_examples": failures[:10],
+        "codec_metadata": metadata.to_dict(),
+    }
+    return summary
+
+
+def require_source_codec_gate(summary: dict[str, Any]) -> None:
+    if summary.get("source_codec_passed") is not True:
+        raise GlobalGCEMutagenicityCodecError(
+            "GlobalGCE Mutagenicity source codec round-trip failed before "
+            f"training: {list(summary.get('source_codec_failure_examples') or [])[:3]}"
+        )
 
 
 def attach_globalgce_generation_dataset(
@@ -780,6 +1210,57 @@ def validate_globalgce_generation_loader(dataloader: Any) -> int:
     )
 
 
+def _prepare_native_and_source_datasets(
+    *,
+    native_train_csv: Path,
+    parents: Sequence[TrainParent],
+    seed: int,
+    torch_module: Any,
+) -> tuple[
+    list[TrainParent],
+    list[int],
+    list[int],
+    _DenseMoleculeDataset,
+    list[int],
+    list[int],
+    _DenseMoleculeDataset,
+]:
+    native_parents = _load_general_train_rows(native_train_csv)
+    native_train_idx, native_val_idx = _stratified_native_split(
+        native_parents,
+        seed=int(seed),
+    )
+    native_dataset = _build_dense_dataset(
+        native_parents,
+        train_idx=native_train_idx,
+        val_idx=native_val_idx,
+        test_idx=[],
+        torch_module=torch_module,
+    )
+    source_train_idx, source_val_idx = _stable_split(parents, seed=int(seed))
+    source_dataset = _build_dense_dataset(
+        parents,
+        train_idx=source_train_idx,
+        val_idx=source_val_idx,
+        test_idx=[],
+        torch_module=torch_module,
+        atom_symbols=native_dataset.atom_symbols,
+        max_num_nodes=max(
+            native_dataset.max_num_nodes,
+            max(Chem.MolFromSmiles(parent.smiles).GetNumAtoms() for parent in parents),
+        ),
+    )
+    return (
+        native_parents,
+        native_train_idx,
+        native_val_idx,
+        native_dataset,
+        source_train_idx,
+        source_val_idx,
+        source_dataset,
+    )
+
+
 class OfficialGlobalGCEMutagenicityGenerator:
     """Execute official GlobalGCE components on current train-only tensors."""
 
@@ -819,6 +1300,58 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "official_source_files": source_files,
         }
 
+    def probe_codec(
+        self,
+        parents: Sequence[TrainParent],
+        *,
+        seed: int,
+        output_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        if not self.native_train_csv.is_file():
+            raise FileNotFoundError(
+                "Native GNN train CSV is required for codec metadata: "
+                f"{self.native_train_csv}"
+            )
+        try:
+            import torch
+        except ImportError as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("GlobalGCE codec probe requires torch.") from exc
+        (
+            native_parents,
+            native_train_idx,
+            native_val_idx,
+            native_dataset,
+            _source_train_idx,
+            _source_val_idx,
+            source_dataset,
+        ) = _prepare_native_and_source_datasets(
+            native_train_csv=self.native_train_csv,
+            parents=parents,
+            seed=int(seed),
+            torch_module=torch,
+        )
+        summary = probe_source_graph_codec(source_dataset, parents)
+        summary.update(
+            {
+                "native_train_rows": len(native_parents),
+                "native_internal_train_ids_hash": _ids_hash(
+                    native_parents,
+                    native_train_idx,
+                ),
+                "native_internal_val_ids_hash": _ids_hash(
+                    native_parents,
+                    native_val_idx,
+                ),
+                "native_max_num_nodes": native_dataset.max_num_nodes,
+                "calibration_loaded": False,
+                "test_loaded": False,
+            }
+        )
+        if output_path is not None:
+            _write_json(Path(output_path).expanduser().resolve(), summary)
+        require_source_codec_gate(summary)
+        return summary
+
     def generate(
         self,
         parents: Sequence[TrainParent],
@@ -838,7 +1371,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "Official GlobalGCE requires the current two-class processed train "
                 f"CSV for its native GNN: {self.native_train_csv}"
             )
-        native_parents = _load_general_train_rows(self.native_train_csv)
         modules = _import_official_modules(self.official_src)
         try:
             import numpy as np
@@ -855,17 +1387,24 @@ class OfficialGlobalGCEMutagenicityGenerator:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(seed))
         resolved_device = torch.device(device)
-        native_train_idx, native_val_idx = _stratified_native_split(
+        (
             native_parents,
+            native_train_idx,
+            native_val_idx,
+            native_dataset,
+            source_train_idx,
+            source_val_idx,
+            source_dataset,
+        ) = _prepare_native_and_source_datasets(
+            native_train_csv=self.native_train_csv,
+            parents=parents,
             seed=int(seed),
-        )
-        native_dataset = _build_dense_dataset(
-            native_parents,
-            train_idx=native_train_idx,
-            val_idx=native_val_idx,
-            test_idx=[],
             torch_module=torch,
         )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        codec_summary = probe_source_graph_codec(source_dataset, parents)
+        _write_json(output_dir / "source_codec_summary.json", codec_summary)
+        require_source_codec_gate(codec_summary)
         native_train_loader = DataLoader(
             Subset(native_dataset, native_train_idx),
             batch_size=128,
@@ -877,7 +1416,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
             batch_size=128,
             shuffle=False,
         )
-        output_dir.mkdir(parents=True, exist_ok=True)
         gnn_checkpoint = output_dir / "native_gnn.pt"
         gnn_model = modules["GTGNN"](
             native_dataset.node_feat_dim,
@@ -900,19 +1438,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
         for parameter in gnn_model.parameters():
             parameter.requires_grad_(False)
 
-        source_train_idx, source_val_idx = _stable_split(parents, seed=int(seed))
-        source_dataset = _build_dense_dataset(
-            parents,
-            train_idx=source_train_idx,
-            val_idx=source_val_idx,
-            test_idx=[],
-            torch_module=torch,
-            atom_symbols=native_dataset.atom_symbols,
-            max_num_nodes=max(
-                native_dataset.max_num_nodes,
-                max(Chem.MolFromSmiles(parent.smiles).GetNumAtoms() for parent in parents),
-            ),
-        )
         source_prediction_loader = DataLoader(
             source_dataset,
             batch_size=500,
@@ -1009,6 +1534,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         ranks: dict[str, int] = defaultdict(int)
         records: list[dict[str, Any]] = []
+        codec_metadata = GlobalGCECodecMetadata.from_dataset(source_dataset)
         native_run_id = (
             f"mutagenicity_seed{seed}_epochs{epochs}_topk{top_k_native}"
         )
@@ -1022,16 +1548,11 @@ class OfficialGlobalGCEMutagenicityGenerator:
             source_index = source_expansion_order[source_position]
             parent = parents[source_index]
             ranks[parent.parent_id] += 1
-            graph_record = _generated_graph_record(
+            conversion = decode_globalgce_molecule(
                 cf_feat[index],
                 cf_adj[index],
                 cf_edge[index] if cf_edge is not None else None,
-                atom_symbols=source_dataset.atom_symbols,
-            )
-            conversion = globalgce_graph_record_to_mol(
-                graph_record,
-                edge_label_mode="internal_one_based",
-                fallback_zero_edge_to_single=False,
+                metadata=codec_metadata,
             )
             records.append(
                 {
@@ -1045,8 +1566,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "native_rule_id": f"official_rule_application_{ranks[parent.parent_id]}",
                     "native_run_id": native_run_id,
                     "native_conversion_ok": bool(conversion.ok),
+                    "native_codec_decoded": bool(conversion.codec_decoded),
+                    "native_conversion_error_type": conversion.error_type,
                     "native_conversion_error": conversion.error_message,
-                    "native_graph_record": graph_record,
+                    "native_graph_record": conversion.graph_record,
                 }
             )
         training_summary = {
@@ -1078,6 +1601,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "frequent_subgraphs_path": str(frequent_subgraphs.resolve()),
             "raw_generated_rows": len(records),
             "native_source_parent_count": len(native_source_indices),
+            **codec_summary,
             "saved_results_candidates_used": False,
             "generation_input_split": "train",
             "calibration_loaded": False,
@@ -1145,6 +1669,15 @@ def _annotate_and_filter_candidates(
         canonical = _canonical_smiles(raw_smiles)
         molecule = Chem.MolFromSmiles(canonical) if canonical else None
         parse_ok = molecule is not None and molecule.GetNumAtoms() > 0
+        native_conversion_ok = source.get("native_conversion_ok")
+        if native_conversion_ok is not None:
+            parse_ok = parse_ok and _bool_value(native_conversion_ok)
+        native_error_type = str(
+            source.get("native_conversion_error_type") or ""
+        ).strip() or None
+        native_error_message = str(
+            source.get("native_conversion_error") or ""
+        ).strip() or None
         teacher_pred: int | None = None
         teacher_ok = False
         if parse_ok and canonical is not None:
@@ -1166,13 +1699,28 @@ def _annotate_and_filter_candidates(
             "native_rule_id": source.get("native_rule_id"),
             "native_run_id": source.get("native_run_id"),
             "rdkit_parse_ok": bool(parse_ok),
+            "native_codec_decoded": _bool_value(
+                source.get("native_codec_decoded", parse_ok)
+            ),
+            "native_conversion_ok": _bool_value(
+                source.get("native_conversion_ok", parse_ok)
+            ),
+            "native_conversion_error_type": native_error_type,
+            "native_conversion_error": native_error_message,
             "teacher_pred": teacher_pred,
             "teacher_target_ok": bool(teacher_ok and teacher_pred == TARGET_LABEL),
             "num_atoms": int(molecule.GetNumAtoms()) if molecule is not None else 0,
             "num_bonds": int(molecule.GetNumBonds()) if molecule is not None else 0,
             "seed": int(seed),
             "raw_index": raw_index,
-            "invalid_reason": None if parse_ok else "rdkit_parse_or_sanitize_failed",
+            "invalid_reason": (
+                None
+                if parse_ok
+                else (
+                    native_error_type
+                    or "rdkit_parse_or_sanitize_failed"
+                )
+            ),
         }
         raw_rows.append(row)
         if not parse_ok or canonical is None:
@@ -1375,12 +1923,30 @@ def build_mutagenicity_train_pool(
     _write_jsonl(destination / "invalid_candidates.jsonl", invalid_rows)
     _write_jsonl(destination / "non_target_candidates.jsonl", non_target_rows)
     source_parent_ids = {str(row["source_parent_id"]) for row in pool_rows}
+    generated_valid_rows = sum(
+        _bool_value(row["rdkit_parse_ok"]) for row in raw_rows
+    )
+    generated_decoded_rows = sum(
+        _bool_value(row.get("native_codec_decoded")) for row in raw_rows
+    )
+    generated_invalid_valence_rows = sum(
+        str(row.get("invalid_reason") or "")
+        == "native_generated_invalid_valence"
+        for row in raw_rows
+    )
+    generated_invalid_other_rows = (
+        len(raw_rows)
+        - generated_valid_rows
+        - generated_invalid_valence_rows
+    )
+    source_codec_passed = training_summary.get("source_codec_passed")
+    pool_nonempty = len(pool_rows) > 0 and len(universe) > 0
     summary = {
         "input_train_rows": len(all_parents),
         "selected_train_rows": len(selected_parents),
         "unique_source_parents": len(source_parent_ids),
         "raw_generated_rows": len(raw_rows),
-        "rdkit_valid_rows": sum(_bool_value(row["rdkit_parse_ok"]) for row in raw_rows),
+        "rdkit_valid_rows": generated_valid_rows,
         "teacher_target_rows": sum(
             _bool_value(row["teacher_target_ok"]) for row in raw_rows
         ),
@@ -1393,11 +1959,74 @@ def build_mutagenicity_train_pool(
         "selected_train_cohort_hash": selected_hash,
         "internal_train_ids_hash": training_summary.get("internal_train_ids_hash"),
         "internal_val_ids_hash": training_summary.get("internal_val_ids_hash"),
+        "source_codec_checked_rows": int(
+            training_summary.get("source_codec_checked_rows") or 0
+        ),
+        "source_codec_rdkit_valid_rows": int(
+            training_summary.get("source_codec_rdkit_valid_rows") or 0
+        ),
+        "source_codec_structure_match_rows": int(
+            training_summary.get("source_codec_structure_match_rows") or 0
+        ),
+        "source_codec_passed": source_codec_passed,
+        "source_codec_failure_examples": list(
+            training_summary.get("source_codec_failure_examples") or []
+        ),
+        "generated_graph_rows": len(raw_rows),
+        "generated_codec_decoded_rows": generated_decoded_rows,
+        "generated_rdkit_valid_rows": generated_valid_rows,
+        "generated_invalid_valence_rows": generated_invalid_valence_rows,
+        "generated_invalid_other_rows": generated_invalid_other_rows,
+        "generated_valid_rate": (
+            generated_valid_rows / len(raw_rows) if raw_rows else 0.0
+        ),
         "calibration_loaded": False,
         "test_loaded": False,
-        "run_complete": True,
+        "run_complete": pool_nonempty,
     }
     _write_json(destination / "summary.json", summary)
+    if not pool_nonempty:
+        failure = {
+            "error": "empty_candidate_universe",
+            "source_codec_passed": source_codec_passed,
+            "raw_generated_rows": len(raw_rows),
+            "generated_codec_decoded_rows": generated_decoded_rows,
+            "generated_rdkit_valid_rows": generated_valid_rows,
+            "generated_invalid_valence_rows": generated_invalid_valence_rows,
+            "generated_invalid_other_rows": generated_invalid_other_rows,
+            "candidate_pool_rows": len(pool_rows),
+            "canonical_unique_candidates": len(universe),
+        }
+        manifest.update(
+            {
+                "run_complete": False,
+                "failed_at": _utc_now(),
+                "failure": failure,
+                "training_summary": str(training_path.resolve()),
+            }
+        )
+        _write_json(manifest_path, manifest)
+        _write_json(
+            checkpoint_path,
+            {
+                "config_fingerprint": fingerprint,
+                "stage": "failed_empty_candidate_universe",
+                "run_complete": False,
+                **failure,
+                "updated_at": _utc_now(),
+            },
+        )
+        raise GlobalGCEEmptyCandidateUniverseError(
+            "GlobalGCE generated no eligible Mutagenicity candidates. "
+            f"source_codec_passed={source_codec_passed!r}, "
+            f"raw_generated_rows={len(raw_rows)}, "
+            f"generated_codec_decoded_rows={generated_decoded_rows}, "
+            f"generated_rdkit_valid_rows={generated_valid_rows}, "
+            f"generated_invalid_valence_rows={generated_invalid_valence_rows}, "
+            f"generated_invalid_other_rows={generated_invalid_other_rows}, "
+            f"candidate_pool_rows={len(pool_rows)}, "
+            f"canonical_unique_candidates={len(universe)}."
+        )
     manifest.update(
         {
             "run_complete": True,
@@ -1538,7 +2167,29 @@ def audit_mutagenicity_train_pool(
             if selected_parents
             else 0.0
         ),
+        "generated_graph_rows": len(raw_rows),
+        "generated_codec_decoded_rows": sum(
+            _bool_value(row.get("native_codec_decoded")) for row in raw_rows
+        ),
+        "generated_rdkit_valid_rows": sum(
+            _bool_value(row.get("rdkit_parse_ok")) for row in raw_rows
+        ),
+        "generated_invalid_valence_rows": sum(
+            str(row.get("invalid_reason") or "")
+            == "native_generated_invalid_valence"
+            for row in raw_rows
+        ),
     }
+    recalculated["generated_invalid_other_rows"] = (
+        len(raw_rows)
+        - recalculated["generated_rdkit_valid_rows"]
+        - recalculated["generated_invalid_valence_rows"]
+    )
+    recalculated["generated_valid_rate"] = (
+        recalculated["generated_rdkit_valid_rows"] / len(raw_rows)
+        if raw_rows
+        else 0.0
+    )
     for field, expected in recalculated.items():
         if summary.get(field) != expected:
             raise AssertionError(
@@ -1564,6 +2215,23 @@ def audit_mutagenicity_train_pool(
         raise AssertionError("Manifest incorrectly reports candidate selection.")
     if manifest.get("teacher_used_only_for_target_validation") is not True:
         raise AssertionError("Manifest teacher role is incorrect.")
+    if summary.get("source_codec_passed") is not True:
+        raise AssertionError(
+            "Summary does not prove that the source graph codec round-trip "
+            "passed before native training."
+        )
+    checked_rows = int(summary.get("source_codec_checked_rows") or 0)
+    if checked_rows != len(selected_parents):
+        raise AssertionError(
+            "Source codec checked-row count does not match selected parents: "
+            f"checked={checked_rows}, selected={len(selected_parents)}."
+        )
+    if int(summary.get("source_codec_rdkit_valid_rows") or 0) != checked_rows:
+        raise AssertionError("Source codec did not sanitize every selected parent.")
+    if int(summary.get("source_codec_structure_match_rows") or 0) != checked_rows:
+        raise AssertionError(
+            "Source codec did not structurally round-trip every selected parent."
+        )
     if require_complete and (
         summary.get("run_complete") is not True
         or manifest.get("run_complete") is not True
@@ -1586,7 +2254,13 @@ def audit_mutagenicity_train_pool(
 __all__ = [
     "DEFAULT_EXPECTED_PARENT_COUNT",
     "DEFAULT_NATIVE_TRAIN_CSV",
+    "GlobalGCECodecMetadata",
+    "GlobalGCEEmptyCandidateUniverseError",
+    "GlobalGCEGraphDecodeResult",
+    "GlobalGCEMutagenicityCodecError",
     "NativeGenerationResult",
+    "OFFICIAL_MUTAGENICITY_EDGE_LABEL_TO_BOND",
+    "OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL",
     "OfficialGlobalGCEMutagenicityGenerator",
     "PoolBuildConfig",
     "TARGET_LABEL",
@@ -1594,7 +2268,11 @@ __all__ = [
     "attach_globalgce_generation_dataset",
     "audit_mutagenicity_train_pool",
     "build_mutagenicity_train_pool",
+    "decode_globalgce_molecule",
+    "globalgce_tensors_to_graph_record",
     "load_strict_train_parents",
+    "probe_source_graph_codec",
+    "require_source_codec_gate",
     "stable_candidate_id",
     "train_cohort_hash",
     "validate_globalgce_generation_loader",

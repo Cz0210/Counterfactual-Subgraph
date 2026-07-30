@@ -5,14 +5,25 @@ import json
 from pathlib import Path
 
 import pytest
+from rdkit import Chem
 
 from src.baselines.globalgce_mutagenicity_adapter import (
+    GlobalGCECodecMetadata,
+    GlobalGCEEmptyCandidateUniverseError,
+    GlobalGCEMutagenicityCodecError,
     NativeGenerationResult,
     PoolBuildConfig,
+    TrainParent,
+    _add_bond_once,
+    _build_dense_dataset,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
+    decode_globalgce_molecule,
+    globalgce_tensors_to_graph_record,
     load_strict_train_parents,
+    probe_source_graph_codec,
+    require_source_codec_gate,
     stable_candidate_id,
     validate_globalgce_generation_loader,
 )
@@ -148,6 +159,11 @@ class _FakeGenerator:
                 "internal_train_ids_hash": "train-hash",
                 "internal_val_ids_hash": "val-hash",
                 "native_gnn_required": True,
+                "source_codec_checked_rows": len(parents),
+                "source_codec_rdkit_valid_rows": len(parents),
+                "source_codec_structure_match_rows": len(parents),
+                "source_codec_passed": True,
+                "source_codec_failure_examples": [],
             },
         )
 
@@ -170,6 +186,35 @@ class _FakeAugmentedDataset:
 
     def __getitem__(self, index: int) -> dict:
         return dict(self.rows[index])
+
+
+def _native_graph_tensors(
+    atom_labels: list[int],
+    edges: list[tuple[int, int, int]],
+    *,
+    node_class_count: int,
+    edge_class_count: int = 4,
+    adjacency_value: float = 1.0,
+):
+    torch = pytest.importorskip("torch")
+    size = len(atom_labels)
+    features = torch.zeros((size, node_class_count), dtype=torch.float32)
+    for index, label in enumerate(atom_labels):
+        features[index, int(label)] = 1.0
+    adjacency = torch.zeros((size, size), dtype=torch.float32)
+    edge_attr = torch.zeros(
+        (size * (size - 1) // 2, edge_class_count),
+        dtype=torch.float32,
+    )
+    edge_attr[:, 0] = 1.0
+    for left, right, edge_label in edges:
+        adjacency[left, right] = adjacency_value
+        adjacency[right, left] = adjacency_value
+        high, low = max(left, right), min(left, right)
+        position = (high - 1) * high // 2 + low
+        edge_attr[position, 0] = 0.0
+        edge_attr[position, edge_label] = 1.0
+    return features, adjacency, edge_attr
 
 
 @pytest.fixture()
@@ -218,6 +263,169 @@ def test_train_only_parent_loading_and_deterministic_parent_limit(
     )
     assert [parent.parent_id for parent in all_parents] == ["p1", "p2", "p3"]
     assert [parent.parent_id for parent in selected] == ["p1", "p2"]
+
+
+def test_source_graph_round_trip_uses_native_metadata() -> None:
+    torch = pytest.importorskip("torch")
+    parents = [
+        TrainParent("benzene", "c1ccccc1", 1, "train"),
+        TrainParent("bromoethane", "CCBr", 1, "train"),
+    ]
+    dataset = _build_dense_dataset(
+        parents,
+        train_idx=[0],
+        val_idx=[1],
+        test_idx=[],
+        torch_module=torch,
+    )
+    summary = probe_source_graph_codec(dataset, parents)
+
+    assert summary["source_codec_checked_rows"] == 2
+    assert summary["source_codec_rdkit_valid_rows"] == 2
+    assert summary["source_codec_structure_match_rows"] == 2
+    assert summary["source_codec_passed"] is True
+    assert summary["source_codec_failure_examples"] == []
+    node_mapping = summary["codec_metadata"]["node_label_mapping"]
+    edge_mapping = summary["codec_metadata"]["edge_label_mapping"]
+    assert node_mapping == {"0": "padding", "1": "C", "2": "Br"}
+    assert edge_mapping == {
+        "0": "no_edge",
+        "1": "single",
+        "2": "double",
+        "3": "triple",
+    }
+
+
+def test_adjacency_is_only_edge_mask_and_edge_class_controls_bond_type() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C",),
+        bond_names=("no_edge", "single", "double", "triple"),
+    )
+    single = _native_graph_tensors(
+        [1, 1],
+        [(0, 1, 1)],
+        node_class_count=2,
+        adjacency_value=9.0,
+    )
+    double = _native_graph_tensors(
+        [1, 1],
+        [(0, 1, 2)],
+        node_class_count=2,
+        adjacency_value=9.0,
+    )
+    single_result = decode_globalgce_molecule(*single, metadata=metadata)
+    double_result = decode_globalgce_molecule(*double, metadata=metadata)
+
+    assert single_result.ok and double_result.ok
+    assert single_result.mol.GetBondWithIdx(0).GetBondType() == Chem.BondType.SINGLE
+    assert double_result.mol.GetBondWithIdx(0).GetBondType() == Chem.BondType.DOUBLE
+
+
+def test_padding_self_loops_and_undirected_edges_are_handled_once() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C",),
+        bond_names=("no_edge", "single", "double", "triple"),
+    )
+    feature, adjacency, edge_attr = _native_graph_tensors(
+        [1, 1, 0],
+        [(0, 1, 1)],
+        node_class_count=2,
+    )
+    adjacency[0, 0] = 1.0
+    record = globalgce_tensors_to_graph_record(
+        feature,
+        adjacency,
+        edge_attr,
+        metadata=metadata,
+    )
+    result = decode_globalgce_molecule(
+        feature,
+        adjacency,
+        edge_attr,
+        metadata=metadata,
+    )
+
+    assert record["padding_node_indices"] == [2]
+    assert record["self_loop_count_ignored"] == 1
+    assert result.ok
+    assert result.num_atoms == 2
+    assert result.num_bonds == 1
+
+
+def test_duplicate_bond_is_rejected_explicitly() -> None:
+    molecule = Chem.RWMol()
+    molecule.AddAtom(Chem.Atom("C"))
+    molecule.AddAtom(Chem.Atom("C"))
+    seen: set[tuple[int, int]] = set()
+    _add_bond_once(molecule, 0, 1, Chem.BondType.SINGLE, seen)
+    with pytest.raises(GlobalGCEMutagenicityCodecError, match="Duplicate"):
+        _add_bond_once(molecule, 1, 0, Chem.BondType.SINGLE, seen)
+
+
+def test_aromatic_bond_metadata_sets_consistent_aromatic_atoms() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C",),
+        bond_names=("no_edge", "single", "double", "triple", "aromatic"),
+    )
+    edges = [
+        (0, 1, 4),
+        (1, 2, 4),
+        (2, 3, 4),
+        (3, 4, 4),
+        (4, 5, 4),
+        (5, 0, 4),
+    ]
+    tensors = _native_graph_tensors(
+        [1] * 6,
+        edges,
+        node_class_count=2,
+        edge_class_count=5,
+    )
+    result = decode_globalgce_molecule(*tensors, metadata=metadata)
+
+    assert result.ok
+    assert result.smiles == "c1ccccc1"
+    assert all(atom.GetIsAromatic() for atom in result.mol.GetAtoms())
+    assert all(bond.GetIsAromatic() for bond in result.mol.GetBonds())
+
+
+def test_bromine_single_bond_is_valid_but_overvalent_bromine_is_not_repaired() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C", "Br"),
+        bond_names=("no_edge", "single", "double", "triple"),
+    )
+    valid = _native_graph_tensors(
+        [1, 2],
+        [(0, 1, 1)],
+        node_class_count=3,
+    )
+    valid_result = decode_globalgce_molecule(*valid, metadata=metadata)
+    assert valid_result.ok
+    assert valid_result.smiles == "CBr"
+
+    invalid = _native_graph_tensors(
+        [2, 1, 1, 1, 1, 1, 1],
+        [(0, index, 1) for index in range(1, 7)],
+        node_class_count=3,
+    )
+    invalid_result = decode_globalgce_molecule(*invalid, metadata=metadata)
+    assert invalid_result.ok is False
+    assert invalid_result.codec_decoded is True
+    assert invalid_result.error_type == "native_generated_invalid_valence"
+    assert invalid_result.smiles is None
+    assert invalid_result.num_bonds == 6
+
+
+def test_source_codec_gate_hard_fails_on_round_trip_mismatch() -> None:
+    summary = {
+        "source_codec_passed": False,
+        "source_codec_failure_examples": [{"parent_id": "p1"}],
+    }
+    with pytest.raises(
+        GlobalGCEMutagenicityCodecError,
+        match="before training",
+    ):
+        require_source_codec_gate(summary)
 
 
 def test_generation_loader_retains_real_native_dataset_contract() -> None:
@@ -369,6 +577,201 @@ def test_build_isolates_invalid_and_non_target_and_deduplicates(
         expected_parent_count=3,
     )
     assert audit["audit_passed"] is True
+
+
+def test_empty_generated_universe_is_incomplete_and_has_no_completion_marker(
+    fixture_paths: dict[str, Path],
+) -> None:
+    class AllInvalidGenerator:
+        def generate(self, parents, **_kwargs):
+            return NativeGenerationResult(
+                [
+                    {
+                        "source_parent_id": parents[0].parent_id,
+                        "source_parent_smiles": parents[0].smiles,
+                        "source_split": "train",
+                        "raw_smiles": None,
+                        "generator_rank": 1,
+                        "native_codec_decoded": True,
+                        "native_conversion_ok": False,
+                        "native_conversion_error_type": (
+                            "native_generated_invalid_valence"
+                        ),
+                        "native_conversion_error": "explicit valence failure",
+                    }
+                ],
+                {
+                    "source_codec_checked_rows": 3,
+                    "source_codec_rdkit_valid_rows": 3,
+                    "source_codec_structure_match_rows": 3,
+                    "source_codec_passed": True,
+                    "source_codec_failure_examples": [],
+                },
+            )
+
+    with pytest.raises(
+        GlobalGCEEmptyCandidateUniverseError,
+        match=r"source_codec_passed=True.*generated_invalid_valence_rows=1",
+    ):
+        build_mutagenicity_train_pool(
+            train_csv=fixture_paths["train"],
+            teacher_path=fixture_paths["teacher"],
+            official_root=fixture_paths["official"],
+            output_dir=fixture_paths["output"],
+            teacher=_FakeTeacher(),
+            generator=AllInvalidGenerator(),
+            config=PoolBuildConfig(
+                expected_parent_count=3,
+                device="cpu",
+                epochs=1,
+                top_k_native=2,
+            ),
+        )
+
+    summary = json.loads(
+        (fixture_paths["output"] / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["raw_generated_rows"] == 1
+    assert summary["generated_graph_rows"] == 1
+    assert summary["generated_codec_decoded_rows"] == 1
+    assert summary["generated_rdkit_valid_rows"] == 0
+    assert summary["generated_invalid_valence_rows"] == 1
+    assert summary["generated_invalid_other_rows"] == 0
+    assert summary["candidate_pool_rows"] == 0
+    assert summary["canonical_unique_candidates"] == 0
+    assert summary["source_codec_passed"] is True
+    assert summary["run_complete"] is False
+    assert not (fixture_paths["output"] / "_RUN_COMPLETE.json").exists()
+
+
+def test_codec_probe_only_does_not_construct_teacher_or_call_training(
+    fixture_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.baselines.globalgce import (
+        build_mutagenicity_train_pool as build_cli,
+    )
+
+    calls = {"probe": 0, "train": 0}
+
+    class ProbeGenerator:
+        def __init__(self, _official_root, *, native_train_csv=None):
+            assert native_train_csv == fixture_paths["train"].resolve()
+
+        def probe_codec(self, parents, *, seed, output_path):
+            calls["probe"] += 1
+            assert [parent.parent_id for parent in parents] == ["p1", "p2"]
+            assert seed == 13
+            payload = {
+                "source_codec_checked_rows": 2,
+                "source_codec_rdkit_valid_rows": 2,
+                "source_codec_structure_match_rows": 2,
+                "source_codec_passed": True,
+                "source_codec_failure_examples": [],
+                "calibration_loaded": False,
+                "test_loaded": False,
+            }
+            Path(output_path).write_text(json.dumps(payload), encoding="utf-8")
+            return payload
+
+    def forbidden_teacher(*_args, **_kwargs):
+        raise AssertionError("Codec probe must not load the RF teacher.")
+
+    def forbidden_train(*_args, **_kwargs):
+        calls["train"] += 1
+        raise AssertionError("Codec probe must not invoke training.")
+
+    monkeypatch.setattr(
+        build_cli,
+        "OfficialGlobalGCEMutagenicityGenerator",
+        ProbeGenerator,
+    )
+    monkeypatch.setattr(build_cli, "TeacherSemanticScorer", forbidden_teacher)
+    monkeypatch.setattr(
+        build_cli,
+        "build_mutagenicity_train_pool",
+        forbidden_train,
+    )
+    exit_code = build_cli.main(
+        [
+            "--train-csv",
+            str(fixture_paths["train"]),
+            "--teacher-path",
+            str(
+                fixture_paths["output"].parent
+                / "teacher-must-not-be-read.pkl"
+            ),
+            "--official-root",
+            str(fixture_paths["official"]),
+            "--native-train-csv",
+            str(fixture_paths["train"]),
+            "--output-dir",
+            str(fixture_paths["output"]),
+            "--expected-parent-count",
+            "3",
+            "--parent-limit",
+            "2",
+            "--codec-probe-only",
+        ]
+    )
+    captured = capsys.readouterr().out
+    assert exit_code == 0
+    assert calls == {"probe": 1, "train": 0}
+    assert "[MUTAGENICITY_GLOBALGCE_CODEC_PROBE_OK]" in captured
+    assert "[MUTAGENICITY_GLOBALGCE_TRAIN_POOL_BUILD_OK]" not in captured
+    assert (fixture_paths["output"] / "codec_probe_summary.json").is_file()
+
+
+def test_build_cli_does_not_print_success_after_empty_pool_error(
+    fixture_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.baselines.globalgce import (
+        build_mutagenicity_train_pool as build_cli,
+    )
+
+    class AvailableTeacher:
+        available = True
+        availability_reason = "ok"
+
+        def __init__(self, _path):
+            pass
+
+    class Generator:
+        def __init__(self, _official_root, *, native_train_csv=None):
+            del native_train_csv
+
+    def empty_build(**_kwargs):
+        raise GlobalGCEEmptyCandidateUniverseError("empty")
+
+    monkeypatch.setattr(build_cli, "TeacherSemanticScorer", AvailableTeacher)
+    monkeypatch.setattr(
+        build_cli,
+        "OfficialGlobalGCEMutagenicityGenerator",
+        Generator,
+    )
+    monkeypatch.setattr(build_cli, "build_mutagenicity_train_pool", empty_build)
+    with pytest.raises(GlobalGCEEmptyCandidateUniverseError):
+        build_cli.main(
+            [
+                "--train-csv",
+                str(fixture_paths["train"]),
+                "--teacher-path",
+                str(fixture_paths["teacher"]),
+                "--official-root",
+                str(fixture_paths["official"]),
+                "--output-dir",
+                str(fixture_paths["output"]),
+                "--expected-parent-count",
+                "3",
+            ]
+        )
+    assert (
+        "[MUTAGENICITY_GLOBALGCE_TRAIN_POOL_BUILD_OK]"
+        not in capsys.readouterr().out
+    )
 
 
 def test_generator_cannot_return_parent_outside_train(

@@ -17,6 +17,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (  # noqa: E402
     OfficialGlobalGCEMutagenicityGenerator,
     PoolBuildConfig,
     build_mutagenicity_train_pool,
+    load_strict_train_parents,
 )
 from src.rewards.teacher_semantic import TeacherSemanticScorer  # noqa: E402
 
@@ -34,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=0.1)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--codec-probe-only",
+        action="store_true",
+        help="Run only the deterministic source graph round-trip gate.",
+    )
     parser.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,
@@ -77,7 +83,6 @@ def _required_file(path_like: str, description: str) -> Path:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     train_csv = _required_file(args.train_csv, "strict train CSV")
-    teacher_path = _required_file(args.teacher_path, "Mutagenicity RF teacher")
     official_root = Path(args.official_root).expanduser().resolve()
     if not official_root.is_dir():
         raise FileNotFoundError(f"GlobalGCE official root is missing: {official_root}")
@@ -87,16 +92,35 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
 
+    generator = OfficialGlobalGCEMutagenicityGenerator(
+        official_root,
+        native_train_csv=native_train_csv,
+    )
+    if args.codec_probe_only:
+        _all_parents, selected_parents = load_strict_train_parents(
+            train_csv,
+            parent_limit=int(args.parent_limit),
+            expected_parent_count=int(args.expected_parent_count),
+            forbid_calibration_test=bool(args.forbid_calibration_test),
+        )
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        summary = generator.probe_codec(
+            selected_parents,
+            seed=int(args.seed),
+            output_path=output_dir / "codec_probe_summary.json",
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        print("[MUTAGENICITY_GLOBALGCE_CODEC_PROBE_OK]")
+        return 0
+
+    teacher_path = _required_file(args.teacher_path, "Mutagenicity RF teacher")
     teacher = TeacherSemanticScorer(teacher_path)
     if not teacher.available:
         raise RuntimeError(
             "Mutagenicity RF teacher is unavailable: "
             f"{teacher.availability_reason}"
         )
-    generator = OfficialGlobalGCEMutagenicityGenerator(
-        official_root,
-        native_train_csv=native_train_csv,
-    )
     summary = build_mutagenicity_train_pool(
         train_csv=train_csv,
         teacher_path=teacher_path,
