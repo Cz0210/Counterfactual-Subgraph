@@ -697,6 +697,89 @@ def _generated_graph_record(
     }
 
 
+def attach_globalgce_generation_dataset(
+    augmented_dataset: Any,
+    native_dataset: Any,
+) -> Any:
+    """Retain the real dataset expected by official ``generate_cfs``.
+
+    The official ``AugmentedDataset`` constructor receives ``original_dataset``
+    but does not retain it. Official generation later assumes it is available
+    as ``dataloader.dataset.dataset``. Attaching that exact object preserves
+    the augmented dataset's length, indexing, and item semantics.
+    """
+
+    if augmented_dataset is native_dataset:
+        raise ValueError(
+            "GlobalGCE generation dataset cannot reference itself as its "
+            "underlying native dataset."
+        )
+    _validated_max_num_nodes(native_dataset, role="underlying native dataset")
+    augmented_dataset.dataset = native_dataset
+    return augmented_dataset
+
+
+def _validated_max_num_nodes(dataset: Any, *, role: str) -> int:
+    if not hasattr(dataset, "max_num_nodes"):
+        raise ValueError(
+            f"GlobalGCE {role} type={type(dataset).__name__} is missing "
+            "required attribute max_num_nodes."
+        )
+    raw_value = getattr(dataset, "max_num_nodes")
+    if isinstance(raw_value, bool):
+        raise ValueError(
+            f"GlobalGCE {role} has invalid max_num_nodes={raw_value!r}; "
+            "expected a finite positive integer."
+        )
+    try:
+        numeric_value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"GlobalGCE {role} has invalid max_num_nodes={raw_value!r}; "
+            "expected a finite positive integer."
+        ) from exc
+    if (
+        not math.isfinite(numeric_value)
+        or numeric_value <= 0
+        or not numeric_value.is_integer()
+    ):
+        raise ValueError(
+            f"GlobalGCE {role} has invalid max_num_nodes={raw_value!r}; "
+            "expected a finite positive integer."
+        )
+    return int(numeric_value)
+
+
+def validate_globalgce_generation_loader(dataloader: Any) -> int:
+    """Validate the nested dataset contract used by official generation."""
+
+    if not hasattr(dataloader, "dataset"):
+        raise ValueError(
+            "GlobalGCE generation loader "
+            f"type={type(dataloader).__name__} is missing attribute dataset."
+        )
+    augmented_dataset = dataloader.dataset
+    if not hasattr(augmented_dataset, "dataset"):
+        raise ValueError(
+            "GlobalGCE generation loader dataset "
+            f"type={type(augmented_dataset).__name__} is missing underlying "
+            "attribute dataset required by official generate_cfs."
+        )
+    native_dataset = augmented_dataset.dataset
+    if native_dataset is augmented_dataset:
+        raise ValueError(
+            "GlobalGCE generation loader has an invalid self-referential "
+            f"dataset type={type(augmented_dataset).__name__}."
+        )
+    return _validated_max_num_nodes(
+        native_dataset,
+        role=(
+            "generation loader underlying dataset "
+            f"type={type(native_dataset).__name__}"
+        ),
+    )
+
+
 class OfficialGlobalGCEMutagenicityGenerator:
     """Execute official GlobalGCE components on current train-only tensors."""
 
@@ -904,6 +987,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         rules = torch.load(rules_checkpoint, map_location=resolved_device)
         augmented_dataset = augmented_test_loader.dataset.dataset
+        attach_globalgce_generation_dataset(
+            augmented_dataset,
+            source_dataset,
+        )
         source_expansion_order = (
             list(source_dataset.train_idx)
             + list(source_dataset.val_idx)
@@ -914,6 +1001,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             batch_size=500,
             shuffle=False,
         )
+        validate_globalgce_generation_loader(all_augmented_loader)
         cf_feat, cf_adj, cf_edge, graph_idx = modules["generate_cfs"](
             all_augmented_loader,
             rules,
@@ -1503,9 +1591,11 @@ __all__ = [
     "PoolBuildConfig",
     "TARGET_LABEL",
     "TrainParent",
+    "attach_globalgce_generation_dataset",
     "audit_mutagenicity_train_pool",
     "build_mutagenicity_train_pool",
     "load_strict_train_parents",
     "stable_candidate_id",
     "train_cohort_hash",
+    "validate_globalgce_generation_loader",
 ]
