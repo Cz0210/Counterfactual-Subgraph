@@ -58,6 +58,12 @@ LEARNING_RATE="${LEARNING_RATE:-0.1}"
 DROPOUT="${DROPOUT:-0.5}"
 RESUME="${RESUME:-true}"
 EXPECTED_PARENT_COUNT="${EXPECTED_PARENT_COUNT:-1448}"
+EXPECTED_INPUT_TRAIN_COUNT="${EXPECTED_INPUT_TRAIN_COUNT:-$EXPECTED_PARENT_COUNT}"
+if [[ "$PARENT_LIMIT" -gt 0 ]]; then
+  EXPECTED_SELECTED_PARENT_COUNT="${EXPECTED_SELECTED_PARENT_COUNT:-$PARENT_LIMIT}"
+else
+  EXPECTED_SELECTED_PARENT_COUNT="${EXPECTED_SELECTED_PARENT_COUNT:-$EXPECTED_INPUT_TRAIN_COUNT}"
+fi
 DEVICE="${DEVICE:-cuda}"
 
 for path in "$TRAIN_CSV" "$TEACHER_PATH" "$NATIVE_TRAIN_CSV"; do
@@ -119,6 +125,8 @@ echo "LEARNING_RATE=$LEARNING_RATE"
 echo "DROPOUT=$DROPOUT"
 echo "DEVICE=$DEVICE"
 echo "RESUME=$RESUME"
+echo "EXPECTED_INPUT_TRAIN_COUNT=$EXPECTED_INPUT_TRAIN_COUNT"
+echo "EXPECTED_SELECTED_PARENT_COUNT=$EXPECTED_SELECTED_PARENT_COUNT"
 python --version
 nvidia-smi || true
 
@@ -130,7 +138,7 @@ python scripts/baselines/globalgce/build_mutagenicity_train_pool.py \
   --official-root "$OFFICIAL_ROOT" \
   --output-dir "$OUTPUT_DIR" \
   --parent-limit "$PARENT_LIMIT" \
-  --expected-parent-count "$EXPECTED_PARENT_COUNT" \
+  --expected-parent-count "$EXPECTED_INPUT_TRAIN_COUNT" \
   --seed "$SEED" \
   --epochs "$EPOCHS" \
   --top-k-native "$TOP_K_NATIVE" \
@@ -144,7 +152,8 @@ python scripts/baselines/globalgce/audit_mutagenicity_train_pool.py \
   --config configs/hpc.yaml \
   --run-dir "$OUTPUT_DIR" \
   --train-csv "$TRAIN_CSV" \
-  --expected-parent-count "$EXPECTED_PARENT_COUNT" \
+  --expected-parent-count "$EXPECTED_SELECTED_PARENT_COUNT" \
+  --expected-input-train-count "$EXPECTED_INPUT_TRAIN_COUNT" \
   --require-target-label-zero \
   --require-unique-universe \
   --forbid-calibration-test \
