@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     GlobalGCEEmptyCandidateUniverseError,
     GlobalGCEMutagenicityCodecError,
     NativeGenerationResult,
+    OfficialGlobalGCEMutagenicityGenerator,
     PoolBuildConfig,
     TrainParent,
     _add_bond_once,
@@ -22,6 +24,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     decode_globalgce_molecule,
     globalgce_tensors_to_graph_record,
     load_strict_train_parents,
+    log_globalgce_phase_memory,
     probe_source_graph_codec,
     require_source_codec_gate,
     stable_candidate_id,
@@ -85,6 +88,24 @@ def _write_ten_parent_train(path: Path) -> None:
             "teacher_correct": "true",
         }
         for index, smiles in enumerate(smiles_values)
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_many_parent_train(path: Path, count: int) -> None:
+    rows = [
+        {
+            "molecule_id": f"p{index:03d}",
+            "smiles": "C" * (index + 1),
+            "label": 1,
+            "split": "train",
+            "teacher_pred": 1,
+            "teacher_correct": "true",
+        }
+        for index in range(int(count))
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -251,6 +272,99 @@ class _LimitedCoverageGenerator:
         )
 
 
+class _ChunkedGenerator:
+    def __init__(self, *, fail_after_total_chunks: int | None = None) -> None:
+        self.fail_after_total_chunks = fail_after_total_chunks
+        self.train_calls = 0
+        self.rule_selection_calls = 0
+        self.chunk_ranges: list[tuple[int, int]] = []
+        self.parent_order: list[str] = []
+        self.raw_part_row_counts: list[int] = []
+
+    def config_identity(self) -> dict:
+        return {"generator_class": "_ChunkedGenerator", "version": 1}
+
+    @staticmethod
+    def _summary(parent_count: int) -> dict:
+        return {
+            "internal_train_ids_hash": "train-hash",
+            "internal_val_ids_hash": "val-hash",
+            "native_gnn_required": True,
+            "source_codec_checked_rows": parent_count,
+            "source_codec_rdkit_valid_rows": parent_count,
+            "source_codec_structure_match_rows": parent_count,
+            "source_codec_invalid_valence_rows": 0,
+            "source_codec_attribute_mapping_failed_rows": 0,
+            "source_codec_passed": True,
+            "source_codec_failure_examples": [],
+            "atom_attribute_source": "source_anchored",
+            "formal_charge_encoded_by_native": False,
+            "source_atom_mapping_method": (
+                "rdkit_atom_index_preserved_by_dense_builder"
+            ),
+            "source_atom_mapping_unique": True,
+            "source_formal_charge_nonzero_atom_count": 0,
+            "generation_uses_inference_mode": True,
+            "generation_requires_gradients": False,
+        }
+
+    def generate(
+        self,
+        parents,
+        *,
+        output_dir,
+        generation_chunk_size,
+        start_parent_offset,
+        on_training_ready,
+        on_chunk,
+        **_kwargs,
+    ):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if int(start_parent_offset) == 0:
+            self.train_calls += 1
+            self.rule_selection_calls += 1
+            on_training_ready(self._summary(len(parents)))
+        for parent_start in range(
+            int(start_parent_offset),
+            len(parents),
+            int(generation_chunk_size),
+        ):
+            parent_end = min(
+                len(parents),
+                parent_start + int(generation_chunk_size),
+            )
+            records = []
+            for parent in parents[parent_start:parent_end]:
+                self.parent_order.append(parent.parent_id)
+                records.append(
+                    {
+                        "source_parent_id": parent.parent_id,
+                        "source_parent_smiles": parent.smiles,
+                        "source_split": "train",
+                        "raw_smiles": "C",
+                        "generator_rank": 1,
+                        "native_codec_decoded": True,
+                        "native_conversion_ok": True,
+                    }
+                )
+            chunk_index = parent_start // int(generation_chunk_size)
+            on_chunk(chunk_index, parent_start, parent_end, records)
+            self.chunk_ranges.append((parent_start, parent_end))
+            raw_part = (
+                output_dir.parent
+                / "raw_generated_candidates.jsonl.part"
+            )
+            self.raw_part_row_counts.append(len(_read_jsonl(raw_part)))
+            if (
+                self.fail_after_total_chunks is not None
+                and len(self.chunk_ranges) >= self.fail_after_total_chunks
+            ):
+                self.fail_after_total_chunks = None
+                raise RuntimeError("intentional chunk interruption")
+            del records
+        return NativeGenerationResult([], self._summary(len(parents)))
+
+
 class _FakeNativeDataset:
     def __init__(self, max_num_nodes: int = 17) -> None:
         self.max_num_nodes = max_num_nodes
@@ -398,6 +512,46 @@ def _build_ten_parent_run(
         ),
     )
     return paths
+
+
+def _many_parent_paths(tmp_path: Path, count: int = 65) -> dict[str, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "train": tmp_path / f"train_{count}.csv",
+        "teacher": tmp_path / "teacher.pkl",
+        "official": tmp_path / "official",
+        "output": tmp_path / "output",
+    }
+    _write_many_parent_train(paths["train"], count)
+    paths["teacher"].write_bytes(b"fake-teacher")
+    _write_official_root(paths["official"])
+    return paths
+
+
+def _build_many_parent_run(
+    paths: dict[str, Path],
+    generator: _ChunkedGenerator,
+    *,
+    count: int = 65,
+    chunk_size: int = 32,
+) -> dict:
+    return build_mutagenicity_train_pool(
+        train_csv=paths["train"],
+        teacher_path=paths["teacher"],
+        official_root=paths["official"],
+        output_dir=paths["output"],
+        teacher=_FakeTeacher(),
+        generator=generator,
+        config=PoolBuildConfig(
+            expected_parent_count=count,
+            device="cpu",
+            epochs=1,
+            top_k_native=2,
+            generation_chunk_size=chunk_size,
+            generation_num_workers=0,
+            memory_log_every_chunks=1,
+        ),
+    )
 
 
 def test_train_only_parent_loading_and_deterministic_parent_limit(
@@ -1121,6 +1275,150 @@ def test_audit_full_mode_uses_complete_train_as_selected_cohort(
     assert audit["selected_train_rows"] == 10
     assert audit["candidate_source_parent_rows"] == 2
     assert audit["source_parent_coverage_recomputed"] == pytest.approx(0.2)
+
+
+def test_chunked_generation_uses_three_chunks_and_preserves_parent_order(
+    tmp_path: Path,
+) -> None:
+    paths = _many_parent_paths(tmp_path)
+    generator = _ChunkedGenerator()
+
+    summary = _build_many_parent_run(paths, generator)
+
+    assert generator.chunk_ranges == [(0, 32), (32, 64), (64, 65)]
+    assert generator.parent_order == [
+        f"p{index:03d}" for index in range(65)
+    ]
+    assert generator.raw_part_row_counts == [32, 64, 65]
+    assert generator.train_calls == 1
+    assert generator.rule_selection_calls == 1
+    assert summary["generation_completed_chunks"] == 3
+    assert summary["generation_num_workers"] == 0
+    assert len(_read_jsonl(paths["output"] / "candidate_pool.jsonl")) == 65
+    assert not (
+        paths["output"] / "raw_generated_candidates.jsonl.part"
+    ).exists()
+    assert not (paths["output"] / "invalid_candidates.jsonl.part").exists()
+    assert not (
+        paths["output"] / "non_target_candidates.jsonl.part"
+    ).exists()
+
+
+def test_chunked_and_single_chunk_outputs_are_identical(
+    tmp_path: Path,
+) -> None:
+    chunked_paths = _many_parent_paths(tmp_path / "chunked")
+    single_paths = _many_parent_paths(tmp_path / "single")
+
+    _build_many_parent_run(
+        chunked_paths,
+        _ChunkedGenerator(),
+        chunk_size=32,
+    )
+    _build_many_parent_run(
+        single_paths,
+        _ChunkedGenerator(),
+        chunk_size=65,
+    )
+
+    for filename in (
+        "raw_generated_candidates.jsonl",
+        "candidate_pool.jsonl",
+        "candidate_universe.jsonl",
+        "invalid_candidates.jsonl",
+        "non_target_candidates.jsonl",
+    ):
+        assert _read_jsonl(
+            chunked_paths["output"] / filename
+        ) == _read_jsonl(single_paths["output"] / filename)
+
+
+def test_chunk_resume_continues_without_duplicate_rows_or_retraining(
+    tmp_path: Path,
+) -> None:
+    paths = _many_parent_paths(tmp_path)
+    generator = _ChunkedGenerator(fail_after_total_chunks=1)
+
+    with pytest.raises(RuntimeError, match="intentional chunk interruption"):
+        _build_many_parent_run(paths, generator)
+
+    output = paths["output"]
+    generation_checkpoint = json.loads(
+        (output / "generation_resume_checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert generation_checkpoint["next_parent_offset"] == 32
+    assert generation_checkpoint["completed_chunk_count"] == 1
+    assert len(
+        _read_jsonl(output / "raw_generated_candidates.jsonl.part")
+    ) == 32
+    assert not (output / "_RUN_COMPLETE.json").exists()
+    interrupted_rows = _read_jsonl(
+        output / "raw_generated_candidates.jsonl.part"
+    )
+    with (
+        output / "raw_generated_candidates.jsonl.part"
+    ).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(interrupted_rows[-1]) + "\n")
+
+    summary = _build_many_parent_run(paths, generator)
+
+    raw_rows = _read_jsonl(output / "raw_generated_candidates.jsonl")
+    assert len(raw_rows) == 65
+    assert len({row["source_parent_id"] for row in raw_rows}) == 65
+    assert generator.chunk_ranges == [(0, 32), (32, 64), (64, 65)]
+    assert generator.train_calls == 1
+    assert generator.rule_selection_calls == 1
+    assert summary["raw_generated_rows"] == 65
+    assert (output / "_RUN_COMPLETE.json").is_file()
+
+
+def test_chunk_resume_rejects_generation_config_mismatch(
+    tmp_path: Path,
+) -> None:
+    paths = _many_parent_paths(tmp_path)
+    generator = _ChunkedGenerator(fail_after_total_chunks=1)
+    with pytest.raises(RuntimeError, match="intentional chunk interruption"):
+        _build_many_parent_run(paths, generator, chunk_size=32)
+
+    with pytest.raises(ValueError, match="Resume configuration mismatch"):
+        _build_many_parent_run(paths, generator, chunk_size=16)
+
+
+def test_memory_log_contains_rss_and_cuda_fields(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = log_globalgce_phase_memory(
+        phase="unit_test",
+        chunk_index=2,
+        processed_parent_count=65,
+        raw_generated_count=65,
+    )
+
+    output = capsys.readouterr().out
+    assert "[GLOBALGCE_MEMORY]" in output
+    assert "rss_gb=" in output
+    assert payload["rss_gb"] > 0
+    assert payload["cuda_allocated_gb"] == 0.0
+    assert payload["cuda_reserved_gb"] == 0.0
+
+
+def test_generation_worker_default_is_zero() -> None:
+    assert PoolBuildConfig().generation_num_workers == 0
+    assert PoolBuildConfig().generation_chunk_size == 32
+    assert PoolBuildConfig().memory_log_every_chunks == 1
+
+
+def test_official_generation_releases_dense_chunk_outputs() -> None:
+    source = inspect.getsource(
+        OfficialGlobalGCEMutagenicityGenerator.generate
+    )
+    assert "with torch.inference_mode()" in source
+    assert "del cf_feat, cf_adj, cf_edge, graph_idx" in source
+    assert "del chunk_loader, chunk_dataset" in source
+    assert "if on_chunk is not None:" in source
+    assert "all_records.extend(chunk_records)" in source
 
 
 def test_generated_attribute_ambiguity_is_excluded_from_candidate_pool(

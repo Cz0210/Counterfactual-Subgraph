@@ -20,7 +20,7 @@ def test_wrapper_has_valid_bash_and_requested_resources() -> None:
         "#SBATCH --ntasks-per-node=1",
         "#SBATCH --cpus-per-task=7",
         "#SBATCH --gres=gpu:a800:1",
-        "#SBATCH --mem=64G",
+        "#SBATCH --mem=128G",
         "#SBATCH --time=24:00:00",
         "#SBATCH --job-name=mut_globalgce",
         "#SBATCH --output=logs/%j.out",
@@ -73,6 +73,9 @@ def test_wrapper_has_deterministic_defaults_and_resume_guards() -> None:
         'LEARNING_RATE="${LEARNING_RATE:-0.1}"',
         'DROPOUT="${DROPOUT:-0.5}"',
         'RESUME="${RESUME:-true}"',
+        'GENERATION_CHUNK_SIZE="${GENERATION_CHUNK_SIZE:-32}"',
+        'GENERATION_NUM_WORKERS="${GENERATION_NUM_WORKERS:-0}"',
+        'MEMORY_LOG_EVERY_CHUNKS="${MEMORY_LOG_EVERY_CHUNKS:-1}"',
     ):
         assert setting in text
     assert "Completed OUTPUT_DIR cannot be rerun" in text
@@ -98,3 +101,17 @@ def test_wrapper_separates_input_and_selected_parent_expectations() -> None:
     assert (
         '--expected-input-train-count "$EXPECTED_INPUT_TRAIN_COUNT"' in text
     )
+
+
+def test_wrapper_passes_chunking_and_bounds_cpu_allocator_threads() -> None:
+    text = _text()
+    assert '--generation-chunk-size "$GENERATION_CHUNK_SIZE"' in text
+    assert '--generation-num-workers "$GENERATION_NUM_WORKERS"' in text
+    assert '--memory-log-every-chunks "$MEMORY_LOG_EVERY_CHUNKS"' in text
+    assert 'export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"' in text
+    assert 'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"' in text
+    assert 'export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"' in text
+    assert "unset http_proxy" not in text
+    assert "unset https_proxy" not in text
+    assert "unset HTTP_PROXY" not in text
+    assert "unset HTTPS_PROXY" not in text

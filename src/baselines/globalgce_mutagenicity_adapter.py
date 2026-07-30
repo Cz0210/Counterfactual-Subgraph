@@ -9,19 +9,22 @@ to the official GlobalGCE implementation.
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import importlib
 import json
 import math
 import os
 import random
+import resource
+import subprocess
 import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Callable, Iterable, Protocol, Sequence
 
 try:
     from rdkit import Chem
@@ -69,6 +72,7 @@ REQUIRED_OUTPUT_FILES = (
     "summary.json",
     "run_manifest.json",
     "resume_checkpoint.json",
+    "generation_resume_checkpoint.json",
     "_RUN_COMPLETE.json",
 )
 
@@ -192,6 +196,14 @@ class NativeGeneratorProtocol(Protocol):
         dropout: float,
         device: str,
         resume: bool,
+        generation_chunk_size: int,
+        generation_num_workers: int,
+        memory_log_every_chunks: int,
+        start_parent_offset: int,
+        on_training_ready: Callable[[dict[str, Any]], None] | None,
+        on_chunk: (
+            Callable[[int, int, int, list[dict[str, Any]]], None] | None
+        ),
     ) -> "NativeGenerationResult":
         ...
 
@@ -216,6 +228,9 @@ class PoolBuildConfig:
     device: str = "cuda"
     resume: bool = True
     forbid_calibration_test: bool = True
+    generation_chunk_size: int = 32
+    generation_num_workers: int = 0
+    memory_log_every_chunks: int = 1
 
 
 @dataclass(slots=True)
@@ -343,6 +358,121 @@ def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     )
 
 
+def _append_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            count += 1
+        handle.flush()
+        os.fsync(handle.fileno())
+    return count
+
+
+def _truncate_jsonl(path: Path, row_count: int) -> None:
+    if int(row_count) < 0:
+        raise ValueError("JSONL row_count must be non-negative.")
+    if not path.exists():
+        if int(row_count) != 0:
+            raise ValueError(
+                f"Resume JSONL is missing but checkpoint expects {row_count} rows: "
+                f"{path}"
+            )
+        _write_jsonl(path, [])
+        return
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.resume.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    copied = 0
+    try:
+        with path.open("r", encoding="utf-8") as source, os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as target:
+            for line in source:
+                if not line.strip():
+                    continue
+                if copied >= int(row_count):
+                    break
+                target.write(line)
+                copied += 1
+            target.flush()
+            os.fsync(target.fileno())
+        if copied != int(row_count):
+            raise ValueError(
+                f"Resume JSONL row mismatch for {path}: "
+                f"expected_at_least={row_count}, found={copied}."
+            )
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError(f"Expected JSON object at {path}:{line_number}")
+            yield payload
+
+
+def _rss_gb() -> float:
+    status_path = Path("/proc/self/status")
+    if status_path.is_file():
+        for line in status_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return float(line.split()[1]) / (1024.0**2)
+    maximum = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        return maximum / (1024.0**3)
+    return maximum / (1024.0**2)
+
+
+def log_globalgce_phase_memory(
+    *,
+    phase: str,
+    chunk_index: int,
+    processed_parent_count: int,
+    raw_generated_count: int,
+    torch_module: Any | None = None,
+) -> dict[str, Any]:
+    cuda_allocated = 0.0
+    cuda_reserved = 0.0
+    if (
+        torch_module is not None
+        and hasattr(torch_module, "cuda")
+        and torch_module.cuda.is_available()
+    ):
+        cuda_allocated = float(torch_module.cuda.memory_allocated()) / (1024.0**3)
+        cuda_reserved = float(torch_module.cuda.memory_reserved()) / (1024.0**3)
+    payload = {
+        "phase": str(phase),
+        "chunk_index": int(chunk_index),
+        "processed_parent_count": int(processed_parent_count),
+        "raw_generated_count": int(raw_generated_count),
+        "rss_gb": _rss_gb(),
+        "cuda_allocated_gb": cuda_allocated,
+        "cuda_reserved_gb": cuda_reserved,
+    }
+    print(
+        "[GLOBALGCE_MEMORY] "
+        + " ".join(f"{key}={value}" for key, value in payload.items()),
+        flush=True,
+    )
+    return payload
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -388,6 +518,20 @@ def _file_identity(path_like: str | Path) -> dict[str, Any]:
     if path.is_file():
         payload["sha256"] = _sha256_file(path)
     return payload
+
+
+def _git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
 
 
 def _bool_value(value: Any) -> bool:
@@ -1542,6 +1686,69 @@ def validate_globalgce_generation_loader(dataloader: Any) -> int:
     )
 
 
+class _AugmentedGenerationChunk:
+    """Index-only view over one parent chunk of the augmented dataset."""
+
+    def __init__(
+        self,
+        augmented_dataset: Any,
+        native_dataset: Any,
+        row_indices: Sequence[int],
+    ) -> None:
+        self.augmented_dataset = augmented_dataset
+        self.dataset = native_dataset
+        self.row_indices = tuple(int(index) for index in row_indices)
+        _validated_max_num_nodes(
+            native_dataset,
+            role="chunk generation underlying native dataset",
+        )
+
+    def __len__(self) -> int:
+        return len(self.row_indices)
+
+    def __getitem__(self, index: int) -> Any:
+        return self.augmented_dataset[self.row_indices[int(index)]]
+
+
+def _detach_tensor_tree(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _detach_tensor_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_detach_tensor_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_detach_tensor_tree(item) for item in value)
+    if hasattr(value, "detach") and callable(value.detach):
+        return value.detach()
+    return value
+
+
+def _augmented_rows_by_source_parent(
+    augmented_dataset: Any,
+    source_expansion_order: Sequence[int],
+    parent_count: int,
+) -> list[list[int]]:
+    rows_by_parent = [[] for _ in range(int(parent_count))]
+    graph_indices = augmented_dataset.graph_idx_list
+    for augmented_index in range(len(augmented_dataset)):
+        source_position = int(graph_indices[augmented_index])
+        if (
+            source_position < 0
+            or source_position >= len(source_expansion_order)
+        ):
+            raise RuntimeError(
+                "Official GlobalGCE augmented dataset contains invalid source "
+                f"position {source_position}."
+            )
+        source_index = int(source_expansion_order[source_position])
+        if source_index < 0 or source_index >= int(parent_count):
+            raise RuntimeError(
+                "Official GlobalGCE augmented dataset maps outside the selected "
+                f"parent cohort: source_index={source_index}."
+            )
+        rows_by_parent[source_index].append(augmented_index)
+    return rows_by_parent
+
+
 def _prepare_native_and_source_datasets(
     *,
     native_train_csv: Path,
@@ -1706,8 +1913,27 @@ class OfficialGlobalGCEMutagenicityGenerator:
         dropout: float,
         device: str,
         resume: bool,
+        generation_chunk_size: int = 32,
+        generation_num_workers: int = 0,
+        memory_log_every_chunks: int = 1,
+        start_parent_offset: int = 0,
+        on_training_ready: Callable[[dict[str, Any]], None] | None = None,
+        on_chunk: (
+            Callable[[int, int, int, list[dict[str, Any]]], None] | None
+        ) = None,
     ) -> NativeGenerationResult:
-        del resume
+        if int(generation_chunk_size) <= 0:
+            raise ValueError("generation_chunk_size must be positive.")
+        if int(generation_num_workers) < 0:
+            raise ValueError("generation_num_workers must be non-negative.")
+        if int(memory_log_every_chunks) <= 0:
+            raise ValueError("memory_log_every_chunks must be positive.")
+        if int(start_parent_offset) < 0 or int(start_parent_offset) > len(
+            parents
+        ):
+            raise ValueError(
+                "start_parent_offset must be within the selected parent cohort."
+            )
         if not self.native_train_csv.is_file():
             raise FileNotFoundError(
                 "Official GlobalGCE requires the current two-class processed train "
@@ -1753,6 +1979,54 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         _write_json(output_dir / "source_codec_summary.json", codec_summary)
         require_source_codec_gate(codec_summary)
+        gnn_checkpoint = output_dir / "native_gnn.pt"
+        model_checkpoint = output_dir / "globalgce_model.pt"
+        rules_checkpoint = output_dir / "globalgce_rules.pt"
+        frequent_subgraphs = output_dir / "frequent_subgraphs.pkl"
+        training_state_path = output_dir / "training_core_summary.json"
+        can_resume_trained_model = bool(
+            resume
+            and training_state_path.is_file()
+            and gnn_checkpoint.is_file()
+            and model_checkpoint.is_file()
+            and rules_checkpoint.is_file()
+        )
+        training_state = (
+            _read_json(training_state_path)
+            if can_resume_trained_model
+            else {}
+        )
+        if can_resume_trained_model:
+            expected_state = {
+                "seed": int(seed),
+                "epochs": int(epochs),
+                "top_k_native": int(top_k_native),
+                "learning_rate": float(learning_rate),
+                "dropout": float(dropout),
+                "selected_parent_count": len(parents),
+            }
+            for key, expected in expected_state.items():
+                if training_state.get(key) != expected:
+                    raise ValueError(
+                        "GlobalGCE trained-model resume configuration mismatch "
+                        f"for {key}: actual={training_state.get(key)!r}, "
+                        f"expected={expected!r}."
+                    )
+            for path, hash_key in (
+                (gnn_checkpoint, "gnn_checkpoint_sha256"),
+                (
+                    model_checkpoint,
+                    "globalgce_model_checkpoint_sha256",
+                ),
+                (rules_checkpoint, "rules_checkpoint_sha256"),
+            ):
+                actual_hash = _sha256_file(path)
+                if training_state.get(hash_key) != actual_hash:
+                    raise ValueError(
+                        "GlobalGCE trained-model resume checkpoint hash "
+                        f"mismatch for {path.name}: actual={actual_hash}, "
+                        f"expected={training_state.get(hash_key)!r}."
+                    )
         native_train_loader = DataLoader(
             Subset(native_dataset, native_train_idx),
             batch_size=128,
@@ -1764,7 +2038,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
             batch_size=128,
             shuffle=False,
         )
-        gnn_checkpoint = output_dir / "native_gnn.pt"
         gnn_model = modules["GTGNN"](
             native_dataset.node_feat_dim,
             32,
@@ -1773,46 +2046,69 @@ class OfficialGlobalGCEMutagenicityGenerator:
             resolved_device,
             str(gnn_checkpoint),
         ).to(resolved_device)
-        gnn_summary = _train_native_gnn(
-            gnn_model,
-            native_train_loader,
-            native_val_loader,
-            torch_module=torch,
-            epochs=int(epochs),
-            learning_rate=float(learning_rate),
-            checkpoint=gnn_checkpoint,
-        )
+        if can_resume_trained_model:
+            gnn_model.load_state_dict(
+                torch.load(gnn_checkpoint, map_location=resolved_device)
+            )
+            gnn_summary = dict(training_state.get("gnn_training") or {})
+        else:
+            gnn_summary = _train_native_gnn(
+                gnn_model,
+                native_train_loader,
+                native_val_loader,
+                torch_module=torch,
+                epochs=int(epochs),
+                learning_rate=float(learning_rate),
+                checkpoint=gnn_checkpoint,
+            )
         gnn_model.eval()
         for parameter in gnn_model.parameters():
             parameter.requires_grad_(False)
 
-        source_prediction_loader = DataLoader(
-            source_dataset,
-            batch_size=500,
-            shuffle=False,
-        )
-        native_source_indices: set[int] = set()
-        with torch.no_grad():
-            for batch in source_prediction_loader:
-                predictions = gnn_model(
-                    batch["feature"].to(resolved_device),
-                    batch["adj"].to(resolved_device),
-                    batch["edge_attr"].to(resolved_device),
-                )["y_pred"].argmax(-1).cpu()
-                native_source_indices.update(
-                    int(index)
-                    for index, prediction in zip(
-                        batch["index"].tolist(),
-                        predictions.tolist(),
+        if can_resume_trained_model:
+            source_train_idx = [
+                int(index)
+                for index in training_state["source_train_idx"]
+            ]
+            source_val_idx = [
+                int(index)
+                for index in training_state["source_val_idx"]
+            ]
+            native_source_indices = set(
+                source_train_idx + source_val_idx
+            )
+        else:
+            source_prediction_loader = DataLoader(
+                source_dataset,
+                batch_size=500,
+                shuffle=False,
+            )
+            native_source_indices = set()
+            with torch.no_grad():
+                for batch in source_prediction_loader:
+                    predictions = gnn_model(
+                        batch["feature"].to(resolved_device),
+                        batch["adj"].to(resolved_device),
+                        batch["edge_attr"].to(resolved_device),
+                    )["y_pred"].argmax(-1).cpu()
+                    native_source_indices.update(
+                        int(index)
+                        for index, prediction in zip(
+                            batch["index"].tolist(),
+                            predictions.tolist(),
+                        )
+                        if int(prediction) == 0
                     )
-                    if int(prediction) == 0
-                )
-        source_train_idx = [
-            index for index in source_train_idx if index in native_source_indices
-        ]
-        source_val_idx = [
-            index for index in source_val_idx if index in native_source_indices
-        ]
+            source_train_idx = [
+                index
+                for index in source_train_idx
+                if index in native_source_indices
+            ]
+            source_val_idx = [
+                index
+                for index in source_val_idx
+                if index in native_source_indices
+            ]
         if not source_train_idx or not source_val_idx:
             raise RuntimeError(
                 "Native GlobalGCE GNN did not retain both internal train and "
@@ -1831,9 +2127,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
             batch_size=500,
             shuffle=False,
         )
-        model_checkpoint = output_dir / "globalgce_model.pt"
-        rules_checkpoint = output_dir / "globalgce_rules.pt"
-        frequent_subgraphs = output_dir / "frequent_subgraphs.pkl"
         globalgce_model = modules["GlobalGCE"](
             source_dataset.node_feat_dim,
             64,
@@ -1848,18 +2141,82 @@ class OfficialGlobalGCEMutagenicityGenerator:
             resolved_device,
             gnn_model,
         ).to(resolved_device)
-        augmented_test_loader = modules["train_globalgce"](
-            int(epochs),
-            gnn_model,
-            globalgce_model,
-            float(learning_rate),
-            source_train_loader,
-            source_val_loader,
-            str(rules_checkpoint),
-            str(model_checkpoint),
-        )
+        if can_resume_trained_model:
+            random.seed(int(seed))
+            frozen_rules = torch.load(
+                rules_checkpoint,
+                map_location=resolved_device,
+            )
+            frozen_features = frozen_rules["feat"].detach().cpu()
+            frozen_adjacencies = frozen_rules["adj"].detach().cpu()
+            frozen_edges = (
+                frozen_rules["edge_attr"].detach().cpu()
+                if frozen_rules.get("edge_attr") is not None
+                else None
+            )
+            official_utils = importlib.import_module("utils")
+            frozen_subgraphs = {}
+            for rule_index in range(len(frozen_features)):
+                frozen_subgraphs[rule_index] = official_utils.get_nx_graph(
+                    frozen_features[rule_index].argmax(-1),
+                    frozen_adjacencies[rule_index],
+                    (
+                        frozen_edges[rule_index].argmax(-1)
+                        if frozen_edges is not None
+                        else None
+                    ),
+                )
+            graph_sizes = [
+                graph.number_of_nodes()
+                for graph in frozen_subgraphs.values()
+            ]
+            globalgce_model.fsg.fs_max_nodes = max(graph_sizes)
+            globalgce_model.fsg.fs_min_nodes = min(graph_sizes)
+            augmented_dataset = globalgce_model.fsg.expand_data_by_fs(
+                source_dataset,
+                frozen_subgraphs,
+            )
+            globalgce_model.create_decoders()
+            globalgce_model.load_state_dict(
+                torch.load(model_checkpoint, map_location=resolved_device)
+            )
+            gnn_summary = dict(training_state.get("gnn_training") or {})
+        else:
+            augmented_test_loader = modules["train_globalgce"](
+                int(epochs),
+                gnn_model,
+                globalgce_model,
+                float(learning_rate),
+                source_train_loader,
+                source_val_loader,
+                str(rules_checkpoint),
+                str(model_checkpoint),
+            )
+            augmented_dataset = augmented_test_loader.dataset.dataset
+            _write_json(
+                training_state_path,
+                {
+                    "seed": int(seed),
+                    "epochs": int(epochs),
+                    "top_k_native": int(top_k_native),
+                    "learning_rate": float(learning_rate),
+                    "dropout": float(dropout),
+                    "selected_parent_count": len(parents),
+                    "source_train_idx": list(source_train_idx),
+                    "source_val_idx": list(source_val_idx),
+                    "gnn_training": gnn_summary,
+                    "gnn_checkpoint_sha256": _sha256_file(gnn_checkpoint),
+                    "globalgce_model_checkpoint_sha256": _sha256_file(
+                        model_checkpoint
+                    ),
+                    "rules_checkpoint_sha256": _sha256_file(rules_checkpoint),
+                    "trained_once": True,
+                    "rule_selection_performed_once": True,
+                },
+            )
         rules = torch.load(rules_checkpoint, map_location=resolved_device)
-        augmented_dataset = augmented_test_loader.dataset.dataset
+        rules = _detach_tensor_tree(rules)
+        globalgce_model.eval()
         attach_globalgce_generation_dataset(
             augmented_dataset,
             source_dataset,
@@ -1869,61 +2226,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
             + list(source_dataset.val_idx)
             + list(source_dataset.test_idx)
         )
-        all_augmented_loader = DataLoader(
-            augmented_dataset,
-            batch_size=500,
-            shuffle=False,
-        )
-        validate_globalgce_generation_loader(all_augmented_loader)
-        cf_feat, cf_adj, cf_edge, graph_idx = modules["generate_cfs"](
-            all_augmented_loader,
-            rules,
-            resolved_device,
-        )
-        ranks: dict[str, int] = defaultdict(int)
-        records: list[dict[str, Any]] = []
         codec_metadata = GlobalGCECodecMetadata.from_dataset(source_dataset)
         native_run_id = (
             f"mutagenicity_seed{seed}_epochs{epochs}_topk{top_k_native}"
         )
-        for index in range(len(cf_feat)):
-            source_position = int(graph_idx[index])
-            if source_position < 0 or source_position >= len(source_expansion_order):
-                raise RuntimeError(
-                    "Official GlobalGCE returned invalid augmented source "
-                    f"position {source_position}."
-                )
-            source_index = source_expansion_order[source_position]
-            parent = parents[source_index]
-            ranks[parent.parent_id] += 1
-            conversion = decode_globalgce_molecule(
-                cf_feat[index],
-                cf_adj[index],
-                cf_edge[index] if cf_edge is not None else None,
-                metadata=codec_metadata,
-                graph_role="generated",
-                source_atom_attributes=(
-                    source_dataset.source_atom_attributes[source_index]
-                ),
-            )
-            records.append(
-                {
-                    "raw_smiles": conversion.smiles,
-                    "source_parent_id": parent.parent_id,
-                    "source_parent_smiles": parent.smiles,
-                    "source_split": "train",
-                    "generator_method": GENERATOR_METHOD,
-                    "generator_rank": ranks[parent.parent_id],
-                    "generator_score": -float(ranks[parent.parent_id]),
-                    "native_rule_id": f"official_rule_application_{ranks[parent.parent_id]}",
-                    "native_run_id": native_run_id,
-                    "native_conversion_ok": bool(conversion.ok),
-                    "native_codec_decoded": bool(conversion.codec_decoded),
-                    "native_conversion_error_type": conversion.error_type,
-                    "native_conversion_error": conversion.error_message,
-                    "native_graph_record": conversion.graph_record,
-                }
-            )
         training_summary = {
             "official_entrypoints": [
                 "data.data_preprocess-compatible dense molecular tensors",
@@ -1951,15 +2257,169 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "globalgce_model_checkpoint": str(model_checkpoint.resolve()),
             "rules_checkpoint": str(rules_checkpoint.resolve()),
             "frequent_subgraphs_path": str(frequent_subgraphs.resolve()),
-            "raw_generated_rows": len(records),
+            "raw_generated_rows": 0,
             "native_source_parent_count": len(native_source_indices),
+            "generation_chunk_size": int(generation_chunk_size),
+            "generation_num_workers": int(generation_num_workers),
+            "generation_uses_inference_mode": True,
+            "generation_requires_gradients": False,
+            "trained_model_resumed": can_resume_trained_model,
             **codec_summary,
             "saved_results_candidates_used": False,
             "generation_input_split": "train",
             "calibration_loaded": False,
             "test_loaded": False,
         }
-        return NativeGenerationResult(records, training_summary)
+        log_globalgce_phase_memory(
+            phase="training_and_rule_selection_ready",
+            chunk_index=-1,
+            processed_parent_count=0,
+            raw_generated_count=0,
+            torch_module=torch,
+        )
+        if on_training_ready is not None:
+            on_training_ready(dict(training_summary))
+
+        rows_by_parent = _augmented_rows_by_source_parent(
+            augmented_dataset,
+            source_expansion_order,
+            len(parents),
+        )
+        all_records: list[dict[str, Any]] = []
+        generated_this_call = 0
+        total_chunks = math.ceil(len(parents) / int(generation_chunk_size))
+        for parent_start in range(
+            int(start_parent_offset),
+            len(parents),
+            int(generation_chunk_size),
+        ):
+            parent_end = min(
+                len(parents),
+                parent_start + int(generation_chunk_size),
+            )
+            chunk_index = parent_start // int(generation_chunk_size)
+            augmented_row_indices = [
+                row_index
+                for parent_index in range(parent_start, parent_end)
+                for row_index in rows_by_parent[parent_index]
+            ]
+            chunk_records: list[dict[str, Any]] = []
+            if augmented_row_indices:
+                chunk_dataset = _AugmentedGenerationChunk(
+                    augmented_dataset,
+                    source_dataset,
+                    augmented_row_indices,
+                )
+                chunk_loader = DataLoader(
+                    chunk_dataset,
+                    batch_size=500,
+                    shuffle=False,
+                    num_workers=int(generation_num_workers),
+                    persistent_workers=False,
+                )
+                validate_globalgce_generation_loader(chunk_loader)
+                with torch.inference_mode():
+                    cf_feat, cf_adj, cf_edge, graph_idx = modules[
+                        "generate_cfs"
+                    ](
+                        chunk_loader,
+                        rules,
+                        resolved_device,
+                    )
+                ranks: dict[str, int] = defaultdict(int)
+                for index in range(len(cf_feat)):
+                    source_position = int(graph_idx[index])
+                    if (
+                        source_position < 0
+                        or source_position >= len(source_expansion_order)
+                    ):
+                        raise RuntimeError(
+                            "Official GlobalGCE returned invalid augmented "
+                            f"source position {source_position}."
+                        )
+                    source_index = source_expansion_order[source_position]
+                    parent = parents[source_index]
+                    ranks[parent.parent_id] += 1
+                    conversion = decode_globalgce_molecule(
+                        cf_feat[index].detach(),
+                        cf_adj[index].detach(),
+                        (
+                            cf_edge[index].detach()
+                            if cf_edge is not None
+                            else None
+                        ),
+                        metadata=codec_metadata,
+                        graph_role="generated",
+                        source_atom_attributes=(
+                            source_dataset.source_atom_attributes[source_index]
+                        ),
+                    )
+                    chunk_records.append(
+                        {
+                            "raw_smiles": conversion.smiles,
+                            "source_parent_id": parent.parent_id,
+                            "source_parent_smiles": parent.smiles,
+                            "source_split": "train",
+                            "generator_method": GENERATOR_METHOD,
+                            "generator_rank": ranks[parent.parent_id],
+                            "generator_score": -float(
+                                ranks[parent.parent_id]
+                            ),
+                            "native_rule_id": (
+                                "official_rule_application_"
+                                f"{ranks[parent.parent_id]}"
+                            ),
+                            "native_run_id": native_run_id,
+                            "native_conversion_ok": bool(conversion.ok),
+                            "native_codec_decoded": bool(
+                                conversion.codec_decoded
+                            ),
+                            "native_conversion_error_type": (
+                                conversion.error_type
+                            ),
+                            "native_conversion_error": (
+                                conversion.error_message
+                            ),
+                            "native_graph_record": conversion.graph_record,
+                        }
+                    )
+                del cf_feat, cf_adj, cf_edge, graph_idx
+                del chunk_loader, chunk_dataset
+            generated_this_call += len(chunk_records)
+            if on_chunk is not None:
+                on_chunk(
+                    chunk_index,
+                    parent_start,
+                    parent_end,
+                    chunk_records,
+                )
+            else:
+                all_records.extend(chunk_records)
+            del chunk_records, augmented_row_indices
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if (
+                chunk_index % int(memory_log_every_chunks) == 0
+                or chunk_index + 1 == total_chunks
+            ):
+                log_globalgce_phase_memory(
+                    phase="generation_chunk_complete",
+                    chunk_index=chunk_index,
+                    processed_parent_count=parent_end,
+                    raw_generated_count=generated_this_call,
+                    torch_module=torch,
+                )
+        training_summary["raw_generated_rows"] = generated_this_call
+        training_summary["generation_chunk_count"] = max(
+            0,
+            total_chunks
+            - (
+                int(start_parent_offset)
+                // int(generation_chunk_size)
+            ),
+        )
+        return NativeGenerationResult(all_records, training_summary)
 
 
 def _stratified_native_split(
@@ -1995,6 +2455,7 @@ def _annotate_and_filter_candidates(
     parents: Sequence[TrainParent],
     teacher: TeacherProtocol,
     seed: int,
+    raw_index_offset: int = 0,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -2007,7 +2468,8 @@ def _annotate_and_filter_candidates(
     invalid_rows: list[dict[str, Any]] = []
     non_target_rows: list[dict[str, Any]] = []
     eligible_by_parent: dict[tuple[str, str], dict[str, Any]] = {}
-    for raw_index, source in enumerate(native_records):
+    for local_raw_index, source in enumerate(native_records):
+        raw_index = int(raw_index_offset) + local_raw_index
         parent_id = str(source.get("source_parent_id") or "").strip()
         if parent_id not in parent_by_id:
             raise ValueError(
@@ -2092,13 +2554,45 @@ def _annotate_and_filter_candidates(
             str(row["canonical_smiles"]),
         ),
     )
+    universe = _candidate_universe_from_pool(pool_rows, seed=seed)
+    return raw_rows, pool_rows, universe, invalid_rows, non_target_rows
+
+
+def _deduplicate_candidate_pool(
+    rows: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    eligible_by_parent: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("source_parent_id") or ""),
+            str(row.get("canonical_smiles") or ""),
+        )
+        if key not in eligible_by_parent:
+            eligible_by_parent[key] = dict(row)
+    return sorted(
+        eligible_by_parent.values(),
+        key=lambda row: (
+            str(row["source_parent_id"]),
+            int(row["generator_rank"]),
+            str(row["canonical_smiles"]),
+        ),
+    )
+
+
+def _candidate_universe_from_pool(
+    pool_rows: Sequence[dict[str, Any]],
+    *,
+    seed: int,
+) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in pool_rows:
         grouped[str(row["canonical_smiles"])].append(row)
     universe: list[dict[str, Any]] = []
     for canonical in sorted(grouped):
         occurrences = grouped[canonical]
-        source_ids = sorted({str(row["source_parent_id"]) for row in occurrences})
+        source_ids = sorted(
+            {str(row["source_parent_id"]) for row in occurrences}
+        )
         representative = occurrences[0]
         universe.append(
             {
@@ -2117,7 +2611,38 @@ def _annotate_and_filter_candidates(
                 "seed": int(seed),
             }
         )
-    return raw_rows, pool_rows, universe, invalid_rows, non_target_rows
+    return universe
+
+
+def _raw_candidate_counts(path: Path) -> dict[str, int]:
+    counts = {
+        "raw_generated_rows": 0,
+        "generated_codec_decoded_rows": 0,
+        "generated_rdkit_valid_rows": 0,
+        "teacher_target_rows": 0,
+        "generated_invalid_valence_rows": 0,
+        "generated_attribute_ambiguous_rows": 0,
+        "generated_sanitize_failure_rows": 0,
+    }
+    for row in _iter_jsonl(path):
+        counts["raw_generated_rows"] += 1
+        counts["generated_codec_decoded_rows"] += int(
+            _bool_value(row.get("native_codec_decoded"))
+        )
+        counts["generated_rdkit_valid_rows"] += int(
+            _bool_value(row.get("rdkit_parse_ok"))
+        )
+        counts["teacher_target_rows"] += int(
+            _bool_value(row.get("teacher_target_ok"))
+        )
+        reason = str(row.get("invalid_reason") or "")
+        if reason == "generated_invalid_valence":
+            counts["generated_invalid_valence_rows"] += 1
+        elif reason == "generated_attribute_ambiguous":
+            counts["generated_attribute_ambiguous_rows"] += 1
+        elif reason == "generated_sanitize_failure":
+            counts["generated_sanitize_failure_rows"] += 1
+    return counts
 
 
 def _config_fingerprint(payload: dict[str, Any]) -> str:
@@ -2141,6 +2666,12 @@ def build_mutagenicity_train_pool(
         raise ValueError("dropout must be in [0, 1).")
     if float(resolved.learning_rate) <= 0.0:
         raise ValueError("learning_rate must be positive.")
+    if int(resolved.generation_chunk_size) <= 0:
+        raise ValueError("generation_chunk_size must be positive.")
+    if int(resolved.generation_num_workers) < 0:
+        raise ValueError("generation_num_workers must be non-negative.")
+    if int(resolved.memory_log_every_chunks) <= 0:
+        raise ValueError("memory_log_every_chunks must be positive.")
     train_path = Path(train_csv).expanduser().resolve()
     teacher_file = Path(teacher_path).expanduser().resolve()
     official_src = _resolve_official_src(official_root)
@@ -2171,6 +2702,11 @@ def build_mutagenicity_train_pool(
         "dropout": float(resolved.dropout),
         "device": str(resolved.device),
         "forbid_calibration_test": bool(resolved.forbid_calibration_test),
+        "generation_chunk_size": int(resolved.generation_chunk_size),
+        "generation_num_workers": int(resolved.generation_num_workers),
+        "memory_log_every_chunks": int(
+            resolved.memory_log_every_chunks
+        ),
         "native_generator": (
             generator.config_identity()
             if callable(getattr(generator, "config_identity", None))
@@ -2224,16 +2760,235 @@ def build_mutagenicity_train_pool(
         )
 
     raw_path = destination / "raw_generated_candidates.jsonl"
+    invalid_path = destination / "invalid_candidates.jsonl"
+    non_target_path = destination / "non_target_candidates.jsonl"
+    pool_path = destination / "candidate_pool.jsonl"
+    part_paths = {
+        "raw": raw_path.with_suffix(raw_path.suffix + ".part"),
+        "invalid": invalid_path.with_suffix(invalid_path.suffix + ".part"),
+        "non_target": non_target_path.with_suffix(
+            non_target_path.suffix + ".part"
+        ),
+        "pool": pool_path.with_suffix(pool_path.suffix + ".part"),
+    }
+    generation_checkpoint_path = (
+        destination / "generation_resume_checkpoint.json"
+    )
     training_path = destination / "training_summary.json"
-    checkpoint = _read_json(checkpoint_path)
-    if (
-        checkpoint.get("stage") in {"generated", "complete"}
-        and raw_path.is_file()
-        and training_path.is_file()
-    ):
-        native_records = _read_jsonl(raw_path)
-        training_summary = _read_json(training_path)
+    generation_state: dict[str, Any]
+    if generation_checkpoint_path.is_file():
+        generation_state = _read_json(generation_checkpoint_path)
+        expected_resume = {
+            "config_hash": fingerprint,
+            "train_cohort_hash": cohort_hash,
+            "selected_cohort_hash": selected_hash,
+            "generation_chunk_size": int(resolved.generation_chunk_size),
+        }
+        for key, expected in expected_resume.items():
+            if generation_state.get(key) != expected:
+                raise ValueError(
+                    "Generation resume configuration/hash mismatch for "
+                    f"{key}: actual={generation_state.get(key)!r}, "
+                    f"expected={expected!r}."
+                )
+        recorded_model_hash = generation_state.get(
+            "model_checkpoint_hash"
+        )
+        model_checkpoint = (
+            destination / "native" / "globalgce_model.pt"
+        )
+        if recorded_model_hash is not None:
+            if not model_checkpoint.is_file():
+                raise ValueError(
+                    "Generation resume checkpoint records a trained model hash "
+                    f"but the checkpoint is missing: {model_checkpoint}"
+                )
+            actual_model_hash = _sha256_file(model_checkpoint)
+            if actual_model_hash != recorded_model_hash:
+                raise ValueError(
+                    "Generation resume model checkpoint hash mismatch: "
+                    f"actual={actual_model_hash}, "
+                    f"expected={recorded_model_hash}."
+                )
+        for name, final_path in (
+            ("raw", raw_path),
+            ("invalid", invalid_path),
+            ("non_target", non_target_path),
+            ("pool", pool_path),
+        ):
+            if not part_paths[name].exists() and final_path.exists():
+                os.replace(final_path, part_paths[name])
+        _truncate_jsonl(
+            part_paths["raw"],
+            int(generation_state.get("raw_generated_rows") or 0),
+        )
+        _truncate_jsonl(
+            part_paths["invalid"],
+            int(generation_state.get("invalid_rows") or 0),
+        )
+        _truncate_jsonl(
+            part_paths["non_target"],
+            int(generation_state.get("non_target_rows") or 0),
+        )
+        _truncate_jsonl(
+            part_paths["pool"],
+            int(generation_state.get("candidate_pool_rows") or 0),
+        )
     else:
+        stale_parts = [
+            str(path)
+            for path in part_paths.values()
+            if path.exists() and path.stat().st_size > 0
+        ]
+        if stale_parts:
+            raise ValueError(
+                "Generation part files exist without a valid "
+                f"generation_resume_checkpoint.json: {stale_parts}"
+            )
+        for path in part_paths.values():
+            _write_jsonl(path, [])
+        generation_state = {
+            "config_hash": fingerprint,
+            "train_cohort_hash": cohort_hash,
+            "selected_cohort_hash": selected_hash,
+            "model_checkpoint_hash": None,
+            "completed_chunk_count": 0,
+            "next_parent_offset": 0,
+            "raw_generated_rows": 0,
+            "invalid_rows": 0,
+            "non_target_rows": 0,
+            "candidate_pool_rows": 0,
+            "git_commit": _git_commit(),
+            "generation_chunk_size": int(resolved.generation_chunk_size),
+            "run_complete": False,
+            "updated_at": _utc_now(),
+        }
+        _write_json(generation_checkpoint_path, generation_state)
+
+    start_parent_offset = int(
+        generation_state.get("next_parent_offset") or 0
+    )
+    if start_parent_offset < 0 or start_parent_offset > len(selected_parents):
+        raise ValueError(
+            "Generation resume next_parent_offset is outside the selected "
+            f"cohort: {start_parent_offset}."
+        )
+    training_summary_holder: dict[str, Any] = (
+        _read_json(training_path) if training_path.is_file() else {}
+    )
+    chunks_consumed = 0
+
+    def _model_checkpoint_hash() -> str | None:
+        model_path = destination / "native" / "globalgce_model.pt"
+        return _sha256_file(model_path) if model_path.is_file() else None
+
+    def _training_ready(summary_payload: dict[str, Any]) -> None:
+        training_summary_holder.clear()
+        training_summary_holder.update(summary_payload)
+        _write_json(training_path, training_summary_holder)
+        generation_state["model_checkpoint_hash"] = (
+            _model_checkpoint_hash()
+        )
+        generation_state["updated_at"] = _utc_now()
+        _write_json(generation_checkpoint_path, generation_state)
+
+    def _consume_chunk(
+        chunk_index: int,
+        parent_start: int,
+        parent_end: int,
+        native_records: list[dict[str, Any]],
+    ) -> None:
+        nonlocal chunks_consumed
+        expected_start = int(
+            generation_state.get("next_parent_offset") or 0
+        )
+        if int(parent_start) != expected_start:
+            raise RuntimeError(
+                "Generation chunk parent offset mismatch: "
+                f"expected={expected_start}, actual={parent_start}."
+            )
+        (
+            raw_chunk,
+            pool_chunk,
+            _universe_chunk,
+            invalid_chunk,
+            non_target_chunk,
+        ) = _annotate_and_filter_candidates(
+            native_records,
+            parents=selected_parents,
+            teacher=teacher,
+            seed=int(resolved.seed),
+            raw_index_offset=int(
+                generation_state.get("raw_generated_rows") or 0
+            ),
+        )
+        _append_jsonl(part_paths["raw"], raw_chunk)
+        _append_jsonl(part_paths["invalid"], invalid_chunk)
+        _append_jsonl(part_paths["non_target"], non_target_chunk)
+        _append_jsonl(part_paths["pool"], pool_chunk)
+        generation_state.update(
+            {
+                "model_checkpoint_hash": (
+                    _model_checkpoint_hash()
+                    or generation_state.get("model_checkpoint_hash")
+                ),
+                "completed_chunk_count": int(
+                    generation_state.get("completed_chunk_count") or 0
+                )
+                + 1,
+                "next_parent_offset": int(parent_end),
+                "raw_generated_rows": int(
+                    generation_state.get("raw_generated_rows") or 0
+                )
+                + len(raw_chunk),
+                "invalid_rows": int(
+                    generation_state.get("invalid_rows") or 0
+                )
+                + len(invalid_chunk),
+                "non_target_rows": int(
+                    generation_state.get("non_target_rows") or 0
+                )
+                + len(non_target_chunk),
+                "candidate_pool_rows": int(
+                    generation_state.get("candidate_pool_rows") or 0
+                )
+                + len(pool_chunk),
+                "last_chunk_index": int(chunk_index),
+                "run_complete": False,
+                "updated_at": _utc_now(),
+            }
+        )
+        _write_json(generation_checkpoint_path, generation_state)
+        _write_json(
+            checkpoint_path,
+            {
+                "config_fingerprint": fingerprint,
+                "stage": "generating_chunks",
+                "next_parent_offset": int(parent_end),
+                "raw_generated_rows": generation_state[
+                    "raw_generated_rows"
+                ],
+                "run_complete": False,
+                "updated_at": _utc_now(),
+            },
+        )
+        chunks_consumed += 1
+        if (
+            int(chunk_index) % int(resolved.memory_log_every_chunks) == 0
+            or int(parent_end) == len(selected_parents)
+        ):
+            log_globalgce_phase_memory(
+                phase="chunk_annotated_and_flushed",
+                chunk_index=int(chunk_index),
+                processed_parent_count=int(parent_end),
+                raw_generated_count=int(
+                    generation_state["raw_generated_rows"]
+                ),
+            )
+        del raw_chunk, pool_chunk, invalid_chunk, non_target_chunk
+
+    result: NativeGenerationResult
+    if start_parent_offset < len(selected_parents):
         result = generator.generate(
             selected_parents,
             output_dir=destination / "native",
@@ -2244,60 +2999,95 @@ def build_mutagenicity_train_pool(
             dropout=float(resolved.dropout),
             device=str(resolved.device),
             resume=bool(resolved.resume),
+            generation_chunk_size=int(resolved.generation_chunk_size),
+            generation_num_workers=int(resolved.generation_num_workers),
+            memory_log_every_chunks=int(
+                resolved.memory_log_every_chunks
+            ),
+            start_parent_offset=start_parent_offset,
+            on_training_ready=_training_ready,
+            on_chunk=_consume_chunk,
         )
-        native_records = list(result.records)
-        training_summary = dict(result.training_summary)
-        # Persist unannotated native output first; it is replaced by the full raw audit below.
-        _write_jsonl(raw_path, native_records)
-        _write_json(training_path, training_summary)
-        _write_json(
-            checkpoint_path,
-            {
-                "config_fingerprint": fingerprint,
-                "stage": "generated",
-                "raw_generated_rows": len(native_records),
-                "run_complete": False,
-                "updated_at": _utc_now(),
-            },
+        training_summary_holder.update(result.training_summary)
+        if result.records:
+            if start_parent_offset != 0 or chunks_consumed:
+                raise RuntimeError(
+                    "Legacy non-streaming generator returned records after "
+                    "chunked generation had already started."
+                )
+            _consume_chunk(
+                0,
+                0,
+                len(selected_parents),
+                list(result.records),
+            )
+        elif chunks_consumed == 0:
+            _consume_chunk(
+                start_parent_offset
+                // int(resolved.generation_chunk_size),
+                start_parent_offset,
+                len(selected_parents),
+                [],
+            )
+        _write_json(training_path, training_summary_holder)
+    elif not training_summary_holder:
+        native_training_state = (
+            destination / "native" / "training_core_summary.json"
         )
+        if not native_training_state.is_file():
+            raise ValueError(
+                "Generation rows are complete but training_summary.json is "
+                "missing, and no native training state is available."
+            )
+        training_summary_holder.update(_read_json(native_training_state))
+        _write_json(training_path, training_summary_holder)
 
-    raw_rows, pool_rows, universe, invalid_rows, non_target_rows = (
-        _annotate_and_filter_candidates(
-            native_records,
-            parents=selected_parents,
-            teacher=teacher,
-            seed=int(resolved.seed),
+    if int(generation_state.get("next_parent_offset") or 0) != len(
+        selected_parents
+    ):
+        raise RuntimeError(
+            "Chunked generation ended before every selected parent was "
+            f"processed: next={generation_state.get('next_parent_offset')}, "
+            f"expected={len(selected_parents)}."
         )
+    training_summary = dict(training_summary_holder)
+    training_summary["raw_generated_rows"] = int(
+        generation_state.get("raw_generated_rows") or 0
     )
-    _write_jsonl(raw_path, raw_rows)
-    _write_jsonl(destination / "candidate_pool.jsonl", pool_rows)
+    _write_json(training_path, training_summary)
+
+    for name, final_path in (
+        ("raw", raw_path),
+        ("invalid", invalid_path),
+        ("non_target", non_target_path),
+    ):
+        os.replace(part_paths[name], final_path)
+    pool_rows = _deduplicate_candidate_pool(
+        _iter_jsonl(part_paths["pool"])
+    )
+    universe = _candidate_universe_from_pool(
+        pool_rows,
+        seed=int(resolved.seed),
+    )
+    _write_jsonl(pool_path, pool_rows)
     _write_jsonl(destination / "candidate_universe.jsonl", universe)
-    _write_jsonl(destination / "invalid_candidates.jsonl", invalid_rows)
-    _write_jsonl(destination / "non_target_candidates.jsonl", non_target_rows)
+    part_paths["pool"].unlink(missing_ok=True)
     source_parent_ids = {str(row["source_parent_id"]) for row in pool_rows}
-    generated_valid_rows = sum(
-        _bool_value(row["rdkit_parse_ok"]) for row in raw_rows
-    )
-    generated_decoded_rows = sum(
-        _bool_value(row.get("native_codec_decoded")) for row in raw_rows
-    )
-    generated_invalid_valence_rows = sum(
-        str(row.get("invalid_reason") or "")
-        == "generated_invalid_valence"
-        for row in raw_rows
-    )
-    generated_attribute_ambiguous_rows = sum(
-        str(row.get("invalid_reason") or "")
-        == "generated_attribute_ambiguous"
-        for row in raw_rows
-    )
-    generated_sanitize_failure_rows = sum(
-        str(row.get("invalid_reason") or "")
-        == "generated_sanitize_failure"
-        for row in raw_rows
-    )
+    raw_counts = _raw_candidate_counts(raw_path)
+    raw_generated_rows = raw_counts["raw_generated_rows"]
+    generated_valid_rows = raw_counts["generated_rdkit_valid_rows"]
+    generated_decoded_rows = raw_counts["generated_codec_decoded_rows"]
+    generated_invalid_valence_rows = raw_counts[
+        "generated_invalid_valence_rows"
+    ]
+    generated_attribute_ambiguous_rows = raw_counts[
+        "generated_attribute_ambiguous_rows"
+    ]
+    generated_sanitize_failure_rows = raw_counts[
+        "generated_sanitize_failure_rows"
+    ]
     generated_invalid_other_rows = (
-        len(raw_rows)
+        raw_generated_rows
         - generated_valid_rows
         - generated_invalid_valence_rows
     )
@@ -2307,11 +3097,9 @@ def build_mutagenicity_train_pool(
         "input_train_rows": len(all_parents),
         "selected_train_rows": len(selected_parents),
         "unique_source_parents": len(source_parent_ids),
-        "raw_generated_rows": len(raw_rows),
+        "raw_generated_rows": raw_generated_rows,
         "rdkit_valid_rows": generated_valid_rows,
-        "teacher_target_rows": sum(
-            _bool_value(row["teacher_target_ok"]) for row in raw_rows
-        ),
+        "teacher_target_rows": raw_counts["teacher_target_rows"],
         "candidate_pool_rows": len(pool_rows),
         "canonical_unique_candidates": len(universe),
         "source_parent_coverage": (
@@ -2359,7 +3147,7 @@ def build_mutagenicity_train_pool(
             training_summary.get("source_formal_charge_nonzero_atom_count")
             or 0
         ),
-        "generated_graph_rows": len(raw_rows),
+        "generated_graph_rows": raw_generated_rows,
         "generated_codec_decoded_rows": generated_decoded_rows,
         "generated_rdkit_valid_rows": generated_valid_rows,
         "generated_invalid_valence_rows": generated_invalid_valence_rows,
@@ -2371,18 +3159,44 @@ def build_mutagenicity_train_pool(
         ),
         "generated_invalid_other_rows": generated_invalid_other_rows,
         "generated_valid_rate": (
-            generated_valid_rows / len(raw_rows) if raw_rows else 0.0
+            generated_valid_rows / raw_generated_rows
+            if raw_generated_rows
+            else 0.0
+        ),
+        "generation_chunk_size": int(resolved.generation_chunk_size),
+        "generation_num_workers": int(resolved.generation_num_workers),
+        "generation_completed_chunks": int(
+            generation_state.get("completed_chunk_count") or 0
+        ),
+        "generation_peak_materialization": "one_parent_chunk",
+        "generation_uses_inference_mode": bool(
+            training_summary.get("generation_uses_inference_mode", False)
         ),
         "calibration_loaded": False,
         "test_loaded": False,
         "run_complete": pool_nonempty,
     }
     _write_json(destination / "summary.json", summary)
+    generation_state.update(
+        {
+            "model_checkpoint_hash": (
+                _model_checkpoint_hash()
+                or generation_state.get("model_checkpoint_hash")
+            ),
+            "next_parent_offset": len(selected_parents),
+            "raw_generated_rows": raw_generated_rows,
+            "candidate_pool_rows": len(pool_rows),
+            "generation_complete": True,
+            "run_complete": bool(pool_nonempty),
+            "updated_at": _utc_now(),
+        }
+    )
+    _write_json(generation_checkpoint_path, generation_state)
     if not pool_nonempty:
         failure = {
             "error": "empty_candidate_universe",
             "source_codec_passed": source_codec_passed,
-            "raw_generated_rows": len(raw_rows),
+            "raw_generated_rows": raw_generated_rows,
             "generated_codec_decoded_rows": generated_decoded_rows,
             "generated_rdkit_valid_rows": generated_valid_rows,
             "generated_invalid_valence_rows": generated_invalid_valence_rows,
@@ -2418,7 +3232,7 @@ def build_mutagenicity_train_pool(
         raise GlobalGCEEmptyCandidateUniverseError(
             "GlobalGCE generated no eligible Mutagenicity candidates. "
             f"source_codec_passed={source_codec_passed!r}, "
-            f"raw_generated_rows={len(raw_rows)}, "
+            f"raw_generated_rows={raw_generated_rows}, "
             f"generated_codec_decoded_rows={generated_decoded_rows}, "
             f"generated_rdkit_valid_rows={generated_valid_rows}, "
             f"generated_invalid_valence_rows={generated_invalid_valence_rows}, "
@@ -2443,7 +3257,7 @@ def build_mutagenicity_train_pool(
         {
             "config_fingerprint": fingerprint,
             "stage": "complete",
-            "raw_generated_rows": len(raw_rows),
+            "raw_generated_rows": raw_generated_rows,
             "candidate_pool_rows": len(pool_rows),
             "run_complete": True,
             "updated_at": _utc_now(),
@@ -2789,6 +3603,7 @@ __all__ = [
     "decode_globalgce_molecule",
     "globalgce_tensors_to_graph_record",
     "load_strict_train_parents",
+    "log_globalgce_phase_memory",
     "probe_source_graph_codec",
     "require_source_codec_gate",
     "stable_candidate_id",

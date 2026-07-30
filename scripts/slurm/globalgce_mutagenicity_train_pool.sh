@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7
 #SBATCH --gres=gpu:a800:1
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --job-name=mut_globalgce
 #SBATCH --output=logs/%j.out
@@ -65,6 +65,13 @@ else
   EXPECTED_SELECTED_PARENT_COUNT="${EXPECTED_SELECTED_PARENT_COUNT:-$EXPECTED_INPUT_TRAIN_COUNT}"
 fi
 DEVICE="${DEVICE:-cuda}"
+GENERATION_CHUNK_SIZE="${GENERATION_CHUNK_SIZE:-32}"
+GENERATION_NUM_WORKERS="${GENERATION_NUM_WORKERS:-0}"
+MEMORY_LOG_EVERY_CHUNKS="${MEMORY_LOG_EVERY_CHUNKS:-1}"
+
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 
 for path in "$TRAIN_CSV" "$TEACHER_PATH" "$NATIVE_TRAIN_CSV"; do
   if [[ ! -s "$path" ]]; then
@@ -127,6 +134,12 @@ echo "DEVICE=$DEVICE"
 echo "RESUME=$RESUME"
 echo "EXPECTED_INPUT_TRAIN_COUNT=$EXPECTED_INPUT_TRAIN_COUNT"
 echo "EXPECTED_SELECTED_PARENT_COUNT=$EXPECTED_SELECTED_PARENT_COUNT"
+echo "GENERATION_CHUNK_SIZE=$GENERATION_CHUNK_SIZE"
+echo "GENERATION_NUM_WORKERS=$GENERATION_NUM_WORKERS"
+echo "MEMORY_LOG_EVERY_CHUNKS=$MEMORY_LOG_EVERY_CHUNKS"
+echo "MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX"
+echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
+echo "MKL_NUM_THREADS=$MKL_NUM_THREADS"
 python --version
 nvidia-smi || true
 
@@ -145,6 +158,9 @@ python scripts/baselines/globalgce/build_mutagenicity_train_pool.py \
   --learning-rate "$LEARNING_RATE" \
   --dropout "$DROPOUT" \
   --device "$DEVICE" \
+  --generation-chunk-size "$GENERATION_CHUNK_SIZE" \
+  --generation-num-workers "$GENERATION_NUM_WORKERS" \
+  --memory-log-every-chunks "$MEMORY_LOG_EVERY_CHUNKS" \
   "$RESUME_FLAG" \
   --forbid-calibration-test
 

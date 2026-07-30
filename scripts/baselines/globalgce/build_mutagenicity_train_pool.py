@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=0.1)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--generation-chunk-size", type=int, default=32)
+    parser.add_argument("--generation-num-workers", type=int, default=0)
+    parser.add_argument("--memory-log-every-chunks", type=int, default=1)
     parser.add_argument(
         "--codec-probe-only",
         action="store_true",
@@ -139,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
             device=str(args.device),
             resume=bool(args.resume),
             forbid_calibration_test=bool(args.forbid_calibration_test),
+            generation_chunk_size=int(args.generation_chunk_size),
+            generation_num_workers=int(args.generation_num_workers),
+            memory_log_every_chunks=int(args.memory_log_every_chunks),
         ),
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
