@@ -23,13 +23,8 @@ from scripts.evaluate_ccrcov_with_molclr_node_fgw import (  # noqa: E402
     _detail_fields,
     _env,
     _env_bool,
-    _finite_distance,
     _fragment_identity,
-    _mean,
-    _median,
     _parse_float_list,
-    _rate,
-    _row_flip,
     _write_csv,
     _write_json,
     build_evaluation_row_audit,
@@ -44,7 +39,6 @@ from src.eval.ccrcov_distance_eval import (  # noqa: E402
     OURS_DIRECTORY_CANDIDATES,
     _evaluate_gt_fullgraph,
     _evaluate_ours,
-    _parse_int_label,
 )
 from src.eval.close_counterfactual_coverage import (  # noqa: E402
     DETAIL_FIELDS,
@@ -54,8 +48,8 @@ from src.eval.close_counterfactual_coverage import (  # noqa: E402
 from src.eval.flip_semantics import (  # noqa: E402
     OLD_WEAK_FLIP_DEFINITION,
     TEACHER_STRICT_FLIP_DEFINITION,
-    old_weak_flip,
 )
+from src.eval.fullgraph_wnode_artifacts import summarize_wnode_thresholds  # noqa: E402
 from src.eval.greed_distance.pair_generation import GT_FULLGRAPH_FIELDS, OURS_FRAGMENT_FIELDS  # noqa: E402
 from src.eval.molclr_node_embeddings import DEFAULT_NODE_EMB_CACHE_DIR  # noqa: E402
 from src.eval.node_wasserstein_distance import (  # noqa: E402
@@ -215,22 +209,6 @@ class ResumeCheckpoint:
         )
 
 
-def _best_row_for_threshold(rows: list[dict[str, Any]], threshold: float) -> dict[str, Any] | None:
-    best: tuple[float, dict[str, Any]] | None = None
-    for row in rows:
-        distance = _finite_distance(row)
-        if distance is None or distance > threshold:
-            continue
-        label = _parse_int_label(row.get("label"))
-        pred_before = _parse_int_label(row.get("pred_before"))
-        pred_after = _parse_int_label(row.get("pred_after"))
-        if label is None or pred_before != label or pred_after == label:
-            continue
-        if best is None or distance < best[0]:
-            best = (distance, row)
-    return best[1] if best else None
-
-
 def summarize_method(
     *,
     method: str,
@@ -245,72 +223,21 @@ def summarize_method(
     skip_redundancy: bool,
     group_audit: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    by_parent: dict[str, list[dict[str, Any]]] = {}
-    for row in details:
-        by_parent.setdefault(str(row.get("parent_id") or ""), []).append(row)
-    teacher_target = {
-        parent_id
-        for parent_id, rows in by_parent.items()
-        if any(_parse_int_label(row.get("pred_before")) == _parse_int_label(row.get("label")) for row in rows)
-    }
-    valid_pairs = sum(_finite_distance(row) is not None for row in details)
-    output: list[dict[str, Any]] = []
-    for threshold_row in threshold_rows:
-        threshold = float(threshold_row["threshold"])
-        if not math.isfinite(threshold):
-            continue
-        close_only = {
-            parent_id for parent_id, rows in by_parent.items()
-            if any((distance := _finite_distance(row)) is not None and distance <= threshold for row in rows)
-        }
-        best_rows = [row for rows in by_parent.values() if (row := _best_row_for_threshold(rows, threshold)) is not None]
-        close_cf = {str(row.get("parent_id") or "") for row in best_rows}
-        weak = {
-            parent_id for parent_id, rows in by_parent.items()
-            if any(
-                (distance := _finite_distance(row)) is not None
-                and distance <= threshold
-                and old_weak_flip(row.get("pred_after"), _parse_int_label(row.get("label")) or 0)
-                for row in rows
-            )
-        }
-        output.append({
-            "method": method,
-            "distance_type": DISTANCE_TYPE,
-            "distance_line": DISTANCE_LINE,
-            "feature_cost": config.feature_cost,
-            "node_mass": config.node_mass,
-            "size_penalty_beta": float(config.size_penalty_beta),
-            "solver": "exact_emd2",
-            "threshold": threshold,
-            "threshold_source": threshold_row.get("threshold_source"),
-            "quantile": threshold_row.get("quantile"),
-            "cf_mode": cf_mode,
-            "main_ccrcov_uses": "teacher_strict_flip",
-            "teacher_strict_flip_definition": TEACHER_STRICT_FLIP_DEFINITION,
-            "old_weak_flip_definition": OLD_WEAK_FLIP_DEFINITION,
-            "old_weak_ccrcov_status": "audit_only",
-            "num_parents": total_parents,
-            "num_teacher_target_parents": len(teacher_target),
-            "num_candidates": total_candidates,
-            "num_valid_pairs": valid_pairs,
-            "num_close_only_covered": len(close_only),
-            "close_only_coverage": _rate(len(close_only), total_parents),
-            "num_close_cf_covered": len(close_cf),
-            "close_cf_coverage": _rate(len(close_cf), total_parents),
-            "old_weak_num_close_cf_covered": len(weak),
-            "old_weak_close_cf_coverage": _rate(len(weak), total_parents),
-            "avg_best_distance": _mean(_finite_distance(row) for row in best_rows),
-            "median_best_distance": _median(_finite_distance(row) for row in best_rows),
-            "avg_cf_drop_among_covered": _mean(row.get("cf_drop") for row in best_rows),
-            "flip_rate_among_covered": _mean(_row_flip(row, label=_parse_int_label(row.get("label")) or 0) for row in best_rows),
-            "total_pairs": len(details),
-            "cache_hit_rate": cache_hit_rate,
-            "node_embedding_cache_hit_rate": node_embedding_cache_hit_rate,
-            "skip_redundancy": skip_redundancy,
-            **group_audit,
-        })
-    return output
+    return summarize_wnode_thresholds(
+        method=method,
+        details=details,
+        threshold_rows=threshold_rows,
+        total_parents=total_parents,
+        total_candidates=total_candidates,
+        feature_cost=config.feature_cost,
+        node_mass=config.node_mass,
+        size_penalty_beta=float(config.size_penalty_beta),
+        cf_mode=cf_mode,
+        cache_hit_rate=cache_hit_rate,
+        node_embedding_cache_hit_rate=node_embedding_cache_hit_rate,
+        skip_redundancy=skip_redundancy,
+        group_audit=group_audit,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
