@@ -87,6 +87,11 @@ class GlobalGCECodecMetadata:
 
     atom_symbols: tuple[str, ...]
     bond_names: tuple[str, ...]
+    formal_charge_encoded_by_native: bool = False
+    atom_attribute_source: str = "source_anchored"
+    source_atom_mapping_method: str = (
+        "rdkit_atom_index_preserved_by_dense_builder"
+    )
 
     @classmethod
     def from_dataset(cls, dataset: Any) -> "GlobalGCECodecMetadata":
@@ -101,7 +106,23 @@ class GlobalGCECodecMetadata:
                 "Native dataset bond metadata must explicitly reserve internal "
                 "label 0 for no-edge/padding."
             )
-        return cls(atom_symbols=atom_symbols, bond_names=bond_names)
+        return cls(
+            atom_symbols=atom_symbols,
+            bond_names=bond_names,
+            formal_charge_encoded_by_native=bool(
+                getattr(dataset, "formal_charge_encoded_by_native", False)
+            ),
+            atom_attribute_source=str(
+                getattr(dataset, "atom_attribute_source", "source_anchored")
+            ),
+            source_atom_mapping_method=str(
+                getattr(
+                    dataset,
+                    "source_atom_mapping_method",
+                    "rdkit_atom_index_preserved_by_dense_builder",
+                )
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +145,11 @@ class GlobalGCECodecMetadata:
                 str(index): name
                 for index, name in OFFICIAL_MUTAGENICITY_EDGE_LABEL_TO_BOND.items()
             },
+            "formal_charge_encoded_by_native": (
+                self.formal_charge_encoded_by_native
+            ),
+            "atom_attribute_source": self.atom_attribute_source,
+            "source_atom_mapping_method": self.source_atom_mapping_method,
         }
 
 
@@ -217,6 +243,7 @@ class _DenseMoleculeDataset:
         test_idx: Sequence[int],
         atom_symbols: Sequence[str],
         bond_names: Sequence[str],
+        source_atom_attributes: Sequence[Sequence[dict[str, Any]]],
     ) -> None:
         self.dataset_name = DATASET_NAME
         self.parent_ids = list(parent_ids)
@@ -236,6 +263,20 @@ class _DenseMoleculeDataset:
         self.index = torch_module.arange(len(parent_ids), dtype=torch_module.long)
         self.atom_symbols = list(atom_symbols)
         self.bond_names = list(bond_names)
+        self.source_atom_attributes = [
+            [dict(atom) for atom in row] for row in source_atom_attributes
+        ]
+        if len(self.source_atom_attributes) != len(self.parent_ids):
+            raise GlobalGCEMutagenicityCodecError(
+                "Source atom sidecar row count does not match native dataset: "
+                f"sidecars={len(self.source_atom_attributes)}, "
+                f"parents={len(self.parent_ids)}."
+            )
+        self.formal_charge_encoded_by_native = False
+        self.atom_attribute_source = "source_anchored"
+        self.source_atom_mapping_method = (
+            "rdkit_atom_index_preserved_by_dense_builder"
+        )
 
     def __len__(self) -> int:
         return len(self.parent_ids)
@@ -566,6 +607,67 @@ def _kekulized_molecule(smiles: str) -> Any:
     return molecule
 
 
+def _source_atom_attribute_sidecar(
+    smiles: str,
+    native_molecule: Any,
+) -> list[dict[str, Any]]:
+    """Capture atom properties omitted by the official Mutagenicity features.
+
+    `_build_dense_dataset` writes each RDKit atom to the native tensor slot
+    with the same `atom.GetIdx()`. This construction provenance gives a unique
+    atom identity even for symmetric molecules where graph isomorphism alone
+    would have multiple automorphisms.
+    """
+
+    source_molecule = Chem.MolFromSmiles(smiles)
+    if source_molecule is None:
+        raise GlobalGCEMutagenicityCodecError(
+            f"Cannot construct source atom attributes for SMILES: {smiles}"
+        )
+    if source_molecule.GetNumAtoms() != native_molecule.GetNumAtoms():
+        raise GlobalGCEMutagenicityCodecError(
+            "Source/native atom count mismatch while constructing atom "
+            f"attribute sidecar for {smiles!r}."
+        )
+    sidecar: list[dict[str, Any]] = []
+    for native_index in range(native_molecule.GetNumAtoms()):
+        source_atom = source_molecule.GetAtomWithIdx(native_index)
+        native_atom = native_molecule.GetAtomWithIdx(native_index)
+        if source_atom.GetAtomicNum() != native_atom.GetAtomicNum():
+            raise GlobalGCEMutagenicityCodecError(
+                "Source/native atomic-number mismatch at preserved atom "
+                f"index={native_index} for {smiles!r}."
+            )
+        sidecar.append(
+            {
+                "native_node_index": native_index,
+                "source_atom_index": source_atom.GetIdx(),
+                "atomic_num": source_atom.GetAtomicNum(),
+                "formal_charge": source_atom.GetFormalCharge(),
+                "is_aromatic": source_atom.GetIsAromatic(),
+                "num_explicit_hs": source_atom.GetNumExplicitHs(),
+                "isotope": source_atom.GetIsotope(),
+                "chiral_tag": int(source_atom.GetChiralTag()),
+                "no_implicit": source_atom.GetNoImplicit(),
+                "attribute_source": "source_anchored",
+            }
+        )
+    source_pairs = {
+        tuple(sorted((bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())))
+        for bond in source_molecule.GetBonds()
+    }
+    native_pairs = {
+        tuple(sorted((bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())))
+        for bond in native_molecule.GetBonds()
+    }
+    if source_pairs != native_pairs:
+        raise GlobalGCEMutagenicityCodecError(
+            "Source/native bond topology mismatch under the preserved RDKit "
+            f"atom index mapping for {smiles!r}."
+        )
+    return sidecar
+
+
 def _build_dense_dataset(
     parents: Sequence[TrainParent],
     *,
@@ -577,6 +679,10 @@ def _build_dense_dataset(
     max_num_nodes: int | None = None,
 ) -> _DenseMoleculeDataset:
     molecules = [_kekulized_molecule(parent.smiles) for parent in parents]
+    source_atom_attributes = [
+        _source_atom_attribute_sidecar(parent.smiles, molecule)
+        for parent, molecule in zip(parents, molecules)
+    ]
     symbols = list(atom_symbols or ())
     if not symbols:
         present_symbols = {
@@ -665,6 +771,7 @@ def _build_dense_dataset(
         test_idx=test_idx,
         atom_symbols=symbols,
         bond_names=("no_edge", "single", "double", "triple"),
+        source_atom_attributes=source_atom_attributes,
     )
 
 
@@ -909,6 +1016,50 @@ def _add_bond_once(
     seen_pairs.add(pair)
 
 
+def _source_attributes_by_native_index(
+    source_atom_attributes: Sequence[dict[str, Any]] | None,
+) -> dict[int, dict[str, Any]]:
+    if source_atom_attributes is None:
+        raise GlobalGCEMutagenicityCodecError(
+            "Source atom attributes are unavailable."
+        )
+    by_native_index: dict[int, dict[str, Any]] = {}
+    source_indices: set[int] = set()
+    for raw in source_atom_attributes:
+        row = dict(raw)
+        try:
+            native_index = int(row["native_node_index"])
+            source_index = int(row["source_atom_index"])
+            atomic_num = int(row["atomic_num"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GlobalGCEMutagenicityCodecError(
+                f"Malformed source atom attribute row: {row!r}."
+            ) from exc
+        if native_index < 0 or source_index < 0 or atomic_num <= 0:
+            raise GlobalGCEMutagenicityCodecError(
+                f"Invalid source atom attribute row: {row!r}."
+            )
+        if native_index in by_native_index or source_index in source_indices:
+            raise GlobalGCEMutagenicityCodecError(
+                "Source atom mapping is not unique: "
+                f"native_node_index={native_index}, "
+                f"source_atom_index={source_index}."
+            )
+        by_native_index[native_index] = row
+        source_indices.add(source_index)
+    return by_native_index
+
+
+def _apply_source_atom_attributes(atom: Any, attributes: dict[str, Any]) -> None:
+    atom.SetFormalCharge(int(attributes.get("formal_charge") or 0))
+    atom.SetIsotope(int(attributes.get("isotope") or 0))
+    atom.SetChiralTag(
+        Chem.rdchem.ChiralType(int(attributes.get("chiral_tag") or 0))
+    )
+    atom.SetNumExplicitHs(int(attributes.get("num_explicit_hs") or 0))
+    atom.SetNoImplicit(bool(attributes.get("no_implicit", False)))
+
+
 def decode_globalgce_molecule(
     feature: Any,
     adjacency: Any,
@@ -916,9 +1067,23 @@ def decode_globalgce_molecule(
     *,
     metadata: GlobalGCECodecMetadata,
     num_nodes: int | None = None,
+    graph_role: str,
+    source_atom_attributes: Sequence[dict[str, Any]] | None,
 ) -> GlobalGCEGraphDecodeResult:
     """Decode one native graph using its explicit node/edge metadata."""
 
+    if graph_role not in {"source", "generated"}:
+        raise ValueError(f"Unsupported GlobalGCE graph role: {graph_role!r}")
+    attribute_error_type = (
+        "source_codec_attribute_mapping_failed"
+        if graph_role == "source"
+        else "generated_attribute_ambiguous"
+    )
+    graph_error_type = (
+        "source_codec_structure_mismatch"
+        if graph_role == "source"
+        else "generated_sanitize_failure"
+    )
     try:
         record = globalgce_tensors_to_graph_record(
             feature,
@@ -929,7 +1094,15 @@ def decode_globalgce_molecule(
         )
     except Exception as exc:
         return GlobalGCEGraphDecodeResult(
-            False, None, None, False, "codec_tensor_error", str(exc), 0, 0, {}
+            False,
+            None,
+            None,
+            False,
+            graph_error_type,
+            str(exc),
+            0,
+            0,
+            {},
         )
     if record["asymmetric_adjacency_pairs"]:
         return GlobalGCEGraphDecodeResult(
@@ -937,7 +1110,7 @@ def decode_globalgce_molecule(
             None,
             None,
             False,
-            "asymmetric_adjacency",
+            graph_error_type,
             f"pairs={record['asymmetric_adjacency_pairs'][:5]}",
             0,
             0,
@@ -946,8 +1119,106 @@ def decode_globalgce_molecule(
     active_nodes = list(record["active_node_indices"])
     if not active_nodes:
         return GlobalGCEGraphDecodeResult(
-            False, None, None, False, "empty_graph", "No real nodes.", 0, 0, record
+            False,
+            None,
+            None,
+            False,
+            graph_error_type,
+            "No real nodes.",
+            0,
+            0,
+            record,
         )
+    try:
+        source_by_native = _source_attributes_by_native_index(
+            source_atom_attributes
+        )
+    except GlobalGCEMutagenicityCodecError as exc:
+        return GlobalGCEGraphDecodeResult(
+            False,
+            None,
+            None,
+            False,
+            attribute_error_type,
+            str(exc),
+            0,
+            0,
+            record,
+        )
+    atom_attribute_audit: list[dict[str, Any]] = []
+    for old_index in active_nodes:
+        internal_label = int(record["node_labels_internal"][old_index])
+        if not 0 < internal_label <= len(metadata.atom_symbols):
+            return GlobalGCEGraphDecodeResult(
+                False,
+                None,
+                None,
+                False,
+                attribute_error_type,
+                f"Unknown internal atom label={internal_label}.",
+                0,
+                0,
+                record,
+            )
+        symbol = metadata.atom_symbols[internal_label - 1]
+        generated_atomic_num = Chem.GetPeriodicTable().GetAtomicNumber(symbol)
+        source_attributes = source_by_native.get(old_index)
+        inherited = (
+            source_attributes is not None
+            and int(source_attributes["atomic_num"]) == generated_atomic_num
+        )
+        audit_row = {
+            "native_node_index": old_index,
+            "source_atom_index": (
+                int(source_attributes["source_atom_index"])
+                if source_attributes is not None
+                else None
+            ),
+            "atomic_num": generated_atomic_num,
+            "formal_charge": (
+                int(source_attributes.get("formal_charge") or 0)
+                if inherited
+                else None
+            ),
+            "native_atom_label": internal_label,
+            "attribute_source": (
+                metadata.atom_attribute_source if inherited else None
+            ),
+            "attributes_inherited": inherited,
+        }
+        if not inherited:
+            audit_row["ambiguity_reason"] = (
+                "new_native_node_without_source_identity"
+                if source_attributes is None
+                else "generated_atom_type_differs_from_source"
+            )
+            atom_attribute_audit.append(audit_row)
+            record["atom_attribute_audit"] = atom_attribute_audit
+            return GlobalGCEGraphDecodeResult(
+                False,
+                None,
+                None,
+                False,
+                attribute_error_type,
+                (
+                    "Formal charge is not encoded by native Mutagenicity "
+                    "features and cannot be inherited for "
+                    f"native_node_index={old_index}: {audit_row!r}."
+                ),
+                0,
+                0,
+                record,
+            )
+        atom_attribute_audit.append(audit_row)
+    record["atom_attribute_audit"] = atom_attribute_audit
+    record["atom_attribute_source"] = metadata.atom_attribute_source
+    record["formal_charge_encoded_by_native"] = (
+        metadata.formal_charge_encoded_by_native
+    )
+    record["source_atom_mapping_method"] = (
+        metadata.source_atom_mapping_method
+    )
+    record["source_atom_mapping_unique"] = True
     editable = Chem.RWMol()
     old_to_new: dict[int, int] = {}
     try:
@@ -958,7 +1229,12 @@ def decode_globalgce_molecule(
                     f"Unknown internal atom label={internal_label}."
                 )
             symbol = metadata.atom_symbols[internal_label - 1]
-            old_to_new[old_index] = editable.AddAtom(Chem.Atom(symbol))
+            atom = Chem.Atom(symbol)
+            _apply_source_atom_attributes(
+                atom,
+                source_by_native[old_index],
+            )
+            old_to_new[old_index] = editable.AddAtom(atom)
         seen_pairs: set[tuple[int, int]] = set()
         for left_position, left in enumerate(active_nodes):
             for right in active_nodes[left_position + 1 :]:
@@ -996,7 +1272,7 @@ def decode_globalgce_molecule(
             None,
             None,
             False,
-            "codec_graph_error",
+            graph_error_type,
             str(exc),
             editable.GetNumAtoms(),
             editable.GetNumBonds(),
@@ -1011,11 +1287,18 @@ def decode_globalgce_molecule(
         )
     except Exception as exc:
         error_message = str(exc)
-        error_type = (
-            "native_generated_invalid_valence"
-            if "valence" in error_message.lower()
-            else "native_generated_invalid_sanitize"
-        )
+        if graph_role == "source":
+            error_type = (
+                "source_codec_invalid_valence"
+                if "valence" in error_message.lower()
+                else "source_codec_structure_mismatch"
+            )
+        else:
+            error_type = (
+                "generated_invalid_valence"
+                if "valence" in error_message.lower()
+                else "generated_sanitize_failure"
+            )
         return GlobalGCEGraphDecodeResult(
             False,
             None,
@@ -1060,6 +1343,8 @@ def _molecules_structure_match(left: Any, right: Any) -> bool:
 def probe_source_graph_codec(
     dataset: Any,
     parents: Sequence[TrainParent],
+    *,
+    atom_attribute_audit_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Round-trip every selected source graph through the production codec."""
 
@@ -1071,6 +1356,10 @@ def probe_source_graph_codec(
     metadata = GlobalGCECodecMetadata.from_dataset(dataset)
     valid_count = 0
     structure_count = 0
+    invalid_valence_count = 0
+    attribute_mapping_failed_count = 0
+    charged_atom_count = 0
+    charge_audit_rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     for index, parent in enumerate(parents):
         graph = dataset[index]
@@ -1080,6 +1369,8 @@ def probe_source_graph_codec(
             graph.get("edge_attr"),
             metadata=metadata,
             num_nodes=int(_to_builtin(graph["num_nodes"])),
+            graph_role="source",
+            source_atom_attributes=dataset.source_atom_attributes[index],
         )
         structure_match = False
         parent_molecule = Chem.MolFromSmiles(parent.smiles)
@@ -1091,7 +1382,31 @@ def probe_source_graph_codec(
             )
             if structure_match:
                 structure_count += 1
+        if result.error_type == "source_codec_invalid_valence":
+            invalid_valence_count += 1
+        if result.error_type == "source_codec_attribute_mapping_failed":
+            attribute_mapping_failed_count += 1
+        for atom_audit in result.graph_record.get("atom_attribute_audit", []):
+            formal_charge = atom_audit.get("formal_charge")
+            if formal_charge is None or int(formal_charge) == 0:
+                continue
+            charged_atom_count += 1
+            if len(charge_audit_rows) < 10:
+                charge_audit_rows.append(
+                    {
+                        "parent_id": parent.parent_id,
+                        "native_node_index": atom_audit["native_node_index"],
+                        "source_atom_index": atom_audit["source_atom_index"],
+                        "atomic_num": atom_audit["atomic_num"],
+                        "formal_charge": int(formal_charge),
+                        "native_atom_label": atom_audit["native_atom_label"],
+                        "attribute_source": atom_audit["attribute_source"],
+                    }
+                )
         if not result.ok or not structure_match:
+            error_type = result.error_type
+            if result.ok and not structure_match:
+                error_type = "source_codec_structure_mismatch"
             failures.append(
                 {
                     "parent_id": parent.parent_id,
@@ -1099,7 +1414,7 @@ def probe_source_graph_codec(
                     "decoded_smiles": result.smiles,
                     "codec_ok": result.ok,
                     "structure_match": structure_match,
-                    "error_type": result.error_type,
+                    "error_type": error_type,
                     "error_message": result.error_message,
                 }
             )
@@ -1108,14 +1423,31 @@ def probe_source_graph_codec(
         "source_codec_checked_rows": checked,
         "source_codec_rdkit_valid_rows": valid_count,
         "source_codec_structure_match_rows": structure_count,
+        "source_codec_invalid_valence_rows": invalid_valence_count,
+        "source_codec_attribute_mapping_failed_rows": (
+            attribute_mapping_failed_count
+        ),
         "source_codec_passed": (
             checked > 0
             and valid_count == checked
             and structure_count == checked
         ),
         "source_codec_failure_examples": failures[:10],
+        "atom_attribute_source": metadata.atom_attribute_source,
+        "formal_charge_encoded_by_native": (
+            metadata.formal_charge_encoded_by_native
+        ),
+        "source_atom_mapping_method": metadata.source_atom_mapping_method,
+        "source_atom_mapping_unique": attribute_mapping_failed_count == 0,
+        "source_formal_charge_nonzero_atom_count": charged_atom_count,
+        "source_atom_attribute_audit_rows": len(charge_audit_rows),
         "codec_metadata": metadata.to_dict(),
     }
+    if atom_attribute_audit_path is not None:
+        _write_jsonl(
+            Path(atom_attribute_audit_path).expanduser().resolve(),
+            charge_audit_rows,
+        )
     return summary
 
 
@@ -1330,7 +1662,17 @@ class OfficialGlobalGCEMutagenicityGenerator:
             seed=int(seed),
             torch_module=torch,
         )
-        summary = probe_source_graph_codec(source_dataset, parents)
+        attribute_audit_path = (
+            Path(output_path).expanduser().resolve().parent
+            / "source_atom_attribute_audit.jsonl"
+            if output_path is not None
+            else None
+        )
+        summary = probe_source_graph_codec(
+            source_dataset,
+            parents,
+            atom_attribute_audit_path=attribute_audit_path,
+        )
         summary.update(
             {
                 "native_train_rows": len(native_parents),
@@ -1402,7 +1744,13 @@ class OfficialGlobalGCEMutagenicityGenerator:
             torch_module=torch,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
-        codec_summary = probe_source_graph_codec(source_dataset, parents)
+        codec_summary = probe_source_graph_codec(
+            source_dataset,
+            parents,
+            atom_attribute_audit_path=(
+                output_dir.parent / "source_atom_attribute_audit.jsonl"
+            ),
+        )
         _write_json(output_dir / "source_codec_summary.json", codec_summary)
         require_source_codec_gate(codec_summary)
         native_train_loader = DataLoader(
@@ -1553,6 +1901,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 cf_adj[index],
                 cf_edge[index] if cf_edge is not None else None,
                 metadata=codec_metadata,
+                graph_role="generated",
+                source_atom_attributes=(
+                    source_dataset.source_atom_attributes[source_index]
+                ),
             )
             records.append(
                 {
@@ -1931,7 +2283,17 @@ def build_mutagenicity_train_pool(
     )
     generated_invalid_valence_rows = sum(
         str(row.get("invalid_reason") or "")
-        == "native_generated_invalid_valence"
+        == "generated_invalid_valence"
+        for row in raw_rows
+    )
+    generated_attribute_ambiguous_rows = sum(
+        str(row.get("invalid_reason") or "")
+        == "generated_attribute_ambiguous"
+        for row in raw_rows
+    )
+    generated_sanitize_failure_rows = sum(
+        str(row.get("invalid_reason") or "")
+        == "generated_sanitize_failure"
         for row in raw_rows
     )
     generated_invalid_other_rows = (
@@ -1968,14 +2330,45 @@ def build_mutagenicity_train_pool(
         "source_codec_structure_match_rows": int(
             training_summary.get("source_codec_structure_match_rows") or 0
         ),
+        "source_codec_invalid_valence_rows": int(
+            training_summary.get("source_codec_invalid_valence_rows") or 0
+        ),
+        "source_codec_attribute_mapping_failed_rows": int(
+            training_summary.get(
+                "source_codec_attribute_mapping_failed_rows"
+            )
+            or 0
+        ),
         "source_codec_passed": source_codec_passed,
         "source_codec_failure_examples": list(
             training_summary.get("source_codec_failure_examples") or []
+        ),
+        "atom_attribute_source": training_summary.get(
+            "atom_attribute_source"
+        ),
+        "formal_charge_encoded_by_native": training_summary.get(
+            "formal_charge_encoded_by_native"
+        ),
+        "source_atom_mapping_method": training_summary.get(
+            "source_atom_mapping_method"
+        ),
+        "source_atom_mapping_unique": training_summary.get(
+            "source_atom_mapping_unique"
+        ),
+        "source_formal_charge_nonzero_atom_count": int(
+            training_summary.get("source_formal_charge_nonzero_atom_count")
+            or 0
         ),
         "generated_graph_rows": len(raw_rows),
         "generated_codec_decoded_rows": generated_decoded_rows,
         "generated_rdkit_valid_rows": generated_valid_rows,
         "generated_invalid_valence_rows": generated_invalid_valence_rows,
+        "generated_attribute_ambiguous_rows": (
+            generated_attribute_ambiguous_rows
+        ),
+        "generated_sanitize_failure_rows": (
+            generated_sanitize_failure_rows
+        ),
         "generated_invalid_other_rows": generated_invalid_other_rows,
         "generated_valid_rate": (
             generated_valid_rows / len(raw_rows) if raw_rows else 0.0
@@ -1993,6 +2386,12 @@ def build_mutagenicity_train_pool(
             "generated_codec_decoded_rows": generated_decoded_rows,
             "generated_rdkit_valid_rows": generated_valid_rows,
             "generated_invalid_valence_rows": generated_invalid_valence_rows,
+            "generated_attribute_ambiguous_rows": (
+                generated_attribute_ambiguous_rows
+            ),
+            "generated_sanitize_failure_rows": (
+                generated_sanitize_failure_rows
+            ),
             "generated_invalid_other_rows": generated_invalid_other_rows,
             "candidate_pool_rows": len(pool_rows),
             "canonical_unique_candidates": len(universe),
@@ -2023,6 +2422,10 @@ def build_mutagenicity_train_pool(
             f"generated_codec_decoded_rows={generated_decoded_rows}, "
             f"generated_rdkit_valid_rows={generated_valid_rows}, "
             f"generated_invalid_valence_rows={generated_invalid_valence_rows}, "
+            "generated_attribute_ambiguous_rows="
+            f"{generated_attribute_ambiguous_rows}, "
+            "generated_sanitize_failure_rows="
+            f"{generated_sanitize_failure_rows}, "
             f"generated_invalid_other_rows={generated_invalid_other_rows}, "
             f"candidate_pool_rows={len(pool_rows)}, "
             f"canonical_unique_candidates={len(universe)}."
@@ -2176,7 +2579,17 @@ def audit_mutagenicity_train_pool(
         ),
         "generated_invalid_valence_rows": sum(
             str(row.get("invalid_reason") or "")
-            == "native_generated_invalid_valence"
+            == "generated_invalid_valence"
+            for row in raw_rows
+        ),
+        "generated_attribute_ambiguous_rows": sum(
+            str(row.get("invalid_reason") or "")
+            == "generated_attribute_ambiguous"
+            for row in raw_rows
+        ),
+        "generated_sanitize_failure_rows": sum(
+            str(row.get("invalid_reason") or "")
+            == "generated_sanitize_failure"
             for row in raw_rows
         ),
     }
@@ -2232,6 +2645,21 @@ def audit_mutagenicity_train_pool(
         raise AssertionError(
             "Source codec did not structurally round-trip every selected parent."
         )
+    if summary.get("formal_charge_encoded_by_native") is not False:
+        raise AssertionError(
+            "Mutagenicity summary incorrectly reports native formal-charge "
+            "encoding."
+        )
+    if summary.get("atom_attribute_source") != "source_anchored":
+        raise AssertionError("Unexpected atom attribute source.")
+    if summary.get("source_atom_mapping_unique") is not True:
+        raise AssertionError("Source atom mapping is not uniquely established.")
+    if int(summary.get("source_codec_invalid_valence_rows") or 0) != 0:
+        raise AssertionError("Source codec has invalid-valence rows.")
+    if int(
+        summary.get("source_codec_attribute_mapping_failed_rows") or 0
+    ) != 0:
+        raise AssertionError("Source codec has atom mapping failures.")
     if require_complete and (
         summary.get("run_complete") is not True
         or manifest.get("run_complete") is not True

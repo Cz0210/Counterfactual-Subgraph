@@ -162,8 +162,17 @@ class _FakeGenerator:
                 "source_codec_checked_rows": len(parents),
                 "source_codec_rdkit_valid_rows": len(parents),
                 "source_codec_structure_match_rows": len(parents),
+                "source_codec_invalid_valence_rows": 0,
+                "source_codec_attribute_mapping_failed_rows": 0,
                 "source_codec_passed": True,
                 "source_codec_failure_examples": [],
+                "atom_attribute_source": "source_anchored",
+                "formal_charge_encoded_by_native": False,
+                "source_atom_mapping_method": (
+                    "rdkit_atom_index_preserved_by_dense_builder"
+                ),
+                "source_atom_mapping_unique": True,
+                "source_formal_charge_nonzero_atom_count": 0,
             },
         )
 
@@ -215,6 +224,38 @@ def _native_graph_tensors(
         edge_attr[position, 0] = 0.0
         edge_attr[position, edge_label] = 1.0
     return features, adjacency, edge_attr
+
+
+def _atom_sidecar(
+    atom_labels: list[int],
+    metadata: GlobalGCECodecMetadata,
+    *,
+    formal_charges: dict[int, int] | None = None,
+    explicit_hs: dict[int, int] | None = None,
+) -> list[dict[str, object]]:
+    periodic_table = Chem.GetPeriodicTable()
+    charges = formal_charges or {}
+    hydrogens = explicit_hs or {}
+    rows = []
+    for index, label in enumerate(atom_labels):
+        if label <= 0:
+            continue
+        symbol = metadata.atom_symbols[label - 1]
+        rows.append(
+            {
+                "native_node_index": index,
+                "source_atom_index": index,
+                "atomic_num": periodic_table.GetAtomicNumber(symbol),
+                "formal_charge": charges.get(index, 0),
+                "is_aromatic": False,
+                "num_explicit_hs": hydrogens.get(index, 0),
+                "isotope": 0,
+                "chiral_tag": int(Chem.ChiralType.CHI_UNSPECIFIED),
+                "no_implicit": bool(hydrogens.get(index, 0)),
+                "attribute_source": "source_anchored",
+            }
+        )
+    return rows
 
 
 @pytest.fixture()
@@ -296,6 +337,238 @@ def test_source_graph_round_trip_uses_native_metadata() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "[N+](=O)[O-]",
+        "O=[N+]([O-])c1ccccc1",
+        "Nc1ccc(O)c([N+](=O)[O-])c1",
+    ],
+)
+def test_nitro_source_graph_round_trip_restores_formal_charge(
+    smiles: str,
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    parents = [TrainParent("nitro", smiles, 1, "train")]
+    dataset = _build_dense_dataset(
+        parents,
+        train_idx=[0],
+        val_idx=[],
+        test_idx=[],
+        torch_module=torch,
+    )
+    audit_path = tmp_path / "source_atom_attribute_audit.jsonl"
+    summary = probe_source_graph_codec(
+        dataset,
+        parents,
+        atom_attribute_audit_path=audit_path,
+    )
+
+    assert summary["formal_charge_encoded_by_native"] is False
+    assert summary["atom_attribute_source"] == "source_anchored"
+    assert summary["source_atom_mapping_unique"] is True
+    assert summary["source_codec_invalid_valence_rows"] == 0
+    assert summary["source_codec_attribute_mapping_failed_rows"] == 0
+    assert summary["source_codec_structure_match_rows"] == 1
+    assert summary["source_codec_passed"] is True
+    charges = {
+        int(row["formal_charge"])
+        for row in map(json.loads, audit_path.read_text().splitlines())
+    }
+    assert charges == {-1, 1}
+
+
+def test_source_sidecar_preserves_charged_atoms_and_neutral_amine() -> None:
+    torch = pytest.importorskip("torch")
+    parents = [
+        TrainParent("nitro", "O=[N+]([O-])c1ccccc1", 1, "train"),
+        TrainParent("amine", "CCN", 1, "train"),
+    ]
+    dataset = _build_dense_dataset(
+        parents,
+        train_idx=[0],
+        val_idx=[1],
+        test_idx=[],
+        torch_module=torch,
+    )
+    nitro_sidecar = dataset.source_atom_attributes[0]
+    amine_sidecar = dataset.source_atom_attributes[1]
+
+    assert any(
+        row["atomic_num"] == 7 and row["formal_charge"] == 1
+        for row in nitro_sidecar
+    )
+    assert any(
+        row["atomic_num"] == 8 and row["formal_charge"] == -1
+        for row in nitro_sidecar
+    )
+    assert all(
+        row["formal_charge"] == 0
+        for row in amine_sidecar
+        if row["atomic_num"] == 7
+    )
+
+
+def test_source_atom_mapping_ambiguity_is_rejected() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C",),
+        bond_names=("no_edge", "single", "double", "triple"),
+    )
+    tensors = _native_graph_tensors(
+        [1, 1],
+        [(0, 1, 1)],
+        node_class_count=2,
+    )
+    ambiguous = _atom_sidecar([1, 1], metadata)
+    ambiguous[1]["source_atom_index"] = 0
+    result = decode_globalgce_molecule(
+        *tensors,
+        metadata=metadata,
+        graph_role="source",
+        source_atom_attributes=ambiguous,
+    )
+
+    assert result.ok is False
+    assert result.error_type == "source_codec_attribute_mapping_failed"
+    assert "not unique" in str(result.error_message)
+
+
+def test_generated_same_atom_type_inherits_source_charge() -> None:
+    torch = pytest.importorskip("torch")
+    parents = [
+        TrainParent("nitro", "O=[N+]([O-])c1ccccc1", 1, "train")
+    ]
+    dataset = _build_dense_dataset(
+        parents,
+        train_idx=[0],
+        val_idx=[],
+        test_idx=[],
+        torch_module=torch,
+    )
+    graph = dataset[0]
+    result = decode_globalgce_molecule(
+        graph["feature"],
+        graph["adj"],
+        graph["edge_attr"],
+        metadata=GlobalGCECodecMetadata.from_dataset(dataset),
+        num_nodes=int(graph["num_nodes"]),
+        graph_role="generated",
+        source_atom_attributes=dataset.source_atom_attributes[0],
+    )
+
+    assert result.ok
+    assert sorted(
+        atom.GetFormalCharge()
+        for atom in result.mol.GetAtoms()
+        if atom.GetFormalCharge()
+    ) == [-1, 1]
+
+
+def test_generated_atom_type_change_does_not_inherit_charge() -> None:
+    torch = pytest.importorskip("torch")
+    parents = [
+        TrainParent("nitro", "O=[N+]([O-])c1ccccc1", 1, "train")
+    ]
+    dataset = _build_dense_dataset(
+        parents,
+        train_idx=[0],
+        val_idx=[],
+        test_idx=[],
+        torch_module=torch,
+    )
+    graph = dataset[0]
+    metadata = GlobalGCECodecMetadata.from_dataset(dataset)
+    feature = graph["feature"].clone()
+    nitrogen_index = next(
+        int(row["native_node_index"])
+        for row in dataset.source_atom_attributes[0]
+        if row["formal_charge"] == 1
+    )
+    carbon_label = metadata.atom_symbols.index("C") + 1
+    feature[nitrogen_index].zero_()
+    feature[nitrogen_index, carbon_label] = 1.0
+    result = decode_globalgce_molecule(
+        feature,
+        graph["adj"],
+        graph["edge_attr"],
+        metadata=metadata,
+        num_nodes=int(graph["num_nodes"]),
+        graph_role="generated",
+        source_atom_attributes=dataset.source_atom_attributes[0],
+    )
+
+    assert result.ok is False
+    assert result.error_type == "generated_attribute_ambiguous"
+    changed = result.graph_record["atom_attribute_audit"][-1]
+    assert changed["attributes_inherited"] is False
+    assert changed["formal_charge"] is None
+    assert (
+        changed["ambiguity_reason"]
+        == "generated_atom_type_differs_from_source"
+    )
+
+
+def test_generated_new_node_without_source_identity_is_ambiguous() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C",),
+        bond_names=("no_edge", "single", "double", "triple"),
+    )
+    tensors = _native_graph_tensors(
+        [1, 1, 1],
+        [(0, 1, 1), (1, 2, 1)],
+        node_class_count=2,
+    )
+    result = decode_globalgce_molecule(
+        *tensors,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=_atom_sidecar([1, 1], metadata),
+    )
+
+    assert result.ok is False
+    assert result.error_type == "generated_attribute_ambiguous"
+    assert (
+        result.graph_record["atom_attribute_audit"][-1][
+            "ambiguity_reason"
+        ]
+        == "new_native_node_without_source_identity"
+    )
+
+
+def test_source_and_generated_valence_errors_use_distinct_types() -> None:
+    metadata = GlobalGCECodecMetadata(
+        atom_symbols=("C", "Br"),
+        bond_names=("no_edge", "single", "double", "triple"),
+    )
+    labels = [2, 1, 1, 1, 1, 1, 1]
+    tensors = _native_graph_tensors(
+        labels,
+        [(0, index, 1) for index in range(1, 7)],
+        node_class_count=3,
+    )
+    sidecar = _atom_sidecar(labels, metadata)
+    source_result = decode_globalgce_molecule(
+        *tensors,
+        metadata=metadata,
+        graph_role="source",
+        source_atom_attributes=sidecar,
+    )
+    generated_result = decode_globalgce_molecule(
+        *tensors,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=sidecar,
+    )
+
+    assert source_result.error_type == "source_codec_invalid_valence"
+    assert generated_result.error_type == "generated_invalid_valence"
+    assert all(
+        row["formal_charge"] == 0
+        for row in generated_result.graph_record["atom_attribute_audit"]
+    )
+
+
 def test_adjacency_is_only_edge_mask_and_edge_class_controls_bond_type() -> None:
     metadata = GlobalGCECodecMetadata(
         atom_symbols=("C",),
@@ -313,8 +586,19 @@ def test_adjacency_is_only_edge_mask_and_edge_class_controls_bond_type() -> None
         node_class_count=2,
         adjacency_value=9.0,
     )
-    single_result = decode_globalgce_molecule(*single, metadata=metadata)
-    double_result = decode_globalgce_molecule(*double, metadata=metadata)
+    sidecar = _atom_sidecar([1, 1], metadata)
+    single_result = decode_globalgce_molecule(
+        *single,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=sidecar,
+    )
+    double_result = decode_globalgce_molecule(
+        *double,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=sidecar,
+    )
 
     assert single_result.ok and double_result.ok
     assert single_result.mol.GetBondWithIdx(0).GetBondType() == Chem.BondType.SINGLE
@@ -343,6 +627,8 @@ def test_padding_self_loops_and_undirected_edges_are_handled_once() -> None:
         adjacency,
         edge_attr,
         metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=_atom_sidecar([1, 1, 0], metadata),
     )
 
     assert record["padding_node_indices"] == [2]
@@ -381,7 +667,12 @@ def test_aromatic_bond_metadata_sets_consistent_aromatic_atoms() -> None:
         node_class_count=2,
         edge_class_count=5,
     )
-    result = decode_globalgce_molecule(*tensors, metadata=metadata)
+    result = decode_globalgce_molecule(
+        *tensors,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=_atom_sidecar([1] * 6, metadata),
+    )
 
     assert result.ok
     assert result.smiles == "c1ccccc1"
@@ -399,7 +690,12 @@ def test_bromine_single_bond_is_valid_but_overvalent_bromine_is_not_repaired() -
         [(0, 1, 1)],
         node_class_count=3,
     )
-    valid_result = decode_globalgce_molecule(*valid, metadata=metadata)
+    valid_result = decode_globalgce_molecule(
+        *valid,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=_atom_sidecar([1, 2], metadata),
+    )
     assert valid_result.ok
     assert valid_result.smiles == "CBr"
 
@@ -408,10 +704,18 @@ def test_bromine_single_bond_is_valid_but_overvalent_bromine_is_not_repaired() -
         [(0, index, 1) for index in range(1, 7)],
         node_class_count=3,
     )
-    invalid_result = decode_globalgce_molecule(*invalid, metadata=metadata)
+    invalid_result = decode_globalgce_molecule(
+        *invalid,
+        metadata=metadata,
+        graph_role="generated",
+        source_atom_attributes=_atom_sidecar(
+            [2, 1, 1, 1, 1, 1, 1],
+            metadata,
+        ),
+    )
     assert invalid_result.ok is False
     assert invalid_result.codec_decoded is True
-    assert invalid_result.error_type == "native_generated_invalid_valence"
+    assert invalid_result.error_type == "generated_invalid_valence"
     assert invalid_result.smiles is None
     assert invalid_result.num_bonds == 6
 
@@ -579,6 +883,82 @@ def test_build_isolates_invalid_and_non_target_and_deduplicates(
     assert audit["audit_passed"] is True
 
 
+def test_generated_attribute_ambiguity_is_excluded_from_candidate_pool(
+    fixture_paths: dict[str, Path],
+) -> None:
+    class AmbiguousGenerator:
+        def generate(self, parents, **_kwargs):
+            return NativeGenerationResult(
+                [
+                    {
+                        "source_parent_id": parents[0].parent_id,
+                        "source_parent_smiles": parents[0].smiles,
+                        "source_split": "train",
+                        "raw_smiles": None,
+                        "generator_rank": 1,
+                        "native_codec_decoded": False,
+                        "native_conversion_ok": False,
+                        "native_conversion_error_type": (
+                            "generated_attribute_ambiguous"
+                        ),
+                        "native_conversion_error": (
+                            "new node has no source identity"
+                        ),
+                    },
+                    {
+                        "source_parent_id": parents[0].parent_id,
+                        "source_parent_smiles": parents[0].smiles,
+                        "source_split": "train",
+                        "raw_smiles": "CC",
+                        "generator_rank": 2,
+                        "native_codec_decoded": True,
+                        "native_conversion_ok": True,
+                    },
+                ],
+                {
+                    "source_codec_checked_rows": len(parents),
+                    "source_codec_rdkit_valid_rows": len(parents),
+                    "source_codec_structure_match_rows": len(parents),
+                    "source_codec_invalid_valence_rows": 0,
+                    "source_codec_attribute_mapping_failed_rows": 0,
+                    "source_codec_passed": True,
+                    "source_codec_failure_examples": [],
+                    "atom_attribute_source": "source_anchored",
+                    "formal_charge_encoded_by_native": False,
+                    "source_atom_mapping_method": (
+                        "rdkit_atom_index_preserved_by_dense_builder"
+                    ),
+                    "source_atom_mapping_unique": True,
+                    "source_formal_charge_nonzero_atom_count": 0,
+                },
+            )
+
+    summary = build_mutagenicity_train_pool(
+        train_csv=fixture_paths["train"],
+        teacher_path=fixture_paths["teacher"],
+        official_root=fixture_paths["official"],
+        output_dir=fixture_paths["output"],
+        teacher=_FakeTeacher(),
+        generator=AmbiguousGenerator(),
+        config=PoolBuildConfig(
+            expected_parent_count=3,
+            device="cpu",
+            epochs=1,
+            top_k_native=2,
+        ),
+    )
+    invalid = _read_jsonl(
+        fixture_paths["output"] / "invalid_candidates.jsonl"
+    )
+    pool = _read_jsonl(fixture_paths["output"] / "candidate_pool.jsonl")
+
+    assert summary["generated_attribute_ambiguous_rows"] == 1
+    assert len(invalid) == 1
+    assert invalid[0]["invalid_reason"] == "generated_attribute_ambiguous"
+    assert len(pool) == 1
+    assert pool[0]["canonical_smiles"] == "CC"
+
+
 def test_empty_generated_universe_is_incomplete_and_has_no_completion_marker(
     fixture_paths: dict[str, Path],
 ) -> None:
@@ -595,7 +975,7 @@ def test_empty_generated_universe_is_incomplete_and_has_no_completion_marker(
                         "native_codec_decoded": True,
                         "native_conversion_ok": False,
                         "native_conversion_error_type": (
-                            "native_generated_invalid_valence"
+                            "generated_invalid_valence"
                         ),
                         "native_conversion_error": "explicit valence failure",
                     }
