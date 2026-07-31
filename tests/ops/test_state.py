@@ -52,3 +52,30 @@ def test_persisted_state_matches_repository_schema(tmp_path: Path) -> None:
         ).read_text(encoding="utf-8")
     )
     jsonschema.Draft202012Validator(schema).validate(store.load())
+
+
+def test_deploy_preflight_states_are_schema_compatible(tmp_path: Path) -> None:
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "ops/schemas/run_state.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    validator = jsonschema.Draft202012Validator(schema)
+    for index, status in enumerate(
+        (
+            RunStatus.DRY_RUN_COMPLETED,
+            RunStatus.REMOTE_PREFLIGHT_RUNNING,
+            RunStatus.REMOTE_PREFLIGHT_PASSED,
+            RunStatus.REMOTE_PREFLIGHT_BLOCKED,
+            RunStatus.NEEDS_DEPLOY,
+        )
+    ):
+        store = RunStore.create(
+            tmp_path / str(index),
+            "task",
+            run_id=f"state_{index}",
+            spec_path="spec.yaml",
+        )
+        store.transition(status)
+        validator.validate(store.load())

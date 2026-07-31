@@ -25,6 +25,7 @@
       "enum": [
         "CREATED",
         "VALIDATED",
+        "DRY_RUN_COMPLETED",
         "LOCAL_PREFLIGHT",
         "LOCAL_GATE_RUNNING",
         "LOCAL_GATE_PASSED",
@@ -33,6 +34,10 @@
         "PUSHED",
         "REMOTE_SYNCING",
         "REMOTE_PREFLIGHT",
+        "REMOTE_PREFLIGHT_RUNNING",
+        "REMOTE_PREFLIGHT_PASSED",
+        "REMOTE_PREFLIGHT_BLOCKED",
+        "NEEDS_DEPLOY",
         "SUBMITTED",
         "RUNNING",
         "AUDITING",

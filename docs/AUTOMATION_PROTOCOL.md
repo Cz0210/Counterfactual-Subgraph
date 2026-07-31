@@ -83,6 +83,28 @@ set -u
 Deploy permits only status, fetch, ancestry verification, and `pull --ff-only`.
 It never cleans or resets the remote tree.
 
+`deploy` has three distinct modes:
+
+- `--dry-run` creates a persisted run and report but executes neither SSH nor
+  remote Git. Its terminal state is `DRY_RUN_COMPLETED`.
+- `--preflight-only` executes one read-only SSH command. It records hostname,
+  repository path, branch, commit, dirty summary, Python, conda, `sbatch`,
+  `sacct`, finalized markers, and proxy-variable presence. It never fetches or
+  pulls and does not require remote-write permission.
+- deploy without either flag retains the separately permission-gated
+  fast-forward synchronization path.
+
+The remote argv contains one `bash -lc` layer. Bash `nounset` remains disabled
+while sourcing `.bashrc` and activating conda; it is not re-enabled by the
+preflight script. Proxy values are never emitted.
+
+A commit mismatch after a successful read-only check produces `NEEDS_DEPLOY`
+with `next_action=deploy`. Equal commits produce
+`REMOTE_PREFLIGHT_PASSED` with
+`next_action=remote_write_approval_required`. A missing tool, finalized output,
+unexpected remote dirty file, wrong branch, or SSH error produces a bounded
+blocked report.
+
 ## 6. Slurm Dependencies
 
 `experimentctl submit` builds calls to `scripts/exp_sbatch.sh`. It parses
@@ -146,10 +168,12 @@ Start with validation and a side-effect-free plan:
 python scripts/ops/experimentctl.py validate-spec ops/specs/example_smoke.yaml
 python scripts/ops/experimentctl.py plan ops/specs/example_smoke.yaml
 python scripts/ops/experimentctl.py run-local ops/specs/example_smoke.yaml --dry-run
+python scripts/ops/experimentctl.py deploy ops/specs/example_smoke.yaml --dry-run
 ```
 
-Real deploy and submission require matching permissions and explicit approval.
-They are deliberately separate commands.
+After reviewing the dry-run report, a read-only preflight may be run with
+`deploy <spec> --preflight-only`. Real deploy and submission require matching
+permissions and explicit approval. They are deliberately separate commands.
 
 ## 12. CLEAR Phase A
 

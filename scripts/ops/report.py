@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 def tail_lines(text: str, maximum: int = 80) -> list[str]:
@@ -27,6 +27,7 @@ def write_final_report(
     provenance: dict[str, Any],
     next_allowed_stage: str | None,
     stop_reason: str,
+    details: Mapping[str, Any] | None = None,
 ) -> tuple[Path, Path]:
     stages = state.get("stages", {})
     passed = [
@@ -54,6 +55,7 @@ def write_final_report(
         "next_allowed_stage": next_allowed_stage,
         "stop_reason": stop_reason,
         "detailed_logs": str(run_dir),
+        "details": dict(details or {}),
     }
     markdown = "\n".join(
         [
@@ -73,6 +75,7 @@ def write_final_report(
             f"- Next allowed stage: {next_allowed_stage or 'none'}",
             f"- Stop reason: {stop_reason}",
             f"- Detailed logs: {run_dir}",
+            f"- Details: {json.dumps(payload['details'], sort_keys=True)}",
             "",
         ]
     )
@@ -95,6 +98,7 @@ def write_blocked_report(
     retry_count: int,
     recommended_action: str,
     scientific_semantics_risk: bool,
+    details: Mapping[str, Any] | None = None,
 ) -> tuple[Path, Path]:
     excerpt = tail_lines(stderr, 80)
     payload = {
@@ -109,6 +113,7 @@ def write_blocked_report(
         "retry_count": retry_count,
         "recommended_action": recommended_action,
         "scientific_semantics_risk": scientific_semantics_risk,
+        "details": dict(details or {}),
     }
     lines = [
         "# Automation Blocked",
@@ -120,6 +125,7 @@ def write_blocked_report(
         f"- Retried: {retry_count}",
         f"- Recommended action: {recommended_action}",
         f"- Scientific semantics may change: {scientific_semantics_risk}",
+        f"- Details: {json.dumps(payload['details'], sort_keys=True)}",
         "",
         "## Stderr Tail",
         "",

@@ -14,6 +14,13 @@ It does not edit SSH configuration, `.bashrc`, sockets, or forwarding rules.
 Proxy variables are inherited without modification. Reports expose only
 presence booleans, not proxy values.
 
+`deploy --preflight-only` is explicitly read-only. Its remote script may run
+`hostname`, `pwd`, directory tests, Git status/branch/HEAD reads, Python and
+command availability checks, conda activation, finalized-marker tests, and
+proxy-presence checks. It cannot run fetch, pull, merge, push, sbatch, file
+creation, deletion, or movement. A commit mismatch is reported as
+`NEEDS_DEPLOY`; it never triggers synchronization.
+
 ## Worktree Safety
 
 Only paths in the task allowlist may be staged. Other local changes, dirty

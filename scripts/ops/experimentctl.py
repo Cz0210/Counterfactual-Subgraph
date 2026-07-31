@@ -22,6 +22,7 @@ from scripts.ops.git_ops import (
     commits_changed_paths,
     head_commit,
     inspect_status,
+    path_allowed,
     push_head,
     stage_allowed_changes,
 )
@@ -33,6 +34,7 @@ from scripts.ops.ssh_ops import (
     build_deploy_argv,
     build_preflight_argv,
     build_status_argv,
+    parse_preflight_output,
 )
 from scripts.ops.state import RunStatus, RunStore, append_jsonl_fsync, atomic_write_json
 from scripts.ops.subprocess_utils import (
@@ -431,59 +433,197 @@ def _ssh_config(spec: TaskSpec) -> SSHConfig:
     )
 
 
+def _deploy_store(
+    spec: TaskSpec, run_dir: str | Path | None
+) -> RunStore:
+    if run_dir is None:
+        return _new_store(spec)
+    requested = Path(run_dir).expanduser().resolve()
+    if requested.exists():
+        if (requested / "state.json").is_file():
+            store = RunStore.open(requested)
+            state = store.load()
+            if state["task_id"] != spec.task_id:
+                raise AutomationBlocked(
+                    f"Run directory belongs to task {state['task_id']!r}, "
+                    f"not {spec.task_id!r}."
+                )
+            return store
+        if any(requested.iterdir()):
+            raise AutomationBlocked(
+                f"Existing run directory is nonempty but has no state: {requested}"
+            )
+    store = RunStore.create_at(
+        requested,
+        task_id=spec.task_id,
+        spec_path=str(spec.path),
+    )
+    dump_spec_snapshot(spec, store.run_dir / "spec.snapshot.yaml")
+    atomic_write_json(store.run_dir / "plan.json", build_plan(spec))
+    store.transition(RunStatus.VALIDATED)
+    return store
+
+
+def _set_commits(
+    store: RunStore, *, local_commit: str, remote_commit: str | None
+) -> None:
+    state = store.load()
+    state["local_commit"] = local_commit
+    state["remote_commit"] = remote_commit
+    store.save(state)
+
+
+def _set_stop_reason(store: RunStore, reason: str) -> None:
+    state = store.load()
+    state["stop_reason"] = reason
+    store.save(state)
+
+
+def _preflight_dirty_summary(
+    dirty_lines: Sequence[str], dynamic_paths: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    allowed: list[str] = []
+    blocked: list[str] = []
+    for line in dirty_lines:
+        path = line[3:].strip() if len(line) >= 4 else line.strip()
+        destination = (
+            allowed if path_allowed(path, dynamic_paths) else blocked
+        )
+        destination.append(line)
+    return allowed, blocked
+
+
+def _existing_deploy_report(store: RunStore) -> Path | None:
+    for name in ("FINAL_REPORT.json", "BLOCKED_REPORT.json"):
+        path = store.run_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
 def deploy(
     spec: TaskSpec,
     *,
     dry_run: bool,
+    preflight_only: bool = False,
     store: RunStore | None = None,
+    run_dir: str | Path | None = None,
+    runner: CommandRunner | None = None,
 ) -> dict[str, Any]:
-    if not spec.data["permissions"]["allow_remote_write"] and not dry_run:
+    if dry_run and preflight_only:
+        raise AutomationBlocked(
+            "--dry-run and --preflight-only are mutually exclusive."
+        )
+    if (
+        spec.data["permissions"]["preserve_proxy_environment"] is not True
+    ):
+        raise AutomationBlocked(
+            "Deploy preflight requires preserve_proxy_environment=true."
+        )
+    if (
+        not spec.data["permissions"]["allow_remote_write"]
+        and not dry_run
+        and not preflight_only
+    ):
         raise AutomationBlocked("Remote writes are disabled by the task spec.")
-    runner = CommandRunner(default_timeout_seconds=120)
+    if store is not None and run_dir is not None:
+        raise AutomationBlocked("Pass either store or run_dir, not both.")
+    store = store or _deploy_store(spec, run_dir)
+    previous_report = _existing_deploy_report(store)
+    if (
+        dry_run
+        and store.load()["status"] == RunStatus.DRY_RUN_COMPLETED.value
+        and previous_report
+    ):
+        return {
+            "run_dir": str(store.run_dir),
+            "status": RunStatus.DRY_RUN_COMPLETED.value,
+            "report": str(previous_report),
+            "return_code": 0,
+            "resumed": True,
+        }
+    previous_preflight = store.load().get("stages", {}).get(
+        "remote_preflight", {}
+    )
+    if (
+        preflight_only
+        and previous_preflight.get("status") in {"PASSED", "NEEDS_DEPLOY"}
+        and previous_report
+    ):
+        return {
+            "run_dir": str(store.run_dir),
+            "status": store.load()["status"],
+            "report": str(previous_report),
+            "return_code": 0,
+            "resumed": True,
+        }
+    command_runner = runner or CommandRunner(default_timeout_seconds=120)
     git_spec = spec.data["git"]
-    status = inspect_status(runner, spec.local_root, git_spec["allowed_paths"])
-    if status.allowed_modified_paths and not git_spec["allow_commit"]:
+    status = inspect_status(
+        command_runner, spec.local_root, git_spec["allowed_paths"]
+    )
+    if (
+        not dry_run
+        and not preflight_only
+        and status.allowed_modified_paths
+        and not git_spec["allow_commit"]
+    ):
         raise AutomationBlocked(
             "Allowed-path changes are uncommitted and allow_commit=false."
         )
-    if git_spec["allow_commit"] and (
+    if (
+        not dry_run
+        and not preflight_only
+        and git_spec["allow_commit"]
+        and (
         status.allowed_modified_paths or status.staged_paths
+        )
     ):
         stage_allowed_changes(
-            runner,
+            command_runner,
             spec.local_root,
             list(git_spec["allowed_paths"]),
             dry_run=dry_run,
         )
         commit = commit_allowed(
-            runner,
+            command_runner,
             spec.local_root,
             branch=spec.data["project"]["branch"],
             message=git_spec["commit_message"],
             dry_run=dry_run,
         )
     else:
-        commit = head_commit(runner, spec.local_root)
-    if git_spec["allow_push"]:
+        commit = head_commit(command_runner, spec.local_root)
+    if (
+        not dry_run
+        and not preflight_only
+        and git_spec["allow_push"]
+    ):
         commit = push_head(
-            runner,
+            command_runner,
             spec.local_root,
             branch=spec.data["project"]["branch"],
             dry_run=dry_run,
         )
     affected_paths = commits_changed_paths(
-        runner, spec.local_root, spec.data["project"]["branch"]
+        command_runner, spec.local_root, spec.data["project"]["branch"]
     )
     config = _ssh_config(spec)
-    output_roots = [
-        str(stage["resources"]["expected_output_root"])
-        for stage in spec.data["stages"]
-        if (stage.get("resources") or {}).get("expected_output_root")
-    ]
+    output_roots = list(
+        dict.fromkeys(
+            str(stage["resources"]["expected_output_root"])
+            for stage in spec.data["stages"]
+            if (stage.get("resources") or {}).get("expected_output_root")
+        )
+    )
     preflight_argv = build_preflight_argv(
         config,
         protected_output_roots=output_roots,
-        allow_overwrite=spec.data["permissions"]["allow_overwrite"],
+        allow_overwrite=(
+            spec.data["permissions"]["allow_overwrite"]
+            and not preflight_only
+            and not dry_run
+        ),
     )
     deploy_argv = build_deploy_argv(
         config,
@@ -493,19 +633,249 @@ def deploy(
         dynamic_paths=git_spec.get("dynamic_remote_paths") or [],
     )
     if dry_run:
+        _set_commits(store, local_commit=commit, remote_commit=None)
+        for stage_id, argv in (
+            ("deploy_preflight_dry_run", preflight_argv),
+            ("deploy_sync_dry_run", deploy_argv),
+        ):
+            store.append_command(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "stage_id": stage_id,
+                    "attempt": 1,
+                    "argv": argv,
+                    "cwd": str(spec.local_root),
+                    "return_code": None,
+                    "timed_out": False,
+                    "dry_run": True,
+                    "executed": False,
+                    "stdout_path": None,
+                    "stderr_path": None,
+                }
+            )
+        store.record_stage(
+            "deploy_dry_run",
+            {
+                "stage_id": "deploy_dry_run",
+                "attempt": 1,
+                "start_time": None,
+                "end_time": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "command_argv": [],
+                "cwd": str(spec.local_root),
+                "return_code": 0,
+                "stdout_path": None,
+                "stderr_path": None,
+                "artifacts": [],
+                "gate_result": None,
+                "job_id": None,
+                "git_commit": commit,
+                "remote_git_commit": None,
+                "status": "PASSED",
+            },
+        )
+        store.transition(
+            RunStatus.DRY_RUN_COMPLETED,
+            reason="Deploy dry-run generated commands without SSH.",
+        )
+        _set_stop_reason(
+            store, "Dry-run only; neither SSH nor remote Git ran."
+        )
+        report, _ = write_final_report(
+            store.run_dir,
+            state=store.load(),
+            gate_summary="Deploy dry-run completed without remote execution.",
+            output_roots=output_roots,
+            provenance={"remote_contacted": False},
+            next_allowed_stage="deploy --preflight-only",
+            stop_reason="Dry-run only; neither SSH nor remote Git ran.",
+            details={
+                "preflight_command_record": "commands.jsonl:1",
+                "deploy_command_record": "commands.jsonl:2",
+                "affected_paths": affected_paths,
+                "remote_contacted": False,
+                "proxy_variables_present": environment_audit(
+                    inherited_environment()
+                )["proxy_present"],
+            },
+        )
         return {
+            "run_dir": str(store.run_dir),
+            "status": RunStatus.DRY_RUN_COMPLETED.value,
+            "report": str(report),
+            "return_code": 0,
             "dry_run": True,
             "preflight_argv": preflight_argv,
             "deploy_argv": deploy_argv,
             "commit": commit,
             "affected_paths": affected_paths,
         }
+    if preflight_only:
+        previous = previous_preflight
+        store.transition(RunStatus.REMOTE_PREFLIGHT_RUNNING)
+        environment = inherited_environment(
+            preserve_proxy_environment=True
+        )
+        atomic_write_json(
+            store.run_dir / "environment_audit.json",
+            environment_audit(environment),
+        )
+        attempt = int(previous.get("attempt", 0)) + 1
+        result = command_runner.run(
+            preflight_argv,
+            cwd=spec.local_root,
+            environment=environment,
+        )
+        stdout_path, stderr_path = _record_command(
+            store, "remote_preflight", attempt, result
+        )
+        parsed = parse_preflight_output(result.stdout, result.stderr)
+        parsed_details = parsed.to_dict()
+        allowed_dirty, blocked_dirty = _preflight_dirty_summary(
+            parsed.dirty_lines,
+            git_spec.get("dynamic_remote_paths") or [],
+        )
+        commits_equal = parsed.commit == commit
+        parsed_details.update(
+            {
+                "local_commit": commit,
+                "remote_commit": parsed.commit,
+                "expected_branch": spec.data["project"]["branch"],
+                "commits_equal": commits_equal,
+                "allowed_dynamic_dirty": allowed_dirty,
+                "blocked_remote_dirty": blocked_dirty,
+            }
+        )
+        hard_failures: list[str] = []
+        if result.returncode != 0:
+            hard_failures.append(f"ssh_return_code={result.returncode}")
+        if parsed.branch != spec.data["project"]["branch"]:
+            hard_failures.append("remote_branch_mismatch")
+        if not parsed.conda_ready:
+            hard_failures.append("conda_not_ready")
+        if not parsed.sbatch_ready:
+            hard_failures.append("sbatch_not_ready")
+        if not parsed.sacct_ready:
+            hard_failures.append("sacct_not_ready")
+        if parsed.finalized_output_blocked:
+            hard_failures.append("finalized_output_blocked")
+        if blocked_dirty:
+            hard_failures.append("remote_tracked_files_dirty")
+        if parsed.commit is None:
+            hard_failures.append("remote_commit_missing")
+        _set_commits(
+            store, local_commit=commit, remote_commit=parsed.commit
+        )
+        stage_status = (
+            "FAILED"
+            if hard_failures
+            else ("PASSED" if commits_equal else "NEEDS_DEPLOY")
+        )
+        store.record_stage(
+            "remote_preflight",
+            {
+                "stage_id": "remote_preflight",
+                "attempt": attempt,
+                "start_time": None,
+                "end_time": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "command_argv": preflight_argv,
+                "cwd": str(spec.local_root),
+                "return_code": result.returncode,
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "artifacts": [],
+                "gate_result": None,
+                "job_id": None,
+                "git_commit": commit,
+                "remote_git_commit": parsed.commit,
+                "status": stage_status,
+            },
+        )
+        if hard_failures:
+            store.transition(
+                RunStatus.REMOTE_PREFLIGHT_BLOCKED,
+                reason="; ".join(hard_failures),
+            )
+            store.transition(
+                RunStatus.BLOCKED, reason="; ".join(hard_failures)
+            )
+            _set_stop_reason(store, "; ".join(hard_failures))
+            report, _ = write_blocked_report(
+                store.run_dir,
+                state=store.load(),
+                failed_stage="remote_preflight",
+                error_class="RemotePreflightFailure",
+                return_code=result.returncode,
+                stderr=result.stderr,
+                artifacts=[],
+                retry_count=attempt - 1,
+                recommended_action=(
+                    "Resolve the reported read-only preflight condition; "
+                    "do not pull automatically."
+                ),
+                scientific_semantics_risk=False,
+                details={
+                    **parsed_details,
+                    "failed_checks": hard_failures,
+                    "next_action": "manual_preflight_remediation",
+                    "remote_write_performed": False,
+                },
+            )
+            return {
+                "run_dir": str(store.run_dir),
+                "status": RunStatus.BLOCKED.value,
+                "report": str(report),
+                "return_code": result.returncode or 2,
+            }
+        if not commits_equal:
+            store.transition(
+                RunStatus.NEEDS_DEPLOY,
+                reason="Remote commit differs from local commit.",
+            )
+            _set_stop_reason(
+                store, "Remote commit differs; deploy was not run."
+            )
+            next_action = "deploy"
+            preflight_status = "NEEDS_DEPLOY"
+        else:
+            store.transition(RunStatus.REMOTE_PREFLIGHT_PASSED)
+            _set_stop_reason(
+                store, "Read-only preflight passed; remote write awaits approval."
+            )
+            next_action = "remote_write_approval_required"
+            preflight_status = "PASS"
+        report, _ = write_final_report(
+            store.run_dir,
+            state=store.load(),
+            gate_summary=f"Read-only SSH preflight: {preflight_status}.",
+            output_roots=output_roots,
+            provenance={"remote_write_performed": False},
+            next_allowed_stage=next_action,
+            stop_reason="Read-only preflight completed; deploy was not run.",
+            details={
+                **parsed_details,
+                "preflight_status": preflight_status,
+                "next_action": next_action,
+                "remote_write_performed": False,
+            },
+        )
+        return {
+            "run_dir": str(store.run_dir),
+            "status": store.load()["status"],
+            "report": str(report),
+            "return_code": 0,
+        }
     if store:
         store.transition(RunStatus.REMOTE_PREFLIGHT)
-    preflight = runner.run(preflight_argv, cwd=spec.local_root)
+    preflight = command_runner.run(preflight_argv, cwd=spec.local_root)
     if preflight.returncode != 0:
         raise AutomationBlocked(preflight.stderr or "Remote preflight failed.")
-    result = runner.run(deploy_argv, cwd=spec.local_root)
+    result = command_runner.run(deploy_argv, cwd=spec.local_root)
     if result.returncode != 0:
         raise AutomationBlocked(result.stderr or "Remote deploy failed.")
     if store:
@@ -751,7 +1121,9 @@ def _parser() -> argparse.ArgumentParser:
     local.add_argument("--dry-run", action="store_true")
     deploy_parser = subparsers.add_parser("deploy")
     deploy_parser.add_argument("spec")
-    deploy_parser.add_argument("--dry-run", action="store_true")
+    deploy_mode = deploy_parser.add_mutually_exclusive_group()
+    deploy_mode.add_argument("--dry-run", action="store_true")
+    deploy_mode.add_argument("--preflight-only", action="store_true")
     deploy_parser.add_argument("--run-dir")
     submit_parser = subparsers.add_parser("submit")
     submit_parser.add_argument("spec")
@@ -820,14 +1192,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     }
                 )
         elif args.command == "deploy":
-            store = RunStore.open(args.run_dir) if args.run_dir else None
-            _json_print(
-                deploy(
-                    load_task_spec(args.spec),
-                    dry_run=args.dry_run,
-                    store=store,
-                )
+            result = deploy(
+                load_task_spec(args.spec),
+                dry_run=args.dry_run,
+                preflight_only=args.preflight_only,
+                run_dir=args.run_dir,
             )
+            _json_print(result)
+            return int(result.get("return_code", 0))
         elif args.command == "submit":
             store = RunStore.open(args.run_dir) if args.run_dir else None
             _json_print(

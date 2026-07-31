@@ -17,6 +17,7 @@ from uuid import uuid4
 class RunStatus(str, Enum):
     CREATED = "CREATED"
     VALIDATED = "VALIDATED"
+    DRY_RUN_COMPLETED = "DRY_RUN_COMPLETED"
     LOCAL_PREFLIGHT = "LOCAL_PREFLIGHT"
     LOCAL_GATE_RUNNING = "LOCAL_GATE_RUNNING"
     LOCAL_GATE_PASSED = "LOCAL_GATE_PASSED"
@@ -25,6 +26,10 @@ class RunStatus(str, Enum):
     PUSHED = "PUSHED"
     REMOTE_SYNCING = "REMOTE_SYNCING"
     REMOTE_PREFLIGHT = "REMOTE_PREFLIGHT"
+    REMOTE_PREFLIGHT_RUNNING = "REMOTE_PREFLIGHT_RUNNING"
+    REMOTE_PREFLIGHT_PASSED = "REMOTE_PREFLIGHT_PASSED"
+    REMOTE_PREFLIGHT_BLOCKED = "REMOTE_PREFLIGHT_BLOCKED"
+    NEEDS_DEPLOY = "NEEDS_DEPLOY"
     SUBMITTED = "SUBMITTED"
     RUNNING = "RUNNING"
     AUDITING = "AUDITING"
@@ -35,6 +40,9 @@ class RunStatus(str, Enum):
 
 
 TERMINAL_STATUSES = {
+    RunStatus.DRY_RUN_COMPLETED.value,
+    RunStatus.REMOTE_PREFLIGHT_PASSED.value,
+    RunStatus.NEEDS_DEPLOY.value,
     RunStatus.BLOCKED.value,
     RunStatus.FAILED.value,
     RunStatus.COMPLETED.value,
@@ -91,9 +99,36 @@ class RunStore:
     ) -> "RunStore":
         resolved = reports_root.expanduser().resolve()
         selected_run_id = run_id or make_run_id()
-        run_dir = resolved / task_id / selected_run_id
-        run_dir.mkdir(parents=True, exist_ok=False)
-        store = cls(run_dir=run_dir)
+        return cls.create_at(
+            resolved / task_id / selected_run_id,
+            task_id=task_id,
+            run_id=selected_run_id,
+            spec_path=spec_path,
+        )
+
+    @classmethod
+    def create_at(
+        cls,
+        run_dir: str | Path,
+        *,
+        task_id: str,
+        run_id: str | None = None,
+        spec_path: str | None = None,
+    ) -> "RunStore":
+        resolved_run_dir = Path(run_dir).expanduser().resolve()
+        selected_run_id = run_id or resolved_run_dir.name or make_run_id()
+        if resolved_run_dir.exists():
+            if not resolved_run_dir.is_dir():
+                raise FileExistsError(
+                    f"Run path is not a directory: {resolved_run_dir}"
+                )
+            if any(resolved_run_dir.iterdir()):
+                raise FileExistsError(
+                    f"Run directory is not empty: {resolved_run_dir}"
+                )
+        else:
+            resolved_run_dir.mkdir(parents=True, exist_ok=False)
+        store = cls(run_dir=resolved_run_dir)
         state = {
             "schema_version": 1,
             "task_id": task_id,
@@ -109,6 +144,9 @@ class RunStore:
             "stop_reason": None,
         }
         atomic_write_json(store.state_path, state)
+        with store.commands_path.open("a", encoding="utf-8") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
         store.append_event("run_created", status=RunStatus.CREATED.value)
         return store
 
