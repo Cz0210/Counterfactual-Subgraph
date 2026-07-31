@@ -1,0 +1,104 @@
+diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -69,4 +69,9 @@ parser.add_argument('--export_dir', default='../../../outputs/hpc/baselines/clea
+                     help='root directory for project-owned CLEAR exports')
++# CLEAR_WRAPPER_MUTAGENICITY_PHASE_B_RUNTIME
++parser.add_argument('--model_dir', default='../models_save/',
++                    help='checkpoint root; defaults to the official location')
++parser.add_argument('--num_experiments', type=int, default=3,
++                    help='number of official split repetitions to train')
+ 
+ args = parser.parse_args()
+ 
+@@ -107,9 +112,10 @@ def proximity_feature(feat_1, feat_2, type='cos'):
+     return output
+ 
+ # CLEAR_WRAPPER_SAVE_CFE_CHECKPOINT
+-def clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch):
+-    os.makedirs('../models_save/', exist_ok=True)
+-    CFE_model_path = f'../models_save/weights_graphCFE_{variant}_{dataset}_exp' + str(exp_i) + '_epoch' + str(epoch) + '.pt'
++def clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch, model_dir='../models_save/'):
++    model_dir = os.path.abspath(model_dir)
++    os.makedirs(model_dir, exist_ok=True)
++    CFE_model_path = os.path.join(model_dir, f'weights_graphCFE_{variant}_{dataset}_exp' + str(exp_i) + '_epoch' + str(epoch) + '.pt')
+     torch.save(model.state_dict(), CFE_model_path)
+     print(f'[CLEAR_CKPT_SAVE] path={CFE_model_path}')
+     return CFE_model_path
+@@ -160,5 +166,6 @@ def train(params):
+         params['train_loader'], params['val_loader'], params['test_loader'], params['exp_i'], params['dataset'], params['metrics'], params['variant']
+     save_model = params['save_model'] if 'save_model' in params else True
++    model_dir = params.get('model_dir', '../models_save/')
+     print("start training!")
+ 
+     time_begin = time.time()
+@@ -219,10 +226,10 @@ def train(params):
+             # save
+             if save_model:
+                 if epoch == 900:
+-                    clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch)
++                    clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch, model_dir)
+ 
+         if save_model and epoch == epochs:
+-            clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch)
++            clear_wrapper_save_cfe_checkpoint(model, variant, dataset, exp_i, epoch, model_dir)
+ 
+         # if epoch % 2000 == 0 and args.dataset == 'imdb_m':
+         #     x_range = [0.0, 6]
+@@ -772,7 +779,7 @@ def run_clear(args, exp_type):
+ 
+ def run_clear(args, exp_type):
+     data_path_root = '../dataset/'
+-    model_path = '../models_save/'
++    model_path = os.path.abspath(args.model_dir) + os.sep
+     assert exp_type == 'train' or exp_type == 'test' or exp_type == 'test_small'
+     small_test = 20
+ 
+@@ -792,7 +799,7 @@ def run_clear(args, exp_type):
+     print('n ', n, 'x_dim: ', x_dim, ' max_num_nodes: ', max_num_nodes, ' num_class: ', num_class)
+ 
+     results_all_exp = {}
+-    exp_num = 3
++    exp_num = int(args.num_experiments)
+     init_params = {'vae_type': 'graphVAE', 'x_dim': x_dim, 'u_dim': u_dim,
+                    'max_num_nodes': max_num_nodes}  # parameters for initialize GraphCFE model
+ 
+@@ -838,6 +845,7 @@ def run_clear(args, exp_type):
+                             'train_loader': train_loader, 'val_loader': val_loader, 'test_loader': test_loader,
+                             'exp_i': exp_i,
+-                            'dataset': args.dataset, 'metrics': metrics, 'save_model': True, 'variant': variant}
++                            'dataset': args.dataset, 'metrics': metrics, 'save_model': True, 'variant': variant,
++                            'model_dir': model_path}
+             train(train_params)
+         else:
+             # test
+diff --git a/src/train_pred.py b/src/train_pred.py
+--- a/src/train_pred.py
++++ b/src/train_pred.py
+@@ -51,5 +51,8 @@ parser.add_argument('--lr', type=float, default=1e-3,
+ parser.add_argument('--weight_decay', type=float, default=1e-5,
+                     help='weight decay')
++# CLEAR_WRAPPER_MUTAGENICITY_PHASE_B_RUNTIME
++parser.add_argument('--model_dir', default='../models_save/',
++                    help='checkpoint root; defaults to the official location')
+ 
+ args = parser.parse_args()
+ 
+@@ -218,8 +221,16 @@ def train(params):
+                 checkpoint_value = eval_results_val.get(checkpoint_metric, eval_results_val['loss'])
+                 if _checkpoint_is_better(checkpoint_value, best_checkpoint_value, checkpoint_metric):
+                     best_checkpoint_value = _safe_float(checkpoint_value)
+-                    path_model = f'../models_save/prediction/weights_graphPred__{args.dataset}.pt'
++                    prediction_dir = os.path.join(os.path.abspath(args.model_dir), 'prediction')
++                    os.makedirs(prediction_dir, exist_ok=True)
++                    path_model = os.path.join(prediction_dir, f'weights_graphPred__{args.dataset}.pt')
+                     torch.save(model.state_dict(), path_model)
+                     print('model saved in ', path_model, 'checkpoint_metric=', checkpoint_metric, 'checkpoint_value=', _format_float(checkpoint_value))
+ 
++    if save_model and args.dataset == 'mutagenicity':
++        prediction_dir = os.path.join(os.path.abspath(args.model_dir), 'prediction')
++        os.makedirs(prediction_dir, exist_ok=True)
++        path_model = os.path.join(prediction_dir, f'weights_graphPred__{args.dataset}.pt')
++        torch.save(model.state_dict(), path_model)
++        print('[CLEAR_GRAPHPRED_FINAL_SAVE] path=', path_model)
+     return

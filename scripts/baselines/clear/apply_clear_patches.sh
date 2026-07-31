@@ -55,3 +55,4 @@ apply_clear_patch "${ROOT_DIR}/patches/clear_official/002_export_test_counterfac
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/003_support_aids_dataset.patch" "CLEAR_WRAPPER_SUPPORT_AIDS_DATASET"
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/004_aids_weighted_graphpred.patch" "CLEAR_WRAPPER_AIDS_WEIGHTED_GRAPHPRED" "${CLEAR_TRAIN_PRED}"
 apply_clear_patch "${ROOT_DIR}/patches/clear_official/005_support_mutagenicity_dataset.patch" "CLEAR_WRAPPER_SUPPORT_MUTAGENICITY_DATASET"
+apply_clear_patch "${ROOT_DIR}/patches/clear_official/006_mutagenicity_phase_b_run_local_checkpoints.patch" "CLEAR_WRAPPER_MUTAGENICITY_PHASE_B_RUNTIME"
