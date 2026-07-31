@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Iterable
 
@@ -200,6 +200,22 @@ def _validate_relative_policy_path(value: str, *, field: str) -> None:
         )
 
 
+def _validate_adopt_path_under(
+    value: str, output_root: PurePosixPath, *, field: str
+) -> None:
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts or value in {"", "."}:
+        raise SpecValidationError(
+            f"{field} must be a safe repository-relative path: {value!r}"
+        )
+    try:
+        path.relative_to(output_root)
+    except ValueError as exc:
+        raise SpecValidationError(
+            f"{field} must remain under adopt_existing.output_root: {value!r}"
+        ) from exc
+
+
 def semantic_validate(data: dict[str, Any]) -> None:
     task_id = str(data["task_id"])
     if not TASK_ID_PATTERN.fullmatch(task_id):
@@ -253,6 +269,50 @@ def semantic_validate(data: dict[str, Any]) -> None:
     if proxy_policy["preserve_existing"] is not True:
         raise SpecValidationError("proxy_policy.preserve_existing must be true.")
     stage_ids = {str(stage["id"]) for stage in data["stages"]}
+    adopt = data.get("adopt_existing")
+    if adopt is not None:
+        output_root = PurePosixPath(str(adopt["output_root"]))
+        if (
+            output_root.is_absolute()
+            or ".." in output_root.parts
+            or str(output_root) in {"", "."}
+        ):
+            raise SpecValidationError(
+                "adopt_existing.output_root must be repository-relative."
+            )
+        marker_paths = []
+        for field in (
+            "completion_marker",
+            "manifest_path",
+            "finalized_marker",
+        ):
+            value = str(adopt[field])
+            _validate_adopt_path_under(value, output_root, field=field)
+            marker_paths.append(value)
+        if len(marker_paths) != len(set(marker_paths)):
+            raise SpecValidationError(
+                "Adoption completion, manifest, and finalized paths must differ."
+            )
+        unknown_stages = sorted(set(adopt["stages"]) - stage_ids)
+        if unknown_stages:
+            raise SpecValidationError(
+                f"adopt_existing references unknown stages: {unknown_stages}"
+            )
+        if "phase_b_gpu_smoke" in adopt["stages"]:
+            raise SpecValidationError(
+                "adopt_existing must stop before phase_b_gpu_smoke."
+            )
+        for current, legacy in adopt["artifact_aliases"].items():
+            _validate_adopt_path_under(
+                str(current), output_root, field="artifact_aliases source"
+            )
+            _validate_adopt_path_under(
+                str(legacy), output_root, field="artifact_aliases destination"
+            )
+        for value in adopt["jsonl_row_counts"]:
+            _validate_adopt_path_under(
+                str(value), output_root, field="jsonl_row_counts"
+            )
     for key in ("auto_until", "stop_before"):
         value = data["execution"].get(key)
         if value is not None and value not in stage_ids:

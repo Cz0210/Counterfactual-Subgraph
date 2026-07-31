@@ -54,6 +54,24 @@ proxy_policy:
   require_any_present_for_git_network: true
   required_for_stages:
     - deploy_git_sync
+adopt_existing:
+  enabled: true
+  mode: legacy_manifest_sha256
+  stages:
+    - phase_a_prepare
+    - phase_a_probe
+    - phase_a_audit
+  output_root: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2
+  completion_marker: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/_PHASE_A_COMPLETE.json
+  manifest_path: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/phase_a_manifest.json
+  finalized_marker: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/_FINALIZED.json
+  expected_generation_commit: f83f701a03306ba6ab0008ea61ce0cc34a2defca
+  artifact_aliases:
+    outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_summary.json: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe_64/codec_probe_summary.json
+    outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_rows.jsonl: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe_64/codec_probe_rows.jsonl
+  jsonl_row_counts:
+    outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_rows.jsonl: 64
+  allow_missing_current_markers: true
 execution:
   auto_until: phase_a_audit
   stop_before: phase_b_gpu_smoke
@@ -165,6 +183,7 @@ stages:
         probe_rows: 64
         probe_failed_rows: 0
         probe_passed: true
+        atom_sidecar_schema_version: clear_mutagenicity_atom_sidecar_v2
         calibration_loaded: false
         test_loaded: false
       forbidden_fields: {}

@@ -33,7 +33,7 @@ def write_final_report(
     passed = [
         stage_id
         for stage_id, record in stages.items()
-        if record.get("status") == "PASSED"
+        if record.get("status") in {"PASSED", "ADOPTED_EXISTING"}
     ]
     jobs = {
         stage_id: record["job_id"]

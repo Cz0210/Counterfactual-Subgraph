@@ -38,6 +38,17 @@ def test_example_and_clear_specs_validate() -> None:
         "require_any_present_for_git_network": True,
         "required_for_stages": ["deploy_git_sync"],
     }
+    adopt = clear.data["adopt_existing"]
+    assert adopt["mode"] == "legacy_manifest_sha256"
+    assert adopt["stages"] == [
+        "phase_a_prepare",
+        "phase_a_probe",
+        "phase_a_audit",
+    ]
+    assert adopt["expected_generation_commit"] == (
+        "f83f701a03306ba6ab0008ea61ce0cc34a2defca"
+    )
+    assert "phase_b_gpu_smoke" not in adopt["stages"]
 
 
 def test_clear_nested_allowlist_matches_patch_001_through_005() -> None:

@@ -174,6 +174,40 @@ loads `spec.snapshot.yaml`. A stage already recorded as `PASSED` is skipped.
 Retries increment the stage attempt without deleting earlier stdout, stderr,
 commands, or events.
 
+## 9.1 Adopt Existing Artifacts
+
+`adopt-existing` records a completed legacy stage without claiming that the
+current commit reran it. The mode is enabled explicitly by a task-level
+`adopt_existing` block and is accepted only when every write, Slurm, GPU,
+full, calibration, test, finalization, and overwrite permission remains
+disabled.
+
+The verifier first runs the task's bounded local regression gate. It then
+uses one non-interactive SSH command to read the completion marker, manifest,
+artifact sizes and SHA256 values, scientific summary fields, JSONL row counts,
+the remote Git commit, and the finalized marker. Every manifest entry is
+checked; omitted or mismatched artifacts block adoption. Artifact aliases map
+the current expected path to a legacy path for verification only. They never
+create a directory, symlink, copied file, or replacement marker on the HPC.
+
+Successful legacy stages are recorded as `ADOPTED_EXISTING` with
+`command_status=NOT_EXECUTED`, `gate_status=PASSED`, and provenance
+`source=legacy_manifest_sha256`. The current local/remote commit and the
+legacy generation commit remain distinct evidence fields. The run stops at
+`STOPPED_BEFORE_APPROVAL`; it does not approve or submit the next stage.
+
+Review the fully side-effect-free command before real verification:
+
+```bash
+python scripts/ops/experimentctl.py adopt-existing \
+  ops/specs/clear_mutagenicity_phase_a_v2.yaml \
+  --dry-run
+```
+
+The dry-run executes neither local tests nor SSH. It persists a local plan,
+state, command record, and report, and exposes the exact read-only remote
+script for review and `bash -n` validation.
+
 ## 10. Reports
 
 Terminal runs produce short Markdown and JSON reports. A blocked report names
@@ -203,3 +237,6 @@ train/validation inputs, expected counts, 64-row codec probe, sidecar v2, and
 round-trip gates. It stops before `phase_b_gpu_smoke`. Its remote-write and
 Slurm permissions are false, so the current artifact is suitable only for
 validation and planning until a reviewed task spec enables the next action.
+Its `adopt_existing` block can verify the frozen `codec_probe_64` legacy
+layout through the Phase A manifest without creating the current
+`codec_probe` layout or `phase_a_gate.json`.

@@ -18,6 +18,7 @@ class RunStatus(str, Enum):
     CREATED = "CREATED"
     VALIDATED = "VALIDATED"
     DRY_RUN_COMPLETED = "DRY_RUN_COMPLETED"
+    ADOPT_EXISTING_DRY_RUN = "ADOPT_EXISTING_DRY_RUN"
     LOCAL_PREFLIGHT = "LOCAL_PREFLIGHT"
     LOCAL_GATE_RUNNING = "LOCAL_GATE_RUNNING"
     LOCAL_GATE_PASSED = "LOCAL_GATE_PASSED"
@@ -34,6 +35,9 @@ class RunStatus(str, Enum):
     REMOTE_PREFLIGHT_BLOCKED = "REMOTE_PREFLIGHT_BLOCKED"
     NEEDS_DEPLOY = "NEEDS_DEPLOY"
     NEEDS_PROXY_SETUP = "NEEDS_PROXY_SETUP"
+    ADOPT_EXISTING_VERIFYING = "ADOPT_EXISTING_VERIFYING"
+    ADOPTED_EXISTING = "ADOPTED_EXISTING"
+    STOPPED_BEFORE_APPROVAL = "STOPPED_BEFORE_APPROVAL"
     SUBMITTED = "SUBMITTED"
     RUNNING = "RUNNING"
     AUDITING = "AUDITING"
@@ -45,11 +49,13 @@ class RunStatus(str, Enum):
 
 TERMINAL_STATUSES = {
     RunStatus.DRY_RUN_COMPLETED.value,
+    RunStatus.ADOPT_EXISTING_DRY_RUN.value,
     RunStatus.REMOTE_PREFLIGHT_PASSED.value,
     RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS.value,
     RunStatus.REMOTE_PREFLIGHT_BLOCKED.value,
     RunStatus.NEEDS_DEPLOY.value,
     RunStatus.NEEDS_PROXY_SETUP.value,
+    RunStatus.STOPPED_BEFORE_APPROVAL.value,
     RunStatus.BLOCKED.value,
     RunStatus.FAILED.value,
     RunStatus.COMPLETED.value,
@@ -242,7 +248,7 @@ class RunStore:
 
     def stage_succeeded(self, stage_id: str) -> bool:
         stage = self.load().get("stages", {}).get(stage_id, {})
-        return stage.get("status") == "PASSED"
+        return stage.get("status") in {"PASSED", "ADOPTED_EXISTING"}
 
     def approve(self, stage_id: str, reason: str, username: str) -> None:
         if not reason.strip():

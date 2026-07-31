@@ -27,6 +27,21 @@ proxy-presence checks. It cannot run fetch, pull, merge, push, sbatch, file
 creation, deletion, or movement. A commit mismatch is reported as
 `NEEDS_DEPLOY`; it never triggers synchronization.
 
+`adopt-existing` has a narrower, manifest-oriented read-only contract. It may
+read JSON/JSONL files, file sizes, SHA256 digests, and Git HEAD through SSH.
+It cannot create compatibility aliases, current-format marker files, or any
+remote report. All evidence and reports are written only below local
+`ops/reports`. A configured alias is a verification lookup, never a filesystem
+operation. Remote bytecode generation is disabled so verification does not
+create `__pycache__`. The command is rejected unless every remote-write, Slurm, GPU,
+full, calibration, test, finalization, and overwrite permission is false.
+
+Legacy adoption does not rewrite provenance. The current local and remote
+commits must match each other, while the legacy generation commit must match
+both the completion marker and manifest. Adopted stages are marked as not
+executed under the current commit, and execution stops before the next
+approval stage.
+
 ## Worktree Safety
 
 Only paths in the task allowlist may be staged. Other local changes, dirty

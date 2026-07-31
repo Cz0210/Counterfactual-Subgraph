@@ -16,6 +16,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.ops.gate_runner import build_gate_json, evaluate_gate
+from scripts.ops.adopt_existing import (
+    build_remote_script as build_adopt_remote_script,
+    build_verification_argv as build_adopt_verification_argv,
+    parse_evidence as parse_adopt_evidence,
+)
 from scripts.ops.git_ops import (
     GitSafetyError,
     commit_allowed,
@@ -994,6 +999,428 @@ def deploy(
     }
 
 
+def _require_adoption_permissions(spec: TaskSpec) -> None:
+    forbidden = (
+        "allow_remote_write",
+        "allow_sbatch",
+        "allow_overwrite",
+        "allow_gpu_smoke",
+        "allow_full",
+        "allow_calibration",
+        "allow_test",
+        "allow_finalization",
+    )
+    enabled = [key for key in forbidden if spec.data["permissions"][key]]
+    if enabled:
+        raise AutomationBlocked(
+            "adopt-existing requires all execution permissions false; enabled="
+            + ",".join(enabled)
+        )
+    adopt = spec.data.get("adopt_existing")
+    if not isinstance(adopt, Mapping) or adopt.get("enabled") is not True:
+        raise AutomationBlocked("adopt_existing is not enabled by the task spec.")
+
+
+def _adoption_verification_config(
+    spec: TaskSpec, *, local_commit: str
+) -> dict[str, Any]:
+    adopt = spec.data["adopt_existing"]
+    adopted_stages = [str(value) for value in adopt["stages"]]
+    stage_gates = []
+    for stage_id in adopted_stages:
+        stage = spec.stage_by_id[stage_id]
+        stage_gates.append(
+            {
+                "stage_id": stage_id,
+                "json_path": stage["gate"].get("json_path"),
+                "required_fields": dict(
+                    stage["gate"].get("required_fields") or {}
+                ),
+                "forbidden_fields": dict(
+                    stage["gate"].get("forbidden_fields") or {}
+                ),
+            }
+        )
+    next_stage = _next_stage_id(spec, adopted_stages[-1])
+    return {
+        "mode": adopt["mode"],
+        "output_root": adopt["output_root"],
+        "completion_marker": adopt["completion_marker"],
+        "manifest_path": adopt["manifest_path"],
+        "finalized_marker": adopt["finalized_marker"],
+        "expected_generation_commit": adopt["expected_generation_commit"],
+        "artifact_aliases": dict(adopt["artifact_aliases"]),
+        "jsonl_row_counts": dict(adopt["jsonl_row_counts"]),
+        "allow_missing_current_markers": adopt[
+            "allow_missing_current_markers"
+        ],
+        "adopted_stages": adopted_stages,
+        "next_stage": next_stage,
+        "stage_gates": stage_gates,
+        "current_local_commit": local_commit,
+    }
+
+
+def _append_adoption_report_contract(
+    report_path: Path, *, commits_differ: bool
+) -> None:
+    statements = [
+        "",
+        "## Legacy Adoption",
+        "",
+        "- Phase A was adopted from verified legacy artifacts.",
+        "- No remote artifact was modified.",
+        "- No Slurm job was submitted.",
+        "- Current code commit and legacy generation commit differ: "
+        f"{str(commits_differ).lower()}.",
+        "- All manifest artifacts had their size and SHA256 verified.",
+        "- Missing current markers were accepted only through legacy manifest "
+        "integrity verification.",
+        "- Execution stopped before phase_b_gpu_smoke pending explicit approval.",
+        "",
+    ]
+    with report_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(statements))
+
+
+def adopt_existing(
+    spec: TaskSpec,
+    *,
+    dry_run: bool,
+    run_dir: str | Path | None = None,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    store = _deploy_store(spec, run_dir)
+    try:
+        _require_adoption_permissions(spec)
+    except AutomationBlocked as exc:
+        reason = str(exc)
+        store.transition(RunStatus.BLOCKED, reason=reason)
+        _set_stop_reason(store, reason)
+        report, _ = write_blocked_report(
+            store.run_dir,
+            state=store.load(),
+            failed_stage="adopt_existing_permissions",
+            error_class="AdoptExistingPermissionBoundary",
+            return_code=None,
+            stderr=reason,
+            artifacts=[],
+            retry_count=0,
+            recommended_action=(
+                "Disable all execution permissions before legacy adoption."
+            ),
+            scientific_semantics_risk=False,
+            details={"remote_write_performed": False, "slurm_jobs": []},
+        )
+        return {
+            "status": RunStatus.BLOCKED.value,
+            "return_code": 2,
+            "run_dir": str(store.run_dir),
+            "report": str(report),
+            "remote_write_performed": False,
+            "slurm_jobs": [],
+        }
+    command_runner = runner or CommandRunner(default_timeout_seconds=600)
+    local_commit = head_commit(command_runner, spec.local_root)
+    verification_config = _adoption_verification_config(
+        spec, local_commit=local_commit
+    )
+    ssh_config = _ssh_config(spec)
+    verification_argv = build_adopt_verification_argv(
+        ssh_config, verification_config
+    )
+    remote_script = build_adopt_remote_script(
+        ssh_config, verification_config
+    )
+    adopted_stages = list(verification_config["adopted_stages"])
+    next_stage = verification_config["next_stage"]
+    output_root = str(verification_config["output_root"])
+
+    if dry_run:
+        _set_commits(store, local_commit=local_commit, remote_commit=None)
+        store.append_command(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "stage_id": "adopt_existing_verification_dry_run",
+                "attempt": 1,
+                "argv": verification_argv,
+                "cwd": str(spec.local_root),
+                "return_code": None,
+                "timed_out": False,
+                "dry_run": True,
+                "executed": False,
+                "stdout_path": None,
+                "stderr_path": None,
+            }
+        )
+        store.record_stage(
+            "adopt_existing_dry_run",
+            {
+                "stage_id": "adopt_existing_dry_run",
+                "attempt": 1,
+                "start_time": None,
+                "end_time": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "command_argv": verification_argv,
+                "cwd": str(spec.local_root),
+                "return_code": None,
+                "status": RunStatus.ADOPT_EXISTING_DRY_RUN.value,
+                "command_status": "NOT_EXECUTED",
+                "gate_status": "NOT_EVALUATED",
+                "job_id": None,
+            },
+        )
+        store.transition(
+            RunStatus.ADOPT_EXISTING_DRY_RUN,
+            reason="Adoption dry-run generated a read-only verification command.",
+        )
+        _set_stop_reason(store, "Dry-run only; SSH and local tests were not run.")
+        report, _ = write_final_report(
+            store.run_dir,
+            state=store.load(),
+            gate_summary="Adopt-existing dry-run only.",
+            output_roots=[output_root],
+            provenance={"remote_write_performed": False, "slurm_jobs": []},
+            next_allowed_stage="adopt-existing without --dry-run",
+            stop_reason="Dry-run only; SSH and local tests were not run.",
+            details={
+                "adopted_stages": adopted_stages,
+                "next_stage": next_stage,
+                "remote_write_performed": False,
+                "slurm_jobs": [],
+            },
+        )
+        return {
+            "status": RunStatus.ADOPT_EXISTING_DRY_RUN.value,
+            "return_code": 0,
+            "dry_run": True,
+            "run_dir": str(store.run_dir),
+            "report": str(report),
+            "verification_argv": verification_argv,
+            "remote_script": remote_script,
+            "adopted_stages": adopted_stages,
+            "next_stage": next_stage,
+            "remote_write_performed": False,
+            "slurm_jobs": [],
+        }
+
+    local_stage = spec.stage_by_id.get("local_phase_a_tests")
+    if local_stage is None or local_stage["kind"] != "local_command":
+        raise AutomationBlocked(
+            "adopt-existing requires local_phase_a_tests local_command."
+        )
+    store.transition(RunStatus.LOCAL_GATE_RUNNING)
+    local_passed = _run_local_stage(
+        spec, store, local_stage, command_runner
+    )
+    if not local_passed:
+        _block_after_stage_failure(
+            store, local_stage, error_class="AdoptExistingLocalGateFailure"
+        )
+        report = store.run_dir / "BLOCKED_REPORT.md"
+        return {
+            "status": RunStatus.BLOCKED.value,
+            "return_code": 2,
+            "run_dir": str(store.run_dir),
+            "report": str(report),
+        }
+
+    store.transition(RunStatus.ADOPT_EXISTING_VERIFYING)
+    result = command_runner.run(
+        verification_argv,
+        cwd=spec.local_root,
+        environment=inherited_environment(preserve_proxy_environment=True),
+    )
+    stdout_path, stderr_path = _record_command(
+        store, "adopt_existing_verification", 1, result
+    )
+    evidence: dict[str, Any]
+    parse_error: str | None = None
+    try:
+        evidence = parse_adopt_evidence(result.stdout)
+    except (ValueError, RuntimeError) as exc:
+        evidence = {}
+        parse_error = str(exc)
+    failures = list(evidence.get("failed_hard_checks") or [])
+    if parse_error:
+        failures.append(f"evidence_parse_error:{parse_error}")
+    if result.returncode != 0:
+        failures.append(f"ssh_return_code:{result.returncode}")
+    if evidence.get("verification_passed") is not True:
+        failures.append("verification_passed_not_true")
+    if evidence.get("current_local_commit") not in (None, local_commit):
+        failures.append("evidence_local_commit_mismatch")
+
+    if failures:
+        store.record_stage(
+            "adopt_existing_verification",
+            {
+                "stage_id": "adopt_existing_verification",
+                "attempt": 1,
+                "start_time": None,
+                "end_time": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "command_argv": verification_argv,
+                "cwd": str(spec.local_root),
+                "return_code": result.returncode,
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
+                "status": "FAILED",
+                "command_status": (
+                    "PASSED" if result.returncode == 0 else "FAILED"
+                ),
+                "gate_status": "BLOCKED",
+                "job_id": None,
+            },
+        )
+        store.transition(RunStatus.BLOCKED, reason="; ".join(failures))
+        _set_stop_reason(store, "; ".join(failures))
+        report, _ = write_blocked_report(
+            store.run_dir,
+            state=store.load(),
+            failed_stage="adopt_existing_verification",
+            error_class="AdoptExistingVerificationFailure",
+            return_code=result.returncode,
+            stderr=result.stderr or parse_error or "",
+            artifacts=[output_root],
+            retry_count=0,
+            recommended_action="Inspect legacy manifest evidence; do not modify it.",
+            scientific_semantics_risk=False,
+            details={
+                "failed_checks": failures,
+                "evidence": evidence,
+                "remote_write_performed": False,
+            },
+        )
+        return {
+            "status": RunStatus.BLOCKED.value,
+            "return_code": result.returncode or 2,
+            "run_dir": str(store.run_dir),
+            "report": str(report),
+        }
+
+    evidence_path = store.run_dir / "evidence/adopt_existing_evidence.json"
+    atomic_write_json(evidence_path, evidence)
+    remote_commit = str(evidence["current_remote_commit"])
+    _set_commits(
+        store, local_commit=local_commit, remote_commit=remote_commit
+    )
+    store.record_stage(
+        "adopt_existing_verification",
+        {
+            "stage_id": "adopt_existing_verification",
+            "attempt": 1,
+            "start_time": None,
+            "end_time": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+            "command_argv": verification_argv,
+            "cwd": str(spec.local_root),
+            "return_code": result.returncode,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "artifacts": [str(evidence_path)],
+            "gate_result": str(evidence_path),
+            "job_id": None,
+            "git_commit": local_commit,
+            "remote_git_commit": remote_commit,
+            "status": "PASSED",
+            "command_status": "PASSED",
+            "gate_status": "PASSED",
+        },
+    )
+    for stage_id in adopted_stages:
+        stage = spec.stage_by_id[stage_id]
+        store.record_stage(
+            stage_id,
+            {
+                "stage_id": stage_id,
+                "attempt": 1,
+                "start_time": None,
+                "end_time": datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+                "command_argv": [],
+                "cwd": str(spec.local_root),
+                "return_code": None,
+                "stdout_path": None,
+                "stderr_path": None,
+                "artifacts": list(stage["expected_artifacts"]),
+                "gate_result": str(evidence_path),
+                "job_id": None,
+                "git_commit": local_commit,
+                "remote_git_commit": remote_commit,
+                "status": RunStatus.ADOPTED_EXISTING.value,
+                "command_status": "NOT_EXECUTED",
+                "gate_status": "PASSED",
+                "provenance": {
+                    "source": "legacy_manifest_sha256",
+                    "legacy_generation_commit": evidence[
+                        "legacy_generation_commit"
+                    ],
+                },
+            },
+        )
+    store.transition(RunStatus.ADOPTED_EXISTING)
+    store.transition(
+        RunStatus.STOPPED_BEFORE_APPROVAL,
+        reason=f"Stopped before {next_stage} pending explicit approval.",
+    )
+    _set_stop_reason(
+        store, f"Stopped before {next_stage} pending explicit approval."
+    )
+    report, _ = write_final_report(
+        store.run_dir,
+        state=store.load(),
+        gate_summary="Phase A adopted through verified legacy manifest integrity.",
+        output_roots=[output_root],
+        provenance={
+            "source": "legacy_manifest_sha256",
+            "current_local_commit": local_commit,
+            "current_remote_commit": remote_commit,
+            "legacy_generation_commit": evidence["legacy_generation_commit"],
+            "remote_write_performed": False,
+            "slurm_jobs": [],
+        },
+        next_allowed_stage=next_stage,
+        stop_reason=f"Stopped before {next_stage} pending explicit approval.",
+        details={
+            "evidence_path": str(evidence_path),
+            "artifact_count": evidence["artifact_count"],
+            "current_required_marker_present": evidence[
+                "current_required_marker_present"
+            ],
+            "accepted_via_legacy_manifest_integrity": evidence[
+                "accepted_via_legacy_manifest_integrity"
+            ],
+            "remote_write_performed": False,
+            "slurm_jobs": [],
+        },
+    )
+    _append_adoption_report_contract(
+        report,
+        commits_differ=(
+            local_commit != str(evidence["legacy_generation_commit"])
+        ),
+    )
+    return {
+        "status": RunStatus.STOPPED_BEFORE_APPROVAL.value,
+        "return_code": 0,
+        "dry_run": False,
+        "run_dir": str(store.run_dir),
+        "report": str(report),
+        "evidence": str(evidence_path),
+        "adopted_stages": adopted_stages,
+        "next_stage": next_stage,
+        "remote_write_performed": False,
+        "slurm_jobs": [],
+    }
+
+
 def submit(
     spec: TaskSpec,
     *,
@@ -1228,6 +1655,10 @@ def _parser() -> argparse.ArgumentParser:
     deploy_mode.add_argument("--dry-run", action="store_true")
     deploy_mode.add_argument("--preflight-only", action="store_true")
     deploy_parser.add_argument("--run-dir")
+    adopt_parser = subparsers.add_parser("adopt-existing")
+    adopt_parser.add_argument("spec")
+    adopt_parser.add_argument("--dry-run", action="store_true")
+    adopt_parser.add_argument("--run-dir")
     submit_parser = subparsers.add_parser("submit")
     submit_parser.add_argument("spec")
     submit_parser.add_argument("--dry-run", action="store_true")
@@ -1299,6 +1730,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_task_spec(args.spec),
                 dry_run=args.dry_run,
                 preflight_only=args.preflight_only,
+                run_dir=args.run_dir,
+            )
+            _json_print(result)
+            return int(result.get("return_code", 0))
+        elif args.command == "adopt-existing":
+            result = adopt_existing(
+                load_task_spec(args.spec),
+                dry_run=args.dry_run,
                 run_dir=args.run_dir,
             )
             _json_print(result)

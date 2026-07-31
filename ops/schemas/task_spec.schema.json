@@ -104,6 +104,52 @@
         }
       }
     },
+    "adopt_existing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "mode",
+        "stages",
+        "output_root",
+        "completion_marker",
+        "manifest_path",
+        "finalized_marker",
+        "expected_generation_commit",
+        "artifact_aliases",
+        "jsonl_row_counts",
+        "allow_missing_current_markers"
+      ],
+      "properties": {
+        "enabled": {"const": true},
+        "mode": {"enum": ["legacy_manifest_sha256"]},
+        "stages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "output_root": {"type": "string", "minLength": 1},
+        "completion_marker": {"type": "string", "minLength": 1},
+        "manifest_path": {"type": "string", "minLength": 1},
+        "finalized_marker": {"type": "string", "minLength": 1},
+        "expected_generation_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "artifact_aliases": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "string", "minLength": 1}
+        },
+        "jsonl_row_counts": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "integer", "minimum": 1}
+        },
+        "allow_missing_current_markers": {"type": "boolean"}
+      }
+    },
     "execution": {
       "type": "object",
       "additionalProperties": false,
