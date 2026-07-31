@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "run_state.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "run_id",
+    "status",
+    "created_at",
+    "updated_at",
+    "spec_path",
+    "local_commit",
+    "remote_commit",
+    "stages",
+    "approvals",
+    "stop_reason"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "status": {
+      "enum": [
+        "CREATED",
+        "VALIDATED",
+        "LOCAL_PREFLIGHT",
+        "LOCAL_GATE_RUNNING",
+        "LOCAL_GATE_PASSED",
+        "LOCAL_GATE_FAILED",
+        "COMMITTING",
+        "PUSHED",
+        "REMOTE_SYNCING",
+        "REMOTE_PREFLIGHT",
+        "SUBMITTED",
+        "RUNNING",
+        "AUDITING",
+        "WAITING_APPROVAL",
+        "BLOCKED",
+        "FAILED",
+        "COMPLETED"
+      ]
+    },
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "spec_path": {"type": "string"},
+    "local_commit": {"type": ["string", "null"]},
+    "remote_commit": {"type": ["string", "null"]},
+    "stages": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/stage_record"}
+    },
+    "approvals": {"type": "object"},
+    "stop_reason": {"type": ["string", "null"]}
+  },
+  "$defs": {
+    "stage_record": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "attempt"],
+      "properties": {
+        "stage_id": {"type": "string"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "start_time": {"type": ["string", "null"]},
+        "end_time": {"type": ["string", "null"]},
+        "command_argv": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "cwd": {"type": "string"},
+        "return_code": {"type": ["integer", "null"]},
+        "stdout_path": {"type": ["string", "null"]},
+        "stderr_path": {"type": ["string", "null"]},
+        "artifacts": {"type": "array"},
+        "gate_result": {"type": ["string", "null"]},
+        "job_id": {"type": ["string", "null"]},
+        "git_commit": {"type": ["string", "null"]},
+        "remote_git_commit": {"type": ["string", "null"]},
+        "status": {"type": "string"}
+      }
+    }
+  }
+}

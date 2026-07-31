@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task_spec.schema.json",
+  "title": "Experiment Automation Task Specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "description",
+    "project",
+    "remote",
+    "git",
+    "execution",
+    "permissions",
+    "stages"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "description": {"type": "string", "minLength": 1},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_root", "remote_root", "branch"],
+      "properties": {
+        "local_root": {"type": "string", "minLength": 1},
+        "remote_root": {"type": "string", "minLength": 1},
+        "branch": {"type": "string", "minLength": 1}
+      }
+    },
+    "remote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port", "control_socket", "conda_env"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "control_socket": {"type": ["string", "null"]},
+        "conda_env": {"type": "string", "minLength": 1}
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_paths",
+        "commit_message",
+        "allow_commit",
+        "allow_push",
+        "require_clean_allowed_paths"
+      ],
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "commit_message": {"type": "string"},
+        "allow_commit": {"type": "boolean"},
+        "allow_push": {"type": "boolean"},
+        "require_clean_allowed_paths": {"type": "boolean"},
+        "dynamic_remote_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "default": []
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auto_until",
+        "stop_before",
+        "max_auto_retries",
+        "poll_interval_seconds"
+      ],
+      "properties": {
+        "auto_until": {"type": "string", "minLength": 1},
+        "stop_before": {"type": ["string", "null"]},
+        "max_auto_retries": {"type": "integer", "minimum": 0, "maximum": 20},
+        "poll_interval_seconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allow_remote_write",
+        "allow_sbatch",
+        "allow_gpu_smoke",
+        "allow_full",
+        "allow_calibration",
+        "allow_test",
+        "allow_finalization",
+        "allow_overwrite"
+      ],
+      "properties": {
+        "allow_remote_write": {"type": "boolean"},
+        "allow_sbatch": {"type": "boolean"},
+        "allow_gpu_smoke": {"type": "boolean"},
+        "allow_full": {"type": "boolean"},
+        "allow_calibration": {"type": "boolean"},
+        "allow_test": {"type": "boolean"},
+        "allow_finalization": {"type": "boolean"},
+        "allow_overwrite": {"type": "boolean"},
+        "preserve_proxy_environment": {"type": "boolean", "default": true}
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/stage"}
+    }
+  },
+  "$defs": {
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "json_path",
+        "required_marker",
+        "required_fields",
+        "forbidden_fields"
+      ],
+      "properties": {
+        "json_path": {"type": ["string", "null"]},
+        "required_marker": {"type": ["string", "null"]},
+        "required_fields": {"type": "object"},
+        "forbidden_fields": {"type": "object"},
+        "float_tolerance": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1e-12
+        },
+        "sha256": {"type": "object"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "tags",
+        "notes",
+        "expected_output_root"
+      ],
+      "properties": {
+        "name": {"type": ["string", "null"]},
+        "tags": {"type": ["string", "null"]},
+        "notes": {"type": ["string", "null"]},
+        "expected_output_root": {"type": ["string", "null"]}
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "command",
+        "script",
+        "dependencies",
+        "expected_artifacts",
+        "gate",
+        "resources"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "kind": {
+          "enum": [
+            "local_command",
+            "remote_command",
+            "slurm_job",
+            "audit",
+            "approval"
+          ]
+        },
+        "command": {
+          "type": ["array", "null"],
+          "items": {"type": "string"}
+        },
+        "script": {"type": ["string", "null"]},
+        "dependencies": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string"}
+        },
+        "expected_artifacts": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "gate": {"$ref": "#/$defs/gate"},
+        "resources": {"$ref": "#/$defs/resources"},
+        "cwd": {"type": ["string", "null"]},
+        "timeout_seconds": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

@@ -1,0 +1,236 @@
+"""Persistent experiment run state and append-only events."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+import json
+import os
+from pathlib import Path
+import socket
+import tempfile
+from typing import Any
+from uuid import uuid4
+
+
+class RunStatus(str, Enum):
+    CREATED = "CREATED"
+    VALIDATED = "VALIDATED"
+    LOCAL_PREFLIGHT = "LOCAL_PREFLIGHT"
+    LOCAL_GATE_RUNNING = "LOCAL_GATE_RUNNING"
+    LOCAL_GATE_PASSED = "LOCAL_GATE_PASSED"
+    LOCAL_GATE_FAILED = "LOCAL_GATE_FAILED"
+    COMMITTING = "COMMITTING"
+    PUSHED = "PUSHED"
+    REMOTE_SYNCING = "REMOTE_SYNCING"
+    REMOTE_PREFLIGHT = "REMOTE_PREFLIGHT"
+    SUBMITTED = "SUBMITTED"
+    RUNNING = "RUNNING"
+    AUDITING = "AUDITING"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+
+
+TERMINAL_STATUSES = {
+    RunStatus.BLOCKED.value,
+    RunStatus.FAILED.value,
+    RunStatus.COMPLETED.value,
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def make_run_id() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}_{uuid4().hex[:8]}"
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def append_jsonl_fsync(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(encoded + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+@dataclass(slots=True)
+class RunStore:
+    run_dir: Path
+
+    @classmethod
+    def create(
+        cls,
+        reports_root: Path,
+        task_id: str,
+        run_id: str | None = None,
+        spec_path: str | None = None,
+    ) -> "RunStore":
+        resolved = reports_root.expanduser().resolve()
+        selected_run_id = run_id or make_run_id()
+        run_dir = resolved / task_id / selected_run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
+        store = cls(run_dir=run_dir)
+        state = {
+            "schema_version": 1,
+            "task_id": task_id,
+            "run_id": selected_run_id,
+            "status": RunStatus.CREATED.value,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "spec_path": spec_path or "",
+            "local_commit": None,
+            "remote_commit": None,
+            "stages": {},
+            "approvals": {},
+            "stop_reason": None,
+        }
+        atomic_write_json(store.state_path, state)
+        store.append_event("run_created", status=RunStatus.CREATED.value)
+        return store
+
+    @classmethod
+    def open(cls, run_dir: str | Path) -> "RunStore":
+        resolved = Path(run_dir).expanduser().resolve()
+        store = cls(run_dir=resolved)
+        if not store.state_path.is_file() or not store.events_path.is_file():
+            raise FileNotFoundError(
+                f"Run state is incomplete under {resolved}"
+            )
+        store.validate_event_history()
+        return store
+
+    @property
+    def state_path(self) -> Path:
+        return self.run_dir / "state.json"
+
+    @property
+    def events_path(self) -> Path:
+        return self.run_dir / "events.jsonl"
+
+    @property
+    def commands_path(self) -> Path:
+        return self.run_dir / "commands.jsonl"
+
+    def load(self) -> dict[str, Any]:
+        payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid state object: {self.state_path}")
+        return payload
+
+    def save(self, state: dict[str, Any]) -> None:
+        state["updated_at"] = utc_now()
+        atomic_write_json(self.state_path, state)
+
+    def append_event(
+        self, event_type: str, **details: Any
+    ) -> dict[str, Any]:
+        state = self.load()
+        event = {
+            "schema_version": 1,
+            "sequence": self.event_count() + 1,
+            "timestamp": utc_now(),
+            "task_id": state["task_id"],
+            "run_id": state["run_id"],
+            "event_type": event_type,
+            **details,
+        }
+        append_jsonl_fsync(self.events_path, event)
+        return event
+
+    def event_count(self) -> int:
+        if not self.events_path.exists():
+            return 0
+        with self.events_path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+
+    def transition(
+        self, status: RunStatus | str, *, reason: str | None = None
+    ) -> None:
+        value = status.value if isinstance(status, RunStatus) else str(status)
+        if value not in {item.value for item in RunStatus}:
+            raise ValueError(f"Unknown run status: {value}")
+        state = self.load()
+        previous = state["status"]
+        state["status"] = value
+        self.save(state)
+        self.append_event(
+            "state_transition",
+            previous_status=previous,
+            status=value,
+            reason=reason,
+        )
+
+    def record_stage(self, stage_id: str, record: dict[str, Any]) -> None:
+        state = self.load()
+        state["stages"][stage_id] = dict(record)
+        self.save(state)
+        self.append_event(
+            "stage_recorded",
+            stage_id=stage_id,
+            stage_status=record.get("status"),
+            attempt=record.get("attempt"),
+        )
+
+    def stage_succeeded(self, stage_id: str) -> bool:
+        stage = self.load().get("stages", {}).get(stage_id, {})
+        return stage.get("status") == "PASSED"
+
+    def approve(self, stage_id: str, reason: str, username: str) -> None:
+        if not reason.strip():
+            raise ValueError("Approval reason must not be empty.")
+        state = self.load()
+        approval = {
+            "timestamp": utc_now(),
+            "username": username,
+            "hostname": socket.gethostname(),
+            "stage_id": stage_id,
+            "reason": reason.strip(),
+        }
+        state["approvals"][stage_id] = approval
+        self.save(state)
+        self.append_event("stage_approved", **approval)
+
+    def is_approved(self, stage_id: str) -> bool:
+        return stage_id in self.load().get("approvals", {})
+
+    def append_command(self, record: dict[str, Any]) -> None:
+        append_jsonl_fsync(self.commands_path, record)
+
+    def validate_event_history(self) -> None:
+        expected = 1
+        with self.events_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if payload.get("sequence") != expected:
+                    raise ValueError(
+                        "Event sequence corruption at "
+                        f"{self.events_path}:{line_number}; "
+                        f"expected={expected}, found={payload.get('sequence')}"
+                    )
+                expected += 1

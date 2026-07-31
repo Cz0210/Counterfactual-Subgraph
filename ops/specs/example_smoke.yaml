@@ -1,0 +1,107 @@
+task_id: example_smoke
+description: Safe local-only self-test for the experiment automation control plane.
+project:
+  local_root: /Users/cz0210/Desktop/Documents/Tongji/GEEX/Code/counterfactual-subgraph
+  remote_root: /share/home/u20526/czx/counterfactual-subgraph
+  branch: main
+remote:
+  host: u20526@logini.tongji.edu.cn
+  port: 10022
+  control_socket: null
+  conda_env: smiles_pip118
+git:
+  allowed_paths:
+    - scripts/ops/**
+    - scripts/slurm/ops/**
+    - ops/specs/**
+    - ops/schemas/**
+    - tests/ops/**
+    - docs/AUTOMATION_*.md
+  commit_message: Add experiment automation control plane
+  allow_commit: false
+  allow_push: false
+  require_clean_allowed_paths: false
+  dynamic_remote_paths: []
+execution:
+  auto_until: sync_status_help
+  stop_before: null
+  max_auto_retries: 0
+  poll_interval_seconds: 60
+permissions:
+  allow_remote_write: false
+  allow_sbatch: false
+  allow_gpu_smoke: false
+  allow_full: false
+  allow_calibration: false
+  allow_test: false
+  allow_finalization: false
+  allow_overwrite: false
+  preserve_proxy_environment: true
+stages:
+  - id: ops_unit_tests
+    kind: local_command
+    command:
+      - python
+      - -m
+      - pytest
+      - -q
+      - tests/ops
+    script: null
+    dependencies: []
+    expected_artifacts: []
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: null
+      tags: local,automation
+      notes: Local unit tests only.
+      expected_output_root: null
+    cwd: null
+    timeout_seconds: 600
+  - id: exp_sbatch_help
+    kind: local_command
+    command:
+      - python
+      - scripts/exp_sbatch.py
+      - --help
+    script: null
+    dependencies:
+      - ops_unit_tests
+    expected_artifacts: []
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: null
+      tags: local,automation
+      notes: CLI discovery only; no submission.
+      expected_output_root: null
+    cwd: null
+    timeout_seconds: 60
+  - id: sync_status_help
+    kind: local_command
+    command:
+      - python
+      - scripts/sync_experiment_status.py
+      - --help
+    script: null
+    dependencies:
+      - exp_sbatch_help
+    expected_artifacts: []
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: null
+      tags: local,automation
+      notes: CLI discovery only; no Slurm query.
+      expected_output_root: null
+    cwd: null
+    timeout_seconds: 60

@@ -1,0 +1,205 @@
+task_id: clear_mutagenicity_phase_a_v2
+description: Plan-only CLEAR Mutagenicity Phase A v2 dataset and chemistry codec rebuild.
+project:
+  local_root: /Users/cz0210/Desktop/Documents/Tongji/GEEX/Code/counterfactual-subgraph
+  remote_root: /share/home/u20526/czx/counterfactual-subgraph
+  branch: main
+remote:
+  host: u20526@logini.tongji.edu.cn
+  port: 10022
+  control_socket: /tmp/tongji-codex.sock
+  conda_env: smiles_pip118
+git:
+  allowed_paths:
+    - src/baselines/clear_mutagenicity_adapter.py
+    - scripts/baselines/clear/prepare_mutagenicity_dataset.py
+    - scripts/baselines/clear/probe_mutagenicity_codec.py
+    - tests/baselines/test_clear_mutagenicity_adapter.py
+    - tests/test_clear_mutagenicity_dataset_wrapper.py
+    - scripts/ops/**
+    - scripts/slurm/ops/**
+    - ops/specs/**
+    - ops/schemas/**
+    - tests/ops/**
+    - docs/AUTOMATION_*.md
+    - requirements_hpc.txt
+  commit_message: Add safe experiment automation infrastructure
+  allow_commit: false
+  allow_push: false
+  require_clean_allowed_paths: false
+  dynamic_remote_paths:
+    - docs/EXPERIMENT_LOG.md
+    - outputs/hpc/experiment_registry/jobs.jsonl
+execution:
+  auto_until: phase_a_audit
+  stop_before: phase_b_gpu_smoke
+  max_auto_retries: 1
+  poll_interval_seconds: 120
+permissions:
+  allow_remote_write: false
+  allow_sbatch: false
+  allow_gpu_smoke: false
+  allow_full: false
+  allow_calibration: false
+  allow_test: false
+  allow_finalization: false
+  allow_overwrite: false
+  preserve_proxy_environment: true
+stages:
+  - id: local_phase_a_tests
+    kind: local_command
+    command:
+      - python
+      - -m
+      - pytest
+      - -q
+      - tests/baselines/test_clear_mutagenicity_adapter.py
+      - tests/test_clear_mutagenicity_dataset_wrapper.py
+    script: null
+    dependencies: []
+    expected_artifacts: []
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: null
+      tags: local,clear,mutagenicity,phase-a
+      notes: Local regression tests; no remote writes.
+      expected_output_root: null
+    cwd: null
+    timeout_seconds: 600
+  - id: phase_a_prepare
+    kind: remote_command
+    command:
+      - python
+      - scripts/baselines/clear/prepare_mutagenicity_dataset.py
+      - --train-positive-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/train_source_label1_teacher_correct.csv
+      - --train-negative-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/train_target_label0_teacher_correct.csv
+      - --val-positive-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/val_source_label1_teacher_correct.csv
+      - --val-negative-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/val_target_label0_teacher_correct.csv
+      - --summary-path
+      - outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/dataset_summary.json
+      - --forbid-calibration-test
+    script: null
+    dependencies:
+      - local_phase_a_tests
+    expected_artifacts:
+      - outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/dataset_summary.json
+    gate:
+      json_path: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/dataset_summary.json
+      required_marker: MUTAGENICITY_CLEAR_DATASET_PREP_OK
+      required_fields:
+        train_positive_rows: 1448
+        train_negative_rows: 1437
+        val_positive_rows: 260
+        val_negative_rows: 95
+        atom_sidecar_schema_version: clear_mutagenicity_atom_sidecar_v2
+        calibration_loaded: false
+        test_loaded: false
+      forbidden_fields: {}
+    resources:
+      name: clear_phase_a_prepare
+      tags: clear,mutagenicity,phase-a,cpu
+      notes: Remote write is currently disabled; plan only.
+      expected_output_root: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2
+    cwd: null
+    timeout_seconds: 3600
+  - id: phase_a_probe
+    kind: remote_command
+    command:
+      - python
+      - scripts/baselines/clear/probe_mutagenicity_codec.py
+      - --train-positive-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/train_source_label1_teacher_correct.csv
+      - --train-negative-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/train_target_label0_teacher_correct.csv
+      - --val-positive-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/val_source_label1_teacher_correct.csv
+      - --val-negative-csv
+      - outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/val_target_label0_teacher_correct.csv
+      - --output-dir
+      - outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe
+      - --limit
+      - "64"
+      - --forbid-calibration-test
+    script: null
+    dependencies:
+      - phase_a_prepare
+    expected_artifacts:
+      - outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_summary.json
+      - outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_rows.jsonl
+    gate:
+      json_path: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_summary.json
+      required_marker: MUTAGENICITY_CLEAR_CODEC_PROBE_OK
+      required_fields:
+        probe_rows: 64
+        probe_failed_rows: 0
+        probe_passed: true
+        calibration_loaded: false
+        test_loaded: false
+      forbidden_fields: {}
+    resources:
+      name: clear_phase_a_probe
+      tags: clear,mutagenicity,phase-a,codec
+      notes: Remote write is currently disabled; plan only.
+      expected_output_root: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe
+    cwd: null
+    timeout_seconds: 3600
+  - id: phase_a_audit
+    kind: audit
+    command: null
+    script: null
+    dependencies:
+      - phase_a_probe
+    expected_artifacts:
+      - outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/phase_a_gate.json
+    gate:
+      json_path: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/phase_a_gate.json
+      required_marker: AUTOMATION_STAGE_GATE_PASS
+      required_fields:
+        audit_passed: true
+        run_complete: true
+        checks.probe_rows: 64
+        checks.failed_rows: 0
+        checks.round_trip: true
+        checks.atom_sidecar_version: clear_mutagenicity_atom_sidecar_v2
+        checks.explicit_h_exact: true
+        checks.no_implicit_exact: true
+        checks.formal_charge_exact: true
+        checks.aromaticity_exact: true
+        checks.chirality_exact: true
+        provenance.calibration_loaded: false
+        provenance.test_loaded: false
+      forbidden_fields: {}
+    resources:
+      name: clear_phase_a_audit
+      tags: clear,mutagenicity,phase-a,audit
+      notes: JSON audit only; no training or selection.
+      expected_output_root: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2
+    cwd: null
+    timeout_seconds: 600
+  - id: phase_b_gpu_smoke
+    kind: approval
+    command: null
+    script: null
+    dependencies:
+      - phase_a_audit
+    expected_artifacts: []
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: null
+      tags: gpu,smoke,approval
+      notes: Explicit approval boundary; not executable in this task.
+      expected_output_root: null
+    cwd: null
+    timeout_seconds: 60
