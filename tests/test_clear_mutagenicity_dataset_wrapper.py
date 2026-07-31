@@ -124,15 +124,77 @@ def test_official_decoder_remains_binary_adjacency() -> None:
     assert "edge_class" not in models.lower()
 
 
-def test_patch_applies_after_existing_project_patches() -> None:
+def test_patch_applies_after_existing_project_patches(
+    tmp_path: Path,
+) -> None:
+    official_root = ROOT / "baselines/clear_official"
+
+    def git_output(repository: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repository), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    real_state_before = (
+        git_output(official_root, "rev-parse", "HEAD"),
+        git_output(official_root, "status", "--porcelain=v1"),
+    )
+    temporary_checkout = tmp_path / "clear_official"
     subprocess.run(
         [
             "git",
-            "-C",
-            str(ROOT / "baselines/clear_official"),
-            "apply",
-            "--check",
-            str(PATCH),
+            "clone",
+            "--shared",
+            str(official_root),
+            str(temporary_checkout),
         ],
         check=True,
+        capture_output=True,
+        text=True,
     )
+    assert git_output(temporary_checkout, "status", "--porcelain=v1") == ""
+    assert git_output(temporary_checkout, "rev-parse", "HEAD") == (
+        real_state_before[0]
+    )
+
+    patch_names = (
+        "001_save_cfe_checkpoints.patch",
+        "002_export_test_counterfactuals.patch",
+        "003_support_aids_dataset.patch",
+        "004_aids_weighted_graphpred.patch",
+        "005_support_mutagenicity_dataset.patch",
+    )
+    for patch_name in patch_names:
+        patch_path = ROOT / "patches/clear_official" / patch_name
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(temporary_checkout),
+                "apply",
+                "--check",
+                str(patch_path),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(temporary_checkout),
+                "apply",
+                str(patch_path),
+            ],
+            check=True,
+        )
+
+    assert "CLEAR_WRAPPER_SUPPORT_MUTAGENICITY_DATASET" in _text(
+        temporary_checkout / "src/main.py"
+    )
+    real_state_after = (
+        git_output(official_root, "rev-parse", "HEAD"),
+        git_output(official_root, "status", "--porcelain=v1"),
+    )
+    assert real_state_after == real_state_before
