@@ -12,6 +12,7 @@ import yaml
 from scripts.ops import experimentctl
 from scripts.ops.adopt_existing import (
     build_remote_script,
+    build_verification_argv,
     encode_evidence,
     verify_existing_artifacts,
 )
@@ -279,14 +280,14 @@ def test_current_local_remote_commit_mismatch_fails(tmp_path: Path) -> None:
     )["failed_hard_checks"]
 
 
-def ssh_config() -> SSHConfig:
+def ssh_config(control_socket: str | None = None) -> SSHConfig:
     return SSHConfig(
         host="logini.tongji.edu.cn",
         port=10022,
         user="u20526",
         remote_root="/share/home/u20526/czx/counterfactual-subgraph",
         conda_env="smiles_pip118",
-        control_socket=None,
+        control_socket=control_socket,
     )
 
 
@@ -306,6 +307,18 @@ def test_remote_adoption_script_is_read_only_and_bash_valid(tmp_path: Path) -> N
             line.strip().startswith(command) for line in script.splitlines()
         )
     assert "export PYTHONDONTWRITEBYTECODE=1" in script
+
+
+def test_adoption_verification_ssh_clears_inherited_forwarding(
+    tmp_path: Path,
+) -> None:
+    _, config = legacy_fixture(tmp_path)
+    argv = build_verification_argv(
+        ssh_config("/tmp/tongji-codex.sock"), config
+    )
+    assert "BatchMode=yes" in argv
+    assert "ClearAllForwardings=yes" in argv
+    assert argv[1:3] == ["-S", "/tmp/tongji-codex.sock"]
 
 
 def test_cli_parser_and_help_support_adopt_existing(capsys) -> None:
@@ -419,6 +432,8 @@ def test_adopt_dry_run_has_contract_and_no_execution(
     assert result["remote_write_performed"] is False
     assert result["slurm_jobs"] == []
     assert runner.calls == []
+    assert "BatchMode=yes" in result["verification_argv"]
+    assert "ClearAllForwardings=yes" in result["verification_argv"]
     syntax = subprocess.run(
         ["bash", "-n"],
         input=result["remote_script"],

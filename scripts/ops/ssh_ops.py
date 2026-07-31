@@ -115,6 +115,8 @@ def build_ssh_argv(
             str(config.port),
             "-o",
             "BatchMode=yes",
+            "-o",
+            "ClearAllForwardings=yes",
             config.destination,
             "--",
             "bash",

@@ -81,6 +81,9 @@ def test_deploy_dry_run_only_constructs_commands(
     assert result["dry_run"] is True
     assert result["commit"] == "abc"
     assert result["preflight_argv"][0] == "ssh"
+    for argv in (result["preflight_argv"], result["deploy_argv"]):
+        assert "BatchMode=yes" in argv
+        assert "ClearAllForwardings=yes" in argv
     assert runner.calls == []
     assert result["status"] == "DRY_RUN_COMPLETED"
     for name in (
@@ -354,6 +357,8 @@ def test_preflight_only_executes_exactly_one_read_only_ssh_command(
     assert len(runner.calls) == 1
     command = runner.calls[0]
     assert command[0] == "ssh"
+    assert "BatchMode=yes" in command
+    assert "ClearAllForwardings=yes" in command
     remote_script = command[-1]
     assert "git fetch" not in remote_script
     assert "git pull" not in remote_script

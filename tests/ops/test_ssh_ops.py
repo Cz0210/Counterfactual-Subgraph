@@ -11,8 +11,10 @@ from scripts.ops.ssh_ops import (
     SSHConfig,
     SSHSafetyError,
     _proxy_presence_lines,
+    build_deploy_argv,
     build_preflight_argv,
     build_ssh_argv,
+    build_status_argv,
     parse_preflight_output,
 )
 from scripts.ops.subprocess_utils import environment_audit, inherited_environment
@@ -33,15 +35,37 @@ def test_standard_ssh_argv_uses_port_and_batch_mode() -> None:
     argv = build_ssh_argv(config(), ["hostname"])
     assert argv[:3] == ["ssh", "-p", "10022"]
     assert "BatchMode=yes" in argv
+    assert "ClearAllForwardings=yes" in argv
     assert "u20526@logini.tongji.edu.cn" in argv
 
 
-def test_control_socket_is_added_without_forward_changes() -> None:
+def test_control_socket_child_clears_inherited_forward_requests() -> None:
     argv = build_ssh_argv(config("/tmp/tongji-codex.sock"), ["hostname"])
     assert argv[1:3] == ["-S", "/tmp/tongji-codex.sock"]
     joined = " ".join(argv)
-    assert "ClearAllForwardings" not in joined
+    assert "BatchMode=yes" in joined
+    assert "ClearAllForwardings=yes" in joined
     assert "39393" not in joined
+
+
+def test_all_ordinary_ssh_builders_disable_inherited_forwarding() -> None:
+    ssh = config("/tmp/tongji-codex.sock")
+    commands = (
+        build_preflight_argv(ssh),
+        build_deploy_argv(
+            ssh, branch="main", expected_commit="a" * 40
+        ),
+        build_status_argv(ssh, ["12345"]),
+    )
+    for argv in commands:
+        assert ["-o", "BatchMode=yes"] == argv[
+            argv.index("BatchMode=yes") - 1 : argv.index("BatchMode=yes") + 1
+        ]
+        assert ["-o", "ClearAllForwardings=yes"] == argv[
+            argv.index("ClearAllForwardings=yes")
+            - 1 : argv.index("ClearAllForwardings=yes")
+            + 1
+        ]
 
 
 def test_preflight_activation_disables_nounset_around_bashrc() -> None:
