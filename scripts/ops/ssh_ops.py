@@ -5,11 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 import shlex
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 
 class SSHSafetyError(RuntimeError):
     """An unsafe SSH command or remote state was detected."""
+
+
+PROXY_VARIABLES = (
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +37,24 @@ class SSHConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteSubmoduleStatus:
+    path: str
+    status_lines: tuple[str, ...]
+    modified_paths: tuple[str, ...]
+    staged_paths: tuple[str, ...]
+    marker_results: dict[str, bool]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "status_lines": list(self.status_lines),
+            "modified_paths": list(self.modified_paths),
+            "staged_paths": list(self.staged_paths),
+            "marker_results": dict(self.marker_results),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RemotePreflight:
     hostname: str | None
     pwd: str | None
@@ -40,6 +68,7 @@ class RemotePreflight:
     finalized_output_blocked: bool
     finalized_paths: tuple[str, ...]
     proxy_present: dict[str, bool]
+    submodules: tuple[RemoteSubmoduleStatus, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +84,9 @@ class RemotePreflight:
             "finalized_output_blocked": self.finalized_output_blocked,
             "finalized_paths": list(self.finalized_paths),
             "proxy_variables_present": dict(self.proxy_present),
+            "patched_submodule_evidence": [
+                item.to_dict() for item in self.submodules
+            ],
         }
 
 
@@ -106,11 +138,25 @@ def _activation_script(config: SSHConfig, body: str) -> str:
     )
 
 
+def _proxy_presence_lines(variable: str) -> list[str]:
+    if variable not in PROXY_VARIABLES:
+        raise ValueError(f"Unsupported proxy variable: {variable!r}")
+    marker = f"PREFLIGHT_PROXY_{variable}"
+    return [
+        f"if [[ -n ${{{variable}+x}} ]]; then",
+        f"  echo '[{marker}] true'",
+        "else",
+        f"  echo '[{marker}] false'",
+        "fi",
+    ]
+
+
 def build_preflight_argv(
     config: SSHConfig,
     *,
     protected_output_roots: Sequence[str] = (),
     allow_overwrite: bool = False,
+    patched_submodules: Sequence[Mapping[str, Any]] = (),
 ) -> list[str]:
     root = shlex.quote(str(PurePosixPath(config.remote_root)))
     lines = [
@@ -135,18 +181,61 @@ def build_preflight_argv(
             "echo '[PREFLIGHT_SACCT_READY] false'; exit 44; fi"
         ),
     ]
-    for key in (
-        "http_proxy",
-        "https_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "all_proxy",
-        "ALL_PROXY",
-    ):
+    for variable in PROXY_VARIABLES:
+        lines.extend(_proxy_presence_lines(variable))
+    for policy in patched_submodules:
+        path = str(policy["path"])
+        path_q = shlex.quote(path)
+        lines.extend(
+            [
+                "echo "
+                + shlex.quote(f"[PREFLIGHT_SUBMODULE_BEGIN] {path}"),
+                "echo "
+                + shlex.quote(f"[PREFLIGHT_SUBMODULE_STATUS_BEGIN] {path}"),
+                f"git -C {path_q} status --porcelain=v1",
+                "echo "
+                + shlex.quote(f"[PREFLIGHT_SUBMODULE_STATUS_END] {path}"),
+                "echo "
+                + shlex.quote(
+                    f"[PREFLIGHT_SUBMODULE_MODIFIED_BEGIN] {path}"
+                ),
+                f"git -C {path_q} diff --name-only",
+                "echo "
+                + shlex.quote(
+                    f"[PREFLIGHT_SUBMODULE_MODIFIED_END] {path}"
+                ),
+                "echo "
+                + shlex.quote(f"[PREFLIGHT_SUBMODULE_STAGED_BEGIN] {path}"),
+                f"git -C {path_q} diff --cached --name-only",
+                "echo "
+                + shlex.quote(f"[PREFLIGHT_SUBMODULE_STAGED_END] {path}"),
+            ]
+        )
+        for marker in policy.get("required_markers") or []:
+            marker_file = str(marker["file"])
+            marker_text = str(marker["contains"])
+            marker_path = shlex.quote(str(PurePosixPath(path) / marker_file))
+            marker_q = shlex.quote(marker_text)
+            marker_prefix = f"{path}|{marker_file}|"
+            lines.extend(
+                [
+                    f"if grep -F -- {marker_q} {marker_path} >/dev/null 2>&1; then",
+                    "  echo "
+                    + shlex.quote(
+                        "[PREFLIGHT_SUBMODULE_MARKER] "
+                        f"{marker_prefix}true"
+                    ),
+                    "else",
+                    "  echo "
+                    + shlex.quote(
+                        "[PREFLIGHT_SUBMODULE_MARKER] "
+                        f"{marker_prefix}false"
+                    ),
+                    "fi",
+                ]
+            )
         lines.append(
-            f"if [[ -n ${{{key}+x}} ]]; then "
-            f"echo '[PREFLIGHT_PROXY_{key}] true'; else "
-            f"echo '[PREFLIGHT_PROXY_{key}] false'; fi"
+            "echo " + shlex.quote(f"[PREFLIGHT_SUBMODULE_END] {path}")
         )
     if not allow_overwrite:
         for output_root in protected_output_roots:
@@ -243,6 +332,10 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
     dirty_lines: list[str] = []
     finalized_paths: list[str] = []
     in_dirty = False
+    submodule_sections: dict[str, dict[str, list[str]]] = {}
+    submodule_markers: dict[str, dict[str, bool]] = {}
+    active_submodule: str | None = None
+    active_section: str | None = None
     combined_lines = [*stdout.splitlines(), *stderr.splitlines()]
     for line in combined_lines:
         if line == "[PREFLIGHT_DIRTY_BEGIN]":
@@ -254,6 +347,50 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
         if in_dirty:
             if line.strip():
                 dirty_lines.append(line)
+            continue
+        section_markers = {
+            "[PREFLIGHT_SUBMODULE_STATUS_BEGIN] ": "status",
+            "[PREFLIGHT_SUBMODULE_MODIFIED_BEGIN] ": "modified",
+            "[PREFLIGHT_SUBMODULE_STAGED_BEGIN] ": "staged",
+        }
+        section_ends = {
+            "[PREFLIGHT_SUBMODULE_STATUS_END] ",
+            "[PREFLIGHT_SUBMODULE_MODIFIED_END] ",
+            "[PREFLIGHT_SUBMODULE_STAGED_END] ",
+        }
+        matched_section = False
+        for prefix, section in section_markers.items():
+            if line.startswith(prefix):
+                active_submodule = line.removeprefix(prefix).strip()
+                active_section = section
+                submodule_sections.setdefault(
+                    active_submodule,
+                    {"status": [], "modified": [], "staged": []},
+                )
+                matched_section = True
+                break
+        if matched_section:
+            continue
+        if any(line.startswith(prefix) for prefix in section_ends):
+            active_submodule = None
+            active_section = None
+            continue
+        if active_submodule is not None and active_section is not None:
+            if line.strip():
+                submodule_sections[active_submodule][active_section].append(
+                    line
+                )
+            continue
+        if line.startswith("[PREFLIGHT_SUBMODULE_MARKER] "):
+            payload = line.removeprefix(
+                "[PREFLIGHT_SUBMODULE_MARKER] "
+            )
+            path, separator, remainder = payload.partition("|")
+            marker_file, second_separator, raw_value = remainder.rpartition("|")
+            if separator and second_separator:
+                submodule_markers.setdefault(path, {})[marker_file] = (
+                    raw_value.strip().lower() == "true"
+                )
             continue
         matched_scalar = False
         for marker, field in scalar_markers.items():
@@ -279,6 +416,26 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
             finalized_paths.append(
                 line.removeprefix("[PREFLIGHT_FINALIZED] ").strip()
             )
+    submodule_paths = list(submodule_sections)
+    for path in submodule_markers:
+        if path not in submodule_paths:
+            submodule_paths.append(path)
+    submodules = tuple(
+        RemoteSubmoduleStatus(
+            path=path,
+            status_lines=tuple(
+                submodule_sections.get(path, {}).get("status", [])
+            ),
+            modified_paths=tuple(
+                submodule_sections.get(path, {}).get("modified", [])
+            ),
+            staged_paths=tuple(
+                submodule_sections.get(path, {}).get("staged", [])
+            ),
+            marker_results=dict(submodule_markers.get(path, {})),
+        )
+        for path in submodule_paths
+    )
     return RemotePreflight(
         hostname=values["hostname"],
         pwd=values["pwd"],
@@ -292,4 +449,5 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
         finalized_output_blocked=booleans["finalized_output_blocked"],
         finalized_paths=tuple(finalized_paths),
         proxy_present=proxy_present,
+        submodules=submodules,
     )

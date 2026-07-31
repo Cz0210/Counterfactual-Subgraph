@@ -70,6 +70,40 @@
         }
       }
     },
+    "remote_dirty_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_tracked_paths", "allowed_patched_submodules"],
+      "properties": {
+        "allowed_tracked_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "allowed_patched_submodules": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/patched_submodule"}
+        }
+      }
+    },
+    "proxy_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preserve_existing",
+        "require_any_present_for_git_network",
+        "required_for_stages"
+      ],
+      "properties": {
+        "preserve_existing": {"type": "boolean"},
+        "require_any_present_for_git_network": {"type": "boolean"},
+        "required_for_stages": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["deploy_git_sync"]}
+        }
+      }
+    },
     "execution": {
       "type": "object",
       "additionalProperties": false,
@@ -118,6 +152,50 @@
     }
   },
   "$defs": {
+    "required_marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "contains"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "contains": {"type": "string", "minLength": 1}
+      }
+    },
+    "patched_submodule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "allow_modified",
+        "allow_untracked",
+        "allow_staged",
+        "required_markers",
+        "allowed_modified_paths"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "allow_modified": {"type": "boolean"},
+        "allow_untracked": {"type": "boolean"},
+        "allow_staged": {"type": "boolean"},
+        "required_markers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/required_marker"}
+        },
+        "allowed_modified_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "allowed_untracked_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "default": []
+        }
+      }
+    },
     "gate": {
       "type": "object",
       "additionalProperties": false,

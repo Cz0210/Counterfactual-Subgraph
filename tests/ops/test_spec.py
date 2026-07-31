@@ -19,6 +19,48 @@ def test_example_and_clear_specs_validate() -> None:
     assert clear.data["permissions"]["allow_calibration"] is False
     assert clear.data["permissions"]["allow_full"] is False
     assert clear.data["execution"]["stop_before"] == "phase_b_gpu_smoke"
+    dirty = clear.data["remote_dirty_policy"]
+    assert dirty["allowed_tracked_paths"] == ["docs/EXPERIMENT_LOG.md"]
+    patched = dirty["allowed_patched_submodules"][0]
+    assert patched["path"] == "baselines/clear_official"
+    assert patched["allowed_modified_paths"] == [
+        "src/data_preprocessing.py",
+        "src/main.py",
+        "src/models.py",
+        "src/train_pred.py",
+    ]
+    assert patched["allowed_untracked_paths"] == [
+        "dataset",
+        "src/__pycache__",
+    ]
+    assert clear.data["proxy_policy"] == {
+        "preserve_existing": True,
+        "require_any_present_for_git_network": True,
+        "required_for_stages": ["deploy_git_sync"],
+    }
+
+
+def test_clear_nested_allowlist_matches_patch_001_through_005() -> None:
+    touched: set[str] = set()
+    patch_root = ROOT / "patches/clear_official"
+    for patch in sorted(patch_root.glob("00[1-5]_*.patch")):
+        for line in patch.read_text(encoding="utf-8").splitlines():
+            if line.startswith("+++ b/") or line.startswith("--- a/"):
+                touched.add(line[6:])
+    clear = load_task_spec(
+        ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
+    )
+    configured = set(
+        clear.data["remote_dirty_policy"]["allowed_patched_submodules"][0][
+            "allowed_modified_paths"
+        ]
+    )
+    assert configured == touched == {
+        "src/data_preprocessing.py",
+        "src/main.py",
+        "src/models.py",
+        "src/train_pred.py",
+    }
 
 
 def test_dependency_cycle_is_rejected(base_spec, write_spec) -> None:
@@ -132,3 +174,26 @@ def test_proxy_preservation_defaults_to_true(base_spec, write_spec) -> None:
     del payload["permissions"]["preserve_proxy_environment"]
     spec = load_task_spec(write_spec(payload))
     assert spec.data["permissions"]["preserve_proxy_environment"] is True
+
+
+def test_remote_policy_paths_must_be_repository_relative(
+    base_spec, write_spec
+) -> None:
+    payload = deepcopy(base_spec)
+    payload["remote_dirty_policy"] = {
+        "allowed_tracked_paths": ["docs/EXPERIMENT_LOG.md"],
+        "allowed_patched_submodules": [
+            {
+                "path": "../outside",
+                "allow_modified": True,
+                "allow_untracked": False,
+                "allow_staged": False,
+                "required_markers": [
+                    {"file": "src/main.py", "contains": "marker"}
+                ],
+                "allowed_modified_paths": ["src/main.py"],
+            }
+        ],
+    }
+    with pytest.raises(SpecValidationError, match="repository-relative"):
+        load_task_spec(write_spec(payload))

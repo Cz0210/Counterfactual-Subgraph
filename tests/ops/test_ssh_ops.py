@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from scripts.ops.ssh_ops import (
+    PROXY_VARIABLES,
     SSHConfig,
     SSHSafetyError,
+    _proxy_presence_lines,
     build_preflight_argv,
     build_ssh_argv,
     parse_preflight_output,
@@ -111,6 +114,74 @@ def test_preflight_script_is_read_only() -> None:
         assert forbidden not in script
 
 
+def test_preflight_proxy_checks_are_well_spaced_bash() -> None:
+    script = build_preflight_argv(config())[-1]
+    assert "thenecho" not in script
+    assert "elseecho" not in script
+    assert "-n${" not in script
+    for variable in PROXY_VARIABLES:
+        assert f"if [[ -n ${{{variable}+x}} ]]; then\n" in script
+        assert f"  echo '[PREFLIGHT_PROXY_{variable}] true'" in script
+
+
+def test_complete_preflight_remote_script_passes_bash_syntax() -> None:
+    script = build_preflight_argv(config())[-1]
+    result = subprocess.run(
+        ["bash", "-n"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("variable", PROXY_VARIABLES)
+@pytest.mark.parametrize("is_set", [False, True])
+def test_proxy_presence_fragment_reports_only_presence(
+    variable: str, is_set: bool
+) -> None:
+    environment = dict(os.environ)
+    for key in PROXY_VARIABLES:
+        environment.pop(key, None)
+    secret = "http://127.0.0.1:39393/do-not-print"
+    if is_set:
+        environment[variable] = secret
+    result = subprocess.run(
+        ["bash"],
+        input="\n".join(_proxy_presence_lines(variable)) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    expected = str(is_set).lower()
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"[PREFLIGHT_PROXY_{variable}] {expected}\n"
+    assert secret not in result.stdout
+
+
+def test_preflight_collects_patched_submodule_evidence_read_only() -> None:
+    policy = {
+        "path": "baselines/clear_official",
+        "required_markers": [
+            {
+                "file": "src/main.py",
+                "contains": "CLEAR_WRAPPER_SUPPORT_MUTAGENICITY_DATASET",
+            }
+        ],
+    }
+    script = build_preflight_argv(
+        config(), patched_submodules=[policy]
+    )[-1]
+    assert "git -C baselines/clear_official status --porcelain=v1" in script
+    assert "git -C baselines/clear_official diff --name-only" in script
+    assert "git -C baselines/clear_official diff --cached --name-only" in script
+    assert "CLEAR_WRAPPER_SUPPORT_MUTAGENICITY_DATASET" in script
+    for forbidden in (" reset ", " clean ", " restore ", " stash "):
+        assert forbidden not in script
+
+
 def test_parse_preflight_records_only_proxy_presence() -> None:
     stdout = "\n".join(
         [
@@ -138,3 +209,27 @@ def test_parse_preflight_records_only_proxy_presence() -> None:
         "HTTP_PROXY": False,
     }
     assert "39393" not in str(result.to_dict())
+
+
+def test_parse_preflight_records_nested_repository_evidence() -> None:
+    stdout = "\n".join(
+        [
+            "[PREFLIGHT_SUBMODULE_STATUS_BEGIN] baselines/clear_official",
+            " M src/main.py",
+            "[PREFLIGHT_SUBMODULE_STATUS_END] baselines/clear_official",
+            "[PREFLIGHT_SUBMODULE_MODIFIED_BEGIN] baselines/clear_official",
+            "src/main.py",
+            "[PREFLIGHT_SUBMODULE_MODIFIED_END] baselines/clear_official",
+            "[PREFLIGHT_SUBMODULE_STAGED_BEGIN] baselines/clear_official",
+            "[PREFLIGHT_SUBMODULE_STAGED_END] baselines/clear_official",
+            "[PREFLIGHT_SUBMODULE_MARKER] "
+            "baselines/clear_official|src/main.py|true",
+        ]
+    )
+    result = parse_preflight_output(stdout)
+    assert len(result.submodules) == 1
+    nested = result.submodules[0]
+    assert nested.path == "baselines/clear_official"
+    assert nested.modified_paths == ("src/main.py",)
+    assert nested.staged_paths == ()
+    assert nested.marker_results == {"src/main.py": True}

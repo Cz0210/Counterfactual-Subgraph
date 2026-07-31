@@ -14,6 +14,12 @@ It does not edit SSH configuration, `.bashrc`, sockets, or forwarding rules.
 Proxy variables are inherited without modification. Reports expose only
 presence booleans, not proxy values.
 
+The proxy gate is readiness metadata, not proxy configuration. An equal-commit
+read-only preflight may pass with warnings when no proxy is present. A commit
+mismatch with no required Git-network proxy stops at `NEEDS_PROXY_SETUP`; the
+controller does not create or alter SSH forwarding, port 39393, `.bashrc`, or
+SSH configuration.
+
 `deploy --preflight-only` is explicitly read-only. Its remote script may run
 `hostname`, `pwd`, directory tests, Git status/branch/HEAD reads, Python and
 command availability checks, conda activation, finalized-marker tests, and
@@ -28,6 +34,12 @@ submodules, experiment logs, and generated outputs are not cleaned, stashed,
 reset, or overwritten. A staged path outside the allowlist blocks the run.
 Finalized output roots are immutable unless overwrite is explicitly enabled
 and separately approved.
+
+Remote patched repositories are not generally allowlisted. Each permitted
+nested repository declares exact modified paths and required markers.
+Unexpected modified paths, any forbidden staged or untracked path, or a missing
+marker blocks preflight while preserving the nested working tree exactly as it
+was found.
 
 ## Scientific Boundaries
 

@@ -22,9 +22,12 @@ from scripts.ops.git_ops import (
     commits_changed_paths,
     head_commit,
     inspect_status,
-    path_allowed,
     push_head,
     stage_allowed_changes,
+)
+from scripts.ops.preflight_policy import (
+    evaluate_remote_dirty_policy,
+    proxy_is_ready,
 )
 from scripts.ops.report import write_blocked_report, write_final_report
 from scripts.ops.slurm_ops import build_exp_sbatch_argv, parse_exp_sbatch_job_id
@@ -479,20 +482,6 @@ def _set_stop_reason(store: RunStore, reason: str) -> None:
     store.save(state)
 
 
-def _preflight_dirty_summary(
-    dirty_lines: Sequence[str], dynamic_paths: Sequence[str]
-) -> tuple[list[str], list[str]]:
-    allowed: list[str] = []
-    blocked: list[str] = []
-    for line in dirty_lines:
-        path = line[3:].strip() if len(line) >= 4 else line.strip()
-        destination = (
-            allowed if path_allowed(path, dynamic_paths) else blocked
-        )
-        destination.append(line)
-    return allowed, blocked
-
-
 def _existing_deploy_report(store: RunStore) -> Path | None:
     for name in ("FINAL_REPORT.json", "BLOCKED_REPORT.json"):
         path = store.run_dir / name
@@ -547,7 +536,14 @@ def deploy(
     )
     if (
         preflight_only
-        and previous_preflight.get("status") in {"PASSED", "NEEDS_DEPLOY"}
+        and previous_preflight.get("status")
+        in {
+            "PASSED",
+            RunStatus.REMOTE_PREFLIGHT_PASSED.value,
+            RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS.value,
+            RunStatus.NEEDS_DEPLOY.value,
+            RunStatus.NEEDS_PROXY_SETUP.value,
+        }
         and previous_report
     ):
         return {
@@ -624,6 +620,9 @@ def deploy(
             and not preflight_only
             and not dry_run
         ),
+        patched_submodules=spec.data["remote_dirty_policy"][
+            "allowed_patched_submodules"
+        ],
     )
     deploy_argv = build_deploy_argv(
         config,
@@ -734,9 +733,14 @@ def deploy(
         )
         parsed = parse_preflight_output(result.stdout, result.stderr)
         parsed_details = parsed.to_dict()
-        allowed_dirty, blocked_dirty = _preflight_dirty_summary(
-            parsed.dirty_lines,
-            git_spec.get("dynamic_remote_paths") or [],
+        dirty_result = evaluate_remote_dirty_policy(
+            parsed, spec.data["remote_dirty_policy"]
+        )
+        proxy_policy = spec.data["proxy_policy"]
+        proxy_ready = proxy_is_ready(parsed.proxy_present, proxy_policy)
+        proxy_required_for_deploy = (
+            "deploy_git_sync" in proxy_policy["required_for_stages"]
+            and proxy_policy["require_any_present_for_git_network"]
         )
         commits_equal = parsed.commit == commit
         parsed_details.update(
@@ -744,9 +748,37 @@ def deploy(
                 "local_commit": commit,
                 "remote_commit": parsed.commit,
                 "expected_branch": spec.data["project"]["branch"],
+                "remote_branch": parsed.branch,
                 "commits_equal": commits_equal,
-                "allowed_dynamic_dirty": allowed_dirty,
-                "blocked_remote_dirty": blocked_dirty,
+                "remote_dirty_summary": dirty_result.to_dict(),
+                "dynamic_dirty": list(dirty_result.dynamic_tracked),
+                "allowed_dynamic_dirty": list(
+                    dirty_result.dynamic_tracked
+                ),
+                "verified_patched_submodules": list(
+                    dirty_result.verified_patched_submodules
+                ),
+                "blocked_remote_dirty": list(dirty_result.blocked),
+                "patched_submodule_audits": list(
+                    dirty_result.submodule_audits
+                ),
+                "patched_submodule_verified": (
+                    bool(
+                        spec.data["remote_dirty_policy"][
+                            "allowed_patched_submodules"
+                        ]
+                    )
+                    and len(dirty_result.verified_patched_submodules)
+                    == len(
+                        spec.data["remote_dirty_policy"][
+                            "allowed_patched_submodules"
+                        ]
+                    )
+                ),
+                "proxy_ready": proxy_ready,
+                "proxy_required_for_deploy_git_sync": (
+                    proxy_required_for_deploy
+                ),
             }
         )
         hard_failures: list[str] = []
@@ -762,18 +794,113 @@ def deploy(
             hard_failures.append("sacct_not_ready")
         if parsed.finalized_output_blocked:
             hard_failures.append("finalized_output_blocked")
-        if blocked_dirty:
+        if dirty_result.blocked:
             hard_failures.append("remote_tracked_files_dirty")
         if parsed.commit is None:
             hard_failures.append("remote_commit_missing")
         _set_commits(
             store, local_commit=commit, remote_commit=parsed.commit
         )
-        stage_status = (
-            "FAILED"
-            if hard_failures
-            else ("PASSED" if commits_equal else "NEEDS_DEPLOY")
-        )
+        command_status = "PASSED" if result.returncode == 0 else "FAILED"
+        if hard_failures:
+            gate_status = "BLOCKED"
+            if result.returncode == 0:
+                stage_status = RunStatus.REMOTE_PREFLIGHT_BLOCKED.value
+                terminal_status = RunStatus.REMOTE_PREFLIGHT_BLOCKED
+            else:
+                stage_status = "FAILED"
+                terminal_status = RunStatus.BLOCKED
+            store.record_stage(
+                "remote_preflight",
+                {
+                    "stage_id": "remote_preflight",
+                    "attempt": attempt,
+                    "start_time": None,
+                    "end_time": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "command_argv": preflight_argv,
+                    "cwd": str(spec.local_root),
+                    "return_code": result.returncode,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "artifacts": [],
+                    "gate_result": None,
+                    "job_id": None,
+                    "git_commit": commit,
+                    "remote_git_commit": parsed.commit,
+                    "command_status": command_status,
+                    "gate_status": gate_status,
+                    "status": stage_status,
+                },
+            )
+            store.transition(terminal_status, reason="; ".join(hard_failures))
+            _set_stop_reason(store, "; ".join(hard_failures))
+            report, _ = write_blocked_report(
+                store.run_dir,
+                state=store.load(),
+                failed_stage="remote_preflight",
+                error_class="RemotePreflightFailure",
+                return_code=result.returncode,
+                stderr=result.stderr,
+                artifacts=[],
+                retry_count=attempt - 1,
+                recommended_action=(
+                    "Resolve the reported read-only preflight condition; "
+                    "do not pull automatically."
+                ),
+                scientific_semantics_risk=False,
+                details={
+                    **parsed_details,
+                    "failed_checks": hard_failures,
+                    "command_status": command_status,
+                    "gate_status": gate_status,
+                    "next_action": "manual_preflight_remediation",
+                    "remote_write_performed": False,
+                },
+            )
+            return {
+                "run_dir": str(store.run_dir),
+                "status": terminal_status.value,
+                "report": str(report),
+                "return_code": result.returncode or 2,
+            }
+        if not commits_equal and proxy_required_for_deploy and not proxy_ready:
+            selected_status = RunStatus.NEEDS_PROXY_SETUP
+            next_action = "proxy_or_ssh_tunnel_required_before_deploy"
+            preflight_status = RunStatus.NEEDS_PROXY_SETUP.value
+            gate_status = "BLOCKED"
+            stop_reason = (
+                "Remote commit differs and Git network proxy readiness is absent."
+            )
+        elif not commits_equal:
+            selected_status = RunStatus.NEEDS_DEPLOY
+            next_action = "deploy"
+            preflight_status = RunStatus.NEEDS_DEPLOY.value
+            gate_status = "PASSED"
+            stop_reason = "Remote commit differs; deploy was not run."
+        elif proxy_required_for_deploy and not proxy_ready:
+            selected_status = RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS
+            next_action = (
+                "configure_proxy_before_future_git_sync_or_request_"
+                "remote_write_approval"
+            )
+            preflight_status = (
+                RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS.value
+            )
+            gate_status = "PASSED_WITH_WARNINGS"
+            stop_reason = (
+                "Read-only preflight passed; proxy is required before a future "
+                "Git synchronization."
+            )
+        else:
+            selected_status = RunStatus.REMOTE_PREFLIGHT_PASSED
+            next_action = "remote_write_approval_required"
+            preflight_status = RunStatus.REMOTE_PREFLIGHT_PASSED.value
+            gate_status = "PASSED"
+            stop_reason = (
+                "Read-only preflight passed; remote write awaits approval."
+            )
         store.record_stage(
             "remote_preflight",
             {
@@ -793,62 +920,13 @@ def deploy(
                 "job_id": None,
                 "git_commit": commit,
                 "remote_git_commit": parsed.commit,
-                "status": stage_status,
+                "command_status": command_status,
+                "gate_status": gate_status,
+                "status": selected_status.value,
             },
         )
-        if hard_failures:
-            store.transition(
-                RunStatus.REMOTE_PREFLIGHT_BLOCKED,
-                reason="; ".join(hard_failures),
-            )
-            store.transition(
-                RunStatus.BLOCKED, reason="; ".join(hard_failures)
-            )
-            _set_stop_reason(store, "; ".join(hard_failures))
-            report, _ = write_blocked_report(
-                store.run_dir,
-                state=store.load(),
-                failed_stage="remote_preflight",
-                error_class="RemotePreflightFailure",
-                return_code=result.returncode,
-                stderr=result.stderr,
-                artifacts=[],
-                retry_count=attempt - 1,
-                recommended_action=(
-                    "Resolve the reported read-only preflight condition; "
-                    "do not pull automatically."
-                ),
-                scientific_semantics_risk=False,
-                details={
-                    **parsed_details,
-                    "failed_checks": hard_failures,
-                    "next_action": "manual_preflight_remediation",
-                    "remote_write_performed": False,
-                },
-            )
-            return {
-                "run_dir": str(store.run_dir),
-                "status": RunStatus.BLOCKED.value,
-                "report": str(report),
-                "return_code": result.returncode or 2,
-            }
-        if not commits_equal:
-            store.transition(
-                RunStatus.NEEDS_DEPLOY,
-                reason="Remote commit differs from local commit.",
-            )
-            _set_stop_reason(
-                store, "Remote commit differs; deploy was not run."
-            )
-            next_action = "deploy"
-            preflight_status = "NEEDS_DEPLOY"
-        else:
-            store.transition(RunStatus.REMOTE_PREFLIGHT_PASSED)
-            _set_stop_reason(
-                store, "Read-only preflight passed; remote write awaits approval."
-            )
-            next_action = "remote_write_approval_required"
-            preflight_status = "PASS"
+        store.transition(selected_status, reason=stop_reason)
+        _set_stop_reason(store, stop_reason)
         report, _ = write_final_report(
             store.run_dir,
             state=store.load(),
@@ -856,10 +934,12 @@ def deploy(
             output_roots=output_roots,
             provenance={"remote_write_performed": False},
             next_allowed_stage=next_action,
-            stop_reason="Read-only preflight completed; deploy was not run.",
+            stop_reason=stop_reason,
             details={
                 **parsed_details,
                 "preflight_status": preflight_status,
+                "command_status": command_status,
+                "gate_status": gate_status,
                 "next_action": next_action,
                 "remote_write_performed": False,
             },
@@ -875,6 +955,29 @@ def deploy(
     preflight = command_runner.run(preflight_argv, cwd=spec.local_root)
     if preflight.returncode != 0:
         raise AutomationBlocked(preflight.stderr or "Remote preflight failed.")
+    parsed_preflight = parse_preflight_output(
+        preflight.stdout, preflight.stderr
+    )
+    dirty_preflight = evaluate_remote_dirty_policy(
+        parsed_preflight, spec.data["remote_dirty_policy"]
+    )
+    if dirty_preflight.blocked:
+        raise AutomationBlocked(
+            "Remote dirty policy blocked deploy: "
+            + ", ".join(dirty_preflight.blocked)
+        )
+    proxy_policy = spec.data["proxy_policy"]
+    proxy_required = (
+        "deploy_git_sync" in proxy_policy["required_for_stages"]
+        and proxy_policy["require_any_present_for_git_network"]
+    )
+    if proxy_required and not proxy_is_ready(
+        parsed_preflight.proxy_present, proxy_policy
+    ):
+        raise AutomationBlocked(
+            "Git-network proxy readiness is absent; "
+            "Git fetch/pull was not executed."
+        )
     result = command_runner.run(deploy_argv, cwd=spec.local_root)
     if result.returncode != 0:
         raise AutomationBlocked(result.stderr or "Remote deploy failed.")

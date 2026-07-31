@@ -67,8 +67,10 @@ def test_deploy_preflight_states_are_schema_compatible(tmp_path: Path) -> None:
             RunStatus.DRY_RUN_COMPLETED,
             RunStatus.REMOTE_PREFLIGHT_RUNNING,
             RunStatus.REMOTE_PREFLIGHT_PASSED,
+            RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS,
             RunStatus.REMOTE_PREFLIGHT_BLOCKED,
             RunStatus.NEEDS_DEPLOY,
+            RunStatus.NEEDS_PROXY_SETUP,
         )
     ):
         store = RunStore.create(

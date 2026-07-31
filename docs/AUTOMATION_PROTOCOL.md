@@ -98,12 +98,33 @@ The remote argv contains one `bash -lc` layer. Bash `nounset` remains disabled
 while sourcing `.bashrc` and activating conda; it is not re-enabled by the
 preflight script. Proxy values are never emitted.
 
+`remote_dirty_policy` separates ordinary tracked dynamic files from declared
+patched nested repositories. A nested repository is accepted only when its
+unstaged paths are a subset of `allowed_modified_paths`, it has no forbidden
+staged or untracked paths, and every required marker is present. Preflight
+collects this evidence with nested `status --porcelain=v1`, `diff --name-only`,
+and `diff --cached --name-only`; it never cleans, restores, or reapplies a
+patch. This is a verified expected-patch state, not an unconditional submodule
+exemption.
+
+`proxy_policy` records whether any inherited proxy variable is present without
+recording a value. Missing proxy readiness does not prevent a read-only check.
+When commits are equal it yields
+`REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS`; when Git synchronization is needed it
+yields `NEEDS_PROXY_SETUP` and fetch/pull remain prohibited.
+
 A commit mismatch after a successful read-only check produces `NEEDS_DEPLOY`
-with `next_action=deploy`. Equal commits produce
+with `next_action=deploy` when Git-network proxy readiness is available; it
+produces `NEEDS_PROXY_SETUP` otherwise. Equal commits normally produce
 `REMOTE_PREFLIGHT_PASSED` with
 `next_action=remote_write_approval_required`. A missing tool, finalized output,
 unexpected remote dirty file, wrong branch, or SSH error produces a bounded
 blocked report.
+
+Remote execution and policy evaluation are recorded independently. A zero SSH
+return code produces `command_status=PASSED`; a failed dirty or provenance gate
+produces `gate_status=BLOCKED` and `REMOTE_PREFLIGHT_BLOCKED`, not a misleading
+command failure.
 
 ## 6. Slurm Dependencies
 

@@ -192,6 +192,14 @@ def _validate_stage_contract(stage: dict[str, Any]) -> None:
         )
 
 
+def _validate_relative_policy_path(value: str, *, field: str) -> None:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or value in {"", "."}:
+        raise SpecValidationError(
+            f"{field} must be a safe repository-relative path: {value!r}"
+        )
+
+
 def semantic_validate(data: dict[str, Any]) -> None:
     task_id = str(data["task_id"])
     if not TASK_ID_PATTERN.fullmatch(task_id):
@@ -212,6 +220,38 @@ def semantic_validate(data: dict[str, Any]) -> None:
             raise SpecValidationError(
                 f"allowed_paths must be safe repository-relative paths: {value}"
             )
+    remote_dirty_policy = data["remote_dirty_policy"]
+    for value in remote_dirty_policy["allowed_tracked_paths"]:
+        _validate_relative_policy_path(
+            str(value), field="remote_dirty_policy.allowed_tracked_paths"
+        )
+    submodule_paths: list[str] = []
+    for submodule in remote_dirty_policy["allowed_patched_submodules"]:
+        submodule_path = str(submodule["path"])
+        _validate_relative_policy_path(
+            submodule_path,
+            field="remote_dirty_policy.allowed_patched_submodules.path",
+        )
+        submodule_paths.append(submodule_path)
+        for value in submodule["allowed_modified_paths"]:
+            _validate_relative_policy_path(
+                str(value), field="allowed_modified_paths"
+            )
+        for value in submodule.get("allowed_untracked_paths") or []:
+            _validate_relative_policy_path(
+                str(value), field="allowed_untracked_paths"
+            )
+        for marker in submodule["required_markers"]:
+            _validate_relative_policy_path(
+                str(marker["file"]), field="required_markers.file"
+            )
+    if len(submodule_paths) != len(set(submodule_paths)):
+        raise SpecValidationError(
+            "remote_dirty_policy patched submodule paths must be unique."
+        )
+    proxy_policy = data["proxy_policy"]
+    if proxy_policy["preserve_existing"] is not True:
+        raise SpecValidationError("proxy_policy.preserve_existing must be true.")
     stage_ids = {str(stage["id"]) for stage in data["stages"]}
     for key in ("auto_until", "stop_before"):
         value = data["execution"].get(key)
@@ -272,6 +312,27 @@ def load_task_spec(path_like: str | Path) -> TaskSpec:
     permissions = payload.get("permissions")
     if isinstance(permissions, dict):
         permissions.setdefault("preserve_proxy_environment", True)
+    git = payload.get("git")
+    dynamic_paths = (
+        list(git.get("dynamic_remote_paths") or [])
+        if isinstance(git, dict)
+        else []
+    )
+    payload.setdefault(
+        "remote_dirty_policy",
+        {
+            "allowed_tracked_paths": dynamic_paths,
+            "allowed_patched_submodules": [],
+        },
+    )
+    payload.setdefault(
+        "proxy_policy",
+        {
+            "preserve_existing": True,
+            "require_any_present_for_git_network": False,
+            "required_for_stages": [],
+        },
+    )
     try:
         jsonschema.Draft202012Validator(_load_schema()).validate(payload)
     except jsonschema.ValidationError as exc:

@@ -219,7 +219,11 @@ def _mock_deploy_git(monkeypatch, commit: str = "abc") -> None:
 
 
 def _preflight_stdout(
-    *, commit: str = "abc", dirty: tuple[str, ...] = ()
+    *,
+    commit: str = "abc",
+    dirty: tuple[str, ...] = (),
+    proxy_ready: bool = True,
+    submodule_lines: tuple[str, ...] = (),
 ) -> str:
     return "\n".join(
         [
@@ -231,11 +235,12 @@ def _preflight_stdout(
             "[PREFLIGHT_DIRTY_BEGIN]",
             *dirty,
             "[PREFLIGHT_DIRTY_END]",
+            *submodule_lines,
             "[PREFLIGHT_PYTHON] Python 3.10.18",
             "[PREFLIGHT_SBATCH_READY] true",
             "[PREFLIGHT_SACCT_READY] true",
             "[PREFLIGHT_PROXY_http_proxy] false",
-            "[PREFLIGHT_PROXY_https_proxy] true",
+            f"[PREFLIGHT_PROXY_https_proxy] {str(proxy_ready).lower()}",
             "[PREFLIGHT_PROXY_HTTP_PROXY] false",
             "[PREFLIGHT_PROXY_HTTPS_PROXY] false",
             "[PREFLIGHT_PROXY_all_proxy] false",
@@ -243,6 +248,59 @@ def _preflight_stdout(
             "[PREFLIGHT_FINALIZED_BLOCKED] false",
             "",
         ]
+    )
+
+
+def _enable_strict_remote_policies(payload) -> None:
+    payload["remote_dirty_policy"] = {
+        "allowed_tracked_paths": ["docs/EXPERIMENT_LOG.md"],
+        "allowed_patched_submodules": [
+            {
+                "path": "baselines/clear_official",
+                "allow_modified": True,
+                "allow_untracked": False,
+                "allow_staged": False,
+                "required_markers": [
+                    {
+                        "file": "src/main.py",
+                        "contains": (
+                            "CLEAR_WRAPPER_SUPPORT_MUTAGENICITY_DATASET"
+                        ),
+                    }
+                ],
+                "allowed_modified_paths": [
+                    "src/data_preprocessing.py",
+                    "src/main.py",
+                    "src/models.py",
+                    "src/train_pred.py",
+                ],
+            }
+        ],
+    }
+    payload["proxy_policy"] = {
+        "preserve_existing": True,
+        "require_any_present_for_git_network": True,
+        "required_for_stages": ["deploy_git_sync"],
+    }
+
+
+def _clear_submodule_output(
+    *, extra_modified: tuple[str, ...] = (), marker: bool = True
+) -> tuple[str, ...]:
+    modified = ("src/main.py", *extra_modified)
+    return (
+        "[PREFLIGHT_SUBMODULE_STATUS_BEGIN] baselines/clear_official",
+        " M src/main.py",
+        *tuple(f" M {value}" for value in extra_modified),
+        "[PREFLIGHT_SUBMODULE_STATUS_END] baselines/clear_official",
+        "[PREFLIGHT_SUBMODULE_MODIFIED_BEGIN] baselines/clear_official",
+        *modified,
+        "[PREFLIGHT_SUBMODULE_MODIFIED_END] baselines/clear_official",
+        "[PREFLIGHT_SUBMODULE_STAGED_BEGIN] baselines/clear_official",
+        "[PREFLIGHT_SUBMODULE_STAGED_END] baselines/clear_official",
+        "[PREFLIGHT_SUBMODULE_MARKER] "
+        "baselines/clear_official|src/main.py|"
+        f"{str(marker).lower()}",
     )
 
 
@@ -472,9 +530,153 @@ def test_preflight_report_never_contains_proxy_value(
     environment_text = (tmp_path / "proxy/environment_audit.json").read_text(
         encoding="utf-8"
     )
+    commands_text = (tmp_path / "proxy/commands.jsonl").read_text(
+        encoding="utf-8"
+    )
+    events_text = (tmp_path / "proxy/events.jsonl").read_text(
+        encoding="utf-8"
+    )
     assert "39393" not in report_text
     assert "39393" not in environment_text
+    assert "39393" not in commands_text
+    assert "39393" not in events_text
     report = json.loads(
         (tmp_path / "proxy/FINAL_REPORT.json").read_text(encoding="utf-8")
     )
     assert report["details"]["proxy_variables_present"]["https_proxy"] is True
+
+
+def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    _enable_strict_remote_policies(base_spec)
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    stdout = _preflight_stdout(
+        dirty=(
+            " m baselines/clear_official",
+            " M docs/EXPERIMENT_LOG.md",
+        ),
+        proxy_ready=False,
+        submodule_lines=_clear_submodule_output(),
+    )
+    runner = FakePreflightRunner(_command_result(tmp_path, stdout=stdout))
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "warning",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS"
+    report = json.loads(
+        (tmp_path / "warning/FINAL_REPORT.json").read_text(encoding="utf-8")
+    )
+    details = report["details"]
+    assert details["dynamic_dirty"] == ["docs/EXPERIMENT_LOG.md"]
+    assert details["verified_patched_submodules"] == [
+        "baselines/clear_official"
+    ]
+    assert details["blocked_remote_dirty"] == []
+    assert details["patched_submodule_verified"] is True
+    assert details["proxy_ready"] is False
+    assert details["remote_write_performed"] is False
+    assert details["next_action"] == (
+        "configure_proxy_before_future_git_sync_or_request_"
+        "remote_write_approval"
+    )
+
+
+def test_commit_mismatch_without_proxy_needs_setup_and_never_pulls(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    _enable_strict_remote_policies(base_spec)
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                commit="older",
+                dirty=(" m baselines/clear_official",),
+                proxy_ready=False,
+                submodule_lines=_clear_submodule_output(),
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "needs_proxy",
+        runner=runner,
+    )
+    assert result["status"] == "NEEDS_PROXY_SETUP"
+    assert len(runner.calls) == 1
+    assert "git fetch" not in runner.calls[0][-1]
+    assert "git pull" not in runner.calls[0][-1]
+
+
+def test_real_deploy_path_cannot_fetch_when_required_proxy_is_absent(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    base_spec["permissions"]["allow_remote_write"] = True
+    base_spec["proxy_policy"] = {
+        "preserve_existing": True,
+        "require_any_present_for_git_network": True,
+        "required_for_stages": ["deploy_git_sync"],
+    }
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(commit="older", proxy_ready=False),
+        )
+    )
+    with pytest.raises(experimentctl.AutomationBlocked, match="fetch/pull"):
+        experimentctl.deploy(
+            experimentctl.load_task_spec(path),
+            dry_run=False,
+            runner=runner,
+        )
+    assert len(runner.calls) == 1
+    assert "git fetch" not in runner.calls[0][-1]
+    assert "git pull" not in runner.calls[0][-1]
+
+
+def test_command_pass_and_dirty_policy_block_are_recorded_separately(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    _enable_strict_remote_policies(base_spec)
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    stdout = _preflight_stdout(
+        dirty=(" m baselines/clear_official",),
+        submodule_lines=_clear_submodule_output(
+            extra_modified=("unexpected.py",)
+        ),
+    )
+    runner = FakePreflightRunner(_command_result(tmp_path, stdout=stdout))
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "policy_block",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_BLOCKED"
+    state = json.loads(
+        (tmp_path / "policy_block/state.json").read_text(encoding="utf-8")
+    )
+    stage = state["stages"]["remote_preflight"]
+    assert stage["command_status"] == "PASSED"
+    assert stage["gate_status"] == "BLOCKED"
+    assert stage["status"] == "REMOTE_PREFLIGHT_BLOCKED"
+    report = json.loads(
+        (tmp_path / "policy_block/BLOCKED_REPORT.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    audit = report["details"]["patched_submodule_audits"][0]
+    assert audit["unexpected_nested_paths"] == ["unexpected.py"]
