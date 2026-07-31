@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.baselines.clear_mutagenicity_adapter import (  # noqa: E402
+    ATOM_SIDECAR_SCHEMA_VERSION,
     DEFAULT_EXPECTED_COUNTS,
     build_clear_dataset_payload,
     load_phase_a_cohorts,
@@ -138,6 +139,10 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     print(f"max_num_nodes={result['max_num_nodes']}", flush=True)
+    print(
+        f"atom_sidecar_schema_version={ATOM_SIDECAR_SCHEMA_VERSION}",
+        flush=True,
+    )
     print(f"summary_path={result['summary_path']}", flush=True)
     return 0
 

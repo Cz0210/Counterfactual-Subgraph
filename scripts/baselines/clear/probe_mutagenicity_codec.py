@@ -100,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     print("[MUTAGENICITY_CLEAR_CODEC_PROBE_OK]", flush=True)
     print(f"probe_rows={summary['probe_rows']}", flush=True)
+    print(f"failed_count={summary['failed_count']}", flush=True)
     print(
         "required_category_representatives="
         f"{summary['required_category_representatives']}",

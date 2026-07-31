@@ -11,6 +11,7 @@ PATCH = ROOT / "patches/clear_official/005_support_mutagenicity_dataset.patch"
 APPLY = ROOT / "scripts/baselines/clear/apply_clear_patches.sh"
 COMMON = ROOT / "scripts/baselines/clear/common.sh"
 RUN = ROOT / "scripts/baselines/clear/run_clear.sh"
+ADAPTER = ROOT / "src/baselines/clear_mutagenicity_adapter.py"
 
 
 def _text(path: Path) -> str:
@@ -43,6 +44,24 @@ def test_prepare_uses_only_strict_train_and_validation_inputs() -> None:
     assert "mutagenicity_full.pickle" not in text
     assert "readiness_v1" not in text
     assert "max_num_nodes=30" not in text
+
+
+def test_atom_sidecar_v2_restores_source_hydrogen_attributes() -> None:
+    text = _text(ADAPTER)
+    for required in (
+        "clear_mutagenicity_atom_sidecar_v2",
+        '"num_explicit_hs"',
+        '"num_implicit_hs"',
+        '"no_implicit"',
+        '"chiral_tag"',
+        "SetNumExplicitHs",
+        "SetNoImplicit",
+        "SetChiralTag",
+        "UpdatePropertyCache(strict=False)",
+        "ambiguous_generated_atom_hydrogen_state",
+    ):
+        assert required in text
+    assert "SetNumImplicitHs" not in text
 
 
 def test_official_patch_is_minimal_binary_adjacency_support() -> None:

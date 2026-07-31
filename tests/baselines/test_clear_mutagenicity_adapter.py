@@ -8,8 +8,10 @@ import pytest
 from rdkit import Chem
 
 from src.baselines.clear_mutagenicity_adapter import (
+    ATOM_SIDECAR_SCHEMA_VERSION,
     DEFAULT_EXPECTED_COUNTS,
     ClearMutagenicityCodecError,
+    PreparedMolecule,
     build_clear_dataset_payload,
     build_train_schema,
     encode_atom_feature,
@@ -39,6 +41,24 @@ TRAIN_NEGATIVE = (
 )
 VAL_POSITIVE = (("vp_br", "CCCBr"), ("vp_p", "CCP(=O)(O)O"))
 VAL_NEGATIVE = (("vn_cl", "CCCl"), ("vn_i", "CCI"))
+
+HISTORICAL_NH_FAILURES = (
+    (
+        "MUT_3019BBA5D04D0B43C486",
+        "C=C(C)C(C)NCCCNC(=O)c1csc(-c2csc(CCNC(=O)C(NC(=O)C(C)C(O)"
+        "C(C)NC(=O)C(NC(=O)c3nc(C(CC(N)=O)NCC(N)C(N)=O)nc(N)c3C)"
+        "C(OC3OC(CO)C(O)C(O)C3OC3OC(CO)C(O)C(OC(N)=O)C3O)"
+        "c3c[nH]cn3)C(C)O)n2)n1",
+    ),
+    ("MUT_006730B97E307FF9A8DF", "O=C(O)CCCc1c[nH]c2ccccc12"),
+    ("MUT_02E516F5A6F36C5747AD", "O=c1[nH][nH]c2ccccc12"),
+    (
+        "MUT_045954270C58B62ACB6D",
+        "O=C(Nc1cccc2c(=O)c3c(ccc4c5cc(NC(=O)c6ccccc6)c6c(=O)c7ccccc7"
+        "c(=O)c6c5[nH]c43)c(=O)c12)c1ccccc1",
+    ),
+    ("MUT_050530D5640387950B07", "Cc1cc2c(nc1N)[nH]c1ccccc12"),
+)
 
 
 class FakeGraphData:
@@ -131,6 +151,46 @@ def _load(paths: dict[str, Path]):
             "val_positive": len(VAL_POSITIVE),
             "val_negative": len(VAL_NEGATIVE),
         },
+    )
+
+
+def _prepared(molecule_id: str, smiles: str) -> PreparedMolecule:
+    mol = Chem.MolFromSmiles(smiles)
+    assert mol is not None
+    return PreparedMolecule(
+        molecule_id=molecule_id,
+        original_smiles=smiles,
+        canonical_smiles=Chem.MolToSmiles(
+            mol, canonical=True, isomericSmiles=True
+        ),
+        label=1,
+        split="train",
+        source_row_index=0,
+        mol=mol,
+        atom_categories=tuple(
+            atom.GetAtomicNum() for atom in mol.GetAtoms()
+        ),
+        charge_categories=tuple(
+            atom.GetFormalCharge() for atom in mol.GetAtoms()
+        ),
+        aromatic_categories=tuple(
+            atom.GetIsAromatic() for atom in mol.GetAtoms()
+        ),
+        bond_categories=tuple(
+            str(bond.GetBondType()).upper() for bond in mol.GetBonds()
+        ),
+        explicit_h_categories=tuple(
+            atom.GetNumExplicitHs() for atom in mol.GetAtoms()
+        ),
+        implicit_h_categories=tuple(
+            atom.GetNumImplicitHs() for atom in mol.GetAtoms()
+        ),
+        no_implicit_categories=tuple(
+            atom.GetNoImplicit() for atom in mol.GetAtoms()
+        ),
+        chiral_tag_categories=tuple(
+            int(atom.GetChiralTag()) for atom in mol.GetAtoms()
+        ),
     )
 
 
@@ -373,6 +433,142 @@ def test_required_category_probe_is_deterministic_and_complete(
     assert summary["probe_failed_rows"] == 0
     assert len(probe_rows) == len(all_rows)
     assert all(row["round_trip_passed"] for row in probe_rows)
+
+
+@pytest.mark.parametrize(("molecule_id", "smiles"), HISTORICAL_NH_FAILURES)
+def test_all_historical_aromatic_nh_failures_round_trip(
+    molecule_id: str,
+    smiles: str,
+) -> None:
+    row = _prepared(molecule_id, smiles)
+    schema = build_train_schema([row])
+    result, checks = round_trip_source_graph(row, schema=schema)
+    assert result.ok, (molecule_id, result.error_type, result.error)
+    assert checks["round_trip_passed"], (molecule_id, checks)
+    assert checks["explicit_hs_exact"]
+    assert checks["no_implicit_exact"]
+    assert checks["chiral_tags_exact"]
+    assert checks["mismatch_fields"] == []
+
+
+def test_aromatic_n_and_nh_remain_distinct() -> None:
+    row = _prepared("aromatic_n_pair", "c1ncc[nH]1")
+    schema = build_train_schema([row])
+    result, checks = round_trip_source_graph(row, schema=schema)
+    assert checks["round_trip_passed"]
+    nitrogens = [
+        atom for atom in result.molecule.GetAtoms() if atom.GetAtomicNum() == 7
+    ]
+    assert [atom.GetNumExplicitHs() for atom in nitrogens] == [0, 1]
+    assert all(atom.GetNoImplicit() is False for atom in nitrogens)
+
+
+def test_source_sidecar_restores_explicit_h_noimplicit_and_chirality() -> None:
+    nh_row = _prepared("indole", "c1c[nH]c2ccccc12")
+    chiral_row = _prepared("chiral", "N[C@@H](C)C(=O)O")
+    schema = build_train_schema([nh_row, chiral_row])
+
+    _, _, nh_sidecar = molecule_to_clear_graph(nh_row, schema=schema)
+    nh_atom = next(
+        atom
+        for atom in nh_sidecar["atoms"]
+        if atom["atomic_num"] == 7 and atom["is_aromatic"]
+    )
+    assert nh_atom["num_explicit_hs"] == 1
+    assert nh_atom["num_implicit_hs"] == 0
+    assert nh_atom["no_implicit"] is False
+    assert nh_sidecar["atom_sidecar_schema_version"] == (
+        ATOM_SIDECAR_SCHEMA_VERSION
+    )
+
+    result, checks = round_trip_source_graph(chiral_row, schema=schema)
+    assert result.ok
+    assert checks["chiral_tags_exact"]
+    assert any(
+        tag != int(Chem.ChiralType.CHI_UNSPECIFIED)
+        for tag in result.decoded_chiral_tags
+    )
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    ("[nH+]1ccccc1", "[n-]1cccc1"),
+)
+def test_charged_aromatic_n_round_trip(smiles: str) -> None:
+    row = _prepared("charged_aromatic_n", smiles)
+    schema = build_train_schema([row])
+    result, checks = round_trip_source_graph(row, schema=schema)
+    assert result.ok
+    assert checks["round_trip_passed"]
+    assert checks["formal_charges_exact"]
+    assert checks["explicit_hs_exact"]
+    assert checks["no_implicit_exact"]
+
+
+def test_unchanged_generated_atom_inherits_parent_hydrogen_state() -> None:
+    row = _prepared("generated_indole", "c1c[nH]c2ccccc12")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    result = project_binary_graph_to_molecule(
+        features=features,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok
+    source_explicit_hs = [
+        atom.GetNumExplicitHs() for atom in row.mol.GetAtoms()
+    ]
+    assert result.decoded_num_explicit_hs == source_explicit_hs
+    assert max(result.decoded_num_explicit_hs) == 1
+
+
+def test_changed_generated_atom_rejects_ambiguous_hydrogen_state() -> None:
+    row = _prepared("generated_changed", "c1c[nH]c2ccccc12")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    nitrogen_slot = next(
+        atom.GetIdx()
+        for atom in row.mol.GetAtoms()
+        if atom.GetAtomicNum() == 7 and atom.GetIsAromatic()
+    )
+    changed = features.copy()
+    changed[
+        nitrogen_slot,
+        schema.atom_feature_start : schema.atom_feature_end,
+    ] = 0.0
+    changed[
+        nitrogen_slot,
+        schema.atom_feature_start + schema.atom_vocabulary.index(6),
+    ] = 1.0
+    result = project_binary_graph_to_molecule(
+        features=changed,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok is False
+    assert result.error_type == "ambiguous_generated_atom_hydrogen_state"
+    assert "explicit-H state cannot be inferred" in str(result.error)
+
+
+def test_dataset_summary_versions_atom_sidecar(
+    phase_a_files: dict[str, Path],
+) -> None:
+    cohorts = _load(phase_a_files)
+    data, _, summary = build_clear_dataset_payload(
+        cohorts=cohorts,
+        graph_data_class=FakeGraphData,
+    )
+    assert summary["atom_sidecar_schema_version"] == (
+        ATOM_SIDECAR_SCHEMA_VERSION
+    )
+    assert summary["stores_num_explicit_hs"] is True
+    assert summary["stores_no_implicit"] is True
+    assert summary["stores_chiral_tag"] is True
+    assert data.atom_sidecar_schema_version == ATOM_SIDECAR_SCHEMA_VERSION
 
 
 def test_calibration_and_test_paths_are_rejected(

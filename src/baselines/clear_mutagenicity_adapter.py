@@ -20,7 +20,7 @@ import hashlib
 import json
 import math
 import pickle
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -38,6 +38,7 @@ NATIVE_ADJACENCY_SEMANTICS = "binary_connectivity"
 RETAINED_BOND_TYPE_SOURCE = "parent_sidecar"
 NEW_EDGE_BOND_RULE = "provisional_single"
 RDKIT_SANITIZE_REQUIRED = True
+ATOM_SIDECAR_SCHEMA_VERSION = "clear_mutagenicity_atom_sidecar_v2"
 DEFAULT_EXPECTED_COUNTS = {
     "train_positive": 1448,
     "train_negative": 1437,
@@ -101,6 +102,10 @@ class PreparedMolecule:
     charge_categories: tuple[int, ...]
     aromatic_categories: tuple[bool, ...]
     bond_categories: tuple[str, ...]
+    explicit_h_categories: tuple[int, ...] = ()
+    implicit_h_categories: tuple[int, ...] = ()
+    no_implicit_categories: tuple[bool, ...] = ()
+    chiral_tag_categories: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -119,6 +124,9 @@ class CodecResult:
     decoded_formal_charges: list[int]
     decoded_aromaticity: list[bool]
     decoded_bond_types: list[str]
+    decoded_num_explicit_hs: list[int] = field(default_factory=list)
+    decoded_no_implicit: list[bool] = field(default_factory=list)
+    decoded_chiral_tags: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -133,6 +141,11 @@ def codec_provenance() -> dict[str, Any]:
         "retained_bond_type_source": RETAINED_BOND_TYPE_SOURCE,
         "new_edge_bond_rule": NEW_EDGE_BOND_RULE,
         "rdkit_sanitize_required": RDKIT_SANITIZE_REQUIRED,
+        "atom_sidecar_schema_version": ATOM_SIDECAR_SCHEMA_VERSION,
+        "stores_num_explicit_hs": True,
+        "stores_no_implicit": True,
+        "stores_chiral_tag": True,
+        "explicit_h_decoder_native": False,
     }
 
 
@@ -279,6 +292,18 @@ def load_strict_cohort(
                 ),
                 bond_categories=tuple(
                     _bond_type_name(bond) for bond in mol.GetBonds()
+                ),
+                explicit_h_categories=tuple(
+                    int(atom.GetNumExplicitHs()) for atom in mol.GetAtoms()
+                ),
+                implicit_h_categories=tuple(
+                    int(atom.GetNumImplicitHs()) for atom in mol.GetAtoms()
+                ),
+                no_implicit_categories=tuple(
+                    bool(atom.GetNoImplicit()) for atom in mol.GetAtoms()
+                ),
+                chiral_tag_categories=tuple(
+                    int(atom.GetChiralTag()) for atom in mol.GetAtoms()
                 ),
             )
         )
@@ -499,6 +524,10 @@ def molecule_to_clear_graph(
                 "atomic_num": int(atom.GetAtomicNum()),
                 "formal_charge": int(atom.GetFormalCharge()),
                 "is_aromatic": bool(atom.GetIsAromatic()),
+                "num_explicit_hs": int(atom.GetNumExplicitHs()),
+                "num_implicit_hs": int(atom.GetNumImplicitHs()),
+                "no_implicit": bool(atom.GetNoImplicit()),
+                "chiral_tag": int(atom.GetChiralTag()),
             }
         )
     for bond in row.mol.GetBonds():
@@ -521,6 +550,7 @@ def molecule_to_clear_graph(
         "source_split": row.split,
         "source_row_index": int(row.source_row_index),
         "num_real_nodes": num_nodes,
+        "atom_sidecar_schema_version": ATOM_SIDECAR_SCHEMA_VERSION,
         "original_atom_indices": list(range(num_nodes)),
         "atoms": atoms,
         "bonds": sorted(
@@ -557,10 +587,22 @@ def project_binary_graph_to_molecule(
     parent_sidecar: dict[str, Any],
     adjacency_threshold: float = 0.5,
     require_connected: bool = True,
+    atom_attribute_mode: str = "source",
 ) -> CodecResult:
-    """Decode nodes and project binary connectivity through source bond types."""
+    """Project CLEAR binary connectivity into a sanitized RDKit molecule.
+
+    CLEAR predicts atom/charge/aromatic features but does not predict explicit
+    hydrogen or chirality state.  Source round trips restore those attributes
+    exactly.  Generated nodes may inherit them only when the decoded
+    atomic-number/charge/aromatic identity matches the same parent node slot.
+    """
 
     chem = _require_rdkit()
+    if atom_attribute_mode not in {"source", "generated"}:
+        raise ValueError(
+            "atom_attribute_mode must be 'source' or 'generated', found "
+            f"{atom_attribute_mode!r}."
+        )
     feature_array = np.asarray(features, dtype=np.float64)
     adjacency_array = np.asarray(adjacency, dtype=np.float64)
     if feature_array.ndim != 2 or adjacency_array.ndim != 2:
@@ -613,6 +655,10 @@ def project_binary_graph_to_molecule(
         )
     slot_to_new = {slot: index for index, (slot, _) in enumerate(decoded)}
     atom_mapping_unique = len(slot_to_new) == len(decoded)
+    source_atoms = {
+        int(item["original_atom_index"]): dict(item)
+        for item in parent_sidecar.get("atoms", [])
+    }
     source_bonds = {
         (
             int(item["begin_atom_index"]),
@@ -620,12 +666,136 @@ def project_binary_graph_to_molecule(
         ): str(item["bond_type"])
         for item in parent_sidecar.get("bonds", [])
     }
+
+    decoded_atomic_numbers = [
+        int(values["atomic_num"]) for _, values in decoded
+    ]
+    decoded_formal_charges = [
+        int(values["formal_charge"]) for _, values in decoded
+    ]
+    decoded_aromaticity = [
+        bool(values["is_aromatic"]) for _, values in decoded
+    ]
+    resolved_attributes: list[dict[str, Any]] = []
+    required_source_attributes = {
+        "atomic_num",
+        "formal_charge",
+        "is_aromatic",
+        "num_explicit_hs",
+        "no_implicit",
+        "chiral_tag",
+    }
+
+    def make_result(
+        *,
+        ok: bool,
+        canonical_smiles: str | None,
+        molecule: Any | None,
+        error_type: str | None,
+        error: str | None,
+        projected_new_edge_count: int = 0,
+        retained_edge_count: int = 0,
+        deleted_edge_count: int = 0,
+        decoded_bond_types: list[str] | None = None,
+    ) -> CodecResult:
+        return CodecResult(
+            ok=ok,
+            canonical_smiles=canonical_smiles,
+            molecule=molecule,
+            error_type=error_type,
+            error=error,
+            num_real_nodes=len(decoded),
+            projected_new_edge_count=projected_new_edge_count,
+            retained_edge_count=retained_edge_count,
+            deleted_edge_count=deleted_edge_count,
+            atom_mapping_unique=atom_mapping_unique,
+            decoded_atomic_numbers=decoded_atomic_numbers,
+            decoded_formal_charges=decoded_formal_charges,
+            decoded_aromaticity=decoded_aromaticity,
+            decoded_bond_types=list(decoded_bond_types or []),
+            decoded_num_explicit_hs=[
+                int(item["num_explicit_hs"]) for item in resolved_attributes
+            ],
+            decoded_no_implicit=[
+                bool(item["no_implicit"]) for item in resolved_attributes
+            ],
+            decoded_chiral_tags=[
+                int(item["chiral_tag"]) for item in resolved_attributes
+            ],
+        )
+
+    for slot, values in decoded:
+        source_atom = source_atoms.get(int(slot))
+        missing = (
+            sorted(required_source_attributes - set(source_atom or {}))
+            if source_atom is not None
+            else sorted(required_source_attributes)
+        )
+        if source_atom is None or missing:
+            error_type = (
+                "source_atom_attribute_mapping_failed"
+                if atom_attribute_mode == "source"
+                else "ambiguous_generated_atom_hydrogen_state"
+            )
+            return make_result(
+                ok=False,
+                canonical_smiles=None,
+                molecule=None,
+                error_type=error_type,
+                error=(
+                    f"Parent atom sidecar is incomplete for node slot {slot}: "
+                    f"missing={missing}"
+                ),
+            )
+        decoded_identity = (
+            int(values["atomic_num"]),
+            int(values["formal_charge"]),
+            bool(values["is_aromatic"]),
+        )
+        source_identity = (
+            int(source_atom["atomic_num"]),
+            int(source_atom["formal_charge"]),
+            bool(source_atom["is_aromatic"]),
+        )
+        if decoded_identity != source_identity:
+            error_type = (
+                "source_atom_attribute_mapping_failed"
+                if atom_attribute_mode == "source"
+                else "ambiguous_generated_atom_hydrogen_state"
+            )
+            return make_result(
+                ok=False,
+                canonical_smiles=None,
+                molecule=None,
+                error_type=error_type,
+                error=(
+                    f"Node slot {slot} identity changed: "
+                    f"source={source_identity}, decoded={decoded_identity}; "
+                    "explicit-H state cannot be inferred."
+                ),
+            )
+        resolved_attributes.append(source_atom)
+
     rw_mol = chem.RWMol()
-    for _slot, values in decoded:
-        atom = chem.Atom(int(values["atomic_num"]))
-        atom.SetFormalCharge(int(values["formal_charge"]))
-        atom.SetIsAromatic(bool(values["is_aromatic"]))
-        rw_mol.AddAtom(atom)
+    try:
+        for (_slot, values), source_atom in zip(
+            decoded, resolved_attributes, strict=True
+        ):
+            atom = chem.Atom(int(values["atomic_num"]))
+            atom.SetFormalCharge(int(values["formal_charge"]))
+            atom.SetNumExplicitHs(int(source_atom["num_explicit_hs"]))
+            atom.SetNoImplicit(bool(source_atom["no_implicit"]))
+            atom.SetChiralTag(chem.ChiralType(int(source_atom["chiral_tag"])))
+            atom.SetIsAromatic(bool(values["is_aromatic"]))
+            rw_mol.AddAtom(atom)
+    except Exception as exc:
+        return make_result(
+            ok=False,
+            canonical_smiles=None,
+            molecule=None,
+            error_type="atom_attribute_projection_failure",
+            error=str(exc),
+        )
 
     retained = 0
     new_edges = 0
@@ -666,30 +836,20 @@ def project_binary_graph_to_molecule(
                     bond.SetIsAromatic(True)
                 decoded_bonds.append(bond_name)
     except Exception as exc:
-        return CodecResult(
+        return make_result(
             ok=False,
             canonical_smiles=None,
             molecule=None,
             error_type="bond_projection_failure",
             error=str(exc),
-            num_real_nodes=len(decoded),
             projected_new_edge_count=new_edges,
             retained_edge_count=retained,
             deleted_edge_count=max(0, len(source_bonds) - active_source_edges),
-            atom_mapping_unique=atom_mapping_unique,
-            decoded_atomic_numbers=[
-                int(values["atomic_num"]) for _, values in decoded
-            ],
-            decoded_formal_charges=[
-                int(values["formal_charge"]) for _, values in decoded
-            ],
-            decoded_aromaticity=[
-                bool(values["is_aromatic"]) for _, values in decoded
-            ],
             decoded_bond_types=decoded_bonds,
         )
     molecule = rw_mol.GetMol()
     try:
+        molecule.UpdatePropertyCache(strict=False)
         chem.SanitizeMol(molecule)
     except Exception as exc:
         message = str(exc)
@@ -698,71 +858,38 @@ def project_binary_graph_to_molecule(
             if "valence" in message.lower()
             else "sanitize_failure"
         )
-        return CodecResult(
+        return make_result(
             ok=False,
             canonical_smiles=None,
             molecule=None,
             error_type=error_type,
             error=message,
-            num_real_nodes=len(decoded),
             projected_new_edge_count=new_edges,
             retained_edge_count=retained,
             deleted_edge_count=max(0, len(source_bonds) - retained),
-            atom_mapping_unique=atom_mapping_unique,
-            decoded_atomic_numbers=[
-                int(values["atomic_num"]) for _, values in decoded
-            ],
-            decoded_formal_charges=[
-                int(values["formal_charge"]) for _, values in decoded
-            ],
-            decoded_aromaticity=[
-                bool(values["is_aromatic"]) for _, values in decoded
-            ],
             decoded_bond_types=decoded_bonds,
         )
     if require_connected and len(chem.GetMolFrags(molecule)) != 1:
-        return CodecResult(
+        return make_result(
             ok=False,
             canonical_smiles=None,
             molecule=None,
             error_type="disconnected_output",
             error="Projected graph contains multiple connected components.",
-            num_real_nodes=len(decoded),
             projected_new_edge_count=new_edges,
             retained_edge_count=retained,
             deleted_edge_count=max(0, len(source_bonds) - retained),
-            atom_mapping_unique=atom_mapping_unique,
-            decoded_atomic_numbers=[
-                int(values["atomic_num"]) for _, values in decoded
-            ],
-            decoded_formal_charges=[
-                int(values["formal_charge"]) for _, values in decoded
-            ],
-            decoded_aromaticity=[
-                bool(values["is_aromatic"]) for _, values in decoded
-            ],
             decoded_bond_types=decoded_bonds,
         )
-    return CodecResult(
+    return make_result(
         ok=True,
         canonical_smiles=_canonical_smiles(molecule),
         molecule=molecule,
         error_type=None,
         error=None,
-        num_real_nodes=len(decoded),
         projected_new_edge_count=new_edges,
         retained_edge_count=retained,
         deleted_edge_count=max(0, len(source_bonds) - retained),
-        atom_mapping_unique=atom_mapping_unique,
-        decoded_atomic_numbers=[
-            int(values["atomic_num"]) for _, values in decoded
-        ],
-        decoded_formal_charges=[
-            int(values["formal_charge"]) for _, values in decoded
-        ],
-        decoded_aromaticity=[
-            bool(values["is_aromatic"]) for _, values in decoded
-        ],
         decoded_bond_types=decoded_bonds,
     )
 
@@ -778,21 +905,85 @@ def round_trip_source_graph(
         adjacency=adjacency,
         schema=schema,
         parent_sidecar=sidecar,
+        atom_attribute_mode="source",
     )
     expected_atoms = list(row.atom_categories)
     expected_charges = list(row.charge_categories)
     expected_aromatic = list(row.aromatic_categories)
-    expected_bonds = sorted(row.bond_categories)
+    expected_explicit_hs = [
+        int(atom.GetNumExplicitHs()) for atom in row.mol.GetAtoms()
+    ]
+    expected_no_implicit = [
+        bool(atom.GetNoImplicit()) for atom in row.mol.GetAtoms()
+    ]
+    expected_chiral_tags = [
+        int(atom.GetChiralTag()) for atom in row.mol.GetAtoms()
+    ]
+    expected_connectivity = sorted(
+        (
+            min(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+            max(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+        )
+        for bond in row.mol.GetBonds()
+    )
+    expected_bonds = sorted(
+        (
+            min(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+            max(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+            _bond_type_name(bond),
+        )
+        for bond in row.mol.GetBonds()
+    )
+    actual_atoms = (
+        list(result.molecule.GetAtoms())
+        if result.ok and result.molecule is not None
+        else []
+    )
+    actual_atomic_numbers = [
+        int(atom.GetAtomicNum()) for atom in actual_atoms
+    ]
+    actual_formal_charges = [
+        int(atom.GetFormalCharge()) for atom in actual_atoms
+    ]
+    actual_aromaticity = [
+        bool(atom.GetIsAromatic()) for atom in actual_atoms
+    ]
+    actual_explicit_hs = [
+        int(atom.GetNumExplicitHs()) for atom in actual_atoms
+    ]
+    actual_no_implicit = [
+        bool(atom.GetNoImplicit()) for atom in actual_atoms
+    ]
+    actual_chiral_tags = [
+        int(atom.GetChiralTag()) for atom in actual_atoms
+    ]
+    decoded_connectivity: list[tuple[int, int]] = []
+    decoded_bonds: list[tuple[int, int, str]] = []
+    if result.ok and result.molecule is not None:
+        decoded_connectivity = sorted(
+            (
+                min(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+                max(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+            )
+            for bond in result.molecule.GetBonds()
+        )
+        decoded_bonds = sorted(
+            (
+                min(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+                max(int(bond.GetBeginAtomIdx()), int(bond.GetEndAtomIdx())),
+                _bond_type_name(bond),
+            )
+            for bond in result.molecule.GetBonds()
+        )
     checks = {
-        "atomic_numbers_exact": result.decoded_atomic_numbers == expected_atoms,
-        "formal_charges_exact": result.decoded_formal_charges == expected_charges,
-        "aromaticity_exact": result.decoded_aromaticity == expected_aromatic,
-        "bond_types_exact": sorted(result.decoded_bond_types) == expected_bonds,
-        "connectivity_exact": (
-            result.ok
-            and result.molecule is not None
-            and result.molecule.GetNumBonds() == row.mol.GetNumBonds()
-        ),
+        "atomic_numbers_exact": actual_atomic_numbers == expected_atoms,
+        "formal_charges_exact": actual_formal_charges == expected_charges,
+        "aromaticity_exact": actual_aromaticity == expected_aromatic,
+        "explicit_hs_exact": actual_explicit_hs == expected_explicit_hs,
+        "no_implicit_exact": actual_no_implicit == expected_no_implicit,
+        "chiral_tags_exact": actual_chiral_tags == expected_chiral_tags,
+        "bond_types_exact": decoded_bonds == expected_bonds,
+        "connectivity_exact": decoded_connectivity == expected_connectivity,
         "canonical_smiles_exact": (
             result.canonical_smiles == row.canonical_smiles
         ),
@@ -804,6 +995,11 @@ def round_trip_source_graph(
         "node_count_exact": result.num_real_nodes == row.mol.GetNumAtoms(),
     }
     checks["round_trip_passed"] = bool(result.ok and all(checks.values()))
+    checks["mismatch_fields"] = sorted(
+        key
+        for key, value in checks.items()
+        if key.endswith("_exact") and not bool(value)
+    )
     return result, checks
 
 
@@ -866,6 +1062,7 @@ def build_clear_dataset_payload(
     data.num_real_nodes_all = [sidecar["num_real_nodes"] for sidecar in sidecars]
     data.molecule_sidecar_all = sidecars
     data.feature_schema = schema.to_dict()
+    data.atom_sidecar_schema_version = ATOM_SIDECAR_SCHEMA_VERSION
     data.clear_dataset_name = DATASET_NAME
     data.calibration_loaded = False
     data.test_loaded = False
@@ -1036,29 +1233,78 @@ def run_codec_probe(
     output_rows: list[dict[str, Any]] = []
     for row in selected:
         result, checks = round_trip_source_graph(row, schema=schema)
+        contains_aromatic_explicit_h = any(
+            bool(atom.GetIsAromatic()) and int(atom.GetNumExplicitHs()) > 0
+            for atom in row.mol.GetAtoms()
+        )
         output_rows.append(
             {
                 "molecule_id": row.molecule_id,
                 "source_split": row.split,
                 "label": row.label,
                 "original_smiles": row.original_smiles,
-                "canonical_smiles": row.canonical_smiles,
+                "source_canonical_smiles": row.canonical_smiles,
                 "num_real_nodes": row.mol.GetNumAtoms(),
                 "atomic_numbers": list(row.atom_categories),
                 "formal_charges": list(row.charge_categories),
                 "aromaticity": list(row.aromatic_categories),
+                "num_explicit_hs": [
+                    int(atom.GetNumExplicitHs())
+                    for atom in row.mol.GetAtoms()
+                ],
+                "num_implicit_hs": [
+                    int(atom.GetNumImplicitHs())
+                    for atom in row.mol.GetAtoms()
+                ],
+                "no_implicit": [
+                    bool(atom.GetNoImplicit()) for atom in row.mol.GetAtoms()
+                ],
+                "chiral_tags": [
+                    int(atom.GetChiralTag()) for atom in row.mol.GetAtoms()
+                ],
+                "contains_aromatic_explicit_h": (
+                    contains_aromatic_explicit_h
+                ),
                 "bond_types": list(row.bond_categories),
                 **result.to_dict(),
                 **checks,
             }
         )
     failed = [row for row in output_rows if not row["round_trip_passed"]]
+    failure_audit = [
+        {
+            "molecule_id": row["molecule_id"],
+            "original_smiles": row["original_smiles"],
+            "contains_aromatic_explicit_h": row[
+                "contains_aromatic_explicit_h"
+            ],
+            "failure_stage": (
+                row.get("error_type") or "round_trip_comparison"
+            ),
+            "failure_message": (
+                row.get("error")
+                or (
+                    "Exact source round-trip mismatch: "
+                    + ",".join(row.get("mismatch_fields", []))
+                )
+            ),
+        }
+        for row in failed
+    ]
     summary = {
         "probe_rows": len(output_rows),
         "probe_passed_rows": len(output_rows) - len(failed),
         "probe_failed_rows": len(failed),
         "probe_passed": not failed,
         "failure_examples": failed[:10],
+        "failed_count": len(failed),
+        "failed_molecule_ids": [
+            row["molecule_id"] for row in failure_audit
+        ],
+        "failed_smiles": [
+            row["original_smiles"] for row in failure_audit
+        ],
+        "failure_audit": failure_audit,
         "atom_vocabulary": list(schema.atom_vocabulary),
         "formal_charge_vocabulary": list(
             schema.formal_charge_vocabulary
@@ -1087,6 +1333,7 @@ def write_jsonl(path: str | Path, rows: Iterable[dict[str, Any]]) -> None:
 
 
 __all__ = [
+    "ATOM_SIDECAR_SCHEMA_VERSION",
     "BOND_DECODER_NATIVE",
     "ClearMutagenicityCodecError",
     "ClearMutagenicityError",
