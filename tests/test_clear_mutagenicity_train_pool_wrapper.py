@@ -11,6 +11,9 @@ WRAPPER = ROOT / "scripts/slurm/clear_mutagenicity_train_pool.sh"
 REPLAY_WRAPPER = (
     ROOT / "scripts/slurm/clear_mutagenicity_generation_replay.sh"
 )
+FULL_GENERATION_WRAPPER = (
+    ROOT / "scripts/slurm/clear_mutagenicity_generation_full.sh"
+)
 APPLY = ROOT / "scripts/baselines/clear/apply_clear_patches.sh"
 PATCH_ROOT = ROOT / "patches/clear_official"
 PATCH_006 = (
@@ -272,3 +275,100 @@ def test_generation_replay_wrapper_is_train_only_and_nounset_safe() -> None:
 
 def test_generation_replay_wrapper_shell_syntax() -> None:
     subprocess.run(["bash", "-n", str(REPLAY_WRAPPER)], check=True)
+
+
+def test_generation_replay_remains_fixed_to_64_parents() -> None:
+    text = _text(REPLAY_WRAPPER)
+    assert 'PARENT_LIMIT="${PARENT_LIMIT:-64}"' in text
+    assert '"$PARENT_LIMIT" -ne 64' in text
+    assert "parent_limit=64" in text
+    assert 'PARENT_LIMIT="${PARENT_LIMIT:-1448}"' not in text
+
+
+def test_full_generation_wrapper_has_fixed_full_protocol() -> None:
+    text = _text(FULL_GENERATION_WRAPPER)
+    for required in (
+        'PARENT_LIMIT="${PARENT_LIMIT:-1448}"',
+        'GENERATION_CHUNK_SIZE="${GENERATION_CHUNK_SIZE:-16}"',
+        'SEED="${SEED:-13}"',
+        '"$PARENT_LIMIT" -ne 1448',
+        '"$GENERATION_CHUNK_SIZE" -ne 16',
+        '"$SEED" -ne 13',
+        "parent_limit=1448, chunk_size=16, seed=13",
+        "[MUTAGENICITY_CLEAR_FULL_GENERATION_CONFIG_ERROR]",
+        "[MUTAGENICITY_CLEAR_FULL_GENERATION_OK]",
+    ):
+        assert required in text
+    assert 'PARENT_LIMIT="${PARENT_LIMIT:-64}"' not in text
+    assert '"$PARENT_LIMIT" -ne 64' not in text
+
+
+def test_full_generation_wrapper_resources_and_generation_only_contract() -> None:
+    text = _text(FULL_GENERATION_WRAPPER)
+    for required in (
+        "#SBATCH --partition=A800",
+        "#SBATCH --cpus-per-task=7",
+        "#SBATCH --gres=gpu:a800:1",
+        "#SBATCH --mem=64G",
+        "#SBATCH --time=04:00:00",
+        'PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-}}"',
+        "--generation-only",
+        'MODEL_TRAINING_PERFORMED=false',
+        '--parent-limit "$PARENT_LIMIT"',
+        '--generation-chunk-size "$GENERATION_CHUNK_SIZE"',
+        '--seed "$SEED"',
+        '--expected-selected-parents 1448',
+    ):
+        assert required in text
+    assert "#SBATCH --cpus-per-task=8" not in text
+    assert "graphpred-epochs" not in text
+    assert "cfe-epochs" not in text
+
+
+def test_full_generation_wrapper_requires_explicit_replay_artifacts() -> None:
+    text = _text(FULL_GENERATION_WRAPPER)
+    for variable in (
+        "SOURCE_RUN_ROOT",
+        "GRAPHPRED_CHECKPOINT",
+        "GRAPHCFE_CHECKPOINT",
+        "OUTPUT_DIR",
+    ):
+        assert f'[[ -n "${{{variable}:-}}" ]]' in text
+    for argument in (
+        '--source-run-root "$SOURCE_RUN_ROOT"',
+        '--graphpred-checkpoint "$GRAPHPRED_CHECKPOINT"',
+        '--graphcfe-checkpoint "$GRAPHCFE_CHECKPOINT"',
+    ):
+        assert argument in text
+    assert 'if [[ "$OUTPUT_DIR" == "$SOURCE_RUN_ROOT" ]]' in text
+    assert '"$OUTPUT_DIR/_RUN_COMPLETE.json"' in text
+    assert '"$OUTPUT_DIR/_RUN_FAILED.json"' in text
+    assert '"$OUTPUT_DIR/_FINALIZED.json"' in text
+    assert '"$RESUME_ENABLED" != true' in text
+
+
+def test_full_generation_wrapper_is_train_only_and_preserves_proxy() -> None:
+    text = _text(FULL_GENERATION_WRAPPER)
+    assert "train_source_label1_teacher_correct.csv" in text
+    assert "--forbid-calibration-test" in text
+    assert "CALIBRATION_LOADED=false" in text
+    assert "TEST_LOADED=false" in text
+    for forbidden in (
+        "calibration_source_label1_teacher_correct.csv",
+        "calibration_target_label0_teacher_correct.csv",
+        "test_source_label1_teacher_correct.csv",
+        "test_target_label0_teacher_correct.csv",
+        "unset http_proxy",
+        "unset https_proxy",
+        "unset HTTP_PROXY",
+        "unset HTTPS_PROXY",
+        "unset all_proxy",
+        "unset ALL_PROXY",
+    ):
+        assert forbidden not in text
+
+
+def test_full_generation_wrapper_shell_syntax() -> None:
+    subprocess.run(
+        ["bash", "-n", str(FULL_GENERATION_WRAPPER)], check=True
+    )
