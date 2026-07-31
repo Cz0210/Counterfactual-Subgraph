@@ -13,7 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -23,9 +23,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.baselines.clear_mutagenicity_adapter import (  # noqa: E402
     ATOM_SIDECAR_SCHEMA_VERSION,
+    GENERATED_CODEC_VERSION,
+    feature_decoding_schema_summary,
     load_strict_cohort,
 )
 from src.baselines.clear_mutagenicity_train_pool import (  # noqa: E402
+    ClearMutagenicityEmptyPoolError,
     EXPECTED_GENERATION_PARENT_ROWS,
     EXPECTED_MODEL_TRAIN_ROWS,
     EXPECTED_MODEL_VAL_ROWS,
@@ -82,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume", action=argparse.BooleanOptionalAction, default=True
     )
+    parser.add_argument("--generation-only", action="store_true")
+    parser.add_argument("--graphpred-checkpoint", default=None)
+    parser.add_argument("--graphcfe-checkpoint", default=None)
+    parser.add_argument("--source-run-root", default=None)
     parser.add_argument(
         "--forbid-calibration-test",
         action=argparse.BooleanOptionalAction,
@@ -286,6 +293,70 @@ def _train_official_models(
     return graphpred_checkpoint, cfe_checkpoint
 
 
+def _resolve_generation_checkpoints(
+    *,
+    generation_only: bool,
+    graphpred_checkpoint: str | Path | None,
+    graphcfe_checkpoint: str | Path | None,
+    source_run_root: str | Path | None,
+    train_models: Callable[[], tuple[Path, Path]],
+) -> tuple[Path, Path, Path | None, bool]:
+    """Resolve checkpoints without ever guessing a replay checkpoint."""
+
+    if not generation_only:
+        if any(
+            value is not None
+            for value in (
+                graphpred_checkpoint,
+                graphcfe_checkpoint,
+                source_run_root,
+            )
+        ):
+            raise ValueError(
+                "Explicit checkpoint/source-run options require "
+                "--generation-only."
+            )
+        graphpred, graphcfe = train_models()
+        return graphpred.resolve(), graphcfe.resolve(), None, True
+
+    if source_run_root is None:
+        raise ValueError("--source-run-root is required for generation-only.")
+    source_root = _required_dir(source_run_root, "source failed run root")
+    if graphpred_checkpoint is None or graphcfe_checkpoint is None:
+        raise ValueError(
+            "--graphpred-checkpoint and --graphcfe-checkpoint are both "
+            "required for generation-only."
+        )
+    graphpred = _required_file(
+        graphpred_checkpoint, "explicit GraphPred checkpoint"
+    )
+    graphcfe = _required_file(
+        graphcfe_checkpoint, "explicit GraphCFE checkpoint"
+    )
+    for checkpoint in (graphpred, graphcfe):
+        try:
+            checkpoint.relative_to(source_root)
+        except ValueError as exc:
+            raise ValueError(
+                "Generation-only checkpoints must be inside the explicit "
+                f"source run root: checkpoint={checkpoint}, "
+                f"source_run_root={source_root}"
+            ) from exc
+    return graphpred, graphcfe, source_root, False
+
+
+def _checkpoint_provenance(
+    graphpred_checkpoint: Path,
+    graphcfe_checkpoint: Path,
+) -> dict[str, Any]:
+    return {
+        "graphpred_checkpoint_path": str(graphpred_checkpoint.resolve()),
+        "graphpred_checkpoint_sha256": sha256_file(graphpred_checkpoint),
+        "graphcfe_checkpoint_path": str(graphcfe_checkpoint.resolve()),
+        "graphcfe_checkpoint_sha256": sha256_file(graphcfe_checkpoint),
+    }
+
+
 def _load_generation_models(
     *,
     official_root: Path,
@@ -439,10 +510,16 @@ def _prepare_output(
     resume: bool,
     fingerprint: str,
     manifest: dict[str, Any],
+    create_training_directories: bool = True,
 ) -> None:
     if (output_dir / "_RUN_COMPLETE.json").is_file():
         raise FileExistsError(
             f"Completed CLEAR Phase B run cannot be overwritten: {output_dir}"
+        )
+    if (output_dir / "_RUN_FAILED.json").is_file():
+        raise FileExistsError(
+            "Failed CLEAR replay is immutable; choose a new output directory: "
+            f"{output_dir}"
         )
     existing = output_dir.exists() and any(output_dir.iterdir())
     if existing and not resume:
@@ -450,8 +527,9 @@ def _prepare_output(
             f"Output directory is non-empty and resume is disabled: {output_dir}"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
-    for directory in ("graphpred", "graphcfe", "checkpoints"):
-        (output_dir / directory).mkdir(parents=True, exist_ok=True)
+    if create_training_directories:
+        for directory in ("graphpred", "graphcfe", "checkpoints"):
+            (output_dir / directory).mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "run_manifest.json"
     if existing:
         if not manifest_path.is_file():
@@ -497,13 +575,24 @@ def main(argv: list[str] | None = None) -> int:
         args.teacher_path, "Mutagenicity RF teacher"
     )
     official_root = _required_dir(args.official_root, "official CLEAR root")
+    replay_paths = (
+        args.source_run_root,
+        args.graphpred_checkpoint,
+        args.graphcfe_checkpoint,
+    )
     if any(
         token in str(path).lower()
-        for path in (generation_csv, teacher_path, phase_a_root)
+        for path in (
+            generation_csv,
+            teacher_path,
+            phase_a_root,
+            *(path for path in replay_paths if path is not None),
+        )
         for token in ("calibration", "test_source", "test_target")
     ):
         raise ValueError("Phase B input path contains calibration/test token.")
-    _apply_official_patches()
+    if not args.generation_only:
+        _apply_official_patches()
     data, phase_a_pickle_info = _load_phase_a_data(official_root)
     data_audit = validate_phase_a_data(
         data,
@@ -523,8 +612,42 @@ def main(argv: list[str] | None = None) -> int:
     )
     selected = select_generation_parents(parents, config.parent_limit)
     output_dir = Path(args.output_dir).expanduser().resolve()
+    replay_graphpred: Path | None = None
+    replay_graphcfe: Path | None = None
+    source_run_root: Path | None = None
+    if args.generation_only:
+        replay_graphpred, replay_graphcfe, source_run_root, _ = (
+            _resolve_generation_checkpoints(
+                generation_only=True,
+                graphpred_checkpoint=args.graphpred_checkpoint,
+                graphcfe_checkpoint=args.graphcfe_checkpoint,
+                source_run_root=args.source_run_root,
+                train_models=lambda: (_ for _ in ()).throw(
+                    AssertionError("generation-only must not train models")
+                ),
+            )
+        )
+        try:
+            output_dir.relative_to(source_run_root)
+            output_overlaps_source = True
+        except ValueError:
+            output_overlaps_source = False
+        if output_overlaps_source:
+            raise ValueError(
+                "Generation replay output must be outside the source failed run."
+            )
+    replay_checkpoint_identity = (
+        _checkpoint_provenance(replay_graphpred, replay_graphcfe)
+        if replay_graphpred is not None and replay_graphcfe is not None
+        else {}
+    )
     identity = {
         "config": config.identity(),
+        "generation_only": bool(args.generation_only),
+        "source_failed_run_root": (
+            str(source_run_root) if source_run_root is not None else None
+        ),
+        "codec_version": GENERATED_CODEC_VERSION,
         "phase_a_summary_sha256": sha256_file(phase_a_summary_path),
         "phase_a_full_pickle_sha256": phase_a_pickle_info[
             "full_pickle_sha256"
@@ -538,11 +661,16 @@ def main(argv: list[str] | None = None) -> int:
         "graphpred_learning_rate": float(args.graphpred_learning_rate),
         "cfe_learning_rate": float(args.cfe_learning_rate),
         "dropout": float(args.dropout),
+        "explicit_replay_checkpoints": replay_checkpoint_identity,
     }
     fingerprint = _config_fingerprint(identity)
     manifest = {
         "dataset": "Mutagenicity",
-        "phase": "clear_graphcfe_train_pool_smoke",
+        "phase": (
+            "clear_graphcfe_generation_only_replay"
+            if args.generation_only
+            else "clear_graphcfe_train_pool_smoke"
+        ),
         "config_fingerprint": fingerprint,
         "inputs": {
             "phase_a_root": str(phase_a_root),
@@ -552,6 +680,15 @@ def main(argv: list[str] | None = None) -> int:
             "official_root": str(official_root),
         },
         "config": identity,
+        "source_failed_run_root": (
+            str(source_run_root) if source_run_root is not None else None
+        ),
+        "generation_parent_ids": [row.molecule_id for row in selected],
+        "parent_limit": int(config.parent_limit),
+        "generation_chunk_size": int(config.generation_chunk_size),
+        "seed": int(config.seed),
+        "model_training_performed": not bool(args.generation_only),
+        "codec_version": GENERATED_CODEC_VERSION,
         "generation_input_split": "train",
         "model_train_split": "train",
         "model_validation_split": "val",
@@ -570,15 +707,54 @@ def main(argv: list[str] | None = None) -> int:
         resume=config.resume,
         fingerprint=fingerprint,
         manifest=manifest,
+        create_training_directories=not bool(args.generation_only),
     )
-    graphpred_checkpoint, cfe_checkpoint = _train_official_models(
-        official_root=official_root,
-        output_dir=output_dir,
-        config=config,
-        graphpred_learning_rate=float(args.graphpred_learning_rate),
-        cfe_learning_rate=float(args.cfe_learning_rate),
-        dropout=float(args.dropout),
+    if args.generation_only:
+        assert replay_graphpred is not None and replay_graphcfe is not None
+        graphpred_checkpoint = replay_graphpred
+        cfe_checkpoint = replay_graphcfe
+        trained_models = False
+    else:
+        (
+            graphpred_checkpoint,
+            cfe_checkpoint,
+            source_run_root,
+            trained_models,
+        ) = _resolve_generation_checkpoints(
+            generation_only=False,
+            graphpred_checkpoint=None,
+            graphcfe_checkpoint=None,
+            source_run_root=None,
+            train_models=lambda: _train_official_models(
+                official_root=official_root,
+                output_dir=output_dir,
+                config=config,
+                graphpred_learning_rate=float(args.graphpred_learning_rate),
+                cfe_learning_rate=float(args.cfe_learning_rate),
+                dropout=float(args.dropout),
+            ),
+        )
+    checkpoint_provenance = _checkpoint_provenance(
+        graphpred_checkpoint, cfe_checkpoint
     )
+    manifest = json.loads(
+        (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    manifest.update(
+        {
+            **checkpoint_provenance,
+            "source_failed_run_root": (
+                str(source_run_root) if source_run_root is not None else None
+            ),
+            "model_training_performed": bool(trained_models),
+        }
+    )
+    write_json(output_dir / "run_manifest.json", manifest)
+    if args.generation_only:
+        print(
+            "[MUTAGENICITY_CLEAR_GENERATION_REPLAY_CHECKPOINTS_OK]",
+            flush=True,
+        )
     torch, graphpred, cfe = _load_generation_models(
         official_root=official_root,
         data=data,
@@ -594,40 +770,108 @@ def main(argv: list[str] | None = None) -> int:
         )
     combined_checkpoint_hash = hashlib.sha256(
         (
-            sha256_file(graphpred_checkpoint)
-            + sha256_file(cfe_checkpoint)
+            checkpoint_provenance["graphpred_checkpoint_sha256"]
+            + checkpoint_provenance["graphcfe_checkpoint_sha256"]
         ).encode("utf-8")
     ).hexdigest()
-    generation_summary = run_streaming_generation(
-        output_dir=output_dir,
-        parents=selected,
-        data=data,
-        schema=schema_from_mapping(dict(data.feature_schema)),
-        teacher=teacher,
-        generate_chunk=_generation_callable(
-            torch_module=torch,
-            graphpred=graphpred,
-            cfe=cfe,
-            data=data,
-            device=config.device,
+    schema = schema_from_mapping(dict(data.feature_schema))
+    if int(data.feature_all[0].shape[1]) != int(schema.feature_dim):
+        raise ValueError(
+            "Phase A tensor feature dimension does not match feature schema: "
+            f"{data.feature_all[0].shape[1]} != {schema.feature_dim}"
+        )
+    summary_feature_dim = phase_a_summary.get("feature_dim")
+    if summary_feature_dim is not None and int(summary_feature_dim) != int(
+        schema.feature_dim
+    ):
+        raise ValueError(
+            "Frozen Phase A summary feature dimension does not match pickle "
+            f"schema: {summary_feature_dim} != {schema.feature_dim}"
+        )
+    print(
+        "[MUTAGENICITY_CLEAR_FEATURE_DECODING_SCHEMA] "
+        + json.dumps(
+            feature_decoding_schema_summary(schema), sort_keys=True
         ),
-        config=config,
-        config_fingerprint=fingerprint,
-        model_checkpoint_hash=combined_checkpoint_hash,
+        flush=True,
     )
+    try:
+        generation_summary = run_streaming_generation(
+            output_dir=output_dir,
+            parents=selected,
+            data=data,
+            schema=schema,
+            teacher=teacher,
+            generate_chunk=_generation_callable(
+                torch_module=torch,
+                graphpred=graphpred,
+                cfe=cfe,
+                data=data,
+                device=config.device,
+            ),
+            config=config,
+            config_fingerprint=fingerprint,
+            model_checkpoint_hash=combined_checkpoint_hash,
+            checkpoint_provenance=checkpoint_provenance,
+        )
+    except ClearMutagenicityEmptyPoolError:
+        failure_summary = json.loads(
+            (output_dir / "failure_summary.json").read_text(encoding="utf-8")
+        )
+        failure_summary.update(
+            {
+                **data_audit,
+                **checkpoint_provenance,
+                "source_failed_run_root": (
+                    str(source_run_root)
+                    if source_run_root is not None
+                    else None
+                ),
+                "generation_parent_ids": [
+                    row.molecule_id for row in selected
+                ],
+                "parent_limit": int(config.parent_limit),
+                "generation_chunk_size": int(config.generation_chunk_size),
+                "seed": int(config.seed),
+                "model_training_performed": bool(trained_models),
+                "calibration_loaded": False,
+                "test_loaded": False,
+                "run_complete": False,
+            }
+        )
+        write_json(output_dir / "failure_summary.json", failure_summary)
+        write_json(output_dir / "summary.json", failure_summary)
+        manifest["run_complete"] = False
+        manifest["failure"] = "empty_candidate_pool"
+        write_json(output_dir / "run_manifest.json", manifest)
+        raise
     print("[MUTAGENICITY_CLEAR_GENERATION_SMOKE_OK]", flush=True)
     summary = {
         **data_audit,
         **generation_summary,
         "generation_source_parent_rows": len(parents),
-        "graphpred_epochs": int(config.graphpred_epochs),
-        "cfe_epochs": int(config.cfe_epochs),
+        "graphpred_epochs": (
+            None if args.generation_only else int(config.graphpred_epochs)
+        ),
+        "cfe_epochs": None if args.generation_only else int(config.cfe_epochs),
         "batch_size": int(config.batch_size),
         "seed": int(config.seed),
         "graphpred_checkpoint": str(graphpred_checkpoint),
-        "graphpred_checkpoint_sha256": sha256_file(graphpred_checkpoint),
+        "graphpred_checkpoint_sha256": checkpoint_provenance[
+            "graphpred_checkpoint_sha256"
+        ],
         "graphcfe_checkpoint": str(cfe_checkpoint),
-        "graphcfe_checkpoint_sha256": sha256_file(cfe_checkpoint),
+        "graphcfe_checkpoint_sha256": checkpoint_provenance[
+            "graphcfe_checkpoint_sha256"
+        ],
+        "source_failed_run_root": (
+            str(source_run_root) if source_run_root is not None else None
+        ),
+        "generation_parent_ids": [row.molecule_id for row in selected],
+        "parent_limit": int(config.parent_limit),
+        "generation_chunk_size": int(config.generation_chunk_size),
+        "model_training_performed": bool(trained_models),
+        "codec_version": GENERATED_CODEC_VERSION,
         "selected_generation_cohort_hash": cohort_hash(selected),
         "source_label": 1,
         "target_label": 0,
@@ -647,6 +891,16 @@ def main(argv: list[str] | None = None) -> int:
         {
             "graphpred_checkpoint": str(graphpred_checkpoint),
             "graphcfe_checkpoint": str(cfe_checkpoint),
+            **checkpoint_provenance,
+            "source_failed_run_root": (
+                str(source_run_root) if source_run_root is not None else None
+            ),
+            "generation_parent_ids": [row.molecule_id for row in selected],
+            "parent_limit": int(config.parent_limit),
+            "generation_chunk_size": int(config.generation_chunk_size),
+            "seed": int(config.seed),
+            "model_training_performed": bool(trained_models),
+            "codec_version": GENERATED_CODEC_VERSION,
             "selected_generation_cohort_hash": cohort_hash(selected),
             "calibration_loaded": False,
             "test_loaded": False,

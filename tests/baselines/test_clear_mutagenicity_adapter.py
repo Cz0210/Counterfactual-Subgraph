@@ -14,6 +14,7 @@ from src.baselines.clear_mutagenicity_adapter import (
     PreparedMolecule,
     build_clear_dataset_payload,
     build_train_schema,
+    decode_generated_atom_feature,
     encode_atom_feature,
     load_phase_a_cohorts,
     molecule_to_clear_graph,
@@ -524,7 +525,7 @@ def test_unchanged_generated_atom_inherits_parent_hydrogen_state() -> None:
     assert max(result.decoded_num_explicit_hs) == 1
 
 
-def test_changed_generated_atom_rejects_ambiguous_hydrogen_state() -> None:
+def test_changed_generated_atom_is_sanitized_instead_of_preemptively_rejected() -> None:
     row = _prepared("generated_changed", "c1c[nH]c2ccccc12")
     schema = build_train_schema([row])
     adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
@@ -550,8 +551,212 @@ def test_changed_generated_atom_rejects_ambiguous_hydrogen_state() -> None:
         atom_attribute_mode="generated",
     )
     assert result.ok is False
-    assert result.error_type == "ambiguous_generated_atom_hydrogen_state"
-    assert "explicit-H state cannot be inferred" in str(result.error)
+    assert result.error_type == "generated_kekulization_failed"
+    assert result.error_type != "ambiguous_generated_atom_hydrogen_state"
+    assert result.decoded_num_explicit_hs[nitrogen_slot] == 0
+    assert result.decoded_no_implicit[nitrogen_slot] is False
+    assert result.decoded_chiral_tags[nitrogen_slot] == int(
+        Chem.ChiralType.CHI_UNSPECIFIED
+    )
+
+
+def _change_generated_atom_identity(
+    features: np.ndarray,
+    *,
+    slot: int,
+    schema,
+    atomic_num: int | None = None,
+    formal_charge: int | None = None,
+    is_aromatic: bool | None = None,
+) -> np.ndarray:
+    changed = features.copy()
+    if atomic_num is not None:
+        changed[slot, schema.atom_feature_start : schema.atom_feature_end] = 0.0
+        changed[
+            slot,
+            schema.atom_feature_start
+            + schema.atom_vocabulary.index(atomic_num),
+        ] = 1.0
+    if formal_charge is not None:
+        changed[
+            slot,
+            schema.charge_feature_start : schema.charge_feature_end,
+        ] = 0.0
+        changed[
+            slot,
+            schema.charge_feature_start
+            + schema.formal_charge_vocabulary.index(formal_charge),
+        ] = 1.0
+    if is_aromatic is not None:
+        changed[slot, schema.aromatic_feature_index] = float(is_aromatic)
+    return changed
+
+
+@pytest.mark.parametrize("source_smiles", ("OC", "NC", "ClC", "BrC"))
+def test_generated_atom_identity_change_uses_decoded_atom_without_source_h(
+    source_smiles: str,
+) -> None:
+    row = _prepared("identity_change", source_smiles)
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    changed = _change_generated_atom_identity(
+        features, slot=0, schema=schema, atomic_num=6
+    )
+    result = project_binary_graph_to_molecule(
+        features=changed,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok, (result.error_type, result.error)
+    assert result.canonical_smiles == "CC"
+    assert result.decoded_atomic_numbers[0] == 6
+    assert result.decoded_num_explicit_hs[0] == 0
+    assert result.decoded_no_implicit[0] is False
+    assert result.atom_state_sources[0] == "generated_deterministic_default"
+
+
+def test_source_mode_still_rejects_atom_identity_change() -> None:
+    row = _prepared("source_exact", "OC")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    changed = _change_generated_atom_identity(
+        features, slot=0, schema=schema, atomic_num=6
+    )
+    result = project_binary_graph_to_molecule(
+        features=changed,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="source",
+    )
+    assert result.ok is False
+    assert result.error_type == "source_atom_attribute_mapping_failed"
+
+
+def test_generated_aromatic_to_nonaromatic_does_not_inherit_source_h() -> None:
+    row = _prepared("aromatic_change", "c1ccccc1")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    changed = _change_generated_atom_identity(
+        features, slot=0, schema=schema, is_aromatic=False
+    )
+    result = project_binary_graph_to_molecule(
+        features=changed,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok is False
+    assert result.error_type == "generated_aromaticity_bond_inconsistent"
+    assert result.decoded_aromaticity[0] is False
+    assert result.decoded_num_explicit_hs[0] == 0
+    assert result.error_type != "ambiguous_generated_atom_hydrogen_state"
+
+
+def test_generated_formal_charge_change_uses_deterministic_hydrogen_state() -> None:
+    charged = _prepared("charged", "[NH4+]")
+    neutral = _prepared("neutral", "N")
+    schema = build_train_schema([charged, neutral])
+    adjacency, features, sidecar = molecule_to_clear_graph(
+        charged, schema=schema
+    )
+    changed = _change_generated_atom_identity(
+        features, slot=0, schema=schema, formal_charge=0
+    )
+    result = project_binary_graph_to_molecule(
+        features=changed,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok, (result.error_type, result.error)
+    assert result.decoded_formal_charges == [0]
+    assert result.decoded_num_explicit_hs == [0]
+    assert result.decoded_no_implicit == [False]
+    assert result.decoded_chiral_tags == [int(Chem.ChiralType.CHI_UNSPECIFIED)]
+
+
+def test_unchanged_identity_with_changed_incident_edge_does_not_inherit_h() -> None:
+    row = _prepared("changed_edge", "[NH2]C")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    adjacency = adjacency.copy()
+    adjacency[0, 1] = adjacency[1, 0] = 0.0
+    result = project_binary_graph_to_molecule(
+        features=features,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+        require_connected=False,
+    )
+    assert result.ok, (result.error_type, result.error)
+    assert result.decoded_num_explicit_hs[0] == 0
+    assert result.atom_state_sources[0] == "generated_deterministic_default"
+
+
+def test_generated_impossible_valence_is_rejected_by_rdkit_sanitize() -> None:
+    row = _prepared("overbonded", "CCCCCC")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    adjacency = np.ones_like(adjacency)
+    result = project_binary_graph_to_molecule(
+        features=features,
+        adjacency=adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok is False
+    assert result.error_type == "generated_valence_sanitize_failed"
+
+
+def test_generated_padded_node_is_not_decoded_as_carbon() -> None:
+    row = _prepared("padded", "CC")
+    schema = build_train_schema([row])
+    adjacency, features, sidecar = molecule_to_clear_graph(row, schema=schema)
+    padded_features = np.zeros((3, schema.feature_dim), dtype=np.float64)
+    padded_features[:2] = features
+    padded_adjacency = np.zeros((3, 3), dtype=np.float64)
+    padded_adjacency[:2, :2] = adjacency
+    result = project_binary_graph_to_molecule(
+        features=padded_features,
+        adjacency=padded_adjacency,
+        schema=schema,
+        parent_sidecar=sidecar,
+        atom_attribute_mode="generated",
+    )
+    assert result.ok
+    assert result.num_real_nodes == 2
+    assert result.feature_decoding_audit["padded_node_count"] == 1
+    assert result.feature_decoding_audit["padded_node_slots"] == [2]
+
+
+def test_generated_logit_argmax_uses_exact_train_vocabulary_mapping(
+    phase_a_files: dict[str, Path],
+) -> None:
+    cohorts = _load(phase_a_files)
+    schema = build_train_schema(
+        cohorts["train_positive"] + cohorts["train_negative"]
+    )
+    feature = np.full(schema.feature_dim, -9.0, dtype=np.float64)
+    atom_index = schema.atom_vocabulary.index(35)
+    charge_index = schema.formal_charge_vocabulary.index(-1)
+    feature[schema.atom_feature_start + atom_index] = -1.0
+    feature[schema.charge_feature_start + charge_index] = -2.0
+    feature[schema.aromatic_feature_index] = 0.7
+    feature[schema.node_present_feature_index] = 1.0
+    decoded = decode_generated_atom_feature(feature, schema=schema)
+    assert decoded is not None
+    assert decoded["atom_argmax_index"] == atom_index
+    assert decoded["charge_argmax_index"] == charge_index
+    assert decoded["atomic_num"] == 35
+    assert decoded["formal_charge"] == -1
+    assert decoded["is_aromatic"] is True
 
 
 def test_dataset_summary_versions_atom_sidecar(

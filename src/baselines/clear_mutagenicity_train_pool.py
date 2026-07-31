@@ -7,7 +7,7 @@ RF-teacher validation, resume state, and artifact audit.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -23,10 +23,12 @@ from rdkit import Chem
 
 from src.baselines.clear_mutagenicity_adapter import (
     ATOM_SIDECAR_SCHEMA_VERSION,
+    GENERATED_CODEC_VERSION,
     ClearMutagenicityCodecError,
     ClearMutagenicitySchema,
     PreparedMolecule,
     codec_provenance,
+    feature_decoding_schema_summary,
     load_strict_cohort,
     project_binary_graph_to_molecule,
 )
@@ -46,6 +48,7 @@ REQUIRED_OUTPUTS = (
     "candidate_pool.jsonl",
     "candidate_universe.jsonl",
     "generation_progress.json",
+    "feature_decoding_summary.json",
     "summary.json",
     "run_manifest.json",
     "train_pool_audit.json",
@@ -563,10 +566,14 @@ def _record_from_generated(
         "chunk_index": int(chunk_index),
         "projection_provenance": {
             **codec_provenance(),
-            "atom_attribute_mode": "source_anchored_generated",
-            "unchanged_parent_atoms_inherit_explicit_h_chirality": True,
-            "changed_atom_policy": "ambiguous_generated_atom_hydrogen_state",
+            "atom_attribute_mode": "generated_deterministic",
+            "unchanged_local_environment_inherits_source_state": True,
+            "changed_atom_policy": (
+                "decoded_identity_with_zero_explicit_h_implicit_h_enabled_"
+                "chiral_unspecified"
+            ),
         },
+        "codec_version": GENERATED_CODEC_VERSION,
         **codec.to_dict(),
     }
     if not codec.ok or codec.molecule is None or not codec.canonical_smiles:
@@ -639,6 +646,127 @@ def candidate_universe_from_pool(
     return universe
 
 
+def summarize_generated_feature_decoding(
+    raw_rows: Sequence[dict[str, Any]],
+    *,
+    schema: ClearMutagenicitySchema,
+) -> dict[str, Any]:
+    """Aggregate lightweight codec evidence without retaining model tensors."""
+
+    atom_argmax: Counter[int] = Counter()
+    charge_argmax: Counter[int] = Counter()
+    decoded_atoms: Counter[int] = Counter()
+    active_counts: Counter[int] = Counter()
+    padded_counts: Counter[int] = Counter()
+    identity_changes: Counter[str] = Counter()
+    actual_dimensions: Counter[int] = Counter()
+    total_identity_changes = 0
+    for row in raw_rows:
+        audit = dict(row.get("feature_decoding_audit") or {})
+        atom_argmax.update(
+            int(value) for value in audit.get("raw_atom_argmax_indices", [])
+        )
+        charge_argmax.update(
+            int(value) for value in audit.get("raw_charge_argmax_indices", [])
+        )
+        decoded_atoms.update(
+            int(value) for value in row.get("decoded_atomic_numbers", [])
+        )
+        active_counts[int(audit.get("active_node_count", 0))] += 1
+        padded_counts[int(audit.get("padded_node_count", 0))] += 1
+        actual_dim = audit.get("actual_node_feature_dim")
+        if actual_dim is not None:
+            actual_dimensions[int(actual_dim)] += 1
+        for change in audit.get("identity_changes", []):
+            source = change.get("source_identity")
+            decoded = change.get("decoded_identity")
+            key = f"{json_dumps(source)}->{json_dumps(decoded)}"
+            identity_changes[key] += 1
+            total_identity_changes += 1
+
+    def ordered(counter: Counter[Any]) -> dict[str, int]:
+        return {
+            str(key): int(counter[key])
+            for key in sorted(counter, key=lambda value: str(value))
+        }
+
+    return {
+        **feature_decoding_schema_summary(schema),
+        "actual_node_feature_dim_distribution": ordered(actual_dimensions),
+        "feature_dimension_matches_schema": (
+            set(actual_dimensions).issubset({int(schema.feature_dim)})
+            and bool(raw_rows)
+        ),
+        "raw_atom_argmax_index_distribution": ordered(atom_argmax),
+        "raw_charge_argmax_index_distribution": ordered(charge_argmax),
+        "decoded_atomic_number_distribution": ordered(decoded_atoms),
+        "active_node_count_distribution": ordered(active_counts),
+        "padded_node_count_distribution": ordered(padded_counts),
+        "padded_node_count": int(
+            sum(count * occurrences for count, occurrences in padded_counts.items())
+        ),
+        "source_decoded_identity_change_count": total_identity_changes,
+        "source_to_decoded_identity_change_matrix": ordered(identity_changes),
+        "generated_row_count": len(raw_rows),
+        "codec_version": GENERATED_CODEC_VERSION,
+    }
+
+
+def build_empty_pool_failure_summary(
+    *,
+    raw_rows: Sequence[dict[str, Any]],
+    invalid_rows: Sequence[dict[str, Any]],
+    non_target_rows: Sequence[dict[str, Any]],
+    pool_rows: Sequence[dict[str, Any]],
+    universe_rows: Sequence[dict[str, Any]],
+    feature_summary: dict[str, Any],
+    checkpoint_provenance: dict[str, Any] | None,
+) -> dict[str, Any]:
+    invalid_reasons = Counter(
+        str(row.get("codec_error_type") or "unknown") for row in invalid_rows
+    )
+    before_predictions = Counter(
+        str(row.get("source_teacher_pred")) for row in raw_rows
+    )
+    after_predictions = Counter(
+        str(row.get("teacher_pred"))
+        for row in raw_rows
+        if row.get("teacher_pred") is not None
+    )
+    return {
+        "raw_generated_rows": len(raw_rows),
+        "invalid_candidate_rows": len(invalid_rows),
+        "non_target_candidate_rows": len(non_target_rows),
+        "candidate_pool_rows": len(pool_rows),
+        "canonical_unique_candidates": len(universe_rows),
+        "invalid_reason_counts": dict(sorted(invalid_reasons.items())),
+        "decoded_atomic_number_distribution": feature_summary.get(
+            "decoded_atomic_number_distribution", {}
+        ),
+        "source_to_decoded_identity_change_matrix": feature_summary.get(
+            "source_to_decoded_identity_change_matrix", {}
+        ),
+        "rf_before_prediction_counts": dict(sorted(before_predictions.items())),
+        "rf_after_prediction_counts": dict(sorted(after_predictions.items())),
+        "graphpred_checkpoint_path": (checkpoint_provenance or {}).get(
+            "graphpred_checkpoint_path"
+        ),
+        "graphpred_checkpoint_sha256": (checkpoint_provenance or {}).get(
+            "graphpred_checkpoint_sha256"
+        ),
+        "graphcfe_checkpoint_path": (checkpoint_provenance or {}).get(
+            "graphcfe_checkpoint_path"
+        ),
+        "graphcfe_checkpoint_sha256": (checkpoint_provenance or {}).get(
+            "graphcfe_checkpoint_sha256"
+        ),
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "codec_version": GENERATED_CODEC_VERSION,
+        "run_complete": False,
+    }
+
+
 def run_streaming_generation(
     *,
     output_dir: str | Path,
@@ -653,6 +781,7 @@ def run_streaming_generation(
     config: TrainPoolConfig,
     config_fingerprint: str,
     model_checkpoint_hash: str,
+    checkpoint_provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate, decode, score, and persist one deterministic chunk at a time."""
 
@@ -680,6 +809,9 @@ def run_streaming_generation(
         raw_rows = read_jsonl(finals["raw"])
         pool_rows = read_jsonl(finals["pool"])
         universe_rows = read_jsonl(destination / "candidate_universe.jsonl")
+        feature_summary = read_json(
+            destination / "feature_decoding_summary.json"
+        )
         if len(raw_rows) != len(parents):
             raise ClearMutagenicityTrainPoolError(
                 "Completed generation raw row count differs from selected parents."
@@ -708,6 +840,8 @@ def run_streaming_generation(
             "source_parent_coverage": len(source_ids) / len(parents),
             "chunk_resume_duplicate_rows": 0,
             "generation_run_complete": True,
+            "feature_decoding_summary": feature_summary,
+            "codec_version": GENERATED_CODEC_VERSION,
         }
 
     if progress_path.exists():
@@ -806,10 +940,37 @@ def run_streaming_generation(
     for name, part in parts.items():
         os.replace(part, finals[name])
     raw_rows = read_jsonl(finals["raw"])
+    invalid_rows = read_jsonl(finals["invalid"])
+    non_target_rows = read_jsonl(finals["non_target"])
     pool_rows = read_jsonl(finals["pool"])
     universe = candidate_universe_from_pool(pool_rows)
     write_jsonl(destination / "candidate_universe.jsonl", universe)
+    feature_summary = summarize_generated_feature_decoding(
+        raw_rows, schema=schema
+    )
+    write_json(
+        destination / "feature_decoding_summary.json", feature_summary
+    )
     if not pool_rows or not universe:
+        failure_summary = build_empty_pool_failure_summary(
+            raw_rows=raw_rows,
+            invalid_rows=invalid_rows,
+            non_target_rows=non_target_rows,
+            pool_rows=pool_rows,
+            universe_rows=universe,
+            feature_summary=feature_summary,
+            checkpoint_provenance=checkpoint_provenance,
+        )
+        write_json(destination / "failure_summary.json", failure_summary)
+        write_json(
+            destination / "_RUN_FAILED.json",
+            {
+                "run_complete": False,
+                "failure": "empty_candidate_pool",
+                "failed_at": utc_now(),
+                "codec_version": GENERATED_CODEC_VERSION,
+            },
+        )
         write_json(
             progress_path,
             {
@@ -838,6 +999,7 @@ def run_streaming_generation(
             "raw_generated_rows": len(raw_rows),
             "candidate_pool_rows": len(pool_rows),
             "candidate_universe_rows": len(universe),
+            "codec_version": GENERATED_CODEC_VERSION,
             "updated_at": utc_now(),
             "run_complete": True,
         },
@@ -876,6 +1038,29 @@ def audit_train_pool(
     pool = read_jsonl(root / "candidate_pool.jsonl")
     universe = read_jsonl(root / "candidate_universe.jsonl")
     raw = read_jsonl(root / "raw_generated_candidates.jsonl")
+    feature_summary: dict[str, Any] | None = None
+    if summary.get("codec_version") == GENERATED_CODEC_VERSION:
+        feature_summary = read_json(root / "feature_decoding_summary.json")
+        if feature_summary.get("codec_version") != GENERATED_CODEC_VERSION:
+            raise AssertionError("Generated codec version mismatch in audit.")
+        if int(feature_summary.get("generated_row_count", -1)) != len(raw):
+            raise AssertionError("Feature-decoding row count mismatch.")
+        if feature_summary.get("feature_dimension_matches_schema") is not True:
+            raise AssertionError("Generated feature dimension failed schema audit.")
+        for prefix in ("graphpred", "graphcfe"):
+            path_value = manifest.get(f"{prefix}_checkpoint_path")
+            expected_hash = manifest.get(f"{prefix}_checkpoint_sha256")
+            if not path_value or not expected_hash:
+                raise AssertionError(
+                    f"Manifest lacks explicit {prefix} checkpoint provenance."
+                )
+            checkpoint = Path(str(path_value)).expanduser().resolve()
+            if not checkpoint.is_file():
+                raise AssertionError(
+                    f"Recorded {prefix} checkpoint is missing: {checkpoint}"
+                )
+            if sha256_file(checkpoint) != str(expected_hash):
+                raise AssertionError(f"Recorded {prefix} checkpoint hash mismatch.")
     parents = load_strict_cohort(
         generation_csv,
         expected_split="train",
@@ -1006,6 +1191,8 @@ def audit_train_pool(
         "teacher_rescored_candidate_rows": len(universe)
         if teacher is not None
         else 0,
+        "feature_decoding_audited": feature_summary is not None,
+        "codec_version": summary.get("codec_version"),
         "run_complete": True,
         "audit_passed": True,
     }
@@ -1019,6 +1206,7 @@ __all__ = [
     "GeneratedGraph",
     "TrainPoolConfig",
     "audit_train_pool",
+    "build_empty_pool_failure_summary",
     "candidate_universe_from_pool",
     "cohort_hash",
     "run_streaming_generation",
@@ -1026,6 +1214,7 @@ __all__ = [
     "select_generation_parents",
     "sha256_file",
     "stable_candidate_id",
+    "summarize_generated_feature_decoding",
     "teacher_probabilities",
     "validate_generation_mapping",
     "validate_phase_a_data",

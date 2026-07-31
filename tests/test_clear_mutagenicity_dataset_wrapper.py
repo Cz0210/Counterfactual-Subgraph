@@ -58,9 +58,11 @@ def test_atom_sidecar_v2_restores_source_hydrogen_attributes() -> None:
         "SetNoImplicit",
         "SetChiralTag",
         "UpdatePropertyCache(strict=False)",
-        "ambiguous_generated_atom_hydrogen_state",
+        "decode_generated_atom_state",
+        "generated_deterministic_default",
     ):
         assert required in text
+    assert "ambiguous_generated_atom_hydrogen_state" not in text
     assert "SetNumImplicitHs" not in text
 
 

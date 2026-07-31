@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "scripts/baselines/clear/build_mutagenicity_train_pool.py"
 AUDIT = ROOT / "scripts/baselines/clear/audit_mutagenicity_train_pool.py"
 WRAPPER = ROOT / "scripts/slurm/clear_mutagenicity_train_pool.sh"
+REPLAY_WRAPPER = (
+    ROOT / "scripts/slurm/clear_mutagenicity_generation_replay.sh"
+)
 APPLY = ROOT / "scripts/baselines/clear/apply_clear_patches.sh"
 PATCH_ROOT = ROOT / "patches/clear_official"
 PATCH_006 = (
@@ -43,6 +46,10 @@ def test_phase_b_cli_help() -> None:
         "--graphpred-epochs",
         "--cfe-epochs",
         "--generation-chunk-size",
+        "--generation-only",
+        "--graphpred-checkpoint",
+        "--graphcfe-checkpoint",
+        "--source-run-root",
         "--resume",
     ):
         assert option in build_help
@@ -204,3 +211,64 @@ def test_patches_001_through_006_apply_in_order(tmp_path: Path) -> None:
 
 def test_wrapper_shell_syntax() -> None:
     subprocess.run(["bash", "-n", str(WRAPPER)], check=True)
+
+
+def test_generation_replay_wrapper_uses_explicit_2021625_artifacts() -> None:
+    text = _text(REPLAY_WRAPPER)
+    for required in (
+        ': "${SOURCE_RUN_ROOT:?',
+        ': "${GRAPHPRED_CHECKPOINT:?',
+        ': "${GRAPHCFE_CHECKPOINT:?',
+        ': "${OUTPUT_DIR:?',
+        "--generation-only",
+        '--source-run-root "$SOURCE_RUN_ROOT"',
+        '--graphpred-checkpoint "$GRAPHPRED_CHECKPOINT"',
+        '--graphcfe-checkpoint "$GRAPHCFE_CHECKPOINT"',
+        'PARENT_LIMIT="${PARENT_LIMIT:-64}"',
+        'GENERATION_CHUNK_SIZE="${GENERATION_CHUNK_SIZE:-16}"',
+        'SEED="${SEED:-13}"',
+        "[MUTAGENICITY_CLEAR_GENERATION_REPLAY_OK]",
+    ):
+        assert required in text
+    assert "graphpred-epochs" not in text
+    assert "cfe-epochs" not in text
+    assert 'if [[ "$OUTPUT_DIR" == "$SOURCE_RUN_ROOT" ]]' in text
+    assert "scripts/exp_sbatch.sh" in text
+    build_text = _text(BUILD)
+    for manifest_field in (
+        '"source_failed_run_root"',
+        '"graphpred_checkpoint_path"',
+        '"graphpred_checkpoint_sha256"',
+        '"graphcfe_checkpoint_path"',
+        '"graphcfe_checkpoint_sha256"',
+        '"generation_parent_ids"',
+        '"model_training_performed"',
+        '"codec_version"',
+    ):
+        assert manifest_field in build_text
+
+
+def test_generation_replay_wrapper_is_train_only_and_nounset_safe() -> None:
+    text = _text(REPLAY_WRAPPER)
+    assert "train_source_label1_teacher_correct.csv" in text
+    assert "mutagenicity_rf_model.pkl" in text
+    assert "--forbid-calibration-test" in text
+    assert "calibration_source_label1_teacher_correct.csv" not in text
+    assert "test_source_label1_teacher_correct.csv" not in text
+    disable = text.index("set +u")
+    source = text.index("source ~/.bashrc")
+    activate = text.index("conda activate smiles_pip118")
+    enable = text.index("set -u", activate)
+    assert disable < source < activate < enable
+    assert "/share/home" not in text
+    for proxy in (
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+    ):
+        assert f"unset {proxy}" not in text
+
+
+def test_generation_replay_wrapper_shell_syntax() -> None:
+    subprocess.run(["bash", "-n", str(REPLAY_WRAPPER)], check=True)

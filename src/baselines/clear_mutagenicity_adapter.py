@@ -39,6 +39,7 @@ RETAINED_BOND_TYPE_SOURCE = "parent_sidecar"
 NEW_EDGE_BOND_RULE = "provisional_single"
 RDKIT_SANITIZE_REQUIRED = True
 ATOM_SIDECAR_SCHEMA_VERSION = "clear_mutagenicity_atom_sidecar_v2"
+GENERATED_CODEC_VERSION = "clear_mutagenicity_generated_codec_v2"
 DEFAULT_EXPECTED_COUNTS = {
     "train_positive": 1448,
     "train_negative": 1437,
@@ -127,6 +128,8 @@ class CodecResult:
     decoded_num_explicit_hs: list[int] = field(default_factory=list)
     decoded_no_implicit: list[bool] = field(default_factory=list)
     decoded_chiral_tags: list[int] = field(default_factory=list)
+    atom_state_sources: list[str] = field(default_factory=list)
+    feature_decoding_audit: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -146,6 +149,10 @@ def codec_provenance() -> dict[str, Any]:
         "stores_no_implicit": True,
         "stores_chiral_tag": True,
         "explicit_h_decoder_native": False,
+        "generated_codec_version": GENERATED_CODEC_VERSION,
+        "generated_changed_atom_hydrogen_policy": (
+            "explicit_hs_0_no_implicit_false_chiral_unspecified"
+        ),
     }
 
 
@@ -500,6 +507,156 @@ def decode_atom_feature(
     }
 
 
+def feature_decoding_schema_summary(
+    schema: ClearMutagenicitySchema,
+) -> dict[str, Any]:
+    """Describe the exact Phase A feature layout used by GraphCFE."""
+
+    return {
+        "node_feature_dim": int(schema.feature_dim),
+        "atom_vocabulary": [int(value) for value in schema.atom_vocabulary],
+        "formal_charge_vocabulary": [
+            int(value) for value in schema.formal_charge_vocabulary
+        ],
+        "feature_slices": {
+            "atom_type": [
+                int(schema.atom_feature_start),
+                int(schema.atom_feature_end),
+            ],
+            "formal_charge": [
+                int(schema.charge_feature_start),
+                int(schema.charge_feature_end),
+            ],
+            "aromaticity_index": int(schema.aromatic_feature_index),
+            "node_present_index": int(schema.node_present_feature_index),
+        },
+        "generated_category_decoding": "finite_unique_argmax_over_logits",
+        "generated_active_node_rule": "node_present_logit_gt_0.5",
+    }
+
+
+def decode_generated_atom_feature(
+    feature: Sequence[float],
+    *,
+    schema: ClearMutagenicitySchema,
+    present_threshold: float = 0.5,
+) -> dict[str, Any] | None:
+    """Decode one GraphCFE output row without pretending logits are one-hot.
+
+    ``decoder_x`` in official CLEAR ends in a linear layer.  Atom and charge
+    blocks are therefore finite logits, while the Phase A source encoder emits
+    exact one-hot values.  Generated rows use a deterministic unique argmax;
+    source reconstruction continues to use :func:`decode_atom_feature`.
+    """
+
+    values = np.asarray(feature, dtype=np.float64).reshape(-1)
+    if values.size != schema.feature_dim:
+        raise ClearMutagenicityCodecError(
+            f"Generated feature dimension mismatch: {values.size} != "
+            f"{schema.feature_dim}"
+        )
+    if not np.all(np.isfinite(values)):
+        raise ClearMutagenicityCodecError(
+            "Generated node feature contains non-finite values."
+        )
+    present_score = float(values[schema.node_present_feature_index])
+    if present_score <= float(present_threshold):
+        return None
+
+    atom_values = values[
+        schema.atom_feature_start : schema.atom_feature_end
+    ]
+    charge_values = values[
+        schema.charge_feature_start : schema.charge_feature_end
+    ]
+    atom_index = int(np.argmax(atom_values))
+    charge_index = int(np.argmax(charge_values))
+    atom_ties = np.flatnonzero(
+        np.isclose(
+            atom_values,
+            float(atom_values[atom_index]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+    )
+    charge_ties = np.flatnonzero(
+        np.isclose(
+            charge_values,
+            float(charge_values[charge_index]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+    )
+    if len(atom_ties) != 1 or len(charge_ties) != 1:
+        raise ClearMutagenicityCodecError(
+            "Generated atom/charge logits do not have a unique argmax: "
+            f"atom_ties={atom_ties.tolist()}, "
+            f"charge_ties={charge_ties.tolist()}"
+        )
+    return {
+        "atomic_num": int(schema.atom_vocabulary[atom_index]),
+        "formal_charge": int(schema.formal_charge_vocabulary[charge_index]),
+        "is_aromatic": bool(values[schema.aromatic_feature_index] > 0.5),
+        "atom_argmax_index": atom_index,
+        "charge_argmax_index": charge_index,
+        "node_present_score": present_score,
+    }
+
+
+def can_inherit_source_atom_state(
+    *,
+    decoded_atom: dict[str, Any],
+    source_atom: dict[str, Any] | None,
+    generated_incident_bonds: Sequence[tuple[int, str]],
+    source_incident_bonds: Sequence[tuple[int, str]],
+) -> bool:
+    """Return whether source H/chirality remains semantically anchored."""
+
+    if source_atom is None:
+        return False
+    decoded_identity = (
+        int(decoded_atom["atomic_num"]),
+        int(decoded_atom["formal_charge"]),
+        bool(decoded_atom["is_aromatic"]),
+    )
+    source_identity = (
+        int(source_atom["atomic_num"]),
+        int(source_atom["formal_charge"]),
+        bool(source_atom["is_aromatic"]),
+    )
+    return (
+        decoded_identity == source_identity
+        and sorted(generated_incident_bonds) == sorted(source_incident_bonds)
+    )
+
+
+def decode_generated_atom_state(
+    *,
+    decoded_atom: dict[str, Any],
+    source_atom: dict[str, Any] | None,
+    inherit_source_state: bool,
+) -> dict[str, Any]:
+    """Resolve deterministic non-native H/chirality for a generated atom."""
+
+    if inherit_source_state:
+        if source_atom is None:
+            raise ClearMutagenicityCodecError(
+                "Source atom is required when inherit_source_state is true."
+            )
+        return {
+            "num_explicit_hs": int(source_atom["num_explicit_hs"]),
+            "no_implicit": bool(source_atom["no_implicit"]),
+            "chiral_tag": int(source_atom["chiral_tag"]),
+            "attribute_source": "source_sidecar_exact_local_environment",
+        }
+    return {
+        "num_explicit_hs": 0,
+        "no_implicit": False,
+        "chiral_tag": int(Chem.ChiralType.CHI_UNSPECIFIED),
+        "attribute_source": "generated_deterministic_default",
+    }
+
+
 def molecule_to_clear_graph(
     row: PreparedMolecule,
     *,
@@ -589,12 +746,12 @@ def project_binary_graph_to_molecule(
     require_connected: bool = True,
     atom_attribute_mode: str = "source",
 ) -> CodecResult:
-    """Project CLEAR binary connectivity into a sanitized RDKit molecule.
+    """Decode source graphs exactly or project generated CLEAR graphs.
 
-    CLEAR predicts atom/charge/aromatic features but does not predict explicit
-    hydrogen or chirality state.  Source round trips restore those attributes
-    exactly.  Generated nodes may inherit them only when the decoded
-    atomic-number/charge/aromatic identity matches the same parent node slot.
+    Source mode is the Phase A round-trip gate and restores every sidecar atom
+    attribute exactly.  Generated mode treats GraphCFE node outputs as logits,
+    permits atom identity changes, and inherits source H/chirality only when
+    both atom identity and the complete local incident-bond signature match.
     """
 
     chem = _require_rdkit()
@@ -613,18 +770,59 @@ def project_binary_graph_to_molecule(
         raise ClearMutagenicityCodecError(
             "Feature and adjacency node dimensions differ."
         )
+
+    feature_audit: dict[str, Any] = {
+        **feature_decoding_schema_summary(schema),
+        "actual_node_feature_dim": (
+            int(feature_array.shape[1]) if feature_array.ndim == 2 else None
+        ),
+        "raw_atom_argmax_indices": [],
+        "raw_charge_argmax_indices": [],
+        "active_node_slots": [],
+        "padded_node_slots": [],
+        "identity_changes": [],
+    }
     decoded: list[tuple[int, dict[str, Any]]] = []
+    decoder = (
+        decode_atom_feature
+        if atom_attribute_mode == "source"
+        else decode_generated_atom_feature
+    )
     try:
+        if feature_array.shape[1] != schema.feature_dim:
+            raise ClearMutagenicityCodecError(
+                f"Feature dimension mismatch: {feature_array.shape[1]} != "
+                f"{schema.feature_dim}"
+            )
         for slot, feature in enumerate(feature_array):
-            atom = decode_atom_feature(feature, schema=schema)
-            if atom is not None:
+            atom_values = feature[
+                schema.atom_feature_start : schema.atom_feature_end
+            ]
+            charge_values = feature[
+                schema.charge_feature_start : schema.charge_feature_end
+            ]
+            feature_audit["raw_atom_argmax_indices"].append(
+                int(np.argmax(atom_values))
+            )
+            feature_audit["raw_charge_argmax_indices"].append(
+                int(np.argmax(charge_values))
+            )
+            atom = decoder(feature, schema=schema)
+            if atom is None:
+                feature_audit["padded_node_slots"].append(int(slot))
+            else:
                 decoded.append((slot, atom))
+                feature_audit["active_node_slots"].append(int(slot))
     except ClearMutagenicityCodecError as exc:
         return CodecResult(
             ok=False,
             canonical_smiles=None,
             molecule=None,
-            error_type="ambiguous_node_category",
+            error_type=(
+                "ambiguous_node_category"
+                if atom_attribute_mode == "source"
+                else "generated_atom_feature_out_of_vocabulary"
+            ),
             error=str(exc),
             num_real_nodes=0,
             projected_new_edge_count=0,
@@ -635,13 +833,22 @@ def project_binary_graph_to_molecule(
             decoded_formal_charges=[],
             decoded_aromaticity=[],
             decoded_bond_types=[],
+            feature_decoding_audit=feature_audit,
         )
+    feature_audit["active_node_count"] = len(decoded)
+    feature_audit["padded_node_count"] = int(
+        feature_array.shape[0] - len(decoded)
+    )
     if not decoded:
         return CodecResult(
             ok=False,
             canonical_smiles=None,
             molecule=None,
-            error_type="empty_molecule",
+            error_type=(
+                "empty_molecule"
+                if atom_attribute_mode == "source"
+                else "generated_invalid_active_node_mask"
+            ),
             error="No node-present feature survived decoding.",
             num_real_nodes=0,
             projected_new_edge_count=0,
@@ -652,7 +859,9 @@ def project_binary_graph_to_molecule(
             decoded_formal_charges=[],
             decoded_aromaticity=[],
             decoded_bond_types=[],
+            feature_decoding_audit=feature_audit,
         )
+
     slot_to_new = {slot: index for index, (slot, _) in enumerate(decoded)}
     atom_mapping_unique = len(slot_to_new) == len(decoded)
     source_atoms = {
@@ -661,11 +870,57 @@ def project_binary_graph_to_molecule(
     }
     source_bonds = {
         (
-            int(item["begin_atom_index"]),
-            int(item["end_atom_index"]),
+            min(
+                int(item["begin_atom_index"]),
+                int(item["end_atom_index"]),
+            ),
+            max(
+                int(item["begin_atom_index"]),
+                int(item["end_atom_index"]),
+            ),
         ): str(item["bond_type"])
         for item in parent_sidecar.get("bonds", [])
     }
+    source_incident: dict[int, list[tuple[int, str]]] = {
+        slot: [] for slot in source_atoms
+    }
+    for (left, right), bond_name in source_bonds.items():
+        source_incident.setdefault(left, []).append((right, bond_name))
+        source_incident.setdefault(right, []).append((left, bond_name))
+
+    edge_plan: list[tuple[int, int, str, bool]] = []
+    generated_incident: dict[int, list[tuple[int, str]]] = {
+        slot: [] for slot, _ in decoded
+    }
+    retained = 0
+    new_edges = 0
+    for left_position, (left_slot, _left_values) in enumerate(decoded):
+        for right_position in range(left_position + 1, len(decoded)):
+            right_slot = decoded[right_position][0]
+            connected = (
+                max(
+                    float(adjacency_array[left_slot, right_slot]),
+                    float(adjacency_array[right_slot, left_slot]),
+                )
+                > float(adjacency_threshold)
+            )
+            if not connected:
+                continue
+            source_key = (
+                min(left_slot, right_slot),
+                max(left_slot, right_slot),
+            )
+            retained_source_bond = source_key in source_bonds
+            bond_name = source_bonds.get(source_key, "SINGLE")
+            edge_plan.append(
+                (left_slot, right_slot, bond_name, retained_source_bond)
+            )
+            generated_incident[left_slot].append((right_slot, bond_name))
+            generated_incident[right_slot].append((left_slot, bond_name))
+            if retained_source_bond:
+                retained += 1
+            else:
+                new_edges += 1
 
     decoded_atomic_numbers = [
         int(values["atomic_num"]) for _, values in decoded
@@ -693,9 +948,6 @@ def project_binary_graph_to_molecule(
         molecule: Any | None,
         error_type: str | None,
         error: str | None,
-        projected_new_edge_count: int = 0,
-        retained_edge_count: int = 0,
-        deleted_edge_count: int = 0,
         decoded_bond_types: list[str] | None = None,
     ) -> CodecResult:
         return CodecResult(
@@ -705,9 +957,9 @@ def project_binary_graph_to_molecule(
             error_type=error_type,
             error=error,
             num_real_nodes=len(decoded),
-            projected_new_edge_count=projected_new_edge_count,
-            retained_edge_count=retained_edge_count,
-            deleted_edge_count=deleted_edge_count,
+            projected_new_edge_count=new_edges,
+            retained_edge_count=retained,
+            deleted_edge_count=max(0, len(source_bonds) - retained),
             atom_mapping_unique=atom_mapping_unique,
             decoded_atomic_numbers=decoded_atomic_numbers,
             decoded_formal_charges=decoded_formal_charges,
@@ -722,6 +974,10 @@ def project_binary_graph_to_molecule(
             decoded_chiral_tags=[
                 int(item["chiral_tag"]) for item in resolved_attributes
             ],
+            atom_state_sources=[
+                str(item["attribute_source"]) for item in resolved_attributes
+            ],
+            feature_decoding_audit=feature_audit,
         )
 
     for slot, values in decoded:
@@ -731,61 +987,80 @@ def project_binary_graph_to_molecule(
             if source_atom is not None
             else sorted(required_source_attributes)
         )
-        if source_atom is None or missing:
-            error_type = (
-                "source_atom_attribute_mapping_failed"
-                if atom_attribute_mode == "source"
-                else "ambiguous_generated_atom_hydrogen_state"
-            )
-            return make_result(
-                ok=False,
-                canonical_smiles=None,
-                molecule=None,
-                error_type=error_type,
-                error=(
-                    f"Parent atom sidecar is incomplete for node slot {slot}: "
-                    f"missing={missing}"
-                ),
-            )
         decoded_identity = (
             int(values["atomic_num"]),
             int(values["formal_charge"]),
             bool(values["is_aromatic"]),
         )
         source_identity = (
-            int(source_atom["atomic_num"]),
-            int(source_atom["formal_charge"]),
-            bool(source_atom["is_aromatic"]),
+            (
+                int(source_atom["atomic_num"]),
+                int(source_atom["formal_charge"]),
+                bool(source_atom["is_aromatic"]),
+            )
+            if source_atom is not None and not missing
+            else None
         )
-        if decoded_identity != source_identity:
-            error_type = (
-                "source_atom_attribute_mapping_failed"
-                if atom_attribute_mode == "source"
-                else "ambiguous_generated_atom_hydrogen_state"
-            )
-            return make_result(
-                ok=False,
-                canonical_smiles=None,
-                molecule=None,
-                error_type=error_type,
-                error=(
-                    f"Node slot {slot} identity changed: "
-                    f"source={source_identity}, decoded={decoded_identity}; "
-                    "explicit-H state cannot be inferred."
+        if atom_attribute_mode == "source":
+            if source_atom is None or missing or decoded_identity != source_identity:
+                return make_result(
+                    ok=False,
+                    canonical_smiles=None,
+                    molecule=None,
+                    error_type="source_atom_attribute_mapping_failed",
+                    error=(
+                        f"Source node slot {slot} cannot be restored exactly: "
+                        f"missing={missing}, source={source_identity}, "
+                        f"decoded={decoded_identity}"
+                    ),
+                )
+            attributes = {
+                "num_explicit_hs": int(source_atom["num_explicit_hs"]),
+                "no_implicit": bool(source_atom["no_implicit"]),
+                "chiral_tag": int(source_atom["chiral_tag"]),
+                "attribute_source": "source_sidecar_exact",
+            }
+        else:
+            if source_identity != decoded_identity:
+                feature_audit["identity_changes"].append(
+                    {
+                        "node_slot": int(slot),
+                        "source_identity": (
+                            list(source_identity)
+                            if source_identity is not None
+                            else None
+                        ),
+                        "decoded_identity": list(decoded_identity),
+                    }
+                )
+            inherit = can_inherit_source_atom_state(
+                decoded_atom=values,
+                source_atom=(
+                    source_atom if source_atom is not None and not missing else None
                 ),
+                generated_incident_bonds=generated_incident.get(slot, []),
+                source_incident_bonds=source_incident.get(slot, []),
             )
-        resolved_attributes.append(source_atom)
+            attributes = decode_generated_atom_state(
+                decoded_atom=values,
+                source_atom=source_atom,
+                inherit_source_state=inherit,
+            )
+        resolved_attributes.append(attributes)
+    feature_audit["source_decoded_identity_change_count"] = len(
+        feature_audit["identity_changes"]
+    )
 
     rw_mol = chem.RWMol()
     try:
-        for (_slot, values), source_atom in zip(
+        for (_slot, values), attributes in zip(
             decoded, resolved_attributes, strict=True
         ):
             atom = chem.Atom(int(values["atomic_num"]))
             atom.SetFormalCharge(int(values["formal_charge"]))
-            atom.SetNumExplicitHs(int(source_atom["num_explicit_hs"]))
-            atom.SetNoImplicit(bool(source_atom["no_implicit"]))
-            atom.SetChiralTag(chem.ChiralType(int(source_atom["chiral_tag"])))
+            atom.SetNumExplicitHs(int(attributes["num_explicit_hs"]))
+            atom.SetNoImplicit(bool(attributes["no_implicit"]))
+            atom.SetChiralTag(chem.ChiralType(int(attributes["chiral_tag"])))
             atom.SetIsAromatic(bool(values["is_aromatic"]))
             rw_mol.AddAtom(atom)
     except Exception as exc:
@@ -793,80 +1068,87 @@ def project_binary_graph_to_molecule(
             ok=False,
             canonical_smiles=None,
             molecule=None,
-            error_type="atom_attribute_projection_failure",
+            error_type=(
+                "atom_attribute_projection_failure"
+                if atom_attribute_mode == "source"
+                else "generated_atom_feature_out_of_vocabulary"
+            ),
             error=str(exc),
         )
 
-    retained = 0
-    new_edges = 0
     decoded_bonds: list[str] = []
-    active_source_edges = 0
     try:
-        for left_position, (left_slot, _left_values) in enumerate(decoded):
-            for right_position in range(left_position + 1, len(decoded)):
-                right_slot = decoded[right_position][0]
-                connected = (
-                    max(
-                        float(adjacency_array[left_slot, right_slot]),
-                        float(adjacency_array[right_slot, left_slot]),
-                    )
-                    > float(adjacency_threshold)
+        for left_slot, right_slot, bond_name, _retained in edge_plan:
+            if bond_name == "AROMATIC" and not (
+                bool(decoded[slot_to_new[left_slot]][1]["is_aromatic"])
+                and bool(decoded[slot_to_new[right_slot]][1]["is_aromatic"])
+            ):
+                return make_result(
+                    ok=False,
+                    canonical_smiles=None,
+                    molecule=None,
+                    error_type=(
+                        "bond_projection_failure"
+                        if atom_attribute_mode == "source"
+                        else "generated_aromaticity_bond_inconsistent"
+                    ),
+                    error=(
+                        "A retained aromatic bond has a generated "
+                        "non-aromatic endpoint."
+                    ),
+                    decoded_bond_types=decoded_bonds,
                 )
-                source_key = (min(left_slot, right_slot), max(left_slot, right_slot))
-                if source_key in source_bonds:
-                    active_source_edges += 1
-                if not connected:
-                    continue
-                if source_key in source_bonds:
-                    bond_name = source_bonds[source_key]
-                    retained += 1
-                else:
-                    bond_name = "SINGLE"
-                    new_edges += 1
-                rw_mol.AddBond(
+            rw_mol.AddBond(
+                int(slot_to_new[left_slot]),
+                int(slot_to_new[right_slot]),
+                _rdkit_bond_type(bond_name),
+            )
+            if bond_name == "AROMATIC":
+                bond = rw_mol.GetBondBetweenAtoms(
                     int(slot_to_new[left_slot]),
                     int(slot_to_new[right_slot]),
-                    _rdkit_bond_type(bond_name),
                 )
-                if bond_name == "AROMATIC":
-                    bond = rw_mol.GetBondBetweenAtoms(
-                        int(slot_to_new[left_slot]),
-                        int(slot_to_new[right_slot]),
-                    )
-                    bond.SetIsAromatic(True)
-                decoded_bonds.append(bond_name)
+                bond.SetIsAromatic(True)
+            decoded_bonds.append(bond_name)
     except Exception as exc:
         return make_result(
             ok=False,
             canonical_smiles=None,
             molecule=None,
-            error_type="bond_projection_failure",
+            error_type=(
+                "bond_projection_failure"
+                if atom_attribute_mode == "source"
+                else "generated_other_sanitize_failed"
+            ),
             error=str(exc),
-            projected_new_edge_count=new_edges,
-            retained_edge_count=retained,
-            deleted_edge_count=max(0, len(source_bonds) - active_source_edges),
             decoded_bond_types=decoded_bonds,
         )
+
     molecule = rw_mol.GetMol()
     try:
         molecule.UpdatePropertyCache(strict=False)
         chem.SanitizeMol(molecule)
     except Exception as exc:
         message = str(exc)
-        error_type = (
-            "invalid_valence"
-            if "valence" in message.lower()
-            else "sanitize_failure"
-        )
+        lowered = message.lower()
+        if atom_attribute_mode == "source":
+            error_type = (
+                "invalid_valence" if "valence" in lowered else "sanitize_failure"
+            )
+        elif "kekul" in lowered:
+            error_type = "generated_kekulization_failed"
+        elif "valence" in lowered:
+            error_type = "generated_valence_sanitize_failed"
+        elif "aromatic" in lowered:
+            error_type = "generated_aromaticity_bond_inconsistent"
+        else:
+            error_type = "generated_other_sanitize_failed"
         return make_result(
             ok=False,
             canonical_smiles=None,
             molecule=None,
             error_type=error_type,
             error=message,
-            projected_new_edge_count=new_edges,
-            retained_edge_count=retained,
-            deleted_edge_count=max(0, len(source_bonds) - retained),
             decoded_bond_types=decoded_bonds,
         )
     if require_connected and len(chem.GetMolFrags(molecule)) != 1:
@@ -874,11 +1156,12 @@ def project_binary_graph_to_molecule(
             ok=False,
             canonical_smiles=None,
             molecule=None,
-            error_type="disconnected_output",
+            error_type=(
+                "disconnected_output"
+                if atom_attribute_mode == "source"
+                else "generated_disconnected_or_empty"
+            ),
             error="Projected graph contains multiple connected components.",
-            projected_new_edge_count=new_edges,
-            retained_edge_count=retained,
-            deleted_edge_count=max(0, len(source_bonds) - retained),
             decoded_bond_types=decoded_bonds,
         )
     return make_result(
@@ -887,9 +1170,6 @@ def project_binary_graph_to_molecule(
         molecule=molecule,
         error_type=None,
         error=None,
-        projected_new_edge_count=new_edges,
-        retained_edge_count=retained,
-        deleted_edge_count=max(0, len(source_bonds) - retained),
         decoded_bond_types=decoded_bonds,
     )
 
@@ -1340,14 +1620,19 @@ __all__ = [
     "ClearMutagenicitySchema",
     "CodecResult",
     "DEFAULT_EXPECTED_COUNTS",
+    "GENERATED_CODEC_VERSION",
     "NATIVE_ADJACENCY_SEMANTICS",
     "NEW_EDGE_BOND_RULE",
     "PreparedMolecule",
     "build_clear_dataset_payload",
     "build_train_schema",
     "codec_provenance",
+    "can_inherit_source_atom_state",
     "decode_atom_feature",
+    "decode_generated_atom_feature",
+    "decode_generated_atom_state",
     "encode_atom_feature",
+    "feature_decoding_schema_summary",
     "load_phase_a_cohorts",
     "molecule_to_clear_graph",
     "project_binary_graph_to_molecule",

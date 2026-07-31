@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from src.baselines.clear_mutagenicity_adapter import (
     molecule_to_clear_graph,
 )
 from src.baselines.clear_mutagenicity_train_pool import (
+    ClearMutagenicityEmptyPoolError,
     GeneratedGraph,
     TrainPoolConfig,
     audit_train_pool,
@@ -219,6 +222,13 @@ def test_streaming_generation_uses_four_chunks_and_lightweight_records(
     assert universe[0]["canonical_smiles"] == "C"
     assert universe[0]["source_parent_count"] == 64
     assert universe[0]["occurrence_count"] == 64
+    feature_audit = read_json(tmp_path / "feature_decoding_summary.json")
+    assert feature_audit["node_feature_dim"] == schema.feature_dim
+    assert feature_audit["feature_dimension_matches_schema"] is True
+    assert feature_audit["generated_row_count"] == 64
+    assert feature_audit["padded_node_count"] == 64
+    assert feature_audit["raw_atom_argmax_index_distribution"] == {"0": 128}
+    assert feature_audit["decoded_atomic_number_distribution"] == {"6": 64}
 
 
 def test_generation_resume_does_not_duplicate_rows(tmp_path: Path) -> None:
@@ -499,3 +509,177 @@ def test_train_pool_config_rejects_full_parent_run() -> None:
 def test_cohort_hash_changes_with_parent_order() -> None:
     rows = [_prepared(0), _prepared(1)]
     assert cohort_hash(rows) != cohort_hash(list(reversed(rows)))
+
+
+def test_empty_pool_writes_diagnostics_and_failed_marker(tmp_path: Path) -> None:
+    parents, schema, data = _fixture_data()
+
+    def invalid_generation(chunk, indices, _chunk_index):
+        rows = []
+        for parent, index in zip(chunk, indices, strict=True):
+            features = np.zeros_like(data.feature_all[index])
+            rows.append(
+                GeneratedGraph(
+                    parent_id=parent.molecule_id,
+                    features=features,
+                    adjacency=np.zeros_like(data.adj_all[index]),
+                    official_pred_before=1,
+                    official_pred_after=1,
+                )
+            )
+        return rows
+
+    checkpoint_provenance = {
+        "graphpred_checkpoint_path": "/run/graphpred.pt",
+        "graphpred_checkpoint_sha256": "a" * 64,
+        "graphcfe_checkpoint_path": "/run/graphcfe.pt",
+        "graphcfe_checkpoint_sha256": "b" * 64,
+    }
+    with pytest.raises(ClearMutagenicityEmptyPoolError):
+        run_streaming_generation(
+            output_dir=tmp_path,
+            parents=parents,
+            data=data,
+            schema=schema,
+            teacher=FakeTeacher(),
+            generate_chunk=invalid_generation,
+            config=TrainPoolConfig(),
+            config_fingerprint="empty-config",
+            model_checkpoint_hash="empty-model",
+            checkpoint_provenance=checkpoint_provenance,
+        )
+    for name in (
+        "raw_generated_candidates.jsonl",
+        "invalid_candidates.jsonl",
+        "non_target_candidates.jsonl",
+        "candidate_pool.jsonl",
+        "candidate_universe.jsonl",
+        "generation_progress.json",
+        "feature_decoding_summary.json",
+        "failure_summary.json",
+        "_RUN_FAILED.json",
+    ):
+        assert (tmp_path / name).is_file()
+    assert not (tmp_path / "_RUN_COMPLETE.json").exists()
+    assert len(read_jsonl(tmp_path / "raw_generated_candidates.jsonl")) == 64
+    assert len(read_jsonl(tmp_path / "invalid_candidates.jsonl")) == 64
+    assert read_jsonl(tmp_path / "candidate_pool.jsonl") == []
+    failure = read_json(tmp_path / "failure_summary.json")
+    assert failure["run_complete"] is False
+    assert failure["invalid_reason_counts"] == {
+        "generated_invalid_active_node_mask": 64
+    }
+    assert failure["graphpred_checkpoint_sha256"] == "a" * 64
+    assert failure["graphcfe_checkpoint_sha256"] == "b" * 64
+    assert failure["calibration_loaded"] is False
+    assert failure["test_loaded"] is False
+
+
+def test_all_non_target_pool_reports_rf_after_counts(tmp_path: Path) -> None:
+    parents, schema, data = _fixture_data()
+
+    def valid_non_target_generation(chunk, indices, _chunk_index):
+        return [
+            GeneratedGraph(
+                parent_id=parent.molecule_id,
+                features=np.asarray(data.feature_all[index]).copy(),
+                adjacency=np.asarray(data.adj_all[index]).copy(),
+                official_pred_before=1,
+                official_pred_after=1,
+            )
+            for parent, index in zip(chunk, indices, strict=True)
+        ]
+
+    with pytest.raises(ClearMutagenicityEmptyPoolError):
+        run_streaming_generation(
+            output_dir=tmp_path,
+            parents=parents,
+            data=data,
+            schema=schema,
+            teacher=FakeTeacher(),
+            generate_chunk=valid_non_target_generation,
+            config=TrainPoolConfig(),
+            config_fingerprint="non-target-config",
+            model_checkpoint_hash="non-target-model",
+        )
+    failure = read_json(tmp_path / "failure_summary.json")
+    assert failure["invalid_candidate_rows"] == 0
+    assert failure["non_target_candidate_rows"] == 64
+    assert failure["rf_before_prediction_counts"] == {"1": 64}
+    assert failure["rf_after_prediction_counts"] == {"1": 64}
+    assert failure["candidate_pool_rows"] == 0
+
+
+def _load_build_script_module():
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts/baselines/clear/build_mutagenicity_train_pool.py"
+    )
+    spec = importlib.util.spec_from_file_location("clear_build_replay", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_generation_only_uses_explicit_checkpoints_without_training(
+    tmp_path: Path,
+) -> None:
+    module = _load_build_script_module()
+    source_run = tmp_path / "failed_run_2021625"
+    checkpoints = source_run / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    graphpred = checkpoints / "graphpred.pt"
+    graphcfe = checkpoints / "graphcfe.pt"
+    graphpred.write_bytes(b"graphpred-2021625")
+    graphcfe.write_bytes(b"graphcfe-2021625")
+    training_calls = 0
+
+    def train_models():
+        nonlocal training_calls
+        training_calls += 1
+        raise AssertionError("generation-only replay must not train")
+
+    resolved_graphpred, resolved_graphcfe, resolved_source, trained = (
+        module._resolve_generation_checkpoints(
+            generation_only=True,
+            graphpred_checkpoint=graphpred,
+            graphcfe_checkpoint=graphcfe,
+            source_run_root=source_run,
+            train_models=train_models,
+        )
+    )
+    assert training_calls == 0
+    assert trained is False
+    assert resolved_source == source_run.resolve()
+    assert resolved_graphpred == graphpred.resolve()
+    assert resolved_graphcfe == graphcfe.resolve()
+    provenance = module._checkpoint_provenance(
+        resolved_graphpred, resolved_graphcfe
+    )
+    assert provenance["graphpred_checkpoint_sha256"] == hashlib.sha256(
+        graphpred.read_bytes()
+    ).hexdigest()
+    assert provenance["graphcfe_checkpoint_sha256"] == hashlib.sha256(
+        graphcfe.read_bytes()
+    ).hexdigest()
+
+
+def test_generation_only_rejects_checkpoint_outside_source_run(
+    tmp_path: Path,
+) -> None:
+    module = _load_build_script_module()
+    source_run = tmp_path / "source"
+    source_run.mkdir()
+    graphpred = tmp_path / "graphpred.pt"
+    graphcfe = source_run / "graphcfe.pt"
+    graphpred.write_bytes(b"x")
+    graphcfe.write_bytes(b"y")
+    with pytest.raises(ValueError, match="inside the explicit source run root"):
+        module._resolve_generation_checkpoints(
+            generation_only=True,
+            graphpred_checkpoint=graphpred,
+            graphcfe_checkpoint=graphcfe,
+            source_run_root=source_run,
+            train_models=lambda: (_ for _ in ()).throw(AssertionError()),
+        )
