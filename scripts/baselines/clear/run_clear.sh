@@ -13,7 +13,7 @@ Usage:
   bash scripts/baselines/clear/run_clear.sh <dataset> <stage>
 
 Datasets:
-  community | ogbg_molhiv | aids | imdb_m
+  community | ogbg_molhiv | aids | mutagenicity | imdb_m
 
 Stages:
   pred | train | test | export_test | export_test_small | baseline_random | baseline_IST | baseline_RM | all
@@ -27,7 +27,14 @@ fi
 
 DATASET="$1"
 STAGE="$2"
-CLEAR_BATCH_SIZE="${CLEAR_BATCH_SIZE:-500}"
+if [ -z "${CLEAR_BATCH_SIZE:-}" ]; then
+  if [ "${DATASET}" = "mutagenicity" ]; then
+    CLEAR_BATCH_SIZE=8
+  else
+    CLEAR_BATCH_SIZE=500
+  fi
+fi
+CLEAR_NUM_WORKERS="${CLEAR_NUM_WORKERS:-0}"
 CLEAR_EXPORT_DIR="${CLEAR_EXPORT_DIR:-../../../outputs/hpc/baselines/clear}"
 CLEAR_EXPORT_FULL_TEST="${CLEAR_EXPORT_FULL_TEST:-1}"
 CLEAR_EXPORT_MAX_ITEMS="${CLEAR_EXPORT_MAX_ITEMS:-}"
@@ -45,6 +52,11 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo "[CLEAR_RUN] dataset=${DATASET}"
 echo "[CLEAR_RUN] stage=${STAGE}"
+echo "[CLEAR_RUN] batch_size=${CLEAR_BATCH_SIZE}"
+echo "[CLEAR_RUN] num_workers=${CLEAR_NUM_WORKERS}"
+if [ "${DATASET}" = "mutagenicity" ]; then
+  echo "[CLEAR_RUN] max_num_nodes_source=strict_train_plus_validation_pickle"
+fi
 echo "[CLEAR_RUN] log_file=${LOG_FILE}"
 check_clear_dataset "${DATASET}"
 print_clear_env
@@ -70,19 +82,19 @@ run_stage() {
   local stage="$1"
   case "${stage}" in
     pred)
-      run_command python train_pred.py --dataset "${DATASET}" --epochs 600 --lr 0.001 --batch_size "${CLEAR_BATCH_SIZE}"
+      run_command python train_pred.py --dataset "${DATASET}" --epochs 600 --lr 0.001 --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}"
       ;;
     train)
-      run_command python main.py --dataset "${DATASET}" --experiment_type train --epochs 1000 --lr 0.001 --batch_size "${CLEAR_BATCH_SIZE}"
+      run_command python main.py --dataset "${DATASET}" --experiment_type train --epochs 1000 --lr 0.001 --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}"
       ensure_clear_cfe_checkpoint_aliases "${DATASET}"
       ;;
     test)
       ensure_clear_cfe_checkpoint_aliases "${DATASET}"
-      run_command python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}"
+      run_command python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}"
       ;;
     export_test)
       ensure_clear_cfe_checkpoint_aliases "${DATASET}"
-      export_args=(python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --export_counterfactuals --export_dir "${CLEAR_EXPORT_DIR}")
+      export_args=(python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}" --export_counterfactuals --export_dir "${CLEAR_EXPORT_DIR}")
       if [ "${CLEAR_EXPORT_FULL_TEST}" != "0" ]; then
         export_args+=(--export_full_test)
       fi
@@ -93,20 +105,20 @@ run_stage() {
       ;;
     export_test_small)
       ensure_clear_cfe_checkpoint_aliases "${DATASET}"
-      export_args=(python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --export_counterfactuals --export_dir "${CLEAR_EXPORT_DIR}")
+      export_args=(python main.py --dataset "${DATASET}" --experiment_type test --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}" --export_counterfactuals --export_dir "${CLEAR_EXPORT_DIR}")
       if [ -n "${CLEAR_EXPORT_MAX_ITEMS}" ]; then
         export_args+=(--export_max_items "${CLEAR_EXPORT_MAX_ITEMS}")
       fi
       run_command "${export_args[@]}"
       ;;
     baseline_random)
-      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type random --batch_size "${CLEAR_BATCH_SIZE}"
+      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type random --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}"
       ;;
     baseline_IST)
-      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type IST --batch_size "${CLEAR_BATCH_SIZE}"
+      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type IST --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}"
       ;;
     baseline_RM)
-      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type RM --batch_size "${CLEAR_BATCH_SIZE}"
+      run_command python main.py --dataset "${DATASET}" --experiment_type baseline --baseline_type RM --batch_size "${CLEAR_BATCH_SIZE}" --num_workers "${CLEAR_NUM_WORKERS}"
       ;;
     all)
       run_stage pred

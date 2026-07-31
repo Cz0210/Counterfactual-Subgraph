@@ -89,6 +89,11 @@ _clear_dataset_files() {
         "${CLEAR_DATASET_DIR}/aids_full.pickle" \
         "${CLEAR_DATASET_DIR}/aids_datasplit.pickle"
       ;;
+    mutagenicity)
+      printf '%s\n' \
+        "${CLEAR_DATASET_DIR}/mutagenicity_full.pickle" \
+        "${CLEAR_DATASET_DIR}/mutagenicity_datasplit.pickle"
+      ;;
     imdb_m)
       printf '%s\n' \
         "${CLEAR_DATASET_DIR}/imdb_m.pickle" \
@@ -97,7 +102,7 @@ _clear_dataset_files() {
       ;;
     *)
       echo "[CLEAR_ERROR] Unsupported CLEAR dataset: ${dataset}" >&2
-      echo "[CLEAR_ERROR] Supported datasets: community, ogbg_molhiv, aids, imdb_m" >&2
+      echo "[CLEAR_ERROR] Supported datasets: community, ogbg_molhiv, aids, mutagenicity, imdb_m" >&2
       return 2
       ;;
   esac

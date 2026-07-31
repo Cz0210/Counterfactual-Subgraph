@@ -1,0 +1,105 @@
+diff --git a/src/data_preprocessing.py b/src/data_preprocessing.py
+index 605a57d..bead001 100644
+--- a/src/data_preprocessing.py
++++ b/src/data_preprocessing.py
+@@ -139,6 +139,12 @@ def load_aids(dataset, padded=True):
+     return data
+ 
+ 
++def load_mutagenicity(dataset, padded=True):
++    with open('../dataset/mutagenicity_full.pickle', 'rb') as handle:
++        data = pickle.load(handle)['data']
++    return data
++
++
+ def load_imdb(dataset, padded=False):
+     #data = preprocess_imdb(dataset, padded, save_flag=True)
+     with open('../dataset/imdb_m.pickle', 'rb') as handle:
+@@ -408,6 +414,19 @@ def load_data(path_root, dataset, exp_num=10):
+             print('AIDS split file has fewer repetitions than requested exp_num: ', exp_num)
+             exit(0)
+ 
++    elif dataset == 'mutagenicity':
++        data = load_mutagenicity(dataset, padded=True)
++        n = len(data)
++        path_data = path_root + 'mutagenicity_datasplit.pickle'
++        with open(path_data, 'rb') as handle:
++            info_index = pickle.load(handle)
++            idx_train_list, idx_val_list, idx_test_list = info_index['idx_train_list'], \
++                                                          info_index['idx_val_list'], info_index['idx_test_list']
++
++        if len(idx_train_list) < exp_num or len(idx_val_list) < exp_num or len(idx_test_list) < exp_num:
++            print('Mutagenicity split file has fewer repetitions than requested exp_num: ', exp_num)
++            exit(0)
++
+     elif dataset == 'imdb_m':
+         data = load_imdb(dataset, padded=True)
+         n = len(data)
+diff --git a/src/main.py b/src/main.py
+index 89f458b..b0b428b 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -46,8 +46,9 @@ parser.add_argument('--dim_h', type=int, default=16, metavar='N', help='dimension
+ parser.add_argument('--dropout', type=float, default=0.1)
+ # CLEAR_WRAPPER_SUPPORT_AIDS_DATASET
++# CLEAR_WRAPPER_SUPPORT_MUTAGENICITY_DATASET
+ 
+ parser.add_argument('--dataset', default='imdb_m', help='dataset to use',
+-                    choices=['community', 'ogbg_molhiv', 'aids', 'imdb_m'])
++                    choices=['community', 'ogbg_molhiv', 'aids', 'mutagenicity', 'imdb_m'])
+ parser.add_argument('--lr', type=float, default=1e-3,
+                     help='learning rate for optimizer')
+ parser.add_argument('--weight_decay', type=float, default=1e-5,
+@@ -574,7 +575,7 @@ def evaluate_causality(dataset, adj_permuted, features_permuted, adj_reconst, fe
+ 
+         score_causal = torch.mean(count_good)
+ 
+-    elif dataset == 'ogbg_molhiv' or dataset == 'aids':
++    elif dataset == 'ogbg_molhiv' or dataset == 'aids' or dataset == 'mutagenicity':
+         ave_x0 = torch.mean(features_permuted[:, :, 0], dim=-1)  # size
+         ave_x0_cf = torch.mean(features_reconst[:, :, 0], dim=-1)  # size
+         ave_x1 = torch.mean(features_permuted[:, :, 1], dim=-1)  # size
+@@ -646,6 +647,6 @@ def evaluate_correct(dataset, adj_permuted, features_permuted, adj_reconst, feat
+             return score / (all+1)
+         score = score / all
+-    elif dataset == 'ogbg_molhiv' or dataset == 'aids':
++    elif dataset == 'ogbg_molhiv' or dataset == 'aids' or dataset == 'mutagenicity':
+         ave_x1 = torch.mean(features_permuted[:, :, 1], dim=-1)  # size
+         ave_x1_cf = torch.mean(features_reconst[:, :, 1], dim=-1)  # size
+ 
+diff --git a/src/models.py b/src/models.py
+index 08f84be..d73cc4f 100644
+--- a/src/models.py
++++ b/src/models.py
+@@ -225,6 +225,9 @@ class Graph_pred_model(nn.Module):
+             x = x.clone()
+             x[:, :, 2:] = 0.
+             x[:, :, 0] = 0.
++        elif self.dataset == 'mutagenicity':
++            # Preserve the project-side discrete atom/charge/aromatic features.
++            x = x.clone()
+ 
+         mask = torch.zeros(self.max_num_nodes).to(device)
+         mask = self.mask.unsqueeze(0).repeat(len(x),1)  # max_num_nodes -> batch_size x max_num_nodes
+diff --git a/src/train_pred.py b/src/train_pred.py
+index 819a98e..318d5b9 100644
+--- a/src/train_pred.py
++++ b/src/train_pred.py
+@@ -45,7 +45,7 @@ parser.add_argument('--dropout', type=float, default=0.1)
+ 
+ parser.add_argument('--dataset', default='ogbg_molhiv', help='dataset to use',
+ # CLEAR_WRAPPER_AIDS_WEIGHTED_GRAPHPRED
+-                    choices=['community', 'ogbg_molhiv', 'aids', 'imdb_m'])
++                    choices=['community', 'ogbg_molhiv', 'aids', 'mutagenicity', 'imdb_m'])
+ parser.add_argument('--lr', type=float, default=1e-3,
+                     help='learning rate for optimizer')  # community: 1e-3
+ parser.add_argument('--weight_decay', type=float, default=1e-5,
+@@ -309,7 +309,7 @@ if __name__ == '__main__':
+     print('running experiment: ', 'training prediction model')
+     data_path_root = '../dataset/'
+     model_path = '../models_save/'
+-    if args.dataset == 'synthetic' or args.dataset == 'ogbg_molhiv' or args.dataset == 'aids' or args.dataset == 'community' or args.dataset == 'imdb_m':
++    if args.dataset == 'synthetic' or args.dataset == 'ogbg_molhiv' or args.dataset == 'aids' or args.dataset == 'mutagenicity' or args.dataset == 'community' or args.dataset == 'imdb_m':
+         metrics = ['Accuracy', 'AUC-ROC', 'F1-score']
+     else:
+         metrics = ['Accuracy']
