@@ -23,15 +23,11 @@ export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 PROFILE="${PROFILE:-smoke}"
 if [[ "$PROFILE" == "smoke" ]]; then
-  PARENT_LIMIT="${PARENT_LIMIT:-64}"
+  EXPECTED_PARENT_LIMIT=64
 elif [[ "$PROFILE" == "full" && "${ALLOW_FULL:-false}" == "true" ]]; then
-  PARENT_LIMIT="${PARENT_LIMIT:-1448}"
+  EXPECTED_PARENT_LIMIT=1448
 else
   echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] invalid/unauthorized PROFILE=$PROFILE." >&2
-  exit 2
-fi
-if [[ ( "$PROFILE" == "smoke" && "$PARENT_LIMIT" -ne 64 ) || ( "$PROFILE" == "full" && "$PARENT_LIMIT" -ne 1448 ) ]]; then
-  echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] profile parent count mismatch." >&2
   exit 2
 fi
 
@@ -70,7 +66,7 @@ done
 mkdir -p "$PROJECT_ROOT/logs"
 echo "PROJECT_ROOT=$PROJECT_ROOT"
 echo "PROFILE=$PROFILE"
-echo "PARENT_LIMIT=$PARENT_LIMIT"
+echo "EXPECTED_PARENT_LIMIT=$EXPECTED_PARENT_LIMIT"
 echo "SUMMARY_DIR=$SUMMARY_DIR"
 echo "EXPORT_DIR=$EXPORT_DIR"
 echo "GNN_CHECKPOINT=$GNN_CHECKPOINT"
@@ -95,7 +91,6 @@ if [[ ! -s "$SUMMARY_DIR/_RUN_COMPLETE.json" ]]; then
     --neurosed-checkpoint "$NEUROSED_CHECKPOINT" \
     --output-dir "$SUMMARY_DIR" \
     --profile "$PROFILE" \
-    --parent-limit "$PARENT_LIMIT" \
     --theta "$SUMMARY_THETA" \
     --minimum-native-export "$MINIMUM_NATIVE_EXPORT" \
     --device cuda:0 \
@@ -119,7 +114,7 @@ if [[ ! -s "$EXPORT_DIR/_RUN_COMPLETE.json" ]]; then
     --teacher-path "$TEACHER_PATH" \
     --output-dir "$EXPORT_DIR" \
     --profile "$PROFILE" \
-    --parent-limit "$PARENT_LIMIT" \
+    --parent-limit "$EXPECTED_PARENT_LIMIT" \
     --top-k "$TOP_K" \
     --forbid-calibration-test
 elif [[ "$RESUME" != "true" ]]; then

@@ -904,6 +904,211 @@ def _torch_save_compat(payload: Any, path: str | Path) -> None:
     torch.save(payload, path)
 
 
+class _SummaryConfigError(ValueError):
+    def __init__(self, message: str, *, details: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.details = dict(details)
+
+
+def _summary_expected_parent_count(profile: str | RunProfile) -> int:
+    resolved = RunProfile(profile)
+    return 64 if resolved is RunProfile.SMOKE else EXPECTED_GENERATION_SOURCE_ROWS
+
+
+def _summary_config_error(
+    *,
+    field: str,
+    actual: Any,
+    expected: Any,
+    count_source: str,
+) -> _SummaryConfigError:
+    return _SummaryConfigError(
+        "Mutagenicity GCFExplainer summary configuration mismatch: "
+        f"field={field}, actual={actual}, expected={expected}, "
+        f"count_source={count_source}.",
+        details={
+            "stage": "summary_config",
+            "field": field,
+            "actual": actual,
+            "expected": expected,
+            "count_source": count_source,
+            "calibration_loaded": False,
+            "test_loaded": False,
+        },
+    )
+
+
+def _validate_summary_parent_count(
+    profile: str | RunProfile,
+    *,
+    summary_parent_count: int,
+    vrrw_parent_limit: int,
+) -> int:
+    expected = _summary_expected_parent_count(profile)
+    if int(vrrw_parent_limit) != expected:
+        raise _summary_config_error(
+            field="vrrw_parent_limit",
+            actual=int(vrrw_parent_limit),
+            expected=expected,
+            count_source="vrrw_manifest_parent_limit",
+        )
+    if int(summary_parent_count) != int(vrrw_parent_limit):
+        raise _summary_config_error(
+            field="summary_parent_count",
+            actual=int(summary_parent_count),
+            expected=int(vrrw_parent_limit),
+            count_source="vrrw_manifest_generation_parent_ids",
+        )
+    return expected
+
+
+def _select_generation_records_in_order(
+    generation_records: Sequence[Mapping[str, Any]],
+    parent_ids: Sequence[str],
+    *,
+    count_source: str,
+) -> list[Mapping[str, Any]]:
+    record_by_id: dict[str, Mapping[str, Any]] = {}
+    duplicate_dataset_ids: list[str] = []
+    for record in generation_records:
+        parent_id = str(record["molecule_id"])
+        if parent_id in record_by_id:
+            duplicate_dataset_ids.append(parent_id)
+        record_by_id[parent_id] = record
+    if duplicate_dataset_ids:
+        raise _summary_config_error(
+            field="dataset_generation_parent_ids_unique",
+            actual=sorted(set(duplicate_dataset_ids))[:10],
+            expected="no_duplicates",
+            count_source="dataset_full_universe",
+        )
+    missing_ids = [parent_id for parent_id in parent_ids if parent_id not in record_by_id]
+    if missing_ids:
+        raise _summary_config_error(
+            field="generation_parent_ids_present_in_dataset",
+            actual=missing_ids[:10],
+            expected="all_present",
+            count_source=count_source,
+        )
+    return [record_by_id[parent_id] for parent_id in parent_ids]
+
+
+def _resolve_summary_parent_lineage(
+    generation_records: Sequence[Mapping[str, Any]],
+    vrrw_manifest: Mapping[str, Any],
+    profile: str | RunProfile,
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    resolved_profile = RunProfile(profile)
+    if vrrw_manifest.get("run_complete") is not True:
+        raise _summary_config_error(
+            field="vrrw_run_complete",
+            actual=vrrw_manifest.get("run_complete"),
+            expected=True,
+            count_source="vrrw_manifest",
+        )
+    manifest_profile = str(vrrw_manifest.get("profile", ""))
+    if manifest_profile != resolved_profile.value:
+        raise _summary_config_error(
+            field="profile",
+            actual=manifest_profile,
+            expected=resolved_profile.value,
+            count_source="vrrw_manifest",
+        )
+    universe_count = int(vrrw_manifest.get("generation_source_parent_rows", -1))
+    if universe_count != EXPECTED_GENERATION_SOURCE_ROWS:
+        raise _summary_config_error(
+            field="generation_source_parent_rows",
+            actual=universe_count,
+            expected=EXPECTED_GENERATION_SOURCE_ROWS,
+            count_source="vrrw_manifest_full_train_source_universe",
+        )
+    if len(generation_records) != universe_count:
+        raise _summary_config_error(
+            field="dataset_generation_source_parent_rows",
+            actual=len(generation_records),
+            expected=universe_count,
+            count_source="dataset_full_universe",
+        )
+    try:
+        vrrw_parent_limit = int(vrrw_manifest["parent_limit"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _summary_config_error(
+            field="vrrw_parent_limit",
+            actual=vrrw_manifest.get("parent_limit"),
+            expected=_summary_expected_parent_count(resolved_profile),
+            count_source="vrrw_manifest_parent_limit",
+        ) from exc
+    raw_parent_ids = vrrw_manifest.get("generation_parent_ids")
+    if not isinstance(raw_parent_ids, list):
+        raise _summary_config_error(
+            field="generation_parent_ids",
+            actual=type(raw_parent_ids).__name__,
+            expected="list",
+            count_source="vrrw_manifest",
+        )
+    parent_ids = [str(value).strip() for value in raw_parent_ids]
+    if any(not value for value in parent_ids):
+        raise _summary_config_error(
+            field="generation_parent_ids_nonempty",
+            actual=False,
+            expected=True,
+            count_source="vrrw_manifest",
+        )
+    if len(parent_ids) != len(set(parent_ids)):
+        raise _summary_config_error(
+            field="generation_parent_ids_unique",
+            actual=len(set(parent_ids)),
+            expected=len(parent_ids),
+            count_source="vrrw_manifest",
+        )
+    if len(parent_ids) != vrrw_parent_limit:
+        raise _summary_config_error(
+            field="vrrw_generation_parent_id_count",
+            actual=len(parent_ids),
+            expected=vrrw_parent_limit,
+            count_source="vrrw_manifest_generation_parent_ids",
+        )
+    selected = _select_generation_records_in_order(
+        generation_records,
+        parent_ids,
+        count_source="vrrw_manifest_generation_parent_ids",
+    )
+    _validate_summary_parent_count(
+        resolved_profile,
+        summary_parent_count=len(selected),
+        vrrw_parent_limit=vrrw_parent_limit,
+    )
+    selected_ids = [str(record["molecule_id"]) for record in selected]
+    if selected_ids != parent_ids:
+        raise _summary_config_error(
+            field="summary_parent_order",
+            actual=selected_ids[:10],
+            expected=parent_ids[:10],
+            count_source="vrrw_manifest_generation_parent_ids",
+        )
+    parent_ids_sha256 = stable_json_sha256(parent_ids)
+    selected_cohort_hash = cohort_hash(selected)
+    manifest_cohort_hash = str(vrrw_manifest.get("generation_source_cohort_hash", ""))
+    if selected_cohort_hash != manifest_cohort_hash:
+        raise _summary_config_error(
+            field="generation_source_cohort_hash",
+            actual=selected_cohort_hash,
+            expected=manifest_cohort_hash,
+            count_source="vrrw_manifest_generation_parent_ids",
+        )
+    return selected, {
+        "generation_source_parent_rows": universe_count,
+        "vrrw_parent_limit": vrrw_parent_limit,
+        "vrrw_selected_parent_count": len(parent_ids),
+        "summary_parent_count": len(selected),
+        "generation_parent_ids": parent_ids,
+        "generation_parent_ids_sha256": parent_ids_sha256,
+        "summary_parent_ids_sha256": stable_json_sha256(selected_ids),
+        "generation_source_cohort_hash": selected_cohort_hash,
+        "parent_order_source": "vrrw_manifest_generation_parent_ids",
+    }
+
+
 def build_native_summary(
     *,
     dataset_dir: str | Path,
@@ -913,17 +1118,11 @@ def build_native_summary(
     neurosed_checkpoint: str | Path,
     output_dir: str | Path,
     profile: str | RunProfile,
-    parent_limit: int,
     theta: float = OFFICIAL_SUMMARY_THETA,
     minimum_native_export: int = 100,
     device: str = "cuda:0",
 ) -> dict[str, Any]:
     resolved_profile = RunProfile(profile)
-    expected_parents = 64 if resolved_profile is RunProfile.SMOKE else 1448
-    if int(parent_limit) != expected_parents:
-        raise ValueError(
-            f"Summary {resolved_profile.value} requires {expected_parents} parents."
-        )
     if not math.isclose(float(theta), OFFICIAL_SUMMARY_THETA, rel_tol=0.0, abs_tol=0.0):
         raise ValueError("Official native summary theta must be 0.1.")
     if int(minimum_native_export) < 100:
@@ -937,6 +1136,22 @@ def build_native_summary(
     schema, _train, _val, generation_records, _summary = load_dataset_artifacts(
         dataset_dir
     )
+    vrrw_root = Path(vrrw_dir).expanduser().resolve()
+    vrrw_manifest_path = vrrw_root / "run_manifest.json"
+    vrrw_manifest = read_json(vrrw_manifest_path)
+    selected_sources, lineage = _resolve_summary_parent_lineage(
+        generation_records,
+        vrrw_manifest,
+        resolved_profile,
+    )
+    for field in ("calibration_loaded", "test_loaded"):
+        if vrrw_manifest.get(field) is not False:
+            raise _summary_config_error(
+                field=f"vrrw_{field}",
+                actual=vrrw_manifest.get(field),
+                expected=False,
+                count_source="vrrw_manifest",
+            )
     checkpoint = Path(gnn_checkpoint).expanduser().resolve()
     neurosed = Path(neurosed_checkpoint).expanduser().resolve()
     if checkpoint_is_aids(checkpoint):
@@ -944,29 +1159,68 @@ def build_native_summary(
     for path, label in ((checkpoint, "GNN"), (neurosed, "NeuroSED")):
         if not path.is_file() or path.stat().st_size <= 0:
             raise FileNotFoundError(f"{label} checkpoint missing: {path}")
-    selected_sources = sorted(
-        generation_records, key=lambda row: str(row["molecule_id"])
-    )[:parent_limit]
     source_graphs = [
         record_to_pyg(row, origin_index=index)
         for index, row in enumerate(selected_sources)
     ]
-    vrrw_root = Path(vrrw_dir).expanduser().resolve()
-    vrrw_manifest = read_json(vrrw_root / "run_manifest.json")
-    if vrrw_manifest.get("run_complete") is not True:
-        raise ValueError("VRRW run is not complete.")
     if str(vrrw_manifest.get("gnn_checkpoint_sha256")) != sha256_file(checkpoint):
         raise ValueError("Summary GNN checkpoint does not match the VRRW run.")
     if str(vrrw_manifest.get("neurosed_checkpoint_sha256")) != sha256_file(neurosed):
         raise ValueError("Summary NeuroSED checkpoint does not match the VRRW run.")
-    if str(vrrw_manifest.get("generation_source_cohort_hash")) != cohort_hash(
-        selected_sources
-    ):
-        raise ValueError("Summary source cohort does not match the VRRW run.")
-    counterfactuals_path = vrrw_root / "counterfactuals.pt"
+    raw_counterfactuals_path = Path(str(vrrw_manifest.get("counterfactuals_path", "")))
+    if not raw_counterfactuals_path.is_absolute():
+        raw_counterfactuals_path = vrrw_root / raw_counterfactuals_path
+    counterfactuals_path = raw_counterfactuals_path.expanduser().resolve()
+    expected_counterfactuals_path = (vrrw_root / "counterfactuals.pt").resolve()
+    if counterfactuals_path != expected_counterfactuals_path:
+        raise _summary_config_error(
+            field="counterfactuals_path",
+            actual=str(counterfactuals_path),
+            expected=str(expected_counterfactuals_path),
+            count_source="vrrw_manifest",
+        )
+    if not counterfactuals_path.is_file() or counterfactuals_path.stat().st_size <= 0:
+        raise FileNotFoundError(f"VRRW counterfactual artifact missing: {counterfactuals_path}")
+    counterfactuals_sha256 = sha256_file(counterfactuals_path)
+    if counterfactuals_sha256 != str(vrrw_manifest.get("counterfactuals_sha256", "")):
+        raise _summary_config_error(
+            field="counterfactuals_sha256",
+            actual=counterfactuals_sha256,
+            expected=vrrw_manifest.get("counterfactuals_sha256"),
+            count_source="vrrw_manifest",
+        )
     payload = _torch_load_compat(counterfactuals_path)
     candidates = list(payload.get("counterfactual_candidates", []))
     graph_map = dict(payload.get("graph_map", {}))
+    manifest_candidate_count = int(
+        vrrw_manifest.get("counterfactual_candidate_count", -1)
+    )
+    if manifest_candidate_count != len(candidates):
+        raise _summary_config_error(
+            field="counterfactual_candidate_count",
+            actual=len(candidates),
+            expected=manifest_candidate_count,
+            count_source="vrrw_counterfactuals_artifact",
+        )
+    print("[MUTAGENICITY_GCFEXPLAINER_SUMMARY_CONFIG]", flush=True)
+    print(f"profile={resolved_profile.value}", flush=True)
+    print(
+        f"generation_source_parent_rows={lineage['generation_source_parent_rows']}",
+        flush=True,
+    )
+    print(
+        f"vrrw_parent_limit={vrrw_manifest['parent_limit']}",
+        flush=True,
+    )
+    print(
+        "vrrw_generation_parent_id_count="
+        f"{lineage['vrrw_selected_parent_count']}",
+        flush=True,
+    )
+    print(f"summary_parent_count={len(source_graphs)}", flush=True)
+    print(f"counterfactual_candidate_count={len(candidates)}", flush=True)
+    print("calibration_loaded=false", flush=True)
+    print("test_loaded=false", flush=True)
     counterfactual_graphs: list[Any] = []
     candidate_meta: list[dict[str, Any]] = []
     target_native_candidates = max(len(source_graphs), int(minimum_native_export))
@@ -1083,6 +1337,7 @@ def build_native_summary(
         "dataset": "Mutagenicity",
         "profile": resolved_profile.value,
         "parent_count": len(source_graphs),
+        **lineage,
         "native_candidate_count": len(counterfactual_graphs),
         "native_rank_exported": len(exported_rows),
         "theta": float(theta),
@@ -1094,12 +1349,41 @@ def build_native_summary(
         "neurosed_checkpoint": str(neurosed),
         "neurosed_checkpoint_sha256": sha256_file(neurosed),
         "source_cohort_hash": cohort_hash(selected_sources),
+        "vrrw_manifest_path": str(vrrw_manifest_path.resolve()),
+        "vrrw_manifest_sha256": sha256_file(vrrw_manifest_path),
+        "counterfactuals_path": str(counterfactuals_path),
+        "counterfactuals_sha256": counterfactuals_sha256,
         "calibration_loaded": False,
         "test_loaded": False,
         "run_complete": True,
     }
     write_json(root / "resolved_config.json", config)
     write_json(root / "run_manifest.json", config)
+    write_json(
+        root / "audit.json",
+        {
+            "audit_passed": True,
+            "run_complete": True,
+            "profile": resolved_profile.value,
+            "generation_source_parent_rows": lineage[
+                "generation_source_parent_rows"
+            ],
+            "vrrw_selected_parent_count": lineage[
+                "vrrw_selected_parent_count"
+            ],
+            "summary_parent_count": lineage["summary_parent_count"],
+            "generation_parent_ids_sha256": lineage[
+                "generation_parent_ids_sha256"
+            ],
+            "summary_parent_ids_sha256": lineage[
+                "summary_parent_ids_sha256"
+            ],
+            "parent_order_source": lineage["parent_order_source"],
+            "native_rank_reordered": False,
+            "calibration_loaded": False,
+            "test_loaded": False,
+        },
+    )
     write_json(root / "_RUN_COMPLETE.json", {"run_complete": True, **config})
     return config
 
@@ -1144,10 +1428,29 @@ def export_rf_valid_native_top20(
     schema, _train, _val, generation_records, _dataset_summary = (
         load_dataset_artifacts(dataset_dir)
     )
-    source_records = sorted(
-        generation_records, key=lambda row: str(row["molecule_id"])
-    )[:parent_limit]
     summary_root = Path(summary_dir).expanduser().resolve()
+    summary_manifest = read_json(summary_root / "run_manifest.json")
+    if summary_manifest.get("run_complete") is not True:
+        raise ValueError("Native summary is not complete.")
+    if str(summary_manifest.get("profile", "")) != resolved_profile.value:
+        raise ValueError("Native summary profile does not match export profile.")
+    summary_parent_ids = [
+        str(value) for value in summary_manifest.get("generation_parent_ids", [])
+    ]
+    if len(summary_parent_ids) != int(parent_limit) or len(
+        summary_parent_ids
+    ) != len(set(summary_parent_ids)):
+        raise ValueError("Native summary parent lineage is incomplete or duplicated.")
+    source_records = _select_generation_records_in_order(
+        generation_records,
+        summary_parent_ids,
+        count_source="summary_manifest_generation_parent_ids",
+    )
+    source_cohort_hash = cohort_hash(source_records)
+    if source_cohort_hash != str(
+        summary_manifest.get("generation_source_cohort_hash", "")
+    ):
+        raise ValueError("Native summary parent lineage hash mismatch.")
     payload = _torch_load_compat(
         summary_root / "selected_counterfactual_graphs.pt"
     )
@@ -1207,6 +1510,11 @@ def export_rf_valid_native_top20(
         "semantic_direction": "mutagenic_to_non_mutagenic",
         "strict_flip_definition": "source_teacher_pred_1_and_candidate_teacher_pred_0",
         "parent_limit": int(parent_limit),
+        "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
+        "summary_parent_count": len(source_records),
+        "generation_parent_ids_sha256": stable_json_sha256(summary_parent_ids),
+        "generation_source_cohort_hash": source_cohort_hash,
+        "parent_order_source": "summary_manifest_generation_parent_ids",
         "native_rank_rows": len(native_rows),
         "rf_target_candidate_universe_rows": len(candidate_universe),
         "selected_top20_rows": len(selected),
@@ -1288,6 +1596,41 @@ def audit_mutagenicity_run(
     parent_ids = [str(value) for value in vrrw_manifest.get("generation_parent_ids", [])]
     if len(parent_ids) != expected_parents or len(parent_ids) != len(set(parent_ids)):
         raise AssertionError("VRRW generation parent IDs are incomplete or duplicated.")
+    if int(vrrw_manifest.get("generation_source_parent_rows", -1)) != (
+        EXPECTED_GENERATION_SOURCE_ROWS
+    ):
+        raise AssertionError("VRRW full generation-source universe count mismatch.")
+    parent_ids_sha256 = stable_json_sha256(parent_ids)
+    if int(summary_manifest.get("generation_source_parent_rows", -1)) != (
+        EXPECTED_GENERATION_SOURCE_ROWS
+    ):
+        raise AssertionError("Summary full generation-source universe count mismatch.")
+    if int(summary_manifest.get("vrrw_selected_parent_count", -1)) != expected_parents:
+        raise AssertionError("Summary VRRW-selected parent count mismatch.")
+    if int(summary_manifest.get("summary_parent_count", -1)) != expected_parents:
+        raise AssertionError("Summary parent count mismatch.")
+    if list(summary_manifest.get("generation_parent_ids", [])) != parent_ids:
+        raise AssertionError("Summary parent order differs from VRRW manifest order.")
+    if str(summary_manifest.get("generation_parent_ids_sha256", "")) != (
+        parent_ids_sha256
+    ):
+        raise AssertionError("Summary generation parent ID hash mismatch.")
+    if str(summary_manifest.get("summary_parent_ids_sha256", "")) != (
+        parent_ids_sha256
+    ):
+        raise AssertionError("Summary selected parent ID hash mismatch.")
+    if str(summary_manifest.get("generation_source_cohort_hash", "")) != str(
+        vrrw_manifest.get("generation_source_cohort_hash", "")
+    ):
+        raise AssertionError("Summary and VRRW source cohort hashes differ.")
+    if summary_manifest.get("parent_order_source") != (
+        "vrrw_manifest_generation_parent_ids"
+    ):
+        raise AssertionError("Summary parent order provenance is invalid.")
+    if str(export_manifest.get("generation_parent_ids_sha256", "")) != (
+        parent_ids_sha256
+    ):
+        raise AssertionError("Export parent lineage hash mismatch.")
     if str(vrrw_manifest.get("gnn_checkpoint_sha256")) != str(
         gnn_manifest.get("checkpoint_sha256")
     ):
@@ -1351,6 +1694,8 @@ def audit_mutagenicity_run(
         "model_val_rows": EXPECTED_MODEL_VAL_ROWS,
         "generation_source_rows": EXPECTED_GENERATION_SOURCE_ROWS,
         "selected_generation_parents": expected_parents,
+        "generation_parent_ids_sha256": parent_ids_sha256,
+        "summary_parent_count": int(summary_manifest["summary_parent_count"]),
         "selected_top20_rows": len(selected),
         "candidate_universe_rows": len(candidate_universe),
         "native_rank_unique": True,

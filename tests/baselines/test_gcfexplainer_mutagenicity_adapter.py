@@ -310,6 +310,136 @@ def test_resume_never_discards_started_vrrw_artifacts(tmp_path: Path) -> None:
         gcf_runtime._clear_vrrw_config_failure_for_resume(run_dir, resume=True)
 
 
+def _lineage_records(count: int = 1448) -> list[dict[str, str]]:
+    return [{"molecule_id": f"MUT_{index:04d}"} for index in range(count)]
+
+
+def _lineage_manifest(
+    parent_ids: list[str],
+    *,
+    profile: str = "smoke",
+    parent_limit: int | None = None,
+    universe_count: int = 1448,
+) -> dict[str, object]:
+    return {
+        "run_complete": True,
+        "profile": profile,
+        "parent_limit": len(parent_ids) if parent_limit is None else parent_limit,
+        "generation_source_parent_rows": universe_count,
+        "generation_parent_ids": list(parent_ids),
+        "generation_source_cohort_hash": gcf_runtime.stable_json_sha256(
+            parent_ids
+        ),
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+
+
+def test_summary_smoke_selects_manifest_parent_ids_from_full_universe() -> None:
+    records = _lineage_records()
+    parent_ids = [f"MUT_{index:04d}" for index in reversed(range(100, 164))]
+    selected, lineage = gcf_runtime._resolve_summary_parent_lineage(
+        records,
+        _lineage_manifest(parent_ids, parent_limit=64),
+        "smoke",
+    )
+    assert len(records) == 1448
+    assert [row["molecule_id"] for row in selected] == parent_ids
+    assert len(selected) == 64
+    assert lineage["generation_source_parent_rows"] == 1448
+    assert lineage["vrrw_selected_parent_count"] == 64
+    assert lineage["summary_parent_count"] == 64
+    assert lineage["generation_parent_ids_sha256"] == (
+        gcf_runtime.stable_json_sha256(parent_ids)
+    )
+    assert lineage["summary_parent_ids_sha256"] == lineage[
+        "generation_parent_ids_sha256"
+    ]
+    assert lineage["parent_order_source"] == (
+        "vrrw_manifest_generation_parent_ids"
+    )
+
+
+def test_summary_smoke_rejects_using_full_universe_as_summary_cohort() -> None:
+    with pytest.raises(gcf_runtime._SummaryConfigError) as caught:
+        gcf_runtime._validate_summary_parent_count(
+            "smoke",
+            summary_parent_count=1448,
+            vrrw_parent_limit=64,
+        )
+    assert caught.value.details["field"] == "summary_parent_count"
+    assert caught.value.details["actual"] == 1448
+    assert caught.value.details["expected"] == 64
+
+
+def test_summary_smoke_rejects_63_manifest_parent_ids() -> None:
+    records = _lineage_records()
+    parent_ids = [f"MUT_{index:04d}" for index in range(63)]
+    with pytest.raises(gcf_runtime._SummaryConfigError) as caught:
+        gcf_runtime._resolve_summary_parent_lineage(
+            records,
+            _lineage_manifest(parent_ids, parent_limit=64),
+            "smoke",
+        )
+    assert caught.value.details["field"] == "vrrw_generation_parent_id_count"
+    assert caught.value.details["actual"] == 63
+    assert caught.value.details["expected"] == 64
+
+
+def test_summary_rejects_duplicate_manifest_parent_ids() -> None:
+    records = _lineage_records()
+    parent_ids = [f"MUT_{index:04d}" for index in range(63)] + ["MUT_0000"]
+    with pytest.raises(gcf_runtime._SummaryConfigError) as caught:
+        gcf_runtime._resolve_summary_parent_lineage(
+            records,
+            _lineage_manifest(parent_ids, parent_limit=64),
+            "smoke",
+        )
+    assert caught.value.details["field"] == "generation_parent_ids_unique"
+
+
+def test_summary_rejects_manifest_parent_missing_from_dataset() -> None:
+    records = _lineage_records()
+    parent_ids = [f"MUT_{index:04d}" for index in range(63)] + ["MUT_MISSING"]
+    with pytest.raises(gcf_runtime._SummaryConfigError) as caught:
+        gcf_runtime._resolve_summary_parent_lineage(
+            records,
+            _lineage_manifest(parent_ids, parent_limit=64),
+            "smoke",
+        )
+    assert caught.value.details["field"] == (
+        "generation_parent_ids_present_in_dataset"
+    )
+    assert caught.value.details["actual"] == ["MUT_MISSING"]
+
+
+def test_summary_full_requires_all_1448_manifest_parent_ids() -> None:
+    records = _lineage_records()
+    parent_ids = [str(row["molecule_id"]) for row in reversed(records)]
+    selected, lineage = gcf_runtime._resolve_summary_parent_lineage(
+        records,
+        _lineage_manifest(
+            parent_ids,
+            profile="full",
+            parent_limit=1448,
+        ),
+        "full",
+    )
+    assert len(selected) == 1448
+    assert [row["molecule_id"] for row in selected] == parent_ids
+    assert lineage["vrrw_parent_limit"] == 1448
+    with pytest.raises(gcf_runtime._SummaryConfigError):
+        gcf_runtime._resolve_summary_parent_lineage(
+            records,
+            _lineage_manifest(
+                parent_ids[:64],
+                profile="full",
+                parent_limit=64,
+            ),
+            "full",
+        )
+
+
 def _importance_fixture():
     torch = pytest.importorskip("torch")
     vrrw = SimpleNamespace(

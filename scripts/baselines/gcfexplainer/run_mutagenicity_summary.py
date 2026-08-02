@@ -14,7 +14,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.baselines.gcfexplainer_mutagenicity_adapter import write_failure_artifacts  # noqa: E402
-from src.baselines.gcfexplainer_mutagenicity_runtime import build_native_summary  # noqa: E402
+from src.baselines.gcfexplainer_mutagenicity_runtime import (  # noqa: E402
+    _SummaryConfigError,
+    build_native_summary,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--neurosed-checkpoint", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--profile", choices=("smoke", "full"), default="smoke")
-    parser.add_argument("--parent-limit", type=int, default=64)
     parser.add_argument("--theta", type=float, default=0.1)
     parser.add_argument("--minimum-native-export", type=int, default=100)
     parser.add_argument("--device", default="cuda:0")
@@ -52,13 +54,29 @@ def main(argv: list[str] | None = None) -> int:
             neurosed_checkpoint=args.neurosed_checkpoint,
             output_dir=args.output_dir,
             profile=args.profile,
-            parent_limit=args.parent_limit,
             theta=args.theta,
             minimum_native_export=args.minimum_native_export,
             device=args.device,
         )
+    except _SummaryConfigError as exc:
+        resolved_config = {**vars(args), **exc.details}
+        write_failure_artifacts(
+            args.output_dir,
+            error=exc,
+            resolved_config=resolved_config,
+            extra=exc.details,
+        )
+        print("[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR]", file=sys.stderr)
+        for key in ("field", "actual", "expected", "count_source"):
+            print(f"{key}={exc.details[key]}", file=sys.stderr)
+        return 2
     except Exception as exc:
-        write_failure_artifacts(args.output_dir, error=exc, resolved_config=vars(args))
+        write_failure_artifacts(
+            args.output_dir,
+            error=exc,
+            resolved_config=vars(args),
+            extra={"stage": "summary_runtime"},
+        )
         raise
     print("[MUTAGENICITY_GCFEXPLAINER_NATIVE_SUMMARY_OK]", flush=True)
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)

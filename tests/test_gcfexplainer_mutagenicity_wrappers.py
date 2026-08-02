@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+import src.baselines.gcfexplainer_mutagenicity_runtime as gcf_runtime
+
+from scripts.baselines.gcfexplainer import run_mutagenicity_summary as summary_cli
 from scripts.baselines.gcfexplainer.run_mutagenicity_vrrw import (
     _resolve_profile_defaults,
     build_parser,
@@ -254,9 +257,87 @@ def test_summary_wrapper_preserves_native_rank_then_rf_filters() -> None:
     export_position = text.index("export_mutagenicity_fullgraph_candidates.py")
     audit_position = text.index("audit_mutagenicity_run.py")
     assert summary_position < export_position < audit_position
+    summary_command = text[summary_position:export_position]
+    assert "--parent-limit" not in summary_command
+    assert 'PARENT_LIMIT="${PARENT_LIMIT' not in text
+    assert "EXPECTED_PARENT_LIMIT=64" in text
+    assert "EXPECTED_PARENT_LIMIT=1448" in text
     assert 'MINIMUM_NATIVE_EXPORT="${MINIMUM_NATIVE_EXPORT:-100}"' in text
     assert 'TOP_K="${TOP_K:-20}"' in text
     assert "mutagenicity_rf_v1/mutagenicity_rf_model.pkl" in text
+
+
+def test_summary_cli_and_runtime_use_vrrw_manifest_parent_lineage() -> None:
+    cli = (
+        ROOT / "scripts/baselines/gcfexplainer/run_mutagenicity_summary.py"
+    ).read_text(encoding="utf-8")
+    runtime = (
+        ROOT / "src/baselines/gcfexplainer_mutagenicity_runtime.py"
+    ).read_text(encoding="utf-8")
+    assert 'parser.add_argument("--parent-limit"' not in cli
+    assert "_SummaryConfigError" in cli
+    assert "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR]" in cli
+    assert "[MUTAGENICITY_GCFEXPLAINER_SUMMARY_CONFIG]" in runtime
+    assert 'vrrw_manifest["parent_limit"]' in runtime
+    assert "vrrw_manifest_generation_parent_ids" in runtime
+    assert '"vrrw_selected_parent_count"' in runtime
+    assert '"summary_parent_count"' in runtime
+    assert '"generation_parent_ids_sha256"' in runtime
+    assert '"vrrw_manifest_sha256"' in runtime
+    assert '"counterfactuals_sha256"' in runtime
+
+
+def test_summary_config_failure_writes_structured_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    error = gcf_runtime._summary_config_error(
+        field="summary_parent_count",
+        actual=1448,
+        expected=64,
+        count_source="dataset_full_universe",
+    )
+
+    def fail_summary(**_kwargs):
+        raise error
+
+    monkeypatch.setattr(summary_cli, "build_native_summary", fail_summary)
+    output_dir = tmp_path / "summary"
+    return_code = summary_cli.main(
+        [
+            "--dataset-dir",
+            str(tmp_path / "dataset"),
+            "--official-root",
+            str(tmp_path / "official"),
+            "--vrrw-dir",
+            str(tmp_path / "vrrw"),
+            "--gnn-checkpoint",
+            str(tmp_path / "model_best.pth"),
+            "--neurosed-checkpoint",
+            str(tmp_path / "best_model.pt"),
+            "--output-dir",
+            str(output_dir),
+            "--profile",
+            "smoke",
+        ]
+    )
+    assert return_code == 2
+    captured = capsys.readouterr()
+    assert "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR]" in captured.err
+    assert "field=summary_parent_count" in captured.err
+    assert "actual=1448" in captured.err
+    assert "expected=64" in captured.err
+    failure = json.loads(
+        (output_dir / "failure_summary.json").read_text(encoding="utf-8")
+    )
+    assert failure["stage"] == "summary_config"
+    assert failure["field"] == "summary_parent_count"
+    assert failure["actual"] == 1448
+    assert failure["expected"] == 64
+    assert (output_dir / "resolved_config.json").is_file()
+    assert (output_dir / "_RUN_FAILED.json").is_file()
+    assert not (output_dir / "_RUN_COMPLETE.json").exists()
 
 
 def test_all_wrapper_defaults_to_smoke_and_requires_full_opt_in() -> None:
