@@ -24,11 +24,11 @@ export PYTHONHASHSEED="${PYTHONHASHSEED:-13}"
 
 PROFILE="${PROFILE:-smoke}"
 if [[ "$PROFILE" == "smoke" ]]; then
-  PARENT_LIMIT="${PARENT_LIMIT:-64}"
-  MAX_STEPS="${MAX_STEPS:-500}"
+  VRRW_PARENT_LIMIT="${VRRW_PARENT_LIMIT:-64}"
+  VRRW_M="${VRRW_M:-500}"
 elif [[ "$PROFILE" == "full" && "${ALLOW_FULL:-false}" == "true" ]]; then
-  PARENT_LIMIT="${PARENT_LIMIT:-1448}"
-  MAX_STEPS="${MAX_STEPS:-50000}"
+  VRRW_PARENT_LIMIT="${VRRW_PARENT_LIMIT:-1448}"
+  VRRW_M="${VRRW_M:-50000}"
 else
   echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] invalid/unauthorized PROFILE=$PROFILE." >&2
   exit 2
@@ -40,46 +40,33 @@ VRRW_DIR="${VRRW_DIR:-$RUN_ROOT/vrrw}"
 OFFICIAL_ROOT="${OFFICIAL_ROOT:-$PROJECT_ROOT/baselines/gcfexplainer_official}"
 GNN_CHECKPOINT="${GNN_CHECKPOINT:-$GNN_DIR/model_best.pth}"
 NEUROSED_CHECKPOINT="${NEUROSED_CHECKPOINT:-$OFFICIAL_ROOT/data/mutagenicity/neurosed/best_model.pt}"
-ALPHA="${ALPHA:-1.0}"
-THETA="${THETA:-0.05}"
+VRRW_ALPHA="${VRRW_ALPHA:-1.0}"
+VRRW_THETA="${VRRW_THETA:-0.05}"
 TELEPORT="${TELEPORT:-0.1}"
 CANDIDATE_CAPACITY="${CANDIDATE_CAPACITY:-100000}"
 SAMPLE_SIZE="${SAMPLE_SIZE:-10000}"
-SEED="${SEED:-13}"
+VRRW_SEED="${VRRW_SEED:-13}"
 RESUME="${RESUME:-true}"
 
-[[ "$ALPHA" == "1.0" && "$SEED" -eq 13 ]] || { echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] alpha=1.0 and seed=13 are fixed." >&2; exit 2; }
-if [[ "$PROFILE" == "smoke" ]]; then
-  [[ "$PARENT_LIMIT" -eq 64 && ( "$MAX_STEPS" -eq 500 || "$MAX_STEPS" -eq 1000 ) ]] || { echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] smoke requires 64 parents and M=500 or 1000." >&2; exit 2; }
-else
-  [[ "$PARENT_LIMIT" -eq 1448 && "$MAX_STEPS" -eq 50000 ]] || { echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] full requires 1448 parents and M=50000." >&2; exit 2; }
-fi
-test -s "$GNN_CHECKPOINT"
-test -s "$NEUROSED_CHECKPOINT"
-if [[ "${GNN_CHECKPOINT,,}" == *aids* || "${GNN_CHECKPOINT,,}" == *hiv* ]]; then
-  echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] AIDS/HIV checkpoint is forbidden." >&2
-  exit 2
-fi
 if [[ -e "$VRRW_DIR/_FINALIZED.json" ]]; then
   echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] finalized VRRW output cannot be overwritten." >&2
   exit 2
 fi
-if [[ -s "$VRRW_DIR/_RUN_COMPLETE.json" ]]; then
-  if [[ "$RESUME" == "true" ]]; then
-    echo "[MUTAGENICITY_GCFEXPLAINER_VRRW_REUSED] $VRRW_DIR"
-    exit 0
-  fi
-  echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] completed VRRW output cannot be overwritten." >&2
-  exit 2
-fi
 
 mkdir -p "$PROJECT_ROOT/logs"
+echo "[MUTAGENICITY_GCFEXPLAINER_VRRW_CONFIG]"
+echo "profile=$PROFILE"
+echo "parent_limit=$VRRW_PARENT_LIMIT"
+echo "M=$VRRW_M"
+echo "alpha=$VRRW_ALPHA"
+echo "theta=$VRRW_THETA"
+echo "seed=$VRRW_SEED"
+echo "dataset_dir=$DATASET_DIR"
+echo "gnn_checkpoint=$GNN_CHECKPOINT"
+echo "generation_source_rows=1448"
+echo "calibration_loaded=false"
+echo "test_loaded=false"
 echo "PROJECT_ROOT=$PROJECT_ROOT"
-echo "PROFILE=$PROFILE"
-echo "PARENT_LIMIT=$PARENT_LIMIT"
-echo "MAX_STEPS=$MAX_STEPS"
-echo "ALPHA=$ALPHA"
-echo "THETA=$THETA"
 echo "GNN_CHECKPOINT=$GNN_CHECKPOINT"
 echo "NEUROSED_CHECKPOINT=$NEUROSED_CHECKPOINT"
 echo "VRRW_DIR=$VRRW_DIR"
@@ -98,15 +85,15 @@ python scripts/baselines/gcfexplainer/run_mutagenicity_vrrw.py \
   --neurosed-checkpoint "$NEUROSED_CHECKPOINT" \
   --output-dir "$VRRW_DIR" \
   --profile "$PROFILE" \
-  --parent-limit "$PARENT_LIMIT" \
-  --max-steps "$MAX_STEPS" \
-  --alpha "$ALPHA" \
-  --theta "$THETA" \
+  --parent-limit "$VRRW_PARENT_LIMIT" \
+  --m "$VRRW_M" \
+  --alpha "$VRRW_ALPHA" \
+  --theta "$VRRW_THETA" \
   --teleport "$TELEPORT" \
   --candidate-capacity "$CANDIDATE_CAPACITY" \
   --no-sample \
   --sample-size "$SAMPLE_SIZE" \
-  --seed "$SEED" \
+  --seed "$VRRW_SEED" \
   --device1 cuda:0 \
   --device2 cuda:0 \
   "$RESUME_ARG" \

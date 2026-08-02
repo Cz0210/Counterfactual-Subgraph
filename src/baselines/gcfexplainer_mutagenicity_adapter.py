@@ -109,9 +109,44 @@ class GCFExplainerEmptyCandidateSetError(GCFExplainerMutagenicityError):
     """Raised when native-rank filtering cannot produce twenty candidates."""
 
 
+class GCFExplainerVRRWConfigError(ValueError):
+    """Raised when a VRRW profile violates its preregistered contract."""
+
+    def __init__(self, message: str, *, details: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.details = dict(details)
+
+
 class RunProfile(str, Enum):
     SMOKE = "smoke"
     FULL = "full"
+
+
+@dataclass(frozen=True, slots=True)
+class VRRWProfileContract:
+    profile: RunProfile
+    parent_limit: int
+    allowed_m: tuple[int, ...]
+    default_m: int
+    alpha: float = 1.0
+    theta: float = 0.05
+    seed: int = SEED
+
+
+VRRW_PROFILE_CONTRACTS: dict[RunProfile, VRRWProfileContract] = {
+    RunProfile.SMOKE: VRRWProfileContract(
+        profile=RunProfile.SMOKE,
+        parent_limit=64,
+        allowed_m=(500, 1000),
+        default_m=500,
+    ),
+    RunProfile.FULL: VRRWProfileContract(
+        profile=RunProfile.FULL,
+        parent_limit=EXPECTED_GENERATION_SOURCE_ROWS,
+        allowed_m=(50000,),
+        default_m=50000,
+    ),
+}
 
 
 class TeacherProtocol(Protocol):
@@ -1236,31 +1271,68 @@ def validate_gnn_profile(
     return resolved
 
 
+def get_vrrw_profile_contract(
+    profile: str | RunProfile,
+) -> VRRWProfileContract:
+    return VRRW_PROFILE_CONTRACTS[RunProfile(profile)]
+
+
 def validate_vrrw_profile(
     profile: str | RunProfile,
     *,
-    parent_count: int,
-    max_steps: int,
+    parent_limit: int,
+    m: int,
     alpha: float,
+    theta: float,
     seed: int,
 ) -> RunProfile:
-    resolved = RunProfile(profile)
-    expected_parents = 64 if resolved is RunProfile.SMOKE else 1448
-    expected_steps = {500, 1000} if resolved is RunProfile.SMOKE else {50000}
-    if int(parent_count) != expected_parents:
-        raise ValueError(
-            f"VRRW {resolved.value} requires {expected_parents} parents."
+    contract = get_vrrw_profile_contract(profile)
+    details = {
+        "stage": "vrrw_config",
+        "profile": contract.profile.value,
+        "parent_limit": int(parent_limit),
+        "M": int(m),
+        "alpha": float(alpha),
+        "theta": float(theta),
+        "seed": int(seed),
+        "expected_parent_limit": contract.parent_limit,
+        "expected_M": list(contract.allowed_m),
+        "expected_alpha": contract.alpha,
+        "expected_theta": contract.theta,
+        "expected_seed": contract.seed,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+    mismatches: list[str] = []
+    if int(parent_limit) != contract.parent_limit:
+        mismatches.append("parent_limit")
+    if int(m) not in contract.allowed_m:
+        mismatches.append("M")
+    if not math.isclose(
+        float(alpha), contract.alpha, rel_tol=0.0, abs_tol=0.0
+    ):
+        mismatches.append("alpha")
+    if not math.isclose(
+        float(theta), contract.theta, rel_tol=0.0, abs_tol=0.0
+    ):
+        mismatches.append("theta")
+    if int(seed) != contract.seed:
+        mismatches.append("seed")
+    if mismatches:
+        details["mismatched_fields"] = mismatches
+        expected_m = (
+            "500_or_1000"
+            if contract.profile is RunProfile.SMOKE
+            else str(contract.default_m)
         )
-    if int(max_steps) not in expected_steps:
-        raise ValueError(
-            f"VRRW {resolved.value} max_steps must be one of "
-            f"{sorted(expected_steps)}."
+        raise GCFExplainerVRRWConfigError(
+            "Mutagenicity GCFExplainer VRRW configuration mismatch: "
+            f"profile={contract.profile.value}, parent_limit={int(parent_limit)}, "
+            f"M={int(m)}, expected_parent_limit={contract.parent_limit}, "
+            f"expected_M={expected_m}; mismatched={','.join(mismatches)}.",
+            details=details,
         )
-    if not math.isclose(float(alpha), 1.0, rel_tol=0.0, abs_tol=0.0):
-        raise ValueError("Mutagenicity VRRW requires alpha=1.0.")
-    if int(seed) != SEED:
-        raise ValueError("Mutagenicity VRRW requires seed=13.")
-    return resolved
+    return contract.profile
 
 
 def stable_graph_candidate_id(graph: Any) -> str:
@@ -1810,6 +1882,7 @@ __all__ = [
     "GCFExplainerEmptyCandidateSetError",
     "GCFExplainerMutagenicityCodecError",
     "GCFExplainerMutagenicityError",
+    "GCFExplainerVRRWConfigError",
     "GraphRecordDataset",
     "MutagenicityGraphSchema",
     "OFFICIAL_AIDS_ROUTE_AUDIT",
@@ -1818,6 +1891,8 @@ __all__ = [
     "SEED",
     "SOURCE_LABEL",
     "TARGET_LABEL",
+    "VRRWProfileContract",
+    "VRRW_PROFILE_CONTRACTS",
     "checkpoint_is_aids",
     "build_native_rank_candidate_universe",
     "cohort_hash",
@@ -1827,6 +1902,7 @@ __all__ = [
     "encode_source_graph",
     "filter_native_rank_candidates",
     "graph_lineage_neighbor_wrapper",
+    "get_vrrw_profile_contract",
     "import_official_modules",
     "load_dataset_artifacts",
     "load_strict_molecules",

@@ -13,6 +13,7 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
     EXPECTED_MODEL_TRAIN_ROWS,
     EXPECTED_MODEL_VAL_ROWS,
     GCFExplainerMutagenicityCodecError,
+    GCFExplainerVRRWConfigError,
     MutagenicityGraphSchema,
     OFFICIAL_MUTAGENICITY_ATOMIC_NUMBERS,
     StrictMolecule,
@@ -22,12 +23,16 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
     encode_source_graph,
     filter_native_rank_candidates,
     graph_lineage_neighbor_wrapper,
+    get_vrrw_profile_contract,
     load_strict_molecules,
     reconstruct_source_graph,
     select_codec_probe_records,
     stable_graph_candidate_id,
     validate_gnn_profile,
     validate_vrrw_profile,
+)
+from src.baselines.gcfexplainer_mutagenicity_runtime import (
+    _clear_vrrw_config_failure_for_resume,
 )
 
 
@@ -156,18 +161,147 @@ def test_strict_counts_and_generation_contract_are_frozen() -> None:
     assert EXPECTED_MODEL_VAL_ROWS == 355
     assert EXPECTED_GENERATION_SOURCE_ROWS == 1448
     assert validate_gnn_profile("full", epochs=1000, train_rows=2885, val_rows=355).value == "full"
-    assert validate_vrrw_profile("full", parent_count=1448, max_steps=50000, alpha=1.0, seed=13).value == "full"
+    assert validate_vrrw_profile(
+        "full",
+        parent_limit=1448,
+        m=50000,
+        alpha=1.0,
+        theta=0.05,
+        seed=13,
+    ).value == "full"
 
 
 def test_smoke_and_full_profile_guards() -> None:
     validate_gnn_profile("smoke", epochs=5, train_rows=64, val_rows=32)
-    validate_vrrw_profile("smoke", parent_count=64, max_steps=500, alpha=1.0, seed=13)
+    validate_vrrw_profile(
+        "smoke",
+        parent_limit=64,
+        m=500,
+        alpha=1.0,
+        theta=0.05,
+        seed=13,
+    )
+    validate_vrrw_profile(
+        "smoke",
+        parent_limit=64,
+        m=1000,
+        alpha=1.0,
+        theta=0.05,
+        seed=13,
+    )
     with pytest.raises(ValueError):
         validate_gnn_profile("full", epochs=5, train_rows=2885, val_rows=355)
-    with pytest.raises(ValueError):
-        validate_vrrw_profile("full", parent_count=64, max_steps=50000, alpha=1.0, seed=13)
-    with pytest.raises(ValueError):
-        validate_vrrw_profile("full", parent_count=1448, max_steps=50000, alpha=0.5, seed=13)
+    with pytest.raises(GCFExplainerVRRWConfigError):
+        validate_vrrw_profile(
+            "full",
+            parent_limit=64,
+            m=50000,
+            alpha=1.0,
+            theta=0.05,
+            seed=13,
+        )
+    with pytest.raises(GCFExplainerVRRWConfigError):
+        validate_vrrw_profile(
+            "full",
+            parent_limit=1448,
+            m=50000,
+            alpha=0.5,
+            theta=0.05,
+            seed=13,
+        )
+
+
+def test_vrrw_profile_defaults_and_actual_values_are_auditable() -> None:
+    smoke = get_vrrw_profile_contract("smoke")
+    full = get_vrrw_profile_contract("full")
+    assert (smoke.parent_limit, smoke.default_m, smoke.allowed_m) == (
+        64,
+        500,
+        (500, 1000),
+    )
+    assert (full.parent_limit, full.default_m, full.allowed_m) == (
+        1448,
+        50000,
+        (50000,),
+    )
+    with pytest.raises(GCFExplainerVRRWConfigError) as caught:
+        validate_vrrw_profile(
+            "smoke",
+            parent_limit=1448,
+            m=50000,
+            alpha=1.0,
+            theta=0.05,
+            seed=13,
+        )
+    assert caught.value.details["parent_limit"] == 1448
+    assert caught.value.details["M"] == 50000
+    assert caught.value.details["expected_parent_limit"] == 64
+    assert caught.value.details["expected_M"] == [500, 1000]
+    assert "parent_limit=1448" in str(caught.value)
+    assert "M=50000" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("profile", "parent_limit", "m", "mismatch"),
+    (
+        ("smoke", 64, 50000, "M"),
+        ("smoke", 1448, 500, "parent_limit"),
+        ("full", 1448, 500, "M"),
+        ("full", 64, 50000, "parent_limit"),
+    ),
+)
+def test_vrrw_profile_rejects_cross_profile_values(
+    profile: str,
+    parent_limit: int,
+    m: int,
+    mismatch: str,
+) -> None:
+    with pytest.raises(GCFExplainerVRRWConfigError) as caught:
+        validate_vrrw_profile(
+            profile,
+            parent_limit=parent_limit,
+            m=m,
+            alpha=1.0,
+            theta=0.05,
+            seed=13,
+        )
+    assert mismatch in caught.value.details["mismatched_fields"]
+
+
+def test_resume_discards_only_stale_pre_generation_config_failure(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "vrrw"
+    run_dir.mkdir()
+    (run_dir / "_RUN_FAILED.json").write_text(
+        json.dumps({"stage": "vrrw_config", "M": 50000}),
+        encoding="utf-8",
+    )
+    (run_dir / "failure_summary.json").write_text(
+        json.dumps({"stage": "vrrw_config", "M": 50000}),
+        encoding="utf-8",
+    )
+    (run_dir / "resolved_config.json").write_text(
+        json.dumps({"profile": "smoke", "M": 50000}),
+        encoding="utf-8",
+    )
+    assert _clear_vrrw_config_failure_for_resume(run_dir, resume=True) is True
+    assert list(run_dir.iterdir()) == []
+
+
+def test_resume_never_discards_started_vrrw_artifacts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "vrrw"
+    run_dir.mkdir()
+    (run_dir / "_RUN_FAILED.json").write_text(
+        json.dumps({"stage": "vrrw_config"}),
+        encoding="utf-8",
+    )
+    (run_dir / "vrrw_progress.json").write_text(
+        json.dumps({"current_step": 1}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="will not discard"):
+        _clear_vrrw_config_failure_for_resume(run_dir, resume=True)
 
 
 def test_csv_loader_enforces_split_teacher_and_forbidden_paths(tmp_path: Path) -> None:

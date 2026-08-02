@@ -24,6 +24,7 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
     checkpoint_is_aids,
     cohort_hash,
     deterministic_balanced_prefix,
+    get_vrrw_profile_contract,
     graph_lineage_neighbor_wrapper,
     import_official_modules,
     load_dataset_artifacts,
@@ -40,7 +41,7 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
 )
 
 
-OFFICIAL_VRRW_THETA = 0.05
+OFFICIAL_VRRW_THETA = get_vrrw_profile_contract("smoke").theta
 OFFICIAL_SUMMARY_THETA = 0.1
 OFFICIAL_TELEPORT = 0.1
 
@@ -83,6 +84,66 @@ def _prepare_output(
         previous = read_json(config_path)
         if previous.get("config_fingerprint") != fingerprint:
             raise ValueError("Resume configuration fingerprint mismatch.")
+
+
+def _clear_vrrw_config_failure_for_resume(
+    output_dir: Path,
+    *,
+    resume: bool,
+) -> bool:
+    """Remove only a pre-generation config failure before a corrected retry."""
+
+    marker = output_dir / "_RUN_FAILED.json"
+    if not resume or not marker.is_file():
+        return False
+    payload = read_json(marker)
+    if payload.get("stage") != "vrrw_config":
+        return False
+    removable = {
+        "_RUN_FAILED.json",
+        "failure_summary.json",
+        "resolved_config.json",
+        "run_manifest.json",
+    }
+    unexpected = sorted(
+        path.name for path in output_dir.iterdir() if path.name not in removable
+    )
+    if unexpected:
+        raise ValueError(
+            "VRRW config-failure retry found generation artifacts and will not "
+            f"discard them: {unexpected}"
+        )
+    for name in removable:
+        path = output_dir / name
+        if path.is_file():
+            path.unlink()
+    return True
+
+
+def _reuse_completed_vrrw(
+    output_dir: Path,
+    *,
+    fingerprint: str,
+    resume: bool,
+) -> dict[str, Any] | None:
+    complete = output_dir / "_RUN_COMPLETE.json"
+    if not complete.is_file():
+        return None
+    if not resume:
+        raise FileExistsError(
+            f"Completed output cannot be overwritten: {output_dir}"
+        )
+    config_path = output_dir / "resolved_config.json"
+    manifest_path = output_dir / "run_manifest.json"
+    if not config_path.is_file() or not manifest_path.is_file():
+        raise ValueError("Completed VRRW output is missing its resumability audit files.")
+    previous = read_json(config_path)
+    if previous.get("config_fingerprint") != fingerprint:
+        raise ValueError("Completed VRRW configuration fingerprint mismatch.")
+    manifest = read_json(manifest_path)
+    if manifest.get("run_complete") is not True:
+        raise ValueError("Completed VRRW marker disagrees with run_manifest.json.")
+    return manifest
 
 
 def _device_name(torch: Any, value: str) -> str:
@@ -413,7 +474,7 @@ def run_official_vrrw(
     output_dir: str | Path,
     profile: str | RunProfile,
     parent_limit: int,
-    max_steps: int,
+    m: int,
     alpha: float,
     theta: float,
     teleport: float,
@@ -433,13 +494,17 @@ def run_official_vrrw(
     ]
     resolved_profile = validate_vrrw_profile(
         profile,
-        parent_count=len(selected),
-        max_steps=max_steps,
+        parent_limit=int(parent_limit),
+        m=m,
         alpha=alpha,
+        theta=theta,
         seed=seed,
     )
-    if not math.isclose(float(theta), OFFICIAL_VRRW_THETA, rel_tol=0.0, abs_tol=0.0):
-        raise ValueError("Official Mutagenicity VRRW theta must be 0.05.")
+    if len(selected) != int(parent_limit):
+        raise ValueError(
+            "Generation source cohort is smaller than the validated parent_limit: "
+            f"requested={int(parent_limit)}, selected={len(selected)}."
+        )
     if not math.isclose(float(teleport), OFFICIAL_TELEPORT, rel_tol=0.0, abs_tol=0.0):
         raise ValueError("Official VRRW teleport probability must be 0.1.")
     checkpoint = Path(gnn_checkpoint).expanduser().resolve()
@@ -468,7 +533,7 @@ def run_official_vrrw(
         "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
         "generation_parent_ids": [str(row["molecule_id"]) for row in selected],
         "generation_source_cohort_hash": cohort_hash(selected),
-        "M": int(max_steps),
+        "M": int(m),
         "alpha": float(alpha),
         "theta": float(theta),
         "theta_source": "official_vrrw_mutagenicity_default",
@@ -487,6 +552,16 @@ def run_official_vrrw(
     fingerprint = stable_json_sha256(config)
     config["config_fingerprint"] = fingerprint
     root = Path(output_dir).expanduser().resolve()
+    if (root / "_FINALIZED.json").exists():
+        raise FileExistsError(f"Finalized output cannot be reused: {root}")
+    completed = _reuse_completed_vrrw(
+        root,
+        fingerprint=fingerprint,
+        resume=resume,
+    )
+    if completed is not None:
+        return completed
+    _clear_vrrw_config_failure_for_resume(root, resume=resume)
     had_incomplete_output = root.exists() and any(root.iterdir())
     _prepare_output(root, fingerprint=fingerprint, resume=resume, allow_progress=True)
     if had_incomplete_output:
@@ -513,8 +588,14 @@ def run_official_vrrw(
         root / "vrrw_progress.json",
         {
             "config_fingerprint": fingerprint,
+            "profile": resolved_profile.value,
+            "parent_limit": int(parent_limit),
+            "M": int(m),
             "current_step": 0,
-            "max_steps": int(max_steps),
+            "max_steps": int(m),
+            "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
+            "calibration_loaded": False,
+            "test_loaded": False,
             "run_complete": False,
             "resume_mode": "deterministic_restart_from_seed",
         },
@@ -602,7 +683,7 @@ def run_official_vrrw(
             input_graphs=graphs,
             importance_args=importance_args,
             teleport_probability=float(teleport),
-            max_steps=int(max_steps),
+            max_steps=int(m),
         )
     finally:
         os.chdir(old_cwd)
@@ -669,8 +750,14 @@ def run_official_vrrw(
         root / "vrrw_progress.json",
         {
             "config_fingerprint": fingerprint,
-            "current_step": int(max_steps),
-            "max_steps": int(max_steps),
+            "profile": resolved_profile.value,
+            "parent_limit": int(parent_limit),
+            "M": int(m),
+            "current_step": int(m),
+            "max_steps": int(m),
+            "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
+            "calibration_loaded": False,
+            "test_loaded": False,
             "visited_graph_count": len(graph_map),
             "run_complete": True,
             "resume_mode": "deterministic_restart_from_seed",

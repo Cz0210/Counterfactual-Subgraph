@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from scripts.baselines.gcfexplainer.run_mutagenicity_vrrw import (
+    _resolve_profile_defaults,
+    build_parser,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,14 +72,180 @@ def test_gnn_wrapper_profiles_and_checkpoint_isolation() -> None:
 
 def test_vrrw_wrapper_has_preregistered_mutagenicity_parameters() -> None:
     text = WRAPPERS[2].read_text(encoding="utf-8")
-    assert 'MAX_STEPS="${MAX_STEPS:-500}"' in text
-    assert 'MAX_STEPS="${MAX_STEPS:-50000}"' in text
-    assert 'ALPHA="${ALPHA:-1.0}"' in text
-    assert 'SEED="${SEED:-13}"' in text
-    assert 'PARENT_LIMIT="${PARENT_LIMIT:-1448}"' in text
-    assert "alpha=1.0 and seed=13 are fixed" in text
-    assert "AIDS/HIV checkpoint is forbidden" in text
+    assert 'VRRW_M="${VRRW_M:-500}"' in text
+    assert 'VRRW_M="${VRRW_M:-50000}"' in text
+    assert 'VRRW_ALPHA="${VRRW_ALPHA:-1.0}"' in text
+    assert 'VRRW_THETA="${VRRW_THETA:-0.05}"' in text
+    assert 'VRRW_SEED="${VRRW_SEED:-13}"' in text
+    assert 'VRRW_PARENT_LIMIT="${VRRW_PARENT_LIMIT:-64}"' in text
+    assert 'VRRW_PARENT_LIMIT="${VRRW_PARENT_LIMIT:-1448}"' in text
+    assert '--parent-limit "$VRRW_PARENT_LIMIT"' in text
+    assert '--m "$VRRW_M"' in text
+    assert "[MUTAGENICITY_GCFEXPLAINER_VRRW_CONFIG]" in text
+    assert 'echo "parent_limit=$VRRW_PARENT_LIMIT"' in text
+    assert 'echo "M=$VRRW_M"' in text
     assert "--no-sample" in text
+    assert "MAX_STEPS" not in text
+
+
+def test_all_wrapper_explicitly_passes_profile_derived_vrrw_contract() -> None:
+    text = WRAPPERS[4].read_text(encoding="utf-8")
+    assert 'VRRW_PARENT_LIMIT="${VRRW_PARENT_LIMIT:-64}"' in text
+    assert 'VRRW_M="${VRRW_M:-500}"' in text
+    assert 'VRRW_PARENT_LIMIT="${VRRW_PARENT_LIMIT:-1448}"' in text
+    assert 'VRRW_M="${VRRW_M:-50000}"' in text
+    assert 'VRRW_ALPHA="${VRRW_ALPHA:-1.0}"' in text
+    assert 'VRRW_THETA="${VRRW_THETA:-0.05}"' in text
+    assert 'VRRW_SEED="${VRRW_SEED:-13}"' in text
+    assert 'VRRW_PARENT_LIMIT="$VRRW_PARENT_LIMIT"' in text
+    assert 'VRRW_M="$VRRW_M"' in text
+    assert 'VRRW_ALPHA="$VRRW_ALPHA"' in text
+    assert 'VRRW_THETA="$VRRW_THETA"' in text
+    assert 'VRRW_SEED="$VRRW_SEED"' in text
+    assert 'PARENT_LIMIT="$VRRW_PARENT_LIMIT"' in text
+    assert "MAX_STEPS" not in text
+
+
+def _parse_vrrw(*extra: str):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--dataset-dir",
+            "dataset",
+            "--official-root",
+            "official",
+            "--gnn-checkpoint",
+            "model_best.pth",
+            "--neurosed-checkpoint",
+            "best_model.pt",
+            "--output-dir",
+            "out",
+            *extra,
+        ]
+    )
+    _resolve_profile_defaults(args)
+    return args
+
+
+def test_vrrw_cli_defaults_are_profile_derived() -> None:
+    smoke = _parse_vrrw()
+    assert (smoke.profile, smoke.parent_limit, smoke.m) == ("smoke", 64, 500)
+    assert (smoke.alpha, smoke.theta, smoke.seed) == (1.0, 0.05, 13)
+    full = _parse_vrrw("--profile", "full")
+    assert (full.parent_limit, full.m) == (1448, 50000)
+    assert (full.alpha, full.theta, full.seed) == (1.0, 0.05, 13)
+
+
+def test_shell_cli_and_runtime_use_one_to_one_vrrw_names() -> None:
+    wrapper = WRAPPERS[2].read_text(encoding="utf-8")
+    cli = (
+        ROOT / "scripts/baselines/gcfexplainer/run_mutagenicity_vrrw.py"
+    ).read_text(encoding="utf-8")
+    runtime = (
+        ROOT / "src/baselines/gcfexplainer_mutagenicity_runtime.py"
+    ).read_text(encoding="utf-8")
+    assert '--profile "$PROFILE"' in wrapper
+    assert '--parent-limit "$VRRW_PARENT_LIMIT"' in wrapper
+    assert '--m "$VRRW_M"' in wrapper
+    assert 'parser.add_argument("--m", type=int)' in cli
+    assert "m=args.m" in cli
+    assert "m: int," in runtime
+    assert "max_steps=int(m)" in runtime
+    assert 'parser.add_argument("--max-steps"' not in cli
+
+
+def test_invalid_vrrw_config_logs_actual_values_and_writes_failure_artifacts(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "vrrw"
+    command = [
+        sys.executable,
+        str(ROOT / "scripts/baselines/gcfexplainer/run_mutagenicity_vrrw.py"),
+        "--dataset-dir",
+        str(tmp_path / "dataset"),
+        "--official-root",
+        str(tmp_path / "official"),
+        "--gnn-checkpoint",
+        str(tmp_path / "model_best.pth"),
+        "--neurosed-checkpoint",
+        str(tmp_path / "best_model.pt"),
+        "--output-dir",
+        str(output_dir),
+        "--profile",
+        "smoke",
+        "--parent-limit",
+        "1448",
+        "--m",
+        "50000",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "[MUTAGENICITY_GCFEXPLAINER_VRRW_CONFIG]" in result.stdout
+    assert "parent_limit=1448" in result.stdout
+    assert "M=50000" in result.stdout
+    assert "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR]" in result.stderr
+    assert "expected_parent_limit=64" in result.stderr
+    assert "expected_M=500_or_1000" in result.stderr
+    payload = json.loads(
+        (output_dir / "failure_summary.json").read_text(encoding="utf-8")
+    )
+    assert payload["stage"] == "vrrw_config"
+    assert payload["profile"] == "smoke"
+    assert payload["parent_limit"] == 1448
+    assert payload["M"] == 50000
+    assert payload["expected_parent_limit"] == 64
+    assert payload["expected_M"] == [500, 1000]
+    assert payload["model_training_performed"] is False
+    assert payload["calibration_loaded"] is False
+    assert payload["test_loaded"] is False
+    assert (output_dir / "_RUN_FAILED.json").is_file()
+
+
+def test_all_resume_reuses_completed_gnn_before_vrrw() -> None:
+    all_text = WRAPPERS[4].read_text(encoding="utf-8")
+    gnn_text = WRAPPERS[1].read_text(encoding="utf-8")
+    assert 'RESUME="${RESUME:-true}"' in all_text
+    assert 'RESUME="$RESUME"' in all_text
+    assert "train_mutagenicity_gnn.sh" in all_text
+    assert "[MUTAGENICITY_GCFEXPLAINER_GNN_REUSED]" in gnn_text
+    assert all_text.index("train_mutagenicity_gnn.sh") < all_text.index(
+        "reproduce_mutagenicity_vrrw.sh"
+    )
+
+
+def test_vrrw_stage_never_trains_models_or_reads_held_out_splits() -> None:
+    wrapper = WRAPPERS[2].read_text(encoding="utf-8")
+    cli = (
+        ROOT / "scripts/baselines/gcfexplainer/run_mutagenicity_vrrw.py"
+    ).read_text(encoding="utf-8")
+    assert "train_mutagenicity_gnn" not in wrapper
+    assert "gnn.py" not in wrapper
+    assert "calibration_source_label" not in wrapper
+    assert "calibration_target_label" not in wrapper
+    assert "test_source_label" not in wrapper
+    assert "test_target_label" not in wrapper
+    assert "--forbid-calibration-test" in wrapper
+    assert '"model_training_performed": False' in cli
+
+
+def test_mutagenicity_wrappers_do_not_unset_any_proxy_variable() -> None:
+    forbidden = (
+        "unset http_proxy",
+        "unset https_proxy",
+        "unset HTTP_PROXY",
+        "unset HTTPS_PROXY",
+        "unset all_proxy",
+        "unset ALL_PROXY",
+    )
+    for wrapper in WRAPPERS:
+        text = wrapper.read_text(encoding="utf-8")
+        assert all(command not in text for command in forbidden)
 
 
 def test_summary_wrapper_preserves_native_rank_then_rf_filters() -> None:
@@ -89,7 +262,8 @@ def test_summary_wrapper_preserves_native_rank_then_rf_filters() -> None:
 def test_all_wrapper_defaults_to_smoke_and_requires_full_opt_in() -> None:
     text = WRAPPERS[4].read_text(encoding="utf-8")
     assert 'PROFILE="${PROFILE:-smoke}"' in text
-    assert '"${ALLOW_FULL:-false}" != "true"' in text
+    assert '"${ALLOW_FULL:-false}" == "true"' in text
+    assert "full requires ALLOW_FULL=true" in text
     assert "prepare_mutagenicity_dataset.sh" in text
     assert "train_mutagenicity_gnn.sh" in text
     assert "reproduce_mutagenicity_vrrw.sh" in text
@@ -120,4 +294,3 @@ def test_runtime_reuses_official_algorithm_entrypoints() -> None:
     assert "vrrw.counterfactual_summary_with_randomwalk" in text
     assert "greedy_counterfactual_summary_from_covering_sets" in text
     assert "native_rank_reordered\": False" in text
-
