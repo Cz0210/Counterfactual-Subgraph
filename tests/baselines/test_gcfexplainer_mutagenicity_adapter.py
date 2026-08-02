@@ -5,8 +5,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from rdkit import Chem
+
+import src.baselines.gcfexplainer_mutagenicity_runtime as gcf_runtime
 
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
     EXPECTED_GENERATION_SOURCE_ROWS,
@@ -31,9 +34,9 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
     validate_gnn_profile,
     validate_vrrw_profile,
 )
-from src.baselines.gcfexplainer_mutagenicity_runtime import (
-    _clear_vrrw_config_failure_for_resume,
-)
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _canonical(smiles: str) -> str:
@@ -285,7 +288,10 @@ def test_resume_discards_only_stale_pre_generation_config_failure(
         json.dumps({"profile": "smoke", "M": 50000}),
         encoding="utf-8",
     )
-    assert _clear_vrrw_config_failure_for_resume(run_dir, resume=True) is True
+    assert gcf_runtime._clear_vrrw_config_failure_for_resume(
+        run_dir,
+        resume=True,
+    ) is True
     assert list(run_dir.iterdir()) == []
 
 
@@ -301,7 +307,187 @@ def test_resume_never_discards_started_vrrw_artifacts(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="will not discard"):
-        _clear_vrrw_config_failure_for_resume(run_dir, resume=True)
+        gcf_runtime._clear_vrrw_config_failure_for_resume(run_dir, resume=True)
+
+
+def _importance_fixture():
+    torch = pytest.importorskip("torch")
+    vrrw = SimpleNamespace(
+        torch=torch,
+        np=np,
+        input_graphs_covered=torch.tensor([1.0, 0.0]),
+        covering_graphs={"covered"},
+    )
+    hashes = ["covered", "new"]
+    coverage = torch.tensor(
+        [
+            [1.0, 0.0],
+            [1.0, 1.0],
+        ]
+    ).to_sparse()
+    predictions = np.array([0.25, 0.75], dtype=np.float64)
+    return vrrw, hashes, coverage, predictions
+
+
+def test_vrrw_alpha_one_uses_only_individual_coverage(monkeypatch) -> None:
+    vrrw, hashes, coverage, predictions = _importance_fixture()
+    expected = gcf_runtime._official_individual_coverage(vrrw, coverage)
+
+    def forbidden_cumulative(*_args, **_kwargs):
+        raise AssertionError("cumulative coverage must not run at alpha=1")
+
+    monkeypatch.setattr(
+        gcf_runtime,
+        "_official_cumulative_coverage",
+        forbidden_cumulative,
+    )
+    parts = np.column_stack((predictions, np.zeros_like(predictions)))
+    result = gcf_runtime._calculate_importance_endpoint_safe(
+        vrrw,
+        hashes,
+        parts,
+        coverage,
+        {"alpha": 1.0},
+    )
+    np.testing.assert_array_equal(parts[:, 1], expected)
+    np.testing.assert_array_equal(result, predictions * expected)
+
+
+def test_vrrw_alpha_zero_uses_only_cumulative_coverage(monkeypatch) -> None:
+    vrrw, hashes, coverage, predictions = _importance_fixture()
+    expected = gcf_runtime._official_cumulative_coverage(
+        vrrw,
+        hashes,
+        coverage,
+    )
+
+    def forbidden_individual(*_args, **_kwargs):
+        raise AssertionError("individual coverage must not run at alpha=0")
+
+    monkeypatch.setattr(
+        gcf_runtime,
+        "_official_individual_coverage",
+        forbidden_individual,
+    )
+    parts = np.column_stack((predictions, np.zeros_like(predictions)))
+    result = gcf_runtime._calculate_importance_endpoint_safe(
+        vrrw,
+        hashes,
+        parts,
+        coverage,
+        {"alpha": 0.0},
+    )
+    np.testing.assert_array_equal(parts[:, 1], expected)
+    np.testing.assert_array_equal(result, predictions * expected)
+
+
+def test_vrrw_weighted_alpha_matches_checked_in_official_formula() -> None:
+    vrrw, hashes, coverage, predictions = _importance_fixture()
+    individual = gcf_runtime._official_individual_coverage(vrrw, coverage)
+    cumulative = gcf_runtime._official_cumulative_coverage(
+        vrrw,
+        hashes,
+        coverage,
+    )
+    expected = 0.5 * individual + 0.5 * cumulative
+    parts = np.column_stack((predictions, np.zeros_like(predictions)))
+    result = gcf_runtime._calculate_importance_endpoint_safe(
+        vrrw,
+        hashes,
+        parts,
+        coverage,
+        {"alpha": 0.5},
+    )
+    np.testing.assert_array_equal(parts[:, 1], expected)
+    np.testing.assert_array_equal(result, predictions * expected)
+
+
+def test_vrrw_zero_coverage_falls_back_to_prediction_importance() -> None:
+    torch = pytest.importorskip("torch")
+    vrrw = SimpleNamespace(
+        torch=torch,
+        np=np,
+        input_graphs_covered=torch.zeros(2),
+        covering_graphs=set(),
+    )
+    coverage = torch.zeros((2, 2)).to_sparse()
+    predictions = np.array([0.2, 0.8], dtype=np.float64)
+    parts = np.column_stack((predictions, np.ones_like(predictions)))
+    result = gcf_runtime._calculate_importance_endpoint_safe(
+        vrrw,
+        ["a", "b"],
+        parts,
+        coverage,
+        {"alpha": 1.0},
+    )
+    np.testing.assert_array_equal(parts[:, 1], np.zeros(2))
+    np.testing.assert_array_equal(result, predictions)
+
+
+def test_vrrw_nonzero_coverage_uses_official_column_product() -> None:
+    vrrw, hashes, coverage, predictions = _importance_fixture()
+    parts = np.column_stack((predictions, np.zeros_like(predictions)))
+    result = gcf_runtime._calculate_importance_endpoint_safe(
+        vrrw,
+        hashes,
+        parts,
+        coverage,
+        {"alpha": 1.0},
+    )
+    np.testing.assert_array_equal(result, np.prod(parts, axis=1))
+
+
+def test_vrrw_endpoint_patch_restores_official_function() -> None:
+    def original(*_args, **_kwargs):
+        return "official"
+
+    vrrw = SimpleNamespace(calculate_importance=original)
+    with gcf_runtime._official_vrrw_alpha_endpoint_patch(vrrw):
+        assert vrrw.calculate_importance is not original
+    assert vrrw.calculate_importance is original
+
+
+def test_vrrw_endpoint_patch_restores_official_function_after_exception() -> None:
+    def original(*_args, **_kwargs):
+        return "official"
+
+    vrrw = SimpleNamespace(calculate_importance=original)
+    with pytest.raises(RuntimeError, match="synthetic VRRW failure"):
+        with gcf_runtime._official_vrrw_alpha_endpoint_patch(vrrw):
+            assert vrrw.calculate_importance is not original
+            raise RuntimeError("synthetic VRRW failure")
+    assert vrrw.calculate_importance is original
+
+
+def test_vrrw_compatibility_shim_does_not_modify_official_source() -> None:
+    official = ROOT / "baselines/gcfexplainer_official/vrrw.py"
+    text = official.read_text(encoding="utf-8")
+    assert "vrrw_alpha_endpoint_none_safe_v1" not in text
+    assert "def calculate_importance(" in text
+    assert "alpha * ind_coverage + (1 - alpha) * cum_coverage" in text
+
+
+def test_mutagenicity_vrrw_alpha_remains_exactly_one() -> None:
+    assert gcf_runtime._alpha_endpoint_branch(1.0) == "individual_only"
+    assert gcf_runtime._alpha_endpoint_branch(0.0) == "cumulative_only"
+    assert gcf_runtime._alpha_endpoint_branch(0.5) == "weighted"
+    validate_vrrw_profile(
+        "smoke",
+        parent_limit=64,
+        m=500,
+        alpha=1.0,
+        theta=0.05,
+        seed=13,
+    )
+    with pytest.raises(GCFExplainerVRRWConfigError):
+        validate_vrrw_profile(
+            "smoke",
+            parent_limit=64,
+            m=500,
+            alpha=0.999999,
+            theta=0.05,
+            seed=13,
+        )
 
 
 def test_csv_loader_enforces_split_teacher_and_forbidden_paths(tmp_path: Path) -> None:

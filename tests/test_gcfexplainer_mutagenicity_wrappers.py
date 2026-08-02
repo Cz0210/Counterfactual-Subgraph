@@ -294,3 +294,19 @@ def test_runtime_reuses_official_algorithm_entrypoints() -> None:
     assert "vrrw.counterfactual_summary_with_randomwalk" in text
     assert "greedy_counterfactual_summary_from_covering_sets" in text
     assert "native_rank_reordered\": False" in text
+
+
+def test_mutagenicity_runtime_scopes_alpha_endpoint_patch() -> None:
+    runtime = (
+        ROOT / "src/baselines/gcfexplainer_mutagenicity_runtime.py"
+    ).read_text(encoding="utf-8")
+    official = (
+        ROOT / "baselines/gcfexplainer_official/vrrw.py"
+    ).read_text(encoding="utf-8")
+    assert "vrrw_alpha_endpoint_none_safe_v1" in runtime
+    assert "official_compatibility_patches" in runtime
+    assert "alpha_endpoint_branch" in runtime
+    assert "[GCFEXPLAINER_OFFICIAL_COMPAT_PATCH]" in runtime
+    assert "with _official_vrrw_alpha_endpoint_patch(vrrw):" in runtime
+    assert "vrrw.calculate_importance = original_calculate_importance" in runtime
+    assert "vrrw_alpha_endpoint_none_safe_v1" not in official

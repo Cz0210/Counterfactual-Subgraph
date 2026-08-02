@@ -8,8 +8,9 @@ import random
 import shutil
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
     EXPECTED_GENERATION_SOURCE_ROWS,
@@ -44,6 +45,116 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
 OFFICIAL_VRRW_THETA = get_vrrw_profile_contract("smoke").theta
 OFFICIAL_SUMMARY_THETA = 0.1
 OFFICIAL_TELEPORT = 0.1
+VRRW_ALPHA_ENDPOINT_PATCH = "vrrw_alpha_endpoint_none_safe_v1"
+
+
+def _alpha_endpoint_branch(alpha: float) -> str:
+    resolved_alpha = float(alpha)
+    if not 0.0 <= resolved_alpha <= 1.0:
+        raise ValueError(f"VRRW alpha must be in [0, 1], found {resolved_alpha}.")
+    if resolved_alpha == 1.0:
+        return "individual_only"
+    if resolved_alpha == 0.0:
+        return "cumulative_only"
+    return "weighted"
+
+
+def _official_individual_coverage(
+    vrrw: Any,
+    coverage_matrices: Any,
+) -> Any:
+    coverage = (
+        coverage_matrices.to_dense().sum(dim=1)
+        / vrrw.input_graphs_covered.shape[0]
+    )
+    return coverage.numpy()
+
+
+def _official_cumulative_coverage(
+    vrrw: Any,
+    hashes: Sequence[Any],
+    coverage_matrices: Any,
+) -> Any:
+    belong = vrrw.torch.Tensor(
+        [hash_ in vrrw.covering_graphs for hash_ in hashes]
+    )
+    support = (
+        coverage_matrices.to_dense()
+        + (coverage_matrices.to_dense().T * belong).T
+        - vrrw.input_graphs_covered
+    )
+    selected = vrrw.torch.maximum(
+        vrrw.torch.zeros(vrrw.input_graphs_covered.shape),
+        support,
+    )
+    coverage = selected.sum(dim=1) / vrrw.input_graphs_covered.shape[0]
+    return coverage.numpy()
+
+
+def _calculate_importance_endpoint_safe(
+    vrrw: Any,
+    hashes: Sequence[Any],
+    importances: Any,
+    coverage_matrices: Any,
+    importance_args: Mapping[str, Any],
+) -> Any:
+    """Preserve official importance arithmetic without multiplying by None."""
+
+    resolved_alpha = float(importance_args["alpha"])
+    branch = _alpha_endpoint_branch(resolved_alpha)
+    if branch == "individual_only":
+        combined_coverage = _official_individual_coverage(
+            vrrw,
+            coverage_matrices,
+        )
+    elif branch == "cumulative_only":
+        combined_coverage = _official_cumulative_coverage(
+            vrrw,
+            hashes,
+            coverage_matrices,
+        )
+    else:
+        individual = _official_individual_coverage(vrrw, coverage_matrices)
+        cumulative = _official_cumulative_coverage(
+            vrrw,
+            hashes,
+            coverage_matrices,
+        )
+        # The checked-in official implementation combines both positive
+        # coverage terms with '+'. Keep that exact interior-alpha semantics.
+        combined_coverage = (
+            resolved_alpha * individual
+            + (1.0 - resolved_alpha) * cumulative
+        )
+    importances[:, 1] = combined_coverage
+    if importances[:, 1].sum() == 0:
+        return importances[:, 0]
+    return vrrw.np.prod(importances, axis=1)
+
+
+@contextmanager
+def _official_vrrw_alpha_endpoint_patch(vrrw: Any) -> Iterator[None]:
+    original_calculate_importance = vrrw.calculate_importance
+
+    def endpoint_safe_calculate_importance(
+        hashes: Sequence[Any],
+        importances: Any,
+        coverage_matrices: Any,
+        importance_args: Mapping[str, Any],
+    ) -> Any:
+        return _calculate_importance_endpoint_safe(
+            vrrw,
+            hashes,
+            importances,
+            coverage_matrices,
+            importance_args,
+        )
+
+    vrrw.calculate_importance = endpoint_safe_calculate_importance
+    try:
+        yield
+    finally:
+        vrrw.calculate_importance = original_calculate_importance
 
 
 def _runtime_stack() -> tuple[Any, Any, Any]:
@@ -507,6 +618,7 @@ def run_official_vrrw(
         )
     if not math.isclose(float(teleport), OFFICIAL_TELEPORT, rel_tol=0.0, abs_tol=0.0):
         raise ValueError("Official VRRW teleport probability must be 0.1.")
+    alpha_endpoint_branch = _alpha_endpoint_branch(alpha)
     checkpoint = Path(gnn_checkpoint).expanduser().resolve()
     neurosed = Path(neurosed_checkpoint).expanduser().resolve()
     if checkpoint_is_aids(checkpoint):
@@ -535,6 +647,7 @@ def run_official_vrrw(
         "generation_source_cohort_hash": cohort_hash(selected),
         "M": int(m),
         "alpha": float(alpha),
+        "alpha_endpoint_branch": alpha_endpoint_branch,
         "theta": float(theta),
         "theta_source": "official_vrrw_mutagenicity_default",
         "distance_normalization": "neurosed_divided_by_sum_graph_element_counts",
@@ -548,6 +661,7 @@ def run_official_vrrw(
         "calibration_loaded": False,
         "test_loaded": False,
         "resume_mode": "deterministic_restart_from_seed",
+        "official_compatibility_patches": [VRRW_ALPHA_ENDPOINT_PATCH],
     }
     fingerprint = stable_json_sha256(config)
     config["config_fingerprint"] = fingerprint
@@ -679,12 +793,18 @@ def run_official_vrrw(
             dataset_name="mutagenicity",
         )
         vrrw.importance_args = importance_args
-        vrrw.counterfactual_summary_with_randomwalk(
-            input_graphs=graphs,
-            importance_args=importance_args,
-            teleport_probability=float(teleport),
-            max_steps=int(m),
-        )
+        print("[GCFEXPLAINER_OFFICIAL_COMPAT_PATCH]", flush=True)
+        print(f"patch={VRRW_ALPHA_ENDPOINT_PATCH}", flush=True)
+        print("dataset=mutagenicity", flush=True)
+        print(f"alpha={float(alpha)}", flush=True)
+        print("official_source_modified=false", flush=True)
+        with _official_vrrw_alpha_endpoint_patch(vrrw):
+            vrrw.counterfactual_summary_with_randomwalk(
+                input_graphs=graphs,
+                importance_args=importance_args,
+                teleport_probability=float(teleport),
+                max_steps=int(m),
+            )
     finally:
         os.chdir(old_cwd)
         distance.load_neurosed = original_load_neurosed
