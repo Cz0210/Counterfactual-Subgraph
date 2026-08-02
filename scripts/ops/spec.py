@@ -216,6 +216,22 @@ def _validate_adopt_path_under(
         ) from exc
 
 
+def _validate_external_manifest_artifact(value: str) -> None:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or value == "."
+        or path.is_absolute()
+        or ".." in path.parts
+        or any(token in value for token in ("*", "?", "[", "]"))
+        or path.as_posix() != value
+    ):
+        raise SpecValidationError(
+            "allowed_external_manifest_artifacts entries must be exact, "
+            f"normalized repository-relative file paths: {value!r}"
+        )
+
+
 def semantic_validate(data: dict[str, Any]) -> None:
     task_id = str(data["task_id"])
     if not TASK_ID_PATTERN.fullmatch(task_id):
@@ -313,6 +329,8 @@ def semantic_validate(data: dict[str, Any]) -> None:
             _validate_adopt_path_under(
                 str(value), output_root, field="jsonl_row_counts"
             )
+        for value in adopt["allowed_external_manifest_artifacts"]:
+            _validate_external_manifest_artifact(str(value))
     for key in ("auto_until", "stop_before"):
         value = data["execution"].get(key)
         if value is not None and value not in stage_ids:

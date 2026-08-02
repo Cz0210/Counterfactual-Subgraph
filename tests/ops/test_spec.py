@@ -48,6 +48,10 @@ def test_example_and_clear_specs_validate() -> None:
     assert adopt["expected_generation_commit"] == (
         "f83f701a03306ba6ab0008ea61ce0cc34a2defca"
     )
+    assert adopt["allowed_external_manifest_artifacts"] == [
+        "baselines/clear_official/dataset/mutagenicity_full.pickle",
+        "baselines/clear_official/dataset/mutagenicity_datasplit.pickle",
+    ]
     assert "phase_b_gpu_smoke" not in adopt["stages"]
 
 

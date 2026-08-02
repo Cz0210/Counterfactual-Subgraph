@@ -50,21 +50,72 @@ def _resolve_project_path(project_root: Path, value: str) -> Path:
     return candidate.resolve(strict=False)
 
 
+def _allowed_external_artifact_paths(
+    project_root: Path,
+    output_root: Path,
+    values: Sequence[str],
+) -> dict[Path, str]:
+    resolved_paths: dict[Path, str] = {}
+    for raw_value in values:
+        value = str(raw_value)
+        relative = PurePosixPath(value)
+        if (
+            not value
+            or value == "."
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or any(token in value for token in ("*", "?", "[", "]"))
+            or relative.as_posix() != value
+        ):
+            raise AdoptExistingVerificationError(
+                "External manifest artifact allowlist entries must be exact, "
+                f"normalized repository-relative file paths: {value!r}"
+            )
+        resolved = (project_root / Path(value)).resolve(strict=False)
+        if not _path_under(resolved, project_root):
+            raise AdoptExistingVerificationError(
+                "External manifest artifact escapes project root through its "
+                f"path or a symlink: {value!r}"
+            )
+        if _path_under(resolved, output_root):
+            raise AdoptExistingVerificationError(
+                "External manifest artifact allowlist entry is already under "
+                f"output_root: {value!r}"
+            )
+        if resolved in resolved_paths:
+            raise AdoptExistingVerificationError(
+                "External manifest artifact allowlist entries resolve to the "
+                f"same file: {resolved_paths[resolved]!r}, {value!r}"
+            )
+        resolved_paths[resolved] = value
+    return resolved_paths
+
+
 def _resolve_artifact_path(
-    project_root: Path, output_root: Path, value: str
-) -> Path:
+    project_root: Path,
+    output_root: Path,
+    value: str,
+    allowed_external_paths: Mapping[Path, str],
+) -> tuple[Path, str]:
     candidate = Path(value)
     if candidate.is_absolute():
         resolved = candidate.resolve(strict=False)
-    elif value == output_root.name or value.startswith("outputs/"):
-        resolved = (project_root / candidate).resolve(strict=False)
     else:
-        resolved = (output_root / candidate).resolve(strict=False)
-    if not _path_under(resolved, output_root):
-        raise AdoptExistingVerificationError(
-            f"Manifest artifact escapes output_root: {value!r}"
-        )
-    return resolved
+        project_candidate = (project_root / candidate).resolve(strict=False)
+        if project_candidate in allowed_external_paths:
+            resolved = project_candidate
+        elif value == output_root.name or value.startswith("outputs/"):
+            resolved = project_candidate
+        else:
+            resolved = (output_root / candidate).resolve(strict=False)
+    if _path_under(resolved, output_root):
+        return resolved, "output_root"
+    if resolved in allowed_external_paths:
+        return resolved, "allowed_external_manifest_artifact"
+    raise AdoptExistingVerificationError(
+        "Manifest artifact escapes output_root and is not an exact allowed "
+        f"external artifact: {value!r}"
+    )
 
 
 def _extract_commit(payload: Mapping[str, Any]) -> str | None:
@@ -152,6 +203,19 @@ def verify_existing_artifacts(
             f"Unsupported adoption mode: {config.get('mode')!r}"
         )
     output_root = _resolve_project_path(root, str(config["output_root"]))
+    if not _path_under(output_root, root):
+        raise AdoptExistingVerificationError(
+            f"Adoption output_root escapes project root: {output_root}"
+        )
+    allowed_external_values = [
+        str(value)
+        for value in (
+            config.get("allowed_external_manifest_artifacts") or []
+        )
+    ]
+    allowed_external_paths = _allowed_external_artifact_paths(
+        root, output_root, allowed_external_values
+    )
     completion_path = _resolve_project_path(
         root, str(config["completion_marker"])
     )
@@ -238,6 +302,8 @@ def verify_existing_artifacts(
         failures.append("current_local_remote_commit_mismatch")
 
     verified_paths: set[Path] = set()
+    manifested_external_paths: set[Path] = set()
+    verified_external_paths: set[Path] = set()
     if manifest:
         try:
             entries = _manifest_entries(manifest)
@@ -246,37 +312,71 @@ def verify_existing_artifacts(
             entries = []
         for entry in entries:
             try:
-                path = _resolve_artifact_path(
-                    root, output_root, str(entry["path"])
+                path, scope = _resolve_artifact_path(
+                    root,
+                    output_root,
+                    str(entry["path"]),
+                    allowed_external_paths,
                 )
             except AdoptExistingVerificationError as exc:
                 failures.append(f"manifest_path_error:{exc}")
+                artifact_checks.append(
+                    {
+                        "manifest_path": str(entry["path"]),
+                        "path": None,
+                        "scope": "rejected",
+                        "expected_size": entry["expected_size"],
+                        "actual_size": None,
+                        "expected_sha256": entry["expected_sha256"],
+                        "actual_sha256": None,
+                        "exists": False,
+                        "regular_file": False,
+                        "size_matches": False,
+                        "sha256_matches": False,
+                    }
+                )
                 continue
-            exists = path.is_file()
-            actual_size = path.stat().st_size if exists else None
-            actual_sha256 = _sha256_file(path) if exists else None
+            if scope == "allowed_external_manifest_artifact":
+                manifested_external_paths.add(path)
+            exists = path.exists()
+            regular_file = path.is_file()
+            actual_size = path.stat().st_size if regular_file else None
+            actual_sha256 = _sha256_file(path) if regular_file else None
             size_matches = actual_size == entry["expected_size"]
             sha_matches = actual_sha256 == entry["expected_sha256"]
             artifact_checks.append(
                 {
+                    "manifest_path": str(entry["path"]),
                     "path": str(path),
+                    "scope": scope,
                     "expected_size": entry["expected_size"],
                     "actual_size": actual_size,
                     "expected_sha256": entry["expected_sha256"],
                     "actual_sha256": actual_sha256,
                     "exists": exists,
+                    "regular_file": regular_file,
                     "size_matches": size_matches,
                     "sha256_matches": sha_matches,
                 }
             )
             if not exists:
                 failures.append(f"artifact_missing:{entry['path']}")
+            elif not regular_file:
+                failures.append(f"artifact_not_regular_file:{entry['path']}")
             elif not size_matches:
                 failures.append(f"artifact_size_mismatch:{entry['path']}")
             elif not sha_matches:
                 failures.append(f"artifact_sha256_mismatch:{entry['path']}")
             else:
                 verified_paths.add(path)
+                if scope == "allowed_external_manifest_artifact":
+                    verified_external_paths.add(path)
+
+    for path, declared in allowed_external_paths.items():
+        if path not in manifested_external_paths:
+            failures.append(
+                f"allowed_external_artifact_not_manifested:{declared}"
+            )
 
     alias_checks: list[dict[str, Any]] = []
     for current, legacy in aliases.items():
@@ -427,6 +527,11 @@ def verify_existing_artifacts(
         and bool(config.get("allow_missing_current_markers", False))
         and not failures
     )
+    external_artifact_checks = [
+        check
+        for check in artifact_checks
+        if check["scope"] == "allowed_external_manifest_artifact"
+    ]
     evidence = {
         "schema_version": 1,
         "mode": SUPPORTED_MODE,
@@ -441,6 +546,24 @@ def verify_existing_artifacts(
         "completion_generation_commit": completion_commit,
         "artifact_count": len(artifact_checks),
         "artifacts": artifact_checks,
+        "allowed_external_manifest_artifacts": allowed_external_values,
+        "external_artifact_count": len(external_artifact_checks),
+        "external_artifacts_verified": (
+            len(external_artifact_checks) == len(allowed_external_paths)
+            and set(allowed_external_paths) == verified_external_paths
+            and all(
+                check["regular_file"]
+                and check["size_matches"]
+                and check["sha256_matches"]
+                for check in external_artifact_checks
+            )
+        ),
+        "external_artifact_verified_paths": [
+            value
+            for value in allowed_external_values
+            if (root / Path(value)).resolve(strict=False)
+            in verified_external_paths
+        ],
         "scientific_field_checks": scientific_checks,
         "stage_gate_checks": stage_gate_checks,
         "jsonl_row_checks": jsonl_checks,

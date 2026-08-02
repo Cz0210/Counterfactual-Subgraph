@@ -1050,6 +1050,9 @@ def _adoption_verification_config(
         "finalized_marker": adopt["finalized_marker"],
         "expected_generation_commit": adopt["expected_generation_commit"],
         "artifact_aliases": dict(adopt["artifact_aliases"]),
+        "allowed_external_manifest_artifacts": list(
+            adopt["allowed_external_manifest_artifacts"]
+        ),
         "jsonl_row_counts": dict(adopt["jsonl_row_counts"]),
         "allow_missing_current_markers": adopt[
             "allow_missing_current_markers"

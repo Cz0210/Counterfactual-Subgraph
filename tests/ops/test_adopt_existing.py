@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
@@ -26,6 +28,10 @@ LEGACY_COMMIT = "f83f701a03306ba6ab0008ea61ce0cc34a2defca"
 CURRENT_COMMIT = "d" * 40
 OUTPUT_REL = Path(
     "outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2"
+)
+EXTERNAL_ARTIFACT_RELS = (
+    Path("baselines/clear_official/dataset/mutagenicity_full.pickle"),
+    Path("baselines/clear_official/dataset/mutagenicity_datasplit.pickle"),
 )
 
 
@@ -115,6 +121,7 @@ def legacy_fixture(tmp_path: Path) -> tuple[Path, dict]:
                 f"{legacy_probe}/codec_probe_rows.jsonl"
             ),
         },
+        "allowed_external_manifest_artifacts": [],
         "jsonl_row_counts": {
             f"{current_probe}/codec_probe_rows.jsonl": 64
         },
@@ -169,6 +176,31 @@ def legacy_fixture(tmp_path: Path) -> tuple[Path, dict]:
     return project, config
 
 
+def add_external_manifest_artifacts(
+    project: Path, config: dict
+) -> list[Path]:
+    manifest_path = project / OUTPUT_REL / "phase_a_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paths: list[Path] = []
+    for index, relative in enumerate(EXTERNAL_ARTIFACT_RELS):
+        path = project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"external-pickle-{index}\n".encode("utf-8"))
+        manifest["artifacts"].append(
+            {
+                "path": str(path.resolve()),
+                "size": path.stat().st_size,
+                "sha256": _sha(path),
+            }
+        )
+        paths.append(path)
+    _write_json(manifest_path, manifest)
+    config["allowed_external_manifest_artifacts"] = [
+        value.as_posix() for value in EXTERNAL_ARTIFACT_RELS
+    ]
+    return paths
+
+
 def verify(project: Path, config: dict, commit: str = CURRENT_COMMIT) -> dict:
     return verify_existing_artifacts(
         project, config, current_remote_commit=commit
@@ -196,6 +228,158 @@ def test_successful_legacy_verification_is_complete_and_read_only(
     assert evidence["accepted_via_legacy_manifest_integrity"] is True
     assert evidence["legacy_generation_commit"] == LEGACY_COMMIT
     assert before == after
+
+
+def test_exact_external_manifest_artifacts_pass_full_integrity_gate(
+    tmp_path: Path,
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    add_external_manifest_artifacts(project, config)
+    evidence = verify(project, config)
+    assert evidence["verification_passed"] is True
+    assert evidence["artifact_count"] == 5
+    assert evidence["external_artifact_count"] == 2
+    assert evidence["external_artifacts_verified"] is True
+    assert evidence["external_artifact_verified_paths"] == [
+        value.as_posix() for value in EXTERNAL_ARTIFACT_RELS
+    ]
+    scopes = [row["scope"] for row in evidence["artifacts"]]
+    assert scopes.count("output_root") == 3
+    assert scopes.count("allowed_external_manifest_artifact") == 2
+    assert all(row["regular_file"] for row in evidence["artifacts"])
+    assert all(row["size_matches"] for row in evidence["artifacts"])
+    assert all(row["sha256_matches"] for row in evidence["artifacts"])
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "unlisted_third.pickle",
+        "mutagenicity_full_copy.pickle",
+        "mutagenicity_full.pickle.evil",
+    ),
+)
+def test_external_manifest_artifact_requires_exact_file_allowlist_match(
+    tmp_path: Path, name: str
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    add_external_manifest_artifacts(project, config)
+    path = project / "baselines/clear_official/dataset" / name
+    path.write_bytes(b"unlisted\n")
+    manifest_path = project / OUTPUT_REL / "phase_a_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"].append(
+        {
+            "path": str(path.resolve()),
+            "size": path.stat().st_size,
+            "sha256": _sha(path),
+        }
+    )
+    _write_json(manifest_path, manifest)
+    evidence = verify(project, config)
+    assert evidence["verification_passed"] is False
+    assert any(
+        failure.startswith("manifest_path_error:")
+        for failure in evidence["failed_hard_checks"]
+    )
+
+
+def test_manifest_artifact_outside_repository_is_rejected(
+    tmp_path: Path,
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    outside = tmp_path / "outside.pickle"
+    outside.write_bytes(b"outside\n")
+    manifest_path = project / OUTPUT_REL / "phase_a_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"].append(
+        {
+            "path": str(outside.resolve()),
+            "size": outside.stat().st_size,
+            "sha256": _sha(outside),
+        }
+    )
+    _write_json(manifest_path, manifest)
+    failures = verify(project, config)["failed_hard_checks"]
+    assert any(value.startswith("manifest_path_error:") for value in failures)
+
+
+def test_external_allowlist_parent_symlink_escape_is_rejected(
+    tmp_path: Path,
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "mutagenicity_full.pickle").write_bytes(b"outside\n")
+    link = project / "baselines/clear_official/dataset"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside, target_is_directory=True)
+    config["allowed_external_manifest_artifacts"] = [
+        EXTERNAL_ARTIFACT_RELS[0].as_posix()
+    ]
+    with pytest.raises(
+        ValueError, match="escapes project root through its path or a symlink"
+    ):
+        verify(project, config)
+
+
+def test_external_manifest_artifact_missing_fails(tmp_path: Path) -> None:
+    project, config = legacy_fixture(tmp_path)
+    paths = add_external_manifest_artifacts(project, config)
+    paths[0].unlink()
+    failures = verify(project, config)["failed_hard_checks"]
+    assert any(value.startswith("artifact_missing:") for value in failures)
+
+
+def test_external_manifest_allowlist_requires_a_regular_file(
+    tmp_path: Path,
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    relative = Path("baselines/clear_official/dataset/not_a_file.pickle")
+    directory = project / relative
+    directory.mkdir(parents=True)
+    manifest_path = project / OUTPUT_REL / "phase_a_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"].append(
+        {
+            "path": str(directory.resolve()),
+            "size": 0,
+            "sha256": "0" * 64,
+        }
+    )
+    _write_json(manifest_path, manifest)
+    config["allowed_external_manifest_artifacts"] = [relative.as_posix()]
+    evidence = verify(project, config)
+    assert evidence["external_artifacts_verified"] is False
+    assert any(
+        value.startswith("artifact_not_regular_file:")
+        for value in evidence["failed_hard_checks"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "failure_prefix"),
+    (
+        ("size", 999_999, "artifact_size_mismatch:"),
+        ("sha256", "0" * 64, "artifact_sha256_mismatch:"),
+    ),
+)
+def test_external_manifest_integrity_mismatch_fails(
+    tmp_path: Path,
+    field: str,
+    replacement: int | str,
+    failure_prefix: str,
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    paths = add_external_manifest_artifacts(project, config)
+    manifest_path = project / OUTPUT_REL / "phase_a_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = str(paths[0].resolve())
+    row = next(item for item in manifest["artifacts"] if item["path"] == target)
+    row[field] = replacement
+    _write_json(manifest_path, manifest)
+    failures = verify(project, config)["failed_hard_checks"]
+    assert any(value.startswith(failure_prefix) for value in failures)
 
 
 @pytest.mark.parametrize(
@@ -391,6 +575,33 @@ def test_alias_path_traversal_is_rejected(tmp_path: Path) -> None:
         load_task_spec(path)
 
 
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        "../outside.pickle",
+        "/absolute/outside.pickle",
+        "baselines/clear_official/dataset/*.pickle",
+        "baselines/clear_official/dataset/file?.pickle",
+        "baselines/clear_official/dataset/file[0].pickle",
+    ),
+)
+def test_external_manifest_allowlist_rejects_unsafe_spec_paths(
+    tmp_path: Path, unsafe_path: str
+) -> None:
+    payload = yaml.safe_load(
+        (ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["adopt_existing"]["allowed_external_manifest_artifacts"] = [
+        unsafe_path
+    ]
+    path = tmp_path / "bad-external.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="repository-relative file paths"):
+        load_task_spec(path)
+
+
 class ExplodingRunner:
     calls: list[list[str]] = []
 
@@ -434,6 +645,16 @@ def test_adopt_dry_run_has_contract_and_no_execution(
     assert runner.calls == []
     assert "BatchMode=yes" in result["verification_argv"]
     assert "ClearAllForwardings=yes" in result["verification_argv"]
+    match = re.search(
+        r"--config-b64 ([A-Za-z0-9+/=]+)", result["remote_script"]
+    )
+    assert match is not None
+    remote_config = json.loads(
+        base64.b64decode(match.group(1)).decode("utf-8")
+    )
+    assert remote_config["allowed_external_manifest_artifacts"] == [
+        value.as_posix() for value in EXTERNAL_ARTIFACT_RELS
+    ]
     syntax = subprocess.run(
         ["bash", "-n"],
         input=result["remote_script"],

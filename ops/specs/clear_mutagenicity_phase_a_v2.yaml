@@ -69,6 +69,9 @@ adopt_existing:
   artifact_aliases:
     outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_summary.json: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe_64/codec_probe_summary.json
     outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_rows.jsonl: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe_64/codec_probe_rows.jsonl
+  allowed_external_manifest_artifacts:
+    - baselines/clear_official/dataset/mutagenicity_full.pickle
+    - baselines/clear_official/dataset/mutagenicity_datasplit.pickle
   jsonl_row_counts:
     outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_rows.jsonl: 64
   allow_missing_current_markers: true
