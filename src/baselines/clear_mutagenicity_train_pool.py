@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from enum import Enum
 import hashlib
 import json
 import math
@@ -41,6 +42,7 @@ TARGET_LABEL = 0
 EXPECTED_MODEL_TRAIN_ROWS = 2885
 EXPECTED_MODEL_VAL_ROWS = 355
 EXPECTED_GENERATION_PARENT_ROWS = 1448
+SMOKE_GENERATION_PARENT_ROWS = 64
 REQUIRED_OUTPUTS = (
     "raw_generated_candidates.jsonl",
     "invalid_candidates.jsonl",
@@ -62,6 +64,13 @@ class ClearMutagenicityTrainPoolError(RuntimeError):
 
 class ClearMutagenicityEmptyPoolError(ClearMutagenicityTrainPoolError):
     """Raised when CLEAR produced no RF-valid target candidates."""
+
+
+class GenerationProfile(str, Enum):
+    """Closed set of train-only generation cohort contracts."""
+
+    SMOKE = "smoke"
+    FULL = "full"
 
 
 class TeacherProtocol(Protocol):
@@ -92,7 +101,7 @@ class TrainPoolConfig:
     expected_generation_parent_rows: int = EXPECTED_GENERATION_PARENT_ROWS
 
     def validate_smoke(self) -> None:
-        if int(self.parent_limit) != 64:
+        if int(self.parent_limit) != SMOKE_GENERATION_PARENT_ROWS:
             raise ValueError(
                 "Phase B is intentionally limited to the 64-parent smoke; "
                 f"found parent_limit={self.parent_limit}."
@@ -107,6 +116,40 @@ class TrainPoolConfig:
                 raise ValueError(f"{field_name} must be positive.")
         if int(self.num_workers) != 0:
             raise ValueError("Phase B generation/training num_workers must be 0.")
+
+    def validate_generation_contract(
+        self, profile: str | GenerationProfile
+    ) -> GenerationProfile:
+        try:
+            resolved = GenerationProfile(profile)
+        except ValueError as exc:
+            raise ValueError(
+                f"Unsupported generation profile: {profile!r}."
+            ) from exc
+        expected_parent_limit = {
+            GenerationProfile.SMOKE: SMOKE_GENERATION_PARENT_ROWS,
+            GenerationProfile.FULL: EXPECTED_GENERATION_PARENT_ROWS,
+        }[resolved]
+        if int(self.parent_limit) != expected_parent_limit:
+            raise ValueError(
+                f"Generation profile {resolved.value!r} requires "
+                f"parent_limit={expected_parent_limit}; found "
+                f"parent_limit={self.parent_limit}."
+            )
+        if int(self.generation_chunk_size) != 16:
+            raise ValueError(
+                f"Generation profile {resolved.value!r} requires "
+                "generation_chunk_size=16."
+            )
+        if int(self.seed) != 13:
+            raise ValueError(
+                f"Generation profile {resolved.value!r} requires seed=13."
+            )
+        if int(self.batch_size) <= 0:
+            raise ValueError("batch_size must be positive.")
+        if int(self.num_workers) != 0:
+            raise ValueError("Generation num_workers must be 0.")
+        return resolved
 
     def identity(self) -> dict[str, Any]:
         return asdict(self)
@@ -721,7 +764,9 @@ def build_empty_pool_failure_summary(
     universe_rows: Sequence[dict[str, Any]],
     feature_summary: dict[str, Any],
     checkpoint_provenance: dict[str, Any] | None,
+    generation_profile: str | GenerationProfile = GenerationProfile.SMOKE,
 ) -> dict[str, Any]:
+    profile = GenerationProfile(generation_profile)
     invalid_reasons = Counter(
         str(row.get("codec_error_type") or "unknown") for row in invalid_rows
     )
@@ -763,6 +808,7 @@ def build_empty_pool_failure_summary(
         "calibration_loaded": False,
         "test_loaded": False,
         "codec_version": GENERATED_CODEC_VERSION,
+        "generation_profile": profile.value,
         "run_complete": False,
     }
 
@@ -782,10 +828,11 @@ def run_streaming_generation(
     config_fingerprint: str,
     model_checkpoint_hash: str,
     checkpoint_provenance: dict[str, Any] | None = None,
+    generation_profile: str | GenerationProfile = GenerationProfile.SMOKE,
 ) -> dict[str, Any]:
     """Generate, decode, score, and persist one deterministic chunk at a time."""
 
-    config.validate_smoke()
+    profile = config.validate_generation_contract(generation_profile)
     destination = Path(output_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     parts = _empty_parts(destination)
@@ -799,6 +846,7 @@ def run_streaming_generation(
         "selected_parent_hash": selected_hash,
         "model_checkpoint_hash": model_checkpoint_hash,
         "generation_chunk_size": int(config.generation_chunk_size),
+        "generation_profile": profile.value,
         "selected_parent_ids": parent_ids,
     }
     row_counts = {name: 0 for name in parts}
@@ -826,6 +874,7 @@ def run_streaming_generation(
         return {
             "selected_generation_parents": len(parents),
             "generation_chunk_size": int(config.generation_chunk_size),
+            "generation_profile": profile.value,
             "completed_chunk_count": int(
                 math.ceil(len(parents) / int(config.generation_chunk_size))
             ),
@@ -960,6 +1009,7 @@ def run_streaming_generation(
             universe_rows=universe,
             feature_summary=feature_summary,
             checkpoint_provenance=checkpoint_provenance,
+            generation_profile=profile,
         )
         write_json(destination / "failure_summary.json", failure_summary)
         write_json(
@@ -969,6 +1019,7 @@ def run_streaming_generation(
                 "failure": "empty_candidate_pool",
                 "failed_at": utc_now(),
                 "codec_version": GENERATED_CODEC_VERSION,
+                "generation_profile": profile.value,
             },
         )
         write_json(
@@ -1000,6 +1051,7 @@ def run_streaming_generation(
             "candidate_pool_rows": len(pool_rows),
             "candidate_universe_rows": len(universe),
             "codec_version": GENERATED_CODEC_VERSION,
+            "generation_profile": profile.value,
             "updated_at": utc_now(),
             "run_complete": True,
         },
@@ -1028,9 +1080,23 @@ def audit_train_pool(
     expected_model_val_rows: int = EXPECTED_MODEL_VAL_ROWS,
     expected_generation_parent_rows: int = EXPECTED_GENERATION_PARENT_ROWS,
     expected_selected_parents: int = 64,
+    expected_generation_profile: str | GenerationProfile = (
+        GenerationProfile.SMOKE
+    ),
+    require_generation_only: bool = False,
     require_complete: bool = True,
     teacher: TeacherProtocol | None = None,
 ) -> dict[str, Any]:
+    profile = GenerationProfile(expected_generation_profile)
+    expected_profile_parent_count = {
+        GenerationProfile.SMOKE: SMOKE_GENERATION_PARENT_ROWS,
+        GenerationProfile.FULL: EXPECTED_GENERATION_PARENT_ROWS,
+    }[profile]
+    if int(expected_selected_parents) != expected_profile_parent_count:
+        raise AssertionError(
+            f"Generation profile {profile.value!r} requires "
+            f"expected_selected_parents={expected_profile_parent_count}."
+        )
     root = Path(run_dir).expanduser().resolve()
     summary = read_json(root / "summary.json")
     manifest = read_json(root / "run_manifest.json")
@@ -1140,6 +1206,42 @@ def audit_train_pool(
         expected_selected_parents
     ):
         raise AssertionError("Selected generation parent count mismatch.")
+    if int(summary.get("generation_source_parent_rows", -1)) != len(parents):
+        raise AssertionError("Generation source parent row count mismatch.")
+    summary_chunk_size = int(summary.get("generation_chunk_size", -1))
+    if summary_chunk_size != 16:
+        raise AssertionError("Summary generation chunk size must be 16.")
+    expected_chunks = math.ceil(
+        int(expected_selected_parents) / summary_chunk_size
+    )
+    if int(summary.get("completed_chunk_count", -1)) != expected_chunks:
+        raise AssertionError("Summary completed chunk count mismatch.")
+    if int(progress.get("completed_chunk_count", -1)) != expected_chunks:
+        raise AssertionError("Progress completed chunk count mismatch.")
+    if int(progress.get("selected_parent_count", -1)) != int(
+        expected_selected_parents
+    ):
+        raise AssertionError("Progress selected parent count mismatch.")
+    for name, payload in (
+        ("summary", summary),
+        ("manifest", manifest),
+        ("generation_progress", progress),
+    ):
+        if payload.get("generation_profile") != profile.value:
+            raise AssertionError(
+                f"{name} generation_profile mismatch: "
+                f"{payload.get('generation_profile')!r} != {profile.value!r}."
+            )
+    generation_only = bool(manifest.get("generation_only", False))
+    if require_generation_only and not generation_only:
+        raise AssertionError("Audit requires generation_only=true.")
+    if generation_only:
+        for name, payload in (("summary", summary), ("manifest", manifest)):
+            if payload.get("model_training_performed") is not False:
+                raise AssertionError(
+                    f"{name} must record model_training_performed=false for "
+                    "generation-only."
+                )
     for name, value in dict(manifest.get("inputs", {})).items():
         basename = Path(str(value)).name.lower()
         if any(
@@ -1181,6 +1283,12 @@ def audit_train_pool(
         "model_val_rows": int(summary["model_val_rows"]),
         "generation_source_rows": len(parents),
         "selected_generation_parents": len(selected),
+        "generation_profile": profile.value,
+        "generation_only": generation_only,
+        "model_training_performed": manifest.get(
+            "model_training_performed"
+        ),
+        "completed_chunk_count": expected_chunks,
         "candidate_pool_rows": len(pool),
         "candidate_universe_rows": len(universe),
         "candidate_source_parent_rows": len(pool_parent_ids),
@@ -1204,6 +1312,7 @@ __all__ = [
     "ClearMutagenicityEmptyPoolError",
     "ClearMutagenicityTrainPoolError",
     "GeneratedGraph",
+    "GenerationProfile",
     "TrainPoolConfig",
     "audit_train_pool",
     "build_empty_pool_failure_summary",

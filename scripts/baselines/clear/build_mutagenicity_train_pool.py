@@ -33,6 +33,7 @@ from src.baselines.clear_mutagenicity_train_pool import (  # noqa: E402
     EXPECTED_MODEL_TRAIN_ROWS,
     EXPECTED_MODEL_VAL_ROWS,
     GeneratedGraph,
+    GenerationProfile,
     TrainPoolConfig,
     audit_train_pool,
     cohort_hash,
@@ -86,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--generation-only", action="store_true")
+    parser.add_argument(
+        "--generation-profile",
+        choices=[profile.value for profile in GenerationProfile],
+        default=GenerationProfile.SMOKE.value,
+        help="Closed generation cohort contract; defaults safely to smoke.",
+    )
     parser.add_argument("--graphpred-checkpoint", default=None)
     parser.add_argument("--graphcfe-checkpoint", default=None)
     parser.add_argument("--source-run-root", default=None)
@@ -111,6 +118,23 @@ def _required_dir(path_like: str | Path, label: str) -> Path:
     if not path.is_dir():
         raise FileNotFoundError(f"{label} is missing: {path}")
     return path
+
+
+def _validate_run_profile(
+    *,
+    config: TrainPoolConfig,
+    generation_profile: str,
+    generation_only: bool,
+) -> GenerationProfile:
+    profile = GenerationProfile(generation_profile)
+    if generation_only:
+        return config.validate_generation_contract(profile)
+    if profile is not GenerationProfile.SMOKE:
+        raise ValueError(
+            "generation_profile='full' is only valid with --generation-only."
+        )
+    config.validate_smoke()
+    return config.validate_generation_contract(profile)
 
 
 def _phase_a_summary_path(root: Path) -> Path:
@@ -556,7 +580,11 @@ def main(argv: list[str] | None = None) -> int:
         device=str(args.device),
         resume=bool(args.resume),
     )
-    config.validate_smoke()
+    generation_profile = _validate_run_profile(
+        config=config,
+        generation_profile=str(args.generation_profile),
+        generation_only=bool(args.generation_only),
+    )
     phase_a_root = _required_dir(args.phase_a_root, "frozen Phase A root")
     phase_a_summary_path = _phase_a_summary_path(phase_a_root)
     phase_a_summary = json.loads(
@@ -644,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     identity = {
         "config": config.identity(),
         "generation_only": bool(args.generation_only),
+        "generation_profile": generation_profile.value,
         "source_failed_run_root": (
             str(source_run_root) if source_run_root is not None else None
         ),
@@ -667,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = {
         "dataset": "Mutagenicity",
         "phase": (
-            "clear_graphcfe_generation_only_replay"
+            f"clear_graphcfe_generation_only_{generation_profile.value}"
             if args.generation_only
             else "clear_graphcfe_train_pool_smoke"
         ),
@@ -685,8 +714,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "generation_parent_ids": [row.molecule_id for row in selected],
         "parent_limit": int(config.parent_limit),
+        "generation_profile": generation_profile.value,
         "generation_chunk_size": int(config.generation_chunk_size),
         "seed": int(config.seed),
+        "generation_only": bool(args.generation_only),
         "model_training_performed": not bool(args.generation_only),
         "codec_version": GENERATED_CODEC_VERSION,
         "generation_input_split": "train",
@@ -747,6 +778,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(source_run_root) if source_run_root is not None else None
             ),
             "model_training_performed": bool(trained_models),
+            "generation_profile": generation_profile.value,
+            "generation_only": bool(args.generation_only),
         }
     )
     write_json(output_dir / "run_manifest.json", manifest)
@@ -813,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
             config_fingerprint=fingerprint,
             model_checkpoint_hash=combined_checkpoint_hash,
             checkpoint_provenance=checkpoint_provenance,
+            generation_profile=generation_profile,
         )
     except ClearMutagenicityEmptyPoolError:
         failure_summary = json.loads(
@@ -830,10 +864,14 @@ def main(argv: list[str] | None = None) -> int:
                 "generation_parent_ids": [
                     row.molecule_id for row in selected
                 ],
+                "generation_profile": generation_profile.value,
+                "generation_source_parent_rows": len(parents),
+                "selected_generation_parents": len(selected),
                 "parent_limit": int(config.parent_limit),
                 "generation_chunk_size": int(config.generation_chunk_size),
                 "seed": int(config.seed),
                 "model_training_performed": bool(trained_models),
+                "generation_only": bool(args.generation_only),
                 "calibration_loaded": False,
                 "test_loaded": False,
                 "run_complete": False,
@@ -845,11 +883,18 @@ def main(argv: list[str] | None = None) -> int:
         manifest["failure"] = "empty_candidate_pool"
         write_json(output_dir / "run_manifest.json", manifest)
         raise
-    print("[MUTAGENICITY_CLEAR_GENERATION_SMOKE_OK]", flush=True)
+    generation_marker = (
+        "[MUTAGENICITY_CLEAR_GENERATION_FULL_OK]"
+        if generation_profile is GenerationProfile.FULL
+        else "[MUTAGENICITY_CLEAR_GENERATION_SMOKE_OK]"
+    )
+    print(generation_marker, flush=True)
     summary = {
         **data_audit,
         **generation_summary,
         "generation_source_parent_rows": len(parents),
+        "generation_profile": generation_profile.value,
+        "generation_only": bool(args.generation_only),
         "graphpred_epochs": (
             None if args.generation_only else int(config.graphpred_epochs)
         ),
@@ -896,6 +941,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(source_run_root) if source_run_root is not None else None
             ),
             "generation_parent_ids": [row.molecule_id for row in selected],
+            "generation_profile": generation_profile.value,
+            "generation_only": bool(args.generation_only),
             "parent_limit": int(config.parent_limit),
             "generation_chunk_size": int(config.generation_chunk_size),
             "seed": int(config.seed),
@@ -911,7 +958,9 @@ def main(argv: list[str] | None = None) -> int:
     audit_train_pool(
         run_dir=output_dir,
         generation_csv=generation_csv,
-        expected_selected_parents=64,
+        expected_selected_parents=int(config.parent_limit),
+        expected_generation_profile=generation_profile,
+        require_generation_only=bool(args.generation_only),
         require_complete=False,
         teacher=teacher,
     )
@@ -924,10 +973,17 @@ def main(argv: list[str] | None = None) -> int:
         {
             "run_complete": True,
             "config_fingerprint": fingerprint,
+            "generation_profile": generation_profile.value,
+            "generation_only": bool(args.generation_only),
             "completed_at": datetime.now(timezone.utc).isoformat(),
         },
     )
-    print("[MUTAGENICITY_CLEAR_TRAIN_POOL_SMOKE_OK]", flush=True)
+    completion_marker = (
+        "[MUTAGENICITY_CLEAR_TRAIN_POOL_FULL_OK]"
+        if generation_profile is GenerationProfile.FULL
+        else "[MUTAGENICITY_CLEAR_TRAIN_POOL_SMOKE_OK]"
+    )
+    print(completion_marker, flush=True)
     return 0
 
 

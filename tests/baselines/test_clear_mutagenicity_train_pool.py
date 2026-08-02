@@ -20,6 +20,7 @@ from src.baselines.clear_mutagenicity_adapter import (
 from src.baselines.clear_mutagenicity_train_pool import (
     ClearMutagenicityEmptyPoolError,
     GeneratedGraph,
+    GenerationProfile,
     TrainPoolConfig,
     audit_train_pool,
     candidate_universe_from_pool,
@@ -231,6 +232,41 @@ def test_streaming_generation_uses_four_chunks_and_lightweight_records(
     assert feature_audit["decoded_atomic_number_distribution"] == {"6": 64}
 
 
+def test_full_generation_profile_streams_all_parents_in_91_chunks(
+    tmp_path: Path,
+) -> None:
+    parents, schema, data = _fixture_data(1448)
+    chunk_sizes: list[int] = []
+
+    def generate(chunk, indices, _chunk_index):
+        chunk_sizes.append(len(chunk))
+        return [
+            _generated(row, data.feature_all[index], data.adj_all[index])
+            for row, index in zip(chunk, indices, strict=True)
+        ]
+
+    result = run_streaming_generation(
+        output_dir=tmp_path,
+        parents=parents,
+        data=data,
+        schema=schema,
+        teacher=FakeTeacher(),
+        generate_chunk=generate,
+        config=TrainPoolConfig(parent_limit=1448),
+        config_fingerprint="full-config",
+        model_checkpoint_hash="full-model",
+        generation_profile=GenerationProfile.FULL,
+    )
+    assert chunk_sizes == ([16] * 90) + [8]
+    assert result["generation_profile"] == "full"
+    assert result["selected_generation_parents"] == 1448
+    assert result["completed_chunk_count"] == 91
+    progress = read_json(tmp_path / "generation_progress.json")
+    assert progress["generation_profile"] == "full"
+    assert progress["selected_parent_count"] == 1448
+    assert progress["completed_chunk_count"] == 91
+
+
 def test_generation_resume_does_not_duplicate_rows(tmp_path: Path) -> None:
     parents, schema, data = _fixture_data()
     calls = 0
@@ -429,7 +465,7 @@ def test_independent_audit_accepts_partial_source_parent_coverage(
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     generation_csv = tmp_path / "train_source.csv"
-    _write_generation_csv(generation_csv, 3)
+    _write_generation_csv(generation_csv, 64)
     canonical = "C"
     pool = [
         {
@@ -453,7 +489,7 @@ def test_independent_audit_accepts_partial_source_parent_coverage(
         }
     ]
     raw = [
-        {"source_parent_id": f"MUT_{index:04d}"} for index in range(3)
+        {"source_parent_id": f"MUT_{index:04d}"} for index in range(64)
     ]
     for name, rows in (
         ("candidate_pool.jsonl", pool),
@@ -469,8 +505,12 @@ def test_independent_audit_accepts_partial_source_parent_coverage(
         {
             "model_train_rows": 4,
             "model_val_rows": 2,
-            "selected_generation_parents": 3,
-            "source_parent_coverage": 2 / 3,
+            "generation_source_parent_rows": 64,
+            "selected_generation_parents": 64,
+            "generation_chunk_size": 16,
+            "completed_chunk_count": 4,
+            "generation_profile": "smoke",
+            "source_parent_coverage": 2 / 64,
             "calibration_loaded": False,
             "test_loaded": False,
             "run_complete": True,
@@ -480,28 +520,65 @@ def test_independent_audit_accepts_partial_source_parent_coverage(
         run_dir / "run_manifest.json",
         {
             "inputs": {"generation_csv": str(generation_csv)},
+            "generation_profile": "smoke",
+            "generation_only": False,
             "calibration_loaded": False,
             "test_loaded": False,
             "run_complete": True,
         },
     )
-    write_json(run_dir / "generation_progress.json", {"run_complete": True})
+    write_json(
+        run_dir / "generation_progress.json",
+        {
+            "generation_profile": "smoke",
+            "selected_parent_count": 64,
+            "completed_chunk_count": 4,
+            "run_complete": True,
+        },
+    )
     write_json(run_dir / "_RUN_COMPLETE.json", {"run_complete": True})
     result = audit_train_pool(
         run_dir=run_dir,
         generation_csv=generation_csv,
         expected_model_train_rows=4,
         expected_model_val_rows=2,
-        expected_generation_parent_rows=3,
-        expected_selected_parents=3,
+        expected_generation_parent_rows=64,
+        expected_selected_parents=64,
     )
     assert result["candidate_source_parent_rows"] == 2
-    assert result["source_parent_coverage_recomputed"] == pytest.approx(2 / 3)
+    assert result["source_parent_coverage_recomputed"] == pytest.approx(2 / 64)
     assert result["calibration_rows_loaded"] == 0
     assert result["test_rows_loaded"] == 0
+    assert result["generation_profile"] == "smoke"
 
 
-def test_train_pool_config_rejects_full_parent_run() -> None:
+@pytest.mark.parametrize(
+    ("profile", "parent_limit"),
+    (("smoke", 64), ("full", 1448)),
+)
+def test_generation_profile_accepts_only_preregistered_parent_count(
+    profile: str, parent_limit: int
+) -> None:
+    resolved = TrainPoolConfig(
+        parent_limit=parent_limit
+    ).validate_generation_contract(profile)
+    assert resolved.value == profile
+
+
+@pytest.mark.parametrize(
+    ("profile", "parent_limit", "required"),
+    (("smoke", 1448, 64), ("full", 64, 1448)),
+)
+def test_generation_profile_rejects_cross_profile_parent_count(
+    profile: str, parent_limit: int, required: int
+) -> None:
+    with pytest.raises(ValueError, match=f"parent_limit={required}"):
+        TrainPoolConfig(
+            parent_limit=parent_limit
+        ).validate_generation_contract(profile)
+
+
+def test_legacy_validate_smoke_still_rejects_full_parent_run() -> None:
     with pytest.raises(ValueError, match="64-parent smoke"):
         TrainPoolConfig(parent_limit=1448).validate_smoke()
 
@@ -622,6 +699,35 @@ def _load_build_script_module():
     return module
 
 
+def test_generation_profile_cli_is_explicit_and_defaults_to_smoke() -> None:
+    module = _load_build_script_module()
+    parser = module.build_parser()
+    args = parser.parse_args(["--output-dir", "unused"])
+    assert args.generation_profile == "smoke"
+    profile_action = next(
+        action
+        for action in parser._actions
+        if action.dest == "generation_profile"
+    )
+    assert tuple(profile_action.choices) == ("smoke", "full")
+
+
+def test_full_profile_requires_generation_only() -> None:
+    module = _load_build_script_module()
+    config = TrainPoolConfig(parent_limit=1448)
+    with pytest.raises(ValueError, match="only valid with --generation-only"):
+        module._validate_run_profile(
+            config=config,
+            generation_profile="full",
+            generation_only=False,
+        )
+    assert module._validate_run_profile(
+        config=config,
+        generation_profile="full",
+        generation_only=True,
+    ) is GenerationProfile.FULL
+
+
 def test_generation_only_uses_explicit_checkpoints_without_training(
     tmp_path: Path,
 ) -> None:
@@ -634,6 +740,12 @@ def test_generation_only_uses_explicit_checkpoints_without_training(
     graphpred.write_bytes(b"graphpred-2021625")
     graphcfe.write_bytes(b"graphcfe-2021625")
     training_calls = 0
+    profile = module._validate_run_profile(
+        config=TrainPoolConfig(parent_limit=1448),
+        generation_profile="full",
+        generation_only=True,
+    )
+    assert profile is GenerationProfile.FULL
 
     def train_models():
         nonlocal training_calls

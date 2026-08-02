@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.baselines.clear_mutagenicity_train_pool import (  # noqa: E402
+    GenerationProfile,
     audit_train_pool,
 )
 from src.rewards.teacher_semantic import TeacherSemanticScorer  # noqa: E402
@@ -32,6 +33,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-generation-parent-rows", type=int, default=1448
     )
     parser.add_argument("--expected-selected-parents", type=int, default=64)
+    parser.add_argument(
+        "--expected-generation-profile",
+        choices=[profile.value for profile in GenerationProfile],
+        default=GenerationProfile.SMOKE.value,
+    )
+    parser.add_argument(
+        "--require-generation-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     parser.add_argument(
         "--require-target-label-zero",
         action=argparse.BooleanOptionalAction,
@@ -79,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
             args.expected_generation_parent_rows
         ),
         expected_selected_parents=int(args.expected_selected_parents),
+        expected_generation_profile=str(args.expected_generation_profile),
+        require_generation_only=bool(args.require_generation_only),
         require_complete=bool(args.require_complete),
         teacher=teacher,
     )

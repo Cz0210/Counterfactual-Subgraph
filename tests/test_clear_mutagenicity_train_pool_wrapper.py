@@ -40,6 +40,12 @@ def test_phase_b_cli_help() -> None:
         capture_output=True,
         text=True,
     ).stdout
+    audit_help = subprocess.run(
+        ["python3", str(AUDIT), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
     for option in (
         "--phase-a-root",
         "--generation-csv",
@@ -50,12 +56,15 @@ def test_phase_b_cli_help() -> None:
         "--cfe-epochs",
         "--generation-chunk-size",
         "--generation-only",
+        "--generation-profile",
         "--graphpred-checkpoint",
         "--graphcfe-checkpoint",
         "--source-run-root",
         "--resume",
     ):
         assert option in build_help
+    assert "--expected-generation-profile" in audit_help
+    assert "--require-generation-only" in audit_help
 
 
 def test_wrapper_is_the_fixed_64_parent_smoke() -> None:
@@ -224,6 +233,9 @@ def test_generation_replay_wrapper_uses_explicit_2021625_artifacts() -> None:
         ': "${GRAPHCFE_CHECKPOINT:?',
         ': "${OUTPUT_DIR:?',
         "--generation-only",
+        "--generation-profile smoke",
+        "--expected-generation-profile smoke",
+        "--require-generation-only",
         '--source-run-root "$SOURCE_RUN_ROOT"',
         '--graphpred-checkpoint "$GRAPHPRED_CHECKPOINT"',
         '--graphcfe-checkpoint "$GRAPHCFE_CHECKPOINT"',
@@ -294,6 +306,7 @@ def test_full_generation_wrapper_has_fixed_full_protocol() -> None:
         '"$PARENT_LIMIT" -ne 1448',
         '"$GENERATION_CHUNK_SIZE" -ne 16',
         '"$SEED" -ne 13',
+        "--generation-profile full",
         "parent_limit=1448, chunk_size=16, seed=13",
         "[MUTAGENICITY_CLEAR_FULL_GENERATION_CONFIG_ERROR]",
         "[MUTAGENICITY_CLEAR_FULL_GENERATION_OK]",
@@ -301,6 +314,7 @@ def test_full_generation_wrapper_has_fixed_full_protocol() -> None:
         assert required in text
     assert 'PARENT_LIMIT="${PARENT_LIMIT:-64}"' not in text
     assert '"$PARENT_LIMIT" -ne 64' not in text
+    assert "--generation-profile smoke" not in text
 
 
 def test_full_generation_wrapper_resources_and_generation_only_contract() -> None:
@@ -313,11 +327,14 @@ def test_full_generation_wrapper_resources_and_generation_only_contract() -> Non
         "#SBATCH --time=04:00:00",
         'PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-}}"',
         "--generation-only",
+        "--generation-profile full",
         'MODEL_TRAINING_PERFORMED=false',
         '--parent-limit "$PARENT_LIMIT"',
         '--generation-chunk-size "$GENERATION_CHUNK_SIZE"',
         '--seed "$SEED"',
         '--expected-selected-parents 1448',
+        '--expected-generation-profile full',
+        '--require-generation-only',
     ):
         assert required in text
     assert "#SBATCH --cpus-per-task=8" not in text

@@ -127,6 +127,7 @@ python scripts/baselines/clear/build_mutagenicity_train_pool.py \
   --official-root "$OFFICIAL_ROOT" \
   --output-dir "$OUTPUT_DIR" \
   --generation-only \
+  --generation-profile smoke \
   --source-run-root "$SOURCE_RUN_ROOT" \
   --graphpred-checkpoint "$GRAPHPRED_CHECKPOINT" \
   --graphcfe-checkpoint "$GRAPHCFE_CHECKPOINT" \
@@ -148,6 +149,8 @@ python scripts/baselines/clear/audit_mutagenicity_train_pool.py \
   --expected-model-val-rows 355 \
   --expected-generation-parent-rows 1448 \
   --expected-selected-parents 64 \
+  --expected-generation-profile smoke \
+  --require-generation-only \
   --require-target-label-zero \
   --require-unique-universe \
   --forbid-calibration-test \
