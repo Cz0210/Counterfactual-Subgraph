@@ -256,7 +256,10 @@ def _preflight_stdout(
 
 def _enable_strict_remote_policies(payload) -> None:
     payload["remote_dirty_policy"] = {
-        "allowed_tracked_paths": ["docs/EXPERIMENT_LOG.md"],
+        "allowed_tracked_paths": [
+            "baselines/clear_official",
+            "docs/EXPERIMENT_LOG.md",
+        ],
         "allowed_patched_submodules": [
             {
                 "path": "baselines/clear_official",
@@ -583,6 +586,15 @@ def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
         "baselines/clear_official"
     ]
     assert details["blocked_remote_dirty"] == []
+    assert details["remote_tracked_dirty_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
+    assert details["allowed_remote_tracked_dirty_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
+    assert details["disallowed_remote_tracked_dirty_paths"] == []
     assert details["patched_submodule_verified"] is True
     assert details["proxy_ready"] is False
     assert details["remote_write_performed"] is False
@@ -590,6 +602,112 @@ def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
         "configure_proxy_before_future_git_sync_or_request_"
         "remote_write_approval"
     )
+    state = json.loads(
+        (tmp_path / "warning/state.json").read_text(encoding="utf-8")
+    )
+    stage = state["stages"]["remote_preflight"]
+    assert stage["remote_tracked_dirty_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
+    assert stage["allowed_remote_tracked_dirty_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
+    assert stage["disallowed_remote_tracked_dirty_paths"] == []
+    evidence = json.loads(
+        (
+            tmp_path
+            / "warning/evidence/remote_preflight_evidence.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert evidence["remote_tracked_dirty_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
+    assert evidence["allowed_remote_tracked_dirty_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
+    assert evidence["disallowed_remote_tracked_dirty_paths"] == []
+
+
+def test_allowlisted_tracked_dirty_warns_even_when_proxy_is_ready(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    _enable_strict_remote_policies(base_spec)
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                dirty=(" M docs/EXPERIMENT_LOG.md",),
+                proxy_ready=True,
+                submodule_lines=_clear_submodule_output(),
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "allowlisted_warning",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS"
+    assert result["return_code"] == 0
+    report = json.loads(
+        (
+            tmp_path / "allowlisted_warning/FINAL_REPORT.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert report["details"]["gate_status"] == "PASSED_WITH_WARNINGS"
+    assert report["details"]["next_action"] == (
+        "remote_write_approval_required"
+    )
+
+
+def test_unknown_tracked_dirty_blocks_and_records_exact_path_groups(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    _enable_strict_remote_policies(base_spec)
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                dirty=(
+                    " M docs/EXPERIMENT_LOG.md",
+                    " M docs/EXPERIMENT_LOG.md.backup",
+                )
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "unknown_tracked",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_BLOCKED"
+    state = json.loads(
+        (tmp_path / "unknown_tracked/state.json").read_text(encoding="utf-8")
+    )
+    assert state["stop_reason"] == "remote_tracked_files_dirty"
+    stage = state["stages"]["remote_preflight"]
+    assert stage["remote_tracked_dirty_paths"] == [
+        "docs/EXPERIMENT_LOG.md",
+        "docs/EXPERIMENT_LOG.md.backup",
+    ]
+    assert stage["allowed_remote_tracked_dirty_paths"] == [
+        "docs/EXPERIMENT_LOG.md"
+    ]
+    assert stage["disallowed_remote_tracked_dirty_paths"] == [
+        "docs/EXPERIMENT_LOG.md.backup"
+    ]
 
 
 def test_commit_mismatch_without_proxy_needs_setup_and_never_pulls(

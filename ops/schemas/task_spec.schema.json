@@ -73,12 +73,13 @@
     "remote_dirty_policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["allowed_tracked_paths", "allowed_patched_submodules"],
+      "required": ["allowed_patched_submodules"],
       "properties": {
         "allowed_tracked_paths": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1}
+          "items": {"type": "string", "minLength": 1},
+          "default": []
         },
         "allowed_patched_submodules": {
           "type": "array",

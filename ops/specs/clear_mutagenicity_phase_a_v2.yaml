@@ -32,6 +32,7 @@ git:
     - outputs/hpc/experiment_registry/jobs.jsonl
 remote_dirty_policy:
   allowed_tracked_paths:
+    - baselines/clear_official
     - docs/EXPERIMENT_LOG.md
   allowed_patched_submodules:
     - path: baselines/clear_official

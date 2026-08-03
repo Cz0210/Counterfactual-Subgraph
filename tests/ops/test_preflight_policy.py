@@ -5,7 +5,10 @@ from scripts.ops.ssh_ops import RemotePreflight, RemoteSubmoduleStatus
 
 
 POLICY = {
-    "allowed_tracked_paths": ["docs/EXPERIMENT_LOG.md"],
+    "allowed_tracked_paths": [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ],
     "allowed_patched_submodules": [
         {
             "path": "baselines/clear_official",
@@ -36,6 +39,7 @@ def preflight(
     staged: tuple[str, ...] = (),
     status: tuple[str, ...] = (" M src/main.py",),
     marker: bool = True,
+    dirty_lines: tuple[str, ...] | None = None,
 ) -> RemotePreflight:
     return RemotePreflight(
         hostname="logini02",
@@ -43,7 +47,9 @@ def preflight(
         branch="main",
         commit="abc",
         python_version="Python 3.10",
-        dirty_lines=(
+        dirty_lines=dirty_lines
+        if dirty_lines is not None
+        else (
             " m baselines/clear_official",
             " M docs/EXPERIMENT_LOG.md",
         ),
@@ -73,6 +79,93 @@ def test_dynamic_log_and_verified_patched_submodule_are_allowed() -> None:
         "baselines/clear_official",
     )
     assert result.blocked == ()
+    assert result.remote_tracked_dirty_paths == (
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    )
+    assert result.allowed_remote_tracked_dirty_paths == (
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    )
+    assert result.disallowed_remote_tracked_dirty_paths == ()
+
+
+def test_missing_tracked_allowlist_preserves_default_blocking() -> None:
+    policy = {**POLICY, "allowed_tracked_paths": []}
+    result = evaluate_remote_dirty_policy(preflight(), policy)
+    assert not result.passed
+    assert result.allowed_remote_tracked_dirty_paths == ()
+    assert result.disallowed_remote_tracked_dirty_paths == (
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    )
+
+
+def test_clean_remote_passes_with_empty_allowlist() -> None:
+    policy = {**POLICY, "allowed_tracked_paths": []}
+    result = evaluate_remote_dirty_policy(
+        preflight(dirty_lines=()), policy
+    )
+    assert result.passed
+    assert result.remote_tracked_dirty_paths == ()
+    assert result.allowed_remote_tracked_dirty_paths == ()
+    assert result.disallowed_remote_tracked_dirty_paths == ()
+
+
+def test_unknown_tracked_path_blocks_even_when_known_paths_are_allowed() -> None:
+    result = evaluate_remote_dirty_policy(
+        preflight(
+            dirty_lines=(
+                " m baselines/clear_official",
+                " M docs/EXPERIMENT_LOG.md",
+                " M notes/unexpected.txt",
+            )
+        ),
+        POLICY,
+    )
+    assert result.blocked == ("notes/unexpected.txt",)
+    assert result.disallowed_remote_tracked_dirty_paths == (
+        "notes/unexpected.txt",
+    )
+
+
+def test_allowlist_is_exact_and_never_matches_a_prefix() -> None:
+    result = evaluate_remote_dirty_policy(
+        preflight(
+            dirty_lines=(
+                " M docs/EXPERIMENT_LOG.md.backup",
+                " M docs/EXPERIMENT_LOG.md/child",
+            )
+        ),
+        POLICY,
+    )
+    assert result.allowed_remote_tracked_dirty_paths == ()
+    assert result.disallowed_remote_tracked_dirty_paths == (
+        "docs/EXPERIMENT_LOG.md.backup",
+        "docs/EXPERIMENT_LOG.md/child",
+    )
+
+
+def test_root_untracked_policy_is_not_relaxed() -> None:
+    result = evaluate_remote_dirty_policy(
+        preflight(dirty_lines=("?? scripts/paper/local.py",)), POLICY
+    )
+    assert result.remote_tracked_dirty_paths == ()
+    assert result.remote_untracked_paths == ("scripts/paper/local.py",)
+    assert result.blocked == ("scripts/paper/local.py",)
+
+
+def test_lowercase_m_identifies_exact_submodule_parent_path() -> None:
+    result = evaluate_remote_dirty_policy(
+        preflight(dirty_lines=(" m baselines/clear_official",)), POLICY
+    )
+    assert result.passed
+    assert result.remote_tracked_dirty_paths == (
+        "baselines/clear_official",
+    )
+    assert result.allowed_remote_tracked_dirty_paths == (
+        "baselines/clear_official",
+    )
 
 
 def test_unexpected_modified_path_blocks_submodule() -> None:

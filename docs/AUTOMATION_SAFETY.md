@@ -51,10 +51,16 @@ Finalized output roots are immutable unless overwrite is explicitly enabled
 and separately approved.
 
 Remote patched repositories are not generally allowlisted. Each permitted
-nested repository declares exact modified paths and required markers.
+nested repository declares an exact top-level tracked-dirty allowlist entry,
+exact modified paths, and required markers.
 Unexpected modified paths, any forbidden staged or untracked path, or a missing
 marker blocks preflight while preserving the nested working tree exactly as it
 was found.
+
+Remote tracked-dirty exemptions are exact paths, not patterns or directory
+prefixes. They default to empty and cannot include the automation control paths
+`scripts/ops`, `tests/ops`, or `ops/specs`. An exemption changes a successful
+read-only preflight into a warning; it never grants a remote write.
 
 ## Scientific Boundaries
 

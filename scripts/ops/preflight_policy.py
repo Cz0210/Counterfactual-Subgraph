@@ -11,6 +11,10 @@ from scripts.ops.ssh_ops import RemotePreflight, RemoteSubmoduleStatus
 
 @dataclass(frozen=True, slots=True)
 class RemoteDirtyPolicyResult:
+    remote_tracked_dirty_paths: tuple[str, ...]
+    allowed_remote_tracked_dirty_paths: tuple[str, ...]
+    disallowed_remote_tracked_dirty_paths: tuple[str, ...]
+    remote_untracked_paths: tuple[str, ...]
     dynamic_tracked: tuple[str, ...]
     verified_patched_submodules: tuple[str, ...]
     blocked: tuple[str, ...]
@@ -22,6 +26,16 @@ class RemoteDirtyPolicyResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "remote_tracked_dirty_paths": list(
+                self.remote_tracked_dirty_paths
+            ),
+            "allowed_remote_tracked_dirty_paths": list(
+                self.allowed_remote_tracked_dirty_paths
+            ),
+            "disallowed_remote_tracked_dirty_paths": list(
+                self.disallowed_remote_tracked_dirty_paths
+            ),
+            "remote_untracked_paths": list(self.remote_untracked_paths),
             "dynamic_tracked": list(self.dynamic_tracked),
             "verified_patched_submodules": list(
                 self.verified_patched_submodules
@@ -32,6 +46,14 @@ class RemoteDirtyPolicyResult:
 
 def _status_path(line: str) -> str:
     return line[3:].strip() if len(line) >= 4 else line.strip()
+
+
+def _is_untracked_line(line: str) -> bool:
+    return line.startswith("??")
+
+
+def _is_nested_worktree_line(line: str) -> bool:
+    return len(line) >= 2 and line[0] == " " and line[1] == "m"
 
 
 def _untracked_paths(status: RemoteSubmoduleStatus) -> list[str]:
@@ -50,13 +72,21 @@ def evaluate_remote_dirty_policy(
 ) -> RemoteDirtyPolicyResult:
     """Classify root dirt and verify declared patched nested repositories."""
 
-    allowed_tracked = list(policy.get("allowed_tracked_paths") or [])
+    # This allowlist is intentionally exact. Git staging allowlists support
+    # patterns, but remote preflight exemptions must never expand by prefix.
+    allowed_tracked = {
+        str(value) for value in policy.get("allowed_tracked_paths") or []
+    }
     submodule_policies = {
         str(item["path"]): item
         for item in policy.get("allowed_patched_submodules") or []
     }
     evidence = {item.path: item for item in preflight.submodules}
     dynamic: list[str] = []
+    tracked: list[str] = []
+    allowed: list[str] = []
+    disallowed: list[str] = []
+    root_untracked: list[str] = []
     blocked: list[str] = []
     root_submodule_lines: dict[str, list[str]] = {
         path: [] for path in submodule_policies
@@ -64,15 +94,30 @@ def evaluate_remote_dirty_policy(
 
     for line in preflight.dirty_lines:
         path = _status_path(line)
+        if _is_untracked_line(line):
+            root_untracked.append(path)
+            blocked.append(path)
+            continue
+        tracked.append(path)
         if path in submodule_policies:
             root_submodule_lines[path].append(line)
-            if len(line) < 2 or line[0] != " " or line[1] != "m":
+            if not _is_nested_worktree_line(line):
                 blocked.append(path)
+                disallowed.append(path)
             continue
-        if path_allowed(path, allowed_tracked):
+        if _is_nested_worktree_line(line):
+            # A lowercase porcelain ``m`` is nested-repository worktree dirt.
+            # It requires the deeper patched-submodule contract in addition to
+            # an exact top-level allowlist entry.
+            blocked.append(path)
+            disallowed.append(path)
+            continue
+        if path in allowed_tracked:
             dynamic.append(path)
+            allowed.append(path)
         else:
             blocked.append(path)
+            disallowed.append(path)
 
     verified: list[str] = []
     audits: list[dict[str, Any]] = []
@@ -97,11 +142,13 @@ def evaluate_remote_dirty_policy(
                 }
             )
             blocked.append(path)
+            if root_submodule_lines[path]:
+                disallowed.append(path)
             continue
 
         modified = sorted(set(nested.modified_paths))
         staged = sorted(set(nested.staged_paths))
-        untracked = _untracked_paths(nested)
+        nested_untracked = _untracked_paths(nested)
         allowed_modified = list(item.get("allowed_modified_paths") or [])
         allowed_untracked_patterns = list(
             item.get("allowed_untracked_paths") or []
@@ -113,10 +160,12 @@ def evaluate_remote_dirty_policy(
         )
         unexpected_untracked = sorted(
             value
-            for value in untracked
+            for value in nested_untracked
             if not path_allowed(value, allowed_untracked_patterns)
         )
-        allowed_untracked = sorted(set(untracked) - set(unexpected_untracked))
+        allowed_untracked = sorted(
+            set(nested_untracked) - set(unexpected_untracked)
+        )
         missing_markers = sorted(
             str(marker["file"])
             for marker in item.get("required_markers") or []
@@ -137,22 +186,30 @@ def evaluate_remote_dirty_policy(
         if missing_markers:
             violations.append("missing_required_markers")
         if any(
-            len(line) < 2 or line[0] != " " or line[1] != "m"
+            not _is_nested_worktree_line(line)
             for line in root_submodule_lines[path]
         ):
             violations.append("top_level_submodule_index_dirty")
 
+        root_path_is_dirty = bool(root_submodule_lines[path])
+        if root_path_is_dirty and path not in allowed_tracked:
+            violations.append("top_level_path_not_exactly_allowlisted")
+
         is_verified = not violations
         if is_verified:
             verified.append(path)
+            if root_path_is_dirty:
+                allowed.append(path)
         else:
             blocked.append(path)
+            if root_path_is_dirty:
+                disallowed.append(path)
         audits.append(
             {
                 "path": path,
                 "nested_modified": modified,
                 "nested_staged": staged,
-                "nested_untracked": untracked,
+                "nested_untracked": nested_untracked,
                 "allowed_nested_untracked": allowed_untracked,
                 "unexpected_nested_untracked": unexpected_untracked,
                 "unexpected_nested_paths": unexpected,
@@ -165,6 +222,12 @@ def evaluate_remote_dirty_policy(
         )
 
     return RemoteDirtyPolicyResult(
+        remote_tracked_dirty_paths=tuple(sorted(set(tracked))),
+        allowed_remote_tracked_dirty_paths=tuple(sorted(set(allowed))),
+        disallowed_remote_tracked_dirty_paths=tuple(
+            sorted(set(disallowed))
+        ),
+        remote_untracked_paths=tuple(sorted(set(root_untracked))),
         dynamic_tracked=tuple(sorted(set(dynamic))),
         verified_patched_submodules=tuple(sorted(set(verified))),
         blocked=tuple(sorted(set(blocked))),

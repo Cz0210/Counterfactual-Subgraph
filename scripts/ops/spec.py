@@ -27,6 +27,11 @@ DANGEROUS_REMOTE_ROOTS = {
     "~",
     "/share/home/u20526",
 }
+PROTECTED_AUTOMATION_PATHS = (
+    "scripts/ops",
+    "tests/ops",
+    "ops/specs",
+)
 
 
 class SpecValidationError(ValueError):
@@ -200,6 +205,30 @@ def _validate_relative_policy_path(value: str, *, field: str) -> None:
         )
 
 
+def _validate_exact_remote_tracked_dirty_path(value: str) -> None:
+    path = PurePosixPath(value)
+    field = "remote_dirty_policy.allowed_tracked_paths"
+    if (
+        not value
+        or value == "."
+        or path.is_absolute()
+        or ".." in path.parts
+        or "\\" in value
+        or any(token in value for token in ("*", "?", "[", "]"))
+        or path.as_posix() != value
+    ):
+        raise SpecValidationError(
+            f"{field} entries must be exact, normalized repository-relative "
+            f"POSIX paths without glob syntax: {value!r}"
+        )
+    for protected in PROTECTED_AUTOMATION_PATHS:
+        if value == protected or value.startswith(protected + "/"):
+            raise SpecValidationError(
+                f"{field} cannot allowlist protected automation path: "
+                f"{value!r}"
+            )
+
+
 def _validate_adopt_path_under(
     value: str, output_root: PurePosixPath, *, field: str
 ) -> None:
@@ -254,9 +283,7 @@ def semantic_validate(data: dict[str, Any]) -> None:
             )
     remote_dirty_policy = data["remote_dirty_policy"]
     for value in remote_dirty_policy["allowed_tracked_paths"]:
-        _validate_relative_policy_path(
-            str(value), field="remote_dirty_policy.allowed_tracked_paths"
-        )
+        _validate_exact_remote_tracked_dirty_path(str(value))
     submodule_paths: list[str] = []
     for submodule in remote_dirty_policy["allowed_patched_submodules"]:
         submodule_path = str(submodule["path"])
@@ -390,19 +417,16 @@ def load_task_spec(path_like: str | Path) -> TaskSpec:
     permissions = payload.get("permissions")
     if isinstance(permissions, dict):
         permissions.setdefault("preserve_proxy_environment", True)
-    git = payload.get("git")
-    dynamic_paths = (
-        list(git.get("dynamic_remote_paths") or [])
-        if isinstance(git, dict)
-        else []
-    )
-    payload.setdefault(
+    remote_dirty_policy = payload.setdefault(
         "remote_dirty_policy",
         {
-            "allowed_tracked_paths": dynamic_paths,
+            "allowed_tracked_paths": [],
             "allowed_patched_submodules": [],
         },
     )
+    if isinstance(remote_dirty_policy, dict):
+        remote_dirty_policy.setdefault("allowed_tracked_paths", [])
+        remote_dirty_policy.setdefault("allowed_patched_submodules", [])
     payload.setdefault(
         "proxy_policy",
         {

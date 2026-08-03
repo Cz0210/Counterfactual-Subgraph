@@ -20,7 +20,10 @@ def test_example_and_clear_specs_validate() -> None:
     assert clear.data["permissions"]["allow_full"] is False
     assert clear.data["execution"]["stop_before"] == "phase_b_gpu_smoke"
     dirty = clear.data["remote_dirty_policy"]
-    assert dirty["allowed_tracked_paths"] == ["docs/EXPERIMENT_LOG.md"]
+    assert dirty["allowed_tracked_paths"] == [
+        "baselines/clear_official",
+        "docs/EXPERIMENT_LOG.md",
+    ]
     patched = dirty["allowed_patched_submodules"][0]
     assert patched["path"] == "baselines/clear_official"
     assert patched["allowed_modified_paths"] == [
@@ -211,4 +214,62 @@ def test_remote_policy_paths_must_be_repository_relative(
         ],
     }
     with pytest.raises(SpecValidationError, match="repository-relative"):
+        load_task_spec(write_spec(payload))
+
+
+def test_remote_tracked_dirty_allowlist_defaults_to_empty(
+    base_spec, write_spec
+) -> None:
+    payload = deepcopy(base_spec)
+    payload["remote_dirty_policy"] = {
+        "allowed_patched_submodules": [],
+    }
+    spec = load_task_spec(write_spec(payload))
+    assert spec.data["remote_dirty_policy"]["allowed_tracked_paths"] == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "/absolute/path",
+        "../outside",
+        "docs/../outside",
+        "docs/*.md",
+        "docs/file?.md",
+        "docs/[abc].md",
+        "docs//EXPERIMENT_LOG.md",
+        "docs\\EXPERIMENT_LOG.md",
+    ],
+)
+def test_remote_tracked_dirty_allowlist_rejects_non_exact_paths(
+    base_spec, write_spec, value
+) -> None:
+    payload = deepcopy(base_spec)
+    payload["remote_dirty_policy"] = {
+        "allowed_tracked_paths": [value],
+        "allowed_patched_submodules": [],
+    }
+    with pytest.raises(SpecValidationError):
+        load_task_spec(write_spec(payload))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "scripts/ops",
+        "scripts/ops/experimentctl.py",
+        "tests/ops/test_spec.py",
+        "ops/specs/example_smoke.yaml",
+    ],
+)
+def test_protected_automation_paths_cannot_be_allowlisted(
+    base_spec, write_spec, value
+) -> None:
+    payload = deepcopy(base_spec)
+    payload["remote_dirty_policy"] = {
+        "allowed_tracked_paths": [value],
+        "allowed_patched_submodules": [],
+    }
+    with pytest.raises(SpecValidationError, match="protected automation path"):
         load_task_spec(write_spec(payload))

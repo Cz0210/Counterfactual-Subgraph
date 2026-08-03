@@ -756,6 +756,20 @@ def deploy(
                 "remote_branch": parsed.branch,
                 "commits_equal": commits_equal,
                 "remote_dirty_summary": dirty_result.to_dict(),
+                "remote_tracked_dirty_paths": list(
+                    dirty_result.remote_tracked_dirty_paths
+                ),
+                "allowed_remote_tracked_dirty_paths": list(
+                    dirty_result.allowed_remote_tracked_dirty_paths
+                ),
+                "disallowed_remote_tracked_dirty_paths": list(
+                    dirty_result.disallowed_remote_tracked_dirty_paths
+                ),
+                "configured_allowed_remote_tracked_dirty_paths": list(
+                    spec.data["remote_dirty_policy"][
+                        "allowed_tracked_paths"
+                    ]
+                ),
                 "dynamic_dirty": list(dirty_result.dynamic_tracked),
                 "allowed_dynamic_dirty": list(
                     dirty_result.dynamic_tracked
@@ -785,6 +799,16 @@ def deploy(
                     proxy_required_for_deploy
                 ),
             }
+        )
+        evidence_path = (
+            store.run_dir / "evidence" / "remote_preflight_evidence.json"
+        )
+        atomic_write_json(
+            evidence_path,
+            {
+                **parsed_details,
+                "remote_write_performed": False,
+            },
         )
         hard_failures: list[str] = []
         if result.returncode != 0:
@@ -829,13 +853,22 @@ def deploy(
                     "return_code": result.returncode,
                     "stdout_path": str(stdout_path),
                     "stderr_path": str(stderr_path),
-                    "artifacts": [],
+                    "artifacts": [str(evidence_path)],
                     "gate_result": None,
                     "job_id": None,
                     "git_commit": commit,
                     "remote_git_commit": parsed.commit,
                     "command_status": command_status,
                     "gate_status": gate_status,
+                    "remote_tracked_dirty_paths": list(
+                        dirty_result.remote_tracked_dirty_paths
+                    ),
+                    "allowed_remote_tracked_dirty_paths": list(
+                        dirty_result.allowed_remote_tracked_dirty_paths
+                    ),
+                    "disallowed_remote_tracked_dirty_paths": list(
+                        dirty_result.disallowed_remote_tracked_dirty_paths
+                    ),
                     "status": stage_status,
                 },
             )
@@ -848,7 +881,7 @@ def deploy(
                 error_class="RemotePreflightFailure",
                 return_code=result.returncode,
                 stderr=result.stderr,
-                artifacts=[],
+                artifacts=[str(evidence_path)],
                 retry_count=attempt - 1,
                 recommended_action=(
                     "Resolve the reported read-only preflight condition; "
@@ -870,6 +903,9 @@ def deploy(
                 "report": str(report),
                 "return_code": result.returncode or 2,
             }
+        allowlisted_tracked_dirty = bool(
+            dirty_result.allowed_remote_tracked_dirty_paths
+        )
         if not commits_equal and proxy_required_for_deploy and not proxy_ready:
             selected_status = RunStatus.NEEDS_PROXY_SETUP
             next_action = "proxy_or_ssh_tunnel_required_before_deploy"
@@ -884,19 +920,34 @@ def deploy(
             preflight_status = RunStatus.NEEDS_DEPLOY.value
             gate_status = "PASSED"
             stop_reason = "Remote commit differs; deploy was not run."
-        elif proxy_required_for_deploy and not proxy_ready:
+        elif (
+            proxy_required_for_deploy and not proxy_ready
+        ) or allowlisted_tracked_dirty:
             selected_status = RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS
-            next_action = (
-                "configure_proxy_before_future_git_sync_or_request_"
-                "remote_write_approval"
-            )
+            if proxy_required_for_deploy and not proxy_ready:
+                next_action = (
+                    "configure_proxy_before_future_git_sync_or_request_"
+                    "remote_write_approval"
+                )
+            else:
+                next_action = "remote_write_approval_required"
             preflight_status = (
                 RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS.value
             )
             gate_status = "PASSED_WITH_WARNINGS"
+            warning_reasons: list[str] = []
+            if proxy_required_for_deploy and not proxy_ready:
+                warning_reasons.append(
+                    "proxy is required before a future Git synchronization"
+                )
+            if allowlisted_tracked_dirty:
+                warning_reasons.append(
+                    "remote tracked dirt was accepted by exact path allowlist"
+                )
             stop_reason = (
-                "Read-only preflight passed; proxy is required before a future "
-                "Git synchronization."
+                "Read-only preflight passed with warnings: "
+                + "; ".join(warning_reasons)
+                + "."
             )
         else:
             selected_status = RunStatus.REMOTE_PREFLIGHT_PASSED
@@ -920,13 +971,22 @@ def deploy(
                 "return_code": result.returncode,
                 "stdout_path": str(stdout_path),
                 "stderr_path": str(stderr_path),
-                "artifacts": [],
+                "artifacts": [str(evidence_path)],
                 "gate_result": None,
                 "job_id": None,
                 "git_commit": commit,
                 "remote_git_commit": parsed.commit,
                 "command_status": command_status,
                 "gate_status": gate_status,
+                "remote_tracked_dirty_paths": list(
+                    dirty_result.remote_tracked_dirty_paths
+                ),
+                "allowed_remote_tracked_dirty_paths": list(
+                    dirty_result.allowed_remote_tracked_dirty_paths
+                ),
+                "disallowed_remote_tracked_dirty_paths": list(
+                    dirty_result.disallowed_remote_tracked_dirty_paths
+                ),
                 "status": selected_status.value,
             },
         )
