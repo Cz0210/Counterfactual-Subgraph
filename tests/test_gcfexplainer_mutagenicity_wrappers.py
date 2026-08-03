@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -67,10 +68,220 @@ def test_gnn_wrapper_profiles_and_checkpoint_isolation() -> None:
     text = WRAPPERS[1].read_text(encoding="utf-8")
     assert 'PROFILE="${PROFILE:-smoke}"' in text
     assert 'EPOCHS="${EPOCHS:-5}"' in text
+    assert 'TRAIN_LIMIT="${TRAIN_LIMIT:-512}"' in text
+    assert 'VAL_LIMIT="${VAL_LIMIT:-128}"' in text
     assert 'EPOCHS="${EPOCHS:-1000}"' in text
-    assert "ALLOW_FULL" in text
-    assert "$RUN_ROOT/gnn" in text
+    assert 'TRAIN_LIMIT="${TRAIN_LIMIT:-2885}"' in text
+    assert 'VAL_LIMIT="${VAL_LIMIT:-355}"' in text
+    assert "ALLOW_FULL" not in text
+    assert 'GNN_DIR="${GNN_DIR:-}"' in text
+    assert "explicit_nonempty_path" in text
     assert "data/aids/gnn" not in text
+
+
+def _run_gnn_wrapper(
+    tmp_path: Path,
+    **overrides: str,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    project_root = tmp_path / "project"
+    dataset_dir = project_root / "dataset"
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / "_PHASE_A_COMPLETE.json").write_text(
+        '{"run_complete": true}\n', encoding="utf-8"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    argv_log = tmp_path / "python_argv.txt"
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        """#!/bin/bash
+set -e
+if [[ "${1:-}" == *train_mutagenicity_gnn.py ]]; then
+  printf '%s\n' "$@" > "$GNN_TEST_ARGV_LOG"
+  output_dir=""
+  previous=""
+  for argument in "$@"; do
+    if [[ "$previous" == "--output-dir" ]]; then
+      output_dir="$argument"
+      break
+    fi
+    previous="$argument"
+  done
+  mkdir -p "$output_dir"
+  printf '{"run_complete": true}\n' > "$output_dir/_RUN_COMPLETE.json"
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/bash\nprintf '0123456789abcdef0123456789abcdef01234567\\n'\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text(
+        f'export PATH="{fake_bin}:$PATH"\nconda() {{ return 0; }}\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    for name in (
+        "PROFILE",
+        "EPOCHS",
+        "TRAIN_LIMIT",
+        "VAL_LIMIT",
+        "SEED",
+        "GNN_DIR",
+        "RUN_ROOT",
+        "ALLOW_FULL",
+    ):
+        env.pop(name, None)
+    env.update(
+        {
+            "HOME": str(home),
+            "PROJECT_ROOT": str(project_root),
+            "DATASET_DIR": str(dataset_dir),
+            "GNN_TEST_ARGV_LOG": str(argv_log),
+            "RESUME": "false",
+            **overrides,
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(WRAPPERS[1])],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    return result, argv_log
+
+
+def test_gnn_smoke_profile_still_uses_existing_contract(tmp_path: Path) -> None:
+    result, argv_log = _run_gnn_wrapper(tmp_path, PROFILE="smoke")
+    assert result.returncode == 0, result.stderr
+    argv = argv_log.read_text(encoding="utf-8").splitlines()
+    assert [argv[argv.index(flag) + 1] for flag in ("--profile", "--epochs", "--train-limit", "--val-limit", "--seed")] == [
+        "smoke",
+        "5",
+        "512",
+        "128",
+        "13",
+    ]
+
+
+def test_gnn_full_profile_passes_exact_contract_and_cli_forwarding(
+    tmp_path: Path,
+) -> None:
+    gnn_dir = tmp_path / "full_gnn"
+    result, argv_log = _run_gnn_wrapper(
+        tmp_path,
+        PROFILE="full",
+        EPOCHS="1000",
+        TRAIN_LIMIT="2885",
+        VAL_LIMIT="355",
+        SEED="13",
+        GNN_DIR=str(gnn_dir),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "[MUTAGENICITY_GCFEXPLAINER_GNN_CONFIG]" in result.stdout
+    assert "profile=full" in result.stdout
+    assert "epochs=1000" in result.stdout
+    assert "train_limit=2885" in result.stdout
+    assert "val_limit=355" in result.stdout
+    assert "calibration_loaded=false" in result.stdout
+    assert "test_loaded=false" in result.stdout
+    argv = argv_log.read_text(encoding="utf-8").splitlines()
+    expected = {
+        "--profile": "full",
+        "--epochs": "1000",
+        "--train-limit": "2885",
+        "--val-limit": "355",
+        "--seed": "13",
+        "--dataset-dir": str(tmp_path / "project" / "dataset"),
+        "--output-dir": str(gnn_dir),
+    }
+    for flag, value in expected.items():
+        assert argv[argv.index(flag) + 1] == value
+    assert "smoke_v1" not in "\n".join(argv)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    (
+        ("EPOCHS", "5", "1000"),
+        ("TRAIN_LIMIT", "2884", "2885"),
+        ("VAL_LIMIT", "354", "355"),
+    ),
+)
+def test_gnn_full_rejects_noncontract_values(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    expected: str,
+) -> None:
+    values = {
+        "PROFILE": "full",
+        "EPOCHS": "1000",
+        "TRAIN_LIMIT": "2885",
+        "VAL_LIMIT": "355",
+        "SEED": "13",
+        "GNN_DIR": str(tmp_path / "full_gnn"),
+    }
+    values[field] = value
+    result, _argv_log = _run_gnn_wrapper(tmp_path, **values)
+    assert result.returncode != 0
+    assert "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR]" in result.stderr
+    assert "profile=full" in result.stderr
+    assert f"field={field.lower()}" in result.stderr
+    assert f"actual={value}" in result.stderr
+    assert f"expected={expected}" in result.stderr
+
+
+def test_gnn_full_requires_explicit_output_dir(tmp_path: Path) -> None:
+    result, _argv_log = _run_gnn_wrapper(
+        tmp_path,
+        PROFILE="full",
+        EPOCHS="1000",
+        TRAIN_LIMIT="2885",
+        VAL_LIMIT="355",
+        SEED="13",
+    )
+    assert result.returncode != 0
+    assert "field=gnn_dir" in result.stderr
+    assert "expected=explicit_nonempty_path" in result.stderr
+
+
+def test_gnn_full_rejects_smoke_output_path(tmp_path: Path) -> None:
+    result, _argv_log = _run_gnn_wrapper(
+        tmp_path,
+        PROFILE="full",
+        EPOCHS="1000",
+        TRAIN_LIMIT="2885",
+        VAL_LIMIT="355",
+        SEED="13",
+        GNN_DIR=str(tmp_path / "smoke_v1" / "gnn"),
+    )
+    assert result.returncode != 0
+    assert "field=gnn_dir" in result.stderr
+    assert "expected=explicit_non_smoke_output_path" in result.stderr
+
+
+def test_gnn_wrapper_rejects_unknown_profile(tmp_path: Path) -> None:
+    result, _argv_log = _run_gnn_wrapper(tmp_path, PROFILE="experimental")
+    assert result.returncode != 0
+    assert "field=profile" in result.stderr
+    assert "actual=experimental" in result.stderr
+    assert "expected=smoke_or_full" in result.stderr
+
+
+def test_later_stage_wrappers_keep_full_authorization_gate() -> None:
+    for wrapper in (WRAPPERS[2], WRAPPERS[3]):
+        text = wrapper.read_text(encoding="utf-8")
+        assert '"${ALLOW_FULL:-false}" == "true"' in text
+        assert "invalid/unauthorized PROFILE=$PROFILE" in text
 
 
 def test_vrrw_wrapper_has_preregistered_mutagenicity_parameters() -> None:
