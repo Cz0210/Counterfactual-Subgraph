@@ -41,6 +41,11 @@ VRRW_THETA="${VRRW_THETA:-0.05}"
 VRRW_SEED="${VRRW_SEED:-13}"
 
 RUN_ROOT="${RUN_ROOT:-$PROJECT_ROOT/outputs/hpc/mutagenicity/baselines/gcfexplainer/${PROFILE}_v1}"
+EXPORT_DIR="${EXPORT_DIR:-}"
+if [[ -z "$EXPORT_DIR" ]]; then
+  echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] EXPORT_DIR must be provided explicitly." >&2
+  exit 2
+fi
 if [[ -e "$RUN_ROOT/_FINALIZED.json" ]]; then
   echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] finalized run cannot be overwritten." >&2
   exit 2
@@ -50,6 +55,7 @@ export PROJECT_ROOT PROFILE RUN_ROOT
 echo "PROJECT_ROOT=$PROJECT_ROOT"
 echo "PROFILE=$PROFILE"
 echo "RUN_ROOT=$RUN_ROOT"
+echo "EXPORT_DIR=$EXPORT_DIR"
 echo "VRRW_PARENT_LIMIT=$VRRW_PARENT_LIMIT"
 echo "VRRW_M=$VRRW_M"
 echo "VRRW_ALPHA=$VRRW_ALPHA"
@@ -78,13 +84,15 @@ env \
   PROFILE="$PROFILE" \
   RUN_ROOT="$RUN_ROOT" \
   RESUME="$RESUME" \
+  EXPORT_DIR="$EXPORT_DIR" \
   PARENT_LIMIT="$VRRW_PARENT_LIMIT" \
   bash scripts/slurm/gcfexplainer/reproduce_mutagenicity_summary.sh
 
-test -s "$RUN_ROOT/export/audit.json"
-test -s "$RUN_ROOT/export/_RUN_COMPLETE.json"
+test -s "$EXPORT_DIR/audit.json"
 if [[ "$PROFILE" == "smoke" ]]; then
+  test -s "$EXPORT_DIR/_SMOKE_AUDIT_COMPLETE.json"
   echo "[MUTAGENICITY_GCFEXPLAINER_SMOKE_OK]"
 else
+  test -s "$EXPORT_DIR/_RUN_COMPLETE.json"
   echo "[MUTAGENICITY_GCFEXPLAINER_FULL_OK]"
 fi

@@ -59,7 +59,26 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         write_failure_artifacts(args.output_dir, error=exc, resolved_config=vars(args))
         raise
-    print("[MUTAGENICITY_GCFEXPLAINER_TOP20_OK]", flush=True)
+    if args.profile == "smoke":
+        print(
+            "[MUTAGENICITY_GCFEXPLAINER_EXPORT_SMOKE_AUDIT_OK]",
+            flush=True,
+        )
+        print(
+            "candidate_yield_gate_passed="
+            f"{str(bool(summary['candidate_yield_gate_passed'])).lower()}",
+            flush=True,
+        )
+        if summary["candidate_yield_gate_passed"]:
+            reason = "candidate_yield_available"
+        elif int(summary["selected_count"]) == 0:
+            reason = "no_rf_target_candidate"
+        else:
+            reason = "insufficient_rf_target_candidates"
+        print(f"reason={reason}", flush=True)
+        print("full_result_ready=false", flush=True)
+    else:
+        print("[MUTAGENICITY_GCFEXPLAINER_TOP20_OK]", flush=True)
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)
     return 0
 

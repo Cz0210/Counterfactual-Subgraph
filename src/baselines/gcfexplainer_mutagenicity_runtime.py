@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import random
@@ -17,20 +18,23 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
     EXPECTED_MODEL_TRAIN_ROWS,
     EXPECTED_MODEL_VAL_ROWS,
     GCFExplainerEmptyCandidateSetError,
+    GCFExplainerMutagenicityCodecError,
     GCFExplainerMutagenicityError,
     GraphRecordDataset,
     RunProfile,
     SEED,
-    build_native_rank_candidate_universe,
     checkpoint_is_aids,
     cohort_hash,
+    decode_generated_fullgraph,
     deterministic_balanced_prefix,
     get_vrrw_profile_contract,
     graph_lineage_neighbor_wrapper,
     import_official_modules,
     load_dataset_artifacts,
     read_json,
+    read_jsonl,
     record_to_pyg,
+    score_teacher_probabilities,
     sha256_file,
     stable_graph_candidate_id,
     stable_json_sha256,
@@ -1400,6 +1404,293 @@ def importlib_import_from_official(official_root: str | Path, module_name: str) 
             pass
 
 
+_SANITIZE_FAILURE_REASONS = {
+    "generated_valence_sanitize_failed",
+    "generated_kekulization_failed",
+    "generated_other_sanitize_failed",
+}
+_FILTER_TERMINAL_STAGES = {
+    "graph_decode",
+    "rdkit_sanitize",
+    "canonicalization",
+    "rf_inference",
+    "rf_target_filter",
+    "selected",
+}
+
+
+def _audit_tensor_list(value: Any) -> list[Any]:
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _graph_audit_dimensions(graph: Any) -> tuple[int, int]:
+    raw_x = getattr(graph, "x", [])
+    x = _audit_tensor_list(raw_x)
+    num_nodes = int(getattr(graph, "num_nodes", len(x)))
+    raw_edges = _audit_tensor_list(getattr(graph, "edge_index", []))
+    edge_pairs: set[tuple[int, int]] = set()
+    if len(raw_edges) == 2:
+        for source, target in zip(raw_edges[0], raw_edges[1], strict=False):
+            a, b = int(source), int(target)
+            if a != b:
+                edge_pairs.add((min(a, b), max(a, b)))
+    return num_nodes, len(edge_pairs)
+
+
+def _graph_origin_index(graph: Any) -> int | None:
+    origin_value = getattr(graph, "gcf_origin_index", None)
+    if origin_value is None:
+        return None
+    values = _audit_tensor_list(origin_value)
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _native_filter_audit_row(
+    native: Mapping[str, Any],
+    graph: Any,
+) -> dict[str, Any]:
+    native_rank = int(native["native_rank"])
+    num_nodes, num_edges = _graph_audit_dimensions(graph)
+    candidate_id = str(native.get("candidate_id", "")).strip()
+    if not candidate_id:
+        try:
+            candidate_id = stable_graph_candidate_id(graph)
+        except Exception:
+            candidate_id = f"GCF_NATIVE_RANK_{native_rank:06d}"
+    return {
+        "candidate_id": candidate_id,
+        "native_rank": native_rank,
+        "source_graph_index": _graph_origin_index(graph),
+        "num_nodes": num_nodes,
+        "num_edges": num_edges,
+        "decode_attempted": False,
+        "decode_ok": False,
+        "rdkit_mol_created": False,
+        "sanitize_ok": False,
+        "sanitize_error_type": "",
+        "sanitize_error_message": "",
+        "canonical_smiles": "",
+        "rf_inference_attempted": False,
+        "rf_inference_ok": False,
+        "rf_pred": None,
+        "rf_target_match": False,
+        "selected": False,
+        "rejection_stage": "",
+        "rejection_reason": "",
+    }
+
+
+def _filter_native_candidates_with_audit(
+    *,
+    native_rows: Sequence[Mapping[str, Any]],
+    graphs: Sequence[Any],
+    source_records: Sequence[Mapping[str, Any]],
+    schema: Any,
+    teacher: Any,
+    top_k: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply native-rank chemistry/RF gates and retain one audit row per rank."""
+
+    if len(native_rows) != len(graphs):
+        raise ValueError("Native rank rows and graph payload length differ.")
+    ordered = sorted(
+        zip(native_rows, graphs, strict=True),
+        key=lambda item: int(item[0]["native_rank"]),
+    )
+    ranks = [int(native["native_rank"]) for native, _graph in ordered]
+    if len(ranks) != len(set(ranks)):
+        raise ValueError("Native candidate ranks must be unique.")
+
+    candidate_universe: list[dict[str, Any]] = []
+    audit_rows: list[dict[str, Any]] = []
+    seen_target_smiles: set[str] = set()
+    for native, graph in ordered:
+        audit = _native_filter_audit_row(native, graph)
+        origin_index = audit["source_graph_index"]
+        if origin_index is None:
+            audit.update(
+                rejection_stage="graph_decode",
+                rejection_reason="missing_source_lineage",
+            )
+            audit_rows.append(audit)
+            continue
+        if origin_index < 0 or origin_index >= len(source_records):
+            audit.update(
+                rejection_stage="graph_decode",
+                rejection_reason="invalid_source_lineage",
+            )
+            audit_rows.append(audit)
+            continue
+
+        audit["decode_attempted"] = True
+        try:
+            decoded = decode_generated_fullgraph(
+                graph,
+                source_record=source_records[origin_index],
+                schema=schema,
+            )
+        except Exception as exc:
+            audit.update(
+                rejection_stage="graph_decode",
+                rejection_reason=f"graph_decode_exception:{type(exc).__name__}",
+            )
+            audit_rows.append(audit)
+            continue
+
+        failure_reason = str(decoded.failure_reason or "")
+        if not decoded.decode_ok:
+            if failure_reason in _SANITIZE_FAILURE_REASONS:
+                audit.update(
+                    decode_ok=True,
+                    rdkit_mol_created=True,
+                    sanitize_ok=False,
+                    sanitize_error_type=failure_reason,
+                    sanitize_error_message=failure_reason,
+                    rejection_stage="rdkit_sanitize",
+                    rejection_reason=failure_reason,
+                )
+            else:
+                mol_was_created = failure_reason == "generated_disconnected_or_empty"
+                audit.update(
+                    rdkit_mol_created=mol_was_created,
+                    sanitize_ok=mol_was_created,
+                    rejection_stage="graph_decode",
+                    rejection_reason=failure_reason or "generated_graph_decode_failed",
+                )
+            audit_rows.append(audit)
+            continue
+
+        canonical_smiles = str(decoded.canonical_smiles or "").strip()
+        audit.update(
+            decode_ok=True,
+            rdkit_mol_created=True,
+            sanitize_ok=True,
+            canonical_smiles=canonical_smiles,
+        )
+        if not canonical_smiles:
+            audit.update(
+                rejection_stage="canonicalization",
+                rejection_reason="empty_canonical_smiles",
+            )
+            audit_rows.append(audit)
+            continue
+        if canonical_smiles in seen_target_smiles:
+            audit.update(
+                rejection_stage="canonicalization",
+                rejection_reason="canonical_duplicate",
+            )
+            audit_rows.append(audit)
+            continue
+
+        audit["rf_inference_attempted"] = True
+        try:
+            pred, prob0, prob1 = score_teacher_probabilities(
+                teacher,
+                canonical_smiles,
+            )
+        except Exception as exc:
+            audit.update(
+                rejection_stage="rf_inference",
+                rejection_reason=f"rf_inference_failed:{type(exc).__name__}",
+            )
+            audit_rows.append(audit)
+            continue
+        audit.update(
+            rf_inference_ok=True,
+            rf_pred=int(pred),
+            rf_target_match=int(pred) == 0,
+        )
+        if int(pred) != 0:
+            audit.update(
+                rejection_stage="rf_target_filter",
+                rejection_reason="rf_not_target_label_0",
+            )
+            audit_rows.append(audit)
+            continue
+
+        molecular_candidate_id = "GCFMOL_" + hashlib.sha256(
+            canonical_smiles.encode("utf-8")
+        ).hexdigest()[:20].upper()
+        candidate_universe.append(
+            {
+                **dict(native),
+                "candidate_id": molecular_candidate_id,
+                "native_candidate_id": audit["candidate_id"],
+                "smiles": canonical_smiles,
+                "canonical_smiles": canonical_smiles,
+                "rdkit_valid": True,
+                "rf_pred": int(pred),
+                "rf_prob_0": float(prob0),
+                "rf_prob_1": float(prob1),
+                "source_method": "official_gcfexplainer_mutagenicity",
+                "selection_method": (
+                    "native_gcf_summary_rank_filtered_by_validity"
+                ),
+                "candidate_set_preselected": True,
+                "selection_performed_in_eval": False,
+                "calibration_loaded": False,
+                "test_loaded": False,
+                "source_parent_index": int(origin_index),
+                "source_parent_id": str(decoded.source_parent_id),
+                "projected_new_edge_count": int(
+                    decoded.projected_new_edge_count
+                ),
+                "retained_edge_count": int(decoded.retained_edge_count),
+                "removed_source_edge_count": int(
+                    decoded.removed_source_edge_count
+                ),
+                "inherited_atom_state_count": int(
+                    decoded.inherited_atom_state_count
+                ),
+                "reset_atom_state_count": int(
+                    decoded.reset_atom_state_count
+                ),
+            }
+        )
+        seen_target_smiles.add(canonical_smiles)
+        audit_rows.append(audit)
+
+    selected = candidate_universe[: int(top_k)]
+    selected_ranks = {int(row["native_rank"]) for row in selected}
+    for audit in audit_rows:
+        if audit["rf_target_match"]:
+            if int(audit["native_rank"]) in selected_ranks:
+                audit.update(
+                    selected=True,
+                    rejection_stage="selected",
+                    rejection_reason="",
+                )
+            else:
+                audit.update(
+                    rejection_stage="selected",
+                    rejection_reason="beyond_requested_top_k",
+                )
+
+    if len(audit_rows) != len(native_rows):
+        raise RuntimeError("Candidate filter audit lost native-ranked rows.")
+    if any(row["rejection_stage"] not in _FILTER_TERMINAL_STAGES for row in audit_rows):
+        raise RuntimeError("Candidate filter audit contains a non-terminal row.")
+    selected_rank_order = [int(row["native_rank"]) for row in selected]
+    if selected_rank_order != sorted(selected_rank_order):
+        raise RuntimeError("RF filtering changed native candidate order.")
+    return candidate_universe, selected, audit_rows
+
+
 def export_rf_valid_native_top20(
     *,
     dataset_dir: str | Path,
@@ -1429,7 +1720,8 @@ def export_rf_valid_native_top20(
         load_dataset_artifacts(dataset_dir)
     )
     summary_root = Path(summary_dir).expanduser().resolve()
-    summary_manifest = read_json(summary_root / "run_manifest.json")
+    summary_manifest_path = summary_root / "run_manifest.json"
+    summary_manifest = read_json(summary_manifest_path)
     if summary_manifest.get("run_complete") is not True:
         raise ValueError("Native summary is not complete.")
     if str(summary_manifest.get("profile", "")) != resolved_profile.value:
@@ -1456,29 +1748,208 @@ def export_rf_valid_native_top20(
     )
     graphs = list(payload.get("selected_graphs", []))
     native_rows = list(payload.get("selected_records", []))
-    candidate_universe, skipped = build_native_rank_candidate_universe(
-        native_rows,
-        graphs,
-        source_records,
-        schema,
-        teacher,
+    resolved_config = {
+        "dataset": "Mutagenicity",
+        "profile": resolved_profile.value,
+        "parent_limit": int(parent_limit),
+        "requested_top_k": int(top_k),
+        "dataset_dir": str(Path(dataset_dir).expanduser().resolve()),
+        "summary_dir": str(summary_root),
+        "summary_manifest_path": str(summary_manifest_path.resolve()),
+        "summary_manifest_sha256": sha256_file(summary_manifest_path),
+        "teacher_path": str(Path(teacher_path).expanduser().resolve()),
+        "teacher_sha256": sha256_file(teacher_path),
+        "parent_order_source": "summary_manifest_generation_parent_ids",
+        "rf_reranking_performed": False,
+        "wnode_reranking_performed": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+    write_json(root / "resolved_config.json", resolved_config)
+    candidate_universe, selected, audit_rows = _filter_native_candidates_with_audit(
+        native_rows=native_rows,
+        graphs=graphs,
+        source_records=source_records,
+        schema=schema,
+        teacher=teacher,
+        top_k=int(top_k),
     )
-    selected = candidate_universe[: int(top_k)]
-    write_jsonl(
-        root / "decoded_native_candidates.jsonl",
-        sorted(
-            [*candidate_universe, *skipped],
-            key=lambda row: int(row.get("native_rank", 0)),
-        ),
+    formal_candidate_set_ready = bool(
+        resolved_profile is RunProfile.FULL and len(selected) >= int(top_k)
     )
+    for row in candidate_universe:
+        row["candidate_set_preselected"] = formal_candidate_set_ready
+    write_jsonl(root / "candidate_filter_audit.jsonl", audit_rows)
+    write_jsonl(root / "decoded_native_candidates.jsonl", audit_rows)
     write_jsonl(
         root / "invalid_candidates.jsonl",
-        [row for row in skipped if str(row.get("skip_reason", "")).startswith("generated_") or "lineage" in str(row.get("skip_reason", ""))],
+        [
+            row
+            for row in audit_rows
+            if row["rejection_stage"] in {"graph_decode", "rdkit_sanitize"}
+        ],
     )
     write_jsonl(
         root / "non_target_candidates.jsonl",
-        [row for row in skipped if row.get("skip_reason") == "rf_not_target_label_0"],
+        [row for row in audit_rows if row["rejection_stage"] == "rf_target_filter"],
     )
+    write_jsonl(root / "candidate_universe.jsonl", candidate_universe)
+    reason_counts = dict(
+        sorted(
+            Counter(
+                str(row["rejection_reason"])
+                for row in audit_rows
+                if str(row["rejection_reason"])
+            ).items()
+        )
+    )
+    selected_ranks = [int(row["native_rank"]) for row in selected]
+    native_rank_input_count = len(native_rows)
+    graph_decode_ok_count = sum(bool(row["decode_ok"]) for row in audit_rows)
+    rdkit_sanitize_ok_count = sum(bool(row["sanitize_ok"]) for row in audit_rows)
+    rf_scored_count = sum(bool(row["rf_inference_ok"]) for row in audit_rows)
+    rf_target_count = sum(bool(row["rf_target_match"]) for row in audit_rows)
+    audit_complete = len(audit_rows) == native_rank_input_count and all(
+        row["rejection_stage"] in _FILTER_TERMINAL_STAGES for row in audit_rows
+    )
+    native_order_preserved = selected_ranks == sorted(selected_ranks)
+    candidate_yield_gate_passed = len(selected) >= int(top_k)
+    smoke_interface_gate_passed = bool(
+        native_rank_input_count > 0
+        and audit_complete
+        and rdkit_sanitize_ok_count > 0
+        and rf_scored_count >= 1
+    )
+    filter_summary = {
+        "profile": resolved_profile.value,
+        "native_rank_input_count": native_rank_input_count,
+        "audit_row_count": len(audit_rows),
+        "graph_decode_ok_count": graph_decode_ok_count,
+        "graph_decode_failed_count": native_rank_input_count
+        - graph_decode_ok_count,
+        "rdkit_sanitize_ok_count": rdkit_sanitize_ok_count,
+        "rdkit_sanitize_failed_count": sum(
+            bool(row["rdkit_mol_created"]) and not bool(row["sanitize_ok"])
+            for row in audit_rows
+        ),
+        "rf_scored_count": rf_scored_count,
+        "rf_inference_failed_count": sum(
+            bool(row["rf_inference_attempted"])
+            and not bool(row["rf_inference_ok"])
+            for row in audit_rows
+        ),
+        "rf_target_count": rf_target_count,
+        "selected_count": len(selected),
+        "requested_top_k": int(top_k),
+        "rejection_reason_counts": reason_counts,
+        "audit_complete": audit_complete,
+        "all_candidates_terminal": audit_complete,
+        "native_order_preserved": native_order_preserved,
+        "selected_native_ranks": selected_ranks,
+        "candidate_yield_gate_passed": candidate_yield_gate_passed,
+        "smoke_interface_gate_passed": smoke_interface_gate_passed,
+        "rf_reranking_performed": False,
+        "wnode_reranking_performed": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+    if len(audit_rows) != native_rank_input_count:
+        raise RuntimeError("candidate_filter_audit.jsonl row count mismatch.")
+    if not native_order_preserved:
+        raise RuntimeError("Selected native ranks are not monotonically increasing.")
+    write_json(root / "filter_summary.json", filter_summary)
+    manifest = {
+        **resolved_config,
+        "source_label": 1,
+        "target_label": 0,
+        "semantic_direction": "mutagenic_to_non_mutagenic",
+        "strict_flip_definition": "source_teacher_pred_1_and_candidate_teacher_pred_0",
+        "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
+        "summary_parent_count": len(source_records),
+        "generation_parent_ids_sha256": stable_json_sha256(summary_parent_ids),
+        "generation_source_cohort_hash": source_cohort_hash,
+        "native_rank_rows": len(native_rows),
+        "native_rank_input_count": native_rank_input_count,
+        "candidate_filter_audit_rows": len(audit_rows),
+        "rf_target_candidate_universe_rows": len(candidate_universe),
+        "selected_count": len(selected),
+        "selected_top20_rows": (
+            len(selected) if resolved_profile is RunProfile.FULL else 0
+        ),
+        "top_k": int(top_k),
+        "skipped_reason_counts": reason_counts,
+        "filter_summary_path": str((root / "filter_summary.json").resolve()),
+        "candidate_filter_audit_path": str(
+            (root / "candidate_filter_audit.jsonl").resolve()
+        ),
+        "candidate_yield_gate_passed": candidate_yield_gate_passed,
+        "smoke_interface_gate_passed": smoke_interface_gate_passed,
+        "full_result_ready": bool(
+            resolved_profile is RunProfile.FULL and candidate_yield_gate_passed
+        ),
+        "selection_method": "native_gcf_summary_rank_filtered_by_validity",
+        "native_rank_reordered": False,
+        "candidate_set_preselected": formal_candidate_set_ready,
+        "selection_performed_in_eval": False,
+        "teacher_used_only_for_target_validation": True,
+        "selected_candidate_order_sha256": stable_json_sha256(
+            [str(row["candidate_id"]) for row in selected]
+        ),
+        "run_complete": (
+            smoke_interface_gate_passed
+            if resolved_profile is RunProfile.SMOKE
+            else candidate_yield_gate_passed
+        ),
+    }
+    write_json(root / "run_manifest.json", manifest)
+    if native_rank_input_count <= 0:
+        failure = {**manifest, "failure": "empty_native_rank_input"}
+        write_json(root / "failure_summary.json", failure)
+        write_json(root / "_RUN_FAILED.json", failure)
+        raise GCFExplainerEmptyCandidateSetError(
+            "Native summary did not provide any ranked candidates."
+        )
+    if rdkit_sanitize_ok_count <= 0 or rf_scored_count <= 0:
+        failure = {
+            **manifest,
+            "failure": "chemical_codec_did_not_reach_rf_inference",
+            "field": "rf_scored_count",
+            "actual": rf_scored_count,
+            "expected_min": 1,
+        }
+        write_json(root / "failure_summary.json", failure)
+        write_json(root / "_RUN_FAILED.json", failure)
+        print("[MUTAGENICITY_GCFEXPLAINER_CHEMICAL_CODEC_ERROR]", flush=True)
+        print("field=rf_scored_count", flush=True)
+        print(f"actual={rf_scored_count}", flush=True)
+        print("expected_min=1", flush=True)
+        raise GCFExplainerMutagenicityCodecError(
+            "GCFExplainer export chemistry codec produced no RF-scorable candidate."
+        )
+    if resolved_profile is RunProfile.SMOKE:
+        smoke_marker = {
+            **manifest,
+            "smoke_audit_complete": True,
+            "full_result_ready": False,
+        }
+        write_json(root / "_SMOKE_AUDIT_COMPLETE.json", smoke_marker)
+        return smoke_marker
+    if len(selected) < int(top_k):
+        failure = {
+            **manifest,
+            "failure": "fewer_than_20_rf_valid_native_candidates",
+            "actual": len(selected),
+            "expected_min": int(top_k),
+        }
+        write_json(
+            root / "failure_summary.json",
+            failure,
+        )
+        write_json(root / "_RUN_FAILED.json", failure)
+        raise GCFExplainerEmptyCandidateSetError(
+            "Full native-rank yield gate failed: "
+            f"selected_count={len(selected)}, expected_min={top_k}."
+        )
     write_csv(
         root / "selected_top20.csv",
         selected,
@@ -1500,53 +1971,6 @@ def export_rf_valid_native_top20(
             "source_parent_id",
         ),
     )
-    write_jsonl(root / "candidate_universe.jsonl", candidate_universe)
-    reason_counts = dict(Counter(str(row.get("skip_reason")) for row in skipped))
-    manifest = {
-        "dataset": "Mutagenicity",
-        "profile": resolved_profile.value,
-        "source_label": 1,
-        "target_label": 0,
-        "semantic_direction": "mutagenic_to_non_mutagenic",
-        "strict_flip_definition": "source_teacher_pred_1_and_candidate_teacher_pred_0",
-        "parent_limit": int(parent_limit),
-        "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
-        "summary_parent_count": len(source_records),
-        "generation_parent_ids_sha256": stable_json_sha256(summary_parent_ids),
-        "generation_source_cohort_hash": source_cohort_hash,
-        "parent_order_source": "summary_manifest_generation_parent_ids",
-        "native_rank_rows": len(native_rows),
-        "rf_target_candidate_universe_rows": len(candidate_universe),
-        "selected_top20_rows": len(selected),
-        "top_k": int(top_k),
-        "skipped_reason_counts": reason_counts,
-        "selection_method": "native_gcf_summary_rank_filtered_by_validity",
-        "native_rank_reordered": False,
-        "candidate_set_preselected": True,
-        "selection_performed_in_eval": False,
-        "teacher_path": str(Path(teacher_path).expanduser().resolve()),
-        "teacher_sha256": sha256_file(teacher_path),
-        "teacher_used_only_for_target_validation": True,
-        "selected_candidate_order_sha256": stable_json_sha256(
-            [str(row["candidate_id"]) for row in selected]
-        ),
-        "calibration_loaded": False,
-        "test_loaded": False,
-        "run_complete": len(selected) == int(top_k),
-    }
-    write_json(root / "run_manifest.json", manifest)
-    if len(selected) != int(top_k):
-        write_json(
-            root / "failure_summary.json",
-            {**manifest, "failure": "fewer_than_20_rf_valid_native_candidates"},
-        )
-        write_json(
-            root / "_RUN_FAILED.json",
-            {**manifest, "run_complete": False},
-        )
-        raise GCFExplainerEmptyCandidateSetError(
-            f"Native-rank filtering produced {len(selected)} / {top_k} candidates."
-        )
     write_json(root / "_RUN_COMPLETE.json", manifest)
     return manifest
 
@@ -1646,6 +2070,32 @@ def audit_mutagenicity_run(
         raise AssertionError("Native summary rank is not unique and contiguous.")
     if len(native_rows) < 100:
         raise AssertionError("Native summary must export at least 100 ranks.")
+    filter_summary = read_json(Path(export_dir) / "filter_summary.json")
+    filter_audit = read_jsonl(
+        Path(export_dir) / "candidate_filter_audit.jsonl"
+    )
+    if len(filter_audit) != len(native_rows):
+        raise AssertionError("Candidate filter audit is not complete.")
+    if int(filter_summary.get("native_rank_input_count", -1)) != len(native_rows):
+        raise AssertionError("Filter summary native input count mismatch.")
+    if int(filter_summary.get("audit_row_count", -1)) != len(filter_audit):
+        raise AssertionError("Filter summary audit row count mismatch.")
+    audit_ranks = [int(row["native_rank"]) for row in filter_audit]
+    if audit_ranks != ranks:
+        raise AssertionError("Candidate filter audit changed native rank order.")
+    if any(
+        str(row.get("rejection_stage", "")) not in _FILTER_TERMINAL_STAGES
+        for row in filter_audit
+    ):
+        raise AssertionError("Candidate filter audit contains a non-terminal row.")
+    if filter_summary.get("native_order_preserved") is not True:
+        raise AssertionError("Candidate filter summary reports native rank reordering.")
+    if filter_summary.get("rf_reranking_performed") is not False:
+        raise AssertionError("Candidate export performed RF reranking.")
+    if filter_summary.get("wnode_reranking_performed") is not False:
+        raise AssertionError("Candidate export performed WNode reranking.")
+    if int(filter_summary.get("rf_scored_count", -1)) < 1:
+        raise AssertionError("Candidate export did not reach RF inference.")
     candidate_universe = read_jsonl(Path(export_dir) / "candidate_universe.jsonl")
     if len(candidate_universe) != int(
         export_manifest.get("rf_target_candidate_universe_rows", -1)
@@ -1663,29 +2113,45 @@ def audit_mutagenicity_run(
 
     if any(Chem.MolFromSmiles(smiles) is None for smiles in universe_smiles):
         raise AssertionError("Candidate universe contains an RDKit-invalid molecule.")
-    with (Path(export_dir) / "selected_top20.csv").open(
-        "r", encoding="utf-8", newline=""
-    ) as handle:
-        selected = [dict(row) for row in __import__("csv").DictReader(handle)]
-    if len(selected) != 20:
-        raise AssertionError("selected_top20.csv must contain exactly 20 rows.")
-    selected_ranks = [int(row["native_rank"]) for row in selected]
-    if selected_ranks != sorted(selected_ranks):
-        raise AssertionError("RF filtering changed native candidate order.")
-    if any(int(row["rf_pred"]) != 0 for row in selected):
-        raise AssertionError("Selected candidate is not RF target label 0.")
-    smiles = [row["canonical_smiles"] for row in selected]
-    if len(smiles) != len(set(smiles)):
-        raise AssertionError("Selected candidate canonical SMILES are duplicated.")
+    selected: list[dict[str, Any]] = []
+    selected_order_hash = str(
+        export_manifest.get("selected_candidate_order_sha256", "")
+    )
+    if resolved_profile is RunProfile.SMOKE:
+        if not (Path(export_dir) / "_SMOKE_AUDIT_COMPLETE.json").is_file():
+            raise AssertionError("Smoke export audit completion marker is missing.")
+        if (Path(export_dir) / "_RUN_COMPLETE.json").exists():
+            raise AssertionError("Smoke export must not write a formal run marker.")
+        if (Path(export_dir) / "selected_top20.csv").exists():
+            raise AssertionError("Smoke export must not freeze selected_top20.csv.")
+        if export_manifest.get("smoke_interface_gate_passed") is not True:
+            raise AssertionError("Smoke export interface gate did not pass.")
+        if export_manifest.get("full_result_ready") is not False:
+            raise AssertionError("Smoke export cannot declare a full result ready.")
+    else:
+        with (Path(export_dir) / "selected_top20.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            selected = [dict(row) for row in __import__("csv").DictReader(handle)]
+        if len(selected) != 20:
+            raise AssertionError("selected_top20.csv must contain exactly 20 rows.")
+        selected_ranks = [int(row["native_rank"]) for row in selected]
+        if selected_ranks != sorted(selected_ranks):
+            raise AssertionError("RF filtering changed native candidate order.")
+        if any(int(row["rf_pred"]) != 0 for row in selected):
+            raise AssertionError("Selected candidate is not RF target label 0.")
+        smiles = [row["canonical_smiles"] for row in selected]
+        if len(smiles) != len(set(smiles)):
+            raise AssertionError("Selected candidate canonical SMILES are duplicated.")
+        selected_order_hash = stable_json_sha256(
+            [str(row["candidate_id"]) for row in selected]
+        )
+        if selected_order_hash != str(
+            export_manifest.get("selected_candidate_order_sha256")
+        ):
+            raise AssertionError("Frozen selected candidate order hash mismatch.")
     if export_manifest.get("selection_performed_in_eval") is not False:
         raise AssertionError("Candidate selection was incorrectly deferred to evaluation.")
-    selected_order_hash = stable_json_sha256(
-        [str(row["candidate_id"]) for row in selected]
-    )
-    if selected_order_hash != str(
-        export_manifest.get("selected_candidate_order_sha256")
-    ):
-        raise AssertionError("Frozen selected candidate order hash mismatch.")
     result = {
         "audit_passed": True,
         "run_complete": True,
@@ -1697,7 +2163,15 @@ def audit_mutagenicity_run(
         "generation_parent_ids_sha256": parent_ids_sha256,
         "summary_parent_count": int(summary_manifest["summary_parent_count"]),
         "selected_top20_rows": len(selected),
+        "selected_count": int(export_manifest.get("selected_count", -1)),
         "candidate_universe_rows": len(candidate_universe),
+        "candidate_filter_audit_rows": len(filter_audit),
+        "rf_scored_count": int(filter_summary["rf_scored_count"]),
+        "rf_target_count": int(filter_summary["rf_target_count"]),
+        "candidate_yield_gate_passed": bool(
+            filter_summary["candidate_yield_gate_passed"]
+        ),
+        "full_result_ready": bool(export_manifest["full_result_ready"]),
         "native_rank_unique": True,
         "native_rank_reordered": False,
         "selected_candidate_order_sha256": selected_order_hash,

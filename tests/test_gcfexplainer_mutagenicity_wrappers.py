@@ -106,6 +106,8 @@ def test_all_wrapper_explicitly_passes_profile_derived_vrrw_contract() -> None:
     assert 'VRRW_THETA="$VRRW_THETA"' in text
     assert 'VRRW_SEED="$VRRW_SEED"' in text
     assert 'PARENT_LIMIT="$VRRW_PARENT_LIMIT"' in text
+    assert 'EXPORT_DIR="${EXPORT_DIR:-}"' in text
+    assert 'EXPORT_DIR="$EXPORT_DIR"' in text
     assert "MAX_STEPS" not in text
 
 
@@ -265,6 +267,45 @@ def test_summary_wrapper_preserves_native_rank_then_rf_filters() -> None:
     assert 'MINIMUM_NATIVE_EXPORT="${MINIMUM_NATIVE_EXPORT:-100}"' in text
     assert 'TOP_K="${TOP_K:-20}"' in text
     assert "mutagenicity_rf_v1/mutagenicity_rf_model.pkl" in text
+    assert 'EXPORT_DIR="${EXPORT_DIR:-}"' in text
+    assert "EXPORT_DIR must be provided explicitly" in text
+    assert '_SMOKE_AUDIT_COMPLETE.json' in text
+    assert 'EXPORT_SUCCESS_MARKER="$EXPORT_DIR/_RUN_COMPLETE.json"' in text
+
+
+def test_export_profile_gates_are_explicit_and_do_not_rerank() -> None:
+    runtime = (
+        ROOT / "src/baselines/gcfexplainer_mutagenicity_runtime.py"
+    ).read_text(encoding="utf-8")
+    cli = (
+        ROOT
+        / "scripts/baselines/gcfexplainer/export_mutagenicity_fullgraph_candidates.py"
+    ).read_text(encoding="utf-8")
+    assert "candidate_filter_audit.jsonl" in runtime
+    assert "filter_summary.json" in runtime
+    assert "smoke_interface_gate_passed" in runtime
+    assert "candidate_yield_gate_passed" in runtime
+    assert "rf_reranking_performed" in runtime
+    assert "wnode_reranking_performed" in runtime
+    assert "_SMOKE_AUDIT_COMPLETE.json" in runtime
+    assert "[MUTAGENICITY_GCFEXPLAINER_CHEMICAL_CODEC_ERROR]" in runtime
+    assert "[MUTAGENICITY_GCFEXPLAINER_EXPORT_SMOKE_AUDIT_OK]" in cli
+    assert "no_rf_target_candidate" in cli
+    official_root = ROOT / "baselines/gcfexplainer_official"
+    for path in official_root.glob("*.py"):
+        official_text = path.read_text(encoding="utf-8")
+        assert "candidate_filter_audit.jsonl" not in official_text
+
+
+def test_summary_and_all_wrappers_require_explicit_export_dir() -> None:
+    summary = WRAPPERS[3].read_text(encoding="utf-8")
+    all_wrapper = WRAPPERS[4].read_text(encoding="utf-8")
+    for text in (summary, all_wrapper):
+        assert 'EXPORT_DIR="${EXPORT_DIR:-}"' in text
+        assert "EXPORT_DIR must be provided explicitly" in text
+        assert 'EXPORT_DIR="${EXPORT_DIR:-$RUN_ROOT/export}"' not in text
+    assert 'test -s "$EXPORT_DIR/_SMOKE_AUDIT_COMPLETE.json"' in all_wrapper
+    assert 'test -s "$EXPORT_DIR/_RUN_COMPLETE.json"' in all_wrapper
 
 
 def test_summary_cli_and_runtime_use_vrrw_manifest_parent_lineage() -> None:

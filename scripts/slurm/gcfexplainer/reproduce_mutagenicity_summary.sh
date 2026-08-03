@@ -36,7 +36,11 @@ DATASET_DIR="${DATASET_DIR:-$RUN_ROOT/dataset}"
 GNN_DIR="${GNN_DIR:-$RUN_ROOT/gnn}"
 VRRW_DIR="${VRRW_DIR:-$RUN_ROOT/vrrw}"
 SUMMARY_DIR="${SUMMARY_DIR:-$RUN_ROOT/native_summary}"
-EXPORT_DIR="${EXPORT_DIR:-$RUN_ROOT/export}"
+EXPORT_DIR="${EXPORT_DIR:-}"
+if [[ -z "$EXPORT_DIR" ]]; then
+  echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] EXPORT_DIR must be provided explicitly." >&2
+  exit 2
+fi
 OFFICIAL_ROOT="${OFFICIAL_ROOT:-$PROJECT_ROOT/baselines/gcfexplainer_official}"
 GNN_CHECKPOINT="${GNN_CHECKPOINT:-$GNN_DIR/model_best.pth}"
 NEUROSED_CHECKPOINT="${NEUROSED_CHECKPOINT:-$OFFICIAL_ROOT/data/mutagenicity/neurosed/best_model.pt}"
@@ -45,6 +49,11 @@ SUMMARY_THETA="${SUMMARY_THETA:-0.1}"
 MINIMUM_NATIVE_EXPORT="${MINIMUM_NATIVE_EXPORT:-100}"
 TOP_K="${TOP_K:-20}"
 RESUME="${RESUME:-true}"
+if [[ "$PROFILE" == "smoke" ]]; then
+  EXPORT_SUCCESS_MARKER="$EXPORT_DIR/_SMOKE_AUDIT_COMPLETE.json"
+else
+  EXPORT_SUCCESS_MARKER="$EXPORT_DIR/_RUN_COMPLETE.json"
+fi
 
 test -s "$DATASET_DIR/_PHASE_A_COMPLETE.json"
 test -s "$GNN_DIR/_RUN_COMPLETE.json"
@@ -102,7 +111,7 @@ else
   echo "[MUTAGENICITY_GCFEXPLAINER_SUMMARY_REUSED] $SUMMARY_DIR"
 fi
 
-if [[ ! -s "$EXPORT_DIR/_RUN_COMPLETE.json" ]]; then
+if [[ ! -s "$EXPORT_SUCCESS_MARKER" ]]; then
   if [[ -d "$EXPORT_DIR" && -n "$(find "$EXPORT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
     echo "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR] incomplete candidate export requires a fresh output directory." >&2
     exit 2
@@ -136,4 +145,5 @@ python scripts/baselines/gcfexplainer/audit_mutagenicity_run.py \
   --forbid-calibration-test
 
 test -s "$EXPORT_DIR/audit.json"
+test -s "$EXPORT_SUCCESS_MARKER"
 echo "[MUTAGENICITY_GCFEXPLAINER_SUMMARY_WRAPPER_OK]"
