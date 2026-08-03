@@ -170,6 +170,7 @@ class Figure4Row:
     mean: float | None
     lower: float | None
     upper: float | None
+    threshold_name: str | None = None
 
 
 def _nearest_theta(rows: Sequence[Figure3Row], q30: float) -> float:
@@ -179,7 +180,27 @@ def _nearest_theta(rows: Sequence[Figure3Row], q30: float) -> float:
     return min(values, key=lambda value: abs(value - q30))
 
 
-def load_figure3_rows(path: Path, *, q30: float) -> tuple[list[Figure3Row], dict[str, Any]]:
+def _parse_expected_methods(value: str | Sequence[str]) -> tuple[str, ...]:
+    raw_values = value.split(",") if isinstance(value, str) else list(value)
+    methods: list[str] = []
+    for raw_value in raw_values:
+        method = _normalize_method(raw_value)
+        if method is None:
+            raise ValueError(f"Unknown expected method: {raw_value!r}")
+        if method in methods:
+            raise ValueError(f"Duplicate expected method: {method}")
+        methods.append(method)
+    if not methods:
+        raise ValueError("At least one expected method is required.")
+    return tuple(methods)
+
+
+def load_figure3_rows(
+    path: Path,
+    *,
+    q30: float,
+    expected_methods: Sequence[str] = METHOD_ORDER,
+) -> tuple[list[Figure3Row], dict[str, Any]]:
     headers, raw_rows = _read_csv(path)
     method_field = _field(headers, ("method",), label="method field")
     k_field = _field(headers, ("k", "K"), label="K field")
@@ -218,10 +239,13 @@ def load_figure3_rows(path: Path, *, q30: float) -> tuple[list[Figure3Row], dict
             raise ValueError(f"Duplicate Figure 3 row after theta selection: {key}")
         per_key.add(key)
     methods = {row.method for row in selected}
-    missing = set(METHOD_ORDER) - methods
+    missing = set(expected_methods) - methods
     if missing:
         raise ValueError(f"Figure 3 CSV is missing standardized methods: {sorted(missing)}")
-    return sorted(selected, key=lambda row: (METHOD_ORDER.index(row.method), row.k)), {
+    unexpected = methods - set(expected_methods)
+    if unexpected:
+        raise ValueError(f"Figure 3 CSV contains unexpected methods: {sorted(unexpected)}")
+    return sorted(selected, key=lambda row: (expected_methods.index(row.method), row.k)), {
         "figure3_csv": str(path),
         "source_columns": headers,
         "method_field": method_field,
@@ -231,11 +255,17 @@ def load_figure3_rows(path: Path, *, q30: float) -> tuple[list[Figure3Row], dict
         "conditional_cost_field": cost_field,
         "selected_theta": selected_theta,
         "theta_delta_from_q30": selected_theta - q30,
+        "expected_methods": list(expected_methods),
         "ignored_unrecognized_methods": sorted(value for value in ignored_methods if value),
     }
 
 
-def load_figure4_rows(path: Path) -> tuple[list[Figure4Row], dict[str, Any]]:
+def load_figure4_rows(
+    path: Path,
+    *,
+    expected_methods: Sequence[str] = METHOD_ORDER,
+    selected_k: int = 20,
+) -> tuple[list[Figure4Row], dict[str, Any]]:
     headers, raw_rows = _read_csv(path)
     method_field = _field(headers, ("method",), label="method field")
     threshold_field = _field(headers, ("threshold", "theta"), label="threshold field")
@@ -244,6 +274,9 @@ def load_figure4_rows(path: Path) -> tuple[list[Figure4Row], dict[str, Any]]:
     mean_field = _optional_field(headers, ("mean", "coverage_mean"))
     lower_field = _optional_field(headers, ("lower", "ci_lower"))
     upper_field = _optional_field(headers, ("upper", "ci_upper"))
+    threshold_name_field = _optional_field(
+        headers, ("threshold_name", "quantile_label")
+    )
     parsed: list[Figure4Row] = []
     ignored_methods: set[str] = set()
     for row_number, row in enumerate(raw_rows, start=2):
@@ -260,27 +293,35 @@ def load_figure4_rows(path: Path) -> tuple[list[Figure4Row], dict[str, Any]]:
                 mean=_as_float(row.get(mean_field), name=mean_field, row_number=row_number) if mean_field and str(row.get(mean_field) or "").strip() else None,
                 lower=_as_float(row.get(lower_field), name=lower_field, row_number=row_number) if lower_field and str(row.get(lower_field) or "").strip() else None,
                 upper=_as_float(row.get(upper_field), name=upper_field, row_number=row_number) if upper_field and str(row.get(upper_field) or "").strip() else None,
+                threshold_name=(
+                    str(row.get(threshold_name_field) or "").strip()
+                    if threshold_name_field
+                    else None
+                ),
             )
         )
     if k_field is not None:
         observed_k = sorted({row.k for row in parsed if row.k is not None})
-        if 20 not in observed_k:
+        if selected_k not in observed_k:
             raise ValueError(
-                "Figure 4 requires the dense K=20 input curve; "
+                f"Figure 4 requires K={selected_k}; "
                 f"observed K values={observed_k}"
             )
-        parsed = [row for row in parsed if row.k == 20]
+        parsed = [row for row in parsed if row.k == selected_k]
     methods = {row.method for row in parsed}
-    missing = set(METHOD_ORDER) - methods
+    missing = set(expected_methods) - methods
     if missing:
         raise ValueError(f"Figure 4 CSV is missing standardized methods: {sorted(missing)}")
+    unexpected = methods - set(expected_methods)
+    if unexpected:
+        raise ValueError(f"Figure 4 CSV contains unexpected methods: {sorted(unexpected)}")
     per_key: set[tuple[str, float]] = set()
     for row in parsed:
         key = (row.method, row.threshold)
         if key in per_key:
             raise ValueError(f"Duplicate Figure 4 row: {key}")
         per_key.add(key)
-    return sorted(parsed, key=lambda row: (METHOD_ORDER.index(row.method), row.threshold)), {
+    return sorted(parsed, key=lambda row: (expected_methods.index(row.method), row.threshold)), {
         "figure4_csv": str(path),
         "source_columns": headers,
         "method_field": method_field,
@@ -290,8 +331,10 @@ def load_figure4_rows(path: Path) -> tuple[list[Figure4Row], dict[str, Any]]:
         "mean_field": mean_field,
         "lower_field": lower_field,
         "upper_field": upper_field,
+        "threshold_name_field": threshold_name_field,
         "ignored_unrecognized_methods": sorted(value for value in ignored_methods if value),
-        "selected_k": 20 if k_field is not None else None,
+        "selected_k": selected_k if k_field is not None else None,
+        "expected_methods": list(expected_methods),
     }
 
 
@@ -299,9 +342,13 @@ def _method_rows(rows: Sequence[Any], method: str) -> list[Any]:
     return [row for row in rows if row.method == method]
 
 
-def _require_prefix(rows: Sequence[Figure3Row], max_k: int) -> None:
+def _require_prefix(
+    rows: Sequence[Figure3Row],
+    max_k: int,
+    methods: Sequence[str] = METHOD_ORDER,
+) -> None:
     expected = list(range(1, max_k + 1))
-    for method in METHOD_ORDER:
+    for method in methods:
         observed = [row.k for row in _method_rows(rows, method) if row.k <= max_k]
         if observed != expected:
             raise ValueError(f"{method} Figure 3 K values must be {expected}; observed={observed}")
@@ -324,19 +371,29 @@ def _save_figure3(
     path_png: Path,
     path_pdf: Path,
     supplemental: bool,
+    methods: Sequence[str] = METHOD_ORDER,
+    dataset_name: str = "AIDS",
 ) -> None:
-    _require_prefix(rows, max_k)
+    _require_prefix(rows, max_k, methods)
     _matplotlib, plt = _import_matplotlib()
     figure, axes = plt.subplots(2, 1, figsize=(7.4, 7.9), sharex=True)
-    for method in METHOD_ORDER:
+    for method in methods:
         method_rows = [row for row in _method_rows(rows, method) if row.k <= max_k]
         x = [row.k for row in method_rows]
         axes[0].plot(x, [row.coverage for row in method_rows], color=METHOD_COLORS[method], marker=METHOD_MARKERS[method], linewidth=1.9, markersize=4.2, label=method)
         axes[1].plot(x, [row.conditional_median_cost for row in method_rows], color=METHOD_COLORS[method], marker=METHOD_MARKERS[method], linewidth=1.9, markersize=4.2, label=method)
-    axes[0].set_ylabel("Coverage / CCRCov")
-    axes[1].set_ylabel("Conditional median cost\n(MolCLR-Node-FGW)")
+    axes[0].set_ylabel("CCRCov at q30" if dataset_name == "Mutagenicity" else "Coverage / CCRCov")
+    axes[1].set_ylabel(
+        "Conditional median cost\namong applicable strict-flip parents"
+        if dataset_name == "Mutagenicity"
+        else "Conditional median cost\n(MolCLR-Node-FGW)"
+    )
     axes[1].set_xlabel("Prefix K")
-    axes[0].set_title(f"theta = {q30:.4f}")
+    axes[0].set_title(
+        f"{dataset_name}: theta = {q30:.4f}"
+        if dataset_name == "Mutagenicity"
+        else f"theta = {q30:.4f}"
+    )
     for axis in axes:
         axis.grid(True, alpha=0.25)
         axis.set_xlim(1, max_k)
@@ -349,7 +406,11 @@ def _save_figure3(
     figure.text(
         0.5,
         0.01,
-        "Conditional cost is the unified-evaluator field; it is not labeled as the original GCFExplainer paper-style unconditional cost.",
+        (
+            "GCFExplainer is pending and is not included in this preliminary three-method comparison."
+            if dataset_name == "Mutagenicity"
+            else "Conditional cost is the unified-evaluator field; it is not labeled as the original GCFExplainer paper-style unconditional cost."
+        ),
         ha="center",
         va="bottom",
         fontsize=8,
@@ -403,30 +464,60 @@ def _save_figure4(
     title: str,
     path_png: Path,
     path_pdf: Path,
+    methods: Sequence[str] = METHOD_ORDER,
+    quantile_mode: bool = False,
 ) -> None:
     _matplotlib, plt = _import_matplotlib()
     figure, axis = plt.subplots(figsize=(7.4, 4.9))
-    for method in METHOD_ORDER:
+    quantile_ticks: dict[float, str] = {}
+    for method in methods:
         method_rows = [row for row in _method_rows(rows, method) if lower_display - EPS <= row.threshold <= upper_display + EPS]
         if not method_rows:
             raise ValueError(f"No Figure 4 data for {method} in [{lower_display}, {upper_display}]")
         x = np.asarray([row.threshold for row in method_rows], dtype=float)
         coverage = np.asarray([row.coverage for row in method_rows], dtype=float)
-        axis.plot(x, coverage, color=METHOD_COLORS[method], linewidth=1.9, label=method)
+        axis.plot(
+            x,
+            coverage,
+            color=METHOD_COLORS[method],
+            marker=METHOD_MARKERS[method] if quantile_mode else None,
+            linewidth=1.9,
+            label=method,
+        )
+        if quantile_mode:
+            for row in method_rows:
+                if row.threshold_name:
+                    quantile_ticks.setdefault(row.threshold, row.threshold_name)
         lower = [row.lower for row in method_rows]
         upper = [row.upper for row in method_rows]
         if all(value is not None for value in lower) and all(value is not None for value in upper):
             axis.fill_between(x, np.asarray(lower, dtype=float), np.asarray(upper, dtype=float), color=METHOD_COLORS[method], alpha=0.12, linewidth=0)
-    if lower_display <= q20 <= upper_display:
+    if not quantile_mode and lower_display <= q20 <= upper_display:
         axis.axvline(q20, color="#666666", linestyle=":", linewidth=1.0, label="q20")
     if lower_display <= q30 <= upper_display:
-        axis.axvline(q30, color="#444444", linestyle="--", linewidth=1.0, label="q30")
+        axis.axvline(
+            q30,
+            color="#444444",
+            linestyle="--",
+            linewidth=1.0,
+            label="Primary threshold q30" if quantile_mode else "q30",
+        )
     axis.set_xlim(lower_display, upper_display)
     axis.set_ylim(bottom=0)
-    axis.set_xlabel("MolCLR-Node-FGW threshold")
+    axis.set_xlabel(
+        "MolCLR-Node-Wasserstein threshold"
+        if quantile_mode
+        else "MolCLR-Node-FGW threshold"
+    )
     axis.set_ylabel("CCRCov")
     axis.set_title(title)
     axis.grid(True, alpha=0.25)
+    if quantile_mode and quantile_ticks:
+        values = sorted(quantile_ticks)
+        axis.set_xticks(
+            values,
+            [f"{quantile_ticks[value]}\n{value:.4f}" for value in values],
+        )
     axis.legend(ncol=2, frameon=False, loc="best")
     figure.tight_layout()
     figure.savefig(path_png, dpi=300, bbox_inches="tight")
@@ -434,9 +525,16 @@ def _save_figure4(
     plt.close(figure)
 
 
-def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) -> list[dict[str, Any]]:
+def _save_table2(
+    rows: Sequence[Figure3Row],
+    *,
+    q30: float,
+    output_dir: Path,
+    methods: Sequence[str] = METHOD_ORDER,
+    dataset_name: str = "AIDS",
+) -> list[dict[str, Any]]:
     k10 = {row.method: row for row in rows if row.k == 10}
-    missing = set(METHOD_ORDER) - set(k10)
+    missing = set(methods) - set(k10)
     if missing:
         raise ValueError(f"Table 2 needs K=10 rows for all methods; missing={sorted(missing)}")
     nonfinite_cost_methods = [
@@ -459,7 +557,7 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
             "coverage_is_best": k10[method].coverage >= max_coverage - EPS,
             "cost_is_best": k10[method].conditional_median_cost <= min_cost + EPS,
         }
-        for method in METHOD_ORDER
+        for method in methods
     ]
     display_fields = ("Method", "Coverage \u2191", "Conditional median cost \u2193")
     display_rows = [
@@ -470,7 +568,12 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
         }
         for row in table_rows
     ]
-    _write_csv(output_dir / "table2_main_k10_q30_compact.csv", display_rows, display_fields)
+    table_stem = (
+        "mut_table2_k10_q30_three_method"
+        if dataset_name == "Mutagenicity"
+        else "table2_main_k10_q30_compact"
+    )
+    _write_csv(output_dir / f"{table_stem}.csv", display_rows, display_fields)
     markdown = [
         "| Method | Coverage ↑ | Conditional median cost ↓ |",
         "| --- | ---: | ---: |",
@@ -478,13 +581,25 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
     for row in table_rows:
         coverage = f"{row['coverage']:.4f}"
         cost = f"{row['conditional_median_cost']:.4f}"
-        if row["method"] == "Ours" and row["coverage_is_best"]:
+        if row["coverage_is_best"] and (
+            dataset_name == "Mutagenicity" or row["method"] == "Ours"
+        ):
             coverage = f"**{coverage}**"
-        if row["method"] == "Ours" and row["cost_is_best"]:
+        if row["cost_is_best"] and (
+            dataset_name == "Mutagenicity" or row["method"] == "Ours"
+        ):
             cost = f"**{cost}**"
         markdown.append(f"| {row['method']} | {coverage} | {cost} |")
-    markdown.extend(("", "MolCLR-Node-FGW, lambda=0.5, strict-flip evaluation."))
-    (output_dir / "table2_main_k10_q30_compact.md").write_text("\n".join(markdown) + "\n", encoding="utf-8")
+    footnote = (
+        "Mutagenicity, 217 test parents, strict-flip, MolCLR-Node-Wasserstein. "
+        "GCFExplainer is pending and is not included in this preliminary three-method comparison."
+        if dataset_name == "Mutagenicity"
+        else "MolCLR-Node-FGW, lambda=0.5, strict-flip evaluation."
+    )
+    markdown.extend(("", footnote))
+    (output_dir / f"{table_stem}.md").write_text(
+        "\n".join(markdown) + "\n", encoding="utf-8"
+    )
 
     _matplotlib, plt = _import_matplotlib()
     figure, axis = plt.subplots(figsize=(7.4, 2.6))
@@ -509,15 +624,15 @@ def _save_table2(rows: Sequence[Figure3Row], *, q30: float, output_dir: Path) ->
         if row_index == 0:
             cell.set_text_props(weight="bold")
             cell.set_facecolor("#eeeeee")
-        elif table_rows[row_index - 1]["method"] == "Ours":
+        elif dataset_name == "Mutagenicity" or table_rows[row_index - 1]["method"] == "Ours":
             if col_index == 1 and table_rows[row_index - 1]["coverage_is_best"]:
                 cell.set_text_props(weight="bold")
             if col_index == 2 and table_rows[row_index - 1]["cost_is_best"]:
                 cell.set_text_props(weight="bold")
-    figure.text(0.5, 0.03, "MolCLR-Node-FGW, lambda=0.5, strict-flip evaluation.", ha="center", fontsize=8)
+    figure.text(0.5, 0.03, footnote, ha="center", fontsize=8)
     figure.tight_layout(rect=(0, 0.09, 1, 1))
-    figure.savefig(output_dir / "table2_main_k10_q30_compact.png", dpi=300, bbox_inches="tight")
-    figure.savefig(output_dir / "table2_main_k10_q30_compact.pdf", bbox_inches="tight")
+    figure.savefig(output_dir / f"{table_stem}.png", dpi=300, bbox_inches="tight")
+    figure.savefig(output_dir / f"{table_stem}.pdf", bbox_inches="tight")
     plt.close(figure)
     return table_rows
 
@@ -621,16 +736,111 @@ Do not claim all-K and all-threshold SOTA from these checks.
     (output_dir / "sota_presentation_audit.txt").write_text(content, encoding="utf-8")
 
 
+def _write_quantile_audit(
+    output_dir: Path,
+    *,
+    figure3_audit: dict[str, Any],
+    figure4_audit: dict[str, Any],
+    table_rows: Sequence[dict[str, Any]],
+    methods: Sequence[str],
+    dataset_name: str,
+    q30: float,
+) -> None:
+    if {str(row["method"]) for row in table_rows} != set(methods):
+        raise ValueError("Quantile audit Table 2 methods do not match expected methods.")
+    best_coverage = max(table_rows, key=lambda row: float(row["coverage"]))
+    best_cost = min(
+        table_rows, key=lambda row: float(row["conditional_median_cost"])
+    )
+    table_lines = "\n".join(
+        f"{row['method']}: coverage={float(row['coverage']):.16g}, "
+        f"conditional_median_cost={float(row['conditional_median_cost']):.16g}"
+        for row in table_rows
+    )
+    content = f"""{dataset_name} completed-method presentation audit
+
+Figure 3 source: {figure3_audit['figure3_csv']}
+Figure 3 conditional cost source field: {figure3_audit['conditional_cost_field']}
+Figure 3 selected theta: {figure3_audit['selected_theta']:.16g}
+Figure 4 source: {figure4_audit['figure4_csv']}
+Figure 4 selected K: {figure4_audit['selected_k']}
+Figure 4 mode: quantile
+q30: {q30:.16g}
+Methods: {','.join(methods)}
+
+{table_lines}
+best among completed methods coverage: {best_coverage['method']} ({float(best_coverage['coverage']):.16g})
+best among completed methods conditional cost: {best_cost['method']} ({float(best_cost['conditional_median_cost']):.16g})
+
+No dense low-cost pAUC was computed from the seven frozen quantile points.
+GCFExplainer is pending and is not included in this preliminary three-method comparison.
+"""
+    (output_dir / "mut_three_method_plot_audit.txt").write_text(
+        content, encoding="utf-8"
+    )
+
+
+def _validate_quantile_rows(
+    rows: Sequence[Figure4Row],
+    *,
+    methods: Sequence[str],
+    q30: float,
+) -> None:
+    reference: list[float] | None = None
+    required_labels = {"q05", "q10", "q20", "q30", "q50", "q70", "q90"}
+    for method in methods:
+        selected = _method_rows(rows, method)
+        if len(selected) != 7:
+            raise ValueError(
+                f"Quantile Figure 4 requires seven rows for {method}; actual={len(selected)}"
+            )
+        labels = {str(row.threshold_name or "") for row in selected}
+        if labels != required_labels:
+            raise ValueError(
+                f"Quantile Figure 4 labels for {method} must be q05..q90; "
+                f"actual={sorted(labels)}"
+            )
+        thresholds = [row.threshold for row in selected]
+        if reference is None:
+            reference = thresholds
+        elif any(
+            not math.isclose(left, right, rel_tol=0.0, abs_tol=EPS)
+            for left, right in zip(reference, thresholds)
+        ):
+            raise ValueError(f"Quantile threshold grid differs for {method}.")
+        q30_rows = [row for row in selected if row.threshold_name == "q30"]
+        if len(q30_rows) != 1 or not math.isclose(
+            q30_rows[0].threshold, q30, rel_tol=0.0, abs_tol=EPS
+        ):
+            raise ValueError(f"{method} q30 threshold does not match requested q30.")
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    expected_methods = _parse_expected_methods(args.expected_methods)
+    figure4_mode = str(args.figure4_mode)
+    dataset_name = str(args.dataset_name)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     figure3_csv = _find_figure3_csv(Path(args.figure3_report_dir).expanduser().resolve())
     figure4_csv = Path(args.figure4_csv).expanduser().resolve()
     if not figure4_csv.is_file():
         raise FileNotFoundError(f"Figure 4 CSV not found: {figure4_csv}")
-    figure3_rows, figure3_audit = load_figure3_rows(figure3_csv, q30=float(args.q30))
-    figure4_rows, figure4_audit = load_figure4_rows(figure4_csv)
-    _require_prefix(figure3_rows, 20)
+    figure3_rows, figure3_audit = load_figure3_rows(
+        figure3_csv,
+        q30=float(args.q30),
+        expected_methods=expected_methods,
+    )
+    selected_figure4_k = 10 if figure4_mode == "quantile" else 20
+    figure4_rows, figure4_audit = load_figure4_rows(
+        figure4_csv,
+        expected_methods=expected_methods,
+        selected_k=selected_figure4_k,
+    )
+    _require_prefix(figure3_rows, 20, expected_methods)
+    if figure4_mode == "quantile":
+        _validate_quantile_rows(
+            figure4_rows, methods=expected_methods, q30=float(args.q30)
+        )
 
     selected_prefix_rows = [
         {
@@ -649,8 +859,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ("method", "k", "theta", "coverage", "conditional_median_cost", "source_csv"),
     )
 
-    selected_threshold_rows = [
-        {
+    selected_threshold_rows = []
+    for row in figure4_rows:
+        if figure4_mode != "quantile" and not 0.0 <= row.threshold <= 0.10:
+            continue
+        selected_row = {
             "method": row.method,
             "k": row.k,
             "threshold": row.threshold,
@@ -663,88 +876,145 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "in_supplement_display_interval": 0.0 <= row.threshold <= 0.10,
             "source_csv": str(figure4_csv),
         }
-        for row in figure4_rows
-        if 0.0 <= row.threshold <= 0.10
-    ]
-    _write_csv(
-        output_dir / "selected_figure4_threshold_data.csv",
-        selected_threshold_rows,
+        if figure4_mode == "quantile":
+            selected_row["threshold_name"] = row.threshold_name
+        selected_threshold_rows.append(selected_row)
+    threshold_fields = (
         (
+            "method", "k", "threshold_name", "threshold", "coverage", "mean", "lower", "upper",
+            "in_low_cost_auc_interval", "in_main_display_interval",
+            "in_supplement_display_interval", "source_csv",
+        )
+        if figure4_mode == "quantile"
+        else (
             "method", "k", "threshold", "coverage", "mean", "lower", "upper",
             "in_low_cost_auc_interval", "in_main_display_interval",
             "in_supplement_display_interval", "source_csv",
-        ),
+        )
+    )
+    _write_csv(
+        output_dir / "selected_figure4_threshold_data.csv",
+        selected_threshold_rows,
+        threshold_fields,
     )
 
+    figure3_main_stem = (
+        "mut_figure3_main_k1_10_coverage_conditional_cost"
+        if dataset_name == "Mutagenicity"
+        else "figure3_main_k1_10_coverage_conditional_cost"
+    )
+    figure3_supplement_stem = (
+        "mut_figure3_supplement_k1_20_coverage_conditional_cost"
+        if dataset_name == "Mutagenicity"
+        else "figure3_supplement_k1_20_coverage_conditional_cost"
+    )
     _save_figure3(
         figure3_rows,
         max_k=10,
         q30=float(args.q30),
-        path_png=output_dir / "figure3_main_k1_10_coverage_conditional_cost.png",
-        path_pdf=output_dir / "figure3_main_k1_10_coverage_conditional_cost.pdf",
+        path_png=output_dir / f"{figure3_main_stem}.png",
+        path_pdf=output_dir / f"{figure3_main_stem}.pdf",
         supplemental=False,
+        methods=expected_methods,
+        dataset_name=dataset_name,
     )
     _save_figure3(
         figure3_rows,
         max_k=20,
         q30=float(args.q30),
-        path_png=output_dir / "figure3_supplement_k1_20_coverage_conditional_cost.png",
-        path_pdf=output_dir / "figure3_supplement_k1_20_coverage_conditional_cost.pdf",
+        path_png=output_dir / f"{figure3_supplement_stem}.png",
+        path_pdf=output_dir / f"{figure3_supplement_stem}.pdf",
         supplemental=True,
+        methods=expected_methods,
+        dataset_name=dataset_name,
     )
-    _save_figure4(
-        figure4_rows,
-        q20=float(args.q20),
+    if figure4_mode == "quantile":
+        thresholds = [row.threshold for row in figure4_rows]
+        _save_figure4(
+            figure4_rows,
+            q20=float(args.q20),
+            q30=float(args.q30),
+            lower_display=min(thresholds),
+            upper_display=max(thresholds),
+            title="Mutagenicity K=10 CCRCov at frozen WNode quantiles",
+            path_png=output_dir / "mut_figure4_quantile_ccrcov_k10.png",
+            path_pdf=output_dir / "mut_figure4_quantile_ccrcov_k10.pdf",
+            methods=expected_methods,
+            quantile_mode=True,
+        )
+    else:
+        _save_figure4(
+            figure4_rows,
+            q20=float(args.q20),
+            q30=float(args.q30),
+            lower_display=float(args.figure4_display_min),
+            upper_display=float(args.q30),
+            title=f"K=20 low-cost CCRCov (display {float(args.figure4_display_min):.3f} to q30)",
+            path_png=output_dir / "figure4_main_low_cost_ccrcov_0_q30.png",
+            path_pdf=output_dir / "figure4_main_low_cost_ccrcov_0_q30.pdf",
+            methods=expected_methods,
+        )
+        _save_figure4(
+            figure4_rows,
+            q20=float(args.q20),
+            q30=float(args.q30),
+            lower_display=0.0,
+            upper_display=0.10,
+            title="K=20 CCRCov across the full threshold range",
+            path_png=output_dir / "figure4_supplement_full_ccrcov_0_010.png",
+            path_pdf=output_dir / "figure4_supplement_full_ccrcov_0_010.pdf",
+            methods=expected_methods,
+        )
+    table_rows = _save_table2(
+        figure3_rows,
         q30=float(args.q30),
-        lower_display=float(args.figure4_display_min),
-        upper_display=float(args.q30),
-        title=f"K=20 low-cost CCRCov (display {float(args.figure4_display_min):.3f} to q30)",
-        path_png=output_dir / "figure4_main_low_cost_ccrcov_0_q30.png",
-        path_pdf=output_dir / "figure4_main_low_cost_ccrcov_0_q30.pdf",
+        output_dir=output_dir,
+        methods=expected_methods,
+        dataset_name=dataset_name,
     )
-    _save_figure4(
-        figure4_rows,
-        q20=float(args.q20),
-        q30=float(args.q30),
-        lower_display=0.0,
-        upper_display=0.10,
-        title="K=20 CCRCov across the full threshold range",
-        path_png=output_dir / "figure4_supplement_full_ccrcov_0_010.png",
-        path_pdf=output_dir / "figure4_supplement_full_ccrcov_0_010.pdf",
-    )
-    table_rows = _save_table2(figure3_rows, q30=float(args.q30), output_dir=output_dir)
 
     auc_rows: list[dict[str, Any]] = []
-    for method in METHOD_ORDER:
-        method_rows = _method_rows(figure4_rows, method)
-        auc_rows.append(
-            {
-                "method": method,
-                "coverage_at_q30": _interpolated_coverage(method_rows, float(args.q30)),
-                **_normalized_auc(method_rows, q30=float(args.q30)),
-            }
+    if figure4_mode == "dense":
+        for method in expected_methods:
+            method_rows = _method_rows(figure4_rows, method)
+            auc_rows.append(
+                {
+                    "method": method,
+                    "coverage_at_q30": _interpolated_coverage(method_rows, float(args.q30)),
+                    **_normalized_auc(method_rows, q30=float(args.q30)),
+                }
+            )
+        _write_csv(
+            output_dir / "figure4_low_cost_auc_0_q30.csv",
+            auc_rows,
+            (
+                "method",
+                "auc_min",
+                "auc_max",
+                "low_cost_normalized_auc",
+                "coverage_at_q30",
+            ),
         )
-    _write_csv(
-        output_dir / "figure4_low_cost_auc_0_q30.csv",
-        auc_rows,
-        (
-            "method",
-            "auc_min",
-            "auc_max",
-            "low_cost_normalized_auc",
-            "coverage_at_q30",
-        ),
-    )
-    _write_audit(
-        output_dir,
-        figure3_audit=figure3_audit,
-        figure4_audit=figure4_audit,
-        table_rows=table_rows,
-        auc_rows=auc_rows,
-        q20=float(args.q20),
-        q30=float(args.q30),
-        figure4_display_min=float(args.figure4_display_min),
-    )
+        _write_audit(
+            output_dir,
+            figure3_audit=figure3_audit,
+            figure4_audit=figure4_audit,
+            table_rows=table_rows,
+            auc_rows=auc_rows,
+            q20=float(args.q20),
+            q30=float(args.q30),
+            figure4_display_min=float(args.figure4_display_min),
+        )
+    else:
+        _write_quantile_audit(
+            output_dir,
+            figure3_audit=figure3_audit,
+            figure4_audit=figure4_audit,
+            table_rows=table_rows,
+            methods=expected_methods,
+            dataset_name=dataset_name,
+            q30=float(args.q30),
+        )
     return {
         "figure3_source": str(figure3_csv),
         "figure4_source": str(figure4_csv),
@@ -753,6 +1023,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "figure4_fields": figure4_audit,
         "table2": table_rows,
         "low_cost_auc": auc_rows,
+        "expected_methods": list(expected_methods),
+        "dataset_name": dataset_name,
+        "figure4_mode": figure4_mode,
     }
 
 
@@ -775,12 +1048,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q20", type=float, default=0.0229636285221722)
     parser.add_argument("--q30", type=float, default=0.0328363645853374)
     parser.add_argument("--figure4-display-min", type=float, default=0.015)
+    parser.add_argument(
+        "--expected-methods",
+        default=",".join(METHOD_ORDER),
+        help="Comma-separated ordered methods expected in both figure inputs.",
+    )
+    parser.add_argument("--dataset-name", default="AIDS")
+    parser.add_argument(
+        "--figure4-mode",
+        choices=("dense", "quantile"),
+        default="dense",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    if not 0.0 <= float(args.figure4_display_min) <= float(args.q30):
+    if args.figure4_mode == "dense" and not 0.0 <= float(args.figure4_display_min) <= float(args.q30):
         raise SystemExit("--figure4-display-min must lie within [0, q30].")
     result = run(args)
     print("[FGW_SOTA_FIGURES_DONE]", flush=True)
