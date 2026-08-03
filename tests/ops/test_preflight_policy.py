@@ -9,6 +9,9 @@ POLICY = {
         "baselines/clear_official",
         "docs/EXPERIMENT_LOG.md",
     ],
+    "allowed_untracked_paths": [
+        "scripts/paper/plot_aids_mut_gcf_style.py"
+    ],
     "allowed_patched_submodules": [
         {
             "path": "baselines/clear_official",
@@ -40,6 +43,8 @@ def preflight(
     status: tuple[str, ...] = (" M src/main.py",),
     marker: bool = True,
     dirty_lines: tuple[str, ...] | None = None,
+    untracked_paths: tuple[str, ...] = (),
+    untracked_scan_complete: bool = True,
 ) -> RemotePreflight:
     return RemotePreflight(
         hostname="logini02",
@@ -53,6 +58,8 @@ def preflight(
             " m baselines/clear_official",
             " M docs/EXPERIMENT_LOG.md",
         ),
+        untracked_paths=untracked_paths,
+        untracked_scan_complete=untracked_scan_complete,
         conda_ready=True,
         sbatch_ready=True,
         sacct_ready=True,
@@ -148,11 +155,54 @@ def test_allowlist_is_exact_and_never_matches_a_prefix() -> None:
 
 def test_root_untracked_policy_is_not_relaxed() -> None:
     result = evaluate_remote_dirty_policy(
-        preflight(dirty_lines=("?? scripts/paper/local.py",)), POLICY
+        preflight(
+            dirty_lines=("?? scripts/paper/",),
+            untracked_paths=("scripts/paper/local.py",),
+        ),
+        POLICY,
     )
     assert result.remote_tracked_dirty_paths == ()
     assert result.remote_untracked_paths == ("scripts/paper/local.py",)
     assert result.blocked == ("scripts/paper/local.py",)
+    assert result.disallowed_remote_untracked_paths == (
+        "scripts/paper/local.py",
+    )
+
+
+def test_folded_untracked_directory_uses_exact_file_allowlist() -> None:
+    result = evaluate_remote_dirty_policy(
+        preflight(
+            dirty_lines=("?? scripts/paper/",),
+            untracked_paths=(
+                "scripts/paper/plot_aids_mut_gcf_style.py",
+            ),
+        ),
+        POLICY,
+    )
+    assert result.passed
+    assert result.remote_untracked_paths == (
+        "scripts/paper/plot_aids_mut_gcf_style.py",
+    )
+    assert result.allowed_remote_untracked_paths == (
+        "scripts/paper/plot_aids_mut_gcf_style.py",
+    )
+    assert result.disallowed_remote_untracked_paths == ()
+    assert "scripts/paper/" not in result.blocked
+
+
+def test_missing_exact_untracked_scan_blocks() -> None:
+    result = evaluate_remote_dirty_policy(
+        preflight(
+            dirty_lines=("?? scripts/paper/",),
+            untracked_scan_complete=False,
+        ),
+        POLICY,
+    )
+    assert not result.passed
+    assert result.untracked_blocked
+    assert result.untracked_evidence_error == (
+        "exact_untracked_scan_incomplete"
+    )
 
 
 def test_lowercase_m_identifies_exact_submodule_parent_path() -> None:

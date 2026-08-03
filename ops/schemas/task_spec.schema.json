@@ -81,6 +81,12 @@
           "items": {"type": "string", "minLength": 1},
           "default": []
         },
+        "allowed_untracked_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "default": []
+        },
         "allowed_patched_submodules": {
           "type": "array",
           "items": {"$ref": "#/$defs/patched_submodule"}

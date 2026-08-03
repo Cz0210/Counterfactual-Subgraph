@@ -31,6 +31,7 @@ PROTECTED_AUTOMATION_PATHS = (
     "scripts/ops",
     "tests/ops",
     "ops/specs",
+    "ops/schemas",
 )
 
 
@@ -205,9 +206,10 @@ def _validate_relative_policy_path(value: str, *, field: str) -> None:
         )
 
 
-def _validate_exact_remote_tracked_dirty_path(value: str) -> None:
+def _validate_exact_remote_dirty_path(
+    value: str, *, field: str, require_file_path: bool
+) -> None:
     path = PurePosixPath(value)
-    field = "remote_dirty_policy.allowed_tracked_paths"
     if (
         not value
         or value == "."
@@ -216,10 +218,13 @@ def _validate_exact_remote_tracked_dirty_path(value: str) -> None:
         or "\\" in value
         or any(token in value for token in ("*", "?", "[", "]"))
         or path.as_posix() != value
+        or (require_file_path and value.endswith("/"))
     ):
         raise SpecValidationError(
             f"{field} entries must be exact, normalized repository-relative "
-            f"POSIX paths without glob syntax: {value!r}"
+            "POSIX "
+            f"{'file ' if require_file_path else ''}paths without glob "
+            f"syntax: {value!r}"
         )
     for protected in PROTECTED_AUTOMATION_PATHS:
         if value == protected or value.startswith(protected + "/"):
@@ -227,6 +232,22 @@ def _validate_exact_remote_tracked_dirty_path(value: str) -> None:
                 f"{field} cannot allowlist protected automation path: "
                 f"{value!r}"
             )
+
+
+def _validate_exact_remote_tracked_dirty_path(value: str) -> None:
+    _validate_exact_remote_dirty_path(
+        value,
+        field="remote_dirty_policy.allowed_tracked_paths",
+        require_file_path=False,
+    )
+
+
+def _validate_exact_remote_untracked_path(value: str) -> None:
+    _validate_exact_remote_dirty_path(
+        value,
+        field="remote_dirty_policy.allowed_untracked_paths",
+        require_file_path=True,
+    )
 
 
 def _validate_adopt_path_under(
@@ -284,6 +305,8 @@ def semantic_validate(data: dict[str, Any]) -> None:
     remote_dirty_policy = data["remote_dirty_policy"]
     for value in remote_dirty_policy["allowed_tracked_paths"]:
         _validate_exact_remote_tracked_dirty_path(str(value))
+    for value in remote_dirty_policy["allowed_untracked_paths"]:
+        _validate_exact_remote_untracked_path(str(value))
     submodule_paths: list[str] = []
     for submodule in remote_dirty_policy["allowed_patched_submodules"]:
         submodule_path = str(submodule["path"])
@@ -426,6 +449,7 @@ def load_task_spec(path_like: str | Path) -> TaskSpec:
     )
     if isinstance(remote_dirty_policy, dict):
         remote_dirty_policy.setdefault("allowed_tracked_paths", [])
+        remote_dirty_policy.setdefault("allowed_untracked_paths", [])
         remote_dirty_policy.setdefault("allowed_patched_submodules", [])
     payload.setdefault(
         "proxy_policy",

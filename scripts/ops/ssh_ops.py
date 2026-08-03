@@ -69,6 +69,8 @@ class RemotePreflight:
     finalized_paths: tuple[str, ...]
     proxy_present: dict[str, bool]
     submodules: tuple[RemoteSubmoduleStatus, ...] = ()
+    untracked_paths: tuple[str, ...] = ()
+    untracked_scan_complete: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -78,6 +80,8 @@ class RemotePreflight:
             "commit": self.commit,
             "python_version": self.python_version,
             "remote_dirty_summary": list(self.dirty_lines),
+            "remote_untracked_paths": list(self.untracked_paths),
+            "untracked_scan_complete": self.untracked_scan_complete,
             "conda_ready": self.conda_ready,
             "sbatch_ready": self.sbatch_ready,
             "sacct_ready": self.sacct_ready,
@@ -171,6 +175,9 @@ def build_preflight_argv(
         "echo '[PREFLIGHT_DIRTY_BEGIN]'",
         "git status --short",
         "echo '[PREFLIGHT_DIRTY_END]'",
+        "echo '[PREFLIGHT_UNTRACKED_BEGIN]'",
+        "git ls-files --others --exclude-standard",
+        "echo '[PREFLIGHT_UNTRACKED_END]'",
         "printf '[PREFLIGHT_PYTHON] '; python --version 2>&1",
         (
             "if command -v sbatch >/dev/null 2>&1; then "
@@ -332,8 +339,11 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
     }
     proxy_present: dict[str, bool] = {}
     dirty_lines: list[str] = []
+    untracked_paths: list[str] = []
     finalized_paths: list[str] = []
     in_dirty = False
+    in_untracked = False
+    untracked_scan_complete = False
     submodule_sections: dict[str, dict[str, list[str]]] = {}
     submodule_markers: dict[str, dict[str, bool]] = {}
     active_submodule: str | None = None
@@ -349,6 +359,18 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
         if in_dirty:
             if line.strip():
                 dirty_lines.append(line)
+            continue
+        if line == "[PREFLIGHT_UNTRACKED_BEGIN]":
+            in_untracked = True
+            untracked_scan_complete = False
+            continue
+        if line == "[PREFLIGHT_UNTRACKED_END]":
+            in_untracked = False
+            untracked_scan_complete = True
+            continue
+        if in_untracked:
+            if line:
+                untracked_paths.append(line)
             continue
         section_markers = {
             "[PREFLIGHT_SUBMODULE_STATUS_BEGIN] ": "status",
@@ -445,6 +467,8 @@ def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:
         commit=values["commit"],
         python_version=values["python_version"],
         dirty_lines=tuple(dirty_lines),
+        untracked_paths=tuple(untracked_paths),
+        untracked_scan_complete=untracked_scan_complete,
         conda_ready=booleans["conda_ready"],
         sbatch_ready=booleans["sbatch_ready"],
         sacct_ready=booleans["sacct_ready"],

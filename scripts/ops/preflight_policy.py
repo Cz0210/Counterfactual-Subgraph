@@ -15,6 +15,10 @@ class RemoteDirtyPolicyResult:
     allowed_remote_tracked_dirty_paths: tuple[str, ...]
     disallowed_remote_tracked_dirty_paths: tuple[str, ...]
     remote_untracked_paths: tuple[str, ...]
+    allowed_remote_untracked_paths: tuple[str, ...]
+    disallowed_remote_untracked_paths: tuple[str, ...]
+    untracked_scan_complete: bool
+    untracked_evidence_error: str | None
     dynamic_tracked: tuple[str, ...]
     verified_patched_submodules: tuple[str, ...]
     blocked: tuple[str, ...]
@@ -22,7 +26,23 @@ class RemoteDirtyPolicyResult:
 
     @property
     def passed(self) -> bool:
-        return not self.blocked
+        return not self.blocked and self.untracked_evidence_error is None
+
+    @property
+    def tracked_blocked(self) -> bool:
+        root_untracked = set(self.disallowed_remote_untracked_paths)
+        non_untracked_blocked = set(self.blocked) - root_untracked
+        return bool(
+            self.disallowed_remote_tracked_dirty_paths
+            or non_untracked_blocked
+        )
+
+    @property
+    def untracked_blocked(self) -> bool:
+        return bool(
+            self.disallowed_remote_untracked_paths
+            or self.untracked_evidence_error
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -36,6 +56,14 @@ class RemoteDirtyPolicyResult:
                 self.disallowed_remote_tracked_dirty_paths
             ),
             "remote_untracked_paths": list(self.remote_untracked_paths),
+            "allowed_remote_untracked_paths": list(
+                self.allowed_remote_untracked_paths
+            ),
+            "disallowed_remote_untracked_paths": list(
+                self.disallowed_remote_untracked_paths
+            ),
+            "untracked_scan_complete": self.untracked_scan_complete,
+            "untracked_evidence_error": self.untracked_evidence_error,
             "dynamic_tracked": list(self.dynamic_tracked),
             "verified_patched_submodules": list(
                 self.verified_patched_submodules
@@ -77,6 +105,9 @@ def evaluate_remote_dirty_policy(
     allowed_tracked = {
         str(value) for value in policy.get("allowed_tracked_paths") or []
     }
+    allowed_untracked_paths = {
+        str(value) for value in policy.get("allowed_untracked_paths") or []
+    }
     submodule_policies = {
         str(item["path"]): item
         for item in policy.get("allowed_patched_submodules") or []
@@ -87,6 +118,8 @@ def evaluate_remote_dirty_policy(
     allowed: list[str] = []
     disallowed: list[str] = []
     root_untracked: list[str] = []
+    allowed_root_untracked: list[str] = []
+    disallowed_root_untracked: list[str] = []
     blocked: list[str] = []
     root_submodule_lines: dict[str, list[str]] = {
         path: [] for path in submodule_policies
@@ -95,8 +128,8 @@ def evaluate_remote_dirty_policy(
     for line in preflight.dirty_lines:
         path = _status_path(line)
         if _is_untracked_line(line):
-            root_untracked.append(path)
-            blocked.append(path)
+            # ``git status`` may collapse a whole untracked directory. Exact
+            # root-level files come only from the dedicated ls-files scan.
             continue
         tracked.append(path)
         if path in submodule_policies:
@@ -118,6 +151,23 @@ def evaluate_remote_dirty_policy(
         else:
             blocked.append(path)
             disallowed.append(path)
+
+    untracked_evidence_error: str | None = None
+    status_reported_untracked = any(
+        _is_untracked_line(line) for line in preflight.dirty_lines
+    )
+    if not preflight.untracked_scan_complete:
+        untracked_evidence_error = "exact_untracked_scan_incomplete"
+    else:
+        root_untracked.extend(preflight.untracked_paths)
+        for path in preflight.untracked_paths:
+            if path in allowed_untracked_paths:
+                allowed_root_untracked.append(path)
+            else:
+                disallowed_root_untracked.append(path)
+                blocked.append(path)
+        if status_reported_untracked and not preflight.untracked_paths:
+            untracked_evidence_error = "untracked_status_scan_mismatch"
 
     verified: list[str] = []
     audits: list[dict[str, Any]] = []
@@ -228,6 +278,14 @@ def evaluate_remote_dirty_policy(
             sorted(set(disallowed))
         ),
         remote_untracked_paths=tuple(sorted(set(root_untracked))),
+        allowed_remote_untracked_paths=tuple(
+            sorted(set(allowed_root_untracked))
+        ),
+        disallowed_remote_untracked_paths=tuple(
+            sorted(set(disallowed_root_untracked))
+        ),
+        untracked_scan_complete=preflight.untracked_scan_complete,
+        untracked_evidence_error=untracked_evidence_error,
         dynamic_tracked=tuple(sorted(set(dynamic))),
         verified_patched_submodules=tuple(sorted(set(verified))),
         blocked=tuple(sorted(set(blocked))),

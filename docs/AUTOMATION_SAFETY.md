@@ -59,8 +59,11 @@ was found.
 
 Remote tracked-dirty exemptions are exact paths, not patterns or directory
 prefixes. They default to empty and cannot include the automation control paths
-`scripts/ops`, `tests/ops`, or `ops/specs`. An exemption changes a successful
-read-only preflight into a warning; it never grants a remote write.
+`scripts/ops`, `tests/ops`, `ops/specs`, or `ops/schemas`. An exemption changes
+a successful read-only preflight into a warning; it never grants a remote
+write. The same protection applies to exact root-level untracked-file
+allowlists. Untracked directories are never allowlisted by prefix; the remote
+read-only scan enumerates individual files before policy evaluation.
 
 ## Scientific Boundaries
 

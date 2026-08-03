@@ -34,6 +34,8 @@ remote_dirty_policy:
   allowed_tracked_paths:
     - baselines/clear_official
     - docs/EXPERIMENT_LOG.md
+  allowed_untracked_paths:
+    - scripts/paper/plot_aids_mut_gcf_style.py
   allowed_patched_submodules:
     - path: baselines/clear_official
       allow_modified: true

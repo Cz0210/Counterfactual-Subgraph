@@ -120,6 +120,9 @@ def test_ssh_argv_has_exactly_one_bash_lc_layer() -> None:
 def test_preflight_script_is_read_only() -> None:
     script = build_preflight_argv(config())[-1]
     assert "git status --short" in script
+    assert "echo '[PREFLIGHT_UNTRACKED_BEGIN]'" in script
+    assert "git ls-files --others --exclude-standard" in script
+    assert "echo '[PREFLIGHT_UNTRACKED_END]'" in script
     assert "git branch --show-current" in script
     assert "git rev-parse HEAD" in script
     for forbidden in (
@@ -217,6 +220,9 @@ def test_parse_preflight_records_only_proxy_presence() -> None:
             "[PREFLIGHT_DIRTY_BEGIN]",
             " M docs/EXPERIMENT_LOG.md",
             "[PREFLIGHT_DIRTY_END]",
+            "[PREFLIGHT_UNTRACKED_BEGIN]",
+            "scripts/paper/plot_aids_mut_gcf_style.py",
+            "[PREFLIGHT_UNTRACKED_END]",
             "[PREFLIGHT_PYTHON] Python 3.10.18",
             "[PREFLIGHT_SBATCH_READY] true",
             "[PREFLIGHT_SACCT_READY] true",
@@ -228,11 +234,34 @@ def test_parse_preflight_records_only_proxy_presence() -> None:
     result = parse_preflight_output(stdout)
     assert result.commit == "abc"
     assert result.dirty_lines == (" M docs/EXPERIMENT_LOG.md",)
+    assert result.untracked_paths == (
+        "scripts/paper/plot_aids_mut_gcf_style.py",
+    )
+    assert result.untracked_scan_complete is True
     assert result.proxy_present == {
         "https_proxy": True,
         "HTTP_PROXY": False,
     }
     assert "39393" not in str(result.to_dict())
+
+
+def test_parse_preflight_uses_exact_untracked_marker_not_folded_status() -> None:
+    stdout = "\n".join(
+        [
+            "[PREFLIGHT_DIRTY_BEGIN]",
+            "?? scripts/paper/",
+            "[PREFLIGHT_DIRTY_END]",
+            "[PREFLIGHT_UNTRACKED_BEGIN]",
+            "scripts/paper/plot_aids_mut_gcf_style.py",
+            "[PREFLIGHT_UNTRACKED_END]",
+        ]
+    )
+    result = parse_preflight_output(stdout)
+    assert result.dirty_lines == ("?? scripts/paper/",)
+    assert result.untracked_paths == (
+        "scripts/paper/plot_aids_mut_gcf_style.py",
+    )
+    assert result.untracked_scan_complete is True
 
 
 def test_parse_preflight_records_nested_repository_evidence() -> None:

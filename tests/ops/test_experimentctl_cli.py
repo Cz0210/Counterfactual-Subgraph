@@ -225,6 +225,7 @@ def _preflight_stdout(
     *,
     commit: str = "abc",
     dirty: tuple[str, ...] = (),
+    untracked: tuple[str, ...] = (),
     proxy_ready: bool = True,
     submodule_lines: tuple[str, ...] = (),
 ) -> str:
@@ -238,6 +239,9 @@ def _preflight_stdout(
             "[PREFLIGHT_DIRTY_BEGIN]",
             *dirty,
             "[PREFLIGHT_DIRTY_END]",
+            "[PREFLIGHT_UNTRACKED_BEGIN]",
+            *untracked,
+            "[PREFLIGHT_UNTRACKED_END]",
             *submodule_lines,
             "[PREFLIGHT_PYTHON] Python 3.10.18",
             "[PREFLIGHT_SBATCH_READY] true",
@@ -260,6 +264,7 @@ def _enable_strict_remote_policies(payload) -> None:
             "baselines/clear_official",
             "docs/EXPERIMENT_LOG.md",
         ],
+        "allowed_untracked_paths": [],
         "allowed_patched_submodules": [
             {
                 "path": "baselines/clear_official",
@@ -558,13 +563,19 @@ def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
     base_spec, write_spec, monkeypatch, tmp_path
 ) -> None:
     _enable_strict_remote_policies(base_spec)
+    allowed_untracked = "scripts/paper/plot_aids_mut_gcf_style.py"
+    base_spec["remote_dirty_policy"]["allowed_untracked_paths"] = [
+        allowed_untracked
+    ]
     path = write_spec(base_spec)
     _mock_deploy_git(monkeypatch)
     stdout = _preflight_stdout(
         dirty=(
             " m baselines/clear_official",
             " M docs/EXPERIMENT_LOG.md",
+            "?? scripts/paper/",
         ),
+        untracked=(allowed_untracked,),
         proxy_ready=False,
         submodule_lines=_clear_submodule_output(),
     )
@@ -595,6 +606,12 @@ def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
         "docs/EXPERIMENT_LOG.md",
     ]
     assert details["disallowed_remote_tracked_dirty_paths"] == []
+    assert details["configured_allowed_remote_untracked_paths"] == [
+        allowed_untracked
+    ]
+    assert details["allowed_remote_untracked_paths"] == [allowed_untracked]
+    assert details["remote_untracked_paths"] == [allowed_untracked]
+    assert details["disallowed_remote_untracked_paths"] == []
     assert details["patched_submodule_verified"] is True
     assert details["proxy_ready"] is False
     assert details["remote_write_performed"] is False
@@ -615,6 +632,12 @@ def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
         "docs/EXPERIMENT_LOG.md",
     ]
     assert stage["disallowed_remote_tracked_dirty_paths"] == []
+    assert stage["configured_allowed_remote_untracked_paths"] == [
+        allowed_untracked
+    ]
+    assert stage["allowed_remote_untracked_paths"] == [allowed_untracked]
+    assert stage["remote_untracked_paths"] == [allowed_untracked]
+    assert stage["disallowed_remote_untracked_paths"] == []
     evidence = json.loads(
         (
             tmp_path
@@ -630,6 +653,12 @@ def test_equal_commits_without_proxy_pass_with_warnings_for_verified_clear(
         "docs/EXPERIMENT_LOG.md",
     ]
     assert evidence["disallowed_remote_tracked_dirty_paths"] == []
+    assert evidence["configured_allowed_remote_untracked_paths"] == [
+        allowed_untracked
+    ]
+    assert evidence["allowed_remote_untracked_paths"] == [allowed_untracked]
+    assert evidence["remote_untracked_paths"] == [allowed_untracked]
+    assert evidence["disallowed_remote_untracked_paths"] == []
 
 
 def test_allowlisted_tracked_dirty_warns_even_when_proxy_is_ready(
@@ -708,6 +737,186 @@ def test_unknown_tracked_dirty_blocks_and_records_exact_path_groups(
     assert stage["disallowed_remote_tracked_dirty_paths"] == [
         "docs/EXPERIMENT_LOG.md.backup"
     ]
+
+
+def test_exact_untracked_file_allowlist_passes_with_warning_and_evidence(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    allowed_path = "scripts/paper/plot_aids_mut_gcf_style.py"
+    base_spec["remote_dirty_policy"] = {
+        "allowed_tracked_paths": [],
+        "allowed_untracked_paths": [allowed_path],
+        "allowed_patched_submodules": [],
+    }
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                dirty=("?? scripts/paper/",),
+                untracked=(allowed_path,),
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "allowed_untracked",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS"
+    assert result["return_code"] == 0
+
+    state = json.loads(
+        (tmp_path / "allowed_untracked/state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    stage = state["stages"]["remote_preflight"]
+    expected = {
+        "configured_allowed_remote_untracked_paths": [allowed_path],
+        "allowed_remote_untracked_paths": [allowed_path],
+        "remote_untracked_paths": [allowed_path],
+        "disallowed_remote_untracked_paths": [],
+    }
+    for field, value in expected.items():
+        assert stage[field] == value
+
+    evidence = json.loads(
+        (
+            tmp_path
+            / "allowed_untracked/evidence/remote_preflight_evidence.json"
+        ).read_text(encoding="utf-8")
+    )
+    report = json.loads(
+        (tmp_path / "allowed_untracked/FINAL_REPORT.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    markdown = (
+        tmp_path / "allowed_untracked/FINAL_REPORT.md"
+    ).read_text(encoding="utf-8")
+    for field, value in expected.items():
+        assert evidence[field] == value
+        assert report["details"][field] == value
+        assert field in markdown
+    assert report["details"]["blocked_remote_dirty"] == []
+    assert report["details"]["gate_status"] == "PASSED_WITH_WARNINGS"
+
+
+def test_untracked_sibling_is_not_allowed_and_has_untracked_stop_reason(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    base_spec["remote_dirty_policy"] = {
+        "allowed_tracked_paths": [],
+        "allowed_untracked_paths": [
+            "scripts/paper/plot_aids_mut_gcf_style.py"
+        ],
+        "allowed_patched_submodules": [],
+    }
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    sibling = "scripts/paper/another_plot.py"
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                dirty=("?? scripts/paper/",),
+                untracked=(sibling,),
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "untracked_block",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_BLOCKED"
+    state = json.loads(
+        (tmp_path / "untracked_block/state.json").read_text(encoding="utf-8")
+    )
+    assert state["stop_reason"] == "remote_untracked_files_dirty"
+    report = json.loads(
+        (tmp_path / "untracked_block/BLOCKED_REPORT.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["details"]["blocked_remote_dirty"] == [sibling]
+    assert report["details"]["remote_untracked_paths"] == [sibling]
+    assert report["details"]["disallowed_remote_untracked_paths"] == [
+        sibling
+    ]
+    assert "scripts/paper/" not in report["details"]["blocked_remote_dirty"]
+
+
+def test_untracked_allowlist_defaults_to_deny(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    candidate = "notes/local.txt"
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                dirty=("?? notes/",),
+                untracked=(candidate,),
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "default_untracked_block",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_BLOCKED"
+    state = json.loads(
+        (tmp_path / "default_untracked_block/state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["stop_reason"] == "remote_untracked_files_dirty"
+
+
+def test_tracked_and_untracked_dirty_use_combined_stop_reason(
+    base_spec, write_spec, monkeypatch, tmp_path
+) -> None:
+    path = write_spec(base_spec)
+    _mock_deploy_git(monkeypatch)
+    tracked = "notes/tracked.txt"
+    untracked = "notes/untracked.txt"
+    runner = FakePreflightRunner(
+        _command_result(
+            tmp_path,
+            stdout=_preflight_stdout(
+                dirty=(f" M {tracked}", "?? notes/"),
+                untracked=(untracked,),
+            ),
+        )
+    )
+    result = experimentctl.deploy(
+        experimentctl.load_task_spec(path),
+        dry_run=False,
+        preflight_only=True,
+        run_dir=tmp_path / "combined_dirty_block",
+        runner=runner,
+    )
+    assert result["status"] == "REMOTE_PREFLIGHT_BLOCKED"
+    state = json.loads(
+        (tmp_path / "combined_dirty_block/state.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["stop_reason"] == "remote_dirty_files_blocked"
+    stage = state["stages"]["remote_preflight"]
+    assert stage["disallowed_remote_tracked_dirty_paths"] == [tracked]
+    assert stage["disallowed_remote_untracked_paths"] == [untracked]
 
 
 def test_commit_mismatch_without_proxy_needs_setup_and_never_pulls(

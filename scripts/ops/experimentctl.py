@@ -770,6 +770,20 @@ def deploy(
                         "allowed_tracked_paths"
                     ]
                 ),
+                "configured_allowed_remote_untracked_paths": list(
+                    spec.data["remote_dirty_policy"][
+                        "allowed_untracked_paths"
+                    ]
+                ),
+                "allowed_remote_untracked_paths": list(
+                    dirty_result.allowed_remote_untracked_paths
+                ),
+                "remote_untracked_paths": list(
+                    dirty_result.remote_untracked_paths
+                ),
+                "disallowed_remote_untracked_paths": list(
+                    dirty_result.disallowed_remote_untracked_paths
+                ),
                 "dynamic_dirty": list(dirty_result.dynamic_tracked),
                 "allowed_dynamic_dirty": list(
                     dirty_result.dynamic_tracked
@@ -823,8 +837,12 @@ def deploy(
             hard_failures.append("sacct_not_ready")
         if parsed.finalized_output_blocked:
             hard_failures.append("finalized_output_blocked")
-        if dirty_result.blocked:
+        if dirty_result.tracked_blocked and dirty_result.untracked_blocked:
+            hard_failures.append("remote_dirty_files_blocked")
+        elif dirty_result.tracked_blocked:
             hard_failures.append("remote_tracked_files_dirty")
+        elif dirty_result.untracked_blocked:
+            hard_failures.append("remote_untracked_files_dirty")
         if parsed.commit is None:
             hard_failures.append("remote_commit_missing")
         _set_commits(
@@ -869,6 +887,20 @@ def deploy(
                     "disallowed_remote_tracked_dirty_paths": list(
                         dirty_result.disallowed_remote_tracked_dirty_paths
                     ),
+                    "configured_allowed_remote_untracked_paths": list(
+                        spec.data["remote_dirty_policy"][
+                            "allowed_untracked_paths"
+                        ]
+                    ),
+                    "allowed_remote_untracked_paths": list(
+                        dirty_result.allowed_remote_untracked_paths
+                    ),
+                    "remote_untracked_paths": list(
+                        dirty_result.remote_untracked_paths
+                    ),
+                    "disallowed_remote_untracked_paths": list(
+                        dirty_result.disallowed_remote_untracked_paths
+                    ),
                     "status": stage_status,
                 },
             )
@@ -906,6 +938,9 @@ def deploy(
         allowlisted_tracked_dirty = bool(
             dirty_result.allowed_remote_tracked_dirty_paths
         )
+        allowlisted_untracked = bool(
+            dirty_result.allowed_remote_untracked_paths
+        )
         if not commits_equal and proxy_required_for_deploy and not proxy_ready:
             selected_status = RunStatus.NEEDS_PROXY_SETUP
             next_action = "proxy_or_ssh_tunnel_required_before_deploy"
@@ -922,7 +957,7 @@ def deploy(
             stop_reason = "Remote commit differs; deploy was not run."
         elif (
             proxy_required_for_deploy and not proxy_ready
-        ) or allowlisted_tracked_dirty:
+        ) or allowlisted_tracked_dirty or allowlisted_untracked:
             selected_status = RunStatus.REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS
             if proxy_required_for_deploy and not proxy_ready:
                 next_action = (
@@ -943,6 +978,11 @@ def deploy(
             if allowlisted_tracked_dirty:
                 warning_reasons.append(
                     "remote tracked dirt was accepted by exact path allowlist"
+                )
+            if allowlisted_untracked:
+                warning_reasons.append(
+                    "remote untracked files were accepted by exact path "
+                    "allowlist"
                 )
             stop_reason = (
                 "Read-only preflight passed with warnings: "
@@ -987,6 +1027,20 @@ def deploy(
                 "disallowed_remote_tracked_dirty_paths": list(
                     dirty_result.disallowed_remote_tracked_dirty_paths
                 ),
+                "configured_allowed_remote_untracked_paths": list(
+                    spec.data["remote_dirty_policy"][
+                        "allowed_untracked_paths"
+                    ]
+                ),
+                "allowed_remote_untracked_paths": list(
+                    dirty_result.allowed_remote_untracked_paths
+                ),
+                "remote_untracked_paths": list(
+                    dirty_result.remote_untracked_paths
+                ),
+                "disallowed_remote_untracked_paths": list(
+                    dirty_result.disallowed_remote_untracked_paths
+                ),
                 "status": selected_status.value,
             },
         )
@@ -1026,7 +1080,7 @@ def deploy(
     dirty_preflight = evaluate_remote_dirty_policy(
         parsed_preflight, spec.data["remote_dirty_policy"]
     )
-    if dirty_preflight.blocked:
+    if not dirty_preflight.passed:
         raise AutomationBlocked(
             "Remote dirty policy blocked deploy: "
             + ", ".join(dirty_preflight.blocked)

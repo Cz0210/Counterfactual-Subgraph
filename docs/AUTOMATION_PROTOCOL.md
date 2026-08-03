@@ -100,11 +100,18 @@ preflight script. Proxy values are never emitted.
 
 `remote_dirty_policy.allowed_tracked_paths` is an optional, default-empty list
 of exact repository-relative POSIX paths. It never applies glob or directory
-prefix matching, and it cannot include `scripts/ops`, `tests/ops`, or
-`ops/specs`. Allowlisted tracked dirt produces
+prefix matching, and it cannot include `scripts/ops`, `tests/ops`,
+`ops/specs`, or `ops/schemas`. Allowlisted tracked dirt produces
 `REMOTE_PREFLIGHT_PASSED_WITH_WARNINGS`; observed, allowed, and disallowed paths
-are persisted in state, report, and read-only preflight evidence. Root-level
-untracked files retain the default blocking policy.
+are persisted in state, report, and read-only preflight evidence.
+
+Root-level untracked files are collected independently with
+`git ls-files --others --exclude-standard` between explicit preflight markers;
+the controller never infers a file from Git's folded `?? directory/` status.
+`remote_dirty_policy.allowed_untracked_paths` is likewise optional,
+default-empty, and exact-file-only. It rejects globs, absolute/traversing paths,
+directory entries, and protected automation files. Tracked-only,
+untracked-only, and combined policy failures use distinct stop reasons.
 
 `remote_dirty_policy` also separates declared patched nested repositories. A
 nested repository is accepted only when its parent path is exactly allowlisted,
