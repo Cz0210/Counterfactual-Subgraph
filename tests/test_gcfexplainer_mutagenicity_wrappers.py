@@ -277,11 +277,10 @@ def test_gnn_wrapper_rejects_unknown_profile(tmp_path: Path) -> None:
     assert "expected=smoke_or_full" in result.stderr
 
 
-def test_later_stage_wrappers_keep_full_authorization_gate() -> None:
-    for wrapper in (WRAPPERS[2], WRAPPERS[3]):
-        text = wrapper.read_text(encoding="utf-8")
-        assert '"${ALLOW_FULL:-false}" == "true"' in text
-        assert "invalid/unauthorized PROFILE=$PROFILE" in text
+def test_summary_wrapper_keeps_full_authorization_gate() -> None:
+    text = WRAPPERS[3].read_text(encoding="utf-8")
+    assert '"${ALLOW_FULL:-false}" == "true"' in text
+    assert "invalid/unauthorized PROFILE=$PROFILE" in text
 
 
 def test_vrrw_wrapper_has_preregistered_mutagenicity_parameters() -> None:
@@ -298,8 +297,254 @@ def test_vrrw_wrapper_has_preregistered_mutagenicity_parameters() -> None:
     assert "[MUTAGENICITY_GCFEXPLAINER_VRRW_CONFIG]" in text
     assert 'echo "parent_limit=$VRRW_PARENT_LIMIT"' in text
     assert 'echo "M=$VRRW_M"' in text
+    assert "ALLOW_FULL" not in text
+    assert 'VRRW_DIR="${VRRW_DIR:-}"' in text
+    assert "22045e5a6a833d6ed980cef9834859859136a1e2f644d19d78bd63345585f239" in text
+    assert "vrrw_alpha_endpoint_none_safe_v1" in text
     assert "--no-sample" in text
     assert "MAX_STEPS" not in text
+
+
+def _run_vrrw_wrapper(
+    tmp_path: Path,
+    **overrides: str,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    project_root = tmp_path / "project"
+    dataset_dir = project_root / "dataset"
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / "_PHASE_A_COMPLETE.json").write_text(
+        '{"run_complete": true}\n', encoding="utf-8"
+    )
+    full_checkpoint = (
+        project_root
+        / "outputs/hpc/mutagenicity/baselines/gcfexplainer/full_v2/gnn/model_best.pth"
+    )
+    full_checkpoint.parent.mkdir(parents=True)
+    full_checkpoint.write_bytes(b"full-gnn")
+    smoke_checkpoint = project_root / "outputs/smoke_v1/gnn/model_best.pth"
+    smoke_checkpoint.parent.mkdir(parents=True)
+    smoke_checkpoint.write_bytes(b"smoke-gnn")
+    neurosed = project_root / "official/data/mutagenicity/neurosed/best_model.pt"
+    neurosed.parent.mkdir(parents=True)
+    neurosed.write_bytes(b"mutagenicity-neurosed")
+
+    fake_bin = tmp_path / "vrrw_bin"
+    fake_bin.mkdir()
+    argv_log = tmp_path / "vrrw_python_argv.txt"
+    fake_python = fake_bin / "python"
+    fake_python.write_text(
+        """#!/bin/bash
+set -e
+if [[ "${1:-}" == *run_mutagenicity_vrrw.py ]]; then
+  printf '%s\n' "$@" > "$VRRW_TEST_ARGV_LOG"
+  output_dir=""
+  previous=""
+  for argument in "$@"; do
+    if [[ "$previous" == "--output-dir" ]]; then
+      output_dir="$argument"
+      break
+    fi
+    previous="$argument"
+  done
+  mkdir -p "$output_dir"
+  printf '{"run_complete": true}\n' > "$output_dir/_RUN_COMPLETE.json"
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/bash\nprintf '0123456789abcdef0123456789abcdef01234567\\n'\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    fake_sha256sum = fake_bin / "sha256sum"
+    fake_sha256sum.write_text(
+        """#!/bin/bash
+if [[ "$1" == "$VRRW_TEST_FULL_GNN" ]]; then
+  printf '22045e5a6a833d6ed980cef9834859859136a1e2f644d19d78bd63345585f239  %s\n' "$1"
+else
+  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  %s\n' "$1"
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_sha256sum.chmod(0o755)
+    home = tmp_path / "vrrw_home"
+    home.mkdir()
+    (home / ".bashrc").write_text(
+        f'export PATH="{fake_bin}:$PATH"\nconda() {{ return 0; }}\n',
+        encoding="utf-8",
+    )
+    profile = overrides.get("PROFILE", "smoke")
+    env = os.environ.copy()
+    for name in (
+        "PROFILE",
+        "VRRW_PARENT_LIMIT",
+        "VRRW_M",
+        "VRRW_ALPHA",
+        "VRRW_THETA",
+        "VRRW_SEED",
+        "VRRW_DIR",
+        "GNN_CHECKPOINT",
+        "NEUROSED_CHECKPOINT",
+        "RUN_ROOT",
+        "ALLOW_FULL",
+    ):
+        env.pop(name, None)
+    default_checkpoint = full_checkpoint if profile == "full" else smoke_checkpoint
+    default_vrrw_dir = project_root / f"{profile}_run" / "vrrw"
+    env.update(
+        {
+            "HOME": str(home),
+            "PROJECT_ROOT": str(project_root),
+            "DATASET_DIR": str(dataset_dir),
+            "GNN_CHECKPOINT": str(default_checkpoint),
+            "NEUROSED_CHECKPOINT": str(neurosed),
+            "VRRW_DIR": str(default_vrrw_dir),
+            "VRRW_TEST_ARGV_LOG": str(argv_log),
+            "VRRW_TEST_FULL_GNN": str(full_checkpoint),
+            "RESUME": "false",
+            **overrides,
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(WRAPPERS[2])],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    return result, argv_log
+
+
+def test_vrrw_smoke_profile_still_passes_existing_contract(tmp_path: Path) -> None:
+    result, argv_log = _run_vrrw_wrapper(tmp_path, PROFILE="smoke")
+    assert result.returncode == 0, result.stderr
+    argv = argv_log.read_text(encoding="utf-8").splitlines()
+    expected = {
+        "--profile": "smoke",
+        "--parent-limit": "64",
+        "--m": "500",
+        "--alpha": "1.0",
+        "--theta": "0.05",
+        "--seed": "13",
+    }
+    for flag, value in expected.items():
+        assert argv[argv.index(flag) + 1] == value
+
+
+def test_vrrw_full_profile_passes_exact_contract_and_cli_forwarding(
+    tmp_path: Path,
+) -> None:
+    result, argv_log = _run_vrrw_wrapper(
+        tmp_path,
+        PROFILE="full",
+        VRRW_PARENT_LIMIT="1448",
+        VRRW_M="50000",
+        VRRW_ALPHA="1.0",
+        VRRW_THETA="0.05",
+        VRRW_SEED="13",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "[MUTAGENICITY_GCFEXPLAINER_VRRW_CONFIG]" in result.stdout
+    assert "profile=full" in result.stdout
+    assert "parent_limit=1448" in result.stdout
+    assert "M=50000" in result.stdout
+    assert "alpha=1.0" in result.stdout
+    assert "theta=0.05" in result.stdout
+    assert "seed=13" in result.stdout
+    assert "official_compatibility_patch=vrrw_alpha_endpoint_none_safe_v1" in result.stdout
+    assert "calibration_loaded=false" in result.stdout
+    assert "test_loaded=false" in result.stdout
+    argv = argv_log.read_text(encoding="utf-8").splitlines()
+    expected = {
+        "--profile": "full",
+        "--parent-limit": "1448",
+        "--m": "50000",
+        "--alpha": "1.0",
+        "--theta": "0.05",
+        "--seed": "13",
+    }
+    for flag, value in expected.items():
+        assert argv[argv.index(flag) + 1] == value
+    assert argv[argv.index("--gnn-checkpoint") + 1].endswith(
+        "full_v2/gnn/model_best.pth"
+    )
+    assert argv[argv.index("--neurosed-checkpoint") + 1].endswith(
+        "official/data/mutagenicity/neurosed/best_model.pt"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "environment_name", "actual", "expected"),
+    (
+        ("M", "VRRW_M", "500", "50000"),
+        ("parent_limit", "VRRW_PARENT_LIMIT", "64", "1448"),
+        ("alpha", "VRRW_ALPHA", "0.5", "1.0"),
+        ("theta", "VRRW_THETA", "0.1", "0.05"),
+        ("seed", "VRRW_SEED", "7", "13"),
+    ),
+)
+def test_vrrw_full_rejects_noncontract_values(
+    tmp_path: Path,
+    field: str,
+    environment_name: str,
+    actual: str,
+    expected: str,
+) -> None:
+    values = {
+        "PROFILE": "full",
+        "VRRW_PARENT_LIMIT": "1448",
+        "VRRW_M": "50000",
+        "VRRW_ALPHA": "1.0",
+        "VRRW_THETA": "0.05",
+        "VRRW_SEED": "13",
+    }
+    values[environment_name] = actual
+    result, _argv_log = _run_vrrw_wrapper(tmp_path, **values)
+    assert result.returncode != 0
+    assert "[MUTAGENICITY_GCFEXPLAINER_CONFIG_ERROR]" in result.stderr
+    assert "profile=full" in result.stderr
+    assert f"field={field}" in result.stderr
+    assert f"actual={actual}" in result.stderr
+    assert f"expected={expected}" in result.stderr
+
+
+def test_vrrw_full_rejects_smoke_gnn_checkpoint(tmp_path: Path) -> None:
+    smoke_checkpoint = tmp_path / "project/outputs/smoke_v1/gnn/model_best.pth"
+    result, _argv_log = _run_vrrw_wrapper(
+        tmp_path,
+        PROFILE="full",
+        GNN_CHECKPOINT=str(smoke_checkpoint),
+    )
+    assert result.returncode != 0
+    assert "field=gnn_checkpoint" in result.stderr
+    assert "full_v2/gnn/model_best.pth" in result.stderr
+
+
+def test_vrrw_full_requires_explicit_output_dir(tmp_path: Path) -> None:
+    result, _argv_log = _run_vrrw_wrapper(
+        tmp_path,
+        PROFILE="full",
+        VRRW_DIR="",
+    )
+    assert result.returncode != 0
+    assert "field=vrrw_dir" in result.stderr
+    assert "expected=explicit_nonempty_path" in result.stderr
+
+
+def test_vrrw_wrapper_rejects_unknown_profile(tmp_path: Path) -> None:
+    result, _argv_log = _run_vrrw_wrapper(
+        tmp_path,
+        PROFILE="experimental",
+    )
+    assert result.returncode != 0
+    assert "field=profile" in result.stderr
+    assert "actual=experimental" in result.stderr
+    assert "expected=smoke_or_full" in result.stderr
 
 
 def test_all_wrapper_explicitly_passes_profile_derived_vrrw_contract() -> None:
