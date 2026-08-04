@@ -1090,7 +1090,13 @@ def render_figure3(
     output_dir: Path,
     *,
     mut_matches_aids: bool,
+    coverage_ymax: float = 80.0,
 ) -> None:
+    if not np.isfinite(coverage_ymax) or coverage_ymax <= 0:
+        raise ValueError("coverage_ymax must be a finite positive percentage.")
+    coverage_ticks = [0, 20, 40, 60, 80]
+    if coverage_ymax > coverage_ticks[-1]:
+        coverage_ticks.append(float(coverage_ymax))
     configure_matplotlib()
     fig, axes = plt.subplots(
         2,
@@ -1136,8 +1142,8 @@ def render_figure3(
     aids_top = axes[0, ACTIVE_DATASET_COLUMNS["AIDS"]]
     aids_bottom = axes[1, ACTIVE_DATASET_COLUMNS["AIDS"]]
     aids_top.set_ylabel("Coverage (%)")
-    aids_top.set_ylim(0, 80)
-    aids_top.set_yticks([0, 20, 40, 60, 80])
+    aids_top.set_ylim(0, coverage_ymax)
+    aids_top.set_yticks(coverage_ticks)
     aids_bottom.set_ylabel("Cost")
     aids_bottom.set_ylim(0.008, 0.11)
     aids_bottom.set_yticks([0.02, 0.04, 0.06, 0.08, 0.10])
@@ -1147,8 +1153,8 @@ def render_figure3(
     mut_coverage = frame.loc[frame["Dataset"] == "Mutagenicity", "Coverage"]
     mut_cost = frame.loc[frame["Dataset"] == "Mutagenicity", "Cost"]
     if mut_matches_aids:
-        mut_top.set_ylim(0, 80)
-        mut_top.set_yticks([0, 20, 40, 60, 80])
+        mut_top.set_ylim(0, coverage_ymax)
+        mut_top.set_yticks(coverage_ticks)
         mut_bottom.set_ylim(0.008, 0.11)
         mut_bottom.set_yticks([0.02, 0.04, 0.06, 0.08, 0.10])
     elif not mut_coverage.empty:

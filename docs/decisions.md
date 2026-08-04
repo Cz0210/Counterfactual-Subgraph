@@ -54,6 +54,40 @@ Accepted
 
 ---
 
+## [2026-08-04] Re-render the combined AIDS/MUT figure set from frozen CSV values
+
+### Background
+
+The completed `matched_aids_v2_copy` presentation directory contains the three
+frozen CSV inputs for Figure 3, Figure 4, and Table 2. Its current Figure 3 CSV
+contains intentional presentation-value edits and therefore no longer matches
+the older output hash recorded by the copied manifest. Recomputing pair
+distances or rankings would discard those explicit CSV values.
+
+### Decision
+
+Provide a presentation-only CSV replay command that validates the complete
+two-dataset/four-method grids, renders with the existing GCF-style functions,
+and records the current file hashes as the numeric source of truth. The replay
+does not read pair details, models, predictions, or candidate rankings. V3 uses
+a 90 percent Figure 3 coverage ceiling because the frozen MUT curves exceed 80
+percent; the existing renderer keeps its 80 percent default for older runs.
+
+### Consequences
+
+- `matched_aids_v2_copy` remains read-only and V3 is written to a new root.
+- Figure 3 and Figure 4 data CSVs and Table 2 CSV are copied byte-for-byte into
+  V3 after validation.
+- A stale copied-manifest hash is retained as advisory evidence but cannot
+  replace the current CSV hash or values.
+- No scientific result, distance, teacher prediction, or ranking is recomputed.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-07-24] Preserve explicit PPO CLI values during config merge
 
 ### Background
