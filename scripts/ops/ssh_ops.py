@@ -312,12 +312,67 @@ def build_status_argv(config: SSHConfig, job_ids: Sequence[str]) -> list[str]:
     lines = [f"cd {root}"]
     for job_id in job_ids:
         quoted = shlex.quote(str(job_id))
-        lines.append(
-            "sacct -n -P -j "
-            f"{quoted} --format=JobIDRaw,State,ExitCode "
-            f"|| squeue -h -j {quoted} -o '%i|%T|N/A'"
+        lines.extend(
+            [
+                "status_output=\"$(sacct -n -X -P -j "
+                f"{quoted} --format=JobIDRaw,State,ExitCode 2>/dev/null || true)\"",
+                "if [[ -n \"$status_output\" ]]; then",
+                "  printf '%s\\n' \"$status_output\"",
+                "else",
+                f"  squeue -h -j {quoted} -o '%i|%T|N/A'",
+                "fi",
+            ]
         )
     return build_ssh_argv(config, _activation_script(config, "\n".join(lines)))
+
+
+def build_remote_project_command_argv(
+    config: SSHConfig, command: Sequence[str]
+) -> list[str]:
+    """Run one audited argv command from the remote project root."""
+
+    root = shlex.quote(str(PurePosixPath(config.remote_root)))
+    body = "\n".join([f"cd {root}", f"exec {shell_join(command)}"])
+    return build_ssh_argv(config, _activation_script(config, body))
+
+
+def build_remote_submit_argv(
+    config: SSHConfig,
+    command: Sequence[str],
+    *,
+    expected_commit: str,
+    output_root: str,
+) -> list[str]:
+    """Build a guarded remote exp_sbatch invocation.
+
+    The preconditions are read-only. The final command is expected to be the
+    repository-owned ``scripts/exp_sbatch.sh`` submission wrapper.
+    """
+
+    if not command or str(command[0]) != "scripts/exp_sbatch.sh":
+        raise SSHSafetyError("Remote Slurm submission must use exp_sbatch.sh.")
+    output = PurePosixPath(output_root)
+    if output.is_absolute() or ".." in output.parts or str(output) in {"", "."}:
+        raise SSHSafetyError(f"Unsafe remote output root: {output_root!r}")
+    root_path = PurePosixPath(config.remote_root)
+    root = shlex.quote(str(root_path))
+    output_absolute = shlex.quote(str(root_path / output))
+    expected = shlex.quote(expected_commit)
+    body = "\n".join(
+        [
+            f"cd {root}",
+            f'if [[ "$(git rev-parse HEAD)" != {expected} ]]; then',
+            "  echo '[AUTOMATION_SUBMIT_BLOCKED] remote commit mismatch' >&2",
+            "  exit 45",
+            "fi",
+            f"if [[ -e {output_absolute} ]]; then",
+            "  echo '[AUTOMATION_SUBMIT_BLOCKED] output root already exists' >&2",
+            "  exit 46",
+            "fi",
+            f"exec {shell_join(command)}",
+        ]
+    )
+    return build_ssh_argv(config, _activation_script(config, body))
 
 
 def parse_preflight_output(stdout: str, stderr: str = "") -> RemotePreflight:

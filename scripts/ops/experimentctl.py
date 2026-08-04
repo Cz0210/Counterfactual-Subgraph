@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from copy import deepcopy
 from datetime import datetime, timezone
 import getpass
@@ -15,7 +16,11 @@ from typing import Any, Mapping, Sequence
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.ops.gate_runner import build_gate_json, evaluate_gate
+from scripts.ops.gate_runner import (
+    build_gate_json,
+    evaluate_gate,
+    evaluate_gate_payload,
+)
 from scripts.ops.adopt_existing import (
     build_remote_script as build_adopt_remote_script,
     build_verification_argv as build_adopt_verification_argv,
@@ -35,12 +40,21 @@ from scripts.ops.preflight_policy import (
     proxy_is_ready,
 )
 from scripts.ops.report import write_blocked_report, write_final_report
-from scripts.ops.slurm_ops import build_exp_sbatch_argv, parse_exp_sbatch_job_id
+from scripts.ops.slurm_ops import (
+    build_exp_sbatch_argv,
+    is_active_status,
+    is_failure_status,
+    is_success_status,
+    parse_exp_sbatch_job_id,
+    parse_slurm_status_output,
+)
 from scripts.ops.spec import TaskSpec, dump_spec_snapshot, load_task_spec
 from scripts.ops.ssh_ops import (
     SSHConfig,
     build_deploy_argv,
     build_preflight_argv,
+    build_remote_project_command_argv,
+    build_remote_submit_argv,
     build_status_argv,
     parse_preflight_output,
 )
@@ -69,15 +83,23 @@ def _stage_plan(spec: TaskSpec) -> list[dict[str, Any]]:
     stop_before = spec.data["execution"].get("stop_before")
     for index, stage_id in enumerate(order, start=1):
         stage = stage_by_id[stage_id]
+        approval_dependency = any(
+            stage_by_id[str(dependency)]["kind"] == "approval"
+            for dependency in stage["dependencies"]
+        )
         planned.append(
             {
                 "index": index,
                 "stage_id": stage_id,
                 "kind": stage["kind"],
                 "dependencies": list(stage["dependencies"]),
-                "automatic": stage_id != stop_before,
+                "automatic": (
+                    stage_id != stop_before and stage["kind"] != "approval"
+                ),
                 "stop_before": stage_id == stop_before,
-                "requires_approval": _requires_approval(stage),
+                "requires_approval": (
+                    _requires_approval(stage) or approval_dependency
+                ),
             }
         )
     return planned
@@ -523,6 +545,7 @@ def deploy(
     if store is not None and run_dir is not None:
         raise AutomationBlocked("Pass either store or run_dir, not both.")
     store = store or _deploy_store(spec, run_dir)
+    command_runner = runner or CommandRunner(default_timeout_seconds=120)
     previous_report = _existing_deploy_report(store)
     if (
         dry_run
@@ -539,6 +562,7 @@ def deploy(
     previous_preflight = store.load().get("stages", {}).get(
         "remote_preflight", {}
     )
+    current_head = head_commit(command_runner, spec.local_root)
     if (
         preflight_only
         and previous_preflight.get("status")
@@ -550,6 +574,8 @@ def deploy(
             RunStatus.NEEDS_PROXY_SETUP.value,
         }
         and previous_report
+        and store.load().get("local_commit") == current_head
+        and store.load().get("remote_commit") == current_head
     ):
         return {
             "run_dir": str(store.run_dir),
@@ -558,7 +584,6 @@ def deploy(
             "return_code": 0,
             "resumed": True,
         }
-    command_runner = runner or CommandRunner(default_timeout_seconds=120)
     git_spec = spec.data["git"]
     status = inspect_status(
         command_runner, spec.local_root, git_spec["allowed_paths"]
@@ -1538,91 +1563,841 @@ def adopt_existing(
     }
 
 
+_CLEAR_PHASE_B_GATE_MARKER = (
+    "[AUTOMATION_CLEAR_PHASE_B_GATE_EVIDENCE_B64]"
+)
+
+
+def _render_runtime_template(
+    value: str,
+    *,
+    run_id: str,
+    output_root: str | None = None,
+    job_id: str | None = None,
+    commit: str | None = None,
+    remote_root: str | None = None,
+) -> str:
+    replacements = {
+        "{run_id}": run_id,
+        "{output_root}": output_root,
+        "{job_id}": job_id,
+        "{commit}": commit,
+        "{remote_root}": remote_root,
+    }
+    rendered = str(value)
+    for token, replacement in replacements.items():
+        if token in rendered:
+            if replacement is None:
+                raise AutomationBlocked(
+                    f"Runtime template {token} is unavailable for {value!r}."
+                )
+            rendered = rendered.replace(token, str(replacement))
+    if "{" in rendered or "}" in rendered:
+        raise AutomationBlocked(f"Unsupported runtime template: {value!r}")
+    return rendered
+
+
+def _smoke_submission_permissions(spec: TaskSpec) -> None:
+    permissions = spec.data["permissions"]
+    required_true = ("allow_remote_write", "allow_sbatch", "allow_gpu_smoke")
+    required_false = (
+        "allow_full",
+        "allow_calibration",
+        "allow_test",
+        "allow_finalization",
+        "allow_overwrite",
+    )
+    failures = [key for key in required_true if permissions.get(key) is not True]
+    failures.extend(
+        key for key in required_false if permissions.get(key) is not False
+    )
+    if failures:
+        raise AutomationBlocked(
+            "Phase B GPU smoke permission contract failed: "
+            + ", ".join(failures)
+        )
+
+
+def _execution_snapshot_path(store: RunStore) -> Path:
+    return store.run_dir / "spec.execution.snapshot.yaml"
+
+
+def _load_execution_spec(store: RunStore) -> TaskSpec:
+    snapshot = _execution_snapshot_path(store)
+    if snapshot.is_file():
+        return load_task_spec(snapshot)
+    source = Path(str(store.load().get("spec_path") or "")).expanduser()
+    if source.is_file():
+        return load_task_spec(source)
+    return _load_snapshot(store.run_dir)
+
+
+def _slurm_compute_stages(spec: TaskSpec) -> list[dict[str, Any]]:
+    return [
+        spec.stage_by_id[stage_id]
+        for stage_id in spec.topological_stage_ids()
+        if spec.stage_by_id[stage_id]["kind"] == "slurm_job"
+        and spec.stage_by_id[stage_id].get("script")
+    ]
+
+
+def _approval_dependency(
+    spec: TaskSpec, stage: Mapping[str, Any]
+) -> str | None:
+    approvals = [
+        str(stage_id)
+        for stage_id in stage["dependencies"]
+        if spec.stage_by_id[str(stage_id)]["kind"] == "approval"
+    ]
+    if len(approvals) > 1:
+        raise AutomationBlocked(
+            f"Stage {stage['id']} has multiple approval dependencies."
+        )
+    return approvals[0] if approvals else None
+
+
+def _render_output_root(
+    stage: Mapping[str, Any], *, run_id: str
+) -> str:
+    template = str((stage.get("resources") or {}).get("expected_output_root") or "")
+    if not template:
+        raise AutomationBlocked(
+            f"Slurm stage {stage['id']} lacks expected_output_root."
+        )
+    rendered = _render_runtime_template(template, run_id=run_id)
+    path = Path(rendered)
+    if path.is_absolute() or ".." in path.parts or rendered in {"", "."}:
+        raise AutomationBlocked(f"Unsafe Slurm output root: {rendered!r}")
+    return path.as_posix()
+
+
+def _write_submission_block(
+    store: RunStore,
+    *,
+    stage_id: str,
+    result: CommandResult,
+    output_root: str,
+    attempt: int,
+) -> None:
+    stdout_path, stderr_path = _record_command(store, stage_id, attempt, result)
+    reason = result.stderr.strip() or result.stdout.strip() or "Remote submission failed."
+    store.transition(RunStatus.BLOCKED, reason=reason)
+    _set_stop_reason(store, reason)
+    write_blocked_report(
+        store.run_dir,
+        state=store.load(),
+        failed_stage=stage_id,
+        error_class="SlurmSubmissionFailure",
+        return_code=result.returncode,
+        stderr=result.stderr or result.stdout,
+        artifacts=[output_root],
+        retry_count=max(0, attempt - 1),
+        recommended_action=(
+            "Inspect the guarded exp_sbatch output. Do not resubmit until it "
+            "is known whether a job ID was created."
+        ),
+        scientific_semantics_risk=False,
+        details={
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "remote_write_performed": result.returncode == 0,
+        },
+    )
+
+
 def submit(
     spec: TaskSpec,
     *,
     dry_run: bool,
     store: RunStore | None = None,
+    runner: CommandRunner | None = None,
 ) -> dict[str, Any]:
-    if not spec.data["permissions"]["allow_sbatch"] and not dry_run:
-        raise AutomationBlocked("Slurm submission is disabled by the task spec.")
-    runner = CommandRunner()
-    job_ids: dict[str, str] = {}
-    commands: list[list[str]] = []
-    if not dry_run and store is None:
+    compute_stages = _slurm_compute_stages(spec)
+    if len(compute_stages) != 1:
         raise AutomationBlocked(
-            "A persisted --run-dir is required for real submission."
+            "Phase B contract permits exactly one controlled Slurm smoke job."
         )
-    for stage_id in spec.topological_stage_ids():
-        stage = spec.stage_by_id[stage_id]
-        if stage["kind"] not in {"slurm_job", "audit"} or not stage.get("script"):
-            continue
-        if _requires_approval(stage) and (
-            store is None or not store.is_approved(stage_id)
-        ):
+    stage = compute_stages[0]
+    stage_id = str(stage["id"])
+    if not dry_run:
+        _smoke_submission_permissions(spec)
+        if store is None:
             raise AutomationBlocked(
-                f"Stage {stage_id} requires an explicit approval event."
+                "A persisted --run-dir is required for real submission."
             )
-        automation_environment: dict[str, str] = {}
-        if store is not None:
-            relative_run = store.run_dir.relative_to(spec.local_root)
-            remote_run = (
-                Path(spec.data["project"]["remote_root"]) / relative_run
+    command_runner = runner or CommandRunner(default_timeout_seconds=120)
+    run_id = store.load()["run_id"] if store is not None else "DRY_RUN"
+    output_root = _render_output_root(stage, run_id=str(run_id))
+    commit = head_commit(command_runner, spec.local_root)
+    approval_stage = _approval_dependency(spec, stage)
+    if not dry_run:
+        assert store is not None
+        if store.load()["status"] in {
+            RunStatus.BLOCKED.value,
+            RunStatus.FAILED.value,
+        }:
+            raise AutomationBlocked(
+                "Blocked/failed runs cannot be resubmitted automatically; "
+                "review the report and create a new run if appropriate."
             )
-            relative_spec = spec.path.relative_to(spec.local_root)
-            remote_spec = (
-                Path(spec.data["project"]["remote_root"]) / relative_spec
-            )
-            automation_environment = {
-                "AUTOMATION_RUN_DIR": str(remote_run),
-                "AUTOMATION_RUN_ID": str(store.load()["run_id"]),
-                "AUTOMATION_SPEC": str(remote_spec),
-                "AUTOMATION_STAGE_ID": stage_id,
+        existing_jobs = list(store.load().get("slurm_jobs") or [])
+        if existing_jobs:
+            if len(existing_jobs) != 1:
+                raise AutomationBlocked("More than one Slurm job is persisted.")
+            return {
+                "dry_run": False,
+                "commands": [],
+                "job_ids": {stage_id: existing_jobs[0]["job_id"]},
+                "slurm_jobs": existing_jobs,
+                "resumed": True,
             }
-            if stage["kind"] == "audit" and stage["dependencies"]:
-                dependency_id = str(stage["dependencies"][0])
-                if dependency_id in job_ids:
-                    automation_environment["AUTOMATION_UPSTREAM_JOB_ID"] = (
-                        job_ids[dependency_id]
-                    )
-        argv = build_exp_sbatch_argv(
-            stage,
-            spec.stage_by_id,
-            job_ids,
-            automation_environment=automation_environment,
-        )
-        commands.append(argv)
-        if dry_run:
-            job_ids[stage_id] = f"DRY_{len(job_ids) + 1}"
-            continue
-        result = runner.run(argv, cwd=spec.local_root)
-        if result.returncode != 0:
-            raise AutomationBlocked(result.stderr or "exp_sbatch failed.")
-        job_ids[stage_id] = parse_exp_sbatch_job_id(result.stdout)
-        if store:
-            previous = store.load().get("stages", {}).get(stage_id, {})
-            store.record_stage(
-                stage_id,
-                {
-                    **previous,
-                    "stage_id": stage_id,
-                    "attempt": int(previous.get("attempt", 0)) + 1,
-                    "start_time": None,
-                    "end_time": None,
-                    "command_argv": argv,
-                    "cwd": str(spec.local_root),
-                    "return_code": result.returncode,
-                    "stdout_path": None,
-                    "stderr_path": None,
-                    "artifacts": list(stage["expected_artifacts"]),
-                    "gate_result": None,
-                    "job_id": job_ids[stage_id],
-                    "git_commit": head_commit(runner, spec.local_root),
-                    "remote_git_commit": store.load().get("remote_commit"),
-                    "status": "SUBMITTED",
-                },
+        if approval_stage is None or not store.is_approved(approval_stage):
+            raise AutomationBlocked(
+                f"Stage {stage_id} requires approval of {approval_stage or 'a boundary stage'}."
             )
-    return {"dry_run": dry_run, "commands": commands, "job_ids": job_ids}
+        approval = store.load()["approvals"][approval_stage]
+        if approval.get("git_commit") != commit:
+            raise AutomationBlocked(
+                "Approval commit differs from current HEAD; approve again after review."
+            )
+        for dependency in stage["dependencies"]:
+            dependency_id = str(dependency)
+            dependency_stage = spec.stage_by_id[dependency_id]
+            if dependency_stage["kind"] == "approval":
+                continue
+            if not store.stage_succeeded(dependency_id):
+                raise AutomationBlocked(
+                    f"Stage dependency is not passed: {dependency_id}"
+                )
+        state = store.load()
+        if state.get("local_commit") != commit or state.get("remote_commit") != commit:
+            raise AutomationBlocked(
+                "Checkpoint commit changed or remote preflight is stale; "
+                "require matching local/remote commits before submission."
+            )
+
+    automation_environment = {
+        "AUTOMATION_OUTPUT_ROOT": output_root,
+        "AUTOMATION_SUBMITTED_COMMIT": commit,
+        "PROJECT_ROOT": str(spec.data["project"]["remote_root"]),
+    }
+    runtime_stage = deepcopy(stage)
+    runtime_stage["resources"] = {
+        **dict(runtime_stage.get("resources") or {}),
+        "expected_output_root": output_root,
+    }
+    runtime_stages = {**spec.stage_by_id, stage_id: runtime_stage}
+    sbatch_argv = build_exp_sbatch_argv(
+        runtime_stage,
+        runtime_stages,
+        {},
+        automation_environment=automation_environment,
+    )
+    ssh_argv = build_remote_submit_argv(
+        _ssh_config(spec),
+        sbatch_argv,
+        expected_commit=commit,
+        output_root=output_root,
+    )
+    if dry_run:
+        return {
+            "dry_run": True,
+            "commands": [ssh_argv],
+            "sbatch_argv": sbatch_argv,
+            "job_ids": {},
+            "slurm_jobs": [],
+            "output_root": output_root,
+            "remote_write_performed": False,
+        }
+
+    assert store is not None
+    dump_spec_snapshot(spec, _execution_snapshot_path(store))
+    previous = store.load().get("stages", {}).get(stage_id, {})
+    attempt = int(previous.get("attempt", 0)) + 1
+    result = command_runner.run(
+        ssh_argv,
+        cwd=spec.local_root,
+        environment=inherited_environment(preserve_proxy_environment=True),
+    )
+    if result.returncode != 0:
+        _write_submission_block(
+            store,
+            stage_id=stage_id,
+            result=result,
+            output_root=output_root,
+            attempt=attempt,
+        )
+        raise AutomationBlocked(result.stderr or "Remote exp_sbatch failed.")
+    try:
+        job_id = parse_exp_sbatch_job_id(result.stdout)
+    except RuntimeError as exc:
+        _write_submission_block(
+            store,
+            stage_id=stage_id,
+            result=result,
+            output_root=output_root,
+            attempt=attempt,
+        )
+        raise AutomationBlocked(str(exc)) from exc
+    submission_stdout, submission_stderr = _record_command(
+        store, stage_id, attempt, result
+    )
+    submitted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    remote_stdout = f"logs/clear_phase_b_smoke_{job_id}.out"
+    remote_stderr = f"logs/clear_phase_b_smoke_{job_id}.err"
+    completion_marker = (
+        f"{output_root}/_AUTOMATION_PHASE_B_GPU_SMOKE_COMPLETE.json"
+    )
+    record = {
+        "stage_id": stage_id,
+        "job_id": job_id,
+        "slurm_state": "SUBMITTED",
+        "exit_code": None,
+        "submitted_at": submitted_at,
+        "submit_argv": sbatch_argv,
+        "ssh_argv": ssh_argv,
+        "submitted_commit": commit,
+        "remote_commit": store.load().get("remote_commit"),
+        "output_root": output_root,
+        "stdout_path": remote_stdout,
+        "stderr_path": remote_stderr,
+        "completion_marker": completion_marker,
+        "gate_result": None,
+    }
+    store.record_slurm_job(record)
+    store.record_stage(
+        stage_id,
+        {
+            **previous,
+            "stage_id": stage_id,
+            "attempt": attempt,
+            "start_time": submitted_at,
+            "end_time": None,
+            "command_argv": ssh_argv,
+            "submit_argv": sbatch_argv,
+            "cwd": str(spec.local_root),
+            "return_code": result.returncode,
+            "submission_stdout_path": str(submission_stdout),
+            "submission_stderr_path": str(submission_stderr),
+            "stdout_path": remote_stdout,
+            "stderr_path": remote_stderr,
+            "artifacts": [output_root],
+            "gate_result": None,
+            "job_id": job_id,
+            "git_commit": commit,
+            "remote_git_commit": store.load().get("remote_commit"),
+            "status": "SUBMITTED",
+        },
+    )
+    store.transition(RunStatus.SUBMITTED, reason=f"Submitted Slurm job {job_id}.")
+    _set_stop_reason(store, "Waiting for on-demand Slurm status refresh.")
+    write_final_report(
+        store.run_dir,
+        state=store.load(),
+        gate_summary="CLEAR Phase B smoke submitted; scientific gate has not run.",
+        output_roots=[output_root],
+        provenance={
+            "submitted_commit": commit,
+            "remote_commit": store.load().get("remote_commit"),
+            "calibration_used": False,
+            "test_used": False,
+            "remote_write_performed": True,
+        },
+        next_allowed_stage="status --refresh",
+        stop_reason="Waiting for on-demand Slurm status refresh.",
+        details={"approval": store.load()["approvals"].get(approval_stage)},
+    )
+    return {
+        "dry_run": False,
+        "commands": [ssh_argv],
+        "job_ids": {stage_id: job_id},
+        "slurm_jobs": list(store.load()["slurm_jobs"]),
+        "output_root": output_root,
+        "remote_write_performed": True,
+    }
+
+
+def _gate_stage_for_compute(
+    spec: TaskSpec, compute_stage_id: str
+) -> dict[str, Any]:
+    matches = [
+        stage
+        for stage in spec.data["stages"]
+        if stage["kind"] == "audit"
+        and list(stage["dependencies"]) == [compute_stage_id]
+        and stage.get("command")
+    ]
+    if len(matches) != 1:
+        raise AutomationBlocked(
+            f"Expected one read-only audit stage after {compute_stage_id}; "
+            f"found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _parse_clear_phase_b_gate_evidence(stdout: str) -> dict[str, Any]:
+    encoded_values = [
+        line.split(maxsplit=1)[1]
+        for line in stdout.splitlines()
+        if line.startswith(_CLEAR_PHASE_B_GATE_MARKER + " ")
+        and len(line.split(maxsplit=1)) == 2
+    ]
+    if len(encoded_values) != 1:
+        raise ValueError(
+            "Remote gate must emit exactly one Phase B evidence marker."
+        )
+    try:
+        payload = json.loads(
+            base64.b64decode(encoded_values[0], validate=True).decode("utf-8")
+        )
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Remote Phase B gate evidence is invalid.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Remote Phase B gate evidence must be a JSON object.")
+    return payload
+
+
+def _update_persisted_job(
+    store: RunStore,
+    current: Mapping[str, Any],
+    *,
+    slurm_state: str,
+    exit_code: str | None,
+    gate_result: str | None = None,
+) -> dict[str, Any]:
+    updated = {
+        **dict(current),
+        "slurm_state": slurm_state,
+        "exit_code": exit_code,
+        "last_refreshed_at": datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    }
+    if gate_result is not None:
+        updated["gate_result"] = gate_result
+    store.record_slurm_job(updated)
+    return updated
+
+
+def _block_slurm_run(
+    store: RunStore,
+    *,
+    stage_id: str,
+    error_class: str,
+    return_code: int | None,
+    stderr: str,
+    output_root: str,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    reason = str(details.get("stop_reason") or error_class)
+    store.transition(RunStatus.BLOCKED, reason=reason)
+    _set_stop_reason(store, reason)
+    report, _ = write_blocked_report(
+        store.run_dir,
+        state=store.load(),
+        failed_stage=stage_id,
+        error_class=error_class,
+        return_code=return_code,
+        stderr=stderr,
+        artifacts=[output_root],
+        retry_count=0,
+        recommended_action=(
+            "Inspect the persisted Slurm logs and Gate evidence; do not "
+            "overwrite or automatically retry the output directory."
+        ),
+        scientific_semantics_risk=False,
+        details={**dict(details), "remote_write_performed": True},
+    )
+    return {
+        "state": store.load(),
+        "status": RunStatus.BLOCKED.value,
+        "report": str(report),
+    }
+
+
+def refresh_status(
+    store: RunStore,
+    spec: TaskSpec,
+    *,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    """Perform one bounded Slurm refresh and, when ready, one read-only Gate."""
+
+    state = store.load()
+    if state["status"] in {RunStatus.BLOCKED.value, RunStatus.FAILED.value}:
+        store.append_event("status_refresh_skipped_blocked_run")
+        return {
+            "state": state,
+            "status": state["status"],
+            "slurm_query": {"skipped": True, "reason": "run_is_blocked"},
+        }
+    gate_records = [
+        record
+        for stage_id, record in state.get("stages", {}).items()
+        if stage_id == "phase_b_gpu_smoke_gate"
+        and record.get("status") == "PASSED"
+    ]
+    if gate_records:
+        store.append_event("status_refresh_skipped_completed_gate")
+        return {"state": store.load(), "resumed": True, "slurm_query": {"skipped": True}}
+    jobs = list(state.get("slurm_jobs") or [])
+    if not jobs:
+        return {"state": state, "slurm_query": {"jobs": [], "skipped": True}}
+    if len(jobs) != 1:
+        raise AutomationBlocked("Phase B permits exactly one persisted Slurm job.")
+    job = jobs[0]
+    stage_id = str(job["stage_id"])
+    job_id = str(job["job_id"])
+    command_runner = runner or CommandRunner(default_timeout_seconds=120)
+    current_commit = head_commit(command_runner, spec.local_root)
+    submitted_commit = str(job.get("submitted_commit") or "")
+    if current_commit != submitted_commit:
+        return _block_slurm_run(
+            store,
+            stage_id=stage_id,
+            error_class="CheckpointCommitChanged",
+            return_code=None,
+            stderr=(
+                f"Current commit {current_commit} differs from submitted "
+                f"commit {submitted_commit}."
+            ),
+            output_root=str(job["output_root"]),
+            details={
+                "stop_reason": "checkpoint_commit_changed",
+                "current_commit": current_commit,
+                "submitted_commit": submitted_commit,
+            },
+        )
+    status_argv = build_status_argv(_ssh_config(spec), [job_id])
+    result = command_runner.run(
+        status_argv,
+        cwd=spec.local_root,
+        environment=inherited_environment(preserve_proxy_environment=True),
+    )
+    attempt = int(job.get("status_refresh_count", 0)) + 1
+    status_stdout, status_stderr = _record_command(
+        store, f"{stage_id}_status", attempt, result
+    )
+    if result.returncode != 0:
+        return _block_slurm_run(
+            store,
+            stage_id=stage_id,
+            error_class="SlurmStatusQueryFailure",
+            return_code=result.returncode,
+            stderr=result.stderr,
+            output_root=str(job["output_root"]),
+            details={
+                "stop_reason": "slurm_status_query_failed",
+                "status_stdout_path": str(status_stdout),
+                "status_stderr_path": str(status_stderr),
+            },
+        )
+    try:
+        slurm_status = parse_slurm_status_output(result.stdout, job_id)
+    except ValueError as exc:
+        return _block_slurm_run(
+            store,
+            stage_id=stage_id,
+            error_class="SlurmStatusParseFailure",
+            return_code=result.returncode,
+            stderr=str(exc),
+            output_root=str(job["output_root"]),
+            details={"stop_reason": "slurm_status_unavailable"},
+        )
+    job = {
+        **job,
+        "status_refresh_count": attempt,
+        "status_query_argv": status_argv,
+        "status_stdout_path": str(status_stdout),
+        "status_stderr_path": str(status_stderr),
+    }
+    job = _update_persisted_job(
+        store,
+        job,
+        slurm_state=slurm_status.state,
+        exit_code=slurm_status.exit_code,
+    )
+    previous_stage = store.load().get("stages", {}).get(stage_id, {})
+    stage_status = "RUNNING" if slurm_status.state == "RUNNING" else slurm_status.state
+    store.record_stage(
+        stage_id,
+        {
+            **previous_stage,
+            "status": stage_status,
+            "slurm_state": slurm_status.state,
+            "slurm_exit_code": slurm_status.exit_code,
+            "return_code": (
+                0 if slurm_status.exit_code == "0:0" else previous_stage.get("return_code")
+            ),
+        },
+    )
+    if is_active_status(slurm_status):
+        run_status = (
+            RunStatus.RUNNING
+            if slurm_status.state in {"RUNNING", "COMPLETING"}
+            else RunStatus.SUBMITTED
+        )
+        store.transition(run_status, reason=f"Slurm job is {slurm_status.state}.")
+        _set_stop_reason(store, "Waiting for on-demand Slurm status refresh.")
+        write_final_report(
+            store.run_dir,
+            state=store.load(),
+            gate_summary=f"Slurm job {job_id} is {slurm_status.state}; Gate not run.",
+            output_roots=[str(job["output_root"])],
+            provenance={
+                "submitted_commit": submitted_commit,
+                "remote_commit": state.get("remote_commit"),
+                "calibration_used": False,
+                "test_used": False,
+            },
+            next_allowed_stage="status --refresh",
+            stop_reason="Waiting for on-demand Slurm status refresh.",
+            details={
+                "poll_interval_seconds": int(spec.data["execution"]["poll_interval_seconds"]),
+                "gate_executed": False,
+            },
+        )
+        return {
+            "state": store.load(),
+            "slurm_query": {
+                "job_id": slurm_status.job_id,
+                "state": slurm_status.state,
+                "exit_code": slurm_status.exit_code,
+            },
+            "next_refresh_after_seconds": int(
+                spec.data["execution"]["poll_interval_seconds"]
+            ),
+        }
+    if is_failure_status(slurm_status):
+        return _block_slurm_run(
+            store,
+            stage_id=stage_id,
+            error_class=f"Slurm{slurm_status.state.title().replace('_', '')}",
+            return_code=1,
+            stderr=(
+                f"Slurm state={slurm_status.state} "
+                f"exit_code={slurm_status.exit_code}"
+            ),
+            output_root=str(job["output_root"]),
+            details={
+                "stop_reason": f"slurm_{slurm_status.state.lower()}",
+                "slurm_state": slurm_status.state,
+                "slurm_exit_code": slurm_status.exit_code,
+                "stdout_path": job.get("stdout_path"),
+                "stderr_path": job.get("stderr_path"),
+                "gate_executed": False,
+            },
+        )
+    if not is_success_status(slurm_status):
+        return _block_slurm_run(
+            store,
+            stage_id=stage_id,
+            error_class="UnsupportedSlurmState",
+            return_code=None,
+            stderr=f"Unsupported Slurm state: {slurm_status.state}",
+            output_root=str(job["output_root"]),
+            details={"stop_reason": "unsupported_slurm_state"},
+        )
+
+    store.transition(
+        RunStatus.AUDITING,
+        reason=f"Slurm job {job_id} completed; running read-only smoke Gate.",
+    )
+    gate_stage = _gate_stage_for_compute(spec, stage_id)
+    gate_stage_id = str(gate_stage["id"])
+    rendered_command = [
+        _render_runtime_template(
+            str(value),
+            run_id=str(state["run_id"]),
+            output_root=str(job["output_root"]),
+            job_id=job_id,
+            commit=submitted_commit,
+            remote_root=str(spec.data["project"]["remote_root"]),
+        )
+        for value in gate_stage["command"]
+    ]
+    gate_argv = build_remote_project_command_argv(
+        _ssh_config(spec), rendered_command
+    )
+    gate_result = command_runner.run(
+        gate_argv,
+        cwd=spec.local_root,
+        environment=inherited_environment(preserve_proxy_environment=True),
+    )
+    gate_attempt = int(
+        store.load().get("stages", {}).get(gate_stage_id, {}).get("attempt", 0)
+    ) + 1
+    gate_stdout, gate_stderr = _record_command(
+        store, gate_stage_id, gate_attempt, gate_result
+    )
+    try:
+        evidence = _parse_clear_phase_b_gate_evidence(gate_result.stdout)
+    except ValueError as exc:
+        evidence = {
+            "audit_passed": False,
+            "run_complete": False,
+            "failed_hard_checks": [f"evidence_parse_failure:{exc}"],
+            "checks": {},
+            "artifacts": {},
+            "provenance": {},
+        }
+    evidence.update(
+        {
+            "task_id": spec.task_id,
+            "run_id": state["run_id"],
+            "stage_id": gate_stage_id,
+            "job_id": job_id,
+            "slurm_state": slurm_status.state,
+            "slurm_exit_code": slurm_status.exit_code,
+            "submit_argv": job.get("submit_argv"),
+            "submitted_commit": submitted_commit,
+            "remote_commit": state.get("remote_commit"),
+            "stdout_path": job.get("stdout_path"),
+            "stderr_path": job.get("stderr_path"),
+            "completion_marker": job.get("completion_marker"),
+            "approval": state.get("approvals", {}).get(
+                _approval_dependency(spec, spec.stage_by_id[stage_id]) or ""
+            ),
+            "approved_stage": _approval_dependency(
+                spec, spec.stage_by_id[stage_id]
+            ),
+            "remote_write_performed": True,
+            "gate_remote_write_performed": False,
+        }
+    )
+    reported_failures = list(evidence.get("failed_hard_checks") or [])
+    evaluation = evaluate_gate_payload(
+        evidence,
+        gate_spec=gate_stage["gate"],
+        slurm_exit_code=slurm_status.exit_code,
+    )
+    combined_failures = [*reported_failures, *evaluation.failed_hard_checks]
+    if gate_result.returncode != 0:
+        combined_failures.append(f"gate_return_code:{gate_result.returncode}")
+    if combined_failures:
+        evaluation = type(evaluation)(
+            passed=False,
+            failed_hard_checks=tuple(dict.fromkeys(combined_failures)),
+            checks=evaluation.checks,
+        )
+    evidence["audit_passed"] = evaluation.passed
+    evidence["run_complete"] = evaluation.passed
+    evidence["failed_hard_checks"] = list(evaluation.failed_hard_checks)
+    evidence_path = store.run_dir / "evidence" / "phase_b_gpu_smoke_gate.json"
+    atomic_write_json(evidence_path, evidence)
+    store.record_stage(
+        gate_stage_id,
+        {
+            "stage_id": gate_stage_id,
+            "attempt": gate_attempt,
+            "start_time": None,
+            "end_time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "command_argv": gate_argv,
+            "cwd": str(spec.local_root),
+            "return_code": gate_result.returncode,
+            "stdout_path": str(gate_stdout),
+            "stderr_path": str(gate_stderr),
+            "artifacts": [
+                _render_runtime_template(
+                    str(value),
+                    run_id=str(state["run_id"]),
+                    output_root=str(job["output_root"]),
+                    job_id=job_id,
+                    commit=submitted_commit,
+                    remote_root=str(spec.data["project"]["remote_root"]),
+                )
+                for value in gate_stage["expected_artifacts"]
+            ],
+            "gate_result": str(evidence_path),
+            "job_id": None,
+            "git_commit": current_commit,
+            "remote_git_commit": state.get("remote_commit"),
+            "command_status": "PASSED" if gate_result.returncode == 0 else "FAILED",
+            "gate_status": "PASSED" if evaluation.passed else "BLOCKED",
+            "status": "PASSED" if evaluation.passed else "FAILED",
+        },
+    )
+    job = _update_persisted_job(
+        store,
+        job,
+        slurm_state=slurm_status.state,
+        exit_code=slurm_status.exit_code,
+        gate_result=str(evidence_path),
+    )
+    if not evaluation.passed:
+        return _block_slurm_run(
+            store,
+            stage_id=gate_stage_id,
+            error_class="PhaseBGpuSmokeGateFailure",
+            return_code=gate_result.returncode,
+            stderr=gate_result.stderr or "\n".join(evaluation.failed_hard_checks),
+            output_root=str(job["output_root"]),
+            details={
+                "stop_reason": "phase_b_gpu_smoke_gate_failed",
+                "gate_result": str(evidence_path),
+                "failed_hard_checks": list(evaluation.failed_hard_checks),
+                "slurm_state": slurm_status.state,
+                "slurm_exit_code": slurm_status.exit_code,
+            },
+        )
+
+    next_stage = _next_stage_id(spec, gate_stage_id)
+    store.transition(
+        RunStatus.STOPPED_BEFORE_APPROVAL,
+        reason=f"Stopped before {next_stage} pending explicit approval.",
+    )
+    _set_stop_reason(
+        store, f"Stopped before {next_stage} pending explicit approval."
+    )
+    report, _ = write_final_report(
+        store.run_dir,
+        state=store.load(),
+        gate_summary="CLEAR Phase B GPU smoke and scientific artifact Gate passed.",
+        output_roots=[str(job["output_root"])],
+        provenance={
+            **dict(evidence.get("provenance") or {}),
+            "submitted_commit": submitted_commit,
+            "remote_commit": state.get("remote_commit"),
+            "job_id": job_id,
+            "remote_write_performed": True,
+        },
+        next_allowed_stage=next_stage,
+        stop_reason=f"Stopped before {next_stage} pending explicit approval.",
+        details={
+            "approval": state.get("approvals", {}).get(
+                _approval_dependency(spec, spec.stage_by_id[stage_id]) or ""
+            ),
+            "gate_result": str(evidence_path),
+            "slurm_state": slurm_status.state,
+            "slurm_exit_code": slurm_status.exit_code,
+            "completion_marker": job.get("completion_marker"),
+        },
+    )
+    return {
+        "state": store.load(),
+        "status": RunStatus.STOPPED_BEFORE_APPROVAL.value,
+        "report": str(report),
+        "gate_result": str(evidence_path),
+        "next_stage": next_stage,
+    }
+
+
+def resume_run(
+    store: RunStore, *, runner: CommandRunner | None = None
+) -> dict[str, Any]:
+    """Advance at most one resumable action; never poll in a loop."""
+
+    spec = _load_execution_spec(store)
+    if store.load().get("slurm_jobs"):
+        return refresh_status(store, spec, runner=runner)
+    compute_stages = _slurm_compute_stages(spec)
+    if compute_stages:
+        approval_stage = _approval_dependency(spec, compute_stages[0])
+        if approval_stage and store.is_approved(approval_stage):
+            result = submit(spec, dry_run=False, store=store, runner=runner)
+            return {"state": store.load(), "submission": result}
+    store.append_event("resume_stopped_no_approved_remote_action")
+    return {"state": store.load(), "resumed": True, "action": "none"}
 
 
 def _load_snapshot(run_dir: Path) -> TaskSpec:
@@ -1870,11 +2645,62 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "approve":
             store = RunStore.open(args.run_dir)
-            spec = _load_snapshot(store.run_dir)
+            spec = _load_execution_spec(store)
             if args.stage not in spec.stage_by_id:
                 raise AutomationBlocked(f"Unknown stage: {args.stage}")
-            store.approve(args.stage, args.reason, getpass.getuser())
-            _json_print({"approved": True, "stage": args.stage})
+            stage = spec.stage_by_id[args.stage]
+            if stage["kind"] != "approval":
+                raise AutomationBlocked(
+                    f"Stage is not an approval boundary: {args.stage}"
+                )
+            for dependency in stage["dependencies"]:
+                if not store.stage_succeeded(str(dependency)):
+                    raise AutomationBlocked(
+                        f"Approval dependency is not passed: {dependency}"
+                    )
+            commit = head_commit(CommandRunner(), spec.local_root)
+            store.approve(
+                args.stage,
+                args.reason,
+                getpass.getuser(),
+                git_commit=commit,
+            )
+            previous = store.load().get("stages", {}).get(args.stage, {})
+            store.record_stage(
+                args.stage,
+                {
+                    **previous,
+                    "stage_id": args.stage,
+                    "attempt": int(previous.get("attempt", 0)) + 1,
+                    "start_time": None,
+                    "end_time": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "command_argv": [],
+                    "cwd": str(spec.local_root),
+                    "return_code": 0,
+                    "stdout_path": None,
+                    "stderr_path": None,
+                    "artifacts": [],
+                    "gate_result": None,
+                    "job_id": None,
+                    "git_commit": commit,
+                    "remote_git_commit": store.load().get("remote_commit"),
+                    "command_status": "NOT_EXECUTED",
+                    "gate_status": "PASSED",
+                    "status": "APPROVED",
+                },
+            )
+            store.transition(
+                RunStatus.WAITING_APPROVAL,
+                reason=f"{args.stage} approved; submission remains separate.",
+            )
+            _set_stop_reason(
+                store, f"{args.stage} approved; invoke submit or resume."
+            )
+            _json_print(
+                {"approved": True, "stage": args.stage, "git_commit": commit}
+            )
         elif args.command == "initialize-run":
             spec = _runtime_spec(
                 load_task_spec(args.spec), Path(args.project_root)
@@ -1902,35 +2728,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             _json_print({"run_dir": str(store.run_dir), "initialized": True})
         elif args.command == "resume":
             store = RunStore.open(args.run_dir)
-            spec = _load_snapshot(store.run_dir)
-            resumed = run_local(spec, existing_store=store)
+            result = resume_run(store)
             _json_print(
-                {"run_dir": str(resumed.run_dir), "status": resumed.load()["status"]}
+                {
+                    "run_dir": str(store.run_dir),
+                    "status": store.load()["status"],
+                    **{key: value for key, value in result.items() if key != "state"},
+                }
             )
         elif args.command == "status":
             store = RunStore.open(args.run_dir)
             state = store.load()
             payload: dict[str, Any] = {"state": state}
             if args.refresh:
-                spec = _load_snapshot(store.run_dir)
-                job_ids = [
-                    str(record["job_id"])
-                    for record in state.get("stages", {}).values()
-                    if str(record.get("job_id") or "").isdigit()
-                ]
-                if job_ids:
-                    runner = CommandRunner(default_timeout_seconds=120)
-                    result = runner.run(
-                        build_status_argv(_ssh_config(spec), job_ids),
-                        cwd=spec.local_root,
-                    )
-                    payload["slurm_query"] = {
-                        "return_code": result.returncode,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                    }
-                else:
-                    payload["slurm_query"] = {"jobs": [], "skipped": True}
+                result = refresh_status(
+                    store,
+                    _load_execution_spec(store),
+                )
+                payload = result
             _json_print(payload)
         elif args.command == "report":
             store = RunStore.open(args.run_dir)

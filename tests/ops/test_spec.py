@@ -18,7 +18,11 @@ def test_example_and_clear_specs_validate() -> None:
     assert clear.data["permissions"]["allow_test"] is False
     assert clear.data["permissions"]["allow_calibration"] is False
     assert clear.data["permissions"]["allow_full"] is False
-    assert clear.data["execution"]["stop_before"] == "phase_b_gpu_smoke"
+    assert clear.data["execution"]["stop_before"] == "phase_c_full_run"
+    assert clear.data["execution"]["auto_until"] == "phase_b_gpu_smoke_gate"
+    assert clear.data["permissions"]["allow_remote_write"] is True
+    assert clear.data["permissions"]["allow_sbatch"] is True
+    assert clear.data["permissions"]["allow_gpu_smoke"] is True
     dirty = clear.data["remote_dirty_policy"]
     assert dirty["allowed_tracked_paths"] == [
         "baselines/clear_official",
@@ -59,6 +63,12 @@ def test_example_and_clear_specs_validate() -> None:
         "baselines/clear_official/dataset/mutagenicity_datasplit.pickle",
     ]
     assert "phase_b_gpu_smoke" not in adopt["stages"]
+    assert clear.topological_stage_ids()[-4:] == [
+        "phase_b_gpu_smoke",
+        "phase_b_gpu_smoke_submit",
+        "phase_b_gpu_smoke_gate",
+        "phase_c_full_run",
+    ]
 
 
 def test_clear_nested_allowlist_matches_patch_001_through_005() -> None:

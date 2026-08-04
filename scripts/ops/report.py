@@ -35,11 +35,13 @@ def write_final_report(
         for stage_id, record in stages.items()
         if record.get("status") in {"PASSED", "ADOPTED_EXISTING"}
     ]
-    jobs = {
-        stage_id: record["job_id"]
-        for stage_id, record in stages.items()
-        if record.get("job_id")
-    }
+    jobs = list(state.get("slurm_jobs") or [])
+    if not jobs:
+        jobs = [
+            {"stage_id": stage_id, "job_id": str(record["job_id"])}
+            for stage_id, record in stages.items()
+            if record.get("job_id")
+        ]
     payload = {
         "task": state["task_id"],
         "run_id": state["run_id"],
@@ -66,7 +68,7 @@ def write_final_report(
             f"- Status: {payload['status']}",
             f"- Local commit: {payload['local_commit'] or 'not created'}",
             f"- Remote commit: {payload['remote_commit'] or 'not deployed'}",
-            f"- Slurm jobs: {jobs or 'none'}",
+            f"- Slurm jobs: {json.dumps(jobs, sort_keys=True) if jobs else 'none'}",
             f"- Passed stages: {', '.join(passed) or 'none'}",
             "- Failed stage: none",
             f"- Gate summary: {gate_summary}",
@@ -105,6 +107,7 @@ def write_blocked_report(
         "task": state["task_id"],
         "run_id": state["run_id"],
         "status": state["status"],
+        "slurm_jobs": list(state.get("slurm_jobs") or []),
         "failed_stage": failed_stage,
         "error_class": error_class,
         "return_code": return_code,

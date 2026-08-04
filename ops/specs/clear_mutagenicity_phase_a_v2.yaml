@@ -1,5 +1,5 @@
 task_id: clear_mutagenicity_phase_a_v2
-description: Plan-only CLEAR Mutagenicity Phase A v2 dataset and chemistry codec rebuild.
+description: CLEAR Mutagenicity Phase A adoption and approved Phase B 64-parent GPU smoke.
 project:
   local_root: /Users/cz0210/Desktop/Documents/Tongji/GEEX/Code/counterfactual-subgraph
   remote_root: /share/home/u20526/czx/counterfactual-subgraph
@@ -18,6 +18,7 @@ git:
     - tests/test_clear_mutagenicity_dataset_wrapper.py
     - scripts/ops/**
     - scripts/slurm/ops/**
+    - scripts/slurm/clear_mutagenicity_phase_b_gpu_smoke.sh
     - ops/specs/**
     - ops/schemas/**
     - tests/ops/**
@@ -79,14 +80,14 @@ adopt_existing:
     outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe/codec_probe_rows.jsonl: 64
   allow_missing_current_markers: true
 execution:
-  auto_until: phase_a_audit
-  stop_before: phase_b_gpu_smoke
+  auto_until: phase_b_gpu_smoke_gate
+  stop_before: phase_c_full_run
   max_auto_retries: 1
   poll_interval_seconds: 120
 permissions:
-  allow_remote_write: false
-  allow_sbatch: false
-  allow_gpu_smoke: false
+  allow_remote_write: true
+  allow_sbatch: true
+  allow_gpu_smoke: true
   allow_full: false
   allow_calibration: false
   allow_test: false
@@ -154,7 +155,7 @@ stages:
     resources:
       name: clear_phase_a_prepare
       tags: clear,mutagenicity,phase-a,cpu
-      notes: Remote write is currently disabled; plan only.
+      notes: Historical Phase A preparation adopted from verified legacy artifacts.
       expected_output_root: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2
     cwd: null
     timeout_seconds: 3600
@@ -196,7 +197,7 @@ stages:
     resources:
       name: clear_phase_a_probe
       tags: clear,mutagenicity,phase-a,codec
-      notes: Remote write is currently disabled; plan only.
+      notes: Historical Phase A codec probe adopted from verified legacy artifacts.
       expected_output_root: outputs/hpc/mutagenicity/baselines/clear/phase_a_dataset_codec_v2/codec_probe
     cwd: null
     timeout_seconds: 3600
@@ -248,7 +249,100 @@ stages:
     resources:
       name: null
       tags: gpu,smoke,approval
-      notes: Explicit approval boundary; not executable in this task.
+      notes: Explicit approval boundary before the single Phase B GPU smoke.
+      expected_output_root: null
+    cwd: null
+    timeout_seconds: 60
+  - id: phase_b_gpu_smoke_submit
+    kind: slurm_job
+    command: null
+    script: scripts/slurm/clear_mutagenicity_phase_b_gpu_smoke.sh
+    dependencies:
+      - phase_b_gpu_smoke
+    expected_artifacts:
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/summary.json
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/run_manifest.json
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/train_pool_audit.json
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/_AUTOMATION_PHASE_B_GPU_SMOKE_COMPLETE.json
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: clear_mut_phase_b_smoke
+      tags: clear,mutagenicity,phase-b,gpu,smoke
+      notes: One 64-parent train-only CLEAR smoke; no calibration or test.
+      expected_output_root: outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}
+    cwd: null
+    timeout_seconds: 120
+  - id: phase_b_gpu_smoke_gate
+    kind: audit
+    command:
+      - python
+      - scripts/ops/clear_phase_b_smoke_gate.py
+      - --project-root
+      - "{remote_root}"
+      - --output-dir
+      - "{output_root}"
+      - --stdout-log
+      - logs/clear_phase_b_smoke_{job_id}.out
+      - --stderr-log
+      - logs/clear_phase_b_smoke_{job_id}.err
+      - --expected-commit
+      - "{commit}"
+      - --expected-job-id
+      - "{job_id}"
+    script: null
+    dependencies:
+      - phase_b_gpu_smoke_submit
+    expected_artifacts:
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/summary.json
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/run_manifest.json
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/train_pool_audit.json
+      - outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}/_AUTOMATION_PHASE_B_GPU_SMOKE_COMPLETE.json
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields:
+        audit_passed: true
+        run_complete: true
+        failed_hard_checks: []
+        checks.model_train_rows: 2885
+        checks.model_val_rows: 355
+        checks.generation_source_rows: 1448
+        checks.selected_generation_parents: 64
+        checks.generation_profile: smoke
+        checks.completed_chunk_count: 4
+        checks.calibration_loaded: false
+        checks.test_loaded: false
+        checks.model_training_performed: true
+      forbidden_fields:
+        provenance.calibration_loaded: true
+        provenance.test_loaded: true
+    resources:
+      name: clear_mut_phase_b_smoke_gate
+      tags: clear,mutagenicity,phase-b,read-only,audit
+      notes: Read-only artifact and log Gate after Slurm reaches COMPLETED/0:0.
+      expected_output_root: outputs/hpc/mutagenicity/baselines/clear/automation_phase_b_smoke/{run_id}
+    cwd: null
+    timeout_seconds: 600
+  - id: phase_c_full_run
+    kind: approval
+    command: null
+    script: null
+    dependencies:
+      - phase_b_gpu_smoke_gate
+    expected_artifacts: []
+    gate:
+      json_path: null
+      required_marker: null
+      required_fields: {}
+      forbidden_fields: {}
+    resources:
+      name: null
+      tags: clear,mutagenicity,full,approval
+      notes: Full run remains forbidden and requires a future explicit protocol change.
       expected_output_root: null
     cwd: null
     timeout_seconds: 60

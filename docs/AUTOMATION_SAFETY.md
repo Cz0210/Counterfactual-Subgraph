@@ -86,6 +86,15 @@ artifacts determine scientific success. Audit jobs run after any compute
 outcome and communicate the gate through their exit code. Downstream compute
 depends on a successful audit.
 
+The CLEAR Phase B smoke uses a stricter single-job variant: approval is bound
+to a commit, remote and local commits must match, and the guarded submit
+command first verifies that its run-ID-scoped output root does not exist. No
+second Slurm job is submitted. An on-demand `status --refresh` reads Slurm
+state and runs a remote read-only artifact Gate only after `COMPLETED/0:0`.
+`FAILED`, `CANCELLED`, `TIMEOUT`, `OUT_OF_MEMORY`, and `NODE_FAIL` block
+without running that Gate. Full, calibration, test, finalization, and
+overwrite permissions remain false.
+
 Codex may build and locally test this control plane and may perform an
 explicitly allowed read-only preflight. It must not submit full, calibration,
 or test work, delete results, overwrite finalized artifacts, or push changes

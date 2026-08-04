@@ -153,6 +153,51 @@ def evaluate_gate(
     )
 
 
+def evaluate_gate_payload(
+    payload: Mapping[str, Any],
+    *,
+    gate_spec: Mapping[str, Any],
+    slurm_exit_code: str | None = None,
+) -> GateEvaluation:
+    """Apply a stage gate to JSON already verified on the remote filesystem."""
+
+    failures: list[str] = []
+    checks: dict[str, Any] = {}
+    tolerance = float(gate_spec.get("float_tolerance", 1e-12))
+    for key, expected in (gate_spec.get("required_fields") or {}).items():
+        try:
+            actual = nested_get(payload, str(key))
+        except KeyError:
+            failures.append(f"required_field_missing:{key}")
+            continue
+        checks[f"required:{key}"] = {"actual": actual, "expected": expected}
+        if not values_equal(actual, expected, tolerance):
+            failures.append(f"required_field_mismatch:{key}")
+    for key, forbidden in (gate_spec.get("forbidden_fields") or {}).items():
+        try:
+            actual = nested_get(payload, str(key))
+        except KeyError:
+            continue
+        checks[f"forbidden:{key}"] = {"actual": actual, "forbidden": forbidden}
+        if values_equal(actual, forbidden, tolerance):
+            failures.append(f"forbidden_field_value:{key}")
+    if payload.get("audit_passed") is not True:
+        failures.append("audit_passed_not_true")
+    if payload.get("run_complete") is not True:
+        failures.append("run_complete_not_true")
+    if payload.get("failed_hard_checks") not in ([], ()):
+        failures.append("failed_hard_checks_not_empty")
+    if slurm_exit_code is not None:
+        checks["slurm_exit_code"] = slurm_exit_code
+        if slurm_exit_code != "0:0":
+            failures.append(f"slurm_exit_code:{slurm_exit_code}")
+    return GateEvaluation(
+        passed=not failures,
+        failed_hard_checks=tuple(dict.fromkeys(failures)),
+        checks=checks,
+    )
+
+
 def build_gate_json(
     *,
     task_id: str,

@@ -180,14 +180,16 @@ python scripts/ops/experimentctl.py approve \
   --reason "reviewed scientific and resource boundary"
 ```
 
-The event stores UTC time, username, hostname, stage, and reason.
+The event stores UTC time, username, hostname, stage, reason, and the reviewed
+Git commit. Submission is blocked if `HEAD` changes after approval.
 
 ## 9. Resume
 
 `resume` loads `state.json`, validates the append-only event sequence, and
-loads `spec.snapshot.yaml`. A stage already recorded as `PASSED` is skipped.
-Retries increment the stage attempt without deleting earlier stdout, stderr,
-commands, or events.
+loads the execution snapshot. It performs at most one action: submit an
+approved job or issue one bounded status refresh. It never loops. A stage
+already recorded as `PASSED` is skipped, and an already persisted Slurm job ID
+is never submitted again.
 
 ## 9.1 Adopt Existing Artifacts
 
@@ -245,13 +247,19 @@ After reviewing the dry-run report, a read-only preflight may be run with
 `deploy <spec> --preflight-only`. Real deploy and submission require matching
 permissions and explicit approval. They are deliberately separate commands.
 
-## 12. CLEAR Phase A
+## 12. CLEAR Phase A And Phase B Smoke
 
 `ops/specs/clear_mutagenicity_phase_a_v2.yaml` records the four strict
 train/validation inputs, expected counts, 64-row codec probe, sidecar v2, and
-round-trip gates. It stops before `phase_b_gpu_smoke`. Its remote-write and
-Slurm permissions are false, so the current artifact is suitable only for
-validation and planning until a reviewed task spec enables the next action.
-Its `adopt_existing` block can verify the frozen `codec_probe_64` legacy
-layout through the Phase A manifest without creating the current
-`codec_probe` layout or `phase_a_gate.json`.
+round-trip gates. Its `adopt_existing` block describes how the already-frozen
+Phase A was verified without creating compatibility artifacts.
+
+Phase B keeps `phase_b_gpu_smoke` as an explicit approval boundary. After that
+approval, `phase_b_gpu_smoke_submit` may submit exactly one 64-parent GPU job
+through `scripts/exp_sbatch.sh`. The output root includes the automation run
+ID and must not exist before submission. `status --refresh` performs one
+read-only `sacct`/`squeue` query. Pending and running jobs remain resumable;
+failed Slurm terminal states block immediately. Only `COMPLETED/0:0` invokes
+the read-only `phase_b_gpu_smoke_gate`, which validates provenance, counts,
+JSON finiteness, logs, and completion markers. A pass stops at
+`phase_c_full_run` with `STOPPED_BEFORE_APPROVAL`; full remains disabled.

@@ -152,6 +152,7 @@ class RunStore:
             "spec_path": spec_path or "",
             "local_commit": None,
             "remote_commit": None,
+            "slurm_jobs": [],
             "stages": {},
             "approvals": {},
             "stop_reason": None,
@@ -190,6 +191,9 @@ class RunStore:
         payload = json.loads(self.state_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"Invalid state object: {self.state_path}")
+        # State schema v1 predates Slurm job persistence. Keep old run
+        # checkpoints resumable while presenting one stable list contract.
+        payload.setdefault("slurm_jobs", [])
         return payload
 
     def save(self, state: dict[str, Any]) -> None:
@@ -248,9 +252,20 @@ class RunStore:
 
     def stage_succeeded(self, stage_id: str) -> bool:
         stage = self.load().get("stages", {}).get(stage_id, {})
-        return stage.get("status") in {"PASSED", "ADOPTED_EXISTING"}
+        return stage.get("status") in {
+            "PASSED",
+            "ADOPTED_EXISTING",
+            "APPROVED",
+        }
 
-    def approve(self, stage_id: str, reason: str, username: str) -> None:
+    def approve(
+        self,
+        stage_id: str,
+        reason: str,
+        username: str,
+        *,
+        git_commit: str | None = None,
+    ) -> None:
         if not reason.strip():
             raise ValueError("Approval reason must not be empty.")
         state = self.load()
@@ -260,6 +275,7 @@ class RunStore:
             "hostname": socket.gethostname(),
             "stage_id": stage_id,
             "reason": reason.strip(),
+            "git_commit": git_commit,
         }
         state["approvals"][stage_id] = approval
         self.save(state)
@@ -267,6 +283,33 @@ class RunStore:
 
     def is_approved(self, stage_id: str) -> bool:
         return stage_id in self.load().get("approvals", {})
+
+    def record_slurm_job(self, record: dict[str, Any]) -> None:
+        job_id = str(record.get("job_id") or "")
+        if not job_id.isdigit():
+            raise ValueError(f"Slurm job_id must be numeric: {job_id!r}")
+        state = self.load()
+        jobs = list(state.get("slurm_jobs") or [])
+        matching = [
+            index
+            for index, item in enumerate(jobs)
+            if str(item.get("job_id")) == job_id
+        ]
+        if len(matching) > 1:
+            raise ValueError(f"Duplicate persisted Slurm job ID: {job_id}")
+        if matching:
+            jobs[matching[0]] = dict(record)
+        else:
+            jobs.append(dict(record))
+        state["slurm_jobs"] = jobs
+        self.save(state)
+        self.append_event(
+            "slurm_job_recorded",
+            stage_id=record.get("stage_id"),
+            job_id=job_id,
+            slurm_state=record.get("slurm_state"),
+            exit_code=record.get("exit_code"),
+        )
 
     def append_command(self, record: dict[str, Any]) -> None:
         append_jsonl_fsync(self.commands_path, record)

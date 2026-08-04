@@ -13,6 +13,7 @@
     "spec_path",
     "local_commit",
     "remote_commit",
+    "slurm_jobs",
     "stages",
     "approvals",
     "stop_reason"
@@ -58,6 +59,20 @@
     "spec_path": {"type": "string"},
     "local_commit": {"type": ["string", "null"]},
     "remote_commit": {"type": ["string", "null"]},
+    "slurm_jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["stage_id", "job_id", "slurm_state"],
+        "properties": {
+          "stage_id": {"type": "string"},
+          "job_id": {"type": "string", "pattern": "^[0-9]+$"},
+          "slurm_state": {"type": "string"},
+          "exit_code": {"type": ["string", "null"]}
+        }
+      }
+    },
     "stages": {
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/stage_record"}

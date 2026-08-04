@@ -41,7 +41,12 @@ def dependency_argument(
     stage_by_id: Mapping[str, Mapping[str, Any]],
     job_ids: Mapping[str, str],
 ) -> str | None:
-    dependencies = [str(value) for value in stage["dependencies"]]
+    dependencies = [
+        str(value)
+        for value in stage["dependencies"]
+        if str(stage_by_id[str(value)]["kind"]) in {"slurm_job", "audit"}
+        and stage_by_id[str(value)].get("script")
+    ]
     if not dependencies:
         return None
     missing = [value for value in dependencies if value not in job_ids]
@@ -109,4 +114,67 @@ def parse_sacct_line(line: str) -> SlurmStatus:
         job_id=columns[0].strip(),
         state=columns[1].strip(),
         exit_code=columns[2].strip(),
+    )
+
+
+ACTIVE_STATES = {
+    "PENDING",
+    "CONFIGURING",
+    "RUNNING",
+    "COMPLETING",
+    "SUSPENDED",
+}
+FAILURE_STATES = {
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "OOM",
+    "OUT_OF_MEMORY",
+    "NODE_FAIL",
+    "BOOT_FAIL",
+    "DEADLINE",
+    "PREEMPTED",
+    "REVOKED",
+}
+
+
+def normalize_slurm_state(value: str) -> str:
+    return value.strip().split(maxsplit=1)[0].rstrip("+").upper()
+
+
+def parse_slurm_status_output(stdout: str, job_id: str) -> SlurmStatus:
+    """Select the top-level job record from sacct or squeue output."""
+
+    candidates: list[SlurmStatus] = []
+    for line in stdout.splitlines():
+        if not line.strip() or line.lstrip().startswith("["):
+            continue
+        try:
+            parsed = parse_sacct_line(line)
+        except ValueError:
+            continue
+        if parsed.job_id == str(job_id):
+            candidates.append(
+                SlurmStatus(
+                    job_id=parsed.job_id,
+                    state=normalize_slurm_state(parsed.state),
+                    exit_code=parsed.exit_code or "N/A",
+                )
+            )
+    if not candidates:
+        raise ValueError(f"No top-level Slurm status found for job {job_id}.")
+    return candidates[-1]
+
+
+def is_active_status(status: SlurmStatus) -> bool:
+    return status.state in ACTIVE_STATES
+
+
+def is_success_status(status: SlurmStatus) -> bool:
+    return status.state == "COMPLETED" and status.exit_code == "0:0"
+
+
+def is_failure_status(status: SlurmStatus) -> bool:
+    return status.state in FAILURE_STATES or (
+        status.state == "COMPLETED" and status.exit_code != "0:0"
     )

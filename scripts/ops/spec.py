@@ -403,9 +403,22 @@ def semantic_validate(data: dict[str, Any]) -> None:
             raise SpecValidationError(
                 f"Stage {stage['id']} reads calibration while forbidden."
             )
-        if not permissions["allow_full"] and _declares_full(stage):
+        if (
+            not permissions["allow_full"]
+            and stage["kind"] != "approval"
+            and _declares_full(stage)
+        ):
             raise SpecValidationError(
                 f"Stage {stage['id']} declares a full run while forbidden."
+            )
+        if (
+            stage["kind"] == "slurm_job"
+            and "gpu" in text
+            and "smoke" in text
+            and not permissions["allow_gpu_smoke"]
+        ):
+            raise SpecValidationError(
+                f"Stage {stage['id']} is a GPU smoke but allow_gpu_smoke=false."
             )
         if stage["kind"] == "slurm_job" and not permissions["allow_sbatch"]:
             raise SpecValidationError(
@@ -427,6 +440,15 @@ def semantic_validate(data: dict[str, Any]) -> None:
     if data["permissions"].get("preserve_proxy_environment") is not True:
         raise SpecValidationError(
             "preserve_proxy_environment must remain true by default."
+        )
+    if any(
+        stage["kind"] == "slurm_job"
+        and "gpu" in _stage_text(stage)
+        and "smoke" in _stage_text(stage)
+        for stage in data["stages"]
+    ) and int(data["execution"]["poll_interval_seconds"]) < 120:
+        raise SpecValidationError(
+            "GPU smoke polling interval must be at least 120 seconds."
         )
 
 

@@ -623,9 +623,17 @@ class OneResultRunner:
 def test_adopt_dry_run_has_contract_and_no_execution(
     monkeypatch, tmp_path: Path
 ) -> None:
-    spec = load_task_spec(
+    loaded = load_task_spec(
         ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
     )
+    payload = deepcopy(loaded.data)
+    for permission in (
+        "allow_remote_write",
+        "allow_sbatch",
+        "allow_gpu_smoke",
+    ):
+        payload["permissions"][permission] = False
+    spec = TaskSpec(path=loaded.path, data=payload)
     monkeypatch.setattr(experimentctl, "head_commit", lambda *args: CURRENT_COMMIT)
     runner = ExplodingRunner()
     runner.calls = []
@@ -670,9 +678,17 @@ def test_successful_adoption_persists_state_report_and_evidence(
 ) -> None:
     project, config = legacy_fixture(tmp_path)
     evidence = verify(project, config)
-    spec = load_task_spec(
+    loaded = load_task_spec(
         ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
     )
+    payload = deepcopy(loaded.data)
+    for permission in (
+        "allow_remote_write",
+        "allow_sbatch",
+        "allow_gpu_smoke",
+    ):
+        payload["permissions"][permission] = False
+    spec = TaskSpec(path=loaded.path, data=payload)
     monkeypatch.setattr(experimentctl, "head_commit", lambda *args: CURRENT_COMMIT)
 
     def pass_local(_spec, store, stage, _runner):
