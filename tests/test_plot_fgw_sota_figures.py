@@ -163,3 +163,67 @@ def test_normalized_auc_uses_canonical_snake_case_schema() -> None:
     assert result["auc_min"] == 0.0
     assert result["auc_max"] == pytest.approx(0.0328)
     assert result["low_cost_normalized_auc"] == pytest.approx(0.5)
+
+
+def test_three_method_quantile_inputs_do_not_require_gcfexplainer(tmp_path: Path) -> None:
+    methods = ("Ours", "CLEAR", "GlobalGCE")
+    figure3_path = tmp_path / "figure3.csv"
+    figure3_rows = [
+        {
+            "method": method,
+            "k": k,
+            "theta": 0.0385762445762996,
+            "coverage": k / 40,
+            "conditional_median_cost": 0.1,
+        }
+        for method in methods
+        for k in range(1, 21)
+    ]
+    _write_csv(figure3_path, list(figure3_rows[0]), figure3_rows)
+    parsed3, _audit3 = PLOT.load_figure3_rows(
+        figure3_path,
+        q30=0.0385762445762996,
+        expected_methods=methods,
+    )
+    assert {row.method for row in parsed3} == set(methods)
+
+    thresholds = (
+        ("q05", 0.0140881224447634),
+        ("q10", 0.0228907585727511),
+        ("q20", 0.0323756993249126),
+        ("q30", 0.0385762445762996),
+        ("q50", 0.0496184268839172),
+        ("q70", 0.0640645252675410),
+        ("q90", 0.0983224211544865),
+    )
+    figure4_path = tmp_path / "figure4.csv"
+    figure4_rows = [
+        {
+            "method": method,
+            "k": k,
+            "threshold_name": label,
+            "threshold": threshold,
+            "coverage": index / 10,
+        }
+        for method in methods
+        for k in (10, 20)
+        for index, (label, threshold) in enumerate(thresholds, start=1)
+    ]
+    _write_csv(figure4_path, list(figure4_rows[0]), figure4_rows)
+    parsed4, audit4 = PLOT.load_figure4_rows(
+        figure4_path,
+        expected_methods=methods,
+        selected_k=10,
+    )
+    PLOT._validate_quantile_rows(
+        parsed4, methods=methods, q30=0.0385762445762996
+    )
+    assert audit4["selected_k"] == 10
+    assert len(parsed4) == 21
+
+
+def test_plot_cli_defaults_preserve_aids_four_method_dense_mode() -> None:
+    args = PLOT.build_parser().parse_args([])
+    assert args.expected_methods == "Ours,GlobalGCE,CLEAR,GCFExplainer"
+    assert args.dataset_name == "AIDS"
+    assert args.figure4_mode == "dense"
