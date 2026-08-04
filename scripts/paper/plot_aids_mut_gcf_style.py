@@ -292,7 +292,21 @@ def _metadata_evidence(
         payload = json.loads(path.read_text(encoding="utf-8"))
         text_sources.append(json.dumps(payload, sort_keys=True))
         for key_path, value in _json_scalars(payload):
-            key = normalize(key_path.rsplit(".", 1)[-1].split("[", 1)[0])
+            key_components = [
+                normalize(component.split("[", 1)[0])
+                for component in key_path.split(".")
+            ]
+            if any(
+                component in {
+                    "checks",
+                    "semantic_checks",
+                    "required_fields",
+                    "forbidden_fields",
+                }
+                for component in key_components[:-1]
+            ):
+                continue
+            key = key_components[-1]
             if key in {"distance", "distance_label", "distance_line"}:
                 record("distance_labels", str(value))
             elif key == "distance_type":

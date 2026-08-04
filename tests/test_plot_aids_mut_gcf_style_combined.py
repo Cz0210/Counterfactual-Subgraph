@@ -315,6 +315,24 @@ def test_unreferenced_sibling_manifest_does_not_contaminate_root(tmp_path: Path)
     assert "unrelated_manifest.json" not in provenance_paths
 
 
+def test_semantic_check_pass_is_not_interpreted_as_eval_selection(tmp_path: Path) -> None:
+    root = _write_root(tmp_path, dataset="Mutagenicity", method="GCFExplainer")
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["semantic_checks"] = {
+        "candidate_set_preselected": True,
+        "selection_performed_in_eval": True,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    evidence = plotter.validate_root(
+        root,
+        project_root=tmp_path,
+        dataset="Mutagenicity",
+        method="GCFExplainer",
+    )
+    assert evidence["selection_performed_in_eval"] == [False]
+
+
 def test_raw_aids_gcf_run_is_standardized_from_frozen_pairs(tmp_path: Path) -> None:
     root = _write_raw_aids_gcf_run(tmp_path)
     before = {
