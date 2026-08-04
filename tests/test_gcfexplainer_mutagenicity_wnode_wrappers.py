@@ -118,6 +118,7 @@ def _candidate_inputs(root: Path) -> tuple[Path, Path, str, str]:
     manifest.write_text(
         json.dumps(
             {
+                "schema_version": "mut_gcf_frozen_top20_v1",
                 "dataset": "Mutagenicity",
                 "source_label": 1,
                 "target_label": 0,
@@ -127,7 +128,12 @@ def _candidate_inputs(root: Path) -> tuple[Path, Path, str, str]:
                 "selection_method": SELECTION_METHOD,
                 "rf_reranking_performed": False,
                 "wnode_reranking_performed": False,
-                "candidate_csv_sha256": csv_sha,
+                "file_inventory": {
+                    "export/selected_top20.csv": {
+                        "bytes": candidates.stat().st_size,
+                        "sha256": csv_sha,
+                    }
+                },
                 "selected_candidate_order_sha256": order_sha,
                 "selected_native_ranks": list(NATIVE_RANKS),
             },
@@ -137,6 +143,23 @@ def _candidate_inputs(root: Path) -> tuple[Path, Path, str, str]:
         encoding="utf-8",
     )
     return candidates, manifest, csv_sha, order_sha
+
+
+def _validate_candidate_inputs(
+    candidates_path: Path,
+    manifest_path: Path,
+    csv_sha: str,
+    order_sha: str,
+) -> dict:
+    return validate_frozen_candidate_contract(
+        candidates_csv=candidates_path,
+        frozen_manifest_path=manifest_path,
+        expected_count=20,
+        expected_csv_sha256=csv_sha,
+        expected_order_sha256=order_sha,
+        expected_native_ranks=NATIVE_RANKS,
+        expected_selection_method=SELECTION_METHOD,
+    )
 
 
 def _thresholds(path: Path) -> tuple[float, ...]:
@@ -169,14 +192,8 @@ def test_existing_fullgraph_loader_reads_frozen_gcf_csv_without_adapter(
         fields=GT_FULLGRAPH_FIELDS,
         directory_candidates=(),
     )
-    contract = validate_frozen_candidate_contract(
-        candidates_csv=candidates_path,
-        frozen_manifest_path=manifest_path,
-        expected_count=20,
-        expected_csv_sha256=csv_sha,
-        expected_order_sha256=order_sha,
-        expected_native_ranks=NATIVE_RANKS,
-        expected_selection_method=SELECTION_METHOD,
+    contract = _validate_candidate_inputs(
+        candidates_path, manifest_path, csv_sha, order_sha
     )
 
     assert validation["num_rows"] == 20
@@ -190,6 +207,130 @@ def test_existing_fullgraph_loader_reads_frozen_gcf_csv_without_adapter(
     assert contract["candidate_set_preselected"] is True
     assert contract["selection_performed_in_eval"] is False
     assert not (ROOT / "src/baselines/gcfexplainer_wnode_adapter.py").exists()
+
+
+def test_real_frozen_manifest_inventory_uses_exact_relative_path_without_mutation(
+    tmp_path: Path,
+) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest_before = manifest_path.read_bytes()
+    candidates_before = candidates_path.read_bytes()
+
+    result = _validate_candidate_inputs(
+        candidates_path, manifest_path, csv_sha, order_sha
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == "mut_gcf_frozen_top20_v1"
+    assert manifest["file_inventory"]["export/selected_top20.csv"]["sha256"] == csv_sha
+    assert result["candidate_csv_sha256"] == csv_sha
+    assert result["selected_candidate_order_sha256"] == order_sha
+    assert result["native_ranks"] == list(NATIVE_RANKS)
+    assert manifest_path.read_bytes() == manifest_before
+    assert candidates_path.read_bytes() == candidates_before
+
+
+def test_real_frozen_manifest_rejects_inventory_sha_mismatch(tmp_path: Path) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"]["export/selected_top20.csv"]["sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest candidate CSV SHA256 mismatch"):
+        _validate_candidate_inputs(candidates_path, manifest_path, csv_sha, order_sha)
+
+
+def test_real_frozen_manifest_accepts_uppercase_inventory_sha(tmp_path: Path) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"]["export/selected_top20.csv"]["sha256"] = (
+        csv_sha.upper()
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = _validate_candidate_inputs(
+        candidates_path, manifest_path, csv_sha, order_sha
+    )
+    assert result["candidate_csv_sha256"] == csv_sha
+
+
+def test_real_frozen_manifest_requires_file_inventory(tmp_path: Path) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("file_inventory")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires file_inventory"):
+        _validate_candidate_inputs(candidates_path, manifest_path, csv_sha, order_sha)
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    (
+        ({"bytes": 1}, "missing sha256"),
+        ("not-a-mapping", "entry must be a mapping"),
+        ({"sha256": "abc"}, "64-character hexadecimal"),
+        ({"sha256": "g" * 64}, "64-character hexadecimal"),
+    ),
+)
+def test_real_frozen_manifest_rejects_invalid_inventory_entry(
+    tmp_path: Path,
+    entry: object,
+    message: str,
+) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"]["export/selected_top20.csv"] = entry
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        _validate_candidate_inputs(candidates_path, manifest_path, csv_sha, order_sha)
+
+
+def test_real_frozen_manifest_rejects_ambiguous_basename_fallback(
+    tmp_path: Path,
+) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"] = {
+        "first/selected_top20.csv": {"sha256": csv_sha},
+        "second/selected_top20.csv": {"sha256": "0" * 64},
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ambiguous selected_top20.csv"):
+        _validate_candidate_inputs(candidates_path, manifest_path, csv_sha, order_sha)
+
+
+def test_legacy_frozen_manifest_candidate_hash_schema_still_passes(
+    tmp_path: Path,
+) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("schema_version")
+    manifest.pop("file_inventory")
+    manifest["candidate_csv_sha256"] = csv_sha.upper()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = _validate_candidate_inputs(
+        candidates_path, manifest_path, csv_sha.upper(), order_sha.upper()
+    )
+    assert result["candidate_csv_sha256"] == csv_sha
+    assert result["selected_candidate_order_sha256"] == order_sha
+
+
+def test_legacy_file_sha256_manifest_schema_still_passes(tmp_path: Path) -> None:
+    candidates_path, manifest_path, csv_sha, order_sha = _candidate_inputs(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("schema_version")
+    manifest.pop("file_inventory")
+    manifest["file_sha256"] = {"export/selected_top20.csv": csv_sha}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = _validate_candidate_inputs(
+        candidates_path, manifest_path, csv_sha, order_sha
+    )
+    assert result["candidate_csv_sha256"] == csv_sha
 
 
 def test_native_rank_loader_uses_csv_order_as_frozen_prefix(tmp_path: Path) -> None:

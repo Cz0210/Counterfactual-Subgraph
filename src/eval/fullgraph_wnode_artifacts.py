@@ -15,7 +15,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -451,7 +451,100 @@ def _manifest_value(payload: Mapping[str, Any], names: set[str]) -> Any:
     return value
 
 
-def _manifest_candidate_csv_sha256(payload: Mapping[str, Any]) -> str:
+def _validated_sha256(value: Any, *, description: str) -> str:
+    digest = _text(value)
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdefABCDEF" for character in digest
+    ):
+        raise ValueError(
+            f"{description} must be a 64-character hexadecimal SHA256."
+        )
+    return digest.lower()
+
+
+def _select_manifest_file_entry(
+    entries: Sequence[tuple[str, Any]],
+    *,
+    candidate_relative_path: str | None,
+    container_name: str,
+) -> tuple[str, Any] | None:
+    if candidate_relative_path is not None:
+        exact = [entry for entry in entries if entry[0] == candidate_relative_path]
+        if len(exact) > 1:
+            raise ValueError(
+                f"Frozen candidate manifest has duplicate {container_name} entries "
+                f"for {candidate_relative_path}."
+            )
+        if exact:
+            return exact[0]
+
+    basename_matches = [
+        entry
+        for entry in entries
+        if PurePosixPath(entry[0]).name == "selected_top20.csv"
+    ]
+    if len(basename_matches) > 1:
+        paths = sorted(path for path, _ in basename_matches)
+        raise ValueError(
+            "Frozen candidate manifest has ambiguous selected_top20.csv "
+            f"entries in {container_name}: {paths}"
+        )
+    return basename_matches[0] if basename_matches else None
+
+
+def _manifest_candidate_csv_sha256(
+    payload: Mapping[str, Any],
+    *,
+    manifest_path: str | Path,
+    candidate_path: str | Path,
+) -> str:
+    resolved_manifest = Path(manifest_path).expanduser().resolve()
+    resolved_candidate = Path(candidate_path).expanduser().resolve()
+    try:
+        candidate_relative_path = resolved_candidate.relative_to(
+            resolved_manifest.parent
+        ).as_posix()
+    except ValueError:
+        candidate_relative_path = None
+
+    schema_version = _text(payload.get("schema_version"))
+    inventory_present = "file_inventory" in payload
+    if schema_version == "mut_gcf_frozen_top20_v1" and not inventory_present:
+        raise ValueError(
+            "mut_gcf_frozen_top20_v1 manifest requires file_inventory."
+        )
+    if inventory_present:
+        inventory = payload.get("file_inventory")
+        if not isinstance(inventory, dict):
+            raise ValueError("Frozen manifest file_inventory must be a mapping.")
+        selected = _select_manifest_file_entry(
+            [(str(path), entry) for path, entry in inventory.items()],
+            candidate_relative_path=candidate_relative_path,
+            container_name="file_inventory",
+        )
+        if selected is not None:
+            relative_path, entry = selected
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    "Frozen manifest file_inventory entry must be a mapping: "
+                    f"{relative_path}"
+                )
+            if entry.get("sha256") in (None, ""):
+                raise ValueError(
+                    "Frozen manifest file_inventory entry is missing sha256: "
+                    f"{relative_path}"
+                )
+            return _validated_sha256(
+                entry.get("sha256"),
+                description=f"file_inventory[{relative_path!r}].sha256",
+            )
+        if schema_version == "mut_gcf_frozen_top20_v1":
+            raise ValueError(
+                "Frozen candidate manifest file_inventory does not identify "
+                f"{candidate_relative_path or 'selected_top20.csv'}."
+            )
+
+    legacy_hashes: list[tuple[str, str]] = []
     direct = _deep_find(
         dict(payload),
         {
@@ -461,27 +554,64 @@ def _manifest_candidate_csv_sha256(payload: Mapping[str, Any]) -> str:
         },
     )
     if direct not in (None, ""):
-        return _text(direct).lower()
+        legacy_hashes.append(
+            (
+                "legacy direct field",
+                _validated_sha256(
+                    direct,
+                    description="Frozen candidate manifest direct SHA256",
+                ),
+            )
+        )
     for container_name in ("artifacts", "files", "file_sha256"):
         container = payload.get(container_name)
         if isinstance(container, dict):
-            for relative, value in container.items():
-                if Path(str(relative)).name != "selected_top20.csv":
-                    continue
-                if isinstance(value, dict):
-                    value = value.get("sha256") or value.get("hash")
-                if value not in (None, ""):
-                    return _text(value).lower()
+            entries = [(str(relative), value) for relative, value in container.items()]
         elif isinstance(container, list):
-            for item in container:
-                if not isinstance(item, dict):
-                    continue
-                relative = item.get("path") or item.get("relative_path")
-                if Path(str(relative or "")).name != "selected_top20.csv":
-                    continue
-                value = item.get("sha256") or item.get("hash")
-                if value not in (None, ""):
-                    return _text(value).lower()
+            entries = [
+                (
+                    str(item.get("path") or item.get("relative_path") or ""),
+                    item,
+                )
+                for item in container
+                if isinstance(item, dict)
+            ]
+        else:
+            continue
+        selected = _select_manifest_file_entry(
+            entries,
+            candidate_relative_path=candidate_relative_path,
+            container_name=container_name,
+        )
+        if selected is None:
+            continue
+        relative_path, value = selected
+        if isinstance(value, dict):
+            value = value.get("sha256") or value.get("hash")
+        if value in (None, ""):
+            raise ValueError(
+                f"Frozen manifest {container_name} entry is missing SHA256: "
+                f"{relative_path}"
+            )
+        legacy_hashes.append(
+            (
+                f"{container_name}[{relative_path!r}]",
+                _validated_sha256(
+                    value,
+                    description=(
+                        f"Frozen candidate manifest {container_name} SHA256"
+                    ),
+                ),
+            )
+        )
+    if legacy_hashes:
+        unique_hashes = {digest for _, digest in legacy_hashes}
+        if len(unique_hashes) != 1:
+            raise ValueError(
+                "Frozen candidate legacy manifest contains conflicting "
+                f"selected_top20.csv SHA256 values: {legacy_hashes}"
+            )
+        return legacy_hashes[0][1]
     raise ValueError(
         "Frozen candidate manifest does not identify selected_top20.csv SHA256."
     )
@@ -545,20 +675,33 @@ def validate_frozen_candidate_contract(
     candidate_ids = [str(row["candidate_id"]) for row in candidates]
     order_sha256 = stable_json_sha256(candidate_ids)
     csv_sha256 = sha256_file(candidate_path)
-    if csv_sha256 != str(expected_csv_sha256).lower():
+    normalized_expected_csv_sha256 = _validated_sha256(
+        expected_csv_sha256,
+        description="Expected frozen candidate CSV SHA256",
+    )
+    normalized_expected_order_sha256 = _validated_sha256(
+        expected_order_sha256,
+        description="Expected frozen candidate order SHA256",
+    )
+    if csv_sha256 != normalized_expected_csv_sha256:
         raise ValueError(
             f"Frozen candidate CSV SHA256 mismatch: actual={csv_sha256}"
         )
-    if order_sha256 != str(expected_order_sha256).lower():
+    if order_sha256 != normalized_expected_order_sha256:
         raise ValueError(
             f"Frozen candidate order SHA256 mismatch: actual={order_sha256}"
         )
 
     manifest = read_json(manifest_path)
-    manifest_csv_sha = _manifest_candidate_csv_sha256(manifest)
-    manifest_order_sha = _text(
-        _manifest_value(manifest, {"selected_candidate_order_sha256"})
-    ).lower()
+    manifest_csv_sha = _manifest_candidate_csv_sha256(
+        manifest,
+        manifest_path=manifest_path,
+        candidate_path=candidate_path,
+    )
+    manifest_order_sha = _validated_sha256(
+        _manifest_value(manifest, {"selected_candidate_order_sha256"}),
+        description="Frozen manifest selected candidate order SHA256",
+    )
     manifest_native_ranks = _manifest_value(manifest, {"selected_native_ranks"})
     if not isinstance(manifest_native_ranks, list):
         raise ValueError("Manifest selected_native_ranks must be a list.")
