@@ -573,14 +573,33 @@ def test_wrapper_reuses_existing_smoke_and_never_targets_full_or_splits() -> Non
 
 def test_wrapper_resources_match_validated_manual_smoke() -> None:
     text = WRAPPER.read_text(encoding="utf-8")
-    for line in (
-        "#SBATCH --partition=A800",
-        "#SBATCH --cpus-per-task=8",
-        "#SBATCH --gres=gpu:a800:1",
-        "#SBATCH --mem=64G",
-        "#SBATCH --time=04:00:00",
-    ):
-        assert line in text
+    directives = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#SBATCH --") or "=" not in stripped:
+            continue
+        key, value = stripped.removeprefix("#SBATCH --").split("=", 1)
+        directives[key] = value
+
+    assert directives["partition"] == "A800"
+    assert int(directives["nodes"]) == 1
+    assert int(directives["ntasks-per-node"]) == 1
+    assert int(directives["cpus-per-task"]) == 7
+    assert directives["gres"] == "gpu:a800:1"
+    assert directives["mem"] == "64G"
+    assert directives["time"] == "04:00:00"
+
+    gpu_count = int(directives["gres"].rsplit(":", 1)[1])
+    total_cpus = (
+        int(directives["nodes"])
+        * int(directives["ntasks-per-node"])
+        * int(directives["cpus-per-task"])
+    )
+    total_gpus = int(directives["nodes"]) * gpu_count
+    assert gpu_count == 1
+    assert total_gpus == 1
+    assert total_cpus / total_gpus <= 7
+    assert "srun " not in text
 
 
 def test_full_stage_remains_approval_only() -> None:
