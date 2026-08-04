@@ -33,14 +33,17 @@ It cannot create compatibility aliases, current-format marker files, or any
 remote report. All evidence and reports are written only below local
 `ops/reports`. A configured alias is a verification lookup, never a filesystem
 operation. Remote bytecode generation is disabled so verification does not
-create `__pycache__`. The command is rejected unless every remote-write, Slurm, GPU,
-full, calibration, test, finalization, and overwrite permission is false.
+create `__pycache__`. Its generated operation-capability record always fixes
+remote write, Slurm submission, stage execution, downstream advancement, and
+artifact overwrite to false. Enabling remote-write, Slurm, and GPU-smoke for a
+later approved stage cannot expand the adoption operation itself.
 
 Legacy adoption does not rewrite provenance. The current local and remote
 commits must match each other, while the legacy generation commit must match
 both the completion marker and manifest. Adopted stages are marked as not
-executed under the current commit, and execution stops before the next
-approval stage.
+executed under the current commit. The adopted stages must be contiguous and
+execution stops before their immediate downstream approval stage, independently
+of the spec's later `auto_until` or `stop_before` settings.
 
 ## Worktree Safety
 

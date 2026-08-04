@@ -21,6 +21,13 @@ from scripts.ops.ssh_ops import SSHConfig, build_ssh_argv
 
 EVIDENCE_MARKER = "[ADOPT_EXISTING_EVIDENCE_B64]"
 SUPPORTED_MODE = "legacy_manifest_sha256"
+READ_ONLY_OPERATION_CAPABILITIES = {
+    "remote_write": False,
+    "slurm_submit": False,
+    "execute_stage": False,
+    "advance_downstream": False,
+    "artifact_overwrite": False,
+}
 
 
 class AdoptExistingVerificationError(ValueError):
@@ -198,6 +205,20 @@ def verify_existing_artifacts(
     """Verify legacy artifacts without modifying any file."""
 
     root = Path(project_root).expanduser().resolve()
+    configured_capabilities = config.get("operation_capabilities")
+    if configured_capabilities is None:
+        capabilities = dict(READ_ONLY_OPERATION_CAPABILITIES)
+    elif isinstance(configured_capabilities, Mapping):
+        capabilities = dict(configured_capabilities)
+    else:
+        raise AdoptExistingVerificationError(
+            "adopt-existing operation_capabilities must be a mapping."
+        )
+    if capabilities != READ_ONLY_OPERATION_CAPABILITIES:
+        raise AdoptExistingVerificationError(
+            "adopt-existing operation capabilities must remain read-only: "
+            f"actual={capabilities!r}"
+        )
     if config.get("mode") != SUPPORTED_MODE:
         raise AdoptExistingVerificationError(
             f"Unsupported adoption mode: {config.get('mode')!r}"
@@ -574,6 +595,8 @@ def verify_existing_artifacts(
         "current_required_marker_present": not bool(missing_current_markers),
         "accepted_via_legacy_manifest_integrity": accepted_legacy,
         "remote_write_performed": False,
+        "operation_capabilities": dict(READ_ONLY_OPERATION_CAPABILITIES),
+        "slurm_jobs": [],
         "adopted_stages": list(config.get("adopted_stages") or []),
         "next_stage": config.get("next_stage"),
     }

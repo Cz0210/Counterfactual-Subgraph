@@ -22,6 +22,7 @@ from scripts.ops.gate_runner import (
     evaluate_gate_payload,
 )
 from scripts.ops.adopt_existing import (
+    READ_ONLY_OPERATION_CAPABILITIES,
     build_remote_script as build_adopt_remote_script,
     build_verification_argv as build_adopt_verification_argv,
     parse_evidence as parse_adopt_evidence,
@@ -48,7 +49,13 @@ from scripts.ops.slurm_ops import (
     parse_exp_sbatch_job_id,
     parse_slurm_status_output,
 )
-from scripts.ops.spec import TaskSpec, dump_spec_snapshot, load_task_spec
+from scripts.ops.spec import (
+    SpecValidationError,
+    TaskSpec,
+    dump_spec_snapshot,
+    load_task_spec,
+    resolve_adoption_boundary_stage,
+)
 from scripts.ops.ssh_ops import (
     SSHConfig,
     build_deploy_argv,
@@ -1138,30 +1145,22 @@ def deploy(
     }
 
 
-def _require_adoption_permissions(spec: TaskSpec) -> None:
-    forbidden = (
-        "allow_remote_write",
-        "allow_sbatch",
-        "allow_overwrite",
-        "allow_gpu_smoke",
-        "allow_full",
-        "allow_calibration",
-        "allow_test",
-        "allow_finalization",
-    )
-    enabled = [key for key in forbidden if spec.data["permissions"][key]]
-    if enabled:
-        raise AutomationBlocked(
-            "adopt-existing requires all execution permissions false; enabled="
-            + ",".join(enabled)
-        )
+def _require_adoption_operation_contract(spec: TaskSpec) -> str:
+    """Validate the stages this read-only operation may adopt and where it stops."""
+
     adopt = spec.data.get("adopt_existing")
     if not isinstance(adopt, Mapping) or adopt.get("enabled") is not True:
         raise AutomationBlocked("adopt_existing is not enabled by the task spec.")
+    try:
+        return resolve_adoption_boundary_stage(spec.data)
+    except SpecValidationError as exc:
+        raise AutomationBlocked(
+            f"Invalid adopt-existing operation boundary: {exc}"
+        ) from exc
 
 
 def _adoption_verification_config(
-    spec: TaskSpec, *, local_commit: str
+    spec: TaskSpec, *, local_commit: str, next_stage: str | None = None
 ) -> dict[str, Any]:
     adopt = spec.data["adopt_existing"]
     adopted_stages = [str(value) for value in adopt["stages"]]
@@ -1180,7 +1179,7 @@ def _adoption_verification_config(
                 ),
             }
         )
-    next_stage = _next_stage_id(spec, adopted_stages[-1])
+    resolved_next_stage = next_stage or _require_adoption_operation_contract(spec)
     return {
         "mode": adopt["mode"],
         "output_root": adopt["output_root"],
@@ -1196,15 +1195,16 @@ def _adoption_verification_config(
         "allow_missing_current_markers": adopt[
             "allow_missing_current_markers"
         ],
+        "operation_capabilities": dict(READ_ONLY_OPERATION_CAPABILITIES),
         "adopted_stages": adopted_stages,
-        "next_stage": next_stage,
+        "next_stage": resolved_next_stage,
         "stage_gates": stage_gates,
         "current_local_commit": local_commit,
     }
 
 
 def _append_adoption_report_contract(
-    report_path: Path, *, commits_differ: bool
+    report_path: Path, *, commits_differ: bool, next_stage: str
 ) -> None:
     statements = [
         "",
@@ -1218,11 +1218,32 @@ def _append_adoption_report_contract(
         "- All manifest artifacts had their size and SHA256 verified.",
         "- Missing current markers were accepted only through legacy manifest "
         "integrity verification.",
-        "- Execution stopped before phase_b_gpu_smoke pending explicit approval.",
+        f"- Execution stopped before {next_stage} pending explicit approval.",
         "",
     ]
     with report_path.open("a", encoding="utf-8") as handle:
         handle.write("\n".join(statements))
+
+
+def _record_adoption_scope(
+    store: RunStore,
+    *,
+    adopted_stages: Sequence[str],
+    next_stage: str,
+) -> None:
+    state = store.load()
+    state["adopted_stages"] = [str(value) for value in adopted_stages]
+    state["next_stage"] = str(next_stage)
+    state["remote_write_performed"] = False
+    state["slurm_jobs"] = []
+    store.save(state)
+    store.append_event(
+        "adoption_scope_recorded",
+        adopted_stages=list(adopted_stages),
+        next_stage=next_stage,
+        remote_write_performed=False,
+        slurm_jobs=[],
+    )
 
 
 def adopt_existing(
@@ -1234,7 +1255,7 @@ def adopt_existing(
 ) -> dict[str, Any]:
     store = _deploy_store(spec, run_dir)
     try:
-        _require_adoption_permissions(spec)
+        adoption_boundary = _require_adoption_operation_contract(spec)
     except AutomationBlocked as exc:
         reason = str(exc)
         store.transition(RunStatus.BLOCKED, reason=reason)
@@ -1242,14 +1263,15 @@ def adopt_existing(
         report, _ = write_blocked_report(
             store.run_dir,
             state=store.load(),
-            failed_stage="adopt_existing_permissions",
-            error_class="AdoptExistingPermissionBoundary",
+            failed_stage="adopt_existing_contract",
+            error_class="AdoptExistingOperationBoundary",
             return_code=None,
             stderr=reason,
             artifacts=[],
             retry_count=0,
             recommended_action=(
-                "Disable all execution permissions before legacy adoption."
+                "Repair adopt_existing.stages dependency lineage and its "
+                "immediate downstream approval boundary."
             ),
             scientific_semantics_risk=False,
             details={"remote_write_performed": False, "slurm_jobs": []},
@@ -1265,7 +1287,9 @@ def adopt_existing(
     command_runner = runner or CommandRunner(default_timeout_seconds=600)
     local_commit = head_commit(command_runner, spec.local_root)
     verification_config = _adoption_verification_config(
-        spec, local_commit=local_commit
+        spec,
+        local_commit=local_commit,
+        next_stage=adoption_boundary,
     )
     ssh_config = _ssh_config(spec)
     verification_argv = build_adopt_verification_argv(
@@ -1280,6 +1304,11 @@ def adopt_existing(
 
     if dry_run:
         _set_commits(store, local_commit=local_commit, remote_commit=None)
+        _record_adoption_scope(
+            store,
+            adopted_stages=adopted_stages,
+            next_stage=next_stage,
+        )
         store.append_command(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(
@@ -1395,6 +1424,16 @@ def adopt_existing(
         failures.append("verification_passed_not_true")
     if evidence.get("current_local_commit") not in (None, local_commit):
         failures.append("evidence_local_commit_mismatch")
+    if evidence.get("remote_write_performed") is not False:
+        failures.append("adoption_remote_write_not_false")
+    if evidence.get("slurm_jobs") != []:
+        failures.append("adoption_slurm_jobs_not_empty")
+    if evidence.get("operation_capabilities") != READ_ONLY_OPERATION_CAPABILITIES:
+        failures.append("adoption_operation_capabilities_not_read_only")
+    if evidence.get("adopted_stages") != adopted_stages:
+        failures.append("evidence_adopted_stages_mismatch")
+    if evidence.get("next_stage") != next_stage:
+        failures.append("evidence_next_stage_mismatch")
 
     if failures:
         store.record_stage(
@@ -1507,6 +1546,11 @@ def adopt_existing(
                 },
             },
         )
+    _record_adoption_scope(
+        store,
+        adopted_stages=adopted_stages,
+        next_stage=next_stage,
+    )
     store.transition(RunStatus.ADOPTED_EXISTING)
     store.transition(
         RunStatus.STOPPED_BEFORE_APPROVAL,
@@ -1548,6 +1592,7 @@ def adopt_existing(
         commits_differ=(
             local_commit != str(evidence["legacy_generation_commit"])
         ),
+        next_stage=next_stage,
     )
     return {
         "status": RunStatus.STOPPED_BEFORE_APPROVAL.value,
@@ -1865,6 +1910,10 @@ def submit(
         "gate_result": None,
     }
     store.record_slurm_job(record)
+    state_after_submit = store.load()
+    state_after_submit["remote_write_performed"] = True
+    state_after_submit["next_stage"] = _next_stage_id(spec, stage_id)
+    store.save(state_after_submit)
     store.record_stage(
         stage_id,
         {
@@ -2342,6 +2391,9 @@ def refresh_status(
         )
 
     next_stage = _next_stage_id(spec, gate_stage_id)
+    state_after_gate = store.load()
+    state_after_gate["next_stage"] = next_stage
+    store.save(state_after_gate)
     store.transition(
         RunStatus.STOPPED_BEFORE_APPROVAL,
         reason=f"Stopped before {next_stage} pending explicit approval.",
@@ -2691,6 +2743,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "status": "APPROVED",
                 },
             )
+            approval_state = store.load()
+            approval_state["next_stage"] = _next_stage_id(spec, args.stage)
+            store.save(approval_state)
             store.transition(
                 RunStatus.WAITING_APPROVAL,
                 reason=f"{args.stage} approved; submission remains separate.",

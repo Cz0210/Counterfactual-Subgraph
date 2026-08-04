@@ -153,6 +153,9 @@ class RunStore:
             "local_commit": None,
             "remote_commit": None,
             "slurm_jobs": [],
+            "adopted_stages": [],
+            "next_stage": None,
+            "remote_write_performed": False,
             "stages": {},
             "approvals": {},
             "stop_reason": None,
@@ -194,6 +197,9 @@ class RunStore:
         # State schema v1 predates Slurm job persistence. Keep old run
         # checkpoints resumable while presenting one stable list contract.
         payload.setdefault("slurm_jobs", [])
+        payload.setdefault("adopted_stages", [])
+        payload.setdefault("next_stage", None)
+        payload.setdefault("remote_write_performed", False)
         return payload
 
     def save(self, state: dict[str, Any]) -> None:

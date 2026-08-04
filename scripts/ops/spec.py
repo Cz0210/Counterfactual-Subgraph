@@ -170,6 +170,118 @@ def topological_order(stages: Iterable[dict[str, Any]]) -> list[str]:
     return ordered
 
 
+def resolve_adoption_boundary_stage(data: dict[str, Any]) -> str:
+    """Resolve the approval immediately following one adoptable DAG segment."""
+
+    adopt = data.get("adopt_existing")
+    if not isinstance(adopt, dict) or adopt.get("enabled") is not True:
+        raise SpecValidationError("adopt_existing is not enabled.")
+    adopted = [str(value) for value in adopt.get("stages") or []]
+    if not adopted or len(adopted) != len(set(adopted)):
+        raise SpecValidationError(
+            "adopt_existing.stages must be a non-empty unique stage list."
+        )
+
+    stages = list(data["stages"])
+    stage_by_id = {str(stage["id"]): stage for stage in stages}
+    order = topological_order(stages)
+    unknown = [stage_id for stage_id in adopted if stage_id not in stage_by_id]
+    if unknown:
+        raise SpecValidationError(
+            f"adopt_existing references unknown stages: {unknown}"
+        )
+    positions = [order.index(stage_id) for stage_id in adopted]
+    expected_positions = list(
+        range(positions[0], positions[0] + len(adopted))
+    )
+    if positions != expected_positions:
+        raise SpecValidationError(
+            "adopt_existing.stages must form one contiguous topological segment "
+            "in dependency order."
+        )
+
+    adopted_set = set(adopted)
+    for index, stage_id in enumerate(adopted):
+        stage = stage_by_id[stage_id]
+        if stage["kind"] in {"approval", "slurm_job", "local_command"}:
+            raise SpecValidationError(
+                f"adopt_existing cannot adopt {stage['kind']} stage {stage_id}."
+            )
+        if _contains_test_split(_stage_text(stage)):
+            raise SpecValidationError(
+                f"adopt_existing stage {stage_id} declares test data."
+            )
+        if _contains_calibration_input(stage):
+            raise SpecValidationError(
+                f"adopt_existing stage {stage_id} declares calibration data."
+            )
+        if _declares_full(stage):
+            raise SpecValidationError(
+                f"adopt_existing stage {stage_id} declares a full run."
+            )
+        stage_tokens = set(
+            re.split(r"[^a-z0-9]+", _stage_text(stage).lower())
+        )
+        if stage_tokens.intersection({"finalization", "finalize", "overwrite"}):
+            raise SpecValidationError(
+                f"adopt_existing stage {stage_id} declares finalization/overwrite."
+            )
+        dependencies = [str(value) for value in stage["dependencies"]]
+        if index > 0 and adopted[index - 1] not in dependencies:
+            raise SpecValidationError(
+                "adopt_existing.stages must preserve direct dependency lineage: "
+                f"{stage_id} must depend on {adopted[index - 1]}."
+            )
+        for dependency in dependencies:
+            if dependency in adopted_set:
+                if adopted.index(dependency) >= index:
+                    raise SpecValidationError(
+                        f"Adopted dependency {dependency} is not before {stage_id}."
+                    )
+                continue
+            dependency_stage = stage_by_id[dependency]
+            if (
+                dependency_stage["kind"] != "local_command"
+                or dependency != "local_phase_a_tests"
+            ):
+                raise SpecValidationError(
+                    "adopt_existing has an incomplete external dependency: "
+                    f"{stage_id} depends on {dependency}."
+                )
+
+    boundary_index = positions[-1] + 1
+    if boundary_index >= len(order):
+        raise SpecValidationError(
+            "adopt_existing has no downstream approval boundary."
+        )
+    boundary_id = order[boundary_index]
+    boundary = stage_by_id[boundary_id]
+    if boundary["kind"] != "approval":
+        raise SpecValidationError(
+            "The first stage after adopt_existing.stages must be approval; "
+            f"found {boundary_id} ({boundary['kind']})."
+        )
+    if adopted[-1] not in [str(value) for value in boundary["dependencies"]]:
+        raise SpecValidationError(
+            f"Adoption approval {boundary_id} must depend on {adopted[-1]}."
+        )
+    external_children = {
+        str(stage["id"])
+        for stage in stages
+        if str(stage["id"]) not in adopted_set
+        and any(
+            str(dependency) in adopted_set
+            for dependency in stage["dependencies"]
+        )
+    }
+    if external_children != {boundary_id}:
+        raise SpecValidationError(
+            "adopt_existing must have exactly one downstream boundary; "
+            f"found {sorted(external_children)}."
+        )
+    return boundary_id
+
+
 def _validate_stage_contract(stage: dict[str, Any]) -> None:
     kind = stage["kind"]
     command = stage.get("command")
@@ -364,10 +476,7 @@ def semantic_validate(data: dict[str, Any]) -> None:
             raise SpecValidationError(
                 f"adopt_existing references unknown stages: {unknown_stages}"
             )
-        if "phase_b_gpu_smoke" in adopt["stages"]:
-            raise SpecValidationError(
-                "adopt_existing must stop before phase_b_gpu_smoke."
-            )
+        resolve_adoption_boundary_stage(data)
         for current, legacy in adopt["artifact_aliases"].items():
             _validate_adopt_path_under(
                 str(current), output_root, field="artifact_aliases source"

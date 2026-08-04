@@ -195,9 +195,16 @@ is never submitted again.
 
 `adopt-existing` records a completed legacy stage without claiming that the
 current commit reran it. The mode is enabled explicitly by a task-level
-`adopt_existing` block and is accepted only when every write, Slurm, GPU,
-full, calibration, test, finalization, and overwrite permission remains
-disabled.
+`adopt_existing` block. Its capabilities are operation-scoped: the adoption
+path is always read-only and cannot inherit remote-write, Slurm, or GPU-smoke
+authority that the same spec grants to later stages. Global permissions remain
+mandatory for `submit`, `resume`, and `execute-stage`.
+
+`adopt_existing.stages` must form one contiguous dependency segment. Their
+only outside prerequisites may be local command gates, and the first stage
+after the segment must be a directly dependent approval stage. Adoption marks
+only that configured segment and stops at this approval boundary; it does not
+reuse `execution.auto_until` or `execution.stop_before` to advance farther.
 
 The verifier first runs the task's bounded local regression gate. It then
 uses one non-interactive SSH command to read the completion marker, manifest,

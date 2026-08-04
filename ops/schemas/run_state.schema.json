@@ -14,6 +14,9 @@
     "local_commit",
     "remote_commit",
     "slurm_jobs",
+    "adopted_stages",
+    "next_stage",
+    "remote_write_performed",
     "stages",
     "approvals",
     "stop_reason"
@@ -73,6 +76,13 @@
         }
       }
     },
+    "adopted_stages": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "next_stage": {"type": ["string", "null"]},
+    "remote_write_performed": {"type": "boolean"},
     "stages": {
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/stage_record"}

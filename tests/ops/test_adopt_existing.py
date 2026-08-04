@@ -18,7 +18,12 @@ from scripts.ops.adopt_existing import (
     encode_evidence,
     verify_existing_artifacts,
 )
-from scripts.ops.spec import TaskSpec, load_task_spec
+from scripts.ops.spec import (
+    SpecValidationError,
+    TaskSpec,
+    load_task_spec,
+    resolve_adoption_boundary_stage,
+)
 from scripts.ops.ssh_ops import SSHConfig
 from scripts.ops.subprocess_utils import CommandResult
 
@@ -228,6 +233,28 @@ def test_successful_legacy_verification_is_complete_and_read_only(
     assert evidence["accepted_via_legacy_manifest_integrity"] is True
     assert evidence["legacy_generation_commit"] == LEGACY_COMMIT
     assert before == after
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    (
+        {},
+        {
+            "remote_write": True,
+            "slurm_submit": False,
+            "execute_stage": False,
+            "advance_downstream": False,
+            "artifact_overwrite": False,
+        },
+    ),
+)
+def test_adoption_operation_capabilities_cannot_be_expanded(
+    tmp_path: Path, capabilities: dict
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    config["operation_capabilities"] = capabilities
+    with pytest.raises(ValueError, match="must remain read-only"):
+        verify(project, config)
 
 
 def test_exact_external_manifest_artifacts_pass_full_integrity_gate(
@@ -517,48 +544,79 @@ def test_cli_parser_and_help_support_adopt_existing(capsys) -> None:
     assert "--dry-run" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    "permission",
-    [
-        "allow_remote_write", "allow_sbatch", "allow_overwrite",
-        "allow_gpu_smoke", "allow_full", "allow_calibration", "allow_test",
-        "allow_finalization",
-    ],
-)
-def test_any_execution_permission_rejects_adoption(permission: str) -> None:
+def test_phase_b_execution_permissions_do_not_expand_adoption_capability() -> None:
     spec = load_task_spec(
         ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
     )
-    payload = deepcopy(spec.data)
-    payload["permissions"][permission] = True
-    with pytest.raises(experimentctl.AutomationBlocked, match="permissions"):
-        experimentctl._require_adoption_permissions(
-            TaskSpec(path=spec.path, data=payload)
-        )
+    assert spec.data["permissions"]["allow_remote_write"] is True
+    assert spec.data["permissions"]["allow_sbatch"] is True
+    assert spec.data["permissions"]["allow_gpu_smoke"] is True
+    assert experimentctl._require_adoption_operation_contract(spec) == (
+        "phase_b_gpu_smoke"
+    )
 
 
-def test_permission_boundary_writes_only_local_blocked_report(
+def test_first_downstream_nonapproval_is_blocked_before_any_command(
     tmp_path: Path,
 ) -> None:
-    spec = load_task_spec(
+    loaded = load_task_spec(
         ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
     )
-    payload = deepcopy(spec.data)
-    payload["permissions"]["allow_remote_write"] = True
-    unsafe = TaskSpec(path=spec.path, data=payload)
+    payload = deepcopy(loaded.data)
+    boundary = next(
+        stage
+        for stage in payload["stages"]
+        if stage["id"] == "phase_b_gpu_smoke"
+    )
+    boundary["kind"] = "remote_command"
+    boundary["command"] = ["python", "-c", "print('must not run')"]
+    unsafe = TaskSpec(path=loaded.path, data=payload)
     runner = ExplodingRunner()
     runner.calls = []
     result = experimentctl.adopt_existing(
         unsafe,
-        dry_run=False,
-        run_dir=tmp_path / "permission-blocked",
+        dry_run=True,
+        run_dir=tmp_path / "boundary-blocked",
         runner=runner,
     )
     assert result["status"] == "BLOCKED"
     assert result["remote_write_performed"] is False
     assert result["slurm_jobs"] == []
     assert runner.calls == []
-    assert (tmp_path / "permission-blocked/BLOCKED_REPORT.md").is_file()
+    report = json.loads(
+        (tmp_path / "boundary-blocked/BLOCKED_REPORT.json").read_text()
+    )
+    assert report["error_class"] == "AdoptExistingOperationBoundary"
+    state = json.loads((tmp_path / "boundary-blocked/state.json").read_text())
+    assert "must be approval" in state["stop_reason"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("non_contiguous", "incomplete_dependency"),
+)
+def test_adoption_stage_lineage_must_be_contiguous_and_complete(
+    tmp_path: Path, mutation: str
+) -> None:
+    payload = yaml.safe_load(
+        (ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if mutation == "non_contiguous":
+        payload["adopt_existing"]["stages"] = [
+            "phase_a_prepare",
+            "phase_a_audit",
+        ]
+    else:
+        probe = next(
+            stage for stage in payload["stages"] if stage["id"] == "phase_a_probe"
+        )
+        probe["dependencies"] = ["local_phase_a_tests"]
+    path = tmp_path / f"bad-adoption-{mutation}.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    with pytest.raises(SpecValidationError, match="contiguous|dependency lineage"):
+        load_task_spec(path)
 
 
 def test_alias_path_traversal_is_rejected(tmp_path: Path) -> None:
@@ -623,17 +681,10 @@ class OneResultRunner:
 def test_adopt_dry_run_has_contract_and_no_execution(
     monkeypatch, tmp_path: Path
 ) -> None:
-    loaded = load_task_spec(
+    spec = load_task_spec(
         ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
     )
-    payload = deepcopy(loaded.data)
-    for permission in (
-        "allow_remote_write",
-        "allow_sbatch",
-        "allow_gpu_smoke",
-    ):
-        payload["permissions"][permission] = False
-    spec = TaskSpec(path=loaded.path, data=payload)
+    assert spec.data["execution"]["stop_before"] == "phase_c_full_run"
     monkeypatch.setattr(experimentctl, "head_commit", lambda *args: CURRENT_COMMIT)
     runner = ExplodingRunner()
     runner.calls = []
@@ -651,6 +702,13 @@ def test_adopt_dry_run_has_contract_and_no_execution(
     assert result["remote_write_performed"] is False
     assert result["slurm_jobs"] == []
     assert runner.calls == []
+    state = json.loads((tmp_path / "dry/state.json").read_text())
+    assert state["adopted_stages"] == [
+        "phase_a_prepare", "phase_a_probe", "phase_a_audit"
+    ]
+    assert state["next_stage"] == "phase_b_gpu_smoke"
+    assert state["remote_write_performed"] is False
+    assert state["slurm_jobs"] == []
     assert "BatchMode=yes" in result["verification_argv"]
     assert "ClearAllForwardings=yes" in result["verification_argv"]
     match = re.search(
@@ -663,6 +721,13 @@ def test_adopt_dry_run_has_contract_and_no_execution(
     assert remote_config["allowed_external_manifest_artifacts"] == [
         value.as_posix() for value in EXTERNAL_ARTIFACT_RELS
     ]
+    assert remote_config["operation_capabilities"] == {
+        "remote_write": False,
+        "slurm_submit": False,
+        "execute_stage": False,
+        "advance_downstream": False,
+        "artifact_overwrite": False,
+    }
     syntax = subprocess.run(
         ["bash", "-n"],
         input=result["remote_script"],
@@ -673,22 +738,45 @@ def test_adopt_dry_run_has_contract_and_no_execution(
     assert syntax.returncode == 0, syntax.stderr
 
 
+def test_legacy_phase_a_only_spec_keeps_same_adoption_boundary(
+    tmp_path: Path,
+) -> None:
+    payload = yaml.safe_load(
+        (ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["stages"] = [
+        stage
+        for stage in payload["stages"]
+        if stage["id"]
+        in {
+            "local_phase_a_tests",
+            "phase_a_prepare",
+            "phase_a_probe",
+            "phase_a_audit",
+            "phase_b_gpu_smoke",
+        }
+    ]
+    payload["execution"]["auto_until"] = "phase_a_audit"
+    payload["execution"]["stop_before"] = "phase_b_gpu_smoke"
+    payload["permissions"]["allow_remote_write"] = False
+    payload["permissions"]["allow_sbatch"] = False
+    payload["permissions"]["allow_gpu_smoke"] = False
+    path = tmp_path / "legacy-phase-a-only.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    spec = load_task_spec(path)
+    assert resolve_adoption_boundary_stage(spec.data) == "phase_b_gpu_smoke"
+
+
 def test_successful_adoption_persists_state_report_and_evidence(
     monkeypatch, tmp_path: Path
 ) -> None:
     project, config = legacy_fixture(tmp_path)
     evidence = verify(project, config)
-    loaded = load_task_spec(
+    spec = load_task_spec(
         ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
     )
-    payload = deepcopy(loaded.data)
-    for permission in (
-        "allow_remote_write",
-        "allow_sbatch",
-        "allow_gpu_smoke",
-    ):
-        payload["permissions"][permission] = False
-    spec = TaskSpec(path=loaded.path, data=payload)
     monkeypatch.setattr(experimentctl, "head_commit", lambda *args: CURRENT_COMMIT)
 
     def pass_local(_spec, store, stage, _runner):
@@ -710,6 +798,13 @@ def test_successful_adoption_persists_state_report_and_evidence(
     )
     assert result["status"] == "STOPPED_BEFORE_APPROVAL"
     state = json.loads((tmp_path / "adopted/state.json").read_text())
+    assert state["status"] == "STOPPED_BEFORE_APPROVAL"
+    assert state["adopted_stages"] == [
+        "phase_a_prepare", "phase_a_probe", "phase_a_audit"
+    ]
+    assert state["next_stage"] == "phase_b_gpu_smoke"
+    assert state["remote_write_performed"] is False
+    assert state["slurm_jobs"] == []
     for stage_id in ("phase_a_prepare", "phase_a_probe", "phase_a_audit"):
         stage = state["stages"][stage_id]
         assert stage["status"] == "ADOPTED_EXISTING"
@@ -725,10 +820,73 @@ def test_successful_adoption_persists_state_report_and_evidence(
         (tmp_path / "adopted/evidence/adopt_existing_evidence.json").read_text()
     )
     assert saved["remote_write_performed"] is False
+    assert saved["slurm_jobs"] == []
+    assert saved["next_stage"] == "phase_b_gpu_smoke"
     report = (tmp_path / "adopted/FINAL_REPORT.md").read_text()
     assert "Phase A was adopted from verified legacy artifacts." in report
     assert "No Slurm job was submitted." in report
     assert "phase_b_gpu_smoke pending explicit approval" in report
+
+
+def test_phase_b_enabled_adoption_invokes_no_remote_write_or_sbatch(
+    monkeypatch, tmp_path: Path
+) -> None:
+    project, config = legacy_fixture(tmp_path)
+    evidence = verify(project, config)
+    spec = load_task_spec(
+        ROOT / "ops/specs/clear_mutagenicity_phase_a_v2.yaml"
+    )
+    assert spec.data["permissions"]["allow_remote_write"] is True
+    assert spec.data["permissions"]["allow_sbatch"] is True
+    assert spec.data["permissions"]["allow_gpu_smoke"] is True
+    monkeypatch.setattr(experimentctl, "head_commit", lambda *args: CURRENT_COMMIT)
+
+    def pass_local(_spec, store, stage, _runner):
+        store.record_stage(stage["id"], {"status": "PASSED", "attempt": 1})
+        return True
+
+    monkeypatch.setattr(experimentctl, "_run_local_stage", pass_local)
+    forbidden_calls = {"remote_write": 0, "sbatch": 0, "execute_stage": 0}
+
+    def forbid(name):
+        def blocked(*_args, **_kwargs):
+            forbidden_calls[name] += 1
+            raise AssertionError(f"adoption invoked forbidden capability: {name}")
+
+        return blocked
+
+    monkeypatch.setattr(experimentctl, "build_deploy_argv", forbid("remote_write"))
+    monkeypatch.setattr(experimentctl, "build_remote_submit_argv", forbid("sbatch"))
+    monkeypatch.setattr(experimentctl, "execute_stage", forbid("execute_stage"))
+    runner = OneResultRunner(
+        CommandResult(
+            argv=["ssh"],
+            cwd=str(tmp_path),
+            returncode=0,
+            stdout="[ADOPT_EXISTING_EVIDENCE_B64] " + encode_evidence(evidence),
+            stderr="",
+        )
+    )
+    result = experimentctl.adopt_existing(
+        spec,
+        dry_run=False,
+        run_dir=tmp_path / "phase-b-enabled-adoption",
+        runner=runner,
+    )
+    assert result["status"] == "STOPPED_BEFORE_APPROVAL"
+    assert result["next_stage"] == "phase_b_gpu_smoke"
+    assert result["remote_write_performed"] is False
+    assert result["slurm_jobs"] == []
+    assert forbidden_calls == {
+        "remote_write": 0,
+        "sbatch": 0,
+        "execute_stage": 0,
+    }
+    assert len(runner.calls) == 1
+    remote_command = runner.calls[0][-1]
+    assert "scripts/ops/adopt_existing.py verify-remote" in remote_command
+    assert "scripts/exp_sbatch" not in remote_command
+    assert "sbatch" not in remote_command
 
 
 def test_local_phase_a_failure_blocks_before_ssh(
