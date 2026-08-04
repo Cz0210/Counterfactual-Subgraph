@@ -4,6 +4,45 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-04] Combine frozen AIDS and Mutagenicity WNode presentation artifacts
+
+### Background
+
+The final AIDS and Mutagenicity comparisons both use
+`MolCLR-Node-Wasserstein`, but retain dataset-specific frozen thresholds and
+threshold grids. Historical AIDS filenames containing `fgw` are compatibility
+names and must not cause the final WNode artifacts to be relabeled as
+Node-FGW.
+
+### Decision
+
+Build the two-dataset four-method presentation only from the standardized
+Ours, GlobalGCE, CLEAR, and GCFExplainer roots. Require provenance for
+`distance_type=node_wasserstein`, strict-flip evaluation, frozen candidate
+order, and no selection in evaluation. Plot Figure 3 from K=1..20 using its
+frozen conditional-cost field, Figure 4 from each dataset's own frozen K=10
+threshold grid, and Table 2 at each dataset's frozen primary threshold. Keep
+the standardized Table 2 cost field without reinterpreting its conditioning,
+and never recompute embeddings, distances, teacher predictions, or rankings.
+The AIDS GCFExplainer input is the completed WNode evaluator run root
+`ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_gcfexplainer_top20_normalized_final`,
+not its `combined/` child. Because that run predates the standardized plotting
+CSV layout, derive its presentation rows in memory from the frozen candidate
+order and saved pair details using the shared GCF-style aggregation helper;
+never write compatibility files into the run root.
+
+### Consequences
+
+- AIDS and Mutagenicity can share one visual layout without sharing or
+  refitting thresholds.
+- Old `ccrcov_molclr_node_fgw_*` and `gt_fullgraph` roots are rejected.
+- The final manifest explicitly records that distance and candidate order were
+  not recomputed.
+
+### Status
+
+Accepted
+
 ---
 
 ## [2026-07-24] Preserve explicit PPO CLI values during config merge
