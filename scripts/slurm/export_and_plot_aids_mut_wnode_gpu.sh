@@ -66,7 +66,7 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "git_commit=$(git rev-parse HEAD)"
 echo "conda_env=${CONDA_DEFAULT_ENV:-unset}"
 echo "python=$(command -v python)"
-echo "distance_label=MolCLR-Node-Wasserstein"
+echo "distance_line=MolCLR-Node-Wasserstein"
 echo "distance_type=node_wasserstein"
 echo "cf_mode=strict_flip"
 echo "AIDS_FIGURE3_CSV=$AIDS_FIGURE3_CSV"
@@ -201,7 +201,7 @@ root = Path(sys.argv[1])
 manifest = json.loads((root / "combined_manifest.json").read_text(encoding="utf-8"))
 complete = json.loads((root / "_RUN_COMPLETE.json").read_text(encoding="utf-8"))
 expected = {
-    "distance_label": "MolCLR-Node-Wasserstein",
+    "distance_line": "MolCLR-Node-Wasserstein",
     "distance_type": "node_wasserstein",
     "cf_mode": "strict_flip",
 }

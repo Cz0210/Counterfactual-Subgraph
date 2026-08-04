@@ -429,6 +429,8 @@ def test_wrapper_supports_native_and_match_aids_outputs() -> None:
     assert "figure3_gcf_style_aids_mut.png" in text
     assert "figure4_gcf_style_aids_mut.png" in text
     assert "table2_gcf_style_aids_mut.png" in text
+    assert '"distance_line": "MolCLR-Node-Wasserstein"' in text
+    assert '"distance_label": "MolCLR-Node-Wasserstein"' not in text
     assert "aids_common3_standardized_v2" not in text
     assert "combined/combined_threshold_summary.csv" not in text
 
