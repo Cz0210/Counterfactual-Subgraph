@@ -477,6 +477,8 @@ def standardize_raw_aids_gcf_run(
     *,
     project_root: Path,
     theta_star: float,
+    figure4_thresholds: Sequence[float],
+    figure4_threshold_source: Mapping[str, Any],
 ) -> tuple[
     pd.DataFrame,
     pd.DataFrame,
@@ -540,14 +542,62 @@ def standardize_raw_aids_gcf_run(
 
     summary = read_csv(combined_path)
     threshold_col = find_column(summary, ["threshold", "theta"])
+    summary_coverage_col = find_column(
+        summary,
+        ["close_cf_coverage", "ccrcov", "coverage"],
+    )
     summary_thresholds = np.sort(numeric(summary, threshold_col).unique().astype(float))
-    if len(summary_thresholds) != EXPECTED_FIGURE4_COUNTS["AIDS"]:
+    if len(summary_thresholds) == 0:
         raise ValueError(
-            "GCFExplainer combined summary does not contain the frozen 102-threshold grid: "
-            f"found={len(summary_thresholds)}"
+            "GCFExplainer combined summary does not contain any frozen thresholds"
         )
     if not np.any(np.isclose(summary_thresholds, theta_star, rtol=0.0, atol=1e-12)):
         raise ValueError(f"GCFExplainer summary does not include theta*={theta_star:.17g}")
+    reconstructed_summary: list[dict[str, float]] = []
+    for threshold in summary_thresholds:
+        matching = summary.loc[
+            np.isclose(
+                numeric(summary, threshold_col).to_numpy(dtype=float),
+                float(threshold),
+                rtol=0.0,
+                atol=1e-12,
+            )
+        ]
+        if len(matching) != 1:
+            raise ValueError(
+                "GCFExplainer combined summary must have one row per threshold: "
+                f"threshold={threshold:.17g} rows={len(matching)}"
+            )
+        expected_coverage = float(matching.iloc[0][summary_coverage_col])
+        actual_coverage = float(
+            compute_prefix_metrics(run, k=20, threshold=float(threshold))["coverage"]
+        )
+        if not math.isclose(actual_coverage, expected_coverage, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(
+                "GCFExplainer saved-pair reconstruction disagrees with official summary: "
+                f"threshold={threshold:.17g} expected={expected_coverage:.17g} "
+                f"actual={actual_coverage:.17g}"
+            )
+        reconstructed_summary.append(
+            {
+                "threshold": float(threshold),
+                "expected_coverage": expected_coverage,
+                "actual_coverage": actual_coverage,
+            }
+        )
+
+    dense_thresholds = np.asarray(list(figure4_thresholds), dtype=float)
+    if (
+        dense_thresholds.ndim != 1
+        or len(dense_thresholds) != EXPECTED_FIGURE4_COUNTS["AIDS"]
+        or not np.isfinite(dense_thresholds).all()
+    ):
+        raise ValueError(
+            "AIDS standardized Figure 4 reference must contain 102 finite thresholds"
+        )
+    dense_thresholds = np.sort(dense_thresholds)
+    if len(np.unique(dense_thresholds)) != len(dense_thresholds):
+        raise ValueError("AIDS standardized Figure 4 reference thresholds are duplicated")
 
     curve_rows = compute_k_curve(run, threshold=theta_star, max_k=20)
     figure3 = pd.DataFrame(
@@ -569,7 +619,7 @@ def standardize_raw_aids_gcf_run(
         raise ValueError("GCFExplainer Figure 3 coverage is outside [0,1]")
     threshold_metrics = [
         compute_prefix_metrics(run, k=10, threshold=float(threshold))
-        for threshold in summary_thresholds
+        for threshold in dense_thresholds
     ]
     figure4 = pd.DataFrame(
         {
@@ -577,7 +627,7 @@ def standardize_raw_aids_gcf_run(
             "Method": "GCFExplainer",
             "K": 10,
             "ThresholdName": "",
-            "Threshold": summary_thresholds,
+            "Threshold": dense_thresholds,
             "Coverage": [float(row["coverage"]) for row in threshold_metrics],
         }
     )
@@ -613,6 +663,9 @@ def standardize_raw_aids_gcf_run(
         "candidate_order_changed": False,
         "run_config": {"path": str(config_path), "sha256": config_sha256},
         "combined_summary": {"path": str(combined_path), "sha256": combined_sha256},
+        "official_summary_threshold_count": len(summary_thresholds),
+        "official_summary_reconstruction": reconstructed_summary,
+        "figure4_threshold_grid_source": dict(figure4_threshold_source),
         "pair_details": {"path": str(details_path), "sha256": details_sha256},
         "candidate_file": {
             "path": str(run.candidate_path),
@@ -1061,6 +1114,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise RuntimeError(
                         "AIDS Ours Table 2 must be loaded before raw GCFExplainer standardization"
                     )
+                aids_figure4_rows = [
+                    frame
+                    for frame in figure4_parts
+                    if set(frame["Dataset"]) == {"AIDS"}
+                    and set(frame["Method"]) == {"Ours"}
+                ]
+                aids_figure4_sources = [
+                    source
+                    for source in source_manifest["figure4"]
+                    if source["dataset"] == "AIDS" and source["method"] == "Ours"
+                ]
+                if len(aids_figure4_rows) != 1 or len(aids_figure4_sources) != 1:
+                    raise RuntimeError(
+                        "AIDS Ours Figure 4 grid must be loaded before raw GCFExplainer "
+                        "standardization"
+                    )
                 (
                     figure3,
                     figure4,
@@ -1073,6 +1142,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     root,
                     project_root=project_root,
                     theta_star=float(aids_table_rows[0]["Theta"]),
+                    figure4_thresholds=aids_figure4_rows[0]["Threshold"].tolist(),
+                    figure4_threshold_source=aids_figure4_sources[0],
                 )
                 provenance[dataset][method] = raw_evidence
             else:

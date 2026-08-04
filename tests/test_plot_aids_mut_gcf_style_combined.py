@@ -143,11 +143,19 @@ def _write_raw_aids_gcf_run(base: Path) -> Path:
     )
     candidate_path = root / "selected_top20.csv"
     candidates.to_csv(candidate_path, index=False)
-    thresholds = np.sort(
-        np.append(
-            np.linspace(0.0, 0.0391548051165848, 101),
+    thresholds = np.asarray(
+        [
+            0.0036989375029972,
+            0.0048443801866389,
+            0.0070071265985866,
+            0.0092885245733581,
             0.014630082696799,
-        )
+            0.0218176142567855,
+            0.0391548051165848,
+        ]
+    )
+    best_distances = np.asarray(
+        [0.001 + 0.000001 * parent_index for parent_index in range(1, 1284)]
     )
     method = "gcfexplainer_top20_normalized"
     summary = pd.DataFrame(
@@ -159,6 +167,10 @@ def _write_raw_aids_gcf_run(base: Path) -> Path:
             "cf_mode": "strict_flip",
             "num_parents": 1283,
             "num_candidates": 20,
+            "close_cf_coverage": [
+                float(np.count_nonzero(best_distances <= threshold) / 1283)
+                for threshold in thresholds
+            ],
             "candidate_set_preselected": True,
             "selection_performed_in_eval": False,
         }
@@ -322,6 +334,16 @@ def test_raw_aids_gcf_run_is_standardized_from_frozen_pairs(tmp_path: Path) -> N
         root,
         project_root=tmp_path,
         theta_star=0.014630082696799,
+        figure4_thresholds=np.sort(
+            np.append(
+                np.linspace(0.0, 0.0391548051165848, 101),
+                0.014630082696799,
+            )
+        ),
+        figure4_threshold_source={
+            "path": str(tmp_path / "aids/ours/figure4_coverage_vs_threshold.csv"),
+            "sha256": "0" * 64,
+        },
     )
     after = {
         path.relative_to(root).as_posix(): plotter.sha256(path)
@@ -339,6 +361,8 @@ def test_raw_aids_gcf_run_is_standardized_from_frozen_pairs(tmp_path: Path) -> N
     assert table_source["candidate_order_changed"] is False
     assert evidence["top20_frozen_ranking_verified"] is True
     assert evidence["complete_cartesian_verified"] is True
+    assert figure4_source["official_summary_threshold_count"] == 7
+    assert len(figure4_source["official_summary_reconstruction"]) == 7
     assert not (root / "figure3_coverage_vs_k.csv").exists()
     assert not (root / "figure4_coverage_vs_threshold.csv").exists()
     assert not (root / "table2_gcfexplainer_k10.csv").exists()

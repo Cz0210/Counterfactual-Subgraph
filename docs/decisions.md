@@ -30,6 +30,10 @@ not its `combined/` child. Because that run predates the standardized plotting
 CSV layout, derive its presentation rows in memory from the frozen candidate
 order and saved pair details using the shared GCF-style aggregation helper;
 never write compatibility files into the run root.
+Its evaluator summary stores seven audit thresholds, while the standardized
+AIDS Figure 4 uses a 102-point frozen grid. First reconstruct and exactly audit
+the seven official K=20 summary rows from saved pairs, then evaluate the frozen
+K=10 prefix on the 102-point grid read from the standardized AIDS Ours root.
 
 ### Consequences
 
