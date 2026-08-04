@@ -31,15 +31,30 @@ export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export MPLBACKEND=Agg
 mkdir -p logs
 
-AIDS_OURS_ROOT="${AIDS_OURS_ROOT:-outputs/hpc/eval/paper/aids_common3_standardized_v2/ours}"
-AIDS_GLOBALGCE_ROOT="${AIDS_GLOBALGCE_ROOT:-outputs/hpc/eval/paper/aids_common3_standardized_v2/globalgce}"
-AIDS_CLEAR_ROOT="${AIDS_CLEAR_ROOT:-outputs/hpc/eval/paper/aids_common3_standardized_v2/clear}"
+AIDS_FIGURE3_CSV="${AIDS_FIGURE3_CSV:-outputs/hpc/eval/paper/molclr_node_wasserstein_figure3_theta005_raw/wnode_fig3_theta005_figure3_wnode_coverage_cost_vs_k.csv}"
+AIDS_FIGURE4_CSV="${AIDS_FIGURE4_CSV:-outputs/hpc/eval/paper/molclr_node_wasserstein_figure4_redline_k10/wnode_figure4_redline_k10_figure4_wnode_coverage_vs_threshold.csv}"
+AIDS_OURS_ROOT="${AIDS_OURS_ROOT:-outputs/hpc/eval/ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_ours_top20_final}"
+AIDS_GLOBALGCE_ROOT="${AIDS_GLOBALGCE_ROOT:-outputs/hpc/eval/ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_globalgce_frequency_top20_final}"
+AIDS_CLEAR_ROOT="${AIDS_CLEAR_ROOT:-outputs/hpc/eval/ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_clear_parent_frequency_top20_final}"
 AIDS_GCF_ROOT="${AIDS_GCF_ROOT:-outputs/hpc/eval/ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_gcfexplainer_top20_normalized_final}"
 MUT_OURS_ROOT="${MUT_OURS_ROOT:-outputs/hpc/mutagenicity/final/ours_wnode_a2_test_v1}"
 MUT_GLOBALGCE_ROOT="${MUT_GLOBALGCE_ROOT:-outputs/hpc/mutagenicity/final/globalgce_wnode_frequency_top20_test_v1}"
 MUT_CLEAR_ROOT="${MUT_CLEAR_ROOT:-outputs/hpc/mutagenicity/final/clear_wnode_parent_frequency_test_v1}"
 MUT_GCF_ROOT="${MUT_GCF_ROOT:-outputs/hpc/mutagenicity/final/gcfexplainer_native5000_top20_wnode_test_v1}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/hpc/eval/paper/aids_mutagenicity_wnode_gcf_style_v1}"
+MUT_THRESHOLD_MODE="${MUT_THRESHOLD_MODE:-match-aids}"
+case "$MUT_THRESHOLD_MODE" in
+  match-aids)
+    DEFAULT_OUTPUT_ROOT="outputs/hpc/eval/paper/aids_mutagenicity_wnode_gcf_style_matched_aids_v1"
+    ;;
+  native)
+    DEFAULT_OUTPUT_ROOT="outputs/hpc/eval/paper/aids_mutagenicity_wnode_gcf_style_v2"
+    ;;
+  *)
+    echo "[ERROR] MUT_THRESHOLD_MODE must be native or match-aids." >&2
+    exit 2
+    ;;
+esac
+OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
 
 echo "===== AIDS + MUTAGENICITY FOUR-METHOD WNODE PLOT ====="
 echo "hostname=$(hostname)"
@@ -54,6 +69,8 @@ echo "python=$(command -v python)"
 echo "distance_label=MolCLR-Node-Wasserstein"
 echo "distance_type=node_wasserstein"
 echo "cf_mode=strict_flip"
+echo "AIDS_FIGURE3_CSV=$AIDS_FIGURE3_CSV"
+echo "AIDS_FIGURE4_CSV=$AIDS_FIGURE4_CSV"
 echo "AIDS_OURS_ROOT=$AIDS_OURS_ROOT"
 echo "AIDS_GLOBALGCE_ROOT=$AIDS_GLOBALGCE_ROOT"
 echo "AIDS_CLEAR_ROOT=$AIDS_CLEAR_ROOT"
@@ -62,42 +79,65 @@ echo "MUT_OURS_ROOT=$MUT_OURS_ROOT"
 echo "MUT_GLOBALGCE_ROOT=$MUT_GLOBALGCE_ROOT"
 echo "MUT_CLEAR_ROOT=$MUT_CLEAR_ROOT"
 echo "MUT_GCF_ROOT=$MUT_GCF_ROOT"
+echo "MUT_THRESHOLD_MODE=$MUT_THRESHOLD_MODE"
 echo "OUTPUT_ROOT=$OUTPUT_ROOT"
 python --version
 nvidia-smi || true
 
-declare -A TABLE_FILES=(
-  ["$AIDS_OURS_ROOT"]="table2_ours_k10.csv"
-  ["$AIDS_GLOBALGCE_ROOT"]="table2_globalgce_k10.csv"
-  ["$AIDS_CLEAR_ROOT"]="table2_clear_k10.csv"
-  ["$MUT_OURS_ROOT"]="table2_ours_k10.csv"
-  ["$MUT_GLOBALGCE_ROOT"]="table2_globalgce_k10.csv"
-  ["$MUT_CLEAR_ROOT"]="table2_clear_k10.csv"
-  ["$MUT_GCF_ROOT"]="table2_gcfexplainer_k10.csv"
-)
-for root in "${!TABLE_FILES[@]}"; do
-  for filename in \
-    figure3_coverage_vs_k.csv \
-    figure4_coverage_vs_threshold.csv \
-    "${TABLE_FILES[$root]}"; do
-    if [[ ! -s "$root/$filename" ]]; then
-      echo "[ERROR] Missing frozen WNode plotting artifact: $root/$filename" >&2
-      exit 3
-    fi
-  done
-done
-
-for filename in \
-  run_config.json \
-  cache_stats.json \
-  details/pair_details.csv \
-  combined/combined_threshold_summary.csv \
-  _RUN_COMPLETE.json; do
-  if [[ ! -s "$AIDS_GCF_ROOT/$filename" ]]; then
-    echo "[ERROR] Missing frozen AIDS GCFExplainer WNode run artifact: $AIDS_GCF_ROOT/$filename" >&2
+for source_csv in "$AIDS_FIGURE3_CSV" "$AIDS_FIGURE4_CSV"; do
+  if [[ ! -s "$source_csv" ]]; then
+    echo "[ERROR] Missing frozen AIDS plotting CSV: $source_csv" >&2
     exit 3
   fi
 done
+
+for root in \
+  "$AIDS_OURS_ROOT" \
+  "$AIDS_GLOBALGCE_ROOT" \
+  "$AIDS_CLEAR_ROOT" \
+  "$AIDS_GCF_ROOT"; do
+  if [[ ! -s "$root/details/pair_details.csv" ]]; then
+    echo "[ERROR] Missing frozen AIDS WNode pair details: $root/details/pair_details.csv" >&2
+    exit 3
+  fi
+done
+
+if [[ "$MUT_THRESHOLD_MODE" == "native" ]]; then
+  declare -A TABLE_FILES=(
+    ["$MUT_OURS_ROOT"]="table2_ours_k10.csv"
+    ["$MUT_GLOBALGCE_ROOT"]="table2_globalgce_k10.csv"
+    ["$MUT_CLEAR_ROOT"]="table2_clear_k10.csv"
+    ["$MUT_GCF_ROOT"]="table2_gcfexplainer_k10.csv"
+  )
+  for root in "${!TABLE_FILES[@]}"; do
+    for filename in \
+      figure3_coverage_vs_k.csv \
+      figure4_coverage_vs_threshold.csv \
+      "${TABLE_FILES[$root]}"; do
+      if [[ ! -s "$root/$filename" ]]; then
+        echo "[ERROR] Missing frozen WNode plotting artifact: $root/$filename" >&2
+        exit 3
+      fi
+    done
+  done
+else
+  mut_pair_artifacts=(
+    "$MUT_OURS_ROOT/pair_matrix.jsonl"
+    "$MUT_OURS_ROOT/selected_sequence.jsonl"
+    "$MUT_GLOBALGCE_ROOT/test_pair_details.csv"
+    "$MUT_GLOBALGCE_ROOT/selected_top20.csv"
+    "$MUT_CLEAR_ROOT/test/k20_pair_details.csv"
+    "$MUT_CLEAR_ROOT/selected_candidates.csv"
+    "$MUT_GCF_ROOT/test_pair_details.csv"
+    "$MUT_GCF_ROOT/selected_sequence.jsonl"
+  )
+  for artifact in "${mut_pair_artifacts[@]}"; do
+    if [[ ! -s "$artifact" ]]; then
+      echo "[ERROR] Missing frozen MUT pair/order artifact: $artifact" >&2
+      exit 3
+    fi
+  done
+fi
 
 case "$AIDS_OURS_ROOT $AIDS_GLOBALGCE_ROOT $AIDS_CLEAR_ROOT $AIDS_GCF_ROOT" in
   *ccrcov_molclr_node_fgw_*|*node_fgw*|*lam05*|*gt_fullgraph*|*opposite_fullgraph*|*opposite-label*)
@@ -115,6 +155,8 @@ python -m py_compile scripts/paper/plot_aids_mut_gcf_style.py
 
 python scripts/paper/plot_aids_mut_gcf_style.py \
   --project-root "$PROJECT_ROOT" \
+  --aids-figure3-csv "$AIDS_FIGURE3_CSV" \
+  --aids-figure4-csv "$AIDS_FIGURE4_CSV" \
   --aids-ours-root "$AIDS_OURS_ROOT" \
   --aids-globalgce-root "$AIDS_GLOBALGCE_ROOT" \
   --aids-clear-root "$AIDS_CLEAR_ROOT" \
@@ -123,20 +165,20 @@ python scripts/paper/plot_aids_mut_gcf_style.py \
   --mut-globalgce-root "$MUT_GLOBALGCE_ROOT" \
   --mut-clear-root "$MUT_CLEAR_ROOT" \
   --mut-gcf-root "$MUT_GCF_ROOT" \
+  --mut-threshold-mode "$MUT_THRESHOLD_MODE" \
   --output-dir "$OUTPUT_ROOT"
 
 expected_outputs=(
-  figure3_aids_mut_gcf_style.png
-  figure3_aids_mut_gcf_style.pdf
-  figure3_aids_mut_source.csv
-  figure4_aids_mut_gcf_style.png
-  figure4_aids_mut_gcf_style.pdf
-  figure4_aids_mut_source.csv
-  table2_aids_mut_gcf_style.csv
-  table2_aids_mut_gcf_style.md
-  table2_aids_mut_gcf_style.png
-  table2_aids_mut_gcf_style.pdf
-  table2_aids_mut_full.csv
+  figure3_gcf_style_aids_mut.png
+  figure3_gcf_style_aids_mut.pdf
+  figure3_gcf_style_aids_mut_data.csv
+  figure4_gcf_style_aids_mut.png
+  figure4_gcf_style_aids_mut.pdf
+  figure4_gcf_style_aids_mut_data.csv
+  table2_gcf_style_aids_mut.csv
+  table2_gcf_style_aids_mut.md
+  table2_gcf_style_aids_mut.png
+  table2_gcf_style_aids_mut.pdf
   combined_audit_report.txt
   combined_manifest.json
   _RUN_COMPLETE.json
@@ -148,7 +190,7 @@ for filename in "${expected_outputs[@]}"; do
   fi
 done
 
-grep -Fq '[AIDS_MUT_GCF_STYLE_PLOT_OK]' "$OUTPUT_ROOT/combined_audit_report.txt"
+grep -Fq '[AIDS_MUT_WNODE_GCF_STYLE_V2_OK]' "$OUTPUT_ROOT/combined_audit_report.txt"
 
 python - "$OUTPUT_ROOT" <<'PY'
 import json
@@ -173,4 +215,8 @@ if manifest.get("distance_recomputed") is not False:
 print("[AIDS_MUT_WNODE_MANIFEST_AUDIT_OK]")
 PY
 
-echo "[AIDS_MUT_WNODE_PLOT_SUCCESS]"
+if [[ "$MUT_THRESHOLD_MODE" == "match-aids" ]]; then
+  echo "[AIDS_MUT_WNODE_GCF_STYLE_MATCHED_AIDS_SUCCESS]"
+else
+  echo "[AIDS_MUT_WNODE_GCF_STYLE_V2_SUCCESS]"
+fi

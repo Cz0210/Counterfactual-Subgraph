@@ -4,44 +4,49 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
-## [2026-08-04] Combine frozen AIDS and Mutagenicity WNode presentation artifacts
+## [2026-08-04] Restore the audited AIDS GCF-style WNode presentation contract
 
 ### Background
 
-The final AIDS and Mutagenicity comparisons both use
-`MolCLR-Node-Wasserstein`, but retain dataset-specific frozen thresholds and
-threshold grids. Historical AIDS filenames containing `fgw` are compatibility
-names and must not cause the final WNode artifacts to be relabeled as
-Node-FGW.
+The first combined AIDS and Mutagenicity renderer used the wrong AIDS primary
+threshold and a shortened threshold grid. A previously audited AIDS renderer,
+its source CSVs, and its Figure 3, Figure 4, and Table 2 outputs establish the
+correct presentation contract.
 
 ### Decision
 
-Build the two-dataset four-method presentation only from the standardized
-Ours, GlobalGCE, CLEAR, and GCFExplainer roots. Require provenance for
-`distance_type=node_wasserstein`, strict-flip evaluation, frozen candidate
-order, and no selection in evaluation. Plot Figure 3 from K=1..20 using its
-frozen conditional-cost field, Figure 4 from each dataset's own frozen K=10
-threshold grid, and Table 2 at each dataset's frozen primary threshold. Keep
-the standardized Table 2 cost field without reinterpreting its conditioning,
-and never recompute embeddings, distances, teacher predictions, or rankings.
-The AIDS GCFExplainer input is the completed WNode evaluator run root
-`ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_gcfexplainer_top20_normalized_final`,
-not its `combined/` child. Because that run predates the standardized plotting
-CSV layout, derive its presentation rows in memory from the frozen candidate
-order and saved pair details using the shared GCF-style aggregation helper;
-never write compatibility files into the run root.
-Its evaluator summary stores seven audit thresholds, while the standardized
-AIDS Figure 4 uses a 102-point frozen grid. First reconstruct and exactly audit
-the seven official K=20 summary rows from saved pairs, then evaluate the frozen
-K=10 prefix on the 102-point grid read from the standardized AIDS Ours root.
+Read AIDS Figure 3 directly from the audited theta-0.05 80-row CSV and AIDS
+Figure 4 directly from the audited K=10 2404-row CSV. Figure 4 retains all 601
+empirical thresholds per method from 0 through 0.0535, with no interpolation.
+Compute only the Table 2 presentation reduction from the four frozen WNode
+pair-detail roots at K=10 and theta=0.05, then require exact agreement with the
+audited four-method values. Reuse the original renderer's serif typography,
+method styles, four-column panel layout, sparse markers, and booktabs-like
+table drawing.
+
+Expose two explicit Mutagenicity presentation profiles. `native` reads its
+frozen dataset-specific threshold and seven-point grid. `match-aids` aggregates
+the already-saved 217x20 strict-flip pair matrices at theta=0.05 and on the
+same 601-point 0..0.0535 grid used by AIDS. This second profile recomputes no
+distance or prediction and preserves each method's frozen candidate order.
+The profiles write separate output roots and can coexist.
+
+The renderer may read and aggregate saved artifacts, but it must not recompute
+embeddings, distances, teacher predictions, candidate selection, or candidate
+order. Both profiles share distance semantics, strict-flip semantics, method
+order, and visual design; their threshold relationship is explicit in the
+profile name and manifest.
 
 ### Consequences
 
-- AIDS and Mutagenicity can share one visual layout without sharing or
-  refitting thresholds.
-- Old `ccrcov_molclr_node_fgw_*` and `gt_fullgraph` roots are rejected.
-- The final manifest explicitly records that distance and candidate order were
-  not recomputed.
+- AIDS Figure 3 and Figure 4 can no longer be silently rebuilt from another
+  threshold or threshold grid.
+- The four AIDS Table 2 values are protected by a numerical regression Gate.
+- Native-threshold and AIDS-matched Mutagenicity presentations cannot
+  overwrite or masquerade as one another.
+- Non-Wasserstein and deletion-fragment provenance remains rejected.
+- The final manifest records that distance, teacher prediction, ranking, and
+  selection were not recomputed.
 
 ### Status
 

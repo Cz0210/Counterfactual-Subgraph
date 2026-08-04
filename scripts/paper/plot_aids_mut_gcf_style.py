@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Plot the frozen AIDS and Mutagenicity four-method WNode comparison."""
+"""Render the frozen AIDS and Mutagenicity WNode results in GCF style.
+
+The script is deliberately presentation-only.  AIDS Figure 3 and Figure 4
+are read from their audited CSVs, AIDS Table 2 is reduced from saved pair
+details, and Mutagenicity is read from frozen plotting artifacts.  It never
+computes embeddings, distances, teacher predictions, or candidate rankings.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -21,36 +26,147 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 
 
 DISTANCE_LABEL = "MolCLR-Node-Wasserstein"
 DISTANCE_TYPE = "node_wasserstein"
 CF_MODE = "strict_flip"
+
 METHODS = ("Ours", "GlobalGCE", "CLEAR", "GCFExplainer")
-DATASETS = ("AIDS", "Mutagenicity")
+DATASET_ORDER = ("AIDS", "NCI1", "Mutagenicity", "Proteins")
+ACTIVE_DATASET_COLUMNS = {"AIDS": 0, "Mutagenicity": 2}
 EXPECTED_PARENT_COUNTS = {"AIDS": 1283, "Mutagenicity": 217}
-EXPECTED_FIGURE4_COUNTS = {"AIDS": 102, "Mutagenicity": 7}
-FORBIDDEN_SOURCE_TOKENS = (
+
+AIDS_FIGURE3_RELATIVE_PATH = Path(
+    "outputs/hpc/eval/paper/molclr_node_wasserstein_figure3_theta005_raw/"
+    "wnode_fig3_theta005_figure3_wnode_coverage_cost_vs_k.csv"
+)
+AIDS_FIGURE4_RELATIVE_PATH = Path(
+    "outputs/hpc/eval/paper/molclr_node_wasserstein_figure4_redline_k10/"
+    "wnode_figure4_redline_k10_figure4_wnode_coverage_vs_threshold.csv"
+)
+AIDS_TABLE_ROOTS = {
+    "Ours": Path(
+        "outputs/hpc/eval/"
+        "ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_ours_top20_final"
+    ),
+    "GlobalGCE": Path(
+        "outputs/hpc/eval/"
+        "ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_"
+        "globalgce_frequency_top20_final"
+    ),
+    "CLEAR": Path(
+        "outputs/hpc/eval/"
+        "ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_"
+        "clear_parent_frequency_top20_final"
+    ),
+    "GCFExplainer": Path(
+        "outputs/hpc/eval/"
+        "ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_"
+        "gcfexplainer_top20_normalized_final"
+    ),
+}
+
+AIDS_FIGURE3_THETA = 0.05
+AIDS_TABLE2_THETA = 0.05
+AIDS_TABLE2_K = 10
+AIDS_FIGURE3_ROWS = 80
+AIDS_FIGURE4_ROWS = 2404
+AIDS_FIGURE4_K = 10
+AIDS_FIGURE4_THRESHOLD_MIN = 0.0
+AIDS_FIGURE4_THRESHOLD_MAX = 0.0535
+AIDS_FIGURE4_POINTS_PER_METHOD = 601
+MUT_FIGURE4_POINTS_PER_METHOD = AIDS_FIGURE4_POINTS_PER_METHOD
+MUT_EXPECTED_PAIR_ROWS = EXPECTED_PARENT_COUNTS["Mutagenicity"] * 20
+
+MUT_FROZEN_PAIR_SPECS = {
+    "Ours": {
+        "pairs": Path("pair_matrix.jsonl"),
+        "order": Path("selected_sequence.jsonl"),
+        "strict": "pair_strict_flip",
+        "distance": "wnode_distance",
+    },
+    "GlobalGCE": {
+        "pairs": Path("test_pair_details.csv"),
+        "order": Path("selected_top20.csv"),
+        "strict": "teacher_strict_flip",
+        "distance": "distance",
+    },
+    "CLEAR": {
+        "pairs": Path("test/k20_pair_details.csv"),
+        "order": Path("selected_candidates.csv"),
+        "strict": "teacher_strict_flip",
+        "distance": "distance",
+    },
+    "GCFExplainer": {
+        "pairs": Path("test_pair_details.csv"),
+        "order": Path("selected_sequence.jsonl"),
+        "strict": "teacher_strict_flip",
+        "distance": "distance",
+    },
+}
+
+AIDS_TABLE2_EXPECTED = {
+    "Ours": (0.7490257209664848, 0.0148861954639967),
+    "GlobalGCE": (0.4489477786438036, 0.0493276937150003),
+    "CLEAR": (0.2166796570537802, 0.0553405022830596),
+    "GCFExplainer": (0.642244738893219, 0.041917737627761),
+}
+
+METHOD_STYLES = {
+    "Ours": {"color": "black", "marker": "s", "label": "Ours"},
+    "GlobalGCE": {"color": "#E53935", "marker": "x", "label": "GlobalGCE"},
+    "CLEAR": {"color": "#2E7D32", "marker": "*", "label": "CLEAR"},
+    "GCFExplainer": {
+        "color": "#B02BC7",
+        "marker": "^",
+        "label": "GCFExplainer",
+    },
+}
+FIGURE3_MARKER_K = (1, 3, 5, 10, 15, 20)
+FIGURE3_MARKER_INDICES = (0, 2, 4, 9, 14, 19)
+FIGURE4_AIDS_MARKEVERY = 100
+FIGURE3_FIGSIZE = (16.0, 6.3)
+FIGURE4_FIGSIZE = (16.0, 3.8)
+TABLE2_FIGSIZE = (15.8, 3.3)
+
+FIGURE3_OUTPUT_STEM = "figure3_gcf_style_aids_mut"
+FIGURE4_OUTPUT_STEM = "figure4_gcf_style_aids_mut"
+TABLE2_OUTPUT_STEM = "table2_gcf_style_aids_mut"
+
+FORBIDDEN_PROVENANCE_TOKENS = (
     "ccrcov_molclr_node_fgw_",
+    "molclr-node-fgw",
     "node_fgw",
+    "fgw_lambda",
     "lam05",
     "gt_fullgraph",
     "opposite_fullgraph",
     "opposite-label",
 )
 
-METHOD_STYLE = {
-    "Ours": {"color": "#202020", "marker": "o"},
-    "GlobalGCE": {"color": "#e68613", "marker": "s"},
-    "CLEAR": {"color": "#2e7d32", "marker": "^"},
-    "GCFExplainer": {"color": "#2563a8", "marker": "D"},
+_METHOD_ALIASES = {
+    "ours": "Ours",
+    "ours_selected_subgraphs": "Ours",
+    "globalgce": "GlobalGCE",
+    "globalgce_frequency_top20": "GlobalGCE",
+    "clear": "CLEAR",
+    "clear_parentfrequency_top20": "CLEAR",
+    "clear_parent_frequency_top20": "CLEAR",
+    "gcfexplainer": "GCFExplainer",
+    "gcfexplainer_top20": "GCFExplainer",
 }
-K_MARKERS = {1, 3, 5, 10, 15, 20}
 
 
 def normalize(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+
+def canonical_method(value: object) -> str:
+    key = normalize(value)
+    if key not in _METHOD_ALIASES:
+        raise ValueError(f"Unknown method label: {value!r}")
+    return _METHOD_ALIASES[key]
 
 
 def find_column(
@@ -61,9 +177,8 @@ def find_column(
 ) -> str | None:
     lookup = {normalize(column): column for column in frame.columns}
     for candidate in candidates:
-        key = normalize(candidate)
-        if key in lookup:
-            return lookup[key]
+        if normalize(candidate) in lookup:
+            return lookup[normalize(candidate)]
     if required:
         raise KeyError(
             f"Required column not found. candidates={list(candidates)}, "
@@ -84,7 +199,7 @@ def read_csv(path: Path) -> pd.DataFrame:
 def numeric(frame: pd.DataFrame, column: str) -> pd.Series:
     values = pd.to_numeric(frame[column], errors="raise")
     if not np.isfinite(values.to_numpy(dtype=float)).all():
-        raise ValueError(f"Non-finite values in column {column}")
+        raise ValueError(f"Non-finite values in {column}")
     return values
 
 
@@ -96,23 +211,90 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _as_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    text = str(value or "").strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    return None
+def normalize_bool(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False)
+    normalized = series.astype(str).str.strip().str.lower()
+    unknown = ~normalized.isin({"true", "1", "yes", "y", "t", "false", "0", "no", "n", "f"})
+    if unknown.any():
+        raise ValueError(f"Unrecognized boolean values: {sorted(normalized[unknown].unique())}")
+    return normalized.isin({"true", "1", "yes", "y", "t"})
 
 
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+def _resolve(project_root: Path, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def _assert_exact_project_path(path: Path, project_root: Path, expected: Path) -> None:
+    expected_path = (project_root / expected).resolve()
+    if path != expected_path:
+        raise ValueError(f"Expected frozen source {expected_path}, received {path}")
+
+
+def _reject_forbidden_provenance(*values: object) -> None:
+    combined = "\n".join(str(value) for value in values).lower()
+    hits = sorted(token for token in FORBIDDEN_PROVENANCE_TOKENS if token in combined)
+    if hits:
+        raise ValueError(f"Forbidden non-WNode provenance: {hits}")
+
+
+def _validate_frame_provenance(
+    frame: pd.DataFrame,
+    *,
+    expected_parents: int,
+    context: str,
+    require_distance_label: bool,
+) -> dict[str, list[object]]:
+    evidence: dict[str, list[object]] = {
+        "distance_labels": [],
+        "distance_types": [],
+        "cf_modes": [],
+        "parent_counts": [],
+        "candidate_set_preselected": [],
+        "selection_performed_in_eval": [],
+    }
+
+    def values(candidates: Sequence[str]) -> list[object]:
+        column = find_column(frame, candidates, required=False)
+        return [] if column is None else frame[column].dropna().unique().tolist()
+
+    evidence["distance_labels"] = values(("distance_label", "distance_line"))
+    evidence["distance_types"] = values(("distance_type",))
+    evidence["cf_modes"] = values(("cf_mode",))
+    evidence["parent_counts"] = values(
+        ("num_parents", "num_test_parents", "test_parent_count")
+    )
+    evidence["candidate_set_preselected"] = values(("candidate_set_preselected",))
+    evidence["selection_performed_in_eval"] = values(("selection_performed_in_eval",))
+
+    _reject_forbidden_provenance(context, evidence)
+    labels = {normalize(value) for value in evidence["distance_labels"]}
+    if require_distance_label and labels != {normalize(DISTANCE_LABEL)}:
+        raise ValueError(f"{context}: unexpected distance labels {sorted(labels)}")
+    if labels and labels != {normalize(DISTANCE_LABEL)}:
+        raise ValueError(f"{context}: unexpected distance labels {sorted(labels)}")
+    types = {normalize(value) for value in evidence["distance_types"]}
+    if types and types != {DISTANCE_TYPE}:
+        raise ValueError(f"{context}: unexpected distance types {sorted(types)}")
+    modes = {normalize(value) for value in evidence["cf_modes"]}
+    if modes and modes != {CF_MODE}:
+        raise ValueError(f"{context}: unexpected cf modes {sorted(modes)}")
+    if evidence["parent_counts"]:
+        counts = {int(float(value)) for value in evidence["parent_counts"]}
+        if counts != {expected_parents}:
+            raise ValueError(f"{context}: unexpected parent counts {sorted(counts)}")
+    if evidence["candidate_set_preselected"]:
+        states = set(normalize_bool(pd.Series(evidence["candidate_set_preselected"])))
+        if states != {True}:
+            raise ValueError(f"{context}: candidates are not proven preselected")
+    if evidence["selection_performed_in_eval"]:
+        states = set(normalize_bool(pd.Series(evidence["selection_performed_in_eval"])))
+        if states != {False}:
+            raise ValueError(f"{context}: selection was performed in evaluation")
+    return evidence
 
 
 def _json_scalars(value: object, prefix: str = "") -> Iterable[tuple[str, object]]:
@@ -127,917 +309,1092 @@ def _json_scalars(value: object, prefix: str = "") -> Iterable[tuple[str, object
         yield prefix, value
 
 
-def _json_strings(value: object) -> Iterable[str]:
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            if isinstance(key, str):
-                yield key
-            yield from _json_strings(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _json_strings(child)
-    elif isinstance(value, str):
-        yield value
-
-
-def _referenced_provenance_files(root: Path, project_root: Path) -> list[Path]:
-    """Follow only local manifest/audit references needed to prove provenance."""
-
-    queue: list[Path] = []
-    seen: set[Path] = set()
-
-    def metadata_files(directory: Path) -> list[Path]:
-        resolved = directory.expanduser().resolve()
-        if not resolved.is_dir() or not _path_is_within(resolved, project_root):
-            return []
-        names = (
-            "*manifest*.json",
-            "*audit*.json",
-            "summary.json",
-            "run_manifest.json",
-            "run_config.json",
-        )
-        matches: list[Path] = []
-        for pattern in names:
-            matches.extend(sorted(resolved.glob(pattern)))
-        return sorted(set(matches))
-
-    def referenced_path(value: str, *, relative_to: Path) -> Path | None:
-        if not (
-            Path(value).is_absolute()
-            or "/" in value
-            or "\\" in value
-            or Path(value).suffix.lower() in {".csv", ".json", ".jsonl", ".pt"}
-        ):
-            return None
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            project_candidate = project_root / candidate
-            local_candidate = relative_to / candidate
-            candidate = (
-                project_candidate
-                if project_candidate.exists() or not local_candidate.exists()
-                else local_candidate
-            )
-        try:
-            candidate = candidate.resolve()
-        except OSError:
-            return None
-        return candidate if _path_is_within(candidate, project_root) else None
-
-    def manifest_references_root(path: Path) -> bool:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        for scalar in _json_strings(payload):
-            if not scalar.strip():
-                continue
-            candidate = referenced_path(scalar, relative_to=path.parent)
-            if candidate is not None and (
-                candidate == root or _path_is_within(candidate, root)
-            ):
-                return True
-        return False
-
-    queue.extend(metadata_files(root))
-    queue.extend(
-        path for path in metadata_files(root.parent) if manifest_references_root(path)
-    )
-    output: list[Path] = []
-    while queue and len(seen) < 96:
-        path = queue.pop(0).resolve()
-        if path in seen or not path.is_file() or not _path_is_within(path, project_root):
-            continue
-        seen.add(path)
-        output.append(path)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for scalar in _json_strings(payload):
-            if not scalar.strip():
-                continue
-            candidate = referenced_path(scalar, relative_to=path.parent)
-            if candidate is None:
-                continue
-            if candidate.is_file() and candidate.suffix.lower() == ".json":
-                queue.append(candidate)
-            elif candidate.is_file():
-                queue.extend(metadata_files(candidate.parent))
-            elif candidate.is_dir():
-                queue.extend(metadata_files(candidate))
-    return sorted(set(output))
-
-
-def _metadata_evidence(
-    *,
-    root: Path,
-    project_root: Path,
-    csv_paths: Sequence[Path],
-) -> dict[str, Any]:
-    evidence: dict[str, list[Any]] = {
+def _root_metadata_evidence(root: Path) -> dict[str, Any]:
+    paths: set[Path] = set()
+    for pattern in (
+        "*manifest*.json",
+        "*audit*.json",
+        "summary.json",
+        "run_config.json",
+        "_RUN_COMPLETE.json",
+    ):
+        paths.update(path for path in root.glob(pattern) if path.is_file())
+    evidence: dict[str, Any] = {
         "distance_labels": [],
         "distance_types": [],
         "cf_modes": [],
         "parent_counts": [],
-        "candidate_counts": [],
         "candidate_set_preselected": [],
         "selection_performed_in_eval": [],
-        "strict_flip_evidence": [],
-        "provenance_files": [],
+        "strict_flip_provenance": [],
+        "files": [],
     }
-    forbidden_hits: list[str] = []
 
     def record(key: str, value: object) -> None:
-        if value is None or value == "":
+        if value is None or value == "" or value in evidence[key]:
             return
-        if value not in evidence[key]:
-            evidence[key].append(value)
+        evidence[key].append(value)
 
-    text_sources = [str(root)]
-    for path in csv_paths:
-        frame = read_csv(path)
-        for column in frame.columns:
-            key = normalize(column)
-            values = frame[column].dropna().unique().tolist()
-            if key in {"distance", "distance_label", "distance_line"}:
-                for value in values:
-                    record("distance_labels", str(value))
-            elif key == "distance_type":
-                for value in values:
-                    record("distance_types", str(value))
-            elif key == "cf_mode":
-                for value in values:
-                    record("cf_modes", str(value))
-            elif key in {"num_parents", "test_parent_count"}:
-                for value in values:
-                    record("parent_counts", int(float(value)))
-            elif key == "candidate_set_preselected":
-                for value in values:
-                    parsed = _as_bool(value)
-                    if parsed is not None:
-                        record("candidate_set_preselected", parsed)
-            elif key == "selection_performed_in_eval":
-                for value in values:
-                    parsed = _as_bool(value)
-                    if parsed is not None:
-                        record("selection_performed_in_eval", parsed)
-            elif "strict_flip" in key:
-                record("strict_flip_evidence", f"{path.name}:{column}")
-
-    provenance_files = _referenced_provenance_files(root, project_root)
-    for path in provenance_files:
-        record("provenance_files", {"path": str(path), "sha256": sha256(path)})
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        text_sources.append(json.dumps(payload, sort_keys=True))
+    for path in sorted(paths):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid provenance JSON {path}: {error}") from error
+        _reject_forbidden_provenance(path, json.dumps(payload, sort_keys=True))
+        evidence["files"].append({"path": str(path), "sha256": sha256(path)})
         for key_path, value in _json_scalars(payload):
-            key_components = [
-                normalize(component.split("[", 1)[0])
-                for component in key_path.split(".")
+            components = [
+                normalize(component.split("[", 1)[0]) for component in key_path.split(".")
             ]
             if any(
-                component in {
-                    "checks",
-                    "semantic_checks",
-                    "required_fields",
-                    "forbidden_fields",
-                }
-                for component in key_components[:-1]
+                component in {"checks", "semantic_checks", "required_fields", "forbidden_fields"}
+                for component in components[:-1]
             ):
                 continue
-            key = key_components[-1]
-            if key in {"distance", "distance_label", "distance_line"}:
+            key = components[-1]
+            if key in {"distance_label", "distance_line"}:
                 record("distance_labels", str(value))
             elif key == "distance_type":
                 record("distance_types", str(value))
             elif key == "cf_mode":
                 record("cf_modes", str(value))
             elif key in {
-                "expected_num_parents",
                 "num_parents",
-                "parent_count",
-                "reference_parent_count",
+                "num_test_parents",
                 "test_parent_count",
+                "reference_parent_count",
             }:
                 try:
                     record("parent_counts", int(value))
-                except (TypeError, ValueError):
-                    pass
-            elif key in {"candidate_count", "num_candidates"}:
-                try:
-                    record("candidate_counts", int(value))
                 except (TypeError, ValueError):
                     pass
             elif key in {
                 "candidate_set_preselected",
                 "candidate_order_frozen",
                 "candidate_order_exact_match",
-                "candidate_order_matches_frozen",
             }:
-                parsed = _as_bool(value)
-                if parsed is True:
-                    record("candidate_set_preselected", parsed)
+                record("candidate_set_preselected", value)
             elif key in {
                 "selection_performed_in_eval",
                 "candidate_selection_performed",
                 "test_candidate_selection",
             }:
-                parsed = _as_bool(value)
-                if parsed is not None:
-                    record("selection_performed_in_eval", parsed)
+                record("selection_performed_in_eval", value)
             elif "strict_flip" in key:
-                parsed = _as_bool(value)
-                try:
-                    positive_count = float(value) > 0
-                except (TypeError, ValueError):
-                    positive_count = False
-                if parsed is True or positive_count:
-                    record("strict_flip_evidence", f"{path}:{key_path}")
-            elif key == "fgw_lambda":
-                forbidden_hits.append(f"{path}:{key_path}")
-
-    combined_text = "\n".join(text_sources).lower()
-    for token in FORBIDDEN_SOURCE_TOKENS:
-        if token in combined_text:
-            forbidden_hits.append(token)
-    if "molclr-node-fgw" in combined_text or '"distance_type": "node_fgw"' in combined_text:
-        forbidden_hits.append("Node-FGW distance metadata")
-    if forbidden_hits:
-        raise ValueError(
-            f"Forbidden non-WNode provenance under {root}: {sorted(set(forbidden_hits))}"
-        )
-
-    labels = {normalize(value) for value in evidence["distance_labels"]}
-    types = {normalize(value) for value in evidence["distance_types"]}
-    if normalize(DISTANCE_LABEL) not in labels:
-        raise ValueError(
-            f"WNode distance label is not proven for {root}; observed={evidence['distance_labels']}"
-        )
-    if types and types != {DISTANCE_TYPE}:
-        raise ValueError(f"Unexpected distance_type for {root}: {evidence['distance_types']}")
-    if not types:
-        raise ValueError(f"WNode distance_type is not proven for {root}.")
-    modes = {normalize(value) for value in evidence["cf_modes"]}
-    if modes and modes != {CF_MODE}:
-        raise ValueError(f"Unexpected cf_mode for {root}: {evidence['cf_modes']}")
-
-    evidence["distance_label_verified"] = True
-    evidence["distance_type_verified"] = True
-    evidence["strict_flip_verified"] = (
-        modes == {CF_MODE} or bool(evidence["strict_flip_evidence"])
-    )
+                record("strict_flip_provenance", f"{path.name}:{key_path}")
     return evidence
 
 
+def _ordered_parts(parts: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    return pd.concat([parts[method] for method in METHODS if method in parts], ignore_index=True)
+
+
+def load_aids_figure3(path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frame = read_csv(path)
+    if len(frame) != AIDS_FIGURE3_ROWS:
+        raise ValueError(f"AIDS Figure 3 row_count={len(frame)}, expected={AIDS_FIGURE3_ROWS}")
+    method_col = find_column(frame, ("method", "Method"))
+    k_col = find_column(frame, ("k", "K"))
+    theta_col = find_column(frame, ("theta", "threshold"))
+    coverage_col = find_column(frame, ("coverage", "Coverage"))
+    cost_col = find_column(frame, ("conditional_median_cost",))
+    _validate_frame_provenance(
+        frame,
+        expected_parents=EXPECTED_PARENT_COUNTS["AIDS"],
+        context="AIDS Figure 3",
+        require_distance_label=True,
+    )
+
+    work = frame.copy()
+    work["_method"] = work[method_col].map(canonical_method)
+    parts: dict[str, pd.DataFrame] = {}
+    for method in METHODS:
+        rows = work.loc[work["_method"] == method].copy()
+        if len(rows) != 20:
+            raise ValueError(f"AIDS Figure 3 {method} rows={len(rows)}, expected=20")
+        k = numeric(rows, k_col).astype(int).to_numpy()
+        if not np.array_equal(k, np.arange(1, 21)):
+            raise ValueError(f"AIDS Figure 3 {method} K must be exactly 1,...,20")
+        theta = numeric(rows, theta_col).to_numpy(dtype=float)
+        if not np.allclose(theta, AIDS_FIGURE3_THETA, rtol=0.0, atol=1e-12):
+            raise ValueError(f"AIDS Figure 3 {method} theta must be {AIDS_FIGURE3_THETA}")
+        coverage = numeric(rows, coverage_col).to_numpy(dtype=float)
+        cost = numeric(rows, cost_col).to_numpy(dtype=float)
+        if not np.all((coverage >= 0.0) & (coverage <= 1.0)):
+            raise ValueError(f"AIDS Figure 3 {method} coverage outside [0,1]")
+        if np.any(cost < 0.0):
+            raise ValueError(f"AIDS Figure 3 {method} cost is negative")
+        parts[method] = pd.DataFrame(
+            {
+                "Dataset": "AIDS",
+                "Method": method,
+                "K": k,
+                "Theta": theta,
+                "Coverage": coverage,
+                "Cost": cost,
+            }
+        )
+    output = _ordered_parts(parts)
+    if output.duplicated(("Method", "K")).any():
+        raise ValueError("AIDS Figure 3 contains duplicate method/K rows")
+    return output, {
+        "path": str(path),
+        "sha256": sha256(path),
+        "row_count": len(frame),
+        "theta": AIDS_FIGURE3_THETA,
+        "cost_source_column": cost_col,
+        "distance_recomputed": False,
+        "candidate_order_changed": False,
+    }
+
+
+def load_aids_figure4(path: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frame = read_csv(path)
+    if len(frame) != AIDS_FIGURE4_ROWS:
+        raise ValueError(f"AIDS Figure 4 row_count={len(frame)}, expected={AIDS_FIGURE4_ROWS}")
+    method_col = find_column(frame, ("method", "Method"))
+    k_col = find_column(frame, ("k", "K"))
+    threshold_col = find_column(frame, ("threshold", "theta"))
+    coverage_col = find_column(frame, ("coverage", "mean", "close_cf_coverage"))
+    _validate_frame_provenance(
+        frame,
+        expected_parents=EXPECTED_PARENT_COUNTS["AIDS"],
+        context="AIDS Figure 4",
+        require_distance_label=True,
+    )
+
+    work = frame.copy()
+    work["_method"] = work[method_col].map(canonical_method)
+    parts: dict[str, pd.DataFrame] = {}
+    grids: list[np.ndarray] = []
+    for method in METHODS:
+        rows = work.loc[work["_method"] == method].copy()
+        if len(rows) != AIDS_FIGURE4_POINTS_PER_METHOD:
+            raise ValueError(
+                f"AIDS Figure 4 {method} points={len(rows)}, "
+                f"expected={AIDS_FIGURE4_POINTS_PER_METHOD}"
+            )
+        k = numeric(rows, k_col).astype(int).to_numpy()
+        if set(k.tolist()) != {AIDS_FIGURE4_K}:
+            raise ValueError(f"AIDS Figure 4 {method} K must be {AIDS_FIGURE4_K}")
+        thresholds = numeric(rows, threshold_col).to_numpy(dtype=float)
+        if not np.all(np.diff(thresholds) > 0.0):
+            raise ValueError(f"AIDS Figure 4 {method} threshold order is not strictly increasing")
+        if not np.isclose(thresholds[0], AIDS_FIGURE4_THRESHOLD_MIN, rtol=0.0, atol=1e-15):
+            raise ValueError(f"AIDS Figure 4 {method} threshold_min is not 0.0")
+        if not np.isclose(thresholds[-1], AIDS_FIGURE4_THRESHOLD_MAX, rtol=0.0, atol=1e-15):
+            raise ValueError(f"AIDS Figure 4 {method} threshold_max is not 0.0535")
+        coverage = numeric(rows, coverage_col).to_numpy(dtype=float)
+        if not np.all((coverage >= 0.0) & (coverage <= 1.0)):
+            raise ValueError(f"AIDS Figure 4 {method} coverage outside [0,1]")
+        grids.append(thresholds)
+        parts[method] = pd.DataFrame(
+            {
+                "Dataset": "AIDS",
+                "Method": method,
+                "K": k,
+                "Threshold": thresholds,
+                "Coverage": coverage,
+            }
+        )
+    first = grids[0]
+    if any(not np.allclose(grid, first, rtol=0.0, atol=1e-15) for grid in grids[1:]):
+        raise ValueError("AIDS Figure 4 threshold grids differ across methods")
+    output = _ordered_parts(parts)
+    if output.duplicated(("Method", "Threshold")).any():
+        raise ValueError("AIDS Figure 4 contains duplicate method/threshold rows")
+    return output, {
+        "path": str(path),
+        "sha256": sha256(path),
+        "row_count": len(frame),
+        "k": AIDS_FIGURE4_K,
+        "points_per_method": AIDS_FIGURE4_POINTS_PER_METHOD,
+        "threshold_min": float(first[0]),
+        "threshold_max": float(first[-1]),
+        "interpolation_performed": False,
+        "distance_recomputed": False,
+        "candidate_order_changed": False,
+    }
+
+
+def candidate_rank(details: pd.DataFrame) -> tuple[pd.Series, str]:
+    for column in ("rank", "selection_rank", "candidate_rank", "native_rank"):
+        if column not in details.columns:
+            continue
+        rank = pd.to_numeric(details[column], errors="coerce")
+        finite = rank.dropna()
+        if finite.empty:
+            continue
+        if finite.min() == 0 and finite.max() <= 19:
+            rank = rank + 1
+        return rank, column
+    candidate_col = find_column(details, ("candidate_id",))
+    order = list(dict.fromkeys(details[candidate_col].astype(str)))
+    mapping = {candidate_id: index for index, candidate_id in enumerate(order, start=1)}
+    return details[candidate_col].astype(str).map(mapping), "stable_first_occurrence"
+
+
+def load_parent_best_distances(run_dir: Path, *, k: int) -> tuple[pd.Series, dict[str, Any]]:
+    _reject_forbidden_provenance(run_dir)
+    path = run_dir / "details" / "pair_details.csv"
+    details = read_csv(path)
+    parent_col = find_column(details, ("parent_id", "molecule_id"))
+    candidate_col = find_column(details, ("candidate_id",))
+    distance_col = find_column(details, ("distance", "wnode_distance"))
+    strict_col = find_column(details, ("cf_flip", "teacher_strict_flip", "strict_flip"))
+    rank, rank_source = candidate_rank(details)
+
+    parent_count = details[parent_col].astype(str).nunique()
+    candidate_count = details[candidate_col].astype(str).nunique()
+    if parent_count != EXPECTED_PARENT_COUNTS["AIDS"]:
+        raise ValueError(f"{path}: parent_count={parent_count}, expected=1283")
+    if candidate_count != 20:
+        raise ValueError(f"{path}: candidate_count={candidate_count}, expected=20")
+    observed_ranks = sorted(set(pd.to_numeric(rank, errors="coerce").dropna().astype(int)))
+    if observed_ranks != list(range(1, 21)):
+        raise ValueError(f"{path}: frozen candidate ranks are not 1,...,20")
+
+    work = details.assign(
+        _rank=rank,
+        _distance=pd.to_numeric(details[distance_col], errors="coerce"),
+        _strict_flip=normalize_bool(details[strict_col]),
+    )
+    valid = work.loc[
+        work["_rank"].notna()
+        & work["_rank"].between(1, k)
+        & work["_distance"].notna()
+        & np.isfinite(work["_distance"])
+        & work["_strict_flip"]
+    ].copy()
+    if valid.empty:
+        raise ValueError(f"{path}: no valid strict-flip rows at K={k}")
+    pair_best = (
+        valid.groupby([parent_col, candidate_col], as_index=False, sort=False)["_distance"]
+        .min()
+    )
+    parent_best = pair_best.groupby(parent_col, sort=False)["_distance"].min().astype(float)
+    if not np.isfinite(parent_best.to_numpy(dtype=float)).all():
+        raise ValueError(f"{path}: non-finite parent-best distances")
+    return parent_best, {
+        "pair_details_path": str(path),
+        "pair_details_sha256": sha256(path),
+        "rank_source": rank_source,
+        "num_raw_rows": len(details),
+        "num_parent_candidate_pairs": len(pair_best),
+        "num_applicable_parents": len(parent_best),
+        "candidate_count": candidate_count,
+        "candidate_order_changed": False,
+        "distance_recomputed": False,
+        "teacher_recomputed": False,
+        "strict_flip_column": strict_col,
+    }
+
+
+def load_aids_table2(roots: Mapping[str, Path]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    audit: dict[str, Any] = {}
+    for method in METHODS:
+        root = roots[method]
+        if not root.is_dir():
+            raise FileNotFoundError(root)
+        parent_best, metadata = load_parent_best_distances(root, k=AIDS_TABLE2_K)
+        coverage = float(
+            np.count_nonzero(parent_best.to_numpy(dtype=float) <= AIDS_TABLE2_THETA)
+            / EXPECTED_PARENT_COUNTS["AIDS"]
+        )
+        cost = float(np.median(parent_best.to_numpy(dtype=float)))
+        expected_coverage, expected_cost = AIDS_TABLE2_EXPECTED[method]
+        if not np.isclose(coverage, expected_coverage, rtol=0.0, atol=1e-12):
+            raise ValueError(
+                f"AIDS Table 2 {method} coverage={coverage:.17g}, "
+                f"expected={expected_coverage:.17g}"
+            )
+        if not np.isclose(cost, expected_cost, rtol=0.0, atol=1e-12):
+            raise ValueError(
+                f"AIDS Table 2 {method} cost={cost:.17g}, expected={expected_cost:.17g}"
+            )
+        row = {
+            "Dataset": "AIDS",
+            "Method": method,
+            "K": AIDS_TABLE2_K,
+            "Theta": AIDS_TABLE2_THETA,
+            "Coverage": coverage,
+            "Cost": cost,
+            "NumParents": EXPECTED_PARENT_COUNTS["AIDS"],
+        }
+        rows.append(row)
+        audit[method] = {**metadata, **row, "root": str(root)}
+    return pd.DataFrame(rows), audit
+
+
 def table2_path(root: Path, method: str) -> Path:
-    preferred = {
-        "Ours": "table2_ours_k10.csv",
-        "GlobalGCE": "table2_globalgce_k10.csv",
-        "CLEAR": "table2_clear_k10.csv",
-        "GCFExplainer": "table2_gcfexplainer_k10.csv",
+    slug = {
+        "Ours": "ours",
+        "GlobalGCE": "globalgce",
+        "CLEAR": "clear",
+        "GCFExplainer": "gcfexplainer",
     }[method]
-    candidate = root / preferred
-    if candidate.is_file():
-        return candidate
+    preferred = root / f"table2_{slug}_k10.csv"
+    if preferred.is_file():
+        return preferred
     matches = sorted(root.glob("table2_*_k10.csv"))
     if len(matches) != 1:
-        raise RuntimeError(
-            f"{method}: expected one K=10 Table 2 CSV under {root}, "
-            f"found {[str(path) for path in matches]}"
+        raise FileNotFoundError(
+            f"{method}: expected one K=10 Table 2 CSV under {root}, found={matches}"
         )
     return matches[0]
 
 
-def _standard_plot_paths(root: Path, method: str) -> list[Path]:
-    return [
-        root / "figure3_coverage_vs_k.csv",
-        root / "figure4_coverage_vs_threshold.csv",
-        table2_path(root, method),
-    ]
+def _read_jsonl(path: Path) -> pd.DataFrame:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise FileNotFoundError(path)
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Invalid JSONL at {path}:{line_number}: {error}") from error
+            if not isinstance(payload, dict):
+                raise ValueError(f"Expected JSON object at {path}:{line_number}")
+            rows.append(payload)
+    if not rows:
+        raise ValueError(f"Empty JSONL: {path}")
+    return pd.DataFrame(rows)
 
 
-def _is_raw_aids_gcf_run(root: Path, *, dataset: str, method: str) -> bool:
-    if dataset != "AIDS" or method != "GCFExplainer" or not root.is_dir():
-        return False
-    if (root / "figure3_coverage_vs_k.csv").is_file():
-        return False
-    return (root / "run_config.json").is_file() and (
-        root / "combined" / "combined_threshold_summary.csv"
-    ).is_file()
+def _read_frozen_frame(path: Path) -> pd.DataFrame:
+    return _read_jsonl(path) if path.suffix == ".jsonl" else read_csv(path)
 
 
-def parse_roots(args: argparse.Namespace) -> dict[str, dict[str, Path]]:
-    return {
-        "AIDS": {
-            "Ours": Path(args.aids_ours_root).resolve(),
-            "GlobalGCE": Path(args.aids_globalgce_root).resolve(),
-            "CLEAR": Path(args.aids_clear_root).resolve(),
-            "GCFExplainer": Path(args.aids_gcf_root).resolve(),
-        },
-        "Mutagenicity": {
-            "Ours": Path(args.mut_ours_root).resolve(),
-            "GlobalGCE": Path(args.mut_globalgce_root).resolve(),
-            "CLEAR": Path(args.mut_clear_root).resolve(),
-            "GCFExplainer": Path(args.mut_gcf_root).resolve(),
-        },
-    }
-
-
-def validate_root(
-    root: Path,
-    *,
-    project_root: Path,
-    dataset: str,
-    method: str,
-) -> dict[str, Any]:
-    if not root.is_dir():
-        raise FileNotFoundError(f"Missing frozen plotting root: {root}")
-    paths = _standard_plot_paths(root, method)
-    for path in paths:
-        if not path.is_file() or path.stat().st_size == 0:
-            raise FileNotFoundError(path)
-    evidence = _metadata_evidence(root=root, project_root=project_root, csv_paths=paths)
-    expected_parents = EXPECTED_PARENT_COUNTS[dataset]
-    observed_parent_counts = set(evidence["parent_counts"])
-    if expected_parents not in observed_parent_counts:
-        raise ValueError(
-            f"{dataset}/{method}: expected parent count {expected_parents} is not proven; "
-            f"observed={sorted(observed_parent_counts)}"
-        )
-    if True not in evidence["candidate_set_preselected"]:
-        raise ValueError(f"{dataset}/{method}: frozen candidate order is not proven.")
-    if True in evidence["selection_performed_in_eval"]:
-        raise ValueError(f"{dataset}/{method}: selection was performed in evaluation.")
-    if False not in evidence["selection_performed_in_eval"]:
-        raise ValueError(f"{dataset}/{method}: no-selection provenance is not proven.")
-    if evidence["strict_flip_verified"] is not True:
-        raise ValueError(f"{dataset}/{method}: strict_flip provenance is not proven.")
-    return evidence
-
-
-def _json_order_sha256(rows: Sequence[Mapping[str, Any]]) -> str:
-    payload = json.dumps(
-        list(rows),
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+def _sequence_sha256(values: Sequence[str]) -> str:
+    payload = json.dumps(list(values), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
-def standardize_raw_aids_gcf_run(
-    root: Path,
-    *,
-    project_root: Path,
-    theta_star: float,
-    figure4_thresholds: Sequence[float],
-    figure4_threshold_source: Mapping[str, Any],
-) -> tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-]:
-    """Aggregate one frozen GCFExplainer WNode run without recomputing pairs."""
-
-    from src.eval.gcf_style_recourse_report import (
-        compute_k_curve,
-        compute_prefix_metrics,
-        load_method_run,
-    )
-
-    if not _is_raw_aids_gcf_run(root, dataset="AIDS", method="GCFExplainer"):
-        raise ValueError(f"Not a supported raw AIDS GCFExplainer run root: {root}")
-    combined_path = root / "combined" / "combined_threshold_summary.csv"
-    config_path = root / "run_config.json"
-    details_path = root / "details" / "pair_details.csv"
-    cache_stats_path = root / "cache_stats.json"
-    complete_path = root / "_RUN_COMPLETE.json"
-    for path in (config_path, combined_path, details_path, cache_stats_path, complete_path):
-        if not path.is_file() or path.stat().st_size == 0:
-            raise FileNotFoundError(path)
-
-    evidence = _metadata_evidence(
-        root=root,
-        project_root=project_root,
-        csv_paths=[combined_path],
-    )
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    complete = json.loads(complete_path.read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or not isinstance(complete, dict):
-        raise ValueError(f"Invalid GCFExplainer run JSON under {root}")
-    if complete.get("complete") is not True and complete.get("run_complete") is not True:
-        raise ValueError(f"GCFExplainer WNode run is not complete: {root}")
-    if config.get("distance_line") != DISTANCE_LABEL:
-        raise ValueError(f"Unexpected GCFExplainer distance_line: {config.get('distance_line')}")
-    if config.get("distance_type") != DISTANCE_TYPE:
-        raise ValueError(f"Unexpected GCFExplainer distance_type: {config.get('distance_type')}")
-    if config.get("cf_mode") != CF_MODE:
-        raise ValueError(f"Unexpected GCFExplainer cf_mode: {config.get('cf_mode')}")
-
-    run = load_method_run(
-        "GCFExplainer",
-        root,
-        expected_top_k=20,
-        expected_num_parents=EXPECTED_PARENT_COUNTS["AIDS"],
-    )
-    if run.num_unique_parent_candidate_pairs != EXPECTED_PARENT_COUNTS["AIDS"] * 20:
-        raise ValueError(
-            "GCFExplainer pair details are not a complete 1283x20 Cartesian matrix: "
-            f"found={run.num_unique_parent_candidate_pairs}"
-        )
-    candidate_ranks = [candidate.rank for candidate in run.candidates]
-    if candidate_ranks != list(range(1, 21)):
-        raise ValueError(f"GCFExplainer frozen ranks must be 1..20: {candidate_ranks}")
-
-    summary = read_csv(combined_path)
-    threshold_col = find_column(summary, ["threshold", "theta"])
-    summary_coverage_col = find_column(
-        summary,
-        ["close_cf_coverage", "ccrcov", "coverage"],
-    )
-    summary_thresholds = np.sort(numeric(summary, threshold_col).unique().astype(float))
-    if len(summary_thresholds) == 0:
-        raise ValueError(
-            "GCFExplainer combined summary does not contain any frozen thresholds"
-        )
-    if not np.any(np.isclose(summary_thresholds, theta_star, rtol=0.0, atol=1e-12)):
-        raise ValueError(f"GCFExplainer summary does not include theta*={theta_star:.17g}")
-    reconstructed_summary: list[dict[str, float]] = []
-    for threshold in summary_thresholds:
-        matching = summary.loc[
-            np.isclose(
-                numeric(summary, threshold_col).to_numpy(dtype=float),
-                float(threshold),
-                rtol=0.0,
-                atol=1e-12,
-            )
-        ]
-        if len(matching) != 1:
-            raise ValueError(
-                "GCFExplainer combined summary must have one row per threshold: "
-                f"threshold={threshold:.17g} rows={len(matching)}"
-            )
-        expected_coverage = float(matching.iloc[0][summary_coverage_col])
-        actual_coverage = float(
-            compute_prefix_metrics(run, k=20, threshold=float(threshold))["coverage"]
-        )
-        if not math.isclose(actual_coverage, expected_coverage, rel_tol=0.0, abs_tol=1e-12):
-            raise ValueError(
-                "GCFExplainer saved-pair reconstruction disagrees with official summary: "
-                f"threshold={threshold:.17g} expected={expected_coverage:.17g} "
-                f"actual={actual_coverage:.17g}"
-            )
-        reconstructed_summary.append(
-            {
-                "threshold": float(threshold),
-                "expected_coverage": expected_coverage,
-                "actual_coverage": actual_coverage,
-            }
-        )
-
-    dense_thresholds = np.asarray(list(figure4_thresholds), dtype=float)
-    if (
-        dense_thresholds.ndim != 1
-        or len(dense_thresholds) != EXPECTED_FIGURE4_COUNTS["AIDS"]
-        or not np.isfinite(dense_thresholds).all()
-    ):
-        raise ValueError(
-            "AIDS standardized Figure 4 reference must contain 102 finite thresholds"
-        )
-    dense_thresholds = np.sort(dense_thresholds)
-    if len(np.unique(dense_thresholds)) != len(dense_thresholds):
-        raise ValueError("AIDS standardized Figure 4 reference thresholds are duplicated")
-
-    curve_rows = compute_k_curve(run, threshold=theta_star, max_k=20)
-    figure3 = pd.DataFrame(
-        {
-            "Dataset": "AIDS",
-            "Method": "GCFExplainer",
-            "K": [int(row["k"]) for row in curve_rows],
-            "Coverage": [float(row["coverage"]) for row in curve_rows],
-            "ConditionalMedianCost": [
-                float(row["conditional_median_cost"]) for row in curve_rows
-            ],
-        }
-    )
-    if not np.isfinite(
-        figure3[["Coverage", "ConditionalMedianCost"]].to_numpy(dtype=float)
-    ).all():
-        raise ValueError("GCFExplainer Figure 3 contains non-finite frozen metrics")
-    if not figure3["Coverage"].between(0, 1).all():
-        raise ValueError("GCFExplainer Figure 3 coverage is outside [0,1]")
-    threshold_metrics = [
-        compute_prefix_metrics(run, k=10, threshold=float(threshold))
-        for threshold in dense_thresholds
-    ]
-    figure4 = pd.DataFrame(
-        {
-            "Dataset": "AIDS",
-            "Method": "GCFExplainer",
-            "K": 10,
-            "ThresholdName": "",
-            "Threshold": dense_thresholds,
-            "Coverage": [float(row["coverage"]) for row in threshold_metrics],
-        }
-    )
-    if not figure4["Coverage"].between(0, 1).all():
-        raise ValueError("GCFExplainer Figure 4 coverage is outside [0,1]")
-    table_metrics = compute_prefix_metrics(run, k=10, threshold=theta_star)
-    table = {
-        "Dataset": "AIDS",
-        "Method": "GCFExplainer",
-        "K": 10,
-        "Theta": float(theta_star),
-        "Coverage": float(table_metrics["coverage"]),
-        "CoveragePercent": 100.0 * float(table_metrics["coverage"]),
-        "Cost": float(table_metrics["median_cost"]),
-    }
-    if not math.isfinite(table["Cost"]) or table["Cost"] < 0:
-        raise ValueError("GCFExplainer K=10 frozen median cost is not finite and non-negative")
-
-    candidate_order = [
-        {"rank": candidate.rank, "candidate_id": candidate.candidate_id}
-        for candidate in run.candidates
-    ]
-    parent_order = [{"parent_id": parent_id} for parent_id in run.parent_ids]
-    config_sha256 = sha256(config_path)
-    combined_sha256 = sha256(combined_path)
-    details_sha256 = sha256(details_path)
-    candidate_sha256 = sha256(run.candidate_path)
-    common_source = {
-        "raw_run_root": str(root),
-        "standardized_from_saved_pairs": True,
-        "distance_recomputed": False,
-        "teacher_recomputed": False,
-        "candidate_order_changed": False,
-        "run_config": {"path": str(config_path), "sha256": config_sha256},
-        "combined_summary": {"path": str(combined_path), "sha256": combined_sha256},
-        "official_summary_threshold_count": len(summary_thresholds),
-        "official_summary_reconstruction": reconstructed_summary,
-        "figure4_threshold_grid_source": dict(figure4_threshold_source),
-        "pair_details": {"path": str(details_path), "sha256": details_sha256},
-        "candidate_file": {
-            "path": str(run.candidate_path),
-            "sha256": candidate_sha256,
-        },
-        "candidate_rank_source": run.rank_source,
-        "candidate_order_sha256": _json_order_sha256(candidate_order),
-        "parent_ids_sha256": _json_order_sha256(parent_order),
-        "num_parents": len(run.parent_ids),
-        "num_candidates": len(run.candidates),
-        "num_unique_parent_candidate_pairs": run.num_unique_parent_candidate_pairs,
-    }
-    figure3_source = {
-        **common_source,
-        "path": str(details_path),
-        "sha256": details_sha256,
-        "columns": {
-            "k": "frozen_candidate_rank_prefix",
-            "coverage": "strict_flip_distance_le_theta",
-            "cost": "conditional_median_cost",
-        },
-    }
-    figure4_source = {
-        **common_source,
-        "path": str(combined_path),
-        "sha256": combined_sha256,
-        "duplicate_rows_removed": 0,
-        "columns": {
-            "k": "frozen_candidate_rank_prefix_k10",
-            "threshold_name": "",
-            "threshold": threshold_col,
-            "coverage": "strict_flip_distance_le_threshold",
-        },
-    }
-    table_source = {
-        **common_source,
-        "path": str(details_path),
-        "sha256": details_sha256,
-        "columns": {
-            "k": "frozen_candidate_rank_prefix_k10",
-            "theta": "AIDS_frozen_theta_star",
-            "coverage": "strict_flip_distance_le_theta",
-            "cost": "median_cost",
-        },
-    }
-    evidence.update(
-        {
-            "raw_run_standardized": True,
-            "candidate_order_sha256": common_source["candidate_order_sha256"],
-            "parent_ids_sha256": common_source["parent_ids_sha256"],
-            "top20_frozen_ranking_verified": True,
-            "complete_cartesian_verified": True,
-        }
-    )
-    return figure3, figure4, table, figure3_source, figure4_source, table_source, evidence
-
-
-def read_figure3(root: Path, dataset: str, method: str) -> tuple[pd.DataFrame, dict[str, Any]]:
-    path = root / "figure3_coverage_vs_k.csv"
-    frame = read_csv(path)
-    k_col = find_column(frame, ["k", "prefix_k", "num_candidates", "candidate_count"])
-    coverage_col = find_column(
-        frame,
-        [
-            "ccrcov_theta_star",
-            "coverage_at_theta_star",
-            "close_cf_coverage_at_theta_star",
-            "close_cf_coverage",
-            "ccrcov",
-            "coverage",
-        ],
-    )
-    cost_col = find_column(
-        frame,
-        [
-            "conditional_median_cost",
-            "applicable_parent_median_cost",
-            "covered_parent_median_cost",
-            "cost",
-        ],
-    )
-    output = pd.DataFrame(
-        {
-            "Dataset": dataset,
-            "Method": method,
-            "K": numeric(frame, k_col).astype(int),
-            "Coverage": numeric(frame, coverage_col).astype(float),
-            "ConditionalMedianCost": numeric(frame, cost_col).astype(float),
-        }
-    ).sort_values("K")
-    output = output.loc[output["K"].between(1, 20)].reset_index(drop=True)
-    if output["K"].tolist() != list(range(1, 21)):
-        raise ValueError(
-            f"{dataset}/{method}: Figure 3 requires K=1,...,20; "
-            f"observed={output['K'].tolist()}"
-        )
-    if not output["Coverage"].between(0, 1).all():
-        raise ValueError(f"{dataset}/{method}: coverage outside [0,1]")
-    if (output["ConditionalMedianCost"] < 0).any():
-        raise ValueError(f"{dataset}/{method}: negative conditional median cost")
-    return output, {
+def _load_mut_candidate_order(path: Path, method: str) -> tuple[list[str], dict[str, Any]]:
+    frame = _read_frozen_frame(path)
+    candidate_col = find_column(frame, ("candidate_id",))
+    rank_col = find_column(frame, ("rank", "selection_rank"))
+    ranks = numeric(frame, rank_col).astype(int).tolist()
+    candidate_ids = frame[candidate_col].astype(str).tolist()
+    if ranks != list(range(1, 21)):
+        raise ValueError(f"Mutagenicity/{method}: frozen ranks must be ordered 1,...,20")
+    if len(candidate_ids) != 20 or len(set(candidate_ids)) != 20:
+        raise ValueError(f"Mutagenicity/{method}: frozen candidate IDs must be 20 unique values")
+    preselected_col = find_column(frame, ("candidate_set_preselected",), required=False)
+    if preselected_col is not None and set(normalize_bool(frame[preselected_col])) != {True}:
+        raise ValueError(f"Mutagenicity/{method}: candidate set is not frozen")
+    selected_in_eval_col = find_column(frame, ("selection_performed_in_eval",), required=False)
+    if selected_in_eval_col is not None and set(normalize_bool(frame[selected_in_eval_col])) != {False}:
+        raise ValueError(f"Mutagenicity/{method}: selection was performed in evaluation")
+    return candidate_ids, {
         "path": str(path),
         "sha256": sha256(path),
-        "columns": {"k": k_col, "coverage": coverage_col, "cost": cost_col},
+        "candidate_count": len(candidate_ids),
+        "candidate_order_sha256": _sequence_sha256(candidate_ids),
+        "candidate_order_changed": False,
     }
 
 
-def _deduplicate_threshold_rows(
+def _load_mut_distance_matrix(
+    root: Path,
+    method: str,
+) -> tuple[np.ndarray, list[str], dict[str, Any]]:
+    if not root.is_dir():
+        raise FileNotFoundError(root)
+    _reject_forbidden_provenance(root)
+    spec = MUT_FROZEN_PAIR_SPECS[method]
+    pair_path = root / spec["pairs"]
+    order_path = root / spec["order"]
+    candidate_ids, order_evidence = _load_mut_candidate_order(order_path, method)
+    pairs = _read_frozen_frame(pair_path)
+    if len(pairs) != MUT_EXPECTED_PAIR_ROWS:
+        raise ValueError(
+            f"Mutagenicity/{method}: pair_count={len(pairs)}, expected={MUT_EXPECTED_PAIR_ROWS}"
+        )
+    parent_col = find_column(pairs, ("parent_id", "molecule_id"))
+    candidate_col = find_column(pairs, ("candidate_id",))
+    if spec["strict"] not in pairs.columns or spec["distance"] not in pairs.columns:
+        raise ValueError(f"Mutagenicity/{method}: frozen pair schema does not match contract")
+
+    parent_ids = list(dict.fromkeys(pairs[parent_col].astype(str)))
+    observed_candidates = set(pairs[candidate_col].astype(str))
+    if len(parent_ids) != EXPECTED_PARENT_COUNTS["Mutagenicity"]:
+        raise ValueError(f"Mutagenicity/{method}: expected 217 unique parents")
+    if observed_candidates != set(candidate_ids):
+        raise ValueError(f"Mutagenicity/{method}: pair candidates differ from frozen order")
+    pair_keys = pairs[parent_col].astype(str) + "\0" + pairs[candidate_col].astype(str)
+    if pair_keys.duplicated().any() or pair_keys.nunique() != MUT_EXPECTED_PAIR_ROWS:
+        raise ValueError(f"Mutagenicity/{method}: pair matrix is not a complete Cartesian product")
+    counts = pairs.groupby(parent_col, sort=False)[candidate_col].nunique().to_numpy(dtype=int)
+    if not np.array_equal(counts, np.full(len(parent_ids), 20, dtype=int)):
+        raise ValueError(f"Mutagenicity/{method}: one or more parents do not have 20 candidates")
+
+    labels: set[str] = set()
+    types: set[str] = set()
+    distance_line_col = find_column(pairs, ("distance_line",), required=False)
+    distance_type_col = find_column(pairs, ("distance_type",), required=False)
+    if distance_line_col is not None:
+        labels.update(normalize(value) for value in pairs[distance_line_col].dropna().unique())
+    if distance_type_col is not None:
+        types.update(normalize(value) for value in pairs[distance_type_col].dropna().unique())
+    metadata = _root_metadata_evidence(root)
+    labels.update(normalize(value) for value in metadata["distance_labels"])
+    types.update(normalize(value) for value in metadata["distance_types"])
+    if labels != {normalize(DISTANCE_LABEL)} or types != {DISTANCE_TYPE}:
+        raise ValueError(
+            f"Mutagenicity/{method}: frozen pair WNode provenance mismatch: "
+            f"labels={sorted(labels)}, types={sorted(types)}"
+        )
+
+    strict = normalize_bool(pairs[spec["strict"]]).to_numpy(dtype=bool)
+    distances = pd.to_numeric(pairs[spec["distance"]], errors="coerce").to_numpy(dtype=float)
+    if np.any(strict & (~np.isfinite(distances) | (distances < 0.0))):
+        raise ValueError(f"Mutagenicity/{method}: strict-flip pair has invalid saved distance")
+    effective = np.where(strict, distances, np.inf)
+    rank_map = {candidate_id: rank for rank, candidate_id in enumerate(candidate_ids, start=1)}
+    work = pd.DataFrame(
+        {
+            "parent_id": pairs[parent_col].astype(str),
+            "rank": pairs[candidate_col].astype(str).map(rank_map),
+            "distance": effective,
+        }
+    )
+    matrix_frame = work.pivot(index="parent_id", columns="rank", values="distance")
+    matrix_frame = matrix_frame.reindex(index=parent_ids, columns=list(range(1, 21)))
+    matrix = matrix_frame.to_numpy(dtype=float)
+    if matrix.shape != (EXPECTED_PARENT_COUNTS["Mutagenicity"], 20):
+        raise ValueError(f"Mutagenicity/{method}: unexpected frozen matrix shape {matrix.shape}")
+    evidence = {
+        "root": str(root),
+        "pair_path": str(pair_path),
+        "pair_sha256": sha256(pair_path),
+        "pair_count": len(pairs),
+        "complete_cartesian": True,
+        "parent_count": len(parent_ids),
+        "parent_ids_sha256": _sequence_sha256(parent_ids),
+        "strict_flip_field": spec["strict"],
+        "distance_field": spec["distance"],
+        "distance_recomputed": False,
+        "teacher_recomputed": False,
+        **order_evidence,
+    }
+    return matrix, parent_ids, evidence
+
+
+def load_mut_method(
+    root: Path,
+    method: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    matrix, _parent_ids, source = _load_mut_distance_matrix(root, method)
+    best = np.full(matrix.shape[0], np.inf, dtype=float)
+    figure3_rows: list[dict[str, Any]] = []
+    best_at_k10: np.ndarray | None = None
+    for candidate_index in range(matrix.shape[1]):
+        best = np.minimum(best, matrix[:, candidate_index])
+        finite = np.isfinite(best)
+        if not np.any(finite):
+            raise ValueError(f"Mutagenicity/{method}: no strict-flip parent at K={candidate_index + 1}")
+        figure3_rows.append(
+            {
+                "Dataset": "Mutagenicity",
+                "Method": method,
+                "K": candidate_index + 1,
+                "Theta": AIDS_FIGURE3_THETA,
+                "Coverage": float(np.mean(best <= AIDS_FIGURE3_THETA)),
+                "Cost": float(np.median(best[finite])),
+            }
+        )
+        if candidate_index + 1 == AIDS_TABLE2_K:
+            best_at_k10 = best.copy()
+    if best_at_k10 is None:
+        raise AssertionError("K=10 prefix was not produced")
+
+    thresholds = np.linspace(
+        AIDS_FIGURE4_THRESHOLD_MIN,
+        AIDS_FIGURE4_THRESHOLD_MAX,
+        AIDS_FIGURE4_POINTS_PER_METHOD,
+    )
+    figure4 = pd.DataFrame(
+        {
+            "Dataset": "Mutagenicity",
+            "Method": method,
+            "K": AIDS_FIGURE4_K,
+            "Threshold": thresholds,
+            "Coverage": [float(np.mean(best_at_k10 <= threshold)) for threshold in thresholds],
+        }
+    )
+    finite_k10 = np.isfinite(best_at_k10)
+    if not np.any(finite_k10):
+        raise ValueError(f"Mutagenicity/{method}: no strict-flip parent at K=10")
+    table = {
+        "Dataset": "Mutagenicity",
+        "Method": method,
+        "K": AIDS_TABLE2_K,
+        "Theta": AIDS_TABLE2_THETA,
+        "Coverage": float(np.mean(best_at_k10 <= AIDS_TABLE2_THETA)),
+        "Cost": float(np.median(best_at_k10[finite_k10])),
+        "NumParents": EXPECTED_PARENT_COUNTS["Mutagenicity"],
+    }
+    source.update(
+        {
+            "threshold_mode": "match-aids",
+            "aggregation_only": True,
+            "figure3_theta": AIDS_FIGURE3_THETA,
+            "table2_theta": AIDS_TABLE2_THETA,
+            "table2_k": AIDS_TABLE2_K,
+            "figure4_k": AIDS_FIGURE4_K,
+            "figure4_threshold_min": AIDS_FIGURE4_THRESHOLD_MIN,
+            "figure4_threshold_max": AIDS_FIGURE4_THRESHOLD_MAX,
+            "figure4_points_per_method": AIDS_FIGURE4_POINTS_PER_METHOD,
+        }
+    )
+    return pd.DataFrame(figure3_rows), figure4, table, source
+
+
+def _filter_method(frame: pd.DataFrame, method: str) -> pd.DataFrame:
+    method_col = find_column(frame, ("method", "Method"), required=False)
+    if method_col is None:
+        return frame.copy()
+    canonical = frame[method_col].map(canonical_method)
+    return frame.loc[canonical == method].copy()
+
+
+def _deduplicate_native_thresholds(
     frame: pd.DataFrame,
     *,
     threshold_col: str,
     coverage_col: str,
-    dataset: str,
-    method: str,
+    context: str,
 ) -> tuple[pd.DataFrame, int]:
     keep: list[int] = []
     removed = 0
-    for _threshold, group in frame.groupby(threshold_col, sort=False):
+    for _, group in frame.groupby(threshold_col, sort=False):
         coverage = numeric(group, coverage_col).to_numpy(dtype=float)
         if not np.allclose(coverage, coverage[0], rtol=0.0, atol=1e-12):
-            raise ValueError(f"{dataset}/{method}: conflicting duplicate threshold rows")
+            raise ValueError(f"{context}: conflicting duplicate threshold rows")
         keep.append(int(group.index[0]))
         removed += len(group) - 1
     return frame.loc[keep].copy(), removed
 
 
-def read_figure4(root: Path, dataset: str, method: str) -> tuple[pd.DataFrame, dict[str, Any]]:
-    path = root / "figure4_coverage_vs_threshold.csv"
-    frame = read_csv(path)
-    k_col = find_column(frame, ["k", "prefix_k", "num_candidates", "candidate_count"], required=False)
-    if k_col is not None:
-        k_values = numeric(frame, k_col).astype(int)
-        if 10 not in set(k_values):
-            raise ValueError(f"{dataset}/{method}: Figure 4 has no K=10")
-        frame = frame.loc[k_values == 10].copy()
-    threshold_col = find_column(frame, ["threshold", "theta", "distance_threshold"])
-    coverage_col = find_column(frame, ["ccrcov", "coverage", "close_cf_coverage", "strict_flip_coverage"])
-    frame, duplicate_rows_removed = _deduplicate_threshold_rows(
-        frame,
-        threshold_col=threshold_col,
-        coverage_col=coverage_col,
-        dataset=dataset,
-        method=method,
-    )
-    threshold_name_col = find_column(
-        frame,
-        ["threshold_name", "quantile_label"],
-        required=False,
-    )
-    output = pd.DataFrame(
-        {
-            "Dataset": dataset,
-            "Method": method,
-            "K": 10,
-            "ThresholdName": (
-                frame[threshold_name_col].astype(str)
-                if threshold_name_col is not None
-                else ""
-            ),
-            "Threshold": numeric(frame, threshold_col).astype(float),
-            "Coverage": numeric(frame, coverage_col).astype(float),
-        }
-    ).sort_values("Threshold").reset_index(drop=True)
-    if output["Threshold"].duplicated().any():
-        raise ValueError(f"{dataset}/{method}: duplicate thresholds remain")
-    if not output["Coverage"].between(0, 1).all():
-        raise ValueError(f"{dataset}/{method}: coverage outside [0,1]")
-    if not output["Coverage"].is_monotonic_increasing:
-        raise ValueError(f"{dataset}/{method}: Figure 4 coverage is not monotonic")
-    expected_count = EXPECTED_FIGURE4_COUNTS[dataset]
-    if len(output) != expected_count:
-        raise ValueError(
-            f"{dataset}/{method}: expected {expected_count} frozen thresholds, found {len(output)}"
-        )
-    return output, {
-        "path": str(path),
-        "sha256": sha256(path),
-        "duplicate_rows_removed": duplicate_rows_removed,
-        "columns": {
-            "k": k_col or "",
-            "threshold_name": threshold_name_col or "",
-            "threshold": threshold_col,
-            "coverage": coverage_col,
-        },
-    }
+def load_mut_native_method(
+    root: Path,
+    method: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    _matrix, _parent_ids, pair_evidence = _load_mut_distance_matrix(root, method)
+    figure3_path = root / "figure3_coverage_vs_k.csv"
+    figure4_path = root / "figure4_coverage_vs_threshold.csv"
+    table_path = table2_path(root, method)
+    raw3 = _filter_method(read_csv(figure3_path), method)
+    raw4 = _filter_method(read_csv(figure4_path), method)
+    raw2 = _filter_method(read_csv(table_path), method)
 
-
-def read_table2(root: Path, dataset: str, method: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = table2_path(root, method)
-    frame = read_csv(path)
-    k_col = find_column(frame, ["k"])
-    frame = frame.loc[numeric(frame, k_col).astype(int) == 10].copy()
-    if len(frame) != 1:
-        raise ValueError(f"{dataset}/{method}: Table 2 needs one K=10 row")
-    theta_col = find_column(frame, ["theta", "theta_star", "threshold"])
-    coverage_col = find_column(frame, ["coverage", "ccrcov_theta_star", "close_cf_coverage", "ccrcov"])
-    cost_col = find_column(
-        frame,
-        ["conditional_median_cost", "applicable_parent_median_cost", "cost"],
+    table_k_col = find_column(raw2, ("k", "K"))
+    table_rows = raw2.loc[numeric(raw2, table_k_col).astype(int) == 10].copy()
+    if len(table_rows) != 1:
+        raise ValueError(f"Mutagenicity/{method}: native Table 2 must have one K=10 row")
+    row = table_rows.iloc[0]
+    theta_col = find_column(table_rows, ("theta", "theta_star", "threshold"))
+    coverage2_col = find_column(table_rows, ("coverage", "ccrcov_theta_star", "ccrcov"))
+    cost2_col = find_column(table_rows, ("conditional_median_cost",))
+    parent_col = find_column(
+        table_rows, ("num_parents", "num_test_parents", "test_parent_count")
     )
-    row = frame.iloc[0]
-    result = {
-        "Dataset": dataset,
+    theta = float(row[theta_col])
+    table = {
+        "Dataset": "Mutagenicity",
         "Method": method,
         "K": 10,
-        "Theta": float(row[theta_col]),
-        "Coverage": float(row[coverage_col]),
-        "CoveragePercent": 100.0 * float(row[coverage_col]),
-        "Cost": float(row[cost_col]),
+        "Theta": theta,
+        "Coverage": float(row[coverage2_col]),
+        "Cost": float(row[cost2_col]),
+        "NumParents": int(row[parent_col]),
     }
-    if not 0.0 <= result["Coverage"] <= 1.0:
-        raise ValueError(f"{dataset}/{method}: invalid Table 2 coverage")
-    if not math.isfinite(result["Cost"]) or result["Cost"] < 0:
-        raise ValueError(f"{dataset}/{method}: invalid Table 2 cost")
-    return result, {
-        "path": str(path),
-        "sha256": sha256(path),
-        "columns": {
-            "k": k_col,
-            "theta": theta_col,
-            "coverage": coverage_col,
-            "cost": cost_col,
+    if table["NumParents"] != EXPECTED_PARENT_COUNTS["Mutagenicity"]:
+        raise ValueError(f"Mutagenicity/{method}: native Table 2 parent count mismatch")
+
+    k3_col = find_column(raw3, ("k", "K"))
+    coverage3_col = find_column(
+        raw3,
+        ("ccrcov_theta_star", "coverage_at_theta_star", "coverage", "close_cf_coverage"),
+    )
+    cost3_col = find_column(raw3, ("conditional_median_cost",))
+    theta3_col = find_column(raw3, ("theta", "theta_star", "threshold"), required=False)
+    k_values = numeric(raw3, k3_col).astype(int).to_numpy()
+    if not np.array_equal(k_values, np.arange(1, 21)):
+        raise ValueError(f"Mutagenicity/{method}: native Figure 3 K must be 1,...,20")
+    theta_values = (
+        np.full(20, theta, dtype=float)
+        if theta3_col is None
+        else numeric(raw3, theta3_col).to_numpy(dtype=float)
+    )
+    if not np.allclose(theta_values, theta, rtol=0.0, atol=1e-12):
+        raise ValueError(f"Mutagenicity/{method}: native Figure 3 theta mismatch")
+    figure3 = pd.DataFrame(
+        {
+            "Dataset": "Mutagenicity",
+            "Method": method,
+            "K": k_values,
+            "Theta": theta_values,
+            "Coverage": numeric(raw3, coverage3_col).to_numpy(dtype=float),
+            "Cost": numeric(raw3, cost3_col).to_numpy(dtype=float),
+        }
+    )
+
+    k4_col = find_column(raw4, ("k", "K"))
+    raw4 = raw4.loc[numeric(raw4, k4_col).astype(int) == 10].copy()
+    threshold_col = find_column(raw4, ("threshold", "theta"))
+    coverage4_col = find_column(raw4, ("coverage", "ccrcov", "close_cf_coverage", "mean"))
+    raw4, removed = _deduplicate_native_thresholds(
+        raw4,
+        threshold_col=threshold_col,
+        coverage_col=coverage4_col,
+        context=f"Mutagenicity/{method} native Figure 4",
+    )
+    thresholds = numeric(raw4, threshold_col).to_numpy(dtype=float)
+    coverage4 = numeric(raw4, coverage4_col).to_numpy(dtype=float)
+    order = np.argsort(thresholds, kind="stable")
+    thresholds = thresholds[order]
+    coverage4 = coverage4[order]
+    if len(thresholds) != 7 or len(np.unique(thresholds)) != 7:
+        raise ValueError(f"Mutagenicity/{method}: native Figure 4 must have 7 thresholds")
+    figure4 = pd.DataFrame(
+        {
+            "Dataset": "Mutagenicity",
+            "Method": method,
+            "K": 10,
+            "Threshold": thresholds,
+            "Coverage": coverage4,
+        }
+    )
+    source = {
+        **pair_evidence,
+        "threshold_mode": "native",
+        "figure3": {"path": str(figure3_path), "sha256": sha256(figure3_path)},
+        "figure4": {
+            "path": str(figure4_path),
+            "sha256": sha256(figure4_path),
+            "duplicate_rows_removed": removed,
         },
+        "table2": {"path": str(table_path), "sha256": sha256(table_path)},
     }
+    return figure3, figure4, table, source
 
 
-def marker_indices_for_k(values: pd.Series) -> list[int]:
-    return [index for index, value in enumerate(values.tolist()) if int(value) in K_MARKERS]
-
-
-def marker_indices_evenly(count: int, target: int = 6) -> list[int]:
-    if count <= target:
-        return list(range(count))
-    return sorted(set(np.linspace(0, count - 1, target).round().astype(int).tolist()))
-
-
-def dataset_threshold_xlim(values: np.ndarray) -> tuple[float, float]:
-    minimum = min(0.0, float(np.min(values)))
-    maximum = float(np.max(values))
-    if maximum <= 0:
-        return 0.0, 1.0
-    step = 0.005 if maximum <= 0.06 else 0.01
-    return minimum, math.ceil(maximum / step) * step
-
-
-def _validate_dataset_alignment(
-    *,
+def validate_mut_alignment(
     figure4: pd.DataFrame,
     table: pd.DataFrame,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for dataset in DATASETS:
-        table_rows = table.loc[table["Dataset"] == dataset]
-        thetas = table_rows["Theta"].to_numpy(dtype=float)
-        if len(thetas) != len(METHODS) or not np.allclose(thetas, thetas[0], rtol=0.0, atol=1e-12):
-            raise ValueError(f"{dataset}: Table 2 methods do not share one frozen theta")
-        method_grids: list[np.ndarray] = []
-        for method in METHODS:
-            rows = figure4.loc[(figure4["Dataset"] == dataset) & (figure4["Method"] == method)]
-            method_grids.append(rows.sort_values("Threshold")["Threshold"].to_numpy(dtype=float))
-        first = method_grids[0]
-        if any(
-            len(grid) != len(first) or not np.allclose(grid, first, rtol=0.0, atol=1e-12)
-            for grid in method_grids[1:]
-        ):
-            raise ValueError(f"{dataset}: Figure 4 threshold grids differ across methods")
-        result[dataset] = {
-            "parent_count": EXPECTED_PARENT_COUNTS[dataset],
-            "theta_star": float(thetas[0]),
-            "figure4_threshold_count": len(first),
-            "figure4_threshold_min": float(first.min()),
-            "figure4_threshold_max": float(first.max()),
+    methods = tuple(table["Method"])
+    if methods != METHODS:
+        raise ValueError(f"Mutagenicity methods must be exactly {METHODS}; observed={methods}")
+    theta_values = table["Theta"].to_numpy(dtype=float)
+    if not np.allclose(theta_values, AIDS_TABLE2_THETA, rtol=0.0, atol=1e-12):
+        raise ValueError("Mutagenicity Table 2 must use the AIDS theta=0.05 contract")
+    grids = [
+        figure4.loc[figure4["Method"] == method, "Threshold"].to_numpy(dtype=float)
+        for method in METHODS
+    ]
+    first = grids[0]
+    if len(first) != AIDS_FIGURE4_POINTS_PER_METHOD:
+        raise ValueError("Mutagenicity Figure 4 must contain 601 thresholds per method")
+    if any(not np.array_equal(grid, first) for grid in grids[1:]):
+        raise ValueError("Mutagenicity Figure 4 threshold grids differ across methods")
+    if not np.isclose(first[0], AIDS_FIGURE4_THRESHOLD_MIN, rtol=0.0, atol=1e-15):
+        raise ValueError("Mutagenicity Figure 4 threshold_min must be 0.0")
+    if not np.isclose(first[-1], AIDS_FIGURE4_THRESHOLD_MAX, rtol=0.0, atol=1e-15):
+        raise ValueError("Mutagenicity Figure 4 threshold_max must be 0.0535")
+    return {
+        "parent_count": EXPECTED_PARENT_COUNTS["Mutagenicity"],
+        "theta": AIDS_TABLE2_THETA,
+        "figure4_threshold_count": len(first),
+        "figure4_threshold_min": float(first[0]),
+        "figure4_threshold_max": float(first[-1]),
+        "methods_present": list(METHODS),
+        "uses_same_parameters_and_range_as_aids": True,
+    }
+
+
+def validate_mut_native_alignment(
+    figure4: pd.DataFrame,
+    table: pd.DataFrame,
+) -> dict[str, Any]:
+    methods = tuple(table["Method"])
+    if methods != METHODS:
+        raise ValueError(f"Mutagenicity methods must be exactly {METHODS}; observed={methods}")
+    theta_values = table["Theta"].to_numpy(dtype=float)
+    if not np.allclose(theta_values, theta_values[0], rtol=0.0, atol=1e-12):
+        raise ValueError("Mutagenicity native Table 2 methods do not share one frozen theta")
+    grids = [
+        figure4.loc[figure4["Method"] == method, "Threshold"].to_numpy(dtype=float)
+        for method in METHODS
+    ]
+    first = grids[0]
+    if len(first) != 7 or any(
+        not np.allclose(grid, first, rtol=0.0, atol=1e-12) for grid in grids[1:]
+    ):
+        raise ValueError("Mutagenicity native Figure 4 grids must share 7 frozen thresholds")
+    return {
+        "parent_count": EXPECTED_PARENT_COUNTS["Mutagenicity"],
+        "theta": float(theta_values[0]),
+        "figure4_threshold_count": len(first),
+        "figure4_threshold_min": float(first[0]),
+        "figure4_threshold_max": float(first[-1]),
+        "methods_present": list(METHODS),
+        "uses_same_parameters_and_range_as_aids": False,
+    }
+
+
+def configure_matplotlib() -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"],
+            "mathtext.fontset": "stix",
+            "axes.titleweight": "bold",
+            "axes.titlesize": 15,
+            "axes.labelsize": 14,
+            "xtick.labelsize": 11,
+            "ytick.labelsize": 11,
+            "legend.fontsize": 12,
+            "axes.linewidth": 0.9,
+            "lines.linewidth": 1.5,
+            "savefig.dpi": 300,
         }
-    return result
+    )
+
+
+def _save_png_pdf(fig: plt.Figure, output_dir: Path, stem: str) -> None:
+    fig.savefig(output_dir / f"{stem}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
+
+
+def _placeholder(axis: plt.Axes, title: str) -> None:
+    axis.clear()
+    axis.axis("off")
+    axis.set_title(title, fontweight="bold", pad=8)
+
+
+def _method_rows(frame: pd.DataFrame, dataset: str, method: str, sort: str) -> pd.DataFrame:
+    return frame.loc[
+        (frame["Dataset"] == dataset) & (frame["Method"] == method)
+    ].sort_values(sort, kind="stable")
+
+
+def render_figure3(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    *,
+    mut_matches_aids: bool,
+) -> None:
+    configure_matplotlib()
+    fig, axes = plt.subplots(
+        2,
+        4,
+        figsize=FIGURE3_FIGSIZE,
+        gridspec_kw={"hspace": 0.18, "wspace": 0.22},
+    )
+    for dataset, column in ACTIVE_DATASET_COLUMNS.items():
+        top = axes[0, column]
+        bottom = axes[1, column]
+        for method in METHODS:
+            rows = _method_rows(frame, dataset, method, "K")
+            if rows.empty:
+                continue
+            style = METHOD_STYLES[method]
+            top.plot(
+                rows["K"],
+                100.0 * rows["Coverage"],
+                color=style["color"],
+                marker=style["marker"],
+                markevery=list(FIGURE3_MARKER_INDICES),
+                markersize=5.5,
+                markeredgewidth=0.9,
+                label=style["label"],
+            )
+            bottom.plot(
+                rows["K"],
+                rows["Cost"],
+                color=style["color"],
+                marker=style["marker"],
+                markevery=list(FIGURE3_MARKER_INDICES),
+                markersize=5.5,
+                markeredgewidth=0.9,
+            )
+        top.set_title(dataset, fontweight="bold", pad=8)
+        top.set_xlim(0, 20)
+        bottom.set_xlim(0, 20)
+        top.set_xticks([0, 5, 10, 15, 20])
+        bottom.set_xticks([0, 5, 10, 15, 20])
+        top.grid(alpha=0.42, linewidth=0.7)
+        bottom.grid(alpha=0.42, linewidth=0.7)
+
+    aids_top = axes[0, ACTIVE_DATASET_COLUMNS["AIDS"]]
+    aids_bottom = axes[1, ACTIVE_DATASET_COLUMNS["AIDS"]]
+    aids_top.set_ylabel("Coverage (%)")
+    aids_top.set_ylim(0, 80)
+    aids_top.set_yticks([0, 20, 40, 60, 80])
+    aids_bottom.set_ylabel("Cost")
+    aids_bottom.set_ylim(0.008, 0.11)
+    aids_bottom.set_yticks([0.02, 0.04, 0.06, 0.08, 0.10])
+
+    mut_top = axes[0, ACTIVE_DATASET_COLUMNS["Mutagenicity"]]
+    mut_bottom = axes[1, ACTIVE_DATASET_COLUMNS["Mutagenicity"]]
+    mut_coverage = frame.loc[frame["Dataset"] == "Mutagenicity", "Coverage"]
+    mut_cost = frame.loc[frame["Dataset"] == "Mutagenicity", "Cost"]
+    if mut_matches_aids:
+        mut_top.set_ylim(0, 80)
+        mut_top.set_yticks([0, 20, 40, 60, 80])
+        mut_bottom.set_ylim(0.008, 0.11)
+        mut_bottom.set_yticks([0.02, 0.04, 0.06, 0.08, 0.10])
+    elif not mut_coverage.empty:
+        ymax = max(80.0, 10.0 * np.ceil(100.0 * float(mut_coverage.max()) / 10.0))
+        mut_top.set_ylim(0, min(100.0, ymax))
+    if not mut_matches_aids and not mut_cost.empty:
+        span = max(0.002, 0.06 * float(mut_cost.max() - mut_cost.min()))
+        mut_bottom.set_ylim(max(0.0, float(mut_cost.min()) - span), float(mut_cost.max()) + span)
+
+    for column, dataset in ((1, "NCI1"), (3, "Proteins")):
+        _placeholder(axes[0, column], dataset)
+        axes[1, column].axis("off")
+
+    handles, labels = aids_top.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=4,
+        frameon=True,
+        bbox_to_anchor=(0.5, -0.015),
+        columnspacing=2.0,
+        handlelength=2.2,
+    )
+    fig.supxlabel("Size ($k$)", y=0.075, fontsize=14)
+    fig.subplots_adjust(left=0.065, right=0.985, top=0.92, bottom=0.16)
+    _save_png_pdf(fig, output_dir, FIGURE3_OUTPUT_STEM)
+    plt.close(fig)
+
+
+def render_figure4(
+    frame: pd.DataFrame,
+    output_dir: Path,
+    *,
+    mut_matches_aids: bool,
+) -> None:
+    configure_matplotlib()
+    fig, axes = plt.subplots(1, 4, figsize=FIGURE4_FIGSIZE, gridspec_kw={"wspace": 0.24})
+    for dataset, column in ACTIVE_DATASET_COLUMNS.items():
+        axis = axes[column]
+        for method in METHODS:
+            rows = _method_rows(frame, dataset, method, "Threshold")
+            if rows.empty:
+                continue
+            style = METHOD_STYLES[method]
+            axis.plot(
+                rows["Threshold"],
+                100.0 * rows["Coverage"],
+                color=style["color"],
+                marker=style["marker"],
+                markevery=(
+                    FIGURE4_AIDS_MARKEVERY
+                    if dataset == "AIDS" or mut_matches_aids
+                    else 1
+                ),
+                markersize=5.5,
+                markeredgewidth=0.9,
+                label=style["label"],
+            )
+        axis.set_title(dataset, fontweight="bold", pad=8)
+        axis.set_xlabel(r"Distance threshold ($\theta$)")
+        axis.grid(alpha=0.42, linewidth=0.7)
+
+    aids_axis = axes[ACTIVE_DATASET_COLUMNS["AIDS"]]
+    aids_axis.set_ylabel("Coverage (%)")
+    aids_axis.set_xlim(AIDS_FIGURE4_THRESHOLD_MIN, AIDS_FIGURE4_THRESHOLD_MAX)
+    aids_axis.set_xticks([0.00, 0.01, 0.02, 0.03, 0.04, 0.05])
+    aids_axis.set_ylim(0, 79.5)
+    aids_axis.set_yticks([0, 10, 20, 30, 40, 50, 60, 70])
+
+    mut_axis = axes[ACTIVE_DATASET_COLUMNS["Mutagenicity"]]
+    mut_rows = frame.loc[frame["Dataset"] == "Mutagenicity"]
+    if mut_matches_aids:
+        mut_axis.set_xlim(AIDS_FIGURE4_THRESHOLD_MIN, AIDS_FIGURE4_THRESHOLD_MAX)
+        mut_axis.set_xticks([0.00, 0.01, 0.02, 0.03, 0.04, 0.05])
+        mut_axis.set_ylim(0, 79.5)
+        mut_axis.set_yticks([0, 10, 20, 30, 40, 50, 60, 70])
+    elif not mut_rows.empty:
+        mut_axis.set_xlim(float(mut_rows["Threshold"].min()), float(mut_rows["Threshold"].max()))
+        mut_ymax = max(80.0, 10.0 * np.ceil(100.0 * float(mut_rows["Coverage"].max()) / 10.0))
+        mut_axis.set_ylim(0, min(100.0, mut_ymax))
+
+    for column, dataset in ((1, "NCI1"), (3, "Proteins")):
+        _placeholder(axes[column], dataset)
+
+    handles, labels = aids_axis.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=4,
+        frameon=True,
+        bbox_to_anchor=(0.5, -0.02),
+        columnspacing=2.0,
+        handlelength=2.2,
+    )
+    fig.subplots_adjust(left=0.065, right=0.985, top=0.90, bottom=0.24)
+    _save_png_pdf(fig, output_dir, FIGURE4_OUTPUT_STEM)
+    plt.close(fig)
+
+
+def distinct_best_and_second(
+    values: pd.Series,
+    *,
+    higher_is_better: bool,
+) -> tuple[float, float | None]:
+    finite = [float(value) for value in values if pd.notna(value)]
+    unique = sorted(set(finite), reverse=higher_is_better)
+    if not unique:
+        return float("nan"), None
+    return unique[0], unique[1] if len(unique) > 1 else None
+
+
+def table_cell_styles(table: pd.DataFrame) -> dict[tuple[str, str, str], str]:
+    styles: dict[tuple[str, str, str], str] = {}
+    for dataset in ("AIDS", "Mutagenicity"):
+        rows = table.loc[table["Dataset"] == dataset]
+        if rows.empty:
+            continue
+        for metric, higher in (("Coverage", True), ("Cost", False)):
+            best, second = distinct_best_and_second(rows[metric], higher_is_better=higher)
+            for _, row in rows.iterrows():
+                value = float(row[metric])
+                if np.isclose(value, best, rtol=0.0, atol=1e-12):
+                    styles[(dataset, str(row["Method"]), metric)] = "best"
+                elif second is not None and np.isclose(value, second, rtol=0.0, atol=1e-12):
+                    styles[(dataset, str(row["Method"]), metric)] = "second"
+                else:
+                    styles[(dataset, str(row["Method"]), metric)] = "normal"
+    return styles
+
+
+def _table_matrix(table: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for method in METHODS:
+        row: dict[str, Any] = {"Method": method}
+        for dataset in DATASET_ORDER:
+            match = table.loc[(table["Dataset"] == dataset) & (table["Method"] == method)]
+            row[f"{dataset} Coverage"] = np.nan if match.empty else float(match.iloc[0]["Coverage"])
+            row[f"{dataset} Cost"] = np.nan if match.empty else float(match.iloc[0]["Cost"])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _display_metric(value: float, *, coverage: bool) -> str:
+    if pd.isna(value):
+        return "—"
+    return f"{100.0 * value:.2f}%" if coverage else f"{value:.4f}"
 
 
 def write_table_outputs(table: pd.DataFrame, output_dir: Path) -> None:
-    pivot = table.pivot(index="Method", columns="Dataset")
-    compact = pd.DataFrame(
-        [
-            {
-                "Method": method,
-                "AIDS Coverage (%)": float(pivot.loc[method, ("CoveragePercent", "AIDS")]),
-                "AIDS Cost": float(pivot.loc[method, ("Cost", "AIDS")]),
-                "Mutagenicity Coverage (%)": float(
-                    pivot.loc[method, ("CoveragePercent", "Mutagenicity")]
-                ),
-                "Mutagenicity Cost": float(pivot.loc[method, ("Cost", "Mutagenicity")]),
-            }
-            for method in METHODS
-        ]
-    )
-    compact.to_csv(output_dir / "table2_aids_mut_gcf_style.csv", index=False)
-    md = [
-        "| Method | AIDS Coverage (%) | AIDS Cost | Mutagenicity Coverage (%) | Mutagenicity Cost |",
-        "|---|---:|---:|---:|---:|",
+    configure_matplotlib()
+    matrix = _table_matrix(table)
+    matrix.to_csv(output_dir / f"{TABLE2_OUTPUT_STEM}.csv", index=False)
+    markdown = [
+        "| Method | AIDS Coverage | AIDS Cost | NCI1 Coverage | NCI1 Cost | "
+        "Mutagenicity Coverage | Mutagenicity Cost | Proteins Coverage | Proteins Cost |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for _, row in compact.iterrows():
-        md.append(
-            f"| {row['Method']} | {row['AIDS Coverage (%)']:.2f} | "
-            f"{row['AIDS Cost']:.4f} | "
-            f"{row['Mutagenicity Coverage (%)']:.2f} | "
-            f"{row['Mutagenicity Cost']:.4f} |"
-        )
-    (output_dir / "table2_aids_mut_gcf_style.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    for _, row in matrix.iterrows():
+        cells = [str(row["Method"])]
+        for dataset in DATASET_ORDER:
+            cells.append(_display_metric(float(row[f"{dataset} Coverage"]), coverage=True))
+            cells.append(_display_metric(float(row[f"{dataset} Cost"]), coverage=False))
+        markdown.append("| " + " | ".join(cells) + " |")
+    (output_dir / f"{TABLE2_OUTPUT_STEM}.md").write_text(
+        "\n".join(markdown) + "\n", encoding="utf-8"
+    )
 
-    fig, ax = plt.subplots(figsize=(12.5, 3.3))
-    ax.axis("off")
-    cell_text = [
-        [
-            row["Method"],
-            f"{row['AIDS Coverage (%)']:.2f}%",
-            f"{row['AIDS Cost']:.4f}",
-            f"{row['Mutagenicity Coverage (%)']:.2f}%",
-            f"{row['Mutagenicity Cost']:.4f}",
-        ]
-        for _, row in compact.iterrows()
-    ]
-    artist = ax.table(
-        cellText=cell_text,
-        colLabels=[
-            "Method",
-            "AIDS Coverage",
-            "AIDS Cost",
-            "Mutagenicity Coverage",
-            "Mutagenicity Cost",
-        ],
-        cellLoc="center",
-        colLoc="center",
-        loc="center",
-    )
-    artist.auto_set_font_size(False)
-    artist.set_fontsize(10)
-    artist.scale(1.0, 1.55)
-    for dataset, coverage_column, cost_column in (("AIDS", 1, 2), ("Mutagenicity", 3, 4)):
-        best_coverage = int(compact[f"{dataset} Coverage (%)"].idxmax()) + 1
-        best_cost = int(compact[f"{dataset} Cost"].idxmin()) + 1
-        artist[(best_coverage, coverage_column)].get_text().set_weight("bold")
-        artist[(best_cost, cost_column)].get_text().set_weight("bold")
-    theta_aids = table.loc[table["Dataset"] == "AIDS", "Theta"].iloc[0]
-    theta_mut = table.loc[table["Dataset"] == "Mutagenicity", "Theta"].iloc[0]
-    ax.set_title(
-        "WNode Global Recourse Comparison at K=10\n"
-        f"AIDS theta*={theta_aids:.6f}; Mutagenicity theta*={theta_mut:.6f}",
-        fontsize=13,
-        pad=16,
-    )
-    fig.tight_layout()
-    fig.savefig(output_dir / "table2_aids_mut_gcf_style.png", dpi=300, bbox_inches="tight")
-    fig.savefig(output_dir / "table2_aids_mut_gcf_style.pdf", bbox_inches="tight")
+    styles = table_cell_styles(table)
+    fig, axis = plt.subplots(figsize=TABLE2_FIGSIZE)
+    axis.set_xlim(0, 10)
+    axis.set_ylim(0, 1)
+    axis.axis("off")
+    method_x = 1.0
+    metric_x = {
+        ("AIDS", "Coverage"): 2.45,
+        ("AIDS", "Cost"): 3.25,
+        ("NCI1", "Coverage"): 4.25,
+        ("NCI1", "Cost"): 5.05,
+        ("Mutagenicity", "Coverage"): 6.15,
+        ("Mutagenicity", "Cost"): 6.95,
+        ("Proteins", "Coverage"): 8.05,
+        ("Proteins", "Cost"): 8.85,
+    }
+    dataset_center = {"AIDS": 2.85, "NCI1": 4.65, "Mutagenicity": 6.55, "Proteins": 8.45}
+    for y, linewidth in ((0.94, 1.4), (0.59, 0.9), (0.06, 1.4)):
+        axis.plot([0.15, 9.75], [y, y], color="black", linewidth=linewidth)
+    axis.text(method_x, 0.75, "Method", ha="center", va="center", fontsize=16, fontweight="bold")
+    for dataset in DATASET_ORDER:
+        axis.text(
+            dataset_center[dataset],
+            0.84,
+            dataset,
+            ha="center",
+            va="center",
+            fontsize=16,
+            fontweight="bold",
+        )
+        for metric in ("Coverage", "Cost"):
+            axis.text(
+                metric_x[(dataset, metric)],
+                0.68,
+                metric,
+                ha="center",
+                va="center",
+                fontsize=14,
+            )
+
+    for row_index, method in enumerate(METHODS):
+        y = (0.48, 0.35, 0.22, 0.09)[row_index]
+        axis.text(method_x, y, method, ha="center", va="center", fontsize=15, fontvariant="small-caps")
+        for dataset in DATASET_ORDER:
+            for metric in ("Coverage", "Cost"):
+                match = table.loc[(table["Dataset"] == dataset) & (table["Method"] == method)]
+                value = np.nan if match.empty else float(match.iloc[0][metric])
+                style = styles.get((dataset, method, metric), "normal")
+                axis.text(
+                    metric_x[(dataset, metric)],
+                    y,
+                    _display_metric(value, coverage=metric == "Coverage"),
+                    ha="center",
+                    va="center",
+                    fontsize=15,
+                    fontweight="bold" if style == "best" else "normal",
+                )
+                if style == "second":
+                    half_width = 0.25 if metric == "Coverage" else 0.22
+                    x = metric_x[(dataset, metric)]
+                    axis.plot(
+                        [x - half_width, x + half_width],
+                        [y - 0.035, y - 0.035],
+                        color="black",
+                        linewidth=0.8,
+                    )
+    _save_png_pdf(fig, output_dir, TABLE2_OUTPUT_STEM)
     plt.close(fig)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate AIDS + Mutagenicity four-method WNode Figure 3, Figure 4, and Table 2."
+        description="Plot frozen AIDS and Mutagenicity WNode artifacts in the GCF-style layout."
     )
     parser.add_argument("--project-root", default=str(Path.cwd()))
+    parser.add_argument("--aids-figure3-csv", required=True)
+    parser.add_argument("--aids-figure4-csv", required=True)
     parser.add_argument("--aids-ours-root", required=True)
     parser.add_argument("--aids-globalgce-root", required=True)
     parser.add_argument("--aids-clear-root", required=True)
@@ -1046,45 +1403,80 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mut-globalgce-root", required=True)
     parser.add_argument("--mut-clear-root", required=True)
     parser.add_argument("--mut-gcf-root", required=True)
+    parser.add_argument(
+        "--mut-threshold-mode",
+        choices=("native", "match-aids"),
+        default="native",
+        help="Keep MUT frozen thresholds or aggregate saved pair distances on the AIDS grid.",
+    )
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--coverage-ymax", type=float, default=100.0)
-    parser.add_argument("--cost-ymin", type=float, default=0.0)
-    parser.add_argument("--cost-ymax", type=float, default=None)
     return parser
 
 
+def _args_paths(args: argparse.Namespace, project_root: Path) -> dict[str, Any]:
+    aids_figure3 = _resolve(project_root, args.aids_figure3_csv)
+    aids_figure4 = _resolve(project_root, args.aids_figure4_csv)
+    _assert_exact_project_path(aids_figure3, project_root, AIDS_FIGURE3_RELATIVE_PATH)
+    _assert_exact_project_path(aids_figure4, project_root, AIDS_FIGURE4_RELATIVE_PATH)
+    aids_roots = {
+        "Ours": _resolve(project_root, args.aids_ours_root),
+        "GlobalGCE": _resolve(project_root, args.aids_globalgce_root),
+        "CLEAR": _resolve(project_root, args.aids_clear_root),
+        "GCFExplainer": _resolve(project_root, args.aids_gcf_root),
+    }
+    for method, expected in AIDS_TABLE_ROOTS.items():
+        _assert_exact_project_path(aids_roots[method], project_root, expected)
+    mut_roots: dict[str, Path] = {
+        "Ours": _resolve(project_root, args.mut_ours_root),
+        "GlobalGCE": _resolve(project_root, args.mut_globalgce_root),
+        "CLEAR": _resolve(project_root, args.mut_clear_root),
+        "GCFExplainer": _resolve(project_root, args.mut_gcf_root),
+    }
+    return {
+        "aids_figure3": aids_figure3,
+        "aids_figure4": aids_figure4,
+        "aids_roots": aids_roots,
+        "mut_roots": mut_roots,
+    }
+
+
 def _write_audit(
-    *,
     output_dir: Path,
-    datasets: Mapping[str, Mapping[str, Path]],
-    dataset_audit: Mapping[str, Any],
+    *,
     sources: Mapping[str, Any],
+    mut_audit: Mapping[str, Any],
+    mut_threshold_mode: str,
 ) -> None:
     lines = [
-        "AIDS + Mutagenicity four-method WNode plot audit",
-        f"distance_label={DISTANCE_LABEL}",
+        "AIDS + Mutagenicity GCF-style WNode plot audit",
+        f"distance_line={DISTANCE_LABEL}",
         f"distance_type={DISTANCE_TYPE}",
         f"cf_mode={CF_MODE}",
-        f"methods={','.join(METHODS)}",
+        f"dataset_order={','.join(DATASET_ORDER)}",
+        f"method_order={','.join(METHODS)}",
+        f"AIDS.figure3_source={sources['aids_figure3']['path']}",
+        f"AIDS.figure3_rows={AIDS_FIGURE3_ROWS}",
+        f"AIDS.figure3_theta={AIDS_FIGURE3_THETA}",
+        f"AIDS.figure4_source={sources['aids_figure4']['path']}",
+        f"AIDS.figure4_rows={AIDS_FIGURE4_ROWS}",
+        f"AIDS.figure4_k={AIDS_FIGURE4_K}",
+        f"AIDS.figure4_points_per_method={AIDS_FIGURE4_POINTS_PER_METHOD}",
+        f"AIDS.figure4_threshold_min={AIDS_FIGURE4_THRESHOLD_MIN}",
+        f"AIDS.figure4_threshold_max={AIDS_FIGURE4_THRESHOLD_MAX}",
+        f"AIDS.table2_k={AIDS_TABLE2_K}",
+        f"AIDS.table2_theta={AIDS_TABLE2_THETA}",
+        f"AIDS.num_parents={EXPECTED_PARENT_COUNTS['AIDS']}",
+        f"Mutagenicity.num_parents={EXPECTED_PARENT_COUNTS['Mutagenicity']}",
+        f"Mutagenicity.threshold_mode={mut_threshold_mode}",
+        f"Mutagenicity.theta={mut_audit['theta']:.17g}",
+        f"Mutagenicity.figure4_threshold_count={mut_audit['figure4_threshold_count']}",
+        f"Mutagenicity.figure4_threshold_min={mut_audit['figure4_threshold_min']:.17g}",
+        f"Mutagenicity.figure4_threshold_max={mut_audit['figure4_threshold_max']:.17g}",
+        "distance_recomputed=false",
+        "teacher_recomputed=false",
+        "candidate_order_changed=false",
+        "[AIDS_MUT_WNODE_GCF_STYLE_V2_OK]",
     ]
-    for dataset in DATASETS:
-        info = dataset_audit[dataset]
-        lines.extend(
-            (
-                f"{dataset}.parent_count={info['parent_count']}",
-                f"{dataset}.theta_star={info['theta_star']:.17g}",
-                f"{dataset}.figure4_threshold_count={info['figure4_threshold_count']}",
-                f"{dataset}.figure4_threshold_min={info['figure4_threshold_min']:.17g}",
-                f"{dataset}.figure4_threshold_max={info['figure4_threshold_max']:.17g}",
-            )
-        )
-        for method in METHODS:
-            lines.append(f"{dataset}.{method}.root={datasets[dataset][method]}")
-            lines.append(
-                f"{dataset}.{method}.distance_verified="
-                f"{sources['provenance'][dataset][method]['distance_type_verified']}"
-            )
-    lines.append("[AIDS_MUT_GCF_STYLE_PLOT_OK]")
     (output_dir / "combined_audit_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1092,258 +1484,109 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     project_root = Path(args.project_root).expanduser().resolve()
     if not project_root.is_dir():
-        raise FileNotFoundError(f"Project root does not exist: {project_root}")
-    datasets = parse_roots(args)
-    output_dir = Path(args.output_dir).expanduser().resolve()
+        raise FileNotFoundError(project_root)
+    paths = _args_paths(args, project_root)
+    output_dir = _resolve(project_root, args.output_dir)
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"Refusing to overwrite non-empty output directory: {output_dir}")
     if output_dir.exists():
         output_dir.rmdir()
     output_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    provenance: dict[str, dict[str, Any]] = {dataset: {} for dataset in DATASETS}
-    for dataset in DATASETS:
-        if tuple(datasets[dataset]) != METHODS:
-            raise ValueError(f"{dataset}: methods must be exactly {METHODS}")
+    aids_figure3, aids_figure3_source = load_aids_figure3(paths["aids_figure3"])
+    aids_figure4, aids_figure4_source = load_aids_figure4(paths["aids_figure4"])
+    aids_table, aids_table_source = load_aids_table2(paths["aids_roots"])
 
-    figure3_parts: list[pd.DataFrame] = []
-    figure4_parts: list[pd.DataFrame] = []
-    table_rows: list[dict[str, Any]] = []
-    source_manifest: dict[str, Any] = {
-        "figure3": [],
-        "figure4": [],
-        "table2": [],
-        "provenance": provenance,
-    }
-    for dataset in DATASETS:
-        for method in METHODS:
-            root = datasets[dataset][method]
-            if _is_raw_aids_gcf_run(root, dataset=dataset, method=method):
-                aids_table_rows = [
-                    row
-                    for row in table_rows
-                    if row["Dataset"] == "AIDS" and row["Method"] == "Ours"
-                ]
-                if len(aids_table_rows) != 1:
-                    raise RuntimeError(
-                        "AIDS Ours Table 2 must be loaded before raw GCFExplainer standardization"
-                    )
-                aids_figure4_rows = [
-                    frame
-                    for frame in figure4_parts
-                    if set(frame["Dataset"]) == {"AIDS"}
-                    and set(frame["Method"]) == {"Ours"}
-                ]
-                aids_figure4_sources = [
-                    source
-                    for source in source_manifest["figure4"]
-                    if source["dataset"] == "AIDS" and source["method"] == "Ours"
-                ]
-                if len(aids_figure4_rows) != 1 or len(aids_figure4_sources) != 1:
-                    raise RuntimeError(
-                        "AIDS Ours Figure 4 grid must be loaded before raw GCFExplainer "
-                        "standardization"
-                    )
-                (
-                    figure3,
-                    figure4,
-                    table_row,
-                    source3,
-                    source4,
-                    source2,
-                    raw_evidence,
-                ) = standardize_raw_aids_gcf_run(
-                    root,
-                    project_root=project_root,
-                    theta_star=float(aids_table_rows[0]["Theta"]),
-                    figure4_thresholds=aids_figure4_rows[0]["Threshold"].tolist(),
-                    figure4_threshold_source=aids_figure4_sources[0],
-                )
-                provenance[dataset][method] = raw_evidence
-            else:
-                provenance[dataset][method] = validate_root(
-                    root,
-                    project_root=project_root,
-                    dataset=dataset,
-                    method=method,
-                )
-                figure3, source3 = read_figure3(root, dataset, method)
-                figure4, source4 = read_figure4(root, dataset, method)
-                table_row, source2 = read_table2(root, dataset, method)
-            figure3_parts.append(figure3)
-            figure4_parts.append(figure4)
-            table_rows.append(table_row)
-            source_manifest["figure3"].append({"dataset": dataset, "method": method, **source3})
-            source_manifest["figure4"].append({"dataset": dataset, "method": method, **source4})
-            source_manifest["table2"].append({"dataset": dataset, "method": method, **source2})
+    mut_figure3_parts: list[pd.DataFrame] = []
+    mut_figure4_parts: list[pd.DataFrame] = []
+    mut_table_rows: list[dict[str, Any]] = []
+    mut_sources: dict[str, Any] = {}
+    mut_matches_aids = args.mut_threshold_mode == "match-aids"
+    mut_loader = load_mut_method if mut_matches_aids else load_mut_native_method
+    for method in METHODS:
+        root = paths["mut_roots"][method]
+        figure3, figure4, table_row, source = mut_loader(root, method)
+        mut_figure3_parts.append(figure3)
+        mut_figure4_parts.append(figure4)
+        mut_table_rows.append(table_row)
+        mut_sources[method] = source
 
-    figure3 = pd.concat(figure3_parts, ignore_index=True)
-    figure4 = pd.concat(figure4_parts, ignore_index=True)
-    table = pd.DataFrame(table_rows)
-    dataset_audit = _validate_dataset_alignment(figure4=figure4, table=table)
+    mut_figure3 = pd.concat(mut_figure3_parts, ignore_index=True)
+    mut_figure4 = pd.concat(mut_figure4_parts, ignore_index=True)
+    mut_table = pd.DataFrame(mut_table_rows)
+    mut_audit = (
+        validate_mut_alignment(mut_figure4, mut_table)
+        if mut_matches_aids
+        else validate_mut_native_alignment(mut_figure4, mut_table)
+    )
+    figure3 = pd.concat((aids_figure3, mut_figure3), ignore_index=True)
+    figure4 = pd.concat((aids_figure4, mut_figure4), ignore_index=True)
+    table = pd.concat((aids_table, mut_table), ignore_index=True)
+
     temp_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=str(output_dir.parent)))
     try:
-        figure3.to_csv(temp_dir / "figure3_aids_mut_source.csv", index=False)
-        figure4.to_csv(temp_dir / "figure4_aids_mut_source.csv", index=False)
-        table.to_csv(temp_dir / "table2_aids_mut_full.csv", index=False)
-
-        plt.rcParams.update(
-            {
-                "font.family": "serif",
-                "axes.titlesize": 14,
-                "axes.titleweight": "bold",
-                "axes.labelsize": 12,
-                "xtick.labelsize": 10,
-                "ytick.labelsize": 10,
-                "legend.fontsize": 10,
-            }
-        )
-        cost_max = args.cost_ymax
-        if cost_max is None:
-            cost_max = 1.08 * float(figure3["ConditionalMedianCost"].max())
-
-        fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.0), sharex="col")
-        for column, dataset in enumerate(DATASETS):
-            for method in METHODS:
-                rows = figure3.loc[
-                    (figure3["Dataset"] == dataset) & (figure3["Method"] == method)
-                ].sort_values("K")
-                style = METHOD_STYLE[method]
-                markevery = marker_indices_for_k(rows["K"])
-                axes[0, column].plot(
-                    rows["K"],
-                    100.0 * rows["Coverage"],
-                    label=method,
-                    color=style["color"],
-                    marker=style["marker"],
-                    markevery=markevery,
-                    linewidth=2.0,
-                    markersize=5.5,
-                )
-                axes[1, column].plot(
-                    rows["K"],
-                    rows["ConditionalMedianCost"],
-                    label=method,
-                    color=style["color"],
-                    marker=style["marker"],
-                    markevery=markevery,
-                    linewidth=2.0,
-                    markersize=5.5,
-                )
-            parent_count = EXPECTED_PARENT_COUNTS[dataset]
-            theta = dataset_audit[dataset]["theta_star"]
-            axes[0, column].set_title(f"{dataset} (n={parent_count}, theta*={theta:.5f})")
-            for axis in (axes[0, column], axes[1, column]):
-                axis.set_xlim(1, 20)
-                axis.set_xticks([1, 5, 10, 15, 20])
-                axis.axvline(10, color="#666666", linestyle="--", linewidth=1.0, alpha=0.7)
-                axis.grid(alpha=0.25)
-            axes[0, column].set_ylim(0, args.coverage_ymax)
-            axes[1, column].set_ylim(args.cost_ymin, cost_max)
-            axes[1, column].set_xlabel("Prefix size K")
-        axes[0, 0].set_ylabel("CCRCov (%)")
-        axes[1, 0].set_ylabel("Conditional median cost")
-        handles, labels = axes[0, 0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, -0.01), ncol=4, frameon=True)
-        fig.tight_layout(rect=[0, 0.07, 1, 1])
-        fig.savefig(temp_dir / "figure3_aids_mut_gcf_style.png", dpi=300, bbox_inches="tight")
-        fig.savefig(temp_dir / "figure3_aids_mut_gcf_style.pdf", bbox_inches="tight")
-        plt.close(fig)
-
-        fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.6), sharey=True)
-        for column, dataset in enumerate(DATASETS):
-            all_thresholds: list[float] = []
-            for method in METHODS:
-                rows = figure4.loc[
-                    (figure4["Dataset"] == dataset) & (figure4["Method"] == method)
-                ].sort_values("Threshold")
-                style = METHOD_STYLE[method]
-                axes[column].plot(
-                    rows["Threshold"],
-                    100.0 * rows["Coverage"],
-                    label=method,
-                    color=style["color"],
-                    marker=style["marker"],
-                    markevery=marker_indices_evenly(len(rows)),
-                    linewidth=2.0,
-                    markersize=5.5,
-                )
-                all_thresholds.extend(rows["Threshold"].tolist())
-            theta = dataset_audit[dataset]["theta_star"]
-            axes[column].axvline(theta, color="#555555", linestyle="--", linewidth=1.2, label="Frozen theta*")
-            x_min, x_max = dataset_threshold_xlim(np.asarray(all_thresholds, dtype=float))
-            axes[column].set_xlim(x_min, x_max)
-            axes[column].set_ylim(0, args.coverage_ymax)
-            axes[column].set_title(dataset)
-            axes[column].set_xlabel("WNode threshold")
-            axes[column].grid(alpha=0.25)
-            axes[column].xaxis.set_major_locator(MaxNLocator(nbins=6))
-            axes[column].xaxis.set_major_formatter(FormatStrFormatter("%.2f"))
-        axes[0].set_ylabel("CCRCov (%)")
-        handles, labels = axes[0].get_legend_handles_labels()
-        by_label = dict(zip(labels, handles))
-        fig.legend(
-            by_label.values(),
-            by_label.keys(),
-            loc="lower center",
-            bbox_to_anchor=(0.5, -0.05),
-            ncol=5,
-            frameon=True,
-        )
-        fig.tight_layout(rect=[0, 0.10, 1, 1])
-        fig.savefig(temp_dir / "figure4_aids_mut_gcf_style.png", dpi=300, bbox_inches="tight")
-        fig.savefig(temp_dir / "figure4_aids_mut_gcf_style.pdf", bbox_inches="tight")
-        plt.close(fig)
-
+        figure3.to_csv(temp_dir / f"{FIGURE3_OUTPUT_STEM}_data.csv", index=False)
+        figure4.to_csv(temp_dir / f"{FIGURE4_OUTPUT_STEM}_data.csv", index=False)
+        render_figure3(figure3, temp_dir, mut_matches_aids=mut_matches_aids)
+        render_figure4(figure4, temp_dir, mut_matches_aids=mut_matches_aids)
         write_table_outputs(table, temp_dir)
+        sources = {
+            "aids_figure3": aids_figure3_source,
+            "aids_figure4": aids_figure4_source,
+            "aids_table2": aids_table_source,
+            "mutagenicity": mut_sources,
+        }
         _write_audit(
-            output_dir=temp_dir,
-            datasets=datasets,
-            dataset_audit=dataset_audit,
-            sources=source_manifest,
+            temp_dir,
+            sources=sources,
+            mut_audit=mut_audit,
+            mut_threshold_mode=args.mut_threshold_mode,
         )
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "datasets": list(DATASETS),
-            "methods": list(METHODS),
-            "distance_label": DISTANCE_LABEL,
+            "dataset_order": list(DATASET_ORDER),
+            "active_dataset_columns": ACTIVE_DATASET_COLUMNS,
+            "method_order": list(METHODS),
+            "distance_line": DISTANCE_LABEL,
             "distance_type": DISTANCE_TYPE,
             "cf_mode": CF_MODE,
-            "selection_performed_in_plot": False,
+            "aids": {
+                "num_parents": EXPECTED_PARENT_COUNTS["AIDS"],
+                "figure3_theta": AIDS_FIGURE3_THETA,
+                "table2_theta": AIDS_TABLE2_THETA,
+                "table2_k": AIDS_TABLE2_K,
+                "figure4_k": AIDS_FIGURE4_K,
+                "figure4_threshold_min": AIDS_FIGURE4_THRESHOLD_MIN,
+                "figure4_threshold_max": AIDS_FIGURE4_THRESHOLD_MAX,
+                "figure4_points_per_method": AIDS_FIGURE4_POINTS_PER_METHOD,
+            },
+            "mutagenicity": mut_audit,
+            "mutagenicity_threshold_mode": args.mut_threshold_mode,
+            "sources": sources,
             "distance_recomputed": False,
             "teacher_recomputed": False,
+            "candidate_ranking_recomputed": False,
             "candidate_order_changed": False,
-            "dataset_audit": dataset_audit,
-            "roots": {
-                dataset: {method: str(datasets[dataset][method]) for method in METHODS}
-                for dataset in DATASETS
-            },
-            "sources": source_manifest,
+            "selection_performed_in_plot": False,
             "outputs": {},
         }
         for path in sorted(temp_dir.iterdir()):
             if path.is_file() and path.name not in {"combined_manifest.json", "_RUN_COMPLETE.json"}:
-                manifest["outputs"][path.name] = {
-                    "bytes": path.stat().st_size,
-                    "sha256": sha256(path),
-                }
+                manifest["outputs"][path.name] = {"bytes": path.stat().st_size, "sha256": sha256(path)}
         (temp_dir / "combined_manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         complete = {
             "run_complete": True,
-            "distance_label": DISTANCE_LABEL,
+            "distance_line": DISTANCE_LABEL,
             "distance_type": DISTANCE_TYPE,
             "cf_mode": CF_MODE,
-            "method_count": len(METHODS),
-            "dataset_count": len(DATASETS),
             "manifest_sha256": sha256(temp_dir / "combined_manifest.json"),
         }
         (temp_dir / "_RUN_COMPLETE.json").write_text(
-            json.dumps(complete, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+            json.dumps(complete, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         os.replace(temp_dir, output_dir)
     except Exception:
@@ -1351,10 +1594,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise
 
     print(f"output_dir={output_dir}")
-    print(f"methods={','.join(METHODS)}")
-    print(f"distance_label={DISTANCE_LABEL}")
-    print(f"distance_type={DISTANCE_TYPE}")
-    print("[AIDS_MUT_GCF_STYLE_PLOT_OK]")
+    print(f"distance_line={DISTANCE_LABEL}")
+    print("[AIDS_MUT_WNODE_GCF_STYLE_V2_OK]")
     return 0
 
 

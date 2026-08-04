@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import inspect
 import json
 import re
 from pathlib import Path
@@ -13,6 +15,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts/paper/plot_aids_mut_gcf_style.py"
 WRAPPER_PATH = ROOT / "scripts/slurm/export_and_plot_aids_mut_wnode_gpu.sh"
+OLD_RENDERER_PATH = (
+    ROOT
+    / "outputs/hpc/eval/paper/Wasserstein_0720_gcfStyle/render_gcf_style_results.py"
+)
 
 
 def _load_module():
@@ -26,396 +32,430 @@ def _load_module():
 plotter = _load_module()
 
 
-METHOD_SLUGS = {
-    "Ours": "ours",
-    "GlobalGCE": "globalgce",
-    "CLEAR": "clear",
-    "GCFExplainer": "gcfexplainer",
-}
+def _write_aids_figure3(path: Path, *, theta: float = 0.05) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for method_index, method in enumerate(plotter.METHODS):
+        for k in range(1, 21):
+            rows.append(
+                {
+                    "method": method,
+                    "distance_label": "MolCLR-Node-Wasserstein",
+                    "k": k,
+                    "theta": theta,
+                    "coverage": 0.1 + 0.01 * method_index + 0.02 * k,
+                    "conditional_median_cost": 0.1 - 0.002 * k + 0.001 * method_index,
+                    "plotted_cost": 0.1 - 0.002 * k + 0.001 * method_index,
+                    "plotted_cost_metric": "conditional_median_cost",
+                }
+            )
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
 
 
-def _write_root(base: Path, *, dataset: str, method: str) -> Path:
-    root = base / dataset.lower() / METHOD_SLUGS[method]
+def _write_aids_figure4(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    thresholds = np.linspace(0.0, 0.0535, 601)
+    rows = []
+    for method_index, method in enumerate(plotter.METHODS):
+        for index, threshold in enumerate(thresholds):
+            rows.append(
+                {
+                    "method": method,
+                    "distance_label": "MolCLR-Node-Wasserstein",
+                    "k": 10,
+                    "threshold": threshold,
+                    "coverage": min(0.79, index / 1000 + 0.01 * method_index),
+                }
+            )
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def _write_mut_root(
+    base: Path,
+    method: str,
+    *,
+    metadata_in_csv: bool = True,
+) -> Path:
+    slug = {
+        "Ours": "ours",
+        "GlobalGCE": "globalgce",
+        "CLEAR": "clear",
+        "GCFExplainer": "gcfexplainer",
+    }[method]
+    root = base / slug
     root.mkdir(parents=True)
-    parent_count = 1283 if dataset == "AIDS" else 217
-    theta = 0.014630082696799 if dataset == "AIDS" else 0.038576244576299636
-    figure4_thresholds = (
-        np.linspace(0.0, 0.0391548051165848, 102)
-        if dataset == "AIDS"
-        else np.asarray(
-            [
-                0.014088122444763422,
-                0.02289075857275116,
-                0.03237569932491265,
-                0.038576244576299636,
-                0.04961842688391724,
-                0.06406452526754104,
-                0.09832242115448658,
-            ]
-        )
+    metadata = {
+        "distance_line": "MolCLR-Node-Wasserstein",
+        "distance_type": "node_wasserstein",
+        "cf_mode": "strict_flip",
+        "num_parents": 217,
+        "candidate_set_preselected": True,
+        "selection_performed_in_eval": False,
+    }
+    row_metadata = metadata if metadata_in_csv else {}
+    theta = 0.038576244576299636
+    pd.DataFrame(
+        [
+            {
+                **row_metadata,
+                "k": k,
+                "theta": theta,
+                "coverage": 0.1 + 0.02 * k,
+                "conditional_median_cost": 0.08 - 0.001 * k,
+            }
+            for k in range(1, 21)
+        ]
+    ).to_csv(root / "figure3_coverage_vs_k.csv", index=False)
+    thresholds = np.asarray(
+        [
+            0.014088122444763422,
+            0.02289075857275116,
+            0.03237569932491265,
+            0.038576244576299636,
+            0.04961842688391724,
+            0.06406452526754104,
+            0.09832242115448658,
+        ]
     )
-    offset = 0.01 * list(METHOD_SLUGS).index(method)
-    figure3 = pd.DataFrame(
-        {
-            "k": range(1, 21),
-            "coverage": np.linspace(0.05 + offset, 0.55 + offset, 20),
-            "conditional_median_cost": np.linspace(0.08 + offset, 0.03 + offset, 20),
-            "fixed_capped_median_cost": 0.9,
-            "distance_line": "MolCLR-Node-Wasserstein",
-            "distance_type": "node_wasserstein",
-            "cf_mode": "strict_flip",
-            "num_parents": parent_count,
-            "candidate_set_preselected": True,
-            "selection_performed_in_eval": False,
-        }
-    )
-    figure3.to_csv(root / "figure3_coverage_vs_k.csv", index=False)
-    figure4 = pd.DataFrame(
-        {
-            "k": 10,
-            "threshold": figure4_thresholds,
-            "coverage": np.linspace(0.0, 0.7 + offset, len(figure4_thresholds)),
-            "distance_line": "MolCLR-Node-Wasserstein",
-            "distance_type": "node_wasserstein",
-            "cf_mode": "strict_flip",
-            "num_parents": parent_count,
-            "candidate_set_preselected": True,
-            "selection_performed_in_eval": False,
-        }
-    )
-    figure4.to_csv(root / "figure4_coverage_vs_threshold.csv", index=False)
-    table = pd.DataFrame(
-        {
-            "k": [10],
-            "theta": [theta],
-            "coverage": [0.4 + offset],
-            "conditional_median_cost": [0.04 + offset],
-            "fixed_capped_median_cost": [0.8],
-            "distance_line": ["MolCLR-Node-Wasserstein"],
-            "distance_type": ["node_wasserstein"],
-            "cf_mode": ["strict_flip"],
-            "num_parents": [parent_count],
-            "candidate_set_preselected": [True],
-            "selection_performed_in_eval": [False],
-        }
-    )
-    table.to_csv(root / f"table2_{METHOD_SLUGS[method]}_k10.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                **row_metadata,
+                "k": 10,
+                "threshold": threshold,
+                "coverage": 0.1 + 0.1 * index,
+            }
+            for index, threshold in enumerate(thresholds)
+        ]
+    ).to_csv(root / "figure4_coverage_vs_threshold.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                **row_metadata,
+                "k": 10,
+                "theta": theta,
+                "coverage": 0.4,
+                "conditional_median_cost": 0.04,
+                "num_test_parents": 217,
+            }
+        ]
+    ).to_csv(root / f"table2_{slug}_k10.csv", index=False)
     (root / "run_manifest.json").write_text(
         json.dumps(
             {
-                "dataset": dataset,
-                "method": method,
-                "distance_line": "MolCLR-Node-Wasserstein",
-                "distance_type": "node_wasserstein",
-                "cf_mode": "strict_flip",
-                "test_parent_count": parent_count,
-                "candidate_count": 20,
-                "candidate_set_preselected": True,
-                "selection_performed_in_eval": False,
+                **metadata,
+                "strict_flip_definition": "pred_before == 1 and pred_after == 0",
                 "run_complete": True,
             }
         ),
         encoding="utf-8",
     )
-    return root
 
-
-def _all_roots(base: Path) -> dict[tuple[str, str], Path]:
-    return {
-        (dataset, method): _write_root(base, dataset=dataset, method=method)
-        for dataset in ("AIDS", "Mutagenicity")
-        for method in METHOD_SLUGS
-    }
-
-
-def _write_raw_aids_gcf_run(base: Path) -> Path:
-    root = base / "ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_gcf"
-    (root / "combined").mkdir(parents=True)
-    (root / "details").mkdir()
-    candidates = pd.DataFrame(
+    candidate_ids = [f"{slug}-candidate-{rank:02d}" for rank in range(1, 21)]
+    order_rows = [
         {
-            "rank": range(1, 21),
-            "candidate_id": [f"gcf-{rank:02d}" for rank in range(1, 21)],
-            "canonical_smiles": ["C" * rank for rank in range(1, 21)],
+            "rank": rank,
+            "candidate_id": candidate_id,
             "candidate_set_preselected": True,
             "selection_performed_in_eval": False,
         }
-    )
-    candidate_path = root / "selected_top20.csv"
-    candidates.to_csv(candidate_path, index=False)
-    thresholds = np.asarray(
-        [
-            0.0036989375029972,
-            0.0048443801866389,
-            0.0070071265985866,
-            0.0092885245733581,
-            0.014630082696799,
-            0.0218176142567855,
-            0.0391548051165848,
-        ]
-    )
-    best_distances = np.asarray(
-        [0.001 + 0.000001 * parent_index for parent_index in range(1, 1284)]
-    )
-    method = "gcfexplainer_top20_normalized"
-    summary = pd.DataFrame(
-        {
-            "method": method,
-            "distance_type": "node_wasserstein",
-            "distance_line": "MolCLR-Node-Wasserstein",
-            "threshold": thresholds,
-            "cf_mode": "strict_flip",
-            "num_parents": 1283,
-            "num_candidates": 20,
-            "close_cf_coverage": [
-                float(np.count_nonzero(best_distances <= threshold) / 1283)
-                for threshold in thresholds
-            ],
-            "candidate_set_preselected": True,
-            "selection_performed_in_eval": False,
-        }
-    )
-    summary.to_csv(root / "combined/combined_threshold_summary.csv", index=False)
-    details = [
-        {
-            "method": method,
-            "parent_id": f"parent-{parent_index:04d}",
-            "candidate_id": f"gcf-{rank:02d}",
-            "candidate_smiles": "C" * rank,
-            "distance": 0.001 * rank + 0.000001 * parent_index,
-            "label": 1,
-            "pred_before": 1,
-            "pred_after": 0,
-            "teacher_strict_flip": True,
-            "cf_drop": 0.5,
-        }
-        for parent_index in range(1, 1284)
-        for rank in range(1, 21)
+        for rank, candidate_id in enumerate(candidate_ids, start=1)
     ]
-    pd.DataFrame(details).to_csv(root / "details/pair_details.csv", index=False)
-    (root / "run_config.json").write_text(
-        json.dumps(
-            {
-                "distance_line": "MolCLR-Node-Wasserstein",
-                "distance_type": "node_wasserstein",
-                "cf_mode": "strict_flip",
-                "main_ccrcov_uses": "teacher_strict_flip",
-                "fullgraph_candidates_path": str(candidate_path),
-                "candidate_set_preselected": True,
-                "selection_performed_in_eval": False,
-                "preselected_topk": 20,
-                "selection_method": "normalized_top20",
-                "thresholds": thresholds.tolist(),
-            }
-        ),
-        encoding="utf-8",
-    )
-    (root / "cache_stats.json").write_text("{}\n", encoding="utf-8")
-    (root / "_RUN_COMPLETE.json").write_text(
-        json.dumps({"complete": True}),
-        encoding="utf-8",
-    )
+    if method in {"Ours", "GCFExplainer"}:
+        order_name = "selected_sequence.jsonl"
+        (root / order_name).write_text(
+            "".join(json.dumps(row) + "\n" for row in order_rows), encoding="utf-8"
+        )
+    else:
+        order_name = "selected_top20.csv" if method == "GlobalGCE" else "selected_candidates.csv"
+        pd.DataFrame(order_rows).to_csv(root / order_name, index=False)
+
+    pair_rows = []
+    for parent_index in range(217):
+        for rank, candidate_id in enumerate(candidate_ids, start=1):
+            strict = (parent_index + rank) % 4 != 0
+            distance = 0.001 * rank + 0.0001 * parent_index
+            if method == "Ours":
+                pair_rows.append(
+                    {
+                        "parent_id": f"parent-{parent_index:03d}",
+                        "candidate_id": candidate_id,
+                        "pair_strict_flip": strict,
+                        "wnode_distance": distance if strict else None,
+                    }
+                )
+            else:
+                pair_rows.append(
+                    {
+                        "parent_id": f"parent-{parent_index:03d}",
+                        "candidate_id": candidate_id,
+                        "teacher_strict_flip": strict,
+                        "distance": distance,
+                        "distance_line": "MolCLR-Node-Wasserstein",
+                        "distance_type": "node_wasserstein",
+                    }
+                )
+    if method == "Ours":
+        (root / "pair_matrix.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in pair_rows), encoding="utf-8"
+        )
+    elif method == "CLEAR":
+        pair_path = root / "test/k20_pair_details.csv"
+        pair_path.parent.mkdir(parents=True)
+        pd.DataFrame(pair_rows).to_csv(pair_path, index=False)
+    else:
+        pd.DataFrame(pair_rows).to_csv(root / "test_pair_details.csv", index=False)
     return root
 
 
-def _argv(base: Path, roots: dict[tuple[str, str], Path], output: Path) -> list[str]:
-    return [
-        "--project-root",
-        str(base),
-        "--aids-ours-root",
-        str(roots[("AIDS", "Ours")]),
-        "--aids-globalgce-root",
-        str(roots[("AIDS", "GlobalGCE")]),
-        "--aids-clear-root",
-        str(roots[("AIDS", "CLEAR")]),
-        "--aids-gcf-root",
-        str(roots[("AIDS", "GCFExplainer")]),
-        "--mut-ours-root",
-        str(roots[("Mutagenicity", "Ours")]),
-        "--mut-globalgce-root",
-        str(roots[("Mutagenicity", "GlobalGCE")]),
-        "--mut-clear-root",
-        str(roots[("Mutagenicity", "CLEAR")]),
-        "--mut-gcf-root",
-        str(roots[("Mutagenicity", "GCFExplainer")]),
-        "--output-dir",
-        str(output),
-    ]
+def test_old_correct_renderer_is_preserved_as_style_source() -> None:
+    assert OLD_RENDERER_PATH.is_file()
+    old = OLD_RENDERER_PATH.read_text(encoding="utf-8")
+    assert 'figsize=(16.0, 6.3)' in old
+    assert 'figsize=(16.0, 3.8)' in old
+    assert 'figsize=(15.8, 3.3)' in old
 
 
-def test_figure3_and_table_prefer_conditional_cost(tmp_path: Path) -> None:
-    root = _write_root(tmp_path, dataset="Mutagenicity", method="Ours")
-    figure3, source = plotter.read_figure3(root, "Mutagenicity", "Ours")
-    table, table_source = plotter.read_table2(root, "Mutagenicity", "Ours")
-    assert source["columns"]["cost"] == "conditional_median_cost"
-    assert table_source["columns"]["cost"] == "conditional_median_cost"
-    assert figure3.loc[0, "ConditionalMedianCost"] != 0.9
-    assert table["Cost"] != 0.8
-
-
-def test_combined_plot_writes_wasserstein_only_manifest(tmp_path: Path) -> None:
-    roots = _all_roots(tmp_path)
-    output = tmp_path / "combined"
-    assert plotter.main(_argv(tmp_path, roots, output)) == 0
-    manifest = json.loads((output / "combined_manifest.json").read_text(encoding="utf-8"))
-    complete = json.loads((output / "_RUN_COMPLETE.json").read_text(encoding="utf-8"))
-    assert manifest["distance_label"] == "MolCLR-Node-Wasserstein"
-    assert manifest["distance_type"] == "node_wasserstein"
-    assert manifest["cf_mode"] == "strict_flip"
-    assert manifest["distance_recomputed"] is False
-    assert manifest["candidate_order_changed"] is False
-    assert complete["run_complete"] is True
-    assert manifest["dataset_audit"]["AIDS"]["figure4_threshold_count"] == 102
-    assert manifest["dataset_audit"]["Mutagenicity"]["figure4_threshold_count"] == 7
-    assert "fgw_lambda" not in json.dumps(manifest).lower()
-
-
-def test_node_fgw_provenance_is_rejected(tmp_path: Path) -> None:
-    root = _write_root(tmp_path, dataset="AIDS", method="Ours")
-    manifest_path = root / "run_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["distance_line"] = "MolCLR-Node-FGW"
-    manifest["distance_type"] = "node_fgw"
-    manifest["fgw_lambda"] = 0.5
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    paths = [
-        root / "figure3_coverage_vs_k.csv",
-        root / "figure4_coverage_vs_threshold.csv",
-        root / "table2_ours_k10.csv",
-    ]
-    with pytest.raises(ValueError, match="Forbidden non-WNode provenance"):
-        plotter._metadata_evidence(root=root, project_root=tmp_path, csv_paths=paths)
-
-
-def test_unreferenced_sibling_manifest_does_not_contaminate_root(tmp_path: Path) -> None:
-    root = _write_root(tmp_path, dataset="AIDS", method="Ours")
-    (root.parent / "unrelated_manifest.json").write_text(
-        json.dumps(
-            {
-                "output_root": str(root.parent / "different_run"),
-                "distance_line": "MolCLR-Node-FGW",
-                "distance_type": "node_fgw",
-                "fgw_lambda": 0.5,
-            }
-        ),
-        encoding="utf-8",
+def test_aids_frozen_source_paths_are_exact() -> None:
+    assert plotter.AIDS_FIGURE3_RELATIVE_PATH.as_posix() == (
+        "outputs/hpc/eval/paper/molclr_node_wasserstein_figure3_theta005_raw/"
+        "wnode_fig3_theta005_figure3_wnode_coverage_cost_vs_k.csv"
     )
-    paths = [
-        root / "figure3_coverage_vs_k.csv",
-        root / "figure4_coverage_vs_threshold.csv",
-        root / "table2_ours_k10.csv",
-    ]
-    evidence = plotter._metadata_evidence(
-        root=root,
-        project_root=tmp_path,
-        csv_paths=paths,
+    assert plotter.AIDS_FIGURE4_RELATIVE_PATH.as_posix() == (
+        "outputs/hpc/eval/paper/molclr_node_wasserstein_figure4_redline_k10/"
+        "wnode_figure4_redline_k10_figure4_wnode_coverage_vs_threshold.csv"
     )
-    provenance_paths = {Path(item["path"]).name for item in evidence["provenance_files"]}
-    assert "run_manifest.json" in provenance_paths
-    assert "unrelated_manifest.json" not in provenance_paths
 
 
-def test_semantic_check_pass_is_not_interpreted_as_eval_selection(tmp_path: Path) -> None:
-    root = _write_root(tmp_path, dataset="Mutagenicity", method="GCFExplainer")
-    manifest_path = root / "run_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["semantic_checks"] = {
-        "candidate_set_preselected": True,
-        "selection_performed_in_eval": True,
+def test_aids_figure3_gate_reads_80_rows_at_theta_005(tmp_path: Path) -> None:
+    path = _write_aids_figure3(tmp_path / plotter.AIDS_FIGURE3_RELATIVE_PATH)
+    frame, source = plotter.load_aids_figure3(path)
+    assert len(frame) == 80
+    assert source["row_count"] == 80
+    assert source["theta"] == 0.05
+    assert source["cost_source_column"] == "conditional_median_cost"
+    assert set(frame["Method"]) == set(plotter.METHODS)
+    for method in plotter.METHODS:
+        rows = frame.loc[frame["Method"] == method]
+        assert rows["K"].tolist() == list(range(1, 21))
+        assert np.allclose(rows["Theta"], 0.05, rtol=0.0, atol=1e-12)
+
+
+def test_aids_figure3_rejects_a_different_theta(tmp_path: Path) -> None:
+    path = _write_aids_figure3(tmp_path / "figure3.csv", theta=0.049)
+    with pytest.raises(ValueError, match="theta must be 0.05"):
+        plotter.load_aids_figure3(path)
+
+
+def test_aids_figure4_gate_reads_dense_601_point_curves(tmp_path: Path) -> None:
+    path = _write_aids_figure4(tmp_path / plotter.AIDS_FIGURE4_RELATIVE_PATH)
+    frame, source = plotter.load_aids_figure4(path)
+    assert len(frame) == 2404
+    assert source["points_per_method"] == 601
+    assert source["threshold_min"] == pytest.approx(0.0, abs=1e-15)
+    assert source["threshold_max"] == pytest.approx(0.0535, abs=1e-15)
+    assert source["interpolation_performed"] is False
+    for method in plotter.METHODS:
+        rows = frame.loc[frame["Method"] == method]
+        assert len(rows) == 601
+        assert rows["K"].unique().tolist() == [10]
+
+
+def test_aids_figure4_rejects_different_method_grid(tmp_path: Path) -> None:
+    path = _write_aids_figure4(tmp_path / "figure4.csv")
+    frame = pd.read_csv(path)
+    mask = (frame["method"] == "CLEAR") & (frame.index == 2 * 601 + 300)
+    frame.loc[mask, "threshold"] += 1e-6
+    frame.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="threshold grids differ|strictly increasing"):
+        plotter.load_aids_figure4(path)
+
+
+def test_aids_table2_exact_values_and_ranking_styles(monkeypatch, tmp_path: Path) -> None:
+    applicable_counts = {
+        "Ours": (998, 961),
+        "GlobalGCE": (1097, 576),
+        "CLEAR": (1097, 278),
+        "GCFExplainer": (1097, 824),
     }
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    evidence = plotter.validate_root(
-        root,
-        project_root=tmp_path,
-        dataset="Mutagenicity",
-        method="GCFExplainer",
-    )
-    assert evidence["selection_performed_in_eval"] == [False]
+    roots = {}
+    for method in plotter.METHODS:
+        root = tmp_path / method
+        root.mkdir()
+        roots[method] = root
+
+    def fake_parent_best(root: Path, *, k: int):
+        method = root.name
+        expected_coverage, expected_cost = plotter.AIDS_TABLE2_EXPECTED[method]
+        count, covered = applicable_counts[method]
+        below = min(expected_cost, 0.04)
+        values = np.full(count, expected_cost, dtype=float)
+        values[:covered] = below
+        # Preserve the exact audited median while retaining the exact covered count.
+        if expected_cost <= plotter.AIDS_TABLE2_THETA:
+            values[:covered] = expected_cost
+            values[covered:] = 0.1
+        assert np.count_nonzero(values <= plotter.AIDS_TABLE2_THETA) == round(
+            expected_coverage * 1283
+        )
+        assert np.median(values) == pytest.approx(expected_cost, abs=1e-15)
+        return pd.Series(values), {"candidate_order_changed": False, "k": k}
+
+    monkeypatch.setattr(plotter, "load_parent_best_distances", fake_parent_best)
+    table, _ = plotter.load_aids_table2(roots)
+    assert table["Method"].tolist() == list(plotter.METHODS)
+    for method, (coverage, cost) in plotter.AIDS_TABLE2_EXPECTED.items():
+        row = table.loc[table["Method"] == method].iloc[0]
+        assert row["Coverage"] == pytest.approx(coverage, abs=1e-12)
+        assert row["Cost"] == pytest.approx(cost, abs=1e-12)
+        assert row["Theta"] == 0.05
+        assert row["K"] == 10
+        assert row["NumParents"] == 1283
+    styles = plotter.table_cell_styles(table)
+    assert styles[("AIDS", "Ours", "Coverage")] == "best"
+    assert styles[("AIDS", "Ours", "Cost")] == "best"
+    assert styles[("AIDS", "GCFExplainer", "Coverage")] == "second"
+    assert styles[("AIDS", "GCFExplainer", "Cost")] == "second"
 
 
-def test_raw_aids_gcf_run_is_standardized_from_frozen_pairs(tmp_path: Path) -> None:
-    root = _write_raw_aids_gcf_run(tmp_path)
-    before = {
-        path.relative_to(root).as_posix(): plotter.sha256(path)
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-    (
-        figure3,
-        figure4,
-        table,
-        figure3_source,
-        figure4_source,
-        table_source,
-        evidence,
-    ) = plotter.standardize_raw_aids_gcf_run(
-        root,
-        project_root=tmp_path,
-        theta_star=0.014630082696799,
-        figure4_thresholds=np.sort(
-            np.append(
-                np.linspace(0.0, 0.0391548051165848, 101),
-                0.014630082696799,
-            )
-        ),
-        figure4_threshold_source={
-            "path": str(tmp_path / "aids/ours/figure4_coverage_vs_threshold.csv"),
-            "sha256": "0" * 64,
-        },
-    )
-    after = {
-        path.relative_to(root).as_posix(): plotter.sha256(path)
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-    assert before == after
+def test_mutagenicity_loader_keeps_its_own_frozen_theta_and_grid(tmp_path: Path) -> None:
+    root = _write_mut_root(tmp_path, "Ours")
+    figure3, figure4, table, source = plotter.load_mut_native_method(root, "Ours")
     assert figure3["K"].tolist() == list(range(1, 21))
-    assert len(figure4) == 102
-    assert figure4["K"].unique().tolist() == [10]
-    assert table["K"] == 10
-    assert table["Theta"] == pytest.approx(0.014630082696799, abs=1e-12)
-    assert figure3_source["distance_recomputed"] is False
-    assert figure4_source["teacher_recomputed"] is False
-    assert table_source["candidate_order_changed"] is False
-    assert evidence["top20_frozen_ranking_verified"] is True
-    assert evidence["complete_cartesian_verified"] is True
-    assert figure4_source["official_summary_threshold_count"] == 7
-    assert len(figure4_source["official_summary_reconstruction"]) == 7
-    assert not (root / "figure3_coverage_vs_k.csv").exists()
-    assert not (root / "figure4_coverage_vs_threshold.csv").exists()
-    assert not (root / "table2_gcfexplainer_k10.csv").exists()
+    assert len(figure4) == 7
+    assert table["Theta"] == pytest.approx(0.038576244576299636, abs=1e-12)
+    assert source["distance_recomputed"] is False
+    assert source["candidate_order_changed"] is False
 
 
-def test_all_four_methods_are_required(tmp_path: Path) -> None:
-    roots = _all_roots(tmp_path)
-    missing = roots[("AIDS", "GCFExplainer")]
-    for path in missing.iterdir():
-        path.unlink()
-    missing.rmdir()
-    with pytest.raises(FileNotFoundError, match="Missing frozen plotting root"):
-        plotter.main(_argv(tmp_path, roots, tmp_path / "combined"))
+def test_mutagenicity_provenance_may_come_from_run_manifest(tmp_path: Path) -> None:
+    root = _write_mut_root(tmp_path, "Ours", metadata_in_csv=False)
+    figure3, figure4, table, _source = plotter.load_mut_native_method(root, "Ours")
+    assert len(figure3) == 20
+    assert len(figure4) == 7
+    assert table["NumParents"] == 217
 
 
-def test_wrapper_uses_correct_fixed_roots_and_resources() -> None:
+def test_mutagenicity_match_aids_profile_uses_saved_pairs_on_dense_grid(tmp_path: Path) -> None:
+    root = _write_mut_root(tmp_path, "GCFExplainer")
+    figure3, figure4, table, source = plotter.load_mut_method(root, "GCFExplainer")
+    assert figure3["K"].tolist() == list(range(1, 21))
+    assert set(figure3["Theta"]) == {0.05}
+    assert len(figure4) == 601
+    assert figure4["Threshold"].iloc[0] == pytest.approx(0.0, abs=1e-15)
+    assert figure4["Threshold"].iloc[-1] == pytest.approx(0.0535, abs=1e-15)
+    assert table["Theta"] == 0.05
+    assert source["threshold_mode"] == "match-aids"
+    assert source["pair_count"] == 217 * 20
+    assert source["complete_cartesian"] is True
+    assert source["distance_recomputed"] is False
+    assert source["candidate_order_changed"] is False
+
+
+def test_layout_and_method_style_match_reference() -> None:
+    assert plotter.DATASET_ORDER == ("AIDS", "NCI1", "Mutagenicity", "Proteins")
+    assert plotter.ACTIVE_DATASET_COLUMNS == {"AIDS": 0, "Mutagenicity": 2}
+    assert plotter.METHODS == ("Ours", "GlobalGCE", "CLEAR", "GCFExplainer")
+    assert plotter.METHOD_STYLES == {
+        "Ours": {"color": "black", "marker": "s", "label": "Ours"},
+        "GlobalGCE": {"color": "#E53935", "marker": "x", "label": "GlobalGCE"},
+        "CLEAR": {"color": "#2E7D32", "marker": "*", "label": "CLEAR"},
+        "GCFExplainer": {"color": "#B02BC7", "marker": "^", "label": "GCFExplainer"},
+    }
+    assert plotter.FIGURE3_MARKER_K == (1, 3, 5, 10, 15, 20)
+    assert plotter.FIGURE3_MARKER_INDICES == (0, 2, 4, 9, 14, 19)
+    assert plotter.FIGURE4_AIDS_MARKEVERY == 100
+
+
+def test_reference_canvas_aspect_ratios_are_retained() -> None:
+    expected = {
+        plotter.FIGURE3_FIGSIZE: 2048 / 826,
+        plotter.FIGURE4_FIGSIZE: 2048 / 514,
+        plotter.TABLE2_FIGSIZE: 2048 / 458,
+    }
+    for size, target_ratio in expected.items():
+        assert size[0] / size[1] == pytest.approx(target_ratio, rel=0.08)
+
+
+def test_plotter_does_not_recompute_distance_or_candidate_rank() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "standardize_raw_aids_gcf_run" not in source
+    assert "compute_k_curve" not in source
+    assert "compute_prefix_metrics" not in source
+    assert "MolCLR" in source
+    assert '"distance_recomputed": False' in source
+    assert '"candidate_order_changed": False' in source
+    assert "q30" not in source.lower()
+    forbidden_threshold = "0.0545" + "395671276376"
+    assert forbidden_threshold not in source
+
+
+def test_exact_cli_paths_are_enforced(tmp_path: Path) -> None:
+    namespace = argparse.Namespace(
+        aids_figure3_csv=str(plotter.AIDS_FIGURE3_RELATIVE_PATH),
+        aids_figure4_csv=str(plotter.AIDS_FIGURE4_RELATIVE_PATH),
+        aids_ours_root=str(plotter.AIDS_TABLE_ROOTS["Ours"]),
+        aids_globalgce_root=str(plotter.AIDS_TABLE_ROOTS["GlobalGCE"]),
+        aids_clear_root=str(plotter.AIDS_TABLE_ROOTS["CLEAR"]),
+        aids_gcf_root=str(plotter.AIDS_TABLE_ROOTS["GCFExplainer"]),
+        mut_ours_root="mut/ours",
+        mut_globalgce_root="mut/globalgce",
+        mut_clear_root="mut/clear",
+        mut_gcf_root="mut/gcf",
+    )
+    paths = plotter._args_paths(namespace, tmp_path)
+    assert paths["aids_figure3"] == (tmp_path / plotter.AIDS_FIGURE3_RELATIVE_PATH).resolve()
+    namespace.aids_figure3_csv = "outputs/hpc/eval/paper/wrong.csv"
+    with pytest.raises(ValueError, match="Expected frozen source"):
+        plotter._args_paths(namespace, tmp_path)
+
+
+def test_wrapper_supports_native_and_match_aids_outputs() -> None:
+    text = WRAPPER_PATH.read_text(encoding="utf-8")
+    assert plotter.AIDS_FIGURE3_RELATIVE_PATH.as_posix() in text
+    assert plotter.AIDS_FIGURE4_RELATIVE_PATH.as_posix() in text
+    for root in plotter.AIDS_TABLE_ROOTS.values():
+        assert root.as_posix() in text
+    assert '--aids-figure3-csv "$AIDS_FIGURE3_CSV"' in text
+    assert '--aids-figure4-csv "$AIDS_FIGURE4_CSV"' in text
+    assert '--mut-threshold-mode "$MUT_THRESHOLD_MODE"' in text
+    assert 'MUT_THRESHOLD_MODE="${MUT_THRESHOLD_MODE:-match-aids}"' in text
+    assert "aids_mutagenicity_wnode_gcf_style_v2" in text
+    assert "aids_mutagenicity_wnode_gcf_style_matched_aids_v1" in text
+    assert "[AIDS_MUT_WNODE_GCF_STYLE_V2_SUCCESS]" in text
+    assert "[AIDS_MUT_WNODE_GCF_STYLE_MATCHED_AIDS_SUCCESS]" in text
+    assert "figure3_gcf_style_aids_mut.png" in text
+    assert "figure4_gcf_style_aids_mut.png" in text
+    assert "table2_gcf_style_aids_mut.png" in text
+    assert "aids_common3_standardized_v2" not in text
+    assert "combined/combined_threshold_summary.csv" not in text
+
+
+def test_wrapper_keeps_verified_resources_and_no_proxy_mutation() -> None:
     text = WRAPPER_PATH.read_text(encoding="utf-8")
     assert "#SBATCH --partition=A800" in text
-    assert "#SBATCH --cpus-per-task=4" in text
     assert "#SBATCH --gres=gpu:a800:1" in text
-    assert (
-        "ccrcov_molclr_node_wasserstein_full_fixed_oursref1283_"
-        "gcfexplainer_top20_normalized_final" in text
-    )
-    assert "aids_common3_standardized_v2/gcfexplainer" not in text
-    assert "combined/combined_threshold_summary.csv" in text
-    assert "details/pair_details.csv" in text
-    assert "gcfexplainer_native5000_top20_wnode_test_v1" in text
-    assert "distance_label=MolCLR-Node-Wasserstein" in text
-    assert "distance_type=node_wasserstein" in text
+    assert "#SBATCH --cpus-per-task=4" in text
+    assert "conda activate smiles_pip118" in text
+    assert "export MPLBACKEND=Agg" in text
     assert not re.search(r"(^|\s)unset\s+(http|https|all)_proxy", text, re.IGNORECASE)
-    assert "fgw_lambda" not in text.lower()
     assignments = [
-        line for line in text.splitlines()
-        if "ROOT=" in line and not line.lstrip().startswith("#")
+        line
+        for line in text.splitlines()
+        if ("ROOT=" in line or "AIDS_FIGURE" in line) and not line.lstrip().startswith("#")
     ]
     assert all("ccrcov_molclr_node_fgw_" not in line for line in assignments)
     assert all("lam05" not in line.lower() for line in assignments)
+
+
+def test_native_and_match_aids_profiles_coexist_with_wnode_provenance() -> None:
+    assert plotter.DISTANCE_LABEL == "MolCLR-Node-Wasserstein"
+    assert plotter.DISTANCE_TYPE == "node_wasserstein"
+    assert plotter.AIDS_FIGURE3_THETA == 0.05
+    assert plotter.AIDS_TABLE2_THETA == 0.05
+    source = inspect.getsource(plotter)
+    assert 'choices=("native", "match-aids")' in source
+    assert '"threshold_mode": "native"' in source
+    assert '"threshold_mode": "match-aids"' in source
