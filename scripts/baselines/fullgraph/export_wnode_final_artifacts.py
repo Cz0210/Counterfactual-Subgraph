@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-run-dir", required=True)
     parser.add_argument("--calibration-run-dir", required=True)
     parser.add_argument("--frozen-candidates-csv", required=True)
+    parser.add_argument("--frozen-candidate-manifest")
+    parser.add_argument("--expected-candidate-order-sha256")
     parser.add_argument("--ours-schema-root", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--method-name", required=True)
@@ -83,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         expected_pair_count=args.expected_pair_count,
         forbid_selection=args.forbid_selection,
         forbid_fitting=args.forbid_fitting,
+        frozen_candidate_manifest=args.frozen_candidate_manifest,
+        expected_candidate_order_sha256=args.expected_candidate_order_sha256,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True), flush=True)
     print("[FULLGRAPH_WNODE_FINAL_ARTIFACT_EXPORT_OK]", flush=True)

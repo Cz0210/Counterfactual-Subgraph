@@ -12,6 +12,7 @@ from scripts.evaluate_ccrcov_with_molclr_node_wasserstein import summarize_metho
 from src.eval.fullgraph_wnode_artifacts import (
     OFFICIAL_FIELDS,
     TABLE_REQUIRED_FIELDS,
+    _method_slug,
     audit_final_artifacts,
     compute_prefix_artifacts,
     export_final_artifacts,
@@ -311,6 +312,9 @@ def test_export_writes_figure_table_provenance_and_hashes(tmp_path: Path) -> Non
     assert summary["k10_ccrcov_theta_star"] == pytest.approx(1 / 3)
     assert summary["k20_ccrcov_theta_star"] == pytest.approx(2 / 3)
     assert len(_read_csv(output / "figure3_coverage_vs_k.csv")) == 20
+    assert (output / "selected_sequence.jsonl").is_file()
+    assert (output / "audit.json").is_file()
+    assert (output / "_RUN_COMPLETE.json").is_file()
     figure4 = _read_csv(output / "figure4_coverage_vs_threshold.csv")
     assert len(figure4) == 14
     assert {int(row["k"]) for row in figure4} == {10, 20}
@@ -338,6 +342,10 @@ def test_export_writes_figure_table_provenance_and_hashes(tmp_path: Path) -> Non
         thresholds=THRESHOLDS,
     )
     assert result["manifest_hashes_verified"] is True
+
+
+def test_gcfexplainer_table_slug_is_stable() -> None:
+    assert _method_slug("GCFExplainer-Top20") == "gcfexplainer"
 
 
 def test_official_mismatch_rejects_without_output(tmp_path: Path) -> None:

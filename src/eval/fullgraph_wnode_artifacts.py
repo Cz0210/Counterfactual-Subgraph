@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -344,6 +344,37 @@ def read_json(path: str | Path) -> dict[str, Any]:
     return value
 
 
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    rows: list[dict[str, Any]] = []
+    with source.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"Expected JSON object at {source}:{line_number}"
+                )
+            rows.append(dict(value))
+    return rows
+
+
+def stable_json_sha256(payload: Any) -> str:
+    """Return the stable JSON identity used by frozen GCF candidate exports."""
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _candidate_smiles(row: dict[str, Any]) -> str:
     for field in (
         "canonical_smiles",
@@ -365,21 +396,37 @@ def load_ranked_candidates(
     expected_count: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     rows, fields = read_csv(path)
-    if "rank" not in fields:
-        raise ValueError(f"Frozen candidate CSV requires a rank column: {path}")
+    has_prefix_rank = "rank" in fields
+    has_native_rank = "native_rank" in fields
+    if not has_prefix_rank and not has_native_rank:
+        raise ValueError(
+            "Frozen candidate CSV requires rank or native_rank: " f"{path}"
+        )
     ranked: list[tuple[int, dict[str, Any]]] = []
-    for row in rows:
-        rank = _as_int(row.get("rank"))
+    native_ranks: list[int] = []
+    for row_index, row in enumerate(rows, start=1):
+        rank = _as_int(row.get("rank")) if has_prefix_rank else row_index
+        native_rank = _as_int(row.get("native_rank"))
         candidate_id = _text(row.get("candidate_id"))
         smiles = _candidate_smiles(row)
         if rank is None or rank <= 0 or not candidate_id or not smiles:
             raise ValueError(f"Invalid frozen candidate row: {row}")
+        if has_native_rank:
+            if native_rank is None or native_rank <= 0:
+                raise ValueError(f"Invalid native_rank in frozen candidate row: {row}")
+            native_ranks.append(native_rank)
         normalized = dict(row)
         normalized["rank"] = rank
         normalized["candidate_id"] = candidate_id
         normalized["candidate_smiles"] = smiles
         ranked.append((rank, normalized))
-    ranked.sort(key=lambda item: item[0])
+    if has_prefix_rank:
+        ranked.sort(key=lambda item: item[0])
+    elif native_ranks != sorted(set(native_ranks)):
+        raise ValueError(
+            "Frozen native_rank values must be unique and strictly increasing "
+            f"in CSV row order: {path}"
+        )
     ordered = [row for _, row in ranked]
     expected_ranks = list(range(1, int(expected_count) + 1))
     if [rank for rank, _ in ranked] != expected_ranks:
@@ -392,6 +439,179 @@ def load_ranked_candidates(
     if len(set(ids)) != len(ids) or len(set(smiles)) != len(smiles):
         raise ValueError("Frozen candidates contain duplicate IDs or SMILES.")
     return ordered, fields
+
+
+def _manifest_value(payload: Mapping[str, Any], names: set[str]) -> Any:
+    value = _deep_find(dict(payload), names)
+    if value in (None, ""):
+        raise ValueError(
+            "Frozen candidate manifest is missing one of: "
+            f"{sorted(names)}"
+        )
+    return value
+
+
+def _manifest_candidate_csv_sha256(payload: Mapping[str, Any]) -> str:
+    direct = _deep_find(
+        dict(payload),
+        {
+            "candidate_csv_sha256",
+            "selected_top20_csv_sha256",
+            "selected_candidates_sha256",
+        },
+    )
+    if direct not in (None, ""):
+        return _text(direct).lower()
+    for container_name in ("artifacts", "files", "file_sha256"):
+        container = payload.get(container_name)
+        if isinstance(container, dict):
+            for relative, value in container.items():
+                if Path(str(relative)).name != "selected_top20.csv":
+                    continue
+                if isinstance(value, dict):
+                    value = value.get("sha256") or value.get("hash")
+                if value not in (None, ""):
+                    return _text(value).lower()
+        elif isinstance(container, list):
+            for item in container:
+                if not isinstance(item, dict):
+                    continue
+                relative = item.get("path") or item.get("relative_path")
+                if Path(str(relative or "")).name != "selected_top20.csv":
+                    continue
+                value = item.get("sha256") or item.get("hash")
+                if value not in (None, ""):
+                    return _text(value).lower()
+    raise ValueError(
+        "Frozen candidate manifest does not identify selected_top20.csv SHA256."
+    )
+
+
+def _manifest_candidate_count(payload: Mapping[str, Any]) -> int | None:
+    for name in (
+        "candidate_count",
+        "selected_candidate_count",
+        "selected_top20_rows",
+        "selected_count",
+    ):
+        if name in payload:
+            return _as_int(payload.get(name))
+    return _as_int(_deep_find(dict(payload), {"candidate_count"}))
+
+
+def validate_frozen_candidate_contract(
+    *,
+    candidates_csv: str | Path,
+    frozen_manifest_path: str | Path,
+    expected_count: int,
+    expected_csv_sha256: str,
+    expected_order_sha256: str,
+    expected_native_ranks: Sequence[int],
+    expected_selection_method: str,
+) -> dict[str, Any]:
+    """Validate a frozen fullgraph CSV without converting or reordering it."""
+
+    candidate_path = Path(candidates_csv).expanduser().resolve()
+    manifest_path = Path(frozen_manifest_path).expanduser().resolve()
+    candidates, fields = load_ranked_candidates(
+        candidate_path,
+        expected_count=int(expected_count),
+    )
+    if "native_rank" not in fields:
+        raise ValueError("GCF frozen candidates must retain native_rank.")
+    native_ranks = [int(row["native_rank"]) for row in candidates]
+    required_native_ranks = [int(value) for value in expected_native_ranks]
+    if native_ranks != required_native_ranks:
+        raise ValueError(
+            "Frozen native candidate order mismatch: "
+            f"actual={native_ranks}, expected={required_native_ranks}"
+        )
+    if not all(_as_bool(row.get("candidate_set_preselected")) for row in candidates):
+        raise ValueError("Every frozen candidate must declare candidate_set_preselected=true.")
+    if any(_as_bool(row.get("selection_performed_in_eval")) for row in candidates):
+        raise ValueError("Frozen candidates declare selection_performed_in_eval=true.")
+    if any(not _as_bool(row.get("rdkit_valid")) for row in candidates):
+        raise ValueError("Frozen candidates contain rdkit_valid=false rows.")
+    if any(_as_int(row.get("rf_pred")) != 0 for row in candidates):
+        raise ValueError("Frozen candidates contain a non-target RF prediction.")
+    selection_methods = {
+        _text(row.get("selection_method")) for row in candidates
+    }
+    if selection_methods != {str(expected_selection_method)}:
+        raise ValueError(
+            "Frozen candidate selection_method mismatch: "
+            f"actual={sorted(selection_methods)}"
+        )
+    candidate_ids = [str(row["candidate_id"]) for row in candidates]
+    order_sha256 = stable_json_sha256(candidate_ids)
+    csv_sha256 = sha256_file(candidate_path)
+    if csv_sha256 != str(expected_csv_sha256).lower():
+        raise ValueError(
+            f"Frozen candidate CSV SHA256 mismatch: actual={csv_sha256}"
+        )
+    if order_sha256 != str(expected_order_sha256).lower():
+        raise ValueError(
+            f"Frozen candidate order SHA256 mismatch: actual={order_sha256}"
+        )
+
+    manifest = read_json(manifest_path)
+    manifest_csv_sha = _manifest_candidate_csv_sha256(manifest)
+    manifest_order_sha = _text(
+        _manifest_value(manifest, {"selected_candidate_order_sha256"})
+    ).lower()
+    manifest_native_ranks = _manifest_value(manifest, {"selected_native_ranks"})
+    if not isinstance(manifest_native_ranks, list):
+        raise ValueError("Manifest selected_native_ranks must be a list.")
+    if manifest_csv_sha != csv_sha256:
+        raise ValueError("Frozen manifest candidate CSV SHA256 mismatch.")
+    if manifest_order_sha != order_sha256:
+        raise ValueError("Frozen manifest candidate order SHA256 mismatch.")
+    if [int(value) for value in manifest_native_ranks] != native_ranks:
+        raise ValueError("Frozen manifest native rank order mismatch.")
+
+    semantic_checks = {
+        "dataset": _text(_manifest_value(manifest, {"dataset"})).lower()
+        == "mutagenicity",
+        "source_label": _as_int(_manifest_value(manifest, {"source_label"})) == 1,
+        "target_label": _as_int(_manifest_value(manifest, {"target_label"})) == 0,
+        "candidate_count": _manifest_candidate_count(manifest)
+        == int(expected_count),
+        "candidate_set_preselected": _as_bool(
+            _manifest_value(manifest, {"candidate_set_preselected"})
+        ),
+        "selection_performed_in_eval": not _as_bool(
+            _manifest_value(manifest, {"selection_performed_in_eval"})
+        ),
+        "rf_reranking_performed": not _as_bool(
+            _manifest_value(manifest, {"rf_reranking_performed"})
+        ),
+        "wnode_reranking_performed": not _as_bool(
+            _manifest_value(manifest, {"wnode_reranking_performed"})
+        ),
+        "selection_method": _text(
+            _manifest_value(manifest, {"selection_method"})
+        )
+        == str(expected_selection_method),
+    }
+    failed = [name for name, passed in semantic_checks.items() if not passed]
+    if failed:
+        raise ValueError(f"Frozen candidate manifest semantic mismatch: {failed}")
+    return {
+        "candidate_count": len(candidates),
+        "candidate_ids": candidate_ids,
+        "native_ranks": native_ranks,
+        "candidate_csv": str(candidate_path),
+        "candidate_csv_sha256": csv_sha256,
+        "frozen_manifest": str(manifest_path),
+        "frozen_manifest_sha256": sha256_file(manifest_path),
+        "selected_candidate_order_sha256": order_sha256,
+        "candidate_set_preselected": True,
+        "selection_performed_in_eval": False,
+        "selection_method": str(expected_selection_method),
+        "row_order_preserved": True,
+        "adapter_used": False,
+        "semantic_checks": semantic_checks,
+    }
 
 
 def locate_test_inputs(test_run_dir: str | Path) -> tuple[Path, Path, Path]:
@@ -786,6 +1006,17 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
+def _write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_csv(
     path: Path,
     rows: Sequence[dict[str, Any]],
@@ -824,6 +1055,18 @@ def _git_commit(repo_root: Path) -> str | None:
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def _method_slug(method_name: str) -> str:
+    lowered = str(method_name).lower()
+    for token, slug in (
+        ("globalgce", "globalgce"),
+        ("gcfexplainer", "gcfexplainer"),
+        ("clear", "clear"),
+    ):
+        if token in lowered:
+            return slug
+    return "_".join(lowered.replace("-", " ").split())
 
 
 def _deep_find(payload: Any, names: set[str]) -> Any:
@@ -895,6 +1138,52 @@ def _extract_threshold_values(payload: dict[str, Any]) -> list[float]:
         if values and all(value is not None for value in values):
             return [float(value) for value in values if value is not None]
     return []
+
+
+def load_frozen_threshold_contract(path: str | Path) -> dict[str, Any]:
+    """Load the shared Mutagenicity thresholds without fitting or fallback."""
+
+    threshold_path = Path(path).expanduser().resolve()
+    payload = read_json(threshold_path)
+    thresholds = _extract_threshold_values(payload)
+    theta_star = _as_float(payload.get("theta_star"))
+    cost_cap = _as_float(payload.get("cost_cap"))
+    threshold_source = _text(payload.get("threshold_source"))
+    if not thresholds or theta_star is None or cost_cap is None:
+        raise ValueError(f"Frozen threshold schema is incomplete: {threshold_path}")
+    if any(not math.isfinite(value) or value < 0.0 for value in thresholds):
+        raise ValueError("Frozen thresholds must be finite and nonnegative.")
+    if thresholds != sorted(thresholds) or len(thresholds) != len(set(thresholds)):
+        raise ValueError("Frozen thresholds must be unique and increasing.")
+    if not any(
+        math.isclose(
+            value,
+            float(theta_star),
+            rel_tol=0.0,
+            abs_tol=FLOAT_TOLERANCE,
+        )
+        for value in thresholds
+    ):
+        raise ValueError("Frozen theta_star is absent from the threshold list.")
+    if not math.isclose(
+        float(cost_cap),
+        float(thresholds[-1]),
+        rel_tol=0.0,
+        abs_tol=FLOAT_TOLERANCE,
+    ):
+        raise ValueError("Frozen cost_cap must equal the largest threshold.")
+    if threshold_source and not threshold_source.startswith("frozen_calibration"):
+        raise ValueError(
+            f"Unexpected frozen threshold source: {threshold_source!r}"
+        )
+    return {
+        "thresholds_json": str(threshold_path),
+        "thresholds_json_sha256": sha256_file(threshold_path),
+        "threshold_source": threshold_source or "frozen_calibration",
+        "thresholds": thresholds,
+        "theta_star": float(theta_star),
+        "cost_cap": float(cost_cap),
+    }
 
 
 def validate_frozen_threshold_provenance(
@@ -979,6 +1268,336 @@ def validate_frozen_threshold_provenance(
         "thresholds_match": True,
         "calibration_run_thresholds_checked": bool(calibration_values),
     }
+
+
+def _dataset_parent_provenance(
+    *,
+    dataset_path: Path,
+    cohort_name: str,
+    id_col: str,
+    label_col: str,
+    source_label: int,
+    expected_parent_count: int,
+) -> dict[str, Any]:
+    if int(source_label) != 1:
+        raise ValueError("Mutagenicity fullgraph evaluation requires source_label=1.")
+    if cohort_name == "calibration":
+        from src.eval.mutagenicity_wnode_matrix import (
+            calibration_cohort_hash,
+            load_calibration_parents,
+        )
+
+        parents = load_calibration_parents(
+            dataset_path,
+            id_col=id_col,
+            smiles_col="smiles",
+            label_col=label_col,
+            cohort_name="calibration",
+            expected_parent_count=expected_parent_count,
+        )
+        cohort_hash = calibration_cohort_hash(parents)
+    elif cohort_name == "test":
+        from src.eval.mutagenicity_wnode_frozen_test import (
+            load_test_parents,
+            test_cohort_hash,
+        )
+
+        parents = load_test_parents(
+            dataset_path,
+            id_col=id_col,
+            smiles_col="smiles",
+            label_col=label_col,
+            cohort_name="test",
+            expected_parent_count=expected_parent_count,
+        )
+        cohort_hash = test_cohort_hash(parents)
+    else:  # pragma: no cover - guarded by the caller.
+        raise ValueError(f"Unsupported parent cohort: {cohort_name!r}")
+    parent_ids = [parent.parent_id for parent in parents]
+    return {
+        "dataset_csv": str(dataset_path),
+        "dataset_csv_sha256": sha256_file(dataset_path),
+        "source_parent_ids_sha256": stable_json_sha256(parent_ids),
+        "source_parent_count": len(parent_ids),
+        "parent_cohort_hash": cohort_hash,
+        f"{cohort_name}_cohort_hash": cohort_hash,
+        "parent_cohort_hash_source": (
+            f"src.eval.mutagenicity_wnode_{'matrix' if cohort_name == 'calibration' else 'frozen_test'}"
+        ),
+    }
+
+
+def audit_fullgraph_evaluation_run(
+    *,
+    run_dir: str | Path,
+    frozen_candidates_csv: str | Path,
+    frozen_manifest_path: str | Path,
+    thresholds_json: str | Path,
+    cohort_name: str,
+    expected_parent_count: int,
+    expected_candidate_count: int,
+    expected_pair_count: int,
+    expected_candidate_csv_sha256: str,
+    expected_candidate_order_sha256: str,
+    expected_teacher_sha256: str,
+    expected_molclr_checkpoint_sha256: str,
+    expected_native_ranks: Sequence[int],
+    expected_method: str,
+    expected_selection_method: str,
+    source_label: int = 1,
+    target_label: int = 0,
+) -> dict[str, Any]:
+    """Audit one existing fullgraph WNode Cartesian run without recomputation."""
+
+    root = Path(run_dir).expanduser().resolve()
+    evaluator_marker = root / "_EVALUATOR_COMPLETE.json"
+    if not evaluator_marker.is_file():
+        raise FileNotFoundError(
+            f"Evaluator completion marker is missing: {evaluator_marker}"
+        )
+    evaluator_completion = read_json(evaluator_marker)
+    if not _as_bool(evaluator_completion.get("complete")):
+        raise ValueError("Evaluator completion marker does not declare complete=true.")
+    if _as_int(
+        evaluator_completion.get("num_unique_parent_candidate_pairs")
+    ) != int(expected_pair_count):
+        raise ValueError("Evaluator completion marker pair count mismatch.")
+    candidates_audit = validate_frozen_candidate_contract(
+        candidates_csv=frozen_candidates_csv,
+        frozen_manifest_path=frozen_manifest_path,
+        expected_count=expected_candidate_count,
+        expected_csv_sha256=expected_candidate_csv_sha256,
+        expected_order_sha256=expected_candidate_order_sha256,
+        expected_native_ranks=expected_native_ranks,
+        expected_selection_method=expected_selection_method,
+    )
+    threshold_contract = load_frozen_threshold_contract(thresholds_json)
+    candidates, _ = load_ranked_candidates(
+        frozen_candidates_csv,
+        expected_count=expected_candidate_count,
+    )
+    pair_path, summary_path, config_path = locate_test_inputs(root)
+    details, _ = read_csv(pair_path)
+    summary_rows, _ = read_csv(summary_path)
+    config = read_json(config_path)
+    parent_ids, _ = validate_complete_cartesian(
+        details,
+        candidates,
+        expected_parent_count=expected_parent_count,
+        expected_pair_count=expected_pair_count,
+    )
+    if len(details) != int(expected_pair_count):
+        raise ValueError(
+            f"Fullgraph detail rows={len(details)} != {expected_pair_count}."
+        )
+    if any(_finite_distance(row) is None for row in details):
+        raise ValueError("Fullgraph Cartesian matrix contains a non-finite distance.")
+    if any(_as_int(row.get("pred_before")) != int(source_label) for row in details):
+        raise ValueError("Fullgraph source teacher prediction is not source_label=1.")
+    if any(_as_int(row.get("pred_after")) != int(target_label) for row in details):
+        raise ValueError("Fullgraph candidate teacher prediction is not target_label=0.")
+    if any(not _as_bool(row.get("teacher_strict_flip")) for row in details):
+        raise ValueError("Fullgraph pair matrix contains a non-strict-flip pair.")
+
+    candidate_ids = [str(row["candidate_id"]) for row in candidates]
+    for parent_id in parent_ids:
+        observed = [
+            _text(row.get("candidate_id"))
+            for row in details
+            if _text(row.get("parent_id")) == parent_id
+        ]
+        if observed != candidate_ids:
+            raise ValueError(
+                f"Evaluator changed frozen candidate order for parent={parent_id!r}."
+            )
+    if stable_json_sha256(candidate_ids) != str(
+        expected_candidate_order_sha256
+    ).lower():
+        raise ValueError("Evaluation candidate order hash changed.")
+
+    expected_thresholds = [
+        float(value) for value in threshold_contract["thresholds"]
+    ]
+    observed_thresholds: list[float] = []
+    for row in summary_rows:
+        if _text(row.get("method")) != str(expected_method):
+            raise ValueError(
+                f"Unexpected method in threshold summary: {row.get('method')!r}"
+            )
+        value = _as_float(row.get("threshold"))
+        if value is None:
+            raise ValueError("Threshold summary contains a non-finite threshold.")
+        observed_thresholds.append(value)
+        if _as_int(row.get("num_parents")) != int(expected_parent_count):
+            raise ValueError("Threshold summary parent count mismatch.")
+        if _as_int(row.get("num_candidates")) != int(expected_candidate_count):
+            raise ValueError("Threshold summary candidate count mismatch.")
+        if _as_int(row.get("num_valid_pairs")) != int(expected_pair_count):
+            raise ValueError("Threshold summary valid-pair count mismatch.")
+        if _text(row.get("cf_mode")) != "strict_flip":
+            raise ValueError("Threshold summary does not use strict_flip.")
+    if len(observed_thresholds) != len(expected_thresholds) or any(
+        not math.isclose(left, right, rel_tol=0.0, abs_tol=FLOAT_TOLERANCE)
+        for left, right in zip(observed_thresholds, expected_thresholds)
+    ):
+        raise ValueError("Evaluation threshold grid differs from frozen thresholds.")
+
+    if _text(config.get("threshold_source")) != "explicit":
+        raise ValueError("Evaluation used fitted or auto-quantile thresholds.")
+    configured_thresholds = config.get("thresholds")
+    if not isinstance(configured_thresholds, list) or len(configured_thresholds) != len(
+        expected_thresholds
+    ):
+        raise ValueError("Evaluation run_config threshold list is incomplete.")
+    if any(
+        not math.isclose(
+            float(left), float(right), rel_tol=0.0, abs_tol=FLOAT_TOLERANCE
+        )
+        for left, right in zip(configured_thresholds, expected_thresholds)
+    ):
+        raise ValueError("Evaluation run_config thresholds changed.")
+    if config.get("candidate_set_preselected") is not True:
+        raise ValueError("Evaluation did not recognize the frozen candidate set.")
+    if config.get("selection_performed_in_eval") is not False:
+        raise ValueError("Evaluation performed candidate selection.")
+    if _text(config.get("selection_method")) != str(expected_selection_method):
+        raise ValueError("Evaluation selection_method changed.")
+    if config.get("run_ours") is not False or config.get("run_fullgraph") is not True:
+        raise ValueError("Evaluation did not run in fullgraph-only mode.")
+    if _text(config.get("cf_mode")) != "strict_flip":
+        raise ValueError("Evaluation run_config does not use strict_flip.")
+    if _text(config.get("feature_cost")) != "cosine":
+        raise ValueError("Evaluation feature_cost must be cosine.")
+    if _text(config.get("node_mass")) != "uniform":
+        raise ValueError("Evaluation node_mass must be uniform.")
+    if _as_float(config.get("size_penalty_beta")) != 0.0:
+        raise ValueError("Evaluation size_penalty_beta must be 0.0.")
+    if _as_int(config.get("label")) != int(source_label):
+        raise ValueError("Evaluation source label differs from source_label=1.")
+    if _as_int(config.get("max_parents")) != int(expected_parent_count):
+        raise ValueError("Evaluation max_parents differs from the frozen cohort.")
+    if _as_int(config.get("max_candidates")) != int(expected_candidate_count):
+        raise ValueError("Evaluation max_candidates differs from frozen Top20.")
+    if _as_int(config.get("preselected_topk")) != int(expected_candidate_count):
+        raise ValueError("Evaluation preselected_topk differs from frozen Top20.")
+
+    teacher_path = Path(_text(config.get("teacher_path"))).expanduser().resolve()
+    molclr_checkpoint = Path(
+        _text(config.get("molclr_checkpoint"))
+    ).expanduser().resolve()
+    for description, path, expected_sha256 in (
+        ("RF teacher", teacher_path, expected_teacher_sha256),
+        (
+            "MolCLR checkpoint",
+            molclr_checkpoint,
+            expected_molclr_checkpoint_sha256,
+        ),
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(f"{description} is missing: {path}")
+        actual_sha256 = sha256_file(path)
+        if actual_sha256 != str(expected_sha256).lower():
+            raise ValueError(
+                f"{description} SHA256 mismatch: actual={actual_sha256}"
+            )
+
+    dataset_path = Path(_text(config.get("dataset_csv"))).expanduser().resolve()
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"Evaluation dataset CSV is missing: {dataset_path}")
+    normalized_cohort = str(cohort_name).strip().lower()
+    if normalized_cohort not in {"calibration", "test"}:
+        raise ValueError(f"Unsupported evaluation cohort: {cohort_name!r}")
+    dataset_name = dataset_path.name.lower()
+    is_test_input = dataset_name.startswith("test_") or "_test_" in dataset_name
+    if normalized_cohort == "calibration" and is_test_input:
+        raise ValueError("Calibration WNode run references a test path.")
+    if normalized_cohort == "test" and not is_test_input:
+        raise ValueError("Frozen test WNode run does not reference the test split.")
+    parent_provenance = _dataset_parent_provenance(
+        dataset_path=dataset_path,
+        cohort_name=normalized_cohort,
+        id_col="molecule_id",
+        label_col=_text(config.get("label_col")) or "label",
+        source_label=int(source_label),
+        expected_parent_count=int(expected_parent_count),
+    )
+    return {
+        "audit_passed": True,
+        "run_complete": True,
+        "cohort": normalized_cohort,
+        "source_label": int(source_label),
+        "target_label": int(target_label),
+        "parent_count": len(parent_ids),
+        "candidate_count": len(candidates),
+        "pair_count": len(details),
+        "complete_cartesian": True,
+        "all_pair_distances_finite": True,
+        "all_source_teacher_predictions_match": True,
+        "all_candidate_teacher_predictions_match": True,
+        "all_pairs_strict_flip": True,
+        "evaluation_parent_ids_sha256": stable_json_sha256(parent_ids),
+        **parent_provenance,
+        **candidates_audit,
+        "threshold_provenance": threshold_contract,
+        "candidate_selection_performed": False,
+        "selection_used_calibration": False,
+        "selection_used_test": False,
+        "test_used_for_selection": False,
+        "threshold_fitted_on_test": False,
+        "candidate_set_preselected": True,
+        "selection_performed_in_eval": False,
+        "strict_flip": True,
+        "distance_line": "MolCLR-Node-Wasserstein",
+        "feature_cost": "cosine",
+        "node_mass": "uniform",
+        "size_penalty_beta": 0.0,
+        "solver": "exact_emd2",
+        "pair_details": str(pair_path),
+        "pair_details_sha256": sha256_file(pair_path),
+        "threshold_summary": str(summary_path),
+        "threshold_summary_sha256": sha256_file(summary_path),
+        "run_config": str(config_path),
+        "run_config_sha256": sha256_file(config_path),
+        "teacher_path": str(teacher_path),
+        "teacher_sha256": sha256_file(teacher_path),
+        "molclr_checkpoint": str(molclr_checkpoint),
+        "molclr_checkpoint_sha256": sha256_file(molclr_checkpoint),
+    }
+
+
+def finalize_fullgraph_evaluation_run(**kwargs: Any) -> dict[str, Any]:
+    """Persist a successful read-only audit after the evaluator completes."""
+
+    audit = audit_fullgraph_evaluation_run(**kwargs)
+    root = Path(kwargs["run_dir"]).expanduser().resolve()
+    if (root / "_RUN_COMPLETE.json").exists():
+        raise FileExistsError(f"Run completion marker already exists: {root}")
+    _write_json(root / "audit.json", audit)
+    _write_json(root / "summary.json", audit)
+    _write_json(
+        root / "run_manifest.json",
+        {
+            **audit,
+            "run_complete": True,
+            "candidate_selection_source": "train_only_frozen_candidates",
+            "candidate_order_source": "frozen_csv_row_order",
+        },
+    )
+    _write_json(
+        root / "_RUN_COMPLETE.json",
+        {
+            "run_complete": True,
+            "audit_passed": True,
+            "cohort": audit["cohort"],
+            "parent_count": audit["parent_count"],
+            "candidate_count": audit["candidate_count"],
+            "pair_count": audit["pair_count"],
+            "selected_candidate_order_sha256": audit[
+                "selected_candidate_order_sha256"
+            ],
+        },
+    )
+    return audit
 
 
 def _table_row(
@@ -1067,6 +1686,8 @@ def export_final_artifacts(
     expected_pair_count: int,
     forbid_selection: bool,
     forbid_fitting: bool,
+    frozen_candidate_manifest: str | Path | None = None,
+    expected_candidate_order_sha256: str | None = None,
 ) -> dict[str, Any]:
     output = Path(output_dir).expanduser().resolve()
     if output.exists():
@@ -1130,6 +1751,15 @@ def export_final_artifacts(
         frozen_candidates_csv,
         expected_count=expected_candidate_count,
     )
+    candidate_order_sha256 = stable_json_sha256(
+        [str(row["candidate_id"]) for row in candidates]
+    )
+    if (
+        expected_candidate_order_sha256 is not None
+        and candidate_order_sha256
+        != str(expected_candidate_order_sha256).strip().lower()
+    ):
+        raise ValueError("Frozen candidate order SHA256 differs from expected value.")
     parent_ids, _ = validate_complete_cartesian(
         details,
         candidates,
@@ -1192,6 +1822,7 @@ def export_final_artifacts(
             if field not in selected_fields:
                 selected_fields.append(field)
         _write_csv(temp / "selected_top20.csv", candidates, selected_fields)
+        _write_jsonl(temp / "selected_sequence.jsonl", candidates)
         _write_csv(temp / "test_pair_details.csv", ordered_details, detail_fields)
         _write_csv(temp / "test_threshold_summary.csv", k20_rows)
         _write_csv(temp / "parent_best_distances.csv", parent_best_rows)
@@ -1209,7 +1840,7 @@ def export_final_artifacts(
                 theta_star=theta_star,
             )
             fields = _resolve_table_fields(Path(ours_schema_root).resolve(), k)
-            slug = "globalgce" if "globalgce" in method_name.lower() else method_name.lower().replace(" ", "_")
+            slug = _method_slug(method_name)
             _write_csv(temp / f"table2_{slug}_k{k}.csv", [table_row], fields)
 
         k10 = by_k[10]
@@ -1245,6 +1876,10 @@ def export_final_artifacts(
             "selection_used_test": False,
             "threshold_fitted_on_test": False,
             "test_used_for_selection": False,
+            "candidate_selection_performed": False,
+            "candidate_set_preselected": True,
+            "selection_performed_in_eval": False,
+            "selected_candidate_order_sha256": candidate_order_sha256,
             "official_summary_reconstruction_passed": True,
             "run_complete": True,
         }
@@ -1259,6 +1894,8 @@ def export_final_artifacts(
             "generation_input_split": "train",
             "candidate_selection_source": "train_only_frozen_candidates",
             "candidate_selection_performed": False,
+            "candidate_set_preselected": True,
+            "selection_performed_in_eval": False,
             "selection_used_calibration": False,
             "selection_used_test": False,
             "threshold_fitted_on_test": False,
@@ -1272,6 +1909,7 @@ def export_final_artifacts(
             "threshold_provenance": threshold_provenance,
             "candidate_csv": str(Path(frozen_candidates_csv).resolve()),
             "candidate_csv_sha256": sha256_file(frozen_candidates_csv),
+            "selected_candidate_order_sha256": candidate_order_sha256,
             "pair_details": str(pair_path),
             "pair_details_sha256": sha256_file(pair_path),
             "official_threshold_summary": str(official_path),
@@ -1292,6 +1930,24 @@ def export_final_artifacts(
             "forbid_selection": bool(forbid_selection),
             "forbid_fitting": bool(forbid_fitting),
         }
+        if frozen_candidate_manifest is not None:
+            frozen_manifest_path = Path(frozen_candidate_manifest).expanduser().resolve()
+            manifest["frozen_candidate_manifest"] = str(frozen_manifest_path)
+            manifest["frozen_candidate_manifest_sha256"] = sha256_file(
+                frozen_manifest_path
+            )
+        test_audit_path = Path(test_run_dir).expanduser().resolve() / "audit.json"
+        calibration_audit_path = calibration_root / "audit.json"
+        if test_audit_path.is_file():
+            manifest["test_evaluation_audit"] = read_json(test_audit_path)
+            manifest["test_evaluation_audit_sha256"] = sha256_file(test_audit_path)
+        if calibration_audit_path.is_file():
+            manifest["calibration_evaluation_audit"] = read_json(
+                calibration_audit_path
+            )
+            manifest["calibration_evaluation_audit_sha256"] = sha256_file(
+                calibration_audit_path
+            )
         _write_json(temp / "run_manifest.json", manifest)
         final_audit = audit_final_artifacts(
             run_dir=temp,
@@ -1306,6 +1962,7 @@ def export_final_artifacts(
             check_manifest=False,
         )
         _write_json(temp / "final_artifact_audit.json", final_audit)
+        _write_json(temp / "audit.json", final_audit)
         artifact_hashes = {
             path.relative_to(temp).as_posix(): sha256_file(path)
             for path in sorted(temp.rglob("*"))
@@ -1319,6 +1976,7 @@ def export_final_artifacts(
                 "all_hashes_generated": True,
                 "self_excluded": "artifact_manifest.json",
                 "finalization_marker_excluded": "_FINALIZED.json",
+                "run_completion_marker_excluded": "_RUN_COMPLETE.json",
             },
         )
         _write_json(
@@ -1330,6 +1988,21 @@ def export_final_artifacts(
                 ),
                 "official_summary_reconstruction_passed": True,
                 "final_artifact_audit_passed": True,
+            },
+        )
+        _write_json(
+            temp / "_RUN_COMPLETE.json",
+            {
+                "run_complete": True,
+                "audit_passed": True,
+                "test_parent_count": len(parent_ids),
+                "candidate_count": len(candidates),
+                "pair_count": len(details),
+                "complete_cartesian": True,
+                "candidate_selection_performed": False,
+                "test_used_for_selection": False,
+                "threshold_fitted_on_test": False,
+                "selected_candidate_order_sha256": candidate_order_sha256,
             },
         )
         os.replace(temp, output)
@@ -1381,6 +2054,10 @@ def audit_final_artifacts(
         row["candidate_id"] for row in frozen
     ]:
         raise ValueError("Exported candidate order differs from frozen rank order.")
+    if any("native_rank" in row for row in frozen) and [
+        _as_int(row.get("native_rank")) for row in candidates
+    ] != [_as_int(row.get("native_rank")) for row in frozen]:
+        raise ValueError("Exported candidate native_rank lineage changed.")
     details, _ = read_csv(root / "test_pair_details.csv")
     parent_ids, _ = validate_complete_cartesian(
         details,
@@ -1502,6 +2179,23 @@ def audit_final_artifacts(
             raise ValueError(f"Table 2 schema mismatch for K={k}.")
     manifest_verified = None
     if check_manifest:
+        for required_name in (
+            "selected_sequence.jsonl",
+            "audit.json",
+            "_RUN_COMPLETE.json",
+        ):
+            if not (root / required_name).is_file():
+                raise ValueError(f"Final artifact file missing: {required_name}")
+        selected_sequence = read_jsonl(root / "selected_sequence.jsonl")
+        if [str(row.get("candidate_id")) for row in selected_sequence] != [
+            str(row["candidate_id"]) for row in candidates
+        ]:
+            raise ValueError("selected_sequence.jsonl changed frozen candidate order.")
+        complete = read_json(root / "_RUN_COMPLETE.json")
+        if not _as_bool(complete.get("run_complete")) or not _as_bool(
+            complete.get("audit_passed")
+        ):
+            raise ValueError("Final run completion marker did not pass audit.")
         finalized = read_json(root / "_FINALIZED.json")
         if not _as_bool(finalized.get("finalized")):
             raise ValueError("Run is not finalized.")
@@ -1573,6 +2267,14 @@ def audit_final_artifacts(
         "figure4_metrics_recomputed": True,
         "test_selection": False,
         "test_threshold_fitting": False,
+        "candidate_selection_performed": False,
+        "candidate_set_preselected": True,
+        "selection_performed_in_eval": False,
+        "test_used_for_selection": False,
+        "threshold_fitted_on_test": False,
+        "selected_candidate_order_sha256": stable_json_sha256(
+            [str(row["candidate_id"]) for row in candidates]
+        ),
         "manifest_hashes_verified": manifest_verified,
     }
 
@@ -1582,13 +2284,19 @@ __all__ = [
     "OFFICIAL_FIELDS",
     "TABLE_REQUIRED_FIELDS",
     "audit_final_artifacts",
+    "audit_fullgraph_evaluation_run",
     "compute_prefix_artifacts",
     "export_final_artifacts",
+    "finalize_fullgraph_evaluation_run",
+    "load_frozen_threshold_contract",
     "load_ranked_candidates",
     "locate_test_inputs",
+    "read_jsonl",
     "reconstruct_official_summary",
     "sha256_file",
+    "stable_json_sha256",
     "summarize_wnode_thresholds",
+    "validate_frozen_candidate_contract",
     "validate_frozen_threshold_provenance",
     "validate_complete_cartesian",
 ]
