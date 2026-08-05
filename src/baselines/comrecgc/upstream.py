@@ -75,10 +75,15 @@ def validate_upstream_checkout(path: str | Path) -> Path:
 def imported_upstream(path: str | Path) -> Iterator[dict[str, ModuleType]]:
     root = validate_upstream_checkout(path)
     old_path = list(sys.path)
+    old_dont_write_bytecode = sys.dont_write_bytecode
     displaced = {name: sys.modules.get(name) for name in UPSTREAM_MODULES}
     for name in UPSTREAM_MODULES:
         sys.modules.pop(name, None)
     sys.path.insert(0, str(root))
+    # The pinned upstream commit contains a tracked CPython cache file.  Never
+    # let importing the external checkout mutate that file (or create other
+    # caches), especially when several Slurm jobs start concurrently.
+    sys.dont_write_bytecode = True
     try:
         modules = {name: importlib.import_module(name) for name in UPSTREAM_MODULES}
         yield modules
@@ -88,4 +93,5 @@ def imported_upstream(path: str | Path) -> Iterator[dict[str, ModuleType]]:
             previous = displaced[name]
             if previous is not None:
                 sys.modules[name] = previous
+        sys.dont_write_bytecode = old_dont_write_bytecode
         sys.path[:] = old_path

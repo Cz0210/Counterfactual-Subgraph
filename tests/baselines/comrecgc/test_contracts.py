@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import ModuleType
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from src.baselines.comrecgc.contracts import (
 )
 from src.baselines.comrecgc.project_dataset import project_label_to_internal
 from src.baselines.comrecgc.runtime import validate_counterfactual_payload
+from src.baselines.comrecgc import upstream
 
 
 def test_generation_profiles_are_frozen() -> None:
@@ -82,3 +85,39 @@ def test_upstream_payload_contract() -> None:
     assert candidates[0]["graph_hash"] == "hash"
     with pytest.raises(RuntimeError):
         validate_counterfactual_payload({"graph_map": {}, "counterfactual_candidates": []})
+
+
+def test_upstream_import_does_not_write_bytecode(tmp_path: Path, monkeypatch) -> None:
+    observed: list[bool] = []
+    original = sys.dont_write_bytecode
+    monkeypatch.setattr(upstream, "validate_upstream_checkout", lambda path: tmp_path)
+
+    def fake_import(name: str) -> ModuleType:
+        observed.append(sys.dont_write_bytecode)
+        return ModuleType(name)
+
+    monkeypatch.setattr(upstream.importlib, "import_module", fake_import)
+    with upstream.imported_upstream(tmp_path) as modules:
+        assert set(modules) == set(upstream.UPSTREAM_MODULES)
+        assert sys.dont_write_bytecode is True
+
+    assert observed == [True] * len(upstream.UPSTREAM_MODULES)
+    assert sys.dont_write_bytecode is original
+
+
+def test_upstream_import_restores_bytecode_flag_after_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    original = sys.dont_write_bytecode
+    monkeypatch.setattr(upstream, "validate_upstream_checkout", lambda path: tmp_path)
+    monkeypatch.setattr(
+        upstream.importlib,
+        "import_module",
+        lambda name: (_ for _ in ()).throw(RuntimeError("import failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        with upstream.imported_upstream(tmp_path):
+            pass
+
+    assert sys.dont_write_bytecode is original
