@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts.baselines.comrecgc.gate_run import run_gate
 from src.baselines.comrecgc.contracts import ordered_ids_sha256, sha256_file
 from src.baselines.comrecgc.exporter import (
+    _sync_generated_node_lineage,
     build_frozen_candidate_manifest,
     export_gate_failure,
 )
@@ -48,6 +51,24 @@ def test_full_export_still_requires_top_k() -> None:
     )
     assert failure is not None
     assert failure[0] == "InsufficientStrictFlipCandidates"
+
+
+def test_generated_lineage_replaces_stale_source_codec_lineage() -> None:
+    class GeneratedGraph:
+        gcf_node_origin = [0, 1, 2]
+        comrecgc_node_origin = [0, 2]
+
+    graph = GeneratedGraph()
+    _sync_generated_node_lineage(graph)
+    assert graph.gcf_node_origin == [0, 2]
+
+
+def test_generated_lineage_is_required() -> None:
+    class GeneratedGraph:
+        gcf_node_origin = [0]
+
+    with pytest.raises(ValueError, match="generated_missing_source_lineage"):
+        _sync_generated_node_lineage(GeneratedGraph())
 
 
 def test_gate_writes_structured_failure_when_upstream_artifacts_are_missing(

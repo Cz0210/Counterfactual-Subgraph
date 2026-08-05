@@ -53,6 +53,34 @@ profile name and manifest.
 Accepted
 
 ---
+## [2026-08-06] Treat COMRECGC node lineage as authoritative during export
+
+### Background
+
+Project Mutagenicity source graphs already contain `gcf_node_origin`. Official
+COMRECGC graph edits clone that field, while the project-owned neighbor wrapper
+updates `comrecgc_node_origin` as nodes are added or removed. The exporter was
+therefore passing stale source lineage to the shared generated-fullgraph codec.
+
+### Decision
+
+Immediately before chemical decoding, always expose the updated
+`comrecgc_node_origin` as `gcf_node_origin`. Missing COMRECGC lineage remains a
+hard failure. This synchronization changes metadata only; it does not modify
+node features, edges, official ordering, chemistry policy, or RF strict-flip.
+
+### Consequences
+
+- Generated Mutagenicity medoids are checked against their actual edited node
+  count instead of stale source-node lineage.
+- The shared fullgraph codec and all scientific validity gates remain intact.
+- Native COMRECGC graph content and upstream source remain unchanged.
+
+### Status
+
+Accepted
+
+---
 
 ## [2026-08-06] Keep COMRECGC native reproduction separate from project adaptation
 

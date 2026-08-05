@@ -175,6 +175,19 @@ def _aids_schema_and_record(graph: Any, atom_vocabulary: Sequence[str]) -> tuple
     }
 
 
+def _sync_generated_node_lineage(graph: Any) -> None:
+    """Expose COMRECGC's updated node lineage to the shared fullgraph codec."""
+
+    lineage = getattr(graph, "comrecgc_node_origin", None)
+    if lineage is None:
+        raise ValueError("generated_missing_source_lineage")
+    # Mutagenicity source graphs already carry gcf_node_origin.  Official edit
+    # operations clone that field unchanged, while our neighbor wrapper updates
+    # comrecgc_node_origin for node additions/removals.  The latter is therefore
+    # the authoritative lineage for a generated graph.
+    graph.gcf_node_origin = lineage
+
+
 def decode_representative(
     graph: Any,
     *,
@@ -201,8 +214,7 @@ def decode_representative(
             schema, source_record = _aids_schema_and_record(
                 graph, [str(value) for value in atom_vocabulary]
             )
-        if not hasattr(graph, "gcf_node_origin"):
-            graph.gcf_node_origin = getattr(graph, "comrecgc_node_origin")
+        _sync_generated_node_lineage(graph)
         result = decode_generated_fullgraph(graph, source_record=source_record, schema=schema)
         return {
             "decode_ok": bool(result.decode_ok),
