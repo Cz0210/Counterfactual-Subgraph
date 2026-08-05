@@ -33,7 +33,7 @@ DEFAULT_REMOTE_HOST = "u20526@logini.tongji.edu.cn"
 DEFAULT_REMOTE_PORT = 10022
 DEFAULT_REMOTE_ROOT = "/share/home/u20526/czx/counterfactual-subgraph"
 DEFAULT_CONTROL_SOCKET = "/tmp/tongji-codex.sock"
-JOB_ID_RE = re.compile(r"(?<!\d)(\d{3,})(?!\d)")
+REGISTERED_JOB_ID_RE = re.compile(r"^job_id=(\d+)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -221,7 +221,10 @@ def submit_job(state: RunState, spec: JobSpec, *, dry_run: bool) -> dict[str, An
     existing = state.find_job(spec.stage, spec.dataset)
     if existing is not None:
         return existing
-    sbatch_args = ["--parsable"]
+    # exp_sbatch.py records and parses Slurm's standard
+    # ``Submitted batch job <id>`` output.  Passing --parsable changes that
+    # output to a bare number and causes the registry to record UNKNOWN.
+    sbatch_args: list[str] = []
     if spec.dependency:
         sbatch_args.append(f"--dependency={spec.dependency}")
     exports = {"PROJECT_ROOT": str(PROJECT_ROOT), **spec.environment}
@@ -255,13 +258,13 @@ def submit_job(state: RunState, spec: JobSpec, *, dry_run: bool) -> dict[str, An
     if dry_run:
         job_id = f"DRYRUN_{spec.dataset}_{spec.stage}"
     else:
-        matches = JOB_ID_RE.findall(result.stdout + "\n" + result.stderr)
-        if not matches:
+        match = REGISTERED_JOB_ID_RE.search(result.stdout)
+        if match is None:
             raise AutomationError(
                 f"Could not parse Slurm job ID for {spec.dataset}/{spec.stage}: "
                 f"stdout={result.stdout[-500:]!r}, stderr={result.stderr[-500:]!r}"
             )
-        job_id = matches[-1]
+        job_id = match.group(1)
     return state.add_job(spec, job_id, argv)
 
 
