@@ -43,5 +43,7 @@ python scripts/baselines/comrecgc/run_generation.py \
   --parent-limit 32 \
   --device cuda:0
 test -s "$OUTPUT_DIR/counterfactuals.pt"
+test -s "$OUTPUT_DIR/native_common_recourse.json"
+test -s "$OUTPUT_DIR/native_representative_counterfactuals.pt"
 test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
 echo "[COMRECGC_NATIVE_SMOKE_SUCCESS]"

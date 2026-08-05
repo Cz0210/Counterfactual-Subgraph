@@ -55,3 +55,9 @@ def test_unified_eval_supports_explicit_resume_and_smoke_audit_input() -> None:
 def test_official_checkout_is_not_vendored() -> None:
     assert not (ROOT / "baselines/comrecgc_official").exists()
     assert "external/COMRECGC/" in (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_native_smoke_requires_common_recourse_serialization() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_native_smoke.sh").read_text(encoding="utf-8")
+    assert 'native_common_recourse.json' in text
+    assert 'native_representative_counterfactuals.pt' in text

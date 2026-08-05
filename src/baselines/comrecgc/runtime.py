@@ -18,6 +18,7 @@ import numpy as np
 from .contracts import (
     CF_MODE,
     METHOD,
+    RecourseParameters,
     UPSTREAM_COMMIT,
     GenerationParameters,
     require_empty_output,
@@ -284,6 +285,153 @@ def _load_bundle(
             parent_limit=parent_limit,
         )
     raise ValueError(f"Unsupported project dataset: {dataset}")
+
+
+def model_counterfactual_graphs(
+    payload: Mapping[str, Any], *, limit: int
+) -> list[Any]:
+    """Resolve actual model-counterfactual graphs in official candidate order."""
+
+    from .recourse import _importance_parts
+
+    graph_map, candidates = validate_counterfactual_payload(payload)
+    resolved: list[Any] = []
+    for candidate in candidates:
+        importance = _importance_parts(candidate)
+        graph_hash = candidate.get("graph_hash")
+        if float(importance[0]) >= 0.5 and graph_hash in graph_map:
+            resolved.append(graph_map[graph_hash][0])
+        if len(resolved) >= int(limit):
+            break
+    if not resolved:
+        raise RuntimeError("Native smoke has no model-counterfactual graph candidates.")
+    return resolved
+
+
+def _run_native_common_recourse_smoke(
+    *,
+    modules: Mapping[str, Any],
+    sources: Sequence[Any],
+    payload: Mapping[str, Any],
+    embedding_model: Any,
+    output_dir: Path,
+    device: str,
+    batch_size: int = 128,
+) -> dict[str, Any]:
+    """Exercise official clustering/summary on real native random-walk output."""
+
+    from sklearn.cluster import DBSCAN
+
+    from .recourse import stable_graph_id, trace_official_cluster_order
+
+    parameters = RecourseParameters.for_mode("smoke")
+    candidate_graphs = model_counterfactual_graphs(payload, limit=parameters.cf_size)
+    torch, Batch = _torch_stack()
+    with torch.no_grad():
+        source_embeddings = embedding_model.embed_model(
+            Batch.from_data_list(list(sources)).to(device)
+        ).detach().cpu()
+    embedding_model.embed_targets(list(sources))
+    source_counts = modules["util"].graph_element_counts(list(sources)).cpu()
+    pair_indices: list[tuple[int, int]] = []
+    recourse_vectors: list[np.ndarray] = []
+    distance_pair_count = 0
+    for start in range(0, len(candidate_graphs), max(1, int(batch_size))):
+        chunk = candidate_graphs[start : start + max(1, int(batch_size))]
+        with torch.no_grad():
+            distances = embedding_model.predict_outer_with_queries(
+                chunk, batch_size=batch_size
+            ).cpu()
+            candidate_embeddings = embedding_model.embed_model(
+                Batch.from_data_list(chunk).to(device)
+            ).detach().cpu()
+        candidate_counts = modules["util"].graph_element_counts(chunk).cpu()
+        scale = candidate_counts[:, None] + source_counts[None, :]
+        normalized = distances / scale
+        valid_pairs = torch.nonzero(
+            normalized <= float(parameters.theta), as_tuple=False
+        )
+        distance_pair_count += int(normalized.numel())
+        for local_candidate, source_index in valid_pairs.tolist():
+            candidate_index = start + int(local_candidate)
+            pair_indices.append((int(source_index), candidate_index))
+            vector = (
+                candidate_embeddings[int(local_candidate)]
+                - source_embeddings[int(source_index)]
+            ) / scale[int(local_candidate), int(source_index)]
+            recourse_vectors.append(vector.numpy())
+    if not recourse_vectors:
+        raise RuntimeError("Native smoke has no pairs inside the official theta gate.")
+    recourse_array = np.asarray(recourse_vectors)
+    if not np.isfinite(recourse_array).all():
+        raise RuntimeError("Native common-recourse embeddings contain NaN/Inf.")
+    clustering = DBSCAN(
+        eps=float(parameters.delta), min_samples=int(parameters.cluster_size)
+    ).fit(recourse_array)
+    official_result = modules["common_recourse"].coverage_summary(
+        db_2=clustering,
+        rec=torch.tensor(recourse_array),
+        idxs=pair_indices,
+        radius=float(parameters.delta),
+        threshold_theta=float(parameters.theta),
+        recourse_size=int(parameters.recourse_size),
+    )
+    selected = trace_official_cluster_order(
+        labels=np.asarray(clustering.labels_),
+        recourse_vectors=recourse_array,
+        pair_indices=pair_indices,
+        radius=float(parameters.delta),
+        theta=float(parameters.theta),
+        recourse_size=int(parameters.recourse_size),
+        official_greedy=modules[
+            "common_recourse"
+        ].greedy_counterfactual_summary_from_covering_sets,
+    )
+    if not selected:
+        raise RuntimeError("Native smoke common-recourse summary is empty.")
+    representatives = [
+        candidate_graphs[int(row["representative_counterfactual_index"])]
+        for row in selected
+    ]
+    representative_path = output_dir / "native_representative_counterfactuals.pt"
+    _torch_save_atomic(representatives, representative_path)
+    reloaded = _torch_load(representative_path)
+    if not isinstance(reloaded, list) or len(reloaded) != len(representatives):
+        raise RuntimeError("Native common-recourse representatives are not reloadable.")
+    rows = [
+        {
+            **row,
+            "candidate_id": stable_graph_id(representatives[index]),
+            "source_graph_id": str(
+                getattr(sources[int(row["representative_source_index"])], "comrecgc_parent_id")
+            ),
+        }
+        for index, row in enumerate(selected)
+    ]
+    summary = {
+        "schema_version": 1,
+        "route": "native_reproduction",
+        "parameters": parameters.__dict__,
+        "model_counterfactual_candidate_count": len(candidate_graphs),
+        "distance_pair_count": distance_pair_count,
+        "theta_eligible_pair_count": len(pair_indices),
+        "dbscan_cluster_count": len(
+            {int(value) for value in clustering.labels_ if int(value) >= 0}
+        ),
+        "common_recourse_count": len(rows),
+        "official_coverage_summary_invoked": True,
+        "official_coverage_summary_result": [list(value) for value in official_result],
+        "official_greedy_order_preserved": True,
+        "representative_policy": "real_pair_nearest_cluster_center",
+        "representative_counterfactuals_path": str(representative_path),
+        "representative_counterfactuals_sha256": sha256_file(representative_path),
+        "serialization_reloadable": True,
+        "no_nan_or_inf": True,
+        "selected_common_recourses": rows,
+        "run_complete": True,
+    }
+    write_json(output_dir / "native_common_recourse.json", summary)
+    return summary
 
 
 def run_project_generation(
@@ -577,6 +725,14 @@ def run_native_smoke(
         materialization_mode = _materialize_official_result(source_result, result)
         payload = _torch_load(result)
         graph_map, candidates = validate_counterfactual_payload(payload)
+        native_common = _run_native_common_recourse_smoke(
+            modules=modules,
+            sources=sources,
+            payload=payload,
+            embedding_model=embedding,
+            output_dir=root,
+            device=device,
+        )
         manifest = {
             "method": METHOD,
             "route": "native_reproduction",
@@ -587,6 +743,19 @@ def run_native_smoke(
             "parent_limit": int(parent_limit),
             "counterfactual_candidate_count": len(candidates),
             "visited_graph_count": len(graph_map),
+            "common_recourse_count": int(native_common["common_recourse_count"]),
+            "native_common_recourse_path": str(root / "native_common_recourse.json"),
+            "native_common_recourse_sha256": sha256_file(
+                root / "native_common_recourse.json"
+            ),
+            "representative_counterfactuals_path": native_common[
+                "representative_counterfactuals_path"
+            ],
+            "representative_counterfactuals_sha256": native_common[
+                "representative_counterfactuals_sha256"
+            ],
+            "serialization_reloadable": native_common["serialization_reloadable"],
+            "no_nan_or_inf": native_common["no_nan_or_inf"],
             "counterfactuals_path": str(result),
             "counterfactuals_sha256": sha256_file(result),
             "artifact_materialization_mode": materialization_mode,

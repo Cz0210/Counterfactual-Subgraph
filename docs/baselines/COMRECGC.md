@@ -47,6 +47,13 @@ their order or formula, and carries source-node lineage. Each embedding cluster
 is exported as the real source-to-counterfactual pair nearest its center; an
 embedding center is never represented as a fictional graph.
 
+Native smoke is complete only after the actual official random-walk payload is
+reloaded, model-counterfactual graphs are clustered with the official DBSCAN
+coverage path, and the official greedy summary yields at least one real graph
+medoid. The audit artifacts are `native_common_recourse.json` and
+`native_representative_counterfactuals.pt`; TU outputs remain ineligible for
+project figures.
+
 ## Frozen Parameters
 
 | Stage | Smoke | Full |
