@@ -110,6 +110,12 @@ def _as_list(value: Any) -> list[int]:
     return [int(item) for item in value]
 
 
+def _materialize_dataset_indices(dataset: Any, indices: Sequence[int]) -> list[Any]:
+    """Load lazy PyG rows before changing away from the dataset's cwd."""
+
+    return [dataset[int(index)] for index in indices]
+
+
 def lineage_neighbor_wrapper(original: Callable[[Any, tuple[Any, ...]], Any]) -> Callable[[Any, tuple[Any, ...]], Any]:
     """Preserve source-node lineage without changing graph tensors."""
 
@@ -515,7 +521,9 @@ def run_native_smoke(
                 model = modules["gnn"].load_trained_gnn(dataset, device=device).eval()
                 predictions = modules["gnn"].load_trained_prediction(dataset, device=device).cpu()
                 source_indices = torch.where(predictions == 0)[0][: int(parent_limit)]
-                sources = graphs[source_indices.tolist()]
+                sources = _materialize_dataset_indices(
+                    graphs, [int(value) for value in source_indices.tolist()]
+                )
                 if len(sources) != int(parent_limit):
                     raise RuntimeError("Native TU smoke source cohort is smaller than requested.")
                 for index, graph in enumerate(sources):
@@ -550,9 +558,7 @@ def run_native_smoke(
                     ):
                         official.counterfactual_summary_with_randomwalk(
                             dataset_name=f"native_{dataset}",
-                            input_graphs=GraphListDataset(
-                                list(sources), int(graphs.num_features)
-                            ),
+                            input_graphs=GraphListDataset(sources, int(graphs.num_features)),
                             importance_args={},
                             teleport_probability=parameters.teleport,
                             max_steps=parameters.steps,

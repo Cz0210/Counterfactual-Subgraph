@@ -19,7 +19,10 @@ from src.baselines.comrecgc.contracts import (
     write_json,
 )
 from src.baselines.comrecgc.project_dataset import project_label_to_internal
-from src.baselines.comrecgc.runtime import validate_counterfactual_payload
+from src.baselines.comrecgc.runtime import (
+    _materialize_dataset_indices,
+    validate_counterfactual_payload,
+)
 from src.baselines.comrecgc import upstream
 
 
@@ -85,6 +88,23 @@ def test_upstream_payload_contract() -> None:
     assert candidates[0]["graph_hash"] == "hash"
     with pytest.raises(RuntimeError):
         validate_counterfactual_payload({"graph_map": {}, "counterfactual_candidates": []})
+
+
+def test_native_source_rows_are_eagerly_materialized() -> None:
+    class LazyRows:
+        def __init__(self) -> None:
+            self.open = True
+
+        def __getitem__(self, index: int) -> str:
+            if not self.open:
+                raise FileNotFoundError("relative processed path unavailable")
+            return f"graph-{index}"
+
+    rows = LazyRows()
+    materialized = _materialize_dataset_indices(rows, [3, 1])
+    rows.open = False
+
+    assert materialized == ["graph-3", "graph-1"]
 
 
 def test_upstream_import_does_not_write_bytecode(tmp_path: Path, monkeypatch) -> None:
