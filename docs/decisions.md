@@ -54,6 +54,45 @@ Accepted
 
 ---
 
+## [2026-08-06] Keep COMRECGC native reproduction separate from project adaptation
+
+### Background
+
+COMRECGC's `--dataset aids` means the filtered PyG TU AIDS benchmark, whereas
+the project paper protocol uses `data/raw/AIDS/HIV.csv`. The two datasets,
+labels, graph IDs, and parent universes are not interchangeable. The upstream
+repository also has no clear redistribution license.
+
+### Decision
+
+Pin upstream commit `122f9341a360e9f06bb58a2f5823bb596021f6bf` in an ignored
+external checkout and do not vendor or modify it. Maintain a native TU smoke
+route for reproducibility only. For project results, inject the frozen HIV.csv
+and strict Mutagenicity graph artifacts, reuse their validated GNN and
+GREED/NeuroSED checkpoints, map labels explicitly to COMRECGC's internal
+source-0/target-1 convention, and preserve upstream edit, transition,
+reinforcement, teleportation, clustering, and greedy ordering. Represent a
+common-recourse cluster by its nearest real source-to-counterfactual pair, not
+by a fictional embedding-center graph. Apply the unified RF strict-flip and
+MolCLR-Node-Wasserstein evaluator only after candidate order is frozen.
+
+### Consequences
+
+- Native TU metrics cannot appear in AIDS/HIV or Mutagenicity project figures.
+- Upstream source and algorithm semantics remain separately auditable.
+- The project records model and dataset fingerprints and never uses test data
+  to generate, rank, or select COMRECGC candidates.
+- Smoke/full jobs are dependency-chained and resumable; full remains gated by
+  successful dataset-specific smoke jobs.
+- Existing CLEAR, GCFExplainer, GlobalGCE, Ours, RF, WNode, and paper artifacts
+  are not modified or overwritten.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-04] Re-render the combined AIDS/MUT figure set from frozen CSV values
 
 ### Background

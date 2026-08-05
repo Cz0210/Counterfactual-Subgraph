@@ -55,3 +55,6 @@ pretrained_models/
 *.pt
 *.pth
 *.ckpt
+# Third-party source is fetched at a pinned commit. COMRECGC does not publish a
+# redistribution license, so its checkout must never be committed here.
+external/COMRECGC/
