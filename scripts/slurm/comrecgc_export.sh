@@ -23,7 +23,9 @@ mkdir -p logs
 DATASET="${DATASET:-}"
 MODE="${MODE:-smoke}"
 REQUIRE_TOP_K="${REQUIRE_TOP_K:-false}"
+RESUME="${RESUME:-false}"
 [[ "$DATASET" == "aids" || "$DATASET" == "mutagenicity" ]] || exit 2
+[[ "$RESUME" == "true" || "$RESUME" == "false" ]] || exit 2
 BASE_ROOT="${BASE_ROOT:-outputs/hpc/baselines/comrecgc/$DATASET/${MODE}_v1}"
 COMMON_RECOURSE_DIR="${COMMON_RECOURSE_DIR:-$BASE_ROOT/common_recourse}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BASE_ROOT/export}"
@@ -35,10 +37,11 @@ else
   VOCAB_ARGS=(--dataset-summary-json outputs/hpc/mutagenicity/baselines/gcfexplainer/smoke_v1/dataset/dataset_summary.json)
 fi
 REQUIRE_ARGS=(); [[ "$REQUIRE_TOP_K" == "true" ]] && REQUIRE_ARGS=(--require-top-k)
-echo "[COMRECGC_STAGE_CONFIG] stage=export dataset=$DATASET mode=$MODE output_dir=$OUTPUT_DIR"
+RESUME_ARGS=(); [[ "$RESUME" == "true" ]] && RESUME_ARGS=(--resume)
+echo "[COMRECGC_STAGE_CONFIG] stage=export dataset=$DATASET mode=$MODE output_dir=$OUTPUT_DIR resume=$RESUME"
 python scripts/baselines/comrecgc/export_candidates.py \
   --dataset "$DATASET" --common-recourse-dir "$COMMON_RECOURSE_DIR" \
   --teacher-path "$TEACHER_PATH" "${VOCAB_ARGS[@]}" --output-dir "$OUTPUT_DIR" \
-  --top-k 20 "${REQUIRE_ARGS[@]}"
+  --top-k 20 "${REQUIRE_ARGS[@]}" "${RESUME_ARGS[@]}"
 test -s "$OUTPUT_DIR/candidate_filter_audit.jsonl"
 echo "[COMRECGC_EXPORT_SUCCESS]"

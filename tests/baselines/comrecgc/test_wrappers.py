@@ -37,6 +37,14 @@ def test_all_submissions_route_through_registry() -> None:
     assert "subprocess.run([\"sbatch\"" not in text
 
 
+def test_export_resume_is_explicit_and_defaults_off() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_export.sh").read_text(encoding="utf-8")
+    assert 'RESUME="${RESUME:-false}"' in text
+    assert '[[ "$RESUME" == "true" || "$RESUME" == "false" ]]' in text
+    assert 'RESUME_ARGS=(--resume)' in text
+    assert '"${RESUME_ARGS[@]}"' in text
+
+
 def test_official_checkout_is_not_vendored() -> None:
     assert not (ROOT / "baselines/comrecgc_official").exists()
     assert "external/COMRECGC/" in (ROOT / ".gitignore").read_text(encoding="utf-8")
