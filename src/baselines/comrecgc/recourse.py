@@ -185,6 +185,21 @@ def ordered_prefix(records: Sequence[Mapping[str, Any]], k: int) -> list[dict[st
     return values[: int(k)]
 
 
+def _importance_parts(candidate: Mapping[str, Any]) -> list[float]:
+    value = candidate.get("importance_parts")
+    if value is None:
+        return [0.0]
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if not isinstance(value, (list, tuple)):
+        value = [value]
+    if not value:
+        return [0.0]
+    return [float(part) for part in value]
+
+
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(fields), extrasaction="ignore")
@@ -240,7 +255,7 @@ def run_common_recourse(
     candidate_graphs: list[Any] = []
     generation_indices: list[int] = []
     for generation_index, candidate in enumerate(raw_candidates):
-        importance = list(candidate.get("importance_parts") or [0.0])
+        importance = _importance_parts(candidate)
         graph_hash = candidate.get("graph_hash")
         if float(importance[0]) >= 0.5 and graph_hash in graph_map:
             candidate_graphs.append(graph_map[graph_hash][0])

@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from src.baselines.comrecgc.recourse import (
+    _importance_parts,
     choose_cluster_medoid,
     ordered_prefix,
     trace_official_cluster_order,
@@ -20,6 +21,13 @@ def test_ordered_prefix_does_not_rerank() -> None:
     assert [row["candidate_id"] for row in ordered_prefix(rows, 2)] == ["b", "a"]
     with pytest.raises(ValueError):
         ordered_prefix([{"rank": 2}], 1)
+
+
+def test_numpy_importance_parts_do_not_use_ambiguous_truth_value() -> None:
+    assert _importance_parts(
+        {"importance_parts": np.asarray([1.0, 0.25], dtype=np.float32)}
+    ) == [1.0, 0.25]
+    assert _importance_parts({"importance_parts": None}) == [0.0]
 
 
 def _official_greedy(counterfactual_covering, graphs_covered_by, k):
