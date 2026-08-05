@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,115 @@ def _csv_rows(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def _write_csv_atomic(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def resolve_candidate_input(
+    *,
+    mode: str,
+    candidates_csv: Path,
+    candidate_manifest: dict[str, Any],
+    candidate_filter_audit: Path,
+    output_dir: Path,
+) -> tuple[Path, list[dict[str, str]], dict[str, Any]]:
+    """Resolve final candidates or a clearly labeled smoke interface cohort."""
+
+    candidates = _csv_rows(candidates_csv)
+    expected_candidates = int(candidate_manifest.get("candidate_count", -1))
+    if len(candidates) != expected_candidates:
+        raise ContractError(
+            f"Frozen candidate count mismatch: csv={len(candidates)}, "
+            f"manifest={expected_candidates}"
+        )
+    if candidates:
+        return candidates_csv, candidates, {
+            "smoke_interface_only": False,
+            "strict_flip_candidate_count": len(candidates),
+            "candidate_input_source": "frozen_strict_flip_candidates",
+        }
+    if mode != "smoke":
+        raise ContractError("Full unified evaluation requires exactly 20 frozen candidates.")
+    if not candidate_filter_audit.is_file():
+        raise ContractError(
+            f"Smoke candidate filter audit is missing: {candidate_filter_audit}"
+        )
+    audit_rows = [
+        json.loads(line)
+        for line in candidate_filter_audit.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    ranks = [int(row["native_rank"]) for row in audit_rows]
+    if len(ranks) != len(set(ranks)) or ranks != sorted(ranks):
+        raise ContractError("Smoke candidate audit is not in unique native-rank order.")
+    interface_rows: list[dict[str, Any]] = []
+    seen_smiles: set[str] = set()
+    for row in audit_rows:
+        smiles = str(row.get("canonical_smiles") or "").strip()
+        if not bool(row.get("decode_ok")) or not bool(row.get("rf_inference_ok")) or not smiles:
+            continue
+        if smiles in seen_smiles:
+            continue
+        seen_smiles.add(smiles)
+        interface_rows.append(
+            {
+                "rank": len(interface_rows) + 1,
+                "native_rank": int(row["native_rank"]),
+                "candidate_id": str(row["candidate_id"]),
+                "smiles": smiles,
+                "canonical_smiles": smiles,
+                "source_parent_id": str(row.get("source_parent_id") or ""),
+                "smoke_interface_only": True,
+                "candidate_set_preselected": True,
+                "selection_performed_in_eval": False,
+                "rf_cf_flip_observed": bool(row.get("rf_cf_flip")),
+            }
+        )
+    if not interface_rows:
+        raise ContractError(
+            "Smoke WNode interface gate requires at least one decoded, RF-scored medoid."
+        )
+    effective_path = output_dir / "smoke_interface_candidates.csv"
+    fields = [
+        "rank",
+        "native_rank",
+        "candidate_id",
+        "smiles",
+        "canonical_smiles",
+        "source_parent_id",
+        "smoke_interface_only",
+        "candidate_set_preselected",
+        "selection_performed_in_eval",
+        "rf_cf_flip_observed",
+    ]
+    _write_csv_atomic(effective_path, interface_rows, fields)
+    evidence = {
+        "schema_version": 1,
+        "smoke_interface_only": True,
+        "eligible_for_final_results": False,
+        "strict_flip_candidate_count": 0,
+        "smoke_interface_candidate_count": len(interface_rows),
+        "candidate_input_source": "native_order_decoded_rf_scored_audit_rows",
+        "candidate_filter_audit_path": str(candidate_filter_audit),
+        "candidate_filter_audit_sha256": sha256_file(candidate_filter_audit),
+        "candidate_order_preserved": True,
+        "selection_performed_in_eval": False,
+        "cf_mode": CF_MODE,
+    }
+    write_json(output_dir / "smoke_interface_candidate_manifest.json", evidence)
+    return effective_path, _csv_rows(effective_path), evidence
+
+
 def _find_pair_details(root: Path) -> Path:
     for candidate in (
         root / "details/pair_details.csv",
@@ -64,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
     parser.add_argument("--candidates-csv", required=True)
     parser.add_argument("--candidate-manifest", required=True)
+    parser.add_argument("--candidate-filter-audit")
     parser.add_argument("--dataset-csv", required=True)
     parser.add_argument("--teacher-path", required=True)
     parser.add_argument("--molclr-root", required=True)
@@ -79,21 +190,28 @@ def main() -> int:
     args = build_parser().parse_args()
     candidate_manifest_path = Path(args.candidate_manifest).expanduser().resolve()
     candidate_manifest = json.loads(candidate_manifest_path.read_text(encoding="utf-8"))
-    candidates = _csv_rows(Path(args.candidates_csv).expanduser().resolve())
-    expected_candidates = int(candidate_manifest.get("candidate_count", -1))
-    if len(candidates) != expected_candidates or not candidates:
-        raise ContractError(
-            f"Frozen candidate count mismatch: csv={len(candidates)}, manifest={expected_candidates}"
-        )
-    if args.mode == "full" and len(candidates) != 20:
-        raise ContractError("Full unified evaluation requires exactly 20 frozen candidates.")
-    if [int(row["rank"]) for row in candidates] != list(range(1, len(candidates) + 1)):
-        raise ContractError("Frozen candidate prefix order is not rank 1..K.")
     thresholds = read_frozen_thresholds(args.thresholds_json)
     output = Path(args.output_dir).expanduser().resolve()
     if output.exists() and any(output.iterdir()) and not args.resume:
         raise FileExistsError(f"Unified evaluation output is non-empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
+    original_candidates_path = Path(args.candidates_csv).expanduser().resolve()
+    audit_path = (
+        Path(args.candidate_filter_audit).expanduser().resolve()
+        if args.candidate_filter_audit
+        else original_candidates_path.parent / "candidate_filter_audit.jsonl"
+    )
+    effective_candidates_path, candidates, candidate_resolution = resolve_candidate_input(
+        mode=args.mode,
+        candidates_csv=original_candidates_path,
+        candidate_manifest=candidate_manifest,
+        candidate_filter_audit=audit_path,
+        output_dir=output,
+    )
+    if args.mode == "full" and len(candidates) != 20:
+        raise ContractError("Full unified evaluation requires exactly 20 frozen candidates.")
+    if [int(row["rank"]) for row in candidates] != list(range(1, len(candidates) + 1)):
+        raise ContractError("Candidate prefix order is not rank 1..K.")
     parent_count = min(16, int(args.expected_parent_count)) if args.mode == "smoke" else int(
         args.expected_parent_count
     )
@@ -137,7 +255,7 @@ def main() -> int:
         "--run-fullgraph",
         "1",
         "--fullgraph-candidates-path",
-        str(Path(args.candidates_csv).expanduser().resolve()),
+        str(effective_candidates_path),
         "--fullgraph-method-name",
         "COMRECGC",
         "--selection-method",
@@ -163,6 +281,7 @@ def main() -> int:
             "thresholds_source_sha256": sha256_file(args.thresholds_json),
             "candidate_set_preselected": True,
             "selection_performed_in_eval": False,
+            **candidate_resolution,
         },
     )
     subprocess.run(argv, cwd=PROJECT_ROOT, check=True, timeout=172800)
@@ -181,6 +300,14 @@ def main() -> int:
         "cf_mode": CF_MODE,
         "parent_count": parent_count,
         "candidate_count": len(candidates),
+        "strict_flip_candidate_count": int(
+            candidate_resolution["strict_flip_candidate_count"]
+        ),
+        "smoke_interface_only": bool(candidate_resolution["smoke_interface_only"]),
+        "eligible_for_final_results": not bool(
+            candidate_resolution["smoke_interface_only"]
+        ),
+        "candidate_input_source": str(candidate_resolution["candidate_input_source"]),
         "pair_count": len(details),
         "complete_cartesian": True,
         "candidate_set_preselected": True,

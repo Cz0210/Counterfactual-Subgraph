@@ -82,6 +82,9 @@ def run_gate(*, root: Path, dataset: str, mode: str) -> dict:
         "audit_passed": not failed,
         "run_complete": not failed,
         "next_stage": "full_generation" if mode == "smoke" and not failed else None,
+        "candidate_yield_gate_passed": int(export.get("selected_count", 0)) > 0,
+        "strict_flip_candidate_count": int(export.get("selected_count", 0)),
+        "smoke_interface_only": bool(evaluation.get("smoke_interface_only", False)),
     }
     write_json(root / "gate.json", gate)
     marker = "_GATE_PASS.json" if not failed else "_GATE_FAILED.json"

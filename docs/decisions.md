@@ -53,6 +53,39 @@ profile name and manifest.
 Accepted
 
 ---
+
+## [2026-08-06] Separate COMRECGC smoke interface evidence from final yield
+
+### Background
+
+The controlled COMRECGC smoke budget produced a chemically valid AIDS medoid
+that the RF classified as `1 -> 1`, so the formal strict-flip candidate CSV was
+correctly empty. Requiring that final CSV as the only WNode input prevented the
+smoke run from demonstrating that the distance interface itself works.
+
+### Decision
+
+For smoke only, when the frozen strict-flip CSV is empty, evaluate decoded and
+RF-scored medoids in unchanged official native-rank order as an explicitly
+labeled interface cohort. The evaluator still uses `strict_flip`, so non-target
+medoids contribute zero coverage. The cohort is marked
+`smoke_interface_only=true` and `eligible_for_final_results=false`. Full runs
+continue to require exactly 20 frozen strict-flip candidates and never use this
+fallback.
+
+### Consequences
+
+- Smoke can independently verify RF and WNode plumbing without claiming
+  scientific candidate yield.
+- `candidate_yield_gate_passed` remains false when no strict-flip medoid exists.
+- Invalid chemistry is never admitted: at least one decoded, RF-scored medoid
+  is required before the smoke interface cohort can be formed.
+
+### Status
+
+Accepted
+
+---
 ## [2026-08-06] Treat COMRECGC node lineage as authoritative during export
 
 ### Background

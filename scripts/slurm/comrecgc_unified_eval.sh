@@ -22,10 +22,13 @@ mkdir -p logs
 
 DATASET="${DATASET:-}"
 MODE="${MODE:-smoke}"
+RESUME="${RESUME:-false}"
 [[ "$DATASET" == "aids" || "$DATASET" == "mutagenicity" ]] || exit 2
+[[ "$RESUME" == "true" || "$RESUME" == "false" ]] || exit 2
 BASE_ROOT="${BASE_ROOT:-outputs/hpc/baselines/comrecgc/$DATASET/${MODE}_v1}"
 CANDIDATES_CSV="${CANDIDATES_CSV:-$BASE_ROOT/export/selected_top20.csv}"
 CANDIDATE_MANIFEST="${CANDIDATE_MANIFEST:-$BASE_ROOT/export/frozen_candidate_manifest.json}"
+CANDIDATE_FILTER_AUDIT="${CANDIDATE_FILTER_AUDIT:-$BASE_ROOT/export/candidate_filter_audit.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BASE_ROOT/eval}"
 if [[ "$DATASET" == "aids" ]]; then
   DATASET_CSV="${DATASET_CSV:-outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv}"
@@ -38,15 +41,17 @@ else
   THRESHOLDS_JSON="${THRESHOLDS_JSON:-outputs/hpc/mutagenicity/final/ours_wnode_a2_test_v1/thresholds.json}"
   EXPECTED_PARENT_COUNT=217
 fi
-echo "[COMRECGC_STAGE_CONFIG] stage=unified_eval dataset=$DATASET mode=$MODE output_dir=$OUTPUT_DIR"
+RESUME_ARGS=(); [[ "$RESUME" == "true" ]] && RESUME_ARGS=(--resume)
+echo "[COMRECGC_STAGE_CONFIG] stage=unified_eval dataset=$DATASET mode=$MODE output_dir=$OUTPUT_DIR resume=$RESUME"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 python scripts/baselines/comrecgc/run_unified_eval.py \
   --dataset "$DATASET" --mode "$MODE" \
   --candidates-csv "$CANDIDATES_CSV" --candidate-manifest "$CANDIDATE_MANIFEST" \
+  --candidate-filter-audit "$CANDIDATE_FILTER_AUDIT" \
   --dataset-csv "$DATASET_CSV" --teacher-path "$TEACHER_PATH" \
   --molclr-root pretrained_models/MolCLR \
   --molclr-checkpoint pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth \
   --thresholds-json "$THRESHOLDS_JSON" --output-dir "$OUTPUT_DIR" \
-  --expected-parent-count "$EXPECTED_PARENT_COUNT"
+  --expected-parent-count "$EXPECTED_PARENT_COUNT" "${RESUME_ARGS[@]}"
 test -s "$OUTPUT_DIR/_COMRECGC_EVAL_COMPLETE.json"
 echo "[COMRECGC_UNIFIED_EVAL_SUCCESS]"
