@@ -329,15 +329,19 @@ def submit_chains(args: argparse.Namespace, state: RunState) -> None:
     )
     identity_id = identity["job_id"]
     for dataset in args.datasets:
+        native_root = (
+            f"outputs/hpc/baselines/comrecgc/native_smoke/{dataset}/"
+            f"{state.data['run_id']}"
+        )
         submit_job(
             state,
             JobSpec(
                 stage="native_smoke",
                 dataset=dataset,
                 script="scripts/slurm/comrecgc_native_smoke.sh",
-                output_root=f"outputs/hpc/baselines/comrecgc/native_smoke/{dataset}",
+                output_root=native_root,
                 dependency=f"afterok:{identity_id}",
-                environment={"NATIVE_DATASET": dataset},
+                environment={"NATIVE_DATASET": dataset, "OUTPUT_DIR": native_root},
             ),
             dry_run=args.dry_run,
         )

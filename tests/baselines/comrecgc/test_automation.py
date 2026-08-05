@@ -119,3 +119,28 @@ def test_submit_rejects_unknown_registered_job_id(tmp_path: Path, monkeypatch) -
         raise AssertionError("UNKNOWN job ID must block submission state")
 
     assert state.data["jobs"] == []
+
+
+def test_native_smoke_output_is_versioned_by_run_id(tmp_path: Path, monkeypatch) -> None:
+    state = MODULE.RunState(
+        tmp_path,
+        run_id="smoke_retry_v2",
+        datasets=["aids"],
+        mode="smoke",
+    )
+    args = argparse.Namespace(datasets=("aids",), mode="smoke", dry_run=True)
+    submitted: list[MODULE.JobSpec] = []
+
+    def fake_submit(run_state, spec, *, dry_run):
+        submitted.append(spec)
+        return run_state.add_job(spec, f"job_{spec.stage}", [spec.script])
+
+    monkeypatch.setattr(MODULE, "submit_job", fake_submit)
+    MODULE.submit_chains(args, state)
+
+    native = next(spec for spec in submitted if spec.stage == "native_smoke")
+    expected = (
+        "outputs/hpc/baselines/comrecgc/native_smoke/aids/smoke_retry_v2"
+    )
+    assert native.output_root == expected
+    assert native.environment["OUTPUT_DIR"] == expected
