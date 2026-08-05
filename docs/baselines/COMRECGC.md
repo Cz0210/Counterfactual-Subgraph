@@ -69,6 +69,10 @@ project figures.
 | seed | 0 | 0 |
 
 Smoke values validate interfaces only and are never reported as final results.
+Native smoke uses a fixed 64-parent diagnostic cohort for both TU datasets.
+The earlier 32-parent native probe was sufficient for random-walk serialization
+but produced no AIDS common-recourse cluster; 64 remains within the predefined
+smoke interface range and is the only native clustering retry.
 The first 50-step/64-sample smoke reached the clustering interface but yielded
 only one representative per dataset: the Mutagenicity graph was chemically
 invalid and the AIDS graph was RF non-target. The single permitted smoke

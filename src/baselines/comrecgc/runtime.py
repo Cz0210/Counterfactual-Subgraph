@@ -387,7 +387,19 @@ def _run_native_common_recourse_smoke(
             "common_recourse"
         ].greedy_counterfactual_summary_from_covering_sets,
     )
+    diagnostics = {
+        "model_counterfactual_candidate_count": len(candidate_graphs),
+        "distance_pair_count": distance_pair_count,
+        "theta_eligible_pair_count": len(pair_indices),
+        "dbscan_cluster_count": len(
+            {int(value) for value in clustering.labels_ if int(value) >= 0}
+        ),
+        "official_coverage_summary_invoked": True,
+        "official_coverage_summary_result": [list(value) for value in official_result],
+        "selected_common_recourse_count": len(selected),
+    }
     if not selected:
+        write_json(output_dir / "native_common_recourse_failure.json", diagnostics)
         raise RuntimeError("Native smoke common-recourse summary is empty.")
     representatives = [
         candidate_graphs[int(row["representative_counterfactual_index"])]
@@ -412,15 +424,8 @@ def _run_native_common_recourse_smoke(
         "schema_version": 1,
         "route": "native_reproduction",
         "parameters": parameters.__dict__,
-        "model_counterfactual_candidate_count": len(candidate_graphs),
-        "distance_pair_count": distance_pair_count,
-        "theta_eligible_pair_count": len(pair_indices),
-        "dbscan_cluster_count": len(
-            {int(value) for value in clustering.labels_ if int(value) >= 0}
-        ),
+        **diagnostics,
         "common_recourse_count": len(rows),
-        "official_coverage_summary_invoked": True,
-        "official_coverage_summary_result": [list(value) for value in official_result],
         "official_greedy_order_preserved": True,
         "representative_policy": "real_pair_nearest_cluster_center",
         "representative_counterfactuals_path": str(representative_path),

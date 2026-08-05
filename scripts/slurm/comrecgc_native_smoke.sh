@@ -23,13 +23,17 @@ export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 mkdir -p logs
 
 NATIVE_DATASET="${NATIVE_DATASET:-aids}"
+NATIVE_PARENT_LIMIT="${NATIVE_PARENT_LIMIT:-64}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/native_smoke/$NATIVE_DATASET}"
 [[ "$NATIVE_DATASET" == "aids" || "$NATIVE_DATASET" == "mutagenicity" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] invalid native dataset=$NATIVE_DATASET" >&2; exit 2;
 }
+[[ "$NATIVE_PARENT_LIMIT" == "64" ]] || {
+  echo "[COMRECGC_CONFIG_ERROR] native smoke parent_limit=$NATIVE_PARENT_LIMIT expected=64" >&2; exit 2;
+}
 [[ -d external/COMRECGC/.git ]] || { echo "[COMRECGC_CONFIG_ERROR] pinned upstream missing" >&2; exit 2; }
 [[ ! -e "$OUTPUT_DIR/_RUN_COMPLETE.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] output complete" >&2; exit 2; }
-echo "[COMRECGC_STAGE_CONFIG] stage=native_smoke dataset=$NATIVE_DATASET output_dir=$OUTPUT_DIR"
+echo "[COMRECGC_STAGE_CONFIG] stage=native_smoke dataset=$NATIVE_DATASET parent_limit=$NATIVE_PARENT_LIMIT output_dir=$OUTPUT_DIR"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 python -m py_compile scripts/baselines/comrecgc/run_generation.py
@@ -40,7 +44,7 @@ python scripts/baselines/comrecgc/run_generation.py \
   --project-root "$PROJECT_ROOT" \
   --upstream-root external/COMRECGC \
   --output-dir "$OUTPUT_DIR" \
-  --parent-limit 32 \
+  --parent-limit "$NATIVE_PARENT_LIMIT" \
   --device cuda:0
 test -s "$OUTPUT_DIR/counterfactuals.pt"
 test -s "$OUTPUT_DIR/native_common_recourse.json"

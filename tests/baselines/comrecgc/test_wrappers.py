@@ -59,5 +59,7 @@ def test_official_checkout_is_not_vendored() -> None:
 
 def test_native_smoke_requires_common_recourse_serialization() -> None:
     text = (ROOT / "scripts/slurm/comrecgc_native_smoke.sh").read_text(encoding="utf-8")
+    assert 'NATIVE_PARENT_LIMIT="${NATIVE_PARENT_LIMIT:-64}"' in text
+    assert '[[ "$NATIVE_PARENT_LIMIT" == "64" ]]' in text
     assert 'native_common_recourse.json' in text
     assert 'native_representative_counterfactuals.pt' in text
