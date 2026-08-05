@@ -51,10 +51,10 @@ embedding center is never represented as a fictional graph.
 
 | Stage | Smoke | Full |
 |---|---:|---:|
-| generation steps | 50 | 50000 |
+| generation steps | 100 | 50000 |
 | heads | 2 | 5 |
 | candidate capacity | 200 | 100000 |
-| neighbor sample size | 64 | 10000 |
+| neighbor sample size | 128 | 10000 |
 | theta / teleport | 0.1 / 0.1 | 0.1 / 0.1 |
 | common recourses | 5 | 100 |
 | CF pool | 200 | 100000 |
@@ -62,6 +62,12 @@ embedding center is never represented as a fictional graph.
 | seed | 0 | 0 |
 
 Smoke values validate interfaces only and are never reported as final results.
+The first 50-step/64-sample smoke reached the clustering interface but yielded
+only one representative per dataset: the Mutagenicity graph was chemically
+invalid and the AIDS graph was RF non-target. The single permitted smoke
+budget retry therefore uses the documented upper smoke bounds of 100 steps
+and 128 samples; full parameters and all scientific thresholds remain
+unchanged.
 Full values match the published implementation unless a future, documented
 resource Gate requires a protocol revision.
 

@@ -27,7 +27,10 @@ from src.baselines.comrecgc import upstream
 
 
 def test_generation_profiles_are_frozen() -> None:
-    GenerationParameters.for_mode("smoke").validate("smoke")
+    smoke = GenerationParameters.for_mode("smoke")
+    assert smoke.steps == 100
+    assert smoke.sample_size == 128
+    smoke.validate("smoke")
     GenerationParameters.for_mode("full").validate("full")
     invalid = GenerationParameters.for_mode("smoke")
     with pytest.raises(ContractError):
@@ -105,6 +108,17 @@ def test_native_source_rows_are_eagerly_materialized() -> None:
     rows.open = False
 
     assert materialized == ["graph-3", "graph-1"]
+
+
+def test_native_runtime_freezes_feature_dimension_before_cwd_switch() -> None:
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "src/baselines/comrecgc/runtime.py"
+    ).read_text(encoding="utf-8")
+    feature_line = source.index("num_features = int(graphs.num_features)")
+    cwd_line = source.index("os.chdir(runtime_root)", feature_line)
+    dataset_line = source.index("GraphListDataset(sources, num_features)", cwd_line)
+    assert feature_line < cwd_line < dataset_line
 
 
 def test_upstream_import_does_not_write_bytecode(tmp_path: Path, monkeypatch) -> None:

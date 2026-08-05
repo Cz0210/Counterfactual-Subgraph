@@ -41,10 +41,10 @@ class GenerationParameters:
             return cls(
                 theta=0.1,
                 teleport=0.1,
-                steps=50,
+                steps=100,
                 heads=2,
                 candidate_capacity=200,
-                sample_size=64,
+                sample_size=128,
                 seed=0,
             )
         if mode == "full":

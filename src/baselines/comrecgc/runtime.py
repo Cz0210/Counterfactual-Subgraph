@@ -518,6 +518,7 @@ def run_native_smoke(
             os.chdir(Path(upstream_root).expanduser().resolve())
             with imported_upstream(upstream_root) as modules:
                 graphs = modules["data"].load_dataset(dataset)
+                num_features = int(graphs.num_features)
                 model = modules["gnn"].load_trained_gnn(dataset, device=device).eval()
                 predictions = modules["gnn"].load_trained_prediction(dataset, device=device).cpu()
                 source_indices = torch.where(predictions == 0)[0][: int(parent_limit)]
@@ -558,7 +559,7 @@ def run_native_smoke(
                     ):
                         official.counterfactual_summary_with_randomwalk(
                             dataset_name=f"native_{dataset}",
-                            input_graphs=GraphListDataset(sources, int(graphs.num_features)),
+                            input_graphs=GraphListDataset(sources, num_features),
                             importance_args={},
                             teleport_probability=parameters.teleport,
                             max_steps=parameters.steps,

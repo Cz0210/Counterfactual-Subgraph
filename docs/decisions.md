@@ -86,6 +86,11 @@ MolCLR-Node-Wasserstein evaluator only after candidate order is frozen.
   successful dataset-specific smoke jobs.
 - Existing CLEAR, GCFExplainer, GlobalGCE, Ours, RF, WNode, and paper artifacts
   are not modified or overwritten.
+- The one permitted interface-only smoke budget retry raises generation from
+  50 steps/64 samples to 100 steps/128 samples after both first runs produced
+  a single common-recourse representative and no unified-evaluation candidate.
+  This remains within the predeclared smoke bounds and does not alter full
+  parameters, clustering thresholds, candidate order, or final evaluation.
 
 ### Status
 

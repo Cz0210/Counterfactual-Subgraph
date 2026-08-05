@@ -93,6 +93,22 @@ def build_frozen_candidate_manifest(
     }
 
 
+def export_gate_failure(
+    summary: Mapping[str, Any], *, require_top_k: bool, top_k: int
+) -> tuple[str, str] | None:
+    if int(summary.get("rf_scored_count", 0)) < 1:
+        return (
+            "NoRFScoredCandidates",
+            "COMRECGC chemical codec smoke gate requires rf_scored_count >= 1.",
+        )
+    if require_top_k and int(summary.get("selected_count", 0)) < int(top_k):
+        return (
+            "InsufficientStrictFlipCandidates",
+            "COMRECGC did not produce the required frozen strict-flip candidate count.",
+        )
+    return None
+
+
 def _aids_schema_and_record(graph: Any, atom_vocabulary: Sequence[str]) -> tuple[Any, dict[str, Any]]:
     from rdkit import Chem
     from src.baselines.gcfexplainer_mutagenicity_adapter import MutagenicityGraphSchema
@@ -393,20 +409,27 @@ def export_representatives(
         csv_path=root / "selected_top20.csv",
     )
     write_json(root / "frozen_candidate_manifest.json", frozen_manifest)
-    if require_top_k and len(selected) < int(top_k):
+    gate_failure = export_gate_failure(
+        summary, require_top_k=require_top_k, top_k=int(top_k)
+    )
+    if gate_failure is not None:
+        error_class, message = gate_failure
         failure = {
             **summary,
             "stage": "project_candidate_export",
-            "error_class": "InsufficientStrictFlipCandidates",
+            "error_class": error_class,
+            "message": message,
             "run_complete": False,
-            "controlled_retry_allowed": True,
+            "controlled_retry_allowed": error_class
+            in {"NoRFScoredCandidates", "InsufficientStrictFlipCandidates"},
         }
+        (root / "_SMOKE_AUDIT_COMPLETE.json").unlink(missing_ok=True)
+        (root / "_RUN_COMPLETE.json").unlink(missing_ok=True)
         write_json(root / "failure_summary.json", failure)
         write_json(root / "_RUN_FAILED.json", failure)
-        raise RuntimeError(
-            f"COMRECGC produced {len(selected)} valid RF strict-flip representatives; "
-            f"required={int(top_k)}."
-        )
+        raise RuntimeError(f"{error_class}: {message}")
+    (root / "_RUN_FAILED.json").unlink(missing_ok=True)
+    (root / "failure_summary.json").unlink(missing_ok=True)
     marker = "_RUN_COMPLETE.json" if len(selected) >= int(top_k) else "_SMOKE_AUDIT_COMPLETE.json"
     write_json(root / marker, {"run_complete": True, "available_k": len(selected)})
     return summary

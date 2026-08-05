@@ -23,23 +23,38 @@ def load(path: Path) -> dict:
     return payload
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), required=True)
-    parser.add_argument("--mode", choices=("smoke", "full"), required=True)
-    parser.add_argument("--base-root", required=True)
-    args = parser.parse_args()
-    root = Path(args.base_root).expanduser().resolve()
-    checks = {}
-    generation = load(root / "generation/run_manifest.json")
-    recourse = load(root / "common_recourse/run_manifest.json")
-    export = load(root / "export/run_manifest.json")
-    evaluation = load(root / "eval/comrecgc_eval_manifest.json")
+def run_gate(*, root: Path, dataset: str, mode: str) -> dict:
+    root = root.expanduser().resolve()
+    checks: dict[str, bool] = {}
+    missing_artifacts: list[str] = []
+
+    def load_required(name: str, relative: str) -> dict:
+        path = root / relative
+        if not path.is_file() or path.stat().st_size <= 0:
+            checks[f"{name}_manifest_present"] = False
+            missing_artifacts.append(str(path))
+            return {}
+        try:
+            payload = load(path)
+        except Exception:
+            checks[f"{name}_manifest_present"] = False
+            missing_artifacts.append(str(path))
+            return {}
+        checks[f"{name}_manifest_present"] = True
+        return payload
+
+    generation = load_required("generation", "generation/run_manifest.json")
+    recourse = load_required("recourse", "common_recourse/run_manifest.json")
+    export = load_required("export", "export/run_manifest.json")
+    evaluation = load_required("evaluation", "eval/comrecgc_eval_manifest.json")
     checks["generation_complete"] = generation.get("run_complete") is True
     checks["candidate_count_positive"] = int(generation.get("counterfactual_candidate_count", 0)) > 0
     checks["recourse_complete"] = recourse.get("run_complete") is True
     checks["cluster_count_positive"] = int(recourse.get("common_recourse_count", 0)) > 0
-    checks["serialization_reloadable"] = (root / "common_recourse/representative_counterfactuals.pt").stat().st_size > 0
+    representative_path = root / "common_recourse/representative_counterfactuals.pt"
+    checks["serialization_reloadable"] = (
+        representative_path.is_file() and representative_path.stat().st_size > 0
+    )
     checks["rf_bridge_called"] = int(export.get("rf_scored_count", 0)) > 0
     checks["wnode_called"] = int(evaluation.get("pair_count", 0)) > 0
     checks["complete_cartesian"] = evaluation.get("complete_cartesian") is True
@@ -53,25 +68,40 @@ def main() -> int:
             evaluation.get("pair_count", 0),
         )
     )
-    if args.mode == "full":
+    if mode == "full":
         checks["top20_available"] = int(export.get("selected_count", 0)) == 20
     failed = sorted(name for name, passed in checks.items() if not passed)
     gate = {
         "schema_version": 1,
         "method": "COMRECGC",
-        "dataset": args.dataset,
-        "mode": args.mode,
+        "dataset": dataset,
+        "mode": mode,
         "checks": checks,
+        "missing_artifacts": missing_artifacts,
         "failed_hard_checks": failed,
         "audit_passed": not failed,
         "run_complete": not failed,
-        "next_stage": "full_generation" if args.mode == "smoke" and not failed else None,
+        "next_stage": "full_generation" if mode == "smoke" and not failed else None,
     }
     write_json(root / "gate.json", gate)
     marker = "_GATE_PASS.json" if not failed else "_GATE_FAILED.json"
+    opposite = root / ("_GATE_FAILED.json" if not failed else "_GATE_PASS.json")
+    opposite.unlink(missing_ok=True)
     write_json(root / marker, gate)
+    return gate
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), required=True)
+    parser.add_argument("--mode", choices=("smoke", "full"), required=True)
+    parser.add_argument("--base-root", required=True)
+    args = parser.parse_args()
+    gate = run_gate(
+        root=Path(args.base_root), dataset=args.dataset, mode=args.mode
+    )
     print(json.dumps(gate, sort_keys=True))
-    if failed:
+    if gate["failed_hard_checks"]:
         print("[COMRECGC_GATE_FAIL]", flush=True)
         return 3
     print("[COMRECGC_GATE_PASS]", flush=True)
