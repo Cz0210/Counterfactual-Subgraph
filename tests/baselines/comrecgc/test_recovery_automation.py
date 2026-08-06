@@ -70,6 +70,23 @@ def test_recovery_submissions_use_experiment_registry() -> None:
     assert 'shutil.which("sbatch")' in source
 
 
+def test_recovery_dirty_allowlist_is_exact_and_only_for_generated_log() -> None:
+    allowed, blocked = MODULE.partition_recovery_dirty(
+        [
+            " M docs/EXPERIMENT_LOG.md",
+            " M docs/EXPERIMENT_LOG.md.evil",
+            " M scripts/automation/run_comrecgc_recovery.py",
+            "?? docs/",
+        ]
+    )
+    assert allowed == [" M docs/EXPERIMENT_LOG.md"]
+    assert blocked == [
+        " M docs/EXPERIMENT_LOG.md.evil",
+        " M scripts/automation/run_comrecgc_recovery.py",
+        "?? docs/",
+    ]
+
+
 def test_slot_preserving_eval_is_in_smoke_and_full_dag() -> None:
     values = MODULE.stages("run2", {"mutagenicity"}, "all")
     by_id = {stage.stage_id: stage for stage in values}

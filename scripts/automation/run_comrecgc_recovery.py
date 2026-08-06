@@ -34,6 +34,7 @@ DEFAULT_REMOTE_PORT = 10022
 DEFAULT_CONTROL_SOCKET = "/tmp/tongji-codex.sock"
 DEFAULT_REMOTE_ROOT = "/share/home/u20526/czx/worktrees/comrecgc-recovery-20260806"
 JOB_ID_RE = re.compile(r"^job_id=(\d+)$", re.MULTILINE)
+ALLOWED_DYNAMIC_DIRTY_PATHS = frozenset({"docs/EXPERIMENT_LOG.md"})
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,18 @@ def git_commit(root: Path) -> str:
     return command(["git", "rev-parse", "HEAD"], cwd=root).stdout.strip()
 
 
+def partition_recovery_dirty(lines: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Allow only the registry-generated experiment log in a recovery worktree."""
+
+    allowed: list[str] = []
+    blocked: list[str] = []
+    for line in lines:
+        relative = line[3:] if len(line) >= 4 else ""
+        target = allowed if relative in ALLOWED_DYNAMIC_DIRTY_PATHS else blocked
+        target.append(line)
+    return allowed, blocked
+
+
 def ssh_argv(args: argparse.Namespace, script: str) -> list[str]:
     values = ["ssh"]
     if args.control_socket:
@@ -194,8 +207,12 @@ def preflight(state: RecoveryState) -> dict[str, Any]:
     branch = command(["git", "branch", "--show-current"], cwd=PROJECT_ROOT).stdout.strip()
     commit = git_commit(PROJECT_ROOT)
     dirty = command(["git", "status", "--short"], cwd=PROJECT_ROOT).stdout.splitlines()
-    if dirty:
-        raise RuntimeError(f"Recovery HPC worktree must be clean: {dirty}")
+    allowed_dynamic_dirty, blocked_dirty = partition_recovery_dirty(dirty)
+    if blocked_dirty:
+        raise RuntimeError(
+            "Recovery HPC worktree is dirty outside the exact dynamic allowlist: "
+            f"{blocked_dirty}"
+        )
     if branch != "baseline/comrecgc-recovery-20260806":
         raise RuntimeError(f"Unexpected recovery branch: {branch}")
     upstream = validate_upstream_checkout(PROJECT_ROOT / "external/COMRECGC")
@@ -211,6 +228,8 @@ def preflight(state: RecoveryState) -> dict[str, Any]:
         "upstream_commit": UPSTREAM_COMMIT,
         "artifact_resolution_passed": artifact_resolution["resolution_passed"],
         "adopted_stage_count": len(state.data["adopted_stages"]),
+        "allowed_dynamic_dirty": allowed_dynamic_dirty,
+        "blocked_dirty": blocked_dirty,
         "sbatch": shutil.which("sbatch") or "",
         "sacct": shutil.which("sacct") or "",
     }

@@ -75,6 +75,12 @@ Mutagenicity smoke generation artifact, and its common-recourse artifact as
 `ADOPT_EXISTING`; adoption creates no Slurm job and does not regenerate either
 candidate set.
 
+Recovery preflight keeps an exact dynamic dirty exception only for
+`docs/EXPERIMENT_LOG.md`, which is regenerated from the append-only experiment
+registry after submissions. No directory prefix or similar filename is
+accepted, and any code, configuration, or other documentation change blocks
+the recovery driver.
+
 ## Trace and chemistry gates
 
 Action tracing is project-owned runtime instrumentation around the pinned
