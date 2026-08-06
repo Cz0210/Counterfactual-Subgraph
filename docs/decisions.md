@@ -5673,3 +5673,14 @@ original official medoid and rank slot without compaction or backfill.
 Accepted
 
 ---
+## 2026-08-07: COMRECGC unmaterialized-tail eviction compatibility
+
+The pinned upstream random walk can index a newly observed non-lead candidate before
+materializing it in `graph_map`. If another candidate evicts that tail in the same
+move, upstream performs `del graph_map[tail]` although the intended final state is
+already absent. The project runtime now makes only that exact deletion idempotent:
+the key must be the current candidate tail and must already be absent from
+`graph_index_map`. All other missing deletions still fail. The scoped patch adds no
+RNG calls, preserves candidate ordering/content, restores a plain dictionary on
+exit, and records its activation count in the run manifest. Upstream source remains
+unchanged.

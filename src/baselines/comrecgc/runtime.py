@@ -50,7 +50,32 @@ OFFICIAL_RUNTIME_PATCHES = (
     "project_internal_label_mapping_v1",
     "bounded_batch_call_oom_safe_v1",
     "source_graph_lineage_v1",
+    "candidate_map_unmaterialized_eviction_none_safe_v1",
 )
+
+
+class _EndpointSafeGraphMap(dict[Any, Any]):
+    """Make only the official unmaterialized-tail eviction idempotent."""
+
+    def __init__(self, module: Any, values: Mapping[Any, Any]) -> None:
+        super().__init__(values)
+        self._module = module
+        self.missing_unmaterialized_eviction_count = 0
+
+    def __delitem__(self, key: Any) -> None:
+        if key in self:
+            super().__delitem__(key)
+            return
+        candidates = getattr(self._module, "counterfactual_candidates", ())
+        tail_hash = candidates[-1].get("graph_hash") if candidates else None
+        index_map = getattr(self._module, "graph_index_map", {})
+        if key != tail_hash or key in index_map:
+            raise KeyError(key)
+        self.missing_unmaterialized_eviction_count += 1
+
+    def __reduce__(self) -> tuple[Any, tuple[dict[Any, Any]]]:
+        # Official torch.save artifacts must contain a plain dict.
+        return dict, (dict(self),)
 
 
 def _torch_stack() -> tuple[Any, Any]:
@@ -259,12 +284,15 @@ def patched_official_runtime(
     embedding_device: str,
     batch_size: int,
     trace_recorder: ActionTraceRecorder | None = None,
+    compatibility_audit: dict[str, Any] | None = None,
 ) -> Iterator[None]:
     originals = {
         "call": module.call,
         "neighbor_graph_access": module.neighbor_graph_access,
         "move_to_next_graph": module.move_to_next_graph,
     }
+    endpoint_safe_graph_map = _EndpointSafeGraphMap(module, module.graph_map)
+    module.graph_map = endpoint_safe_graph_map
     module.call = _safe_call_factory(
         model=model,
         embedding_model=embedding_model,
@@ -284,6 +312,18 @@ def patched_official_runtime(
     try:
         yield
     finally:
+        if compatibility_audit is not None:
+            compatibility_audit.update(
+                {
+                    "patch": "candidate_map_unmaterialized_eviction_none_safe_v1",
+                    "missing_unmaterialized_eviction_count": int(
+                        endpoint_safe_graph_map.missing_unmaterialized_eviction_count
+                    ),
+                    "rng_calls_added": 0,
+                    "candidate_order_changed": False,
+                }
+            )
+        module.graph_map = dict(endpoint_safe_graph_map)
         module.call = originals["call"]
         module.neighbor_graph_access = originals["neighbor_graph_access"]
         module.move_to_next_graph = originals["move_to_next_graph"]
@@ -560,6 +600,7 @@ def run_project_generation(
         if trace_output_dir is not None
         else None
     )
+    compatibility_audit: dict[str, Any] = {}
     try:
         with imported_upstream(upstream_root) as modules:
             official = modules["comrecgc"]
@@ -654,6 +695,7 @@ def run_project_generation(
                     embedding_device=device,
                     batch_size=batch_size,
                     trace_recorder=trace_recorder,
+                    compatibility_audit=compatibility_audit,
                 ):
                     official.counterfactual_summary_with_randomwalk(
                         dataset_name=dataset_key,
@@ -710,6 +752,7 @@ def run_project_generation(
                 "trace_enabled": trace_recorder is not None,
                 "trace_summary": trace_summary,
                 "trace_parity": parity_summary,
+                "official_compatibility_audit": compatibility_audit,
                 "candidate_order_source": "official_frequency_reinforced_order",
                 "algorithm_rerun": True,
                 "run_complete": True,
@@ -784,6 +827,7 @@ def run_native_smoke(
         runtime_root = root / "official_runtime"
         runtime_root.mkdir(parents=True)
         old_cwd = Path.cwd()
+        compatibility_audit: dict[str, Any] = {}
         try:
             os.chdir(Path(upstream_root).expanduser().resolve())
             with imported_upstream(upstream_root) as modules:
@@ -854,6 +898,7 @@ def run_native_smoke(
                         gnn_device=device,
                         embedding_device=device,
                         batch_size=128,
+                        compatibility_audit=compatibility_audit,
                     ):
                         official.counterfactual_summary_with_randomwalk(
                             dataset_name=f"native_{dataset}",
@@ -916,6 +961,8 @@ def run_native_smoke(
             "counterfactuals_path": str(result),
             "counterfactuals_sha256": sha256_file(result),
             "artifact_materialization_mode": materialization_mode,
+            "official_compatibility_patches": list(OFFICIAL_RUNTIME_PATCHES),
+            "official_compatibility_audit": compatibility_audit,
             "not_eligible_for_project_figures": True,
             "run_complete": True,
             "full_execution_pass": mode == "full",

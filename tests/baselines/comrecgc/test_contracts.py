@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import pickle
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,9 @@ from src.baselines.comrecgc.contracts import (
 from src.baselines.comrecgc.project_dataset import project_label_to_internal
 from src.baselines.comrecgc.preregistration import validate_chemistry_trace_evidence
 from src.baselines.comrecgc.runtime import (
+    _EndpointSafeGraphMap,
     _materialize_dataset_indices,
+    patched_official_runtime,
     validate_counterfactual_payload,
 )
 from src.baselines.comrecgc import upstream
@@ -221,6 +224,93 @@ def test_native_trusted_payload_is_resolved_before_upstream_chdir() -> None:
     cwd_line = source.index("os.chdir(Path(upstream_root)", resolve_line)
     load_line = source.index("load_aids_tensor_payload(\n                        trusted_payload_path", cwd_line)
     assert resolve_line < cwd_line < load_line
+
+
+def test_endpoint_safe_graph_map_preserves_normal_deletion_and_serializes_plain_dict() -> None:
+    module = type("Module", (), {})()
+    module.counterfactual_candidates = [{"graph_hash": "tail"}]
+    module.graph_index_map = {}
+    graph_map = _EndpointSafeGraphMap(module, {"tail": [1], "keep": [2]})
+
+    del graph_map["tail"]
+
+    assert graph_map == {"keep": [2]}
+    assert graph_map.missing_unmaterialized_eviction_count == 0
+    restored = pickle.loads(pickle.dumps(graph_map))
+    assert type(restored) is dict
+    assert restored == {"keep": [2]}
+
+
+def test_endpoint_safe_graph_map_only_allows_unmaterialized_tail_eviction() -> None:
+    module = type("Module", (), {})()
+    module.counterfactual_candidates = [{"graph_hash": "unmaterialized"}]
+    module.graph_index_map = {}
+    graph_map = _EndpointSafeGraphMap(module, {"keep": [2]})
+
+    del graph_map["unmaterialized"]
+
+    assert graph_map == {"keep": [2]}
+    assert graph_map.missing_unmaterialized_eviction_count == 1
+    with pytest.raises(KeyError):
+        del graph_map["different"]
+    module.graph_index_map["unmaterialized"] = 0
+    with pytest.raises(KeyError):
+        del graph_map["unmaterialized"]
+
+
+@pytest.mark.parametrize("raise_inside", [False, True])
+def test_endpoint_safe_runtime_restores_plain_map_and_official_functions(
+    monkeypatch, raise_inside: bool
+) -> None:
+    import src.baselines.comrecgc.runtime as runtime
+
+    original_call = object()
+    original_neighbor = lambda graph, action: graph
+    original_move = object()
+    module = SimpleNamespace(
+        call=original_call,
+        neighbor_graph_access=original_neighbor,
+        move_to_next_graph=original_move,
+        graph_map={"keep": [1]},
+        graph_index_map={},
+        counterfactual_candidates=[{"graph_hash": "unmaterialized"}],
+    )
+    patched_call = object()
+    monkeypatch.setattr(runtime, "_safe_call_factory", lambda **_kwargs: patched_call)
+    audit: dict[str, object] = {}
+
+    def exercise() -> None:
+        with patched_official_runtime(
+            module,
+            model=object(),
+            embedding_model=object(),
+            gnn_device="cpu",
+            embedding_device="cpu",
+            batch_size=1,
+            compatibility_audit=audit,
+        ):
+            assert module.call is patched_call
+            del module.graph_map["unmaterialized"]
+            if raise_inside:
+                raise RuntimeError("expected")
+
+    if raise_inside:
+        with pytest.raises(RuntimeError, match="expected"):
+            exercise()
+    else:
+        exercise()
+
+    assert type(module.graph_map) is dict
+    assert module.graph_map == {"keep": [1]}
+    assert module.call is original_call
+    assert module.neighbor_graph_access is original_neighbor
+    assert module.move_to_next_graph is original_move
+    assert audit == {
+        "patch": "candidate_map_unmaterialized_eviction_none_safe_v1",
+        "missing_unmaterialized_eviction_count": 1,
+        "rng_calls_added": 0,
+        "candidate_order_changed": False,
+    }
 
 
 def test_upstream_import_does_not_write_bytecode(tmp_path: Path, monkeypatch) -> None:
