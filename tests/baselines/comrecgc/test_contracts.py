@@ -161,6 +161,68 @@ def test_native_runtime_freezes_feature_dimension_before_cwd_switch() -> None:
     assert feature_line < cwd_line < dataset_line
 
 
+def test_native_aids_gnn_does_not_reopen_the_trusted_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import types
+
+    import src.baselines.comrecgc.runtime as runtime
+
+    checkpoint = tmp_path / "data/aids/gnn/model_best.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    observed: dict[str, object] = {}
+
+    class Model:
+        def __init__(self, **kwargs) -> None:
+            observed["kwargs"] = kwargs
+
+        def to(self, device: str):
+            observed["device"] = device
+            return self
+
+        def load_state_dict(self, state_dict) -> None:
+            observed["state_dict"] = state_dict
+
+        def eval(self):
+            observed["eval"] = True
+            return self
+
+    fake_torch = types.SimpleNamespace(load=lambda *args, **kwargs: {"weight": 1})
+    monkeypatch.setattr(runtime, "_torch_stack", lambda: (fake_torch, object()))
+    module = types.SimpleNamespace(GNN=Model)
+
+    result = runtime._load_native_aids_gnn_from_trusted_features(
+        gnn_module=module,
+        upstream_root=tmp_path,
+        num_features=9,
+        device="cuda:0",
+    )
+
+    assert isinstance(result, Model)
+    assert observed["kwargs"] == {
+        "num_features": 9,
+        "num_classes": 2,
+        "num_layers": 3,
+        "dim": 20,
+        "dropout": 0.0,
+    }
+    assert observed["device"] == "cuda:0"
+    assert observed["state_dict"] == {"weight": 1}
+    assert observed["eval"] is True
+
+
+def test_native_trusted_payload_is_resolved_before_upstream_chdir() -> None:
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "src/baselines/comrecgc/runtime.py"
+    ).read_text(encoding="utf-8")
+    resolve_line = source.index("trusted_payload_path.resolve(strict=True)")
+    cwd_line = source.index("os.chdir(Path(upstream_root)", resolve_line)
+    load_line = source.index("load_aids_tensor_payload(\n                        trusted_payload_path", cwd_line)
+    assert resolve_line < cwd_line < load_line
+
+
 def test_upstream_import_does_not_write_bytecode(tmp_path: Path, monkeypatch) -> None:
     observed: list[bool] = []
     original = sys.dont_write_bytecode

@@ -91,6 +91,10 @@ importance, clustering, and ranking parameters remain unchanged.
 - A later end-to-end retry may adopt each explicitly enumerated, passing smoke
   Gate by hashing every file in that stage root. Full stages remain
   non-adoptable through this interface.
+- Native AIDS resolves the trusted tensor payload before entering the pinned
+  upstream working directory and constructs the identical official GNN from
+  that payload's frozen feature dimension, avoiding an unsafe second cache
+  read under PyTorch 2.6 without modifying upstream code or model weights.
 
 ### Status
 

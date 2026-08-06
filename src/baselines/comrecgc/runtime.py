@@ -95,6 +95,39 @@ def _torch_save_atomic(payload: Any, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _load_native_aids_gnn_from_trusted_features(
+    *,
+    gnn_module: Any,
+    upstream_root: str | Path,
+    num_features: int,
+    device: str,
+) -> Any:
+    """Load the pinned official GNN without reopening the trusted PyG cache."""
+
+    torch, _Batch = _torch_stack()
+    model = gnn_module.GNN(
+        num_features=int(num_features),
+        num_classes=2,
+        num_layers=3,
+        dim=20,
+        dropout=0.0,
+    ).to(device)
+    checkpoint = (
+        Path(upstream_root).expanduser().resolve()
+        / "data/aids/gnn/model_best.pth"
+    )
+    try:
+        state_dict = torch.load(
+            checkpoint,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:  # pragma: no cover - older pinned torch compatibility
+        state_dict = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(state_dict)
+    return model.eval()
+
+
 def validate_counterfactual_payload(payload: Any) -> tuple[dict[Any, Any], list[dict[str, Any]]]:
     if not isinstance(payload, dict):
         raise RuntimeError("COMRECGC counterfactual payload must be a dictionary.")
@@ -734,6 +767,12 @@ def run_native_smoke(
 
     parameters.validate(mode)
     project = Path(project_root).expanduser().resolve()
+    trusted_payload_path: Path | None = None
+    if trusted_dataset_payload is not None:
+        trusted_payload_path = Path(trusted_dataset_payload).expanduser()
+        if not trusted_payload_path.is_absolute():
+            trusted_payload_path = project / trusted_payload_path
+        trusted_payload_path = trusted_payload_path.resolve(strict=True)
     root = require_empty_output(output_dir)
     torch, _Batch = _torch_stack()
     random.seed(parameters.seed)
@@ -757,14 +796,23 @@ def run_native_smoke(
                             "Native AIDS execution requires a scoped trusted-cache payload."
                         )
                     graphs, _dataset_payload = load_aids_tensor_payload(
-                        trusted_dataset_payload,
+                        trusted_payload_path,
                         expected_inventory_sha256=expected_cache_inventory_sha256,
                     )
                     num_features = int(graphs[0].x.shape[1])
                 else:
                     graphs = modules["data"].load_dataset(dataset)
                     num_features = int(graphs.num_features)
-                model = modules["gnn"].load_trained_gnn(dataset, device=device).eval()
+                model = (
+                    _load_native_aids_gnn_from_trusted_features(
+                        gnn_module=modules["gnn"],
+                        upstream_root=upstream_root,
+                        num_features=num_features,
+                        device=device,
+                    )
+                    if dataset == "aids"
+                    else modules["gnn"].load_trained_gnn(dataset, device=device).eval()
+                )
                 predictions = modules["gnn"].load_trained_prediction(dataset, device=device).cpu()
                 all_source_indices = torch.where(predictions == 0)[0]
                 source_indices = (
