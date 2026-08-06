@@ -38,7 +38,36 @@ from src.baselines.comrecgc.slot_evaluation import (  # noqa: E402
 from src.eval.close_counterfactual_coverage import _load_parent_records  # noqa: E402
 
 
-def _threshold_contract(path: Path) -> tuple[list[float], float, float, dict[str, Any]]:
+def _threshold_contract(
+    path: Path,
+    *,
+    theta_star_override: float | None = None,
+    cost_cap_override: float | None = None,
+) -> tuple[list[float], float, float, dict[str, Any]]:
+    if path.suffix.lower() == ".csv":
+        rows = read_csv(path)
+        threshold_field = next(
+            (field for field in ("threshold", "theta") if rows and field in rows[0]),
+            None,
+        )
+        if threshold_field is None:
+            raise ValueError("Frozen threshold CSV has no threshold/theta column.")
+        thresholds = sorted({float(row[threshold_field]) for row in rows})
+        if not thresholds:
+            raise ValueError("Frozen threshold CSV is empty.")
+        if theta_star_override is None:
+            raise ValueError("Threshold CSV requires an explicit frozen theta_star.")
+        theta_star = float(theta_star_override)
+        cost_cap = (
+            float(cost_cap_override)
+            if cost_cap_override is not None
+            else float(max(thresholds))
+        )
+        return thresholds, theta_star, cost_cap, {
+            "threshold_source": "frozen_empirical_curve_csv",
+            "threshold_field": threshold_field,
+            "threshold_count": len(thresholds),
+        }
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Frozen threshold artifact must be a JSON object.")
@@ -60,8 +89,16 @@ def _threshold_contract(path: Path) -> tuple[list[float], float, float, dict[str
     if not isinstance(values, list) or not values:
         raise ValueError("Frozen threshold artifact has no threshold grid.")
     thresholds = sorted({float(value) for value in values})
-    theta_star = payload.get("theta_star")
-    cost_cap = payload.get("cost_cap")
+    theta_star = (
+        theta_star_override
+        if theta_star_override is not None
+        else payload.get("theta_star")
+    )
+    cost_cap = (
+        cost_cap_override
+        if cost_cap_override is not None
+        else payload.get("cost_cap")
+    )
     if theta_star is None:
         theta_star = quantile_map.get(0.30)
     if cost_cap is None:
@@ -183,12 +220,15 @@ def _parent_records(dataset_csv: Path, expected_count: int) -> tuple[list[str], 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("smoke", "full"), required=True)
+    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), default="mutagenicity")
     parser.add_argument("--chemistry-dir", required=True)
     parser.add_argument("--dataset-csv", required=True)
     parser.add_argument("--teacher-path", required=True)
     parser.add_argument("--molclr-root", required=True)
     parser.add_argument("--molclr-checkpoint", required=True)
     parser.add_argument("--thresholds-json", required=True)
+    parser.add_argument("--theta-star", type=float)
+    parser.add_argument("--cost-cap", type=float)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expected-parent-count", type=int, required=True)
     parser.add_argument("--max-k", type=int, default=20)
@@ -226,7 +266,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     write_jsonl(root / "representative_counterfactuals.jsonl", all_slots)
     parent_ids, probe_smiles = _parent_records(dataset_csv, args.expected_parent_count)
     thresholds, theta_star, cost_cap, threshold_payload = _threshold_contract(
-        thresholds_path
+        thresholds_path,
+        theta_star_override=args.theta_star,
+        cost_cap_override=args.cost_cap,
     )
     evaluator_invoked = False
     interface_probe_invoked = False
@@ -297,7 +339,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     write_csv(root / "parent_best_distances.csv", parent_best)
     by_k = {int(row["k"]): row for row in prefixes}
     for k in (10, 20):
-        write_csv(root / f"table2_comrecgc_k{k}.csv", [table_row(by_k[k], theta_star=theta_star)])
+        write_csv(
+            root / f"table2_comrecgc_k{k}.csv",
+            [
+                table_row(
+                    by_k[k],
+                    theta_star=theta_star,
+                    dataset="AIDS" if args.dataset == "aids" else "Mutagenicity",
+                )
+            ],
+        )
     audit = build_final_audit(
         root=root,
         prefixes=prefixes,
@@ -310,6 +361,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     summary = {
         **audit,
+        "dataset": "AIDS" if args.dataset == "aids" else "Mutagenicity",
+        "dataset_key": args.dataset,
         "mode": args.mode,
         "theta_star": theta_star,
         "cost_cap": cost_cap,
@@ -332,6 +385,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "project_commit": chemistry_payload.get("project_commit"),
         "upstream_commit": chemistry_payload.get("upstream_commit"),
         "repair_policy_sha256": chemistry_payload.get("repair_policy_sha256"),
+        "dataset_fingerprint": chemistry_payload.get("dataset_fingerprint"),
+        "generation_parent_ids_sha256": chemistry_payload.get(
+            "generation_parent_ids_sha256"
+        ),
         "dataset_csv": str(dataset_csv),
         "dataset_csv_sha256": sha256_file(dataset_csv),
         "teacher_path": str(teacher),
@@ -372,7 +429,7 @@ def main() -> int:
         output = Path(args.output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         failure = {
-            "stage": "mutagenicity_slot_unified_eval",
+            "stage": f"{args.dataset}_slot_unified_eval",
             "error_class": type(exc).__name__,
             "message": str(exc),
             "run_complete": False,

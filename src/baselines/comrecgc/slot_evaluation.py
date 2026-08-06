@@ -508,10 +508,12 @@ def _assert_monotonic(
         raise ValueError("Coverage versus threshold is not monotonic nondecreasing.")
 
 
-def table_row(prefix: Mapping[str, Any], *, theta_star: float) -> dict[str, Any]:
+def table_row(
+    prefix: Mapping[str, Any], *, theta_star: float, dataset: str = "Mutagenicity"
+) -> dict[str, Any]:
     return {
         "method": METHOD,
-        "dataset": "Mutagenicity",
+        "dataset": dataset,
         "source_label": 1,
         "target_label": 0,
         "k": int(prefix["k"]),

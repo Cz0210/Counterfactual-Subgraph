@@ -656,6 +656,7 @@ def run_project_generation(
                     source_graphs_by_parent_id=dict(
                         zip(bundle.parent_ids, bundle.graphs, strict=True)
                     ),
+                    compact_candidate_lineage=mode == "full",
                 )
             if parity_reference_path is not None:
                 reference_path = Path(parity_reference_path).expanduser().resolve()

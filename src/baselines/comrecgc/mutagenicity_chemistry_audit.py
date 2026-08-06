@@ -6,9 +6,13 @@ import csv
 import io
 import json
 import math
+import os
 import subprocess
+import tempfile
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -21,9 +25,19 @@ from .contracts import (
     stable_json_sha256,
     write_json,
 )
-from .graph_trace import stable_graph_sha256
-from .preregistration import write_mutagenicity_chem_repair_preregistration
-from .project_dataset import load_mutagenicity_generation_bundle
+from .graph_trace import (
+    iter_candidate_lineage_from_selected_trace,
+    iter_selected_trace,
+    stable_graph_sha256,
+)
+from .preregistration import (
+    validate_chemistry_trace_evidence,
+    write_mutagenicity_chem_repair_preregistration,
+)
+from .project_dataset import (
+    load_aids_generation_bundle,
+    load_mutagenicity_generation_bundle,
+)
 from .runtime import _torch_load, _torch_save_atomic, validate_counterfactual_payload
 
 
@@ -63,6 +77,118 @@ def _load_json_list(path: str | Path) -> list[dict[str, Any]]:
     return [dict(row) for row in value]
 
 
+def _lineage_contract(path: str | Path) -> tuple[Any, int, str]:
+    source = Path(path).expanduser().resolve()
+    value = json.loads(source.read_text(encoding="utf-8"))
+    if isinstance(value, list) and all(isinstance(row, dict) for row in value):
+        return [dict(row) for row in value], len(value), "inline_json"
+    if not isinstance(value, dict):
+        raise ValueError(f"Unsupported COMRECGC lineage artifact: {source}")
+    if value.get("format") != "selected_trace_predecessor_index":
+        raise ValueError(
+            f"Unsupported COMRECGC lineage format: {value.get('format')!r}"
+        )
+    count = int(value.get("candidate_count", -1))
+    if count < 0:
+        raise ValueError("Compact COMRECGC lineage has no valid candidate count.")
+    return value, count, "selected_trace_predecessor_index"
+
+
+def _resolved_child(root: Path, relative: Any, field: str) -> Path:
+    candidate = Path(str(relative))
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+        raise ValueError(f"Compact lineage {field} is not a safe relative path.")
+    resolved = (root / candidate).resolve()
+    if resolved.parent != root and root not in resolved.parents:
+        raise ValueError(f"Compact lineage {field} escapes its trace root.")
+    return resolved
+
+
+def _iter_jsonl(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"Expected JSON object row: {path}")
+                yield value
+
+
+def _iter_candidate_lineage(
+    *,
+    path: Path,
+    contract: Any,
+    payload: Mapping[str, Any],
+    source_graphs_by_parent_id: Mapping[str, Any],
+) -> Any:
+    if isinstance(contract, list):
+        yield from contract
+        return
+    trace_root = path.parent
+    index_path = _resolved_child(
+        trace_root, contract.get("candidate_index_path"), "candidate_index_path"
+    )
+    selected_path = _resolved_child(
+        trace_root,
+        contract.get("selected_trace_manifest_path"),
+        "selected_trace_manifest_path",
+    )
+    if sha256_file(index_path) != str(contract.get("candidate_index_sha256")):
+        raise ValueError("Compact candidate lineage index SHA256 mismatch.")
+    if sha256_file(selected_path) != str(
+        contract.get("selected_trace_manifest_sha256")
+    ):
+        raise ValueError("Compact selected trace manifest SHA256 mismatch.")
+    recovered_rows = iter_candidate_lineage_from_selected_trace(
+        payload,
+        iter_selected_trace(selected_path),
+        source_graphs_by_parent_id=source_graphs_by_parent_id,
+        include_actions=True,
+    )
+    sentinel = object()
+    summary_fields = (
+        "candidate_index",
+        "official_graph_hash",
+        "stable_graph_sha256",
+        "parent_id",
+        "action_lineage_resolved",
+        "zero_action_source_root",
+        "lineage_root_status",
+        "action_count",
+    )
+    for expected_index, (summary, recovered) in enumerate(
+        zip_longest(_iter_jsonl(index_path), recovered_rows, fillvalue=sentinel)
+    ):
+        if summary is sentinel or recovered is sentinel:
+            raise ValueError("Compact candidate lineage row count mismatch.")
+        if int(summary.get("candidate_index", -1)) != expected_index:
+            raise ValueError("Compact candidate lineage index is out of order.")
+        if any(summary.get(field) != recovered.get(field) for field in summary_fields):
+            raise ValueError(
+                f"Compact candidate lineage summary differs at candidate {expected_index}."
+            )
+        yield recovered
+
+
+@contextmanager
+def _atomic_jsonl_writer(path: Path) -> Any:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def _canonical(smiles: str) -> str:
     from rdkit import Chem
 
@@ -95,10 +221,12 @@ def _candidate_graphs(payload: Mapping[str, Any]) -> list[Any]:
     return values
 
 
-def _mapping_payloads(schema: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+def _mapping_payloads(
+    schema: Any, *, dataset: str = "mutagenicity"
+) -> tuple[dict[str, Any], dict[str, Any]]:
     atom = {
         "schema_version": 1,
-        "source": "MutagenicityGraphSchema.feature_atomic_numbers",
+        "source": f"{dataset}_project_graph_schema.feature_atomic_numbers",
         "node_label_semantics": "one_hot_atom_type",
         "node_feature_dim": int(schema.node_feature_dim),
         "index_to_atomic_number": {
@@ -109,7 +237,7 @@ def _mapping_payloads(schema: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     }
     bond = {
         "schema_version": 1,
-        "source": "gcfexplainer_mutagenicity_fullgraph_codec_v1",
+        "source": "project_fullgraph_codec_deterministic_repair_v1",
         "retained_bond_rule": "source_sidecar_exact",
         "new_untyped_edge_bond_type": "SINGLE",
         "supported_source_bond_types": list(schema.bond_type_vocabulary),
@@ -216,6 +344,138 @@ def _source_and_noop_gate(
     return schema, bundle.graphs, record_by_id, source_rows, no_op_rows
 
 
+def _aids_source_and_noop_gate(
+    *, root: Path, dataset_dir: Path, source_csv: Path, parent_limit: int
+) -> tuple[
+    dict[str, Any],
+    list[Any],
+    dict[str, Mapping[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Freeze exact HIV source chemistry without introducing a second codec."""
+
+    from rdkit import Chem
+    from torch_geometric.data import Batch
+
+    from src.baselines.gcfexplainer_mutagenicity_adapter import (
+        decode_generated_fullgraph,
+        reconstruct_source_graph,
+    )
+
+    from .exporter import _aids_schema_and_record
+
+    bundle = load_aids_generation_bundle(
+        dataset_dir=dataset_dir,
+        source_csv=source_csv,
+        parent_limit=parent_limit,
+    )
+    if len(bundle.graphs) != parent_limit:
+        raise ValueError("AIDS/HIV source cohort does not match the frozen parent count.")
+    source_rows: list[dict[str, Any]] = []
+    no_op_rows: list[dict[str, Any]] = []
+    records: dict[str, Mapping[str, Any]] = {}
+    schemas: dict[str, Any] = {}
+    source_graphs: list[Any] = []
+    for graph in bundle.graphs:
+        cloned = graph.clone()
+        cloned.gcf_node_origin = cloned.comrecgc_node_origin
+        parent_id = str(cloned.comrecgc_parent_id)
+        schema, record = _aids_schema_and_record(cloned, bundle.atom_vocabulary)
+        record = {
+            **record,
+            "num_nodes": int(cloned.num_nodes),
+            "num_edges": int(cloned.edge_index.shape[1] // 2),
+        }
+        schemas[parent_id] = schema
+        records[parent_id] = record
+        source_graphs.append(cloned)
+
+    serialized = root / "source_graph_noop_roundtrip.pt"
+    _torch_save_atomic(source_graphs, serialized)
+    reloaded = _torch_load(serialized)
+    batched = Batch.from_data_list(source_graphs).to_data_list()
+    if not isinstance(reloaded, list) or len(reloaded) != len(source_graphs):
+        raise ValueError("AIDS/HIV source graph save/load did not preserve graph count.")
+    if len(batched) != len(source_graphs):
+        raise ValueError("AIDS/HIV source graph batch/unbatch did not preserve graph count.")
+    for graph, loaded_graph, batched_graph in zip(
+        source_graphs, reloaded, batched, strict=True
+    ):
+        parent_id = str(graph.comrecgc_parent_id)
+        schema = schemas[parent_id]
+        record = records[parent_id]
+        molecule, diagnostics = reconstruct_source_graph(record, schema)
+        reconstructed = _canonical(
+            Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+        )
+        expected = _canonical(str(record["canonical_smiles"]))
+        decoded = decode_generated_fullgraph(
+            graph, source_record=record, schema=schema
+        )
+        graph_hash = stable_graph_sha256(graph)
+        loaded_hash = stable_graph_sha256(loaded_graph)
+        batched_hash = stable_graph_sha256(batched_graph)
+        node_origin = [
+            int(value) for value in graph.comrecgc_node_origin.detach().cpu().tolist()
+        ]
+        expected_origin = list(range(int(graph.num_nodes)))
+        source_ok = bool(
+            diagnostics.get("round_trip_passed")
+            and reconstructed == expected
+            and node_origin == expected_origin
+        )
+        no_op_ok = bool(
+            decoded.decode_ok
+            and decoded.canonical_smiles == expected
+            and graph_hash == loaded_hash == batched_hash
+        )
+        source_rows.append(
+            {
+                "parent_id": parent_id,
+                "source_graph_sha256": graph_hash,
+                "sanitize_ok": source_ok,
+                "node_count_exact": int(molecule.GetNumAtoms()) == int(record["num_nodes"]),
+                "undirected_bond_count_exact": int(molecule.GetNumBonds())
+                == int(record["num_edges"]),
+                "atomic_number_exact": diagnostics.get("atomic_numbers_exact"),
+                "formal_charge_exact": diagnostics.get("formal_charges_exact"),
+                "aromaticity_exact": diagnostics.get("aromaticity_exact"),
+                "explicit_h_exact": diagnostics.get("explicit_hs_exact"),
+                "no_implicit_exact": diagnostics.get("no_implicit_exact"),
+                "chirality_exact": diagnostics.get("chiral_tags_exact"),
+                "bond_type_exact": diagnostics.get("bond_types_exact"),
+                "edge_direction_normalization_exact": True,
+                "duplicate_edge_absence": int(graph.edge_index.shape[1])
+                == 2 * int(record["num_edges"]),
+                "self_loop_absence": not bool(
+                    (graph.edge_index[0] == graph.edge_index[1]).any().item()
+                ),
+                "edge_attr_alignment_exact": getattr(graph, "edge_attr", None) is None,
+                "node_lineage_exact": node_origin == expected_origin,
+                "canonical_molecule_equivalence": reconstructed == expected,
+                "roundtrip_ok": source_ok,
+            }
+        )
+        no_op_rows.append(
+            {
+                "parent_id": parent_id,
+                "source_graph_sha256": graph_hash,
+                "clone_graph_sha256": stable_graph_sha256(graph.clone()),
+                "save_load_graph_sha256": loaded_hash,
+                "batch_unbatch_graph_sha256": batched_hash,
+                "empty_action_decode_ok": decoded.decode_ok,
+                "canonical_smiles": decoded.canonical_smiles,
+                "noop_roundtrip_ok": no_op_ok,
+            }
+        )
+    if not all(bool(row["roundtrip_ok"]) for row in source_rows):
+        raise ValueError("AIDS/HIV source round-trip is not 100%; repair is forbidden.")
+    if not all(bool(row["noop_roundtrip_ok"]) for row in no_op_rows):
+        raise ValueError("AIDS/HIV no-op/serialization round-trip is not 100%.")
+    return schemas, source_graphs, records, source_rows, no_op_rows
+
+
 def run_mutagenicity_chemistry_audit(
     *,
     project_root: str | Path,
@@ -230,8 +490,15 @@ def run_mutagenicity_chemistry_audit(
     expected_candidate_count: int | None = 164,
     expected_medoid_count: int | None = 4,
     expected_counterfactuals_sha256: str | None = None,
+    dataset: str = "mutagenicity",
+    source_csv: str | Path | None = None,
 ) -> dict[str, Any]:
     """Audit all raw candidates, replay exact actions, and freeze one repair each."""
+
+    if dataset not in {"aids", "mutagenicity"}:
+        raise ValueError(f"Unsupported project chemistry dataset: {dataset}")
+    if dataset == "aids" and source_csv is None:
+        raise ValueError("AIDS/HIV chemistry audit requires source_csv.")
 
     root = require_empty_output(output_dir)
     project = Path(project_root).expanduser().resolve()
@@ -245,37 +512,69 @@ def run_mutagenicity_chemistry_audit(
         raise ValueError("Mutagenicity generation artifact differs from its manifest.")
     if expected_counterfactuals_sha256 and actual_sha != expected_counterfactuals_sha256:
         raise ValueError("Mutagenicity generation artifact differs from the frozen blocker SHA256.")
-    parity = _load_json(trace_parity_path)
-    if parity.get("trace_parity_passed") is not True:
-        raise ValueError("Trace parity must pass before chemistry audit.")
-    lineage = _load_json_list(trace_lineage_path)
+    trace_evidence = validate_chemistry_trace_evidence(
+        trace_parity_path,
+        dataset=dataset,
+    )
+    lineage_path = Path(trace_lineage_path).expanduser().resolve()
+    lineage_contract, lineage_count, lineage_format = _lineage_contract(lineage_path)
+    evidence_candidate_count = trace_evidence.get("candidate_count")
+    if evidence_candidate_count is not None and int(evidence_candidate_count) != lineage_count:
+        raise ValueError(
+            "Trace evidence and candidate lineage counts differ: "
+            f"evidence={evidence_candidate_count}, lineage={lineage_count}."
+        )
     payload = _torch_load(counterfactuals)
     candidate_graphs = _candidate_graphs(payload)
     if (
         expected_candidate_count is not None
         and (
             len(candidate_graphs) != expected_candidate_count
-            or len(lineage) != expected_candidate_count
+            or lineage_count != expected_candidate_count
         )
     ):
         raise ValueError(
             "Frozen Mutagenicity candidate count mismatch: "
-            f"graphs={len(candidate_graphs)}, lineage={len(lineage)}, expected={expected_candidate_count}."
+            f"graphs={len(candidate_graphs)}, lineage={lineage_count}, expected={expected_candidate_count}."
         )
-    if [int(row.get("candidate_index", -1)) for row in lineage] != list(range(len(lineage))):
-        raise ValueError("Candidate action lineage is not in exact official candidate order.")
-    if any(row.get("action_lineage_resolved") is not True for row in lineage):
-        raise ValueError("At least one Mutagenicity candidate action lineage is unresolved.")
+    if lineage_count != len(candidate_graphs):
+        raise ValueError(
+            "Generation and lineage candidate counts differ: "
+            f"graphs={len(candidate_graphs)}, lineage={lineage_count}."
+        )
 
-    schema, source_graphs, source_records, source_rows, no_op_rows = _source_and_noop_gate(
-        root=root,
-        dataset_dir=dataset_root,
-        parent_limit=parent_limit,
-    )
+    if dataset == "aids":
+        schemas, source_graphs, source_records, source_rows, no_op_rows = (
+            _aids_source_and_noop_gate(
+                root=root,
+                dataset_dir=dataset_root,
+                source_csv=Path(str(source_csv)).expanduser().resolve(),
+                parent_limit=parent_limit,
+            )
+        )
+        schema = next(iter(schemas.values()))
+    else:
+        schema, source_graphs, source_records, source_rows, no_op_rows = (
+            _source_and_noop_gate(
+                root=root,
+                dataset_dir=dataset_root,
+                parent_limit=parent_limit,
+            )
+        )
+        schemas = {
+            str(getattr(graph, "comrecgc_parent_id")): schema
+            for graph in source_graphs
+        }
     source_by_id = {
         str(getattr(graph, "comrecgc_parent_id")): graph for graph in source_graphs
     }
-    atom_mapping, bond_mapping = _mapping_payloads(schema)
+    lineage = _iter_candidate_lineage(
+        path=lineage_path,
+        contract=lineage_contract,
+        payload=payload,
+        source_graphs_by_parent_id=source_by_id,
+    )
+    atom_mapping, bond_mapping = _mapping_payloads(schema, dataset=dataset)
     atom_mapping_path = root / "atom_label_mapping.json"
     bond_mapping_path = root / "bond_mapping.json"
     write_json(atom_mapping_path, atom_mapping)
@@ -295,22 +594,42 @@ def run_mutagenicity_chemistry_audit(
             atom_mapping_path=atom_mapping_path,
             bond_mapping_path=bond_mapping_path,
             output_path=preregistration_target,
+            dataset=dataset,
         )
         preregistration_sha = str(preregistration["file_sha256"])
+
+    common_records = _load_json_list(common_root / "selected_common_recourses.json")
+    if expected_medoid_count is not None and len(common_records) != expected_medoid_count:
+        raise ValueError("Official Mutagenicity medoid count differs from the frozen blocker.")
+    ranks = [int(row["rank"]) for row in common_records]
+    if ranks != list(range(1, len(ranks) + 1)):
+        raise ValueError("Official common-recourse rank is not contiguous and frozen.")
+    medoid_candidate_indices = {
+        int(row["generation_candidate_index"]) for row in common_records
+    }
+    if any(index < 0 or index >= len(candidate_graphs) for index in medoid_candidate_indices):
+        raise ValueError("Official common-recourse medoid index is outside candidate range.")
 
     raw_rows: list[dict[str, Any]] = []
     repaired_rows: list[dict[str, Any]] = []
     action_rows: list[dict[str, Any]] = []
     first_invalid_rows: list[dict[str, Any]] = []
+    materialize_all_repaired_graphs = lineage_format == "inline_json"
     repaired_graphs: list[Any] = []
+    medoid_graphs_by_index: dict[int, Any] = {}
     action_type_counts: dict[str, Counter[str]] = defaultdict(Counter)
     raw_reason_counts: Counter[str] = Counter()
     for index, (graph, trace) in enumerate(zip(candidate_graphs, lineage, strict=True)):
+        if int(trace.get("candidate_index", -1)) != index:
+            raise ValueError("Candidate action lineage is not in exact official order.")
+        if trace.get("action_lineage_resolved") is not True:
+            raise ValueError(f"Candidate {index} action lineage is unresolved.")
         parent_id = str(trace.get("parent_id") or getattr(graph, "comrecgc_parent_id", ""))
         if parent_id not in source_by_id or parent_id not in source_records:
             raise ValueError(f"Candidate {index} parent lineage is absent: {parent_id!r}")
         source_graph = source_by_id[parent_id]
         source_record = source_records[parent_id]
+        candidate_schema = schemas[parent_id]
         actions = list(trace.get("actions") or [])
         raw_replay = replay_raw_actions(source_graph, actions)
         replay_sha = stable_graph_sha256(raw_replay)
@@ -319,17 +638,20 @@ def run_mutagenicity_chemistry_audit(
             raise ValueError(f"Candidate {index} exact action replay differs from official graph.")
         from src.baselines.gcfexplainer_mutagenicity_adapter import decode_generated_fullgraph
 
-        raw_decoded = decode_generated_fullgraph(graph, source_record=source_record, schema=schema)
+        graph.gcf_node_origin = graph.comrecgc_node_origin
+        raw_decoded = decode_generated_fullgraph(
+            graph, source_record=source_record, schema=candidate_schema
+        )
         first = repair_candidate(
             source_graph=source_graph,
             source_record=source_record,
-            schema=schema,
+            schema=candidate_schema,
             actions=actions,
         )
         second = repair_candidate(
             source_graph=source_graph,
             source_record=source_record,
-            schema=schema,
+            schema=candidate_schema,
             actions=actions,
         )
         deterministic = bool(
@@ -339,10 +661,15 @@ def run_mutagenicity_chemistry_audit(
         )
         if not deterministic:
             raise ValueError(f"Candidate {index} chemistry repair is nondeterministic.")
-        repaired_graphs.append(first.graph)
+        if materialize_all_repaired_graphs:
+            repaired_graphs.append(first.graph)
+        if index in medoid_candidate_indices:
+            medoid_graphs_by_index[index] = first.graph
         raw_reason = "valid" if raw_decoded.decode_ok else str(raw_decoded.failure_reason)
         raw_reason_counts[raw_reason] += 1
-        candidate_id = f"COMRECGC_MUT_RAW_{index:06d}"
+        candidate_id = (
+            f"COMRECGC_{'AIDS' if dataset == 'aids' else 'MUT'}_RAW_{index:06d}"
+        )
         raw_rows.append(
             {
                 "candidate_id": candidate_id,
@@ -409,23 +736,22 @@ def run_mutagenicity_chemistry_audit(
             action_rows.append(row)
             action_type_counts[str(action["action_type"])][str(action["status"])] += 1
 
-    _torch_save_atomic(repaired_graphs, root / "repaired_candidates.pt")
-    reloaded_repaired = _torch_load(root / "repaired_candidates.pt")
-    if len(reloaded_repaired) != len(repaired_graphs):
-        raise ValueError("Repaired candidate artifact is not reloadable.")
+    repaired_candidates_path: Path | None = None
+    if materialize_all_repaired_graphs:
+        repaired_candidates_path = root / "repaired_candidates.pt"
+        _torch_save_atomic(repaired_graphs, repaired_candidates_path)
+        reloaded_repaired = _torch_load(repaired_candidates_path)
+        if len(reloaded_repaired) != len(repaired_graphs):
+            raise ValueError("Repaired candidate artifact is not reloadable.")
 
-    common_records = _load_json_list(common_root / "selected_common_recourses.json")
-    if expected_medoid_count is not None and len(common_records) != expected_medoid_count:
-        raise ValueError("Official Mutagenicity medoid count differs from the frozen blocker.")
-    ranks = [int(row["rank"]) for row in common_records]
-    if ranks != list(range(1, len(ranks) + 1)):
-        raise ValueError("Official common-recourse rank is not contiguous and frozen.")
     medoid_rows: list[dict[str, Any]] = []
     medoid_graphs: list[Any] = []
     for common in common_records:
         candidate_index = int(common["generation_candidate_index"])
         repaired = repaired_rows[candidate_index]
-        medoid_graphs.append(repaired_graphs[candidate_index])
+        if candidate_index not in medoid_graphs_by_index:
+            raise ValueError("Repaired official medoid graph was not retained.")
+        medoid_graphs.append(medoid_graphs_by_index[candidate_index])
         medoid_rows.append(
             {
                 "official_cluster_rank": int(common["rank"]),
@@ -504,6 +830,8 @@ def run_mutagenicity_chemistry_audit(
     repaired_medoid_count = sum(bool(row["repair_success"]) for row in medoid_rows)
     audit = {
         "schema_version": 1,
+        "dataset": "AIDS/HIV" if dataset == "aids" else "Mutagenicity",
+        "dataset_key": dataset,
         "audit_passed": True,
         "engineering_smoke_pass": True,
         "method": REPAIR_METHOD,
@@ -511,12 +839,26 @@ def run_mutagenicity_chemistry_audit(
         "repair_policy_sha256": preregistration_sha,
         "upstream_commit": UPSTREAM_COMMIT,
         "project_commit": _project_commit(project),
+        "dataset_fingerprint": generation_manifest.get("dataset_audit", {}).get(
+            "dataset_fingerprint"
+        ),
+        "generation_parent_ids_sha256": generation_manifest.get(
+            "generation_parent_ids_sha256"
+        ),
         "source_parent_count": len(source_rows),
         "source_roundtrip_pass_count": source_pass,
         "source_roundtrip_rate": source_pass / len(source_rows),
         "noop_roundtrip_pass_count": noop_pass,
         "noop_roundtrip_rate": noop_pass / len(no_op_rows),
-        "trace_parity": True,
+        "trace_parity": bool(trace_evidence["trace_parity_passed"]),
+        "trace_integrity": bool(trace_evidence["trace_integrity_passed"]),
+        "trace_evidence_kind": trace_evidence["trace_evidence_kind"],
+        "trace_parity_required": bool(trace_evidence["trace_parity_required"]),
+        "trace_lineage_format": lineage_format,
+        "trace_lineage_streamed": lineage_format == "selected_trace_predecessor_index",
+        "max_candidate_lineages_materialized": (
+            1 if lineage_format == "selected_trace_predecessor_index" else lineage_count
+        ),
         "raw_candidate_count": len(raw_rows),
         "raw_valid_candidate_count": sum(bool(row["raw_sanitize_ok"]) for row in raw_rows),
         "raw_invalid_reason_counts": dict(raw_reason_counts),
@@ -526,6 +868,12 @@ def run_mutagenicity_chemistry_audit(
         "repaired_official_medoid_count": repaired_medoid_count,
         "repair_deterministic_count": sum(bool(row["repair_deterministic"]) for row in repaired_rows),
         "one_raw_candidate_max_one_repaired_candidate": True,
+        "all_repaired_graphs_materialized": materialize_all_repaired_graphs,
+        "retained_repaired_graph_object_count": (
+            len(repaired_graphs)
+            if materialize_all_repaired_graphs
+            else len(medoid_graphs_by_index)
+        ),
         "official_cluster_rank_unchanged": True,
         "invalid_slot_backfill": False,
         "rank_compaction": False,
@@ -544,8 +892,8 @@ def run_mutagenicity_chemistry_audit(
         "counterfactuals_sha256": actual_sha,
         "trace_lineage_path": str(Path(trace_lineage_path).resolve()),
         "trace_lineage_sha256": sha256_file(trace_lineage_path),
-        "trace_parity_path": str(Path(trace_parity_path).resolve()),
-        "trace_parity_sha256": sha256_file(trace_parity_path),
+        "trace_evidence_path": str(Path(trace_parity_path).resolve()),
+        "trace_evidence_sha256": sha256_file(trace_parity_path),
         "preregistration_path": str(preregistration_target),
         "preregistration_sha256": preregistration_sha,
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -559,8 +907,19 @@ def run_mutagenicity_chemistry_audit(
             "algorithm_rerun": False,
             "candidate_order_source": "official_random_walk_candidate_order",
             "official_medoid_policy": "original_official_medoid_only",
-            "repaired_candidates_path": str(root / "repaired_candidates.pt"),
-            "repaired_candidates_sha256": sha256_file(root / "repaired_candidates.pt"),
+            "repaired_candidates_path": (
+                str(repaired_candidates_path) if repaired_candidates_path else None
+            ),
+            "repaired_candidates_sha256": (
+                sha256_file(repaired_candidates_path)
+                if repaired_candidates_path
+                else None
+            ),
+            "repaired_candidates_materialization": (
+                "all_candidates_smoke_compatibility"
+                if repaired_candidates_path
+                else "omitted_full_memory_bound_representatives_only"
+            ),
             "repaired_official_medoids_path": str(root / "repaired_official_medoids.pt"),
             "repaired_official_medoids_sha256": sha256_file(
                 root / "repaired_official_medoids.pt"
@@ -570,13 +929,13 @@ def run_mutagenicity_chemistry_audit(
     atomic_write_bytes(
         root / "audit.txt",
         (
-            "COMRECGC Mutagenicity chemistry audit\n"
+            f"COMRECGC {audit['dataset']} chemistry audit\n"
             f"source_roundtrip={source_pass}/{len(source_rows)}\n"
             f"noop_roundtrip={noop_pass}/{len(no_op_rows)}\n"
             f"raw_candidates={len(raw_rows)} raw_valid={audit['raw_valid_candidate_count']}\n"
             f"repaired_candidates={repaired_count} repaired_official_medoids={repaired_medoid_count}\n"
             "rf_used_in_repair=false wnode_used_in_repair=false\n"
-            "[COMRECGC_MUT_CHEMISTRY_ENGINEERING_SMOKE_PASS]\n"
+            "[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]\n"
         ).encode("utf-8"),
     )
     write_json(
@@ -596,8 +955,12 @@ def run_mutagenicity_chemistry_audit(
                     "raw_candidates.jsonl",
                     "repair_provenance.jsonl",
                     "official_medoid_repair.csv",
-                    "repaired_candidates.pt",
                     "repaired_official_medoids.pt",
+                    *(
+                        ("repaired_candidates.pt",)
+                        if repaired_candidates_path is not None
+                        else ()
+                    ),
                 )
             },
         },

@@ -21,6 +21,7 @@ from src.baselines.comrecgc.contracts import sha256_file, write_json  # noqa: E4
 
 
 REQUIRED = (
+    "pair_matrix.jsonl",
     "figure3_coverage_vs_k.csv",
     "figure4_coverage_vs_threshold.csv",
     "table2_comrecgc_k10.csv",
@@ -34,6 +35,13 @@ REQUIRED = (
     "summary.json",
     "run_manifest.json",
     "final_artifact_audit.json",
+)
+EMPTY_ALLOWED = frozenset(
+    {
+        "pair_matrix.jsonl",
+        "selected_sequence.jsonl",
+        "representative_counterfactuals.jsonl",
+    }
 )
 
 
@@ -66,6 +74,7 @@ def freeze(
     source_dir: str | Path,
     gate_dir: str | Path,
     output_dir: str | Path,
+    dataset: str = "mutagenicity",
     automation_state: str | Path | None = None,
 ) -> dict[str, Any]:
     source = Path(source_dir).expanduser().resolve()
@@ -81,7 +90,9 @@ def freeze(
         raise ValueError("Unexpected method in source run manifest.")
     for name in REQUIRED:
         path = source / name
-        if not path.is_file() or path.stat().st_size <= 0:
+        if not path.is_file() or (
+            path.stat().st_size <= 0 and name not in EMPTY_ALLOWED
+        ):
             raise FileNotFoundError(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(
@@ -108,9 +119,12 @@ def freeze(
             state = Path(automation_state).expanduser().resolve()
             state_payload = _load(state)
             state_path = str(state)
+        if dataset not in {"aids", "mutagenicity"}:
+            raise ValueError(f"Unsupported COMRECGC freeze dataset: {dataset}")
         freeze_manifest = {
             "schema_version": 1,
-            "dataset": "Mutagenicity",
+            "dataset": "AIDS" if dataset == "aids" else "Mutagenicity",
+            "dataset_key": dataset,
             "method": "COMRECGC-Adapted-DeterministicChemRepair",
             "source_output_root": str(source),
             "standardized_output_root": str(destination),
@@ -155,12 +169,14 @@ def main() -> int:
     parser.add_argument("--source-dir", required=True)
     parser.add_argument("--gate-dir", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), default="mutagenicity")
     parser.add_argument("--automation-state")
     args = parser.parse_args()
     result = freeze(
         source_dir=args.source_dir,
         gate_dir=args.gate_dir,
         output_dir=args.output_dir,
+        dataset=args.dataset,
         automation_state=args.automation_state,
     )
     print(json.dumps(result, sort_keys=True))

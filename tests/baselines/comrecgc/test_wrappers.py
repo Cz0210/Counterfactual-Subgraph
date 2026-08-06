@@ -95,3 +95,38 @@ def test_mut_trace_adoption_does_not_rerun_random_walk() -> None:
     assert "run_generation.py" not in text
     assert "--source-failed-generation-dir" in text
     assert "algorithm_rerun=false" in text
+
+
+def test_project_full_wrappers_freeze_scientific_contracts() -> None:
+    generation = (ROOT / "scripts/slurm/comrecgc_project_generate.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '[[ "$DATASET" == "aids" ]] && EXPECTED_PARENT_LIMIT=1283' in generation
+    assert "EXPECTED_PARENT_LIMIT=1448" in generation
+    assert "--trace-output-dir" in generation
+
+    evaluation = (
+        ROOT / "scripts/slurm/comrecgc_project_slot_eval.sh"
+    ).read_text(encoding="utf-8")
+    assert "wnode_figure4_redline_k10_figure4_wnode_coverage_vs_threshold.csv" in evaluation
+    assert "--theta-star 0.05 --cost-cap 0.0535" in evaluation
+    assert "test_source_label1_teacher_correct.csv" in evaluation
+    assert "--max-k 20" in evaluation
+
+    chemistry = (
+        ROOT / "scripts/slurm/comrecgc_project_chemistry.sh"
+    ).read_text(encoding="utf-8")
+    assert "--trace-lineage-path" in chemistry
+    assert "--trace-evidence-path" in chemistry
+    assert "$TRACE_DIR/trace_summary.json" in chemistry
+    assert "recovery_trace_v1" not in chemistry
+    assert "--parent-limit \"$PARENT_LIMIT\"" in chemistry
+
+
+def test_aids_project_smoke_is_read_only_adoption() -> None:
+    text = (
+        ROOT / "scripts/slurm/comrecgc_aids_project_smoke_adopt.sh"
+    ).read_text(encoding="utf-8")
+    assert "adopt_aids_project_smoke.py" in text
+    assert "run_generation.py" not in text
+    assert "algorithm_rerun=false" in text

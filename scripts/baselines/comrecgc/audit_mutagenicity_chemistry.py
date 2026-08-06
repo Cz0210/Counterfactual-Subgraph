@@ -22,10 +22,13 @@ from src.baselines.comrecgc.mutagenicity_chemistry_audit import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=str(PROJECT_ROOT))
+    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), default="mutagenicity")
     parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--source-csv")
     parser.add_argument("--generation-dir", required=True)
     parser.add_argument("--trace-lineage-path", required=True)
-    parser.add_argument("--trace-parity-path", required=True)
+    parser.add_argument("--trace-parity-path")
+    parser.add_argument("--trace-evidence-path")
     parser.add_argument("--common-recourse-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--preregistration-path", required=True)
@@ -40,12 +43,15 @@ def main() -> int:
     args = build_parser().parse_args()
     output = Path(args.output_dir).expanduser().resolve()
     try:
+        trace_evidence_path = args.trace_evidence_path or args.trace_parity_path
+        if not trace_evidence_path:
+            raise ValueError("A trace parity or trace integrity evidence path is required.")
         audit = run_mutagenicity_chemistry_audit(
             project_root=args.project_root,
             dataset_dir=args.dataset_dir,
             generation_dir=args.generation_dir,
             trace_lineage_path=args.trace_lineage_path,
-            trace_parity_path=args.trace_parity_path,
+            trace_parity_path=trace_evidence_path,
             common_recourse_dir=args.common_recourse_dir,
             output_dir=output,
             preregistration_path=args.preregistration_path,
@@ -53,11 +59,13 @@ def main() -> int:
             expected_candidate_count=args.expected_candidate_count,
             expected_medoid_count=args.expected_medoid_count,
             expected_counterfactuals_sha256=args.expected_counterfactuals_sha256,
+            dataset=args.dataset,
+            source_csv=args.source_csv,
         )
     except Exception as exc:
         output.mkdir(parents=True, exist_ok=True)
         failure = {
-            "stage": "mutagenicity_chemistry_audit",
+            "stage": f"{args.dataset}_project_chemistry_audit",
             "error_class": type(exc).__name__,
             "message": str(exc),
             "calibration_loaded": False,

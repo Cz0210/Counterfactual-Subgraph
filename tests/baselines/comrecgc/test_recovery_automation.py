@@ -71,6 +71,7 @@ def test_aids_full_is_absent_from_smoke_and_deferred_in_all(
     assert [stage.stage_id for stage in smoke] == [
         "aids_existing_audit",
         "aids_density_retry",
+        "aids_project_smoke_gate",
     ]
 
     state = MODULE.RecoveryState(
@@ -86,12 +87,25 @@ def test_aids_full_is_absent_from_smoke_and_deferred_in_all(
 
     monkeypatch.setattr(MODULE, "submit", fake_submit)
     initially = MODULE.submit_ready_stages(all_stages, state, dry_run=False)
-    assert initially == ["aids_existing_audit", "aids_density_retry"]
+    assert initially == [
+        "aids_existing_audit",
+        "aids_density_retry",
+        "aids_project_smoke_gate",
+    ]
     assert state.job("aids_native_full") is None
 
-    state.data["completed_stages"] = ["aids_density_retry"]
+    state.data["completed_stages"] = ["aids_project_smoke_gate"]
     after_density = MODULE.submit_ready_stages(all_stages, state, dry_run=False)
-    assert after_density == ["aids_native_full", "aids_native_full_gate"]
+    assert after_density == [
+        "aids_native_full",
+        "aids_native_full_gate",
+        "aids_project_full_generation",
+        "aids_project_full_common_recourse",
+        "aids_project_full_chemistry",
+        "aids_project_full_unified_eval",
+        "aids_project_full_gate",
+        "aids_project_freeze",
+    ]
 
 
 def test_recovery_submissions_use_experiment_registry() -> None:
@@ -139,7 +153,20 @@ def test_slot_preserving_eval_is_in_smoke_and_full_dag() -> None:
     assert by_id["mut_full_unified_eval"].dependency_stages == (
         "mut_full_chemistry",
     )
-    assert by_id["mut_full_gate"].dependency_type == "afterany"
+    assert by_id["mut_full_chemistry"].script.endswith(
+        "comrecgc_project_chemistry.sh"
+    )
+    assert by_id["mut_full_unified_eval"].script.endswith(
+        "comrecgc_project_slot_eval.sh"
+    )
+    assert by_id["mut_full_gate"].script.endswith(
+        "comrecgc_project_full_gate.sh"
+    )
+    assert by_id["mut_freeze"].script.endswith("comrecgc_project_freeze.sh")
+    assert by_id["mut_full_chemistry"].environment["TRACE_EVIDENCE_PATH"].endswith(
+        "/generation/trace_parity.json"
+    )
+    assert by_id["mut_full_gate"].dependency_type == "afterok"
     assert by_id["mut_freeze"].dependency_stages == ("mut_full_gate",)
 
 
@@ -251,6 +278,79 @@ def test_retry3_authorization_template_keeps_full_kill_switch_closed() -> None:
     assert value["random_walk_rerun_allowed"] is False
     assert (value["max_aids_jobs"], value["max_mutagenicity_jobs"]) == (2, 4)
     assert value["max_total_jobs"] == 6
+
+
+def test_end_to_end_authorization_is_exact_and_enables_only_gated_full() -> None:
+    value = MODULE.end_to_end_authorization_template("a" * 40)
+    assert value == {
+        "authorization_status": "AUTHORIZED",
+        "authorized_scope": "COMRECGC_END_TO_END_AIDS_MUTAGENICITY",
+        "project_commit": "a" * 40,
+        "upstream_commit": MODULE.UPSTREAM_COMMIT,
+        "phase_c_full_approved": True,
+        "full_submission_allowed": True,
+        "auto_promote_to_full": True,
+        "candidate_regeneration_in_smoke": False,
+        "candidate_generation_in_full": True,
+        "random_walk_rerun_in_smoke": False,
+        "random_walk_full_allowed": True,
+        "scientific_parameter_sweep_allowed": False,
+        "rank_backfill_allowed": False,
+        "rf_guided_repair_allowed": False,
+        "wnode_guided_repair_allowed": False,
+    }
+    MODULE.assert_full_authorized(value)
+
+
+def test_end_to_end_dag_is_frozen_and_full_requires_dataset_smoke_gate(
+    tmp_path: Path,
+) -> None:
+    authorization = MODULE.end_to_end_authorization_template(
+        MODULE.git_commit(MODULE.PROJECT_ROOT)
+    )
+    state = MODULE.RecoveryState(
+        tmp_path,
+        "comrecgc_end_to_end_test",
+        requested_mode="all",
+        datasets=["aids", "mutagenicity"],
+        authorization=authorization,
+        authorization_sha256="e" * 64,
+    )
+    values = MODULE.stages(
+        "comrecgc_end_to_end_test", {"aids", "mutagenicity"}, "all"
+    )
+    path, digest = MODULE.write_authorized_job_dag(state, values)
+    assert path.is_file()
+    assert len(digest) == 64
+    by_id = {stage.stage_id: stage for stage in values}
+    with pytest.raises(RuntimeError, match="smoke engineering Gate"):
+        MODULE.assert_smoke_engineering_gate(state, "aids")
+    with pytest.raises(RuntimeError, match="smoke engineering Gate"):
+        MODULE.assert_smoke_engineering_gate(state, "mutagenicity")
+    state.data["completed_stages"] = [
+        "aids_project_smoke_gate",
+        "mut_chemrepair_smoke_gate",
+    ]
+    MODULE.assert_smoke_engineering_gate(state, "aids")
+    MODULE.assert_smoke_engineering_gate(state, "mutagenicity")
+    MODULE.validate_stage_in_authorized_dag(
+        by_id["aids_project_full_generation"], state
+    )
+    MODULE.validate_stage_in_authorized_dag(by_id["mut_full_generation"], state)
+
+
+def test_end_to_end_dependencies_are_afterok_and_no_rank_backfill() -> None:
+    values = MODULE.stages(
+        "comrecgc_end_to_end_test", {"aids", "mutagenicity"}, "all"
+    )
+    assert all(
+        stage.dependency_type in {None, "afterok"}
+        for stage in values
+    )
+    authorization = MODULE.end_to_end_authorization_template("a" * 40)
+    assert authorization["rank_backfill_allowed"] is False
+    assert authorization["rf_guided_repair_allowed"] is False
+    assert authorization["wnode_guided_repair_allowed"] is False
 
 
 def test_frozen_blocker_artifacts_are_adopted_idempotently(tmp_path: Path) -> None:

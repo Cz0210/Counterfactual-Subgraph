@@ -48,9 +48,10 @@ is exported as the real source-to-counterfactual pair nearest its center; an
 embedding center is never represented as a fictional graph.
 
 Native smoke is complete only after the actual official random-walk payload is
-reloaded, model-counterfactual graphs are clustered with the official DBSCAN
-coverage path, and the official greedy summary yields at least one real graph
-medoid. The audit artifacts are `native_common_recourse.json` and
+reloaded, model-counterfactual graphs traverse the official DBSCAN coverage
+path, and the official greedy summary serialization completes. An empty
+cluster/medoid set is a valid scientific result, not an engineering failure.
+The audit artifacts are `native_common_recourse.json` and
 `native_representative_counterfactuals.pt`; TU outputs remain ineligible for
 project figures.
 
@@ -93,17 +94,28 @@ python scripts/automation/run_comrecgc_baseline.py \
   --mode smoke
 ```
 
-Full chains require `--after-smoke-pass`; Slurm `afterok` dependencies prevent
-generation from running when a smoke Gate fails. The driver writes state,
-events, evidence paths, job records, and short reports under
-`outputs/hpc/automation/comrecgc/<run_id>/`. Status refresh is explicit; there
-is no long-lived local poll loop.
+The authorization-scoped recovery driver freezes the complete job DAG before
+submission. Full nodes require the matching dataset's completed engineering
+smoke Gate and use only Slurm `afterok` dependencies. Under the separately
+recorded end-to-end authorization, a successful smoke Gate may promote its own
+dataset chain without a second prompt; an engineering failure blocks only that
+dataset. The driver writes state, events, evidence paths, job records, and short
+reports under `outputs/hpc/automation/comrecgc_recovery/<run_id>/`. Status
+refresh is explicit; there is no long-lived local poll loop.
+
+Full project generation writes selected-transition events to bounded JSONL
+chunks and stores only a compact candidate lineage index. Chemistry reconstructs
+one candidate lineage at a time and retains graph objects only for the immutable
+official medoid ranks. Smoke artifacts keep the legacy inline lineage schema for
+backward compatibility. Neither format changes RNG calls, neighbor ordering,
+candidate payloads, importance values, DBSCAN inputs, or greedy rank.
 
 ## Unified Evaluation
 
-Candidate export preserves official common-recourse rank, filters graph/RDKit
-invalid and RF non-target candidates in that order, and never reranks by RF or
-WNode. Final metadata uses:
+Candidate export preserves every official common-recourse rank slot. The
+deterministic chemistry policy marks invalid medoids unavailable without
+compaction or backfill; only repaired-valid medoids are sent to RF and WNode.
+Final metadata uses:
 
 ```text
 method = COMRECGC

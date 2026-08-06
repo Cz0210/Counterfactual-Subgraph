@@ -53,6 +53,46 @@ profile name and manifest.
 Accepted
 
 ---
+## [2026-08-06] Gate COMRECGC end-to-end promotion and stream full lineage
+
+### Background
+
+The recovered smoke trace proved candidate/order/frequency and discrete
+importance decisions unchanged, but materializing every candidate's complete
+action path and repaired graph would multiply memory at the frozen full budget
+of 50,000 steps, five heads, and capacity 100,000. The project owner also
+authorized full execution after, and only after, each dataset's engineering
+smoke Gate passes.
+
+### Decision
+
+Freeze an authorization file and exact job DAG at the project commit. Require
+the dataset-specific smoke Gate before any full node and use `afterok` for every
+edge. AIDS native full and project AIDS/HIV full remain separate; only the
+project route can enter paper artifacts. Scientific empty output is a passing
+execution with coverage zero and conditional cost unavailable.
+
+For full project generation, stream selected transitions to atomic bounded
+JSONL chunks, write a compact candidate index, and reconstruct one lineage at a
+time during chemistry audit. Retain repaired graph objects only for original
+official medoids. Keep inline lineage for existing smoke/recovery artifacts.
+
+### Consequences
+
+- Full execution cannot precede its dataset's smoke engineering Gate.
+- Empty clusters, invalid repaired medoids, or zero strict flips do not trigger
+  parameter changes, rank backfill, seed search, or engineering retries.
+- Trace capture adds no RNG calls and does not alter neighbor enumeration,
+  importance, DBSCAN inputs, candidate order, or official greedy rank.
+- AIDS uses the same 1283-parent CSV and frozen dense WNode threshold grid as
+  the existing final AIDS evaluator; Mutagenicity uses its frozen 217-parent
+  test cohort and threshold artifact.
+
+### Status
+
+Accepted
+
+---
 ## [2026-08-06] Harden COMRECGC retry3 as an authorization-scoped smoke replay
 
 ### Background

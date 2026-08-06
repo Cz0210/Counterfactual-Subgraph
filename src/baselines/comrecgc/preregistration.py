@@ -83,6 +83,49 @@ def write_aids_density_preregistration(
     )
 
 
+def validate_chemistry_trace_evidence(
+    path: str | Path,
+    *,
+    dataset: str,
+) -> dict[str, Any]:
+    """Validate dataset-scoped trace evidence without overstating parity."""
+
+    source = Path(path).expanduser().resolve()
+    payload = _load(source)
+    if payload.get("trace_parity_passed") is True:
+        return {
+            "trace_evidence_kind": "trace_on_off_parity",
+            "trace_parity_required": True,
+            "trace_parity_passed": True,
+            "trace_integrity_passed": True,
+            "candidate_count": payload.get("candidate_count"),
+        }
+    if dataset != "aids":
+        raise ValueError("Chemistry repair cannot be frozen before trace parity passes.")
+    marker = source.parent / "_TRACE_COMPLETE.json"
+    marker_payload = _load(marker)
+    candidate_count = int(payload.get("candidate_count", -1))
+    resolved_count = int(payload.get("candidate_lineage_resolved_count", -2))
+    valid = bool(
+        payload.get("trace_only") is True
+        and int(payload.get("rng_calls_added", -1)) == 0
+        and candidate_count >= 0
+        and resolved_count == candidate_count
+        and marker_payload.get("trace_complete") is True
+    )
+    if not valid:
+        raise ValueError("AIDS chemistry trace integrity evidence is incomplete.")
+    return {
+        "trace_evidence_kind": "streamed_trace_integrity_no_on_off_reference",
+        "trace_parity_required": False,
+        "trace_parity_passed": False,
+        "trace_integrity_passed": True,
+        "candidate_count": candidate_count,
+        "trace_complete_marker_path": str(marker),
+        "trace_complete_marker_sha256": sha256_file(marker),
+    }
+
+
 def write_mutagenicity_chem_repair_preregistration(
     *,
     project_commit: str,
@@ -91,10 +134,12 @@ def write_mutagenicity_chem_repair_preregistration(
     atom_mapping_path: str | Path,
     bond_mapping_path: str | Path,
     output_path: str | Path,
+    dataset: str = "mutagenicity",
 ) -> dict[str, Any]:
-    parity = _load(trace_parity_path)
-    if parity.get("trace_parity_passed") is not True:
-        raise ValueError("Chemistry repair cannot be frozen before trace parity passes.")
+    trace_evidence = validate_chemistry_trace_evidence(
+        trace_parity_path,
+        dataset=dataset,
+    )
     return _write_new(
         output_path,
         {
@@ -105,8 +150,12 @@ def write_mutagenicity_chem_repair_preregistration(
             "project_commit": project_commit,
             "source_counterfactuals_path": str(Path(source_counterfactuals_path).resolve()),
             "source_counterfactuals_sha256": sha256_file(source_counterfactuals_path),
-            "trace_parity_path": str(Path(trace_parity_path).resolve()),
-            "trace_parity_sha256": sha256_file(trace_parity_path),
+            "trace_evidence_path": str(Path(trace_parity_path).resolve()),
+            "trace_evidence_sha256": sha256_file(trace_parity_path),
+            "trace_evidence_kind": trace_evidence["trace_evidence_kind"],
+            "trace_parity_required": trace_evidence["trace_parity_required"],
+            "trace_parity_passed": trace_evidence["trace_parity_passed"],
+            "trace_integrity_passed": trace_evidence["trace_integrity_passed"],
             "source_attributes": "preserve",
             "retained_atom_attributes": "preserve",
             "retained_bond_attributes": "preserve",

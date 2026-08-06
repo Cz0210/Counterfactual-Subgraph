@@ -24,6 +24,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.baselines.comrecgc.artifact_resolution import resolve_recovery_artifacts  # noqa: E402
 from src.baselines.comrecgc.cache_trust import audit_aids_pyg_cache  # noqa: E402
 from src.baselines.comrecgc.contracts import (  # noqa: E402
+    GenerationParameters,
+    RecourseParameters,
     UPSTREAM_COMMIT,
     append_jsonl,
     sha256_file,
@@ -38,6 +40,7 @@ DEFAULT_REMOTE_ROOT = "/share/home/u20526/czx/worktrees/comrecgc-recovery-202608
 JOB_ID_RE = re.compile(r"^job_id=(\d+)$", re.MULTILINE)
 ALLOWED_DYNAMIC_DIRTY_PATHS = frozenset({"docs/EXPERIMENT_LOG.md"})
 RETRY3_SCOPE = "RETRY3_SMOKE_ONLY"
+END_TO_END_SCOPE = "COMRECGC_END_TO_END_AIDS_MUTAGENICITY"
 AUTHORIZED_SMOKE_STAGES = frozenset(
     {
         "aids_existing_audit",
@@ -48,10 +51,17 @@ AUTHORIZED_SMOKE_STAGES = frozenset(
         "mut_chemrepair_smoke_gate",
     }
 )
+END_TO_END_RUN_PREFIX = "comrecgc_end_to_end_"
 FULL_STAGE_IDS = frozenset(
     {
         "aids_native_full",
         "aids_native_full_gate",
+        "aids_project_full_generation",
+        "aids_project_full_common_recourse",
+        "aids_project_full_chemistry",
+        "aids_project_full_unified_eval",
+        "aids_project_full_gate",
+        "aids_project_freeze",
         "mut_full_generation",
         "mut_full_common_recourse",
         "mut_full_chemistry",
@@ -60,6 +70,10 @@ FULL_STAGE_IDS = frozenset(
         "mut_freeze",
     }
 )
+SMOKE_GATE_STAGE_IDS = {
+    "aids": frozenset({"aids_project_smoke_gate"}),
+    "mutagenicity": frozenset({"mut_chemrepair_smoke_gate"}),
+}
 
 
 @dataclass(frozen=True)
@@ -202,6 +216,26 @@ def retry3_authorization_template(project_commit: str) -> dict[str, Any]:
     }
 
 
+def end_to_end_authorization_template(project_commit: str) -> dict[str, Any]:
+    return {
+        "authorization_status": "AUTHORIZED",
+        "authorized_scope": END_TO_END_SCOPE,
+        "project_commit": str(project_commit),
+        "upstream_commit": UPSTREAM_COMMIT,
+        "phase_c_full_approved": True,
+        "full_submission_allowed": True,
+        "auto_promote_to_full": True,
+        "candidate_regeneration_in_smoke": False,
+        "candidate_generation_in_full": True,
+        "random_walk_rerun_in_smoke": False,
+        "random_walk_full_allowed": True,
+        "scientific_parameter_sweep_allowed": False,
+        "rank_backfill_allowed": False,
+        "rf_guided_repair_allowed": False,
+        "wnode_guided_repair_allowed": False,
+    }
+
+
 def validate_retry3_authorization(
     authorization: dict[str, Any], *, project_commit: str
 ) -> None:
@@ -239,6 +273,41 @@ def load_retry3_authorization(root: Path, *, project_commit: str) -> tuple[dict[
     return value, sha256_file(path)
 
 
+def initialize_end_to_end_authorization(
+    root: Path, *, project_commit: str
+) -> tuple[Path, str]:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "authorization.json"
+    expected = end_to_end_authorization_template(project_commit)
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != expected:
+            raise RuntimeError(f"Existing end-to-end authorization differs: {path}")
+    else:
+        write_json(path, expected)
+    return path, sha256_file(path)
+
+
+def load_end_to_end_authorization(
+    root: Path, *, project_commit: str
+) -> tuple[dict[str, Any], str]:
+    path = root / "authorization.json"
+    if not path.is_file():
+        raise RuntimeError(f"End-to-end authorization is missing: {path}")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError(f"End-to-end authorization must be a JSON object: {path}")
+    expected = end_to_end_authorization_template(project_commit)
+    mismatches = {
+        field: {"actual": value.get(field), "expected": expected_value}
+        for field, expected_value in expected.items()
+        if value.get(field) != expected_value
+    }
+    if mismatches:
+        raise RuntimeError(f"Invalid end-to-end authorization: {mismatches}")
+    return value, sha256_file(path)
+
+
 def assert_full_authorized(authorization: dict[str, Any] | None) -> None:
     if authorization is None:
         raise RuntimeError("Full submission requires an explicit authorization object.")
@@ -246,6 +315,93 @@ def assert_full_authorized(authorization: dict[str, Any] | None) -> None:
         raise RuntimeError("Full submission blocked: phase_c_full_approved is not true.")
     if authorization.get("full_submission_allowed") is not True:
         raise RuntimeError("Full submission blocked: full_submission_allowed is not true.")
+    if authorization.get("auto_promote_to_full") is not True:
+        raise RuntimeError("Full submission blocked: auto_promote_to_full is not true.")
+
+
+def assert_smoke_engineering_gate(state: RecoveryState, dataset: str) -> None:
+    required = SMOKE_GATE_STAGE_IDS[str(dataset)]
+    completed = set(state.data.get("completed_stages") or [])
+    missing = sorted(required - completed)
+    if missing:
+        raise RuntimeError(
+            f"Full submission blocked before {dataset} smoke engineering Gate: {missing}"
+        )
+
+
+def _stage_payload(stage: Stage, state: RecoveryState) -> dict[str, Any]:
+    profile = "full" if stage.stage_id in FULL_STAGE_IDS else "smoke"
+    scientific_parameters: dict[str, Any] = {
+        key: value
+        for key, value in stage.environment.items()
+        if key in {"DATASET", "MODE", "PARENT_LIMIT"}
+    }
+    if "generation" in stage.stage_id:
+        scientific_parameters["generation"] = GenerationParameters.for_mode(
+            profile
+        ).__dict__
+    if "common_recourse" in stage.stage_id or stage.stage_id == "aids_native_full":
+        scientific_parameters["common_recourse"] = RecourseParameters.for_mode(
+            profile
+        ).__dict__
+    return {
+        "stage": stage.stage_id,
+        "dataset": stage.dataset,
+        "slurm_script": stage.script,
+        "dependency_type": stage.dependency_type,
+        "dependency_stages": list(stage.dependency_stages),
+        "input_roots": sorted(
+            value
+            for key, value in stage.environment.items()
+            if key.endswith("_DIR") or key.endswith("_ROOT") or key.endswith("_PATH")
+        ),
+        "output_root": stage.output_root,
+        "project_commit": state.data["project_commit"],
+        "upstream_commit": UPSTREAM_COMMIT,
+        "scientific_parameters": scientific_parameters,
+        "expected_artifacts": ["run_manifest.json", "completion_marker"],
+        "profile": profile,
+        "retry_policy": "one_engineering_or_transient_retry_no_scientific_retry",
+    }
+
+
+def write_authorized_job_dag(
+    state: RecoveryState, stage_values: Sequence[Stage]
+) -> tuple[Path, str]:
+    path = state.root / "authorized_job_dag.json"
+    payload = {
+        "schema_version": 1,
+        "authorization_sha256": state.data.get("authorization_sha256"),
+        "project_commit": state.data["project_commit"],
+        "upstream_commit": UPSTREAM_COMMIT,
+        "nodes": [_stage_payload(stage, state) for stage in stage_values],
+    }
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise RuntimeError(f"Authorized COMRECGC job DAG changed: {path}")
+    else:
+        write_json(path, payload)
+    digest = sha256_file(path)
+    state.data["job_dag_sha256"] = digest
+    state.save()
+    return path, digest
+
+
+def validate_stage_in_authorized_dag(stage: Stage, state: RecoveryState) -> None:
+    authorization = state.data.get("authorization")
+    if not isinstance(authorization, dict):
+        return
+    if authorization.get("authorized_scope") != END_TO_END_SCOPE:
+        return
+    path = state.root / "authorized_job_dag.json"
+    if not path.is_file():
+        raise RuntimeError("End-to-end submission requires authorized_job_dag.json.")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected = _stage_payload(stage, state)
+    matches = [row for row in payload.get("nodes") or [] if row.get("stage") == stage.stage_id]
+    if matches != [expected]:
+        raise RuntimeError(f"Stage is absent or differs from authorized DAG: {stage.stage_id}")
 
 
 def validate_job_caps(state: RecoveryState, *, next_stage: Stage | None = None) -> None:
@@ -484,6 +640,37 @@ def write_retry3_input_manifest(
                 "adoption_mode": "ADOPT_EXISTING",
             }
         )
+        project_smoke = (
+            PROJECT_ROOT
+            / "outputs/hpc/baselines/comrecgc/aids/"
+            "smoke_comrecgc_smoke_budget_retry_20260806_v4"
+        )
+        project_generation = project_smoke / "generation/counterfactuals.pt"
+        project_manifest = project_smoke / "generation/run_manifest.json"
+        project_gate = project_smoke / "gate.json"
+        if not all(path.is_file() for path in (project_generation, project_manifest, project_gate)):
+            raise RuntimeError("Frozen project AIDS/HIV smoke adoption inputs are missing.")
+        project_value = json.loads(project_manifest.read_text(encoding="utf-8"))
+        records.append(
+            {
+                "dataset": "aids_project_smoke",
+                "artifact_path": str(project_generation.resolve()),
+                "artifact_sha256": sha256_file(project_generation),
+                "artifact_bytes": project_generation.stat().st_size,
+                "manifest_path": str(project_manifest.resolve()),
+                "manifest_sha256": sha256_file(project_manifest),
+                "gate_path": str(project_gate.resolve()),
+                "gate_sha256": sha256_file(project_gate),
+                "dataset_fingerprint": project_value["dataset_audit"][
+                    "dataset_fingerprint"
+                ],
+                "parent_count": 64,
+                "candidate_count": int(project_value["counterfactual_candidate_count"]),
+                "seed": int(project_value["parameters"]["seed"]),
+                "algorithm_rerun": False,
+                "adoption_mode": "ADOPT_EXISTING",
+            }
+        )
     if "mutagenicity" in datasets:
         generation = dict(selected["mutagenicity_generation"])
         common = dict(selected["mutagenicity_common_recourse"])
@@ -565,6 +752,9 @@ def verify_retry3_inputs(state: RecoveryState) -> str | None:
             "common_recourse_manifest_sha256"
         ]:
             raise RuntimeError("Retry3 frozen common-recourse manifest changed.")
+        gate_path = record.get("gate_path")
+        if gate_path and sha256_file(gate_path) != record["gate_sha256"]:
+            raise RuntimeError("Frozen project AIDS/HIV smoke gate changed.")
     after = _artifact_set_sha256(records)
     if after != manifest["input_artifact_set_sha256"]:
         raise RuntimeError("Retry3 frozen input inventory changed after submission.")
@@ -620,6 +810,26 @@ def adopt_resolved_artifacts(
             "algorithm_rerun": False,
         },
     ]
+    if "aids" in set(state.data.get("datasets") or []):
+        project_smoke = (
+            PROJECT_ROOT
+            / "outputs/hpc/baselines/comrecgc/aids/"
+            "smoke_comrecgc_smoke_budget_retry_20260806_v4"
+        )
+        project_counterfactuals = project_smoke / "generation/counterfactuals.pt"
+        if project_counterfactuals.is_file():
+            records.insert(
+                1,
+                {
+                    "stage_id": "aids_project_smoke_artifact",
+                    "dataset": "aids",
+                    "status": "ADOPT_EXISTING",
+                    "artifact_path": str(project_smoke),
+                    "artifact_sha256": sha256_file(project_counterfactuals),
+                    "evidence_path": str(project_smoke / "gate.json"),
+                    "algorithm_rerun": False,
+                },
+            )
     if state.data.get("adopted_stages") != records:
         state.data["adopted_stages"] = records
         state.save()
@@ -645,12 +855,16 @@ def submit(stage: Stage, state: RecoveryState, *, dry_run: bool) -> dict[str, An
         return existing
     if stage.stage_id in FULL_STAGE_IDS:
         assert_full_authorized(state.data.get("authorization"))
+        assert_smoke_engineering_gate(state, stage.dataset)
+    validate_stage_in_authorized_dag(stage, state)
     if "_retry3" in str(state.data.get("run_id")):
         validate_job_caps(state, next_stage=stage)
     dependency = _dependency(stage, state)
     exports = {
         "PROJECT_ROOT": str(PROJECT_ROOT),
         "RECOVERY_RUN_ID": state.data["run_id"],
+        "EXPECTED_PROJECT_COMMIT": state.data["project_commit"],
+        "EXPECTED_UPSTREAM_COMMIT": UPSTREAM_COMMIT,
         **stage.environment,
     }
     sbatch_args = [
@@ -675,13 +889,19 @@ def submit(stage: Stage, state: RecoveryState, *, dry_run: bool) -> dict[str, An
         "--dataset",
         stage.dataset,
         "--method",
-        "COMRECGC-Adapted-DeterministicChemRepair"
-        if stage.dataset == "mutagenicity"
-        else "COMRECGC-Native",
+        (
+            "COMRECGC-Native"
+            if stage.stage_id.startswith("aids_native")
+            or stage.stage_id in {"aids_existing_audit", "aids_density_retry"}
+            else "COMRECGC-Adapted-DeterministicChemRepair"
+        ),
         "--metric",
-        "MolCLR-Node-Wasserstein strict_flip CCRCOV"
-        if stage.dataset == "mutagenicity"
-        else "official native common recourse",
+        (
+            "official native common recourse"
+            if stage.stage_id.startswith("aids_native")
+            or stage.stage_id in {"aids_existing_audit", "aids_density_retry"}
+            else "MolCLR-Node-Wasserstein strict_flip CCRCOV"
+        ),
     ]
     if dry_run:
         argv.append("--dry-run")
@@ -745,6 +965,7 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
         smoke_base = f"outputs/hpc/baselines/comrecgc/aids/recovery_smoke_{run_id}"
         existing_audit = smoke_base + "/existing_audit"
         density_audit = smoke_base + "/parent_density"
+        project_smoke = smoke_base + "/project_adapter_adoption"
         values.extend(
             [
                 Stage(
@@ -772,29 +993,136 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                         "OUTPUT_DIR": density_audit,
                     },
                 ),
+                Stage(
+                    "aids_project_smoke_gate",
+                    "aids",
+                    "scripts/slurm/comrecgc_aids_project_smoke_adopt.sh",
+                    project_smoke,
+                    "afterok",
+                    ("aids_density_retry",),
+                    {
+                        "DATASET": "aids",
+                        "MODE": "smoke",
+                        "SOURCE_ROOT": (
+                            "outputs/hpc/baselines/comrecgc/aids/"
+                            "smoke_comrecgc_smoke_budget_retry_20260806_v4"
+                        ),
+                        "OUTPUT_DIR": project_smoke,
+                    },
+                ),
             ]
         )
         if mode == "all":
+            native_full = (
+                f"outputs/hpc/baselines/comrecgc/native_full/aids/{run_id}"
+            )
+            project_full = (
+                f"outputs/hpc/baselines/comrecgc/aids/project_full_{run_id}"
+            )
+            standardized = (
+                "outputs/hpc/eval/paper/"
+                "aids_common4_comrecgc_standardized_v1/comrecgc"
+            )
             values.extend(
                 [
                     Stage(
                         "aids_native_full",
                         "aids",
                         "scripts/slurm/comrecgc_aids_native_full.sh",
-                        "outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1",
+                        native_full,
                         "afterok",
-                        ("aids_density_retry",),
-                        {},
+                        ("aids_project_smoke_gate",),
+                        {
+                            "OUTPUT_DIR": native_full,
+                            "PREREGISTRATION": native_full + "/preregistration.json",
+                        },
                         True,
                     ),
                     Stage(
                         "aids_native_full_gate",
                         "aids",
                         "scripts/slurm/comrecgc_aids_native_full_gate.sh",
-                        "outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1/gate",
-                        "afterany",
+                        native_full + "/gate",
+                        "afterok",
                         ("aids_native_full",),
-                        {},
+                        {"INPUT_DIR": native_full, "OUTPUT_DIR": native_full + "/gate"},
+                    ),
+                    Stage(
+                        "aids_project_full_generation",
+                        "aids",
+                        "scripts/slurm/comrecgc_project_generate.sh",
+                        project_full + "/generation",
+                        "afterok",
+                        ("aids_project_smoke_gate",),
+                        {
+                            "DATASET": "aids",
+                            "MODE": "full",
+                            "BASE_ROOT": project_full,
+                            "PARENT_LIMIT": "1283",
+                        },
+                        True,
+                    ),
+                    Stage(
+                        "aids_project_full_common_recourse",
+                        "aids",
+                        "scripts/slurm/comrecgc_common_recourse.sh",
+                        project_full + "/common_recourse",
+                        "afterok",
+                        ("aids_project_full_generation",),
+                        {
+                            "DATASET": "aids",
+                            "MODE": "full",
+                            "BASE_ROOT": project_full,
+                            "PARENT_LIMIT": "1283",
+                        },
+                    ),
+                    Stage(
+                        "aids_project_full_chemistry",
+                        "aids",
+                        "scripts/slurm/comrecgc_project_chemistry.sh",
+                        project_full + "/chemistry",
+                        "afterok",
+                        ("aids_project_full_common_recourse",),
+                        {
+                            "DATASET": "aids",
+                            "MODE": "full",
+                            "BASE_ROOT": project_full,
+                            "PARENT_LIMIT": "1283",
+                        },
+                    ),
+                    Stage(
+                        "aids_project_full_unified_eval",
+                        "aids",
+                        "scripts/slurm/comrecgc_project_slot_eval.sh",
+                        project_full + "/unified_eval",
+                        "afterok",
+                        ("aids_project_full_chemistry",),
+                        {"DATASET": "aids", "MODE": "full", "BASE_ROOT": project_full},
+                    ),
+                    Stage(
+                        "aids_project_full_gate",
+                        "aids",
+                        "scripts/slurm/comrecgc_project_full_gate.sh",
+                        project_full + "/full_gate",
+                        "afterok",
+                        ("aids_project_full_unified_eval",),
+                        {"DATASET": "aids", "BASE_ROOT": project_full},
+                    ),
+                    Stage(
+                        "aids_project_freeze",
+                        "aids",
+                        "scripts/slurm/comrecgc_project_freeze.sh",
+                        standardized,
+                        "afterok",
+                        ("aids_project_full_gate",),
+                        {
+                            "DATASET": "aids",
+                            "BASE_ROOT": project_full,
+                            "STANDARDIZED_ROOT": standardized,
+                            "AUTOMATION_STATE": (
+                                f"outputs/hpc/automation/comrecgc_recovery/{run_id}/state.json"
+                            ),
+                        },
                     ),
                 ]
             )
@@ -869,7 +1197,7 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                         full_base + "/generation",
                         "afterok",
                         ("mut_chemrepair_smoke_gate",),
-                        {"BASE_ROOT": full_base},
+                        {"BASE_ROOT": full_base, "PARENT_LIMIT": "1448"},
                         True,
                     ),
                     Stage(
@@ -879,47 +1207,56 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                         full_base + "/common_recourse",
                         "afterok",
                         ("mut_full_generation",),
-                        {"BASE_ROOT": full_base, "DATASET": "mutagenicity", "MODE": "full"},
+                        {
+                            "BASE_ROOT": full_base,
+                            "DATASET": "mutagenicity",
+                            "MODE": "full",
+                            "PARENT_LIMIT": "1448",
+                        },
                     ),
                     Stage(
                         "mut_full_chemistry",
                         "mutagenicity",
-                        "scripts/slurm/comrecgc_mut_full_chemistry.sh",
+                        "scripts/slurm/comrecgc_project_chemistry.sh",
                         full_base + "/chemistry",
                         "afterok",
                         ("mut_full_common_recourse",),
                         {
                             "BASE_ROOT": full_base,
-                            "TRACE_PARITY_PATH": smoke_base + "/generation/trace_parity.json",
+                            "DATASET": "mutagenicity",
+                            "MODE": "full",
+                            "PARENT_LIMIT": "1448",
+                            "TRACE_EVIDENCE_PATH": smoke_base + "/generation/trace_parity.json",
                         },
                     ),
                     Stage(
                         "mut_full_unified_eval",
                         "mutagenicity",
-                        "scripts/slurm/comrecgc_mut_unified_eval.sh",
+                        "scripts/slurm/comrecgc_project_slot_eval.sh",
                         full_base + "/unified_eval",
                         "afterok",
                         ("mut_full_chemistry",),
-                        {"BASE_ROOT": full_base, "MODE": "full"},
+                        {"BASE_ROOT": full_base, "DATASET": "mutagenicity", "MODE": "full"},
                     ),
                     Stage(
                         "mut_full_gate",
                         "mutagenicity",
-                        "scripts/slurm/comrecgc_mut_full_gate.sh",
+                        "scripts/slurm/comrecgc_project_full_gate.sh",
                         full_base + "/full_gate",
-                        "afterany",
+                        "afterok",
                         ("mut_full_unified_eval",),
-                        {"BASE_ROOT": full_base},
+                        {"BASE_ROOT": full_base, "DATASET": "mutagenicity"},
                     ),
                     Stage(
                         "mut_freeze",
                         "mutagenicity",
-                        "scripts/slurm/comrecgc_mut_freeze.sh",
+                        "scripts/slurm/comrecgc_project_freeze.sh",
                         "outputs/hpc/eval/paper/mutagenicity_common4_comrecgc_standardized_v1/comrecgc",
                         "afterok",
                         ("mut_full_gate",),
                         {
                             "BASE_ROOT": full_base,
+                            "DATASET": "mutagenicity",
                             "STANDARDIZED_ROOT": "outputs/hpc/eval/paper/mutagenicity_common4_comrecgc_standardized_v1/comrecgc",
                             "AUTOMATION_STATE": f"outputs/hpc/automation/comrecgc_recovery/{run_id}/state.json",
                         },
@@ -968,7 +1305,17 @@ def refresh(state: RecoveryState) -> None:
             active = True
     state.data["completed_stages"] = sorted(set(completed))
     state.data["failed_stages"] = sorted(set(failed))
-    if failed:
+    datasets = set(state.data.get("datasets") or [])
+    terminal_stages = set()
+    if "aids" in datasets:
+        terminal_stages.update({"aids_native_full_gate", "aids_project_freeze"})
+    if "mutagenicity" in datasets:
+        terminal_stages.add("mut_freeze")
+    if terminal_stages and terminal_stages <= set(completed):
+        status = "END_TO_END_COMPLETED"
+    elif failed and active:
+        status = "RUNNING_WITH_BLOCKED_DATASET"
+    elif failed:
         status = "BLOCKED"
     elif active:
         status = "RUNNING"
@@ -990,6 +1337,7 @@ def report(state: RecoveryState) -> None:
         "completed_stages": state.data["completed_stages"],
         "failed_stages": state.data["failed_stages"],
         "authorization_sha256": state.data.get("authorization_sha256"),
+        "job_dag_sha256": state.data.get("job_dag_sha256"),
         "input_sha256_before": state.data.get("input_artifact_set_sha256_before"),
         "input_sha256_after": state.data.get("input_artifact_set_sha256_after"),
         "state_path": str(state.state_path),
@@ -1029,7 +1377,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--initialize-authorization",
         action="store_true",
-        help="Create the exact smoke-only retry3 authorization and exit.",
+        help="Create the exact run-scoped authorization and exit.",
     )
     parser.add_argument("--remote-host", default=DEFAULT_REMOTE_HOST)
     parser.add_argument("--remote-port", type=int, default=DEFAULT_REMOTE_PORT)
@@ -1047,10 +1395,14 @@ def main() -> int:
         raise ValueError("--datasets must contain aids and/or mutagenicity.")
     state_root = PROJECT_ROOT / f"outputs/hpc/automation/comrecgc_recovery/{args.run_id}"
     current_commit = git_commit(PROJECT_ROOT)
+    end_to_end = args.run_id.startswith(END_TO_END_RUN_PREFIX)
     if args.initialize_authorization:
-        path, digest = initialize_retry3_authorization(
-            state_root, project_commit=current_commit
+        initializer = (
+            initialize_end_to_end_authorization
+            if end_to_end
+            else initialize_retry3_authorization
         )
+        path, digest = initializer(state_root, project_commit=current_commit)
         print(
             json.dumps(
                 {
@@ -1065,7 +1417,14 @@ def main() -> int:
 
     authorization: dict[str, Any] | None = None
     authorization_sha256: str | None = None
-    if "_retry3" in args.run_id:
+    if end_to_end:
+        authorization, authorization_sha256 = load_end_to_end_authorization(
+            state_root, project_commit=current_commit
+        )
+        if args.mode not in {"all", "refresh"}:
+            raise RuntimeError("End-to-end authorization requires --mode all or refresh.")
+        assert_full_authorized(authorization)
+    elif "_retry3" in args.run_id:
         authorization, authorization_sha256 = load_retry3_authorization(
             state_root, project_commit=current_commit
         )
@@ -1086,32 +1445,33 @@ def main() -> int:
             f"state={state.data.get('project_commit')}, current={current_commit}."
         )
     try:
+        requested_mode = str(state.data.get("requested_mode") or args.mode)
+        requested_datasets = set(state.data.get("datasets") or datasets)
+        stage_values = stages(args.run_id, requested_datasets, requested_mode)
+        if end_to_end:
+            write_authorized_job_dag(state, stage_values)
         if args.mode == "refresh":
-            recover_registered_jobs(
-                stages(
-                    args.run_id,
-                    set(state.data.get("datasets") or datasets),
-                    str(state.data.get("requested_mode") or "smoke"),
-                ),
-                state,
-            )
+            recover_registered_jobs(stage_values, state)
             refresh(state)
-            requested_mode = str(state.data.get("requested_mode") or "smoke")
-            requested_datasets = set(state.data.get("datasets") or datasets)
-            if requested_mode == "all" and not state.data.get("failed_stages"):
+            if requested_mode == "all":
                 assert_full_authorized(state.data.get("authorization"))
+                validate_new_output_roots(stage_values, state)
                 submitted = submit_ready_stages(
-                    stages(args.run_id, requested_datasets, requested_mode),
+                    stage_values,
                     state,
                     dry_run=False,
                 )
                 if submitted:
-                    state.transition("FULL_SUBMITTED", newly_submitted_stages=submitted)
+                    status = (
+                        "FULL_SUBMITTED"
+                        if any(stage_id in FULL_STAGE_IDS for stage_id in submitted)
+                        else "SMOKE_SUBMITTED"
+                    )
+                    state.transition(status, newly_submitted_stages=submitted)
             report(state)
         else:
             if state.data["status"] == "CREATED":
                 preflight(state)
-            stage_values = stages(args.run_id, datasets, args.mode)
             recover_registered_jobs(stage_values, state)
             validate_new_output_roots(stage_values, state)
             submit_ready_stages(

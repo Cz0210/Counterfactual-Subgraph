@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -443,6 +445,7 @@ class ActionTraceRecorder:
         payload: Mapping[str, Any],
         *,
         source_graphs_by_parent_id: Mapping[str, Any] | None = None,
+        compact_candidate_lineage: bool = False,
     ) -> dict[str, Any]:
         root = self._configure_output(output_dir)
         self._flush_chunks(final=True)
@@ -467,17 +470,96 @@ class ActionTraceRecorder:
                 "resume_policy": "reuse_byte_identical_completed_chunks",
             },
         )
-        lineage = (
-            recover_candidate_lineage_from_selected_trace(
-                payload,
-                load_selected_trace(selected_manifest_path),
-                source_graphs_by_parent_id=source_graphs_by_parent_id,
-            )
-            if source_graphs_by_parent_id is not None
-            else self.candidate_lineage(payload)
-        )
         lineage_path = root / "candidate_action_lineage.json"
-        write_json(lineage_path, lineage)
+        lineage_index_path: Path | None = None
+        if compact_candidate_lineage:
+            if source_graphs_by_parent_id is None:
+                raise ValueError(
+                    "Compact COMRECGC lineage requires frozen source graphs."
+                )
+            lineage_index_path = root / "candidate_action_lineage_index.jsonl"
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=root,
+                prefix=f".{lineage_index_path.name}.",
+                suffix=".tmp",
+            )
+            temporary = Path(temporary_name)
+            lineage_count = 0
+            lineage_resolved_count = 0
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    for expected_index, row in enumerate(
+                        iter_candidate_lineage_from_selected_trace(
+                            payload,
+                            iter_selected_trace(selected_manifest_path),
+                            source_graphs_by_parent_id=source_graphs_by_parent_id,
+                            include_actions=False,
+                        )
+                    ):
+                        if int(row["candidate_index"]) != expected_index:
+                            raise ValueError(
+                                "Compact COMRECGC lineage index is not in candidate order."
+                            )
+                        handle.write(
+                            json.dumps(
+                                row,
+                                sort_keys=True,
+                                ensure_ascii=True,
+                                default=str,
+                            )
+                        )
+                        handle.write("\n")
+                        lineage_count += 1
+                        lineage_resolved_count += int(
+                            row["action_lineage_resolved"] is True
+                        )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if lineage_index_path.exists():
+                    if lineage_index_path.read_bytes() != temporary.read_bytes():
+                        raise ValueError(
+                            "Existing compact COMRECGC lineage index differs during resume."
+                        )
+                    temporary.unlink()
+                else:
+                    os.replace(temporary, lineage_index_path)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+            write_json(
+                lineage_path,
+                {
+                    "schema_version": 2,
+                    "format": "selected_trace_predecessor_index",
+                    "candidate_count": lineage_count,
+                    "candidate_lineage_resolved_count": lineage_resolved_count,
+                    "candidate_index_path": lineage_index_path.name,
+                    "candidate_index_sha256": sha256_file(lineage_index_path),
+                    "selected_trace_manifest_path": selected_manifest_path.name,
+                    "selected_trace_manifest_sha256": sha256_file(
+                        selected_manifest_path
+                    ),
+                    "candidate_actions_inlined": False,
+                    "reconstruction_policy": (
+                        "stream_one_candidate_from_selected_trace_v1"
+                    ),
+                },
+            )
+        else:
+            lineage = (
+                recover_candidate_lineage_from_selected_trace(
+                    payload,
+                    iter_selected_trace(selected_manifest_path),
+                    source_graphs_by_parent_id=source_graphs_by_parent_id,
+                )
+                if source_graphs_by_parent_id is not None
+                else self.candidate_lineage(payload)
+            )
+            write_json(lineage_path, lineage)
+            lineage_count = len(lineage)
+            lineage_resolved_count = sum(
+                bool(row["action_lineage_resolved"]) for row in lineage
+            )
         summary = {
             "trace_schema_version": 1,
             "trace_only": True,
@@ -486,14 +568,23 @@ class ActionTraceRecorder:
             "live_enumerated_transition_pair_count": len(self.enumerated),
             "selected_transition_count": self.selected_transition_count,
             "teleport_count": self.teleport_count,
-            "candidate_count": len(lineage),
-            "candidate_lineage_resolved_count": sum(
-                bool(row["action_lineage_resolved"]) for row in lineage
-            ),
+            "candidate_count": lineage_count,
+            "candidate_lineage_resolved_count": lineage_resolved_count,
             "selected_trace_path": str(selected_manifest_path),
             "selected_trace_chunk_count": len(self._chunks),
             "max_buffered_event_count": int(self.chunk_size),
             "candidate_lineage_path": str(lineage_path),
+            "candidate_lineage_format": (
+                "selected_trace_predecessor_index"
+                if compact_candidate_lineage
+                else "inline_json"
+            ),
+            "candidate_lineage_index_path": (
+                str(lineage_index_path) if lineage_index_path is not None else None
+            ),
+            "max_materialized_candidate_lineages": (
+                1 if compact_candidate_lineage else lineage_count
+            ),
             "lineage_recovery_policy": (
                 "pinned_upstream_official_hash_source_root_v2"
                 if source_graphs_by_parent_id is not None
@@ -512,31 +603,38 @@ class ActionTraceRecorder:
         return summary
 
 
-def load_selected_trace(manifest_path: str | Path) -> list[dict[str, Any]]:
-    """Reload a completed chunked trace in exact walk order."""
+def iter_selected_trace(manifest_path: str | Path) -> Any:
+    """Stream a completed chunked trace in exact walk order."""
 
     path = Path(manifest_path).expanduser().resolve()
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("format") != "chunked_jsonl":
         raise ValueError(f"Unsupported COMRECGC selected trace format: {manifest.get('format')!r}")
-    rows: list[dict[str, Any]] = []
+    total = 0
     for expected_index, chunk in enumerate(manifest.get("chunks") or []):
         if int(chunk.get("index", -1)) != expected_index:
             raise ValueError("COMRECGC selected trace chunks are not contiguous.")
         chunk_path = path.parent / str(chunk["path"])
         if sha256_file(chunk_path) != str(chunk["sha256"]):
             raise ValueError(f"COMRECGC selected trace chunk SHA256 mismatch: {chunk_path}")
-        chunk_rows = [
-            json.loads(line)
-            for line in chunk_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        if len(chunk_rows) != int(chunk["row_count"]):
+        chunk_count = 0
+        with chunk_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                chunk_count += 1
+                total += 1
+                yield json.loads(line)
+        if chunk_count != int(chunk["row_count"]):
             raise ValueError(f"COMRECGC selected trace chunk row count mismatch: {chunk_path}")
-        rows.extend(chunk_rows)
-    if len(rows) != int(manifest.get("row_count", -1)):
+    if total != int(manifest.get("row_count", -1)):
         raise ValueError("COMRECGC selected trace total row count mismatch.")
-    return rows
+
+
+def load_selected_trace(manifest_path: str | Path) -> list[dict[str, Any]]:
+    """Reload a small completed trace as a list for compatibility/tests."""
+
+    return list(iter_selected_trace(manifest_path))
 
 
 def _feature_rows(graph: Any) -> list[list[float]]:
@@ -663,30 +761,32 @@ def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any
     )
 
 
-def recover_candidate_lineage_from_selected_trace(
+def _lineage_recovery_context(
     payload: Mapping[str, Any],
-    selected_events: Sequence[Mapping[str, Any]],
-    *,
-    source_graphs_by_parent_id: Mapping[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """Recover complete candidate paths from streamed source/target graph deltas."""
-
+    selected_events: Any,
+    source_graphs_by_parent_id: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     graph_map = payload.get("graph_map") or {}
-    graph_by_key: dict[tuple[str, str], Any] = {}
+    graph_by_stable_key: dict[tuple[str, str], Any] = {}
     graph_by_official_key: dict[tuple[str, str], Any] = {}
+    official_matches: dict[str, list[tuple[tuple[str, str], Any]]] = {}
     for official_hash, entry in graph_map.items():
         graph = entry[0]
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
         key = (parent_id, stable_graph_sha256(graph))
-        existing = graph_by_key.get(key)
-        if existing is not None and normalized_graph_payload(existing) != normalized_graph_payload(graph):
+        existing_stable = graph_by_stable_key.get(key)
+        if existing_stable is not None and (
+            normalized_graph_payload(existing_stable)
+            != normalized_graph_payload(graph)
+        ):
             raise ValueError("Stable COMRECGC graph identity collision during trace recovery.")
-        graph_by_key[key] = graph
+        graph_by_stable_key[key] = graph
         official_key = (parent_id, str(official_hash))
         existing = graph_by_official_key.get(official_key)
         if existing is not None and normalized_graph_payload(existing) != normalized_graph_payload(graph):
             raise ValueError("Official COMRECGC graph identity collision during trace recovery.")
         graph_by_official_key[official_key] = graph
+        official_matches.setdefault(str(official_hash), []).append((official_key, graph))
 
     frozen_sources = {
         str(parent_id): graph
@@ -759,15 +859,39 @@ def recover_candidate_lineage_from_selected_trace(
             predecessor[target_key] = event
         observed_source_keys.add(source_key)
 
-    rows: list[dict[str, Any]] = []
-    candidates = list(payload.get("counterfactual_candidates") or [])
-    for candidate_index, candidate in enumerate(candidates):
+    return {
+        "graph_by_official_key": graph_by_official_key,
+        "official_matches": official_matches,
+        "frozen_sources": frozen_sources,
+        "predecessor": predecessor,
+        "observed_source_keys": observed_source_keys,
+        "source_graphs_required": source_graphs_by_parent_id is not None,
+    }
+
+
+def iter_candidate_lineage_from_selected_trace(
+    payload: Mapping[str, Any],
+    selected_events: Any,
+    *,
+    source_graphs_by_parent_id: Mapping[str, Any] | None = None,
+    include_actions: bool = True,
+) -> Any:
+    """Yield candidate paths one at a time from one compact predecessor index."""
+
+    context = _lineage_recovery_context(
+        payload, selected_events, source_graphs_by_parent_id
+    )
+    graph_by_official_key = context["graph_by_official_key"]
+    official_matches = context["official_matches"]
+    frozen_sources = context["frozen_sources"]
+    predecessor = context["predecessor"]
+    observed_source_keys = context["observed_source_keys"]
+    source_graphs_required = bool(context["source_graphs_required"])
+    for candidate_index, candidate in enumerate(
+        payload.get("counterfactual_candidates") or []
+    ):
         official_hash = str(candidate.get("graph_hash"))
-        candidate_matches = [
-            (key, value)
-            for key, value in graph_by_official_key.items()
-            if key[1] == official_hash
-        ]
+        candidate_matches = official_matches.get(official_hash, [])
         if len(candidate_matches) != 1:
             raise ValueError(
                 "Candidate official graph identity is absent or ambiguous during trace recovery: "
@@ -802,7 +926,7 @@ def recover_candidate_lineage_from_selected_trace(
             root_graph is not None
             and (
                 frozen_source_exact
-                if source_graphs_by_parent_id is not None
+                if source_graphs_required
                 else observed_root
             )
         )
@@ -831,27 +955,46 @@ def recover_candidate_lineage_from_selected_trace(
             node_ids = target_node_ids
         if len(node_ids) != int(graph.num_nodes):
             resolved = False
-        rows.append(
-            {
-                "candidate_index": candidate_index,
-                "official_graph_hash": official_hash,
-                "stable_graph_sha256": candidate_sha,
-                "parent_id": parent_id,
-                "action_lineage_resolved": resolved,
-                "zero_action_source_root": bool(not path and frozen_source_exact),
-                "lineage_root_status": (
-                    "frozen_source_graph_exact_zero_action"
-                    if not path and frozen_source_exact
-                    else "frozen_source_graph_exact"
-                    if frozen_source_exact
-                    else "observed_trace_source"
-                    if observed_root
-                    else "unresolved"
-                ),
-                "actions": enriched_path,
-            }
+        yield {
+            "candidate_index": candidate_index,
+            "official_graph_hash": official_hash,
+            "stable_graph_sha256": candidate_sha,
+            "parent_id": parent_id,
+            "action_lineage_resolved": resolved,
+            "zero_action_source_root": bool(not path and frozen_source_exact),
+            "lineage_root_status": (
+                "frozen_source_graph_exact_zero_action"
+                if not path and frozen_source_exact
+                else "frozen_source_graph_exact"
+                if frozen_source_exact
+                else "observed_trace_source"
+                if observed_root
+                else "unresolved"
+            ),
+            "action_count": len(enriched_path),
+            "lineage_storage": (
+                "inline_actions" if include_actions else "selected_trace_predecessor_index"
+            ),
+            "actions": enriched_path if include_actions else [],
+        }
+
+
+def recover_candidate_lineage_from_selected_trace(
+    payload: Mapping[str, Any],
+    selected_events: Any,
+    *,
+    source_graphs_by_parent_id: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Recover complete candidate paths from streamed source/target graph deltas."""
+
+    return list(
+        iter_candidate_lineage_from_selected_trace(
+            payload,
+            selected_events,
+            source_graphs_by_parent_id=source_graphs_by_parent_id,
+            include_actions=True,
         )
-    return rows
+    )
 
 
 def _importance(value: Any) -> list[float]:

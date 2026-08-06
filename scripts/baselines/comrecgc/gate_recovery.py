@@ -16,6 +16,7 @@ from src.baselines.comrecgc.recovery_gate import (  # noqa: E402
     gate_aids_native_full,
     gate_mutagenicity_full,
     gate_mutagenicity_chemistry_smoke,
+    gate_project_full,
 )
 
 
@@ -23,23 +24,48 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--stage",
-        choices=("aids-native-full", "mut-chemistry-smoke", "mut-full"),
+        choices=("aids-native-full", "mut-chemistry-smoke", "mut-full", "project-full"),
         required=True,
     )
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--eval-dir")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--dataset", choices=("aids", "mutagenicity"))
+    parser.add_argument("--expected-parent-count", type=int)
+    parser.add_argument("--expected-teacher-sha256")
+    parser.add_argument("--expected-project-commit")
     args = parser.parse_args()
     if args.stage == "aids-native-full":
-        result = gate_aids_native_full(args.input_dir, args.output_dir)
+        result = gate_aids_native_full(
+            args.input_dir,
+            args.output_dir,
+            expected_project_commit=args.expected_project_commit,
+        )
     elif args.stage == "mut-chemistry-smoke":
         result = gate_mutagenicity_chemistry_smoke(
             args.input_dir,
             args.output_dir,
             eval_dir=args.eval_dir,
         )
-    else:
+    elif args.stage == "mut-full":
         result = gate_mutagenicity_full(args.input_dir, args.output_dir)
+    else:
+        if (
+            not args.dataset
+            or args.expected_parent_count is None
+            or not args.expected_teacher_sha256
+        ):
+            parser.error(
+                "project-full requires dataset, expected-parent-count, and teacher SHA256"
+            )
+        result = gate_project_full(
+            args.input_dir,
+            args.output_dir,
+            dataset=args.dataset,
+            expected_parent_count=args.expected_parent_count,
+            expected_teacher_sha256=args.expected_teacher_sha256,
+            expected_project_commit=args.expected_project_commit,
+        )
     print(json.dumps(result, sort_keys=True))
     return 0
 

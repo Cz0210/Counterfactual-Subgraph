@@ -103,6 +103,8 @@ def test_mut_full_gate_accepts_audited_empty_scientific_output(tmp_path: Path) -
         {
             "run_complete": True,
             "mode": "full",
+            "dataset_key": "mutagenicity",
+            "upstream_commit": UPSTREAM_COMMIT,
             "distance_line": "MolCLR-Node-Wasserstein",
             "cf_mode": "strict_flip",
             "parent_count": 217,
@@ -144,6 +146,8 @@ def test_mut_full_gate_accepts_audited_empty_scientific_output(tmp_path: Path) -
     for name in (
         "pair_matrix.jsonl",
         "selected_sequence.jsonl",
+        "selected_common_recourses.json",
+        "representative_counterfactuals.jsonl",
         "parent_best_distances.csv",
         "prefix_metrics.json",
         "figure3_coverage_vs_k.csv",
@@ -158,4 +162,6 @@ def test_mut_full_gate_accepts_audited_empty_scientific_output(tmp_path: Path) -
 
     assert result["audit_passed"] is True
     assert result["scientific_output_empty"] is True
-    assert result["status"] == "MUT_FULL_PASS"
+    assert result["status"] == "FULL_EXECUTION_PASS"
+    assert result["scientific_output_status"] == "SCIENTIFIC_OUTPUT_EMPTY"
+    assert result["figure_artifact_status"] == "FIGURE_ARTIFACTS_READY"

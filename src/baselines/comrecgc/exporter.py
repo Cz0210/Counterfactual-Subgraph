@@ -170,8 +170,13 @@ def _aids_schema_and_record(graph: Any, atom_vocabulary: Sequence[str]) -> tuple
     return schema, {
         "molecule_id": source_id,
         "canonical_smiles": Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True),
+        "num_nodes": int(graph.num_nodes),
+        "num_edges": int(graph.edge_index.shape[1] // 2),
+        "x": graph.x.detach().cpu().tolist(),
+        "edge_index": graph.edge_index.detach().cpu().tolist(),
         "atom_sidecar": atoms,
         "bond_sidecar": bonds,
+        "explicit_h_nodes": False,
     }
 
 

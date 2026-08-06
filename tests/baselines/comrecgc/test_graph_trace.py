@@ -11,6 +11,8 @@ from src.baselines.comrecgc.graph_trace import (
     TRACE_IMPORTANCE_ABS_TOLERANCE,
     assert_trace_parity,
     infer_official_single_edit,
+    iter_candidate_lineage_from_selected_trace,
+    iter_selected_trace,
     load_selected_trace,
     recover_candidate_lineage_from_selected_trace,
     stable_graph_sha256,
@@ -445,3 +447,80 @@ def test_trace_resume_reuses_identical_completed_chunks_without_duplicates(tmp_p
         (tmp_path / "selected_action_trace_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["chunks"][0]["materialization"] == "adopt_existing_identical"
+
+
+def test_full_trace_writes_compact_reloadable_lineage_without_inline_actions(tmp_path) -> None:
+    recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
+    source, target, module = _record_one_transition(recorder)
+
+    def move(*_args: object, **_kwargs: object) -> tuple:
+        return (["target"], False, None, None, None)
+
+    recorder.wrap_move(move, module)(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+    payload_value = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    summary = recorder.write(
+        tmp_path,
+        payload_value,
+        source_graphs_by_parent_id={"parent-1": source},
+        compact_candidate_lineage=True,
+    )
+    contract = __import__("json").loads(
+        (tmp_path / "candidate_action_lineage.json").read_text(encoding="utf-8")
+    )
+
+    assert contract["format"] == "selected_trace_predecessor_index"
+    assert contract["candidate_actions_inlined"] is False
+    assert summary["candidate_lineage_format"] == "selected_trace_predecessor_index"
+    assert summary["max_materialized_candidate_lineages"] == 1
+    index_row = __import__("json").loads(
+        (tmp_path / contract["candidate_index_path"])
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    assert index_row["actions"] == []
+    recovered = list(
+        iter_candidate_lineage_from_selected_trace(
+            payload_value,
+            iter_selected_trace(tmp_path / contract["selected_trace_manifest_path"]),
+            source_graphs_by_parent_id={"parent-1": source},
+        )
+    )
+    assert recovered[0]["actions"][0]["action"] == ["NLC", 0, 1]
+
+
+def test_compact_trace_resume_reuses_index_without_duplicate_rows(tmp_path) -> None:
+    for _run in range(2):
+        recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
+        source, target, module = _record_one_transition(recorder)
+
+        def move(*_args: object, **_kwargs: object) -> tuple:
+            return (["target"], False, None, None, None)
+
+        recorder.wrap_move(move, module)(
+            graphs_hash=["source"],
+            start_graphs_hash=["source"],
+            importance_args={},
+            teleport_probability=0.1,
+        )
+        recorder.write(
+            tmp_path,
+            {
+                "graph_map": {"source": [source], "target": [target]},
+                "counterfactual_candidates": [{"graph_hash": "target"}],
+            },
+            source_graphs_by_parent_id={"parent-1": source},
+            compact_candidate_lineage=True,
+        )
+
+    rows = (
+        tmp_path / "candidate_action_lineage_index.jsonl"
+    ).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1

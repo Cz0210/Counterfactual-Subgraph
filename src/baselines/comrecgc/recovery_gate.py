@@ -22,7 +22,12 @@ def _load(path: Path) -> dict[str, Any]:
     return value
 
 
-def gate_aids_native_full(input_dir: str | Path, output_dir: str | Path) -> dict[str, Any]:
+def gate_aids_native_full(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    expected_project_commit: str | None = None,
+) -> dict[str, Any]:
     source = Path(input_dir).expanduser().resolve()
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -37,6 +42,11 @@ def gate_aids_native_full(input_dir: str | Path, output_dir: str | Path) -> dict
         failures.append("full_parent_universe")
     if manifest.get("upstream_commit") != UPSTREAM_COMMIT:
         failures.append("upstream_commit")
+    if (
+        expected_project_commit is not None
+        and manifest.get("project_commit") != expected_project_commit
+    ):
+        failures.append("project_commit")
     if manifest.get("parameters") != expected_generation:
         failures.append("generation_parameters")
     if common.get("parameters") != expected_recourse:
@@ -180,7 +190,15 @@ def _csv_rows(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
-def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dict[str, Any]:
+def gate_project_full(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    dataset: str,
+    expected_parent_count: int,
+    expected_teacher_sha256: str,
+    expected_project_commit: str | None = None,
+) -> dict[str, Any]:
     source = Path(input_dir).expanduser().resolve()
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -190,9 +208,10 @@ def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dic
     exact = {
         "run_complete": True,
         "mode": "full",
+        "dataset_key": dataset,
         "distance_line": "MolCLR-Node-Wasserstein",
         "cf_mode": "strict_flip",
-        "parent_count": 217,
+        "parent_count": int(expected_parent_count),
         "candidate_set_preselected": True,
         "selection_performed_in_eval": False,
         "candidate_order_unchanged": True,
@@ -207,8 +226,15 @@ def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dic
     for field, expected in exact.items():
         if manifest.get(field) != expected:
             failures.append(f"{field}:actual={manifest.get(field)!r}:expected={expected!r}")
-    if manifest.get("teacher_sha256") != EXPECTED_MUT_TEACHER_SHA256:
+    if manifest.get("teacher_sha256") != expected_teacher_sha256:
         failures.append("teacher_sha256")
+    if manifest.get("upstream_commit") != UPSTREAM_COMMIT:
+        failures.append("upstream_commit")
+    if (
+        expected_project_commit is not None
+        and manifest.get("project_commit") != expected_project_commit
+    ):
+        failures.append("project_commit")
     if manifest.get("molclr_checkpoint_sha256") != EXPECTED_MOLCLR_SHA256:
         failures.append("molclr_checkpoint_sha256")
     if audit.get("audit_passed") is not True:
@@ -216,6 +242,8 @@ def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dic
     required = (
         "pair_matrix.jsonl",
         "selected_sequence.jsonl",
+        "selected_common_recourses.json",
+        "representative_counterfactuals.jsonl",
         "parent_best_distances.csv",
         "prefix_metrics.csv",
         "prefix_metrics.json",
@@ -228,9 +256,16 @@ def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dic
         "final_artifact_audit.json",
         "_RUN_COMPLETE.json",
     )
+    empty_allowed = {
+        "pair_matrix.jsonl",
+        "selected_sequence.jsonl",
+        "representative_counterfactuals.jsonl",
+    }
     for name in required:
         path = source / name
-        if not path.is_file() or path.stat().st_size <= 0:
+        if not path.is_file() or (
+            path.stat().st_size <= 0 and name not in empty_allowed
+        ):
             failures.append(f"missing:{name}")
     prefixes = _csv_rows(source / "prefix_metrics.csv") if (source / "prefix_metrics.csv").is_file() else []
     if [int(row["k"]) for row in prefixes] != list(range(1, 21)):
@@ -254,12 +289,21 @@ def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dic
             failures.append("empty_cost_must_be_na")
     result = {
         "schema_version": 1,
-        "stage": "mutagenicity_full_gate",
+        "stage": f"{dataset}_project_full_gate",
         "audit_passed": not failures,
         "run_complete": not failures,
         "failed_hard_checks": failures,
-        "status": "MUT_FULL_PASS" if not failures else "BLOCKED",
+        "status": "FULL_EXECUTION_PASS" if not failures else "BLOCKED",
+        "dataset": dataset,
         "scientific_output_empty": bool(audit.get("scientific_output_empty")),
+        "scientific_output_status": (
+            "SCIENTIFIC_OUTPUT_EMPTY"
+            if bool(audit.get("scientific_output_empty"))
+            else "SCIENTIFIC_OUTPUT_NONEMPTY"
+        ),
+        "figure_artifact_status": (
+            "FIGURE_ARTIFACTS_READY" if not failures else "BLOCKED"
+        ),
         "strict_flip_status": audit.get("strict_flip_status"),
         "valid_k20": manifest.get("valid_k20"),
         "k20_coverage": manifest.get("k20_coverage"),
@@ -270,6 +314,16 @@ def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dic
     write_json(output / "gate_result.json", result)
     if failures:
         write_json(output / "_RUN_FAILED.json", result)
-        raise ValueError("Mutagenicity full gate failed: " + ", ".join(failures))
+        raise ValueError(f"{dataset} project full gate failed: " + ", ".join(failures))
     write_json(output / "_RUN_COMPLETE.json", result)
     return result
+
+
+def gate_mutagenicity_full(input_dir: str | Path, output_dir: str | Path) -> dict[str, Any]:
+    return gate_project_full(
+        input_dir,
+        output_dir,
+        dataset="mutagenicity",
+        expected_parent_count=217,
+        expected_teacher_sha256=EXPECTED_MUT_TEACHER_SHA256,
+    )

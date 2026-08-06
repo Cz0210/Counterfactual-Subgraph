@@ -19,6 +19,7 @@ from src.baselines.comrecgc.contracts import (
     write_json,
 )
 from src.baselines.comrecgc.project_dataset import project_label_to_internal
+from src.baselines.comrecgc.preregistration import validate_chemistry_trace_evidence
 from src.baselines.comrecgc.runtime import (
     _materialize_dataset_indices,
     validate_counterfactual_payload,
@@ -52,6 +53,45 @@ def test_atomic_json_write(tmp_path: Path) -> None:
     write_json(path, {"value": 3})
     assert json.loads(path.read_text(encoding="utf-8")) == {"value": 3}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_mutagenicity_chemistry_requires_true_trace_parity(tmp_path: Path) -> None:
+    evidence = tmp_path / "trace_summary.json"
+    write_json(
+        evidence,
+        {
+            "trace_only": True,
+            "rng_calls_added": 0,
+            "candidate_count": 2,
+            "candidate_lineage_resolved_count": 2,
+        },
+    )
+    write_json(tmp_path / "_TRACE_COMPLETE.json", {"trace_complete": True})
+
+    with pytest.raises(ValueError, match="trace parity"):
+        validate_chemistry_trace_evidence(evidence, dataset="mutagenicity")
+
+
+def test_aids_chemistry_accepts_complete_streamed_trace_without_claiming_parity(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "trace_summary.json"
+    write_json(
+        evidence,
+        {
+            "trace_only": True,
+            "rng_calls_added": 0,
+            "candidate_count": 2,
+            "candidate_lineage_resolved_count": 2,
+        },
+    )
+    write_json(tmp_path / "_TRACE_COMPLETE.json", {"trace_complete": True})
+
+    result = validate_chemistry_trace_evidence(evidence, dataset="aids")
+
+    assert result["trace_integrity_passed"] is True
+    assert result["trace_parity_required"] is False
+    assert result["trace_parity_passed"] is False
 
 
 def test_monotonicity_gate() -> None:
