@@ -353,13 +353,17 @@ def test_end_to_end_dependencies_are_afterok_and_no_rank_backfill() -> None:
     assert authorization["wnode_guided_repair_allowed"] is False
 
 
-def test_frozen_blocker_artifacts_are_adopted_idempotently(tmp_path: Path) -> None:
+def test_frozen_blocker_artifacts_are_adopted_idempotently(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     state = MODULE.RecoveryState(
         tmp_path,
         "run3",
         requested_mode="all",
         datasets=["aids", "mutagenicity"],
     )
+    monkeypatch.setattr(MODULE, "PROJECT_ROOT", tmp_path)
     resolution = {
         "selected": {
             "aids_native": {
