@@ -650,7 +650,13 @@ def run_project_generation(
             trace_summary: dict[str, Any] | None = None
             parity_summary: dict[str, Any] | None = None
             if trace_recorder is not None:
-                trace_summary = trace_recorder.write(trace_output_dir, payload)
+                trace_summary = trace_recorder.write(
+                    trace_output_dir,
+                    payload,
+                    source_graphs_by_parent_id=dict(
+                        zip(bundle.parent_ids, bundle.graphs, strict=True)
+                    ),
+                )
             if parity_reference_path is not None:
                 reference_path = Path(parity_reference_path).expanduser().resolve()
                 parity_summary = assert_trace_parity(_torch_load(reference_path), payload)

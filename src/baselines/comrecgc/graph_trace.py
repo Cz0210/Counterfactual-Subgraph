@@ -437,7 +437,13 @@ class ActionTraceRecorder:
             )
         return rows
 
-    def write(self, output_dir: str | Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def write(
+        self,
+        output_dir: str | Path,
+        payload: Mapping[str, Any],
+        *,
+        source_graphs_by_parent_id: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         root = self._configure_output(output_dir)
         self._flush_chunks(final=True)
         expected_parts = {Path(row["path"]).name for row in self._chunks}
@@ -461,7 +467,15 @@ class ActionTraceRecorder:
                 "resume_policy": "reuse_byte_identical_completed_chunks",
             },
         )
-        lineage = self.candidate_lineage(payload)
+        lineage = (
+            recover_candidate_lineage_from_selected_trace(
+                payload,
+                load_selected_trace(selected_manifest_path),
+                source_graphs_by_parent_id=source_graphs_by_parent_id,
+            )
+            if source_graphs_by_parent_id is not None
+            else self.candidate_lineage(payload)
+        )
         lineage_path = root / "candidate_action_lineage.json"
         write_json(lineage_path, lineage)
         summary = {
@@ -480,6 +494,11 @@ class ActionTraceRecorder:
             "selected_trace_chunk_count": len(self._chunks),
             "max_buffered_event_count": int(self.chunk_size),
             "candidate_lineage_path": str(lineage_path),
+            "lineage_recovery_policy": (
+                "pinned_upstream_official_hash_source_root_v2"
+                if source_graphs_by_parent_id is not None
+                else "runtime_recorded_predecessor_v1"
+            ),
         }
         write_json(root / "trace_summary.json", summary)
         write_json(

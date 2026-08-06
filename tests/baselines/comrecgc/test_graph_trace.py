@@ -393,6 +393,30 @@ def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:
     assert not hasattr(recorder, "selected")
 
 
+def test_streamed_trace_write_resolves_frozen_zero_action_root(tmp_path) -> None:
+    source = graph()
+    recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
+    payload_value = {
+        "graph_map": {"source": [source]},
+        "counterfactual_candidates": [{"graph_hash": "source"}],
+    }
+
+    summary = recorder.write(
+        tmp_path,
+        payload_value,
+        source_graphs_by_parent_id={"parent-1": source},
+    )
+    lineage = __import__("json").loads(
+        (tmp_path / "candidate_action_lineage.json").read_text(encoding="utf-8")
+    )
+
+    assert summary["candidate_lineage_resolved_count"] == 1
+    assert summary["lineage_recovery_policy"] == (
+        "pinned_upstream_official_hash_source_root_v2"
+    )
+    assert lineage[0]["zero_action_source_root"] is True
+
+
 def test_trace_resume_reuses_identical_completed_chunks_without_duplicates(tmp_path) -> None:
     payload_value = None
     for _run in range(2):
