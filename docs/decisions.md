@@ -88,6 +88,9 @@ importance, clustering, and ranking parameters remain unchanged.
   cannot crash read-only random-walk tracing.
 - Full generation has enough wall time without reducing the preregistered
   50,000-step budget or changing scientific behavior.
+- A later end-to-end retry may adopt each explicitly enumerated, passing smoke
+  Gate by hashing every file in that stage root. Full stages remain
+  non-adoptable through this interface.
 
 ### Status
 

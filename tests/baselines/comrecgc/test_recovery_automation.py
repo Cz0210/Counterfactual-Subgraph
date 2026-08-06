@@ -484,6 +484,107 @@ def test_completed_stage_adoption_detects_artifact_change(
         MODULE.verify_completed_stage_adoptions(state)
 
 
+def _write_later_smoke_stage(root: Path, stage_id: str) -> Path:
+    root.mkdir(parents=True)
+    if stage_id in {"aids_existing_audit", "aids_density_retry"}:
+        parents = 64 if stage_id == "aids_existing_audit" else 1473
+        (root / "audit.json").write_text(
+            json.dumps({"audit_passed": True, "parent_count": parents}),
+            encoding="utf-8",
+        )
+        (root / "audit.txt").write_text("PASS\n", encoding="utf-8")
+        (root / "manifest.json").write_text(
+            json.dumps({"audit_passed": True, "run_complete": True}),
+            encoding="utf-8",
+        )
+        (root / "cache_trust_after.json").write_text(
+            json.dumps({"cache_trust_passed": True}), encoding="utf-8"
+        )
+        (root / "provenance.json").write_text("{}\n", encoding="utf-8")
+    elif stage_id == "aids_project_smoke_gate":
+        value = {
+            "audit_passed": True,
+            "run_complete": True,
+            "stage": "aids_project_smoke_gate",
+            "status": "ENGINEERING_SMOKE_PASS",
+            "dataset": "AIDS/HIV",
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "selection_performed_in_eval": False,
+        }
+        for name in ("_RUN_COMPLETE.json", "run_manifest.json", "audit.json"):
+            (root / name).write_text(json.dumps(value), encoding="utf-8")
+    elif stage_id == "mut_unified_eval_smoke":
+        value = {
+            "audit_passed": True,
+            "run_complete": True,
+            "parent_count": 16,
+            "rf_callable": True,
+            "wnode_callable": True,
+            "calibration_loaded": False,
+            "selection_performed_in_eval": False,
+            "invalid_slot_backfill": False,
+            "rank_compaction": False,
+        }
+        (root / "_SMOKE_AUDIT_COMPLETE.json").write_text(
+            json.dumps({"audit_passed": True, "run_complete": True}),
+            encoding="utf-8",
+        )
+        (root / "run_manifest.json").write_text(json.dumps(value), encoding="utf-8")
+        (root / "final_artifact_audit.json").write_text(
+            json.dumps(value), encoding="utf-8"
+        )
+        (root / "pair_matrix.jsonl").write_text("{}\n", encoding="utf-8")
+    else:
+        value = {
+            "audit_passed": True,
+            "run_complete": True,
+            "status": "MUT_REPAIR_SMOKE_PASS",
+        }
+        (root / "_RUN_COMPLETE.json").write_text(json.dumps(value), encoding="utf-8")
+        (root / "gate_result.json").write_text(json.dumps(value), encoding="utf-8")
+    return root
+
+
+def test_all_completed_engineering_smoke_stages_are_exactly_adoptable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(MODULE, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "git_commit", lambda _root: "a" * 40)
+    stage_ids = (
+        "aids_existing_audit",
+        "aids_density_retry",
+        "aids_project_smoke_gate",
+        "mut_unified_eval_smoke",
+        "mut_chemrepair_smoke_gate",
+    )
+    values = []
+    for stage_id in stage_ids:
+        output = _write_later_smoke_stage(
+            tmp_path / "outputs/hpc/baselines/comrecgc/completed" / stage_id,
+            stage_id,
+        )
+        values.append(f"{stage_id}={output}")
+    state = MODULE.RecoveryState(
+        tmp_path / "state",
+        "comrecgc_end_to_end_adopt_test",
+        requested_mode="all",
+        datasets=["aids", "mutagenicity"],
+    )
+    mappings = MODULE.register_completed_stage_adoptions(
+        state, values, known_stage_ids=set(stage_ids)
+    )
+    assert set(mappings) == set(stage_ids)
+    MODULE.verify_completed_stage_adoptions(state)
+
+
+def test_full_stage_cannot_be_adopted_as_completed_smoke(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="not authorized"):
+        MODULE._validate_completed_stage_artifacts(
+            "mut_full_generation", tmp_path
+        )
+
+
 def test_frozen_blocker_artifacts_are_adopted_idempotently(
     tmp_path: Path,
     monkeypatch,

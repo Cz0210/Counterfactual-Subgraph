@@ -984,23 +984,50 @@ def validate_new_output_roots(
 
 
 def _validate_completed_stage_artifacts(stage_id: str, output: Path) -> list[Path]:
-    required = [output / "_RUN_COMPLETE.json", output / "run_manifest.json"]
+    if (output / "_RUN_FAILED.json").exists():
+        raise RuntimeError(f"Completed-stage adoption contains a failure marker: {stage_id}.")
+    required: list[Path]
     if stage_id == "mut_trace_adopt":
+        required = [output / "_RUN_COMPLETE.json", output / "run_manifest.json"]
         required.extend([output / "trace_parity.json", output / "counterfactuals.pt"])
     elif stage_id == "mut_chemistry_audit":
+        required = [output / "_RUN_COMPLETE.json", output / "run_manifest.json"]
         required.extend(
             [output / "audit.json", output / "audit.txt", output / "final_artifact_audit.json"]
         )
+    elif stage_id in {"aids_existing_audit", "aids_density_retry"}:
+        required = [
+            output / "audit.json",
+            output / "audit.txt",
+            output / "manifest.json",
+            output / "cache_trust_after.json",
+            output / "provenance.json",
+        ]
+    elif stage_id == "aids_project_smoke_gate":
+        required = [
+            output / "_RUN_COMPLETE.json",
+            output / "run_manifest.json",
+            output / "audit.json",
+        ]
+    elif stage_id == "mut_unified_eval_smoke":
+        required = [
+            output / "_SMOKE_AUDIT_COMPLETE.json",
+            output / "run_manifest.json",
+            output / "final_artifact_audit.json",
+            output / "pair_matrix.jsonl",
+        ]
+    elif stage_id == "mut_chemrepair_smoke_gate":
+        required = [output / "_RUN_COMPLETE.json", output / "gate_result.json"]
     else:
         raise RuntimeError(f"Completed-stage adoption is not authorized for {stage_id}.")
     missing = [str(path) for path in required if not path.is_file() or path.stat().st_size <= 0]
     if missing:
         raise RuntimeError(f"Completed-stage adoption artifacts are missing: {missing}")
-    marker = json.loads(required[0].read_text(encoding="utf-8"))
-    manifest = json.loads(required[1].read_text(encoding="utf-8"))
-    if marker.get("run_complete") is not True or manifest.get("run_complete") is not True:
-        raise RuntimeError(f"Completed-stage adoption is not complete: {stage_id}")
     if stage_id == "mut_trace_adopt":
+        marker = json.loads((output / "_RUN_COMPLETE.json").read_text(encoding="utf-8"))
+        manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+        if marker.get("run_complete") is not True or manifest.get("run_complete") is not True:
+            raise RuntimeError(f"Completed-stage adoption is not complete: {stage_id}")
         parity = json.loads((output / "trace_parity.json").read_text(encoding="utf-8"))
         exact_fields = (
             "trace_parity_passed",
@@ -1015,7 +1042,11 @@ def _validate_completed_stage_artifacts(stage_id: str, output: Path) -> list[Pat
         compared = set(parity.get("compared_fields") or [])
         if not {"stable_graph_sha256", "frequency", "order"} <= compared:
             raise RuntimeError("Completed trace adoption lacks exact graph/order/frequency evidence.")
-    else:
+    elif stage_id == "mut_chemistry_audit":
+        marker = json.loads((output / "_RUN_COMPLETE.json").read_text(encoding="utf-8"))
+        manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+        if marker.get("run_complete") is not True or manifest.get("run_complete") is not True:
+            raise RuntimeError(f"Completed-stage adoption is not complete: {stage_id}")
         audit = json.loads((output / "audit.json").read_text(encoding="utf-8"))
         audit_text = (output / "audit.txt").read_text(encoding="utf-8")
         if (
@@ -1025,7 +1056,67 @@ def _validate_completed_stage_artifacts(stage_id: str, output: Path) -> list[Pat
             or "[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]" not in audit_text
         ):
             raise RuntimeError("Completed chemistry adoption does not pass its engineering Gate.")
-    return required
+    elif stage_id in {"aids_existing_audit", "aids_density_retry"}:
+        audit = json.loads((output / "audit.json").read_text(encoding="utf-8"))
+        manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+        cache = json.loads((output / "cache_trust_after.json").read_text(encoding="utf-8"))
+        expected_parents = 64 if stage_id == "aids_existing_audit" else 1473
+        if (
+            audit.get("audit_passed") is not True
+            or int(audit.get("parent_count", -1)) != expected_parents
+            or manifest.get("audit_passed") is not True
+            or manifest.get("run_complete") is not True
+            or cache.get("cache_trust_passed") is not True
+        ):
+            raise RuntimeError(f"Completed AIDS DBSCAN adoption failed its Gate: {stage_id}.")
+    elif stage_id == "aids_project_smoke_gate":
+        audit = json.loads((output / "audit.json").read_text(encoding="utf-8"))
+        exact = {
+            "audit_passed": True,
+            "run_complete": True,
+            "stage": "aids_project_smoke_gate",
+            "status": "ENGINEERING_SMOKE_PASS",
+            "dataset": "AIDS/HIV",
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "selection_performed_in_eval": False,
+        }
+        if any(audit.get(field) != expected for field, expected in exact.items()):
+            raise RuntimeError("Completed AIDS project smoke adoption failed its Gate.")
+    elif stage_id == "mut_unified_eval_smoke":
+        marker = json.loads(
+            (output / "_SMOKE_AUDIT_COMPLETE.json").read_text(encoding="utf-8")
+        )
+        audit = json.loads((output / "final_artifact_audit.json").read_text(encoding="utf-8"))
+        exact = {
+            "audit_passed": True,
+            "run_complete": True,
+            "parent_count": 16,
+            "rf_callable": True,
+            "wnode_callable": True,
+            "calibration_loaded": False,
+            "selection_performed_in_eval": False,
+            "invalid_slot_backfill": False,
+            "rank_compaction": False,
+        }
+        if (
+            marker.get("audit_passed") is not True
+            or marker.get("run_complete") is not True
+            or any(audit.get(field) != expected for field, expected in exact.items())
+        ):
+            raise RuntimeError("Completed Mutagenicity unified smoke adoption failed its Gate.")
+    elif stage_id == "mut_chemrepair_smoke_gate":
+        gate = json.loads((output / "gate_result.json").read_text(encoding="utf-8"))
+        if (
+            gate.get("audit_passed") is not True
+            or gate.get("run_complete") is not True
+            or gate.get("status") != "MUT_REPAIR_SMOKE_PASS"
+        ):
+            raise RuntimeError("Completed Mutagenicity smoke Gate adoption is not passing.")
+    return sorted(
+        (path for path in output.iterdir() if path.is_file()),
+        key=lambda path: path.name,
+    )
 
 
 def register_completed_stage_adoptions(
