@@ -421,6 +421,237 @@ def load_selected_trace(manifest_path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _feature_rows(graph: Any) -> list[list[float]]:
+    values = _plain(getattr(graph, "x"))
+    if not isinstance(values, list):
+        raise ValueError("COMRECGC action recovery requires a matrix-valued x tensor.")
+    return [[float(item) for item in row] for row in values]
+
+
+def _undirected_edges(graph: Any) -> set[tuple[int, int]]:
+    edge_index = _plain(getattr(graph, "edge_index"))
+    if not isinstance(edge_index, list) or len(edge_index) != 2:
+        raise ValueError("COMRECGC action recovery requires a [2, E] edge_index.")
+    return {
+        tuple(sorted((int(first), int(second))))
+        for first, second in zip(edge_index[0], edge_index[1], strict=True)
+        if int(first) != int(second)
+    }
+
+
+def _removed_node_edges(
+    edges: set[tuple[int, int]], removed: int
+) -> set[tuple[int, int]]:
+    def shifted(value: int) -> int:
+        return value - 1 if value > removed else value
+
+    return {
+        tuple(sorted((shifted(first), shifted(second))))
+        for first, second in edges
+        if removed not in {first, second}
+    }
+
+
+def _is_bridge(
+    edges: set[tuple[int, int]], edge: tuple[int, int], num_nodes: int
+) -> bool:
+    remaining = edges - {edge}
+    adjacency = {index: set() for index in range(num_nodes)}
+    for first, second in remaining:
+        adjacency[first].add(second)
+        adjacency[second].add(first)
+    first, second = edge
+    pending = [first]
+    seen = {first}
+    while pending:
+        current = pending.pop()
+        for neighbor in adjacency[current]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                pending.append(neighbor)
+    return second not in seen
+
+
+def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any]:
+    """Recover one pinned-upstream neighbor action from an exact graph delta."""
+
+    source_x = _feature_rows(source_graph)
+    target_x = _feature_rows(target_graph)
+    source_edges = _undirected_edges(source_graph)
+    target_edges = _undirected_edges(target_graph)
+    source_nodes = len(source_x)
+    target_nodes = len(target_x)
+
+    if source_nodes == target_nodes:
+        changed_features = [
+            index
+            for index, (source_row, target_row) in enumerate(
+                zip(source_x, target_x, strict=True)
+            )
+            if source_row != target_row
+        ]
+        added_edges = target_edges - source_edges
+        removed_edges = source_edges - target_edges
+        if len(changed_features) == 1 and not added_edges and not removed_edges:
+            node = changed_features[0]
+            active = [index for index, value in enumerate(target_x[node]) if value == 1.0]
+            if len(active) != 1 or any(
+                value not in {0.0, 1.0} for value in target_x[node]
+            ):
+                raise ValueError("Recovered NLC target is not one-hot encoded.")
+            return ["NLC", node, active[0]]
+        if not changed_features and len(added_edges) == 1 and not removed_edges:
+            first, second = next(iter(added_edges))
+            return ["EA", first, second]
+        if not changed_features and len(removed_edges) == 1 and not added_edges:
+            edge = next(iter(removed_edges))
+            action = "ERR" if _is_bridge(source_edges, edge, source_nodes) else "ER"
+            return [action, edge[0], edge[1]]
+        if not changed_features and not added_edges and not removed_edges:
+            return ["NOTHING", 0, 0]
+    elif target_nodes == source_nodes + 1:
+        if target_x[:-1] != source_x:
+            raise ValueError("Recovered node addition changes retained node features.")
+        active = [index for index, value in enumerate(target_x[-1]) if value == 1.0]
+        if len(active) != 1 or any(value not in {0.0, 1.0} for value in target_x[-1]):
+            raise ValueError("Recovered node addition is not one-hot encoded.")
+        if not source_edges <= target_edges:
+            raise ValueError("Recovered node addition also removes an edge.")
+        added_edges = target_edges - source_edges
+        if not added_edges:
+            return ["INA", active[0], active[0]]
+        if len(added_edges) == 1:
+            first, second = next(iter(added_edges))
+            new_node = source_nodes
+            if new_node in {first, second}:
+                attachment = second if first == new_node else first
+                return ["NA", attachment, active[0]]
+    elif target_nodes == source_nodes - 1:
+        matches: list[list[Any]] = []
+        for removed in range(source_nodes):
+            if source_x[:removed] + source_x[removed + 1 :] != target_x:
+                continue
+            if _removed_node_edges(source_edges, removed) != target_edges:
+                continue
+            degree = sum(removed in edge for edge in source_edges)
+            if degree == 0:
+                matches.append(["INR", removed, removed])
+            elif degree == 1:
+                matches.append(["NR", removed, removed])
+        if len(matches) == 1:
+            return matches[0]
+    raise ValueError(
+        "Selected COMRECGC transition is not one unique pinned-upstream single edit."
+    )
+
+
+def recover_candidate_lineage_from_selected_trace(
+    payload: Mapping[str, Any], selected_events: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Recover complete candidate paths from streamed source/target graph deltas."""
+
+    graph_map = payload.get("graph_map") or {}
+    graph_by_key: dict[tuple[str, str], Any] = {}
+    graph_by_official_hash: dict[str, Any] = {}
+    for official_hash, entry in graph_map.items():
+        graph = entry[0]
+        parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
+        key = (parent_id, stable_graph_sha256(graph))
+        existing = graph_by_key.get(key)
+        if existing is not None and normalized_graph_payload(existing) != normalized_graph_payload(graph):
+            raise ValueError("Stable COMRECGC graph identity collision during trace recovery.")
+        graph_by_key[key] = graph
+        graph_by_official_hash[str(official_hash)] = graph
+
+    predecessor: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw_event in selected_events:
+        if raw_event.get("event") != "selected_transition":
+            continue
+        event = dict(raw_event)
+        parent_id = str(event.get("parent_id") or "")
+        source_key = (parent_id, str(event["source_graph_sha256"]))
+        target_key = (parent_id, str(event["target_graph_sha256"]))
+        source_graph = graph_by_key.get(source_key)
+        target_graph = graph_by_key.get(target_key)
+        if source_graph is None:
+            source_graph = graph_by_official_hash.get(str(event["source_official_hash"]))
+        if target_graph is None:
+            target_graph = graph_by_official_hash.get(str(event["target_official_hash"]))
+        if source_graph is None or target_graph is None:
+            raise ValueError("Selected trace references a graph absent from the frozen payload.")
+        inferred = infer_official_single_edit(source_graph, target_graph)
+        recorded = event.get("action")
+        if recorded is not None and list(recorded) != inferred:
+            raise ValueError(
+                "Recorded selected action disagrees with its exact source/target graph delta."
+            )
+        event["action"] = inferred
+        event["action_resolution"] = "exact"
+        event["action_recovery"] = (
+            "recorded_exact" if recorded is not None else "inferred_exact_graph_delta_v1"
+        )
+        predecessor.setdefault(target_key, event)
+
+    rows: list[dict[str, Any]] = []
+    candidates = list(payload.get("counterfactual_candidates") or [])
+    for candidate_index, candidate in enumerate(candidates):
+        official_hash = str(candidate.get("graph_hash"))
+        graph = graph_by_official_hash.get(official_hash)
+        if graph is None:
+            raise ValueError(f"Candidate graph is absent during trace recovery: {official_hash}")
+        parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
+        candidate_sha = stable_graph_sha256(graph)
+        current_key = (parent_id, candidate_sha)
+        reversed_path: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        while current_key in predecessor:
+            if current_key in seen:
+                raise ValueError("Recovered COMRECGC predecessor graph contains a cycle.")
+            seen.add(current_key)
+            event = predecessor[current_key]
+            reversed_path.append(event)
+            current_key = (parent_id, str(event["source_graph_sha256"]))
+        path = list(reversed(reversed_path))
+        root_graph = graph_by_key.get(current_key)
+        resolved = bool(path and root_graph is not None)
+        enriched_path: list[dict[str, Any]] = []
+        node_ids = trace_node_ids(root_graph) if root_graph is not None else []
+        for path_index, event in enumerate(path):
+            enriched = dict(event)
+            source_node_ids = list(node_ids)
+            action = list(event["action"])
+            target_node_ids = list(source_node_ids)
+            if str(action[0]) in {"NA", "INA"}:
+                target_node_ids.append(
+                    f"new:{parent_id}:move:{int(event['move_index'])}:"
+                    f"head:{int(event['head_index'])}:path:{path_index}:"
+                    f"target:{event['target_graph_sha256']}"
+                )
+            elif str(action[0]) in {"NR", "INR"}:
+                removed = int(action[1])
+                if not 0 <= removed < len(target_node_ids):
+                    resolved = False
+                else:
+                    target_node_ids.pop(removed)
+            enriched["source_node_ids"] = source_node_ids
+            enriched["target_node_ids"] = target_node_ids
+            enriched_path.append(enriched)
+            node_ids = target_node_ids
+        if len(node_ids) != int(graph.num_nodes):
+            resolved = False
+        rows.append(
+            {
+                "candidate_index": candidate_index,
+                "official_graph_hash": official_hash,
+                "stable_graph_sha256": candidate_sha,
+                "parent_id": parent_id,
+                "action_lineage_resolved": resolved,
+                "actions": enriched_path,
+            }
+        )
+    return rows
+
+
 def _importance(value: Any) -> list[float]:
     if value is None:
         return []

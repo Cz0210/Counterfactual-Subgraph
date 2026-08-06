@@ -70,3 +70,13 @@ def test_aids_existing_audit_loads_trusted_upstream_pyg_cache() -> None:
         encoding="utf-8"
     )
     assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" in text
+
+
+def test_mut_trace_adoption_does_not_rerun_random_walk() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_mut_trace_adopt.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "recover_mutagenicity_trace.py" in text
+    assert "run_generation.py" not in text
+    assert "--source-failed-generation-dir" in text
+    assert "algorithm_rerun=false" in text

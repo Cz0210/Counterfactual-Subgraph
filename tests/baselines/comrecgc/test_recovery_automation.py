@@ -90,6 +90,13 @@ def test_recovery_dirty_allowlist_is_exact_and_only_for_generated_log() -> None:
 def test_slot_preserving_eval_is_in_smoke_and_full_dag() -> None:
     values = MODULE.stages("run2", {"mutagenicity"}, "all")
     by_id = {stage.stage_id: stage for stage in values}
+    assert by_id["mut_trace_adopt"].script.endswith(
+        "comrecgc_mut_trace_adopt.sh"
+    )
+    assert by_id["mut_trace_adopt"].dependency_stages == ()
+    assert by_id["mut_chemistry_audit"].dependency_stages == (
+        "mut_trace_adopt",
+    )
     assert by_id["mut_unified_eval_smoke"].dependency_stages == (
         "mut_chemistry_audit",
     )

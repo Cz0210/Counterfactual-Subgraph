@@ -10,7 +10,9 @@ from src.baselines.comrecgc.graph_trace import (
     ActionTraceRecorder,
     TRACE_IMPORTANCE_ABS_TOLERANCE,
     assert_trace_parity,
+    infer_official_single_edit,
     load_selected_trace,
+    recover_candidate_lineage_from_selected_trace,
     stable_graph_sha256,
 )
 
@@ -147,6 +149,54 @@ def test_trace_parity_rejects_candidate_order_change() -> None:
 
     with pytest.raises(ValueError, match="topology, features, frequency, or order"):
         assert_trace_parity(reference, traced)
+
+
+def test_infer_official_single_edit_recovers_node_label_change() -> None:
+    assert infer_official_single_edit(graph(), graph(atom=1)) == ["NLC", 0, 1]
+
+
+def test_recover_lineage_infers_action_missing_from_cached_transition() -> None:
+    source = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [
+            {"graph_hash": "target", "frequency": 2, "importance_parts": [0.8, 1.0]}
+        ],
+    }
+    selected_events = [
+        {
+            "move_index": 3,
+            "head_index": 1,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_graph_sha256(source),
+            "target_graph_sha256": stable_graph_sha256(target),
+            "action_resolution": "missing",
+            "action": None,
+            "parent_id": "parent-1",
+        }
+    ]
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload, selected_events
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["actions"][0]["action"] == ["NLC", 0, 1]
+    assert (
+        lineage[0]["actions"][0]["action_recovery"]
+        == "inferred_exact_graph_delta_v1"
+    )
+    assert lineage[0]["actions"][0]["source_node_ids"] == [
+        "source:0",
+        "source:1",
+    ]
+    assert lineage[0]["actions"][0]["target_node_ids"] == [
+        "source:0",
+        "source:1",
+    ]
 
 
 def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:

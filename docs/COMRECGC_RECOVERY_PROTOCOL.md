@@ -124,6 +124,11 @@ and frequency. Importance values are finite and may differ by at most `1e-6`
 absolute under a repeated CUDA float32 execution. The parity evidence records
 the exact mismatch count and maximum difference; this narrow numerical policy
 does not permit topology, ordering, frequency, or candidate payload drift.
+If a complete streamed trace was blocked only by the obsolete exact-float gate,
+the recovery chain validates that failed marker, reloads every trace chunk,
+infers cached-neighbor actions only from unique pinned-upstream graph deltas,
+and materializes a new completed directory with hard links where possible.
+The random walk is not rerun and the failed source directory is not modified.
 
 ## Slot-preserving unified evaluation
 

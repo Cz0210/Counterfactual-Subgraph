@@ -5442,6 +5442,11 @@ jobs reuse the existing TU cache without network access. Trace parity requires
 exact candidate tensors, order, and frequency. Repeated CUDA float32 importance
 values may differ by at most `1e-6` absolute; the mismatch count and maximum
 difference are persisted, and any larger or non-finite difference is fatal.
+If that gate blocked only after a complete trace was serialized, adopt the
+failed trace into a fresh directory instead of rerunning the random walk.
+Recover actions omitted by cached upstream neighborhoods only when a unique
+pinned-upstream single-edit graph delta reproduces the saved source and target;
+record inferred actions separately and preserve the frozen candidate order.
 
 For project Mutagenicity, replay the exact official action lineage and apply one
 deterministic chemistry projection per raw candidate: retained chemistry comes

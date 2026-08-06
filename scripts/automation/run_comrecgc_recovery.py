@@ -434,13 +434,20 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
         values.extend(
             [
                 Stage(
-                    "mut_trace_replay",
+                    "mut_trace_adopt",
                     "mutagenicity",
-                    "scripts/slurm/comrecgc_mut_trace_replay.sh",
+                    "scripts/slurm/comrecgc_mut_trace_adopt.sh",
                     smoke_base + "/generation",
                     None,
                     (),
-                    {"OUTPUT_DIR": smoke_base + "/generation"},
+                    {
+                        "SOURCE_FAILED_GENERATION_DIR": (
+                            "outputs/hpc/baselines/comrecgc/mutagenicity/"
+                            "recovery_smoke_comrecgc_recovery_20260806_mut_retry1/"
+                            "generation"
+                        ),
+                        "OUTPUT_DIR": smoke_base + "/generation",
+                    },
                 ),
                 Stage(
                     "mut_chemistry_audit",
@@ -448,7 +455,7 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                     "scripts/slurm/comrecgc_mut_chemistry_audit.sh",
                     smoke_base + "/chemistry",
                     "afterok",
-                    ("mut_trace_replay",),
+                    ("mut_trace_adopt",),
                     {
                         "GENERATION_DIR": smoke_base + "/generation",
                         "OUTPUT_DIR": smoke_base + "/chemistry",
