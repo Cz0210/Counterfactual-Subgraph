@@ -151,6 +151,16 @@ def test_project_full_wrappers_freeze_scientific_contracts() -> None:
     assert "--parent-limit \"$PARENT_LIMIT\"" in chemistry
 
 
+def test_full_generation_jobs_use_qos_supported_seven_day_walltime() -> None:
+    for name in (
+        "comrecgc_aids_native_full.sh",
+        "comrecgc_mut_full.sh",
+        "comrecgc_project_generate.sh",
+    ):
+        text = (ROOT / "scripts/slurm" / name).read_text(encoding="utf-8")
+        assert "#SBATCH --time=7-00:00:00" in text
+
+
 def test_aids_project_smoke_is_read_only_adoption() -> None:
     text = (
         ROOT / "scripts/slurm/comrecgc_aids_project_smoke_adopt.sh"

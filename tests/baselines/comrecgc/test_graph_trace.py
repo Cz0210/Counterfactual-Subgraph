@@ -73,6 +73,55 @@ def test_untyped_identity_explicitly_ignores_stale_official_edge_sidecar() -> No
     assert stable_untyped_graph_sha256(first) == stable_untyped_graph_sha256(reordered)
 
 
+def test_action_trace_uses_untyped_identity_for_stale_official_edge_sidecar() -> None:
+    source = SimpleNamespace(
+        x=[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
+        edge_index=[[0, 1], [1, 0]],
+        edge_attr=[[1.0], [1.0]],
+        num_nodes=3,
+        comrecgc_parent_id="parent-1",
+        comrecgc_trace_node_ids=("source:0", "source:1", "source:2"),
+    )
+    target = SimpleNamespace(
+        x=[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
+        edge_index=[[0, 1, 1, 2], [1, 0, 2, 1]],
+        edge_attr=[[1.0], [1.0]],
+        num_nodes=3,
+        comrecgc_parent_id="parent-1",
+        comrecgc_trace_node_ids=("source:0", "source:1", "source:2"),
+    )
+    recorder = ActionTraceRecorder()
+    recorder.record_enumerated(
+        source_graph=source,
+        target_graph=target,
+        action=("EA", 1, 2),
+    )
+    assert len(recorder.enumerated) == 1
+    ((source_sha, target_sha),) = recorder.enumerated.keys()
+    assert source_sha == stable_untyped_graph_sha256(source)
+    assert target_sha == stable_untyped_graph_sha256(target)
+
+    module = SimpleNamespace(graph_map={"source": [source], "target": [target]})
+    wrapped = recorder.wrap_move(
+        lambda *_args, **_kwargs: (["target"], False, None, None, None),
+        module,
+    )
+    wrapped(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+    lineage = recorder.candidate_lineage(
+        {
+            "graph_map": module.graph_map,
+            "counterfactual_candidates": [{"graph_hash": "target"}],
+        }
+    )
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["actions"][0]["action"] == ["EA", 1, 2]
+
+
 def test_trace_does_not_change_candidates() -> None:
     reference = payload(graph(), graph(atom=1))
     traced = payload(graph(swapped_edges=True), graph(atom=1))

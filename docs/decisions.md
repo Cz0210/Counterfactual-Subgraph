@@ -54,6 +54,47 @@ Accepted
 
 ---
 
+## [2026-08-07] Isolate COMRECGC full preflight artifacts and trace untyped edits
+
+### Background
+
+The first end-to-end full submission exposed two engineering-only failures.
+The native AIDS wrapper wrote its preregistration into the fresh generation
+root before invoking the generation runner, so the runner correctly rejected
+the now non-empty directory.  Project AIDS reached the upstream random walk,
+but pinned COMRECGC edits `edge_index` without consistently updating the
+unused bond-label `edge_attr` sidecar; the project trace identity therefore
+rejected the first stale sidecar even though upstream does not consume it.
+Early full throughput also showed that the fixed 50,000-step protocol can
+exceed the wrappers' 48-hour request, while the assigned A800 QOS permits seven
+days.
+
+### Decision
+
+Store native-full preregistration under the append-only automation state root,
+outside the fresh generation output.  Keep the chemistry-facing typed graph
+identity strict, but make the side-effect-free upstream action trace and its
+parity/replay identity explicitly node-and-adjacency based.  This matches the
+pinned algorithm's actual graph semantics and never repairs or mutates its
+candidate payload.  Request the QOS-supported seven-day wall time only for
+full generation wrappers; all seeds, parents, steps, heads, candidate budgets,
+importance, clustering, and ranking parameters remain unchanged.
+
+### Consequences
+
+- Native preflight evidence no longer invalidates the generation fresh-output
+  gate.
+- A stale upstream bond sidecar remains visible to strict chemistry checks but
+  cannot crash read-only random-walk tracing.
+- Full generation has enough wall time without reducing the preregistered
+  50,000-step budget or changing scientific behavior.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-07] Distinguish COMRECGC rank slots from reused source medoids
 
 ### Background

@@ -1192,7 +1192,10 @@ def stages(
                         ("aids_project_smoke_gate",),
                         {
                             "OUTPUT_DIR": native_full,
-                            "PREREGISTRATION": native_full + "/preregistration.json",
+                            "PREREGISTRATION": (
+                                f"outputs/hpc/automation/comrecgc_recovery/{run_id}/"
+                                "aids_native_full_preregistration.json"
+                            ),
                         },
                         True,
                     ),

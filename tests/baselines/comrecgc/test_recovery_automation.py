@@ -354,6 +354,20 @@ def test_end_to_end_dependencies_are_afterok_and_no_rank_backfill() -> None:
     assert authorization["wnode_guided_repair_allowed"] is False
 
 
+def test_aids_native_full_preregistration_is_outside_fresh_generation_root() -> None:
+    run_id = "comrecgc_end_to_end_test"
+    by_id = {
+        stage.stage_id: stage
+        for stage in MODULE.stages(run_id, {"aids"}, "all")
+    }
+    stage = by_id["aids_native_full"]
+    preregistration = stage.environment["PREREGISTRATION"]
+    assert preregistration.startswith(
+        f"outputs/hpc/automation/comrecgc_recovery/{run_id}/"
+    )
+    assert not preregistration.startswith(stage.output_root + "/")
+
+
 def _write_completed_mut_stage(root: Path, stage_id: str) -> Path:
     root.mkdir(parents=True)
     (root / "_RUN_COMPLETE.json").write_text(

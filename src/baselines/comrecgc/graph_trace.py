@@ -115,6 +115,17 @@ def stable_untyped_graph_sha256(graph: Any) -> str:
     return stable_json_sha256(normalized_untyped_graph_payload(graph))
 
 
+def _recorded_trace_sha_matches(graph: Any, expected: str) -> bool:
+    """Accept the current untyped trace identity and legacy aligned typed traces."""
+
+    if stable_untyped_graph_sha256(graph) == str(expected):
+        return True
+    try:
+        return stable_graph_sha256(graph) == str(expected)
+    except ValueError:
+        return False
+
+
 def normalized_action(action: Sequence[Any]) -> list[Any]:
     return [_plain(value) for value in action]
 
@@ -124,7 +135,7 @@ def apply_action_to_normalized_payload(
 ) -> dict[str, Any]:
     """Apply one pinned-upstream edit in the canonical untyped graph space."""
 
-    payload = normalized_graph_payload(source_graph)
+    payload = normalized_untyped_graph_payload(source_graph)
     nodes = [list(row) for row in payload["x"]]
     edges = [dict(row) for row in payload["directed_edges"]]
     name = str(action[0])
@@ -149,8 +160,8 @@ def apply_action_to_normalized_payload(
                 raise ValueError("Recovered node attachment is outside the source graph.")
             edges.extend(
                 [
-                    {"source": attachment, "target": new_node, "attr": None},
-                    {"source": new_node, "target": attachment, "attr": None},
+                    {"source": attachment, "target": new_node},
+                    {"source": new_node, "target": attachment},
                 ]
             )
     elif name in {"NR", "INR"}:
@@ -185,8 +196,8 @@ def apply_action_to_normalized_payload(
             raise ValueError("Recovered edge addition is outside the source graph.")
         edges.extend(
             [
-                {"source": first, "target": second, "attr": None},
-                {"source": second, "target": first, "attr": None},
+                {"source": first, "target": second},
+                {"source": second, "target": first},
             ]
         )
     else:
@@ -195,7 +206,6 @@ def apply_action_to_normalized_payload(
         key=lambda row: (
             int(row["source"]),
             int(row["target"]),
-            json.dumps(row["attr"], sort_keys=True, separators=(",", ":")),
         )
     )
     return {"num_nodes": len(nodes), "x": nodes, "directed_edges": edges}
@@ -318,8 +328,8 @@ class ActionTraceRecorder:
         target_graph: Any,
         action: Sequence[Any],
     ) -> None:
-        source_sha = stable_graph_sha256(source_graph)
-        target_sha = stable_graph_sha256(target_graph)
+        source_sha = stable_untyped_graph_sha256(source_graph)
+        target_sha = stable_untyped_graph_sha256(target_graph)
         record = {
             "source_graph_sha256": source_sha,
             "target_graph_sha256": target_sha,
@@ -342,7 +352,9 @@ class ActionTraceRecorder:
                         "source_official_hashes": [str(value) for value in graphs_hash],
                     }
                 )
-                consumed_sources = {stable_graph_sha256(graph) for graph in source_graphs}
+                consumed_sources = {
+                    stable_untyped_graph_sha256(graph) for graph in source_graphs
+                }
                 self._discard_enumerated_sources(consumed_sources)
                 self.move_index += 1
                 return result
@@ -350,8 +362,8 @@ class ActionTraceRecorder:
                 zip(graphs_hash, list(next_hashes), source_graphs, strict=True)
             ):
                 target_graph = module.graph_map[target_hash][0]
-                source_sha = stable_graph_sha256(source_graph)
-                target_sha = stable_graph_sha256(target_graph)
+                source_sha = stable_untyped_graph_sha256(source_graph)
+                target_sha = stable_untyped_graph_sha256(target_graph)
                 candidates = self.enumerated.get((source_sha, target_sha), [])
                 unique: dict[str, dict[str, Any]] = {
                     json.dumps(row["action"], separators=(",", ":")): row
@@ -375,7 +387,9 @@ class ActionTraceRecorder:
                 self._stream_event(event)
                 if action_record is not None:
                     self.predecessor_by_official_hash.setdefault(str(target_hash), event)
-            consumed_sources = {stable_graph_sha256(graph) for graph in source_graphs}
+            consumed_sources = {
+                stable_untyped_graph_sha256(graph) for graph in source_graphs
+            }
             self._discard_enumerated_sources(consumed_sources)
             self.move_index += 1
             return result
@@ -444,7 +458,7 @@ class ActionTraceRecorder:
                                 apply_action_to_normalized_payload(
                                     source_graph_entry[0], action
                                 )
-                                == normalized_graph_payload(target_graph_entry[0])
+                                == normalized_untyped_graph_payload(target_graph_entry[0])
                             )
                         enriched["action_replay_exact"] = replay_exact
                         node_lineage_resolved = node_lineage_resolved and replay_exact
@@ -460,7 +474,9 @@ class ActionTraceRecorder:
                 {
                     "candidate_index": index,
                     "official_graph_hash": official_hash,
-                    "stable_graph_sha256": stable_graph_sha256(graph) if graph is not None else None,
+                    "stable_graph_sha256": (
+                        stable_untyped_graph_sha256(graph) if graph is not None else None
+                    ),
                     "parent_id": str(getattr(graph, "comrecgc_parent_id", "")) if graph is not None else "",
                     "action_lineage_resolved": bool(
                         node_lineage_resolved
@@ -497,6 +513,7 @@ class ActionTraceRecorder:
             {
                 "schema_version": 1,
                 "format": "chunked_jsonl",
+                "graph_identity_mode": "official_untyped_node_adjacency_v1",
                 "chunk_size": int(self.chunk_size),
                 "row_count": self.selected_transition_count + self.teleport_count,
                 "chunks": self._chunks,
@@ -596,6 +613,7 @@ class ActionTraceRecorder:
         summary = {
             "trace_schema_version": 1,
             "trace_only": True,
+            "graph_identity_mode": "official_untyped_node_adjacency_v1",
             "rng_calls_added": 0,
             "enumerated_transition_count": self.enumerated_transition_count,
             "live_enumerated_transition_pair_count": len(self.enumerated),
@@ -806,17 +824,21 @@ def _lineage_recovery_context(
     for official_hash, entry in graph_map.items():
         graph = entry[0]
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
-        key = (parent_id, stable_graph_sha256(graph))
+        key = (parent_id, stable_untyped_graph_sha256(graph))
         existing_stable = graph_by_stable_key.get(key)
         if existing_stable is not None and (
-            normalized_graph_payload(existing_stable)
-            != normalized_graph_payload(graph)
+            normalized_untyped_graph_payload(existing_stable)
+            != normalized_untyped_graph_payload(graph)
         ):
             raise ValueError("Stable COMRECGC graph identity collision during trace recovery.")
         graph_by_stable_key[key] = graph
         official_key = (parent_id, str(official_hash))
         existing = graph_by_official_key.get(official_key)
-        if existing is not None and normalized_graph_payload(existing) != normalized_graph_payload(graph):
+        if (
+            existing is not None
+            and normalized_untyped_graph_payload(existing)
+            != normalized_untyped_graph_payload(graph)
+        ):
             raise ValueError("Official COMRECGC graph identity collision during trace recovery.")
         graph_by_official_key[official_key] = graph
         official_matches.setdefault(str(official_hash), []).append((official_key, graph))
@@ -848,13 +870,17 @@ def _lineage_recovery_context(
         target_graph = graph_by_official_key.get(target_key)
         if source_graph is None or target_graph is None:
             raise ValueError("Selected trace references a graph absent from the frozen payload.")
-        if stable_graph_sha256(source_graph) != str(event["source_graph_sha256"]):
+        if not _recorded_trace_sha_matches(
+            source_graph, str(event["source_graph_sha256"])
+        ):
             raise ValueError("Selected trace source graph SHA256 differs from the frozen payload.")
-        if stable_graph_sha256(target_graph) != str(event["target_graph_sha256"]):
+        if not _recorded_trace_sha_matches(
+            target_graph, str(event["target_graph_sha256"])
+        ):
             raise ValueError("Selected trace target graph SHA256 differs from the frozen payload.")
         inferred = infer_official_single_edit(source_graph, target_graph)
         replayed = apply_action_to_normalized_payload(source_graph, inferred)
-        if replayed != normalized_graph_payload(target_graph):
+        if replayed != normalized_untyped_graph_payload(target_graph):
             raise ValueError(
                 "Recovered selected action does not replay to the exact target graph."
             )
@@ -934,7 +960,7 @@ def iter_candidate_lineage_from_selected_trace(
         if graph is None:
             raise ValueError(f"Candidate graph is absent during trace recovery: {official_hash}")
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
-        candidate_sha = stable_graph_sha256(graph)
+        candidate_sha = stable_untyped_graph_sha256(graph)
         current_key = candidate_key
         reversed_path: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -952,8 +978,8 @@ def iter_candidate_lineage_from_selected_trace(
         frozen_source_exact = bool(
             root_graph is not None
             and frozen_source is not None
-            and normalized_graph_payload(root_graph)
-            == normalized_graph_payload(frozen_source)
+            and normalized_untyped_graph_payload(root_graph)
+            == normalized_untyped_graph_payload(frozen_source)
         )
         resolved = bool(
             root_graph is not None
@@ -1051,8 +1077,8 @@ def normalized_candidate_sequence(payload: Mapping[str, Any]) -> list[dict[str, 
             raise ValueError(f"Candidate graph is absent from graph_map: {official_hash!r}")
         rows.append(
             {
-                "candidate_id": stable_graph_sha256(graph_entry[0]),
-                "stable_graph_sha256": stable_graph_sha256(graph_entry[0]),
+                "candidate_id": stable_untyped_graph_sha256(graph_entry[0]),
+                "stable_graph_sha256": stable_untyped_graph_sha256(graph_entry[0]),
                 "frequency": int(candidate.get("frequency", 0)),
                 "importance_parts": _importance(candidate.get("importance_parts")),
             }
@@ -1215,6 +1241,7 @@ def assert_trace_parity(
     ]
     return {
         "trace_parity_passed": True,
+        "graph_identity_mode": "official_untyped_node_adjacency_v1",
         "candidate_count": len(reference),
         "candidate_sequence_sha256": stable_json_sha256(reference),
         "traced_candidate_sequence_sha256": stable_json_sha256(traced),
