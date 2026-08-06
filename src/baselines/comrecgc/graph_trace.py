@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .contracts import append_jsonl, stable_json_sha256, write_json
+from .contracts import atomic_write_bytes, sha256_file, stable_json_sha256, write_json
 
 
 def _plain(value: Any) -> Any:
@@ -101,12 +101,93 @@ def trace_node_ids(graph: Any) -> list[str]:
 
 @dataclass
 class ActionTraceRecorder:
-    """Record enumerated and actually selected actions without changing RNG."""
+    """Record selected actions without retaining a second in-memory walk history.
 
+    The official runtime still owns its graph state.  This recorder keeps only
+    the first predecessor needed to reconstruct candidate lineages and streams
+    audit events to deterministic chunks.  A resumed deterministic replay
+    reuses byte-identical completed chunks instead of appending duplicates.
+    """
+
+    output_dir: str | Path | None = None
+    chunk_size: int = 512
     enumerated: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
-    selected: list[dict[str, Any]] = field(default_factory=list)
     predecessor_by_official_hash: dict[str, dict[str, Any]] = field(default_factory=dict)
     move_index: int = 0
+    enumerated_transition_count: int = 0
+    selected_transition_count: int = 0
+    teleport_count: int = 0
+    _trace_root: Path | None = field(default=None, init=False, repr=False)
+    _pending_events: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _chunks: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if int(self.chunk_size) <= 0:
+            raise ValueError("COMRECGC trace chunk_size must be positive.")
+        if self.output_dir is not None:
+            self._configure_output(self.output_dir)
+
+    def _configure_output(self, output_dir: str | Path) -> Path:
+        root = Path(output_dir).expanduser().resolve()
+        if self._trace_root is not None and self._trace_root != root:
+            raise ValueError(
+                "COMRECGC trace recorder cannot change output directories: "
+                f"{self._trace_root} != {root}"
+            )
+        (root / "selected_action_trace_chunks").mkdir(parents=True, exist_ok=True)
+        self._trace_root = root
+        return root
+
+    def _flush_chunks(self, *, final: bool) -> None:
+        if self._trace_root is None:
+            return
+        while len(self._pending_events) >= int(self.chunk_size) or (
+            final and self._pending_events
+        ):
+            count = min(len(self._pending_events), int(self.chunk_size))
+            rows = self._pending_events[:count]
+            encoded = (
+                "".join(
+                    json.dumps(row, sort_keys=True, ensure_ascii=True, default=str) + "\n"
+                    for row in rows
+                )
+            ).encode("utf-8")
+            index = len(self._chunks)
+            relative = Path("selected_action_trace_chunks") / f"part-{index:06d}.jsonl"
+            destination = self._trace_root / relative
+            materialization = "atomic_write"
+            if destination.exists():
+                if destination.read_bytes() != encoded:
+                    raise ValueError(
+                        "Existing COMRECGC trace chunk differs during deterministic resume: "
+                        f"{destination}"
+                    )
+                materialization = "adopt_existing_identical"
+            else:
+                atomic_write_bytes(destination, encoded)
+            self._chunks.append(
+                {
+                    "index": index,
+                    "path": relative.as_posix(),
+                    "row_count": count,
+                    "bytes": destination.stat().st_size,
+                    "sha256": sha256_file(destination),
+                    "materialization": materialization,
+                }
+            )
+            del self._pending_events[:count]
+
+    def _stream_event(self, event: dict[str, Any]) -> None:
+        if event.get("event") == "selected_transition":
+            self.selected_transition_count += 1
+        elif event.get("event") == "teleport":
+            self.teleport_count += 1
+        self._pending_events.append(event)
+        self._flush_chunks(final=False)
+
+    def _discard_enumerated_sources(self, source_shas: set[str]) -> None:
+        for key in [key for key in self.enumerated if key[0] in source_shas]:
+            self.enumerated.pop(key, None)
 
     def record_enumerated(
         self,
@@ -123,10 +204,9 @@ class ActionTraceRecorder:
             "source_graph_sha256": source_sha,
             "target_graph_sha256": target_sha,
             "action": normalized_action(action),
-            "source_node_ids": [str(value) for value in source_node_ids],
-            "target_node_ids": [str(value) for value in target_node_ids],
         }
         self.enumerated.setdefault((source_sha, target_sha), []).append(record)
+        self.enumerated_transition_count += 1
 
     def wrap_move(self, original: Callable[..., Any], module: Any) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -135,7 +215,7 @@ class ActionTraceRecorder:
             result = original(*args, **kwargs)
             next_hashes, teleported = result[0], bool(result[1])
             if teleported or next_hashes is None:
-                self.selected.append(
+                self._stream_event(
                     {
                         "move_index": self.move_index,
                         "event": "teleport",
@@ -143,11 +223,7 @@ class ActionTraceRecorder:
                     }
                 )
                 consumed_sources = {stable_graph_sha256(graph) for graph in source_graphs}
-                self.enumerated = {
-                    key: value
-                    for key, value in self.enumerated.items()
-                    if key[0] not in consumed_sources
-                }
+                self._discard_enumerated_sources(consumed_sources)
                 self.move_index += 1
                 return result
             for head_index, (source_hash, target_hash, source_graph) in enumerate(
@@ -174,19 +250,13 @@ class ActionTraceRecorder:
                         "missing" if not unique else "ambiguous"
                     ),
                     "action": None if action_record is None else action_record["action"],
-                    "source_node_ids": trace_node_ids(source_graph),
-                    "target_node_ids": trace_node_ids(target_graph),
                     "parent_id": str(getattr(target_graph, "comrecgc_parent_id", "")),
                 }
-                self.selected.append(event)
+                self._stream_event(event)
                 if action_record is not None:
                     self.predecessor_by_official_hash.setdefault(str(target_hash), event)
             consumed_sources = {stable_graph_sha256(graph) for graph in source_graphs}
-            self.enumerated = {
-                key: value
-                for key, value in self.enumerated.items()
-                if key[0] not in consumed_sources
-            }
+            self._discard_enumerated_sources(consumed_sources)
             self.move_index += 1
             return result
 
@@ -231,12 +301,29 @@ class ActionTraceRecorder:
         return rows
 
     def write(self, output_dir: str | Path, payload: Mapping[str, Any]) -> dict[str, Any]:
-        root = Path(output_dir).expanduser().resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        selected_path = root / "selected_action_trace.jsonl"
-        selected_path.unlink(missing_ok=True)
-        for row in self.selected:
-            append_jsonl(selected_path, row)
+        root = self._configure_output(output_dir)
+        self._flush_chunks(final=True)
+        expected_parts = {Path(row["path"]).name for row in self._chunks}
+        actual_parts = {
+            path.name for path in (root / "selected_action_trace_chunks").glob("part-*.jsonl")
+        }
+        if actual_parts != expected_parts:
+            raise ValueError(
+                "COMRECGC trace resume found stale or missing chunks: "
+                f"expected={sorted(expected_parts)}, actual={sorted(actual_parts)}"
+            )
+        selected_manifest_path = root / "selected_action_trace_manifest.json"
+        write_json(
+            selected_manifest_path,
+            {
+                "schema_version": 1,
+                "format": "chunked_jsonl",
+                "chunk_size": int(self.chunk_size),
+                "row_count": self.selected_transition_count + self.teleport_count,
+                "chunks": self._chunks,
+                "resume_policy": "reuse_byte_identical_completed_chunks",
+            },
+        )
         lineage = self.candidate_lineage(payload)
         lineage_path = root / "candidate_action_lineage.json"
         write_json(lineage_path, lineage)
@@ -244,20 +331,56 @@ class ActionTraceRecorder:
             "trace_schema_version": 1,
             "trace_only": True,
             "rng_calls_added": 0,
-            "enumerated_transition_pair_count": len(self.enumerated),
-            "selected_transition_count": sum(
-                row.get("event") == "selected_transition" for row in self.selected
-            ),
-            "teleport_count": sum(row.get("event") == "teleport" for row in self.selected),
+            "enumerated_transition_count": self.enumerated_transition_count,
+            "live_enumerated_transition_pair_count": len(self.enumerated),
+            "selected_transition_count": self.selected_transition_count,
+            "teleport_count": self.teleport_count,
             "candidate_count": len(lineage),
             "candidate_lineage_resolved_count": sum(
                 bool(row["action_lineage_resolved"]) for row in lineage
             ),
-            "selected_trace_path": str(selected_path),
+            "selected_trace_path": str(selected_manifest_path),
+            "selected_trace_chunk_count": len(self._chunks),
+            "max_buffered_event_count": int(self.chunk_size),
             "candidate_lineage_path": str(lineage_path),
         }
         write_json(root / "trace_summary.json", summary)
+        write_json(
+            root / "_TRACE_COMPLETE.json",
+            {
+                "trace_complete": True,
+                "selected_trace_manifest_sha256": sha256_file(selected_manifest_path),
+                "candidate_lineage_sha256": sha256_file(lineage_path),
+            },
+        )
         return summary
+
+
+def load_selected_trace(manifest_path: str | Path) -> list[dict[str, Any]]:
+    """Reload a completed chunked trace in exact walk order."""
+
+    path = Path(manifest_path).expanduser().resolve()
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("format") != "chunked_jsonl":
+        raise ValueError(f"Unsupported COMRECGC selected trace format: {manifest.get('format')!r}")
+    rows: list[dict[str, Any]] = []
+    for expected_index, chunk in enumerate(manifest.get("chunks") or []):
+        if int(chunk.get("index", -1)) != expected_index:
+            raise ValueError("COMRECGC selected trace chunks are not contiguous.")
+        chunk_path = path.parent / str(chunk["path"])
+        if sha256_file(chunk_path) != str(chunk["sha256"]):
+            raise ValueError(f"COMRECGC selected trace chunk SHA256 mismatch: {chunk_path}")
+        chunk_rows = [
+            json.loads(line)
+            for line in chunk_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if len(chunk_rows) != int(chunk["row_count"]):
+            raise ValueError(f"COMRECGC selected trace chunk row count mismatch: {chunk_path}")
+        rows.extend(chunk_rows)
+    if len(rows) != int(manifest.get("row_count", -1)):
+        raise ValueError("COMRECGC selected trace total row count mismatch.")
+    return rows
 
 
 def _importance(value: Any) -> list[float]:

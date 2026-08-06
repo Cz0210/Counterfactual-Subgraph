@@ -84,3 +84,42 @@ def test_slot_preserving_eval_is_in_smoke_and_full_dag() -> None:
     )
     assert by_id["mut_full_gate"].dependency_type == "afterany"
     assert by_id["mut_freeze"].dependency_stages == ("mut_full_gate",)
+
+
+def test_frozen_blocker_artifacts_are_adopted_idempotently(tmp_path: Path) -> None:
+    state = MODULE.RecoveryState(
+        tmp_path,
+        "run3",
+        requested_mode="all",
+        datasets=["aids", "mutagenicity"],
+    )
+    resolution = {
+        "selected": {
+            "aids_native": {
+                "counterfactuals_path": "/aids/counterfactuals.pt",
+                "counterfactuals_sha256": "a" * 64,
+                "counterfactuals_bytes": 340685,
+                "evidence_path": "/aids/failure.json",
+            },
+            "mutagenicity_generation": {
+                "counterfactuals_path": "/mut/counterfactuals.pt",
+                "counterfactuals_sha256": "b" * 64,
+                "counterfactuals_bytes": 953049,
+                "manifest_path": "/mut/run_manifest.json",
+            },
+            "mutagenicity_common_recourse": {
+                "common_recourse_dir": "/mut/common_recourse",
+                "selected_common_recourses_sha256": "c" * 64,
+                "representative_counterfactuals_sha256": "d" * 64,
+                "manifest_path": "/mut/common_recourse/run_manifest.json",
+            },
+        }
+    }
+    first = MODULE.adopt_resolved_artifacts(state, resolution)
+    second = MODULE.adopt_resolved_artifacts(state, resolution)
+    assert second == first
+    assert [row["status"] for row in first] == ["ADOPT_EXISTING"] * 3
+    assert all(row["algorithm_rerun"] is False for row in first)
+    assert state.data["jobs"] == []
+    events = state.events_path.read_text(encoding="utf-8")
+    assert events.count('"event": "STAGES_ADOPTED"') == 1

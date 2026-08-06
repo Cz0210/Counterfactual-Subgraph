@@ -92,12 +92,14 @@ class RecoveryState:
                 "project_commit": git_commit(PROJECT_ROOT),
                 "upstream_commit": UPSTREAM_COMMIT,
                 "jobs": [],
+                "adopted_stages": [],
                 "completed_stages": [],
                 "failed_stages": [],
                 "created_at": now(),
             }
             self.save()
             self.event("RUN_CREATED", {"run_id": run_id})
+        self.data.setdefault("adopted_stages", [])
 
     def save(self) -> None:
         self.data["updated_at"] = now()
@@ -201,12 +203,14 @@ def preflight(state: RecoveryState) -> dict[str, Any]:
         outputs_root=PROJECT_ROOT / "outputs/hpc/baselines/comrecgc",
         output_path=state.root / "evidence/artifact_resolution.json",
     )
+    adopt_resolved_artifacts(state, artifact_resolution)
     evidence = {
         "branch": branch,
         "project_commit": commit,
         "upstream_root": str(upstream),
         "upstream_commit": UPSTREAM_COMMIT,
         "artifact_resolution_passed": artifact_resolution["resolution_passed"],
+        "adopted_stage_count": len(state.data["adopted_stages"]),
         "sbatch": shutil.which("sbatch") or "",
         "sacct": shutil.which("sacct") or "",
     }
@@ -215,6 +219,60 @@ def preflight(state: RecoveryState) -> dict[str, Any]:
     write_json(state.root / "evidence/preflight.json", evidence)
     state.transition("PREFLIGHT_PASSED", preflight=evidence)
     return evidence
+
+
+def adopt_resolved_artifacts(
+    state: RecoveryState, artifact_resolution: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Record frozen successful inputs without submitting or regenerating them."""
+
+    selected = dict(artifact_resolution.get("selected") or {})
+    aids = dict(selected.get("aids_native") or {})
+    mut_generation = dict(selected.get("mutagenicity_generation") or {})
+    mut_common = dict(selected.get("mutagenicity_common_recourse") or {})
+    if not aids or not mut_generation or not mut_common:
+        raise RuntimeError("Resolved COMRECGC artifacts are incomplete and cannot be adopted.")
+    records = [
+        {
+            "stage_id": "aids_native_candidate_artifact",
+            "dataset": "aids",
+            "status": "ADOPT_EXISTING",
+            "artifact_path": aids["counterfactuals_path"],
+            "artifact_sha256": aids["counterfactuals_sha256"],
+            "artifact_bytes": int(aids["counterfactuals_bytes"]),
+            "evidence_path": aids["evidence_path"],
+            "algorithm_rerun": False,
+        },
+        {
+            "stage_id": "mut_smoke_generation_artifact",
+            "dataset": "mutagenicity",
+            "status": "ADOPT_EXISTING",
+            "artifact_path": mut_generation["counterfactuals_path"],
+            "artifact_sha256": mut_generation["counterfactuals_sha256"],
+            "artifact_bytes": int(mut_generation["counterfactuals_bytes"]),
+            "evidence_path": mut_generation["manifest_path"],
+            "algorithm_rerun": False,
+        },
+        {
+            "stage_id": "mut_smoke_common_recourse_artifact",
+            "dataset": "mutagenicity",
+            "status": "ADOPT_EXISTING",
+            "artifact_path": mut_common["common_recourse_dir"],
+            "selected_common_recourses_sha256": mut_common[
+                "selected_common_recourses_sha256"
+            ],
+            "representative_counterfactuals_sha256": mut_common[
+                "representative_counterfactuals_sha256"
+            ],
+            "evidence_path": mut_common["manifest_path"],
+            "algorithm_rerun": False,
+        },
+    ]
+    if state.data.get("adopted_stages") != records:
+        state.data["adopted_stages"] = records
+        state.save()
+        state.event("STAGES_ADOPTED", {"stages": records})
+    return records
 
 
 def _dependency(stage: Stage, state: RecoveryState) -> str | None:
@@ -532,6 +590,7 @@ def report(state: RecoveryState) -> None:
         "project_commit": state.data["project_commit"],
         "upstream_commit": state.data["upstream_commit"],
         "jobs": state.data["jobs"],
+        "adopted_stages": state.data.get("adopted_stages") or [],
         "completed_stages": state.data["completed_stages"],
         "failed_stages": state.data["failed_stages"],
         "state_path": str(state.state_path),
@@ -544,6 +603,10 @@ def report(state: RecoveryState) -> None:
         f"- Status: {payload['status']}",
         f"- Project commit: {payload['project_commit']}",
         f"- Upstream commit: {payload['upstream_commit']}",
+        "- Adopted stages: "
+        + ", ".join(row["stage_id"] for row in payload["adopted_stages"])
+        if payload["adopted_stages"]
+        else "- Adopted stages: none",
         f"- Completed stages: {', '.join(payload['completed_stages']) or 'none'}",
         f"- Failed stages: {', '.join(payload['failed_stages']) or 'none'}",
         "",

@@ -5431,6 +5431,12 @@ set and upstream parameters. Run native full with upstream defaults regardless
 of density-retry yield, treating an empty common-recourse result as valid
 science with N/A cost.
 
+Persist selected-transition trace events as bounded, atomic JSONL chunks. Keep
+only the first predecessor needed for candidate replay, release consumed
+neighbor/action mappings after every move, and reuse only byte-identical chunks
+on deterministic resume. This prevents the trace layer from retaining a second
+full graph/path history or duplicating a completed trace prefix.
+
 For project Mutagenicity, replay the exact official action lineage and apply one
 deterministic chemistry projection per raw candidate: retained chemistry comes
 from source sidecars, new untyped edges are SINGLE, each action is sanitized

@@ -537,7 +537,11 @@ def run_project_generation(
     runtime_root = root / "official_runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).isoformat()
-    trace_recorder = ActionTraceRecorder() if trace_output_dir is not None else None
+    trace_recorder = (
+        ActionTraceRecorder(output_dir=trace_output_dir)
+        if trace_output_dir is not None
+        else None
+    )
     try:
         with imported_upstream(upstream_root) as modules:
             official = modules["comrecgc"]

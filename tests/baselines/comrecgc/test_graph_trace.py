@@ -8,6 +8,7 @@ import pytest
 from src.baselines.comrecgc.graph_trace import (
     ActionTraceRecorder,
     assert_trace_parity,
+    load_selected_trace,
     stable_graph_sha256,
 )
 
@@ -63,10 +64,9 @@ def test_trace_parity_rejects_frequency_or_order_change() -> None:
         assert_trace_parity(reference, traced)
 
 
-def test_selected_action_lineage_is_exact_and_ordered() -> None:
+def _record_one_transition(recorder: ActionTraceRecorder) -> tuple[Graph, Graph, SimpleNamespace]:
     source = graph()
     target = graph(atom=1)
-    recorder = ActionTraceRecorder()
     recorder.record_enumerated(
         source_graph=source,
         target_graph=target,
@@ -75,6 +75,13 @@ def test_selected_action_lineage_is_exact_and_ordered() -> None:
         target_node_ids=target.comrecgc_trace_node_ids,
     )
     module = SimpleNamespace(graph_map={"source": [source], "target": [target]})
+
+    return source, target, module
+
+
+def test_selected_action_lineage_is_exact_and_ordered() -> None:
+    recorder = ActionTraceRecorder()
+    _source, target, module = _record_one_transition(recorder)
 
     def move(*_args: object, **_kwargs: object) -> tuple:
         return (["target"], False, None, None, None)
@@ -93,3 +100,59 @@ def test_selected_action_lineage_is_exact_and_ordered() -> None:
     lineage = recorder.candidate_lineage(candidate_payload)
     assert lineage[0]["action_lineage_resolved"] is True
     assert lineage[0]["actions"][0]["action"] == ["NLC", 0, 1]
+
+
+def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:
+    recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
+    _source, target, module = _record_one_transition(recorder)
+
+    def move(*_args: object, **_kwargs: object) -> tuple:
+        return (["target"], False, None, None, None)
+
+    recorder.wrap_move(move, module)(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+    payload_value = {
+        "graph_map": {"target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    summary = recorder.write(tmp_path, payload_value)
+    rows = load_selected_trace(summary["selected_trace_path"])
+    assert len(rows) == 1
+    assert rows[0]["action"] == ["NLC", 0, 1]
+    assert summary["selected_trace_chunk_count"] == 1
+    assert recorder._pending_events == []
+    assert not hasattr(recorder, "selected")
+
+
+def test_trace_resume_reuses_identical_completed_chunks_without_duplicates(tmp_path) -> None:
+    payload_value = None
+    for _run in range(2):
+        recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
+        _source, target, module = _record_one_transition(recorder)
+
+        def move(*_args: object, **_kwargs: object) -> tuple:
+            return (["target"], False, None, None, None)
+
+        recorder.wrap_move(move, module)(
+            graphs_hash=["source"],
+            start_graphs_hash=["source"],
+            importance_args={},
+            teleport_probability=0.1,
+        )
+        payload_value = {
+            "graph_map": {"target": [target]},
+            "counterfactual_candidates": [{"graph_hash": "target"}],
+        }
+        summary = recorder.write(tmp_path, payload_value)
+
+    chunks = list((tmp_path / "selected_action_trace_chunks").glob("part-*.jsonl"))
+    assert len(chunks) == 1
+    assert len(load_selected_trace(summary["selected_trace_path"])) == 1
+    manifest = __import__("json").loads(
+        (tmp_path / "selected_action_trace_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["chunks"][0]["materialization"] == "adopt_existing_identical"

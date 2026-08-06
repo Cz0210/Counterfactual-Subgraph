@@ -70,7 +70,10 @@ events and evidence paths. Successful stages are reusable and retries are bounde
 
 The resolver accepts these only when exact statistics, manifest lineage,
 fixed upstream commit, and file SHA256 agree. Directory names alone are not an
-identity proof.
+identity proof. The recovery state records the AIDS candidate artifact, the
+Mutagenicity smoke generation artifact, and its common-recourse artifact as
+`ADOPT_EXISTING`; adoption creates no Slurm job and does not regenerate either
+candidate set.
 
 ## Trace and chemistry gates
 
@@ -79,6 +82,10 @@ upstream functions. It records enumerated actions and the selected transition
 predecessor without making RNG calls. Consumed neighbor maps are released after
 each move and candidate paths are reconstructed from first predecessors, so
 full tracing is linear in selected moves rather than quadratic in path length.
+Selected-transition audit events are atomically streamed in bounded JSONL
+chunks; the recorder never retains a second complete walk history. A resumed
+deterministic replay reuses byte-identical completed chunks by index and rejects
+different or stale chunks, so it cannot duplicate an already persisted prefix.
 Trace-on output must match the frozen trace-off payload in normalized graph
 topology, node features, frequency, importance, and candidate order.
 
