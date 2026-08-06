@@ -19,6 +19,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/share/home/u20526/czx/counterfactual-subgraph}"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONHASHSEED=0
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 SOURCE_ARTIFACT="${SOURCE_ARTIFACT:-outputs/hpc/baselines/comrecgc/native_smoke/aids/comrecgc_native_common_64p_20260806_v6/counterfactuals.pt}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-096ddd0f4ac31126a0665a11effb7362c2137229ff6b53b50e16c081ef6c274a}"

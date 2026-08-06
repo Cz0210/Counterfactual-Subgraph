@@ -63,3 +63,10 @@ def test_native_smoke_requires_common_recourse_serialization() -> None:
     assert '[[ "$NATIVE_PARENT_LIMIT" == "64" ]]' in text
     assert 'native_common_recourse.json' in text
     assert 'native_representative_counterfactuals.pt' in text
+
+
+def test_aids_existing_audit_loads_trusted_upstream_pyg_cache() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_aids_existing_audit.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" in text

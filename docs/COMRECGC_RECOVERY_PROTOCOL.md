@@ -115,7 +115,9 @@ cluster is recorded as `EMPTY_COMMON_RECOURSE`, with coverage zero and cost
 `null`/N/A. It is not converted into an engineering failure.
 All native dataset/model calls run with the pinned upstream checkout as their
 scoped working directory so existing TU runtime caches are reused; the project
-never downloads benchmark data from a compute job.
+never downloads benchmark data from a compute job. Native wrappers opt into
+trusted full-object loading for the pinned PyG cache because PyTorch 2.6 changed
+the `torch.load` default to `weights_only=True`.
 
 Trace replay requires exact candidate count, graph tensors, candidate order,
 and frequency. Importance values are finite and may differ by at most `1e-6`
