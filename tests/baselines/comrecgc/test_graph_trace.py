@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from types import SimpleNamespace
+
+import pytest
+
+from src.baselines.comrecgc.graph_trace import (
+    ActionTraceRecorder,
+    assert_trace_parity,
+    stable_graph_sha256,
+)
+
+
+@dataclass
+class Graph:
+    x: list[list[float]]
+    edge_index: list[list[int]]
+    num_nodes: int
+    comrecgc_parent_id: str = "parent-1"
+    comrecgc_trace_node_ids: tuple[str, ...] = ("source:0", "source:1")
+
+
+def graph(*, swapped_edges: bool = False, atom: int = 0) -> Graph:
+    edges = [[0, 1], [1, 0]]
+    if swapped_edges:
+        edges = [[1, 0], [0, 1]]
+    return Graph(
+        x=[[1.0 - atom, float(atom)], [0.0, 1.0]],
+        edge_index=edges,
+        num_nodes=2,
+    )
+
+
+def payload(first: Graph, second: Graph) -> dict:
+    return {
+        "graph_map": {"a": [first], "b": [second]},
+        "counterfactual_candidates": [
+            {"graph_hash": "a", "frequency": 4, "importance_parts": [0.7, 1.0]},
+            {"graph_hash": "b", "frequency": 2, "importance_parts": [0.8, 1.0]},
+        ],
+    }
+
+
+def test_stable_graph_sha256_normalizes_edge_order() -> None:
+    assert stable_graph_sha256(graph()) == stable_graph_sha256(graph(swapped_edges=True))
+    assert stable_graph_sha256(graph()) != stable_graph_sha256(graph(atom=1))
+
+
+def test_trace_does_not_change_candidates() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(swapped_edges=True), graph(atom=1))
+    result = assert_trace_parity(reference, traced)
+    assert result["trace_parity_passed"] is True
+    assert result["candidate_count"] == 2
+
+
+def test_trace_parity_rejects_frequency_or_order_change() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    traced["counterfactual_candidates"][0]["frequency"] = 5
+    with pytest.raises(ValueError, match="Trace-on/off"):
+        assert_trace_parity(reference, traced)
+
+
+def test_selected_action_lineage_is_exact_and_ordered() -> None:
+    source = graph()
+    target = graph(atom=1)
+    recorder = ActionTraceRecorder()
+    recorder.record_enumerated(
+        source_graph=source,
+        target_graph=target,
+        action=("NLC", 0, 1),
+        source_node_ids=source.comrecgc_trace_node_ids,
+        target_node_ids=target.comrecgc_trace_node_ids,
+    )
+    module = SimpleNamespace(graph_map={"source": [source], "target": [target]})
+
+    def move(*_args: object, **_kwargs: object) -> tuple:
+        return (["target"], False, None, None, None)
+
+    wrapped = recorder.wrap_move(move, module)
+    wrapped(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+    candidate_payload = {
+        "graph_map": {"target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    lineage = recorder.candidate_lineage(candidate_payload)
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["actions"][0]["action"] == ["NLC", 0, 1]

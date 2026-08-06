@@ -31,6 +31,12 @@ from .model_adapter import (
     load_aids_gnn,
     load_mutagenicity_gnn,
 )
+from .graph_trace import (
+    ActionTraceRecorder,
+    assert_trace_parity,
+    stable_graph_sha256,
+    trace_node_ids,
+)
 from .project_dataset import (
     GraphListDataset,
     ProjectDatasetBundle,
@@ -117,11 +123,16 @@ def _materialize_dataset_indices(dataset: Any, indices: Sequence[int]) -> list[A
     return [dataset[int(index)] for index in indices]
 
 
-def lineage_neighbor_wrapper(original: Callable[[Any, tuple[Any, ...]], Any]) -> Callable[[Any, tuple[Any, ...]], Any]:
+def lineage_neighbor_wrapper(
+    original: Callable[[Any, tuple[Any, ...]], Any],
+    *,
+    trace_recorder: ActionTraceRecorder | None = None,
+) -> Callable[[Any, tuple[Any, ...]], Any]:
     """Preserve source-node lineage without changing graph tensors."""
 
     def wrapped(graph: Any, action: tuple[Any, ...]) -> Any:
         torch, _Batch = _torch_stack()
+        source_trace_ids = trace_node_ids(graph) if trace_recorder is not None else []
         result = original(graph, action)
         origins = _as_list(getattr(graph, "comrecgc_node_origin"))
         action_name = str(action[0])
@@ -136,6 +147,18 @@ def lineage_neighbor_wrapper(original: Callable[[Any, tuple[Any, ...]], Any]) ->
                 f"action={action_name}, origins={len(origins)}, nodes={int(result.num_nodes)}"
             )
         result.comrecgc_node_origin = torch.tensor(origins, dtype=torch.long)
+        if trace_recorder is not None:
+            target_trace_ids = list(source_trace_ids)
+            if action_name in {"NA", "INA"}:
+                target_trace_ids.append(
+                    "new:"
+                    + stable_graph_sha256(graph)[:16]
+                    + ":"
+                    + ":".join(str(value) for value in action)
+                )
+            elif action_name in {"NR", "INR"}:
+                target_trace_ids.pop(int(action[1]))
+            result.comrecgc_trace_node_ids = target_trace_ids
         for name in (
             "comrecgc_parent_id",
             "comrecgc_source_index",
@@ -145,6 +168,14 @@ def lineage_neighbor_wrapper(original: Callable[[Any, tuple[Any, ...]], Any]) ->
         ):
             if hasattr(graph, name):
                 setattr(result, name, getattr(graph, name))
+        if trace_recorder is not None:
+            trace_recorder.record_enumerated(
+                source_graph=graph,
+                target_graph=result,
+                action=action,
+                source_node_ids=source_trace_ids,
+                target_node_ids=target_trace_ids,
+            )
         return result
 
     return wrapped
@@ -209,10 +240,12 @@ def patched_official_runtime(
     gnn_device: str,
     embedding_device: str,
     batch_size: int,
+    trace_recorder: ActionTraceRecorder | None = None,
 ) -> Iterator[None]:
     originals = {
         "call": module.call,
         "neighbor_graph_access": module.neighbor_graph_access,
+        "move_to_next_graph": module.move_to_next_graph,
     }
     module.call = _safe_call_factory(
         model=model,
@@ -221,12 +254,21 @@ def patched_official_runtime(
         embedding_device=embedding_device,
         batch_size=batch_size,
     )
-    module.neighbor_graph_access = lineage_neighbor_wrapper(module.neighbor_graph_access)
+    module.neighbor_graph_access = lineage_neighbor_wrapper(
+        module.neighbor_graph_access,
+        trace_recorder=trace_recorder,
+    )
+    if trace_recorder is not None:
+        module.move_to_next_graph = trace_recorder.wrap_move(
+            module.move_to_next_graph,
+            module,
+        )
     try:
         yield
     finally:
         module.call = originals["call"]
         module.neighbor_graph_access = originals["neighbor_graph_access"]
+        module.move_to_next_graph = originals["move_to_next_graph"]
 
 
 def _predict_internal(model: Any, graphs: Sequence[Any], *, device: str, batch_size: int = 128) -> list[int]:
@@ -308,7 +350,7 @@ def model_counterfactual_graphs(
     return resolved
 
 
-def _run_native_common_recourse_smoke(
+def _run_native_common_recourse(
     *,
     modules: Mapping[str, Any],
     sources: Sequence[Any],
@@ -316,6 +358,8 @@ def _run_native_common_recourse_smoke(
     embedding_model: Any,
     output_dir: Path,
     device: str,
+    mode: str,
+    allow_empty: bool,
     batch_size: int = 128,
 ) -> dict[str, Any]:
     """Exercise official clustering/summary on real native random-walk output."""
@@ -324,7 +368,7 @@ def _run_native_common_recourse_smoke(
 
     from .recourse import stable_graph_id, trace_official_cluster_order
 
-    parameters = RecourseParameters.for_mode("smoke")
+    parameters = RecourseParameters.for_mode(mode)
     candidate_graphs = model_counterfactual_graphs(payload, limit=parameters.cf_size)
     torch, Batch = _torch_stack()
     with torch.no_grad():
@@ -360,45 +404,49 @@ def _run_native_common_recourse_smoke(
                 - source_embeddings[int(source_index)]
             ) / scale[int(local_candidate), int(source_index)]
             recourse_vectors.append(vector.numpy())
-    if not recourse_vectors:
-        raise RuntimeError("Native smoke has no pairs inside the official theta gate.")
-    recourse_array = np.asarray(recourse_vectors)
-    if not np.isfinite(recourse_array).all():
-        raise RuntimeError("Native common-recourse embeddings contain NaN/Inf.")
-    clustering = DBSCAN(
-        eps=float(parameters.delta), min_samples=int(parameters.cluster_size)
-    ).fit(recourse_array)
-    official_result = modules["common_recourse"].coverage_summary(
-        db_2=clustering,
-        rec=torch.tensor(recourse_array),
-        idxs=pair_indices,
-        radius=float(parameters.delta),
-        threshold_theta=float(parameters.theta),
-        recourse_size=int(parameters.recourse_size),
-    )
-    selected = trace_official_cluster_order(
-        labels=np.asarray(clustering.labels_),
-        recourse_vectors=recourse_array,
-        pair_indices=pair_indices,
-        radius=float(parameters.delta),
-        theta=float(parameters.theta),
-        recourse_size=int(parameters.recourse_size),
-        official_greedy=modules[
-            "common_recourse"
-        ].greedy_counterfactual_summary_from_covering_sets,
-    )
+    if recourse_vectors:
+        recourse_array = np.asarray(recourse_vectors)
+        if not np.isfinite(recourse_array).all():
+            raise RuntimeError("Native common-recourse embeddings contain NaN/Inf.")
+        clustering = DBSCAN(
+            eps=float(parameters.delta), min_samples=int(parameters.cluster_size)
+        ).fit(recourse_array)
+        official_result = modules["common_recourse"].coverage_summary(
+            db_2=clustering,
+            rec=torch.tensor(recourse_array),
+            idxs=pair_indices,
+            radius=float(parameters.delta),
+            threshold_theta=float(parameters.theta),
+            recourse_size=int(parameters.recourse_size),
+        )
+        selected = trace_official_cluster_order(
+            labels=np.asarray(clustering.labels_),
+            recourse_vectors=recourse_array,
+            pair_indices=pair_indices,
+            radius=float(parameters.delta),
+            theta=float(parameters.theta),
+            recourse_size=int(parameters.recourse_size),
+            official_greedy=modules[
+                "common_recourse"
+            ].greedy_counterfactual_summary_from_covering_sets,
+        )
+        labels = np.asarray(clustering.labels_)
+    else:
+        recourse_array = np.empty((0, 0), dtype=float)
+        official_result = ([], [], [])
+        selected = []
+        labels = np.asarray([], dtype=int)
     diagnostics = {
         "model_counterfactual_candidate_count": len(candidate_graphs),
         "distance_pair_count": distance_pair_count,
         "theta_eligible_pair_count": len(pair_indices),
-        "dbscan_cluster_count": len(
-            {int(value) for value in clustering.labels_ if int(value) >= 0}
-        ),
+        "dbscan_cluster_count": len({int(value) for value in labels if int(value) >= 0}),
+        "dbscan_noise_point_count": int(np.count_nonzero(labels < 0)),
         "official_coverage_summary_invoked": True,
         "official_coverage_summary_result": [list(value) for value in official_result],
         "selected_common_recourse_count": len(selected),
     }
-    if not selected:
+    if not selected and not allow_empty:
         write_json(output_dir / "native_common_recourse_failure.json", diagnostics)
         raise RuntimeError("Native smoke common-recourse summary is empty.")
     representatives = [
@@ -426,6 +474,11 @@ def _run_native_common_recourse_smoke(
         "parameters": parameters.__dict__,
         **diagnostics,
         "common_recourse_count": len(rows),
+        "scientific_output_empty": not bool(rows),
+        "execution_status": (
+            "EMPTY_COMMON_RECOURSE" if not rows else "FULL_EXECUTION_PASS"
+        ),
+        "native_cost": None if not rows else rows[-1]["native_cumulative_cost"],
         "official_greedy_order_preserved": True,
         "representative_policy": "real_pair_nearest_cluster_center",
         "representative_counterfactuals_path": str(representative_path),
@@ -455,6 +508,8 @@ def run_project_generation(
     device: str = "cuda:0",
     batch_size: int = 128,
     resume: bool = False,
+    trace_output_dir: str | Path | None = None,
+    parity_reference_path: str | Path | None = None,
 ) -> dict[str, Any]:
     parameters.validate(mode)
     project = Path(project_root).expanduser().resolve()
@@ -482,6 +537,7 @@ def run_project_generation(
     runtime_root = root / "official_runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).isoformat()
+    trace_recorder = ActionTraceRecorder() if trace_output_dir is not None else None
     try:
         with imported_upstream(upstream_root) as modules:
             official = modules["comrecgc"]
@@ -542,7 +598,14 @@ def run_project_generation(
                 "cf_mode": CF_MODE,
                 "calibration_loaded": False,
                 "test_loaded": False,
-                "official_compatibility_patches": list(OFFICIAL_RUNTIME_PATCHES),
+                "official_compatibility_patches": [
+                    *OFFICIAL_RUNTIME_PATCHES,
+                    *(
+                        ["project_runtime_action_trace_only_v1"]
+                        if trace_recorder is not None
+                        else []
+                    ),
+                ],
                 "official_source_modified": False,
                 "started_at": started,
             }
@@ -568,6 +631,7 @@ def run_project_generation(
                     gnn_device=device,
                     embedding_device=device,
                     batch_size=batch_size,
+                    trace_recorder=trace_recorder,
                 ):
                     official.counterfactual_summary_with_randomwalk(
                         dataset_name=dataset_key,
@@ -595,6 +659,16 @@ def run_project_generation(
             materialization = _materialize_official_result(official_result, result_path)
             payload = _torch_load(result_path)
             graph_map, candidates = validate_counterfactual_payload(payload)
+            trace_summary: dict[str, Any] | None = None
+            parity_summary: dict[str, Any] | None = None
+            if trace_recorder is not None:
+                trace_summary = trace_recorder.write(trace_output_dir, payload)
+            if parity_reference_path is not None:
+                reference_path = Path(parity_reference_path).expanduser().resolve()
+                parity_summary = assert_trace_parity(_torch_load(reference_path), payload)
+                parity_summary["reference_path"] = str(reference_path)
+                parity_summary["reference_sha256"] = sha256_file(reference_path)
+                write_json(root / "trace_parity.json", parity_summary)
             manifest = {
                 **config,
                 "counterfactuals_path": str(result_path),
@@ -604,6 +678,9 @@ def run_project_generation(
                 "counterfactual_candidate_count": len(candidates),
                 "visited_graph_count": len(graph_map),
                 "traversed_step_count": len(payload.get("traversed_hashes") or []),
+                "trace_enabled": trace_recorder is not None,
+                "trace_summary": trace_summary,
+                "trace_parity": parity_summary,
                 "candidate_order_source": "official_frequency_reinforced_order",
                 "algorithm_rerun": True,
                 "run_complete": True,
@@ -653,16 +730,19 @@ def run_native_smoke(
     parameters: GenerationParameters,
     parent_limit: int = 32,
     device: str = "cuda:0",
+    mode: str = "smoke",
 ) -> dict[str, Any]:
     """Exercise the official TU dataset/model/NeuroSED/random-walk route."""
 
-    parameters.validate("smoke")
+    parameters.validate(mode)
     project = Path(project_root).expanduser().resolve()
     root = require_empty_output(output_dir)
     torch, _Batch = _torch_stack()
     random.seed(parameters.seed)
     np.random.seed(parameters.seed)
     torch.manual_seed(parameters.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(parameters.seed)
     try:
         runtime_root = root / "official_runtime"
         runtime_root.mkdir(parents=True)
@@ -674,11 +754,16 @@ def run_native_smoke(
                 num_features = int(graphs.num_features)
                 model = modules["gnn"].load_trained_gnn(dataset, device=device).eval()
                 predictions = modules["gnn"].load_trained_prediction(dataset, device=device).cpu()
-                source_indices = torch.where(predictions == 0)[0][: int(parent_limit)]
+                all_source_indices = torch.where(predictions == 0)[0]
+                source_indices = (
+                    all_source_indices
+                    if mode == "full"
+                    else all_source_indices[: int(parent_limit)]
+                )
                 sources = _materialize_dataset_indices(
                     graphs, [int(value) for value in source_indices.tolist()]
                 )
-                if len(sources) != int(parent_limit):
+                if mode == "smoke" and len(sources) != int(parent_limit):
                     raise RuntimeError("Native TU smoke source cohort is smaller than requested.")
                 for index, graph in enumerate(sources):
                     graph.comrecgc_parent_id = f"TU_{dataset.upper()}_{int(source_indices[index]):06d}"
@@ -730,25 +815,32 @@ def run_native_smoke(
         materialization_mode = _materialize_official_result(source_result, result)
         payload = _torch_load(result)
         graph_map, candidates = validate_counterfactual_payload(payload)
-        native_common = _run_native_common_recourse_smoke(
+        native_common = _run_native_common_recourse(
             modules=modules,
             sources=sources,
             payload=payload,
             embedding_model=embedding,
             output_dir=root,
             device=device,
+            mode=mode,
+            allow_empty=mode == "full",
         )
         manifest = {
             "method": METHOD,
             "route": "native_reproduction",
             "dataset": f"TU/{dataset}",
+            "mode": mode,
             "project_commit": _git_commit(project),
             "upstream_commit": UPSTREAM_COMMIT,
             "parameters": parameters.__dict__,
-            "parent_limit": int(parent_limit),
+            "parent_limit": len(sources),
+            "full_parent_universe": mode == "full",
             "counterfactual_candidate_count": len(candidates),
             "visited_graph_count": len(graph_map),
             "common_recourse_count": int(native_common["common_recourse_count"]),
+            "scientific_output_empty": bool(native_common["scientific_output_empty"]),
+            "execution_status": str(native_common["execution_status"]),
+            "native_cost": native_common["native_cost"],
             "native_common_recourse_path": str(root / "native_common_recourse.json"),
             "native_common_recourse_sha256": sha256_file(
                 root / "native_common_recourse.json"
@@ -766,13 +858,14 @@ def run_native_smoke(
             "artifact_materialization_mode": materialization_mode,
             "not_eligible_for_project_figures": True,
             "run_complete": True,
+            "full_execution_pass": mode == "full",
         }
         write_json(root / "run_manifest.json", manifest)
         write_json(root / "_RUN_COMPLETE.json", {"run_complete": True})
         return manifest
     except Exception as exc:
         failure = {
-            "stage": "native_smoke",
+            "stage": f"native_{mode}",
             "dataset": dataset,
             "error_class": type(exc).__name__,
             "message": str(exc),

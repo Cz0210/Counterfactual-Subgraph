@@ -32,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--trace-output-dir",
+        help="Optional project-owned action trace directory; does not modify upstream output.",
+    )
+    parser.add_argument(
+        "--parity-reference",
+        help="Trace-disabled counterfactuals.pt used for normalized trace parity.",
+    )
     return parser
 
 
@@ -42,16 +50,15 @@ def main() -> int:
     if not upstream.is_absolute():
         upstream = Path(args.project_root) / upstream
     if args.route == "native":
-        if args.mode != "smoke":
-            raise ValueError("Native full is intentionally not exposed by this smoke entrypoint.")
         manifest = run_native_smoke(
             project_root=args.project_root,
             upstream_root=upstream,
             dataset=args.dataset,
             output_dir=args.output_dir,
             parameters=parameters,
-            parent_limit=args.parent_limit or 32,
+            parent_limit=args.parent_limit or (32 if args.mode == "smoke" else 0),
             device=args.device,
+            mode=args.mode,
         )
     else:
         required = {
@@ -78,6 +85,8 @@ def main() -> int:
             device=args.device,
             batch_size=args.batch_size,
             resume=args.resume,
+            trace_output_dir=args.trace_output_dir,
+            parity_reference_path=args.parity_reference,
         )
     print(json.dumps(manifest, sort_keys=True, default=str))
     return 0

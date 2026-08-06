@@ -310,33 +310,37 @@ def run_common_recourse(
                     / scale[int(local_cf), int(original_index)]
                 )
                 recourse_vectors.append(vector.numpy())
-        if not recourse_vectors:
-            raise RuntimeError("No source-counterfactual pairs satisfy the official theta gate.")
-        recourse_array = np.asarray(recourse_vectors)
-        if not np.isfinite(recourse_array).all():
-            raise RuntimeError("Recourse embeddings contain NaN/Inf.")
-        clustering = DBSCAN(eps=float(parameters.delta), min_samples=int(parameters.cluster_size))
-        clustering.fit(recourse_array)
-        official_result = modules["common_recourse"].coverage_summary(
-            db_2=clustering,
-            rec=torch.tensor(recourse_array),
-            idxs=pair_indices,
-            radius=float(parameters.delta),
-            threshold_theta=float(parameters.theta),
-            recourse_size=int(parameters.recourse_size),
-        )
-        selected = trace_official_cluster_order(
-            labels=np.asarray(clustering.labels_),
-            recourse_vectors=recourse_array,
-            pair_indices=pair_indices,
-            radius=float(parameters.delta),
-            theta=float(parameters.theta),
-            recourse_size=int(parameters.recourse_size),
-            official_greedy=modules[
-                "common_recourse"
-            ].greedy_counterfactual_summary_from_covering_sets,
-        )
-    if not selected:
+        if recourse_vectors:
+            recourse_array = np.asarray(recourse_vectors)
+            if not np.isfinite(recourse_array).all():
+                raise RuntimeError("Recourse embeddings contain NaN/Inf.")
+            clustering = DBSCAN(eps=float(parameters.delta), min_samples=int(parameters.cluster_size))
+            clustering.fit(recourse_array)
+            official_result = modules["common_recourse"].coverage_summary(
+                db_2=clustering,
+                rec=torch.tensor(recourse_array),
+                idxs=pair_indices,
+                radius=float(parameters.delta),
+                threshold_theta=float(parameters.theta),
+                recourse_size=int(parameters.recourse_size),
+            )
+            selected = trace_official_cluster_order(
+                labels=np.asarray(clustering.labels_),
+                recourse_vectors=recourse_array,
+                pair_indices=pair_indices,
+                radius=float(parameters.delta),
+                theta=float(parameters.theta),
+                recourse_size=int(parameters.recourse_size),
+                official_greedy=modules[
+                    "common_recourse"
+                ].greedy_counterfactual_summary_from_covering_sets,
+            )
+            cluster_labels = np.asarray(clustering.labels_)
+        else:
+            official_result = ([], [], [])
+            selected = []
+            cluster_labels = np.asarray([], dtype=int)
+    if not selected and mode != "full":
         raise RuntimeError("Official common-recourse filtering produced no eligible clusters.")
     representative_graphs: list[Any] = []
     output_rows: list[dict[str, Any]] = []
@@ -388,8 +392,14 @@ def run_common_recourse(
         "model_counterfactual_candidate_count": len(candidate_graphs),
         "distance_pair_count": distance_pair_count,
         "theta_eligible_pair_count": len(pair_indices),
-        "dbscan_cluster_count": len({int(value) for value in clustering.labels_ if int(value) >= 0}),
+        "dbscan_cluster_count": len({int(value) for value in cluster_labels if int(value) >= 0}),
+        "dbscan_noise_point_count": int(np.count_nonzero(cluster_labels < 0)),
         "common_recourse_count": len(output_rows),
+        "scientific_output_empty": not bool(output_rows),
+        "execution_status": (
+            "SCIENTIFIC_OUTPUT_EMPTY" if not output_rows else "FULL_EXECUTION_PASS"
+        ),
+        "native_cost": None if not output_rows else output_rows[-1]["native_cost"],
         "official_coverage_summary_invoked": True,
         "official_coverage_summary_result": [list(value) for value in official_result],
         "official_greedy_order_preserved": True,
