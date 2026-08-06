@@ -167,6 +167,7 @@ def test_recover_existing_trace_without_algorithm_rerun(tmp_path: Path) -> None:
         "num_ambiguous_reconstructions": 0,
         "num_replay_exact": 1,
         "num_replay_failed": 0,
+        "num_zero_action_source_roots": 0,
     }
     assert result["counterfactuals_materialization_mode"] == "hardlink"
     assert os.stat(source / "counterfactuals.pt").st_ino == os.stat(

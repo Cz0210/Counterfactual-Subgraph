@@ -255,6 +255,118 @@ def test_recover_lineage_infers_action_missing_from_cached_transition() -> None:
     ]
 
 
+def test_recover_lineage_accepts_exact_frozen_zero_action_source_root() -> None:
+    source = graph()
+    candidate_payload = {
+        "graph_map": {"source": [source]},
+        "counterfactual_candidates": [{"graph_hash": "source"}],
+    }
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        [],
+        source_graphs_by_parent_id={"parent-1": source},
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["zero_action_source_root"] is True
+    assert lineage[0]["lineage_root_status"] == "frozen_source_graph_exact_zero_action"
+    assert lineage[0]["actions"] == []
+
+
+def test_recover_lineage_rejects_unverified_zero_action_candidate() -> None:
+    candidate = graph()
+    different_source = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"candidate": [candidate]},
+        "counterfactual_candidates": [{"graph_hash": "candidate"}],
+    }
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        [],
+        source_graphs_by_parent_id={"parent-1": different_source},
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is False
+    assert lineage[0]["zero_action_source_root"] is False
+    assert lineage[0]["lineage_root_status"] == "unresolved"
+
+
+def test_recover_lineage_deduplicates_identical_target_events() -> None:
+    source = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    base_event = {
+        "move_index": 3,
+        "head_index": 1,
+        "event": "selected_transition",
+        "source_official_hash": "source",
+        "target_official_hash": "target",
+        "source_graph_sha256": stable_graph_sha256(source),
+        "target_graph_sha256": stable_graph_sha256(target),
+        "parent_id": "parent-1",
+    }
+    selected_events = [
+        {**base_event, "action_resolution": "exact", "action": ["NLC", 0, 1]},
+        {**base_event, "action_resolution": "missing", "action": None},
+    ]
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        source_graphs_by_parent_id={"parent-1": source},
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert len(lineage[0]["actions"]) == 1
+    assert lineage[0]["actions"][0]["action_recovery"] == "recorded_exact"
+
+
+def test_recover_lineage_rejects_conflicting_predecessors_for_one_target() -> None:
+    source_a = graph()
+    source_b = Graph(
+        x=[[0.0, 1.0], [1.0, 0.0]],
+        edge_index=[[0, 1], [1, 0]],
+        num_nodes=2,
+    )
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {
+            "source-a": [source_a],
+            "source-b": [source_b],
+            "target": [target],
+        },
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = []
+    for source_hash, source in (("source-a", source_a), ("source-b", source_b)):
+        selected_events.append(
+            {
+                "move_index": 3,
+                "head_index": 1,
+                "event": "selected_transition",
+                "source_official_hash": source_hash,
+                "target_official_hash": "target",
+                "source_graph_sha256": stable_graph_sha256(source),
+                "target_graph_sha256": stable_graph_sha256(target),
+                "action_resolution": "missing",
+                "action": None,
+                "parent_id": "parent-1",
+            }
+        )
+
+    with pytest.raises(ValueError, match="Ambiguous COMRECGC predecessor"):
+        recover_candidate_lineage_from_selected_trace(
+            candidate_payload,
+            selected_events,
+            source_graphs_by_parent_id={"parent-1": source_a},
+        )
+
+
 def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:
     recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
     source, target, module = _record_one_transition(recorder)

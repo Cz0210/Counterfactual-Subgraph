@@ -645,13 +645,16 @@ def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any
 
 
 def recover_candidate_lineage_from_selected_trace(
-    payload: Mapping[str, Any], selected_events: Sequence[Mapping[str, Any]]
+    payload: Mapping[str, Any],
+    selected_events: Sequence[Mapping[str, Any]],
+    *,
+    source_graphs_by_parent_id: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover complete candidate paths from streamed source/target graph deltas."""
 
     graph_map = payload.get("graph_map") or {}
     graph_by_key: dict[tuple[str, str], Any] = {}
-    graph_by_official_hash: dict[str, Any] = {}
+    graph_by_official_key: dict[tuple[str, str], Any] = {}
     for official_hash, entry in graph_map.items():
         graph = entry[0]
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
@@ -660,24 +663,43 @@ def recover_candidate_lineage_from_selected_trace(
         if existing is not None and normalized_graph_payload(existing) != normalized_graph_payload(graph):
             raise ValueError("Stable COMRECGC graph identity collision during trace recovery.")
         graph_by_key[key] = graph
-        graph_by_official_hash[str(official_hash)] = graph
+        official_key = (parent_id, str(official_hash))
+        existing = graph_by_official_key.get(official_key)
+        if existing is not None and normalized_graph_payload(existing) != normalized_graph_payload(graph):
+            raise ValueError("Official COMRECGC graph identity collision during trace recovery.")
+        graph_by_official_key[official_key] = graph
+
+    frozen_sources = {
+        str(parent_id): graph
+        for parent_id, graph in (source_graphs_by_parent_id or {}).items()
+    }
+    for parent_id, graph in frozen_sources.items():
+        graph_parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
+        if graph_parent_id and graph_parent_id != parent_id:
+            raise ValueError(
+                "Frozen COMRECGC source graph parent identity mismatch: "
+                f"key={parent_id!r}, graph={graph_parent_id!r}."
+            )
 
     predecessor: dict[tuple[str, str], dict[str, Any]] = {}
+    observed_source_keys: set[tuple[str, str]] = set()
     for raw_event in selected_events:
         if raw_event.get("event") != "selected_transition":
             continue
         event = dict(raw_event)
         parent_id = str(event.get("parent_id") or "")
-        source_key = (parent_id, str(event["source_graph_sha256"]))
-        target_key = (parent_id, str(event["target_graph_sha256"]))
-        source_graph = graph_by_key.get(source_key)
-        target_graph = graph_by_key.get(target_key)
-        if source_graph is None:
-            source_graph = graph_by_official_hash.get(str(event["source_official_hash"]))
-        if target_graph is None:
-            target_graph = graph_by_official_hash.get(str(event["target_official_hash"]))
+        if not parent_id:
+            raise ValueError("Selected trace event has no COMRECGC parent identity.")
+        source_key = (parent_id, str(event["source_official_hash"]))
+        target_key = (parent_id, str(event["target_official_hash"]))
+        source_graph = graph_by_official_key.get(source_key)
+        target_graph = graph_by_official_key.get(target_key)
         if source_graph is None or target_graph is None:
             raise ValueError("Selected trace references a graph absent from the frozen payload.")
+        if stable_graph_sha256(source_graph) != str(event["source_graph_sha256"]):
+            raise ValueError("Selected trace source graph SHA256 differs from the frozen payload.")
+        if stable_graph_sha256(target_graph) != str(event["target_graph_sha256"]):
+            raise ValueError("Selected trace target graph SHA256 differs from the frozen payload.")
         inferred = infer_official_single_edit(source_graph, target_graph)
         replayed = apply_action_to_normalized_payload(source_graph, inferred)
         if replayed != normalized_graph_payload(target_graph):
@@ -695,18 +717,49 @@ def recover_candidate_lineage_from_selected_trace(
             "recorded_exact" if recorded is not None else "inferred_exact_graph_delta_v1"
         )
         event["action_replay_exact"] = True
-        predecessor.setdefault(target_key, event)
+        existing = predecessor.get(target_key)
+        if existing is not None:
+            comparable_fields = (
+                "parent_id",
+                "source_official_hash",
+                "target_official_hash",
+                "source_graph_sha256",
+                "target_graph_sha256",
+                "action",
+            )
+            if any(existing.get(field) != event.get(field) for field in comparable_fields):
+                raise ValueError(
+                    "Ambiguous COMRECGC predecessor events target the same graph."
+                )
+            if (
+                existing.get("action_recovery") != "recorded_exact"
+                and event.get("action_recovery") == "recorded_exact"
+            ):
+                predecessor[target_key] = event
+        else:
+            predecessor[target_key] = event
+        observed_source_keys.add(source_key)
 
     rows: list[dict[str, Any]] = []
     candidates = list(payload.get("counterfactual_candidates") or [])
     for candidate_index, candidate in enumerate(candidates):
         official_hash = str(candidate.get("graph_hash"))
-        graph = graph_by_official_hash.get(official_hash)
+        candidate_matches = [
+            (key, value)
+            for key, value in graph_by_official_key.items()
+            if key[1] == official_hash
+        ]
+        if len(candidate_matches) != 1:
+            raise ValueError(
+                "Candidate official graph identity is absent or ambiguous during trace recovery: "
+                f"{official_hash}."
+            )
+        (candidate_key, graph) = candidate_matches[0]
         if graph is None:
             raise ValueError(f"Candidate graph is absent during trace recovery: {official_hash}")
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
         candidate_sha = stable_graph_sha256(graph)
-        current_key = (parent_id, candidate_sha)
+        current_key = candidate_key
         reversed_path: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         while current_key in predecessor:
@@ -715,10 +768,25 @@ def recover_candidate_lineage_from_selected_trace(
             seen.add(current_key)
             event = predecessor[current_key]
             reversed_path.append(event)
-            current_key = (parent_id, str(event["source_graph_sha256"]))
+            current_key = (parent_id, str(event["source_official_hash"]))
         path = list(reversed(reversed_path))
-        root_graph = graph_by_key.get(current_key)
-        resolved = bool(path and root_graph is not None)
+        root_graph = graph_by_official_key.get(current_key)
+        observed_root = current_key in observed_source_keys
+        frozen_source = frozen_sources.get(parent_id)
+        frozen_source_exact = bool(
+            root_graph is not None
+            and frozen_source is not None
+            and normalized_graph_payload(root_graph)
+            == normalized_graph_payload(frozen_source)
+        )
+        resolved = bool(
+            root_graph is not None
+            and (
+                frozen_source_exact
+                if source_graphs_by_parent_id is not None
+                else observed_root
+            )
+        )
         enriched_path: list[dict[str, Any]] = []
         node_ids = trace_node_ids(root_graph) if root_graph is not None else []
         for path_index, event in enumerate(path):
@@ -751,6 +819,16 @@ def recover_candidate_lineage_from_selected_trace(
                 "stable_graph_sha256": candidate_sha,
                 "parent_id": parent_id,
                 "action_lineage_resolved": resolved,
+                "zero_action_source_root": bool(not path and frozen_source_exact),
+                "lineage_root_status": (
+                    "frozen_source_graph_exact_zero_action"
+                    if not path and frozen_source_exact
+                    else "frozen_source_graph_exact"
+                    if frozen_source_exact
+                    else "observed_trace_source"
+                    if observed_root
+                    else "unresolved"
+                ),
                 "actions": enriched_path,
             }
         )

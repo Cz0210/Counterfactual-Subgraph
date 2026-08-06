@@ -121,6 +121,7 @@ def recover_mutagenicity_trace_run(
     output_dir: str | Path,
     expected_reference_sha256: str,
     expected_candidate_count: int = 164,
+    dataset_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Validate and materialize an existing trace without rerunning COMRECGC."""
 
@@ -162,8 +163,27 @@ def recover_mutagenicity_trace_run(
     ):
         raise ValueError("Source selected trace manifest SHA256 mismatch.")
     selected_events = load_selected_trace(selected_manifest)
+    source_graphs_by_parent_id = None
+    source_dataset_fingerprint = None
+    if dataset_dir is not None:
+        from .project_dataset import load_mutagenicity_generation_bundle
+
+        source_bundle = load_mutagenicity_generation_bundle(
+            dataset_dir=dataset_dir,
+            parent_limit=int(config["parent_limit"]),
+        )
+        if source_bundle.parent_ids != list(config["generation_parent_ids"]):
+            raise ValueError(
+                "Frozen trace source parent order differs from resolved generation config."
+            )
+        source_graphs_by_parent_id = dict(
+            zip(source_bundle.parent_ids, source_bundle.graphs, strict=True)
+        )
+        source_dataset_fingerprint = source_bundle.dataset_fingerprint
     lineage = recover_candidate_lineage_from_selected_trace(
-        source_payload, selected_events
+        source_payload,
+        selected_events,
+        source_graphs_by_parent_id=source_graphs_by_parent_id,
     )
     if len(lineage) != int(expected_candidate_count) or any(
         row.get("action_lineage_resolved") is not True for row in lineage
@@ -187,12 +207,16 @@ def recover_mutagenicity_trace_run(
     )
     if replay_exact_count != transition_count:
         raise ValueError("Recovered action lineage does not replay exactly.")
+    zero_action_source_root_count = sum(
+        row.get("zero_action_source_root") is True for row in lineage
+    )
     lineage_replay = {
         "num_transitions": transition_count,
         "num_canonical_actions": transition_count,
         "num_ambiguous_reconstructions": 0,
         "num_replay_exact": replay_exact_count,
         "num_replay_failed": 0,
+        "num_zero_action_source_roots": zero_action_source_root_count,
     }
 
     counterfactuals_path = output_root / "counterfactuals.pt"
@@ -225,7 +249,10 @@ def recover_mutagenicity_trace_run(
         "candidate_lineage_path": str(lineage_path),
         "candidate_lineage_resolved_count": len(lineage),
         "selected_trace_path": str(output_trace / selected_manifest.name),
-        "lineage_recovery_policy": "pinned_upstream_exact_graph_delta_v1",
+        "lineage_recovery_policy": "pinned_upstream_official_hash_source_root_v2",
+        "source_dataset_dir": None if dataset_dir is None else str(Path(dataset_dir).expanduser().resolve()),
+        "source_dataset_fingerprint": source_dataset_fingerprint,
+        "zero_action_source_root_count": zero_action_source_root_count,
         "inferred_action_count": inferred_action_count,
         "recorded_action_count": recorded_action_count,
         "algorithm_rerun": False,
@@ -281,7 +308,10 @@ def recover_mutagenicity_trace_run(
         "counterfactuals_materialization_mode": counterfactuals_mode,
         "resolved_config_materialization_mode": resolved_config_mode,
         "trace_materialization_modes": trace_materialization_modes,
-        "lineage_recovery_policy": "pinned_upstream_exact_graph_delta_v1",
+        "lineage_recovery_policy": "pinned_upstream_official_hash_source_root_v2",
+        "source_dataset_dir": None if dataset_dir is None else str(Path(dataset_dir).expanduser().resolve()),
+        "source_dataset_fingerprint": source_dataset_fingerprint,
+        "zero_action_source_root_count": zero_action_source_root_count,
         "inferred_action_count": inferred_action_count,
         "recorded_action_count": recorded_action_count,
         "trace_parity": parity,

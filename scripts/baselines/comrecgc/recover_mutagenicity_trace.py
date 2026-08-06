@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-failed-generation-dir", required=True)
     parser.add_argument("--reference-counterfactuals-path", required=True)
     parser.add_argument("--expected-reference-sha256", required=True)
+    parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expected-candidate-count", type=int, default=164)
     return parser
@@ -39,6 +40,7 @@ def main() -> int:
             output_dir=output,
             expected_reference_sha256=args.expected_reference_sha256,
             expected_candidate_count=args.expected_candidate_count,
+            dataset_dir=args.dataset_dir,
         )
     except Exception as exc:
         output.mkdir(parents=True, exist_ok=True)

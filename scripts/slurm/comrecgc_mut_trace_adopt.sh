@@ -23,12 +23,16 @@ export PYTHONHASHSEED=0
 SOURCE_FAILED_GENERATION_DIR="${SOURCE_FAILED_GENERATION_DIR:-outputs/hpc/baselines/comrecgc/mutagenicity/recovery_smoke_comrecgc_recovery_20260806_mut_retry1/generation}"
 REFERENCE="${REFERENCE:-outputs/hpc/baselines/comrecgc/mutagenicity/smoke_comrecgc_smoke_budget_retry_20260806_v4/generation/counterfactuals.pt}"
 REFERENCE_SHA256="${REFERENCE_SHA256:-060879cbaf69b1e3279301350f587cab809d48991559a80ff5227c46466df8d0}"
+DATASET_DIR="${DATASET_DIR:-outputs/hpc/mutagenicity/baselines/gcfexplainer/smoke_v1/dataset}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/mutagenicity/recovery_adopted_trace_v1/generation}"
 [[ -s "$SOURCE_FAILED_GENERATION_DIR/counterfactuals.pt" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] missing source trace artifact" >&2; exit 2;
 }
 [[ -s "$SOURCE_FAILED_GENERATION_DIR/trace/_TRACE_COMPLETE.json" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] missing source trace marker" >&2; exit 2;
+}
+[[ -s "$DATASET_DIR/generation_source_graphs.pt" ]] || {
+  echo "[COMRECGC_CONFIG_ERROR] missing frozen generation source graphs" >&2; exit 2;
 }
 [[ ! -e "$OUTPUT_DIR" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] adoption output already exists=$OUTPUT_DIR" >&2; exit 2;
@@ -40,6 +44,7 @@ python scripts/baselines/comrecgc/recover_mutagenicity_trace.py \
   --source-failed-generation-dir "$SOURCE_FAILED_GENERATION_DIR" \
   --reference-counterfactuals-path "$REFERENCE" \
   --expected-reference-sha256 "$REFERENCE_SHA256" \
+  --dataset-dir "$DATASET_DIR" \
   --output-dir "$OUTPUT_DIR" \
   --expected-candidate-count 164
 test -s "$OUTPUT_DIR/recovery_manifest.json"
