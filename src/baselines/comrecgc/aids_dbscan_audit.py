@@ -51,6 +51,13 @@ def _working_directory(path: str | Path):
         os.chdir(previous)
 
 
+def _resolve_project_input(project_root: Path, path: str | Path) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    return candidate.resolve(strict=True)
+
+
 def resolve_upstream_contract(upstream_root: str | Path) -> DBSCANContract:
     root = validate_upstream_checkout(upstream_root)
     source = (root / "common_recourse.py").read_text(encoding="utf-8")
@@ -299,6 +306,11 @@ def run_aids_native_dbscan_audit(
     root = require_empty_output(output_dir)
     project = Path(project_root).expanduser().resolve()
     artifact = Path(counterfactuals_path).expanduser().resolve()
+    if trusted_dataset_payload is None:
+        raise ValueError(
+            "AIDS native audit requires a scoped trusted-cache tensor payload."
+        )
+    trusted_payload_path = _resolve_project_input(project, trusted_dataset_payload)
     if sha256_file(artifact) != expected_sha256:
         raise ValueError("AIDS native counterfactual artifact SHA256 mismatch.")
     contract = resolve_upstream_contract(upstream_root)
@@ -311,14 +323,10 @@ def run_aids_native_dbscan_audit(
         )
     torch, Batch = _torch_stack()
     with imported_upstream(upstream_root) as modules, _working_directory(upstream_root):
-        if trusted_dataset_payload is None:
-            raise ValueError(
-                "AIDS native audit requires a scoped trusted-cache tensor payload."
-            )
         if expected_cache_inventory_sha256 is None:
             raise ValueError("Trusted AIDS cache inventory SHA256 is required.")
         dataset, dataset_payload = load_aids_tensor_payload(
-            trusted_dataset_payload,
+            trusted_payload_path,
             expected_inventory_sha256=expected_cache_inventory_sha256,
         )
         predictions = modules["gnn"].load_trained_prediction("aids", device=device).cpu()
@@ -457,8 +465,8 @@ def run_aids_native_dbscan_audit(
         "audit_passed": True,
         "candidate_identity_basis": "official_untyped_x_edge_index",
         "candidate_stale_edge_attr_count": int(stale_edge_attr_count),
-        "trusted_dataset_payload": str(Path(trusted_dataset_payload).resolve()),
-        "trusted_dataset_payload_sha256": sha256_file(trusted_dataset_payload),
+        "trusted_dataset_payload": str(trusted_payload_path),
+        "trusted_dataset_payload_sha256": sha256_file(trusted_payload_path),
         "trusted_cache_inventory_sha256": expected_cache_inventory_sha256,
         "scientific_output_empty": geometry["postfilter_cluster_count"] == 0,
         "source_counterfactuals_path": str(artifact),

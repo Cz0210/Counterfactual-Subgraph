@@ -6,10 +6,27 @@ import numpy as np
 
 from src.baselines.comrecgc.aids_dbscan_audit import (
     DBSCANContract,
+    _resolve_project_input,
     _working_directory,
     audit_geometry,
     distribution_summary,
 )
+
+
+def test_project_relative_trusted_payload_can_be_resolved_before_upstream_chdir(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    upstream = project / "external/COMRECGC"
+    payload = project / "outputs/trusted_dataset.pt"
+    upstream.mkdir(parents=True)
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b"trusted")
+
+    resolved = _resolve_project_input(project, "outputs/trusted_dataset.pt")
+    with _working_directory(upstream):
+        assert resolved == payload.resolve()
+        assert resolved.read_bytes() == b"trusted"
 
 
 def test_upstream_working_directory_is_scoped_and_restored(tmp_path: Path) -> None:

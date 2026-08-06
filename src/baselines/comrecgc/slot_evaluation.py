@@ -9,6 +9,7 @@ selection, reordering, distance calculation, or teacher inference.
 from __future__ import annotations
 
 import csv
+from collections import Counter
 import io
 import json
 import math
@@ -24,6 +25,29 @@ METHOD = "COMRECGC-Adapted-DeterministicChemRepair"
 ADAPTATION_MODE = "official_cluster_original_medoid_deterministic_chemical_repair"
 SELECTION_METHOD = "official_cluster_rank_original_medoid_no_backfill"
 FLOAT_TOLERANCE = 1e-12
+
+
+def _candidate_slot_id(rank: int) -> str:
+    """Return the evaluator-only identity for one immutable official rank slot."""
+
+    return f"COMRECGC_OFFICIAL_SLOT_{int(rank):06d}"
+
+
+def _slot_id(slot: Mapping[str, Any]) -> str:
+    value = _text(slot.get("candidate_slot_id"))
+    if value:
+        return value
+    rank = _integer(slot.get("official_cluster_rank"))
+    if rank is None or rank <= 0:
+        raise ValueError("Official medoid slot has no stable positive rank identity.")
+    return _candidate_slot_id(rank)
+
+
+def _source_candidate_id(slot: Mapping[str, Any]) -> str:
+    value = _text(slot.get("source_candidate_id") or slot.get("candidate_id"))
+    if not value:
+        raise ValueError("Official medoid slot has no source candidate identity.")
+    return value
 
 
 def _text(value: Any) -> str:
@@ -103,8 +127,11 @@ def load_official_slots(path: str | Path) -> list[dict[str, Any]]:
     for row in rows:
         rank = _integer(row.get("official_cluster_rank"))
         candidate_id = _text(row.get("candidate_id"))
-        if rank is None or rank <= 0 or not candidate_id:
-            raise ValueError("Official medoid rows require a positive rank and candidate_id.")
+        cluster_id = _text(row.get("cluster_id"))
+        if rank is None or rank <= 0 or not candidate_id or not cluster_id:
+            raise ValueError(
+                "Official medoid rows require a positive rank, cluster_id, and candidate_id."
+            )
         if _bool(row.get("invalid_slot_backfill")):
             raise ValueError(f"Official rank {rank} was backfilled; evaluation is forbidden.")
         if _bool(row.get("rank_compaction")):
@@ -116,7 +143,10 @@ def load_official_slots(path: str | Path) -> list[dict[str, Any]]:
             {
                 **row,
                 "official_cluster_rank": rank,
+                "cluster_id": cluster_id,
                 "candidate_id": candidate_id,
+                "source_candidate_id": candidate_id,
+                "candidate_slot_id": _candidate_slot_id(rank),
                 "repair_success": repair_success,
                 "repaired_smiles": smiles,
                 "candidate_slot_valid": slot_valid,
@@ -131,9 +161,37 @@ def load_official_slots(path: str | Path) -> list[dict[str, Any]]:
         raise ValueError(
             "Official medoid ranks must remain the contiguous upstream sequence 1..N."
         )
-    candidate_ids = [str(row["candidate_id"]) for row in slots]
-    if len(candidate_ids) != len(set(candidate_ids)):
-        raise ValueError("Official medoid candidate IDs must be unique.")
+    cluster_ids = [str(row["cluster_id"]) for row in slots]
+    if len(cluster_ids) != len(set(cluster_ids)):
+        raise ValueError("Official cluster IDs must be unique across rank slots.")
+    slot_ids = [_slot_id(row) for row in slots]
+    if len(slot_ids) != len(set(slot_ids)):
+        raise ValueError("Official candidate slot IDs must be unique.")
+    source_counts = Counter(_source_candidate_id(row) for row in slots)
+    source_signatures: dict[str, tuple[bool, str, str]] = {}
+    evaluation_id_by_smiles: dict[str, str] = {}
+    for slot in slots:
+        source_id = _source_candidate_id(slot)
+        signature = (
+            bool(slot["repair_success"]),
+            str(slot["repaired_smiles"]),
+            _text(slot.get("repaired_graph_sha256")),
+        )
+        previous = source_signatures.setdefault(source_id, signature)
+        if previous != signature:
+            raise ValueError(
+                f"Reused source candidate {source_id!r} has inconsistent repair lineage."
+            )
+        repaired_smiles = str(slot["repaired_smiles"])
+        evaluation_id = (
+            evaluation_id_by_smiles.setdefault(repaired_smiles, _slot_id(slot))
+            if bool(slot["candidate_slot_valid"])
+            else _slot_id(slot)
+        )
+        slot["evaluation_candidate_id"] = evaluation_id
+        slot["evaluation_compute_reused"] = evaluation_id != _slot_id(slot)
+        slot["source_candidate_slot_count"] = source_counts[source_id]
+        slot["source_candidate_reused_across_slots"] = source_counts[source_id] > 1
     return slots
 
 
@@ -142,15 +200,27 @@ def build_internal_valid_candidates(
 ) -> list[dict[str, Any]]:
     """Build a compute-only CSV while retaining each candidate's native rank."""
 
-    rows: list[dict[str, Any]] = []
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
     for slot in slots:
         if not bool(slot.get("candidate_slot_valid")):
             continue
+        grouped.setdefault(str(slot["evaluation_candidate_id"]), []).append(slot)
+    rows: list[dict[str, Any]] = []
+    for evaluation_candidate_id, group in grouped.items():
+        slot = group[0]
         rows.append(
             {
                 "rank": len(rows) + 1,
                 "native_rank": int(slot["official_cluster_rank"]),
-                "candidate_id": str(slot["candidate_id"]),
+                "candidate_id": evaluation_candidate_id,
+                "candidate_slot_id": evaluation_candidate_id,
+                "source_candidate_id": _source_candidate_id(slot),
+                "cluster_id": str(slot["cluster_id"]),
+                "official_rank_slots": [
+                    int(item["official_cluster_rank"]) for item in group
+                ],
+                "candidate_slot_ids": [_slot_id(item) for item in group],
+                "evaluation_compute_reuse_count": len(group),
                 "smiles": str(slot["repaired_smiles"]),
                 "canonical_smiles": str(slot["repaired_smiles"]),
                 "candidate_set_preselected": True,
@@ -171,7 +241,7 @@ def expand_pair_rows(
     """Expand valid evaluator rows into a Cartesian parent x official-slot audit."""
 
     valid_ids = {
-        str(slot["candidate_id"])
+        str(slot["evaluation_candidate_id"])
         for slot in slots
         if bool(slot.get("candidate_slot_valid"))
     }
@@ -196,12 +266,22 @@ def expand_pair_rows(
         raise ValueError("Parent IDs must be unique.")
     for parent_id in parent_ids:
         for slot in slots:
-            candidate_id = str(slot["candidate_id"])
+            candidate_id = _slot_id(slot)
+            source_candidate_id = _source_candidate_id(slot)
             rank = int(slot["official_cluster_rank"])
             if bool(slot.get("candidate_slot_valid")):
-                row = dict(indexed[(str(parent_id), candidate_id)])
+                evaluation_candidate_id = str(slot["evaluation_candidate_id"])
+                row = dict(indexed[(str(parent_id), evaluation_candidate_id)])
                 row.update(
                     {
+                        "candidate_id": candidate_id,
+                        "candidate_slot_id": candidate_id,
+                        "evaluation_candidate_id": evaluation_candidate_id,
+                        "evaluation_compute_reused": bool(
+                            slot.get("evaluation_compute_reused")
+                        ),
+                        "source_candidate_id": source_candidate_id,
+                        "cluster_id": str(slot["cluster_id"]),
                         "official_cluster_rank": rank,
                         "candidate_slot_valid": True,
                         "slot_status": "REPAIRED_VALID",
@@ -215,6 +295,11 @@ def expand_pair_rows(
                     "method": METHOD,
                     "parent_id": str(parent_id),
                     "candidate_id": candidate_id,
+                    "candidate_slot_id": candidate_id,
+                    "evaluation_candidate_id": None,
+                    "evaluation_compute_reused": False,
+                    "source_candidate_id": source_candidate_id,
+                    "cluster_id": str(slot.get("cluster_id") or ""),
                     "official_cluster_rank": rank,
                     "candidate_slot_valid": False,
                     "slot_status": "REPAIRED_INVALID",
@@ -281,9 +366,10 @@ def compute_slot_metrics(
     if threshold_values != sorted(set(threshold_values)):
         raise ValueError("Thresholds must be sorted and unique.")
     rank_by_id = {
-        str(slot["candidate_id"]): int(slot["official_cluster_rank"])
+        _slot_id(slot): int(slot["official_cluster_rank"])
         for slot in slots
     }
+    source_id_by_slot = {_slot_id(slot): _source_candidate_id(slot) for slot in slots}
     valid_by_rank = {
         int(slot["official_cluster_rank"]): bool(slot.get("candidate_slot_valid"))
         for slot in slots
@@ -419,11 +505,13 @@ def compute_slot_metrics(
                 conditional.append(float(best_distance))
                 best_candidate_id: str | None = str(best_row["candidate_id"])
                 best_rank: int | None = rank_by_id[best_candidate_id]
+                best_source_candidate_id: str | None = source_id_by_slot[best_candidate_id]
                 cf_drop = _finite(best_row.get("cf_drop"))
             else:
                 best_distance = None
                 best_candidate_id = None
                 best_rank = None
+                best_source_candidate_id = None
                 cf_drop = None
             parent_best_rows.append(
                 {
@@ -431,6 +519,7 @@ def compute_slot_metrics(
                     "requested_k": requested_k,
                     "parent_id": str(parent_id),
                     "best_candidate_id": best_candidate_id,
+                    "best_source_candidate_id": best_source_candidate_id,
                     "best_official_cluster_rank": best_rank,
                     "best_distance": best_distance,
                     "capped_distance": min(best_distance, cost_cap)
@@ -549,6 +638,12 @@ def build_final_audit(
     interface_probe_invoked: bool,
 ) -> dict[str, Any]:
     valid_slots = sum(bool(row.get("candidate_slot_valid")) for row in slots)
+    source_candidate_ids = [_source_candidate_id(row) for row in slots]
+    evaluated_candidate_ids = {
+        str(row["evaluation_candidate_id"])
+        for row in slots
+        if bool(row.get("candidate_slot_valid"))
+    }
     strict_flip_observed = any(
         int(row.get("num_any_strict_flip_parents") or 0) > 0 for row in prefixes
     )
@@ -573,6 +668,17 @@ def build_final_audit(
         "cf_mode": "strict_flip",
         "parent_count": int(parent_count),
         "official_rank_slot_count": len(slots),
+        "unique_candidate_slot_count": len({_slot_id(row) for row in slots}),
+        "unique_source_candidate_count": len(set(source_candidate_ids)),
+        "source_candidate_duplicate_slot_count": len(source_candidate_ids)
+        - len(set(source_candidate_ids)),
+        "source_candidate_reuse_preserved": True,
+        "unique_evaluated_chemical_candidate_count": len(evaluated_candidate_ids),
+        "evaluation_compute_reuse_slot_count": valid_slots
+        - len(evaluated_candidate_ids),
+        "evaluation_compute_reuse_semantics": (
+            "identical_repaired_smiles_scored_once_then_expanded_to_official_slots"
+        ),
         "valid_repaired_slot_count": valid_slots,
         "invalid_repaired_slot_count": len(slots) - valid_slots,
         "strict_flip_status": "STRICT_FLIP_OBSERVED"

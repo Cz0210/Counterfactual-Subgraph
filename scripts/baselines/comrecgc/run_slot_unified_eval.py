@@ -406,6 +406,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "official_rank_candidate_ids_sha256": stable_json_sha256(
             [str(row["candidate_id"]) for row in all_slots]
         ),
+        "official_rank_candidate_slot_ids_sha256": stable_json_sha256(
+            [str(row["candidate_slot_id"]) for row in all_slots]
+        ),
+        "official_rank_source_candidate_ids_sha256": stable_json_sha256(
+            [str(row["source_candidate_id"]) for row in all_slots]
+        ),
+        "official_rank_evaluation_candidate_ids_sha256": stable_json_sha256(
+            [str(row["evaluation_candidate_id"]) for row in all_slots]
+        ),
+        "source_candidate_reuse_across_slots": len(
+            {str(row["source_candidate_id"]) for row in all_slots}
+        )
+        < len(all_slots),
+        "candidate_identity_contract": {
+            "evaluation_compute_identity": "evaluation_candidate_id",
+            "official_output_identity": "candidate_slot_id",
+            "lineage_identity": "source_candidate_id",
+            "slot_identity_source": "official_cluster_rank",
+            "source_candidate_reuse_preserved": True,
+            "official_slot_deduplication_performed": False,
+            "identical_smiles_compute_reuse": True,
+            "rank_compaction_performed": False,
+            "cross_rank_backfill_performed": False,
+        },
         "candidate_order_source": "official_common_recourse_cluster_rank",
         "candidate_order_unchanged": True,
         "invalid_candidates_sent_to_rf_or_wnode": False,

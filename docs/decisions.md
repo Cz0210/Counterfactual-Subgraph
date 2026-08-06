@@ -54,6 +54,40 @@ Accepted
 
 ---
 
+## [2026-08-07] Distinguish COMRECGC rank slots from reused source medoids
+
+### Background
+
+The frozen Mutagenicity common-recourse result contains four distinct official
+clusters, while three cluster slots legitimately select the same original
+candidate graph as their medoid.  The first unified-evaluation adapter treated
+the source candidate ID as the rank-slot identity and rejected this valid
+lineage before RF or WNode evaluation.
+
+### Decision
+
+Keep each original candidate ID unchanged as `source_candidate_id`, and assign
+an evaluator-only `candidate_slot_id` from the immutable official cluster rank.
+Require rank and cluster IDs to be unique and preserve repeated source candidate
+IDs in their exact official order. Identical repaired SMILES are scored once by
+the shared evaluator and that exact result is expanded back to every official
+slot; rank slots are never deduplicated, compacted, or backfilled.
+
+### Consequences
+
+- Reused medoid graphs remain separate official prefix slots with explicit
+  shared lineage.
+- Shared evaluator pair keys are unambiguous, while output manifests retain
+  hashes for both slot order and original candidate order.
+- Candidate graphs, chemistry repair, RF/WNode semantics, DBSCAN, and official
+  greedy ordering are unchanged.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-06] Scope trusted TU AIDS loading and preserve untyped COMRECGC identities
 
 ### Background
