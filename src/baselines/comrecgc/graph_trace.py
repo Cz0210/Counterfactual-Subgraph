@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import atomic_write_bytes, sha256_file, stable_json_sha256, write_json
+
+
+TRACE_IMPORTANCE_ABS_TOLERANCE = 1e-6
 
 
 def _plain(value: Any) -> Any:
@@ -451,12 +455,73 @@ def assert_trace_parity(
 ) -> dict[str, Any]:
     reference = normalized_candidate_sequence(reference_payload)
     traced = normalized_candidate_sequence(traced_payload)
-    if reference != traced:
-        raise ValueError("Trace-on/off candidate topology, features, frequency, importance, or order differ.")
+    if len(reference) != len(traced):
+        raise ValueError(
+            "Trace-on/off candidate count differs: "
+            f"reference={len(reference)}, traced={len(traced)}."
+        )
+
+    exact_importance_mismatch_count = 0
+    max_importance_abs_difference = 0.0
+    for index, (reference_row, traced_row) in enumerate(
+        zip(reference, traced, strict=True)
+    ):
+        for field in ("stable_graph_sha256", "frequency"):
+            if reference_row[field] != traced_row[field]:
+                raise ValueError(
+                    "Trace-on/off candidate topology, features, frequency, or order "
+                    f"differs at candidate {index}, field={field}."
+                )
+        reference_importance = reference_row["importance_parts"]
+        traced_importance = traced_row["importance_parts"]
+        if len(reference_importance) != len(traced_importance):
+            raise ValueError(
+                "Trace-on/off importance shape differs at candidate "
+                f"{index}: reference={len(reference_importance)}, "
+                f"traced={len(traced_importance)}."
+            )
+        for part_index, (reference_value, traced_value) in enumerate(
+            zip(reference_importance, traced_importance, strict=True)
+        ):
+            if not math.isfinite(reference_value) or not math.isfinite(traced_value):
+                raise ValueError(
+                    "Trace-on/off importance contains NaN/Inf at candidate "
+                    f"{index}, part={part_index}."
+                )
+            difference = abs(reference_value - traced_value)
+            max_importance_abs_difference = max(
+                max_importance_abs_difference, difference
+            )
+            if difference != 0.0:
+                exact_importance_mismatch_count += 1
+            if difference > TRACE_IMPORTANCE_ABS_TOLERANCE:
+                raise ValueError(
+                    "Trace-on/off importance exceeds the audited CUDA float32 "
+                    f"replay tolerance at candidate {index}, part={part_index}: "
+                    f"abs_difference={difference}, "
+                    f"tolerance={TRACE_IMPORTANCE_ABS_TOLERANCE}."
+                )
+
+    structural_sequence = [
+        {
+            "stable_graph_sha256": row["stable_graph_sha256"],
+            "frequency": row["frequency"],
+        }
+        for row in reference
+    ]
     return {
         "trace_parity_passed": True,
         "candidate_count": len(reference),
         "candidate_sequence_sha256": stable_json_sha256(reference),
+        "traced_candidate_sequence_sha256": stable_json_sha256(traced),
+        "structural_candidate_sequence_sha256": stable_json_sha256(
+            structural_sequence
+        ),
+        "importance_comparison_policy": "float32_cuda_replay_abs_tolerance_v1",
+        "importance_abs_tolerance": TRACE_IMPORTANCE_ABS_TOLERANCE,
+        "importance_exact_match": exact_importance_mismatch_count == 0,
+        "importance_exact_mismatch_count": exact_importance_mismatch_count,
+        "importance_max_abs_difference": max_importance_abs_difference,
         "compared_fields": [
             "stable_graph_sha256",
             "frequency",

@@ -6,7 +6,9 @@ import ast
 import csv
 import io
 import math
+import os
 from collections import Counter, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +38,16 @@ class DBSCANContract:
     cf_size: int
     metric: str = "euclidean"
     algorithm: str = "auto"
+
+
+@contextmanager
+def _working_directory(path: str | Path):
+    previous = Path.cwd()
+    try:
+        os.chdir(Path(path).expanduser().resolve())
+        yield
+    finally:
+        os.chdir(previous)
 
 
 def resolve_upstream_contract(upstream_root: str | Path) -> DBSCANContract:
@@ -295,7 +307,7 @@ def run_aids_native_dbscan_audit(
             f"AIDS model-counterfactual count mismatch: {len(candidate_graphs)} != {expected_candidates}"
         )
     torch, Batch = _torch_stack()
-    with imported_upstream(upstream_root) as modules:
+    with imported_upstream(upstream_root) as modules, _working_directory(upstream_root):
         dataset = modules["data"].load_dataset("aids")
         predictions = modules["gnn"].load_trained_prediction("aids", device=device).cpu()
         reject_indices = [int(value) for value in torch.where(predictions == 0)[0].tolist()]

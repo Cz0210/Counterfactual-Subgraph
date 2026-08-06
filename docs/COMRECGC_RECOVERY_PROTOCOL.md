@@ -113,6 +113,15 @@ with the project full contract before preregistration. AIDS native full uses all
 official `prediction == 0` parents. A completed run with no eligible DBSCAN
 cluster is recorded as `EMPTY_COMMON_RECOURSE`, with coverage zero and cost
 `null`/N/A. It is not converted into an engineering failure.
+All native dataset/model calls run with the pinned upstream checkout as their
+scoped working directory so existing TU runtime caches are reused; the project
+never downloads benchmark data from a compute job.
+
+Trace replay requires exact candidate count, graph tensors, candidate order,
+and frequency. Importance values are finite and may differ by at most `1e-6`
+absolute under a repeated CUDA float32 execution. The parity evidence records
+the exact mismatch count and maximum difference; this narrow numerical policy
+does not permit topology, ordering, frequency, or candidate payload drift.
 
 ## Slot-preserving unified evaluation
 

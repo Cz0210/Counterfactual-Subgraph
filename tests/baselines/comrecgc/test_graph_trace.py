@@ -8,6 +8,7 @@ import pytest
 
 from src.baselines.comrecgc.graph_trace import (
     ActionTraceRecorder,
+    TRACE_IMPORTANCE_ABS_TOLERANCE,
     assert_trace_parity,
     load_selected_trace,
     stable_graph_sha256,
@@ -111,6 +112,41 @@ def test_trace_parity_accepts_numpy_importance_without_truth_coercion() -> None:
             [0.7, 1.0], dtype=np.float64
         )
     assert assert_trace_parity(reference, traced)["trace_parity_passed"] is True
+
+
+def test_trace_parity_accepts_audited_cuda_float32_importance_drift() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    traced["counterfactual_candidates"][0]["importance_parts"][0] += 7.75e-7
+
+    result = assert_trace_parity(reference, traced)
+
+    assert result["trace_parity_passed"] is True
+    assert result["importance_exact_match"] is False
+    assert result["importance_exact_mismatch_count"] == 1
+    assert result["importance_max_abs_difference"] <= TRACE_IMPORTANCE_ABS_TOLERANCE
+    assert (
+        result["importance_comparison_policy"]
+        == "float32_cuda_replay_abs_tolerance_v1"
+    )
+
+
+def test_trace_parity_rejects_importance_beyond_audited_tolerance() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    traced["counterfactual_candidates"][0]["importance_parts"][0] += 1.1e-6
+
+    with pytest.raises(ValueError, match="exceeds the audited CUDA float32"):
+        assert_trace_parity(reference, traced)
+
+
+def test_trace_parity_rejects_candidate_order_change() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    traced["counterfactual_candidates"].reverse()
+
+    with pytest.raises(ValueError, match="topology, features, frequency, or order"):
+        assert_trace_parity(reference, traced)
 
 
 def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:

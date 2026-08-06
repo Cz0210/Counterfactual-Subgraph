@@ -5437,6 +5437,12 @@ neighbor/action mappings after every move, and reuse only byte-identical chunks
 on deterministic resume. This prevents the trace layer from retaining a second
 full graph/path history or duplicating a completed trace prefix.
 
+Run native AIDS data/model reads from the pinned upstream checkout so compute
+jobs reuse the existing TU cache without network access. Trace parity requires
+exact candidate tensors, order, and frequency. Repeated CUDA float32 importance
+values may differ by at most `1e-6` absolute; the mismatch count and maximum
+difference are persisted, and any larger or non-finite difference is fatal.
+
 For project Mutagenicity, replay the exact official action lineage and apply one
 deterministic chemistry projection per raw candidate: retained chemistry comes
 from source sidecars, new untyped edges are SINGLE, each action is sanitized

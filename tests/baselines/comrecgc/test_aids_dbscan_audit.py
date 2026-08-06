@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from src.baselines.comrecgc.aids_dbscan_audit import (
     DBSCANContract,
+    _working_directory,
     audit_geometry,
     distribution_summary,
 )
+
+
+def test_upstream_working_directory_is_scoped_and_restored(tmp_path: Path) -> None:
+    before = Path.cwd()
+    with _working_directory(tmp_path):
+        assert Path.cwd() == tmp_path.resolve()
+    assert Path.cwd() == before
 
 
 def test_distribution_summary_uses_float64_without_rounding() -> None:
