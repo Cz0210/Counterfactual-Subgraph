@@ -62,6 +62,36 @@ def test_mut_full_submission_is_deferred_until_smoke_gate_passes(
     ]
 
 
+def test_aids_full_is_absent_from_smoke_and_deferred_in_all(
+    tmp_path: Path, monkeypatch
+) -> None:
+    smoke = MODULE.stages("aids-smoke", {"aids"}, "smoke")
+    assert [stage.stage_id for stage in smoke] == [
+        "aids_existing_audit",
+        "aids_density_retry",
+    ]
+
+    state = MODULE.RecoveryState(
+        tmp_path,
+        "aids-all",
+        requested_mode="all",
+        datasets=["aids"],
+    )
+    all_stages = MODULE.stages("aids-all", {"aids"}, "all")
+
+    def fake_submit(stage, run_state, *, dry_run):
+        return run_state.add_job(stage, f"job_{stage.stage_id}", [stage.script])
+
+    monkeypatch.setattr(MODULE, "submit", fake_submit)
+    initially = MODULE.submit_ready_stages(all_stages, state, dry_run=False)
+    assert initially == ["aids_existing_audit", "aids_density_retry"]
+    assert state.job("aids_native_full") is None
+
+    state.data["completed_stages"] = ["aids_density_retry"]
+    after_density = MODULE.submit_ready_stages(all_stages, state, dry_run=False)
+    assert after_density == ["aids_native_full", "aids_native_full_gate"]
+
+
 def test_recovery_submissions_use_experiment_registry() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert '"scripts/exp_sbatch.sh"' in source

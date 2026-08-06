@@ -409,26 +409,32 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                     ("aids_existing_audit",),
                     {},
                 ),
-                Stage(
-                    "aids_native_full",
-                    "aids",
-                    "scripts/slurm/comrecgc_aids_native_full.sh",
-                    "outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1",
-                    "afterok",
-                    ("aids_density_retry",),
-                    {},
-                ),
-                Stage(
-                    "aids_native_full_gate",
-                    "aids",
-                    "scripts/slurm/comrecgc_aids_native_full_gate.sh",
-                    "outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1/gate",
-                    "afterany",
-                    ("aids_native_full",),
-                    {},
-                ),
             ]
         )
+        if mode == "all":
+            values.extend(
+                [
+                    Stage(
+                        "aids_native_full",
+                        "aids",
+                        "scripts/slurm/comrecgc_aids_native_full.sh",
+                        "outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1",
+                        "afterok",
+                        ("aids_density_retry",),
+                        {},
+                        True,
+                    ),
+                    Stage(
+                        "aids_native_full_gate",
+                        "aids",
+                        "scripts/slurm/comrecgc_aids_native_full_gate.sh",
+                        "outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1/gate",
+                        "afterany",
+                        ("aids_native_full",),
+                        {},
+                    ),
+                ]
+            )
     if "mutagenicity" in datasets:
         smoke_base = f"outputs/hpc/baselines/comrecgc/mutagenicity/recovery_smoke_{run_id}"
         values.extend(

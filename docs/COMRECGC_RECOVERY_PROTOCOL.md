@@ -129,6 +129,9 @@ the recovery chain validates that failed marker, reloads every trace chunk,
 infers cached-neighbor actions only from unique pinned-upstream graph deltas,
 and materializes a new completed directory with hard links where possible.
 The random walk is not rerun and the failed source directory is not modified.
+AIDS smoke mode stops after the frozen-candidate audit and parent-density gate.
+Even in all mode, native full is not submitted until that density stage is
+observed as `COMPLETED/0:0` by a later refresh.
 
 ## Slot-preserving unified evaluation
 
