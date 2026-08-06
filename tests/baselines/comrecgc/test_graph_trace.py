@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from src.baselines.comrecgc.graph_trace import (
@@ -71,8 +72,6 @@ def _record_one_transition(recorder: ActionTraceRecorder) -> tuple[Graph, Graph,
         source_graph=source,
         target_graph=target,
         action=("NLC", 0, 1),
-        source_node_ids=source.comrecgc_trace_node_ids,
-        target_node_ids=target.comrecgc_trace_node_ids,
     )
     module = SimpleNamespace(graph_map={"source": [source], "target": [target]})
 
@@ -81,7 +80,7 @@ def _record_one_transition(recorder: ActionTraceRecorder) -> tuple[Graph, Graph,
 
 def test_selected_action_lineage_is_exact_and_ordered() -> None:
     recorder = ActionTraceRecorder()
-    _source, target, module = _record_one_transition(recorder)
+    source, target, module = _record_one_transition(recorder)
 
     def move(*_args: object, **_kwargs: object) -> tuple:
         return (["target"], False, None, None, None)
@@ -94,17 +93,29 @@ def test_selected_action_lineage_is_exact_and_ordered() -> None:
         teleport_probability=0.1,
     )
     candidate_payload = {
-        "graph_map": {"target": [target]},
+        "graph_map": {"source": [source], "target": [target]},
         "counterfactual_candidates": [{"graph_hash": "target"}],
     }
     lineage = recorder.candidate_lineage(candidate_payload)
     assert lineage[0]["action_lineage_resolved"] is True
     assert lineage[0]["actions"][0]["action"] == ["NLC", 0, 1]
+    assert lineage[0]["actions"][0]["source_node_ids"] == ["source:0", "source:1"]
+    assert lineage[0]["actions"][0]["target_node_ids"] == ["source:0", "source:1"]
+
+
+def test_trace_parity_accepts_numpy_importance_without_truth_coercion() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    for value in (reference, traced):
+        value["counterfactual_candidates"][0]["importance_parts"] = np.asarray(
+            [0.7, 1.0], dtype=np.float64
+        )
+    assert assert_trace_parity(reference, traced)["trace_parity_passed"] is True
 
 
 def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:
     recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
-    _source, target, module = _record_one_transition(recorder)
+    source, target, module = _record_one_transition(recorder)
 
     def move(*_args: object, **_kwargs: object) -> tuple:
         return (["target"], False, None, None, None)
@@ -116,7 +127,7 @@ def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:
         teleport_probability=0.1,
     )
     payload_value = {
-        "graph_map": {"target": [target]},
+        "graph_map": {"source": [source], "target": [target]},
         "counterfactual_candidates": [{"graph_hash": "target"}],
     }
     summary = recorder.write(tmp_path, payload_value)
@@ -132,7 +143,7 @@ def test_trace_resume_reuses_identical_completed_chunks_without_duplicates(tmp_p
     payload_value = None
     for _run in range(2):
         recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
-        _source, target, module = _record_one_transition(recorder)
+        source, target, module = _record_one_transition(recorder)
 
         def move(*_args: object, **_kwargs: object) -> tuple:
             return (["target"], False, None, None, None)
@@ -144,7 +155,7 @@ def test_trace_resume_reuses_identical_completed_chunks_without_duplicates(tmp_p
             teleport_probability=0.1,
         )
         payload_value = {
-            "graph_map": {"target": [target]},
+            "graph_map": {"source": [source], "target": [target]},
             "counterfactual_candidates": [{"graph_hash": "target"}],
         }
         summary = recorder.write(tmp_path, payload_value)

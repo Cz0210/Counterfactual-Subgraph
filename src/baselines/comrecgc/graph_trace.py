@@ -195,8 +195,6 @@ class ActionTraceRecorder:
         source_graph: Any,
         target_graph: Any,
         action: Sequence[Any],
-        source_node_ids: Sequence[str],
-        target_node_ids: Sequence[str],
     ) -> None:
         source_sha = stable_graph_sha256(source_graph)
         target_sha = stable_graph_sha256(target_graph)
@@ -279,12 +277,47 @@ class ActionTraceRecorder:
 
     def candidate_lineage(self, payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         graph_map = payload.get("graph_map") or {}
+        graph_map_by_string = {str(key): value for key, value in graph_map.items()}
         rows: list[dict[str, Any]] = []
         for index, candidate in enumerate(payload.get("counterfactual_candidates") or []):
             official_hash = str(candidate.get("graph_hash"))
             graph_entry = graph_map.get(candidate.get("graph_hash"))
             graph = graph_entry[0] if graph_entry else None
             path = self._lineage_for_hash(official_hash)
+            enriched_path: list[dict[str, Any]] = []
+            node_lineage_resolved = path is not None
+            if path:
+                source_entry = graph_map_by_string.get(str(path[0]["source_official_hash"]))
+                if source_entry:
+                    current_node_ids = trace_node_ids(source_entry[0])
+                    for path_index, event in enumerate(path):
+                        enriched = dict(event)
+                        source_node_ids = list(current_node_ids)
+                        action = list(event.get("action") or [])
+                        target_node_ids = list(source_node_ids)
+                        if not action:
+                            node_lineage_resolved = False
+                        elif str(action[0]) in {"NA", "INA"}:
+                            target_node_ids.append(
+                                "new:"
+                                + str(getattr(graph, "comrecgc_parent_id", ""))
+                                + f":move:{int(event['move_index'])}:head:{int(event['head_index'])}"
+                                + f":path:{path_index}:target:{event['target_official_hash']}"
+                            )
+                        elif str(action[0]) in {"NR", "INR"}:
+                            remove_index = int(action[1])
+                            if not 0 <= remove_index < len(target_node_ids):
+                                node_lineage_resolved = False
+                            else:
+                                target_node_ids.pop(remove_index)
+                        enriched["source_node_ids"] = source_node_ids
+                        enriched["target_node_ids"] = target_node_ids
+                        enriched_path.append(enriched)
+                        current_node_ids = target_node_ids
+                    if graph is not None and len(current_node_ids) != int(graph.num_nodes):
+                        node_lineage_resolved = False
+                else:
+                    node_lineage_resolved = False
             rows.append(
                 {
                     "candidate_index": index,
@@ -292,10 +325,11 @@ class ActionTraceRecorder:
                     "stable_graph_sha256": stable_graph_sha256(graph) if graph is not None else None,
                     "parent_id": str(getattr(graph, "comrecgc_parent_id", "")) if graph is not None else "",
                     "action_lineage_resolved": bool(
-                        path is not None
+                        node_lineage_resolved
+                        and path is not None
                         and all(row.get("action_resolution") == "exact" for row in path)
                     ),
-                    "actions": [] if path is None else path,
+                    "actions": enriched_path,
                 }
             )
         return rows
@@ -384,7 +418,14 @@ def load_selected_trace(manifest_path: str | Path) -> list[dict[str, Any]]:
 
 
 def _importance(value: Any) -> list[float]:
-    return [float(item) for item in _plain(value or [])]
+    if value is None:
+        return []
+    resolved = _plain(value)
+    if resolved is None:
+        return []
+    if not isinstance(resolved, list):
+        resolved = [resolved]
+    return [float(item) for item in resolved]
 
 
 def normalized_candidate_sequence(payload: Mapping[str, Any]) -> list[dict[str, Any]]:

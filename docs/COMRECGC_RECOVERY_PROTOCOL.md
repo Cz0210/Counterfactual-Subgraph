@@ -92,6 +92,9 @@ Selected-transition audit events are atomically streamed in bounded JSONL
 chunks; the recorder never retains a second complete walk history. A resumed
 deterministic replay reuses byte-identical completed chunks by index and rejects
 different or stale chunks, so it cannot duplicate an already persisted prefix.
+Trace-only node identifiers are reconstructed from the final official action
+path and source-node origins; they are never attached to PyG graphs or written
+into the official candidate payload.
 Trace-on output must match the frozen trace-off payload in normalized graph
 topology, node features, frequency, importance, and candidate order.
 

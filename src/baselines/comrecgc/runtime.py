@@ -35,7 +35,6 @@ from .graph_trace import (
     ActionTraceRecorder,
     assert_trace_parity,
     stable_graph_sha256,
-    trace_node_ids,
 )
 from .project_dataset import (
     GraphListDataset,
@@ -132,7 +131,6 @@ def lineage_neighbor_wrapper(
 
     def wrapped(graph: Any, action: tuple[Any, ...]) -> Any:
         torch, _Batch = _torch_stack()
-        source_trace_ids = trace_node_ids(graph) if trace_recorder is not None else []
         result = original(graph, action)
         origins = _as_list(getattr(graph, "comrecgc_node_origin"))
         action_name = str(action[0])
@@ -147,18 +145,6 @@ def lineage_neighbor_wrapper(
                 f"action={action_name}, origins={len(origins)}, nodes={int(result.num_nodes)}"
             )
         result.comrecgc_node_origin = torch.tensor(origins, dtype=torch.long)
-        if trace_recorder is not None:
-            target_trace_ids = list(source_trace_ids)
-            if action_name in {"NA", "INA"}:
-                target_trace_ids.append(
-                    "new:"
-                    + stable_graph_sha256(graph)[:16]
-                    + ":"
-                    + ":".join(str(value) for value in action)
-                )
-            elif action_name in {"NR", "INR"}:
-                target_trace_ids.pop(int(action[1]))
-            result.comrecgc_trace_node_ids = target_trace_ids
         for name in (
             "comrecgc_parent_id",
             "comrecgc_source_index",
@@ -173,8 +159,6 @@ def lineage_neighbor_wrapper(
                 source_graph=graph,
                 target_graph=result,
                 action=action,
-                source_node_ids=source_trace_ids,
-                target_node_ids=target_trace_ids,
             )
         return result
 
