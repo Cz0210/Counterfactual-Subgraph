@@ -13,6 +13,7 @@ def _upstream(tmp_path: Path, *, mode: int = 0o644) -> Path:
     root = tmp_path / "upstream"
     cache = root / "data/aids/processed"
     cache.mkdir(parents=True)
+    os.chmod(cache, 0o755)
     (cache / "data_0.pt").write_bytes(b"trusted-cache")
     os.chmod(cache / "data_0.pt", mode)
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
