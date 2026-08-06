@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--parity-reference",
         help="Trace-disabled counterfactuals.pt used for normalized trace parity.",
     )
+    parser.add_argument("--trusted-dataset-payload")
+    parser.add_argument("--expected-cache-inventory-sha256")
     return parser
 
 
@@ -59,6 +61,8 @@ def main() -> int:
             parent_limit=args.parent_limit or (32 if args.mode == "smoke" else 0),
             device=args.device,
             mode=args.mode,
+            trusted_dataset_payload=args.trusted_dataset_payload,
+            expected_cache_inventory_sha256=args.expected_cache_inventory_sha256,
         )
     else:
         required = {

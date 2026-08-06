@@ -13,6 +13,39 @@ from typing import Any
 from .contracts import UPSTREAM_COMMIT, stable_json_sha256, write_json
 
 
+def load_aids_tensor_payload(
+    path: str | Path, *, expected_inventory_sha256: str
+) -> tuple[list[Any], dict[str, Any]]:
+    """Safely load the tensor-only derivative produced by the trusted child."""
+
+    import torch
+    from torch_geometric.data import Data
+
+    source = Path(path).expanduser().resolve(strict=True)
+    payload = torch.load(source, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict):
+        raise ValueError("Trusted AIDS dataset payload must be a dictionary.")
+    if payload.get("cache_inventory_sha256") != expected_inventory_sha256:
+        raise ValueError("Trusted AIDS dataset payload cache lineage mismatch.")
+    rows = payload.get("graphs")
+    if not isinstance(rows, list) or len(rows) != 1837:
+        raise ValueError("Trusted AIDS dataset payload must contain 1837 graphs.")
+    graphs: list[Any] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or int(row.get("source_index", -1)) != index:
+            raise ValueError("Trusted AIDS graph ordering differs from the frozen cache.")
+        graphs.append(
+            Data(
+                x=row["x"],
+                edge_index=row["edge_index"],
+                edge_attr=row.get("edge_attr"),
+                y=row["y"],
+                num_nodes=int(row["num_nodes"]),
+            )
+        )
+    return graphs, payload
+
+
 def _version(module_name: str) -> str:
     try:
         module = __import__(module_name)

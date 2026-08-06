@@ -74,9 +74,12 @@ def test_aids_existing_audit_loads_trusted_upstream_pyg_cache() -> None:
     assert "audit_trusted_aids_cache.py" in text
     scoped_load = (
         "env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \\\n"
-        "python scripts/baselines/comrecgc/audit_aids_native_dbscan.py"
+        "python scripts/baselines/comrecgc/materialize_trusted_aids_cache.py"
     )
     assert scoped_load in text
+    assert "env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \\\npython scripts/baselines/comrecgc/audit_aids_native_dbscan.py" not in text
+    assert "--trusted-dataset-payload" in text
+    assert "--expected-cache-inventory-sha256" in text
     assert "--expected-inventory-sha256" in text
 
     density = (ROOT / "scripts/slurm/comrecgc_aids_density_retry.sh").read_text(
@@ -85,6 +88,31 @@ def test_aids_existing_audit_loads_trusted_upstream_pyg_cache() -> None:
     assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" not in density
     assert density.count("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1") == 1
     assert "audit_trusted_aids_cache.py" in density
+    assert "materialize_trusted_aids_cache.py" in density
+    assert "--trusted-dataset-payload" in density
+
+    for name in ("comrecgc_aids_native_full.sh", "comrecgc_native_smoke.sh"):
+        wrapper = (ROOT / "scripts/slurm" / name).read_text(encoding="utf-8")
+        assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" not in wrapper
+        assert wrapper.count("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1") == 1
+        assert "materialize_trusted_aids_cache.py" in wrapper
+        assert "--trusted-dataset-payload" in wrapper
+
+    generation = (
+        ROOT / "scripts/baselines/comrecgc/run_generation.py"
+    ).read_text(encoding="utf-8")
+    assert 'parser.add_argument("--trusted-dataset-payload")' in generation
+    assert 'parser.add_argument("--expected-cache-inventory-sha256")' in generation
+
+
+def test_mut_chemistry_wrapper_accepts_only_explicit_complete_adoption() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_mut_chemistry_audit.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'ADOPT_EXISTING="${ADOPT_EXISTING:-false}"' in text
+    assert "[COMRECGC_MUT_CHEMISTRY_ADOPT_EXISTING_SUCCESS]" in text
+    assert text.count("[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]") == 2
+    assert "[COMRECGC_MUT_CHEMISTRY_ENGINEERING_SMOKE_PASS]" not in text
 
 
 def test_mut_trace_adoption_does_not_rerun_random_walk() -> None:

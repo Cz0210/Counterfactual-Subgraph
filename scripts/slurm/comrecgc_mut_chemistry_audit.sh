@@ -26,10 +26,23 @@ TRACE_DIR="${TRACE_DIR:-$GENERATION_DIR/trace}"
 COMMON_RECOURSE_DIR="${COMMON_RECOURSE_DIR:-outputs/hpc/baselines/comrecgc/mutagenicity/smoke_comrecgc_smoke_budget_retry_20260806_v4/common_recourse}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/mutagenicity_chemistry_audit_v1}"
 PREREGISTRATION="${PREREGISTRATION:-outputs/hpc/baselines/comrecgc/preregistration/mutagenicity_deterministic_chem_repair_v1.json}"
+ADOPT_EXISTING="${ADOPT_EXISTING:-false}"
+[[ "$ADOPT_EXISTING" == "true" || "$ADOPT_EXISTING" == "false" ]] || {
+  echo "[COMRECGC_CONFIG_ERROR] invalid ADOPT_EXISTING=$ADOPT_EXISTING" >&2; exit 2;
+}
 for input in "$DATASET_DIR" "$GENERATION_DIR/run_manifest.json" "$GENERATION_DIR/trace_parity.json" "$TRACE_DIR/candidate_action_lineage.json" "$COMMON_RECOURSE_DIR/selected_common_recourses.json"; do
   [[ -e "$input" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing=$input" >&2; exit 2; }
 done
-[[ ! -e "$OUTPUT_DIR/_RUN_COMPLETE.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] output complete=$OUTPUT_DIR" >&2; exit 2; }
+if [[ -e "$OUTPUT_DIR/_RUN_COMPLETE.json" ]]; then
+  [[ "$ADOPT_EXISTING" == "true" ]] || {
+    echo "[COMRECGC_CONFIG_ERROR] output complete=$OUTPUT_DIR" >&2; exit 2;
+  }
+  python -c 'import json,sys; a=json.load(open(sys.argv[1])); r=json.load(open(sys.argv[2])); assert a.get("audit_passed") is True; assert r.get("run_complete") is True' \
+    "$OUTPUT_DIR/audit.json" "$OUTPUT_DIR/run_manifest.json"
+  grep -Fq '[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]' "$OUTPUT_DIR/audit.txt"
+  echo "[COMRECGC_MUT_CHEMISTRY_ADOPT_EXISTING_SUCCESS]"
+  exit 0
+fi
 echo "[COMRECGC_RECOVERY_CONFIG] stage=mut_chemistry_audit parents=64 candidates=164 medoids=4"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
@@ -47,5 +60,5 @@ python scripts/baselines/comrecgc/audit_mutagenicity_chemistry.py \
   --expected-candidate-count 164 \
   --expected-medoid-count 4
 test -s "$OUTPUT_DIR/audit.json"
-grep -Fq '[COMRECGC_MUT_CHEMISTRY_ENGINEERING_SMOKE_PASS]' "$OUTPUT_DIR/audit.txt"
+grep -Fq '[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]' "$OUTPUT_DIR/audit.txt"
 echo "[COMRECGC_MUT_CHEMISTRY_AUDIT_SUCCESS]"

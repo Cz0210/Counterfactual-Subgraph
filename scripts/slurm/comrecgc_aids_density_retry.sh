@@ -26,6 +26,8 @@ EXISTING_AUDIT="${EXISTING_AUDIT:-outputs/hpc/baselines/comrecgc/aids_native_dbs
 PREREGISTRATION="${PREREGISTRATION:-outputs/hpc/baselines/comrecgc/preregistration/aids_native_parent_density_retry_v1.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/aids_native_parent_density_retry_v1}"
 CACHE_TRUST_BEFORE="${CACHE_TRUST_BEFORE:-${OUTPUT_DIR}.cache_trust_before.json}"
+TRUSTED_DATASET_PAYLOAD="${TRUSTED_DATASET_PAYLOAD:-${OUTPUT_DIR}.trusted_dataset.pt}"
+CACHE_TRUST_AFTER_LOAD="${CACHE_TRUST_AFTER_LOAD:-${OUTPUT_DIR}.cache_trust_after_load.json}"
 [[ -s "$EXISTING_AUDIT" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing audit=$EXISTING_AUDIT" >&2; exit 2; }
 [[ ! -e "$OUTPUT_DIR/manifest.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] output exists=$OUTPUT_DIR" >&2; exit 2; }
 if [[ ! -e "$PREREGISTRATION" ]]; then
@@ -42,6 +44,13 @@ python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
   --output "$CACHE_TRUST_BEFORE"
 CACHE_SHA256_BEFORE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["cache_sha256"])' "$CACHE_TRUST_BEFORE")"
 env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+python scripts/baselines/comrecgc/materialize_trusted_aids_cache.py \
+  --cache-trust-json "$CACHE_TRUST_BEFORE" \
+  --output "$TRUSTED_DATASET_PAYLOAD"
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$CACHE_TRUST_AFTER_LOAD" \
+  --expected-inventory-sha256 "$CACHE_SHA256_BEFORE"
 python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --project-root "$PROJECT_ROOT" \
   --upstream-root external/COMRECGC \
@@ -51,6 +60,8 @@ python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --expected-candidates 31 \
   --full-reject-parent-universe \
   --preregistration-path "$PREREGISTRATION" \
+  --trusted-dataset-payload "$TRUSTED_DATASET_PAYLOAD" \
+  --expected-cache-inventory-sha256 "$CACHE_SHA256_BEFORE" \
   --device cuda:0 \
   --batch-size 128
 python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \

@@ -37,14 +37,7 @@ def _plain(value: Any) -> Any:
     return str(value)
 
 
-def normalized_graph_payload(graph: Any) -> dict[str, Any]:
-    """Return a canonical tensor-only graph payload suitable for SHA256.
-
-    Metadata and Python object identity are deliberately excluded. Directed
-    edges are normalized with their aligned edge attributes, so serialization
-    order cannot change the identity while an edge-feature misalignment does.
-    """
-
+def _normalized_nodes_and_edges(graph: Any) -> tuple[list[Any], list[int], list[int]]:
     nodes = _plain(getattr(graph, "x"))
     edge_index = _plain(getattr(graph, "edge_index"))
     if not isinstance(nodes, list) or not isinstance(edge_index, list) or len(edge_index) != 2:
@@ -52,6 +45,18 @@ def normalized_graph_payload(graph: Any) -> dict[str, Any]:
     sources, targets = edge_index
     if len(sources) != len(targets):
         raise ValueError("Graph edge_index rows are not aligned.")
+    return nodes, sources, targets
+
+
+def normalized_graph_payload(graph: Any) -> dict[str, Any]:
+    """Return a canonical typed graph payload suitable for SHA256.
+
+    Metadata and Python object identity are deliberately excluded. Directed
+    edges are normalized with their aligned edge attributes, so serialization
+    order cannot change the identity while an edge-feature misalignment does.
+    """
+
+    nodes, sources, targets = _normalized_nodes_and_edges(graph)
     edge_attr_value = getattr(graph, "edge_attr", None)
     edge_attrs = _plain(edge_attr_value) if edge_attr_value is not None else None
     if edge_attrs is not None and len(edge_attrs) != len(sources):
@@ -78,8 +83,36 @@ def normalized_graph_payload(graph: Any) -> dict[str, Any]:
     }
 
 
+def normalized_untyped_graph_payload(graph: Any) -> dict[str, Any]:
+    """Return the canonical node/adjacency identity used by untyped COMRECGC.
+
+    Pinned upstream COMRECGC mutates ``edge_index`` but does not consume or
+    consistently update the TU dataset's bond-label ``edge_attr`` sidecar.
+    Callers must opt into this identity explicitly; the typed identity above
+    remains strict and continues to reject a stale or misaligned sidecar.
+    """
+
+    nodes, sources, targets = _normalized_nodes_and_edges(graph)
+    edges = sorted(
+        (
+            {"source": int(source), "target": int(target)}
+            for source, target in zip(sources, targets, strict=True)
+        ),
+        key=lambda row: (int(row["source"]), int(row["target"])),
+    )
+    return {
+        "num_nodes": int(getattr(graph, "num_nodes", len(nodes))),
+        "x": nodes,
+        "directed_edges": edges,
+    }
+
+
 def stable_graph_sha256(graph: Any) -> str:
     return stable_json_sha256(normalized_graph_payload(graph))
+
+
+def stable_untyped_graph_sha256(graph: Any) -> str:
+    return stable_json_sha256(normalized_untyped_graph_payload(graph))
 
 
 def normalized_action(action: Sequence[Any]) -> list[Any]:

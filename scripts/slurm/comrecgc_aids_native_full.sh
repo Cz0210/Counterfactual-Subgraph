@@ -23,6 +23,8 @@ export PYTHONHASHSEED=0
 PREREGISTRATION="${PREREGISTRATION:-outputs/hpc/baselines/comrecgc/preregistration/aids_native_full_v1.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/native_full/aids/native_full_v1}"
 CACHE_TRUST_BEFORE="${CACHE_TRUST_BEFORE:-${OUTPUT_DIR}.cache_trust_before.json}"
+TRUSTED_DATASET_PAYLOAD="${TRUSTED_DATASET_PAYLOAD:-${OUTPUT_DIR}.trusted_dataset.pt}"
+CACHE_TRUST_AFTER_LOAD="${CACHE_TRUST_AFTER_LOAD:-${OUTPUT_DIR}.cache_trust_after_load.json}"
 [[ -d external/COMRECGC/.git ]] || { echo "[COMRECGC_CONFIG_ERROR] pinned upstream missing" >&2; exit 2; }
 [[ ! -e "$OUTPUT_DIR/_RUN_COMPLETE.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] output complete=$OUTPUT_DIR" >&2; exit 2; }
 mkdir -p "$(dirname "$OUTPUT_DIR")"
@@ -42,6 +44,13 @@ python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
   --output "$CACHE_TRUST_BEFORE"
 CACHE_SHA256_BEFORE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["cache_sha256"])' "$CACHE_TRUST_BEFORE")"
 env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+python scripts/baselines/comrecgc/materialize_trusted_aids_cache.py \
+  --cache-trust-json "$CACHE_TRUST_BEFORE" \
+  --output "$TRUSTED_DATASET_PAYLOAD"
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$CACHE_TRUST_AFTER_LOAD" \
+  --expected-inventory-sha256 "$CACHE_SHA256_BEFORE"
 python scripts/baselines/comrecgc/run_generation.py \
   --route native \
   --dataset aids \
@@ -49,6 +58,8 @@ python scripts/baselines/comrecgc/run_generation.py \
   --project-root "$PROJECT_ROOT" \
   --upstream-root external/COMRECGC \
   --output-dir "$OUTPUT_DIR" \
+  --trusted-dataset-payload "$TRUSTED_DATASET_PAYLOAD" \
+  --expected-cache-inventory-sha256 "$CACHE_SHA256_BEFORE" \
   --device cuda:0
 python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
   --upstream-root external/COMRECGC \

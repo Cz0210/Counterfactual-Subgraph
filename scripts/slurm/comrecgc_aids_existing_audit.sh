@@ -24,6 +24,8 @@ SOURCE_ARTIFACT="${SOURCE_ARTIFACT:-outputs/hpc/baselines/comrecgc/native_smoke/
 EXPECTED_SHA256="${EXPECTED_SHA256:-096ddd0f4ac31126a0665a11effb7362c2137229ff6b53b50e16c081ef6c274a}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/aids_native_dbscan_audit_v1}"
 CACHE_TRUST_BEFORE="${CACHE_TRUST_BEFORE:-${OUTPUT_DIR}.cache_trust_before.json}"
+TRUSTED_DATASET_PAYLOAD="${TRUSTED_DATASET_PAYLOAD:-${OUTPUT_DIR}.trusted_dataset.pt}"
+CACHE_TRUST_AFTER_LOAD="${CACHE_TRUST_AFTER_LOAD:-${OUTPUT_DIR}.cache_trust_after_load.json}"
 [[ -f "$SOURCE_ARTIFACT" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing=$SOURCE_ARTIFACT" >&2; exit 2; }
 [[ "$(sha256sum "$SOURCE_ARTIFACT" | awk '{print $1}')" == "$EXPECTED_SHA256" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] AIDS frozen artifact SHA256 mismatch" >&2; exit 2;
@@ -39,8 +41,15 @@ python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
   --upstream-root external/COMRECGC \
   --output "$CACHE_TRUST_BEFORE"
 CACHE_SHA256_BEFORE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["cache_sha256"])' "$CACHE_TRUST_BEFORE")"
-python -m py_compile scripts/baselines/comrecgc/audit_aids_native_dbscan.py
 env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+python scripts/baselines/comrecgc/materialize_trusted_aids_cache.py \
+  --cache-trust-json "$CACHE_TRUST_BEFORE" \
+  --output "$TRUSTED_DATASET_PAYLOAD"
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$CACHE_TRUST_AFTER_LOAD" \
+  --expected-inventory-sha256 "$CACHE_SHA256_BEFORE"
+python -m py_compile scripts/baselines/comrecgc/audit_aids_native_dbscan.py
 python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --project-root "$PROJECT_ROOT" \
   --upstream-root external/COMRECGC \
@@ -51,6 +60,8 @@ python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --expected-candidates 31 \
   --expected-distance-pairs 1984 \
   --expected-eligible-pairs 28 \
+  --trusted-dataset-payload "$TRUSTED_DATASET_PAYLOAD" \
+  --expected-cache-inventory-sha256 "$CACHE_SHA256_BEFORE" \
   --device cuda:0 \
   --batch-size 128
 python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \

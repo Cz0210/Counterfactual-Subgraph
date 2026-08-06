@@ -32,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preregistration-path")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--trusted-dataset-payload", required=True)
+    parser.add_argument("--expected-cache-inventory-sha256", required=True)
     return parser
 
 
@@ -55,6 +57,8 @@ def main() -> int:
         preregistration_path=args.preregistration_path,
         device=args.device,
         batch_size=args.batch_size,
+        trusted_dataset_payload=args.trusted_dataset_payload,
+        expected_cache_inventory_sha256=args.expected_cache_inventory_sha256,
     )
     print(json.dumps(result, sort_keys=True))
     return 0

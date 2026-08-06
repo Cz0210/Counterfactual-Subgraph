@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .cache_trust import load_aids_tensor_payload
 from .contracts import (
     UPSTREAM_COMMIT,
     atomic_write_bytes,
@@ -24,7 +25,7 @@ from .contracts import (
     stable_json_sha256,
     write_json,
 )
-from .graph_trace import stable_graph_sha256
+from .graph_trace import stable_untyped_graph_sha256
 from .runtime import _materialize_dataset_indices, _torch_load, _torch_stack, model_counterfactual_graphs
 from .upstream import imported_upstream, validate_upstream_checkout
 
@@ -292,6 +293,8 @@ def run_aids_native_dbscan_audit(
     preregistration_path: str | Path | None = None,
     device: str = "cuda:0",
     batch_size: int = 128,
+    trusted_dataset_payload: str | Path | None = None,
+    expected_cache_inventory_sha256: str | None = None,
 ) -> dict[str, Any]:
     root = require_empty_output(output_dir)
     project = Path(project_root).expanduser().resolve()
@@ -308,7 +311,16 @@ def run_aids_native_dbscan_audit(
         )
     torch, Batch = _torch_stack()
     with imported_upstream(upstream_root) as modules, _working_directory(upstream_root):
-        dataset = modules["data"].load_dataset("aids")
+        if trusted_dataset_payload is None:
+            raise ValueError(
+                "AIDS native audit requires a scoped trusted-cache tensor payload."
+            )
+        if expected_cache_inventory_sha256 is None:
+            raise ValueError("Trusted AIDS cache inventory SHA256 is required.")
+        dataset, dataset_payload = load_aids_tensor_payload(
+            trusted_dataset_payload,
+            expected_inventory_sha256=expected_cache_inventory_sha256,
+        )
         predictions = modules["gnn"].load_trained_prediction("aids", device=device).cpu()
         reject_indices = [int(value) for value in torch.where(predictions == 0)[0].tolist()]
         if not full_reject_parent_universe:
@@ -328,7 +340,12 @@ def run_aids_native_dbscan_audit(
             source_embeddings = embedding.embed_model(Batch.from_data_list(sources).to(device)).detach().cpu()
         embedding.embed_targets(sources)
         source_counts = modules["util"].graph_element_counts(sources).cpu()
-        candidate_ids = [stable_graph_sha256(graph) for graph in candidate_graphs]
+        candidate_ids = [stable_untyped_graph_sha256(graph) for graph in candidate_graphs]
+        stale_edge_attr_count = sum(
+            getattr(graph, "edge_attr", None) is not None
+            and len(graph.edge_attr) != int(graph.edge_index.shape[1])
+            for graph in candidate_graphs
+        )
         all_distance_rows: list[dict[str, Any]] = []
         eligible_rows: list[dict[str, Any]] = []
         pair_indices: list[tuple[int, int]] = []
@@ -438,6 +455,11 @@ def run_aids_native_dbscan_audit(
     audit = {
         "schema_version": 1,
         "audit_passed": True,
+        "candidate_identity_basis": "official_untyped_x_edge_index",
+        "candidate_stale_edge_attr_count": int(stale_edge_attr_count),
+        "trusted_dataset_payload": str(Path(trusted_dataset_payload).resolve()),
+        "trusted_dataset_payload_sha256": sha256_file(trusted_dataset_payload),
+        "trusted_cache_inventory_sha256": expected_cache_inventory_sha256,
         "scientific_output_empty": geometry["postfilter_cluster_count"] == 0,
         "source_counterfactuals_path": str(artifact),
         "source_counterfactuals_sha256": source_sha,

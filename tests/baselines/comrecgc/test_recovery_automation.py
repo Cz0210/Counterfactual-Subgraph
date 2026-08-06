@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -351,6 +352,122 @@ def test_end_to_end_dependencies_are_afterok_and_no_rank_backfill() -> None:
     assert authorization["rank_backfill_allowed"] is False
     assert authorization["rf_guided_repair_allowed"] is False
     assert authorization["wnode_guided_repair_allowed"] is False
+
+
+def _write_completed_mut_stage(root: Path, stage_id: str) -> Path:
+    root.mkdir(parents=True)
+    (root / "_RUN_COMPLETE.json").write_text(
+        json.dumps({"run_complete": True}), encoding="utf-8"
+    )
+    (root / "run_manifest.json").write_text(
+        json.dumps({"run_complete": True}), encoding="utf-8"
+    )
+    if stage_id == "mut_trace_adopt":
+        (root / "counterfactuals.pt").write_bytes(b"frozen")
+        (root / "trace_parity.json").write_text(
+            json.dumps(
+                {
+                    "trace_parity_passed": True,
+                    "compared_fields": [
+                        "stable_graph_sha256",
+                        "frequency",
+                        "order",
+                    ],
+                    "importance_threshold_mask_exact": True,
+                    "model_cf_id_set_exact": True,
+                    "model_cf_order_exact": True,
+                    "dbscan_input_id_set_exact": True,
+                    "dbscan_input_order_exact": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+    else:
+        (root / "audit.json").write_text(
+            json.dumps(
+                {
+                    "audit_passed": True,
+                    "source_roundtrip_rate": 1.0,
+                    "noop_roundtrip_rate": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "audit.txt").write_text(
+            "[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]\n", encoding="utf-8"
+        )
+        (root / "final_artifact_audit.json").write_text("{}\n", encoding="utf-8")
+    return root
+
+
+def test_completed_stage_adoption_is_exact_and_satisfies_afterok_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(MODULE, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "git_commit", lambda _root: "a" * 40)
+    generation = _write_completed_mut_stage(
+        tmp_path / "outputs/hpc/baselines/comrecgc/old/generation",
+        "mut_trace_adopt",
+    )
+    chemistry = _write_completed_mut_stage(
+        tmp_path / "outputs/hpc/baselines/comrecgc/old/chemistry",
+        "mut_chemistry_audit",
+    )
+    state = MODULE.RecoveryState(
+        tmp_path / "state",
+        "comrecgc_end_to_end_retry_test",
+        requested_mode="all",
+        datasets=["mutagenicity"],
+    )
+    mappings = MODULE.register_completed_stage_adoptions(
+        state,
+        [
+            f"mut_trace_adopt={generation}",
+            f"mut_chemistry_audit={chemistry}",
+        ],
+        known_stage_ids={"mut_trace_adopt", "mut_chemistry_audit"},
+    )
+    values = MODULE.stages(
+        state.data["run_id"],
+        {"mutagenicity"},
+        "all",
+        adopted_stage_outputs=mappings,
+    )
+    by_id = {stage.stage_id: stage for stage in values}
+    assert by_id["mut_unified_eval_smoke"].environment["CHEMISTRY_DIR"] == mappings[
+        "mut_chemistry_audit"
+    ]
+    assert MODULE._dependency(by_id["mut_unified_eval_smoke"], state) is None
+    assert set(state.data["completed_stages"]) == {
+        "mut_trace_adopt",
+        "mut_chemistry_audit",
+    }
+    MODULE.verify_completed_stage_adoptions(state)
+
+
+def test_completed_stage_adoption_detects_artifact_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(MODULE, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "git_commit", lambda _root: "a" * 40)
+    generation = _write_completed_mut_stage(
+        tmp_path / "outputs/hpc/baselines/comrecgc/old/generation",
+        "mut_trace_adopt",
+    )
+    state = MODULE.RecoveryState(
+        tmp_path / "state",
+        "comrecgc_end_to_end_retry_test",
+        requested_mode="all",
+        datasets=["mutagenicity"],
+    )
+    MODULE.register_completed_stage_adoptions(
+        state,
+        [f"mut_trace_adopt={generation}"],
+        known_stage_ids={"mut_trace_adopt"},
+    )
+    (generation / "counterfactuals.pt").write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="changed after freeze"):
+        MODULE.verify_completed_stage_adoptions(state)
 
 
 def test_frozen_blocker_artifacts_are_adopted_idempotently(

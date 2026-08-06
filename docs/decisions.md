@@ -53,6 +53,43 @@ profile name and manifest.
 Accepted
 
 ---
+
+## [2026-08-06] Scope trusted TU AIDS loading and preserve untyped COMRECGC identities
+
+### Background
+
+The retry3 native AIDS audit exposed two compatibility properties of the pinned
+upstream artifacts. PyTorch 2.6+ requires an explicit trusted-pickle boundary
+for the 1,837 cached PyG objects, and upstream graph edits can leave the TU bond
+label sidecar shorter than the edited adjacency even though COMRECGC consumes
+only node labels and `edge_index`. A separate Mutagenicity wrapper also checked
+an obsolete success marker after producing a complete chemistry audit.
+
+### Decision
+
+Load the frozen AIDS cache only in one compatibility-scoped child process and
+materialize a tensor-only, weights-only-reloadable payload whose cache inventory
+SHA256 is checked before and after loading. Native model, NeuroSED, RF, and
+MolCLR processes do not inherit the compatibility variable. Keep the general
+typed graph hash strict, while native AIDS DBSCAN uses an explicit canonical
+`official_untyped_x_edge_index` identity that ignores the unused stale sidecar.
+Allow an exact, hash-frozen completed smoke stage to satisfy a later `afterok`
+dependency without rerunning that stage. Fix the chemistry wrapper to recognize
+the project-wide engineering-pass marker.
+
+### Consequences
+
+- No upstream source, candidate tensor, candidate order, distance, DBSCAN
+  parameter, or greedy ordering changes.
+- A completed stage can be adopted only from COMRECGC output roots and is
+  rehashed on every refresh; any mutation blocks continuation.
+- Failed Slurm history remains intact while retries use fresh versioned roots.
+
+### Status
+
+Accepted
+
+---
 ## [2026-08-06] Gate COMRECGC end-to-end promotion and stream full lineage
 
 ### Background

@@ -16,6 +16,7 @@ from src.baselines.comrecgc.graph_trace import (
     load_selected_trace,
     recover_candidate_lineage_from_selected_trace,
     stable_graph_sha256,
+    stable_untyped_graph_sha256,
 )
 
 
@@ -52,6 +53,24 @@ def payload(first: Graph, second: Graph) -> dict:
 def test_stable_graph_sha256_normalizes_edge_order() -> None:
     assert stable_graph_sha256(graph()) == stable_graph_sha256(graph(swapped_edges=True))
     assert stable_graph_sha256(graph()) != stable_graph_sha256(graph(atom=1))
+
+
+def test_untyped_identity_explicitly_ignores_stale_official_edge_sidecar() -> None:
+    first = SimpleNamespace(
+        x=[[1.0, 0.0], [0.0, 1.0]],
+        edge_index=[[0, 1], [1, 0]],
+        edge_attr=[1],
+        num_nodes=2,
+    )
+    reordered = SimpleNamespace(
+        x=[[1.0, 0.0], [0.0, 1.0]],
+        edge_index=[[1, 0], [0, 1]],
+        edge_attr=[1],
+        num_nodes=2,
+    )
+    with pytest.raises(ValueError, match="edge_attr is not aligned"):
+        stable_graph_sha256(first)
+    assert stable_untyped_graph_sha256(first) == stable_untyped_graph_sha256(reordered)
 
 
 def test_trace_does_not_change_candidates() -> None:

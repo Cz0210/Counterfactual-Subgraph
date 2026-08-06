@@ -144,6 +144,10 @@ class RecoveryState:
             self.save()
             self.event("RUN_CREATED", {"run_id": run_id})
         self.data.setdefault("adopted_stages", [])
+        self.data.setdefault("completed_stages", [])
+        self.data.setdefault("failed_stages", [])
+        self.data.setdefault("completed_stage_adoptions", [])
+        self.data.setdefault("adopted_stage_outputs", {})
         if authorization is not None:
             existing_sha = self.data.get("authorization_sha256")
             if existing_sha not in {None, authorization_sha256}:
@@ -438,7 +442,10 @@ def recover_registered_jobs(
             if isinstance(value, dict):
                 registry_rows.append(value)
     adopted: list[str] = []
+    completed_adoptions = set(state.data.get("adopted_stage_outputs") or {})
     for stage in stage_values:
+        if stage.stage_id in completed_adoptions:
+            continue
         if state.job(stage.stage_id) is not None:
             continue
         matches = [
@@ -552,6 +559,8 @@ def delegate_remote(args: argparse.Namespace) -> int:
         remote.append("--dry-run")
     if args.initialize_authorization:
         remote.append("--initialize-authorization")
+    for value in args.adopt_completed_stage:
+        remote.extend(["--adopt-completed-stage", value])
     script = "cd " + shlex.quote(args.remote_root) + " && " + shlex.join(remote)
     result = command(ssh_argv(args, script), cwd=PROJECT_ROOT, timeout=1800, check=False)
     sys.stdout.write(result.stdout)
@@ -841,11 +850,16 @@ def _dependency(stage: Stage, state: RecoveryState) -> str | None:
     if not stage.dependency_stages:
         return None
     ids: list[str] = []
+    completed = set(state.data.get("completed_stages") or [])
     for dependency_stage in stage.dependency_stages:
         record = state.job(dependency_stage)
         if record is None:
+            if dependency_stage in completed:
+                continue
             raise RuntimeError(f"Dependency is not submitted: {dependency_stage}")
         ids.append(str(record["job_id"]))
+    if not ids:
+        return None
     return f"{stage.dependency_type}:" + ":".join(ids)
 
 
@@ -928,11 +942,18 @@ def submit_ready_stages(
     """Submit only stages whose dependency records exist and whose hard gate passed."""
 
     submitted: list[str] = []
-    completed = set(state.data.get("completed_stages") or [])
+    completed = set(state.data.get("completed_stages") or []) | set(
+        state.data.get("adopted_stage_outputs") or {}
+    )
     for stage in stage_values:
+        if stage.stage_id in set(state.data.get("adopted_stage_outputs") or {}):
+            continue
         if state.job(stage.stage_id) is not None:
             continue
-        if any(state.job(dependency) is None for dependency in stage.dependency_stages):
+        if any(
+            state.job(dependency) is None and dependency not in completed
+            for dependency in stage.dependency_stages
+        ):
             continue
         if stage.defer_until_dependencies_complete and any(
             dependency not in completed for dependency in stage.dependency_stages
@@ -949,7 +970,10 @@ def validate_new_output_roots(
     """Refuse an unregistered retry output instead of guessing its provenance."""
 
     collisions: list[str] = []
+    adopted = set(state.data.get("adopted_stage_outputs") or {})
     for stage in stage_values:
+        if stage.stage_id in adopted:
+            continue
         if state.job(stage.stage_id) is not None:
             continue
         output = (PROJECT_ROOT / stage.output_root).resolve()
@@ -959,7 +983,141 @@ def validate_new_output_roots(
         raise RuntimeError(f"Retry3 output collision: {collisions}")
 
 
-def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
+def _validate_completed_stage_artifacts(stage_id: str, output: Path) -> list[Path]:
+    required = [output / "_RUN_COMPLETE.json", output / "run_manifest.json"]
+    if stage_id == "mut_trace_adopt":
+        required.extend([output / "trace_parity.json", output / "counterfactuals.pt"])
+    elif stage_id == "mut_chemistry_audit":
+        required.extend(
+            [output / "audit.json", output / "audit.txt", output / "final_artifact_audit.json"]
+        )
+    else:
+        raise RuntimeError(f"Completed-stage adoption is not authorized for {stage_id}.")
+    missing = [str(path) for path in required if not path.is_file() or path.stat().st_size <= 0]
+    if missing:
+        raise RuntimeError(f"Completed-stage adoption artifacts are missing: {missing}")
+    marker = json.loads(required[0].read_text(encoding="utf-8"))
+    manifest = json.loads(required[1].read_text(encoding="utf-8"))
+    if marker.get("run_complete") is not True or manifest.get("run_complete") is not True:
+        raise RuntimeError(f"Completed-stage adoption is not complete: {stage_id}")
+    if stage_id == "mut_trace_adopt":
+        parity = json.loads((output / "trace_parity.json").read_text(encoding="utf-8"))
+        exact_fields = (
+            "trace_parity_passed",
+            "importance_threshold_mask_exact",
+            "model_cf_id_set_exact",
+            "model_cf_order_exact",
+            "dbscan_input_id_set_exact",
+            "dbscan_input_order_exact",
+        )
+        if any(parity.get(field) is not True for field in exact_fields):
+            raise RuntimeError("Completed trace adoption does not pass exact discrete parity.")
+        compared = set(parity.get("compared_fields") or [])
+        if not {"stable_graph_sha256", "frequency", "order"} <= compared:
+            raise RuntimeError("Completed trace adoption lacks exact graph/order/frequency evidence.")
+    else:
+        audit = json.loads((output / "audit.json").read_text(encoding="utf-8"))
+        audit_text = (output / "audit.txt").read_text(encoding="utf-8")
+        if (
+            audit.get("audit_passed") is not True
+            or float(audit.get("source_roundtrip_rate", 0.0)) != 1.0
+            or float(audit.get("noop_roundtrip_rate", 0.0)) != 1.0
+            or "[COMRECGC_PROJECT_CHEMISTRY_ENGINEERING_PASS]" not in audit_text
+        ):
+            raise RuntimeError("Completed chemistry adoption does not pass its engineering Gate.")
+    return required
+
+
+def register_completed_stage_adoptions(
+    state: RecoveryState,
+    values: Sequence[str],
+    *,
+    known_stage_ids: set[str],
+) -> dict[str, str]:
+    mappings = dict(state.data.get("adopted_stage_outputs") or {})
+    records = list(state.data.get("completed_stage_adoptions") or [])
+    records_by_stage = {str(row["stage_id"]): row for row in records}
+    allowed_root = (PROJECT_ROOT / "outputs/hpc/baselines/comrecgc").resolve()
+    for value in values:
+        if "=" not in value:
+            raise RuntimeError("--adopt-completed-stage requires STAGE_ID=OUTPUT_PATH.")
+        stage_id, raw_path = value.split("=", 1)
+        if stage_id not in known_stage_ids:
+            raise RuntimeError(f"Unknown completed stage adoption: {stage_id}")
+        output = Path(raw_path).expanduser()
+        if not output.is_absolute():
+            output = PROJECT_ROOT / output
+        output = output.resolve(strict=True)
+        if not output.is_relative_to(allowed_root):
+            raise RuntimeError("Completed-stage adoption must remain in COMRECGC outputs.")
+        relative = (
+            Path("outputs/hpc/baselines/comrecgc")
+            / output.relative_to(allowed_root)
+        ).as_posix()
+        existing = mappings.get(stage_id)
+        if existing is not None and existing != relative:
+            raise RuntimeError(f"Completed-stage adoption path changed for {stage_id}.")
+        paths = _validate_completed_stage_artifacts(stage_id, output)
+        files = {
+            path.name: {
+                "path": str(path),
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+            for path in paths
+        }
+        record = {
+            "stage_id": stage_id,
+            "status": "ADOPT_EXISTING",
+            "output_root": relative,
+            "files": files,
+            "adopted_at": now(),
+        }
+        previous = records_by_stage.get(stage_id)
+        if previous is not None:
+            comparable_previous = {key: previous.get(key) for key in ("stage_id", "status", "output_root", "files")}
+            comparable_record = {key: record.get(key) for key in comparable_previous}
+            if comparable_previous != comparable_record:
+                raise RuntimeError(f"Completed-stage adoption evidence changed for {stage_id}.")
+            record = previous
+        else:
+            records.append(record)
+            records_by_stage[stage_id] = record
+            state.event("COMPLETED_STAGE_ADOPTED", record)
+        mappings[stage_id] = relative
+    state.data["adopted_stage_outputs"] = mappings
+    state.data["completed_stage_adoptions"] = records
+    state.data["completed_stages"] = sorted(
+        set(state.data.get("completed_stages") or []) | set(mappings)
+    )
+    state.save()
+    write_json(state.root / "evidence/completed_stage_adoptions.json", {"stages": records})
+    return mappings
+
+
+def verify_completed_stage_adoptions(state: RecoveryState) -> None:
+    for record in state.data.get("completed_stage_adoptions") or []:
+        output = (PROJECT_ROOT / str(record["output_root"])).resolve(strict=True)
+        paths = _validate_completed_stage_artifacts(str(record["stage_id"]), output)
+        current = {path.name: sha256_file(path) for path in paths}
+        expected = {
+            name: str(value["sha256"])
+            for name, value in dict(record.get("files") or {}).items()
+        }
+        if current != expected:
+            raise RuntimeError(
+                f"Completed-stage adoption changed after freeze: {record['stage_id']}"
+            )
+
+
+def stages(
+    run_id: str,
+    datasets: set[str],
+    mode: str,
+    *,
+    adopted_stage_outputs: dict[str, str] | None = None,
+) -> list[Stage]:
+    adopted_outputs = dict(adopted_stage_outputs or {})
     values: list[Stage] = []
     if "aids" in datasets:
         smoke_base = f"outputs/hpc/baselines/comrecgc/aids/recovery_smoke_{run_id}"
@@ -1128,13 +1286,25 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
             )
     if "mutagenicity" in datasets:
         smoke_base = f"outputs/hpc/baselines/comrecgc/mutagenicity/recovery_smoke_{run_id}"
+        generation_output = adopted_outputs.get(
+            "mut_trace_adopt", smoke_base + "/generation"
+        )
+        chemistry_output = adopted_outputs.get(
+            "mut_chemistry_audit", smoke_base + "/chemistry"
+        )
+        unified_eval_output = adopted_outputs.get(
+            "mut_unified_eval_smoke", smoke_base + "/unified_eval"
+        )
+        gate_output = adopted_outputs.get(
+            "mut_chemrepair_smoke_gate", smoke_base + "/gate"
+        )
         values.extend(
             [
                 Stage(
                     "mut_trace_adopt",
                     "mutagenicity",
                     "scripts/slurm/comrecgc_mut_trace_adopt.sh",
-                    smoke_base + "/generation",
+                    generation_output,
                     None,
                     (),
                     {
@@ -1143,45 +1313,45 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                             "recovery_smoke_comrecgc_recovery_20260806_mut_retry1/"
                             "generation"
                         ),
-                        "OUTPUT_DIR": smoke_base + "/generation",
+                        "OUTPUT_DIR": generation_output,
                     },
                 ),
                 Stage(
                     "mut_chemistry_audit",
                     "mutagenicity",
                     "scripts/slurm/comrecgc_mut_chemistry_audit.sh",
-                    smoke_base + "/chemistry",
+                    chemistry_output,
                     "afterok",
                     ("mut_trace_adopt",),
                     {
-                        "GENERATION_DIR": smoke_base + "/generation",
-                        "OUTPUT_DIR": smoke_base + "/chemistry",
+                        "GENERATION_DIR": generation_output,
+                        "OUTPUT_DIR": chemistry_output,
                     },
                 ),
                 Stage(
                     "mut_unified_eval_smoke",
                     "mutagenicity",
                     "scripts/slurm/comrecgc_mut_unified_eval.sh",
-                    smoke_base + "/unified_eval",
+                    unified_eval_output,
                     "afterok",
                     ("mut_chemistry_audit",),
                     {
                         "MODE": "smoke",
-                        "CHEMISTRY_DIR": smoke_base + "/chemistry",
-                        "OUTPUT_DIR": smoke_base + "/unified_eval",
+                        "CHEMISTRY_DIR": chemistry_output,
+                        "OUTPUT_DIR": unified_eval_output,
                     },
                 ),
                 Stage(
                     "mut_chemrepair_smoke_gate",
                     "mutagenicity",
                     "scripts/slurm/comrecgc_mut_chemrepair_smoke_gate.sh",
-                    smoke_base + "/gate",
+                    gate_output,
                     "afterok",
                     ("mut_unified_eval_smoke",),
                     {
-                        "INPUT_DIR": smoke_base + "/chemistry",
-                        "EVAL_DIR": smoke_base + "/unified_eval",
-                        "OUTPUT_DIR": smoke_base + "/gate",
+                        "INPUT_DIR": chemistry_output,
+                        "EVAL_DIR": unified_eval_output,
+                        "OUTPUT_DIR": gate_output,
                     },
                 ),
             ]
@@ -1226,7 +1396,7 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
                             "DATASET": "mutagenicity",
                             "MODE": "full",
                             "PARENT_LIMIT": "1448",
-                            "TRACE_EVIDENCE_PATH": smoke_base + "/generation/trace_parity.json",
+                            "TRACE_EVIDENCE_PATH": generation_output + "/trace_parity.json",
                         },
                     ),
                     Stage(
@@ -1268,9 +1438,10 @@ def stages(run_id: str, datasets: set[str], mode: str) -> list[Stage]:
 
 def refresh(state: RecoveryState) -> None:
     verify_retry3_inputs(state)
+    verify_completed_stage_adoptions(state)
     active = False
     failed: list[str] = []
-    completed: list[str] = []
+    completed: list[str] = list(state.data.get("adopted_stage_outputs") or {})
     terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL"}
     for record in state.data["jobs"]:
         if str(record["job_id"]).startswith("DRYRUN_"):
@@ -1383,6 +1554,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote-port", type=int, default=DEFAULT_REMOTE_PORT)
     parser.add_argument("--control-socket", default=DEFAULT_CONTROL_SOCKET)
     parser.add_argument("--remote-root", default=DEFAULT_REMOTE_ROOT)
+    parser.add_argument(
+        "--adopt-completed-stage",
+        action="append",
+        default=[],
+        metavar="STAGE_ID=OUTPUT_PATH",
+        help="Adopt an exact completed smoke-stage output without resubmitting it.",
+    )
     return parser
 
 
@@ -1447,7 +1625,18 @@ def main() -> int:
     try:
         requested_mode = str(state.data.get("requested_mode") or args.mode)
         requested_datasets = set(state.data.get("datasets") or datasets)
-        stage_values = stages(args.run_id, requested_datasets, requested_mode)
+        default_stage_values = stages(args.run_id, requested_datasets, requested_mode)
+        register_completed_stage_adoptions(
+            state,
+            args.adopt_completed_stage,
+            known_stage_ids={stage.stage_id for stage in default_stage_values},
+        )
+        stage_values = stages(
+            args.run_id,
+            requested_datasets,
+            requested_mode,
+            adopted_stage_outputs=dict(state.data.get("adopted_stage_outputs") or {}),
+        )
         if end_to_end:
             write_authorized_job_dag(state, stage_values)
         if args.mode == "refresh":

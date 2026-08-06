@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 
+from .cache_trust import load_aids_tensor_payload
 from .contracts import (
     CF_MODE,
     METHOD,
@@ -726,6 +727,8 @@ def run_native_smoke(
     parent_limit: int = 32,
     device: str = "cuda:0",
     mode: str = "smoke",
+    trusted_dataset_payload: str | Path | None = None,
+    expected_cache_inventory_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Exercise the official TU dataset/model/NeuroSED/random-walk route."""
 
@@ -745,8 +748,22 @@ def run_native_smoke(
         try:
             os.chdir(Path(upstream_root).expanduser().resolve())
             with imported_upstream(upstream_root) as modules:
-                graphs = modules["data"].load_dataset(dataset)
-                num_features = int(graphs.num_features)
+                if dataset == "aids":
+                    if (
+                        trusted_dataset_payload is None
+                        or expected_cache_inventory_sha256 is None
+                    ):
+                        raise ValueError(
+                            "Native AIDS execution requires a scoped trusted-cache payload."
+                        )
+                    graphs, _dataset_payload = load_aids_tensor_payload(
+                        trusted_dataset_payload,
+                        expected_inventory_sha256=expected_cache_inventory_sha256,
+                    )
+                    num_features = int(graphs[0].x.shape[1])
+                else:
+                    graphs = modules["data"].load_dataset(dataset)
+                    num_features = int(graphs.num_features)
                 model = modules["gnn"].load_trained_gnn(dataset, device=device).eval()
                 predictions = modules["gnn"].load_trained_prediction(dataset, device=device).cpu()
                 all_source_indices = torch.where(predictions == 0)[0]
