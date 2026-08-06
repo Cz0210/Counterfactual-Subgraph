@@ -5410,3 +5410,51 @@ The SFT/PPO smoke and full wrappers rebuild these views before data generation.
 Accepted
 
 ---
+## [2026-08-06] Recover COMRECGC with trace-only lineage and deterministic chemistry projection
+
+### Background
+
+The pinned COMRECGC native AIDS smoke produced 31 counterfactual candidates but
+no common-recourse cluster, while the project Mutagenicity smoke produced four
+official medoids that all failed RDKit decoding before RF inference. Changing
+DBSCAN or random-walk parameters after seeing those outcomes would confound the
+baseline, and replacing an invalid medoid with another cluster member would
+change official greedy selection.
+
+### Decision
+
+Keep upstream commit `122f9341a360e9f06bb58a2f5823bb596021f6bf`
+unmodified. Add project-owned action tracing that is parity-checked against the
+frozen smoke payload, a read-only float64 DBSCAN geometry audit, and one
+preregistered AIDS parent-density diagnostic using the unchanged 31-candidate
+set and upstream parameters. Run native full with upstream defaults regardless
+of density-retry yield, treating an empty common-recourse result as valid
+science with N/A cost.
+
+For project Mutagenicity, replay the exact official action lineage and apply one
+deterministic chemistry projection per raw candidate: retained chemistry comes
+from source sidecars, new untyped edges are SINGLE, each action is sanitized
+once, invalid actions are rolled back, and dependent actions are skipped. RF,
+strict-flip, and WNode are unavailable to the repair decision. Preserve the
+original official medoid and rank slot without compaction or backfill.
+
+### Consequences
+
+- COMRECGC-Native, COMRECGC-Raw-Project, and
+  COMRECGC-Adapted-DeterministicChemRepair remain separate report routes.
+- Zero repaired medoids or zero strict flips do not fail the engineering smoke
+  when source/no-op, trace, determinism, lineage, and serialization gates pass.
+- Unified evaluation delegates RF and WNode computation to the existing shared
+  evaluator, then maps valid pair rows back to immutable official rank slots;
+  invalid slots remain unavailable and are never compacted or backfilled.
+- Full jobs are submitted only through the experiment registry and remain
+  resumable from append-only recovery state. Mutagenicity full submission is
+  deferred until the smoke gate reaches `COMPLETED/0:0`.
+- Existing Ours, GCFExplainer, GlobalGCE, CLEAR, evaluator, RF, MolCLR, WNode,
+  and frozen result artifacts are unchanged.
+
+### Status
+
+Accepted
+
+---
