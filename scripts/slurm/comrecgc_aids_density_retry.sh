@@ -25,6 +25,7 @@ EXPECTED_SHA256="${EXPECTED_SHA256:-096ddd0f4ac31126a0665a11effb7362c2137229ff6b
 EXISTING_AUDIT="${EXISTING_AUDIT:-outputs/hpc/baselines/comrecgc/aids_native_dbscan_audit_v1/audit.json}"
 PREREGISTRATION="${PREREGISTRATION:-outputs/hpc/baselines/comrecgc/preregistration/aids_native_parent_density_retry_v1.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/aids_native_parent_density_retry_v1}"
+CACHE_TRUST_BEFORE="${CACHE_TRUST_BEFORE:-${OUTPUT_DIR}.cache_trust_before.json}"
 [[ -s "$EXISTING_AUDIT" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing audit=$EXISTING_AUDIT" >&2; exit 2; }
 [[ ! -e "$OUTPUT_DIR/manifest.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] output exists=$OUTPUT_DIR" >&2; exit 2; }
 if [[ ! -e "$PREREGISTRATION" ]]; then
@@ -36,6 +37,11 @@ test -s "$PREREGISTRATION"
 echo "[COMRECGC_RECOVERY_CONFIG] stage=aids_density_retry candidate_regeneration=false parent_universe=all_native_reject"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD) prereg_sha=$(sha256sum "$PREREGISTRATION" | awk '{print $1}')"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$CACHE_TRUST_BEFORE"
+CACHE_SHA256_BEFORE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["cache_sha256"])' "$CACHE_TRUST_BEFORE")"
+env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
 python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --project-root "$PROJECT_ROOT" \
   --upstream-root external/COMRECGC \
@@ -47,5 +53,9 @@ python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --preregistration-path "$PREREGISTRATION" \
   --device cuda:0 \
   --batch-size 128
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$OUTPUT_DIR/cache_trust_after.json" \
+  --expected-inventory-sha256 "$CACHE_SHA256_BEFORE"
 test -s "$OUTPUT_DIR/audit.json"
 echo "[COMRECGC_AIDS_DENSITY_RETRY_SUCCESS]"

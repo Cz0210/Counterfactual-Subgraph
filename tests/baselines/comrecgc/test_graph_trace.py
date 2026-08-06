@@ -102,6 +102,7 @@ def test_selected_action_lineage_is_exact_and_ordered() -> None:
     lineage = recorder.candidate_lineage(candidate_payload)
     assert lineage[0]["action_lineage_resolved"] is True
     assert lineage[0]["actions"][0]["action"] == ["NLC", 0, 1]
+    assert lineage[0]["actions"][0]["action_replay_exact"] is True
     assert lineage[0]["actions"][0]["source_node_ids"] == ["source:0", "source:1"]
     assert lineage[0]["actions"][0]["target_node_ids"] == ["source:0", "source:1"]
 
@@ -127,6 +128,13 @@ def test_trace_parity_accepts_audited_cuda_float32_importance_drift() -> None:
     assert result["importance_exact_match"] is False
     assert result["importance_exact_mismatch_count"] == 1
     assert result["importance_max_abs_difference"] <= TRACE_IMPORTANCE_ABS_TOLERANCE
+    assert result["importance_threshold_mask_exact"] is True
+    assert result["model_cf_id_set_exact"] is True
+    assert result["model_cf_order_exact"] is True
+    assert result["dbscan_input_id_set_exact"] is True
+    assert result["dbscan_input_order_exact"] is True
+    assert result["num_diff_gt_1e_7"] == 1
+    assert result["num_diff_gt_1e_6"] == 0
     assert (
         result["importance_comparison_policy"]
         == "float32_cuda_replay_abs_tolerance_v1"
@@ -149,6 +157,54 @@ def test_trace_parity_rejects_candidate_order_change() -> None:
 
     with pytest.raises(ValueError, match="topology, features, frequency, or order"):
         assert_trace_parity(reference, traced)
+
+
+def test_trace_parity_rejects_importance_threshold_mask_change() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    reference["counterfactual_candidates"][0]["importance_parts"][0] = 0.4999996
+    traced["counterfactual_candidates"][0]["importance_parts"][0] = 0.5000004
+
+    with pytest.raises(ValueError, match="importance_threshold_mask_exact"):
+        assert_trace_parity(reference, traced)
+
+
+def test_trace_parity_rejects_model_cf_set_or_order_change() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    with pytest.raises(ValueError, match="model_cf_id_set_exact"):
+        assert_trace_parity(
+            reference,
+            traced,
+            reference_model_cf_ids=["a", "b"],
+            traced_model_cf_ids=["a", "c"],
+        )
+    with pytest.raises(ValueError, match="model_cf_order_exact"):
+        assert_trace_parity(
+            reference,
+            traced,
+            reference_model_cf_ids=["a", "b"],
+            traced_model_cf_ids=["b", "a"],
+        )
+
+
+def test_trace_parity_rejects_dbscan_input_set_or_order_change() -> None:
+    reference = payload(graph(), graph(atom=1))
+    traced = payload(graph(), graph(atom=1))
+    with pytest.raises(ValueError, match="dbscan_input_id_set_exact"):
+        assert_trace_parity(
+            reference,
+            traced,
+            reference_dbscan_input_ids=["p0:c0", "p1:c0"],
+            traced_dbscan_input_ids=["p0:c0", "p2:c0"],
+        )
+    with pytest.raises(ValueError, match="dbscan_input_order_exact"):
+        assert_trace_parity(
+            reference,
+            traced,
+            reference_dbscan_input_ids=["p0:c0", "p1:c0"],
+            traced_dbscan_input_ids=["p1:c0", "p0:c0"],
+        )
 
 
 def test_infer_official_single_edit_recovers_node_label_change() -> None:

@@ -5,6 +5,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPT = (
     Path(__file__).resolve().parents[3]
@@ -133,11 +135,122 @@ def test_slot_preserving_eval_is_in_smoke_and_full_dag() -> None:
     assert by_id["mut_chemrepair_smoke_gate"].dependency_stages == (
         "mut_unified_eval_smoke",
     )
+    assert by_id["mut_chemrepair_smoke_gate"].dependency_type == "afterok"
     assert by_id["mut_full_unified_eval"].dependency_stages == (
         "mut_full_chemistry",
     )
     assert by_id["mut_full_gate"].dependency_type == "afterany"
     assert by_id["mut_freeze"].dependency_stages == ("mut_full_gate",)
+
+
+def test_retry3_requires_authorization_file_and_exact_project_commit(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="authorization is missing"):
+        MODULE.load_retry3_authorization(tmp_path, project_commit="a" * 40)
+
+    path, _digest = MODULE.initialize_retry3_authorization(
+        tmp_path, project_commit="a" * 40
+    )
+    assert path.is_file()
+    with pytest.raises(RuntimeError, match="project_commit"):
+        MODULE.load_retry3_authorization(tmp_path, project_commit="b" * 40)
+
+
+def _authorized_state(tmp_path: Path) -> object:
+    authorization = MODULE.retry3_authorization_template(MODULE.git_commit(MODULE.PROJECT_ROOT))
+    return MODULE.RecoveryState(
+        tmp_path,
+        "comrecgc_recovery_test_retry3",
+        requested_mode="smoke",
+        datasets=["aids", "mutagenicity"],
+        authorization=authorization,
+        authorization_sha256="f" * 64,
+    )
+
+
+def test_retry3_smoke_job_caps_are_two_four_and_six(tmp_path: Path) -> None:
+    state = _authorized_state(tmp_path)
+    state.data["jobs"] = [
+        {"stage_id": "aids_existing_audit"},
+        {"stage_id": "aids_density_retry"},
+        {"stage_id": "mut_trace_adopt"},
+        {"stage_id": "mut_chemistry_audit"},
+        {"stage_id": "mut_unified_eval_smoke"},
+        {"stage_id": "mut_chemrepair_smoke_gate"},
+    ]
+    MODULE.validate_job_caps(state)
+
+    state.data["jobs"].append({"stage_id": "aids_existing_audit"})
+    with pytest.raises(RuntimeError, match="AIDS job cap"):
+        MODULE.validate_job_caps(state)
+
+    state.data["jobs"] = [
+        {"stage_id": "mut_trace_adopt"},
+        {"stage_id": "mut_chemistry_audit"},
+        {"stage_id": "mut_unified_eval_smoke"},
+        {"stage_id": "mut_chemrepair_smoke_gate"},
+        {"stage_id": "mut_trace_adopt"},
+    ]
+    with pytest.raises(RuntimeError, match="Mutagenicity job cap"):
+        MODULE.validate_job_caps(state)
+
+    state.data["authorization"]["max_aids_jobs"] = 7
+    state.data["authorization"]["max_mutagenicity_jobs"] = 7
+    state.data["jobs"] = [
+        {"stage_id": "aids_existing_audit"},
+        {"stage_id": "aids_density_retry"},
+        {"stage_id": "mut_trace_adopt"},
+        {"stage_id": "mut_chemistry_audit"},
+        {"stage_id": "mut_unified_eval_smoke"},
+        {"stage_id": "mut_chemrepair_smoke_gate"},
+        {"stage_id": "mut_trace_adopt"},
+    ]
+    with pytest.raises(RuntimeError, match="total job cap"):
+        MODULE.validate_job_caps(state)
+
+
+def test_retry3_full_submission_is_blocked_before_registry_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = _authorized_state(tmp_path)
+    stage = MODULE.Stage(
+        "aids_native_full",
+        "aids",
+        "scripts/slurm/comrecgc_aids_native_full.sh",
+        "outputs/never-created",
+        None,
+        (),
+        {},
+    )
+
+    def unexpected_command(*_args, **_kwargs):
+        raise AssertionError("exp_sbatch must not be reached")
+
+    monkeypatch.setattr(MODULE, "command", unexpected_command)
+    with pytest.raises(RuntimeError, match="phase_c_full_approved"):
+        MODULE.submit(stage, state, dry_run=False)
+
+
+def test_retry3_aids_output_roots_are_versioned_by_run_id() -> None:
+    run_id = "comrecgc_recovery_20260806_aids_retry3"
+    values = MODULE.stages(run_id, {"aids"}, "smoke")
+    assert all(run_id in stage.output_root for stage in values)
+    assert values[0].environment["OUTPUT_DIR"] == values[0].output_root
+    assert values[1].environment["EXISTING_AUDIT"].startswith(values[0].output_root)
+
+
+def test_retry3_authorization_template_keeps_full_kill_switch_closed() -> None:
+    value = MODULE.retry3_authorization_template("a" * 40)
+    assert value["authorization_status"] == "AUTHORIZED"
+    assert value["authorized_scope"] == "RETRY3_SMOKE_ONLY"
+    assert value["phase_c_full_approved"] is False
+    assert value["full_submission_allowed"] is False
+    assert value["auto_promote_to_full"] is False
+    assert value["candidate_regeneration_allowed"] is False
+    assert value["random_walk_rerun_allowed"] is False
+    assert (value["max_aids_jobs"], value["max_mutagenicity_jobs"]) == (2, 4)
+    assert value["max_total_jobs"] == 6
 
 
 def test_frozen_blocker_artifacts_are_adopted_idempotently(tmp_path: Path) -> None:

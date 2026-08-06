@@ -19,11 +19,11 @@ PROJECT_ROOT="${PROJECT_ROOT:-/share/home/u20526/czx/counterfactual-subgraph}"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONHASHSEED=0
-export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 SOURCE_ARTIFACT="${SOURCE_ARTIFACT:-outputs/hpc/baselines/comrecgc/native_smoke/aids/comrecgc_native_common_64p_20260806_v6/counterfactuals.pt}"
 EXPECTED_SHA256="${EXPECTED_SHA256:-096ddd0f4ac31126a0665a11effb7362c2137229ff6b53b50e16c081ef6c274a}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/aids_native_dbscan_audit_v1}"
+CACHE_TRUST_BEFORE="${CACHE_TRUST_BEFORE:-${OUTPUT_DIR}.cache_trust_before.json}"
 [[ -f "$SOURCE_ARTIFACT" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing=$SOURCE_ARTIFACT" >&2; exit 2; }
 [[ "$(sha256sum "$SOURCE_ARTIFACT" | awk '{print $1}')" == "$EXPECTED_SHA256" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] AIDS frozen artifact SHA256 mismatch" >&2; exit 2;
@@ -35,7 +35,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-outputs/hpc/baselines/comrecgc/aids_native_dbscan_audi
 echo "[COMRECGC_RECOVERY_CONFIG] stage=aids_existing_audit source=$SOURCE_ARTIFACT output=$OUTPUT_DIR"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$CACHE_TRUST_BEFORE"
+CACHE_SHA256_BEFORE="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["cache_sha256"])' "$CACHE_TRUST_BEFORE")"
 python -m py_compile scripts/baselines/comrecgc/audit_aids_native_dbscan.py
+env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
 python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --project-root "$PROJECT_ROOT" \
   --upstream-root external/COMRECGC \
@@ -48,6 +53,10 @@ python scripts/baselines/comrecgc/audit_aids_native_dbscan.py \
   --expected-eligible-pairs 28 \
   --device cuda:0 \
   --batch-size 128
+python scripts/baselines/comrecgc/audit_trusted_aids_cache.py \
+  --upstream-root external/COMRECGC \
+  --output "$OUTPUT_DIR/cache_trust_after.json" \
+  --expected-inventory-sha256 "$CACHE_SHA256_BEFORE"
 test -s "$OUTPUT_DIR/audit.json"
 grep -Fq '[COMRECGC_AIDS_DBSCAN_AUDIT_PASS]' "$OUTPUT_DIR/audit.txt"
 echo "[COMRECGC_AIDS_EXISTING_AUDIT_SUCCESS]"

@@ -179,6 +179,21 @@ def recover_mutagenicity_trace_run(
         for row in lineage
         for event in row["actions"]
     )
+    transition_count = sum(len(row["actions"]) for row in lineage)
+    replay_exact_count = sum(
+        event.get("action_replay_exact") is True
+        for row in lineage
+        for event in row["actions"]
+    )
+    if replay_exact_count != transition_count:
+        raise ValueError("Recovered action lineage does not replay exactly.")
+    lineage_replay = {
+        "num_transitions": transition_count,
+        "num_canonical_actions": transition_count,
+        "num_ambiguous_reconstructions": 0,
+        "num_replay_exact": replay_exact_count,
+        "num_replay_failed": 0,
+    }
 
     counterfactuals_path = output_root / "counterfactuals.pt"
     counterfactuals_mode = _materialize(
@@ -214,6 +229,7 @@ def recover_mutagenicity_trace_run(
         "inferred_action_count": inferred_action_count,
         "recorded_action_count": recorded_action_count,
         "algorithm_rerun": False,
+        "lineage_replay": lineage_replay,
     }
     write_json(output_trace / "trace_summary.json", trace_summary)
     write_json(
@@ -241,6 +257,7 @@ def recover_mutagenicity_trace_run(
         "trace_enabled": True,
         "trace_summary": trace_summary,
         "trace_parity": parity,
+        "lineage_replay": lineage_replay,
         "candidate_order_source": "official_frequency_reinforced_order",
         "algorithm_rerun": False,
         "source_algorithm_rerun": True,
@@ -268,6 +285,7 @@ def recover_mutagenicity_trace_run(
         "inferred_action_count": inferred_action_count,
         "recorded_action_count": recorded_action_count,
         "trace_parity": parity,
+        "lineage_replay": lineage_replay,
         "calibration_loaded": False,
         "test_loaded": False,
     }

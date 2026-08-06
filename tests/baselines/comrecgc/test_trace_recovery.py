@@ -161,6 +161,13 @@ def test_recover_existing_trace_without_algorithm_rerun(tmp_path: Path) -> None:
     assert result["algorithm_rerun"] is False
     assert result["candidate_order_unchanged"] is True
     assert result["inferred_action_count"] == 1
+    assert result["lineage_replay"] == {
+        "num_transitions": 1,
+        "num_canonical_actions": 1,
+        "num_ambiguous_reconstructions": 0,
+        "num_replay_exact": 1,
+        "num_replay_failed": 0,
+    }
     assert result["counterfactuals_materialization_mode"] == "hardlink"
     assert os.stat(source / "counterfactuals.pt").st_ino == os.stat(
         output / "counterfactuals.pt"

@@ -69,7 +69,22 @@ def test_aids_existing_audit_loads_trusted_upstream_pyg_cache() -> None:
     text = (ROOT / "scripts/slurm/comrecgc_aids_existing_audit.sh").read_text(
         encoding="utf-8"
     )
-    assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" in text
+    assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" not in text
+    assert text.count("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1") == 1
+    assert "audit_trusted_aids_cache.py" in text
+    scoped_load = (
+        "env TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \\\n"
+        "python scripts/baselines/comrecgc/audit_aids_native_dbscan.py"
+    )
+    assert scoped_load in text
+    assert "--expected-inventory-sha256" in text
+
+    density = (ROOT / "scripts/slurm/comrecgc_aids_density_retry.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1" not in density
+    assert density.count("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1") == 1
+    assert "audit_trusted_aids_cache.py" in density
 
 
 def test_mut_trace_adoption_does_not_rerun_random_walk() -> None:

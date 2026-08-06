@@ -53,6 +53,45 @@ profile name and manifest.
 Accepted
 
 ---
+## [2026-08-06] Harden COMRECGC retry3 as an authorization-scoped smoke replay
+
+### Background
+
+The retry2 recovery jobs exposed four control-plane risks before retry3: the
+trusted AIDS PyG cache compatibility variable was exported process-wide, the
+Mutagenicity smoke gate used `afterany`, the recovery driver did not consume a
+run-specific authorization artifact, and trace parity did not freeze the
+discrete model-CF and DBSCAN input decisions.
+
+### Decision
+
+Require an exact `authorization.json` bound to the current project and pinned
+upstream commits before any retry3 submission. Limit that authorization to two
+AIDS and four Mutagenicity smoke jobs, and require separate positive booleans
+for every full submission path. Use `afterok` throughout the Mutagenicity smoke
+chain. Audit the immutable AIDS cache before and after loading, and scope
+`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` to only the Python process that loads that
+cache. Extend trace parity with exact importance-mask, model-CF set/order, and
+DBSCAN input set/order gates while retaining the audited `1e-6` floating-point
+tolerance.
+
+### Consequences
+
+- Retry3 cannot auto-promote to full and cannot exceed the authorized 2/4/6
+  job limits.
+- Existing retry jobs are adopted from state and the experiment registry
+  instead of being resubmitted after a client interruption.
+- A writable or symlinked AIDS cache blocks only the AIDS chain with explicit
+  evidence; it does not weaken trusted pickle loading or block the independent
+  Mutagenicity smoke chain.
+- Random-walk candidates, importance math, DBSCAN parameters, greedy order,
+  and frozen artifacts are unchanged.
+
+### Status
+
+Accepted
+
+---
 
 ## [2026-08-06] Separate COMRECGC smoke interface evidence from final yield
 

@@ -12,6 +12,7 @@ from .contracts import atomic_write_bytes, sha256_file, stable_json_sha256, writ
 
 
 TRACE_IMPORTANCE_ABS_TOLERANCE = 1e-6
+MODEL_CF_IMPORTANCE_THRESHOLD = 0.5
 
 
 def _plain(value: Any) -> Any:
@@ -81,6 +82,88 @@ def stable_graph_sha256(graph: Any) -> str:
 
 def normalized_action(action: Sequence[Any]) -> list[Any]:
     return [_plain(value) for value in action]
+
+
+def apply_action_to_normalized_payload(
+    source_graph: Any, action: Sequence[Any]
+) -> dict[str, Any]:
+    """Apply one pinned-upstream edit in the canonical untyped graph space."""
+
+    payload = normalized_graph_payload(source_graph)
+    nodes = [list(row) for row in payload["x"]]
+    edges = [dict(row) for row in payload["directed_edges"]]
+    name = str(action[0])
+    if name == "NOTHING":
+        pass
+    elif name == "NLC":
+        node, label = int(action[1]), int(action[2])
+        if not 0 <= node < len(nodes) or not 0 <= label < len(nodes[node]):
+            raise ValueError("Recovered NLC action is outside the source graph.")
+        nodes[node] = [0.0] * len(nodes[node])
+        nodes[node][label] = 1.0
+    elif name in {"NA", "INA"}:
+        attachment, label = int(action[1]), int(action[2])
+        if not nodes or not 0 <= label < len(nodes[0]):
+            raise ValueError("Recovered node-addition label is outside the vocabulary.")
+        new_node = len(nodes)
+        feature = [0.0] * len(nodes[0])
+        feature[label] = 1.0
+        nodes.append(feature)
+        if name == "NA":
+            if not 0 <= attachment < new_node:
+                raise ValueError("Recovered node attachment is outside the source graph.")
+            edges.extend(
+                [
+                    {"source": attachment, "target": new_node, "attr": None},
+                    {"source": new_node, "target": attachment, "attr": None},
+                ]
+            )
+    elif name in {"NR", "INR"}:
+        removed = int(action[1])
+        if not 0 <= removed < len(nodes):
+            raise ValueError("Recovered node removal is outside the source graph.")
+        nodes.pop(removed)
+        retained: list[dict[str, Any]] = []
+        for edge in edges:
+            source, target = int(edge["source"]), int(edge["target"])
+            if removed in {source, target}:
+                continue
+            retained.append(
+                {
+                    **edge,
+                    "source": source - 1 if source > removed else source,
+                    "target": target - 1 if target > removed else target,
+                }
+            )
+        edges = retained
+    elif name in {"ER", "ERR"}:
+        first, second = int(action[1]), int(action[2])
+        edges = [
+            edge
+            for edge in edges
+            if (int(edge["source"]), int(edge["target"]))
+            not in {(first, second), (second, first)}
+        ]
+    elif name == "EA":
+        first, second = int(action[1]), int(action[2])
+        if not (0 <= first < len(nodes) and 0 <= second < len(nodes)):
+            raise ValueError("Recovered edge addition is outside the source graph.")
+        edges.extend(
+            [
+                {"source": first, "target": second, "attr": None},
+                {"source": second, "target": first, "attr": None},
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported recovered COMRECGC action: {name}")
+    edges.sort(
+        key=lambda row: (
+            int(row["source"]),
+            int(row["target"]),
+            json.dumps(row["attr"], sort_keys=True, separators=(",", ":")),
+        )
+    )
+    return {"num_nodes": len(nodes), "x": nodes, "directed_edges": edges}
 
 
 def trace_node_ids(graph: Any) -> list[str]:
@@ -296,6 +379,12 @@ class ActionTraceRecorder:
                     current_node_ids = trace_node_ids(source_entry[0])
                     for path_index, event in enumerate(path):
                         enriched = dict(event)
+                        source_graph_entry = graph_map_by_string.get(
+                            str(event["source_official_hash"])
+                        )
+                        target_graph_entry = graph_map_by_string.get(
+                            str(event["target_official_hash"])
+                        )
                         source_node_ids = list(current_node_ids)
                         action = list(event.get("action") or [])
                         target_node_ids = list(source_node_ids)
@@ -314,6 +403,16 @@ class ActionTraceRecorder:
                                 node_lineage_resolved = False
                             else:
                                 target_node_ids.pop(remove_index)
+                        replay_exact = bool(source_graph_entry and target_graph_entry)
+                        if replay_exact:
+                            replay_exact = (
+                                apply_action_to_normalized_payload(
+                                    source_graph_entry[0], action
+                                )
+                                == normalized_graph_payload(target_graph_entry[0])
+                            )
+                        enriched["action_replay_exact"] = replay_exact
+                        node_lineage_resolved = node_lineage_resolved and replay_exact
                         enriched["source_node_ids"] = source_node_ids
                         enriched["target_node_ids"] = target_node_ids
                         enriched_path.append(enriched)
@@ -580,6 +679,11 @@ def recover_candidate_lineage_from_selected_trace(
         if source_graph is None or target_graph is None:
             raise ValueError("Selected trace references a graph absent from the frozen payload.")
         inferred = infer_official_single_edit(source_graph, target_graph)
+        replayed = apply_action_to_normalized_payload(source_graph, inferred)
+        if replayed != normalized_graph_payload(target_graph):
+            raise ValueError(
+                "Recovered selected action does not replay to the exact target graph."
+            )
         recorded = event.get("action")
         if recorded is not None and list(recorded) != inferred:
             raise ValueError(
@@ -590,6 +694,7 @@ def recover_candidate_lineage_from_selected_trace(
         event["action_recovery"] = (
             "recorded_exact" if recorded is not None else "inferred_exact_graph_delta_v1"
         )
+        event["action_replay_exact"] = True
         predecessor.setdefault(target_key, event)
 
     rows: list[dict[str, Any]] = []
@@ -673,6 +778,7 @@ def normalized_candidate_sequence(payload: Mapping[str, Any]) -> list[dict[str, 
             raise ValueError(f"Candidate graph is absent from graph_map: {official_hash!r}")
         rows.append(
             {
+                "candidate_id": stable_graph_sha256(graph_entry[0]),
                 "stable_graph_sha256": stable_graph_sha256(graph_entry[0]),
                 "frequency": int(candidate.get("frequency", 0)),
                 "importance_parts": _importance(candidate.get("importance_parts")),
@@ -681,8 +787,42 @@ def normalized_candidate_sequence(payload: Mapping[str, Any]) -> list[dict[str, 
     return rows
 
 
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    position = (len(ordered) - 1) * float(percentile)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _derived_model_cf_ids(
+    rows: Sequence[Mapping[str, Any]], *, threshold: float
+) -> tuple[list[bool], list[str]]:
+    mask: list[bool] = []
+    identifiers: list[str] = []
+    for row in rows:
+        importance = list(row["importance_parts"])
+        selected = bool(importance and float(importance[0]) >= float(threshold))
+        mask.append(selected)
+        if selected:
+            identifiers.append(str(row["candidate_id"]))
+    return mask, identifiers
+
+
 def assert_trace_parity(
-    reference_payload: Mapping[str, Any], traced_payload: Mapping[str, Any]
+    reference_payload: Mapping[str, Any],
+    traced_payload: Mapping[str, Any],
+    *,
+    importance_threshold: float = MODEL_CF_IMPORTANCE_THRESHOLD,
+    reference_model_cf_ids: Sequence[str] | None = None,
+    traced_model_cf_ids: Sequence[str] | None = None,
+    reference_dbscan_input_ids: Sequence[str] | None = None,
+    traced_dbscan_input_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     reference = normalized_candidate_sequence(reference_payload)
     traced = normalized_candidate_sequence(traced_payload)
@@ -693,7 +833,8 @@ def assert_trace_parity(
         )
 
     exact_importance_mismatch_count = 0
-    max_importance_abs_difference = 0.0
+    absolute_differences: list[float] = []
+    relative_differences: list[float] = []
     for index, (reference_row, traced_row) in enumerate(
         zip(reference, traced, strict=True)
     ):
@@ -720,9 +861,9 @@ def assert_trace_parity(
                     f"{index}, part={part_index}."
                 )
             difference = abs(reference_value - traced_value)
-            max_importance_abs_difference = max(
-                max_importance_abs_difference, difference
-            )
+            absolute_differences.append(difference)
+            denominator = max(abs(reference_value), abs(traced_value), 1e-12)
+            relative_differences.append(difference / denominator)
             if difference != 0.0:
                 exact_importance_mismatch_count += 1
             if difference > TRACE_IMPORTANCE_ABS_TOLERANCE:
@@ -732,6 +873,65 @@ def assert_trace_parity(
                     f"abs_difference={difference}, "
                     f"tolerance={TRACE_IMPORTANCE_ABS_TOLERANCE}."
                 )
+
+    reference_mask, derived_reference_model_ids = _derived_model_cf_ids(
+        reference, threshold=importance_threshold
+    )
+    traced_mask, derived_traced_model_ids = _derived_model_cf_ids(
+        traced, threshold=importance_threshold
+    )
+    importance_threshold_mask_exact = reference_mask == traced_mask
+    resolved_reference_model_ids = list(
+        derived_reference_model_ids
+        if reference_model_cf_ids is None
+        else map(str, reference_model_cf_ids)
+    )
+    resolved_traced_model_ids = list(
+        derived_traced_model_ids
+        if traced_model_cf_ids is None
+        else map(str, traced_model_cf_ids)
+    )
+    model_cf_id_set_exact = set(resolved_reference_model_ids) == set(
+        resolved_traced_model_ids
+    )
+    model_cf_order_exact = resolved_reference_model_ids == resolved_traced_model_ids
+    resolved_reference_dbscan_ids = list(
+        resolved_reference_model_ids
+        if reference_dbscan_input_ids is None
+        else map(str, reference_dbscan_input_ids)
+    )
+    resolved_traced_dbscan_ids = list(
+        resolved_traced_model_ids
+        if traced_dbscan_input_ids is None
+        else map(str, traced_dbscan_input_ids)
+    )
+    dbscan_input_id_set_exact = set(resolved_reference_dbscan_ids) == set(
+        resolved_traced_dbscan_ids
+    )
+    dbscan_input_order_exact = (
+        resolved_reference_dbscan_ids == resolved_traced_dbscan_ids
+    )
+    discrete_checks = {
+        "importance_threshold_mask_exact": importance_threshold_mask_exact,
+        "model_cf_id_set_exact": model_cf_id_set_exact,
+        "model_cf_order_exact": model_cf_order_exact,
+        "dbscan_input_id_set_exact": dbscan_input_id_set_exact,
+        "dbscan_input_order_exact": dbscan_input_order_exact,
+    }
+    failed_discrete = [key for key, value in discrete_checks.items() if not value]
+    if failed_discrete:
+        raise ValueError(
+            "Trace-on/off discrete decision parity differs: "
+            + ", ".join(failed_discrete)
+        )
+
+    max_importance_abs_difference = max(absolute_differences, default=0.0)
+    max_importance_relative_difference = max(relative_differences, default=0.0)
+    reference_threshold_distances = [
+        abs(float(row["importance_parts"][0]) - float(importance_threshold))
+        for row in reference
+        if row["importance_parts"]
+    ]
 
     structural_sequence = [
         {
@@ -753,10 +953,33 @@ def assert_trace_parity(
         "importance_exact_match": exact_importance_mismatch_count == 0,
         "importance_exact_mismatch_count": exact_importance_mismatch_count,
         "importance_max_abs_difference": max_importance_abs_difference,
+        "max_abs_diff": max_importance_abs_difference,
+        "max_relative_diff": max_importance_relative_difference,
+        "mean_abs_diff": (
+            sum(absolute_differences) / len(absolute_differences)
+            if absolute_differences
+            else 0.0
+        ),
+        "q99_abs_diff": _percentile(absolute_differences, 0.99),
+        "num_diff_gt_1e_7": sum(value > 1e-7 for value in absolute_differences),
+        "num_diff_gt_1e_6": sum(value > 1e-6 for value in absolute_differences),
+        "minimum_distance_to_importance_threshold": min(
+            reference_threshold_distances, default=None
+        ),
+        "num_values_within_1e_6_of_threshold": sum(
+            value <= 1e-6 for value in reference_threshold_distances
+        ),
+        "importance_threshold": float(importance_threshold),
+        **discrete_checks,
+        "model_cf_count": len(resolved_reference_model_ids),
+        "dbscan_input_count": len(resolved_reference_dbscan_ids),
         "compared_fields": [
             "stable_graph_sha256",
             "frequency",
             "importance_parts",
             "order",
+            "importance_threshold_mask",
+            "model_cf_ids",
+            "dbscan_input_ids",
         ],
     }
