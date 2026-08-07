@@ -45,7 +45,7 @@ if [ "$RESUME" != "true" ] && { [ -d "$OUTPUT_DIR" ] || [ -d "$WORK_DIR" ]; }; t
   exit 2
 fi
 
-EXPECTED_TEST_PARENTS=$(awk 'END {print NR > 0 ? NR - 1 : 0}' "$TEST_CSV")
+EXPECTED_TEST_PARENTS=$(awk 'END {print (NR > 0 ? NR - 1 : 0)}' "$TEST_CSV")
 if [ "$EXPECTED_TEST_PARENTS" -le 0 ]; then
   echo "[BACE_CONFIG_ERROR] empty test source cohort: $TEST_CSV" >&2
   exit 2

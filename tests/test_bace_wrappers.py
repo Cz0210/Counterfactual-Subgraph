@@ -36,6 +36,7 @@ def test_requested_bace_wrappers_use_registered_cluster_contract() -> None:
 def test_bace_eval_common_reuses_shared_evaluator_without_selector() -> None:
     content = _text("bace_eval_method_common.sh")
     assert "scripts/evaluate_bace_method.py" in content
+    assert "awk 'END {print (NR > 0 ? NR - 1 : 0)}'" in content
     assert "bace_teacher.pkl" in content
     assert "test_source_label1_teacher_correct.csv" in content
     assert "select_mutagenicity_wnode_prefix" not in content
