@@ -5709,3 +5709,56 @@ seven-CPU allocation and keeps the seven-day limit. Cross-job random-walk
 resume remains disabled because the pinned runtime does not serialize all
 Python/NumPy/Torch RNG and transition state; a fresh versioned output is
 required instead of claiming an unsafe resume.
+
+---
+
+## 2026-08-07: BACE Ours end-to-end paper artifact contract
+
+### Background
+
+The existing AIDS and Mutagenicity Ours paths already share candidate-pool,
+coverage-heavy MMR selection, and strict-flip MolCLR-Node-Wasserstein
+evaluation components. BACE must enter those components without changing
+their algorithms or either existing dataset route.
+
+### Decision
+
+Add a project-owned BACE adapter that normalizes a local raw CSV to
+`smiles`/`label`, canonicalizes molecules, records stable molecule and graph
+hashes, and freezes deterministic scaffold-level train, validation,
+calibration, and test splits. Train an independent Morgan-RF BACE teacher on
+train only, select it on validation only, and materialize calibration/test
+teacher-correct cohorts only after the model is frozen.
+
+Reuse the stable300 checkpoint and its established generation parameters to
+generate candidates from the teacher-correct BACE train-source cohort. A
+lineage-only adapter adds stable BACE parent IDs without modifying or
+reordering scientific candidate fields. The existing candidate audit must
+pass its structural selector gate before the unchanged coverage-heavy MMR
+selector freezes Top20.
+
+Use Ours calibration distances to freeze the existing q05, q10, q20, q30,
+q50, q70, q90 protocol, with q30 as `theta_star` and q90 as the cost cap. The
+selected Top20 then enters the existing MolCLR-Node-Wasserstein evaluator on
+the teacher-correct BACE test cohort under `strict_flip`; evaluation never
+invokes a selector or changes candidate order.
+
+Write the plotting columns directly at artifact creation time:
+
+- Figure 3: `method,k,coverage,cost`;
+- Figure 4: `method,threshold,coverage`;
+- Table 2: `method,k,coverage,cost,flip_rate,cf_drop`.
+
+### Consequences
+
+- The repository does not download BACE implicitly; `data/raw/BACE/bace.csv`
+  is an explicit, auditable input.
+- Generation, audit, selector, evaluation, and artifact audit have separate
+  Slurm stages and fresh-output gates. Calibration/test data are not loaded by
+  generation or selection.
+- The final artifact audit rejects schema, order, method, threshold,
+  parent-ID, teacher, or MolCLR drift; it never recomputes metrics.
+- This decision authorizes BACE Ours only. No BACE GlobalGCE, GCFExplainer, or
+  COMRECGC experiment is implemented or submitted in this stage.
+- Existing AIDS and Mutagenicity adapters, evaluators, candidates, and paper
+  artifacts are unchanged.
