@@ -53,6 +53,7 @@ def test_bace_ours_generation_reuses_frozen_stable300_parameters() -> None:
     assert "--projection-penalty 1.0" in content
     assert "calibration_loaded=false" in content
     assert "test_loaded=false" in content
+    assert "awk 'END {print (NR > 0 ? NR - 1 : 0)}'" in content
     assert "scripts/generate_full_candidate_pool.py" in content
     assert "scripts/baselines/bace/enrich_ours_candidate_pool.py" in content
 

@@ -58,7 +58,7 @@ for path in "$DATASET_PATH" "$BASE_MODEL_PATH" "$SFT_LORA_PATH" "$PPO_CHECKPOINT
   fi
 done
 
-PARENT_COUNT=$(awk 'END {print NR > 0 ? NR - 1 : 0}' "$DATASET_PATH")
+PARENT_COUNT=$(awk 'END {print (NR > 0 ? NR - 1 : 0)}' "$DATASET_PATH")
 if [ "$PARENT_COUNT" -le 0 ]; then
   echo "[BACE_CONFIG_ERROR] empty BACE train-source generation cohort" >&2
   exit 2
