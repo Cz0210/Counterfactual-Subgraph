@@ -161,6 +161,25 @@ def test_full_generation_jobs_use_qos_supported_seven_day_walltime() -> None:
         assert "#SBATCH --time=7-00:00:00" in text
 
 
+def test_aids_project_full_uses_memory_headroom_and_rejects_fake_resume() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_project_generate.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "#SBATCH --mem=192G" in text
+    assert '[[ "$RESUME" == "false" ]]' in text
+    assert "no proven cross-job RNG/state resume" in text
+    assert "--resume" not in text
+    assert "--cpus-per-task=7" in text
+    assert "--gres=gpu:a800:1" in text
+
+
+def test_full_runtime_enables_selected_transition_only_action_index() -> None:
+    text = (ROOT / "src/baselines/comrecgc/runtime.py").read_text(encoding="utf-8")
+    assert 'compact_enumeration=mode == "full"' in text
+    assert '"full_selected_transition_weak_action_index_v1"' in text
+    assert '"generation_resume_supported": False' in text
+
+
 def test_aids_project_smoke_is_read_only_adoption() -> None:
     text = (
         ROOT / "scripts/slurm/comrecgc_aids_project_smoke_adopt.sh"

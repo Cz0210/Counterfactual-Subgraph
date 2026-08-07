@@ -596,7 +596,10 @@ def run_project_generation(
     runtime_root.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).isoformat()
     trace_recorder = (
-        ActionTraceRecorder(output_dir=trace_output_dir)
+        ActionTraceRecorder(
+            output_dir=trace_output_dir,
+            compact_enumeration=mode == "full",
+        )
         if trace_output_dir is not None
         else None
     )
@@ -664,12 +667,21 @@ def run_project_generation(
                 "official_compatibility_patches": [
                     *OFFICIAL_RUNTIME_PATCHES,
                     *(
-                        ["project_runtime_action_trace_only_v1"]
+                        [
+                            "project_runtime_action_trace_only_v1",
+                            *(
+                                ["full_selected_transition_weak_action_index_v1"]
+                                if mode == "full"
+                                else []
+                            ),
+                        ]
                         if trace_recorder is not None
                         else []
                     ),
                 ],
                 "official_source_modified": False,
+                "generation_resume_supported": False,
+                "transition_cache_policy": "pinned_upstream_in_memory_transitions_v1",
                 "started_at": started,
             }
             config["config_sha256"] = stable_json_sha256(config)

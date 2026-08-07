@@ -5684,3 +5684,28 @@ the key must be the current candidate tail and must already be absent from
 RNG calls, preserves candidate ordering/content, restores a plain dictionary on
 exit, and records its activation count in the run manifest. Upstream source remains
 unchanged.
+
+---
+
+## 2026-08-07: Compact full-generation action indexing
+
+The first project AIDS full run remained CPU-bound and reached roughly 55 GiB
+RSS while the pinned random walk was still populating its per-source transition
+cache. The project trace layer was hashing both the source and target graph for
+every enumerated neighbor, even though only five selected transitions per walk
+step are part of the lineage evidence.
+
+Full generation now associates each enumerated action with the exact target
+object already retained by the pinned upstream transition cache through a weak
+reference. Stable source/target SHA256 values are computed only after upstream
+selects a transition. The selected trace, action replay, RNG calls, neighbor
+enumeration/order, model calls, candidate payload, importance, DBSCAN inputs,
+and greedy ordering are unchanged. Cache hit/miss counts and the compact trace
+mode are recorded for audit. Smoke retains the prior stable-graph-pair trace so
+the two implementations remain independently covered.
+
+The AIDS project generation wrapper requests 192 GiB on the existing one-A800,
+seven-CPU allocation and keeps the seven-day limit. Cross-job random-walk
+resume remains disabled because the pinned runtime does not serialize all
+Python/NumPy/Torch RNG and transition state; a fresh versioned output is
+required instead of claiming an unsafe resume.

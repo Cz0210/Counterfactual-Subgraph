@@ -6,6 +6,7 @@ import json
 import math
 import os
 import tempfile
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -243,15 +244,21 @@ class ActionTraceRecorder:
 
     output_dir: str | Path | None = None
     chunk_size: int = 512
+    compact_enumeration: bool = False
     enumerated: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
     predecessor_by_official_hash: dict[str, dict[str, Any]] = field(default_factory=dict)
     move_index: int = 0
     enumerated_transition_count: int = 0
     selected_transition_count: int = 0
     teleport_count: int = 0
+    transition_cache_hit_count: int = 0
+    transition_cache_miss_count: int = 0
     _trace_root: Path | None = field(default=None, init=False, repr=False)
     _pending_events: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _chunks: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _enumerated_by_target_object: dict[
+        int, tuple[Any, list[list[Any]]]
+    ] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if int(self.chunk_size) <= 0:
@@ -321,6 +328,56 @@ class ActionTraceRecorder:
         for key in [key for key in self.enumerated if key[0] in source_shas]:
             self.enumerated.pop(key, None)
 
+    def _forget_enumerated_target(self, object_id: int, reference: Any) -> None:
+        current = self._enumerated_by_target_object.get(object_id)
+        if current is not None and current[0] is reference:
+            self._enumerated_by_target_object.pop(object_id, None)
+
+    def _record_compact_enumerated_target(
+        self, target_graph: Any, action: Sequence[Any]
+    ) -> None:
+        object_id = id(target_graph)
+        current = self._enumerated_by_target_object.get(object_id)
+        if current is not None and current[0]() is target_graph:
+            current[1].append(normalized_action(action))
+            return
+        try:
+            reference = weakref.ref(
+                target_graph,
+                lambda resolved, key=object_id: self._forget_enumerated_target(
+                    key, resolved
+                ),
+            )
+        except TypeError as exc:
+            raise TypeError(
+                "Compact COMRECGC action tracing requires weak-referenceable graph objects."
+            ) from exc
+        self._enumerated_by_target_object[object_id] = (
+            reference,
+            [normalized_action(action)],
+        )
+
+    def _compact_transition_records(
+        self,
+        module: Any,
+        *,
+        source_hash: Any,
+        target_hash: Any,
+    ) -> list[dict[str, Any]]:
+        transition = getattr(module, "transitions", {}).get(source_hash)
+        if not isinstance(transition, tuple) or len(transition) < 2:
+            return []
+        target_hashes, target_graphs = transition[0], transition[1]
+        records: list[dict[str, Any]] = []
+        for resolved_hash, graph in zip(target_hashes, target_graphs, strict=True):
+            if resolved_hash != target_hash:
+                continue
+            current = self._enumerated_by_target_object.get(id(graph))
+            if current is None or current[0]() is not graph:
+                continue
+            records.extend({"action": list(action)} for action in current[1])
+        return records
+
     def record_enumerated(
         self,
         *,
@@ -328,6 +385,10 @@ class ActionTraceRecorder:
         target_graph: Any,
         action: Sequence[Any],
     ) -> None:
+        if self.compact_enumeration:
+            self._record_compact_enumerated_target(target_graph, action)
+            self.enumerated_transition_count += 1
+            return
         source_sha = stable_untyped_graph_sha256(source_graph)
         target_sha = stable_untyped_graph_sha256(target_graph)
         record = {
@@ -342,6 +403,10 @@ class ActionTraceRecorder:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             graphs_hash = list(kwargs.get("graphs_hash", args[0] if args else []))
             source_graphs = [module.graph_map[value][0] for value in graphs_hash]
+            transitions = getattr(module, "transitions", {})
+            transition_cache_before = [
+                value in transitions for value in graphs_hash
+            ]
             result = original(*args, **kwargs)
             next_hashes, teleported = result[0], bool(result[1])
             if teleported or next_hashes is None:
@@ -352,19 +417,32 @@ class ActionTraceRecorder:
                         "source_official_hashes": [str(value) for value in graphs_hash],
                     }
                 )
-                consumed_sources = {
-                    stable_untyped_graph_sha256(graph) for graph in source_graphs
-                }
-                self._discard_enumerated_sources(consumed_sources)
+                if not self.compact_enumeration:
+                    consumed_sources = {
+                        stable_untyped_graph_sha256(graph) for graph in source_graphs
+                    }
+                    self._discard_enumerated_sources(consumed_sources)
                 self.move_index += 1
                 return result
+            self.transition_cache_hit_count += sum(transition_cache_before)
+            self.transition_cache_miss_count += len(transition_cache_before) - sum(
+                transition_cache_before
+            )
             for head_index, (source_hash, target_hash, source_graph) in enumerate(
                 zip(graphs_hash, list(next_hashes), source_graphs, strict=True)
             ):
                 target_graph = module.graph_map[target_hash][0]
                 source_sha = stable_untyped_graph_sha256(source_graph)
                 target_sha = stable_untyped_graph_sha256(target_graph)
-                candidates = self.enumerated.get((source_sha, target_sha), [])
+                candidates = (
+                    self._compact_transition_records(
+                        module,
+                        source_hash=source_hash,
+                        target_hash=target_hash,
+                    )
+                    if self.compact_enumeration
+                    else self.enumerated.get((source_sha, target_sha), [])
+                )
                 unique: dict[str, dict[str, Any]] = {
                     json.dumps(row["action"], separators=(",", ":")): row
                     for row in candidates
@@ -387,10 +465,11 @@ class ActionTraceRecorder:
                 self._stream_event(event)
                 if action_record is not None:
                     self.predecessor_by_official_hash.setdefault(str(target_hash), event)
-            consumed_sources = {
-                stable_untyped_graph_sha256(graph) for graph in source_graphs
-            }
-            self._discard_enumerated_sources(consumed_sources)
+            if not self.compact_enumeration:
+                consumed_sources = {
+                    stable_untyped_graph_sha256(graph) for graph in source_graphs
+                }
+                self._discard_enumerated_sources(consumed_sources)
             self.move_index += 1
             return result
 
@@ -615,8 +694,21 @@ class ActionTraceRecorder:
             "trace_only": True,
             "graph_identity_mode": "official_untyped_node_adjacency_v1",
             "rng_calls_added": 0,
+            "candidate_payload_mutated": False,
+            "enumeration_trace_mode": (
+                "weak_target_object_action_index_v1"
+                if self.compact_enumeration
+                else "stable_graph_pair_v1"
+            ),
             "enumerated_transition_count": self.enumerated_transition_count,
-            "live_enumerated_transition_pair_count": len(self.enumerated),
+            "live_enumerated_transition_pair_count": (
+                len(self._enumerated_by_target_object)
+                if self.compact_enumeration
+                else len(self.enumerated)
+            ),
+            "transition_cache_hit_count": self.transition_cache_hit_count,
+            "transition_cache_miss_count": self.transition_cache_miss_count,
+            "transition_cache_policy": "pinned_upstream_in_memory_transitions_v1",
             "selected_transition_count": self.selected_transition_count,
             "teleport_count": self.teleport_count,
             "candidate_count": lineage_count,

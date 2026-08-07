@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7
 #SBATCH --gres=gpu:a800:1
-#SBATCH --mem=64G
+#SBATCH --mem=192G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -29,6 +29,9 @@ RESUME="${RESUME:-false}"
 }
 [[ "$MODE" == "smoke" || "$MODE" == "full" ]] || {
   echo "[COMRECGC_CONFIG_ERROR] MODE must be smoke or full" >&2; exit 2;
+}
+[[ "$RESUME" == "false" ]] || {
+  echo "[COMRECGC_CONFIG_ERROR] project generation has no proven cross-job RNG/state resume; use a fresh versioned output" >&2; exit 2;
 }
 if [[ "$MODE" == "smoke" ]]; then
   EXPECTED_PARENT_LIMIT=64
@@ -63,16 +66,13 @@ done
 echo "[COMRECGC_STAGE_CONFIG] stage=project_generation dataset=$DATASET mode=$MODE parent_limit=$PARENT_LIMIT output_dir=$OUTPUT_DIR"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
-RESUME_ARGS=()
-[[ "$RESUME" == "true" ]] && RESUME_ARGS=(--resume)
 python scripts/baselines/comrecgc/run_generation.py \
   --route project --dataset "$DATASET" --mode "$MODE" \
   --project-root "$PROJECT_ROOT" --upstream-root external/COMRECGC \
   --dataset-dir "$DATASET_DIR" "${SOURCE_ARGS[@]}" \
   --gnn-checkpoint "$GNN_CHECKPOINT" --distance-checkpoint "$DISTANCE_CHECKPOINT" \
   --output-dir "$OUTPUT_DIR" --parent-limit "$PARENT_LIMIT" --device cuda:0 \
-  --trace-output-dir "$TRACE_DIR" \
-  "${RESUME_ARGS[@]}"
+  --trace-output-dir "$TRACE_DIR"
 test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
 test -s "$TRACE_DIR/candidate_action_lineage.json"
 echo "[COMRECGC_PROJECT_GENERATION_SUCCESS]"

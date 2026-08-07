@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import src.baselines.comrecgc.graph_trace as graph_trace_module
 from src.baselines.comrecgc.graph_trace import (
     ActionTraceRecorder,
     TRACE_IMPORTANCE_ABS_TOLERANCE,
@@ -120,6 +121,121 @@ def test_action_trace_uses_untyped_identity_for_stale_official_edge_sidecar() ->
     )
     assert lineage[0]["action_lineage_resolved"] is True
     assert lineage[0]["actions"][0]["action"] == ["EA", 1, 2]
+
+
+def test_full_compact_enumeration_defers_graph_hashing_until_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = graph()
+    target = graph(atom=1)
+    recorder = ActionTraceRecorder(compact_enumeration=True)
+
+    def forbidden_hash(_graph: object) -> str:
+        raise AssertionError("enumerated neighbors must not be hashed in compact mode")
+
+    monkeypatch.setattr(
+        graph_trace_module,
+        "stable_untyped_graph_sha256",
+        forbidden_hash,
+    )
+    target_fields = dict(vars(target))
+    recorder.record_enumerated(
+        source_graph=source,
+        target_graph=target,
+        action=("NLC", 0, 1),
+    )
+
+    assert recorder.enumerated == {}
+    assert recorder.enumerated_transition_count == 1
+    assert dict(vars(target)) == target_fields
+
+
+def test_full_compact_trace_resolves_selected_action_from_upstream_transition(
+    tmp_path,
+) -> None:
+    source = graph()
+    target = graph(atom=1)
+    recorder = ActionTraceRecorder(
+        output_dir=tmp_path,
+        chunk_size=1,
+        compact_enumeration=True,
+    )
+    recorder.record_enumerated(
+        source_graph=source,
+        target_graph=target,
+        action=("NLC", 0, 1),
+    )
+    module = SimpleNamespace(
+        graph_map={"source": [source], "target": [target]},
+        transitions={},
+    )
+
+    def first_move(*_args: object, **_kwargs: object) -> tuple:
+        module.transitions["source"] = (
+            ["target"],
+            [target],
+            [[0.7, 1.0]],
+            [[0.0]],
+        )
+        return (["target"], False, None, None, None)
+
+    recorder.wrap_move(first_move, module)(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+    payload_value = {
+        "graph_map": module.graph_map,
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    summary = recorder.write(
+        tmp_path,
+        payload_value,
+        source_graphs_by_parent_id={"parent-1": source},
+        compact_candidate_lineage=True,
+    )
+    events = load_selected_trace(summary["selected_trace_path"])
+
+    assert events[0]["action_resolution"] == "exact"
+    assert events[0]["action"] == ["NLC", 0, 1]
+    assert summary["enumeration_trace_mode"] == "weak_target_object_action_index_v1"
+    assert summary["transition_cache_hit_count"] == 0
+    assert summary["transition_cache_miss_count"] == 1
+    assert summary["candidate_payload_mutated"] is False
+
+
+def test_full_compact_trace_audits_upstream_transition_cache_hit(tmp_path) -> None:
+    source = graph()
+    target = graph(atom=1)
+    recorder = ActionTraceRecorder(
+        output_dir=tmp_path,
+        chunk_size=1,
+        compact_enumeration=True,
+    )
+    recorder.record_enumerated(
+        source_graph=source,
+        target_graph=target,
+        action=("NLC", 0, 1),
+    )
+    module = SimpleNamespace(
+        graph_map={"source": [source], "target": [target]},
+        transitions={
+            "source": (["target"], [target], [[0.7, 1.0]], [[0.0]])
+        },
+    )
+    recorder.wrap_move(
+        lambda *_args, **_kwargs: (["target"], False, None, None, None),
+        module,
+    )(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+
+    assert recorder.transition_cache_hit_count == 1
+    assert recorder.transition_cache_miss_count == 0
 
 
 def test_trace_does_not_change_candidates() -> None:
