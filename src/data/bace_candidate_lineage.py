@@ -76,6 +76,8 @@ def attach_bace_candidate_lineage(
     parents = _load_parents(parents_path)
     enriched: list[dict[str, Any]] = []
     counts = {index: 0 for index in range(len(parents))}
+    preserved_generator_parent_ids = 0
+    added_project_parent_ids = 0
     with raw_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -109,11 +111,26 @@ def attach_bace_candidate_lineage(
                 raise ValueError(f"BACE parent label mismatch at line {line_number}.")
             parent_id = str(parent["molecule_id"]).strip()
             additions = {
-                "parent_id": parent_id,
                 "molecule_id": parent_id,
                 "source_graph_hash": str(parent["source_graph_hash"]).strip(),
                 "candidate_id": f"BACE_OURS_{parent_id}_{candidate_index:02d}",
             }
+            existing_parent_id = row.get("parent_id")
+            if existing_parent_id is None:
+                additions["parent_id"] = parent_id
+                added_project_parent_ids += 1
+            else:
+                rendered_parent_id = str(existing_parent_id).strip()
+                try:
+                    generator_parent_id_matches = int(rendered_parent_id) == parent_index
+                except ValueError:
+                    generator_parent_id_matches = False
+                if rendered_parent_id != parent_id and not generator_parent_id_matches:
+                    raise ValueError(
+                        "BACE generator parent_id does not match parent_index or "
+                        f"project molecule_id at line {line_number}."
+                    )
+                preserved_generator_parent_ids += 1
             for key, value in additions.items():
                 existing = row.get(key)
                 if existing is not None and str(existing).strip() != str(value):
@@ -153,8 +170,11 @@ def attach_bace_candidate_lineage(
         "candidates_per_parent": expected_per_parent,
         "candidate_order_unchanged": True,
         "scientific_fields_changed": False,
+        "parent_id_policy": "preserve_generator_parent_id_or_add_project_molecule_id",
+        "preserved_generator_parent_id_count": preserved_generator_parent_ids,
+        "added_project_parent_id_count": added_project_parent_ids,
         "added_fields": [
-            "parent_id",
+            *(["parent_id"] if added_project_parent_ids else []),
             "molecule_id",
             "source_graph_hash",
             "candidate_id",

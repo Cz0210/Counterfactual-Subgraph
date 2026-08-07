@@ -5762,3 +5762,17 @@ Write the plotting columns directly at artifact creation time:
   COMRECGC experiment is implemented or submitted in this stage.
 - Existing AIDS and Mutagenicity adapters, evaluators, candidates, and paper
   artifacts are unchanged.
+
+### Generation persistence recovery
+
+The shared generator already emits an integer `parent_id` equal to its
+`parent_index`. The BACE lineage adapter preserves and verifies that field,
+then adds the stable project `molecule_id`, graph hash, and candidate ID. It
+never overwrites candidate values or changes row order.
+
+If generation completes but lineage persistence fails, the wrapper may adopt
+the raw pool only when its recorded source job, exact SHA256, expected row
+count, and otherwise-empty persistence state all match. That recovery skips
+model generation, records `algorithm_rerun=false`, and writes the normal
+lineage and completion manifests. It cannot be used to resume a partial raw
+pool or overwrite any finalized output.

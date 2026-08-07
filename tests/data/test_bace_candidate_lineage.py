@@ -97,3 +97,56 @@ def test_bace_candidate_lineage_rejects_parent_smiles_drift(tmp_path: Path) -> N
             manifest_path=tmp_path / "manifest.json",
             expected_candidates_per_parent=2,
         )
+
+
+def test_bace_candidate_lineage_preserves_generator_parent_ids(tmp_path: Path) -> None:
+    parents = tmp_path / "parents.csv"
+    raw = tmp_path / "raw.jsonl"
+    _write_parents(parents)
+    rows = _raw_rows()
+    for row in rows:
+        row["parent_id"] = row["parent_index"]
+    raw.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    manifest = tmp_path / "manifest.json"
+    result = attach_bace_candidate_lineage(
+        raw_pool_jsonl=raw,
+        parent_csv=parents,
+        output_jsonl=tmp_path / "out.jsonl",
+        manifest_path=manifest,
+        expected_candidates_per_parent=2,
+    )
+    enriched = [
+        json.loads(line) for line in (tmp_path / "out.jsonl").read_text().splitlines()
+    ]
+    assert [row["parent_id"] for row in enriched] == [0, 0, 1, 1]
+    assert [row["molecule_id"] for row in enriched] == [
+        "BACE_a",
+        "BACE_a",
+        "BACE_b",
+        "BACE_b",
+    ]
+    assert result["preserved_generator_parent_id_count"] == 4
+    assert result["scientific_fields_changed"] is False
+
+
+def test_bace_candidate_lineage_rejects_unrelated_existing_parent_id(
+    tmp_path: Path,
+) -> None:
+    parents = tmp_path / "parents.csv"
+    raw = tmp_path / "raw.jsonl"
+    _write_parents(parents)
+    rows = _raw_rows()
+    rows[0]["parent_id"] = "wrong-parent"
+    raw.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="does not match parent_index"):
+        attach_bace_candidate_lineage(
+            raw_pool_jsonl=raw,
+            parent_csv=parents,
+            output_jsonl=tmp_path / "out.jsonl",
+            manifest_path=tmp_path / "manifest.json",
+            expected_candidates_per_parent=2,
+        )

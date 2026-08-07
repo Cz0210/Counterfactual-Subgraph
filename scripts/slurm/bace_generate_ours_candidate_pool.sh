@@ -28,6 +28,9 @@ PPO_CHECKPOINT_PATH=${PPO_CHECKPOINT_PATH:-outputs/hpc/rl_checkpoints/decoded_ch
 TEACHER_PATH=${TEACHER_PATH:-outputs/hpc/oracle/bace/bace_teacher.pkl}
 OUTPUT_DIR=${OUTPUT_DIR:-outputs/hpc/candidate_pools/bace_ours}
 RESUME=${RESUME:-false}
+RECOVER_GENERATION=${RECOVER_GENERATION:-false}
+SOURCE_GENERATION_JOB_ID=${SOURCE_GENERATION_JOB_ID:-}
+EXPECTED_RAW_POOL_SHA256=${EXPECTED_RAW_POOL_SHA256:-}
 
 NUM_RETURN_SEQUENCES=4
 GEN_TEMPERATURE=0.5
@@ -45,11 +48,42 @@ if [ "$RESUME" = "true" ] && [ -s "$COMPLETE_MARKER" ]; then
   echo "[BACE_OURS_CANDIDATE_POOL_ADOPT_EXISTING] output_dir=$OUTPUT_DIR"
   exit 0
 fi
-if [ -d "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
+if [ "$RECOVER_GENERATION" != "true" ] && \
+   [ -d "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
   echo "[BACE_CONFIG_ERROR] candidate output is non-empty: $OUTPUT_DIR" >&2
   exit 2
 fi
 mkdir -p "$OUTPUT_DIR"
+
+if [ "$RECOVER_GENERATION" = "true" ]; then
+  if [ -z "$SOURCE_GENERATION_JOB_ID" ]; then
+    echo "[BACE_CONFIG_ERROR] recovery requires SOURCE_GENERATION_JOB_ID" >&2
+    exit 2
+  fi
+  if ! [[ "$EXPECTED_RAW_POOL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "[BACE_CONFIG_ERROR] recovery requires a lowercase SHA256" >&2
+    exit 2
+  fi
+  for path in "$RAW_POOL" "$SUMMARY"; do
+    if [ ! -s "$path" ]; then
+      echo "[BACE_CONFIG_ERROR] missing completed generation artifact: $path" >&2
+      exit 2
+    fi
+  done
+  for path in "$POOL" "$LINEAGE_MANIFEST" "$RUN_MANIFEST" "$COMPLETE_MARKER"; do
+    if [ -e "$path" ]; then
+      echo "[BACE_CONFIG_ERROR] recovery output already exists: $path" >&2
+      exit 2
+    fi
+  done
+  UNEXPECTED_OUTPUT=$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 \
+    ! -name "$(basename "$RAW_POOL")" \
+    ! -name "$(basename "$SUMMARY")" -print -quit)
+  if [ -n "$UNEXPECTED_OUTPUT" ]; then
+    echo "[BACE_CONFIG_ERROR] unexpected recovery input: $UNEXPECTED_OUTPUT" >&2
+    exit 2
+  fi
+fi
 
 for path in "$DATASET_PATH" "$BASE_MODEL_PATH" "$SFT_LORA_PATH" "$PPO_CHECKPOINT_PATH" "$TEACHER_PATH"; do
   if [ ! -e "$path" ]; then
@@ -81,36 +115,51 @@ echo "ppo_checkpoint_path=$PPO_CHECKPOINT_PATH"
 echo "parent_count=$PARENT_COUNT"
 echo "expected_rows=$EXPECTED_ROWS"
 echo "output_dir=$OUTPUT_DIR"
+echo "recover_generation=$RECOVER_GENERATION"
+echo "source_generation_job_id=${SOURCE_GENERATION_JOB_ID:-none}"
 echo "calibration_loaded=false"
 echo "test_loaded=false"
 
-python scripts/generate_full_candidate_pool.py \
-  --config configs/hpc.yaml \
-  --set inference.fallback_to_heuristic=false \
-  --dataset-path "$DATASET_PATH" \
-  --base-model-path "$BASE_MODEL_PATH" \
-  --sft-lora-path "$SFT_LORA_PATH" \
-  --ppo-checkpoint-path "$PPO_CHECKPOINT_PATH" \
-  --teacher-path "$TEACHER_PATH" \
-  --out-jsonl "$RAW_POOL" \
-  --out-summary-json "$SUMMARY" \
-  --label-col label \
-  --smiles-col smiles \
-  --target-label 1 \
-  --num-return-sequences "$NUM_RETURN_SEQUENCES" \
-  --generation-temperature "$GEN_TEMPERATURE" \
-  --generation-top-p "$GEN_TOP_P" \
-  --generation-do-sample true \
-  --max-new-tokens "$MAX_NEW_TOKENS" \
-  --batch-size 1 \
-  --seed "$SEED" \
-  --enable-parent-projection \
-  --enable-projected-cf-reward \
-  --enable-substructure-distance-reward \
-  --substructure-distance-reward-weight 0.3 \
-  --projection-penalty 1.0 \
-  --enable-minimal-syntax-repair \
-  --enable-component-salvage
+if [ "$RECOVER_GENERATION" = "true" ]; then
+  ACTUAL_RAW_POOL_SHA256=$(sha256sum "$RAW_POOL" | awk '{print $1}')
+  if [ "$ACTUAL_RAW_POOL_SHA256" != "$EXPECTED_RAW_POOL_SHA256" ]; then
+    echo "[BACE_CONFIG_ERROR] recovered raw candidate SHA256 mismatch" >&2
+    exit 2
+  fi
+  if [ "$(wc -l < "$RAW_POOL")" -ne "$EXPECTED_ROWS" ]; then
+    echo "[BACE_CONFIG_ERROR] recovered raw candidate row count mismatch" >&2
+    exit 2
+  fi
+  echo "[BACE_OURS_GENERATION_ADOPT_EXISTING] algorithm_rerun=false"
+else
+  python scripts/generate_full_candidate_pool.py \
+    --config configs/hpc.yaml \
+    --set inference.fallback_to_heuristic=false \
+    --dataset-path "$DATASET_PATH" \
+    --base-model-path "$BASE_MODEL_PATH" \
+    --sft-lora-path "$SFT_LORA_PATH" \
+    --ppo-checkpoint-path "$PPO_CHECKPOINT_PATH" \
+    --teacher-path "$TEACHER_PATH" \
+    --out-jsonl "$RAW_POOL" \
+    --out-summary-json "$SUMMARY" \
+    --label-col label \
+    --smiles-col smiles \
+    --target-label 1 \
+    --num-return-sequences "$NUM_RETURN_SEQUENCES" \
+    --generation-temperature "$GEN_TEMPERATURE" \
+    --generation-top-p "$GEN_TOP_P" \
+    --generation-do-sample true \
+    --max-new-tokens "$MAX_NEW_TOKENS" \
+    --batch-size 1 \
+    --seed "$SEED" \
+    --enable-parent-projection \
+    --enable-projected-cf-reward \
+    --enable-substructure-distance-reward \
+    --substructure-distance-reward-weight 0.3 \
+    --projection-penalty 1.0 \
+    --enable-minimal-syntax-repair \
+    --enable-component-salvage
+fi
 
 python scripts/baselines/bace/enrich_ours_candidate_pool.py \
   --config configs/hpc.yaml \
@@ -125,6 +174,7 @@ export DATASET_PATH BASE_MODEL_PATH SFT_LORA_PATH PPO_CHECKPOINT_PATH
 export TEACHER_PATH OUTPUT_DIR POOL SUMMARY LINEAGE_MANIFEST RUN_MANIFEST
 export PARENT_COUNT EXPECTED_ROWS NUM_RETURN_SEQUENCES GEN_TEMPERATURE GEN_TOP_P
 export MAX_NEW_TOKENS SEED
+export RECOVER_GENERATION SOURCE_GENERATION_JOB_ID EXPECTED_RAW_POOL_SHA256
 python - <<'PY'
 import hashlib
 import json
@@ -172,6 +222,12 @@ manifest = {
     },
     "parent_count": int(os.environ["PARENT_COUNT"]),
     "candidate_count": int(os.environ["EXPECTED_ROWS"]),
+    "generation_recovery": {
+        "adopted_existing": os.environ["RECOVER_GENERATION"] == "true",
+        "algorithm_rerun": os.environ["RECOVER_GENERATION"] != "true",
+        "source_generation_job_id": os.environ["SOURCE_GENERATION_JOB_ID"] or None,
+        "expected_raw_pool_sha256": os.environ["EXPECTED_RAW_POOL_SHA256"] or None,
+    },
     "candidate_pool": identity(os.environ["POOL"]),
     "generation_summary": identity(os.environ["SUMMARY"]),
     "lineage_manifest": identity(os.environ["LINEAGE_MANIFEST"]),

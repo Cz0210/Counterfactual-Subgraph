@@ -55,6 +55,9 @@ def test_bace_ours_generation_reuses_frozen_stable300_parameters() -> None:
     assert "calibration_loaded=false" in content
     assert "test_loaded=false" in content
     assert "awk 'END {print (NR > 0 ? NR - 1 : 0)}'" in content
+    assert "RECOVER_GENERATION" in content
+    assert "EXPECTED_RAW_POOL_SHA256" in content
+    assert "[BACE_OURS_GENERATION_ADOPT_EXISTING] algorithm_rerun=false" in content
     assert "scripts/generate_full_candidate_pool.py" in content
     assert "scripts/baselines/bace/enrich_ours_candidate_pool.py" in content
 
