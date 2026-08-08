@@ -5748,6 +5748,16 @@ resume remains disabled because the pinned runtime does not serialize all
 Python/NumPy/Torch RNG and transition state; a fresh versioned output is
 required instead of claiming an unsafe resume.
 
+### Registered submission log-directory preflight
+
+Slurm resolves relative `#SBATCH --output` and `--error` paths before the
+batch script can run. A fresh Git worktree does not contain the ignored
+`logs/` directory, so an otherwise valid registered job can fail at launch
+without entering Python or producing a log. The shared `exp_sbatch.sh` entry
+now creates and verifies the worktree-local `logs/` directory before invoking
+the registry/submission client. This changes no Slurm resources, scientific
+parameters, runtime algorithm, or output artifact contract.
+
 ---
 
 ## 2026-08-08: Bounded COMRECGC full transition graph cache

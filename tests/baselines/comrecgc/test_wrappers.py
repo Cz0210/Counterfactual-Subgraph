@@ -37,6 +37,14 @@ def test_all_submissions_route_through_registry() -> None:
     assert "subprocess.run([\"sbatch\"" not in text
 
 
+def test_registered_submission_precreates_relative_slurm_log_directory() -> None:
+    wrapper = (ROOT / "scripts/exp_sbatch.sh").read_text(encoding="utf-8")
+    mkdir_index = wrapper.index('mkdir -p "$PROJECT_ROOT/logs"')
+    submit_index = wrapper.index('python scripts/exp_sbatch.py "$@"')
+    assert mkdir_index < submit_index
+    assert '[[ ! -d "$PROJECT_ROOT/logs" || ! -w "$PROJECT_ROOT/logs" ]]' in wrapper
+
+
 def test_export_resume_is_explicit_and_defaults_off() -> None:
     text = (ROOT / "scripts/slurm/comrecgc_export.sh").read_text(encoding="utf-8")
     assert 'RESUME="${RESUME:-false}"' in text
