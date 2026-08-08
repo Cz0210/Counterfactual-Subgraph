@@ -613,3 +613,18 @@ A good first rebuilt version should support the following end-to-end workflow:
 7. run a minimal training/evaluation command.
 
 If these are achieved with clean module boundaries, the rebuild is on the right path.
+
+---
+
+## 7. BBBP Framework Extension (2026-08-09)
+
+The BBBP common4/generalization/ablation work is an isolated, additive roadmap
+extension. Its framework now provides deterministic data/split contracts,
+teacher isolation, real four-method DAGs, common artifact schemas,
+cross-scaffold and held-out protocols, candidate/selector/budget controls,
+multi-seed aggregation, and parent-level confidence intervals.
+
+Before execution, future work must freeze the raw BBBP identity and the
+dataset-specific GlobalGCE, GCFExplainer, COMRECGC, and ChemLLM checkpoint
+contracts. Those inputs must be supplied through manifests/configuration; they
+must not be resolved by changing the shared evaluator or by using test data.

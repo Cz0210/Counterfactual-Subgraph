@@ -1,0 +1,73 @@
+{
+  "schema_version": "bbbp_experiment_plans_v1",
+  "dataset": "BBBP",
+  "status": "FRAMEWORK_ONLY_NOT_RUN",
+  "seeds": [0, 1, 2],
+  "protocol": {
+    "dataset": "BBBP",
+    "source_label": 1,
+    "target_label": 0,
+    "cf_mode": "strict_flip",
+    "distance_line": "MolCLR-Node-Wasserstein",
+    "feature_cost": "cosine",
+    "node_mass": "uniform",
+    "size_penalty_beta": 0.0,
+    "threshold_source": "calibration",
+    "candidate_source_splits": ["train", "val"],
+    "selector_source_splits": ["calibration"],
+    "test_usage": "final_evaluation_only",
+    "selection_performed_in_eval": false,
+    "threshold_fitted_on_test": false,
+    "k_values": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+    "table2_k": 10
+  },
+  "runtime_metrics_template": {
+    "wall_time_seconds": null,
+    "gpu_time_seconds": null,
+    "cpu_time_seconds": null,
+    "peak_rss_mb": null,
+    "peak_gpu_memory_mb": null,
+    "num_parents": null,
+    "num_candidates": null,
+    "num_pairs": null,
+    "cache_hit_rate": null,
+    "candidates_per_second": null,
+    "pairs_per_second": null,
+    "successful_cf_per_gpu_hour": null
+  },
+  "plans": {
+    "common4": {
+      "output_root": "outputs/hpc/eval/paper/bbbp_common3_standardized_v1",
+      "stages": [
+        {"id":"prepare","method":"shared","wrapper":"scripts/slurm/bbbp_prepare_dataset.sh","depends_on":[],"output_root":"data/processed/BBBP","stage_type":"cpu_prepare","status":"NOT_RUN","resources":{},"required_inputs":["data/raw/BBBP/bbbp.csv"],"expected_artifacts":["all.csv","train.csv","val.csv","calibration.csv","test.csv","split_manifest.json","split_leakage_audit.json"]},
+        {"id":"teacher","method":"shared","wrapper":"scripts/slurm/bbbp_train_teacher.sh","depends_on":["prepare"],"output_root":"outputs/hpc/oracle/bbbp","stage_type":"cpu_train","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/train.csv","data/processed/BBBP/val.csv","data/processed/BBBP/calibration.csv","data/processed/BBBP/test.csv"],"expected_artifacts":["bbbp_teacher.pkl","teacher_summary.json","teacher_split_manifest.json","teacher_leakage_audit.json"]},
+
+        {"id":"ours_generate","method":"ours","wrapper":"scripts/slurm/bbbp_generate_ours_candidate_pool.sh","depends_on":["teacher"],"output_root":"outputs/hpc/candidate_pools/bbbp_ours","stage_type":"gpu_generation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/oracle/bbbp/bbbp_teacher.pkl"],"expected_artifacts":["candidate_pool.raw.jsonl","generation_summary.json"]},
+        {"id":"ours_persist","method":"ours","wrapper":"scripts/slurm/bbbp_persist_ours_candidate_pool.sh","depends_on":["ours_generate"],"output_root":"outputs/hpc/candidate_pools/bbbp_ours","stage_type":"cpu_lineage","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/candidate_pools/bbbp_ours/candidate_pool.raw.jsonl"],"expected_artifacts":["candidate_pool.jsonl","candidate_lineage_manifest.json"]},
+        {"id":"ours_audit","method":"ours","wrapper":"scripts/slurm/bbbp_audit_ours_candidate_pool.sh","depends_on":["ours_persist"],"output_root":"outputs/hpc/candidate_pools/bbbp_ours/audit","stage_type":"cpu_audit","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/candidate_pools/bbbp_ours/candidate_pool.jsonl"],"expected_artifacts":["candidate_audit_gate.json","candidate_lineage_audit.json"]},
+        {"id":"ours_select","method":"ours","wrapper":"scripts/slurm/bbbp_select_ours_top20.sh","depends_on":["ours_audit"],"output_root":"outputs/hpc/selectors/bbbp_ours_top20","stage_type":"cpu_selection","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/candidate_pools/bbbp_ours/candidate_pool.jsonl"],"expected_artifacts":["selected_subgraphs.json","selected_subgraphs.csv","selector_summary.json"]},
+        {"id":"ours_eval","method":"ours","wrapper":"scripts/slurm/bbbp_eval_ours.sh","depends_on":["ours_select"],"output_root":"outputs/hpc/eval/paper/bbbp_common3_standardized_v1/ours","stage_type":"gpu_evaluation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/selectors/bbbp_ours_top20","outputs/hpc/oracle/bbbp/bbbp_teacher.pkl"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_ours_k10.csv","summary.json","run_manifest.json","final_artifact_audit.json"]},
+
+        {"id":"globalgce_prepare","method":"globalgce","wrapper":"scripts/slurm/bbbp_globalgce_prepare.sh","depends_on":["teacher"],"output_root":"outputs/hpc/baselines/globalgce/bbbp_v1/prepare","stage_type":"cpu_prepare","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/train.csv","data/processed/BBBP/val.csv"],"expected_artifacts":["dataset_manifest.json","split_leakage_audit.json"]},
+        {"id":"globalgce_native","method":"globalgce","wrapper":"scripts/slurm/bbbp_globalgce_native.sh","depends_on":["globalgce_prepare"],"output_root":"outputs/hpc/baselines/globalgce/bbbp_v1/native","stage_type":"gpu_native","status":"NOT_RUN","resources":{},"required_inputs":["baselines/globalgce_official"],"expected_artifacts":["run_metadata.json","official_rules"]},
+        {"id":"globalgce_export","method":"globalgce","wrapper":"scripts/slurm/bbbp_globalgce_export.sh","depends_on":["globalgce_native"],"output_root":"outputs/hpc/baselines/globalgce/bbbp_v1/export","stage_type":"cpu_export","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/globalgce/bbbp_v1/native"],"expected_artifacts":["candidate_pool.jsonl","candidate_lineage_audit.json"]},
+        {"id":"globalgce_summary","method":"globalgce","wrapper":"scripts/slurm/bbbp_globalgce_summary.sh","depends_on":["globalgce_export"],"output_root":"outputs/hpc/baselines/globalgce/bbbp_v1/summary","stage_type":"cpu_selection","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/globalgce/bbbp_v1/export/candidate_pool.jsonl"],"expected_artifacts":["selected_top20.csv","selection_manifest.json"]},
+        {"id":"globalgce_eval","method":"globalgce","wrapper":"scripts/slurm/bbbp_globalgce_eval.sh","depends_on":["globalgce_summary","ours_eval"],"output_root":"outputs/hpc/eval/paper/bbbp_common3_standardized_v1/globalgce","stage_type":"gpu_evaluation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/globalgce/bbbp_v1/summary/selected_top20.csv","outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_globalgce_k10.csv","summary.json","run_manifest.json","final_artifact_audit.json"]},
+
+        {"id":"gcf_prepare","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_gcf_prepare.sh","depends_on":["teacher"],"output_root":"outputs/hpc/baselines/gcfexplainer/bbbp_v1/dataset","stage_type":"cpu_prepare","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/train.csv","data/processed/BBBP/val.csv"],"expected_artifacts":["dataset_summary.json","codec_probe_summary.json"]},
+        {"id":"gcf_gnn","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_gcf_gnn.sh","depends_on":["gcf_prepare"],"output_root":"outputs/hpc/baselines/gcfexplainer/bbbp_v1/gnn","stage_type":"gpu_train","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/gcfexplainer/bbbp_v1/dataset"],"expected_artifacts":["model_best.pth","run_manifest.json"]},
+        {"id":"gcf_vrrw","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_gcf_vrrw.sh","depends_on":["gcf_gnn"],"output_root":"outputs/hpc/baselines/gcfexplainer/bbbp_v1/vrrw","stage_type":"gpu_native","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/gcfexplainer/bbbp_v1/gnn/model_best.pth"],"expected_artifacts":["counterfactuals.pt","run_manifest.json"]},
+        {"id":"gcf_summary","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_gcf_summary.sh","depends_on":["gcf_vrrw"],"output_root":"outputs/hpc/baselines/gcfexplainer/bbbp_v1/summary","stage_type":"gpu_summary","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/gcfexplainer/bbbp_v1/vrrw/counterfactuals.pt"],"expected_artifacts":["selected_top20.csv","candidate_lineage_audit.json"]},
+        {"id":"gcf_eval","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_gcf_eval.sh","depends_on":["gcf_summary","ours_eval"],"output_root":"outputs/hpc/eval/paper/bbbp_common3_standardized_v1/gcfexplainer","stage_type":"gpu_evaluation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/gcfexplainer/bbbp_v1/summary/selected_top20.csv","outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_gcfexplainer_k10.csv","summary.json","run_manifest.json","final_artifact_audit.json"]},
+
+        {"id":"comrec_prepare","method":"comrecgc","wrapper":"scripts/slurm/bbbp_comrecgc_prepare.sh","depends_on":["teacher"],"output_root":"outputs/hpc/baselines/comrecgc/bbbp_v1/prepare","stage_type":"cpu_prepare","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/train.csv","outputs/hpc/oracle/bbbp/bbbp_teacher.pkl"],"expected_artifacts":["dataset_identity_audit.json","run_manifest.json"]},
+        {"id":"comrec_native","method":"comrecgc","wrapper":"scripts/slurm/bbbp_comrecgc_native.sh","depends_on":["comrec_prepare","gcf_gnn"],"output_root":"outputs/hpc/baselines/comrecgc/bbbp_v1/native","stage_type":"gpu_native","status":"NOT_RUN","resources":{},"required_inputs":["external/COMRECGC","outputs/hpc/baselines/gcfexplainer/bbbp_v1/gnn/model_best.pth"],"expected_artifacts":["counterfactuals.pt","generation_manifest.json","checkpoint"]},
+        {"id":"comrec_transition_gate","method":"comrecgc","wrapper":"scripts/slurm/bbbp_comrecgc_transition_gate.sh","depends_on":["comrec_native"],"output_root":"outputs/hpc/baselines/comrecgc/bbbp_v1/transition_gate","stage_type":"cpu_audit","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/comrecgc/bbbp_v1/native"],"expected_artifacts":["transition_gate.json","memory_diagnostics.json"]},
+        {"id":"comrec_export","method":"comrecgc","wrapper":"scripts/slurm/bbbp_comrecgc_export.sh","depends_on":["comrec_transition_gate"],"output_root":"outputs/hpc/baselines/comrecgc/bbbp_v1/export","stage_type":"gpu_summary","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/comrecgc/bbbp_v1/native/counterfactuals.pt"],"expected_artifacts":["selected_top20.csv","candidate_lineage_audit.json","selected_common_recourses.json"]},
+        {"id":"comrec_eval","method":"comrecgc","wrapper":"scripts/slurm/bbbp_comrecgc_eval.sh","depends_on":["comrec_export","ours_eval"],"output_root":"outputs/hpc/eval/paper/bbbp_common3_standardized_v1/comrecgc","stage_type":"gpu_evaluation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/baselines/comrecgc/bbbp_v1/export/selected_top20.csv","outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_comrecgc_k10.csv","summary.json","run_manifest.json","final_artifact_audit.json"]},
+
+        {"id":"common_audit","method":"common4","wrapper":"scripts/slurm/bbbp_audit_paper_artifacts.sh","depends_on":["ours_eval","globalgce_eval","gcf_eval","comrec_eval"],"output_root":"outputs/hpc/eval/paper/bbbp_common3_standardized_v1","stage_type":"cpu_audit","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_bbbp_k10.csv","bbbp_paper_artifact_audit.json"]}
+      ]
+    }
+  }
+}

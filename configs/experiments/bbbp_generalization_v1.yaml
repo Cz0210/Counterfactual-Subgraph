@@ -1,0 +1,47 @@
+{
+  "schema_version": "bbbp_experiment_plans_v1",
+  "dataset": "BBBP",
+  "status": "FRAMEWORK_ONLY_NOT_RUN",
+  "seeds": [0, 1, 2],
+  "protocol": {
+    "dataset": "BBBP", "source_label": 1, "target_label": 0,
+    "cf_mode": "strict_flip", "distance_line": "MolCLR-Node-Wasserstein",
+    "feature_cost": "cosine", "node_mass": "uniform", "size_penalty_beta": 0.0,
+    "threshold_source": "calibration", "candidate_source_splits": ["train", "val"],
+    "selector_source_splits": ["calibration"], "test_usage": "final_evaluation_only",
+    "selection_performed_in_eval": false, "threshold_fitted_on_test": false,
+    "acyclic_policy": "canonical-smiles", "table2_k": 10
+  },
+  "runtime_metrics_template": {
+    "wall_time_seconds": null, "gpu_time_seconds": null, "cpu_time_seconds": null,
+    "peak_rss_mb": null, "peak_gpu_memory_mb": null, "num_parents": null,
+    "num_candidates": null, "num_pairs": null, "cache_hit_rate": null,
+    "candidates_per_second": null, "pairs_per_second": null,
+    "successful_cf_per_gpu_hour": null
+  },
+  "plans": {
+    "cross-scaffold": {
+      "output_root": "outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1",
+      "stages": [
+        {"id":"cross_prepare","method":"shared","wrapper":"scripts/slurm/bbbp_cross_scaffold_prepare.sh","depends_on":[],"output_root":"data/processed/BBBP/cross_scaffold_v1","stage_type":"cpu_prepare","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/all.csv"],"expected_artifacts":["train.csv","val.csv","calibration.csv","test.csv","split_manifest.json","split_leakage_audit.json"]},
+        {"id":"cross_teacher","method":"shared","wrapper":"scripts/slurm/bbbp_cross_scaffold_teacher.sh","depends_on":["cross_prepare"],"output_root":"outputs/hpc/oracle/bbbp/cross_scaffold_v1","stage_type":"cpu_train","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/cross_scaffold_v1/train.csv"],"expected_artifacts":["bbbp_teacher.pkl","teacher_summary.json","teacher_leakage_audit.json"]},
+        {"id":"cross_ours","method":"ours","wrapper":"scripts/slurm/bbbp_cross_scaffold_ours.sh","depends_on":["cross_teacher"],"output_root":"outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/ours","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/oracle/bbbp/cross_scaffold_v1/bbbp_teacher.pkl"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_ours_k10.csv","protocol_manifest.json"]},
+        {"id":"cross_globalgce","method":"globalgce","wrapper":"scripts/slurm/bbbp_cross_scaffold_globalgce.sh","depends_on":["cross_teacher","cross_ours"],"output_root":"outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/globalgce","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_globalgce_k10.csv","protocol_manifest.json"]},
+        {"id":"cross_gcfexplainer","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_cross_scaffold_gcfexplainer.sh","depends_on":["cross_teacher","cross_ours"],"output_root":"outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/gcfexplainer","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_gcfexplainer_k10.csv","protocol_manifest.json"]},
+        {"id":"cross_comrecgc","method":"comrecgc","wrapper":"scripts/slurm/bbbp_cross_scaffold_comrecgc.sh","depends_on":["cross_teacher","cross_ours"],"output_root":"outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/comrecgc","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_comrecgc_k10.csv","protocol_manifest.json"]},
+        {"id":"cross_audit","method":"common4","wrapper":"scripts/slurm/bbbp_cross_scaffold_audit.sh","depends_on":["cross_ours","cross_globalgce","cross_gcfexplainer","cross_comrecgc"],"output_root":"outputs/hpc/eval/generalization/bbbp/cross_scaffold_v1","stage_type":"cpu_audit","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/cross_scaffold_v1/split_leakage_audit.json"],"expected_artifacts":["cross_scaffold_summary.json","final_artifact_audit.json"]}
+      ]
+    },
+    "heldout": {
+      "output_root": "outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1",
+      "stages": [
+        {"id":"heldout_protocol","method":"shared","wrapper":"scripts/slurm/bbbp_heldout_prepare.sh","depends_on":[],"output_root":"outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1/protocol","stage_type":"cpu_audit","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/split_manifest.json"],"expected_artifacts":["protocol_manifest.json","split_leakage_audit.json"]},
+        {"id":"heldout_ours","method":"ours","wrapper":"scripts/slurm/bbbp_heldout_ours.sh","depends_on":["heldout_protocol"],"output_root":"outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1/ours","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_ours_k10.csv","candidate_lineage_audit.json"]},
+        {"id":"heldout_globalgce","method":"globalgce","wrapper":"scripts/slurm/bbbp_heldout_globalgce.sh","depends_on":["heldout_protocol"],"output_root":"outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1/globalgce","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_globalgce_k10.csv","candidate_lineage_audit.json"]},
+        {"id":"heldout_gcfexplainer","method":"gcfexplainer","wrapper":"scripts/slurm/bbbp_heldout_gcfexplainer.sh","depends_on":["heldout_protocol"],"output_root":"outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1/gcfexplainer","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_gcfexplainer_k10.csv","candidate_lineage_audit.json"]},
+        {"id":"heldout_comrecgc","method":"comrecgc","wrapper":"scripts/slurm/bbbp_heldout_comrecgc.sh","depends_on":["heldout_protocol"],"output_root":"outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1/comrecgc","stage_type":"gpu_pipeline","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/paper/bbbp_common3_standardized_v1/thresholds.json"],"expected_artifacts":["figure3_coverage_vs_k.csv","figure4_coverage_vs_threshold.csv","table2_comrecgc_k10.csv","candidate_lineage_audit.json"]},
+        {"id":"heldout_audit","method":"common4","wrapper":"scripts/slurm/bbbp_heldout_audit.sh","depends_on":["heldout_ours","heldout_globalgce","heldout_gcfexplainer","heldout_comrecgc"],"output_root":"outputs/hpc/eval/generalization/bbbp","stage_type":"cpu_audit","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/generalization/bbbp/heldout_molecule_v1"],"expected_artifacts":["transductive_vs_heldout_summary.csv","transductive_vs_heldout_summary.json"]}
+      ]
+    }
+  }
+}

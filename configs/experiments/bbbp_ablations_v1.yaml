@@ -1,0 +1,49 @@
+{
+  "schema_version": "bbbp_experiment_plans_v1",
+  "dataset": "BBBP",
+  "status": "FRAMEWORK_ONLY_NOT_RUN",
+  "seeds": [0, 1, 2],
+  "protocol": {
+    "dataset": "BBBP", "source_label": 1, "target_label": 0,
+    "cf_mode": "strict_flip", "distance_line": "MolCLR-Node-Wasserstein",
+    "feature_cost": "cosine", "node_mass": "uniform", "size_penalty_beta": 0.0,
+    "threshold_source": "calibration", "candidate_source_splits": ["train", "val"],
+    "selector_source_splits": ["calibration"], "test_usage": "final_evaluation_only",
+    "selection_performed_in_eval": false, "threshold_fitted_on_test": false,
+    "table2_k": 10
+  },
+  "runtime_metrics_template": {
+    "wall_time_seconds": null, "gpu_time_seconds": null, "cpu_time_seconds": null,
+    "peak_rss_mb": null, "peak_gpu_memory_mb": null, "num_parents": null,
+    "num_candidates": null, "num_pairs": null, "cache_hit_rate": null,
+    "candidates_per_second": null, "pairs_per_second": null,
+    "successful_cf_per_gpu_hour": null
+  },
+  "candidate_source_variants": ["chemllm_ppo","chemllm_sft_only","random_connected_size_matched","random_brics_size_matched","random_topk_from_chemllm_pool"],
+  "selector_variants": ["full_selector","no_cf_term","no_coverage_term","no_structural_redundancy","no_coverage_redundancy","no_size_penalty","cfdrop_only","coverage_only","random_topk"],
+  "candidate_budgets": [1,2,4,8],
+  "bootstrap_samples": 1000,
+  "plans": {
+    "candidate-source-ablation": {
+      "output_root":"outputs/hpc/eval/ablation/bbbp/candidate_source_v1",
+      "stages":[
+        {"id":"candidate_source_run","method":"ours_ablation","wrapper":"scripts/slurm/bbbp_candidate_source_ablation.sh","depends_on":[],"output_root":"outputs/hpc/eval/ablation/bbbp/candidate_source_v1","stage_type":"gpu_ablation","status":"NOT_RUN","resources":{},"required_inputs":["data/processed/BBBP/train.csv","outputs/hpc/oracle/bbbp/bbbp_teacher.pkl"],"expected_artifacts":["candidate_source_ablation.csv","candidate_source_ablation.json"]},
+        {"id":"candidate_source_aggregate","method":"aggregate","wrapper":"scripts/slurm/bbbp_aggregate_replicates.sh","depends_on":["candidate_source_run"],"output_root":"outputs/hpc/eval/ablation/bbbp/candidate_source_v1/aggregate","stage_type":"cpu_aggregate","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/ablation/bbbp/candidate_source_v1"],"expected_artifacts":["replicate_summary.json","bootstrap_summary.json"]}
+      ]
+    },
+    "selector-ablation": {
+      "output_root":"outputs/hpc/eval/ablation/bbbp/selector_v1",
+      "stages":[
+        {"id":"selector_run","method":"ours_ablation","wrapper":"scripts/slurm/bbbp_selector_ablation.sh","depends_on":[],"output_root":"outputs/hpc/eval/ablation/bbbp/selector_v1","stage_type":"gpu_ablation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/candidate_pools/bbbp_ours/candidate_pool.jsonl"],"expected_artifacts":["selector_ablation.csv","selector_ablation.json"]},
+        {"id":"selector_aggregate","method":"aggregate","wrapper":"scripts/slurm/bbbp_aggregate_selector_replicates.sh","depends_on":["selector_run"],"output_root":"outputs/hpc/eval/ablation/bbbp/selector_v1/aggregate","stage_type":"cpu_aggregate","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/ablation/bbbp/selector_v1"],"expected_artifacts":["replicate_summary.json","bootstrap_summary.json"]}
+      ]
+    },
+    "candidate-budget": {
+      "output_root":"outputs/hpc/eval/ablation/bbbp/candidate_budget_v1",
+      "stages":[
+        {"id":"budget_run","method":"ours_ablation","wrapper":"scripts/slurm/bbbp_candidate_budget_ablation.sh","depends_on":[],"output_root":"outputs/hpc/eval/ablation/bbbp/candidate_budget_v1","stage_type":"gpu_ablation","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/candidate_pools/bbbp_ours/candidate_pool_max8.jsonl"],"expected_artifacts":["candidate_budget_scaling.csv","candidate_budget_scaling.json"]},
+        {"id":"budget_aggregate","method":"aggregate","wrapper":"scripts/slurm/bbbp_aggregate_budget_replicates.sh","depends_on":["budget_run"],"output_root":"outputs/hpc/eval/ablation/bbbp/candidate_budget_v1/aggregate","stage_type":"cpu_aggregate","status":"NOT_RUN","resources":{},"required_inputs":["outputs/hpc/eval/ablation/bbbp/candidate_budget_v1"],"expected_artifacts":["replicate_summary.json","bootstrap_summary.json"]}
+      ]
+    }
+  }
+}

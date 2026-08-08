@@ -5818,3 +5818,37 @@ schemas directly; no post-experiment compatibility conversion is permitted.
   shared final evaluator after Top20 is frozen.
 - AIDS and Mutagenicity GCFExplainer routes and all existing BACE Ours
   artifacts remain unchanged.
+
+---
+
+## 2026-08-09: BBBP common4, generalization, and ablation framework
+
+### Decision
+
+Add BBBP as a framework-only protocol on an isolated feature branch. Reuse the
+existing strict-flip MolCLR-Node-Wasserstein evaluator and plotting schemas;
+do not fork metric definitions or modify AIDS, Mutagenicity, or BACE defaults.
+Normalize a local BBBP CSV into deterministic train/validation/calibration/test
+artifacts, select an independent Morgan-RF teacher using validation only, and
+enforce split, candidate-lineage, selector-source, and threshold-source gates
+fail-closed.
+
+Model the four methods as their real multi-stage DAGs. Ours keeps the existing
+ChemLLM/selector path; GlobalGCE, GCFExplainer, and COMRECGC remain native
+fullgraph methods. Import the reviewed COMRECGC bounded transition cache and
+streaming trace implementation rather than constructing a second OOM fix.
+
+Add plan-only cross-scaffold and held-out protocols, PPO/SFT/random candidate
+controls, selector-component variants, nested candidate budgets, seeds 0/1/2,
+and parent-level bootstrap confidence intervals. The planner can render future
+`scripts/exp_sbatch.sh` commands but has no submission operation.
+
+### Consequences
+
+- Current status is `FRAMEWORK_ONLY_NOT_RUN`; no BBBP model, candidate,
+  distance, registry entry, or formal output is created.
+- `data/raw/BBBP/bbbp.csv`, checkpoint paths, and BBBP-specific native
+  baseline compatibility manifests remain explicit future inputs.
+- Figure 3, Figure 4, and Table 2 use their existing schemas directly, with
+  calibration-only thresholds and no test-time selection.
+- Existing AIDS, Mutagenicity, BACE, and active HPC artifacts are unchanged.
