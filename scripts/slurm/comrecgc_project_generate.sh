@@ -35,8 +35,10 @@ RESUME="${RESUME:-false}"
 }
 if [[ "$MODE" == "smoke" ]]; then
   EXPECTED_PARENT_LIMIT=64
+  TRANSITION_STATE_POLICY="pinned_upstream_in_memory_transitions_v1"
 else
   [[ "$DATASET" == "aids" ]] && EXPECTED_PARENT_LIMIT=1283 || EXPECTED_PARENT_LIMIT=1448
+  TRANSITION_STATE_POLICY="pinned_upstream_active_move_deferred_eviction_v1"
 fi
 PARENT_LIMIT="${PARENT_LIMIT:-$EXPECTED_PARENT_LIMIT}"
 [[ "$PARENT_LIMIT" == "$EXPECTED_PARENT_LIMIT" ]] || {
@@ -63,7 +65,7 @@ fi
 for input in "$DATASET_DIR" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   [[ -e "$input" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing input=$input" >&2; exit 2; }
 done
-echo "[COMRECGC_STAGE_CONFIG] stage=project_generation dataset=$DATASET mode=$MODE parent_limit=$PARENT_LIMIT output_dir=$OUTPUT_DIR"
+echo "[COMRECGC_STAGE_CONFIG] stage=project_generation dataset=$DATASET mode=$MODE parent_limit=$PARENT_LIMIT transition_state_policy=$TRANSITION_STATE_POLICY output_dir=$OUTPUT_DIR"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 python scripts/baselines/comrecgc/run_generation.py \

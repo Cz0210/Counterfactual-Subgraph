@@ -22,7 +22,9 @@ from src.baselines.comrecgc.contracts import (
 from src.baselines.comrecgc.project_dataset import project_label_to_internal
 from src.baselines.comrecgc.preregistration import validate_chemistry_trace_evidence
 from src.baselines.comrecgc.runtime import (
+    ACTIVE_MOVE_TRANSITION_PATCH,
     _EndpointSafeGraphMap,
+    _MoveScopedTransitionMap,
     _materialize_dataset_indices,
     patched_official_runtime,
     validate_counterfactual_payload,
@@ -256,6 +258,146 @@ def test_endpoint_safe_graph_map_only_allows_unmaterialized_tail_eviction() -> N
     module.graph_index_map["unmaterialized"] = 0
     with pytest.raises(KeyError):
         del graph_map["unmaterialized"]
+
+
+def test_active_head_transition_eviction_is_deferred_for_1000_moves() -> None:
+    module = SimpleNamespace(graph_index_map={}, graph_map={})
+    transitions = _MoveScopedTransitionMap(module, {}, seed=0)
+    checkpoint: bytes | None = None
+
+    for step in range(1, 1_001):
+        heads = (f"lead-{step}", f"follower-{step}")
+        for index, graph_hash in enumerate(heads):
+            module.graph_index_map[graph_hash] = index
+            module.graph_map[graph_hash] = [f"graph-{graph_hash}"]
+            transitions[graph_hash] = (f"transition-{graph_hash}",)
+
+        transitions.begin_move(heads)
+        module.graph_index_map.pop(heads[1])
+        module.graph_map.pop(heads[1])
+        del transitions[heads[1]]
+
+        assert all(graph_hash in transitions for graph_hash in heads)
+        assert transitions[heads[1]] == (f"transition-{heads[1]}",)
+        if step == 500:
+            checkpoint = pickle.dumps(transitions)
+            restored = pickle.loads(checkpoint)
+            assert type(restored) is dict
+            assert restored == dict(transitions)
+
+        transitions.end_move()
+        assert heads[1] not in transitions
+        module.graph_index_map.pop(heads[0])
+        module.graph_map.pop(heads[0])
+        del transitions[heads[0]]
+
+    assert checkpoint is not None
+    assert transitions.audit() == {
+        "patch": ACTIVE_MOVE_TRANSITION_PATCH,
+        "policy": "defer_current_head_eviction_until_move_complete",
+        "move_count": 1_000,
+        "deferred_deletion_count": 1_000,
+        "applied_deferred_deletion_count": 1_000,
+        "cancelled_deferred_deletion_count": 0,
+        "missing_lookup_count": 0,
+        "max_transition_size": 2,
+        "rng_calls_added": 0,
+        "candidate_order_changed": False,
+        "scientific_parameters_changed": False,
+    }
+
+
+def test_transition_lookup_failure_reports_move_context() -> None:
+    module = SimpleNamespace(graph_index_map={"missing": 0}, graph_map={"missing": [1]})
+    transitions = _MoveScopedTransitionMap(module, {}, seed=13)
+    transitions.begin_move(["lead", "missing"])
+
+    with pytest.raises(RuntimeError) as error:
+        transitions["missing"]
+
+    message = str(error.value)
+    assert "[COMRECGC_TRANSITION_STATE_ERROR]" in message
+    assert "current_step=1" in message
+    assert "head=1" in message
+    assert "seed=13" in message
+    assert "graph_hash=missing" in message
+    assert "transition_size=0" in message
+    assert "cache_size=1" in message
+    transitions.end_move()
+
+
+def test_runtime_defers_active_transition_cleanup_until_original_move_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.baselines.comrecgc.runtime as runtime
+
+    module = SimpleNamespace(
+        call=object(),
+        neighbor_graph_access=lambda graph, _action: graph,
+        graph_map={"lead": [1], "follower": [2]},
+        graph_index_map={"lead": 0, "follower": 1},
+        counterfactual_candidates=[],
+        transitions={"lead": ("lead-transition",), "follower": ("follower-transition",)},
+    )
+    observed: dict[str, object] = {}
+
+    def original_move(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        module.graph_index_map.pop("follower")
+        module.graph_map.pop("follower")
+        del module.transitions["follower"]
+        observed["available_during_move"] = module.transitions["follower"]
+        return (["lead", "lead"], False, None, None, None)
+
+    module.move_to_next_graph = original_move
+    monkeypatch.setattr(runtime, "_safe_call_factory", lambda **_kwargs: object())
+    audit: dict[str, object] = {}
+
+    def trace_wrap(original: object, traced_module: object) -> object:
+        def traced(*args: object, **kwargs: object) -> tuple[object, ...]:
+            result = original(*args, **kwargs)
+            observed["available_to_trace"] = traced_module.transitions["follower"]
+            return result
+
+        return traced
+
+    trace_recorder = SimpleNamespace(wrap_move=trace_wrap)
+
+    with patched_official_runtime(
+        module,
+        model=object(),
+        embedding_model=object(),
+        gnn_device="cpu",
+        embedding_device="cpu",
+        batch_size=1,
+        trace_recorder=trace_recorder,
+        compatibility_audit=audit,
+        preserve_active_transitions=True,
+        seed=0,
+    ):
+        module.move_to_next_graph(
+            graphs_hash=["lead", "follower"],
+            start_graphs_hash=["lead", "follower"],
+            importance_args={},
+            teleport_probability=0.1,
+        )
+        assert "follower" not in module.transitions
+
+    assert observed["available_during_move"] == ("follower-transition",)
+    assert observed["available_to_trace"] == ("follower-transition",)
+    assert type(module.transitions) is dict
+    assert audit["transition_state"] == {
+        "patch": ACTIVE_MOVE_TRANSITION_PATCH,
+        "policy": "defer_current_head_eviction_until_move_complete",
+        "move_count": 1,
+        "deferred_deletion_count": 1,
+        "applied_deferred_deletion_count": 1,
+        "cancelled_deferred_deletion_count": 0,
+        "missing_lookup_count": 0,
+        "max_transition_size": 2,
+        "rng_calls_added": 0,
+        "candidate_order_changed": False,
+        "scientific_parameters_changed": False,
+    }
 
 
 @pytest.mark.parametrize("raise_inside", [False, True])
