@@ -4,6 +4,44 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-08] Defer active-head transition eviction within one COMRECGC move
+
+### Background
+
+The fixed AIDS/HIV project full run reached step 34,939 before the pinned
+upstream `move_to_next_graph` raised a transition lookup `KeyError`. Upstream
+materializes transitions for all current random-walk heads, then the selected
+lead reinforces a candidate. At full candidate capacity that reinforcement can
+evict a non-lead current head and delete its transition before the same move
+consumes it for follower matching.
+
+### Decision
+
+Wrap only project full generation's upstream transition dictionary. A deletion
+of a current move head is deferred until the wrapped move returns; then the
+deletion is applied if the candidate remains evicted. Non-active transition
+deletions remain immediate. A missing lookup raises a diagnostic error with
+step, head, seed, graph hash, transition size, and graph-cache size. The wrapper
+adds no random calls and leaves neighbor enumeration, candidate capacity,
+importance, DBSCAN, and ranking untouched. It serializes as a plain dictionary
+and emits bounded progress diagnostics at step 1,000 and every 10,000 steps.
+
+### Consequences
+
+- Every current head retains its already-built transition for the complete
+  official move that consumes it.
+- Evicted historical transitions are still released after that move, avoiding
+  an unbounded full-run cache.
+- Smoke and native routes keep their previous transition behavior.
+- Cross-job random-walk resume remains unsupported; retries use a fresh
+  versioned output with the same frozen scientific parameters.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-04] Restore the audited AIDS GCF-style WNode presentation contract
 
 ### Background

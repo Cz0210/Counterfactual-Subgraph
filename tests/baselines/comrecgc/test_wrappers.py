@@ -178,6 +178,18 @@ def test_full_runtime_enables_selected_transition_only_action_index() -> None:
     assert 'compact_enumeration=mode == "full"' in text
     assert '"full_selected_transition_weak_action_index_v1"' in text
     assert '"generation_resume_supported": False' in text
+    assert 'preserve_active_transitions=mode == "full"' in text
+    assert '"active_move_transition_eviction_deferred_v1"' in text
+
+
+def test_project_generation_wrapper_declares_move_scoped_transition_policy() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_project_generate.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "pinned_upstream_active_move_deferred_eviction_v1" in text
+    assert "transition_state_policy=$TRANSITION_STATE_POLICY" in text
+    assert "#SBATCH --time=7-00:00:00" in text
+    assert "#SBATCH --mem=192G" in text
 
 
 def test_aids_project_smoke_is_read_only_adoption() -> None:

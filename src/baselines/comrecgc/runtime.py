@@ -53,6 +53,8 @@ OFFICIAL_RUNTIME_PATCHES = (
     "candidate_map_unmaterialized_eviction_none_safe_v1",
 )
 
+ACTIVE_MOVE_TRANSITION_PATCH = "active_move_transition_eviction_deferred_v1"
+
 
 class _EndpointSafeGraphMap(dict[Any, Any]):
     """Make only the official unmaterialized-tail eviction idempotent."""
@@ -75,6 +77,113 @@ class _EndpointSafeGraphMap(dict[Any, Any]):
 
     def __reduce__(self) -> tuple[Any, tuple[dict[Any, Any]]]:
         # Official torch.save artifacts must contain a plain dict.
+        return dict, (dict(self),)
+
+
+class _MoveScopedTransitionMap(dict[Any, Any]):
+    """Keep current-head transitions alive until one official move completes.
+
+    Upstream candidate-capacity eviction can remove a non-lead head after all
+    head transitions have been built but before followers consume them.  The
+    deferred deletion is applied immediately after the move, so cache capacity
+    and subsequent algorithm behavior stay unchanged.
+    """
+
+    def __init__(self, module: Any, values: Mapping[Any, Any], *, seed: int) -> None:
+        super().__init__(values)
+        self._module = module
+        self._seed = int(seed)
+        self._active_keys: tuple[Any, ...] = ()
+        self._deferred_deletions: set[Any] = set()
+        self._current_step = 0
+        self.move_count = 0
+        self.deferred_deletion_count = 0
+        self.applied_deferred_deletion_count = 0
+        self.cancelled_deferred_deletion_count = 0
+        self.missing_lookup_count = 0
+        self.max_transition_size = len(self)
+
+    def begin_move(self, graph_hashes: Sequence[Any]) -> int:
+        if self._active_keys or self._deferred_deletions:
+            raise RuntimeError("COMRECGC transition move scopes cannot be nested.")
+        self.move_count += 1
+        self._current_step = self.move_count
+        self._active_keys = tuple(graph_hashes)
+        return self._current_step
+
+    def end_move(self) -> None:
+        index_map = getattr(self._module, "graph_index_map", {})
+        for key in tuple(self._deferred_deletions):
+            if key in index_map:
+                self.cancelled_deferred_deletion_count += 1
+            elif key in self:
+                super().__delitem__(key)
+                self.applied_deferred_deletion_count += 1
+        self._deferred_deletions.clear()
+        self._active_keys = ()
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(key, value)
+        self.max_transition_size = max(self.max_transition_size, len(self))
+
+    def __delitem__(self, key: Any) -> None:
+        if key in self._active_keys and key in self:
+            if key not in self._deferred_deletions:
+                self.deferred_deletion_count += 1
+            self._deferred_deletions.add(key)
+            return
+        super().__delitem__(key)
+
+    def __getitem__(self, key: Any) -> Any:
+        if key not in self:
+            self.missing_lookup_count += 1
+            head = self._active_keys.index(key) if key in self._active_keys else None
+            graph_map = getattr(self._module, "graph_map", {})
+            raise RuntimeError(
+                "[COMRECGC_TRANSITION_STATE_ERROR] "
+                f"current_step={self._current_step} head={head} seed={self._seed} "
+                f"graph_hash={key} transition_size={len(self)} "
+                f"cache_size={len(graph_map)} active_head_count={len(self._active_keys)}"
+            )
+        return super().__getitem__(key)
+
+    def wrap_move(self, original: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            graph_hashes = list(kwargs.get("graphs_hash", args[0] if args else []))
+            current_step = self.begin_move(graph_hashes)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                self.end_move()
+                if current_step == 1_000 or current_step % 10_000 == 0:
+                    print(
+                        "[COMRECGC_TRANSITION_STATE] "
+                        f"current_step={current_step} seed={self._seed} "
+                        f"transition_size={len(self)} "
+                        f"cache_size={len(getattr(self._module, 'graph_map', {}))} "
+                        f"deferred_deletions={self.deferred_deletion_count} "
+                        f"missing_lookups={self.missing_lookup_count}",
+                        flush=True,
+                    )
+
+        return wrapped
+
+    def audit(self) -> dict[str, Any]:
+        return {
+            "patch": ACTIVE_MOVE_TRANSITION_PATCH,
+            "policy": "defer_current_head_eviction_until_move_complete",
+            "move_count": self.move_count,
+            "deferred_deletion_count": self.deferred_deletion_count,
+            "applied_deferred_deletion_count": self.applied_deferred_deletion_count,
+            "cancelled_deferred_deletion_count": self.cancelled_deferred_deletion_count,
+            "missing_lookup_count": self.missing_lookup_count,
+            "max_transition_size": self.max_transition_size,
+            "rng_calls_added": 0,
+            "candidate_order_changed": False,
+            "scientific_parameters_changed": False,
+        }
+
+    def __reduce__(self) -> tuple[Any, tuple[dict[Any, Any]]]:
         return dict, (dict(self),)
 
 
@@ -285,6 +394,8 @@ def patched_official_runtime(
     batch_size: int,
     trace_recorder: ActionTraceRecorder | None = None,
     compatibility_audit: dict[str, Any] | None = None,
+    preserve_active_transitions: bool = False,
+    seed: int = 0,
 ) -> Iterator[None]:
     originals = {
         "call": module.call,
@@ -293,6 +404,13 @@ def patched_official_runtime(
     }
     endpoint_safe_graph_map = _EndpointSafeGraphMap(module, module.graph_map)
     module.graph_map = endpoint_safe_graph_map
+    transition_map = (
+        _MoveScopedTransitionMap(module, module.transitions, seed=seed)
+        if preserve_active_transitions
+        else None
+    )
+    if transition_map is not None:
+        module.transitions = transition_map
     module.call = _safe_call_factory(
         model=model,
         embedding_model=embedding_model,
@@ -304,11 +422,14 @@ def patched_official_runtime(
         module.neighbor_graph_access,
         trace_recorder=trace_recorder,
     )
+    patched_move = module.move_to_next_graph
     if trace_recorder is not None:
-        module.move_to_next_graph = trace_recorder.wrap_move(
-            module.move_to_next_graph,
-            module,
-        )
+        patched_move = trace_recorder.wrap_move(patched_move, module)
+    if transition_map is not None:
+        # Keep the transition scope outside trace capture so selected-action
+        # resolution can still inspect the transition before deferred cleanup.
+        patched_move = transition_map.wrap_move(patched_move)
+    module.move_to_next_graph = patched_move
     try:
         yield
     finally:
@@ -323,7 +444,11 @@ def patched_official_runtime(
                     "candidate_order_changed": False,
                 }
             )
+            if transition_map is not None:
+                compatibility_audit["transition_state"] = transition_map.audit()
         module.graph_map = dict(endpoint_safe_graph_map)
+        if transition_map is not None:
+            module.transitions = dict(transition_map)
         module.call = originals["call"]
         module.neighbor_graph_access = originals["neighbor_graph_access"]
         module.move_to_next_graph = originals["move_to_next_graph"]
@@ -666,6 +791,7 @@ def run_project_generation(
                 "test_loaded": False,
                 "official_compatibility_patches": [
                     *OFFICIAL_RUNTIME_PATCHES,
+                    *([ACTIVE_MOVE_TRANSITION_PATCH] if mode == "full" else []),
                     *(
                         [
                             "project_runtime_action_trace_only_v1",
@@ -681,7 +807,11 @@ def run_project_generation(
                 ],
                 "official_source_modified": False,
                 "generation_resume_supported": False,
-                "transition_cache_policy": "pinned_upstream_in_memory_transitions_v1",
+                "transition_cache_policy": (
+                    "pinned_upstream_active_move_deferred_eviction_v1"
+                    if mode == "full"
+                    else "pinned_upstream_in_memory_transitions_v1"
+                ),
                 "started_at": started,
             }
             config["config_sha256"] = stable_json_sha256(config)
@@ -708,6 +838,8 @@ def run_project_generation(
                     batch_size=batch_size,
                     trace_recorder=trace_recorder,
                     compatibility_audit=compatibility_audit,
+                    preserve_active_transitions=mode == "full",
+                    seed=parameters.seed,
                 ):
                     official.counterfactual_summary_with_randomwalk(
                         dataset_name=dataset_key,
