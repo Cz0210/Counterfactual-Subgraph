@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7
 #SBATCH --gres=gpu:a800:1
-#SBATCH --mem=96G
+#SBATCH --mem=128G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -30,7 +30,7 @@ DISTANCE_CHECKPOINT="${DISTANCE_CHECKPOINT:-outputs/hpc/pretrained/gcfexplainer/
 for input in "$DATASET_DIR" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   [[ -e "$input" ]] || { echo "[COMRECGC_CONFIG_ERROR] missing=$input" >&2; exit 2; }
 done
-echo "[COMRECGC_RECOVERY_CONFIG] stage=mut_full parents=1448 steps=50000 heads=5 k=100000 sample_size=10000 seed=0 trace_only=true"
+echo "[COMRECGC_RECOVERY_CONFIG] stage=mut_full parents=1448 steps=50000 heads=5 k=100000 sample_size=10000 seed=0 trace_only=true transition_cache=exact_action_replay_with_bounded_expanded_lru_v1 expanded_capacity=5"
 echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse HEAD)"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 python scripts/baselines/comrecgc/run_generation.py \

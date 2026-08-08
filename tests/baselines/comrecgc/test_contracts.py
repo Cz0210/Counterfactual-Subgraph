@@ -400,6 +400,72 @@ def test_runtime_defers_active_transition_cleanup_until_original_move_returns(
     }
 
 
+def test_runtime_installs_and_restores_compact_full_transition_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.baselines.comrecgc.runtime as runtime
+
+    source = SimpleNamespace(value=10)
+    module = SimpleNamespace(
+        call=object(),
+        neighbor_graph_access=lambda graph, action: SimpleNamespace(
+            value=graph.value + int(action[1])
+        ),
+        graph_map={"source": [source, None, None]},
+        graph_index_map={"source": 0},
+        counterfactual_candidates=[],
+        transitions={},
+    )
+
+    def move(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        target = module.neighbor_graph_access(source, ("ADD", 1))
+        module.transitions["source"] = (
+            ["target"],
+            [target],
+            [[0.7, 1.0]],
+            [[1.0, 2.0]],
+        )
+        module.graph_map["target"] = [target, None, None]
+        module.graph_index_map["target"] = 1
+        assert module.transitions["source"][1][0].value == 11
+        return (["target"], False, None, None, None)
+
+    module.move_to_next_graph = move
+    monkeypatch.setattr(runtime, "_safe_call_factory", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "_apply_neighbor_with_lineage",
+        lambda original, graph, action: original(graph, action),
+    )
+    audit: dict[str, object] = {}
+
+    with patched_official_runtime(
+        module,
+        model=object(),
+        embedding_model=object(),
+        gnn_device="cpu",
+        embedding_device="cpu",
+        batch_size=1,
+        compatibility_audit=audit,
+        preserve_active_transitions=True,
+        compact_transitions=True,
+        transition_expanded_capacity=1,
+        seed=0,
+    ):
+        module.move_to_next_graph(
+            graphs_hash=["source"],
+            start_graphs_hash=["source"],
+            importance_args={},
+            teleport_probability=0.1,
+        )
+
+    assert module.transitions == {}
+    transition_audit = audit["transition_state"]
+    assert transition_audit["policy"] == "exact_action_replay_with_bounded_expanded_lru"
+    assert transition_audit["expanded_capacity"] == 1
+    assert transition_audit["model_recomputation_count"] == 0
+
+
 @pytest.mark.parametrize("raise_inside", [False, True])
 def test_endpoint_safe_runtime_restores_plain_map_and_official_functions(
     monkeypatch, raise_inside: bool
