@@ -6072,3 +6072,27 @@ The failed job does not contain a complete atomic RNG/transition/graph-state
 checkpoint, so its partial progress is evidence only and cannot be resumed.
 Retry 6 uses a fresh versioned root and identical scientific parameters. See
 `docs/postmortems/COMRECGC_AIDS_2164128_GRAPH_STATE_FAILURE.md`.
+
+---
+
+## 2026-08-08: Bounded COMRECGC full transition graph cache
+
+Mutagenicity full generation exhausted its 96 GiB host-memory allocation after
+22,156 of 50,000 steps. The streamed action trace occupied only about 42 MiB;
+the dominant retained state was the pinned upstream `transitions` dictionary,
+which stores every complete neighbor PyG graph alongside already-computed
+hashes, importance values, and embeddings.
+
+Full project generation now keeps the exact hashes, importance arrays,
+embeddings, and enumerated edit actions, while retaining complete reconstructed
+neighbor graphs only for a heads-sized LRU. An evicted expanded transition is
+reconstructed from its exact action without another model call, random draw,
+neighbor enumeration, or numerical recomputation. Current-head deletion remains
+deferred until the move ends. Cache size, hits, misses, reconstruction counts,
+and compact numeric bytes are recorded in the compatibility audit.
+
+The Mutagenicity wrapper receives 128 GiB of host-memory headroom on the same
+single A800 and seven CPUs. Seed, steps, heads, candidate capacity, sample size,
+teleport probability, importance, DBSCAN parameters, candidate order, and
+official source remain unchanged. Cross-job resume remains disabled because the
+failed process did not persist complete RNG and candidate state.

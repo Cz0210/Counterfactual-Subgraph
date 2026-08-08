@@ -238,6 +238,38 @@ def test_full_compact_trace_audits_upstream_transition_cache_hit(tmp_path) -> No
     assert recorder.transition_cache_miss_count == 0
 
 
+def test_full_compact_trace_reads_actions_from_memory_bounded_cache() -> None:
+    source = graph()
+    target = graph(atom=1)
+    recorder = ActionTraceRecorder(compact_enumeration=True)
+
+    class CompactTransitions(dict):
+        def action_records(self, source_hash: str, target_hash: str) -> list[dict]:
+            assert source_hash == "source"
+            assert target_hash == "target"
+            return [{"action": ["NLC", 0, 1]}]
+
+    module = SimpleNamespace(
+        graph_map={"source": [source], "target": [target]},
+        transitions=CompactTransitions(source=object()),
+    )
+    recorder.wrap_move(
+        lambda *_args, **_kwargs: (["target"], False, None, None, None),
+        module,
+    )(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+
+    assert recorder.predecessor_by_official_hash["target"]["action"] == [
+        "NLC",
+        0,
+        1,
+    ]
+
+
 def test_trace_does_not_change_candidates() -> None:
     reference = payload(graph(), graph(atom=1))
     traced = payload(graph(swapped_edges=True), graph(atom=1))

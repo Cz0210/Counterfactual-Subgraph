@@ -179,7 +179,21 @@ def test_full_runtime_enables_selected_transition_only_action_index() -> None:
     assert '"full_selected_transition_weak_action_index_v1"' in text
     assert '"generation_resume_supported": False' in text
     assert 'preserve_active_transitions=mode == "full"' in text
+    assert 'compact_transitions=mode == "full"' in text
+    assert "transition_expanded_capacity=parameters.heads" in text
     assert '"active_move_transition_eviction_deferred_v1"' in text
+    assert '"compact_transition_action_replay_lru_v1"' in (
+        ROOT / "src/baselines/comrecgc/transition_cache.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_mut_full_uses_bounded_transition_cache_with_memory_headroom() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_mut_full.sh").read_text(encoding="utf-8")
+    assert "#SBATCH --mem=128G" in text
+    assert "#SBATCH --cpus-per-task=7" in text
+    assert "#SBATCH --gres=gpu:a800:1" in text
+    assert "exact_action_replay_with_bounded_expanded_lru_v1" in text
+    assert "expanded_capacity=5" in text
 
 
 def test_project_generation_wrapper_declares_move_scoped_transition_policy() -> None:

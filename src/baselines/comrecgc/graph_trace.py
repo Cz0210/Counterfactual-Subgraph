@@ -364,7 +364,11 @@ class ActionTraceRecorder:
         source_hash: Any,
         target_hash: Any,
     ) -> list[dict[str, Any]]:
-        transition = getattr(module, "transitions", {}).get(source_hash)
+        transitions = getattr(module, "transitions", {})
+        action_records = getattr(transitions, "action_records", None)
+        if callable(action_records):
+            return action_records(source_hash, target_hash)
+        transition = transitions.get(source_hash)
         if not isinstance(transition, tuple) or len(transition) < 2:
             return []
         target_hashes, target_graphs = transition[0], transition[1]

@@ -48,6 +48,10 @@ from .project_dataset import (
     load_aids_generation_bundle,
     load_mutagenicity_generation_bundle,
 )
+from .transition_cache import (
+    COMPACT_TRANSITION_CACHE_PATCH,
+    CompactMoveScopedTransitionMap,
+)
 from .upstream import imported_upstream
 
 OFFICIAL_RUNTIME_PATCHES = (
@@ -331,38 +335,52 @@ def _materialize_dataset_indices(dataset: Any, indices: Sequence[int]) -> list[A
     return [dataset[int(index)] for index in indices]
 
 
+def _apply_neighbor_with_lineage(
+    original: Callable[[Any, tuple[Any, ...]], Any],
+    graph: Any,
+    action: tuple[Any, ...],
+) -> Any:
+    """Apply one official edit while preserving project source-node lineage."""
+
+    torch, _Batch = _torch_stack()
+    result = original(graph, action)
+    origins = _as_list(getattr(graph, "comrecgc_node_origin"))
+    action_name = str(action[0])
+    if action_name in {"NA", "INA"}:
+        origins.append(-1)
+    elif action_name in {"NR", "INR"}:
+        remove_index = int(action[1])
+        origins = [value for index, value in enumerate(origins) if index != remove_index]
+    if len(origins) != int(result.num_nodes):
+        raise RuntimeError(
+            "COMRECGC lineage length changed independently of graph nodes: "
+            f"action={action_name}, origins={len(origins)}, nodes={int(result.num_nodes)}"
+        )
+    result.comrecgc_node_origin = torch.tensor(origins, dtype=torch.long)
+    for name in (
+        "comrecgc_parent_id",
+        "comrecgc_source_index",
+        "comrecgc_source_smiles",
+        "comrecgc_project_label",
+        "comrecgc_source_record",
+    ):
+        if hasattr(graph, name):
+            setattr(result, name, getattr(graph, name))
+    return result
+
+
 def lineage_neighbor_wrapper(
     original: Callable[[Any, tuple[Any, ...]], Any],
     *,
     trace_recorder: ActionTraceRecorder | None = None,
+    transition_cache: CompactMoveScopedTransitionMap | None = None,
 ) -> Callable[[Any, tuple[Any, ...]], Any]:
     """Preserve source-node lineage without changing graph tensors."""
 
     def wrapped(graph: Any, action: tuple[Any, ...]) -> Any:
-        torch, _Batch = _torch_stack()
-        result = original(graph, action)
-        origins = _as_list(getattr(graph, "comrecgc_node_origin"))
-        action_name = str(action[0])
-        if action_name in {"NA", "INA"}:
-            origins.append(-1)
-        elif action_name in {"NR", "INR"}:
-            remove_index = int(action[1])
-            origins = [value for index, value in enumerate(origins) if index != remove_index]
-        if len(origins) != int(result.num_nodes):
-            raise RuntimeError(
-                "COMRECGC lineage length changed independently of graph nodes: "
-                f"action={action_name}, origins={len(origins)}, nodes={int(result.num_nodes)}"
-            )
-        result.comrecgc_node_origin = torch.tensor(origins, dtype=torch.long)
-        for name in (
-            "comrecgc_parent_id",
-            "comrecgc_source_index",
-            "comrecgc_source_smiles",
-            "comrecgc_project_label",
-            "comrecgc_source_record",
-        ):
-            if hasattr(graph, name):
-                setattr(result, name, getattr(graph, name))
+        result = _apply_neighbor_with_lineage(original, graph, action)
+        if transition_cache is not None:
+            transition_cache.record_enumerated(result, action)
         if trace_recorder is not None:
             trace_recorder.record_enumerated(
                 source_graph=graph,
@@ -436,6 +454,8 @@ def patched_official_runtime(
     trace_recorder: ActionTraceRecorder | None = None,
     compatibility_audit: dict[str, Any] | None = None,
     preserve_active_transitions: bool = False,
+    compact_transitions: bool = False,
+    transition_expanded_capacity: int = 5,
     seed: int = 0,
     graph_state_dir: str | Path | None = None,
 ) -> Iterator[None]:
@@ -444,6 +464,7 @@ def patched_official_runtime(
         "neighbor_graph_access": module.neighbor_graph_access,
         "move_to_next_graph": module.move_to_next_graph,
     }
+    original_neighbor = module.neighbor_graph_access
     live_graph_state = (
         LiveGraphState(
             module,
@@ -463,16 +484,29 @@ def patched_official_runtime(
     module.graph_map = endpoint_safe_graph_map
     if live_graph_state is not None:
         module.comrecgc_live_graph_state = live_graph_state
-    transition_map = (
-        _MoveScopedTransitionMap(
-            module,
-            module.transitions,
-            seed=seed,
-            live_graph_state=live_graph_state,
+    if compact_transitions:
+        transition_map: _MoveScopedTransitionMap | CompactMoveScopedTransitionMap | None = (
+            CompactMoveScopedTransitionMap(
+                module,
+                module.transitions,
+                seed=seed,
+                expanded_capacity=transition_expanded_capacity,
+                rebuild_target=lambda graph, action: _apply_neighbor_with_lineage(
+                    original_neighbor, graph, action
+                ),
+            )
         )
-        if preserve_active_transitions
-        else None
-    )
+    else:
+        transition_map = (
+            _MoveScopedTransitionMap(
+                module,
+                module.transitions,
+                seed=seed,
+                live_graph_state=live_graph_state,
+            )
+            if preserve_active_transitions
+            else None
+        )
     if transition_map is not None:
         module.transitions = transition_map
     module.call = _safe_call_factory(
@@ -483,8 +517,13 @@ def patched_official_runtime(
         batch_size=batch_size,
     )
     module.neighbor_graph_access = lineage_neighbor_wrapper(
-        module.neighbor_graph_access,
+        original_neighbor,
         trace_recorder=trace_recorder,
+        transition_cache=(
+            transition_map
+            if isinstance(transition_map, CompactMoveScopedTransitionMap)
+            else None
+        ),
     )
     patched_move = module.move_to_next_graph
     if trace_recorder is not None:
@@ -520,7 +559,11 @@ def patched_official_runtime(
         finally:
             module.graph_map = dict(endpoint_safe_graph_map)
             if transition_map is not None:
-                module.transitions = dict(transition_map)
+                module.transitions = (
+                    {}
+                    if isinstance(transition_map, CompactMoveScopedTransitionMap)
+                    else dict(transition_map)
+                )
             module.call = originals["call"]
             module.neighbor_graph_access = originals["neighbor_graph_access"]
             module.move_to_next_graph = originals["move_to_next_graph"]
@@ -876,6 +919,7 @@ def run_project_generation(
                     *OFFICIAL_RUNTIME_PATCHES,
                     *([ACTIVE_MOVE_TRANSITION_PATCH] if mode == "full" else []),
                     *([LIVE_GRAPH_STATE_PATCH] if mode == "full" else []),
+                    *([COMPACT_TRANSITION_CACHE_PATCH] if mode == "full" else []),
                     *(
                         [
                             "project_runtime_action_trace_only_v1",
@@ -892,11 +936,15 @@ def run_project_generation(
                 "official_source_modified": False,
                 "generation_resume_supported": False,
                 "transition_cache_policy": (
-                    GRAPH_STATE_POLICY
+                    "authoritative_backing_plus_exact_action_replay_lru_v3"
                     if mode == "full"
                     else "pinned_upstream_in_memory_transitions_v1"
                 ),
                 "graph_state_dir": str(graph_state_root) if mode == "full" else None,
+                "transition_expanded_capacity": (
+                    int(parameters.heads) if mode == "full" else None
+                ),
+                "transition_model_recomputation": False,
                 "started_at": started,
             }
             config["config_sha256"] = stable_json_sha256(config)
@@ -924,6 +972,8 @@ def run_project_generation(
                     trace_recorder=trace_recorder,
                     compatibility_audit=compatibility_audit,
                     preserve_active_transitions=mode == "full",
+                    compact_transitions=mode == "full",
+                    transition_expanded_capacity=parameters.heads,
                     seed=parameters.seed,
                     graph_state_dir=graph_state_root if mode == "full" else None,
                 ):
