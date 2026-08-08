@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
+import src.baselines.gcfexplainer_bace_adapter as bace_adapter
+
 from src.baselines.gcfexplainer_bace_adapter import (
     BACE_FEATURE_ATOMIC_NUMBERS,
     BACE_FEATURE_KEEP_INDICES,
+    BACE_PROBE_REQUIRED_CATEGORIES,
     EXPECTED_GENERATION_SOURCE_ROWS,
     EXPECTED_MODEL_TRAIN_ROWS,
     EXPECTED_MODEL_VAL_ROWS,
@@ -34,6 +37,19 @@ def test_bace_full_profiles_are_frozen() -> None:
         theta=0.05,
         seed=13,
     )
+    assert "p" not in BACE_PROBE_REQUIRED_CATEGORIES
+    assert set(BACE_PROBE_REQUIRED_CATEGORIES) == {
+        "cl",
+        "br",
+        "i",
+        "charged",
+        "aromatic_hetero",
+        "n_h",
+        "double",
+        "triple",
+        "aromatic_bond",
+        "near_max_nodes",
+    }
 
 
 @pytest.mark.parametrize(
@@ -122,3 +138,30 @@ def test_bace_adapter_does_not_modify_official_source_tree() -> None:
     ).read_text(encoding="utf-8")
     assert "write_text" not in production
     assert "gcfexplainer_official/vrrw.py" not in production
+
+
+def test_bace_codec_probe_selection_does_not_require_absent_phosphorus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    categories = list(BACE_PROBE_REQUIRED_CATEGORIES)
+    records = [
+        {
+            "molecule_id": f"BACE_{index:03d}",
+            "num_nodes": 100 if index == 0 else 10,
+            "probe_categories": {categories[index]} if index < len(categories) else set(),
+        }
+        for index in range(64)
+    ]
+    monkeypatch.setattr(
+        bace_adapter,
+        "_record_categories",
+        lambda record: set(record["probe_categories"]),
+    )
+    selected, coverage = bace_adapter._select_bace_codec_probe_records(
+        records,
+        limit=64,
+    )
+    assert len(selected) == 64
+    assert set(coverage) == set(BACE_PROBE_REQUIRED_CATEGORIES)
+    assert all(coverage[category] for category in BACE_PROBE_REQUIRED_CATEGORIES)
+    assert "p" not in coverage

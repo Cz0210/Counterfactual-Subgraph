@@ -147,7 +147,7 @@ def test_bace_gcfexplainer_wrappers_preserve_official_full_contract() -> None:
 def test_bace_gcfexplainer_evaluation_reuses_frozen_wnode_contract() -> None:
     content = _text("bace_eval_gcfexplainer.sh")
     assert "BACE_METHOD=gcfexplainer" in content
-    assert "full_v1/export/selected_top20.csv" in content
+    assert "full_v2/export/selected_top20.csv" in content
     assert "outputs/hpc/oracle/bace/bace_teacher.pkl" in content
     assert "bace_ours_wnode_work_v1/thresholds.json" in content
     assert "bace_common3_standardized_v1/gcfexplainer" in content

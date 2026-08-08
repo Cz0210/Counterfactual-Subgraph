@@ -20,12 +20,14 @@ from rdkit import Chem
 
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
     GCFExplainerMutagenicityCodecError,
+    PROBE_REQUIRED_CATEGORIES,
     StrictMolecule,
+    _record_categories,
     cohort_hash,
     encode_source_graph,
     load_strict_molecules,
     read_json,
-    run_codec_probe,
+    reconstruct_source_graph,
     sha256_file,
     write_json,
     write_jsonl,
@@ -57,6 +59,9 @@ BACE_FEATURE_KEEP_INDICES = tuple(
 )
 SUPPORTED_BOND_TYPES = ("SINGLE", "DOUBLE", "TRIPLE", "AROMATIC")
 ATOM_SIDECAR_SCHEMA_VERSION = "gcfexplainer_bace_atom_sidecar_v1"
+BACE_PROBE_REQUIRED_CATEGORIES = tuple(
+    category for category in PROBE_REQUIRED_CATEGORIES if category != "p"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +213,122 @@ def derive_bace_schema(
     )
 
 
+def _select_bace_codec_probe_records(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    if limit <= 0:
+        raise ValueError("BACE codec probe limit must be positive.")
+    ordered = sorted(
+        (dict(record) for record in records),
+        key=lambda record: str(record["molecule_id"]),
+    )
+    if len(ordered) < limit:
+        raise ValueError(f"BACE codec probe requires {limit} rows; found {len(ordered)}.")
+    by_category: dict[str, list[dict[str, Any]]] = {
+        category: [] for category in BACE_PROBE_REQUIRED_CATEGORIES
+    }
+    max_nodes = max(int(record["num_nodes"]) for record in ordered)
+    near_threshold = max(1, int(math.floor(max_nodes * 0.9)))
+    for record in ordered:
+        categories = _record_categories(record)
+        if int(record["num_nodes"]) >= near_threshold:
+            categories.add("near_max_nodes")
+        for category in categories:
+            if category in by_category:
+                by_category[category].append(record)
+    missing = [category for category, rows in by_category.items() if not rows]
+    if missing:
+        raise ValueError(f"BACE codec probe cannot cover required categories: {missing}")
+
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[str] = set()
+    for category in BACE_PROBE_REQUIRED_CATEGORIES:
+        record = by_category[category][0]
+        molecule_id = str(record["molecule_id"])
+        if molecule_id not in selected_ids:
+            selected.append(record)
+            selected_ids.add(molecule_id)
+    for record in ordered:
+        if len(selected) >= limit:
+            break
+        molecule_id = str(record["molecule_id"])
+        if molecule_id not in selected_ids:
+            selected.append(record)
+            selected_ids.add(molecule_id)
+    selected = selected[:limit]
+    coverage = {
+        category: [
+            str(record["molecule_id"])
+            for record in selected
+            if record in category_records
+        ]
+        for category, category_records in by_category.items()
+    }
+    return selected, coverage
+
+
+def run_bace_codec_probe(
+    records: Sequence[Mapping[str, Any]],
+    schema: BACEGraphSchema,
+    *,
+    output_dir: str | Path,
+    limit: int = 64,
+) -> dict[str, Any]:
+    selected, coverage = _select_bace_codec_probe_records(records, limit=limit)
+    rows: list[dict[str, Any]] = []
+    for record in selected:
+        base = {
+            "molecule_id": record["molecule_id"],
+            "canonical_smiles": record["canonical_smiles"],
+            "split": record["split"],
+            "num_nodes": int(record["num_nodes"]),
+            "source_graph_hash": record["source_graph_hash"],
+            "categories": sorted(_record_categories(record)),
+        }
+        try:
+            _molecule, checks = reconstruct_source_graph(record, schema)
+            rows.append({**base, **checks, "failure_reason": ""})
+        except Exception as exc:
+            rows.append(
+                {
+                    **base,
+                    "round_trip_passed": False,
+                    "failure_reason": f"{type(exc).__name__}:{exc}",
+                }
+            )
+    failed = [row for row in rows if row.get("round_trip_passed") is not True]
+    destination = Path(output_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    write_jsonl(destination / "codec_probe_rows.jsonl", rows)
+    summary = {
+        "probe_rows": len(rows),
+        "probe_passed_rows": len(rows) - len(failed),
+        "probe_failed_rows": len(failed),
+        "probe_passed": not failed,
+        "required_category_coverage": coverage,
+        "required_categories": list(BACE_PROBE_REQUIRED_CATEGORIES),
+        "excluded_absent_train_categories": ["p"],
+        "atom_sidecar_schema_version": schema.atom_sidecar_schema_version,
+        "node_feature_dim": schema.node_feature_dim,
+        "formal_charge_exact": not failed,
+        "aromaticity_exact": not failed,
+        "explicit_h_exact": not failed,
+        "no_implicit_exact": not failed,
+        "chirality_exact": not failed,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "run_complete": not failed,
+    }
+    write_json(destination / "codec_probe_summary.json", summary)
+    if failed:
+        raise GCFExplainerMutagenicityCodecError(
+            f"BACE codec probe failed for {len(failed)} source molecules."
+        )
+    return summary
+
+
 def prepare_bace_gcf_dataset(
     *,
     train_source_csv: str | Path,
@@ -297,12 +418,11 @@ def prepare_bace_gcf_dataset(
         for graph in (*train_graphs, *val_graphs)
     ]
     write_jsonl(destination / "source_graph_manifest.jsonl", manifest_rows)
-    probe = run_codec_probe(
+    probe = run_bace_codec_probe(
         (*train_graphs, *val_graphs),
         schema,
         output_dir=destination / "codec_probe_64",
         limit=64,
-        require_all=True,
     )
     inputs = {
         "train_source": str(Path(train_source_csv).expanduser().resolve()),
@@ -544,6 +664,7 @@ __all__ = [
     "ATOM_SIDECAR_SCHEMA_VERSION",
     "BACE_FEATURE_ATOMIC_NUMBERS",
     "BACE_FEATURE_KEEP_INDICES",
+    "BACE_PROBE_REQUIRED_CATEGORIES",
     "BACEGraphSchema",
     "DATASET",
     "EXPECTED_GENERATION_SOURCE_ROWS",
@@ -556,6 +677,7 @@ __all__ = [
     "derive_bace_schema",
     "load_bace_gcf_dataset",
     "prepare_bace_gcf_dataset",
+    "run_bace_codec_probe",
     "validate_bace_gnn_profile",
     "validate_bace_vrrw_profile",
 ]

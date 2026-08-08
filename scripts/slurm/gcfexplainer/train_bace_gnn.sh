@@ -22,8 +22,8 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH=$PWD
 mkdir -p logs
 
-DATASET_DIR=${DATASET_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v1/dataset}
-GNN_DIR=${GNN_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v1/gnn}
+DATASET_DIR=${DATASET_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v2/dataset}
+GNN_DIR=${GNN_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v2/gnn}
 OFFICIAL_ROOT=${OFFICIAL_ROOT:-$PROJECT_ROOT/baselines/gcfexplainer_official}
 RESUME=${RESUME:-true}
 

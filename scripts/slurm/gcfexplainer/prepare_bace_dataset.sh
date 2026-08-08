@@ -23,8 +23,8 @@ export PYTHONPATH=$PWD
 mkdir -p logs
 
 TEACHER_ROOT=${TEACHER_ROOT:-$SHARED_PROJECT_ROOT/outputs/hpc/oracle/bace}
-DATASET_DIR=${DATASET_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v1/dataset}
-NEUROSED_DIR=${NEUROSED_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v1/neurosed}
+DATASET_DIR=${DATASET_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v2/dataset}
+NEUROSED_DIR=${NEUROSED_DIR:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v2/neurosed}
 SOURCE_NEUROSED=${SOURCE_NEUROSED:-$SHARED_PROJECT_ROOT/outputs/hpc/pretrained/gcfexplainer/mutagenicity/neurosed/best_model.pt}
 
 if [ -s "$DATASET_DIR/_RUN_COMPLETE.json" ] && \

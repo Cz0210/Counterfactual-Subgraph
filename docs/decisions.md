@@ -5799,6 +5799,11 @@ orders, and absence of training/calibration/test access are recorded in a
 manifest. This is an explicit transfer limitation, not a newly trained BACE
 graph-edit distance model.
 
+The BACE codec probe keeps every established chemistry and round-trip category
+except phosphorus. Phosphorus is excluded explicitly because the frozen BACE
+train vocabulary does not contain it; requiring the Mutagenicity-only `p`
+category would reject the correct nine-channel dataset before generation.
+
 Final comparison directly reuses the BACE fullgraph evaluator with the frozen
 Ours threshold contract, BACE RF teacher, MolCLR-Node-Wasserstein distance,
 and `strict_flip`. It writes the existing Figure 3, Figure 4, and Table 2

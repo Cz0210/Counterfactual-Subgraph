@@ -22,7 +22,7 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH=$PWD
 mkdir -p logs
 
-BASE=${BASE:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v1}
+BASE=${BASE:-$SHARED_PROJECT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v2}
 DATASET_DIR=${DATASET_DIR:-$BASE/dataset}
 GNN_CHECKPOINT=${GNN_CHECKPOINT:-$BASE/gnn/model_best.pth}
 NEUROSED_CHECKPOINT=${NEUROSED_CHECKPOINT:-$BASE/neurosed/best_model.pt}
