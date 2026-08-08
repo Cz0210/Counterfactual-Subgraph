@@ -4,7 +4,13 @@ import csv
 import json
 from pathlib import Path
 
+from scripts.evaluate_ccrcov_with_molclr_node_fgw import (
+    validate_preselected_candidate_csv,
+)
 from scripts.audit_bace_paper_artifacts import audit_bace_artifacts
+from src.eval.close_counterfactual_coverage import _load_candidate_records
+from src.eval.gcf_style_recourse_report import load_candidate_ranking
+from src.eval.greed_distance.pair_generation import GT_FULLGRAPH_FIELDS
 from src.eval.bace_paper_artifacts import (
     FIGURE3_FIELDS,
     FIGURE4_FIELDS,
@@ -179,3 +185,40 @@ def test_single_ours_audit_accepts_direct_paper_root(tmp_path: Path) -> None:
     assert audit["methods"] == ["Ours"]
     assert audit["test_parent_count"] == 2
     assert (paper_root / "table2_bace_k10.csv").is_file()
+
+
+def test_bace_gcf_native_rank_csv_is_directly_compatible_and_ordered(
+    tmp_path: Path,
+) -> None:
+    candidate_path = tmp_path / "selected_top20.csv"
+    rows = [
+        {
+            "candidate_id": f"GCFBACE_{rank:02d}",
+            "native_rank": 100 + rank * 3,
+            "smiles": "C" * rank,
+            "canonical_smiles": "C" * rank,
+            "candidate_set_preselected": "true",
+            "selection_performed_in_eval": "false",
+        }
+        for rank in range(1, 21)
+    ]
+    _write_csv(candidate_path, list(rows[0]), rows)
+
+    validation = validate_preselected_candidate_csv(candidate_path, 20)
+    _path, evaluator_candidates = _load_candidate_records(
+        candidate_path,
+        fields=GT_FULLGRAPH_FIELDS,
+        directory_candidates=(),
+    )
+    report_candidates, rank_source = load_candidate_ranking(
+        candidate_path,
+        ours=False,
+        expected_top_k=20,
+    )
+
+    expected_ids = [str(row["candidate_id"]) for row in rows]
+    assert validation["num_rows"] == 20
+    assert [candidate.candidate_id for candidate in evaluator_candidates] == expected_ids
+    assert [candidate.candidate_id for candidate in report_candidates] == expected_ids
+    assert [candidate.rank for candidate in report_candidates] == list(range(1, 21))
+    assert rank_source == "row_order"

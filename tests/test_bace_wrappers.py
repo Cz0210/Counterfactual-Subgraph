@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.eval.bace_paper_artifacts import METHODS
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SLURM = ROOT / "scripts/slurm"
@@ -88,3 +90,71 @@ def test_bace_ours_evaluation_uses_selector_and_direct_paper_root() -> None:
     audit = _text("bace_audit_paper_artifacts.sh")
     assert "EXPECTED_METHODS=${EXPECTED_METHODS:-ours}" in audit
     assert "--thresholds-json" in audit
+
+
+def test_bace_gcfexplainer_wrappers_preserve_official_full_contract() -> None:
+    names = [
+        "gcfexplainer/prepare_bace_dataset.sh",
+        "gcfexplainer/train_bace_gnn.sh",
+        "gcfexplainer/reproduce_bace_vrrw.sh",
+        "gcfexplainer/reproduce_bace_summary.sh",
+        "bace_eval_gcfexplainer.sh",
+    ]
+    for name in names:
+        content = _text(name)
+        assert "#SBATCH --partition=A800" in content
+        assert "#SBATCH --gres=gpu:a800:1" in content
+        assert "#SBATCH --cpus-per-task=7" in content
+        assert "#SBATCH --output=logs/%j.out" in content
+        assert "#SBATCH --error=logs/%j.err" in content
+        assert "unset http_proxy" not in content
+        assert "unset https_proxy" not in content
+        assert 'cd "$PROJECT_ROOT"' in content
+        assert "export PYTHONPATH=$PWD" in content
+
+    prepare = _text("gcfexplainer/prepare_bace_dataset.sh")
+    assert "train_source_label1_teacher_correct.csv" in prepare
+    assert "train_target_label0_teacher_correct.csv" in prepare
+    assert "val_source_label1_teacher_correct.csv" in prepare
+    assert "val_target_label0_teacher_correct.csv" in prepare
+    assert "calibration_source" not in prepare
+    assert "test_source" not in prepare
+
+    gnn = _text("gcfexplainer/train_bace_gnn.sh")
+    for token in (
+        "--profile full",
+        "--epochs 1000",
+        "--train-limit 869",
+        "--val-limit 162",
+        "--seed 13",
+    ):
+        assert token in gnn
+
+    vrrw = _text("gcfexplainer/reproduce_bace_vrrw.sh")
+    for token in (
+        "--profile full",
+        "--parent-limit 360",
+        "--m 50000",
+        "--alpha 1.0",
+        "--theta 0.05",
+        "--teleport 0.1",
+        "--seed 13",
+    ):
+        assert token in vrrw
+    assert "scripts/select_mutagenicity_wnode_prefix.py" not in vrrw
+
+
+def test_bace_gcfexplainer_evaluation_reuses_frozen_wnode_contract() -> None:
+    content = _text("bace_eval_gcfexplainer.sh")
+    assert "BACE_METHOD=gcfexplainer" in content
+    assert "full_v1/export/selected_top20.csv" in content
+    assert "outputs/hpc/oracle/bace/bace_teacher.pkl" in content
+    assert "bace_ours_wnode_work_v1/thresholds.json" in content
+    assert "bace_common3_standardized_v1/gcfexplainer" in content
+    assert "bace_eval_method_common.sh" in content
+    assert "select_" not in content
+    assert METHODS["gcfexplainer"] == {
+        "display": "GCFExplainer",
+        "candidate_kind": "fullgraph",
+        "selection_method": "native_gcf_summary_rank_filtered_by_validity",
+    }

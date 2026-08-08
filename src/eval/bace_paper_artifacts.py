@@ -33,6 +33,11 @@ METHODS = {
         "candidate_kind": "ours",
         "selection_method": "chemllm_stable300_external_selector",
     },
+    "gcfexplainer": {
+        "display": "GCFExplainer",
+        "candidate_kind": "fullgraph",
+        "selection_method": "native_gcf_summary_rank_filtered_by_validity",
+    },
 }
 
 

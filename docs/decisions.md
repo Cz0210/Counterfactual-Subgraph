@@ -5776,3 +5776,40 @@ count, and otherwise-empty persistence state all match. That recovery skips
 model generation, records `algorithm_rerun=false`, and writes the normal
 lineage and completion manifests. It cannot be used to resume a partial raw
 pool or overwrite any finalized output.
+
+---
+
+## 2026-08-08: BACE official GCFExplainer project adaptation
+
+### Decision
+
+Run BACE through the existing project-owned official GCFExplainer boundary:
+freeze the teacher-consistent train/validation cohorts, train the unchanged
+official three-layer GNN using train and validation only, run official VRRW on
+the 360 train-source parents, preserve official greedy summary order, then
+filter that order only for molecular validity and BACE RF target label 0.
+Neither RF probabilities nor WNode distances re-rank candidates.
+
+The frozen BACE train/validation atom alphabet has nine channels. The only
+available verified project NeuroSED checkpoint has the official ten-channel
+Mutagenicity order. Its BACE transfer therefore deterministically removes the
+phosphorus input column, which BACE does not contain, while preserving every
+other weight byte-for-byte. The projection, source/output hashes, channel
+orders, and absence of training/calibration/test access are recorded in a
+manifest. This is an explicit transfer limitation, not a newly trained BACE
+graph-edit distance model.
+
+Final comparison directly reuses the BACE fullgraph evaluator with the frozen
+Ours threshold contract, BACE RF teacher, MolCLR-Node-Wasserstein distance,
+and `strict_flip`. It writes the existing Figure 3, Figure 4, and Table 2
+schemas directly; no post-experiment compatibility conversion is permitted.
+
+### Consequences
+
+- Official GCFExplainer algorithm files, GNN architecture, edit map, VRRW,
+  importance, graph distance, dynamic teleportation, and greedy ordering are
+  unchanged.
+- Generation reads no calibration or test cohort; test is loaded only by the
+  shared final evaluator after Top20 is frozen.
+- AIDS and Mutagenicity GCFExplainer routes and all existing BACE Ours
+  artifacts remain unchanged.
