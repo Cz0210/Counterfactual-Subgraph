@@ -96,6 +96,21 @@ If the complete pool still contains fewer than 20 valid target candidates, the
 new path fails closed with `INSUFFICIENT_VALID_NATIVE_CANDIDATES` and preserves
 the full attrition audit.
 
+## Retry runtime finding
+
+The first two registered retries never launched because the isolated worktree
+did not yet contain its ignored `logs/` directory while the Slurm directives
+used relative `logs/%j.out` and `logs/%j.err` paths. Creating that directory
+before submission allowed the shell and Python process to start normally.
+
+The resulting full summary then exposed a separate identity-contract issue:
+multiple native records can share `stable_graph_candidate_id` when they encode
+the same structural graph. Those records are valid members of the ordered
+native sequence; `native_rank`, not structural candidate ID, is the unique row
+key. The loader now retains every rank and leaves duplicate removal to the
+existing sequential canonical-SMILES audit. Final exported candidate IDs remain
+unique and no rank is reordered, repaired, compacted, or backfilled.
+
 ## Safety
 
 - VRRW `2163953` is adopted, not rerun or modified.
