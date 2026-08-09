@@ -6049,3 +6049,26 @@ method-balanced pooled calibration distribution: one minimum connected
 strict-flip distance per parent and method, with total weight 0.5 for Ours and
 0.5 for GCFExplainer. Pooled Q30 is the strict primary and pooled Q50 is the
 standard sensitivity threshold. Both are frozen before the sole v4 test job.
+
+---
+
+## 2026-08-09: Lossless COMRECGC live-graph backing state
+
+AIDS project full generation job `2164128` failed near step 46690 because a
+multi-head restart retained a hash after upstream candidate-capacity eviction
+removed its graph-map entry. The prior move-scoped transition protection did
+not cover this restart-to-trace interval, and direct trace dictionary access
+bypassed its missing-lookup diagnostics.
+
+Keep the pinned upstream algorithm unchanged. Project runtime wrappers now
+preserve logically evicted graph entries in a checksum-verified SQLite backing
+store, resolve all trace graph reads through one fail-closed API, and pin the
+complete move/trace lifecycle. Active candidate-map membership, RNG calls,
+proposal order, importance, DBSCAN, greedy rank, seed, heads, and steps remain
+unchanged. A bounded-cache stress gate must match the unbounded reference and
+the full downstream chain must wait for a generation-integrity gate.
+
+The failed job does not contain a complete atomic RNG/transition/graph-state
+checkpoint, so its partial progress is evidence only and cannot be resumed.
+Retry 6 uses a fresh versioned root and identical scientific parameters. See
+`docs/postmortems/COMRECGC_AIDS_2164128_GRAPH_STATE_FAILURE.md`.

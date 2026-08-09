@@ -38,7 +38,7 @@ if [[ "$MODE" == "smoke" ]]; then
   TRANSITION_STATE_POLICY="pinned_upstream_in_memory_transitions_v1"
 else
   [[ "$DATASET" == "aids" ]] && EXPECTED_PARENT_LIMIT=1283 || EXPECTED_PARENT_LIMIT=1448
-  TRANSITION_STATE_POLICY="pinned_upstream_active_move_deferred_eviction_v1"
+  TRANSITION_STATE_POLICY="authoritative_backing_live_graph_resolution_v2"
 fi
 PARENT_LIMIT="${PARENT_LIMIT:-$EXPECTED_PARENT_LIMIT}"
 [[ "$PARENT_LIMIT" == "$EXPECTED_PARENT_LIMIT" ]] || {
@@ -47,6 +47,7 @@ PARENT_LIMIT="${PARENT_LIMIT:-$EXPECTED_PARENT_LIMIT}"
 BASE_ROOT="${BASE_ROOT:-outputs/hpc/baselines/comrecgc/$DATASET/${MODE}_v1}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BASE_ROOT/generation}"
 TRACE_DIR="${TRACE_DIR:-$OUTPUT_DIR/trace}"
+GRAPH_STATE_DIR="${GRAPH_STATE_DIR:-$OUTPUT_DIR/graph_state}"
 if [[ "$RESUME" != "true" && -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "[COMRECGC_CONFIG_ERROR] non-empty output with RESUME=false: $OUTPUT_DIR" >&2; exit 2
 fi
@@ -74,7 +75,11 @@ python scripts/baselines/comrecgc/run_generation.py \
   --dataset-dir "$DATASET_DIR" "${SOURCE_ARGS[@]}" \
   --gnn-checkpoint "$GNN_CHECKPOINT" --distance-checkpoint "$DISTANCE_CHECKPOINT" \
   --output-dir "$OUTPUT_DIR" --parent-limit "$PARENT_LIMIT" --device cuda:0 \
-  --trace-output-dir "$TRACE_DIR"
+  --trace-output-dir "$TRACE_DIR" --graph-state-dir "$GRAPH_STATE_DIR"
 test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
 test -s "$TRACE_DIR/candidate_action_lineage.json"
+if [[ "$MODE" == "full" ]]; then
+  test -s "$OUTPUT_DIR/graph_state_audit.json"
+  test -s "$GRAPH_STATE_DIR/authoritative_graph_store.sqlite3"
+fi
 echo "[COMRECGC_PROJECT_GENERATION_SUCCESS]"
