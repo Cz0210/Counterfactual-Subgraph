@@ -5747,3 +5747,26 @@ seven-CPU allocation and keeps the seven-day limit. Cross-job random-walk
 resume remains disabled because the pinned runtime does not serialize all
 Python/NumPy/Torch RNG and transition state; a fresh versioned output is
 required instead of claiming an unsafe resume.
+
+---
+
+## 2026-08-09: Lossless COMRECGC live-graph backing state
+
+AIDS project full generation job `2164128` failed near step 46690 because a
+multi-head restart retained a hash after upstream candidate-capacity eviction
+removed its graph-map entry. The prior move-scoped transition protection did
+not cover this restart-to-trace interval, and direct trace dictionary access
+bypassed its missing-lookup diagnostics.
+
+Keep the pinned upstream algorithm unchanged. Project runtime wrappers now
+preserve logically evicted graph entries in a checksum-verified SQLite backing
+store, resolve all trace graph reads through one fail-closed API, and pin the
+complete move/trace lifecycle. Active candidate-map membership, RNG calls,
+proposal order, importance, DBSCAN, greedy rank, seed, heads, and steps remain
+unchanged. A bounded-cache stress gate must match the unbounded reference and
+the full downstream chain must wait for a generation-integrity gate.
+
+The failed job does not contain a complete atomic RNG/transition/graph-state
+checkpoint, so its partial progress is evidence only and cannot be resumed.
+Retry 6 uses a fresh versioned root and identical scientific parameters. See
+`docs/postmortems/COMRECGC_AIDS_2164128_GRAPH_STATE_FAILURE.md`.

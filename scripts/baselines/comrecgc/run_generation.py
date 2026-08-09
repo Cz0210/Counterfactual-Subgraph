@@ -42,6 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--trusted-dataset-payload")
     parser.add_argument("--expected-cache-inventory-sha256")
+    parser.add_argument(
+        "--graph-state-dir",
+        help="Project-owned authoritative graph-state store for full random walks.",
+    )
     return parser
 
 
@@ -91,6 +95,7 @@ def main() -> int:
             resume=args.resume,
             trace_output_dir=args.trace_output_dir,
             parity_reference_path=args.parity_reference,
+            graph_state_dir=args.graph_state_dir,
         )
     print(json.dumps(manifest, sort_keys=True, default=str))
     return 0

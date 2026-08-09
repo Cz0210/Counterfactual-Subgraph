@@ -401,22 +401,77 @@ class ActionTraceRecorder:
 
     def wrap_move(self, original: Callable[..., Any], module: Any) -> Callable[..., Any]:
         def wrapped(*args: Any, **kwargs: Any) -> Any:
+            # Local import avoids a module cycle: live_graph_state uses the
+            # canonical graph identity defined above.
+            from .live_graph_state import pin_graphs, resolve_graph, resolve_graphs
+
             graphs_hash = list(kwargs.get("graphs_hash", args[0] if args else []))
-            source_graphs = [module.graph_map[value][0] for value in graphs_hash]
-            transitions = getattr(module, "transitions", {})
-            transition_cache_before = [
-                value in transitions for value in graphs_hash
-            ]
-            result = original(*args, **kwargs)
-            next_hashes, teleported = result[0], bool(result[1])
-            if teleported or next_hashes is None:
-                self._stream_event(
-                    {
-                        "move_index": self.move_index,
-                        "event": "teleport",
-                        "source_official_hashes": [str(value) for value in graphs_hash],
-                    }
+            with pin_graphs(module, graphs_hash):
+                source_graphs = resolve_graphs(module, graphs_hash)
+                transitions = getattr(module, "transitions", {})
+                transition_cache_before = [
+                    value in transitions for value in graphs_hash
+                ]
+                result = original(*args, **kwargs)
+                next_hashes, teleported = result[0], bool(result[1])
+                if teleported or next_hashes is None:
+                    self._stream_event(
+                        {
+                            "move_index": self.move_index,
+                            "event": "teleport",
+                            "source_official_hashes": [str(value) for value in graphs_hash],
+                        }
+                    )
+                    if not self.compact_enumeration:
+                        consumed_sources = {
+                            stable_untyped_graph_sha256(graph) for graph in source_graphs
+                        }
+                        self._discard_enumerated_sources(consumed_sources)
+                    self.move_index += 1
+                    return result
+                resolved_next_hashes = list(next_hashes)
+                self.transition_cache_hit_count += sum(transition_cache_before)
+                self.transition_cache_miss_count += len(transition_cache_before) - sum(
+                    transition_cache_before
                 )
+                with pin_graphs(module, resolved_next_hashes):
+                    for head_index, (source_hash, target_hash, source_graph) in enumerate(
+                        zip(graphs_hash, resolved_next_hashes, source_graphs, strict=True)
+                    ):
+                        target_graph = resolve_graph(module, target_hash)
+                        source_sha = stable_untyped_graph_sha256(source_graph)
+                        target_sha = stable_untyped_graph_sha256(target_graph)
+                        candidates = (
+                            self._compact_transition_records(
+                                module,
+                                source_hash=source_hash,
+                                target_hash=target_hash,
+                            )
+                            if self.compact_enumeration
+                            else self.enumerated.get((source_sha, target_sha), [])
+                        )
+                        unique: dict[str, dict[str, Any]] = {
+                            json.dumps(row["action"], separators=(",", ":")): row
+                            for row in candidates
+                        }
+                        action_record = next(iter(unique.values())) if len(unique) == 1 else None
+                        event = {
+                            "move_index": self.move_index,
+                            "head_index": head_index,
+                            "event": "selected_transition",
+                            "source_official_hash": str(source_hash),
+                            "target_official_hash": str(target_hash),
+                            "source_graph_sha256": source_sha,
+                            "target_graph_sha256": target_sha,
+                            "action_resolution": "exact" if action_record else (
+                                "missing" if not unique else "ambiguous"
+                            ),
+                            "action": None if action_record is None else action_record["action"],
+                            "parent_id": str(getattr(target_graph, "comrecgc_parent_id", "")),
+                        }
+                        self._stream_event(event)
+                        if action_record is not None:
+                            self.predecessor_by_official_hash.setdefault(str(target_hash), event)
                 if not self.compact_enumeration:
                     consumed_sources = {
                         stable_untyped_graph_sha256(graph) for graph in source_graphs
@@ -424,54 +479,6 @@ class ActionTraceRecorder:
                     self._discard_enumerated_sources(consumed_sources)
                 self.move_index += 1
                 return result
-            self.transition_cache_hit_count += sum(transition_cache_before)
-            self.transition_cache_miss_count += len(transition_cache_before) - sum(
-                transition_cache_before
-            )
-            for head_index, (source_hash, target_hash, source_graph) in enumerate(
-                zip(graphs_hash, list(next_hashes), source_graphs, strict=True)
-            ):
-                target_graph = module.graph_map[target_hash][0]
-                source_sha = stable_untyped_graph_sha256(source_graph)
-                target_sha = stable_untyped_graph_sha256(target_graph)
-                candidates = (
-                    self._compact_transition_records(
-                        module,
-                        source_hash=source_hash,
-                        target_hash=target_hash,
-                    )
-                    if self.compact_enumeration
-                    else self.enumerated.get((source_sha, target_sha), [])
-                )
-                unique: dict[str, dict[str, Any]] = {
-                    json.dumps(row["action"], separators=(",", ":")): row
-                    for row in candidates
-                }
-                action_record = next(iter(unique.values())) if len(unique) == 1 else None
-                event = {
-                    "move_index": self.move_index,
-                    "head_index": head_index,
-                    "event": "selected_transition",
-                    "source_official_hash": str(source_hash),
-                    "target_official_hash": str(target_hash),
-                    "source_graph_sha256": source_sha,
-                    "target_graph_sha256": target_sha,
-                    "action_resolution": "exact" if action_record else (
-                        "missing" if not unique else "ambiguous"
-                    ),
-                    "action": None if action_record is None else action_record["action"],
-                    "parent_id": str(getattr(target_graph, "comrecgc_parent_id", "")),
-                }
-                self._stream_event(event)
-                if action_record is not None:
-                    self.predecessor_by_official_hash.setdefault(str(target_hash), event)
-            if not self.compact_enumeration:
-                consumed_sources = {
-                    stable_untyped_graph_sha256(graph) for graph in source_graphs
-                }
-                self._discard_enumerated_sources(consumed_sources)
-            self.move_index += 1
-            return result
 
         return wrapped
 

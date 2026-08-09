@@ -37,6 +37,11 @@ from .graph_trace import (
     assert_trace_parity,
     stable_graph_sha256,
 )
+from .live_graph_state import (
+    GRAPH_STATE_POLICY,
+    LiveGraphState,
+    current_rss_mib,
+)
 from .project_dataset import (
     GraphListDataset,
     ProjectDatasetBundle,
@@ -54,6 +59,7 @@ OFFICIAL_RUNTIME_PATCHES = (
 )
 
 ACTIVE_MOVE_TRANSITION_PATCH = "active_move_transition_eviction_deferred_v1"
+LIVE_GRAPH_STATE_PATCH = "live_graph_authoritative_backing_resolution_v2"
 
 
 class _EndpointSafeGraphMap(dict[Any, Any]):
@@ -89,7 +95,14 @@ class _MoveScopedTransitionMap(dict[Any, Any]):
     and subsequent algorithm behavior stay unchanged.
     """
 
-    def __init__(self, module: Any, values: Mapping[Any, Any], *, seed: int) -> None:
+    def __init__(
+        self,
+        module: Any,
+        values: Mapping[Any, Any],
+        *,
+        seed: int,
+        live_graph_state: LiveGraphState | None = None,
+    ) -> None:
         super().__init__(values)
         self._module = module
         self._seed = int(seed)
@@ -102,6 +115,7 @@ class _MoveScopedTransitionMap(dict[Any, Any]):
         self.cancelled_deferred_deletion_count = 0
         self.missing_lookup_count = 0
         self.max_transition_size = len(self)
+        self._live_graph_state = live_graph_state
 
     def begin_move(self, graph_hashes: Sequence[Any]) -> int:
         if self._active_keys or self._deferred_deletions:
@@ -109,6 +123,10 @@ class _MoveScopedTransitionMap(dict[Any, Any]):
         self.move_count += 1
         self._current_step = self.move_count
         self._active_keys = tuple(graph_hashes)
+        if self._live_graph_state is not None:
+            self._live_graph_state.graph_map.begin_move(
+                graph_hashes, current_step=self._current_step
+            )
         return self._current_step
 
     def end_move(self) -> None:
@@ -155,16 +173,39 @@ class _MoveScopedTransitionMap(dict[Any, Any]):
                 return original(*args, **kwargs)
             finally:
                 self.end_move()
-                if current_step == 1_000 or current_step % 10_000 == 0:
+                report_steps = {1_000, 45_000, 46_000, 46_600, 47_000, 48_000, 50_000}
+                if current_step in report_steps or current_step % 1_000 == 0:
+                    live_map = (
+                        self._live_graph_state.graph_map
+                        if self._live_graph_state is not None
+                        else None
+                    )
+                    rss_mib = current_rss_mib()
                     print(
                         "[COMRECGC_TRANSITION_STATE] "
                         f"current_step={current_step} seed={self._seed} "
                         f"transition_size={len(self)} "
                         f"cache_size={len(getattr(self._module, 'graph_map', {}))} "
                         f"deferred_deletions={self.deferred_deletion_count} "
-                        f"missing_lookups={self.missing_lookup_count}",
+                        f"missing_lookups={self.missing_lookup_count} "
+                        f"backing_store_size={live_map.store.count() if live_map else 0} "
+                        f"pins={sum(live_map.pin_counts.values()) if live_map else 0} "
+                        f"graph_deferred_deletions={len(live_map.deferred_deletions) if live_map else 0} "
+                        f"eviction_committed={live_map.eviction_committed if live_map else 0} "
+                        f"rehydrations={live_map.rehydrations if live_map else 0} "
+                        f"unresolved_graph_lookups={live_map.unresolved_lookups if live_map else 0} "
+                        f"max_rss_mib={rss_mib if rss_mib is not None else 'unavailable'}",
                         flush=True,
                     )
+                    if current_step in {45_000, 46_000, 46_600, 47_000, 48_000, 50_000}:
+                        print(
+                            "[COMRECGC_GRAPH_STATE_INTEGRITY_SNAPSHOT] "
+                            f"current_step={current_step} "
+                            f"all_current_hashes_resolvable="
+                            f"{all(live_map.contains_resolvable(key) for key in self._active_keys) if live_map else True} "
+                            f"recent_eviction={live_map.recent_evictions[-1] if live_map and live_map.recent_evictions else None}",
+                            flush=True,
+                        )
 
         return wrapped
 
@@ -396,16 +437,39 @@ def patched_official_runtime(
     compatibility_audit: dict[str, Any] | None = None,
     preserve_active_transitions: bool = False,
     seed: int = 0,
+    graph_state_dir: str | Path | None = None,
 ) -> Iterator[None]:
     originals = {
         "call": module.call,
         "neighbor_graph_access": module.neighbor_graph_access,
         "move_to_next_graph": module.move_to_next_graph,
     }
-    endpoint_safe_graph_map = _EndpointSafeGraphMap(module, module.graph_map)
+    live_graph_state = (
+        LiveGraphState(
+            module,
+            module.graph_map,
+            store_path=Path(graph_state_dir).expanduser().resolve()
+            / "authoritative_graph_store.sqlite3",
+            seed=seed,
+        )
+        if preserve_active_transitions and graph_state_dir is not None
+        else None
+    )
+    endpoint_safe_graph_map = (
+        live_graph_state.graph_map
+        if live_graph_state is not None
+        else _EndpointSafeGraphMap(module, module.graph_map)
+    )
     module.graph_map = endpoint_safe_graph_map
+    if live_graph_state is not None:
+        module.comrecgc_live_graph_state = live_graph_state
     transition_map = (
-        _MoveScopedTransitionMap(module, module.transitions, seed=seed)
+        _MoveScopedTransitionMap(
+            module,
+            module.transitions,
+            seed=seed,
+            live_graph_state=live_graph_state,
+        )
         if preserve_active_transitions
         else None
     )
@@ -429,29 +493,40 @@ def patched_official_runtime(
         # Keep the transition scope outside trace capture so selected-action
         # resolution can still inspect the transition before deferred cleanup.
         patched_move = transition_map.wrap_move(patched_move)
+    if live_graph_state is not None:
+        # Outermost scope: pins cover trace reads, the official move,
+        # transition updates, streamed trace writes, and deferred cleanup.
+        patched_move = live_graph_state.wrap_move(patched_move)
     module.move_to_next_graph = patched_move
     try:
         yield
     finally:
-        if compatibility_audit is not None:
-            compatibility_audit.update(
-                {
-                    "patch": "candidate_map_unmaterialized_eviction_none_safe_v1",
-                    "missing_unmaterialized_eviction_count": int(
-                        endpoint_safe_graph_map.missing_unmaterialized_eviction_count
-                    ),
-                    "rng_calls_added": 0,
-                    "candidate_order_changed": False,
-                }
-            )
+        try:
+            if compatibility_audit is not None:
+                compatibility_audit.update(
+                    {
+                        "patch": "candidate_map_unmaterialized_eviction_none_safe_v1",
+                        "missing_unmaterialized_eviction_count": int(
+                            endpoint_safe_graph_map.missing_unmaterialized_eviction_count
+                        ),
+                        "rng_calls_added": 0,
+                        "candidate_order_changed": False,
+                    }
+                )
+                if transition_map is not None:
+                    compatibility_audit["transition_state"] = transition_map.audit()
+                if live_graph_state is not None:
+                    compatibility_audit["live_graph_state"] = live_graph_state.audit()
+        finally:
+            module.graph_map = dict(endpoint_safe_graph_map)
             if transition_map is not None:
-                compatibility_audit["transition_state"] = transition_map.audit()
-        module.graph_map = dict(endpoint_safe_graph_map)
-        if transition_map is not None:
-            module.transitions = dict(transition_map)
-        module.call = originals["call"]
-        module.neighbor_graph_access = originals["neighbor_graph_access"]
-        module.move_to_next_graph = originals["move_to_next_graph"]
+                module.transitions = dict(transition_map)
+            module.call = originals["call"]
+            module.neighbor_graph_access = originals["neighbor_graph_access"]
+            module.move_to_next_graph = originals["move_to_next_graph"]
+            if live_graph_state is not None:
+                delattr(module, "comrecgc_live_graph_state")
+                live_graph_state.close()
 
 
 def _predict_internal(model: Any, graphs: Sequence[Any], *, device: str, batch_size: int = 128) -> list[int]:
@@ -693,6 +768,7 @@ def run_project_generation(
     resume: bool = False,
     trace_output_dir: str | Path | None = None,
     parity_reference_path: str | Path | None = None,
+    graph_state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     parameters.validate(mode)
     project = Path(project_root).expanduser().resolve()
@@ -719,6 +795,13 @@ def run_project_generation(
     dataset_key = "project_aids" if dataset == "aids" else "project_mutagenicity"
     runtime_root = root / "official_runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
+    graph_state_root = (
+        Path(graph_state_dir).expanduser().resolve()
+        if graph_state_dir is not None
+        else root / "graph_state"
+    )
+    if mode == "full":
+        graph_state_root.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).isoformat()
     trace_recorder = (
         ActionTraceRecorder(
@@ -792,6 +875,7 @@ def run_project_generation(
                 "official_compatibility_patches": [
                     *OFFICIAL_RUNTIME_PATCHES,
                     *([ACTIVE_MOVE_TRANSITION_PATCH] if mode == "full" else []),
+                    *([LIVE_GRAPH_STATE_PATCH] if mode == "full" else []),
                     *(
                         [
                             "project_runtime_action_trace_only_v1",
@@ -808,10 +892,11 @@ def run_project_generation(
                 "official_source_modified": False,
                 "generation_resume_supported": False,
                 "transition_cache_policy": (
-                    "pinned_upstream_active_move_deferred_eviction_v1"
+                    GRAPH_STATE_POLICY
                     if mode == "full"
                     else "pinned_upstream_in_memory_transitions_v1"
                 ),
+                "graph_state_dir": str(graph_state_root) if mode == "full" else None,
                 "started_at": started,
             }
             config["config_sha256"] = stable_json_sha256(config)
@@ -840,6 +925,7 @@ def run_project_generation(
                     compatibility_audit=compatibility_audit,
                     preserve_active_transitions=mode == "full",
                     seed=parameters.seed,
+                    graph_state_dir=graph_state_root if mode == "full" else None,
                 ):
                     official.counterfactual_summary_with_randomwalk(
                         dataset_name=dataset_key,
@@ -867,6 +953,10 @@ def run_project_generation(
             materialization = _materialize_official_result(official_result, result_path)
             payload = _torch_load(result_path)
             graph_map, candidates = validate_counterfactual_payload(payload)
+            graph_state_audit_path: Path | None = None
+            if "live_graph_state" in compatibility_audit:
+                graph_state_audit_path = root / "graph_state_audit.json"
+                write_json(graph_state_audit_path, compatibility_audit["live_graph_state"])
             trace_summary: dict[str, Any] | None = None
             parity_summary: dict[str, Any] | None = None
             if trace_recorder is not None:
@@ -897,6 +987,12 @@ def run_project_generation(
                 "trace_summary": trace_summary,
                 "trace_parity": parity_summary,
                 "official_compatibility_audit": compatibility_audit,
+                "graph_state_audit_path": (
+                    str(graph_state_audit_path) if graph_state_audit_path else None
+                ),
+                "graph_state_audit_sha256": (
+                    sha256_file(graph_state_audit_path) if graph_state_audit_path else None
+                ),
                 "candidate_order_source": "official_frequency_reinforced_order",
                 "algorithm_rerun": True,
                 "run_complete": True,
@@ -930,6 +1026,7 @@ def run_project_generation(
             "calibration_loaded": False,
             "test_loaded": False,
             "run_complete": False,
+            "official_compatibility_audit": compatibility_audit,
             "failed_at": datetime.now(timezone.utc).isoformat(),
         }
         write_json(root / "failure_summary.json", failure)

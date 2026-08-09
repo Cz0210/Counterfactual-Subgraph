@@ -186,7 +186,8 @@ def test_project_generation_wrapper_declares_move_scoped_transition_policy() -> 
     text = (ROOT / "scripts/slurm/comrecgc_project_generate.sh").read_text(
         encoding="utf-8"
     )
-    assert "pinned_upstream_active_move_deferred_eviction_v1" in text
+    assert "authoritative_backing_live_graph_resolution_v2" in text
+    assert '--graph-state-dir "$GRAPH_STATE_DIR"' in text
     assert "transition_state_policy=$TRANSITION_STATE_POLICY" in text
     assert "#SBATCH --time=7-00:00:00" in text
     assert "#SBATCH --mem=192G" in text
