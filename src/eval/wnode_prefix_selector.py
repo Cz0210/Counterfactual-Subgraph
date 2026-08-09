@@ -19,6 +19,10 @@ from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
 from src.eval.bace_paper_artifacts import load_bace_thresholds
 from src.eval.molclr_node_embeddings import canonicalize_smiles
 from src.eval.mutagenicity_wnode_selector import (
@@ -317,6 +321,7 @@ def select_sequence(
     top_k: int = TOP_K,
     prefix_weights: Sequence[float] = DEFAULT_PREFIX_WEIGHTS,
     local_swap_passes: int = 2,
+    eligible_candidate_indices: Sequence[int] | None = None,
 ) -> tuple[list[int], dict[str, Any]]:
     covred = build_coverage_redundancy_matrix(matrix.distances, thresholds.levels)
     objective = _objective(
@@ -327,7 +332,15 @@ def select_sequence(
         coverage_redundancy=covred,
         chemistry=chemistry,
     )
-    universe = list(range(len(matrix.candidate_rows)))
+    universe = (
+        [int(value) for value in eligible_candidate_indices]
+        if eligible_candidate_indices is not None
+        else list(range(len(matrix.candidate_rows)))
+    )
+    if len(universe) < int(top_k):
+        raise ValueError(
+            f"Connected selector needs {top_k} eligible actions, found {len(universe)}."
+        )
     sequence, greedy_trace = greedy_select(
         universe,
         top_k=int(top_k),
@@ -530,6 +543,7 @@ def _cross_validate(
     *,
     a0_sequence: Sequence[int] | None = None,
     local_swap_passes: int = 2,
+    eligible_candidate_indices: Sequence[int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     all_positions = set(range(len(matrix.parent_ids)))
@@ -544,6 +558,7 @@ def _cross_validate(
                 chemistry,
                 variant,
                 local_swap_passes=local_swap_passes,
+                eligible_candidate_indices=eligible_candidate_indices,
             )
         else:
             sequence = list(a0_sequence)
@@ -619,6 +634,8 @@ def _candidate_limitation(
     matrix: MatrixData,
     thresholds: ThresholdBundle,
     parent_smiles: dict[str, str],
+    *,
+    connected_valid_candidate_count: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     finite = np.isfinite(matrix.distances)
     close = matrix.distances <= thresholds.theta_star
@@ -684,7 +701,13 @@ def _candidate_limitation(
             ]
         )
     )
-    required = bool(close_union < 0.80 and no_effective >= 0.20)
+    candidates_with_strict = int(np.count_nonzero(np.any(finite, axis=0)))
+    candidates_with_close = int(np.count_nonzero(np.any(close, axis=0)))
+    required = bool(
+        connected_valid_candidate_count < TOP_K
+        or candidates_with_strict < TOP_K
+        or (close_union < 0.80 and no_effective >= 0.20)
+    )
     audit = {
         "schema_version": "bace_candidate_pool_limitation_v1",
         "parent_count": len(matrix.parent_ids),
@@ -692,13 +715,72 @@ def _candidate_limitation(
         "all_candidate_union_coverage": applicable_union,
         "all_candidate_strict_flip_union": strict_union,
         "all_candidate_close_strict_flip_union": close_union,
+        "num_unique_candidates_with_any_connected_strict_flip": candidates_with_strict,
+        "num_unique_candidates_with_any_close_connected_strict_flip": candidates_with_close,
+        "num_unique_candidates_with_any_connected_valid_action": connected_valid_candidate_count,
         "candidate_expansion_rule": (
-            "close_union < 0.80 and (C_applicable_not_flip + D_no_applicable) >= 0.20"
+            "connected_valid_candidates < 20 or connected_strict_candidates < 20 "
+            "or (close_union < 0.80 and no_effective >= 0.20)"
         ),
         "candidate_expansion_required": required,
         "test_used": False,
     }
     return audit, rows, scaffold_rows
+
+
+def _candidate_connectivity_stats(
+    matrix: MatrixData,
+    thresholds: ThresholdBundle,
+) -> list[dict[str, Any]]:
+    rows_by_candidate: dict[str, list[dict[str, Any]]] = {
+        candidate_id: [] for candidate_id in matrix.candidate_ids
+    }
+    with (matrix.matrix_run_dir / "pair_matrix.jsonl").open(encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            rows_by_candidate[str(row["candidate_id"])].append(row)
+    output: list[dict[str, Any]] = []
+    for source in matrix.candidate_rows:
+        candidate_id = str(source["candidate_id"])
+        rows = rows_by_candidate[candidate_id]
+        connected_valid = sum(
+            int(row.get("num_connected_valid_matches") or 0) > 0 for row in rows
+        )
+        strict = sum(bool(row.get("pair_strict_flip")) for row in rows)
+        close = sum(
+            bool(row.get("pair_strict_flip"))
+            and row.get("wnode_distance") is not None
+            and float(row["wnode_distance"]) <= thresholds.theta_star
+            for row in rows
+        )
+        output.append(
+            {
+                "candidate_id": candidate_id,
+                "canonical_fragment": source.get("canonical_fragment"),
+                "calibration_parent_count": len(rows),
+                "connected_valid_parent_count": connected_valid,
+                "connected_strict_flip_parent_count": strict,
+                "close_connected_strict_flip_parent_count": close,
+                "disconnected_match_count": sum(
+                    int(row.get("num_disconnected_matches") or 0) for row in rows
+                ),
+                "has_connected_valid_calibration_action": connected_valid > 0,
+                "has_connected_strict_flip_calibration_action": strict > 0,
+            }
+        )
+    return output
+
+
+def _connected_valid_candidate_indices(
+    matrix: MatrixData,
+    connectivity_rows: Sequence[dict[str, Any]],
+) -> list[int]:
+    by_id = {str(row["candidate_id"]): row for row in connectivity_rows}
+    return [
+        index
+        for index, candidate_id in enumerate(matrix.candidate_ids)
+        if bool(by_id[candidate_id]["has_connected_valid_calibration_action"])
+    ]
 
 
 def run_bace_wnode_prefix_selector(
@@ -709,6 +791,7 @@ def run_bace_wnode_prefix_selector(
     output_dir: str | Path,
     local_swap_passes: int = 2,
     fold_count: int = 5,
+    require_connected: bool = False,
 ) -> dict[str, Any]:
     assert_calibration_selector_inputs(
         matrix_run_dir, thresholds_json, current_selected_csv, output_dir
@@ -718,6 +801,11 @@ def run_bace_wnode_prefix_selector(
         raise FileExistsError(f"Selector output is non-empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
     matrix = load_calibration_matrix(matrix_run_dir, forbid_test=True)
+    if require_connected:
+        if matrix.manifest.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+            raise ValueError("BACE connected selector rejects a legacy action matrix.")
+        if matrix.manifest.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("BACE connected selector rejects a mismatched match policy.")
     if len(matrix.parent_ids) != 60:
         raise ValueError(f"Expected 60 BACE calibration parents, found {len(matrix.parent_ids)}")
     if len(matrix.candidate_rows) < TOP_K:
@@ -726,19 +814,49 @@ def run_bace_wnode_prefix_selector(
         thresholds_json,
         finite_distance_count=len(matrix.full_finite_distances),
     )
+    threshold_contract = load_bace_thresholds(thresholds_json)
+    if require_connected:
+        if threshold_contract.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+            raise ValueError("BACE connected selector rejects legacy thresholds.")
+        if threshold_contract.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("BACE connected selector threshold policy mismatch.")
     chemistry = build_candidate_chemistry(
         matrix.candidate_rows,
         size_normalization_rows=matrix.full_candidate_rows,
     )
+    if require_connected:
+        connectivity_rows = _candidate_connectivity_stats(matrix, thresholds)
+        eligible_candidate_indices = _connected_valid_candidate_indices(
+            matrix, connectivity_rows
+        )
+    else:
+        connectivity_rows = [
+            {
+                "candidate_id": candidate_id,
+                "canonical_fragment": matrix.candidate_rows[index].get(
+                    "canonical_fragment"
+                ),
+                "has_connected_valid_calibration_action": True,
+            }
+            for index, candidate_id in enumerate(matrix.candidate_ids)
+        ]
+        eligible_candidate_indices = list(range(len(matrix.candidate_ids)))
+    if require_connected and len(eligible_candidate_indices) < TOP_K:
+        raise ValueError(
+            "Connected candidate universe has fewer than 20 actions with a "
+            "connected-valid calibration deletion."
+        )
     folds = build_calibration_folds(matrix, fold_count=int(fold_count))
     a0 = _read_a0_sequence(current_selected_csv, matrix)
 
     cv_summaries: list[dict[str, Any]] = []
     cv_rows: list[dict[str, Any]] = []
     a0_variant = PrefixVariant("A0_current", "prefix")
+    a0_connected_valid = set(a0).issubset(set(eligible_candidate_indices))
     summary, rows = _cross_validate(
         matrix, thresholds, chemistry, folds, a0_variant, a0_sequence=a0
     )
+    summary["eligible_under_connected_policy"] = a0_connected_valid
     cv_summaries.append(summary)
     cv_rows.extend(rows)
     for variant in _base_variants():
@@ -749,6 +867,7 @@ def run_bace_wnode_prefix_selector(
             folds,
             variant,
             local_swap_passes=0,
+            eligible_candidate_indices=eligible_candidate_indices,
         )
         cv_summaries.append(summary)
         cv_rows.extend(rows)
@@ -761,6 +880,7 @@ def run_bace_wnode_prefix_selector(
             folds,
             variant,
             local_swap_passes=0,
+            eligible_candidate_indices=eligible_candidate_indices,
         )
         a4_summaries.append(summary)
         cv_rows.extend(rows)
@@ -771,7 +891,14 @@ def run_bace_wnode_prefix_selector(
         if _stable_sha256(asdict(variant)) == selected_a4_summary["config_sha256"]
     )
     cv_summaries.append(selected_a4_summary)
-    chosen_cv = min(cv_summaries, key=_cv_sort_key)
+    chosen_cv = min(
+        [
+            row
+            for row in cv_summaries
+            if row["variant"] != "A0_current" or a0_connected_valid
+        ],
+        key=_cv_sort_key,
+    )
 
     variants = [a0_variant, *_base_variants(), selected_a4]
     sequences: dict[str, list[int]] = {}
@@ -789,6 +916,7 @@ def run_bace_wnode_prefix_selector(
                 chemistry,
                 variant,
                 local_swap_passes=local_swap_passes,
+                eligible_candidate_indices=eligible_candidate_indices,
             )
         sequences[variant.name] = sequence
         traces[variant.name] = trace
@@ -832,6 +960,20 @@ def run_bace_wnode_prefix_selector(
         raise AssertionError("Final selection has duplicate candidate IDs.")
     if len({row["fragment"] for row in selected_rows}) != TOP_K:
         raise AssertionError("Final selection has duplicate canonical fragments.")
+    connectivity_by_id = {
+        str(row["candidate_id"]): row for row in connectivity_rows
+    }
+    selected_connectivity = [
+        connectivity_by_id[str(row["candidate_id"])] for row in selected_rows
+    ]
+    all_selected_connected_valid = all(
+        bool(row["has_connected_valid_calibration_action"])
+        for row in selected_connectivity
+    )
+    if require_connected and not all_selected_connected_valid:
+        raise ValueError(
+            "Connected selector chose a candidate without a connected-valid calibration action."
+        )
 
     selected_csv = destination / "selected_top20.csv"
     _write_csv(selected_csv, selected_rows)
@@ -849,10 +991,14 @@ def run_bace_wnode_prefix_selector(
     _write_csv(destination / "selector_cv_results.csv", cv_rows)
     _write_json(destination / "objective_traces.json", traces)
     _write_csv(destination / "parent_best_distances.csv", selected_parent_rows)
+    _write_csv(destination / "candidate_connectivity_stats.csv", connectivity_rows)
 
     parent_smiles = _parent_smiles(matrix)
     limitation, hard_parents, scaffold_rows = _candidate_limitation(
-        matrix, thresholds, parent_smiles
+        matrix,
+        thresholds,
+        parent_smiles,
+        connected_valid_candidate_count=len(eligible_candidate_indices),
     )
     _write_json(destination / "candidate_pool_limitation_audit.json", limitation)
     _write_csv(destination / "hard_parent_groups.csv", hard_parents)
@@ -877,6 +1023,13 @@ def run_bace_wnode_prefix_selector(
         "folds": [[matrix.parent_ids[index] for index in fold] for fold in folds],
         "test_used": False,
         "gcf_result_used": False,
+        "action_semantics_version": matrix.manifest.get(
+            "action_semantics_version", "hard_delete_all_matches_v1"
+        ),
+        "match_selection_policy": matrix.manifest.get(
+            "match_selection_policy",
+            "min_wnode_then_cfdrop_then_match_index_v1",
+        ),
     }
     _write_json(destination / "selected_variant_manifest.json", decision)
 
@@ -901,6 +1054,9 @@ def run_bace_wnode_prefix_selector(
         "theta_star": thresholds.theta_star,
         "selector_config": decision,
         "created_at": _utc_now(),
+        "action_semantics_version": decision["action_semantics_version"],
+        "match_selection_policy": decision["match_selection_policy"],
+        "all_selected_have_connected_valid_calibration_action": all_selected_connected_valid,
     }
     if limitation["candidate_expansion_required"]:
         selection_record["freeze_block_reason"] = (
@@ -917,6 +1073,8 @@ def run_bace_wnode_prefix_selector(
         "selected_sequence_sha256": selected_sha,
         "selection_performed_in_eval": False,
         "test_used": False,
+        "action_semantics_version": decision["action_semantics_version"],
+        "match_selection_policy": decision["match_selection_policy"],
     }
     _write_json(destination / "rank_preservation_audit.json", rank_audit)
     summary_payload = {
@@ -931,6 +1089,10 @@ def run_bace_wnode_prefix_selector(
         "test_used": False,
         "gcf_result_used": False,
         "selection_frozen": not limitation["candidate_expansion_required"],
+        "action_semantics_version": decision["action_semantics_version"],
+        "match_selection_policy": decision["match_selection_policy"],
+        "all_selected_have_connected_valid_calibration_action": all_selected_connected_valid,
+        "disconnected_residual_used_count": 0 if require_connected else None,
         "run_complete": True,
     }
     _write_json(destination / "summary.json", summary_payload)
@@ -946,9 +1108,31 @@ def run_bace_wnode_prefix_selector(
             "threshold_fitted_on_test": False,
             "test_loaded": False,
             "gcf_result_used": False,
+            "action_semantics_version": decision["action_semantics_version"],
+            "match_selection_policy": decision["match_selection_policy"],
             "run_complete": True,
         },
     )
+    selector_audit = {
+        "schema_version": "bace_connected_selector_audit_v3",
+        "passed": True,
+        "selected_count": len(selected_rows),
+        "ranks_exact_1_to_20": True,
+        "unique_candidates": True,
+        "test_loaded": False,
+        "test_used": False,
+        "gcf_result_used": False,
+        "all_selected_have_connected_valid_calibration_action": all_selected_connected_valid,
+        "all_calibration_winners_connected": True if require_connected else None,
+        "disconnected_residual_used_count": 0 if require_connected else None,
+        "action_semantics_version": decision["action_semantics_version"],
+        "match_selection_policy": decision["match_selection_policy"],
+        "threshold_fitted_on_test": False,
+        "selection_performed_in_eval": False,
+        "selection_frozen": not limitation["candidate_expansion_required"],
+    }
+    _write_json(destination / "selector_manifest.json", selection_record)
+    _write_json(destination / "selector_audit.json", selector_audit)
     _write_json(destination / "_RUN_COMPLETE.json", summary_payload)
     return summary_payload
 

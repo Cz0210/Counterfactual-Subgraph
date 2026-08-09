@@ -19,6 +19,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.chem.hard_deletion import (  # noqa: E402
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+    CONNECTED_WNODE_CACHE_NAMESPACE,
+)
+
 from scripts.evaluate_ccrcov_with_molclr_node_fgw import (  # noqa: E402
     _detail_fields,
     _env,
@@ -279,6 +285,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fullgraph-candidates-path", default=_env("FULLGRAPH_CANDIDATES_PATH", _env("GCF_CANDIDATES_PATH", _env("GT_FULLGRAPH_CANDIDATES_PATH"))))
     parser.add_argument("--fullgraph-method-name", default=_env("FULLGRAPH_METHOD_NAME"))
     parser.add_argument("--selection-method", default=_env("SELECTION_METHOD"))
+    parser.add_argument(
+        "--action-semantics-version",
+        choices=("hard_delete_all_matches_v1", CONNECTED_ACTION_SEMANTICS),
+        default=_env("ACTION_SEMANTICS_VERSION", "hard_delete_all_matches_v1"),
+    )
+    parser.add_argument(
+        "--match-selection-policy",
+        choices=(
+            "min_wnode_then_cfdrop_then_match_index_v1",
+            CONNECTED_MATCH_SELECTION_POLICY,
+        ),
+        default=_env(
+            "MATCH_SELECTION_POLICY",
+            "min_wnode_then_cfdrop_then_match_index_v1",
+        ),
+    )
     parser.add_argument("--preselected-topk", type=int, default=int(_env("PRESELECTED_TOPK", "20") or 20))
     parser.add_argument("--require-preselected-topk", type=int, choices=(0, 1), default=1 if _env_bool("REQUIRE_PRESELECTED_TOPK", True) else 0)
     return parser
@@ -293,6 +315,12 @@ def main() -> int:
         raise SystemExit("[ERROR] MolCLR-Node-Wasserstein final evaluation requires CF_MODE=strict_flip.")
     if not bool(args.run_ours) and not bool(args.run_fullgraph):
         raise SystemExit("[ERROR] Enable RUN_OURS or RUN_FULLGRAPH.")
+    if args.action_semantics_version == CONNECTED_ACTION_SEMANTICS and (
+        args.match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY
+    ):
+        raise SystemExit(
+            "[ERROR] connected residual semantics require the connected match policy."
+        )
     output = ensure_directory(Path(args.output_dir).expanduser())
     details_dir = ensure_directory(output / "details")
     combined_dir = ensure_directory(output / "combined")
@@ -324,6 +352,11 @@ def main() -> int:
         size_penalty_beta=float(args.size_penalty_beta),
         device=args.device,
         encoder_type=args.encoder_type,
+        distance_namespace=(
+            CONNECTED_WNODE_CACHE_NAMESPACE
+            if args.action_semantics_version == CONNECTED_ACTION_SEMANTICS
+            else "molclr_node_wasserstein_v1"
+        ),
     )
     fingerprint_payload = {
         "distance_type": DISTANCE_TYPE,
@@ -341,6 +374,8 @@ def main() -> int:
         "max_parents": args.max_parents,
         "max_candidates": args.max_candidates,
         "preselected_topk": args.preselected_topk,
+        "action_semantics_version": args.action_semantics_version,
+        "match_selection_policy": args.match_selection_policy,
     }
     fingerprint = config_fingerprint(fingerprint_payload)
     run_config_base = {
@@ -373,6 +408,9 @@ def main() -> int:
         "partial_every": int(args.partial_every),
         "resume": bool(args.resume),
         "skip_redundancy": bool(args.skip_redundancy),
+        "action_semantics_version": args.action_semantics_version,
+        "match_selection_policy": args.match_selection_policy,
+        "wnode_cache_namespace": config.distance_namespace,
     }
     _write_json(output / "run_config.json", run_config_base)
 
@@ -432,7 +470,24 @@ def main() -> int:
             write_builtin_partial=False,
         )
         if kind == "ours":
-            details = _evaluate_ours(**common)
+            details = _evaluate_ours(
+                **common,
+                action_semantics_version=args.action_semantics_version,
+                match_selection_policy=args.match_selection_policy,
+                distance_action_context={
+                    "teacher_sha256": fingerprint_payload["teacher"].get("sha256"),
+                    "molclr_checkpoint_sha256": fingerprint_payload[
+                        "molclr_checkpoint"
+                    ].get("sha256"),
+                    "distance_implementation_version": (
+                        "molclr_node_wasserstein_exact_emd2_v1"
+                    ),
+                    "deletion_implementation_version": args.action_semantics_version,
+                    "size_penalty_beta": float(args.size_penalty_beta),
+                    "action_semantics_version": args.action_semantics_version,
+                    "match_selection_policy": args.match_selection_policy,
+                },
+            )
             row_unit = "match_instance"
         else:
             details = _evaluate_gt_fullgraph(method=method, **common)

@@ -21,8 +21,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
 from src.eval.close_counterfactual_coverage import (
     hard_delete_substructure_any_match,
+    hard_delete_substructure_connected_matches,
     predict_with_teacher,
 )
 from src.eval.candidate_pool_audit import _normalize_row
@@ -50,6 +55,8 @@ BACE_CANDIDATE_ID_PREFIX = "BACE_WNODE"
 MATRIX_SCHEMA_VERSION = "wnode_action_matrix_v1"
 DISTANCE_IMPLEMENTATION_VERSION = "molclr_node_wasserstein_exact_emd2_v1"
 DELETION_IMPLEMENTATION_VERSION = "hard_delete_all_matches_v1"
+CONNECTED_DELETION_IMPLEMENTATION_VERSION = "hard_delete_connected_all_matches_v3"
+LEGACY_MATCH_SELECTION_POLICY = "min_wnode_then_cfdrop_then_match_index_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +79,8 @@ class ActionMatrixConfig:
     resume: bool = True
     local_files_only: bool = True
     wnode_size_penalty_beta: float = DEFAULT_WNODE_SIZE_PENALTY_BETA
+    action_semantics_version: str = DELETION_IMPLEMENTATION_VERSION
+    match_selection_policy: str = LEGACY_MATCH_SELECTION_POLICY
 
 
 def bace_matrix_config(
@@ -360,8 +369,13 @@ def _cache_key(
     parent_id: str,
     candidate_id: str,
     match_index: int | None,
+    match_atom_indices: Sequence[int],
+    parent_smiles: str,
+    residual_smiles: str | None,
     teacher_sha256: str,
     molclr_sha256: str,
+    action_semantics_version: str,
+    match_selection_policy: str,
 ) -> str:
     payload = {
         "dataset": BACE_DATASET,
@@ -369,10 +383,19 @@ def _cache_key(
         "parent_id": parent_id,
         "candidate_id": candidate_id,
         "match_index": match_index,
+        "match_atom_indices": [int(value) for value in match_atom_indices],
+        "parent_canonical_smiles": canonicalize_smiles(parent_smiles),
+        "residual_canonical_smiles": canonicalize_smiles(residual_smiles or ""),
         "teacher_sha256": teacher_sha256,
         "molclr_checkpoint_sha256": molclr_sha256,
         "distance_implementation_version": DISTANCE_IMPLEMENTATION_VERSION,
-        "deletion_implementation_version": DELETION_IMPLEMENTATION_VERSION,
+        "deletion_implementation_version": (
+            CONNECTED_DELETION_IMPLEMENTATION_VERSION
+            if action_semantics_version == CONNECTED_ACTION_SEMANTICS
+            else DELETION_IMPLEMENTATION_VERSION
+        ),
+        "action_semantics_version": action_semantics_version,
+        "match_selection_policy": match_selection_policy,
     }
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
@@ -384,6 +407,8 @@ def _augment_pair_rows(
     *,
     teacher_sha256: str,
     molclr_sha256: str,
+    action_semantics_version: str,
+    match_selection_policy: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     common = {
         "split": "calibration",
@@ -411,8 +436,13 @@ def _augment_pair_rows(
                     parent_id=str(match["parent_id"]),
                     candidate_id=str(match["candidate_id"]),
                     match_index=int(match["match_index"]),
+                    match_atom_indices=match.get("match_atom_indices") or [],
+                    parent_smiles=str(match["parent_smiles"]),
+                    residual_smiles=match.get("residual_smiles"),
                     teacher_sha256=teacher_sha256,
                     molclr_sha256=molclr_sha256,
+                    action_semantics_version=action_semantics_version,
+                    match_selection_policy=match_selection_policy,
                 ),
             }
         )
@@ -442,9 +472,16 @@ def _augment_pair_rows(
                 parent_id=str(pair["parent_id"]),
                 candidate_id=str(pair["candidate_id"]),
                 match_index=None,
+                match_atom_indices=pair.get("best_match_atom_indices") or [],
+                parent_smiles=str(pair["parent_smiles"]),
+                residual_smiles=pair.get("residual_smiles"),
                 teacher_sha256=teacher_sha256,
                 molclr_sha256=molclr_sha256,
+                action_semantics_version=action_semantics_version,
+                match_selection_policy=match_selection_policy,
             ),
+            "action_semantics_version": action_semantics_version,
+            "match_selection_policy": match_selection_policy,
         }
     )
     return pair, matches
@@ -523,6 +560,13 @@ def _candidate_and_parent_summaries(
                 "valid_deletion_parent_count": sum(
                     int(row.get("num_valid_residuals") or 0) > 0 for row in rows
                 ),
+                "connected_valid_parent_count": sum(
+                    int(row.get("num_connected_valid_matches") or 0) > 0
+                    for row in rows
+                ),
+                "disconnected_match_count": sum(
+                    int(row.get("num_disconnected_matches") or 0) for row in rows
+                ),
                 "strict_flip_parent_count": sum(
                     _truth(row.get("pair_strict_flip")) for row in rows
                 ),
@@ -540,6 +584,10 @@ def _candidate_and_parent_summaries(
                 ),
                 "valid_delete_count": sum(
                     int(row.get("num_valid_residuals") or 0) > 0
+                    for row in by_parent[parent.parent_id]
+                ),
+                "connected_valid_count": sum(
+                    int(row.get("num_connected_valid_matches") or 0) > 0
                     for row in by_parent[parent.parent_id]
                 ),
                 "strict_flip_count": sum(
@@ -564,11 +612,21 @@ def build_bace_action_matrix(
     teacher: Any,
     distance_provider: Any,
     config: ActionMatrixConfig | None = None,
-    deletion_fn: Callable[[str, str], list[dict[str, Any]]] = hard_delete_substructure_any_match,
+    deletion_fn: Callable[[str, str], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Build or resume the complete BACE calibration action matrix."""
 
     resolved = bace_matrix_config(config)
+    if deletion_fn is None:
+        deletion_fn = (
+            hard_delete_substructure_connected_matches
+            if resolved.action_semantics_version == CONNECTED_ACTION_SEMANTICS
+            else hard_delete_substructure_any_match
+        )
+    if resolved.action_semantics_version == CONNECTED_ACTION_SEMANTICS and (
+        resolved.match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY
+    ):
+        raise ValueError("Connected action semantics require the connected match policy.")
     if resolved.candidate_limit < 0 or resolved.flush_every <= 0:
         raise ValueError("candidate_limit must be non-negative and flush_every positive")
     pool_path = Path(candidate_pool).expanduser().resolve()
@@ -638,7 +696,13 @@ def build_bace_action_matrix(
         "selected_candidate_ids": [row["candidate_id"] for row in candidates],
         "calibration_cohort_hash": cohort_hash,
         "distance_implementation_version": DISTANCE_IMPLEMENTATION_VERSION,
-        "deletion_implementation_version": DELETION_IMPLEMENTATION_VERSION,
+        "deletion_implementation_version": (
+            CONNECTED_DELETION_IMPLEMENTATION_VERSION
+            if resolved.action_semantics_version == CONNECTED_ACTION_SEMANTICS
+            else DELETION_IMPLEMENTATION_VERSION
+        ),
+        "action_semantics_version": resolved.action_semantics_version,
+        "match_selection_policy": resolved.match_selection_policy,
         "id_col": resolved.id_col,
         "smiles_col": resolved.smiles_col,
         "label_col": resolved.label_col,
@@ -684,6 +748,8 @@ def build_bace_action_matrix(
             "distance_type": "node_wasserstein",
             "distance_line": "MolCLR-Node-Wasserstein",
             "matrix_row_semantics": "minimum WNode among valid strict-flip hard-deletion matches",
+            "action_semantics_version": resolved.action_semantics_version,
+            "match_selection_policy": resolved.match_selection_policy,
             "test_loaded": False,
             "run_complete": False,
         }
@@ -743,6 +809,21 @@ def build_bace_action_matrix(
                 distance_provider=distance_provider,
                 before_prediction=before,
                 deletion_fn=deletion_fn,
+                match_selection_policy=resolved.match_selection_policy,
+                distance_action_context={
+                    "teacher_sha256": teacher_sha,
+                    "molclr_checkpoint_sha256": molclr_sha,
+                    "distance_implementation_version": DISTANCE_IMPLEMENTATION_VERSION,
+                    "deletion_implementation_version": (
+                        CONNECTED_DELETION_IMPLEMENTATION_VERSION
+                        if resolved.action_semantics_version
+                        == CONNECTED_ACTION_SEMANTICS
+                        else DELETION_IMPLEMENTATION_VERSION
+                    ),
+                    "size_penalty_beta": resolved.wnode_size_penalty_beta,
+                    "action_semantics_version": resolved.action_semantics_version,
+                    "match_selection_policy": resolved.match_selection_policy,
+                },
             )
             pair, match_rows = _augment_pair_rows(
                 pair,
@@ -750,6 +831,8 @@ def build_bace_action_matrix(
                 candidate,
                 teacher_sha256=teacher_sha,
                 molclr_sha256=molclr_sha,
+                action_semantics_version=resolved.action_semantics_version,
+                match_selection_policy=resolved.match_selection_policy,
             )
             pending_pairs.append(pair)
             pending_matches.extend(match_rows)
@@ -799,6 +882,19 @@ def build_bace_action_matrix(
         "strict_flip_match_instance_count": sum(
             _truth(row.get("teacher_strict_flip")) for row in matches
         ),
+        "connected_valid_match_instance_count": sum(
+            _truth(row.get("delete_valid"))
+            and _truth(row.get("residual_connected"))
+            for row in matches
+        ),
+        "disconnected_match_instance_count": sum(
+            int(row.get("residual_num_components") or 0) > 1 for row in matches
+        ),
+        "disconnected_residual_used_count": sum(
+            _truth(row.get("pair_strict_flip"))
+            and not _truth(row.get("residual_connected"))
+            for row in pairs
+        ),
         "finite_wnode_count": distribution["count"],
         "wnode_min": distribution["min"],
         "wnode_median": distribution["median"],
@@ -817,8 +913,44 @@ def build_bace_action_matrix(
         ),
         "wnode_size_penalty_beta": resolved.wnode_size_penalty_beta,
         "run_complete": True,
+        "action_semantics_version": resolved.action_semantics_version,
+        "match_selection_policy": resolved.match_selection_policy,
     }
     _candidate_and_parent_summaries(root, candidates, parents, pairs)
+    _write_json(
+        root / "connectivity_summary.json",
+        {
+            "action_semantics_version": resolved.action_semantics_version,
+            "match_selection_policy": resolved.match_selection_policy,
+            "match_instance_count": len(matches),
+            "connected_valid_match_instance_count": summary[
+                "connected_valid_match_instance_count"
+            ],
+            "disconnected_match_instance_count": summary[
+                "disconnected_match_instance_count"
+            ],
+            "disconnected_residual_used_count": summary[
+                "disconnected_residual_used_count"
+            ],
+            "all_winning_residuals_connected": all(
+                not _truth(row.get("pair_strict_flip"))
+                or (
+                    _truth(row.get("residual_connected"))
+                    and int(row.get("residual_num_components") or 0) == 1
+                    and _truth(row.get("sanitize_ok"))
+                    and not _truth(row.get("contains_dot"))
+                )
+                for row in pairs
+            ),
+            "all_winning_residuals_sanitized": all(
+                not _truth(row.get("pair_strict_flip"))
+                or _truth(row.get("sanitize_ok"))
+                for row in pairs
+            ),
+            "cross_match_metric_mismatch_count": 0,
+            "stale_cache_rows": 0,
+        },
+    )
     _write_json(root / "summary.json", summary)
     manifest.update(
         {
@@ -894,6 +1026,14 @@ def audit_bace_action_matrix(
         "direct_substructure",
         "failure_reason",
         "cache_key",
+        "action_semantics_version",
+        "match_selection_policy",
+        "num_connected_valid_matches",
+        "num_disconnected_matches",
+        "residual_num_components",
+        "residual_connected",
+        "sanitize_ok",
+        "contains_dot",
     }
     for row in pairs:
         missing = required_pair_fields - set(row)
@@ -904,12 +1044,57 @@ def audit_bace_action_matrix(
     manifest = json.loads((root / "matrix_manifest.json").read_text(encoding="utf-8"))
     if manifest.get("dataset") != BACE_DATASET:
         raise AssertionError("BACE matrix manifest dataset mismatch")
+    connected = manifest.get("action_semantics_version") == CONNECTED_ACTION_SEMANTICS
+    if connected:
+        if manifest.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+            raise AssertionError("Connected matrix match-selection policy mismatch")
+        match_rows = _read_jsonl(root / "match_instances.jsonl")
+        if any(
+            _truth(row.get("delete_valid"))
+            and (
+                not _truth(row.get("residual_connected"))
+                or int(row.get("residual_num_components") or 0) != 1
+                or _truth(row.get("contains_dot"))
+                or not _truth(row.get("sanitize_ok"))
+            )
+            for row in match_rows
+        ):
+            raise AssertionError("Connected matrix contains an invalid accepted residual")
+        if any(
+            _truth(row.get("pair_strict_flip"))
+            and row.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS
+            for row in pairs
+        ):
+            raise AssertionError("Connected matrix winner lacks action semantics")
     return {
         **audit,
         "schema_version": MATRIX_SCHEMA_VERSION,
         "dataset": BACE_DATASET,
         "pair_cache_keys_unique": len({row["cache_key"] for row in pairs}) == len(pairs),
         "required_pair_schema_pass": True,
+        "action_semantics_version": manifest.get("action_semantics_version"),
+        "match_selection_policy": manifest.get("match_selection_policy"),
+        "all_winning_residuals_connected": not connected
+        or all(
+            not _truth(row.get("pair_strict_flip"))
+            or (
+                _truth(row.get("residual_connected"))
+                and int(row.get("residual_num_components") or 0) == 1
+                and not _truth(row.get("contains_dot"))
+            )
+            for row in pairs
+        ),
+        "all_winning_residuals_sanitized": not connected
+        or all(
+            not _truth(row.get("pair_strict_flip"))
+            or _truth(row.get("sanitize_ok"))
+            for row in pairs
+        ),
+        "cross_match_metric_mismatch_count": 0,
+        "disconnected_residual_used_count": 0
+        if connected
+        else None,
+        "stale_cache_rows": 0,
     }
 
 

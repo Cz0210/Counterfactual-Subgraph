@@ -20,6 +20,11 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUNS = {
@@ -118,6 +123,8 @@ class MethodRun:
     raw_parent_ids: tuple[str, ...] = ()
     parent_filter_applied: bool = False
     strict_flip_mismatch_rows: int = 0
+    disconnected_residual_used_count: int = 0
+    covered_residual_connected_rate: float | None = None
 
 
 def _text(value: Any) -> str:
@@ -186,6 +193,21 @@ def _as_int(value: Any) -> int | None:
     if number is None or not float(number).is_integer():
         return None
     return int(number)
+
+
+def _atom_tuple(value: Any) -> tuple[int, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(int(item) for item in value)
+    text = _text(value)
+    if not text:
+        return ()
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(int(item) for item in parsed)
 
 
 def _normalize_candidate_id(value: Any) -> str:
@@ -428,6 +450,8 @@ def aggregate_detail_rows(
     candidates: Sequence[CandidateRank],
     source: Path = Path("pair_details.csv"),
     allowed_parent_ids: set[str] | None = None,
+    action_semantics_version: str = "hard_delete_all_matches_v1",
+    match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
 ) -> tuple[
     tuple[str, ...],
     dict[tuple[str, str], PairRecourse],
@@ -446,6 +470,10 @@ def aggregate_detail_rows(
     observed_candidate_ids: set[str] = set()
     detail_count = 0
     strict_flip_mismatch_rows = 0
+    disconnected_residual_used_count = 0
+    strict_connected_rows = 0
+    strict_candidate_rows = 0
+    best_keys: dict[tuple[str, str], tuple[Any, ...]] = {}
     for row_number, row in enumerate(rows, start=2):
         method = _text(row.get("method"))
         if method:
@@ -480,9 +508,42 @@ def aggregate_detail_rows(
             strict_flip_mismatch_rows += 1
         if not strict_flip:
             continue
+        if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+            if match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY:
+                raise ValueError(
+                    "Connected detail aggregation requires the connected match policy."
+                )
+            connected = _as_bool(row.get("residual_connected"))
+            sanitized = _as_bool(row.get("sanitize_ok"))
+            contains_dot = _as_bool(row.get("contains_dot"))
+            components = _as_int(row.get("num_components"))
+            delete_valid = _as_bool(row.get("delete_valid"))
+            strict_candidate_rows += 1
+            if not (
+                delete_valid
+                and connected
+                and sanitized
+                and not contains_dot
+                and components == 1
+            ):
+                disconnected_residual_used_count += 1
+                raise ValueError(
+                    "Connected BACE run contains a finite strict-flip row with an "
+                    f"invalid residual: source={source} row={row_number}"
+                )
+            strict_connected_rows += 1
         cf_drop = _as_float(row.get("cf_drop"))
-        previous = recourse.get(key)
-        if previous is None or distance < previous.distance:
+        winner_key: tuple[Any, ...]
+        if match_selection_policy == CONNECTED_MATCH_SELECTION_POLICY:
+            winner_key = (
+                distance,
+                -float(cf_drop if cf_drop is not None else float("-inf")),
+                _atom_tuple(row.get("match_atoms")),
+            )
+        else:
+            winner_key = (distance,)
+        if key not in best_keys or winner_key < best_keys[key]:
+            best_keys[key] = winner_key
             recourse[key] = PairRecourse(
                 parent_id=parent_id,
                 candidate_id=candidate.candidate_id,
@@ -501,6 +562,12 @@ def aggregate_detail_rows(
             count > 1 for count in group_row_counts.values()
         ),
         "strict_flip_mismatch_rows": strict_flip_mismatch_rows,
+        "disconnected_residual_used_count": disconnected_residual_used_count,
+        "covered_residual_connected_rate": (
+            strict_connected_rows / strict_candidate_rows
+            if strict_candidate_rows
+            else None
+        ),
     }
     return tuple(sorted(parent_ids, key=_natural_key)), recourse, audit, methods
 
@@ -595,6 +662,10 @@ def load_method_run(
         candidates=candidates,
         source=detail_path,
         allowed_parent_ids=reference_set,
+        action_semantics_version=_text(config.get("action_semantics_version"))
+        or "hard_delete_all_matches_v1",
+        match_selection_policy=_text(config.get("match_selection_policy"))
+        or "min_wnode_then_cfdrop_then_match_index_v1",
     )
     if len(methods) != 1:
         raise ValueError(f"Expected one evaluator method in {detail_path}, found {sorted(methods)}")
@@ -632,6 +703,12 @@ def load_method_run(
         raw_parent_ids=raw_parent_ids,
         parent_filter_applied=reference_set is not None,
         strict_flip_mismatch_rows=audit["strict_flip_mismatch_rows"],
+        disconnected_residual_used_count=audit[
+            "disconnected_residual_used_count"
+        ],
+        covered_residual_connected_rate=audit[
+            "covered_residual_connected_rate"
+        ],
     )
 
 
@@ -731,6 +808,8 @@ def add_figure3_plotted_cost(
             plotted_cost = float(raw_value)
         except (TypeError, ValueError):
             plotted_cost = float("nan")
+        if int(row.get("num_covered") or 0) == 0:
+            plotted_cost = float("nan")
         theta = float(row["theta"])
         if (
             cost_metric == DEFAULT_THETA_COVERED_COST_METRIC
@@ -747,7 +826,12 @@ def add_figure3_plotted_cost(
         output.append(row)
     plotted = np.asarray([row["plotted_cost"] for row in output], dtype=float)
     selected = np.asarray(
-        [float(row[cost_metric]) if row.get(cost_metric) is not None else np.nan for row in rows],
+        [
+            float(row[cost_metric])
+            if row.get(cost_metric) is not None and int(row.get("num_covered") or 0) > 0
+            else np.nan
+            for row in rows
+        ],
         dtype=float,
     )
     if not np.allclose(plotted, selected, equal_nan=True):

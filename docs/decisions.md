@@ -5903,3 +5903,41 @@ cost definition remain unchanged.
   without an inline SHA256. The paper exporter computes the missing digest
   from that immutable file and still requires exact agreement with the frozen
   selection; it never accepts path equality as a substitute for hash equality.
+
+---
+
+## 2026-08-10: Connected molecular residuals for hard-deletion CCRCOV
+
+### Decision
+
+Version the molecular hard-deletion action as
+`connected_sanitized_residual_v1`. An exact RDKit substructure match is a
+feasible action only when deleting exactly those atoms leaves a nonempty,
+sanitized molecule with exactly one connected component and no dot-separated
+SMILES. The evaluator does not retain a largest component, repair chemistry,
+or impose an additional attachment-count heuristic.
+
+For multiple feasible matches, use
+`existential_min_wnode_among_valid_connected_strict_flips_v1`: choose the
+minimum MolCLR-Node-Wasserstein distance among connected, sanitized, RF
+strict-flip matches, then break ties by higher CFDrop and the canonical atom
+tuple. Distance, prediction, CFDrop, residual, and edit cost must all come from
+that same match row.
+
+The corrected BACE protocol refits the existing q05--q90 common calibration
+grid from connected calibration actions, rebuilds the calibration matrix and
+selector, and evaluates the frozen test cohort once. Ours and GCFExplainer use
+the same new threshold manifest. Old BACE v1/v2 artifacts and caches remain
+immutable evidence and are not promoted.
+
+### Consequences
+
+- Teacher and MolCLR calls occur only after connected residual validation.
+- Connected distances use the independent
+  `molclr_node_wasserstein_connected_residual_v3` cache namespace and logical
+  action keys include parent, residual, candidate, match, model, and policy
+  identities.
+- Legacy action semantics remain the default for existing AIDS/Mutagenicity
+  entrypoints; this change does not silently reinterpret their frozen files.
+- The old BACE Ours result is invalid for paper use because its rank-1 action
+  derived almost all apparent coverage from disconnected residuals.

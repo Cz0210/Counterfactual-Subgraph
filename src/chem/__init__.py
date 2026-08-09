@@ -14,6 +14,14 @@ from src.chem.deletion import (
     delete_fragment_from_parent,
     get_remainder_graph,
 )
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+    CONNECTED_WNODE_CACHE_NAMESPACE,
+    HardDeletionOutcome,
+    apply_hard_deletion_match,
+    enumerate_connected_hard_deletions,
+)
 from src.chem.minimal_repair import repair_minimal_fragment_syntax
 from src.chem.minimal_repair import generate_minimal_syntax_repair_candidates
 from src.chem.projection import (
@@ -71,6 +79,12 @@ __all__ = [
     "compute_substructure_distance_reward",
     "canonicalize_smiles",
     "delete_fragment_from_parent",
+    "CONNECTED_ACTION_SEMANTICS",
+    "CONNECTED_MATCH_SELECTION_POLICY",
+    "CONNECTED_WNODE_CACHE_NAMESPACE",
+    "HardDeletionOutcome",
+    "apply_hard_deletion_match",
+    "enumerate_connected_hard_deletions",
     "find_parent_substructure_matches",
     "generate_minimal_syntax_repair_candidates",
     "get_remainder_graph",

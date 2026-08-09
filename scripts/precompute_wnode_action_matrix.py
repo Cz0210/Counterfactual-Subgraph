@@ -13,11 +13,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.eval.molclr_node_embeddings import DEFAULT_NODE_EMB_CACHE_DIR  # noqa: E402
+from src.chem.hard_deletion import (  # noqa: E402
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+    CONNECTED_WNODE_CACHE_NAMESPACE,
+)
 from src.eval.node_wasserstein_distance import (  # noqa: E402
     MolCLRNodeWassersteinConfig,
     MolCLRNodeWassersteinDistance,
 )
 from src.eval.wnode_action_matrix import (  # noqa: E402
+    DELETION_IMPLEMENTATION_VERSION,
+    LEGACY_MATCH_SELECTION_POLICY,
     MatrixBuildConfig,
     build_bace_action_matrix,
 )
@@ -48,6 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cf-mode", choices=("strict_flip",), default="strict_flip")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--action-semantics-version",
+        choices=(DELETION_IMPLEMENTATION_VERSION, CONNECTED_ACTION_SEMANTICS),
+        default=DELETION_IMPLEMENTATION_VERSION,
+    )
+    parser.add_argument(
+        "--match-selection-policy",
+        choices=(LEGACY_MATCH_SELECTION_POLICY, CONNECTED_MATCH_SELECTION_POLICY),
+        default=LEGACY_MATCH_SELECTION_POLICY,
+    )
     return parser
 
 
@@ -62,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.split != "calibration":
         raise ValueError("Action selection may only precompute the calibration split.")
+    if args.action_semantics_version == CONNECTED_ACTION_SEMANTICS and (
+        args.match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY
+    ):
+        raise ValueError("Connected residual semantics require the connected match policy.")
     parent_csv = _existing(args.parent_csv, "parent CSV")
     if "test" in {part.lower() for part in parent_csv.parts}:
         raise ValueError(f"Test parent input is forbidden: {parent_csv}")
@@ -87,6 +108,11 @@ def main(argv: list[str] | None = None) -> int:
             size_penalty_beta=0.0,
             device=str(args.device),
             encoder_type="gin",
+            distance_namespace=(
+                CONNECTED_WNODE_CACHE_NAMESPACE
+                if args.action_semantics_version == CONNECTED_ACTION_SEMANTICS
+                else "molclr_node_wasserstein_v1"
+            ),
         )
     )
     try:
@@ -116,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                 resume=bool(args.resume),
                 local_files_only=True,
                 wnode_size_penalty_beta=0.0,
+                action_semantics_version=str(args.action_semantics_version),
+                match_selection_policy=str(args.match_selection_policy),
             ),
         )
     finally:

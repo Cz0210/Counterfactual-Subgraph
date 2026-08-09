@@ -11,6 +11,11 @@ import math
 from pathlib import Path
 from typing import Any
 
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
+
 
 def _json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -37,7 +42,12 @@ def _assert_monotone(values: list[float], label: str) -> None:
         raise AssertionError(f"{label} is not monotone non-decreasing")
 
 
-def audit_selector(root: Path, *, require_frozen: bool = True) -> dict[str, Any]:
+def audit_selector(
+    root: Path,
+    *,
+    require_frozen: bool = True,
+    require_connected: bool = False,
+) -> dict[str, Any]:
     required = (
         "selected_top20.csv",
         "selected_top20.json",
@@ -88,6 +98,29 @@ def audit_selector(root: Path, *, require_frozen: bool = True) -> dict[str, Any]
         raise AssertionError("Selector was not calibration-only")
     if run.get("selection_performed_in_eval") is not False:
         raise AssertionError("Selection is marked as occurring in evaluation")
+    if require_connected:
+        connected_required = (
+            "candidate_connectivity_stats.csv",
+            "selector_manifest.json",
+            "selector_audit.json",
+        )
+        for name in connected_required:
+            if not (root / name).is_file():
+                raise AssertionError(f"Missing connected selector artifact: {root / name}")
+        connected_audit = _json(root / "selector_audit.json")
+        for payload in (selection, run, connected_audit):
+            if payload.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+                raise AssertionError("Selector lacks connected action semantics")
+            if payload.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+                raise AssertionError("Selector match policy changed")
+        if connected_audit.get("disconnected_residual_used_count") != 0:
+            raise AssertionError("Selector used a disconnected residual")
+        if connected_audit.get("all_calibration_winners_connected") is not True:
+            raise AssertionError("Selector has a disconnected calibration winner")
+        if connected_audit.get(
+            "all_selected_have_connected_valid_calibration_action"
+        ) is not True:
+            raise AssertionError("A selected action lacks connected calibration support")
     rank = _json(root / "rank_preservation_audit.json")
     if rank.get("rank_preservation_pass") is not True:
         raise AssertionError("Rank preservation failed")
@@ -99,10 +132,17 @@ def audit_selector(root: Path, *, require_frozen: bool = True) -> dict[str, Any]
         "selection_frozen": selection_frozen,
         "test_used": False,
         "gcf_result_used": False,
+        "action_semantics_version": run.get("action_semantics_version"),
+        "match_selection_policy": run.get("match_selection_policy"),
     }
 
 
-def audit_final(root: Path, selector_root: Path) -> dict[str, Any]:
+def audit_final(
+    root: Path,
+    selector_root: Path,
+    *,
+    require_connected: bool = False,
+) -> dict[str, Any]:
     required = (
         "figure3_coverage_vs_k.csv",
         "figure4_coverage_vs_threshold.csv",
@@ -115,7 +155,11 @@ def audit_final(root: Path, selector_root: Path) -> dict[str, Any]:
         path = root / name
         if not path.is_file() or path.stat().st_size <= 0:
             raise AssertionError(f"Missing final artifact: {path}")
-    selector_audit = audit_selector(selector_root, require_frozen=True)
+    selector_audit = audit_selector(
+        selector_root,
+        require_frozen=True,
+        require_connected=require_connected,
+    )
     figure3 = _csv(root / "figure3_coverage_vs_k.csv")
     figure4 = _csv(root / "figure4_coverage_vs_threshold.csv")
     table2 = _csv(root / "table2_ours_k10.csv")
@@ -140,6 +184,16 @@ def audit_final(root: Path, selector_root: Path) -> dict[str, Any]:
         raise AssertionError("Final run selected candidates in evaluation")
     if manifest.get("threshold_fitted_on_test") is not False:
         raise AssertionError("Final run fitted threshold on test")
+    if require_connected:
+        for payload in (summary, manifest, artifact_audit):
+            if payload.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+                raise AssertionError("Final artifact lacks connected action semantics")
+            if payload.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+                raise AssertionError("Final artifact match policy changed")
+        if summary.get("disconnected_residual_used_count") != 0:
+            raise AssertionError("Final artifact used a disconnected residual")
+        if summary.get("covered_residual_connected_rate") not in {None, 1.0}:
+            raise AssertionError("Final covered residual connected rate is not 1")
     if int(manifest.get("test_evaluation_count") or 0) != 1:
         raise AssertionError("Final run must record exactly one test evaluation")
     if manifest.get("selected_sequence_sha256") != selector_audit["selected_sequence_sha256"]:
@@ -203,6 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--selector-root")
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--allow-provisional", action="store_true")
+    parser.add_argument("--require-connected", action="store_true")
     return parser
 
 
@@ -210,11 +265,19 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.root).expanduser().resolve()
     if args.mode == "selector":
-        result = audit_selector(root, require_frozen=not args.allow_provisional)
+        result = audit_selector(
+            root,
+            require_frozen=not args.allow_provisional,
+            require_connected=bool(args.require_connected),
+        )
     else:
         if not args.selector_root:
             raise ValueError("--mode final requires --selector-root")
-        result = audit_final(root, Path(args.selector_root).expanduser().resolve())
+        result = audit_final(
+            root,
+            Path(args.selector_root).expanduser().resolve(),
+            require_connected=bool(args.require_connected),
+        )
     output = Path(args.output_json).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")

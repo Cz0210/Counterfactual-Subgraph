@@ -12,6 +12,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
 from src.eval.gcf_style_recourse_report import (
     best_recourse_by_parent,
     compute_k_curve,
@@ -133,11 +137,126 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                raise ValueError(f"Expected JSON object in {path}:{line_number}")
+            rows.append(dict(payload))
+    return rows
+
+
+def _linear_quantile(values: Sequence[float], quantile: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        raise ValueError("Cannot fit BACE thresholds without finite distances.")
+    position = (len(ordered) - 1) * float(quantile)
+    low = math.floor(position)
+    high = math.ceil(position)
+    fraction = position - low
+    return ordered[low] * (1.0 - fraction) + ordered[high] * fraction
+
+
+def freeze_bace_connected_thresholds_from_matrix(
+    *,
+    calibration_matrix_dir: str | Path,
+    output_path: str | Path,
+) -> dict[str, Any]:
+    """Freeze the existing q-grid from connected calibration actions only."""
+
+    matrix_root = Path(calibration_matrix_dir).expanduser().resolve()
+    manifest_path = matrix_root / "matrix_manifest.json"
+    audit_path = matrix_root / "matrix_audit.json"
+    pair_path = matrix_root / "pair_matrix.jsonl"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    if manifest.get("run_complete") is not True or audit.get("run_complete") is not True:
+        raise ValueError("Connected calibration matrix is not complete.")
+    if manifest.get("test_loaded") is not False:
+        raise ValueError("Connected threshold source does not prove test_loaded=false.")
+    if manifest.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+        raise ValueError("Threshold source is not a connected-residual matrix.")
+    if manifest.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+        raise ValueError("Threshold source uses a different match policy.")
+    if audit.get("disconnected_residual_used_count") != 0:
+        raise ValueError("Threshold source used a disconnected residual.")
+    if audit.get("all_winning_residuals_connected") is not True:
+        raise ValueError("Threshold source has a disconnected winning residual.")
+    rows = _read_jsonl(pair_path)
+    finite: list[float] = []
+    for row in rows:
+        if not bool(row.get("pair_strict_flip")):
+            continue
+        if not (
+            bool(row.get("residual_connected"))
+            and bool(row.get("sanitize_ok"))
+            and int(row.get("residual_num_components") or 0) == 1
+            and not bool(row.get("contains_dot"))
+        ):
+            raise ValueError("Connected threshold source contains an invalid winner.")
+        try:
+            distance = float(row["wnode_distance"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Connected strict-flip winner lacks WNode distance.") from exc
+        if math.isfinite(distance) and distance >= 0.0:
+            finite.append(distance)
+    thresholds = [_linear_quantile(finite, quantile) for quantile in QUANTILES]
+    inputs = dict(manifest.get("inputs") or {})
+    payload = {
+        "schema_version": "bace_wnode_thresholds_v2",
+        "dataset": "BACE",
+        "distance_line": DISTANCE_LINE,
+        "distance_type": DISTANCE_TYPE,
+        "cf_mode": CF_MODE,
+        "threshold_source": "connected_ours_calibration_matrix",
+        "threshold_protocol_version": "bace_common_quantile_grid_q05_q90_v1",
+        "action_semantics_version": CONNECTED_ACTION_SEMANTICS,
+        "match_selection_policy": CONNECTED_MATCH_SELECTION_POLICY,
+        "quantiles": list(QUANTILES),
+        "thresholds": thresholds,
+        "theta_star_quantile": 0.30,
+        "theta_star": thresholds[3],
+        "cost_cap_quantile": 0.90,
+        "cost_cap": thresholds[-1],
+        "finite_connected_strict_flip_pair_count": len(finite),
+        "calibration_matrix_dir": str(matrix_root),
+        "calibration_matrix_manifest_sha256": sha256_file(manifest_path),
+        "calibration_matrix_audit_sha256": sha256_file(audit_path),
+        "calibration_pair_matrix_sha256": sha256_file(pair_path),
+        "calibration_cohort_hash": inputs.get("calibration_cohort_hash"),
+        "calibration_parent_csv": (inputs.get("calibration_csv") or {}).get("path"),
+        "calibration_parent_csv_sha256": (inputs.get("calibration_csv") or {}).get("sha256"),
+        "teacher_sha256": (inputs.get("teacher_path") or {}).get("sha256"),
+        "molclr_checkpoint_sha256": (inputs.get("molclr_checkpoint") or {}).get("sha256"),
+        "distance_implementation_version": inputs.get("distance_implementation_version"),
+        "size_penalty_beta": inputs.get("wnode_size_penalty_beta"),
+        "selection_used_test": False,
+        "threshold_fitted_on_test": False,
+        "shared_across_methods": True,
+        "old_threshold_contaminated": True,
+    }
+    target = Path(output_path).expanduser().resolve()
+    if target.exists():
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise FileExistsError(f"Frozen connected BACE threshold differs: {target}")
+        return existing
+    _write_json(target, payload)
+    return payload
+
+
 def freeze_bace_thresholds(
     *,
     calibration_run_dir: str | Path,
     output_path: str | Path,
     calibration_parent_csv: str | Path,
+    action_semantics_version: str = "hard_delete_all_matches_v1",
+    match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
 ) -> dict[str, Any]:
     run_root = Path(calibration_run_dir).expanduser().resolve()
     source = run_root / "distance_quantiles.csv"
@@ -167,8 +286,19 @@ def freeze_bace_thresholds(
     run_config = json.loads((run_root / "run_config.json").read_text(encoding="utf-8"))
     if str(run_config.get("threshold_source")) != "auto_quantile":
         raise ValueError("BACE thresholds must originate from Ours auto-quantile calibration.")
+    if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+        if match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("Connected thresholds require the connected match policy.")
+        if run_config.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+            raise ValueError("Connected thresholds cannot be frozen from a legacy run.")
+        if run_config.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("Connected threshold run has the wrong match policy.")
     payload = {
-        "schema_version": "bace_wnode_thresholds_v1",
+        "schema_version": (
+            "bace_wnode_thresholds_v2"
+            if action_semantics_version == CONNECTED_ACTION_SEMANTICS
+            else "bace_wnode_thresholds_v1"
+        ),
         "dataset": "BACE",
         "distance_line": DISTANCE_LINE,
         "distance_type": DISTANCE_TYPE,
@@ -187,6 +317,13 @@ def freeze_bace_thresholds(
         "selection_used_test": False,
         "threshold_fitted_on_test": False,
     }
+    if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+        payload.update(
+            {
+                "action_semantics_version": action_semantics_version,
+                "match_selection_policy": match_selection_policy,
+            }
+        )
     target = Path(output_path).expanduser().resolve()
     if target.exists():
         existing = json.loads(target.read_text(encoding="utf-8"))
@@ -200,7 +337,8 @@ def freeze_bace_thresholds(
 def load_bace_thresholds(path: str | Path) -> dict[str, Any]:
     source = Path(path).expanduser().resolve()
     payload = json.loads(source.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "bace_wnode_thresholds_v1":
+    schema = payload.get("schema_version")
+    if schema not in {"bace_wnode_thresholds_v1", "bace_wnode_thresholds_v2"}:
         raise ValueError(f"Unsupported BACE threshold schema: {source}")
     if payload.get("distance_line") != DISTANCE_LINE or payload.get("cf_mode") != CF_MODE:
         raise ValueError("BACE threshold distance/strict-flip semantics changed.")
@@ -221,6 +359,13 @@ def load_bace_thresholds(path: str | Path) -> dict[str, Any]:
         float(payload["cost_cap"]), thresholds[-1], rel_tol=0.0, abs_tol=1e-12
     ):
         raise ValueError("BACE cost_cap is not q90.")
+    if schema == "bace_wnode_thresholds_v2":
+        if payload.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+            raise ValueError("BACE v2 thresholds lack connected action semantics.")
+        if payload.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("BACE v2 thresholds have the wrong match policy.")
+        if payload.get("threshold_fitted_on_test") is not False:
+            raise ValueError("BACE v2 thresholds do not prove calibration-only fitting.")
     return payload
 
 
@@ -235,11 +380,20 @@ def export_bace_method_artifacts(
     selection_manifest: str | Path | None = None,
     test_evaluation_count: int | None = None,
     reference_artifact_root: str | Path | None = None,
+    action_semantics_version: str = "hard_delete_all_matches_v1",
+    match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
 ) -> dict[str, Any]:
     if method not in METHODS:
         raise ValueError(f"Unsupported BACE method: {method}")
     spec = METHODS[method]
     thresholds = load_bace_thresholds(thresholds_json)
+    if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+        if match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("Connected artifacts require the connected match policy.")
+        if thresholds.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+            raise ValueError("Connected artifacts require connected frozen thresholds.")
+        if thresholds.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+            raise ValueError("Connected artifacts and thresholds use different match policies.")
     run = load_method_run(
         str(spec["display"]),
         test_run_dir,
@@ -247,6 +401,20 @@ def export_bace_method_artifacts(
         expected_num_parents=int(expected_parent_count),
     )
     theta_star = float(thresholds["theta_star"])
+    if (
+        run.config.get("action_semantics_version") or "hard_delete_all_matches_v1"
+    ) != action_semantics_version:
+        raise ValueError("BACE evaluator and artifact action semantics differ.")
+    if (
+        run.config.get("match_selection_policy")
+        or "min_wnode_then_cfdrop_then_match_index_v1"
+    ) != match_selection_policy:
+        raise ValueError("BACE evaluator and artifact match-selection policies differ.")
+    if method == "ours" and action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+        if run.disconnected_residual_used_count != 0:
+            raise ValueError("Connected Ours run used a disconnected residual.")
+        if run.covered_residual_connected_rate not in {None, 1.0}:
+            raise ValueError("Connected Ours run contains a non-connected covered residual.")
     selection_contract: dict[str, Any] | None = None
     selection_manifest_path: Path | None = None
     if selection_manifest is not None:
@@ -262,6 +430,11 @@ def export_bace_method_artifacts(
             raise ValueError("BACE frozen selector does not prove gcf_result_used=false.")
         if selection_contract.get("selection_split") != "calibration":
             raise ValueError("BACE frozen selector was not selected on calibration.")
+        if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+            if selection_contract.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
+                raise ValueError("Frozen selection lacks connected action semantics.")
+            if selection_contract.get("match_selection_policy") != CONNECTED_MATCH_SELECTION_POLICY:
+                raise ValueError("Frozen selection uses a different match policy.")
         if int(test_evaluation_count or 0) != 1:
             raise ValueError("A frozen BACE selection requires test_evaluation_count=1.")
     prefix = compute_k_curve(run, threshold=theta_star, max_k=int(expected_top_k))
@@ -425,6 +598,8 @@ def export_bace_method_artifacts(
             "distance_line": DISTANCE_LINE,
             "distance_type": DISTANCE_TYPE,
             "cf_mode": CF_MODE,
+            "action_semantics_version": action_semantics_version,
+            "match_selection_policy": match_selection_policy,
             "test_parent_count": len(run.parent_ids),
             "test_parent_ids_sha256": parent_ids_sha256,
             "candidate_count": len(run.candidates),
@@ -437,6 +612,12 @@ def export_bace_method_artifacts(
             "selection_performed_in_eval": False,
             "test_used_for_selection": False,
             "threshold_fitted_on_test": False,
+            "disconnected_residual_used_count": (
+                run.disconnected_residual_used_count if method == "ours" else 0
+            ),
+            "covered_residual_connected_rate": (
+                run.covered_residual_connected_rate if method == "ours" else None
+            ),
             "selection_split": (
                 selection_contract.get("selection_split")
                 if selection_contract is not None
@@ -485,8 +666,16 @@ def export_bace_method_artifacts(
             "molclr_checkpoint": run_config.get("molclr_checkpoint"),
             "distance_line": DISTANCE_LINE,
             "cf_mode": CF_MODE,
+            "action_semantics_version": action_semantics_version,
+            "match_selection_policy": match_selection_policy,
             "test_used_for_selection": False,
             "threshold_fitted_on_test": False,
+            "disconnected_residual_used_count": summary[
+                "disconnected_residual_used_count"
+            ],
+            "covered_residual_connected_rate": summary[
+                "covered_residual_connected_rate"
+            ],
             "selection_split": (
                 selection_contract.get("selection_split")
                 if selection_contract is not None
@@ -528,6 +717,8 @@ def export_bace_method_artifacts(
             "table2_schema": list(TABLE2_FIELDS),
             "table2_rows": 1,
             "strict_flip": True,
+            "action_semantics_version": action_semantics_version,
+            "match_selection_policy": match_selection_policy,
             "candidate_order_preserved": True,
             "selection_performed_in_eval": False,
             "coverage_vs_k_monotone": True,
@@ -539,6 +730,17 @@ def export_bace_method_artifacts(
             ),
             "test_used_for_selection": False,
             "threshold_fitted_on_test": False,
+            "disconnected_residual_used_count": summary[
+                "disconnected_residual_used_count"
+            ],
+            "covered_residual_connected_rate": summary[
+                "covered_residual_connected_rate"
+            ],
+            "all_covered_residuals_connected": (
+                method != "ours"
+                or action_semantics_version != CONNECTED_ACTION_SEMANTICS
+                or summary["covered_residual_connected_rate"] in {None, 1.0}
+            ),
             "test_evaluation_count": test_evaluation_count,
             "selected_candidate_ids_exact": selected_candidate_ids_exact,
             "teacher_identity_exact": teacher_identity_exact,
@@ -577,6 +779,7 @@ __all__ = [
     "QUANTILES",
     "TABLE2_FIELDS",
     "export_bace_method_artifacts",
+    "freeze_bace_connected_thresholds_from_matrix",
     "freeze_bace_thresholds",
     "load_bace_thresholds",
     "sha256_file",

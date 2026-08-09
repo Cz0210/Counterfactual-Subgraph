@@ -9,12 +9,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
+from src.chem.hard_deletion import CONNECTED_ACTION_SEMANTICS
 from src.eval.close_counterfactual_coverage import (
     DETAIL_FIELDS,
     SUMMARY_FIELDS,
     CandidateRecord,
     ParentRecord,
     hard_delete_substructure_any_match,
+    hard_delete_substructure_connected_matches,
     predict_with_teacher,
     render_report,
     _as_bool,
@@ -517,8 +519,16 @@ def _distance_row_update(
     parent_smiles: str,
     action_smiles: str,
     distance_type: str,
+    action_context: dict[str, Any] | None = None,
 ) -> None:
-    result = provider.distance(parent_smiles, action_smiles)
+    if action_context is not None and hasattr(provider, "distance_for_action"):
+        result = provider.distance_for_action(
+            parent_smiles,
+            action_smiles,
+            action_context=action_context,
+        )
+    else:
+        result = provider.distance(parent_smiles, action_smiles)
     row.update(
         {
             "distance": result.get("distance"),
@@ -544,6 +554,9 @@ def _evaluate_ours(
     completed_pair_keys: set[tuple[str, str]] | None = None,
     checkpoint_callback: Callable[[list[dict[str, Any]], set[tuple[str, str]]], None] | None = None,
     write_builtin_partial: bool = True,
+    action_semantics_version: str = "hard_delete_all_matches_v1",
+    match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
+    distance_action_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     details: list[dict[str, Any]] = [dict(row) for row in (initial_details or [])]
     completed = set(completed_pair_keys or set())
@@ -558,7 +571,12 @@ def _evaluate_ours(
                 continue
             work_done += 1
             base = _row_base(method="ours_selected_subgraphs", distance_type=distance_type, ged_mode=distance_name, parent=parent, candidate=candidate)
-            deletions = hard_delete_substructure_any_match(parent.smiles, candidate.smiles)
+            deletion_fn = (
+                hard_delete_substructure_connected_matches
+                if action_semantics_version == CONNECTED_ACTION_SEMANTICS
+                else hard_delete_substructure_any_match
+            )
+            deletions = deletion_fn(parent.smiles, candidate.smiles)
             if not deletions:
                 row = dict(base)
                 row.update({"p_before": before.get("p_label"), "pred_before": before.get("pred_label"), "error": "no_substructure_match"})
@@ -574,6 +592,17 @@ def _evaluate_ours(
                         "residual_smiles": deletion.get("residual_smiles"),
                         "delete_valid": bool(deletion.get("delete_valid")),
                         "num_components": deletion.get("num_components"),
+                        "residual_connected": deletion.get("residual_connected"),
+                        "sanitize_ok": deletion.get("sanitize_ok"),
+                        "contains_dot": deletion.get("contains_dot"),
+                        "residual_heavy_atom_count": deletion.get(
+                            "residual_heavy_atom_count"
+                        ),
+                        "boundary_bond_count": deletion.get("boundary_bond_count"),
+                        "action_semantics_version": deletion.get(
+                            "action_semantics_version", action_semantics_version
+                        ),
+                        "match_selection_policy": match_selection_policy,
                         "num_match_atoms": deletion.get("num_match_atoms"),
                         "num_removed_atoms": deletion.get("num_removed_atoms"),
                         "num_removed_bonds": deletion.get("num_removed_bonds"),
@@ -605,7 +634,22 @@ def _evaluate_ours(
                                 parent.label,
                             )
                         )
-                        _distance_row_update(row, provider=provider, parent_smiles=parent.smiles, action_smiles=residual, distance_type=distance_type)
+                        _distance_row_update(
+                            row,
+                            provider=provider,
+                            parent_smiles=parent.smiles,
+                            action_smiles=residual,
+                            distance_type=distance_type,
+                            action_context={
+                                **dict(distance_action_context or {}),
+                                "parent_id": parent.parent_id,
+                                "candidate_id": candidate.candidate_id,
+                                "match_index": deletion.get("match_index"),
+                                "match_atom_indices": deletion.get("match_atoms") or [],
+                                "action_semantics_version": action_semantics_version,
+                                "match_selection_policy": match_selection_policy,
+                            },
+                        )
                     details.append(row)
             completed.add(pair_key)
             if partial_every > 0 and work_done % int(partial_every) == 0:

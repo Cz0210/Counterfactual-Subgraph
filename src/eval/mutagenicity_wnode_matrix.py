@@ -421,6 +421,8 @@ def evaluate_parent_candidate_pair(
     distance_provider: DistanceProtocol,
     before_prediction: dict[str, Any] | None = None,
     deletion_fn: Callable[[str, str], list[dict[str, Any]]] = hard_delete_substructure_any_match,
+    match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
+    distance_action_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Evaluate every hard-deletion match and aggregate one pair row."""
 
@@ -448,6 +450,15 @@ def evaluate_parent_candidate_pair(
             "match_atom_indices": list(deletion.get("match_atoms") or []),
             "delete_valid": delete_valid,
             "residual_smiles": residual_smiles,
+            "residual_num_components": deletion.get(
+                "residual_num_components", deletion.get("num_components")
+            ),
+            "residual_connected": deletion.get("residual_connected"),
+            "sanitize_ok": deletion.get("sanitize_ok"),
+            "contains_dot": deletion.get("contains_dot"),
+            "residual_heavy_atom_count": deletion.get("residual_heavy_atom_count"),
+            "boundary_bond_count": deletion.get("boundary_bond_count"),
+            "action_semantics_version": deletion.get("action_semantics_version"),
             "pred_before": before.get("pred_label"),
             "pred_after": None,
             "p1_before": before.get("p_label"),
@@ -491,10 +502,32 @@ def evaluate_parent_candidate_pair(
             }
         )
         if strict_flip:
-            distance_result = distance_provider.distance(
-                parent.smiles,
-                residual_smiles or "",
-            )
+            action_context = {
+                **dict(distance_action_context or {}),
+                "parent_id": parent.parent_id,
+                "candidate_id": candidate_id,
+                "match_index": match_index,
+                "match_atom_indices": list(match_row["match_atom_indices"]),
+                "action_semantics_version": match_row.get(
+                    "action_semantics_version"
+                )
+                or (distance_action_context or {}).get(
+                    "action_semantics_version",
+                    "hard_delete_all_matches_v1",
+                ),
+                "match_selection_policy": match_selection_policy,
+            }
+            if hasattr(distance_provider, "distance_for_action"):
+                distance_result = distance_provider.distance_for_action(
+                    parent.smiles,
+                    residual_smiles or "",
+                    action_context=action_context,
+                )
+            else:
+                distance_result = distance_provider.distance(
+                    parent.smiles,
+                    residual_smiles or "",
+                )
             distance = _finite_float(distance_result.get("distance"))
             distance_ok = bool(
                 distance_result.get("ok")
@@ -520,13 +553,32 @@ def evaluate_parent_candidate_pair(
                 strict_finite_rows.append(match_row)
         match_rows.append(match_row)
 
-    strict_finite_rows.sort(
-        key=lambda row: (
-            float(row["wnode_distance"]),
-            -float(row["cf_drop"] if row["cf_drop"] is not None else float("-inf")),
-            int(row["match_index"]),
+    if match_selection_policy == (
+        "existential_min_wnode_among_valid_connected_strict_flips_v1"
+    ):
+        strict_finite_rows.sort(
+            key=lambda row: (
+                float(row["wnode_distance"]),
+                -float(
+                    row["cf_drop"]
+                    if row["cf_drop"] is not None
+                    else float("-inf")
+                ),
+                tuple(int(value) for value in row["match_atom_indices"]),
+            )
         )
-    )
+    else:
+        strict_finite_rows.sort(
+            key=lambda row: (
+                float(row["wnode_distance"]),
+                -float(
+                    row["cf_drop"]
+                    if row["cf_drop"] is not None
+                    else float("-inf")
+                ),
+                int(row["match_index"]),
+            )
+        )
     best = strict_finite_rows[0] if strict_finite_rows else None
     num_valid_residuals = sum(bool(row["delete_valid"]) for row in match_rows)
     num_strict_flip_matches = sum(
@@ -553,11 +605,30 @@ def evaluate_parent_candidate_pair(
         "applicable": bool(deletions),
         "num_matches": len(deletions),
         "num_valid_residuals": num_valid_residuals,
+        "num_connected_valid_matches": sum(
+            bool(row["delete_valid"] and row.get("residual_connected"))
+            for row in match_rows
+        ),
+        "num_disconnected_matches": sum(
+            row.get("residual_num_components") is not None
+            and int(row["residual_num_components"]) > 1
+            for row in match_rows
+        ),
         "num_strict_flip_matches": num_strict_flip_matches,
         "pair_strict_flip": best is not None,
         "best_match_index": best.get("match_index") if best else None,
         "best_match_atom_indices": best.get("match_atom_indices") if best else [],
         "residual_smiles": best.get("residual_smiles") if best else None,
+        "residual_num_components": best.get("residual_num_components")
+        if best
+        else None,
+        "residual_connected": best.get("residual_connected") if best else None,
+        "sanitize_ok": best.get("sanitize_ok") if best else None,
+        "contains_dot": best.get("contains_dot") if best else None,
+        "residual_heavy_atom_count": best.get("residual_heavy_atom_count")
+        if best
+        else None,
+        "boundary_bond_count": best.get("boundary_bond_count") if best else None,
         "pred_before": best.get("pred_before") if best else before.get("pred_label"),
         "pred_after": best.get("pred_after") if best else None,
         "p1_before": best.get("p1_before") if best else before.get("p_label"),
@@ -565,6 +636,17 @@ def evaluate_parent_candidate_pair(
         "cf_drop": best.get("cf_drop") if best else None,
         "wnode_distance": best.get("wnode_distance") if best else None,
         "failure_reason": failure_reason,
+        "action_semantics_version": best.get("action_semantics_version")
+        if best
+        else next(
+            (
+                row.get("action_semantics_version")
+                for row in match_rows
+                if row.get("action_semantics_version")
+            ),
+            None,
+        ),
+        "match_selection_policy": match_selection_policy,
     }
     return pair_row, match_rows
 

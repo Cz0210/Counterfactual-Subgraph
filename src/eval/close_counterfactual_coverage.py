@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from src.chem.hard_deletion import (
+    CONNECTED_ACTION_SEMANTICS,
+    enumerate_connected_hard_deletions,
+)
 from src.eval.flip_semantics import teacher_flip_audit_fields, teacher_strict_flip
 from src.rewards.teacher_semantic import TeacherSemanticScorer
 from src.utils.io import ensure_directory
@@ -64,6 +68,13 @@ DETAIL_FIELDS = [
     "residual_smiles",
     "delete_valid",
     "num_components",
+    "residual_connected",
+    "sanitize_ok",
+    "contains_dot",
+    "residual_heavy_atom_count",
+    "boundary_bond_count",
+    "action_semantics_version",
+    "match_selection_policy",
     "num_match_atoms",
     "num_removed_atoms",
     "num_removed_bonds",
@@ -375,6 +386,21 @@ def hard_delete_substructure_any_match(
             payload["error"] = f"delete_failed:{exc}"
         candidates.append(payload)
     return candidates
+
+
+def hard_delete_substructure_connected_matches(
+    parent_smiles: str,
+    fragment_smiles: str,
+) -> list[dict[str, Any]]:
+    """Enumerate exact deletions under the versioned connected policy."""
+
+    return [
+        outcome.as_dict()
+        for outcome in enumerate_connected_hard_deletions(
+            parent_smiles,
+            fragment_smiles,
+        )
+    ]
 
 
 def mol_to_labeled_nx_graph(mol: Any) -> Any:
@@ -1591,6 +1617,8 @@ __all__ = [
     "evaluate_gcf_counterfactual_graphs",
     "evaluate_ours_selected_subgraphs",
     "hard_delete_substructure_any_match",
+    "hard_delete_substructure_connected_matches",
+    "CONNECTED_ACTION_SEMANTICS",
     "mol_from_smiles",
     "mol_to_labeled_nx_graph",
     "normalized_delete_ged_distance",

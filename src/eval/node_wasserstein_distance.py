@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -34,6 +36,7 @@ class MolCLRNodeWassersteinConfig:
     size_penalty_beta: float = 0.0
     device: str = "cuda"
     encoder_type: str = "gin"
+    distance_namespace: str = WNODE_DISTANCE_NAMESPACE
 
 
 def cosine_node_cost_matrix(H1: np.ndarray, H2: np.ndarray, *, epsilon: float = 1e-12) -> np.ndarray:
@@ -117,9 +120,10 @@ def node_wasserstein_pair_key(
     node_mass: str,
     size_penalty_beta: float,
     node_embedding_schema_version: str = NODE_EMBEDDING_CACHE_SCHEMA_VERSION,
+    distance_namespace: str = WNODE_DISTANCE_NAMESPACE,
 ) -> str:
     return canonical_symmetric_distance_key(
-        distance_namespace=WNODE_DISTANCE_NAMESPACE,
+        distance_namespace=str(distance_namespace),
         canonical_smiles_a=canonical_smiles_a,
         canonical_smiles_b=canonical_smiles_b,
         parameters={
@@ -131,6 +135,48 @@ def node_wasserstein_pair_key(
             "solver": "exact_emd2",
         },
     )
+
+
+def node_wasserstein_action_key(
+    *,
+    canonical_parent_smiles: str,
+    canonical_residual_smiles: str,
+    checkpoint_identity: str,
+    feature_cost: str,
+    node_mass: str,
+    size_penalty_beta: float,
+    distance_namespace: str,
+    action_context: dict[str, Any],
+) -> str:
+    """Return a directional cache key for one versioned deletion action."""
+
+    required = {
+        "candidate_id",
+        "match_atom_indices",
+        "teacher_sha256",
+        "action_semantics_version",
+        "match_selection_policy",
+        "distance_implementation_version",
+    }
+    missing = sorted(required - set(action_context))
+    if missing:
+        raise ValueError(f"Action-aware WNode cache context is missing: {missing}")
+    payload = {
+        "distance_namespace": str(distance_namespace),
+        "parent_canonical_smiles": str(canonical_parent_smiles),
+        "residual_canonical_smiles": str(canonical_residual_smiles),
+        "molclr_checkpoint_identity": str(checkpoint_identity),
+        "node_embedding_schema_version": NODE_EMBEDDING_CACHE_SCHEMA_VERSION,
+        "feature_cost": str(feature_cost),
+        "node_mass": str(node_mass),
+        "size_penalty_beta": float(size_penalty_beta),
+        "solver": "exact_emd2",
+        "action_context": dict(action_context),
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class MolCLRNodeWassersteinDistance:
@@ -157,6 +203,28 @@ class MolCLRNodeWassersteinDistance:
         self.started_at = time.time()
 
     def distance(self, smiles_a: str, smiles_b: str) -> dict[str, Any]:
+        return self._distance(smiles_a, smiles_b, action_context=None)
+
+    def distance_for_action(
+        self,
+        parent_smiles: str,
+        residual_smiles: str,
+        *,
+        action_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._distance(
+            parent_smiles,
+            residual_smiles,
+            action_context=action_context,
+        )
+
+    def _distance(
+        self,
+        smiles_a: str,
+        smiles_b: str,
+        *,
+        action_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         canonical_a = canonicalize_smiles(smiles_a)
         canonical_b = canonicalize_smiles(smiles_b)
         if canonical_a is None or canonical_b is None:
@@ -170,14 +238,27 @@ class MolCLRNodeWassersteinDistance:
                 "error": "invalid_or_empty_smiles",
                 "metadata": None,
             }
-        key = node_wasserstein_pair_key(
-            canonical_smiles_a=canonical_a,
-            canonical_smiles_b=canonical_b,
-            checkpoint_identity=self.embedder.checkpoint_identity,
-            feature_cost=self.config.feature_cost,
-            node_mass=self.config.node_mass,
-            size_penalty_beta=float(self.config.size_penalty_beta),
-        )
+        if action_context is None:
+            key = node_wasserstein_pair_key(
+                canonical_smiles_a=canonical_a,
+                canonical_smiles_b=canonical_b,
+                checkpoint_identity=self.embedder.checkpoint_identity,
+                feature_cost=self.config.feature_cost,
+                node_mass=self.config.node_mass,
+                size_penalty_beta=float(self.config.size_penalty_beta),
+                distance_namespace=self.config.distance_namespace,
+            )
+        else:
+            key = node_wasserstein_action_key(
+                canonical_parent_smiles=canonical_a,
+                canonical_residual_smiles=canonical_b,
+                checkpoint_identity=self.embedder.checkpoint_identity,
+                feature_cost=self.config.feature_cost,
+                node_mass=self.config.node_mass,
+                size_penalty_beta=float(self.config.size_penalty_beta),
+                distance_namespace=self.config.distance_namespace,
+                action_context=action_context,
+            )
         cached, metadata = self.cache.get_distance(key)
         if cached is not None:
             return {
@@ -213,8 +294,9 @@ class MolCLRNodeWassersteinDistance:
             {
                 "canonical_smiles_a": canonical_a,
                 "canonical_smiles_b": canonical_b,
-                "distance_namespace": WNODE_DISTANCE_NAMESPACE,
+                "distance_namespace": self.config.distance_namespace,
                 "node_embedding_schema_version": NODE_EMBEDDING_CACHE_SCHEMA_VERSION,
+                "action_context": action_context,
             }
         )
         self.cache.set_distance(key, value, metadata, distance_type="molclr_node_wasserstein")
@@ -246,6 +328,7 @@ class MolCLRNodeWassersteinDistance:
             "size_penalty_beta": float(self.config.size_penalty_beta),
             "solver": "exact_emd2",
             "node_emb_cache_dir": str(Path(self.config.node_emb_cache_dir).expanduser()),
+            "distance_namespace": self.config.distance_namespace,
         }
 
     def close(self) -> None:
@@ -260,5 +343,6 @@ __all__ = [
     "compute_node_wasserstein_distance",
     "cosine_node_cost_matrix",
     "node_wasserstein_pair_key",
+    "node_wasserstein_action_key",
     "uniform_node_mass",
 ]

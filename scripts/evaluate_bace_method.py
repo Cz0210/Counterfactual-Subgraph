@@ -20,6 +20,10 @@ from src.eval.bace_paper_artifacts import (  # noqa: E402
     freeze_bace_thresholds,
     load_bace_thresholds,
 )
+from src.chem.hard_deletion import (  # noqa: E402
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +49,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-manifest")
     parser.add_argument("--test-evaluation-count", type=int)
     parser.add_argument("--reference-artifact-root")
+    parser.add_argument(
+        "--action-semantics-version",
+        default="hard_delete_all_matches_v1",
+        choices=("hard_delete_all_matches_v1", CONNECTED_ACTION_SEMANTICS),
+    )
+    parser.add_argument(
+        "--match-selection-policy",
+        default="min_wnode_then_cfdrop_then_match_index_v1",
+        choices=(
+            "min_wnode_then_cfdrop_then_match_index_v1",
+            CONNECTED_MATCH_SELECTION_POLICY,
+        ),
+    )
+    parser.add_argument(
+        "--wnode-cache-db",
+        default="outputs/hpc/cache/distance_cache/molclr_node_wasserstein_v1.sqlite",
+    )
     return parser
 
 
@@ -107,6 +128,12 @@ def _evaluator_argv(
         "1",
         "--selection-method",
         str(spec["selection_method"]),
+        "--action-semantics-version",
+        str(args.action_semantics_version),
+        "--match-selection-policy",
+        str(args.match_selection_policy),
+        "--wnode-cache-db",
+        str(Path(args.wnode_cache_db).expanduser().resolve()),
         "--skip-redundancy",
         "1",
         "--resume",
@@ -154,6 +181,10 @@ def _run(argv: list[str], output_dir: Path, *, resume: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.action_semantics_version == CONNECTED_ACTION_SEMANTICS and (
+        args.match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY
+    ):
+        raise ValueError("Connected residual semantics require the connected match policy.")
     work = Path(args.work_dir).expanduser().resolve()
     test_run = work / "test"
     threshold_path = Path(args.thresholds_json).expanduser().resolve()
@@ -174,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
             calibration_run_dir=calibration_run,
             output_path=threshold_path,
             calibration_parent_csv=args.calibration_csv,
+            action_semantics_version=args.action_semantics_version,
+            match_selection_policy=args.match_selection_policy,
         )
     contract = load_bace_thresholds(threshold_path)
     explicit = ",".join(format(float(value), ".17g") for value in contract["thresholds"])
@@ -194,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         selection_manifest=args.selection_manifest,
         test_evaluation_count=args.test_evaluation_count,
         reference_artifact_root=args.reference_artifact_root,
+        action_semantics_version=args.action_semantics_version,
+        match_selection_policy=args.match_selection_policy,
     )
     print(json.dumps(summary, sort_keys=True), flush=True)
     print("[BACE_METHOD_PAPER_ARTIFACTS_OK]", flush=True)
