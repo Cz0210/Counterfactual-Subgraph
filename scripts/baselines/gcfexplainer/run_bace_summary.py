@@ -28,6 +28,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", choices=("smoke", "full"), required=True)
     parser.add_argument("--theta", type=float, default=0.1)
     parser.add_argument("--minimum-native-export", type=int, default=100)
+    parser.add_argument(
+        "--native-candidate-limit",
+        type=int,
+        default=None,
+        help=(
+            "Maximum saved model-counterfactual candidates entering the native "
+            "summary; zero scans the complete frozen VRRW pool."
+        ),
+    )
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args(argv)
     result = build_bace_native_summary(
@@ -40,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile,
         theta=args.theta,
         minimum_native_export=args.minimum_native_export,
+        native_candidate_limit=args.native_candidate_limit,
         device=args.device,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
