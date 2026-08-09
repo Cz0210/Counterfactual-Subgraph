@@ -49,6 +49,26 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _identity_sha256(
+    identity: Mapping[str, Any] | None,
+    *,
+    fallback_path: str | Path | None = None,
+) -> str | None:
+    """Resolve a file identity without weakening SHA256 provenance checks."""
+
+    record = dict(identity or {})
+    declared = str(record.get("sha256") or "").strip().lower()
+    if declared:
+        if len(declared) != 64 or any(char not in "0123456789abcdef" for char in declared):
+            raise ValueError(f"Invalid SHA256 in file identity: {declared!r}")
+        return declared
+    path_value = record.get("path") or fallback_path
+    if not path_value:
+        return None
+    path = Path(str(path_value)).expanduser().resolve()
+    return sha256_file(path) if path.is_file() else None
+
+
 def stable_json_sha256(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -304,6 +324,14 @@ def export_bace_method_artifacts(
         run_config = run.config
         candidate_ids = [candidate.candidate_id for candidate in run.candidates]
         parent_ids_sha256 = stable_json_sha256(list(run.parent_ids))
+        run_teacher_sha256 = _identity_sha256(
+            run_config.get("teacher"),
+            fallback_path=run_config.get("teacher_path"),
+        )
+        run_molclr_sha256 = _identity_sha256(
+            run_config.get("molclr_checkpoint_identity"),
+            fallback_path=run_config.get("molclr_checkpoint"),
+        )
         selected_candidate_ids_exact = True
         teacher_identity_exact = True
         molclr_identity_exact = True
@@ -316,21 +344,13 @@ def export_bace_method_artifacts(
                 raise ValueError("Evaluator candidate order differs from frozen selection.")
             expected_teacher = selection_contract.get("teacher_identity") or {}
             expected_molclr = selection_contract.get("molclr_identity") or {}
-            actual_teacher = run_config.get("teacher") or {}
-            actual_molclr = run_config.get("molclr_checkpoint")
-            actual_molclr_identity = run_config.get("molclr_checkpoint_identity") or {}
-            if not actual_molclr_identity and actual_molclr:
-                actual_molclr_identity = {
-                    "sha256": sha256_file(Path(str(actual_molclr)).expanduser().resolve())
-                }
             teacher_identity_exact = bool(
-                expected_teacher.get("sha256")
-                and expected_teacher.get("sha256") == actual_teacher.get("sha256")
+                _identity_sha256(expected_teacher)
+                and _identity_sha256(expected_teacher) == run_teacher_sha256
             )
             molclr_identity_exact = bool(
-                expected_molclr.get("sha256")
-                and expected_molclr.get("sha256")
-                == actual_molclr_identity.get("sha256")
+                _identity_sha256(expected_molclr)
+                and _identity_sha256(expected_molclr) == run_molclr_sha256
             )
             threshold_identity_exact = bool(
                 selection_contract.get("threshold_manifest_sha256")
@@ -364,12 +384,12 @@ def export_bace_method_artifacts(
             reference_teacher_exact = bool(
                 reference_teacher_path.is_file()
                 and sha256_file(reference_teacher_path)
-                == (run_config.get("teacher") or {}).get("sha256")
+                == run_teacher_sha256
             )
             reference_molclr_exact = bool(
                 reference_molclr_path.is_file()
                 and sha256_file(reference_molclr_path)
-                == sha256_file(Path(str(run_config.get("molclr_checkpoint"))).expanduser())
+                == run_molclr_sha256
             )
             reference_protocol_exact = bool(
                 reference_summary.get("test_parent_ids_sha256") == parent_ids_sha256

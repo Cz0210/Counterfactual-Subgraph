@@ -34,6 +34,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_ours_wnode_p
 REFERENCE_ARTIFACT_ROOT=${REFERENCE_ARTIFACT_ROOT:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_ours_wnode}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
+RESUME_EXISTING_TEST_RUN=${RESUME_EXISTING_TEST_RUN:-0}
 
 for path in "$SELECTOR_ROOT/selector_audit.json" "$SELECTION_MANIFEST" "$TEACHER_PATH" "$MOLCLR_CHECKPOINT" "$TEST_CSV" "$THRESHOLDS_JSON" "$REFERENCE_ARTIFACT_ROOT/run_manifest.json"; do
   test -s "$path" || { echo "[BACE_V2_CONFIG_ERROR] missing $path" >&2; exit 2; }
@@ -62,6 +63,9 @@ args=(
   --test-evaluation-count 1
   --reference-artifact-root "$REFERENCE_ARTIFACT_ROOT"
 )
+if [ "$RESUME_EXISTING_TEST_RUN" = 1 ]; then
+  args+=(--resume)
+fi
 echo "hostname=$(hostname)"
 echo "git_commit=$(git rev-parse HEAD)"
 echo "python=$(which python)"

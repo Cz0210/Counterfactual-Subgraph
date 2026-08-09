@@ -203,6 +203,10 @@ def test_export_records_frozen_selection_without_changing_csv_schema(
         output_dir=reference,
         expected_parent_count=2,
     )
+    run_config_path = run / "run_config.json"
+    run_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+    run_config["teacher"].pop("sha256")
+    run_config_path.write_text(json.dumps(run_config), encoding="utf-8")
     output = tmp_path / "ours_v2"
     export_bace_method_artifacts(
         method="ours",

@@ -11,6 +11,8 @@ def test_v2_wrappers_keep_frozen_semantics() -> None:
     assert "--test-evaluation-count 1" in text
     assert "bace_ours_wnode_prefix_v2" in text
     assert "OUTPUT_DIR=${OUTPUT_DIR:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_ours_wnode_prefix_v2}" in text
+    assert "RESUME_EXISTING_TEST_RUN=${RESUME_EXISTING_TEST_RUN:-0}" in text
+    assert "args+=(--resume)" in text
 
 
 def test_all_v2_wrappers_support_dry_run_and_validation() -> None:

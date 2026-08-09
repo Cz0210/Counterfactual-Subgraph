@@ -5856,3 +5856,7 @@ cost definition remain unchanged.
   delegating hard deletion, teacher scoring, all-match aggregation, and WNode
   distance to the existing production functions; the Mutagenicity matrix is
   unchanged.
+- Older evaluator run manifests may record the teacher path, size, and mtime
+  without an inline SHA256. The paper exporter computes the missing digest
+  from that immutable file and still requires exact agreement with the frozen
+  selection; it never accepts path equality as a substitute for hash equality.
