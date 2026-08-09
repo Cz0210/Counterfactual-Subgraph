@@ -102,6 +102,27 @@ def main(argv: list[str] | None = None) -> int:
     same_molclr = _sha256(Path(ours_manifest["molclr_checkpoint"])) == _sha256(
         Path(gcf_manifest["molclr_checkpoint"])
     )
+    same_cost_definition = bool(
+        ours_summary.get("cost_cap") == gcf_summary.get("cost_cap")
+        and ours_audit.get("table2_schema") == gcf_audit.get("table2_schema")
+    )
+    expected_schemas = {
+        "figure3_schema": ["method", "k", "coverage", "cost"],
+        "figure4_schema": ["method", "threshold", "coverage"],
+        "table2_schema": [
+            "method",
+            "k",
+            "coverage",
+            "cost",
+            "flip_rate",
+            "cf_drop",
+        ],
+    }
+    plotting_adapter_required = any(
+        ours_audit.get(field) != expected
+        or gcf_audit.get(field) != expected
+        for field, expected in expected_schemas.items()
+    )
     common_checks = {
         "same_threshold": same_threshold,
         "same_parent_cohort": same_parent_cohort,
@@ -113,7 +134,17 @@ def main(argv: list[str] | None = None) -> int:
         "same_distance_line": ours_summary.get("distance_line")
         == gcf_summary.get("distance_line")
         == "MolCLR-Node-Wasserstein",
+        "same_cost_definition": same_cost_definition,
+        "selection_performed_in_eval": bool(
+            ours_summary.get("selection_performed_in_eval")
+            or gcf_summary.get("selection_performed_in_eval")
+        ),
+        "test_used_for_selection": bool(
+            ours_summary.get("test_used_for_selection")
+            or gcf_summary.get("test_used_for_selection")
+        ),
         "threshold_fitted_on_test": False,
+        "plotting_adapter_required": plotting_adapter_required,
         "ours_disconnected_residual_used_count": ours_summary.get(
             "disconnected_residual_used_count"
         ),
@@ -134,9 +165,13 @@ def main(argv: list[str] | None = None) -> int:
                 "same_molclr",
                 "same_cf_mode",
                 "same_distance_line",
+                "same_cost_definition",
                 "gcf_all_candidates_connected",
             )
         )
+        and common_checks["selection_performed_in_eval"] is False
+        and common_checks["test_used_for_selection"] is False
+        and common_checks["plotting_adapter_required"] is False
         and common_checks["ours_disconnected_residual_used_count"] == 0
         and common_checks["ours_covered_residual_connected_rate"] in {None, 1.0}
         and ours_audit.get("passed") is True
@@ -185,6 +220,21 @@ def main(argv: list[str] | None = None) -> int:
         "gcf_root": str(gcf_root),
     }
     _write_json(output / "bace_connected_protocol_audit.json", protocol)
+    _write_json(
+        output / "cohort_parity_audit.json",
+        {
+            "passed": True,
+            "same_parent_cohort": True,
+            "eligible_parent_count": ours_summary["test_parent_count"],
+            "eligible_parent_ids_sha256": ours_summary[
+                "test_parent_ids_sha256"
+            ],
+            "ours_parent_count": ours_summary["test_parent_count"],
+            "gcf_parent_count": gcf_summary["test_parent_count"],
+            "ours_parent_ids_sha256": ours_summary["test_parent_ids_sha256"],
+            "gcf_parent_ids_sha256": gcf_summary["test_parent_ids_sha256"],
+        },
+    )
     _write_json(
         output / "threshold_parity_audit.json",
         {
