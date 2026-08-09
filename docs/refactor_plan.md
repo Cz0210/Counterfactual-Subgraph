@@ -613,3 +613,20 @@ A good first rebuilt version should support the following end-to-end workflow:
 7. run a minimal training/evaluation command.
 
 If these are achieved with clean module boundaries, the rebuild is on the right path.
+
+---
+
+## 7. BACE WNode Prefix Optimization Extension
+
+The BACE paper path now has an additive, versioned optimization route:
+
+1. audit frozen rank and coverage funnels;
+2. precompute a calibration-only WNode action matrix;
+3. compare frozen selector variants with grouped calibration CV;
+4. conditionally expand candidates only when the calibration limitation gate
+   identifies a candidate-limited pool;
+5. freeze one rank-preserving Top20 sequence;
+6. run one new test evaluation and a non-promoting paper artifact audit.
+
+This extension reuses the production evaluator and does not alter the AIDS or
+Mutagenicity roadmaps.

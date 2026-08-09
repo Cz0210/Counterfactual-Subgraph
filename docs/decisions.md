@@ -5818,3 +5818,41 @@ schemas directly; no post-experiment compatibility conversion is permitted.
   shared final evaluator after Top20 is frozen.
 - AIDS and Mutagenicity GCFExplainer routes and all existing BACE Ours
   artifacts remain unchanged.
+
+---
+
+## 2026-08-09: BACE Ours calibration-only WNode prefix selection
+
+### Decision
+
+Treat the existing BACE Ours candidate pool, RF teacher, MolCLR checkpoint,
+q05--q90 threshold contract, and test result as immutable provenance. Diagnose
+the flat K=3--10 prefix before changing selection, then build a complete
+calibration parent by unique-action matrix with the production hard-deletion,
+all-match, RF `strict_flip`, and MolCLR-Node-Wasserstein implementations.
+
+Select one nested Top20 outside evaluation using only the 60 frozen
+calibration parents. Compare the existing selector with single-threshold,
+multi-threshold, prefix-weighted, and coverage/structure-redundancy variants.
+Use deterministic five-fold scaffold-grouped calibration CV and the fixed
+pre-registered hyperparameter grid. The frozen BACE threshold manifest is an
+input; Ours may not refit a method-specific threshold.
+
+The selected sequence is immutable before the only new test evaluation.
+Figure 3 uses its nested K=1--20 prefixes, Table 2 uses its first ten actions,
+and Figure 4 uses its first twenty actions. The existing paper CSV schemas and
+cost definition remain unchanged.
+
+### Consequences
+
+- Selector entrypoints reject test- or GCFExplainer-named inputs and record
+  `test_used=false` and `gcf_result_used=false` in frozen provenance.
+- Candidate expansion is conditional on a calibration-only limitation gate.
+  If required, it reuses the frozen stable300 checkpoint and fixed
+  multi-seed/multi-temperature regimes; it never reads test parents.
+- Existing BACE Ours, BACE GCFExplainer, AIDS, and Mutagenicity artifacts are
+  not overwritten or promoted automatically.
+- A new BACE matrix module owns dataset identity, resume, and artifacts while
+  delegating hard deletion, teacher scoring, all-match aggregation, and WNode
+  distance to the existing production functions; the Mutagenicity matrix is
+  unchanged.

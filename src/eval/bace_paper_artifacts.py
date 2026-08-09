@@ -212,6 +212,9 @@ def export_bace_method_artifacts(
     output_dir: str | Path,
     expected_parent_count: int,
     expected_top_k: int = 20,
+    selection_manifest: str | Path | None = None,
+    test_evaluation_count: int | None = None,
+    reference_artifact_root: str | Path | None = None,
 ) -> dict[str, Any]:
     if method not in METHODS:
         raise ValueError(f"Unsupported BACE method: {method}")
@@ -224,6 +227,23 @@ def export_bace_method_artifacts(
         expected_num_parents=int(expected_parent_count),
     )
     theta_star = float(thresholds["theta_star"])
+    selection_contract: dict[str, Any] | None = None
+    selection_manifest_path: Path | None = None
+    if selection_manifest is not None:
+        selection_manifest_path = Path(selection_manifest).expanduser().resolve()
+        selection_contract = json.loads(
+            selection_manifest_path.read_text(encoding="utf-8")
+        )
+        if selection_contract.get("selection_frozen") is not True:
+            raise ValueError("BACE selection manifest is not frozen.")
+        if selection_contract.get("test_used") is not False:
+            raise ValueError("BACE frozen selector does not prove test_used=false.")
+        if selection_contract.get("gcf_result_used") is not False:
+            raise ValueError("BACE frozen selector does not prove gcf_result_used=false.")
+        if selection_contract.get("selection_split") != "calibration":
+            raise ValueError("BACE frozen selector was not selected on calibration.")
+        if int(test_evaluation_count or 0) != 1:
+            raise ValueError("A frozen BACE selection requires test_evaluation_count=1.")
     prefix = compute_k_curve(run, threshold=theta_star, max_k=int(expected_top_k))
     figure3 = [
         {
@@ -281,8 +301,101 @@ def export_bace_method_artifacts(
         _write_csv(
             temporary / f"table2_{method}_k10.csv", [table2], TABLE2_FIELDS
         )
+        run_config = run.config
         candidate_ids = [candidate.candidate_id for candidate in run.candidates]
         parent_ids_sha256 = stable_json_sha256(list(run.parent_ids))
+        selected_candidate_ids_exact = True
+        teacher_identity_exact = True
+        molclr_identity_exact = True
+        threshold_identity_exact = True
+        if selection_contract is not None:
+            selected_candidate_ids_exact = candidate_ids == [
+                str(value) for value in selection_contract.get("selected_candidate_ids", [])
+            ]
+            if not selected_candidate_ids_exact:
+                raise ValueError("Evaluator candidate order differs from frozen selection.")
+            expected_teacher = selection_contract.get("teacher_identity") or {}
+            expected_molclr = selection_contract.get("molclr_identity") or {}
+            actual_teacher = run_config.get("teacher") or {}
+            actual_molclr = run_config.get("molclr_checkpoint")
+            actual_molclr_identity = run_config.get("molclr_checkpoint_identity") or {}
+            if not actual_molclr_identity and actual_molclr:
+                actual_molclr_identity = {
+                    "sha256": sha256_file(Path(str(actual_molclr)).expanduser().resolve())
+                }
+            teacher_identity_exact = bool(
+                expected_teacher.get("sha256")
+                and expected_teacher.get("sha256") == actual_teacher.get("sha256")
+            )
+            molclr_identity_exact = bool(
+                expected_molclr.get("sha256")
+                and expected_molclr.get("sha256")
+                == actual_molclr_identity.get("sha256")
+            )
+            threshold_identity_exact = bool(
+                selection_contract.get("threshold_manifest_sha256")
+                == sha256_file(thresholds_json)
+            )
+            if not teacher_identity_exact:
+                raise ValueError("Evaluator teacher differs from frozen selection.")
+            if not molclr_identity_exact:
+                raise ValueError("Evaluator MolCLR checkpoint differs from frozen selection.")
+            if not threshold_identity_exact:
+                raise ValueError("Evaluator thresholds differ from frozen selection.")
+
+        reference_protocol_exact = True
+        reference_teacher_exact = True
+        reference_molclr_exact = True
+        reference_root: Path | None = None
+        if reference_artifact_root is not None:
+            reference_root = Path(reference_artifact_root).expanduser().resolve()
+            reference_summary = json.loads(
+                (reference_root / "summary.json").read_text(encoding="utf-8")
+            )
+            reference_manifest = json.loads(
+                (reference_root / "run_manifest.json").read_text(encoding="utf-8")
+            )
+            reference_teacher_path = Path(
+                str(reference_manifest.get("teacher_path") or "")
+            ).expanduser()
+            reference_molclr_path = Path(
+                str(reference_manifest.get("molclr_checkpoint") or "")
+            ).expanduser()
+            reference_teacher_exact = bool(
+                reference_teacher_path.is_file()
+                and sha256_file(reference_teacher_path)
+                == (run_config.get("teacher") or {}).get("sha256")
+            )
+            reference_molclr_exact = bool(
+                reference_molclr_path.is_file()
+                and sha256_file(reference_molclr_path)
+                == sha256_file(Path(str(run_config.get("molclr_checkpoint"))).expanduser())
+            )
+            reference_protocol_exact = bool(
+                reference_summary.get("test_parent_ids_sha256") == parent_ids_sha256
+                and math.isclose(
+                    float(reference_summary.get("theta_star")),
+                    theta_star,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    float(reference_summary.get("cost_cap")),
+                    float(thresholds["cost_cap"]),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and reference_summary.get("cf_mode") == CF_MODE
+                and reference_summary.get("distance_line") == DISTANCE_LINE
+                and reference_manifest.get("thresholds_json_sha256")
+                == sha256_file(thresholds_json)
+                and reference_teacher_exact
+                and reference_molclr_exact
+            )
+            if not reference_protocol_exact:
+                raise ValueError(
+                    "BACE v2 test cohort or frozen evaluation protocol differs from original Ours."
+                )
         summary = {
             "schema_version": "bace_paper_method_summary_v1",
             "dataset": "BACE",
@@ -304,11 +417,28 @@ def export_bace_method_artifacts(
             "selection_performed_in_eval": False,
             "test_used_for_selection": False,
             "threshold_fitted_on_test": False,
+            "selection_split": (
+                selection_contract.get("selection_split")
+                if selection_contract is not None
+                else None
+            ),
+            "selected_sequence_sha256": (
+                selection_contract.get("selected_sequence_sha256")
+                if selection_contract is not None
+                else None
+            ),
+            "test_evaluation_count": test_evaluation_count,
             "candidate_order_sha256": stable_json_sha256(candidate_ids),
+            "selected_candidate_ids_exact": selected_candidate_ids_exact,
+            "teacher_identity_exact": teacher_identity_exact,
+            "molclr_identity_exact": molclr_identity_exact,
+            "threshold_identity_exact": threshold_identity_exact,
+            "reference_protocol_exact": reference_protocol_exact,
+            "reference_teacher_exact": reference_teacher_exact,
+            "reference_molclr_exact": reference_molclr_exact,
             "run_complete": True,
         }
         _write_json(temporary / "summary.json", summary)
-        run_config = run.config
         manifest = {
             "schema_version": "bace_paper_method_manifest_v1",
             "dataset": "BACE",
@@ -337,6 +467,31 @@ def export_bace_method_artifacts(
             "cf_mode": CF_MODE,
             "test_used_for_selection": False,
             "threshold_fitted_on_test": False,
+            "selection_split": (
+                selection_contract.get("selection_split")
+                if selection_contract is not None
+                else None
+            ),
+            "selection_manifest": (
+                str(selection_manifest_path)
+                if selection_manifest_path is not None
+                else None
+            ),
+            "selection_manifest_sha256": (
+                sha256_file(selection_manifest_path)
+                if selection_manifest_path is not None
+                else None
+            ),
+            "selected_sequence_sha256": (
+                selection_contract.get("selected_sequence_sha256")
+                if selection_contract is not None
+                else None
+            ),
+            "test_evaluation_count": test_evaluation_count,
+            "reference_artifact_root": str(reference_root) if reference_root else None,
+            "reference_protocol_exact": reference_protocol_exact,
+            "reference_teacher_exact": reference_teacher_exact,
+            "reference_molclr_exact": reference_molclr_exact,
         }
         _write_json(temporary / "run_manifest.json", manifest)
         audit = {
@@ -357,6 +512,23 @@ def export_bace_method_artifacts(
             "selection_performed_in_eval": False,
             "coverage_vs_k_monotone": True,
             "coverage_vs_threshold_monotone": True,
+            "selection_split": (
+                selection_contract.get("selection_split")
+                if selection_contract is not None
+                else None
+            ),
+            "test_used_for_selection": False,
+            "threshold_fitted_on_test": False,
+            "test_evaluation_count": test_evaluation_count,
+            "selected_candidate_ids_exact": selected_candidate_ids_exact,
+            "teacher_identity_exact": teacher_identity_exact,
+            "molclr_identity_exact": molclr_identity_exact,
+            "threshold_identity_exact": threshold_identity_exact,
+            "same_test_parents": reference_protocol_exact,
+            "same_theta": reference_protocol_exact,
+            "same_cost_definition": reference_protocol_exact,
+            "same_reference_teacher": reference_teacher_exact,
+            "same_reference_molclr": reference_molclr_exact,
         }
         _write_json(temporary / "final_artifact_audit.json", audit)
         file_inventory = {

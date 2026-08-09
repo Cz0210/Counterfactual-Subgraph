@@ -18,6 +18,7 @@ from src.eval.bace_paper_artifacts import (
     TABLE2_FIELDS,
     export_bace_method_artifacts,
     freeze_bace_thresholds,
+    sha256_file,
 )
 
 
@@ -77,6 +78,10 @@ def _fake_run(tmp_path: Path, *, display: str, parents: int = 2) -> Path:
         ["rank", "candidate_id", "final_fragment" if ours else "candidate_smiles"],
         candidate_rows,
     )
+    teacher = tmp_path / "bace_teacher.pkl"
+    molclr = tmp_path / "model.pth"
+    teacher.write_bytes(b"teacher")
+    molclr.write_bytes(b"molclr")
     config = {
         "candidate_set_preselected": True,
         "selection_performed_in_eval": False,
@@ -84,8 +89,9 @@ def _fake_run(tmp_path: Path, *, display: str, parents: int = 2) -> Path:
         "cf_mode": "strict_flip",
         "main_ccrcov_uses": "teacher_strict_flip",
         "selection_method": "frozen_external_order",
-        "teacher_path": "bace_teacher.pkl",
-        "molclr_checkpoint": "model.pth",
+        "teacher_path": str(teacher),
+        "teacher": {"path": str(teacher), "sha256": sha256_file(teacher)},
+        "molclr_checkpoint": str(molclr),
     }
     if ours:
         config["ours_selected_path"] = str(candidate_root)
@@ -163,6 +169,61 @@ def test_export_bace_method_uses_fixed_schema_and_prefix(tmp_path: Path) -> None
     assert [int(row["k"]) for row in rows3] == list(range(1, 21))
     assert len(rows4) == 7
     assert summary["selection_performed_in_eval"] is False
+
+
+def test_export_records_frozen_selection_without_changing_csv_schema(
+    tmp_path: Path,
+) -> None:
+    thresholds = _threshold_contract(tmp_path)
+    run = _fake_run(tmp_path, display="Ours")
+    selection = tmp_path / "frozen_selection.json"
+    selection.write_text(
+        json.dumps(
+            {
+                "selection_frozen": True,
+                "selection_split": "calibration",
+                "test_used": False,
+                "gcf_result_used": False,
+                "selected_sequence_sha256": "a" * 64,
+                "selected_candidate_ids": [f"c{rank}" for rank in range(1, 21)],
+                "teacher_identity": {
+                    "sha256": sha256_file(tmp_path / "bace_teacher.pkl")
+                },
+                "molclr_identity": {"sha256": sha256_file(tmp_path / "model.pth")},
+                "threshold_manifest_sha256": sha256_file(thresholds),
+            }
+        ),
+        encoding="utf-8",
+    )
+    reference = tmp_path / "ours_reference"
+    export_bace_method_artifacts(
+        method="ours",
+        test_run_dir=run,
+        thresholds_json=thresholds,
+        output_dir=reference,
+        expected_parent_count=2,
+    )
+    output = tmp_path / "ours_v2"
+    export_bace_method_artifacts(
+        method="ours",
+        test_run_dir=run,
+        thresholds_json=thresholds,
+        output_dir=output,
+        expected_parent_count=2,
+        selection_manifest=selection,
+        test_evaluation_count=1,
+        reference_artifact_root=reference,
+    )
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["selection_split"] == "calibration"
+    assert manifest["selected_sequence_sha256"] == "a" * 64
+    assert manifest["test_evaluation_count"] == 1
+    assert manifest["reference_protocol_exact"] is True
+    audit = json.loads((output / "final_artifact_audit.json").read_text())
+    assert audit["same_reference_teacher"] is True
+    assert audit["same_reference_molclr"] is True
+    with (output / "figure3_coverage_vs_k.csv").open() as handle:
+        assert tuple(csv.DictReader(handle).fieldnames or ()) == FIGURE3_FIELDS
 
 
 def test_single_ours_audit_accepts_direct_paper_root(tmp_path: Path) -> None:

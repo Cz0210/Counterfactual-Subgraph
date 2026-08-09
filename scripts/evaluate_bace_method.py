@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-test-parents", type=int, required=True)
     parser.add_argument("--calibrate-thresholds", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--selection-manifest")
+    parser.add_argument("--test-evaluation-count", type=int)
+    parser.add_argument("--reference-artifact-root")
     return parser
 
 
@@ -188,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         expected_parent_count=args.expected_test_parents,
         expected_top_k=20,
+        selection_manifest=args.selection_manifest,
+        test_evaluation_count=args.test_evaluation_count,
+        reference_artifact_root=args.reference_artifact_root,
     )
     print(json.dumps(summary, sort_keys=True), flush=True)
     print("[BACE_METHOD_PAPER_ARTIFACTS_OK]", flush=True)
