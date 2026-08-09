@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-swap-passes", type=int, default=2)
     parser.add_argument("--forbid-test", action="store_true", required=True)
     parser.add_argument("--require-connected", action="store_true")
+    parser.add_argument("--expansion-manifest")
     return parser
 
 
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         local_swap_passes=int(args.local_swap_passes),
         fold_count=int(args.fold_count),
         require_connected=bool(args.require_connected),
+        expansion_manifest=args.expansion_manifest,
     )
     print(json.dumps(summary, sort_keys=True), flush=True)
     print("[BACE_WNODE_PREFIX_SELECTION_OK]", flush=True)

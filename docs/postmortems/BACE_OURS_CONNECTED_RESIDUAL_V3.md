@@ -35,3 +35,15 @@ The corrected outputs are versioned under:
 The original v2 outputs are preserved read-only. Candidate selection remains
 calibration-only, GCF results are not selector inputs, and the corrected test
 evaluation is allowed exactly once after the connected selection gate passes.
+
+## Calibration gate
+
+The initial connected matrix contained 154 unique actions and 9,240
+parent-action pairs. It rejected 2,682 disconnected match instances before
+teacher or distance evaluation, leaving 48 connected strict-flip pairs. Only
+9 candidates covered any calibration parent at the connected q30 threshold,
+and their union covered 6 of 60 calibration parents. This satisfies the
+pre-registered candidate-limitation rule and authorizes one fixed
+multi-seed/multi-temperature expansion. Expanded source rows must themselves
+have a connected, sanitized recorded source-parent residual before entering
+the merged candidate pool.

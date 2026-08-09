@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import sys
@@ -15,6 +16,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.eval.molclr_node_embeddings import canonicalize_smiles
+
+from rdkit import Chem, RDLogger
+
+
+RDLogger.DisableLog("rdApp.error")
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -53,6 +59,27 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def connected_source_residual_status(row: dict[str, Any]) -> tuple[bool, str]:
+    """Validate the exact source-parent residual recorded by generation."""
+
+    residual_smiles = str(row.get("parent_without_fragment_smiles") or "").strip()
+    if not residual_smiles:
+        return False, "missing_source_residual"
+    mol = Chem.MolFromSmiles(residual_smiles, sanitize=False)
+    if mol is None:
+        return False, "source_residual_parse_failed"
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        return False, "source_residual_sanitize_failed"
+    if mol.GetNumHeavyAtoms() <= 0:
+        return False, "source_residual_empty"
+    canonical = Chem.MolToSmiles(mol, canonical=True)
+    if len(Chem.GetMolFrags(mol)) != 1 or "." in canonical:
+        return False, "source_residual_disconnected"
+    return True, "connected_sanitized_residual"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
@@ -62,6 +89,7 @@ def main() -> int:
     parser.add_argument("--train-parent-ids", required=True)
     parser.add_argument("--test-parent-ids", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--require-connected-source-residual", action="store_true")
     args = parser.parse_args()
     sources = [Path(args.base_pool).expanduser().resolve()] + [
         Path(value).expanduser().resolve() for value in args.regime_pool
@@ -80,12 +108,20 @@ def main() -> int:
         raise ValueError("Train and test candidate-source ID sets overlap")
     chosen: dict[tuple[str, str], tuple[tuple[Any, ...], dict[str, Any]]] = {}
     input_count = 0
+    source_residual_failures: Counter[str] = Counter()
+    connected_source_input_count = 0
     for source_index, source in enumerate(sources):
         for row_index, row in enumerate(_rows(source)):
             input_count += 1
             parent_id = _parent_id(row)
             if parent_id not in train_ids or parent_id in test_ids:
                 raise ValueError(f"Candidate source is outside frozen train cohort: {parent_id}")
+            source_connected, source_reason = connected_source_residual_status(row)
+            if args.require_connected_source_residual and not source_connected:
+                source_residual_failures[source_reason] += 1
+                continue
+            if source_connected:
+                connected_source_input_count += 1
             fragment = canonicalize_smiles(str(row.get("final_fragment") or ""))
             if not fragment:
                 continue
@@ -94,6 +130,8 @@ def main() -> int:
             payload["candidate_lineage_source"] = str(source)
             payload["candidate_lineage_source_index"] = source_index
             payload["candidate_lineage_row_index"] = row_index
+            payload["source_residual_connected"] = source_connected
+            payload["source_residual_validity_reason"] = source_reason
             key = (parent_id, fragment)
             score = (
                 int(_bool(row.get("cf_flip"))),
@@ -129,6 +167,18 @@ def main() -> int:
         ],
         "candidate_pool_sha256": _sha(pool),
         "test_parent_used": False,
+        "connected_source_residual_required": bool(
+            args.require_connected_source_residual
+        ),
+        "connected_source_input_count": connected_source_input_count,
+        "source_residual_filtered_count": sum(source_residual_failures.values()),
+        "source_residual_failure_counts": dict(sorted(source_residual_failures.items())),
+        "all_retained_source_residuals_connected": all(
+            bool(row.get("source_residual_connected")) for row in rows
+        ),
+        "action_semantics_version": "connected_sanitized_residual_v1"
+        if args.require_connected_source_residual
+        else None,
         "run_complete": True,
     }
     (output / "candidate_pool_audit.json").write_text(

@@ -468,7 +468,13 @@ def _sequence_metrics(
     }
 
 
-def _read_a0_sequence(path: str | Path, matrix: MatrixData) -> list[int]:
+def _read_a0_sequence(
+    path: str | Path,
+    matrix: MatrixData,
+    *,
+    allow_missing: bool = False,
+    fallback_indices: Sequence[int] = (),
+) -> list[int]:
     source = Path(path).expanduser().resolve()
     assert_calibration_selector_inputs(source)
     with source.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -483,8 +489,20 @@ def _read_a0_sequence(path: str | Path, matrix: MatrixData) -> list[int]:
     for row in rows:
         fragment = canonicalize_smiles(str(row.get("fragment") or ""))
         if fragment not in by_fragment:
+            if allow_missing:
+                continue
             raise ValueError(f"A0 fragment is absent from the full matrix: {fragment}")
         sequence.append(by_fragment[fragment])
+    if allow_missing:
+        for index in fallback_indices:
+            if index not in sequence:
+                sequence.append(int(index))
+            if len(sequence) == TOP_K:
+                break
+    if len(sequence) != TOP_K:
+        raise ValueError(
+            f"A0 sequence resolves to {len(sequence)} candidates; expected {TOP_K}."
+        )
     if len(set(sequence)) != TOP_K:
         raise ValueError("A0 maps to duplicate canonical matrix candidates.")
     return sequence
@@ -792,6 +810,7 @@ def run_bace_wnode_prefix_selector(
     local_swap_passes: int = 2,
     fold_count: int = 5,
     require_connected: bool = False,
+    expansion_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     assert_calibration_selector_inputs(
         matrix_run_dir, thresholds_json, current_selected_csv, output_dir
@@ -801,6 +820,30 @@ def run_bace_wnode_prefix_selector(
         raise FileExistsError(f"Selector output is non-empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
     matrix = load_calibration_matrix(matrix_run_dir, forbid_test=True)
+    expansion_payload: dict[str, Any] | None = None
+    expansion_manifest_path: Path | None = None
+    if expansion_manifest is not None:
+        expansion_manifest_path = Path(expansion_manifest).expanduser().resolve()
+        assert_calibration_selector_inputs(expansion_manifest_path)
+        expansion_payload = json.loads(
+            expansion_manifest_path.read_text(encoding="utf-8")
+        )
+        matrix_pool = matrix.manifest.get("inputs", {}).get("candidate_pool", {})
+        if not isinstance(expansion_payload, dict):
+            raise ValueError("Expansion manifest must be a JSON object.")
+        required_expansion_contract = {
+            "run_complete": True,
+            "test_parent_used": False,
+            "connected_source_residual_required": True,
+            "all_retained_source_residuals_connected": True,
+        }
+        for field, expected in required_expansion_contract.items():
+            if expansion_payload.get(field) is not expected:
+                raise ValueError(f"Expansion manifest {field} must be {expected!r}.")
+        if expansion_payload.get("candidate_pool_sha256") != matrix_pool.get("sha256"):
+            raise ValueError(
+                "Expansion manifest candidate pool SHA does not match matrix input."
+            )
     if require_connected:
         if matrix.manifest.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
             raise ValueError("BACE connected selector rejects a legacy action matrix.")
@@ -847,7 +890,13 @@ def run_bace_wnode_prefix_selector(
             "connected-valid calibration deletion."
         )
     folds = build_calibration_folds(matrix, fold_count=int(fold_count))
-    a0 = _read_a0_sequence(current_selected_csv, matrix)
+    a0_expansion_adapted = expansion_payload is not None
+    a0 = _read_a0_sequence(
+        current_selected_csv,
+        matrix,
+        allow_missing=a0_expansion_adapted,
+        fallback_indices=eligible_candidate_indices,
+    )
 
     cv_summaries: list[dict[str, Any]] = []
     cv_rows: list[dict[str, Any]] = []
@@ -1000,6 +1049,14 @@ def run_bace_wnode_prefix_selector(
         parent_smiles,
         connected_valid_candidate_count=len(eligible_candidate_indices),
     )
+    expansion_completed = expansion_payload is not None
+    selection_frozen = bool(
+        not limitation["candidate_expansion_required"] or expansion_completed
+    )
+    limitation["preregistered_expansion_completed"] = expansion_completed
+    limitation["post_expansion_pool_still_limited"] = bool(
+        limitation["candidate_expansion_required"] and expansion_completed
+    )
     _write_json(destination / "candidate_pool_limitation_audit.json", limitation)
     _write_csv(destination / "hard_parent_groups.csv", hard_parents)
     _write_csv(destination / "scaffold_coverage.csv", scaffold_rows)
@@ -1023,6 +1080,11 @@ def run_bace_wnode_prefix_selector(
         "folds": [[matrix.parent_ids[index] for index in fold] for fold in folds],
         "test_used": False,
         "gcf_result_used": False,
+        "a0_expansion_adaptation": (
+            "preserve_surviving_current_order_then_stable_connected_fill"
+            if a0_expansion_adapted
+            else "none"
+        ),
         "action_semantics_version": matrix.manifest.get(
             "action_semantics_version", "hard_delete_all_matches_v1"
         ),
@@ -1038,7 +1100,7 @@ def run_bace_wnode_prefix_selector(
     matrix_manifest = matrix.manifest
     selection_record = {
         "schema_version": "bace_ours_wnode_frozen_selection_v2",
-        "selection_frozen": not limitation["candidate_expansion_required"],
+        "selection_frozen": selection_frozen,
         "selection_split": "calibration",
         "test_used": False,
         "gcf_result_used": False,
@@ -1057,8 +1119,15 @@ def run_bace_wnode_prefix_selector(
         "action_semantics_version": decision["action_semantics_version"],
         "match_selection_policy": decision["match_selection_policy"],
         "all_selected_have_connected_valid_calibration_action": all_selected_connected_valid,
+        "preregistered_expansion_completed": expansion_completed,
+        "expansion_manifest": str(expansion_manifest_path)
+        if expansion_manifest_path is not None
+        else None,
+        "expansion_manifest_sha256": _sha256_file(expansion_manifest_path)
+        if expansion_manifest_path is not None
+        else None,
     }
-    if limitation["candidate_expansion_required"]:
+    if not selection_frozen:
         selection_record["freeze_block_reason"] = (
             "candidate_pool_limitation_audit requires preregistered expansion"
         )
@@ -1088,7 +1157,8 @@ def run_bace_wnode_prefix_selector(
         "test_loaded": False,
         "test_used": False,
         "gcf_result_used": False,
-        "selection_frozen": not limitation["candidate_expansion_required"],
+        "selection_frozen": selection_frozen,
+        "preregistered_expansion_completed": expansion_completed,
         "action_semantics_version": decision["action_semantics_version"],
         "match_selection_policy": decision["match_selection_policy"],
         "all_selected_have_connected_valid_calibration_action": all_selected_connected_valid,
@@ -1110,6 +1180,10 @@ def run_bace_wnode_prefix_selector(
             "gcf_result_used": False,
             "action_semantics_version": decision["action_semantics_version"],
             "match_selection_policy": decision["match_selection_policy"],
+            "preregistered_expansion_completed": expansion_completed,
+            "expansion_manifest": str(expansion_manifest_path)
+            if expansion_manifest_path is not None
+            else None,
             "run_complete": True,
         },
     )
@@ -1129,7 +1203,8 @@ def run_bace_wnode_prefix_selector(
         "match_selection_policy": decision["match_selection_policy"],
         "threshold_fitted_on_test": False,
         "selection_performed_in_eval": False,
-        "selection_frozen": not limitation["candidate_expansion_required"],
+        "selection_frozen": selection_frozen,
+        "preregistered_expansion_completed": expansion_completed,
     }
     _write_json(destination / "selector_manifest.json", selection_record)
     _write_json(destination / "selector_audit.json", selector_audit)

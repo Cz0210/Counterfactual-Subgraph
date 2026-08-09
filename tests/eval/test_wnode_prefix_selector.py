@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 import csv
+import json
 import tempfile
 from pathlib import Path
 
+import src.eval.wnode_prefix_selector as selector_module
 from src.eval.mutagenicity_wnode_selector import build_candidate_chemistry
 from src.eval.wnode_prefix_selector import (
     PrefixVariant,
@@ -84,3 +86,61 @@ def test_end_to_end_selector_freezes_ranked_calibration_sequence() -> None:
         with (output / "selected_top20.csv").open(newline="") as handle:
             rows = list(csv.DictReader(handle))
         assert [int(row["rank"]) for row in rows] == list(range(1, 21))
+
+
+def test_preregistered_expansion_freezes_once_without_test_guidance(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="bace_preregistered_expansion_") as temporary:
+        root = Path(temporary)
+        matrix = matrix_data(root, parents=60, candidates=20)
+        thresholds = threshold_manifest(root / "thresholds.json")
+        current = root / "current_selected.csv"
+        with current.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["rank", "fragment"])
+            writer.writeheader()
+            for rank, row in enumerate(matrix.candidate_rows, start=1):
+                writer.writerow(
+                    {
+                        "rank": rank,
+                        "fragment": "Br" if rank == 1 else row["canonical_fragment"],
+                    }
+                )
+        expansion = root / "candidate_pool_audit.json"
+        expansion.write_text(
+            json.dumps(
+                {
+                    "run_complete": True,
+                    "test_parent_used": False,
+                    "connected_source_residual_required": True,
+                    "all_retained_source_residuals_connected": True,
+                    "candidate_pool_sha256": "a" * 64,
+                }
+            ),
+            encoding="utf-8",
+        )
+        original = selector_module._candidate_limitation
+
+        def forced_limitation(*args, **kwargs):
+            audit, rows, scaffolds = original(*args, **kwargs)
+            audit["candidate_expansion_required"] = True
+            return audit, rows, scaffolds
+
+        monkeypatch.setattr(selector_module, "_candidate_limitation", forced_limitation)
+        output = root / "expanded_selector"
+        summary = run_bace_wnode_prefix_selector(
+            matrix_run_dir=matrix.matrix_run_dir,
+            thresholds_json=thresholds,
+            current_selected_csv=current,
+            output_dir=output,
+            expansion_manifest=expansion,
+        )
+        frozen = json.loads((output / "frozen_selection.json").read_text())
+        limitation = json.loads(
+            (output / "candidate_pool_limitation_audit.json").read_text()
+        )
+        assert summary["selection_frozen"] is True
+        assert summary["preregistered_expansion_completed"] is True
+        assert frozen["test_used"] is False
+        assert frozen["preregistered_expansion_completed"] is True
+        assert limitation["post_expansion_pool_still_limited"] is True

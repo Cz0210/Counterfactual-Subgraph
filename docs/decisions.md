@@ -5941,3 +5941,12 @@ immutable evidence and are not promoted.
   entrypoints; this change does not silently reinterpret their frozen files.
 - The old BACE Ours result is invalid for paper use because its rank-1 action
   derived almost all apparent coverage from disconnected residuals.
+
+The first connected calibration pass found only nine candidates with any
+strict flip inside the common q30 threshold and a six-of-sixty parent union.
+This activates the pre-registered, one-shot candidate expansion: the frozen
+checkpoint is sampled at exactly three fixed seed/temperature/top-p regimes.
+The merged formal pool rejects any row whose recorded source-parent deletion
+is empty, unsanitized, or disconnected. After that fixed expansion the best
+calibration-only sequence is frozen once even if the limitation diagnostic
+remains true; no extra seed, test-guided retry, or adaptive budget is allowed.
