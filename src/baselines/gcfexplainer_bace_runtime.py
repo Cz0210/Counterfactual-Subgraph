@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import math
 import os
@@ -10,6 +11,8 @@ import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from rdkit import Chem, rdBase
 
 from src.baselines.gcfexplainer_bace_adapter import (
     DATASET,
@@ -27,13 +30,16 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
     GCFExplainerEmptyCandidateSetError,
     GCFExplainerMutagenicityCodecError,
     GraphRecordDataset,
+    StrictMolecule,
     cohort_hash,
     decode_generated_fullgraph,
     deterministic_balanced_prefix,
+    encode_source_graph,
     graph_lineage_neighbor_wrapper,
     import_official_modules,
     read_json,
     record_to_pyg,
+    reconstruct_source_graph,
     score_teacher_probabilities,
     sha256_file,
     stable_graph_candidate_id,
@@ -549,6 +555,77 @@ def _resolve_parent_lineage(
     }
 
 
+def official_greedy_coverage_order(
+    counterfactual_covering: Mapping[int, set[int]],
+    graphs_covered_by: Mapping[int, set[int]],
+) -> list[tuple[int, int]]:
+    """Return the official greedy order with an exact zero-gain fast path.
+
+    The upstream implementation repeatedly selects the first insertion-ordered
+    candidate having maximum uncovered-parent count.  Once that maximum is
+    zero, every remaining set is empty and upstream deterministically emits the
+    remaining dictionary keys in insertion order.  Fast-forwarding only that
+    zero-gain tail preserves the exact upstream result while avoiding a
+    quadratic scan over tens of thousands of saved VRRW candidates.
+    """
+
+    pending = {
+        int(candidate): set(parents)
+        for candidate, parents in counterfactual_covering.items()
+    }
+    covered: set[int] = set()
+    order: list[tuple[int, int]] = []
+    while pending:
+        candidate, newly_covered = max(
+            pending.items(), key=lambda item: len(item[1])
+        )
+        if not newly_covered:
+            order.extend((int(value), len(covered)) for value in pending)
+            break
+        covered.update(newly_covered)
+        pending.pop(candidate)
+        for parent in newly_covered:
+            for other in graphs_covered_by[int(parent)] - {candidate}:
+                if other in pending:
+                    pending[other].discard(int(parent))
+        order.append((int(candidate), len(covered)))
+    return order
+
+
+def _model_counterfactual_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    graph_map: Mapping[Any, Any],
+    *,
+    limit: int | None,
+) -> tuple[list[Any], list[dict[str, Any]], int]:
+    if limit is not None and int(limit) < 0:
+        raise ValueError("BACE native candidate limit cannot be negative.")
+    graphs: list[Any] = []
+    metadata: list[dict[str, Any]] = []
+    available = 0
+    for source_index, candidate in enumerate(candidates):
+        parts = candidate.get("importance_parts", [0.0])
+        prediction_importance = float(parts[0])
+        graph_hash = candidate.get("graph_hash")
+        if prediction_importance < 0.5 or graph_hash not in graph_map:
+            continue
+        available += 1
+        if limit is not None and len(graphs) >= int(limit):
+            continue
+        graph = graph_map[graph_hash]
+        graphs.append(graph)
+        metadata.append(
+            {
+                "graph_hash": str(graph_hash),
+                "frequency": int(candidate.get("frequency", 0)),
+                "importance_prediction": prediction_importance,
+                "source_candidate_index": int(source_index),
+                "candidate_id": stable_graph_candidate_id(graph),
+            }
+        )
+    return graphs, metadata, available
+
+
 def build_bace_native_summary(
     *,
     dataset_dir: str | Path,
@@ -560,6 +637,7 @@ def build_bace_native_summary(
     profile: str,
     theta: float = OFFICIAL_SUMMARY_THETA,
     minimum_native_export: int = 100,
+    native_candidate_limit: int | None = None,
     device: str = "cuda:0",
 ) -> dict[str, Any]:
     if not math.isclose(float(theta), OFFICIAL_SUMMARY_THETA, rel_tol=0.0, abs_tol=0.0):
@@ -593,25 +671,25 @@ def build_bace_native_summary(
     graph_map = dict(payload.get("graph_map", {}))
     if len(candidates) != int(vrrw_manifest.get("counterfactual_candidate_count", -1)):
         raise ValueError("BACE VRRW candidate count differs from its manifest.")
-    counterfactual_graphs: list[Any] = []
-    candidate_meta: list[dict[str, Any]] = []
-    target_count = max(len(selected_sources), int(minimum_native_export))
-    for index, candidate in enumerate(candidates):
-        parts = candidate.get("importance_parts", [0.0])
-        prediction_importance = float(parts[0])
-        graph_hash = candidate.get("graph_hash")
-        if prediction_importance >= 0.5 and graph_hash in graph_map:
-            counterfactual_graphs.append(graph_map[graph_hash])
-            candidate_meta.append(
-                {
-                    "graph_hash": str(graph_hash),
-                    "frequency": int(candidate.get("frequency", 0)),
-                    "importance_prediction": prediction_importance,
-                    "source_candidate_index": index,
-                }
-            )
-        if len(counterfactual_graphs) >= target_count:
-            break
+    legacy_target_count = max(len(selected_sources), int(minimum_native_export))
+    if native_candidate_limit is None:
+        effective_limit: int | None = legacy_target_count
+    elif int(native_candidate_limit) == 0:
+        effective_limit = None
+    elif int(native_candidate_limit) < int(minimum_native_export):
+        raise ValueError(
+            "BACE native candidate limit must be zero (all) or at least "
+            f"minimum_native_export={minimum_native_export}."
+        )
+    else:
+        effective_limit = int(native_candidate_limit)
+    counterfactual_graphs, candidate_meta, available_model_counterfactuals = (
+        _model_counterfactual_candidates(
+            candidates,
+            graph_map,
+            limit=effective_limit,
+        )
+    )
     if len(counterfactual_graphs) < int(minimum_native_export):
         raise GCFExplainerEmptyCandidateSetError(
             "BACE VRRW produced fewer than 100 model-counterfactual graphs."
@@ -648,33 +726,43 @@ def build_bace_native_summary(
         )[0].tolist():
             counterfactual_covering[int(candidate_index)].add(parent_index)
             graphs_covered_by[parent_index].add(int(candidate_index))
-    coverings = modules["summary"].greedy_counterfactual_summary_from_covering_sets(
-        counterfactual_covering={
-            key: set(value) for key, value in counterfactual_covering.items()
-        },
-        graphs_covered_by={key: set(value) for key, value in graphs_covered_by.items()},
-        k=len(counterfactual_covering),
+    ranked = official_greedy_coverage_order(
+        counterfactual_covering=counterfactual_covering,
+        graphs_covered_by=graphs_covered_by,
     )
-    order = [int(coverings[rank][0]) for rank in sorted(coverings)]
-    selected_graphs = [counterfactual_graphs[index] for index in order]
+    order = [index for index, _covered in ranked]
     native_rows = [
         {
-            "candidate_id": stable_graph_candidate_id(counterfactual_graphs[index]),
+            "candidate_id": candidate_meta[index]["candidate_id"],
             "native_rank": rank,
             "candidate_index": index,
             "graph_hash": candidate_meta[index]["graph_hash"],
             "frequency": candidate_meta[index]["frequency"],
             "importance_prediction": candidate_meta[index]["importance_prediction"],
-            "covered_parent_count_at_rank": int(coverings[rank][1]),
+            "covered_parent_count_at_rank": int(covered_count),
             "selection_method": "official_greedy_coverage_gain",
         }
-        for rank, index in enumerate(order, start=1)
+        for rank, (index, covered_count) in enumerate(ranked, start=1)
     ]
+    inline_graphs = len(order) <= 1000
     _torch_save_compat(
         {
-            "selected_graphs": selected_graphs,
+            "selected_graphs": (
+                [counterfactual_graphs[index] for index in order]
+                if inline_graphs
+                else []
+            ),
+            "selected_graph_hashes": [
+                candidate_meta[index]["graph_hash"] for index in order
+            ],
             "selected_records": native_rows,
             "source_counterfactuals_path": str(counterfactuals_path),
+            "source_counterfactuals_sha256": sha256_file(counterfactuals_path),
+            "graph_storage_mode": (
+                "inline_graphs"
+                if inline_graphs
+                else "vrrw_graph_hash_reference"
+            ),
             "selection_policy": "official_greedy_coverage_gain",
         },
         root / "selected_counterfactual_graphs.pt",
@@ -696,16 +784,28 @@ def build_bace_native_summary(
     )
     _torch_save_compat(distances, root / "native_distance_matrix.pt")
     manifest = {
-        "schema_version": "gcfexplainer_bace_native_summary_v1",
+        "schema_version": "gcfexplainer_bace_native_summary_v2",
         "dataset": DATASET,
         "profile": str(profile),
         "parent_count": len(source_graphs),
         **lineage,
         "native_candidate_count": len(counterfactual_graphs),
+        "available_model_counterfactual_count": available_model_counterfactuals,
+        "native_candidate_limit": (
+            0 if effective_limit is None else int(effective_limit)
+        ),
+        "native_candidate_pool_exhaustive": effective_limit is None
+        or len(counterfactual_graphs) == available_model_counterfactuals,
+        "legacy_native_candidate_limit": legacy_target_count,
         "native_rank_exported": len(native_rows),
         "theta": float(theta),
         "theta_source": "official_summary_default",
         "selection_method": "official_greedy_coverage_gain",
+        "greedy_implementation": "official_semantics_zero_gain_tail_fast_forward",
+        "official_greedy_semantics_preserved": True,
+        "ranked_graph_storage_mode": (
+            "inline_graphs" if inline_graphs else "vrrw_graph_hash_reference"
+        ),
         "gnn_checkpoint": str(checkpoint),
         "gnn_checkpoint_sha256": sha256_file(checkpoint),
         "neurosed_checkpoint": str(neurosed),
@@ -737,6 +837,542 @@ def _origin_index(graph: Any) -> int | None:
     return int(value)
 
 
+def _load_ranked_summary_graphs(
+    summary_root: Path,
+    summary_manifest: Mapping[str, Any],
+) -> list[tuple[dict[str, Any], Any]]:
+    payload = _torch_load_compat(summary_root / "selected_counterfactual_graphs.pt")
+    native_rows = [dict(value) for value in payload.get("selected_records", [])]
+    if not native_rows:
+        raise ValueError("BACE native summary rank payload is empty.")
+    ranks = [int(row["native_rank"]) for row in native_rows]
+    if ranks != list(range(1, len(native_rows) + 1)):
+        raise ValueError(
+            "BACE native summary rows are not in their contiguous native-rank order."
+        )
+    if len({str(row["candidate_id"]) for row in native_rows}) != len(native_rows):
+        raise ValueError("BACE native summary candidate IDs are duplicated.")
+
+    inline = list(payload.get("selected_graphs", []))
+    if inline:
+        if len(inline) != len(native_rows):
+            raise ValueError("BACE inline summary graph/rank counts differ.")
+        return list(zip(native_rows, inline, strict=True))
+
+    graph_hashes = [str(value) for value in payload.get("selected_graph_hashes", [])]
+    if len(graph_hashes) != len(native_rows):
+        raise ValueError("BACE referenced summary graph/rank counts differ.")
+    source_path = Path(
+        str(payload.get("source_counterfactuals_path") or "")
+    ).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"BACE referenced VRRW payload is missing: {source_path}")
+    expected_path = Path(
+        str(summary_manifest.get("counterfactuals_path") or source_path)
+    ).expanduser().resolve()
+    if source_path != expected_path:
+        raise ValueError("BACE summary graph reference path differs from its manifest.")
+    expected_sha = str(
+        payload.get("source_counterfactuals_sha256")
+        or summary_manifest.get("counterfactuals_sha256")
+        or ""
+    )
+    if len(expected_sha) != 64 or sha256_file(source_path) != expected_sha:
+        raise ValueError("BACE referenced VRRW payload SHA256 mismatch.")
+    source_payload = _torch_load_compat(source_path)
+    graph_map = {
+        str(key): graph for key, graph in dict(source_payload.get("graph_map", {})).items()
+    }
+    missing = [value for value in graph_hashes if value not in graph_map]
+    if missing:
+        raise ValueError(
+            "BACE native summary references missing VRRW graphs: "
+            f"{missing[:5]}"
+        )
+    return [
+        (row, graph_map[graph_hash])
+        for row, graph_hash in zip(native_rows, graph_hashes, strict=True)
+    ]
+
+
+def _audit_bace_ranked_candidates(
+    *,
+    ranked: Sequence[tuple[Mapping[str, Any], Any]],
+    source_records: Sequence[Mapping[str, Any]],
+    schema: Any,
+    teacher: Any,
+    target_k: int,
+    scan_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if int(target_k) <= 0:
+        raise ValueError("BACE target_k must be positive.")
+    if int(scan_limit) < 0:
+        raise ValueError("BACE scan_limit cannot be negative.")
+    maximum = len(ranked) if int(scan_limit) == 0 else min(len(ranked), int(scan_limit))
+    audit_rows: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
+    seen_smiles: dict[str, str] = {}
+
+    for native_value, graph in ranked[:maximum]:
+        native = dict(native_value)
+        graph_hash = str(native.get("graph_hash") or "")
+        audit: dict[str, Any] = {
+            "candidate_id": str(native["candidate_id"]),
+            "native_rank": int(native["native_rank"]),
+            "native_score": int(native.get("covered_parent_count_at_rank", 0)),
+            "frequency": int(native.get("frequency", 0)),
+            "graph_hash": graph_hash,
+            "source_graph_index": _origin_index(graph),
+            "decode_ok": False,
+            "parse_ok": False,
+            "sanitize_ok": False,
+            "canonical_smiles": "",
+            "duplicate_of": "",
+            "rf_inference_ok": False,
+            "teacher_prediction": None,
+            "teacher_probability_0": None,
+            "teacher_probability_1": None,
+            "counterfactual_ok": False,
+            "selected": False,
+            "rejection_stage": "",
+            "rejection_reason": "",
+        }
+        origin = audit["source_graph_index"]
+        if origin is None or not 0 <= int(origin) < len(source_records):
+            audit.update(
+                rejection_stage="graph_decode",
+                rejection_reason="missing_or_invalid_source_lineage",
+            )
+            audit_rows.append(audit)
+            continue
+        with rdBase.BlockLogs():
+            decoded = decode_generated_fullgraph(
+                graph,
+                source_record=source_records[int(origin)],
+                schema=schema,
+            )
+        if not decoded.decode_ok:
+            reason = str(decoded.failure_reason)
+            audit.update(
+                rejection_stage=(
+                    "rdkit_sanitize"
+                    if any(token in reason for token in ("sanitize", "kekul", "valence", "aromaticity"))
+                    else "graph_decode"
+                ),
+                rejection_reason=reason,
+            )
+            audit_rows.append(audit)
+            continue
+        smiles = str(decoded.canonical_smiles).strip()
+        audit.update(
+            decode_ok=True,
+            parse_ok=True,
+            sanitize_ok=True,
+            canonical_smiles=smiles,
+        )
+        if not smiles:
+            audit.update(
+                rejection_stage="canonicalization",
+                rejection_reason="empty_canonical_smiles",
+            )
+            audit_rows.append(audit)
+            continue
+        if smiles in seen_smiles:
+            audit.update(
+                duplicate_of=seen_smiles[smiles],
+                rejection_stage="canonicalization",
+                rejection_reason="duplicate_canonical_smiles",
+            )
+            audit_rows.append(audit)
+            continue
+        seen_smiles[smiles] = str(native["candidate_id"])
+        try:
+            prediction, probability0, probability1 = score_teacher_probabilities(
+                teacher, smiles
+            )
+        except Exception as exc:
+            audit.update(
+                rejection_stage="rf_inference",
+                rejection_reason=f"rf_inference_failed:{type(exc).__name__}",
+            )
+            audit_rows.append(audit)
+            continue
+        counterfactual_ok = int(prediction) == TARGET_LABEL
+        audit.update(
+            rf_inference_ok=True,
+            teacher_prediction=int(prediction),
+            teacher_probability_0=float(probability0),
+            teacher_probability_1=float(probability1),
+            counterfactual_ok=counterfactual_ok,
+        )
+        if not counterfactual_ok:
+            audit.update(
+                rejection_stage="rf_target_filter",
+                rejection_reason="rf_not_target_label_0",
+            )
+            audit_rows.append(audit)
+            continue
+        candidate_id = "GCFBACE_" + hashlib.sha256(
+            smiles.encode("utf-8")
+        ).hexdigest()[:20].upper()
+        selected.append(
+            {
+                **native,
+                "candidate_id": candidate_id,
+                "native_candidate_id": str(native["candidate_id"]),
+                "smiles": smiles,
+                "canonical_smiles": smiles,
+                "rdkit_valid": True,
+                "rf_pred": int(prediction),
+                "rf_prob_0": float(probability0),
+                "rf_prob_1": float(probability1),
+                "source_method": "official_gcfexplainer_bace",
+                "selection_method": "native_gcf_summary_rank_filtered_by_validity",
+                "candidate_set_preselected": True,
+                "selection_performed_in_eval": False,
+                "source_parent_id": str(decoded.source_parent_id),
+                "projected_new_edge_count": int(decoded.projected_new_edge_count),
+                "retained_edge_count": int(decoded.retained_edge_count),
+            }
+        )
+        audit.update(selected=True, rejection_stage="selected")
+        audit_rows.append(audit)
+        if len(selected) >= int(target_k):
+            break
+
+    reasons = Counter(
+        str(row["rejection_reason"])
+        for row in audit_rows
+        if str(row["rejection_reason"])
+    )
+    graph_hashes = [str(native.get("graph_hash") or "") for native, _graph in ranked]
+    attrition = {
+        "num_raw_native_records": len(ranked),
+        "num_unique_graph_hashes": len(set(graph_hashes)),
+        "num_ranked_candidates": len(ranked),
+        "num_scanned_candidates": len(audit_rows),
+        "num_decode_success": sum(bool(row["decode_ok"]) for row in audit_rows),
+        "num_decode_failed": sum(not bool(row["decode_ok"]) for row in audit_rows),
+        "num_rdkit_parse_success": sum(bool(row["parse_ok"]) for row in audit_rows),
+        "num_sanitize_success": sum(bool(row["sanitize_ok"]) for row in audit_rows),
+        "num_sanitize_failed": sum(
+            row["rejection_stage"] == "rdkit_sanitize" for row in audit_rows
+        ),
+        "num_canonical_unique": len(seen_smiles),
+        "num_teacher_evaluable": sum(
+            bool(row["rf_inference_ok"]) for row in audit_rows
+        ),
+        "num_teacher_counterfactual": sum(
+            bool(row["counterfactual_ok"]) for row in audit_rows
+        ),
+        "num_retained": len(selected),
+        "requested_k": int(target_k),
+        "scan_limit": int(scan_limit),
+        "max_scanned_rank": (
+            int(audit_rows[-1]["native_rank"]) if audit_rows else 0
+        ),
+        "scan_exhausted": len(audit_rows) == len(ranked),
+        "scan_limit_exhausted": (
+            int(scan_limit) > 0
+            and len(audit_rows) == maximum
+            and len(selected) < int(target_k)
+        ),
+        "target_reached": len(selected) == int(target_k),
+        "failure_reason_counts": dict(sorted(reasons.items())),
+        "native_order_preserved": [
+            int(row["native_rank"]) for row in audit_rows
+        ] == sorted(int(row["native_rank"]) for row in audit_rows),
+        "candidate_repair_performed": False,
+        "candidate_copy_performed": False,
+        "rank_backfill_performed": False,
+        "rf_reranking_performed": False,
+        "wnode_reranking_performed": False,
+        "test_used_for_selection": False,
+    }
+    return audit_rows, selected, attrition
+
+
+def _write_candidate_attrition_artifacts(
+    root: Path,
+    audit_rows: Sequence[Mapping[str, Any]],
+    attrition: Mapping[str, Any],
+) -> None:
+    write_json(root / "candidate_attrition_audit.json", attrition)
+    write_jsonl(root / "candidate_filter_audit.jsonl", audit_rows)
+    write_csv(
+        root / "candidate_attrition_rows.csv",
+        audit_rows,
+        (
+            "candidate_id",
+            "native_rank",
+            "native_score",
+            "frequency",
+            "graph_hash",
+            "source_graph_index",
+            "decode_ok",
+            "parse_ok",
+            "sanitize_ok",
+            "canonical_smiles",
+            "duplicate_of",
+            "rf_inference_ok",
+            "teacher_prediction",
+            "teacher_probability_0",
+            "teacher_probability_1",
+            "counterfactual_ok",
+            "selected",
+            "rejection_stage",
+            "rejection_reason",
+        ),
+    )
+    lines = [f"{key}={value}" for key, value in sorted(attrition.items())]
+    destination = root / "candidate_attrition_report.txt"
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+
+
+def audit_bace_vrrw_candidate_sufficiency(
+    *,
+    dataset_dir: str | Path,
+    vrrw_dir: str | Path,
+    teacher: Any,
+    teacher_path: str | Path,
+    output_dir: str | Path,
+    profile: str,
+    parent_limit: int,
+    target_k: int = 20,
+    scan_limit: int = 0,
+) -> dict[str, Any]:
+    """Prove candidate-pool sufficiency without changing final native ranking.
+
+    Rows are inspected in the immutable VRRW frequency order.  This audit can
+    establish that the completed artifact contains at least ``target_k`` valid
+    RF counterfactual graphs before the more expensive NeuroSED/greedy summary
+    is rebuilt.  Its ranks are explicitly audit-only and are never exported as
+    the final candidate sequence.
+    """
+
+    expected_parent_limit = 64 if profile == "smoke" else EXPECTED_GENERATION_SOURCE_ROWS
+    if int(parent_limit) != expected_parent_limit:
+        raise ValueError("BACE VRRW audit parent_limit differs from profile contract.")
+    root = Path(output_dir).expanduser().resolve()
+    if root.exists() and any(root.iterdir()):
+        raise FileExistsError(f"BACE VRRW audit output cannot be overwritten: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    schema, _train, _val, generation, _summary = load_bace_gcf_dataset(dataset_dir)
+    vrrw_root = Path(vrrw_dir).expanduser().resolve()
+    manifest_path = vrrw_root / "run_manifest.json"
+    manifest = read_json(manifest_path)
+    source_records, lineage = _resolve_parent_lineage(generation, manifest, profile)
+    counterfactuals_path = (vrrw_root / "counterfactuals.pt").resolve()
+    expected_sha = str(manifest.get("counterfactuals_sha256") or "")
+    if len(expected_sha) != 64 or sha256_file(counterfactuals_path) != expected_sha:
+        raise ValueError("BACE VRRW audit artifact SHA256 mismatch.")
+    payload = _torch_load_compat(counterfactuals_path)
+    candidates = list(payload.get("counterfactual_candidates", []))
+    graph_map = dict(payload.get("graph_map", {}))
+    if len(candidates) != int(manifest.get("counterfactual_candidate_count", -1)):
+        raise ValueError("BACE VRRW audit candidate count differs from its manifest.")
+    graphs, metadata, available = _model_counterfactual_candidates(
+        candidates,
+        graph_map,
+        limit=None,
+    )
+    audit_ranked = [
+        (
+            {
+                "candidate_id": item["candidate_id"],
+                "native_rank": rank,
+                "candidate_index": item["source_candidate_index"],
+                "graph_hash": item["graph_hash"],
+                "frequency": item["frequency"],
+                "importance_prediction": item["importance_prediction"],
+                "covered_parent_count_at_rank": 0,
+                "selection_method": "vrrw_frequency_model_cf_sufficiency_audit",
+            },
+            graph,
+        )
+        for rank, (item, graph) in enumerate(zip(metadata, graphs, strict=True), start=1)
+    ]
+    audit_rows, selected, attrition = _audit_bace_ranked_candidates(
+        ranked=audit_ranked,
+        source_records=source_records,
+        schema=schema,
+        teacher=teacher,
+        target_k=int(target_k),
+        scan_limit=int(scan_limit),
+    )
+    audit_summary = {
+        "schema_version": "gcfexplainer_bace_vrrw_candidate_sufficiency_audit_v1",
+        "dataset": DATASET,
+        "profile": str(profile),
+        **lineage,
+        "vrrw_raw_candidate_count": len(candidates),
+        "vrrw_graph_map_count": len(graph_map),
+        "vrrw_model_counterfactual_count": available,
+        "counterfactuals_path": str(counterfactuals_path),
+        "counterfactuals_sha256": expected_sha,
+        "vrrw_manifest_path": str(manifest_path),
+        "vrrw_manifest_sha256": sha256_file(manifest_path),
+        "teacher_path": str(Path(teacher_path).expanduser().resolve()),
+        "teacher_sha256": sha256_file(teacher_path),
+        "rank_semantics": "audit_only_vrrw_frequency_not_final_greedy_rank",
+        "final_selection_performed": False,
+        "candidate_pool_sufficient": len(selected) == int(target_k),
+        "candidate_repair_performed": False,
+        "test_used_for_selection": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        **attrition,
+        "candidate_attrition": dict(attrition),
+    }
+    _write_candidate_attrition_artifacts(root, audit_rows, audit_summary)
+    write_json(root / "candidate_attrition_audit.json", audit_summary)
+    if len(selected) < int(target_k):
+        write_json(root / "_AUDIT_FAILED.json", audit_summary)
+        raise GCFExplainerEmptyCandidateSetError(
+            "INSUFFICIENT_VALID_NATIVE_CANDIDATES: completed BACE VRRW pool "
+            f"contains only {len(selected)} / {target_k} audit-valid candidates."
+        )
+    write_json(root / "_AUDIT_COMPLETE.json", {"audit_passed": True, **audit_summary})
+    return audit_summary
+
+
+def _external_roundtrip_records(
+    path: str | Path,
+    *,
+    expected_split: str,
+    sample_limit: int,
+) -> list[StrictMolecule]:
+    source = Path(path).expanduser().resolve()
+    with source.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    selected = sorted(rows, key=lambda row: str(row.get("molecule_id") or ""))[
+        : int(sample_limit)
+    ]
+    result: list[StrictMolecule] = []
+    for index, row in enumerate(selected):
+        split = str(row.get("split") or "").strip().lower()
+        if split != expected_split:
+            raise ValueError(f"BACE round-trip split mismatch in {source}: {split}")
+        smiles = str(row.get("smiles") or "").strip()
+        molecule = Chem.MolFromSmiles(smiles)
+        if molecule is None:
+            raise ValueError(f"BACE round-trip source SMILES is invalid: {smiles!r}")
+        Chem.SanitizeMol(molecule)
+        canonical = Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
+        label = int(float(str(row.get("label"))))
+        result.append(
+            StrictMolecule(
+                molecule_id=str(row["molecule_id"]),
+                smiles=smiles,
+                canonical_smiles=canonical,
+                label=label,
+                split=split,
+                semantic_label=str(row.get("semantic_label") or ""),
+                source_row_index=index,
+                source_path=str(source),
+            )
+        )
+    return result
+
+
+def audit_bace_source_roundtrip(
+    *,
+    dataset_dir: str | Path,
+    teacher: Any,
+    output_dir: str | Path,
+    calibration_source_csv: str | Path | None = None,
+    test_source_csv: str | Path | None = None,
+    external_sample_limit: int = 16,
+) -> dict[str, Any]:
+    schema, train, val, generation, _summary = load_bace_gcf_dataset(dataset_dir)
+    groups: dict[str, Sequence[Mapping[str, Any]]] = {
+        "train": train,
+        "validation": val,
+        "generation": generation,
+    }
+    for name, path, split in (
+        ("calibration", calibration_source_csv, "calibration"),
+        ("test", test_source_csv, "test"),
+    ):
+        if path is None:
+            continue
+        records = _external_roundtrip_records(
+            path,
+            expected_split=split,
+            sample_limit=int(external_sample_limit),
+        )
+        groups[name] = [encode_source_graph(record, schema) for record in records]
+
+    rows: list[dict[str, Any]] = []
+    split_summary: dict[str, Any] = {}
+    for split_name, records in groups.items():
+        split_failed = 0
+        for record in records:
+            row: dict[str, Any] = {
+                "split": split_name,
+                "molecule_id": str(record["molecule_id"]),
+                "canonical_smiles": str(record["canonical_smiles"]),
+            }
+            try:
+                molecule, checks = reconstruct_source_graph(record, schema)
+                reconstructed = Chem.MolToSmiles(
+                    Chem.RemoveHs(molecule, sanitize=True),
+                    canonical=True,
+                    isomericSmiles=True,
+                )
+                prediction, _probability0, _probability1 = score_teacher_probabilities(
+                    teacher, reconstructed
+                )
+                row.update(
+                    checks,
+                    reconstructed_canonical_smiles=reconstructed,
+                    teacher_prediction=int(prediction),
+                    teacher_prediction_exact=int(prediction) == int(record["label"]),
+                    failure_reason="",
+                )
+                row["round_trip_passed"] = bool(
+                    row["round_trip_passed"] and row["teacher_prediction_exact"]
+                )
+            except Exception as exc:
+                row.update(
+                    round_trip_passed=False,
+                    teacher_prediction_exact=False,
+                    failure_reason=f"{type(exc).__name__}:{exc}",
+                )
+            if row["round_trip_passed"] is not True:
+                split_failed += 1
+            rows.append(row)
+        split_summary[split_name] = {
+            "rows": len(records),
+            "passed": len(records) - split_failed,
+            "failed": split_failed,
+        }
+    summary = {
+        "schema_version": "gcfexplainer_bace_source_roundtrip_audit_v1",
+        "dataset": DATASET,
+        "splits": split_summary,
+        "round_trip_passed": all(value["failed"] == 0 for value in split_summary.values()),
+        "mapping_bug_found": any(value["failed"] > 0 for value in split_summary.values()),
+        "selection_performed": False,
+        "test_used_for_selection": False,
+    }
+    root = Path(output_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    write_json(root / "source_roundtrip_audit.json", summary)
+    fieldnames = tuple(dict.fromkeys(key for row in rows for key in row))
+    write_csv(root / "source_roundtrip_rows.csv", rows, fieldnames)
+    if not summary["round_trip_passed"]:
+        raise GCFExplainerMutagenicityCodecError(
+            "BACE source graph round-trip audit failed."
+        )
+    return summary
+
+
 def export_bace_rf_valid_top20(
     *,
     dataset_dir: str | Path,
@@ -747,6 +1383,8 @@ def export_bace_rf_valid_top20(
     profile: str,
     parent_limit: int,
     top_k: int = 20,
+    scan_limit: int = 0,
+    validate_only: bool = False,
 ) -> dict[str, Any]:
     expected_parent_limit = 64 if profile == "smoke" else EXPECTED_GENERATION_SOURCE_ROWS
     if int(parent_limit) != expected_parent_limit:
@@ -767,128 +1405,17 @@ def export_bace_rf_valid_top20(
     source_records = [by_id[value] for value in parent_ids]
     if len(source_records) != expected_parent_limit:
         raise ValueError("BACE export parent lineage count mismatch.")
-    payload = _torch_load_compat(summary_root / "selected_counterfactual_graphs.pt")
-    graphs = list(payload.get("selected_graphs", []))
-    native_rows = list(payload.get("selected_records", []))
-    if len(graphs) != len(native_rows) or not native_rows:
-        raise ValueError("BACE native summary graph/rank payload is incomplete.")
-    ordered = sorted(
-        zip(native_rows, graphs, strict=True),
-        key=lambda item: int(item[0]["native_rank"]),
+    ordered = _load_ranked_summary_graphs(summary_root, summary_manifest)
+    audit_rows, selected, attrition = _audit_bace_ranked_candidates(
+        ranked=ordered,
+        source_records=source_records,
+        schema=schema,
+        teacher=teacher,
+        target_k=int(top_k),
+        scan_limit=int(scan_limit),
     )
-    ranks = [int(row["native_rank"]) for row, _graph in ordered]
-    if len(ranks) != len(set(ranks)):
-        raise ValueError("BACE native ranks are duplicated.")
-    audit_rows: list[dict[str, Any]] = []
-    candidate_universe: list[dict[str, Any]] = []
-    seen_smiles: set[str] = set()
-    for native, graph in ordered:
-        audit: dict[str, Any] = {
-            "candidate_id": str(native["candidate_id"]),
-            "native_rank": int(native["native_rank"]),
-            "source_graph_index": _origin_index(graph),
-            "decode_ok": False,
-            "sanitize_ok": False,
-            "canonical_smiles": "",
-            "rf_inference_ok": False,
-            "rf_pred": None,
-            "rf_target_match": False,
-            "selected": False,
-            "rejection_stage": "",
-            "rejection_reason": "",
-        }
-        origin = audit["source_graph_index"]
-        if origin is None or not 0 <= int(origin) < len(source_records):
-            audit.update(
-                rejection_stage="graph_decode",
-                rejection_reason="missing_or_invalid_source_lineage",
-            )
-            audit_rows.append(audit)
-            continue
-        decoded = decode_generated_fullgraph(
-            graph, source_record=source_records[int(origin)], schema=schema
-        )
-        if not decoded.decode_ok:
-            audit.update(
-                rejection_stage="rdkit_sanitize"
-                if "sanitize" in str(decoded.failure_reason)
-                or "kekul" in str(decoded.failure_reason)
-                or "valence" in str(decoded.failure_reason)
-                else "graph_decode",
-                rejection_reason=str(decoded.failure_reason),
-            )
-            audit_rows.append(audit)
-            continue
-        smiles = str(decoded.canonical_smiles).strip()
-        audit.update(decode_ok=True, sanitize_ok=True, canonical_smiles=smiles)
-        if not smiles or smiles in seen_smiles:
-            audit.update(
-                rejection_stage="canonicalization",
-                rejection_reason="empty_or_duplicate_canonical_smiles",
-            )
-            audit_rows.append(audit)
-            continue
-        try:
-            prediction, probability0, probability1 = score_teacher_probabilities(
-                teacher, smiles
-            )
-        except Exception as exc:
-            audit.update(
-                rejection_stage="rf_inference",
-                rejection_reason=f"rf_inference_failed:{type(exc).__name__}",
-            )
-            audit_rows.append(audit)
-            continue
-        audit.update(
-            rf_inference_ok=True,
-            rf_pred=int(prediction),
-            rf_target_match=int(prediction) == TARGET_LABEL,
-        )
-        if int(prediction) != TARGET_LABEL:
-            audit.update(
-                rejection_stage="rf_target_filter",
-                rejection_reason="rf_not_target_label_0",
-            )
-            audit_rows.append(audit)
-            continue
-        candidate_id = "GCFBACE_" + hashlib.sha256(smiles.encode("utf-8")).hexdigest()[
-            :20
-        ].upper()
-        candidate_universe.append(
-            {
-                **dict(native),
-                "candidate_id": candidate_id,
-                "native_candidate_id": str(native["candidate_id"]),
-                "smiles": smiles,
-                "canonical_smiles": smiles,
-                "rdkit_valid": True,
-                "rf_pred": int(prediction),
-                "rf_prob_0": float(probability0),
-                "rf_prob_1": float(probability1),
-                "source_method": "official_gcfexplainer_bace",
-                "selection_method": "native_gcf_summary_rank_filtered_by_validity",
-                "candidate_set_preselected": True,
-                "selection_performed_in_eval": False,
-                "source_parent_id": str(decoded.source_parent_id),
-                "projected_new_edge_count": int(decoded.projected_new_edge_count),
-                "retained_edge_count": int(decoded.retained_edge_count),
-            }
-        )
-        seen_smiles.add(smiles)
-        audit_rows.append(audit)
-    selected = candidate_universe[: int(top_k)]
-    selected_ranks = {int(row["native_rank"]) for row in selected}
-    for audit in audit_rows:
-        if audit["rf_target_match"]:
-            if int(audit["native_rank"]) in selected_ranks:
-                audit.update(selected=True, rejection_stage="selected")
-            else:
-                audit.update(
-                    rejection_stage="selected",
-                    rejection_reason="beyond_requested_top_k",
-                )
-    write_jsonl(root / "candidate_filter_audit.jsonl", audit_rows)
-    write_jsonl(root / "candidate_universe.jsonl", candidate_universe)
+    _write_candidate_attrition_artifacts(root, audit_rows, attrition)
+    write_jsonl(root / "candidate_universe.jsonl", selected)
     manifest = {
         "schema_version": "gcfexplainer_bace_frozen_top20_v1",
         "dataset": DATASET,
@@ -899,11 +1426,15 @@ def export_bace_rf_valid_top20(
         "generation_source_parent_rows": EXPECTED_GENERATION_SOURCE_ROWS,
         "summary_parent_count": len(source_records),
         "generation_parent_ids_sha256": stable_json_sha256(parent_ids),
-        "native_rank_input_count": len(native_rows),
+        "native_rank_input_count": len(ordered),
         "candidate_filter_audit_rows": len(audit_rows),
-        "rf_target_candidate_universe_rows": len(candidate_universe),
+        "rf_target_candidate_universe_rows": len(selected),
         "selected_count": len(selected),
         "requested_top_k": int(top_k),
+        "scan_limit": int(scan_limit),
+        "max_scanned_rank": int(attrition["max_scanned_rank"]),
+        "scan_exhausted": bool(attrition["scan_exhausted"]),
+        "candidate_attrition": dict(attrition),
         "selection_method": "native_gcf_summary_rank_filtered_by_validity",
         "candidate_set_preselected": len(selected) == int(top_k),
         "selection_performed_in_eval": False,
@@ -917,7 +1448,9 @@ def export_bace_rf_valid_top20(
         ),
         "calibration_loaded": False,
         "test_loaded": False,
-        "run_complete": len(selected) == int(top_k),
+        "run_complete": len(selected) == int(top_k) and not bool(validate_only),
+        "validation_passed": len(selected) == int(top_k),
+        "validate_only": bool(validate_only),
     }
     write_json(root / "resolved_config.json", manifest)
     write_json(root / "run_manifest.json", manifest)
@@ -925,8 +1458,14 @@ def export_bace_rf_valid_top20(
         write_json(root / "failure_summary.json", manifest)
         write_json(root / "_RUN_FAILED.json", manifest)
         raise GCFExplainerEmptyCandidateSetError(
-            f"BACE native-rank export yielded {len(selected)} / {top_k} candidates."
+            "INSUFFICIENT_VALID_NATIVE_CANDIDATES: BACE native-rank export "
+            f"yielded {len(selected)} / {top_k} candidates after scanning "
+            f"{len(audit_rows)} / {len(ordered)} ranks."
         )
+    if validate_only:
+        write_json(root / "validation_summary.json", manifest)
+        write_json(root / "_VALIDATION_COMPLETE.json", {"validation_passed": True})
+        return manifest
     write_csv(
         root / "selected_top20.csv",
         selected,
@@ -953,8 +1492,11 @@ def export_bace_rf_valid_top20(
 
 
 __all__ = [
+    "audit_bace_source_roundtrip",
+    "audit_bace_vrrw_candidate_sufficiency",
     "build_bace_native_summary",
     "export_bace_rf_valid_top20",
+    "official_greedy_coverage_order",
     "run_bace_official_vrrw",
     "train_bace_official_gnn",
 ]

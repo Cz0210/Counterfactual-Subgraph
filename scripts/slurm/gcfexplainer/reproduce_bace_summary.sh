@@ -31,6 +31,9 @@ SUMMARY_DIR=${SUMMARY_DIR:-$BASE/native_summary}
 EXPORT_DIR=${EXPORT_DIR:-$BASE/export}
 TEACHER_PATH=${TEACHER_PATH:-$SHARED_PROJECT_ROOT/outputs/hpc/oracle/bace/bace_teacher.pkl}
 OFFICIAL_ROOT=${OFFICIAL_ROOT:-$PROJECT_ROOT/baselines/gcfexplainer_official}
+NATIVE_CANDIDATE_LIMIT=${NATIVE_CANDIDATE_LIMIT:-0}
+TARGET_K=${TARGET_K:-20}
+SCAN_LIMIT=${SCAN_LIMIT:-0}
 
 if [ ! -s "$SUMMARY_DIR/_RUN_COMPLETE.json" ]; then
   python scripts/baselines/gcfexplainer/run_bace_summary.py \
@@ -45,6 +48,7 @@ if [ ! -s "$SUMMARY_DIR/_RUN_COMPLETE.json" ]; then
     --profile full \
     --theta 0.1 \
     --minimum-native-export 100 \
+    --native-candidate-limit "$NATIVE_CANDIDATE_LIMIT" \
     --device cuda:0
 fi
 
@@ -58,7 +62,8 @@ if [ ! -s "$EXPORT_DIR/_RUN_COMPLETE.json" ]; then
     --output-dir "$EXPORT_DIR" \
     --profile full \
     --parent-limit 360 \
-    --top-k 20
+    --target-k "$TARGET_K" \
+    --scan-limit "$SCAN_LIMIT"
 fi
 
 test -s "$SUMMARY_DIR/_RUN_COMPLETE.json"

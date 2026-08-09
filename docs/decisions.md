@@ -4,6 +4,45 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-09] Expand BACE GCF native ranking from the frozen VRRW pool
+
+### Background
+
+The completed 50,000-step BACE GCFExplainer VRRW artifact contains 45,488
+saved candidates and 38,637 model-counterfactual candidates. The first native
+summary inherited upstream's one-candidate-per-parent shortlist size and ranked
+only 360 candidates. Chemistry and RF filtering of those ranks retained 2 of
+the required 20, even though the much larger immutable VRRW pool was never
+examined by the summary.
+
+### Decision
+
+Keep the completed VRRW artifact, GNN, NeuroSED distance, theta, teacher, and
+official greedy objective fixed. Permit BACE summary generation to include all
+saved model-counterfactual candidates when the explicit candidate limit is
+zero. Preserve the exact greedy tie behavior and fast-forward only its
+mathematically deterministic all-zero coverage tail. Store large ranked graph
+sequences as hash references to the SHA-frozen VRRW graph map.
+
+Filter the resulting native ranks sequentially until 20 unique, chemically
+valid RF-target candidates are found or the pool is exhausted. Emit structured
+candidate attrition and fail closed when insufficient. Candidate chemistry,
+native order, RF predictions, and WNode values never alter generation or native
+ranking; no repair, copying, rank compaction, or backfill is allowed.
+
+### Consequences
+
+- The 50,000-step VRRW job is reused rather than repeated.
+- BACE source-graph codec identity remains independently gated.
+- The final selected CSV keeps the existing paper evaluator schema.
+- Expanded internal summary storage does not duplicate hundreds of megabytes
+  of graph objects.
+- AIDS and Mutagenicity GCFExplainer behavior is unchanged.
+
+### Status
+
+Accepted
+
 ## [2026-08-04] Restore the audited AIDS GCF-style WNode presentation contract
 
 ### Background

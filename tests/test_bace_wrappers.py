@@ -143,6 +143,23 @@ def test_bace_gcfexplainer_wrappers_preserve_official_full_contract() -> None:
         assert token in vrrw
     assert "scripts/select_mutagenicity_wnode_prefix.py" not in vrrw
 
+    summary = _text("gcfexplainer/reproduce_bace_summary.sh")
+    assert "--native-candidate-limit \"$NATIVE_CANDIDATE_LIMIT\"" in summary
+    assert "NATIVE_CANDIDATE_LIMIT=${NATIVE_CANDIDATE_LIMIT:-0}" in summary
+    assert "--target-k \"$TARGET_K\"" in summary
+    assert "--scan-limit \"$SCAN_LIMIT\"" in summary
+    assert "--top-k 20" not in summary
+
+
+def test_bace_native_candidate_audit_is_nonselective_and_registered_ready() -> None:
+    content = _text("gcfexplainer/audit_bace_native_candidates.sh")
+    assert "audit_bace_native_candidates.py" in content
+    assert "--target-k 20" in content
+    assert "--scan-limit 0" in content
+    assert "calibration_source_label1_teacher_correct.csv" in content
+    assert "test_source_label1_teacher_correct.csv" in content
+    assert "select_mutagenicity_wnode_prefix" not in content
+
 
 def test_bace_gcfexplainer_evaluation_reuses_frozen_wnode_contract() -> None:
     content = _text("bace_eval_gcfexplainer.sh")
