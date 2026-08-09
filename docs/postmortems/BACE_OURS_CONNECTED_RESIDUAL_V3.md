@@ -47,3 +47,16 @@ pre-registered candidate-limitation rule and authorizes one fixed
 multi-seed/multi-temperature expansion. Expanded source rows must themselves
 have a connected, sanitized recorded source-parent residual before entering
 the merged candidate pool.
+
+## Fullgraph report boundary
+
+The first corrected GCFExplainer re-evaluation completed all 2,320 fullgraph
+parent-candidate pairs, then failed during report aggregation because the
+connected protocol guard treated a fullgraph candidate as if it were an Ours
+hard-deletion residual. Fullgraph rows intentionally have no deletion-residual
+fields. The report loader now applies residual connectivity assertions only to
+deletion-action methods; GCFExplainer remains guarded by its separate frozen
+candidate audit, which requires all 20 fullgraph candidates to be sanitized,
+single-component, unique, teacher-counterfactual, and native-rank preserving.
+The completed pair output is reused through the evaluator's existing resume
+path, so this reporting fix does not repeat or alter distance computation.

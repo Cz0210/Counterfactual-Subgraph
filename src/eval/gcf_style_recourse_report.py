@@ -452,6 +452,7 @@ def aggregate_detail_rows(
     allowed_parent_ids: set[str] | None = None,
     action_semantics_version: str = "hard_delete_all_matches_v1",
     match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
+    connected_residual_action: bool = True,
 ) -> tuple[
     tuple[str, ...],
     dict[tuple[str, str], PairRecourse],
@@ -508,7 +509,10 @@ def aggregate_detail_rows(
             strict_flip_mismatch_rows += 1
         if not strict_flip:
             continue
-        if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
+        if (
+            connected_residual_action
+            and action_semantics_version == CONNECTED_ACTION_SEMANTICS
+        ):
             if match_selection_policy != CONNECTED_MATCH_SELECTION_POLICY:
                 raise ValueError(
                     "Connected detail aggregation requires the connected match policy."
@@ -666,6 +670,7 @@ def load_method_run(
         or "hard_delete_all_matches_v1",
         match_selection_policy=_text(config.get("match_selection_policy"))
         or "min_wnode_then_cfdrop_then_match_index_v1",
+        connected_residual_action=ours,
     )
     if len(methods) != 1:
         raise ValueError(f"Expected one evaluator method in {detail_path}, found {sorted(methods)}")

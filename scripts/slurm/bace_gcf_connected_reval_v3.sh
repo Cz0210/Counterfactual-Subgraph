@@ -34,6 +34,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_common3_conn
 WNODE_CACHE_DB=${WNODE_CACHE_DB:-$ARTIFACT_ROOT/outputs/hpc/cache/distance_cache/molclr_node_wasserstein_connected_residual_v3.sqlite}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
+RESUME_WORK=${RESUME_WORK:-0}
 
 for path in "$CANDIDATE_PATH" "$GCF_CANDIDATE_AUDIT" "$TEACHER_PATH" "$MOLCLR_CHECKPOINT" "$TEST_CSV" "$THRESHOLDS_JSON"; do
   test -s "$path" || { echo "[BACE_GCF_CONNECTED_CONFIG_ERROR] missing $path" >&2; exit 2; }
@@ -65,6 +66,9 @@ args=(
   --match-selection-policy existential_min_wnode_among_valid_connected_strict_flips_v1
   --wnode-cache-db "$WNODE_CACHE_DB"
 )
+if [ "$RESUME_WORK" = 1 ]; then
+  args+=(--resume)
+fi
 echo "hostname=$(hostname)"
 echo "git_commit=$(git rev-parse HEAD)"
 echo "python=$(which python)"
@@ -76,6 +80,8 @@ if [ "$DRY_RUN" = 1 ] || [ "$VALIDATE_ONLY" = 1 ]; then
   exit 0
 fi
 test ! -e "$OUTPUT_DIR" || { echo "[BACE_GCF_CONNECTED_COLLISION] $OUTPUT_DIR" >&2; exit 2; }
-test ! -e "$WORK_DIR/test" || { echo "[BACE_GCF_CONNECTED_WORK_COLLISION] $WORK_DIR/test" >&2; exit 2; }
+if [ "$RESUME_WORK" != 1 ]; then
+  test ! -e "$WORK_DIR/test" || { echo "[BACE_GCF_CONNECTED_WORK_COLLISION] $WORK_DIR/test" >&2; exit 2; }
+fi
 "${args[@]}"
 echo "[BACE_GCF_CONNECTED_REVAL_V3_SUCCESS]"
