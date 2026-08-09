@@ -30,6 +30,10 @@ candidate attrition and fail closed when insufficient. Candidate chemistry,
 native order, RF predictions, and WNode values never alter generation or native
 ranking; no repair, copying, rank compaction, or backfill is allowed.
 
+Treat native rank as the unique summary-row identity. Structural candidate IDs
+may repeat when distinct VRRW records encode the same graph; these records stay
+in sequence and are accounted for by the canonical-SMILES deduplication audit.
+
 ### Consequences
 
 - The 50,000-step VRRW job is reused rather than repeated.

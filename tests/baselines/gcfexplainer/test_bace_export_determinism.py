@@ -39,7 +39,7 @@ def test_candidate_export_is_deterministic_and_keeps_native_slots(
     assert first[2]["wnode_reranking_performed"] is False
 
 
-def test_large_summary_graph_hash_references_rehydrate_in_native_order(
+def test_duplicate_structural_ids_rehydrate_in_native_rank_order(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -48,7 +48,7 @@ def test_large_summary_graph_hash_references_rehydrate_in_native_order(
     source = tmp_path / "counterfactuals.pt"
     source.write_bytes(b"immutable-vrrw")
     rows = [
-        {"candidate_id": f"N{rank}", "native_rank": rank}
+        {"candidate_id": "DUPLICATE_STRUCTURAL_ID", "native_rank": rank}
         for rank in range(1, 4)
     ]
     selected_payload = {
@@ -77,3 +77,27 @@ def test_large_summary_graph_hash_references_rehydrate_in_native_order(
     )
     assert [int(row["native_rank"]) for row, _graph in resolved] == [1, 2, 3]
     assert [graph.candidate_test_index for _row, graph in resolved] == [1, 2, 3]
+
+
+def test_duplicate_native_ids_do_not_duplicate_final_candidate_ids(
+    monkeypatch,
+    source_records,
+) -> None:
+    ranked = ranked_candidates(3)
+    ranked[1][0]["candidate_id"] = ranked[0][0]["candidate_id"]
+    monkeypatch.setattr(
+        runtime,
+        "decode_generated_fullgraph",
+        lambda graph, **_kwargs: decode_result(graph.candidate_test_index),
+    )
+    _audit, selected, summary = runtime._audit_bace_ranked_candidates(
+        ranked=ranked,
+        source_records=source_records,
+        schema=object(),
+        teacher=FakeTeacher({"C0", "C1", "C2"}),
+        target_k=3,
+        scan_limit=0,
+    )
+    assert summary["num_duplicate_native_candidate_ids"] == 1
+    assert summary["selected_candidate_ids_unique"] is True
+    assert len({row["candidate_id"] for row in selected}) == 3

@@ -850,8 +850,10 @@ def _load_ranked_summary_graphs(
         raise ValueError(
             "BACE native summary rows are not in their contiguous native-rank order."
         )
-    if len({str(row["candidate_id"]) for row in native_rows}) != len(native_rows):
-        raise ValueError("BACE native summary candidate IDs are duplicated.")
+    # ``candidate_id`` is a structural identity, not the ranked-row key.  The
+    # VRRW pool can contain the same graph through distinct native records, so
+    # native rank is the unique row identity and canonical dedup belongs to the
+    # sequential export audit below.
 
     inline = list(payload.get("selected_graphs", []))
     if inline:
@@ -985,7 +987,9 @@ def _audit_bace_ranked_candidates(
             )
             audit_rows.append(audit)
             continue
-        seen_smiles[smiles] = str(native["candidate_id"])
+        seen_smiles[smiles] = (
+            f"{native['candidate_id']}@native_rank={int(native['native_rank'])}"
+        )
         try:
             prediction, probability0, probability1 = score_teacher_probabilities(
                 teacher, smiles
@@ -1046,9 +1050,21 @@ def _audit_bace_ranked_candidates(
         if str(row["rejection_reason"])
     )
     graph_hashes = [str(native.get("graph_hash") or "") for native, _graph in ranked]
+    native_candidate_ids = [
+        str(native.get("candidate_id") or "") for native, _graph in ranked
+    ]
+    selected_candidate_ids = [str(row["candidate_id"]) for row in selected]
+    selected_candidate_ids_unique = len(selected_candidate_ids) == len(
+        set(selected_candidate_ids)
+    )
+    if not selected_candidate_ids_unique:
+        raise ValueError("BACE selected candidate IDs are not unique.")
     attrition = {
         "num_raw_native_records": len(ranked),
         "num_unique_graph_hashes": len(set(graph_hashes)),
+        "num_unique_native_candidate_ids": len(set(native_candidate_ids)),
+        "num_duplicate_native_candidate_ids": len(native_candidate_ids)
+        - len(set(native_candidate_ids)),
         "num_ranked_candidates": len(ranked),
         "num_scanned_candidates": len(audit_rows),
         "num_decode_success": sum(bool(row["decode_ok"]) for row in audit_rows),
@@ -1078,6 +1094,7 @@ def _audit_bace_ranked_candidates(
             and len(selected) < int(target_k)
         ),
         "target_reached": len(selected) == int(target_k),
+        "selected_candidate_ids_unique": selected_candidate_ids_unique,
         "failure_reason_counts": dict(sorted(reasons.items())),
         "native_order_preserved": [
             int(row["native_rank"]) for row in audit_rows
