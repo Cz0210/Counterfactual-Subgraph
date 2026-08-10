@@ -175,3 +175,39 @@ def test_bace_gcfexplainer_evaluation_reuses_frozen_wnode_contract() -> None:
         "candidate_kind": "fullgraph",
         "selection_method": "native_gcf_summary_rank_filtered_by_validity",
     }
+
+
+def test_bace_common4_globalgce_and_comrecgc_wrappers_are_isolated() -> None:
+    names = (
+        "build_bace_train_pool.sh",
+        "freeze_bace_frequency_top20.sh",
+        "bace_eval_globalgce_connected_v1.sh",
+        "comrecgc_bace_project_generate.sh",
+        "comrecgc_bace_generation_integrity.sh",
+        "comrecgc_bace_common_recourse.sh",
+        "comrecgc_bace_project_chemistry.sh",
+        "comrecgc_bace_slot_eval.sh",
+        "comrecgc_bace_artifact_gate.sh",
+        "bace_import_v4_common4.sh",
+        "bace_common4_connected_audit.sh",
+    )
+    for name in names:
+        content = _text(name)
+        assert "#SBATCH --partition=A800" in content
+        assert "#SBATCH --gres=gpu:a800:1" in content
+        assert "#SBATCH --output=logs/%j.out" in content
+        assert "#SBATCH --error=logs/%j.err" in content
+        assert 'cd "$PROJECT_ROOT"' in content
+        assert "export PYTHONPATH=$PWD" in content
+        assert "DRY_RUN" in content
+        assert "VALIDATE_ONLY" in content
+        assert "afterany" not in content
+    assert METHODS["globalgce"] == {
+        "display": "GlobalGCE",
+        "candidate_kind": "fullgraph",
+        "selection_method": "globalgce_frequency_top20_train_support_v1",
+    }
+    generation = _text("comrecgc_bace_project_generate.sh")
+    assert "--parent-limit 360" in generation
+    assert "scientific_parameters=seed0,steps50000,heads5" in generation
+    assert "bace/project_full_connected_v1" in generation

@@ -22,7 +22,11 @@ from .contracts import (
     write_json,
 )
 from .model_adapter import AIDSGreedEmbeddingAdapter
-from .project_dataset import load_aids_generation_bundle, load_mutagenicity_generation_bundle
+from .project_dataset import (
+    load_aids_generation_bundle,
+    load_bace_generation_bundle,
+    load_mutagenicity_generation_bundle,
+)
 from .upstream import imported_upstream
 
 
@@ -241,11 +245,18 @@ def run_common_recourse(
             source_csv=source_csv,
             parent_limit=parent_limit,
         )
-    else:
+    elif dataset == "mutagenicity":
         bundle = load_mutagenicity_generation_bundle(
             dataset_dir=dataset_dir,
             parent_limit=parent_limit,
         )
+    elif dataset == "bace":
+        bundle = load_bace_generation_bundle(
+            dataset_dir=dataset_dir,
+            parent_limit=parent_limit,
+        )
+    else:
+        raise ValueError(f"Unsupported project dataset: {dataset}")
     payload_path = Path(generation_manifest["counterfactuals_path"]).resolve()
     if sha256_file(payload_path) != generation_manifest["counterfactuals_sha256"]:
         raise ValueError("Generation counterfactual artifact SHA256 mismatch.")

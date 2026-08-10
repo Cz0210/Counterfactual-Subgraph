@@ -36,6 +36,16 @@ from src.baselines.comrecgc.slot_evaluation import (  # noqa: E402
     write_jsonl,
 )
 from src.eval.close_counterfactual_coverage import _load_parent_records  # noqa: E402
+from src.chem.hard_deletion import (  # noqa: E402
+    CONNECTED_ACTION_SEMANTICS,
+    CONNECTED_MATCH_SELECTION_POLICY,
+)
+
+
+BACE_METHOD = "COMRECGC"
+BACE_FIGURE3_FIELDS = ("method", "k", "coverage", "cost")
+BACE_FIGURE4_FIELDS = ("method", "threshold", "coverage")
+BACE_TABLE2_FIELDS = ("method", "k", "coverage", "cost", "flip_rate", "cf_drop")
 
 
 def _threshold_contract(
@@ -122,6 +132,8 @@ def _run_shared_evaluator(
     max_parents: int,
     device: str,
     resume: bool,
+    action_semantics_version: str = "hard_delete_all_matches_v1",
+    match_selection_policy: str = "min_wnode_then_cfdrop_then_match_index_v1",
 ) -> list[dict[str, str]]:
     argv = [
         sys.executable,
@@ -174,6 +186,10 @@ def _run_shared_evaluator(
         METHOD,
         "--selection-method",
         SELECTION_METHOD,
+        "--action-semantics-version",
+        action_semantics_version,
+        "--match-selection-policy",
+        match_selection_policy,
         "--preselected-topk",
         "1",
         "--require-preselected-topk",
@@ -199,6 +215,105 @@ def _run_shared_evaluator(
     return read_csv(details)
 
 
+def _apply_bace_connected_candidate_gate(
+    slots: list[dict[str, Any]],
+) -> dict[str, int | bool]:
+    """Invalidate disconnected repaired medoids without changing rank slots."""
+
+    from rdkit import Chem
+
+    repaired = 0
+    connected = 0
+    disconnected = 0
+    for slot in slots:
+        slot["connected_action_semantics"] = CONNECTED_ACTION_SEMANTICS
+        slot["repaired_sanitize_ok"] = False
+        slot["repaired_num_components"] = None
+        slot["repaired_contains_dot"] = False
+        slot["repaired_connected"] = False
+        if not bool(slot.get("candidate_slot_valid")):
+            continue
+        repaired += 1
+        smiles = str(slot.get("repaired_smiles") or "").strip()
+        molecule = Chem.MolFromSmiles(smiles)
+        sanitize_ok = False
+        component_count: int | None = None
+        if molecule is not None and molecule.GetNumAtoms() > 0:
+            try:
+                Chem.SanitizeMol(molecule)
+                sanitize_ok = True
+                component_count = len(Chem.GetMolFrags(molecule))
+            except Exception:
+                sanitize_ok = False
+        contains_dot = "." in smiles
+        is_connected = bool(
+            sanitize_ok
+            and molecule is not None
+            and molecule.GetNumAtoms() > 0
+            and component_count == 1
+            and not contains_dot
+        )
+        slot["repaired_sanitize_ok"] = sanitize_ok
+        slot["repaired_num_components"] = component_count
+        slot["repaired_contains_dot"] = contains_dot
+        slot["repaired_connected"] = is_connected
+        if is_connected:
+            connected += 1
+            continue
+        disconnected += 1
+        slot["candidate_slot_valid"] = False
+        slot["slot_status"] = "CONNECTED_PROTOCOL_INVALID"
+        slot["slot_rejection_reason"] = (
+            "repaired_candidate_not_nonempty_sanitized_single_component"
+        )
+    return {
+        "repaired_slot_count_before_connected_gate": repaired,
+        "connected_repaired_slot_count": connected,
+        "disconnected_repaired_slot_count": disconnected,
+        "disconnected_output_used_count": 0,
+        "all_repaired_candidates_connected": disconnected == 0,
+        "all_evaluated_candidates_connected": True,
+    }
+
+
+def _bace_paper_rows(
+    *,
+    prefixes: list[dict[str, Any]],
+    figure4: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    by_k = {int(row["k"]): row for row in prefixes}
+    figure3_rows = [
+        {
+            "method": BACE_METHOD,
+            "k": int(row["k"]),
+            "coverage": float(row["close_cf_coverage"]),
+            "cost": row.get("conditional_median_cost"),
+        }
+        for row in prefixes
+    ]
+    figure4_rows = [
+        {
+            "method": BACE_METHOD,
+            "threshold": float(row["threshold"]),
+            "coverage": float(row["close_cf_coverage"]),
+        }
+        for row in figure4
+    ]
+    return figure3_rows, figure4_rows, by_k
+
+
+def _bace_table_row(prefix: dict[str, Any]) -> dict[str, Any]:
+    covered = int(prefix.get("num_close_cf_covered") or 0)
+    return {
+        "method": BACE_METHOD,
+        "k": int(prefix["k"]),
+        "coverage": float(prefix["close_cf_coverage"]),
+        "cost": prefix.get("conditional_median_cost"),
+        "flip_rate": 1.0 if covered > 0 else 0.0,
+        "cf_drop": prefix.get("avg_cf_drop_among_covered"),
+    }
+
+
 def _parent_records(dataset_csv: Path, expected_count: int) -> tuple[list[str], str]:
     _path, records, label_column = _load_parent_records(
         dataset_csv,
@@ -219,8 +334,12 @@ def _parent_records(dataset_csv: Path, expected_count: int) -> tuple[list[str], 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("smoke", "full"), required=True)
-    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), default="mutagenicity")
+    parser.add_argument(
+        "--dataset", choices=("aids", "mutagenicity", "bace"), default="mutagenicity"
+    )
     parser.add_argument("--chemistry-dir", required=True)
     parser.add_argument("--dataset-csv", required=True)
     parser.add_argument("--teacher-path", required=True)
@@ -257,6 +376,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(chemistry_payload, dict) or chemistry_payload.get("run_complete") is not True:
         raise ValueError("Chemistry audit manifest is incomplete.")
     all_slots = load_official_slots(chemistry / "medoid_validity.csv")
+    connected_gate: dict[str, int | bool] | None = None
+    if args.dataset == "bace":
+        connected_gate = _apply_bace_connected_candidate_gate(all_slots)
     slots = all_slots[: int(args.max_k)]
     valid_candidates = build_internal_valid_candidates(slots)
     write_csv(root / "selected_rank_slots.csv", all_slots)
@@ -287,6 +409,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_parents=args.expected_parent_count,
             device=args.device,
             resume=args.resume,
+            action_semantics_version=(
+                CONNECTED_ACTION_SEMANTICS
+                if args.dataset == "bace"
+                else "hard_delete_all_matches_v1"
+            ),
+            match_selection_policy=(
+                CONNECTED_MATCH_SELECTION_POLICY
+                if args.dataset == "bace"
+                else "min_wnode_then_cfdrop_then_match_index_v1"
+            ),
         )
         evaluator_invoked = True
     else:
@@ -314,6 +446,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_parents=1,
             device=args.device,
             resume=args.resume,
+            action_semantics_version=(
+                CONNECTED_ACTION_SEMANTICS
+                if args.dataset == "bace"
+                else "hard_delete_all_matches_v1"
+            ),
+            match_selection_policy=(
+                CONNECTED_MATCH_SELECTION_POLICY
+                if args.dataset == "bace"
+                else "min_wnode_then_cfdrop_then_match_index_v1"
+            ),
         )
         interface_probe_invoked = True
     pair_rows = expand_pair_rows(
@@ -334,20 +476,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     figure4 = [row for row in threshold_metrics if int(row["k"]) == int(args.max_k)]
     write_csv(root / "prefix_metrics.csv", prefixes)
     write_json(root / "prefix_metrics.json", {"prefix_metrics": prefixes})
-    write_csv(root / "figure3_coverage_vs_k.csv", prefixes)
-    write_csv(root / "figure4_coverage_vs_threshold.csv", figure4)
+    if args.dataset == "bace":
+        bace_figure3, bace_figure4, by_k = _bace_paper_rows(
+            prefixes=prefixes,
+            figure4=figure4,
+        )
+        write_csv(root / "figure3_coverage_vs_k.csv", bace_figure3)
+        write_csv(root / "figure4_coverage_vs_threshold.csv", bace_figure4)
+    else:
+        by_k = {int(row["k"]): row for row in prefixes}
+        write_csv(root / "figure3_coverage_vs_k.csv", prefixes)
+        write_csv(root / "figure4_coverage_vs_threshold.csv", figure4)
     write_csv(root / "parent_best_distances.csv", parent_best)
-    by_k = {int(row["k"]): row for row in prefixes}
     for k in (10, 20):
+        row = (
+            _bace_table_row(by_k[k])
+            if args.dataset == "bace"
+            else table_row(
+                by_k[k],
+                theta_star=theta_star,
+                dataset="AIDS" if args.dataset == "aids" else "Mutagenicity",
+            )
+        )
         write_csv(
             root / f"table2_comrecgc_k{k}.csv",
-            [
-                table_row(
-                    by_k[k],
-                    theta_star=theta_star,
-                    dataset="AIDS" if args.dataset == "aids" else "Mutagenicity",
-                )
-            ],
+            [row],
         )
     audit = build_final_audit(
         root=root,
@@ -361,7 +514,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     summary = {
         **audit,
-        "dataset": "AIDS" if args.dataset == "aids" else "Mutagenicity",
+        "dataset": {
+            "aids": "AIDS",
+            "mutagenicity": "Mutagenicity",
+            "bace": "BACE",
+        }[args.dataset],
         "dataset_key": args.dataset,
         "mode": args.mode,
         "theta_star": theta_star,
@@ -376,6 +533,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "k20_coverage": float(by_k[20]["close_cf_coverage"]),
         "k20_conditional_median_cost": by_k[20]["conditional_median_cost"],
     }
+    if args.dataset == "bace":
+        summary.update(
+            {
+                "method": BACE_METHOD,
+                "test_parent_count": len(parent_ids),
+                "test_parent_ids_sha256": stable_json_sha256(parent_ids),
+                "candidate_count": len(all_slots),
+                "test_evaluation_count": 1,
+                "cost_definition": "applicable_parent_conditional_median_wnode",
+                "action_semantics_version": CONNECTED_ACTION_SEMANTICS,
+                "match_selection_policy": CONNECTED_MATCH_SELECTION_POLICY,
+                "connected_action_semantics": True,
+                **dict(connected_gate or {}),
+            }
+        )
+        audit.update(
+            {
+                "passed": bool(audit["audit_passed"]),
+                "dataset": "BACE",
+                "method": BACE_METHOD,
+                "action_semantics_version": CONNECTED_ACTION_SEMANTICS,
+                "match_selection_policy": CONNECTED_MATCH_SELECTION_POLICY,
+                "connected_action_semantics": True,
+                **dict(connected_gate or {}),
+            }
+        )
+        write_json(root / "final_artifact_audit.json", audit)
     write_json(root / "summary.json", summary)
     run_manifest = {
         **summary,

@@ -36,6 +36,7 @@ from .preregistration import (
 )
 from .project_dataset import (
     load_aids_generation_bundle,
+    load_bace_generation_bundle,
     load_mutagenicity_generation_bundle,
 )
 from .runtime import _torch_load, _torch_save_atomic, validate_counterfactual_payload
@@ -247,25 +248,41 @@ def _mapping_payloads(
 
 
 def _source_and_noop_gate(
-    *, root: Path, dataset_dir: Path, parent_limit: int
+    *, root: Path, dataset_dir: Path, parent_limit: int, dataset: str
 ) -> tuple[Any, list[Any], dict[str, Mapping[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     from rdkit import Chem
     from torch_geometric.data import Batch
 
     from src.baselines.gcfexplainer_mutagenicity_adapter import (
         decode_generated_fullgraph,
-        load_dataset_artifacts,
         reconstruct_source_graph,
     )
 
+    if dataset == "bace":
+        from src.baselines.gcfexplainer_bace_adapter import (
+            load_bace_gcf_dataset as load_dataset_artifacts,
+        )
+
+        bundle_loader = load_bace_generation_bundle
+    elif dataset == "mutagenicity":
+        from src.baselines.gcfexplainer_mutagenicity_adapter import (
+            load_dataset_artifacts,
+        )
+
+        bundle_loader = load_mutagenicity_generation_bundle
+    else:
+        raise ValueError(f"Unsupported shared molecular graph codec: {dataset}")
+
     schema, _train, _val, generation, _summary = load_dataset_artifacts(dataset_dir)
     records = sorted(generation, key=lambda row: str(row["molecule_id"]))[: int(parent_limit)]
-    bundle = load_mutagenicity_generation_bundle(
+    bundle = bundle_loader(
         dataset_dir=dataset_dir,
         parent_limit=parent_limit,
     )
     if len(records) != parent_limit or len(bundle.graphs) != parent_limit:
-        raise ValueError("Mutagenicity source cohort does not match the frozen smoke parent count.")
+        raise ValueError(
+            f"{dataset} source cohort does not match the frozen parent count."
+        )
     record_by_id = {str(row["molecule_id"]): row for row in records}
     source_rows: list[dict[str, Any]] = []
     no_op_rows: list[dict[str, Any]] = []
@@ -338,9 +355,9 @@ def _source_and_noop_gate(
             }
         )
     if not all(bool(row["roundtrip_ok"]) for row in source_rows):
-        raise ValueError("Mutagenicity source round-trip is not 100%; repair is forbidden.")
+        raise ValueError(f"{dataset} source round-trip is not 100%; repair is forbidden.")
     if not all(bool(row["noop_roundtrip_ok"]) for row in no_op_rows):
-        raise ValueError("Mutagenicity no-op/serialization round-trip is not 100%.")
+        raise ValueError(f"{dataset} no-op/serialization round-trip is not 100%.")
     return schema, bundle.graphs, record_by_id, source_rows, no_op_rows
 
 
@@ -495,7 +512,7 @@ def run_mutagenicity_chemistry_audit(
 ) -> dict[str, Any]:
     """Audit all raw candidates, replay exact actions, and freeze one repair each."""
 
-    if dataset not in {"aids", "mutagenicity"}:
+    if dataset not in {"aids", "mutagenicity", "bace"}:
         raise ValueError(f"Unsupported project chemistry dataset: {dataset}")
     if dataset == "aids" and source_csv is None:
         raise ValueError("AIDS/HIV chemistry audit requires source_csv.")
@@ -559,6 +576,7 @@ def run_mutagenicity_chemistry_audit(
                 root=root,
                 dataset_dir=dataset_root,
                 parent_limit=parent_limit,
+                dataset=dataset,
             )
         )
         schemas = {
@@ -667,9 +685,12 @@ def run_mutagenicity_chemistry_audit(
             medoid_graphs_by_index[index] = first.graph
         raw_reason = "valid" if raw_decoded.decode_ok else str(raw_decoded.failure_reason)
         raw_reason_counts[raw_reason] += 1
-        candidate_id = (
-            f"COMRECGC_{'AIDS' if dataset == 'aids' else 'MUT'}_RAW_{index:06d}"
-        )
+        candidate_prefix = {
+            "aids": "AIDS",
+            "mutagenicity": "MUT",
+            "bace": "BACE",
+        }[dataset]
+        candidate_id = f"COMRECGC_{candidate_prefix}_RAW_{index:06d}"
         raw_rows.append(
             {
                 "candidate_id": candidate_id,
@@ -830,7 +851,11 @@ def run_mutagenicity_chemistry_audit(
     repaired_medoid_count = sum(bool(row["repair_success"]) for row in medoid_rows)
     audit = {
         "schema_version": 1,
-        "dataset": "AIDS/HIV" if dataset == "aids" else "Mutagenicity",
+        "dataset": {
+            "aids": "AIDS/HIV",
+            "mutagenicity": "Mutagenicity",
+            "bace": "BACE",
+        }[dataset],
         "dataset_key": dataset,
         "audit_passed": True,
         "engineering_smoke_pass": True,

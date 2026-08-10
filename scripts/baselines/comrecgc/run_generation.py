@@ -18,8 +18,12 @@ from src.baselines.comrecgc.runtime import run_native_smoke, run_project_generat
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--route", choices=("native", "project"), required=True)
-    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), required=True)
+    parser.add_argument(
+        "--dataset", choices=("aids", "mutagenicity", "bace"), required=True
+    )
     parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
     parser.add_argument("--project-root", default=str(PROJECT_ROOT))
     parser.add_argument("--upstream-root", default="external/COMRECGC")

@@ -6125,3 +6125,33 @@ unresolved evidence. A completed walk needs no RNG state for deterministic
 freeze-only postprocessing; incomplete random-walk resume still requires a
 complete atomic RNG/transition checkpoint and otherwise starts from step zero.
 See `docs/postmortems/COMRECGC_RESOLVER_FREEZE_CLOSURE_20260810.md`.
+
+---
+
+## 2026-08-10: BACE connected four-method integration
+
+BACE GlobalGCE reuses the established project-owned Mutagenicity adapter only
+at its generic dense-molecule boundary. Dataset identity, the two-class BACE
+train set, the 360 teacher-consistent train-source parents, checkpoints, stable
+candidate IDs, manifests, and output roots remain BACE-specific. The official
+GlobalGCE training and generation routines are unchanged. Its paper sequence
+is frozen once by deterministic train-only frequency/support ranking after
+parse, sanitize, connectivity, uniqueness, and frozen-teacher target checks;
+calibration, test, WNode, and other methods do not rerank it.
+
+BACE COMRECGC uses the fixed upstream full random-walk, importance, DBSCAN, and
+greedy ordering parameters through the unified resolver/backing-store runtime.
+The original medoid rank remains an immutable slot. Deterministic chemistry
+repair may invalidate a slot, and the connected protocol may invalidate a
+repaired full molecule, but neither operation compacts ranks or backfills from
+another cluster. Only connected, sanitized candidates enter RF/WNode scoring;
+an empty valid sequence remains an engineering PASS with zero coverage and
+undefined conditional cost.
+
+The completed BACE v4 Ours and GCFExplainer method directories are imported
+into the new common4 root by exact per-file SHA256, without rerunning test or
+rewriting CSV files. GlobalGCE and COMRECGC must use the same frozen v4 parent
+cohort, teacher, MolCLR checkpoint, threshold manifest, strict-flip rule, and
+cost schema. The common4 audit fails closed on any identity, connectivity,
+ordering, or schema mismatch and emits plotting-ready Figure 3, Figure 4, and
+Table 2 combined files without an adapter.

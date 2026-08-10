@@ -100,7 +100,7 @@ def validate_chemistry_trace_evidence(
             "trace_integrity_passed": True,
             "candidate_count": payload.get("candidate_count"),
         }
-    if dataset != "aids":
+    if dataset not in {"aids", "bace"}:
         raise ValueError("Chemistry repair cannot be frozen before trace parity passes.")
     marker = source.parent / "_TRACE_COMPLETE.json"
     marker_payload = _load(marker)
@@ -114,7 +114,7 @@ def validate_chemistry_trace_evidence(
         and marker_payload.get("trace_complete") is True
     )
     if not valid:
-        raise ValueError("AIDS chemistry trace integrity evidence is incomplete.")
+        raise ValueError(f"{dataset} chemistry trace integrity evidence is incomplete.")
     return {
         "trace_evidence_kind": "streamed_trace_integrity_no_on_off_reference",
         "trace_parity_required": False,

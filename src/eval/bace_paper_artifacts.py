@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from rdkit import Chem
+
 from src.chem.hard_deletion import (
     CONNECTED_ACTION_SEMANTICS,
     CONNECTED_MATCH_SELECTION_POLICY,
@@ -41,6 +43,11 @@ METHODS = {
         "display": "GCFExplainer",
         "candidate_kind": "fullgraph",
         "selection_method": "native_gcf_summary_rank_filtered_by_validity",
+    },
+    "globalgce": {
+        "display": "GlobalGCE",
+        "candidate_kind": "fullgraph",
+        "selection_method": "globalgce_frequency_top20_train_support_v1",
     },
 }
 
@@ -400,6 +407,32 @@ def export_bace_method_artifacts(
         expected_top_k=int(expected_top_k),
         expected_num_parents=int(expected_parent_count),
     )
+    connected_candidate_count: int | None = None
+    if (
+        spec["candidate_kind"] == "fullgraph"
+        and action_semantics_version == CONNECTED_ACTION_SEMANTICS
+    ):
+        connected_candidate_count = 0
+        for candidate in run.candidates:
+            molecule = Chem.MolFromSmiles(candidate.smiles)
+            if molecule is None or molecule.GetNumAtoms() <= 0:
+                raise ValueError(
+                    f"BACE {spec['display']} candidate is not a nonempty molecule: "
+                    f"rank={candidate.rank}."
+                )
+            try:
+                Chem.SanitizeMol(molecule)
+            except Exception as exc:
+                raise ValueError(
+                    f"BACE {spec['display']} candidate does not sanitize: "
+                    f"rank={candidate.rank}."
+                ) from exc
+            if "." in candidate.smiles or len(Chem.GetMolFrags(molecule)) != 1:
+                raise ValueError(
+                    f"BACE {spec['display']} candidate is disconnected: "
+                    f"rank={candidate.rank}."
+                )
+            connected_candidate_count += 1
     theta_star = float(thresholds["theta_star"])
     if (
         run.config.get("action_semantics_version") or "hard_delete_all_matches_v1"
@@ -428,8 +461,13 @@ def export_bace_method_artifacts(
             raise ValueError("BACE frozen selector does not prove test_used=false.")
         if selection_contract.get("gcf_result_used") is not False:
             raise ValueError("BACE frozen selector does not prove gcf_result_used=false.")
-        if selection_contract.get("selection_split") != "calibration":
-            raise ValueError("BACE frozen selector was not selected on calibration.")
+        expected_selection_split = "train" if method == "globalgce" else "calibration"
+        if selection_contract.get("selection_split") != expected_selection_split:
+            raise ValueError(
+                "BACE frozen selector uses the wrong split: "
+                f"actual={selection_contract.get('selection_split')!r}, "
+                f"expected={expected_selection_split!r}."
+            )
         if action_semantics_version == CONNECTED_ACTION_SEMANTICS:
             if selection_contract.get("action_semantics_version") != CONNECTED_ACTION_SEMANTICS:
                 raise ValueError("Frozen selection lacks connected action semantics.")
@@ -603,6 +641,12 @@ def export_bace_method_artifacts(
             "test_parent_count": len(run.parent_ids),
             "test_parent_ids_sha256": parent_ids_sha256,
             "candidate_count": len(run.candidates),
+            "connected_candidate_count": connected_candidate_count,
+            "all_candidates_connected": (
+                connected_candidate_count == len(run.candidates)
+                if connected_candidate_count is not None
+                else None
+            ),
             "pair_count": int(run.num_unique_parent_candidate_pairs),
             "theta_star": theta_star,
             "cost_cap": float(thresholds["cost_cap"]),
@@ -673,6 +717,8 @@ def export_bace_method_artifacts(
             "disconnected_residual_used_count": summary[
                 "disconnected_residual_used_count"
             ],
+            "connected_candidate_count": connected_candidate_count,
+            "all_candidates_connected": summary["all_candidates_connected"],
             "covered_residual_connected_rate": summary[
                 "covered_residual_connected_rate"
             ],
@@ -741,6 +787,7 @@ def export_bace_method_artifacts(
                 or action_semantics_version != CONNECTED_ACTION_SEMANTICS
                 or summary["covered_residual_connected_rate"] in {None, 1.0}
             ),
+            "all_candidates_connected": summary["all_candidates_connected"],
             "test_evaluation_count": test_evaluation_count,
             "selected_candidate_ids_exact": selected_candidate_ids_exact,
             "teacher_identity_exact": teacher_identity_exact,

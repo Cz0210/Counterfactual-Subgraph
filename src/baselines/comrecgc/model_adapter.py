@@ -60,17 +60,18 @@ def load_aids_gnn(checkpoint: str | Path, *, num_features: int, device: str) -> 
     }
 
 
-def load_mutagenicity_gnn(
+def _load_project_gcf_gnn(
     checkpoint: str | Path,
     *,
     num_features: int,
     official_gnn_class: Any,
     device: str,
+    dataset_name: str,
 ) -> tuple[Any, dict[str, Any]]:
     torch, _functional, _Batch = _runtime_stack()
     path = Path(checkpoint).expanduser().resolve()
     if not path.is_file():
-        raise FileNotFoundError(f"Mutagenicity project GNN checkpoint missing: {path}")
+        raise FileNotFoundError(f"{dataset_name} project GNN checkpoint missing: {path}")
     model = official_gnn_class(
         num_features=num_features,
         num_classes=2,
@@ -91,6 +92,38 @@ def load_mutagenicity_gnn(
         "label_mapping": "prepared_gnn_label_source0_target1",
         "model_retrained": False,
     }
+
+
+def load_mutagenicity_gnn(
+    checkpoint: str | Path,
+    *,
+    num_features: int,
+    official_gnn_class: Any,
+    device: str,
+) -> tuple[Any, dict[str, Any]]:
+    return _load_project_gcf_gnn(
+        checkpoint,
+        num_features=num_features,
+        official_gnn_class=official_gnn_class,
+        device=device,
+        dataset_name="Mutagenicity",
+    )
+
+
+def load_bace_gnn(
+    checkpoint: str | Path,
+    *,
+    num_features: int,
+    official_gnn_class: Any,
+    device: str,
+) -> tuple[Any, dict[str, Any]]:
+    return _load_project_gcf_gnn(
+        checkpoint,
+        num_features=num_features,
+        official_gnn_class=official_gnn_class,
+        device=device,
+        dataset_name="BACE",
+    )
 
 
 def _one_hot_atomic_numbers(graphs: Sequence[Any], atom_vocabulary: Sequence[str]) -> list[dict[str, Any]]:

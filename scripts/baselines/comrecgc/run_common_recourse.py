@@ -18,7 +18,11 @@ from src.baselines.comrecgc.recourse import run_common_recourse  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), required=True)
+    parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--dataset", choices=("aids", "mutagenicity", "bace"), required=True
+    )
     parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
     parser.add_argument("--upstream-root", default="external/COMRECGC")
     parser.add_argument("--dataset-dir", required=True)

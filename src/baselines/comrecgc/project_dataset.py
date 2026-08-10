@@ -302,6 +302,66 @@ def load_mutagenicity_generation_bundle(
     )
 
 
+def load_bace_generation_bundle(
+    *, dataset_dir: str | Path, parent_limit: int | None = None
+) -> ProjectDatasetBundle:
+    """Load the frozen BACE train-source graph universe used by GCFExplainer.
+
+    BACE and Mutagenicity share the project-owned one-hot molecular graph
+    contract, but retain separate schemas, checkpoints, fingerprints, and
+    parent universes.  Calibration and test artifacts are never opened here.
+    """
+
+    from src.baselines.gcfexplainer_bace_adapter import load_bace_gcf_dataset
+    from src.baselines.gcfexplainer_mutagenicity_adapter import record_to_pyg
+
+    root = Path(dataset_dir).expanduser().resolve()
+    schema, _train, _val, generation, summary = load_bace_gcf_dataset(root)
+    selected_records = sorted(generation, key=lambda row: str(row["molecule_id"]))
+    if parent_limit is not None:
+        selected_records = selected_records[: int(parent_limit)]
+    graphs = [
+        record_to_pyg(record, origin_index=index)
+        for index, record in enumerate(selected_records)
+    ]
+    parent_ids = [str(record["molecule_id"]) for record in selected_records]
+    for index, (graph, record) in enumerate(zip(graphs, selected_records, strict=True)):
+        graph.comrecgc_parent_id = parent_ids[index]
+        graph.comrecgc_source_index = index
+        graph.comrecgc_source_smiles = str(record["canonical_smiles"])
+        graph.comrecgc_project_label = 1
+        graph.comrecgc_source_record = record
+        if not hasattr(graph, "comrecgc_node_origin"):
+            graph.comrecgc_node_origin = getattr(graph, "gcf_node_origin")
+    fingerprint_payload = {
+        "dataset_summary_sha256": sha256_file(root / "dataset_summary.json"),
+        "generation_sha256": sha256_file(root / "generation_source_graphs.pt"),
+        "generation_source_cohort_hash": summary.get(
+            "generation_source_cohort_hash"
+        ),
+        "parent_ids": parent_ids,
+        "source_graph_hashes": [
+            str(record["source_graph_hash"]) for record in selected_records
+        ],
+    }
+    return ProjectDatasetBundle(
+        dataset="BACE",
+        graphs=graphs,
+        parent_ids=parent_ids,
+        source_label=1,
+        target_label=0,
+        node_feature_dim=schema.node_feature_dim,
+        atom_vocabulary=tuple(schema.feature_atomic_numbers),
+        dataset_source="BACE teacher-consistent strict train-source graph artifact",
+        source_files=(
+            str(root / "dataset_summary.json"),
+            str(root / "generation_source_graphs.pt"),
+        ),
+        dataset_fingerprint=stable_json_sha256(fingerprint_payload),
+        generation_source_parent_rows=len(generation),
+    )
+
+
 def verify_evaluation_parent_ids(
     path: str | Path,
     *,

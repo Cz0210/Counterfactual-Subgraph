@@ -30,6 +30,7 @@ from .contracts import (
 from .model_adapter import (
     AIDSGreedEmbeddingAdapter,
     load_aids_gnn,
+    load_bace_gnn,
     load_mutagenicity_gnn,
 )
 from .graph_trace import (
@@ -51,6 +52,7 @@ from .project_dataset import (
     GraphListDataset,
     ProjectDatasetBundle,
     load_aids_generation_bundle,
+    load_bace_generation_bundle,
     load_mutagenicity_generation_bundle,
 )
 from .transition_cache import (
@@ -632,6 +634,11 @@ def _load_bundle(
             dataset_dir=dataset_dir,
             parent_limit=parent_limit,
         )
+    if dataset == "bace":
+        return load_bace_generation_bundle(
+            dataset_dir=dataset_dir,
+            parent_limit=parent_limit,
+        )
     raise ValueError(f"Unsupported project dataset: {dataset}")
 
 
@@ -840,7 +847,13 @@ def run_project_generation(
     torch.manual_seed(parameters.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(parameters.seed)
-    dataset_key = "project_aids" if dataset == "aids" else "project_mutagenicity"
+    dataset_key = {
+        "aids": "project_aids",
+        "mutagenicity": "project_mutagenicity",
+        "bace": "project_bace",
+    }.get(dataset)
+    if dataset_key is None:
+        raise ValueError(f"Unsupported project dataset: {dataset}")
     runtime_root = root / "official_runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     graph_state_root = (
@@ -882,7 +895,10 @@ def run_project_generation(
                 ).eval()
                 distance_provenance = embedding_model.provenance()
             else:
-                model, model_provenance = load_mutagenicity_gnn(
+                loader = (
+                    load_bace_gnn if dataset == "bace" else load_mutagenicity_gnn
+                )
+                model, model_provenance = loader(
                     gnn_checkpoint,
                     num_features=bundle.node_feature_dim,
                     official_gnn_class=modules["gnn"].GNN,
@@ -896,7 +912,7 @@ def run_project_generation(
                 distance_provenance = {
                     "checkpoint_path": str(Path(distance_checkpoint).expanduser().resolve()),
                     "checkpoint_sha256": sha256_file(distance_checkpoint),
-                    "distance_model": "mutagenicity_neurosed",
+                    "distance_model": f"{dataset}_neurosed",
                     "checkpoint_retrained": False,
                 }
             predictions = _predict_internal(model, bundle.graphs, device=device)

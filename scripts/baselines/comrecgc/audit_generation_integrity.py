@@ -18,6 +18,8 @@ from src.baselines.comrecgc.generation_integrity import audit_generation_integri
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--generation-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expected-steps", type=int, default=50_000)

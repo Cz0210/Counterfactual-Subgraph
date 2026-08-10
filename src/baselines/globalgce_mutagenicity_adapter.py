@@ -259,8 +259,9 @@ class _DenseMoleculeDataset:
         atom_symbols: Sequence[str],
         bond_names: Sequence[str],
         source_atom_attributes: Sequence[Sequence[dict[str, Any]]],
+        dataset_name: str = DATASET_NAME,
     ) -> None:
-        self.dataset_name = DATASET_NAME
+        self.dataset_name = str(dataset_name)
         self.parent_ids = list(parent_ids)
         self.feat = feat
         self.adj = adj
@@ -552,9 +553,12 @@ def _finite_float(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def stable_candidate_id(canonical_smiles: str) -> str:
+def stable_candidate_id(
+    canonical_smiles: str, *, dataset_name: str = DATASET_NAME
+) -> str:
     digest = hashlib.sha256(str(canonical_smiles).encode("utf-8")).hexdigest()
-    return f"MUT_GLOBALGCE_{digest[:20].upper()}"
+    prefix = "BACE" if str(dataset_name).strip().lower() == "bace" else "MUT"
+    return f"{prefix}_GLOBALGCE_{digest[:20].upper()}"
 
 
 def _normalized_tokens(path: Path) -> set[str]:
@@ -821,6 +825,7 @@ def _build_dense_dataset(
     torch_module: Any,
     atom_symbols: Sequence[str] | None = None,
     max_num_nodes: int | None = None,
+    dataset_name: str = DATASET_NAME,
 ) -> _DenseMoleculeDataset:
     molecules = [_kekulized_molecule(parent.smiles) for parent in parents]
     source_atom_attributes = [
@@ -916,6 +921,7 @@ def _build_dense_dataset(
         atom_symbols=symbols,
         bond_names=("no_edge", "single", "double", "triple"),
         source_atom_attributes=source_atom_attributes,
+        dataset_name=dataset_name,
     )
 
 
@@ -1755,6 +1761,7 @@ def _prepare_native_and_source_datasets(
     parents: Sequence[TrainParent],
     seed: int,
     torch_module: Any,
+    dataset_name: str = DATASET_NAME,
 ) -> tuple[
     list[TrainParent],
     list[int],
@@ -1775,6 +1782,7 @@ def _prepare_native_and_source_datasets(
         val_idx=native_val_idx,
         test_idx=[],
         torch_module=torch_module,
+        dataset_name=dataset_name,
     )
     source_train_idx, source_val_idx = _stable_split(parents, seed=int(seed))
     source_dataset = _build_dense_dataset(
@@ -1788,6 +1796,7 @@ def _prepare_native_and_source_datasets(
             native_dataset.max_num_nodes,
             max(Chem.MolFromSmiles(parent.smiles).GetNumAtoms() for parent in parents),
         ),
+        dataset_name=dataset_name,
     )
     return (
         native_parents,
@@ -1808,6 +1817,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         official_root: str | Path,
         *,
         native_train_csv: str | Path | None = None,
+        dataset_name: str = DATASET_NAME,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
@@ -1817,6 +1827,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         self.native_train_csv = Path(
             configured or repo_root / DEFAULT_NATIVE_TRAIN_CSV
         ).expanduser().resolve()
+        self.dataset_name = str(dataset_name)
 
     def config_identity(self) -> dict[str, Any]:
         source_files = {}
@@ -1834,6 +1845,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 source_files[relative] = _file_identity(path)
         return {
             "generator_class": type(self).__name__,
+            "dataset_name": self.dataset_name,
             "native_train_csv": _file_identity(self.native_train_csv),
             "official_src": str(self.official_src),
             "official_source_files": source_files,
@@ -1868,6 +1880,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             parents=parents,
             seed=int(seed),
             torch_module=torch,
+            dataset_name=self.dataset_name,
         )
         attribute_audit_path = (
             Path(output_path).expanduser().resolve().parent
@@ -1968,6 +1981,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             parents=parents,
             seed=int(seed),
             torch_module=torch,
+            dataset_name=self.dataset_name,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         codec_summary = probe_source_graph_codec(
@@ -2456,6 +2470,7 @@ def _annotate_and_filter_candidates(
     teacher: TeacherProtocol,
     seed: int,
     raw_index_offset: int = 0,
+    dataset_name: str = DATASET_NAME,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -2498,7 +2513,9 @@ def _annotate_and_filter_candidates(
             teacher_pred, teacher_ok = _teacher_prediction(teacher, canonical)
         row = {
             "candidate_id": (
-                stable_candidate_id(canonical) if canonical is not None else None
+                stable_candidate_id(canonical, dataset_name=dataset_name)
+                if canonical is not None
+                else None
             ),
             "canonical_smiles": canonical,
             "raw_smiles": raw_smiles,
@@ -2554,7 +2571,11 @@ def _annotate_and_filter_candidates(
             str(row["canonical_smiles"]),
         ),
     )
-    universe = _candidate_universe_from_pool(pool_rows, seed=seed)
+    universe = _candidate_universe_from_pool(
+        pool_rows,
+        seed=seed,
+        dataset_name=dataset_name,
+    )
     return raw_rows, pool_rows, universe, invalid_rows, non_target_rows
 
 
@@ -2583,6 +2604,7 @@ def _candidate_universe_from_pool(
     pool_rows: Sequence[dict[str, Any]],
     *,
     seed: int,
+    dataset_name: str = DATASET_NAME,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in pool_rows:
@@ -2596,7 +2618,10 @@ def _candidate_universe_from_pool(
         representative = occurrences[0]
         universe.append(
             {
-                "candidate_id": stable_candidate_id(canonical),
+                "candidate_id": stable_candidate_id(
+                    canonical,
+                    dataset_name=dataset_name,
+                ),
                 "canonical_smiles": canonical,
                 "raw_smiles": representative["raw_smiles"],
                 "generator_method": GENERATOR_METHOD,
@@ -2658,6 +2683,7 @@ def build_mutagenicity_train_pool(
     teacher: TeacherProtocol,
     generator: NativeGeneratorProtocol,
     config: PoolBuildConfig | None = None,
+    dataset_name: str = DATASET_NAME,
 ) -> dict[str, Any]:
     resolved = config or PoolBuildConfig()
     if int(resolved.epochs) <= 0 or int(resolved.top_k_native) <= 0:
@@ -2689,6 +2715,7 @@ def build_mutagenicity_train_pool(
         raise FileExistsError(f"Completed GlobalGCE train pool cannot be rerun: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
     fingerprint_payload = {
+        "dataset_name": str(dataset_name),
         "train_csv": _file_identity(train_path),
         "teacher_path": _file_identity(teacher_file),
         "official_root": _file_identity(official_src),
@@ -2737,7 +2764,7 @@ def build_mutagenicity_train_pool(
             "created_at": _utc_now(),
             "config_fingerprint": fingerprint,
             "inputs": fingerprint_payload,
-            "dataset": DATASET_NAME,
+            "dataset": str(dataset_name),
             "source_label": SOURCE_LABEL,
             "target_label": TARGET_LABEL,
             "generation_input_split": "train",
@@ -2921,6 +2948,7 @@ def build_mutagenicity_train_pool(
             raw_index_offset=int(
                 generation_state.get("raw_generated_rows") or 0
             ),
+            dataset_name=str(dataset_name),
         )
         _append_jsonl(part_paths["raw"], raw_chunk)
         _append_jsonl(part_paths["invalid"], invalid_chunk)
@@ -3068,6 +3096,7 @@ def build_mutagenicity_train_pool(
     universe = _candidate_universe_from_pool(
         pool_rows,
         seed=int(resolved.seed),
+        dataset_name=str(dataset_name),
     )
     _write_jsonl(pool_path, pool_rows)
     _write_jsonl(destination / "candidate_universe.jsonl", universe)
@@ -3286,6 +3315,7 @@ def audit_mutagenicity_train_pool(
     require_unique_universe: bool = True,
     forbid_calibration_test: bool = True,
     require_complete: bool = True,
+    dataset_name: str = DATASET_NAME,
 ) -> dict[str, Any]:
     root = Path(run_dir).expanduser().resolve()
     for relative in REQUIRED_OUTPUT_FILES:
@@ -3300,6 +3330,11 @@ def audit_mutagenicity_train_pool(
             raise FileNotFoundError(f"Empty GlobalGCE train-pool artifact: {path}")
     summary = _read_json(root / "summary.json")
     manifest = _read_json(root / "run_manifest.json")
+    if str(manifest.get("dataset") or "") != str(dataset_name):
+        raise AssertionError(
+            "GlobalGCE train-pool dataset identity mismatch: "
+            f"actual={manifest.get('dataset')!r}, expected={dataset_name!r}."
+        )
     manifest_inputs = dict(manifest.get("inputs") or {})
     parent_limit = int(
         manifest_inputs.get("parent_limit") or 0
@@ -3380,7 +3415,10 @@ def audit_mutagenicity_train_pool(
         if str(row.get("source_split") or "").lower() != "train":
             raise AssertionError("Candidate pool source_split is not train.")
         canonical = str(row.get("canonical_smiles") or "")
-        if stable_candidate_id(canonical) != row.get("candidate_id"):
+        if stable_candidate_id(
+            canonical,
+            dataset_name=dataset_name,
+        ) != row.get("candidate_id"):
             raise AssertionError("Candidate pool stable ID mismatch.")
         if require_target_label_zero and (
             int(row.get("teacher_pred")) != TARGET_LABEL
@@ -3403,7 +3441,10 @@ def audit_mutagenicity_train_pool(
         canonical = str(row.get("canonical_smiles") or "")
         if _canonical_smiles(canonical) != canonical:
             raise AssertionError("Candidate universe contains invalid/noncanonical SMILES.")
-        if stable_candidate_id(canonical) != row.get("candidate_id"):
+        if stable_candidate_id(
+            canonical,
+            dataset_name=dataset_name,
+        ) != row.get("candidate_id"):
             raise AssertionError("Candidate universe stable ID mismatch.")
         if int(row.get("teacher_pred")) != TARGET_LABEL:
             raise AssertionError("Candidate universe contains teacher_pred != 0.")

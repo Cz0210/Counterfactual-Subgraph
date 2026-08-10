@@ -21,8 +21,12 @@ from src.baselines.comrecgc.mutagenicity_chemistry_audit import (  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--project-root", default=str(PROJECT_ROOT))
-    parser.add_argument("--dataset", choices=("aids", "mutagenicity"), default="mutagenicity")
+    parser.add_argument(
+        "--dataset", choices=("aids", "mutagenicity", "bace"), default="mutagenicity"
+    )
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--source-csv")
     parser.add_argument("--generation-dir", required=True)
