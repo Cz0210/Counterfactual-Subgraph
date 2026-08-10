@@ -905,6 +905,8 @@ def _audit_bace_ranked_candidates(
     teacher: Any,
     target_k: int,
     scan_limit: int,
+    scan_all: bool = False,
+    require_connected: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     if int(target_k) <= 0:
         raise ValueError("BACE target_k must be positive.")
@@ -928,6 +930,7 @@ def _audit_bace_ranked_candidates(
             "decode_ok": False,
             "parse_ok": False,
             "sanitize_ok": False,
+            "connected": False,
             "canonical_smiles": "",
             "duplicate_of": "",
             "rf_inference_ok": False,
@@ -979,6 +982,21 @@ def _audit_bace_ranked_candidates(
             )
             audit_rows.append(audit)
             continue
+        with rdBase.BlockLogs():
+            decoded_molecule = Chem.MolFromSmiles(smiles)
+        connected = bool(
+            decoded_molecule is not None
+            and len(Chem.GetMolFrags(decoded_molecule)) == 1
+            and "." not in smiles
+        )
+        audit["connected"] = connected
+        if bool(require_connected) and not connected:
+            audit.update(
+                rejection_stage="connectivity",
+                rejection_reason="disconnected_fullgraph_candidate",
+            )
+            audit_rows.append(audit)
+            continue
         if smiles in seen_smiles:
             audit.update(
                 duplicate_of=seen_smiles[smiles],
@@ -1019,14 +1037,16 @@ def _audit_bace_ranked_candidates(
         candidate_id = "GCFBACE_" + hashlib.sha256(
             smiles.encode("utf-8")
         ).hexdigest()[:20].upper()
-        selected.append(
-            {
+        if len(selected) < int(target_k):
+            selected.append(
+                {
                 **native,
                 "candidate_id": candidate_id,
                 "native_candidate_id": str(native["candidate_id"]),
                 "smiles": smiles,
                 "canonical_smiles": smiles,
                 "rdkit_valid": True,
+                "connected": connected,
                 "rf_pred": int(prediction),
                 "rf_prob_0": float(probability0),
                 "rf_prob_1": float(probability1),
@@ -1037,11 +1057,17 @@ def _audit_bace_ranked_candidates(
                 "source_parent_id": str(decoded.source_parent_id),
                 "projected_new_edge_count": int(decoded.projected_new_edge_count),
                 "retained_edge_count": int(decoded.retained_edge_count),
-            }
-        )
-        audit.update(selected=True, rejection_stage="selected")
+                }
+            )
+            audit.update(selected=True, rejection_stage="selected")
+        else:
+            audit.update(
+                selected=False,
+                rejection_stage="eligible_after_target",
+                rejection_reason="valid_counterfactual_after_frozen_top_k",
+            )
         audit_rows.append(audit)
-        if len(selected) >= int(target_k):
+        if len(selected) >= int(target_k) and not bool(scan_all):
             break
 
     reasons = Counter(
@@ -1074,6 +1100,14 @@ def _audit_bace_ranked_candidates(
         "num_sanitize_failed": sum(
             row["rejection_stage"] == "rdkit_sanitize" for row in audit_rows
         ),
+        "num_connected_candidates": sum(bool(row["connected"]) for row in audit_rows),
+        "num_unique_connected_candidates": len(
+            {
+                str(row["canonical_smiles"])
+                for row in audit_rows
+                if bool(row["connected"]) and str(row["canonical_smiles"])
+            }
+        ),
         "num_canonical_unique": len(seen_smiles),
         "num_teacher_evaluable": sum(
             bool(row["rf_inference_ok"]) for row in audit_rows
@@ -1084,6 +1118,8 @@ def _audit_bace_ranked_candidates(
         "num_retained": len(selected),
         "requested_k": int(target_k),
         "scan_limit": int(scan_limit),
+        "scan_all": bool(scan_all),
+        "require_connected": bool(require_connected),
         "max_scanned_rank": (
             int(audit_rows[-1]["native_rank"]) if audit_rows else 0
         ),
@@ -1129,6 +1165,7 @@ def _write_candidate_attrition_artifacts(
             "decode_ok",
             "parse_ok",
             "sanitize_ok",
+            "connected",
             "canonical_smiles",
             "duplicate_of",
             "rf_inference_ok",
@@ -1162,6 +1199,8 @@ def audit_bace_vrrw_candidate_sufficiency(
     parent_limit: int,
     target_k: int = 20,
     scan_limit: int = 0,
+    scan_all: bool = False,
+    require_connected: bool = False,
 ) -> dict[str, Any]:
     """Prove candidate-pool sufficiency without changing final native ranking.
 
@@ -1221,6 +1260,8 @@ def audit_bace_vrrw_candidate_sufficiency(
         teacher=teacher,
         target_k=int(target_k),
         scan_limit=int(scan_limit),
+        scan_all=bool(scan_all),
+        require_connected=bool(require_connected),
     )
     audit_summary = {
         "schema_version": "gcfexplainer_bace_vrrw_candidate_sufficiency_audit_v1",
@@ -1401,6 +1442,8 @@ def export_bace_rf_valid_top20(
     parent_limit: int,
     top_k: int = 20,
     scan_limit: int = 0,
+    scan_all: bool = False,
+    require_connected: bool = False,
     validate_only: bool = False,
 ) -> dict[str, Any]:
     expected_parent_limit = 64 if profile == "smoke" else EXPECTED_GENERATION_SOURCE_ROWS
@@ -1430,6 +1473,8 @@ def export_bace_rf_valid_top20(
         teacher=teacher,
         target_k=int(top_k),
         scan_limit=int(scan_limit),
+        scan_all=bool(scan_all),
+        require_connected=bool(require_connected),
     )
     _write_candidate_attrition_artifacts(root, audit_rows, attrition)
     write_jsonl(root / "candidate_universe.jsonl", selected)
@@ -1449,6 +1494,8 @@ def export_bace_rf_valid_top20(
         "selected_count": len(selected),
         "requested_top_k": int(top_k),
         "scan_limit": int(scan_limit),
+        "scan_all": bool(scan_all),
+        "require_connected": bool(require_connected),
         "max_scanned_rank": int(attrition["max_scanned_rank"]),
         "scan_exhausted": bool(attrition["scan_exhausted"]),
         "candidate_attrition": dict(attrition),

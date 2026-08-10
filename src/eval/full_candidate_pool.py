@@ -26,6 +26,10 @@ _TOKENIZER_FILENAMES = (
     "merges.txt",
 )
 
+DATASET_PROMPT_MODE = "dataset"
+CONNECTED_DELETION_PROMPT_MODE = "connected_deletion_v1"
+GENERATION_PROMPT_MODES = (DATASET_PROMPT_MODE, CONNECTED_DELETION_PROMPT_MODE)
+
 
 @dataclass(frozen=True, slots=True)
 class FullPoolGenerationConfig:
@@ -34,6 +38,7 @@ class FullPoolGenerationConfig:
     label_col: str = "label"
     smiles_col: str = "parent_smiles"
     target_label: int = 1
+    prompt_mode: str = DATASET_PROMPT_MODE
     num_return_sequences: int = 4
     generation_temperature: float = 0.7
     generation_top_p: float = 0.9
@@ -51,6 +56,30 @@ class FullPoolGenerationConfig:
     limit: int = 0
     local_files_only: bool = True
     trust_remote_code: bool = True
+
+
+def render_generation_prompt(record: PPOPromptRecord, *, prompt_mode: str) -> str:
+    """Return the frozen dataset prompt or the preregistered connected-deletion prompt."""
+
+    mode = str(prompt_mode).strip().lower()
+    if mode == DATASET_PROMPT_MODE:
+        return record.prompt
+    if mode != CONNECTED_DELETION_PROMPT_MODE:
+        raise ValueError(
+            f"Unsupported prompt mode {prompt_mode!r}; expected one of {GENERATION_PROMPT_MODES}."
+        )
+    return (
+        "Generate exactly one valid connected fragment SMILES that is an exact substructure "
+        "of the parent molecule. Removing that exact occurrence should leave a nonempty, "
+        "sanitized, single connected residual molecule and should flip the original label. "
+        "Prefer a removable terminal substituent or branch with one attachment bond. Avoid "
+        "internal linkers, fragments whose deletion creates multiple components, fragments "
+        "that are too small to be meaningful, and fragments close to the whole parent. "
+        "Return fragment SMILES only, with no explanation.\n"
+        f"MOLECULE_SMILES: {record.parent_smiles}\n"
+        f"ORIGINAL_LABEL: {record.label}\n"
+        "COUNTERFACTUAL_FRAGMENT_SMILES:"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +436,7 @@ def _enrich_reward_log(
     record: PPOPromptRecord,
     candidate_index: int,
     raw_response: str,
+    generation_prompt: str | None = None,
 ) -> dict[str, Any]:
     final_fragment = _resolve_final_fragment(row)
     direct_substructure = bool(
@@ -435,7 +465,8 @@ def _enrich_reward_log(
             "parent_index": int(record.parent_index),
             "candidate_index": int(candidate_index),
             "label": int(record.label),
-            "prompt": record.prompt,
+            "prompt": generation_prompt or record.prompt,
+            "dataset_prompt": record.prompt,
             "raw_response": raw_response,
             "raw_output": raw_response,
             "raw_fragment": _normalize_text(
@@ -679,7 +710,10 @@ def generate_full_candidate_pool(
 
     for batch_start in range(0, len(dataset_records), batch_size):
         batch_records = dataset_records[batch_start : batch_start + batch_size]
-        prompt_texts = [record.prompt for record in batch_records]
+        prompt_texts = [
+            render_generation_prompt(record, prompt_mode=config.prompt_mode)
+            for record in batch_records
+        ]
         encoded = tokenizer(
             prompt_texts,
             return_tensors="pt",
@@ -717,15 +751,16 @@ def generate_full_candidate_pool(
         response_text_batch: list[str] = []
         record_repeats: list[PPOPromptRecord] = []
         candidate_indices: list[int] = []
+        generation_prompts: list[str] = []
 
         sequence_index = 0
-        for record in batch_records:
+        for record, generation_prompt in zip(batch_records, prompt_texts, strict=True):
             for candidate_index in range(int(config.num_return_sequences)):
                 full_text = full_texts[sequence_index]
                 response_text = response_texts[sequence_index]
                 fragment = clean_generated_smiles(response_text)
-                if full_text.startswith(record.prompt):
-                    suffix = full_text[len(record.prompt) :].strip()
+                if full_text.startswith(generation_prompt):
+                    suffix = full_text[len(generation_prompt) :].strip()
                     if suffix:
                         fragment = clean_generated_smiles(suffix)
                 parent_smiles_batch.append(record.parent_smiles)
@@ -735,7 +770,8 @@ def generate_full_candidate_pool(
                     {
                         "id": record.parent_index,
                         "index": record.parent_index,
-                        "prompt": record.prompt,
+                        "prompt": generation_prompt,
+                        "dataset_prompt": record.prompt,
                         "parent_index": record.parent_index,
                         "candidate_index": candidate_index,
                     }
@@ -743,6 +779,7 @@ def generate_full_candidate_pool(
                 response_text_batch.append(response_text)
                 record_repeats.append(record)
                 candidate_indices.append(candidate_index)
+                generation_prompts.append(generation_prompt)
                 sequence_index += 1
 
         reward_tensor, reward_logs = rewarder.compute_rewards_from_decoded(
@@ -762,6 +799,7 @@ def generate_full_candidate_pool(
                     record=record_repeats[index],
                     candidate_index=candidate_indices[index],
                     raw_response=response_text_batch[index],
+                    generation_prompt=generation_prompts[index],
                 )
             )
 
@@ -784,10 +822,14 @@ def generate_full_candidate_pool(
 
 
 __all__ = [
+    "CONNECTED_DELETION_PROMPT_MODE",
+    "DATASET_PROMPT_MODE",
+    "GENERATION_PROMPT_MODES",
     "CheckpointInspection",
     "FullPoolGenerationConfig",
     "build_generation_kwargs",
     "generate_full_candidate_pool",
+    "render_generation_prompt",
     "generate_ids_with_sanitized_kwargs",
     "inspect_checkpoint_directory",
     "resolve_adapter_load_path",

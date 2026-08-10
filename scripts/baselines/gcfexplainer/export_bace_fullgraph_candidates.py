@@ -39,6 +39,16 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="Maximum native ranks to inspect; zero scans until K or pool exhaustion.",
     )
+    parser.add_argument(
+        "--scan-all",
+        action="store_true",
+        help="Audit every available native rank while freezing the same first valid top-k.",
+    )
+    parser.add_argument(
+        "--require-connected",
+        action="store_true",
+        help="Reject disconnected full-graph candidates before teacher evaluation.",
+    )
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
     if args.target_k is not None and args.top_k is not None:
@@ -60,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         parent_limit=args.parent_limit,
         top_k=target_k,
         scan_limit=args.scan_limit,
+        scan_all=bool(args.scan_all),
+        require_connected=bool(args.require_connected),
         validate_only=args.validate_only,
     )
     print(json.dumps(result, sort_keys=True), flush=True)

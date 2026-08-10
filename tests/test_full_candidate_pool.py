@@ -9,16 +9,37 @@ from types import SimpleNamespace
 from unittest import mock
 
 from src.eval.full_candidate_pool import (
+    CONNECTED_DELETION_PROMPT_MODE,
     FullPoolGenerationConfig,
     build_generation_kwargs,
     generate_ids_with_sanitized_kwargs,
     inspect_checkpoint_directory,
     resolve_adapter_load_path,
+    render_generation_prompt,
     set_global_generation_seed,
 )
 
 
 class FullCandidatePoolCheckpointTests(unittest.TestCase):
+    def test_connected_deletion_prompt_is_explicit_and_dataset_prompt_stays_default(self) -> None:
+        record = SimpleNamespace(
+            parent_smiles="CCOC(=O)N",
+            label=1,
+            prompt="legacy prompt",
+        )
+
+        self.assertEqual(render_generation_prompt(record, prompt_mode="dataset"), "legacy prompt")
+        connected_prompt = render_generation_prompt(
+            record,
+            prompt_mode=CONNECTED_DELETION_PROMPT_MODE,
+        )
+
+        self.assertIn("single connected residual molecule", connected_prompt)
+        self.assertIn("Prefer a removable terminal substituent", connected_prompt)
+        self.assertIn("MOLECULE_SMILES: CCOC(=O)N", connected_prompt)
+        self.assertIn("ORIGINAL_LABEL: 1", connected_prompt)
+        self.assertTrue(connected_prompt.endswith("COUNTERFACTUAL_FRAGMENT_SMILES:"))
+
     def test_inspect_checkpoint_directory_prefers_root_adapter_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ckpt_dir = Path(tmpdir) / "ppo_root"

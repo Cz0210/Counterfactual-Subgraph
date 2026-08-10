@@ -36,3 +36,35 @@ def test_attrition_records_sanitize_dedup_and_teacher_rejections(
     assert summary["num_canonical_unique"] == 3
     assert summary["num_teacher_counterfactual"] == 1
     assert summary["scan_exhausted"] is True
+
+
+def test_scan_all_audits_tail_without_changing_frozen_top_k(
+    monkeypatch,
+    source_records,
+) -> None:
+    ranked = ranked_candidates(8)
+    monkeypatch.setattr(
+        runtime,
+        "decode_generated_fullgraph",
+        lambda graph, **_kwargs: decode_result(
+            graph.candidate_test_index,
+            smiles="C" * (graph.candidate_test_index + 1),
+        ),
+    )
+    audit, selected, summary = runtime._audit_bace_ranked_candidates(
+        ranked=ranked,
+        source_records=source_records,
+        schema=object(),
+        teacher=FakeTeacher({"C" * (index + 1) for index in range(8)}),
+        target_k=2,
+        scan_limit=0,
+        scan_all=True,
+        require_connected=True,
+    )
+
+    assert len(audit) == 8
+    assert [int(row["native_rank"]) for row in selected] == [1, 2]
+    assert summary["num_teacher_counterfactual"] == 8
+    assert summary["num_retained"] == 2
+    assert summary["scan_exhausted"] is True
+    assert summary["scan_all"] is True

@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parent-limit", type=int, required=True)
     parser.add_argument("--target-k", type=int, default=20)
     parser.add_argument("--scan-limit", type=int, default=0)
+    parser.add_argument("--scan-all", action="store_true")
+    parser.add_argument("--require-connected", action="store_true")
     parser.add_argument("--calibration-source-csv")
     parser.add_argument("--test-source-csv")
     parser.add_argument("--external-sample-limit", type=int, default=16)
@@ -49,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         parent_limit=args.parent_limit,
         target_k=args.target_k,
         scan_limit=args.scan_limit,
+        scan_all=bool(args.scan_all),
+        require_connected=bool(args.require_connected),
     )
     roundtrip = audit_bace_source_roundtrip(
         dataset_dir=args.dataset_dir,

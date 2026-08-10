@@ -5966,3 +5966,33 @@ remains true; no extra seed, test-guided retry, or adaptive budget is allowed.
   Ours-derived Q30 threshold is not treated as method-independent merely because
   downstream methods reuse it; if no cross-dataset preregistered rule can be
   proven, pooled calibration Q30/Q50 thresholds must be frozen before test use.
+
+## 2026-08-10: BACE v4 connected-aware generation and complete GCF audit
+
+### Decision
+
+The BACE v4 expansion is an opt-in generation protocol named
+`connected_deletion_v1`. It reuses the frozen ChemLLM/SFT/PPO checkpoints and
+the train-only source cohort, while explicitly asking for an exact connected
+substructure whose hard deletion leaves one nonempty sanitized component.
+Round 1 has exactly three preregistered temperature/top-p/seed regimes with
+eight samples per source. Every generated row is replayed through the same
+connected hard-deletion implementation before entering the merged pool.
+
+Source-parent RF flip, CFDrop, and oracle outcomes remain provenance and
+ranking features, not matrix-admission gates. The default dataset prompt and
+legacy merge behavior remain unchanged for all existing experiments.
+
+The BACE GCFExplainer v4 audit scans every available native rank but freezes
+the same first twenty valid connected RF counterfactuals in native order. Rows
+after the frozen twentieth candidate are attrition evidence only; they cannot
+change the sequence or trigger RF/WNode reranking.
+
+### Consequences
+
+- Test parents and GCF results are absent from Ours generation and selection.
+- Existing BACE v3 Ours/GCF artifacts remain immutable.
+- A full native-rank GCF audit can establish whether the old summary stopped
+  early without silently changing official ordering semantics.
+- Final test remains blocked until a method-independent calibration threshold
+  contract and both frozen selections pass the common protocol gate.

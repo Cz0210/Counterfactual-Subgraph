@@ -79,3 +79,55 @@ def test_merge_filters_disconnected_source_residual(
         "source_residual_disconnected": 1
     }
     assert audit["all_retained_source_residuals_connected"] is True
+
+
+def test_candidateaware_merge_keeps_source_effect_as_preference_not_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    base = tmp_path / "base.jsonl"
+    row = {
+        "molecule_id": "p1",
+        "parent_id": "p1",
+        "parent_smiles": "CCO",
+        "final_fragment": "O",
+        "parse_ok": True,
+        "valid": True,
+        "connected": True,
+        "direct_substructure": True,
+        "final_substructure": True,
+        "parent_without_fragment_smiles": "CC",
+        "cf_flip": False,
+        "cf_drop": 0.0,
+        "atom_ratio": 1.0 / 3.0,
+        "candidate_lineage_source": "fixture",
+        "candidate_lineage_source_index": 0,
+    }
+    base.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    train_ids = tmp_path / "train.txt"
+    test_ids = tmp_path / "test.txt"
+    train_ids.write_text("p1\n", encoding="utf-8")
+    test_ids.write_text("p2\n", encoding="utf-8")
+    output = tmp_path / "merged"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "merge",
+            "--base-pool",
+            str(base),
+            "--train-parent-ids",
+            str(train_ids),
+            "--test-parent-ids",
+            str(test_ids),
+            "--output-dir",
+            str(output),
+            "--require-connected-source-residual",
+            "--candidateaware-v4",
+        ],
+    )
+
+    assert main() == 0
+    retained = json.loads((output / "candidate_pool.jsonl").read_text())
+    assert retained["cf_flip"] is False
+    assert retained["source_residual_connected"] is True
+    assert len(retained["candidate_lineage_sha256"]) == 64

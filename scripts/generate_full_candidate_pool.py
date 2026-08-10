@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.eval.full_candidate_pool import (  # noqa: E402
+    GENERATION_PROMPT_MODES,
     FullPoolGenerationConfig,
     generate_full_candidate_pool,
 )
@@ -101,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label-col", default="label", help="Preferred label column.")
     parser.add_argument("--smiles-col", default="parent_smiles", help="Preferred smiles column.")
     parser.add_argument("--target-label", type=int, default=1, help="Only keep this parent label.")
+    parser.add_argument(
+        "--prompt-mode",
+        choices=GENERATION_PROMPT_MODES,
+        default="dataset",
+        help="Prompt protocol. The connected mode is opt-in and leaves existing runs unchanged.",
+    )
     parser.add_argument(
         "--num-return-sequences",
         type=int,
@@ -195,6 +202,7 @@ def main() -> None:
             label_col=str(args.label_col),
             smiles_col=str(args.smiles_col),
             target_label=int(args.target_label),
+            prompt_mode=str(args.prompt_mode),
             num_return_sequences=int(args.num_return_sequences),
             generation_temperature=float(args.generation_temperature),
             generation_top_p=float(args.generation_top_p),

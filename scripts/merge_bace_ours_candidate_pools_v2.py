@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.eval.molclr_node_embeddings import canonicalize_smiles
+from src.eval.bace_candidate_universe import classify_connected_feasible_source_row
 
 from rdkit import Chem, RDLogger
 
@@ -59,6 +60,23 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _stable_sha(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _parent_metadata(path: str | None) -> dict[str, dict[str, str]]:
+    if not path:
+        return {}
+    import csv
+
+    with Path(path).expanduser().resolve().open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        rows = [dict(row) for row in csv.DictReader(handle)]
+    return {str(row["molecule_id"]).strip(): row for row in rows}
+
+
 def connected_source_residual_status(row: dict[str, Any]) -> tuple[bool, str]:
     """Validate the exact source-parent residual recorded by generation."""
 
@@ -90,6 +108,8 @@ def main() -> int:
     parser.add_argument("--test-parent-ids", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--require-connected-source-residual", action="store_true")
+    parser.add_argument("--candidateaware-v4", action="store_true")
+    parser.add_argument("--source-metadata-csv")
     args = parser.parse_args()
     sources = [Path(args.base_pool).expanduser().resolve()] + [
         Path(value).expanduser().resolve() for value in args.regime_pool
@@ -106,6 +126,7 @@ def main() -> int:
     }
     if train_ids & test_ids:
         raise ValueError("Train and test candidate-source ID sets overlap")
+    parent_metadata = _parent_metadata(args.source_metadata_csv)
     chosen: dict[tuple[str, str], tuple[tuple[Any, ...], dict[str, Any]]] = {}
     input_count = 0
     source_residual_failures: Counter[str] = Counter()
@@ -122,6 +143,24 @@ def main() -> int:
                 continue
             if source_connected:
                 connected_source_input_count += 1
+            v4_decision: dict[str, Any] | None = None
+            if args.candidateaware_v4:
+                row_for_gate = dict(row)
+                row_for_gate.setdefault("candidate_lineage_source", str(source))
+                row_for_gate.setdefault("candidate_lineage_source_index", source_index)
+                row_for_gate.setdefault("candidate_lineage_row_index", row_index)
+                v4_decision = classify_connected_feasible_source_row(
+                    row_for_gate,
+                    record_index=row_index,
+                    min_atom_ratio=0.0,
+                    max_atom_ratio=0.85,
+                    require_lineage=True,
+                )
+                if not v4_decision["entered_connected_feasible_universe"]:
+                    source_residual_failures[
+                        str(v4_decision["matrix_exclusion_reason"] or "excluded_other")
+                    ] += 1
+                    continue
             fragment = canonicalize_smiles(str(row.get("final_fragment") or ""))
             if not fragment:
                 continue
@@ -132,8 +171,39 @@ def main() -> int:
             payload["candidate_lineage_row_index"] = row_index
             payload["source_residual_connected"] = source_connected
             payload["source_residual_validity_reason"] = source_reason
+            if args.candidateaware_v4:
+                assert v4_decision is not None
+                metadata = parent_metadata.get(parent_id, {})
+                payload.update(
+                    source_residual_connected=True,
+                    source_residual_num_components=1,
+                    source_residual_sanitized=True,
+                    boundary_bond_count=v4_decision["boundary_bond_count_min"],
+                    attachment_count=v4_decision["attachment_count_min"],
+                    source_scaffold=str(
+                        payload.get("source_scaffold") or metadata.get("scaffold") or ""
+                    ),
+                    source_cluster=str(payload.get("source_cluster") or ""),
+                )
+                payload.setdefault("generation_round", 0 if source_index == 0 else None)
+                payload.setdefault("generation_regime", "base" if source_index == 0 else "")
+                payload.setdefault("connected_generation_prompt", False)
+                payload["candidate_lineage_sha256"] = str(
+                    payload.get("candidate_lineage_sha256")
+                    or _stable_sha(
+                        {
+                            "source_sha256": _sha(source),
+                            "source_parent_id": parent_id,
+                            "source_index": source_index,
+                            "source_row_index": row_index,
+                            "fragment": fragment,
+                        }
+                    )
+                )
             key = (parent_id, fragment)
             score = (
+                int(bool(payload.get("source_residual_connected"))),
+                int(bool(payload.get("direct_substructure"))),
                 int(_bool(row.get("cf_flip"))),
                 _float(row.get("cf_drop"), float("-inf")),
                 -_float(row.get("atom_ratio"), float("inf")),
@@ -157,6 +227,8 @@ def main() -> int:
         "parent_count": len({_parent_id(row) for row in rows}),
         "dedup_key": "parent_id + canonical final_fragment",
         "dedup_preference": [
+            "connected_sanitized_source_residual",
+            "direct_substructure",
             "strict_flip",
             "higher_cf_drop",
             "smaller_atom_ratio",
@@ -170,6 +242,7 @@ def main() -> int:
         "connected_source_residual_required": bool(
             args.require_connected_source_residual
         ),
+        "candidateaware_v4": bool(args.candidateaware_v4),
         "connected_source_input_count": connected_source_input_count,
         "source_residual_filtered_count": sum(source_residual_failures.values()),
         "source_residual_failure_counts": dict(sorted(source_residual_failures.items())),
@@ -179,6 +252,17 @@ def main() -> int:
         "action_semantics_version": "connected_sanitized_residual_v1"
         if args.require_connected_source_residual
         else None,
+        "unique_scaffold_count": len(
+            {str(row.get("source_scaffold")) for row in rows if row.get("source_scaffold")}
+        ),
+        "unique_source_cluster_count": len(
+            {str(row.get("source_cluster")) for row in rows if row.get("source_cluster")}
+        ),
+        "molclr_source_cluster_available": any(bool(row.get("source_cluster")) for row in rows),
+        "source_cf_flip_rate": (
+            sum(_bool(row.get("cf_flip")) for row in rows) / len(rows) if rows else 0.0
+        ),
+        "test_source_parent_count": 0,
         "run_complete": True,
     }
     (output / "candidate_pool_audit.json").write_text(

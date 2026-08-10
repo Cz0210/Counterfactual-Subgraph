@@ -639,4 +639,7 @@ Mutagenicity roadmaps.
 - [ ] Freeze a method-independent pooled calibration threshold contract.
 - [ ] Run the preregistered connected-aware generation rounds only when the
   calibration union gate reports candidate limitation.
+- [x] Add an opt-in connected-deletion prompt and source-side chemistry gate.
+- [x] Add fixed Round-1 generation, merge, and calibration-matrix wrappers.
+- [x] Add a complete native-rank GCF attrition audit that preserves Top20.
 - [ ] Freeze Ours/GCF calibration selections before exactly one v4 test run.
