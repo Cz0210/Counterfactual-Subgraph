@@ -6106,3 +6106,22 @@ single A800 and seven CPUs. Seed, steps, heads, candidate capacity, sample size,
 teleport probability, importance, DBSCAN parameters, candidate order, and
 official source remain unchanged. Cross-job resume remains disabled because the
 failed process did not persist complete RNG and candidate state.
+
+---
+
+## 2026-08-10: Close COMRECGC trace and frozen-payload graph references
+
+A completed full walk can outlive the bounded hot `graph_map`: selected trace
+chunks and compact transitions may still reference exact graphs held only in
+the authoritative SQLite store. All project trace and transition-source reads
+now use one fail-closed resolver. Before freezing, required graph references are
+rehydrated, checksum-verified, atomically serialized, and verified again after
+reload. Missing or colliding graph state is never skipped or substituted.
+
+Freeze-only reuse is allowed only after a separate audit proves that the walk
+completed, the fixed generation configuration matches, the backing store is
+sound, selected-trace closure is complete, and transition integrity has no
+unresolved evidence. A completed walk needs no RNG state for deterministic
+freeze-only postprocessing; incomplete random-walk resume still requires a
+complete atomic RNG/transition checkpoint and otherwise starts from step zero.
+See `docs/postmortems/COMRECGC_RESOLVER_FREEZE_CLOSURE_20260810.md`.

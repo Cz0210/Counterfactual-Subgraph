@@ -8,6 +8,7 @@ from typing import Any
 
 from .checkpoint_audit import audit_generation_checkpoint
 from .contracts import sha256_file
+from .frozen_payload import payload_graphs_by_official_hash
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -25,13 +26,21 @@ def audit_generation_integrity(
     progress_path = root / "progress.json"
     complete_path = root / "_RUN_COMPLETE.json"
     graph_audit_path = root / "graph_state_audit.json"
-    required = (manifest_path, progress_path, complete_path, graph_audit_path)
+    closure_audit_path = root / "frozen_payload_closure_audit.json"
+    required = (
+        manifest_path,
+        progress_path,
+        complete_path,
+        graph_audit_path,
+        closure_audit_path,
+    )
     missing = [str(path) for path in required if not path.is_file() or path.stat().st_size <= 0]
     if missing:
         raise FileNotFoundError(f"Generation integrity inputs missing: {missing}")
     manifest = _json(manifest_path)
     progress = _json(progress_path)
     graph_audit = _json(graph_audit_path)
+    closure_audit = _json(closure_audit_path)
     result_path = Path(manifest["counterfactuals_path"]).expanduser().resolve()
     if not result_path.is_file():
         raise FileNotFoundError(f"Generation counterfactual artifact missing: {result_path}")
@@ -51,6 +60,7 @@ def audit_generation_integrity(
     if not isinstance(graph_map, dict) or not isinstance(candidates, list):
         raise TypeError("Generation payload graph_map/counterfactual_candidates are invalid.")
     selected_hashes = [row.get("graph_hash") for row in candidates if isinstance(row, dict)]
+    frozen_graphs = payload_graphs_by_official_hash(payload)
 
     checkpoint = audit_generation_checkpoint(root)
     incomplete_checkpoint = bool(checkpoint["checkpoint_manifest_found"]) and not bool(
@@ -70,7 +80,16 @@ def audit_generation_integrity(
             graph_audit.get("invalid_transition_destination_count", -1)
         )
         == 0,
-        "selected_graph_hashes_resolvable": all(value in graph_map for value in selected_hashes),
+        "selected_graph_hashes_resolvable": all(
+            str(value) in frozen_graphs for value in selected_hashes
+        ),
+        "frozen_payload_closure_complete": closure_audit.get("closure_complete") is True,
+        "frozen_payload_post_write_verified": closure_audit.get(
+            "post_write_reload_verified"
+        )
+        is True,
+        "frozen_payload_checksum_matches": closure_audit.get("payload_checksum")
+        == sha256_file(result_path),
         "backing_store_integrity": bool(
             (graph_audit.get("backing_store") or {}).get("integrity_passed")
         ),
@@ -92,6 +111,7 @@ def audit_generation_integrity(
             (graph_audit.get("backing_store") or {}).get("integrity_passed")
         ),
         "checkpoint_audit": checkpoint,
+        "frozen_payload_closure_audit": closure_audit,
         "checks": checks,
         "generation_integrity_passed": all(checks.values()),
     }

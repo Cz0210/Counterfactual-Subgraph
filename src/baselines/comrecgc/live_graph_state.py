@@ -338,6 +338,12 @@ class LiveGraphMap(dict[Any, Any]):
     def transition_integrity(self) -> dict[str, int]:
         transitions = getattr(self._module, "transitions", {})
         stored_keys = self.store.stored_keys()
+        stored_keys_by_string = {str(value): value for value in stored_keys}
+        if len(stored_keys_by_string) != len(stored_keys):
+            raise ComRecGCGraphHashCollisionError(
+                "[COMRECGC_GRAPH_HASH_COLLISION] backing store contains "
+                "ambiguous string-normalized official hashes"
+            )
         unresolved_sources = 0
         invalid_destinations = 0
         destination_count = 0
@@ -353,9 +359,10 @@ class LiveGraphMap(dict[Any, Any]):
                 continue
             destination_count += len(hashes)
             for graph_hash, graph in zip(hashes, graphs, strict=True):
-                if graph_hash not in stored_keys:
+                stored_key = stored_keys_by_string.get(str(graph_hash))
+                if stored_key is None:
                     continue
-                stored = self.store.metadata(graph_hash)
+                stored = self.store.metadata(stored_key)
                 if stored is None or stored["graph_sha256"] != stable_untyped_graph_sha256(graph):
                     invalid_destinations += 1
         return {

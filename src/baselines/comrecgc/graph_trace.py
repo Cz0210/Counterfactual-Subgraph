@@ -9,7 +9,7 @@ import tempfile
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
 from .contracts import atomic_write_bytes, sha256_file, stable_json_sha256, write_json
 
@@ -585,6 +585,8 @@ class ActionTraceRecorder:
         *,
         source_graphs_by_parent_id: Mapping[str, Any] | None = None,
         compact_candidate_lineage: bool = False,
+        frozen_payload_backing_store: str | Path | None = None,
+        frozen_payload_audit_path: str | Path | None = None,
     ) -> dict[str, Any]:
         root = self._configure_output(output_dir)
         self._flush_chunks(final=True)
@@ -610,6 +612,23 @@ class ActionTraceRecorder:
                 "resume_policy": "reuse_byte_identical_completed_chunks",
             },
         )
+        frozen_payload_closure: dict[str, Any] | None = None
+        if frozen_payload_backing_store is not None:
+            if not isinstance(payload, MutableMapping):
+                raise TypeError(
+                    "COMRECGC full trace closure requires a mutable payload mapping."
+                )
+            from .frozen_payload import materialize_frozen_payload_closure
+
+            frozen, frozen_payload_closure = materialize_frozen_payload_closure(
+                payload,
+                iter_selected_trace(selected_manifest_path),
+                backing_store_path=frozen_payload_backing_store,
+            )
+            payload.clear()
+            payload.update(frozen)
+            if frozen_payload_audit_path is not None:
+                write_json(frozen_payload_audit_path, frozen_payload_closure)
         lineage_path = root / "candidate_action_lineage.json"
         lineage_index_path: Path | None = None
         if compact_candidate_lineage:
@@ -744,6 +763,7 @@ class ActionTraceRecorder:
                 if source_graphs_by_parent_id is not None
                 else "runtime_recorded_predecessor_v1"
             ),
+            "frozen_payload_closure": frozen_payload_closure,
         }
         write_json(root / "trace_summary.json", summary)
         write_json(
@@ -924,8 +944,17 @@ def _lineage_recovery_context(
     graph_by_stable_key: dict[tuple[str, str], Any] = {}
     graph_by_official_key: dict[tuple[str, str], Any] = {}
     official_matches: dict[str, list[tuple[tuple[str, str], Any]]] = {}
-    for official_hash, entry in graph_map.items():
-        graph = entry[0]
+    frozen_graph_closure = payload.get("frozen_graph_closure") or {}
+    graph_rows = [
+        (official_hash, entry[0]) for official_hash, entry in graph_map.items()
+    ]
+    active_hash_strings = {str(key) for key in graph_map}
+    graph_rows.extend(
+        (official_hash, graph)
+        for official_hash, graph in frozen_graph_closure.items()
+        if str(official_hash) not in active_hash_strings
+    )
+    for official_hash, graph in graph_rows:
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
         key = (parent_id, stable_untyped_graph_sha256(graph))
         existing_stable = graph_by_stable_key.get(key)

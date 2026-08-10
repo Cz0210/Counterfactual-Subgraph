@@ -92,7 +92,7 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
         self._expanded: OrderedDict[Any, tuple[Any, ...]] = OrderedDict()
         self._actions_by_object_id: dict[int, tuple[Any, ...]] = {}
         self._active_keys: tuple[Any, ...] = ()
-        self._active_graph_entries: dict[Any, Any] = {}
+        self._active_graphs: dict[Any, Any] = {}
         self._deferred_deletions: set[Any] = set()
         self._current_step = 0
         self.move_count = 0
@@ -138,9 +138,14 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
         self.move_count += 1
         self._current_step = self.move_count
         self._active_keys = tuple(graph_hashes)
-        graph_map = getattr(self._module, "graph_map", {})
-        self._active_graph_entries = {
-            key: graph_map[key] for key in self._active_keys if key in graph_map
+        # Resolve through the same fail-closed authority used by graph tracing.
+        # ``LiveGraphMap.__contains__`` intentionally reflects only the bounded
+        # hot set, so membership checks followed by raw indexing would bypass
+        # the authoritative backing store after an eviction.
+        from .live_graph_state import resolve_graph
+
+        self._active_graphs = {
+            key: resolve_graph(self._module, key) for key in self._active_keys
         }
         return self._current_step
 
@@ -153,7 +158,7 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
                 self._drop(key)
                 self.applied_deferred_deletion_count += 1
         self._deferred_deletions.clear()
-        self._active_graph_entries.clear()
+        self._active_graphs.clear()
         self._active_keys = ()
 
     def __contains__(self, key: object) -> bool:
@@ -210,17 +215,11 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
         self.max_transition_size = max(self.max_transition_size, len(self._entries))
 
     def _source_graph(self, key: Any) -> Any:
-        if key in self._active_graph_entries:
-            return self._active_graph_entries[key][0]
-        graph_map = getattr(self._module, "graph_map", {})
-        if key in graph_map:
-            return graph_map[key][0]
-        raise RuntimeError(
-            "[COMRECGC_COMPACT_TRANSITION_SOURCE_ERROR] "
-            f"current_step={self._current_step} seed={self._seed} "
-            f"graph_hash={key} transition_size={len(self)} "
-            f"cache_size={len(graph_map)}"
-        )
+        if key in self._active_graphs:
+            return self._active_graphs[key]
+        from .live_graph_state import resolve_graph
+
+        return resolve_graph(self._module, key)
 
     def __getitem__(self, key: Any) -> Any:
         if key not in self._entries:
@@ -326,6 +325,7 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
             "applied_deferred_deletion_count": self.applied_deferred_deletion_count,
             "cancelled_deferred_deletion_count": self.cancelled_deferred_deletion_count,
             "missing_lookup_count": self.missing_lookup_count,
+            "graph_source_resolution": "unified_live_graph_resolver_v3",
             "model_recomputation_count": 0,
             "rng_calls_added": 0,
             "neighbor_order_changed": False,

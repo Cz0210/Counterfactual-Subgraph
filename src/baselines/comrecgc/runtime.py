@@ -35,7 +35,12 @@ from .model_adapter import (
 from .graph_trace import (
     ActionTraceRecorder,
     assert_trace_parity,
+    iter_selected_trace,
     stable_graph_sha256,
+)
+from .frozen_payload import (
+    materialize_frozen_payload_closure,
+    payload_file_audit,
 )
 from .live_graph_state import (
     GRAPH_STATE_POLICY,
@@ -1009,7 +1014,15 @@ def run_project_generation(
                 write_json(graph_state_audit_path, compatibility_audit["live_graph_state"])
             trace_summary: dict[str, Any] | None = None
             parity_summary: dict[str, Any] | None = None
+            frozen_payload_audit_path: Path | None = None
+            frozen_payload_audit: dict[str, Any] | None = None
+            backing_store_path = graph_state_root / "authoritative_graph_store.sqlite3"
             if trace_recorder is not None:
+                frozen_payload_audit_path = (
+                    root / "frozen_payload_closure_audit.json"
+                    if mode == "full"
+                    else None
+                )
                 trace_summary = trace_recorder.write(
                     trace_output_dir,
                     payload,
@@ -1017,7 +1030,53 @@ def run_project_generation(
                         zip(bundle.parent_ids, bundle.graphs, strict=True)
                     ),
                     compact_candidate_lineage=mode == "full",
+                    frozen_payload_backing_store=(
+                        backing_store_path if mode == "full" else None
+                    ),
+                    frozen_payload_audit_path=frozen_payload_audit_path,
                 )
+                frozen_payload_audit = trace_summary.get("frozen_payload_closure")
+            elif mode == "full":
+                frozen_payload_audit_path = root / "frozen_payload_closure_audit.json"
+                payload, frozen_payload_audit = materialize_frozen_payload_closure(
+                    payload, (), backing_store_path=backing_store_path
+                )
+                write_json(frozen_payload_audit_path, frozen_payload_audit)
+            if mode == "full":
+                # The official file contains only the bounded hot map. Replace
+                # the project copy atomically with its referentially complete
+                # closure, then reload it once before permitting downstream use.
+                _torch_save_atomic(payload, result_path)
+                verified_payload = _torch_load(result_path)
+                selected_events = (
+                    iter_selected_trace(
+                        Path(trace_output_dir) / "selected_action_trace_manifest.json"
+                    )
+                    if trace_recorder is not None
+                    else ()
+                )
+                _verified_payload, verification = materialize_frozen_payload_closure(
+                    verified_payload,
+                    selected_events,
+                    backing_store_path=None,
+                )
+                if not verification["closure_complete"]:
+                    raise RuntimeError(
+                        "COMRECGC frozen payload failed its post-write closure audit."
+                    )
+                frozen_payload_audit = {
+                    **(frozen_payload_audit or {}),
+                    **payload_file_audit(result_path),
+                    "post_write_reload_verified": True,
+                    "post_write_required_hash_count": verification[
+                        "required_hash_count"
+                    ],
+                }
+                if frozen_payload_audit_path is not None:
+                    write_json(frozen_payload_audit_path, frozen_payload_audit)
+                payload = verified_payload
+                graph_map, candidates = validate_counterfactual_payload(payload)
+                materialization = f"{materialization}_then_atomic_closure_rewrite"
             if parity_reference_path is not None:
                 reference_path = Path(parity_reference_path).expanduser().resolve()
                 parity_summary = assert_trace_parity(_torch_load(reference_path), payload)
@@ -1043,6 +1102,17 @@ def run_project_generation(
                 "graph_state_audit_sha256": (
                     sha256_file(graph_state_audit_path) if graph_state_audit_path else None
                 ),
+                "frozen_payload_closure_audit_path": (
+                    str(frozen_payload_audit_path)
+                    if frozen_payload_audit_path is not None
+                    else None
+                ),
+                "frozen_payload_closure_audit_sha256": (
+                    sha256_file(frozen_payload_audit_path)
+                    if frozen_payload_audit_path is not None
+                    else None
+                ),
+                "frozen_payload_closure": frozen_payload_audit,
                 "candidate_order_source": "official_frequency_reinforced_order",
                 "algorithm_rerun": True,
                 "run_complete": True,
