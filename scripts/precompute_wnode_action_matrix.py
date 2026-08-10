@@ -28,6 +28,10 @@ from src.eval.wnode_action_matrix import (  # noqa: E402
     MatrixBuildConfig,
     build_bace_action_matrix,
 )
+from src.eval.bace_candidate_universe import (  # noqa: E402
+    CANDIDATE_UNIVERSE_POLICIES,
+    LEGACY_SOURCE_EFFECT_POLICY,
+)
 from src.rewards.teacher_semantic import TeacherSemanticScorer  # noqa: E402
 
 
@@ -51,6 +55,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-unique-candidates", type=int, default=0)
     parser.add_argument("--parent-limit", type=int, default=0)
     parser.add_argument("--candidate-limit", type=int, default=0)
+    parser.add_argument(
+        "--candidate-universe-policy",
+        choices=CANDIDATE_UNIVERSE_POLICIES,
+        default=LEGACY_SOURCE_EFFECT_POLICY,
+    )
+    parser.add_argument("--min-source-atom-ratio", type=float, default=0.0)
+    parser.add_argument("--max-source-atom-ratio", type=float, default=0.85)
+    parser.add_argument(
+        "--require-candidate-lineage",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     parser.add_argument("--flush-every", type=int, default=100)
     parser.add_argument("--cf-mode", choices=("strict_flip",), default="strict_flip")
     parser.add_argument("--device", default="cuda")
@@ -144,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
                 wnode_size_penalty_beta=0.0,
                 action_semantics_version=str(args.action_semantics_version),
                 match_selection_policy=str(args.match_selection_policy),
+                candidate_universe_policy=str(args.candidate_universe_policy),
+                min_source_atom_ratio=float(args.min_source_atom_ratio),
+                max_source_atom_ratio=float(args.max_source_atom_ratio),
+                require_candidate_lineage=bool(args.require_candidate_lineage),
             ),
         )
     finally:

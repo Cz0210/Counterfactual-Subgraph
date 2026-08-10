@@ -630,3 +630,13 @@ The BACE paper path now has an additive, versioned optimization route:
 
 This extension reuses the production evaluator and does not alter the AIDS or
 Mutagenicity roadmaps.
+# BACE Connected Candidate-Aware v4 (2026-08-10)
+
+- [x] Preserve legacy matrix admission as an explicit default policy.
+- [x] Add chemistry-only `connected_feasible_v4` candidate admission.
+- [x] Add 151-to-matrix attrition and cross-dataset threshold protocol audits.
+- [x] Add a versioned full connected calibration matrix wrapper and union report.
+- [ ] Freeze a method-independent pooled calibration threshold contract.
+- [ ] Run the preregistered connected-aware generation rounds only when the
+  calibration union gate reports candidate limitation.
+- [ ] Freeze Ours/GCF calibration selections before exactly one v4 test run.

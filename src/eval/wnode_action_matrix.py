@@ -31,6 +31,12 @@ from src.eval.close_counterfactual_coverage import (
     predict_with_teacher,
 )
 from src.eval.candidate_pool_audit import _normalize_row
+from src.eval.bace_candidate_universe import (
+    CANDIDATE_UNIVERSE_POLICIES,
+    CONNECTED_FEASIBLE_V4_POLICY,
+    LEGACY_SOURCE_EFFECT_POLICY,
+    build_connected_feasible_candidate_universe,
+)
 from src.eval.class_counterfactual_selector import _is_failure_free
 from src.eval.molclr_node_embeddings import canonicalize_smiles
 from src.eval.mutagenicity_wnode_matrix import (
@@ -81,6 +87,10 @@ class ActionMatrixConfig:
     wnode_size_penalty_beta: float = DEFAULT_WNODE_SIZE_PENALTY_BETA
     action_semantics_version: str = DELETION_IMPLEMENTATION_VERSION
     match_selection_policy: str = LEGACY_MATCH_SELECTION_POLICY
+    candidate_universe_policy: str = LEGACY_SOURCE_EFFECT_POLICY
+    min_source_atom_ratio: float = 0.0
+    max_source_atom_ratio: float = 0.85
+    require_candidate_lineage: bool = False
 
 
 def bace_matrix_config(
@@ -261,66 +271,99 @@ def _mean_truth(rows: Sequence[dict[str, Any]], key: str) -> float:
 
 
 def _build_bace_universe(
-    pool_rows: Sequence[dict[str, Any]], config: ActionMatrixConfig
+    pool_rows: Sequence[dict[str, Any]],
+    config: ActionMatrixConfig,
+    *,
+    deletion_fn: Callable[[str, str], Sequence[Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    eligible_rows: list[dict[str, Any]] = []
-    filter_counts: dict[str, int] = defaultdict(int)
-    for index, row in enumerate(pool_rows):
-        normalized = _normalize_row(row, record_index=index)
-        if normalized.label != 1:
-            filter_counts["label_mismatch"] += 1
-            continue
-        if not normalized.final_fragment:
-            filter_counts["missing_final_fragment"] += 1
-            continue
-        if not normalized.final_substructure:
-            filter_counts["final_substructure_fail"] += 1
-            continue
-        if not normalized.parse_ok:
-            filter_counts["parse_fail"] += 1
-            continue
-        if not normalized.valid:
-            filter_counts["valid_fail"] += 1
-            continue
-        if not normalized.connected:
-            filter_counts["connected_fail"] += 1
-            continue
-        if not normalized.oracle_ok:
-            filter_counts["oracle_fail"] += 1
-            continue
-        if normalized.cf_drop is None or float(normalized.cf_drop) < 0.2:
-            filter_counts["cf_drop_fail"] += 1
-            continue
-        if not normalized.cf_flip:
-            filter_counts["cf_flip_fail"] += 1
-            continue
-        if not _is_failure_free(normalized.failure_tag):
-            filter_counts["failure_tag_fail"] += 1
-            continue
-        if normalized.full_parent:
-            filter_counts["full_parent_fail"] += 1
-            continue
-        if normalized.near_parent:
-            filter_counts["near_parent_fail"] += 1
-            continue
-        if normalized.too_small:
-            filter_counts["too_small_fail"] += 1
-            continue
-        eligible_rows.append(row)
-    universe, statistics_payload = build_candidate_universe(
-        eligible_rows, candidate_order=config.candidate_order
-    )
-    statistics_payload["input_pool_rows"] = len(pool_rows)
-    statistics_payload["source_filter_counts"] = dict(filter_counts)
-    statistics_payload["source_filter_contract"] = {
-        "label": 1,
-        "min_cf_drop": 0.2,
-        "require_cf_flip": True,
-        "require_final_substructure": True,
-        "require_parse_valid_connected_oracle": True,
-        "require_failure_free": True,
-        "reject_full_near_parent_and_too_small": True,
-    }
+    if config.candidate_universe_policy == CONNECTED_FEASIBLE_V4_POLICY:
+        universe, statistics_payload, decisions = (
+            build_connected_feasible_candidate_universe(
+                pool_rows,
+                candidate_order=config.candidate_order,
+                min_atom_ratio=config.min_source_atom_ratio,
+                max_atom_ratio=config.max_source_atom_ratio,
+                require_lineage=config.require_candidate_lineage,
+                deletion_fn=deletion_fn,
+            )
+        )
+        eligible_indices = {
+            int(decision["record_index"])
+            for decision in decisions
+            if decision["entered_connected_feasible_universe"]
+        }
+        eligible_rows = [
+            row for index, row in enumerate(pool_rows) if index in eligible_indices
+        ]
+    elif config.candidate_universe_policy != LEGACY_SOURCE_EFFECT_POLICY:
+        raise ValueError(
+            "Unsupported BACE candidate-universe policy: "
+            f"{config.candidate_universe_policy!r}"
+        )
+    else:
+        universe = []
+        statistics_payload = {}
+        eligible_rows = []
+
+    if config.candidate_universe_policy == LEGACY_SOURCE_EFFECT_POLICY:
+        filter_counts: dict[str, int] = defaultdict(int)
+        for index, row in enumerate(pool_rows):
+            normalized = _normalize_row(row, record_index=index)
+            if normalized.label != 1:
+                filter_counts["label_mismatch"] += 1
+                continue
+            if not normalized.final_fragment:
+                filter_counts["missing_final_fragment"] += 1
+                continue
+            if not normalized.final_substructure:
+                filter_counts["final_substructure_fail"] += 1
+                continue
+            if not normalized.parse_ok:
+                filter_counts["parse_fail"] += 1
+                continue
+            if not normalized.valid:
+                filter_counts["valid_fail"] += 1
+                continue
+            if not normalized.connected:
+                filter_counts["connected_fail"] += 1
+                continue
+            if not normalized.oracle_ok:
+                filter_counts["oracle_fail"] += 1
+                continue
+            if normalized.cf_drop is None or float(normalized.cf_drop) < 0.2:
+                filter_counts["cf_drop_fail"] += 1
+                continue
+            if not normalized.cf_flip:
+                filter_counts["cf_flip_fail"] += 1
+                continue
+            if not _is_failure_free(normalized.failure_tag):
+                filter_counts["failure_tag_fail"] += 1
+                continue
+            if normalized.full_parent:
+                filter_counts["full_parent_fail"] += 1
+                continue
+            if normalized.near_parent:
+                filter_counts["near_parent_fail"] += 1
+                continue
+            if normalized.too_small:
+                filter_counts["too_small_fail"] += 1
+                continue
+            eligible_rows.append(row)
+        universe, statistics_payload = build_candidate_universe(
+            eligible_rows, candidate_order=config.candidate_order
+        )
+        statistics_payload["input_pool_rows"] = len(pool_rows)
+        statistics_payload["source_filter_counts"] = dict(filter_counts)
+        statistics_payload["source_filter_contract"] = {
+            "policy": LEGACY_SOURCE_EFFECT_POLICY,
+            "label": 1,
+            "min_cf_drop": 0.2,
+            "require_cf_flip": True,
+            "require_final_substructure": True,
+            "require_parse_valid_connected_oracle": True,
+            "require_failure_free": True,
+            "reject_full_near_parent_and_too_small": True,
+        }
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in eligible_rows:
         canonical = canonicalize_smiles(str(row.get("final_fragment") or "").strip())
@@ -629,6 +672,10 @@ def build_bace_action_matrix(
         raise ValueError("Connected action semantics require the connected match policy.")
     if resolved.candidate_limit < 0 or resolved.flush_every <= 0:
         raise ValueError("candidate_limit must be non-negative and flush_every positive")
+    if resolved.candidate_universe_policy not in CANDIDATE_UNIVERSE_POLICIES:
+        raise ValueError(
+            f"Unsupported candidate_universe_policy={resolved.candidate_universe_policy!r}"
+        )
     pool_path = Path(candidate_pool).expanduser().resolve()
     calibration_path = Path(calibration_csv).expanduser().resolve()
     if "test" in {part.lower() for part in calibration_path.parts}:
@@ -637,7 +684,9 @@ def build_bace_action_matrix(
     root.mkdir(parents=True, exist_ok=True)
 
     pool_rows = _read_jsonl(pool_path)
-    universe, universe_stats = _build_bace_universe(pool_rows, resolved)
+    universe, universe_stats = _build_bace_universe(
+        pool_rows, resolved, deletion_fn=deletion_fn
+    )
     source_parent_count = len(
         {parent_id for row in pool_rows if (parent_id := _source_parent_id(row))}
     )
@@ -713,6 +762,10 @@ def build_bace_action_matrix(
         "expected_source_eligible_rows": resolved.expected_source_eligible_rows,
         "expected_unique_candidates": resolved.expected_unique_candidates,
         "candidate_order": resolved.candidate_order,
+        "candidate_universe_policy": resolved.candidate_universe_policy,
+        "min_source_atom_ratio": resolved.min_source_atom_ratio,
+        "max_source_atom_ratio": resolved.max_source_atom_ratio,
+        "require_candidate_lineage": resolved.require_candidate_lineage,
         "wnode_size_penalty_beta": resolved.wnode_size_penalty_beta,
         "local_files_only": resolved.local_files_only,
     }

@@ -5950,3 +5950,19 @@ The merged formal pool rejects any row whose recorded source-parent deletion
 is empty, unsanitized, or disconnected. After that fixed expansion the best
 calibration-only sequence is frozen once even if the limitation diagnostic
 remains true; no extra seed, test-guided retry, or adaptive budget is allowed.
+# 2026-08-10: BACE v4 candidate universe uses chemistry feasibility, not source effect
+
+- The historical BACE WNode matrix required `oracle_ok`, source `cf_drop >= 0.2`,
+  and source `cf_flip` before a fragment could be evaluated across calibration
+  parents.  This reduced the connected v3 pool from 151 canonical fragments to
+  55 and conflated source-parent performance with class-level utility.
+- `connected_feasible_v4` admits only parseable/canonical connected fragments
+  with complete lineage, an exact source-parent match, a nonempty sanitized
+  single-component source residual, and the frozen `(0.0, 0.85)` atom-ratio
+  window.  Source oracle, flip, and CFDrop remain recorded ranking features.
+- The legacy policy remains the default, so AIDS, Mutagenicity, and all frozen
+  BACE v3 artifacts retain their prior behavior.
+- A threshold protocol audit must run before BACE v4 final test evaluation.  An
+  Ours-derived Q30 threshold is not treated as method-independent merely because
+  downstream methods reuse it; if no cross-dataset preregistered rule can be
+  proven, pooled calibration Q30/Q50 thresholds must be frozen before test use.
