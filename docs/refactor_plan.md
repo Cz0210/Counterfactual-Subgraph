@@ -642,4 +642,7 @@ Mutagenicity roadmaps.
 - [x] Add an opt-in connected-deletion prompt and source-side chemistry gate.
 - [x] Add fixed Round-1 generation, merge, and calibration-matrix wrappers.
 - [x] Add a complete native-rank GCF attrition audit that preserves Top20.
+- [x] Add the calibration-only hard-parent Round-2 cohort and fixed regimes.
+- [x] Add method-balanced pooled calibration Q30/Q50 threshold freezing.
+- [x] Add pre-test selection/protocol gates and a one-shot Ours/GCF test job.
 - [ ] Freeze Ours/GCF calibration selections before exactly one v4 test run.

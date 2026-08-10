@@ -5996,3 +5996,16 @@ change the sequence or trigger RF/WNode reranking.
   early without silently changing official ordering semantics.
 - Final test remains blocked until a method-independent calibration threshold
   contract and both frozen selections pass the common protocol gate.
+
+Round 2 is also fixed before test. It runs only when the Round-1 calibration
+matrix remains below either preregistered candidate-limitation bound. Its
+source cohort is derived from calibration hard groups B/C/D and mapped to
+train-only molecules by exact Bemis-Murcko scaffold, then deterministic Morgan
+similarity. No frozen MolCLR source-cluster artifact exists for BACE, so the
+manifest records that absence rather than inventing cluster identities.
+
+If no cross-dataset threshold preregistration can be proven, v4 freezes a
+method-balanced pooled calibration distribution: one minimum connected
+strict-flip distance per parent and method, with total weight 0.5 for Ours and
+0.5 for GCFExplainer. Pooled Q30 is the strict primary and pooled Q50 is the
+standard sensitivity threshold. Both are frozen before the sole v4 test job.
