@@ -28,11 +28,13 @@ class OfficialGlobalGCEBACEGenerator(OfficialGlobalGCEMutagenicityGenerator):
         official_root: str | Path,
         *,
         native_train_csv: str | Path,
+        min_freq: int,
     ) -> None:
         super().__init__(
             official_root,
             native_train_csv=native_train_csv,
             dataset_name=DATASET_NAME,
+            min_freq=int(min_freq),
         )
 
 

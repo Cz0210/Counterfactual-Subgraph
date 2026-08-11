@@ -23,12 +23,26 @@ export PYTHONPATH=$PWD
 mkdir -p logs
 
 RUN_DIR=${RUN_DIR:-$ARTIFACT_ROOT/outputs/hpc/baselines/globalgce/bace/train_pool_connected_v1}
+MIN_FREQ_MANIFEST=${MIN_FREQ_MANIFEST:-}
 TEACHER_PATH=${TEACHER_PATH:-$ARTIFACT_ROOT/outputs/hpc/oracle/bace/bace_teacher.pkl}
 MOLCLR_CHECKPOINT=${MOLCLR_CHECKPOINT:-$ARTIFACT_ROOT/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth}
 THRESHOLDS_JSON=${THRESHOLDS_JSON:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_connected_candidateaware_v4/threshold_protocol/thresholds.json}
 OUTPUT_DIR=${OUTPUT_DIR:-$ARTIFACT_ROOT/outputs/hpc/selectors/bace_globalgce_frequency_top20_connected_v1}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
+
+if [[ -n "$MIN_FREQ_MANIFEST" ]]; then
+  test -s "$MIN_FREQ_MANIFEST" || { echo "missing min-freq manifest: $MIN_FREQ_MANIFEST" >&2; exit 2; }
+  RUN_DIR=$(python - "$MIN_FREQ_MANIFEST" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding="utf-8"))
+assert p["dataset"] == "BACE"
+assert p["selection_split"] == "calibration"
+assert p["test_loaded"] is False
+print(p["selected_pool_path"])
+PY
+)
+fi
 
 for path in "$RUN_DIR/_RUN_COMPLETE.json" "$RUN_DIR/candidate_universe.jsonl" "$TEACHER_PATH" "$MOLCLR_CHECKPOINT" "$THRESHOLDS_JSON"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }

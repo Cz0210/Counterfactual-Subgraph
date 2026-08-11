@@ -6155,3 +6155,24 @@ cohort, teacher, MolCLR checkpoint, threshold manifest, strict-flip rule, and
 cost schema. The common4 audit fails closed on any identity, connectivity,
 ordering, or schema mismatch and emits plotting-ready Figure 3, Figure 4, and
 Table 2 combined files without an adapter.
+
+---
+
+## 2026-08-11: BACE v4 launch and offline dependency gates
+
+BACE GlobalGCE no longer relies on the official dataset-name dictionary having
+a BACE entry. Its minimum frequency is either an explicit calibration candidate
+or a frozen calibration-only manifest selected from the fixed train-cohort ratio
+grid. Test metrics are rejected by the resolver and selector. The official
+GlobalGCE source remains unchanged; the resolved value is injected only into the
+isolated training process and recorded in its generator identity.
+
+BACE COMRECGC now receives an explicit absolute checkout root and expected fixed
+upstream commit. A short gate verifies source files, Git cleanliness, optional
+vendor-manifest hashes, and imports before full generation. Offline immutable
+vendor checkouts are allowed to carry only their integrity manifest as an
+untracked file. No formal BACE job performs an online checkout.
+
+Zero-runtime Slurm exit `0:53` is handled as launch infrastructure failure. The
+three observed roots did not share one node, so retry jobs use `--requeue`
+without excluding a node and depend on a short launch preflight.

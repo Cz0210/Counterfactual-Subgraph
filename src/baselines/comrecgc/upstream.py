@@ -7,6 +7,7 @@ loads a separately fetched checkout and verifies its exact commit.
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import PurePosixPath
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Iterator
 
-from .contracts import ContractError, UPSTREAM_COMMIT
+from .contracts import ContractError, UPSTREAM_COMMIT, sha256_file
 
 UPSTREAM_MODULES = (
     "util",
@@ -58,7 +59,8 @@ def validate_upstream_checkout(path: str | Path) -> Path:
             and parts[0] == "data"
             and parts[2] in {"tudataset", "processed"}
         )
-        if not runtime_data:
+        vendor_manifest = bool(status == "??" and relative == "vendor_manifest.json")
+        if not runtime_data and not vendor_manifest:
             blocked.append(line)
     if blocked:
         raise ContractError(
@@ -68,6 +70,19 @@ def validate_upstream_checkout(path: str | Path) -> Path:
     for filename in ("comrecgc.py", "common_recourse.py", "data.py", "gnn.py"):
         if not (root / filename).is_file():
             raise FileNotFoundError(f"Pinned COMRECGC file is missing: {root / filename}")
+    vendor_manifest = root / "vendor_manifest.json"
+    if vendor_manifest.is_file():
+        payload = json.loads(vendor_manifest.read_text(encoding="utf-8"))
+        expected_files = {
+            filename: sha256_file(root / filename)
+            for filename in ("comrecgc.py", "common_recourse.py", "data.py", "gnn.py")
+        }
+        if (
+            payload.get("commit") != commit
+            or payload.get("key_file_sha256") != expected_files
+            or payload.get("read_only_usage") is not True
+        ):
+            raise ContractError("COMRECGC vendor manifest integrity check failed.")
     return root
 
 

@@ -18,6 +18,9 @@ from src.baselines.globalgce_bace_adapter import (  # noqa: E402
     build_bace_train_pool,
 )
 from src.baselines.globalgce_mutagenicity_adapter import PoolBuildConfig  # noqa: E402
+from src.baselines.globalgce_min_freq import (  # noqa: E402
+    resolve_globalgce_min_freq,
+)
 from src.rewards.teacher_semantic import TeacherSemanticScorer  # noqa: E402
 
 
@@ -42,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-num-workers", type=int, default=0)
     parser.add_argument("--memory-log-every-chunks", type=int, default=1)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--min-freq", type=int, default=None)
+    parser.add_argument("--min-freq-manifest", default=None)
     return parser
 
 
@@ -63,9 +68,15 @@ def main(argv: list[str] | None = None) -> int:
     teacher = TeacherSemanticScorer(teacher_path)
     if not teacher.available:
         raise RuntimeError(f"BACE RF teacher is unavailable: {teacher.availability_reason}")
+    resolution = resolve_globalgce_min_freq(
+        "BACE",
+        explicit_min_freq=args.min_freq,
+        calibration_manifest=args.min_freq_manifest,
+    )
     generator = OfficialGlobalGCEBACEGenerator(
         official_root,
         native_train_csv=native_train_csv,
+        min_freq=resolution.value,
     )
     summary = build_bace_train_pool(
         train_csv=train_csv,

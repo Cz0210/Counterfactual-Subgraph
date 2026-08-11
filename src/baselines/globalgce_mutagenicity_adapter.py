@@ -936,6 +936,7 @@ def _import_official_modules(official_src: Path) -> dict[str, Any]:
         "train_globalgce": importlib.import_module(
             "models.models_utils"
         ).train_globalgce,
+        "fsg_module": importlib.import_module("models.fsg"),
     }
 
 
@@ -1818,6 +1819,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         *,
         native_train_csv: str | Path | None = None,
         dataset_name: str = DATASET_NAME,
+        min_freq: int | None = None,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
@@ -1828,6 +1830,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
             configured or repo_root / DEFAULT_NATIVE_TRAIN_CSV
         ).expanduser().resolve()
         self.dataset_name = str(dataset_name)
+        self.min_freq = int(min_freq) if min_freq is not None else None
+        if self.min_freq is not None and self.min_freq < 2:
+            raise ValueError("GlobalGCE min_freq must be at least two.")
 
     def config_identity(self) -> dict[str, Any]:
         source_files = {}
@@ -1846,6 +1851,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         return {
             "generator_class": type(self).__name__,
             "dataset_name": self.dataset_name,
+            "min_freq": self.min_freq,
             "native_train_csv": _file_identity(self.native_train_csv),
             "official_src": str(self.official_src),
             "official_source_files": source_files,
@@ -1953,6 +1959,11 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 f"CSV for its native GNN: {self.native_train_csv}"
             )
         modules = _import_official_modules(self.official_src)
+        if self.min_freq is not None:
+            # Official fsg.py indexes this process-local mapping directly.
+            # The project resolves the value before training and records it in
+            # provenance; no upstream source checkout is modified.
+            modules["fsg_module"].MIN_FREQ[self.dataset_name] = self.min_freq
         try:
             import numpy as np
             import torch

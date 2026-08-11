@@ -29,12 +29,19 @@ DISTANCE_CHECKPOINT=${DISTANCE_CHECKPOINT:-$ARTIFACT_ROOT/outputs/hpc/bace/basel
 OUTPUT_DIR=${OUTPUT_DIR:-$BASE_ROOT/generation}
 TRACE_DIR=${TRACE_DIR:-$OUTPUT_DIR/trace}
 GRAPH_STATE_DIR=${GRAPH_STATE_DIR:-$OUTPUT_DIR/graph_state}
+COMRECGC_EXPECTED_COMMIT=${COMRECGC_EXPECTED_COMMIT:-122f9341a360e9f06bb58a2f5823bb596021f6bf}
+COMRECGC_ROOT=${COMRECGC_ROOT:-/share/home/u20526/czx/vendor/COMRECGC/$COMRECGC_EXPECTED_COMMIT}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
 
 for path in "$DATASET_DIR/dataset_summary.json" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
 done
+python scripts/verify_comrecgc_checkout.py \
+  --config configs/hpc.yaml \
+  --root "$COMRECGC_ROOT" \
+  --expected-commit "$COMRECGC_EXPECTED_COMMIT" \
+  --validate-imports
 args=(
   python scripts/baselines/comrecgc/run_generation.py
   --config configs/hpc.yaml
@@ -43,7 +50,7 @@ args=(
   --dataset bace
   --mode full
   --project-root "$PROJECT_ROOT"
-  --upstream-root external/COMRECGC
+  --upstream-root "$COMRECGC_ROOT"
   --dataset-dir "$DATASET_DIR"
   --gnn-checkpoint "$GNN_CHECKPOINT"
   --distance-checkpoint "$DISTANCE_CHECKPOINT"

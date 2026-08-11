@@ -29,6 +29,8 @@ OFFICIAL_ROOT=${OFFICIAL_ROOT:-$ARTIFACT_ROOT/baselines/globalgce_official}
 OUTPUT_DIR=${OUTPUT_DIR:-$ARTIFACT_ROOT/outputs/hpc/baselines/globalgce/bace/train_pool_connected_v1}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
+MIN_FREQ=${MIN_FREQ:-}
+MIN_FREQ_MANIFEST=${MIN_FREQ_MANIFEST:-$ARTIFACT_ROOT/outputs/hpc/optimization/bace_globalgce_v4_retry2/globalgce_bace_min_freq_manifest.json}
 
 for path in "$TRAIN_CSV" "$NATIVE_TRAIN_CSV" "$TEACHER_PATH"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
@@ -56,6 +58,12 @@ args=(
   --memory-log-every-chunks 1
   --resume
 )
+if [[ -n "$MIN_FREQ" ]]; then
+  args+=(--min-freq "$MIN_FREQ")
+else
+  test -s "$MIN_FREQ_MANIFEST" || { echo "missing min-freq manifest: $MIN_FREQ_MANIFEST" >&2; exit 2; }
+  args+=(--min-freq-manifest "$MIN_FREQ_MANIFEST")
+fi
 
 echo "hostname=$(hostname)"
 echo "python=$(which python)"

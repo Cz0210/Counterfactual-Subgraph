@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=bace_globalgce_minfreq_candidate_v4
+#SBATCH --partition=A800
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=7
+#SBATCH --gres=gpu:a800:1
+#SBATCH --mem=128G
+#SBATCH --time=7-00:00:00
+#SBATCH --output=logs/%A_%a.out
+#SBATCH --error=logs/%A_%a.err
+
+set -euo pipefail
+set +u; source ~/.bashrc; conda activate smiles_pip118; set -u
+PROJECT_ROOT=${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-/share/home/u20526/czx/counterfactual-subgraph}}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-/share/home/u20526/czx/counterfactual-subgraph}
+cd "$PROJECT_ROOT"; export PYTHONPATH=$PWD; mkdir -p logs
+GRID=(2 4 7 18)
+TASK_INDEX=${SLURM_ARRAY_TASK_ID:-0}
+MIN_FREQ=${GRID[$TASK_INDEX]}
+OUTPUT_ROOT=${OUTPUT_ROOT:-$ARTIFACT_ROOT/outputs/hpc/optimization/bace_globalgce_v4_retry2}
+CASE_ROOT=$OUTPUT_ROOT/candidates/min_freq_$MIN_FREQ
+POOL_DIR=$CASE_ROOT/pool
+SELECTOR_DIR=$CASE_ROOT/selector
+MATRIX_POOL=$CASE_ROOT/matrix_pool.jsonl
+MATRIX_DIR=$CASE_ROOT/calibration_matrix
+TRAIN_CSV=${TRAIN_CSV:-$ARTIFACT_ROOT/outputs/hpc/oracle/bace/teacher_consistent/train_source_label1_teacher_correct.csv}
+NATIVE_TRAIN_CSV=${NATIVE_TRAIN_CSV:-$ARTIFACT_ROOT/data/processed/BACE/train.csv}
+CALIBRATION_CSV=${CALIBRATION_CSV:-$ARTIFACT_ROOT/outputs/hpc/oracle/bace/teacher_consistent/calibration_source_label1_teacher_correct.csv}
+TEACHER_PATH=${TEACHER_PATH:-$ARTIFACT_ROOT/outputs/hpc/oracle/bace/bace_teacher.pkl}
+OFFICIAL_ROOT=${OFFICIAL_ROOT:-$ARTIFACT_ROOT/baselines/globalgce_official}
+MOLCLR_ROOT=${MOLCLR_ROOT:-$ARTIFACT_ROOT/pretrained_models/MolCLR}
+MOLCLR_CHECKPOINT=${MOLCLR_CHECKPOINT:-$MOLCLR_ROOT/ckpt/pretrained_gin/checkpoints/model.pth}
+THRESHOLDS_JSON=${THRESHOLDS_JSON:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_common3_connected_residual_v3_expanded/thresholds.json}
+WNODE_CACHE_DB=${WNODE_CACHE_DB:-$ARTIFACT_ROOT/outputs/hpc/cache/bace_globalgce_minfreq_v4.sqlite3}
+for path in "$TRAIN_CSV" "$NATIVE_TRAIN_CSV" "$CALIBRATION_CSV" "$TEACHER_PATH" "$MOLCLR_CHECKPOINT" "$THRESHOLDS_JSON"; do test -s "$path" || { echo "missing $path" >&2; exit 2; }; done
+test -d "$OFFICIAL_ROOT"
+echo "hostname=$(hostname) min_freq=$MIN_FREQ git_commit=$(git rev-parse HEAD)"
+if [[ ${DRY_RUN:-0} == 1 || ${VALIDATE_ONLY:-0} == 1 ]]; then echo '[BACE_GLOBALGCE_MIN_FREQ_CANDIDATE_VALIDATE_OK]'; exit 0; fi
+test ! -e "$CASE_ROOT" || { echo "output collision: $CASE_ROOT" >&2; exit 2; }
+mkdir -p "$CASE_ROOT"
+python scripts/baselines/globalgce/build_bace_train_pool.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --train-csv "$TRAIN_CSV" --native-train-csv "$NATIVE_TRAIN_CSV" --teacher-path "$TEACHER_PATH" --official-root "$OFFICIAL_ROOT" --output-dir "$POOL_DIR" --expected-parent-count 360 --seed 13 --epochs 100 --top-k-native 20 --learning-rate 0.1 --dropout 0.5 --device cuda --generation-chunk-size 32 --min-freq "$MIN_FREQ" --resume
+python scripts/baselines/globalgce/freeze_bace_frequency_top20.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --run-dir "$POOL_DIR" --teacher-path "$TEACHER_PATH" --molclr-checkpoint "$MOLCLR_CHECKPOINT" --thresholds-json "$THRESHOLDS_JSON" --output-dir "$SELECTOR_DIR" --target-k 20
+python scripts/baselines/globalgce/export_bace_frequency_pool.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --selected-csv "$SELECTOR_DIR/selected_top20_for_eval.csv" --output "$MATRIX_POOL"
+python scripts/precompute_wnode_action_matrix.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --dataset BACE --split calibration --parent-csv "$CALIBRATION_CSV" --candidate-pool "$MATRIX_POOL" --teacher-path "$TEACHER_PATH" --molclr-root "$MOLCLR_ROOT" --molclr-checkpoint "$MOLCLR_CHECKPOINT" --wnode-cache-db "$WNODE_CACHE_DB" --output-dir "$MATRIX_DIR" --expected-parent-count 60 --expected-pool-rows 20 --expected-source-parent-count 20 --expected-source-eligible-rows 20 --expected-unique-candidates 20 --cf-mode strict_flip --device cuda --action-semantics-version connected_sanitized_residual_v1 --match-selection-policy existential_min_wnode_among_valid_connected_strict_flips_v1 --resume
+python scripts/baselines/globalgce/score_bace_min_freq.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --min-freq "$MIN_FREQ" --pool-path "$POOL_DIR" --selection-csv "$SELECTOR_DIR/selected_top20_for_eval.csv" --matrix-root "$MATRIX_DIR" --thresholds-json "$THRESHOLDS_JSON" --output "$CASE_ROOT/calibration_metrics.json"
+echo '[BACE_GLOBALGCE_MIN_FREQ_CANDIDATE_SUCCESS]'
