@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=audit_project_gpu_lanes
-#SBATCH --partition=A800
+#SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1

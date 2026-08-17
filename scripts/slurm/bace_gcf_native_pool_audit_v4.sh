@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bace_gcf_native_audit_v4
-#SBATCH --partition=A800
+#SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7

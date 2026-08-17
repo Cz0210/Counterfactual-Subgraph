@@ -6210,3 +6210,5 @@ checkpoint, and GlobalGCE stages request none. The static plan includes active
 legacy jobs and fails closed unless each lane uses at most one GPU and their
 combined theoretical concurrency is at most two. Protected jobs are reported as
 account occupancy only and never become cancellation or dependency targets.
+Because the cluster rejects zero-GPU jobs in the A800 partition, these CPU-only
+stages use the default `intel` partition rather than reserving an idle GPU.

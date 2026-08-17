@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bace_common4_audit
-#SBATCH --partition=A800
+#SBATCH --partition=intel
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
