@@ -6219,3 +6219,10 @@ are considered only while fewer than 20 A0 rules resolve; the selector never
 extends an already complete prefix. This is an engineering boundary fix and
 does not alter candidate ordering, calibration objectives, thresholds, or test
 isolation.
+
+GPU plan validation reconciles current Slurm allocations with an optional
+`submitted_job_id` on planned stages. An active job that is the already
+submitted instance of a plan stage is counted once and remains subject to the
+plan's transitive lane ordering. Any active project GPU job that cannot be
+matched to a planned stage still requires an explicit `afterany` resource-lane
+dependency before a new job may enter that lane.

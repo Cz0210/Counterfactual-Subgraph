@@ -139,3 +139,48 @@ def test_existing_lane_head_requires_resource_serialization() -> None:
     )
     assert audit["PLAN_VALID"] is False
     assert "existing_bace_lane_head_not_serialized" in audit["failures"]
+
+
+def test_active_job_already_submitted_from_plan_is_not_double_counted() -> None:
+    mut_generation = _stage(
+        "mut_generation_retry8", "mutagenicity", "ComRecGC", 1, "mut"
+    )
+    mut_generation["submitted_job_id"] = "3000001"
+    plan = {
+        "stages": [
+            mut_generation,
+            _stage(
+                "mut_integrity",
+                "mutagenicity",
+                "ComRecGC",
+                0,
+                data=("afterok:mut_generation_retry8",),
+            ),
+            _stage(
+                "mut_eval",
+                "mutagenicity",
+                "ComRecGC",
+                1,
+                "mut",
+                data=("afterok:mut_integrity",),
+            ),
+        ]
+    }
+    current = {
+        "active_mut_gpus": 1,
+        "active_bace_gpus": 0,
+        "active_mut_gpu_jobs": [{"JobId": "3000001", "gpus": 1}],
+        "active_bace_gpu_jobs": [],
+    }
+
+    audit = validate_plan(
+        plan,
+        current=current,
+        mut_lane_limit=1,
+        bace_lane_limit=1,
+        total_limit=2,
+    )
+
+    assert audit["PLAN_VALID"] is True
+    assert audit["planned_releasable_mut_gpus"] == 1
+    assert audit["matched_active_plan_jobs"]["mut"] == ["3000001"]

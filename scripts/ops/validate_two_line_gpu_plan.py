@@ -112,6 +112,28 @@ def validate_plan(
     current = current or {}
     existing_mut = int(current.get("active_mut_gpus") or 0)
     existing_bace = int(current.get("active_bace_gpus") or 0)
+    active_jobs_by_lane = {
+        "mut": list(current.get("active_mut_gpu_jobs") or []),
+        "bace": list(current.get("active_bace_gpu_jobs") or []),
+    }
+    submitted_job_to_stage: dict[str, str] = {}
+    for name, row in by_name.items():
+        submitted_job_id = str(row.get("submitted_job_id") or "").strip()
+        if not submitted_job_id:
+            continue
+        if submitted_job_id in submitted_job_to_stage:
+            failures.append(f"duplicate_submitted_job_id:{submitted_job_id}")
+        submitted_job_to_stage[submitted_job_id] = name
+    matched_active_plan_jobs: dict[str, list[str]] = {"mut": [], "bace": []}
+    unmatched_active_job_ids: dict[str, list[str]] = {"mut": [], "bace": []}
+    for lane, rows in active_jobs_by_lane.items():
+        for row in rows:
+            job_id = str(row.get("JobId") or row.get("job_id") or "").strip()
+            stage_name = submitted_job_to_stage.get(job_id)
+            if stage_name and by_name[stage_name].get("gpu_lane") == lane:
+                matched_active_plan_jobs[lane].append(job_id)
+            elif job_id:
+                unmatched_active_job_ids[lane].append(job_id)
     if existing_mut > mut_lane_limit:
         failures.append("existing_mut_gpu_limit")
     if existing_bace > bace_lane_limit:
@@ -119,7 +141,9 @@ def validate_plan(
     if existing_mut + existing_bace > total_limit:
         failures.append("existing_total_gpu_limit")
     for lane, existing in (("mut", existing_mut), ("bace", existing_bace)):
-        if not existing:
+        unmatched_ids = unmatched_active_job_ids[lane]
+        unmatched_gpu_count = max(0, existing - len(matched_active_plan_jobs[lane]))
+        if not unmatched_gpu_count:
             continue
         lane_head = str(plan.get("existing_lane_heads", {}).get(lane) or "")
         first_gpu = next(
@@ -131,7 +155,10 @@ def validate_plan(
             None,
         )
         dependencies = [str(value) for value in (first_gpu or {}).get("resource_dependencies") or []]
-        if not lane_head or f"afterany:{lane_head}" not in dependencies:
+        lane_head_matches_current = bool(lane_head) and (
+            not unmatched_ids or lane_head in unmatched_ids
+        )
+        if not lane_head_matches_current or f"afterany:{lane_head}" not in dependencies:
             failures.append(f"existing_{lane}_lane_head_not_serialized")
 
     planned_mut = any(
@@ -166,6 +193,10 @@ def validate_plan(
         "CURRENT_OLD_JOBS_INCLUDED": current_included,
         "existing_active_mut_gpus": existing_mut,
         "existing_active_bace_gpus": existing_bace,
+        "planned_releasable_mut_gpus": len(matched_active_plan_jobs["mut"]),
+        "planned_releasable_bace_gpus": len(matched_active_plan_jobs["bace"]),
+        "matched_active_plan_jobs": matched_active_plan_jobs,
+        "unmatched_active_job_ids": unmatched_active_job_ids,
         "planned_stage_count": len(stages),
     }
     return result
