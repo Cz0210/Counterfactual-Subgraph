@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
-#SBATCH --gres=gpu:a800:1
 #SBATCH --mem=8G
 #SBATCH --time=00:10:00
 #SBATCH --output=logs/%j.out
@@ -24,12 +23,9 @@ mkdir -p logs
 echo "hostname=$(hostname)"
 date --iso-8601=seconds
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-elif [[ ${VALIDATE_ONLY:-0} == 1 || ${DRY_RUN:-0} == 1 ]]; then
-  echo 'nvidia_smi=unavailable_on_validation_host'
+  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 else
-  echo 'nvidia-smi is required on the Slurm compute node' >&2
-  exit 2
+  echo 'nvidia_smi=unavailable_cpu_preflight'
 fi
 echo "python=$(which python)"
 python --version
