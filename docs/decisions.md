@@ -6212,3 +6212,10 @@ combined theoretical concurrency is at most two. Protected jobs are reported as
 account occupancy only and never become cancellation or dependency targets.
 Because the cluster rejects zero-GPU jobs in the A800 partition, these CPU-only
 stages use the default `intel` partition rather than reserving an idle GPU.
+
+The BACE candidate-aware selector preserves a complete 20-rule A0 sequence
+verbatim when adapting it to an expanded candidate universe. Fallback indices
+are considered only while fewer than 20 A0 rules resolve; the selector never
+extends an already complete prefix. This is an engineering boundary fix and
+does not alter candidate ordering, calibration objectives, thresholds, or test
+isolation.

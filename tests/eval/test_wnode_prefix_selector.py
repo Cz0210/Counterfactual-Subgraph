@@ -144,3 +144,24 @@ def test_preregistered_expansion_freezes_once_without_test_guidance(
         assert frozen["test_used"] is False
         assert frozen["preregistered_expansion_completed"] is True
         assert limitation["post_expansion_pool_still_limited"] is True
+
+
+def test_expansion_fallback_does_not_extend_complete_a0() -> None:
+    with tempfile.TemporaryDirectory(prefix="bace_complete_a0_") as temporary:
+        root = Path(temporary)
+        matrix = matrix_data(root, parents=60, candidates=70)
+        current = root / "current_selected.csv"
+        with current.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["rank", "fragment"])
+            writer.writeheader()
+            for rank, row in enumerate(matrix.candidate_rows[:20], start=1):
+                writer.writerow({"rank": rank, "fragment": row["canonical_fragment"]})
+
+        sequence = selector_module._read_a0_sequence(
+            current,
+            matrix,
+            allow_missing=True,
+            fallback_indices=range(70),
+        )
+
+        assert sequence == list(range(20))

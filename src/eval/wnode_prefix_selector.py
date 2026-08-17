@@ -495,10 +495,10 @@ def _read_a0_sequence(
         sequence.append(by_fragment[fragment])
     if allow_missing:
         for index in fallback_indices:
+            if len(sequence) >= TOP_K:
+                break
             if index not in sequence:
                 sequence.append(int(index))
-            if len(sequence) == TOP_K:
-                break
     if len(sequence) != TOP_K:
         raise ValueError(
             f"A0 sequence resolves to {len(sequence)} candidates; expected {TOP_K}."
