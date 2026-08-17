@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expected-test-parents", type=int, required=True)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--calibrate-thresholds", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--selection-manifest")
@@ -121,7 +122,7 @@ def _evaluator_argv(
         "--size-penalty-beta",
         "0.0",
         "--device",
-        "cuda",
+        str(args.device),
         "--preselected-topk",
         "20",
         "--require-preselected-topk",

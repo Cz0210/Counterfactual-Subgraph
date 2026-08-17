@@ -8,20 +8,61 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 WRAPPERS = sorted((ROOT / "scripts/slurm").glob("comrecgc_*.sh"))
+CPU_ONLY_WRAPPERS = {
+    "comrecgc_bace_artifact_gate.sh",
+    "comrecgc_bace_generation_integrity.sh",
+    "comrecgc_bace_project_chemistry.sh",
+    "comrecgc_checkpoint_audit.sh",
+    "comrecgc_generation_integrity_gate.sh",
+    "comrecgc_mut_freeze.sh",
+    "comrecgc_mut_full_chemistry.sh",
+    "comrecgc_mut_full_gate.sh",
+    "comrecgc_project_chemistry.sh",
+    "comrecgc_project_freeze.sh",
+    "comrecgc_project_full_gate.sh",
+    "comrecgc_storage_preflight_v6.sh",
+}
 
 
 @pytest.mark.parametrize("path", WRAPPERS, ids=lambda path: path.name)
-def test_wrappers_use_safe_single_gpu_resources(path: Path) -> None:
+def test_wrappers_never_request_more_than_one_gpu(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "#SBATCH --partition=A800" in text
     assert "#SBATCH --nodes=1" in text
     assert "#SBATCH --ntasks-per-node=1" in text
-    assert "#SBATCH --gres=gpu:a800:1" in text
+    assert "--gres=gpu:2" not in text
+    assert "--gres=gpu:a800:2" not in text
+    assert "--gpus=2" not in text
+    assert "--gpus-per-node=2" not in text
+    if "#SBATCH --gres=" in text:
+        assert "#SBATCH --gres=gpu:a800:1" in text
     match = re.search(r"#SBATCH --cpus-per-task=(\d+)", text)
     assert match and int(match.group(1)) <= 7
     assert "unset http_proxy" not in text
     assert "unset https_proxy" not in text
     assert "export PYTHONPATH=" in text
+
+
+@pytest.mark.parametrize("name", sorted(CPU_ONLY_WRAPPERS))
+def test_integrity_chemistry_gate_freeze_and_preflight_are_cpu_only(name: str) -> None:
+    text = (ROOT / "scripts/slurm" / name).read_text(encoding="utf-8")
+    assert "#SBATCH --gres=" not in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "comrecgc_mut_generation_storage_v6.sh",
+        "comrecgc_bace_generation_storage_v6.sh",
+        "comrecgc_common_recourse.sh",
+        "comrecgc_bace_common_recourse.sh",
+        "comrecgc_project_slot_eval.sh",
+        "comrecgc_bace_slot_eval.sh",
+    ],
+)
+def test_generation_recourse_and_wnode_eval_request_exactly_one_gpu(name: str) -> None:
+    text = (ROOT / "scripts/slurm" / name).read_text(encoding="utf-8")
+    assert text.count("#SBATCH --gres=gpu:a800:1") == 1
 
 
 def test_full_profile_is_not_an_arbitrary_budget() -> None:

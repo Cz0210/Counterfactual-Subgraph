@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
-#SBATCH --gres=gpu:a800:1
 #SBATCH --mem=16G
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/%j.out
@@ -27,6 +26,7 @@ echo "hostname=$(hostname) job_id=${SLURM_JOB_ID:-unset} commit=$(git rev-parse 
 python -V
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 python scripts/baselines/comrecgc/audit_generation_checkpoint.py \
+  --config configs/hpc.yaml \
   --generation-dir "$GENERATION_DIR" \
   --output "$OUTPUT"
 test -s "$OUTPUT"

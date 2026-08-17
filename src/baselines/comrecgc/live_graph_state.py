@@ -67,8 +67,18 @@ class AuthoritativeGraphStore:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self.path), timeout=60.0)
-        self._connection.execute("PRAGMA journal_mode=DELETE")
+        self._connection.execute("PRAGMA busy_timeout=60000")
+        journal_mode = str(
+            self._connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        ).lower()
+        if journal_mode != "wal":
+            self._connection.close()
+            raise RuntimeError(
+                "COMRECGC authoritative graph store requires SQLite WAL support: "
+                f"path={self.path}, journal_mode={journal_mode!r}"
+            )
         self._connection.execute("PRAGMA synchronous=FULL")
+        self._connection.execute("PRAGMA wal_autocheckpoint=1000")
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS graphs (
@@ -86,7 +96,21 @@ class AuthoritativeGraphStore:
 
     def close(self) -> None:
         self._connection.commit()
+        self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._connection.close()
+
+    def checkpoint_wal(self, *, truncate: bool = False) -> dict[str, int]:
+        """Flush committed WAL pages without weakening durability."""
+
+        mode = "TRUNCATE" if truncate else "PASSIVE"
+        busy, log_pages, checkpointed_pages = self._connection.execute(
+            f"PRAGMA wal_checkpoint({mode})"
+        ).fetchone()
+        return {
+            "busy": int(busy),
+            "log_pages": int(log_pages),
+            "checkpointed_pages": int(checkpointed_pages),
+        }
 
     def contains(self, key: Any) -> bool:
         row = self._connection.execute(
@@ -163,6 +187,17 @@ class AuthoritativeGraphStore:
             for row in self._connection.execute("SELECT key_blob FROM graphs")
         }
 
+    def find_keys_by_graph_sha256(self, graph_sha256: str) -> list[Any]:
+        """Return exact stored keys for one canonical graph fingerprint."""
+
+        return [
+            pickle.loads(row[0])
+            for row in self._connection.execute(
+                "SELECT key_blob FROM graphs WHERE graph_sha256 = ? ORDER BY key_id",
+                (str(graph_sha256),),
+            )
+        ]
+
     def integrity_audit(self) -> dict[str, Any]:
         integrity = str(self._connection.execute("PRAGMA integrity_check").fetchone()[0])
         digest = hashlib.sha256()
@@ -180,6 +215,8 @@ class AuthoritativeGraphStore:
             digest.update(str(value_sha256).encode("ascii"))
             digest.update(str(graph_sha256).encode("ascii"))
             row_count += 1
+        wal_path = Path(f"{self.path}-wal")
+        shm_path = Path(f"{self.path}-shm")
         return {
             "integrity_check": integrity,
             "integrity_passed": integrity == "ok",
@@ -187,6 +224,11 @@ class AuthoritativeGraphStore:
             "content_sha256": digest.hexdigest(),
             "path": str(self.path),
             "bytes": self.path.stat().st_size if self.path.exists() else 0,
+            "wal_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
+            "shm_bytes": shm_path.stat().st_size if shm_path.exists() else 0,
+            "journal_mode": str(
+                self._connection.execute("PRAGMA journal_mode").fetchone()[0]
+            ).lower(),
         }
 
 
@@ -422,6 +464,33 @@ class LiveGraphMap(dict[Any, Any]):
             "scientific_parameters_changed": False,
         }
 
+    def runtime_diagnostics(self) -> dict[str, Any]:
+        """Return counters suitable for frequent progress heartbeats.
+
+        The full ``audit`` deliberately verifies every backing-store row.  A
+        long random walk must not repeat that O(database size) scan every few
+        hundred moves, so storage monitoring uses this constant-time view.
+        """
+
+        return {
+            "policy": GRAPH_STATE_POLICY,
+            "hot_cache_size": dict.__len__(self),
+            "max_hot_cache_size": self.max_hot_cache_size,
+            "backing_store_size": self.store.count(),
+            "pins": sum(self.pin_counts.values()),
+            "deferred_deletions": len(self.deferred_deletions),
+            "eviction_attempts": self.eviction_attempts,
+            "eviction_committed": self.eviction_committed,
+            "eviction_deferred": self.eviction_deferred,
+            "active_eviction_prevented": self.active_eviction_prevented,
+            "deferred_flushed": self.deferred_flushed,
+            "rehydrations": self.rehydrations,
+            "unresolved_lookups": self.unresolved_lookups,
+            "missing_unmaterialized_eviction_count": (
+                self.missing_unmaterialized_eviction_count
+            ),
+        }
+
     def __reduce__(self) -> tuple[Any, tuple[dict[Any, Any]]]:
         return dict, (dict(self),)
 
@@ -436,11 +505,13 @@ class LiveGraphState:
         *,
         store_path: str | Path,
         seed: int,
+        on_step: Callable[[int, "LiveGraphState"], None] | None = None,
     ) -> None:
         self.module = module
         self.store = AuthoritativeGraphStore(store_path)
         self.graph_map = LiveGraphMap(module, values, store=self.store, seed=seed)
         self.move_count = 0
+        self._on_step = on_step
 
     def resolve_graph(self, graph_hash: Any) -> Any:
         return self.graph_map.resolve(graph_hash)[0]
@@ -463,14 +534,23 @@ class LiveGraphState:
             self.graph_map.begin_move(graph_hashes, current_step=self.move_count)
             try:
                 with self.pin_many(graph_hashes):
-                    return original(*args, **kwargs)
+                    result = original(*args, **kwargs)
             finally:
                 self.graph_map.end_move()
+            if self._on_step is not None:
+                self._on_step(self.move_count, self)
+            return result
 
         return wrapped
 
     def audit(self) -> dict[str, Any]:
         return {"move_count": self.move_count, **self.graph_map.audit()}
+
+    def runtime_diagnostics(self) -> dict[str, Any]:
+        return {
+            "move_count": self.move_count,
+            **self.graph_map.runtime_diagnostics(),
+        }
 
     def close(self) -> None:
         self.store.close()

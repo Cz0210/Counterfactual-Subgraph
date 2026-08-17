@@ -32,6 +32,8 @@ PARENT_LIMIT="${PARENT_LIMIT:-$PARENT_LIMIT_EXPECTED}"
 BASE_ROOT="${BASE_ROOT:-outputs/hpc/baselines/comrecgc/$DATASET/${MODE}_v1}"
 GENERATION_DIR="${GENERATION_DIR:-$BASE_ROOT/generation}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BASE_ROOT/common_recourse}"
+COMRECGC_EXPECTED_COMMIT="${COMRECGC_EXPECTED_COMMIT:-122f9341a360e9f06bb58a2f5823bb596021f6bf}"
+COMRECGC_ROOT="${COMRECGC_ROOT:-/share/home/u20526/czx/vendor/COMRECGC/$COMRECGC_EXPECTED_COMMIT}"
 if [[ "$RESUME" != "true" && -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "[COMRECGC_CONFIG_ERROR] non-empty output with RESUME=false: $OUTPUT_DIR" >&2; exit 2
 fi
@@ -46,10 +48,14 @@ else
   SOURCE_ARGS=()
 fi
 [[ -s "$GENERATION_DIR/_RUN_COMPLETE.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] generation incomplete" >&2; exit 2; }
+python scripts/verify_comrecgc_checkout.py --config configs/hpc.yaml \
+  --root "$COMRECGC_ROOT" --expected-commit "$COMRECGC_EXPECTED_COMMIT" \
+  --validate-imports
 echo "[COMRECGC_STAGE_CONFIG] stage=common_recourse dataset=$DATASET mode=$MODE output_dir=$OUTPUT_DIR"
 RESUME_ARGS=(); [[ "$RESUME" == "true" ]] && RESUME_ARGS=(--resume)
 python scripts/baselines/comrecgc/run_common_recourse.py \
-  --dataset "$DATASET" --mode "$MODE" --upstream-root external/COMRECGC \
+  --config configs/hpc.yaml --set inference.fallback_to_heuristic=false \
+  --dataset "$DATASET" --mode "$MODE" --upstream-root "$COMRECGC_ROOT" \
   --dataset-dir "$DATASET_DIR" "${SOURCE_ARGS[@]}" --generation-dir "$GENERATION_DIR" \
   --distance-checkpoint "$DISTANCE_CHECKPOINT" --output-dir "$OUTPUT_DIR" \
   --parent-limit "$PARENT_LIMIT" --device cuda:0 "${RESUME_ARGS[@]}"

@@ -18,6 +18,8 @@ from src.baselines.comrecgc.contracts import write_json  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--generation-dir", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()

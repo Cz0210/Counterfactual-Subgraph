@@ -50,6 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--graph-state-dir",
         help="Project-owned authoritative graph-state store for full random walks.",
     )
+    parser.add_argument(
+        "--storage-guard-root",
+        help="Persistent scratch root monitored during full random walks.",
+    )
+    parser.add_argument("--storage-check-every-steps", type=int, default=500)
+    parser.add_argument("--storage-min-free-gib", type=float, default=20.0)
+    parser.add_argument("--storage-min-free-ratio", type=float, default=0.05)
+    parser.add_argument("--storage-min-free-inodes", type=int, default=100_000)
     return parser
 
 
@@ -100,6 +108,11 @@ def main() -> int:
             trace_output_dir=args.trace_output_dir,
             parity_reference_path=args.parity_reference,
             graph_state_dir=args.graph_state_dir,
+            storage_guard_root=args.storage_guard_root,
+            storage_check_every_steps=args.storage_check_every_steps,
+            storage_min_free_bytes=int(args.storage_min_free_gib * 1024**3),
+            storage_min_free_ratio=args.storage_min_free_ratio,
+            storage_min_free_inodes=args.storage_min_free_inodes,
         )
     print(json.dumps(manifest, sort_keys=True, default=str))
     return 0

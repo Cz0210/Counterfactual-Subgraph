@@ -646,3 +646,17 @@ Mutagenicity roadmaps.
 - [x] Add method-balanced pooled calibration Q30/Q50 threshold freezing.
 - [x] Add pre-test selection/protocol gates and a one-shot Ours/GCF test job.
 - [ ] Freeze Ours/GCF calibration selections before exactly one v4 test run.
+
+# Storage-Safe Two-Lane Recovery (2026-08-17)
+
+- [x] Add persistent-scratch and SQLite WAL preflight checks.
+- [x] Add fail-closed projected-capacity monitoring for COMRECGC full walks.
+- [x] Unify AIDS validator/recovery frozen graph and alias closure.
+- [x] Load BACE GCF thresholds exclusively from a frozen shared manifest.
+- [x] Add resumable, deterministic GlobalGCE root/epoch checkpoints without
+  changing the official mining or training objective.
+- [x] Add current-queue GPU accounting and a static two-lane plan validator.
+- [x] Make checkpoint, integrity, chemistry, gate, and freeze wrappers CPU-only.
+- [ ] Run HPC scratch/checkpoint/plan gates from the committed recovery worktree.
+- [ ] Submit fresh MUT retry8 and BACE retry chains with one GPU per lane.
+- [ ] Complete the downstream connected four-method artifact audits.

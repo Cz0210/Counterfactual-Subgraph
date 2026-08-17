@@ -40,7 +40,7 @@ from .graph_trace import (
     stable_graph_sha256,
 )
 from .frozen_payload import (
-    materialize_frozen_payload_closure,
+    build_frozen_payload_closure,
     payload_file_audit,
 )
 from .live_graph_state import (
@@ -48,6 +48,7 @@ from .live_graph_state import (
     LiveGraphState,
     current_rss_mib,
 )
+from .storage_guard import StorageGuard, StorageGuardConfig
 from .project_dataset import (
     GraphListDataset,
     ProjectDatasetBundle,
@@ -465,6 +466,7 @@ def patched_official_runtime(
     transition_expanded_capacity: int = 5,
     seed: int = 0,
     graph_state_dir: str | Path | None = None,
+    storage_guard: StorageGuard | None = None,
 ) -> Iterator[None]:
     originals = {
         "call": module.call,
@@ -479,6 +481,7 @@ def patched_official_runtime(
             store_path=Path(graph_state_dir).expanduser().resolve()
             / "authoritative_graph_store.sqlite3",
             seed=seed,
+            on_step=storage_guard.check if storage_guard is not None else None,
         )
         if preserve_active_transitions and graph_state_dir is not None
         else None
@@ -824,6 +827,11 @@ def run_project_generation(
     trace_output_dir: str | Path | None = None,
     parity_reference_path: str | Path | None = None,
     graph_state_dir: str | Path | None = None,
+    storage_guard_root: str | Path | None = None,
+    storage_check_every_steps: int = 500,
+    storage_min_free_bytes: int = 20 * 1024**3,
+    storage_min_free_ratio: float = 0.05,
+    storage_min_free_inodes: int = 100_000,
 ) -> dict[str, Any]:
     parameters.validate(mode)
     project = Path(project_root).expanduser().resolve()
@@ -863,6 +871,20 @@ def run_project_generation(
     )
     if mode == "full":
         graph_state_root.mkdir(parents=True, exist_ok=True)
+    storage_guard: StorageGuard | None = None
+    if mode == "full" and storage_guard_root is not None:
+        guard_root = Path(storage_guard_root).expanduser().resolve()
+        storage_guard = StorageGuard(
+            StorageGuardConfig(
+                root=guard_root,
+                expected_steps=int(parameters.steps),
+                check_every_steps=int(storage_check_every_steps),
+                min_free_bytes=int(storage_min_free_bytes),
+                min_free_ratio=float(storage_min_free_ratio),
+                min_free_inodes=int(storage_min_free_inodes),
+            ),
+            database_path=graph_state_root / "authoritative_graph_store.sqlite3",
+        )
     started = datetime.now(timezone.utc).isoformat()
     trace_recorder = (
         ActionTraceRecorder(
@@ -962,6 +984,18 @@ def run_project_generation(
                     else "pinned_upstream_in_memory_transitions_v1"
                 ),
                 "graph_state_dir": str(graph_state_root) if mode == "full" else None,
+                "storage_guard": (
+                    {
+                        "enabled": True,
+                        "root": str(storage_guard.root),
+                        "check_every_steps": int(storage_check_every_steps),
+                        "min_free_bytes": int(storage_min_free_bytes),
+                        "min_free_ratio": float(storage_min_free_ratio),
+                        "min_free_inodes": int(storage_min_free_inodes),
+                    }
+                    if storage_guard is not None
+                    else {"enabled": False}
+                ),
                 "transition_expanded_capacity": (
                     int(parameters.heads) if mode == "full" else None
                 ),
@@ -997,6 +1031,7 @@ def run_project_generation(
                     transition_expanded_capacity=parameters.heads,
                     seed=parameters.seed,
                     graph_state_dir=graph_state_root if mode == "full" else None,
+                    storage_guard=storage_guard,
                 ):
                     official.counterfactual_summary_with_randomwalk(
                         dataset_name=dataset_key,
@@ -1054,7 +1089,7 @@ def run_project_generation(
                 frozen_payload_audit = trace_summary.get("frozen_payload_closure")
             elif mode == "full":
                 frozen_payload_audit_path = root / "frozen_payload_closure_audit.json"
-                payload, frozen_payload_audit = materialize_frozen_payload_closure(
+                payload, frozen_payload_audit = build_frozen_payload_closure(
                     payload, (), backing_store_path=backing_store_path
                 )
                 write_json(frozen_payload_audit_path, frozen_payload_audit)
@@ -1071,7 +1106,7 @@ def run_project_generation(
                     if trace_recorder is not None
                     else ()
                 )
-                _verified_payload, verification = materialize_frozen_payload_closure(
+                _verified_payload, verification = build_frozen_payload_closure(
                     verified_payload,
                     selected_events,
                     backing_store_path=None,

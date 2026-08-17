@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, Sequence
 
+from .globalgce_resumable import train_globalgce_resumable
+
 try:
     from rdkit import Chem
 except ImportError:  # pragma: no cover - runtime dependency
@@ -929,14 +931,15 @@ def _import_official_modules(official_src: Path) -> dict[str, Any]:
     source_text = str(official_src)
     if source_text not in sys.path:
         sys.path.insert(0, source_text)
+    models_utils = importlib.import_module("models.models_utils")
     return {
         "GTGNN": importlib.import_module("models.GTGNN").GTGNN,
         "GlobalGCE": importlib.import_module("models.GlobalGCE").GlobalGCE,
         "generate_cfs": importlib.import_module("models.GlobalGCE").generate_cfs,
-        "train_globalgce": importlib.import_module(
-            "models.models_utils"
-        ).train_globalgce,
+        "train_globalgce": models_utils.train_globalgce,
+        "test_globalgce": models_utils.test_globalgce,
         "fsg_module": importlib.import_module("models.fsg"),
+        "gspan_module": importlib.import_module("models.gSpan.gSpan"),
     }
 
 
@@ -2207,15 +2210,21 @@ class OfficialGlobalGCEMutagenicityGenerator:
             )
             gnn_summary = dict(training_state.get("gnn_training") or {})
         else:
-            augmented_test_loader = modules["train_globalgce"](
-                int(epochs),
-                gnn_model,
-                globalgce_model,
-                float(learning_rate),
-                source_train_loader,
-                source_val_loader,
-                str(rules_checkpoint),
-                str(model_checkpoint),
+            augmented_test_loader = train_globalgce_resumable(
+                epochs=int(epochs),
+                pred_model=gnn_model,
+                model=globalgce_model,
+                learning_rate=float(learning_rate),
+                train_loader=source_train_loader,
+                val_loader=source_val_loader,
+                save_rule_path=rules_checkpoint,
+                save_model_path=model_checkpoint,
+                checkpoint_dir=output_dir / "globalgce_training_checkpoints",
+                torch_module=torch,
+                numpy_module=np,
+                test_globalgce=modules["test_globalgce"],
+                gspan_module=modules["gspan_module"],
+                resume=bool(resume),
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
             _write_json(
@@ -2289,6 +2298,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "generation_uses_inference_mode": True,
             "generation_requires_gradients": False,
             "trained_model_resumed": can_resume_trained_model,
+            "training_checkpoint_policy": "gspan_root_chunks_plus_epoch_atomic_v1",
+            "unused_pandas_report_materialization": False,
             **codec_summary,
             "saved_results_candidates_used": False,
             "generation_input_split": "train",

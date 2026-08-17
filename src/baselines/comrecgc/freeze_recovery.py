@@ -13,7 +13,7 @@ from typing import Any
 from .contracts import GenerationParameters, require_empty_output, sha256_file, write_json
 from .frozen_payload import (
     atomic_torch_save,
-    materialize_frozen_payload_closure,
+    build_frozen_payload_closure,
     payload_file_audit,
     torch_load_payload,
 )
@@ -141,7 +141,7 @@ def validate_completed_generation_freeze(
     closure_audit: dict[str, Any] | None = None
     closure_error: str | None = None
     try:
-        closed_payload, closure_audit = materialize_frozen_payload_closure(
+        closed_payload, closure_audit = build_frozen_payload_closure(
             payload,
             selected_events,
             backing_store_path=backing_store,
@@ -320,7 +320,7 @@ def recover_completed_generation_freeze(
     payload_path = output / "counterfactuals.pt"
     atomic_torch_save(payload, payload_path)
     reloaded = torch_load_payload(payload_path)
-    _verified, post_write = materialize_frozen_payload_closure(
+    _verified, post_write = build_frozen_payload_closure(
         reloaded,
         iter_selected_trace(trace_output / source_manifest_path.name),
         backing_store_path=None,

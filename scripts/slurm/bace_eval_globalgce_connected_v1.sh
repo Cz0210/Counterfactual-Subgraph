@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7
-#SBATCH --gres=gpu:a800:1
 #SBATCH --mem=96G
 #SBATCH --time=5-00:00:00
 #SBATCH --output=logs/%j.out
@@ -55,6 +54,7 @@ args=(
   --work-dir "$WORK_DIR"
   --output-dir "$OUTPUT_DIR"
   --expected-test-parents 116
+  --device cpu
   --selection-manifest "$SELECTION_MANIFEST"
   --test-evaluation-count 1
   --reference-artifact-root "$REFERENCE_ROOT"

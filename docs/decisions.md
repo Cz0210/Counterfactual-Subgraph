@@ -6176,3 +6176,37 @@ untracked file. No formal BACE job performs an online checkout.
 Zero-runtime Slurm exit `0:53` is handled as launch infrastructure failure. The
 three observed roots did not share one node, so retry jobs use `--requeue`
 without excluding a node and depend on a short launch preflight.
+
+---
+
+## 2026-08-17: Persistent experiment state and two single-GPU lanes
+
+The failed Mutagenicity and BACE COMRECGC runs exhausted the `/share` project
+filesystem while writing their authoritative SQLite graph stores. Long-lived
+SQLite state, WAL/SHM files, trace payloads, checkpoints, and WNode pair caches
+therefore live on compute-visible persistent project scratch. `/share` retains
+only versioned links, manifests, logs, audits, and final compact artifacts. A
+500-move storage guard records free bytes, free inodes, database growth, and
+projected final size. It checkpoints the WAL and fails closed before exhaustion;
+because the pinned random walk still lacks a complete atomic RNG/transition
+checkpoint, a guard stop never claims unsupported scientific resume.
+
+The completed AIDS walk exposed a separate freeze alias mismatch: validator and
+recovery could resolve the same graph under different official hashes. Both now
+use one pure closure builder that persists canonical graph records, complete
+alias chains, and original trace hashes, then verifies them after serialization.
+This is a code-only repair in this recovery round; no AIDS job is submitted.
+
+BACE GCF reads the already frozen, method-shared calibration threshold manifest
+and never invokes `auto_quantile`; its threshold-independent pair cache can be
+copied to scratch and reused. BACE GlobalGCE remains CPU-only. Its official DFS,
+support, loss, epoch, and rule ordering stay fixed, while unused per-pattern
+pandas report concatenation is removed and independent top-level gSpan roots and
+training epochs receive atomic checkpoints and heartbeats.
+
+New Mutagenicity and BACE GPU stages are represented as two serialized lanes.
+Each GPU stage requests exactly one A800; CPU integrity, chemistry, gate, freeze,
+checkpoint, and GlobalGCE stages request none. The static plan includes active
+legacy jobs and fails closed unless each lane uses at most one GPU and their
+combined theoretical concurrency is at most two. Protected jobs are reported as
+account occupancy only and never become cancellation or dependency targets.

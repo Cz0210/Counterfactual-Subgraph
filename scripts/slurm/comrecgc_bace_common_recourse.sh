@@ -26,10 +26,13 @@ DATASET_DIR=${DATASET_DIR:-$ARTIFACT_ROOT/outputs/hpc/bace/baselines/gcfexplaine
 GENERATION_DIR=${GENERATION_DIR:-$BASE_ROOT/generation}
 DISTANCE_CHECKPOINT=${DISTANCE_CHECKPOINT:-$ARTIFACT_ROOT/outputs/hpc/bace/baselines/gcfexplainer/full_v2/neurosed/best_model.pt}
 OUTPUT_DIR=${OUTPUT_DIR:-$BASE_ROOT/common_recourse}
+COMRECGC_EXPECTED_COMMIT=${COMRECGC_EXPECTED_COMMIT:-122f9341a360e9f06bb58a2f5823bb596021f6bf}
+COMRECGC_ROOT=${COMRECGC_ROOT:-/share/home/u20526/czx/vendor/COMRECGC/$COMRECGC_EXPECTED_COMMIT}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
 for path in "$GENERATION_DIR/_RUN_COMPLETE.json" "$DISTANCE_CHECKPOINT"; do test -s "$path" || { echo "missing input: $path" >&2; exit 2; }; done
-args=(python scripts/baselines/comrecgc/run_common_recourse.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --dataset bace --mode full --upstream-root external/COMRECGC --dataset-dir "$DATASET_DIR" --generation-dir "$GENERATION_DIR" --distance-checkpoint "$DISTANCE_CHECKPOINT" --output-dir "$OUTPUT_DIR" --parent-limit 360 --device cuda:0)
+python scripts/verify_comrecgc_checkout.py --config configs/hpc.yaml --root "$COMRECGC_ROOT" --expected-commit "$COMRECGC_EXPECTED_COMMIT" --validate-imports
+args=(python scripts/baselines/comrecgc/run_common_recourse.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --dataset bace --mode full --upstream-root "$COMRECGC_ROOT" --dataset-dir "$DATASET_DIR" --generation-dir "$GENERATION_DIR" --distance-checkpoint "$DISTANCE_CHECKPOINT" --output-dir "$OUTPUT_DIR" --parent-limit 360 --device cuda:0)
 echo "hostname=$(hostname)"; echo "python=$(which python)"; python --version; python -c 'import torch; print("cuda_available=" + str(torch.cuda.is_available()))'; echo "git_commit=$(git rev-parse HEAD)"
 printf 'command='; printf '%q ' "${args[@]}"; printf '\n'
 if [[ "$DRY_RUN" == 1 || "$VALIDATE_ONLY" == 1 ]]; then echo '[COMRECGC_BACE_RECOURSE_VALIDATE_OK]'; exit 0; fi

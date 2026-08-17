@@ -618,9 +618,9 @@ class ActionTraceRecorder:
                 raise TypeError(
                     "COMRECGC full trace closure requires a mutable payload mapping."
                 )
-            from .frozen_payload import materialize_frozen_payload_closure
+            from .frozen_payload import build_frozen_payload_closure
 
-            frozen, frozen_payload_closure = materialize_frozen_payload_closure(
+            frozen, frozen_payload_closure = build_frozen_payload_closure(
                 payload,
                 iter_selected_trace(selected_manifest_path),
                 backing_store_path=frozen_payload_backing_store,
@@ -940,20 +940,13 @@ def _lineage_recovery_context(
     selected_events: Any,
     source_graphs_by_parent_id: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    graph_map = payload.get("graph_map") or {}
+    from .frozen_payload import payload_graphs_by_official_hash
+
     graph_by_stable_key: dict[tuple[str, str], Any] = {}
     graph_by_official_key: dict[tuple[str, str], Any] = {}
     official_matches: dict[str, list[tuple[tuple[str, str], Any]]] = {}
-    frozen_graph_closure = payload.get("frozen_graph_closure") or {}
-    graph_rows = [
-        (official_hash, entry[0]) for official_hash, entry in graph_map.items()
-    ]
-    active_hash_strings = {str(key) for key in graph_map}
-    graph_rows.extend(
-        (official_hash, graph)
-        for official_hash, graph in frozen_graph_closure.items()
-        if str(official_hash) not in active_hash_strings
-    )
+    all_payload_graphs = payload_graphs_by_official_hash(payload)
+    graph_rows = list(all_payload_graphs.items())
     for official_hash, graph in graph_rows:
         parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
         key = (parent_id, stable_untyped_graph_sha256(graph))

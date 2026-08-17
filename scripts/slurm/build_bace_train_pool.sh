@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7
-#SBATCH --gres=gpu:a800:1
 #SBATCH --mem=128G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=logs/%j.out
@@ -52,7 +51,7 @@ args=(
   --top-k-native 20
   --learning-rate 0.1
   --dropout 0.5
-  --device cuda
+  --device cpu
   --generation-chunk-size 32
   --generation-num-workers 0
   --memory-log-every-chunks 1

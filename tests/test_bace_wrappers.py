@@ -194,7 +194,7 @@ def test_bace_common4_globalgce_and_comrecgc_wrappers_are_isolated() -> None:
     for name in names:
         content = _text(name)
         assert "#SBATCH --partition=A800" in content
-        assert "#SBATCH --gres=gpu:a800:1" in content
+        assert "--gres=gpu:a800:2" not in content
         assert "#SBATCH --output=logs/%j.out" in content
         assert "#SBATCH --error=logs/%j.err" in content
         assert 'cd "$PROJECT_ROOT"' in content
@@ -202,6 +202,26 @@ def test_bace_common4_globalgce_and_comrecgc_wrappers_are_isolated() -> None:
         assert "DRY_RUN" in content
         assert "VALIDATE_ONLY" in content
         assert "afterany" not in content
+    cpu_only = {
+        "build_bace_train_pool.sh",
+        "freeze_bace_frequency_top20.sh",
+        "bace_eval_globalgce_connected_v1.sh",
+        "comrecgc_bace_generation_integrity.sh",
+        "comrecgc_bace_project_chemistry.sh",
+        "comrecgc_bace_artifact_gate.sh",
+        "bace_import_v4_common4.sh",
+        "bace_common4_connected_audit.sh",
+    }
+    for name in cpu_only:
+        assert "#SBATCH --gres=" not in _text(name)
+    for name in {
+        "comrecgc_bace_project_generate.sh",
+        "comrecgc_bace_common_recourse.sh",
+        "comrecgc_bace_slot_eval.sh",
+    }:
+        assert _text(name).count("#SBATCH --gres=gpu:a800:1") == 1
+    assert "--device cpu" in _text("build_bace_train_pool.sh")
+    assert "--device cpu" in _text("bace_eval_globalgce_connected_v1.sh")
     assert METHODS["globalgce"] == {
         "display": "GlobalGCE",
         "candidate_kind": "fullgraph",

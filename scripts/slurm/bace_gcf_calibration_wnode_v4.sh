@@ -20,9 +20,13 @@ CALIBRATION_CSV=${CALIBRATION_CSV:-$ARTIFACT_ROOT/outputs/hpc/oracle/bace/teache
 TEACHER_PATH=${TEACHER_PATH:-$ARTIFACT_ROOT/outputs/hpc/oracle/bace/bace_teacher.pkl}
 MOLCLR_ROOT=${MOLCLR_ROOT:-$ARTIFACT_ROOT/pretrained_models/MolCLR}; MOLCLR_CHECKPOINT=${MOLCLR_CHECKPOINT:-$MOLCLR_ROOT/ckpt/pretrained_gin/checkpoints/model.pth}
 OUTPUT_DIR=${OUTPUT_DIR:-$ARTIFACT_ROOT/outputs/hpc/optimization/bace_gcf_candidateaware_v4/calibration_run}
-WNODE_CACHE_DB=${WNODE_CACHE_DB:-$ARTIFACT_ROOT/outputs/hpc/cache/distance_cache/molclr_node_wasserstein_connected_residual_v3.sqlite}
+THRESHOLDS_JSON=${THRESHOLDS_JSON:-$ARTIFACT_ROOT/outputs/hpc/eval/paper/bace_common3_connected_residual_v3_expanded/thresholds.json}
+PERSISTENT_SCRATCH_ROOT=${PERSISTENT_SCRATCH_ROOT:-/share/project/p20526/u20526/counterfactual-subgraph}
+WNODE_CACHE_DB=${WNODE_CACHE_DB:-$PERSISTENT_SCRATCH_ROOT/bace_gcf_pair_cache_v6/molclr_node_wasserstein.sqlite3}
 DRY_RUN=${DRY_RUN:-0}; VALIDATE_ONLY=${VALIDATE_ONLY:-0}
-for path in "$GCF_AUDIT_ROOT/run_manifest.json" "$GCF_AUDIT_ROOT/candidate_universe.jsonl" "$CANDIDATE_PATH" "$CALIBRATION_CSV" "$TEACHER_PATH" "$MOLCLR_CHECKPOINT"; do test -s "$path" || { echo "missing $path" >&2; exit 2; }; done
+for path in "$GCF_AUDIT_ROOT/run_manifest.json" "$GCF_AUDIT_ROOT/candidate_universe.jsonl" "$CANDIDATE_PATH" "$CALIBRATION_CSV" "$TEACHER_PATH" "$MOLCLR_CHECKPOINT" "$THRESHOLDS_JSON"; do test -s "$path" || { echo "missing $path" >&2; exit 2; }; done
+mkdir -p "$(dirname "$WNODE_CACHE_DB")"
+WNODE_THRESHOLDS=$(python scripts/resolve_frozen_wnode_thresholds.py --config configs/hpc.yaml --thresholds-json "$THRESHOLDS_JSON" --format csv)
 python - "$GCF_AUDIT_ROOT/run_manifest.json" "$GCF_AUDIT_ROOT/candidate_universe.jsonl" "$CANDIDATE_PATH" <<'PY'
 import csv,json,sys
 p=json.load(open(sys.argv[1])); a=p["candidate_attrition"]
@@ -40,13 +44,13 @@ args=(python scripts/evaluate_ccrcov_with_molclr_node_wasserstein.py
  --molclr-root "$MOLCLR_ROOT" --molclr-checkpoint "$MOLCLR_CHECKPOINT"
  --label 1 --smiles-col smiles --label-col label --cf-mode strict_flip
  --output-dir "$OUTPUT_DIR" --max-parents 0 --max-candidates 20
- --wnode-thresholds auto_quantile --wnode-quantiles 0.05,0.10,0.20,0.30,0.50,0.70,0.90
+ --wnode-thresholds "$WNODE_THRESHOLDS"
  --feature-cost cosine --node-mass uniform --size-penalty-beta 0.0 --device cuda
  --preselected-topk 20 --require-preselected-topk 1
  --selection-method native_gcf_summary_rank_filtered_by_validity
  --action-semantics-version connected_sanitized_residual_v1
  --match-selection-policy existential_min_wnode_among_valid_connected_strict_flips_v1
- --wnode-cache-db "$WNODE_CACHE_DB" --skip-redundancy 1 --resume 0
+ --wnode-cache-db "$WNODE_CACHE_DB" --skip-redundancy 1 --resume 1
  --run-ours 0 --run-fullgraph 1 --fullgraph-candidates-path "$CANDIDATE_PATH"
  --fullgraph-method-name GCFExplainer)
 echo "hostname=$(hostname)"; echo "git_commit=$(git rev-parse HEAD)"; printf 'command='; printf '%q ' "${args[@]}"; printf '\n'
