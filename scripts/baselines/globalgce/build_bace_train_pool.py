@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-chunk-size", type=int, default=32)
     parser.add_argument("--generation-num-workers", type=int, default=0)
     parser.add_argument("--memory-log-every-chunks", type=int, default=1)
+    parser.add_argument("--gspan-flush-every", type=int, default=256)
+    parser.add_argument("--gspan-max-in-memory-candidates", type=int, default=256)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-freq", type=int, default=None)
     parser.add_argument("--min-freq-manifest", default=None)
@@ -99,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
             generation_chunk_size=int(args.generation_chunk_size),
             generation_num_workers=int(args.generation_num_workers),
             memory_log_every_chunks=int(args.memory_log_every_chunks),
+            gspan_flush_every=int(args.gspan_flush_every),
+            gspan_max_in_memory_candidates=int(
+                args.gspan_max_in_memory_candidates
+            ),
         ),
     )
     print(json.dumps(summary, indent=2, sort_keys=True), flush=True)

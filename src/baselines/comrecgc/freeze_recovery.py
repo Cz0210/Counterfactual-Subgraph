@@ -14,6 +14,7 @@ from .contracts import GenerationParameters, require_empty_output, sha256_file, 
 from .frozen_payload import (
     atomic_torch_save,
     build_frozen_payload_closure,
+    payload_graphs_by_official_hash,
     payload_file_audit,
     torch_load_payload,
 )
@@ -320,13 +321,23 @@ def recover_completed_generation_freeze(
     payload_path = output / "counterfactuals.pt"
     atomic_torch_save(payload, payload_path)
     reloaded = torch_load_payload(payload_path)
-    _verified, post_write = build_frozen_payload_closure(
+    verified_payload, post_write = build_frozen_payload_closure(
         reloaded,
         iter_selected_trace(trace_output / source_manifest_path.name),
         backing_store_path=None,
     )
     if post_write["closure_complete"] is not True:
         raise RuntimeError("Recovered payload failed post-write closure verification.")
+    expected_trace_hashes = set(payload.get("original_trace_hashes") or [])
+    actual_trace_hashes = set(verified_payload.get("original_trace_hashes") or [])
+    resolvable_hashes = payload_graphs_by_official_hash(verified_payload)
+    missing_roundtrip_hashes = sorted(expected_trace_hashes - set(resolvable_hashes))
+    if expected_trace_hashes != actual_trace_hashes or missing_roundtrip_hashes:
+        raise RuntimeError(
+            "Recovered payload changed or lost original selected-trace hashes: "
+            f"expected={len(expected_trace_hashes)}, actual={len(actual_trace_hashes)}, "
+            f"missing={missing_roundtrip_hashes[:20]}."
+        )
 
     graph_state = output / "graph_state"
     store_mode = _materialize(
@@ -343,6 +354,8 @@ def recover_completed_generation_freeze(
         **audit["frozen_payload_closure"],
         **payload_file_audit(payload_path),
         "post_write_reload_verified": True,
+        "original_trace_hash_roundtrip_verified": True,
+        "original_trace_hash_roundtrip_count": len(expected_trace_hashes),
     }
     write_json(output / "frozen_payload_closure_audit.json", closure_audit)
     trace_summary = {

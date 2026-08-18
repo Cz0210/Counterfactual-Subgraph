@@ -134,6 +134,6 @@ def test_root_chunk_resume_matches_uninterrupted_reference(tmp_path) -> None:
 
     assert first_result == reference
     assert resumed_result == reference
-    parts = sorted(tmp_path.glob("support_*/root-*.pkl"))
-    assert len(parts) == 2
+    databases = sorted(tmp_path.glob("support_*/frequent_patterns.sqlite3"))
+    assert len(databases) == 1
     assert list(tmp_path.glob("support_*/checkpoint.json"))

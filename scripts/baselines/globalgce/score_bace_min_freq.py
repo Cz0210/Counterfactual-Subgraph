@@ -8,9 +8,18 @@ import csv
 import itertools
 import json
 import math
+import sys
 from pathlib import Path
 from statistics import median
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.baselines.globalgce_bace_action_adapter import (  # noqa: E402
+    assert_nonzero_fullgraph_applicability,
+)
 
 
 def _truth(value: Any) -> bool:
@@ -19,6 +28,11 @@ def _truth(value: Any) -> bool:
 
 def _jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _csv(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
 
 
 def _thresholds(path: Path) -> tuple[float, list[float]]:
@@ -66,27 +80,41 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     matrix_root = Path(args.matrix_root).expanduser().resolve()
-    pairs = _jsonl(matrix_root / "pair_matrix.jsonl")
-    candidates = _jsonl(matrix_root / "candidate_universe.jsonl")
+    fullgraph_pairs = matrix_root / "details" / "pair_details.csv"
+    legacy_pairs = matrix_root / "pair_matrix.jsonl"
+    if fullgraph_pairs.is_file():
+        pairs: list[dict[str, Any]] = _csv(fullgraph_pairs)
+        pair_schema = "connected_sanitized_fullgraph_counterfactual_v1"
+        pair_audit = assert_nonzero_fullgraph_applicability(pairs)
+    elif legacy_pairs.is_file():
+        pairs = _jsonl(legacy_pairs)
+        pair_schema = "legacy_deletion_matrix"
+        pair_audit = None
+    else:
+        raise FileNotFoundError(
+            f"No fullgraph pair_details.csv or legacy pair_matrix.jsonl under {matrix_root}."
+        )
     with Path(args.selection_csv).expanduser().resolve().open(newline="", encoding="utf-8") as handle:
         selected = list(csv.DictReader(handle))
-    fragment_to_id = {
-        str(row.get("canonical_fragment") or row.get("fragment_smiles") or ""): str(row["candidate_id"])
-        for row in candidates
-    }
-    ordered_ids = []
-    for row in selected:
-        fragment = str(row.get("canonical_smiles") or row.get("smiles") or "")
-        if fragment not in fragment_to_id:
-            raise ValueError(f"Selected GlobalGCE fragment absent from matrix: {fragment}")
-        ordered_ids.append(fragment_to_id[fragment])
+    ordered_ids = [str(row.get("candidate_id") or "") for row in selected]
+    if not all(ordered_ids) or len(set(ordered_ids)) != len(ordered_ids):
+        raise ValueError("Selected GlobalGCE candidate IDs must be nonempty and unique.")
+    observed_ids = {str(row.get("candidate_id") or "") for row in pairs}
+    missing = [value for value in ordered_ids if value not in observed_ids]
+    if missing:
+        raise ValueError(f"Selected GlobalGCE candidates absent from matrix: {missing}")
     by_candidate: dict[str, dict[str, tuple[bool, float]]] = {}
     parents = sorted({str(row["parent_id"]) for row in pairs})
     for row in pairs:
         candidate_id = str(row["candidate_id"])
-        distance = row.get("wnode_distance")
+        distance = row.get("distance", row.get("wnode_distance"))
         by_candidate.setdefault(candidate_id, {})[str(row["parent_id"])] = (
-            _truth(row.get("pair_strict_flip", row.get("strict_flip"))),
+            _truth(
+                row.get(
+                    "teacher_strict_flip",
+                    row.get("cf_flip", row.get("pair_strict_flip", row.get("strict_flip"))),
+                )
+            ),
             float(distance) if distance not in (None, "") else math.inf,
         )
     primary, grid = _thresholds(Path(args.thresholds_json).expanduser().resolve())
@@ -127,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
         "rule_count": len(ordered_ids),
         "primary_threshold": primary,
         "calibration_parent_count": len(parents),
+        "candidate_native_type": "full_counterfactual_graph",
+        "action_adapter": "connected_sanitized_fullgraph_counterfactual_v1",
+        "pair_schema": pair_schema,
+        "pair_audit": pair_audit,
     }
     if args.validate_only:
         print(json.dumps(result, indent=2, sort_keys=True))

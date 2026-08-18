@@ -6226,3 +6226,36 @@ submitted instance of a plan stage is counted once and remains subject to the
 plan's transitive lane ordering. Any active project GPU job that cannot be
 matched to a planned stage still requires an explicit `afterany` resource-lane
 dependency before a new job may enter that lane.
+
+---
+
+## 2026-08-18: Fullgraph GlobalGCE actions and fail-closed generation slices
+
+BACE GlobalGCE frequency candidates are complete generated counterfactual
+molecules. They are not deletion fragments. The previous calibration adapter
+copied `canonical_smiles` into `final_fragment` and routed every pair through
+Ours' hard-deletion primitive, which correctly produced zero substructure
+matches but measured the wrong action. GlobalGCE now uses the same fullgraph
+contract as the established GCF path: parse, sanitize, require one connected
+component, query the frozen teacher, and compute parent-to-candidate WNode.
+An all-zero applicability matrix fails as a schema/action-adapter error.
+
+At low BACE support, official gSpan emits enough frequent patterns to exhaust
+192 GiB before GlobalGCE performs its stable support sort and top-k slice. The
+project wrapper now records deterministic traversal indices in a scratch SQLite
+store, commits each top-level root, resumes only completed roots, and loads only
+the official stable top-k order. This changes storage complexity, not mining,
+support, rule ranking, or model training semantics.
+
+COMRECGC continuation is deliberately stricter than a nonempty-output check.
+A slice no-ops when the 50,000-step completion contract is present and resumes
+only an atomic checkpoint carrying RNG, transition, trace, backing-store, and
+referential-closure evidence. Without that evidence it fails closed and never
+silently starts at step zero. The currently running BACE v6 process cannot gain
+new checkpoint behavior retroactively; its continuation jobs therefore protect
+completed output and expose an honest blocker if it times out without a safe
+manifest.
+
+The project GPU plan includes the two live one-GPU roots. Future MUT/AIDs work
+shares one serialized lane and future BACE work shares the other; no stage may
+request more than one GPU and total project concurrency remains at most two.

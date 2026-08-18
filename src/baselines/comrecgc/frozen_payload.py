@@ -13,10 +13,10 @@ from .graph_trace import stable_graph_sha256, stable_untyped_graph_sha256
 from .live_graph_state import AuthoritativeGraphStore
 
 
-FROZEN_PAYLOAD_CLOSURE_POLICY = "canonical_graph_alias_roundtrip_closure_v6"
+FROZEN_PAYLOAD_CLOSURE_POLICY = "canonical_graph_alias_roundtrip_closure_v7"
 
 
-class ComRecGCFrozenPayloadClosureError(RuntimeError):
+class FrozenPayloadClosureError(RuntimeError):
     """Raised when a frozen payload cannot resolve every required graph."""
 
     def __init__(self, diagnostics: Mapping[str, Any]) -> None:
@@ -25,6 +25,11 @@ class ComRecGCFrozenPayloadClosureError(RuntimeError):
             "[COMRECGC_FROZEN_PAYLOAD_CLOSURE_ERROR] "
             + str(self.diagnostics)
         )
+
+
+# Keep the published v6 exception name import-compatible while exposing the
+# method-neutral name used by validator and recovery in v7.
+ComRecGCFrozenPayloadClosureError = FrozenPayloadClosureError
 
 
 def _graph_from_entry(value: Any) -> Any:
@@ -149,6 +154,31 @@ def _collect_requirements(
             row["expected_sha256"].add(str(expected_sha))
         if parent_id:
             row["parent_ids"].add(str(parent_id))
+
+    # A reloaded frozen payload must audit exactly the same closure as the
+    # payload that was written.  Persisting the complete requirement rows also
+    # protects hashes referenced by provenance sections that an older runtime
+    # may no longer expose as a top-level field.
+    for persisted in payload.get("frozen_payload_closure_requirements") or []:
+        if not isinstance(persisted, Mapping) or persisted.get("official_hash") is None:
+            raise FrozenPayloadClosureError(
+                {"reason": "malformed_persisted_closure_requirement"}
+            )
+        kinds = list(persisted.get("kinds") or [])
+        if not kinds:
+            raise FrozenPayloadClosureError(
+                {
+                    "reason": "persisted_closure_requirement_has_no_kind",
+                    "graph_hash": str(persisted["official_hash"]),
+                }
+            )
+        expected = [str(value) for value in persisted.get("expected_sha256") or []]
+        parents = [str(value) for value in persisted.get("parent_ids") or []]
+        for kind in kinds:
+            add(persisted["official_hash"], str(kind))
+        row = required[str(persisted["official_hash"])]
+        row["expected_sha256"].update(expected)
+        row["parent_ids"].update(parents)
 
     for candidate in payload.get("counterfactual_candidates") or []:
         if isinstance(candidate, Mapping) and candidate.get("graph_hash") is not None:
@@ -457,7 +487,7 @@ def build_frozen_payload_closure(
         for key, value in sorted(required.items())
     ]
     audit = {
-        "schema_version": "comrecgc_frozen_payload_closure_v6",
+        "schema_version": "comrecgc_frozen_payload_closure_v7",
         "policy": FROZEN_PAYLOAD_CLOSURE_POLICY,
         "required_hash_count": len(required),
         "resolved_from_hot_cache": resolved_from_hot,
@@ -488,6 +518,7 @@ def build_frozen_payload_closure(
         "original_trace_hash_count": len(original_trace_hashes),
         "requirement_kind_counts": dict(sorted(kind_counts.items())),
         "requirements_sha256": stable_json_sha256(serialized_requirements),
+        "required_hashes_sha256": stable_json_sha256(sorted(required)),
         "backing_store": store_audit,
         "closure_complete": not unresolved and not sha_mismatches,
         "candidate_order_changed": False,
@@ -503,6 +534,8 @@ def build_frozen_payload_closure(
     frozen["canonical_graph_records"] = canonical_graph_records
     frozen["alias_to_canonical"] = alias_to_canonical
     frozen["original_trace_hashes"] = original_trace_hashes
+    frozen["required_hashes"] = sorted(required)
+    frozen["frozen_payload_closure_requirements"] = serialized_requirements
     frozen["frozen_payload_closure"] = {
         key: value
         for key, value in audit.items()

@@ -201,6 +201,8 @@ class NativeGeneratorProtocol(Protocol):
         generation_chunk_size: int,
         generation_num_workers: int,
         memory_log_every_chunks: int,
+        gspan_flush_every: int,
+        gspan_max_in_memory_candidates: int,
         start_parent_offset: int,
         on_training_ready: Callable[[dict[str, Any]], None] | None,
         on_chunk: (
@@ -233,6 +235,8 @@ class PoolBuildConfig:
     generation_chunk_size: int = 32
     generation_num_workers: int = 0
     memory_log_every_chunks: int = 1
+    gspan_flush_every: int = 256
+    gspan_max_in_memory_candidates: int = 256
 
 
 @dataclass(slots=True)
@@ -1938,6 +1942,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
         generation_chunk_size: int = 32,
         generation_num_workers: int = 0,
         memory_log_every_chunks: int = 1,
+        gspan_flush_every: int = 256,
+        gspan_max_in_memory_candidates: int = 256,
         start_parent_offset: int = 0,
         on_training_ready: Callable[[dict[str, Any]], None] | None = None,
         on_chunk: (
@@ -1950,6 +1956,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
             raise ValueError("generation_num_workers must be non-negative.")
         if int(memory_log_every_chunks) <= 0:
             raise ValueError("memory_log_every_chunks must be positive.")
+        if int(gspan_flush_every) <= 0 or int(gspan_max_in_memory_candidates) <= 0:
+            raise ValueError("gSpan streaming limits must be positive.")
         if int(start_parent_offset) < 0 or int(start_parent_offset) > len(
             parents
         ):
@@ -2225,6 +2233,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 test_globalgce=modules["test_globalgce"],
                 gspan_module=modules["gspan_module"],
                 resume=bool(resume),
+                gspan_flush_every=int(gspan_flush_every),
+                gspan_max_in_memory_candidates=int(gspan_max_in_memory_candidates),
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
             _write_json(
@@ -2720,6 +2730,11 @@ def build_mutagenicity_train_pool(
         raise ValueError("generation_num_workers must be non-negative.")
     if int(resolved.memory_log_every_chunks) <= 0:
         raise ValueError("memory_log_every_chunks must be positive.")
+    if (
+        int(resolved.gspan_flush_every) <= 0
+        or int(resolved.gspan_max_in_memory_candidates) <= 0
+    ):
+        raise ValueError("gSpan streaming limits must be positive.")
     train_path = Path(train_csv).expanduser().resolve()
     teacher_file = Path(teacher_path).expanduser().resolve()
     official_src = _resolve_official_src(official_root)
@@ -2755,6 +2770,10 @@ def build_mutagenicity_train_pool(
         "generation_num_workers": int(resolved.generation_num_workers),
         "memory_log_every_chunks": int(
             resolved.memory_log_every_chunks
+        ),
+        "gspan_flush_every": int(resolved.gspan_flush_every),
+        "gspan_max_in_memory_candidates": int(
+            resolved.gspan_max_in_memory_candidates
         ),
         "native_generator": (
             generator.config_identity()
@@ -3053,6 +3072,10 @@ def build_mutagenicity_train_pool(
             generation_num_workers=int(resolved.generation_num_workers),
             memory_log_every_chunks=int(
                 resolved.memory_log_every_chunks
+            ),
+            gspan_flush_every=int(resolved.gspan_flush_every),
+            gspan_max_in_memory_candidates=int(
+                resolved.gspan_max_in_memory_candidates
             ),
             start_parent_offset=start_parent_offset,
             on_training_ready=_training_ready,

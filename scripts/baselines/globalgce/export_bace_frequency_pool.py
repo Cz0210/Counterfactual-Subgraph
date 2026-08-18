@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Convert frozen GlobalGCE frequency ranks into the common matrix pool schema."""
+"""Convert frozen BACE GlobalGCE ranks into a fullgraph candidate CSV."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.baselines.globalgce_bace_action_adapter import (  # noqa: E402
+    adapt_globalgce_fullgraph_rows,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,40 +34,42 @@ def main(argv: list[str] | None = None) -> int:
     output = Path(args.output).expanduser().resolve()
     with source.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    ranks = [int(row["rank"]) for row in rows]
-    if ranks != list(range(1, len(rows) + 1)) or not rows:
-        raise ValueError("GlobalGCE frequency ranks must be contiguous and non-empty.")
+    adapted = adapt_globalgce_fullgraph_rows(rows)
     if args.validate_only:
-        print(f"[BACE_GLOBALGCE_MATRIX_POOL_VALIDATE_OK] rows={len(rows)}")
+        print(
+            "[BACE_GLOBALGCE_FULLGRAPH_ADAPTER_VALIDATE_OK] "
+            f"rows={len(adapted)} native_output_type=full_counterfactual_graph"
+        )
         return 0
     if output.exists():
         raise FileExistsError(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8") as handle:
-        for row in rows:
-            fragment = str(row.get("canonical_smiles") or row.get("smiles") or "")
-            payload = {
-                "molecule_id": f"globalgce_rule_{int(row['rank']):04d}",
-                "parent_id": f"globalgce_rule_{int(row['rank']):04d}",
-                "label": 1,
-                "final_fragment": fragment,
-                "final_substructure": True,
-                "parse_ok": True,
-                "valid": True,
-                "connected": True,
-                "oracle_ok": True,
-                "cf_drop": 1.0,
-                "cf_flip": True,
-                "failure_tag": "",
-                "full_parent": False,
-                "near_parent": False,
-                "too_small": False,
-                "globalgce_native_rank": int(row["rank"]),
-                "globalgce_candidate_id": str(row["candidate_id"]),
-                "source_split": "train",
-            }
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
-    print(f"[BACE_GLOBALGCE_MATRIX_POOL_OK] rows={len(rows)} output={output}")
+    fields = [
+        "rank", "candidate_id", "candidate_smiles", "canonical_smiles",
+        "rf_strict_flip", "connected", "native_output_type", "action_adapter",
+        "selection_mode", "source_split",
+    ]
+    with output.open("x", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for candidate in adapted:
+            writer.writerow(
+                {
+                    "rank": candidate.rank,
+                    "candidate_id": candidate.candidate_id,
+                    "candidate_smiles": candidate.candidate_smiles,
+                    "canonical_smiles": candidate.canonical_smiles,
+                    "rf_strict_flip": candidate.source_row.get("rf_strict_flip", True),
+                    "connected": True,
+                    "native_output_type": candidate.native_output_type,
+                    "action_adapter": candidate.action_adapter,
+                    "selection_mode": candidate.source_row.get(
+                        "selection_mode", "globalgce_frequency_top20_train_support_v1"
+                    ),
+                    "source_split": candidate.source_row.get("source_split", "train"),
+                }
+            )
+    print(f"[BACE_GLOBALGCE_FULLGRAPH_ADAPTER_OK] rows={len(adapted)} output={output}")
     return 0
 
 

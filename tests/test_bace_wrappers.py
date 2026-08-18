@@ -193,7 +193,10 @@ def test_bace_common4_globalgce_and_comrecgc_wrappers_are_isolated() -> None:
     )
     for name in names:
         content = _text(name)
-        assert "#SBATCH --partition=A800" in content
+        assert (
+            "#SBATCH --partition=A800" in content
+            or "#SBATCH --partition=intel" in content
+        )
         assert "--gres=gpu:a800:2" not in content
         assert "#SBATCH --output=logs/%j.out" in content
         assert "#SBATCH --error=logs/%j.err" in content
@@ -213,7 +216,8 @@ def test_bace_common4_globalgce_and_comrecgc_wrappers_are_isolated() -> None:
         "bace_common4_connected_audit.sh",
     }
     for name in cpu_only:
-        assert "#SBATCH --gres=" not in _text(name)
+        content = _text(name)
+        assert "#SBATCH --gres=" not in content
     for name in {
         "comrecgc_bace_project_generate.sh",
         "comrecgc_bace_common_recourse.sh",

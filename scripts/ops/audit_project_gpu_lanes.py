@@ -120,13 +120,20 @@ def audit_records(records: Iterable[dict[str, str]]) -> dict[str, Any]:
         for row in active_project
         if row["gpu_lane"] == "bace" and int(row["gpus"] or 0) > 0
     ]
+    active_aids = [
+        row
+        for row in active_project
+        if row["gpu_lane"] == "aids" and int(row["gpus"] or 0) > 0
+    ]
     result = {
         "schema_version": "project_gpu_lane_usage_v1",
         "active_project_jobs": active_project,
         "active_mut_gpu_jobs": active_mut,
         "active_bace_gpu_jobs": active_bace,
+        "active_aids_gpu_jobs": active_aids,
         "active_mut_gpus": sum(int(row["gpus"] or 0) for row in active_mut),
         "active_bace_gpus": sum(int(row["gpus"] or 0) for row in active_bace),
+        "active_aids_gpus": sum(int(row["gpus"] or 0) for row in active_aids),
         "pending_mut_gpu_requests": pending_mut,
         "pending_bace_gpu_requests": pending_bace,
         "protected_other_project_gpus": sum(
@@ -138,10 +145,16 @@ def audit_records(records: Iterable[dict[str, str]]) -> dict[str, Any]:
     result["active_mut_plus_bace_gpus"] = (
         result["active_mut_gpus"] + result["active_bace_gpus"]
     )
+    result["active_mut_aids_gpus"] = (
+        result["active_mut_gpus"] + result["active_aids_gpus"]
+    )
+    result["active_project_gpus"] = (
+        result["active_mut_aids_gpus"] + result["active_bace_gpus"]
+    )
     result["limits_pass"] = (
-        result["active_mut_gpus"] <= 1
+        result["active_mut_aids_gpus"] <= 1
         and result["active_bace_gpus"] <= 1
-        and result["active_mut_plus_bace_gpus"] <= 2
+        and result["active_project_gpus"] <= 2
     )
     return result
 

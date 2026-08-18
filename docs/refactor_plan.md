@@ -660,3 +660,19 @@ Mutagenicity roadmaps.
 - [ ] Run HPC scratch/checkpoint/plan gates from the committed recovery worktree.
 - [ ] Submit fresh MUT retry8 and BACE retry chains with one GPU per lane.
 - [ ] Complete the downstream connected four-method artifact audits.
+
+# Three-Line Recovery v7 (2026-08-18)
+
+- [x] Persist complete AIDS original-hash, alias, transition, frontier, and
+  recourse closure requirements across payload reload.
+- [x] Add a fail-closed COMRECGC resume-or-finalize decision and two-slice BACE
+  continuation wrapper.
+- [x] Classify BACE GlobalGCE native candidates as full counterfactual graphs
+  and remove the deletion-fragment matrix adaptation.
+- [x] Spill low-support gSpan reports to resumable scratch SQLite and preserve
+  official stable support top-k semantics.
+- [x] Include the live MUT and BACE allocations in a two-GPU project planner.
+- [ ] Revalidate and recover the completed AIDS walk on CPU only.
+- [ ] Recompute GlobalGCE calibration matrices for min-freq 18/7/4 and stream
+  min-freq 2 without a GPU.
+- [ ] Complete GlobalGCE and COMRECGC BACE artifacts, then run common4 audit.

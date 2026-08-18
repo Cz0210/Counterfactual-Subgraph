@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 WRAPPERS = sorted((ROOT / "scripts/slurm").glob("comrecgc_*.sh"))
 CPU_ONLY_WRAPPERS = {
+    "comrecgc_aids_freeze_recovery_cpu_v7.sh",
     "comrecgc_bace_artifact_gate.sh",
     "comrecgc_bace_generation_integrity.sh",
     "comrecgc_bace_project_chemistry.sh",
@@ -27,7 +28,10 @@ CPU_ONLY_WRAPPERS = {
 @pytest.mark.parametrize("path", WRAPPERS, ids=lambda path: path.name)
 def test_wrappers_never_request_more_than_one_gpu(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    assert "#SBATCH --partition=A800" in text
+    assert (
+        "#SBATCH --partition=A800" in text
+        or "#SBATCH --partition=intel" in text
+    )
     assert "#SBATCH --nodes=1" in text
     assert "#SBATCH --ntasks-per-node=1" in text
     assert "--gres=gpu:2" not in text
@@ -35,6 +39,7 @@ def test_wrappers_never_request_more_than_one_gpu(path: Path) -> None:
     assert "--gpus=2" not in text
     assert "--gpus-per-node=2" not in text
     if "#SBATCH --gres=" in text:
+        assert "#SBATCH --partition=A800" in text
         assert "#SBATCH --gres=gpu:a800:1" in text
     match = re.search(r"#SBATCH --cpus-per-task=(\d+)", text)
     assert match and int(match.group(1)) <= 7
