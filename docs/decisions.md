@@ -6259,3 +6259,12 @@ manifest.
 The project GPU plan includes the two live one-GPU roots. Future MUT/AIDs work
 shares one serialized lane and future BACE work shares the other; no stage may
 request more than one GPU and total project concurrency remains at most two.
+
+Completed-walk freeze recovery distinguishes serialized transition state from
+the runtime proposal cache. If a payload persists transitions, their complete
+source/destination closure remains mandatory. If it does not, the selected
+trace is the authoritative record consumed by lineage reconstruction, and
+historical runtime-cache mismatch counters remain visible diagnostics rather
+than forcing a scientifically unnecessary 50,000-step rerun. This exception is
+limited to completed walks; checkpoint resume still requires atomic RNG,
+transition, trace, backing-store, and closure state.

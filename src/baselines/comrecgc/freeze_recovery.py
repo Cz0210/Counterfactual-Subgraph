@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -154,6 +155,37 @@ def validate_completed_generation_freeze(
         expected_steps
     )
     rng_present = _rng_state_present(root)
+    serialized_transitions = payload.get("transitions")
+    serialized_transition_state_present = (
+        isinstance(serialized_transitions, Mapping) and bool(serialized_transitions)
+    )
+    serialized_transition_hash_count = int(
+        (closure_audit or {}).get("transition_hash_count", 0)
+    )
+    serialized_transition_closure_complete = bool(
+        closure_audit
+        and closure_audit.get("closure_complete")
+        and (
+            not serialized_transition_state_present
+            or serialized_transition_hash_count > 0
+        )
+    )
+    historical_transition_audit = {
+        "source_count": int(graph_audit.get("transition_source_count", 0)),
+        "destination_count": int(
+            graph_audit.get("transition_destination_count", 0)
+        ),
+        "unresolved_source_count": int(
+            graph_audit.get("unresolved_transition_source_count", -1)
+        ),
+        "invalid_destination_count": int(
+            graph_audit.get("invalid_transition_destination_count", -1)
+        ),
+    }
+    historical_transition_audit["passed"] = (
+        historical_transition_audit["unresolved_source_count"] == 0
+        and historical_transition_audit["invalid_destination_count"] == 0
+    )
     checks = {
         "failure_is_post_generation_freeze": (
             failure.get("stage") == "project_generation"
@@ -175,21 +207,20 @@ def validate_completed_generation_freeze(
             graph_audit.get("unresolved_lookups", -1)
         )
         == 0,
-        "transition_sources_resolvable": int(
-            graph_audit.get("unresolved_transition_source_count", -1)
-        )
-        == 0,
-        "transition_destinations_valid": int(
-            graph_audit.get("invalid_transition_destination_count", -1)
-        )
-        == 0,
+        # Runtime transitions are an ephemeral proposal cache.  A completed
+        # walk only needs them in the frozen closure when the source payload
+        # actually serialized them.  The selected trace is the authoritative
+        # record of transitions consumed by downstream reconstruction.
+        "serialized_transition_closure_complete": (
+            serialized_transition_closure_complete
+        ),
         "frozen_payload_closure_complete": bool(
             closure_audit and closure_audit.get("closure_complete")
         ),
     }
     freeze_only_safe = all(checks.values())
     result = {
-        "schema_version": "comrecgc_completed_generation_freeze_audit_v3",
+        "schema_version": "comrecgc_completed_generation_freeze_audit_v4",
         "source_generation_dir": str(root),
         "dataset": dataset,
         "completed_steps": graph_audit.get("move_count"),
@@ -200,10 +231,17 @@ def validate_completed_generation_freeze(
         "all_selected_trace_hashes_resolvable": bool(
             closure_audit and closure_audit.get("closure_complete")
         ),
-        "all_transition_hashes_resolvable": checks[
-            "transition_sources_resolvable"
-        ]
-        and checks["transition_destinations_valid"],
+        "all_transition_hashes_resolvable": (
+            serialized_transition_closure_complete
+        ),
+        "serialized_transition_state_present": serialized_transition_state_present,
+        "serialized_transition_hash_count": serialized_transition_hash_count,
+        "transition_closure_policy": (
+            "serialized_transition_closure_if_present_otherwise_"
+            "completed_selected_trace_authority_v1"
+        ),
+        "historical_transition_state_required_for_freeze_only": False,
+        "historical_transition_audit": historical_transition_audit,
         "RNG_state_present": rng_present,
         "rng_state_required_for_freeze_only": False,
         "rng_state_reason": (

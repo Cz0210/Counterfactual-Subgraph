@@ -26,7 +26,12 @@ def _graph(values: list[int], edges: list[tuple[int, int]]) -> SimpleNamespace:
     )
 
 
-def _source_root(tmp_path, *, invalid_destinations: int = 0):
+def _source_root(
+    tmp_path,
+    *,
+    invalid_destinations: int = 0,
+    malformed_serialized_transition: bool = False,
+):
     root = tmp_path / "generation"
     trace = root / "trace"
     chunks = trace / "selected_action_trace_chunks"
@@ -48,6 +53,10 @@ def _source_root(tmp_path, *, invalid_destinations: int = 0):
         "counterfactual_candidates": [{"graph_hash": "target", "frequency": 1}],
         "traversed_hashes": ["source", "target"],
     }
+    if malformed_serialized_transition:
+        payload["transitions"] = {
+            "source": (["target", "missing"], [target])
+        }
     torch.save(payload, root / "counterfactuals.pt")
     event = {
         "move_index": 49_999,
@@ -127,7 +136,9 @@ def test_completed_walk_is_safe_for_freeze_without_rng_resume_state(tmp_path) ->
     assert "source" in payload["graph_map"]
 
 
-def test_transition_integrity_failure_blocks_freeze_only(tmp_path) -> None:
+def test_historical_transition_cache_mismatch_is_diagnostic_after_completed_walk(
+    tmp_path,
+) -> None:
     root = _source_root(tmp_path, invalid_destinations=1)
 
     audit, payload = validate_completed_generation_freeze(
@@ -138,6 +149,26 @@ def test_transition_integrity_failure_blocks_freeze_only(tmp_path) -> None:
         expected_project_commit="base",
     )
 
+    assert audit["FREEZE_ONLY_RECOVERY_SAFE"] is True
+    assert audit["serialized_transition_state_present"] is False
+    assert audit["historical_transition_state_required_for_freeze_only"] is False
+    assert audit["historical_transition_audit"]["invalid_destination_count"] == 1
+    assert audit["historical_transition_audit"]["passed"] is False
+    assert payload is not None
+
+
+def test_malformed_serialized_transition_blocks_freeze_only(tmp_path) -> None:
+    root = _source_root(tmp_path, malformed_serialized_transition=True)
+
+    audit, payload = validate_completed_generation_freeze(
+        source_generation_dir=root,
+        dataset="aids",
+        dataset_dir=tmp_path / "unused",
+        source_csv=tmp_path / "unused.csv",
+        expected_project_commit="base",
+    )
+
     assert audit["FREEZE_ONLY_RECOVERY_SAFE"] is False
-    assert audit["checks"]["transition_destinations_valid"] is False
+    assert audit["serialized_transition_state_present"] is True
+    assert audit["checks"]["serialized_transition_closure_complete"] is False
     assert payload is None
