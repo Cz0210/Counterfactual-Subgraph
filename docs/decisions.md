@@ -6403,3 +6403,36 @@ persisted orphan-stage shutdown uses the exact pidfd-bound leader signal
 instead of `killpg` from a recorded PGID.  The production stage runner owns
 signal forwarding to its live scientific process group, closing the
 controller-side PID/PGID reuse window without changing scientific work.
+
+---
+
+## 2026-08-21: Mirror the live global first-recorded COMRECGC predecessor during freeze recovery
+
+The completed Mutagenicity trace can select the same normalized transition
+more than once under different official source-hash aliases.  The live
+`ActionTraceRecorder` indexes a predecessor by the global official target hash
+and uses `setdefault` only for events carrying an exact recorded action.  The
+freeze recovery had instead indexed by `(parent_id, target_hash)` and rejected
+any repeated target whose source official hash differed.  That mismatch made
+valid preserved walk evidence fail even though both source SHA, target SHA,
+and recorded-action replay proved the same transition.  It also would have
+missed the live global behavior for a target hash reached from two parents.
+
+Freeze recovery now consumes the verified selected-trace order and retains the
+first exact recorded event for each global official target hash, matching the
+live recorder.  Every later event is still independently resolved from the
+frozen payload, checked against its recorded source and target SHA, and exact-
+replayed before it can be classified.  Exact repeats, normalized-source
+aliases, distinct exact predecessor events, and cross-parent convergence are
+reported separately, and a deterministic digest binds the selected
+predecessor index.  A later recorded event supersedes only a legacy inferred
+placeholder; unresolved competing legacy-only predecessors continue to fail
+closed.  Frozen-payload official-hash collisions, SHA mismatches, replay
+mismatches, cycles, and candidate paths that would cross parent identity also
+remain fatal.
+
+This is a recovery-parity repair only.  It changes no random-walk proposal,
+selection, RNG use, candidate order, graph operation, threshold, model, or
+evaluation behavior.  It enables the completed Mutagenicity walk to be frozen
+without rerunning generation and applies the same evidence standard to AIDS.
+No BACE scientific module or workflow is changed.

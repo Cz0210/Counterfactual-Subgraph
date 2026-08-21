@@ -713,4 +713,7 @@ Mutagenicity roadmaps.
 - [x] Provide Python-3.10/glibc-compatible exact pidfd signalling, cooperative
   stop markers when the kernel lacks pidfd support, and fail-closed manual
   handling instead of persisted-orphan `killpg` targeting.
+- [x] Make completed-walk freeze recovery mirror the live global
+  first-recorded predecessor index, with exact replay for every repeated event
+  and explicit alias/convergence/conflict audit counters.
 - [ ] Pass the AutoDL integration smokes, then start the four formal lanes.

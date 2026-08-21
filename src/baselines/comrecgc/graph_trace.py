@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -1097,7 +1098,10 @@ def _lineage_recovery_context(
     audit.clear()
     audit.update(
         {
-            "schema_version": "comrecgc_recorded_action_first_v1",
+            "schema_version": "comrecgc_recorded_action_first_v2",
+            "predecessor_selection_policy": (
+                "global_first_recorded_exact_event_in_selected_trace_order_v1"
+            ),
             "recorded_action_present_count": 0,
             "recorded_action_replay_ok_count": 0,
             "recorded_action_replay_mismatch_count": 0,
@@ -1113,12 +1117,25 @@ def _lineage_recovery_context(
             "legacy_inference_invocation_count": 0,
             "legacy_inference_success_count": 0,
             "legacy_inference_failure_count": 0,
+            "predecessor_target_count": 0,
+            "predecessor_duplicate_event_count": 0,
+            "predecessor_duplicate_exact_transition_count": 0,
+            "predecessor_duplicate_content_equivalent_count": 0,
+            "predecessor_source_official_alias_count": 0,
+            "predecessor_conflicting_exact_event_count": 0,
+            "predecessor_cross_parent_convergence_count": 0,
+            "predecessor_recorded_upgrade_count": 0,
+            "predecessor_unverified_conflict_count": 0,
+            "predecessor_unresolved_legacy_conflict_count": 0,
+            "selected_event_source_parent_mismatch_count": 0,
+            "selected_event_target_parent_mismatch_count": 0,
+            "predecessor_selected_parent_mismatch_count": 0,
         }
     )
 
     graph_by_stable_key: dict[tuple[str, str], Any] = {}
-    graph_by_official_key: dict[tuple[str, str], Any] = {}
-    official_matches: dict[str, list[tuple[tuple[str, str], Any]]] = {}
+    graph_by_official_key: dict[str, Any] = {}
+    official_matches: dict[str, list[tuple[str, Any]]] = {}
     all_payload_graphs = payload_graphs_by_official_hash(payload)
     graph_rows = list(all_payload_graphs.items())
     for official_hash, graph in graph_rows:
@@ -1131,7 +1148,11 @@ def _lineage_recovery_context(
         ):
             raise ValueError("Stable COMRECGC graph identity collision during trace recovery.")
         graph_by_stable_key[key] = graph
-        official_key = (parent_id, str(official_hash))
+        # Pinned upstream and ActionTraceRecorder both key graph state and the
+        # predecessor index by the global official hash, not by parent.  The
+        # frozen-payload resolver has already rejected a global official hash
+        # that names different normalized graph content.
+        official_key = str(official_hash)
         existing = graph_by_official_key.get(official_key)
         if (
             existing is not None
@@ -1154,21 +1175,38 @@ def _lineage_recovery_context(
                 f"key={parent_id!r}, graph={graph_parent_id!r}."
             )
 
-    predecessor: dict[tuple[str, str], dict[str, Any]] = {}
+    predecessor: dict[str, dict[str, Any]] = {}
+    unresolved_legacy_conflicts: set[str] = set()
     observed_source_keys: set[tuple[str, str]] = set()
-    for raw_event in selected_events:
+    selected_transition_index = 0
+    for selected_trace_row_index, raw_event in enumerate(selected_events):
         if raw_event.get("event") != "selected_transition":
             continue
         event = dict(raw_event)
+        event["selected_trace_row_index"] = selected_trace_row_index
+        event["selected_transition_index"] = selected_transition_index
+        selected_transition_index += 1
         parent_id = str(event.get("parent_id") or "")
         if not parent_id:
             raise ValueError("Selected trace event has no COMRECGC parent identity.")
-        source_key = (parent_id, str(event["source_official_hash"]))
-        target_key = (parent_id, str(event["target_official_hash"]))
+        source_key = str(event["source_official_hash"])
+        target_key = str(event["target_official_hash"])
         source_graph = graph_by_official_key.get(source_key)
         target_graph = graph_by_official_key.get(target_key)
         if source_graph is None or target_graph is None:
             raise ValueError("Selected trace references a graph absent from the frozen payload.")
+        source_parent_id = str(getattr(source_graph, "comrecgc_parent_id", ""))
+        target_parent_id = str(getattr(target_graph, "comrecgc_parent_id", ""))
+        audit["selected_event_source_parent_mismatch_count"] += int(
+            bool(source_parent_id and source_parent_id != parent_id)
+        )
+        audit["selected_event_target_parent_mismatch_count"] += int(
+            bool(target_parent_id and target_parent_id != parent_id)
+        )
+        event["graph_parent_identity_exact"] = bool(
+            (not source_parent_id or source_parent_id == parent_id)
+            and (not target_parent_id or target_parent_id == parent_id)
+        )
         if not _recorded_trace_sha_matches(
             source_graph, str(event["source_graph_sha256"])
         ):
@@ -1312,7 +1350,10 @@ def _lineage_recovery_context(
         event["action_replay_exact"] = True
         existing = predecessor.get(target_key)
         if existing is not None:
-            comparable_fields = (
+            audit["predecessor_duplicate_event_count"] += 1
+            cross_parent = existing.get("parent_id") != event.get("parent_id")
+            audit["predecessor_cross_parent_convergence_count"] += int(cross_parent)
+            exact_transition_fields = (
                 "parent_id",
                 "source_official_hash",
                 "target_official_hash",
@@ -1320,18 +1361,104 @@ def _lineage_recovery_context(
                 "target_graph_sha256",
                 "action",
             )
-            if any(existing.get(field) != event.get(field) for field in comparable_fields):
+            exact_transition = all(
+                existing.get(field) == event.get(field)
+                for field in exact_transition_fields
+            )
+            existing_source = graph_by_official_key.get(
+                str(existing["source_official_hash"])
+            )
+            if existing_source is None:
                 raise ValueError(
-                    "Ambiguous COMRECGC predecessor events target the same graph."
+                    "Selected predecessor source graph disappeared from the frozen payload."
                 )
-            if (
-                existing.get("action_recovery") != "recorded_exact"
-                and event.get("action_recovery") == "recorded_exact"
+            content_equivalent = bool(
+                existing.get("action") == event.get("action")
+                and normalized_untyped_graph_payload(existing_source)
+                == normalized_untyped_graph_payload(source_graph)
+            )
+            if exact_transition:
+                audit["predecessor_duplicate_exact_transition_count"] += 1
+            elif content_equivalent:
+                audit["predecessor_duplicate_content_equivalent_count"] += 1
+                audit["predecessor_source_official_alias_count"] += int(
+                    existing.get("source_official_hash")
+                    != event.get("source_official_hash")
+                )
+            else:
+                # Multiple heads/parents may later converge on one official
+                # target.  The live recorder deterministically retained the
+                # first recorded exact event via dict.setdefault.  Preserve
+                # that same binding, but never hide the convergence: every
+                # later event was independently SHA-checked and replayed above.
+                audit["predecessor_conflicting_exact_event_count"] += 1
+                if (
+                    existing.get("action_recovery") != "recorded_exact"
+                    and event.get("action_recovery") != "recorded_exact"
+                ):
+                    audit["predecessor_unverified_conflict_count"] += 1
+                    unresolved_legacy_conflicts.add(target_key)
+            if existing.get("action_recovery") != "recorded_exact" and (
+                event.get("action_recovery") == "recorded_exact"
             ):
+                if not event["graph_parent_identity_exact"]:
+                    audit["predecessor_selected_parent_mismatch_count"] += 1
+                    raise ValueError(
+                        "Recorded COMRECGC predecessor parent identity is not uniquely bound."
+                    )
+                audit["predecessor_recorded_upgrade_count"] += 1
+                unresolved_legacy_conflicts.discard(target_key)
+                event["predecessor_selection"] = (
+                    "first_recorded_exact_event_in_selected_trace_order"
+                )
+                predecessor.pop(target_key)
                 predecessor[target_key] = event
         else:
+            if not event["graph_parent_identity_exact"]:
+                audit["predecessor_selected_parent_mismatch_count"] += 1
+                raise ValueError(
+                    "First COMRECGC predecessor parent identity is not uniquely bound."
+                )
+            event["predecessor_selection"] = (
+                "first_recorded_exact_event_in_selected_trace_order"
+                if event.get("action_recovery") == "recorded_exact"
+                else "legacy_inferred_placeholder_in_selected_trace_order"
+            )
             predecessor[target_key] = event
-        observed_source_keys.add(source_key)
+        observed_source_keys.add((parent_id, source_key))
+
+    audit["predecessor_unresolved_legacy_conflict_count"] = len(
+        unresolved_legacy_conflicts
+    )
+    if unresolved_legacy_conflicts:
+        raise ValueError(
+            "Ambiguous legacy COMRECGC predecessor events target the same graph."
+        )
+    audit["predecessor_target_count"] = len(predecessor)
+    predecessor_index_digest = hashlib.sha256()
+    for target_hash, event in predecessor.items():
+        predecessor_index_digest.update(
+            json.dumps(
+                {
+                    "target_official_hash": target_hash,
+                    "selected_trace_row_index": event["selected_trace_row_index"],
+                    "selected_transition_index": event["selected_transition_index"],
+                    "parent_id": event["parent_id"],
+                    "source_official_hash": event["source_official_hash"],
+                    "source_graph_sha256": event["source_graph_sha256"],
+                    "target_graph_sha256": event["target_graph_sha256"],
+                    "action": event["action"],
+                    "action_recovery": event["action_recovery"],
+                },
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+        predecessor_index_digest.update(b"\n")
+    audit["predecessor_index_digest_format"] = "ordered_jsonl_v1"
+    audit["predecessor_index_sha256"] = predecessor_index_digest.hexdigest()
 
     return {
         "graph_by_official_key": graph_by_official_key,
@@ -1383,17 +1510,21 @@ def iter_candidate_lineage_from_selected_trace(
         candidate_sha = stable_untyped_graph_sha256(graph)
         current_key = candidate_key
         reversed_path: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         while current_key in predecessor:
             if current_key in seen:
                 raise ValueError("Recovered COMRECGC predecessor graph contains a cycle.")
             seen.add(current_key)
             event = predecessor[current_key]
+            if str(event["parent_id"]) != parent_id:
+                raise ValueError(
+                    "Recovered COMRECGC predecessor crosses candidate parent identity."
+                )
             reversed_path.append(event)
-            current_key = (parent_id, str(event["source_official_hash"]))
+            current_key = str(event["source_official_hash"])
         path = list(reversed(reversed_path))
         root_graph = graph_by_official_key.get(current_key)
-        observed_root = current_key in observed_source_keys
+        observed_root = (parent_id, current_key) in observed_source_keys
         frozen_source = frozen_sources.get(parent_id)
         frozen_source_exact = bool(
             root_graph is not None

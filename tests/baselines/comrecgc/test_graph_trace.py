@@ -794,15 +794,174 @@ def test_recover_lineage_deduplicates_identical_target_events() -> None:
         {**base_event, "action_resolution": "missing", "action": None},
     ]
 
+    audit: dict[str, object] = {}
     lineage = recover_candidate_lineage_from_selected_trace(
         candidate_payload,
         selected_events,
         source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
     )
 
     assert lineage[0]["action_lineage_resolved"] is True
     assert len(lineage[0]["actions"]) == 1
     assert lineage[0]["actions"][0]["action_recovery"] == "recorded_exact"
+    assert audit["predecessor_target_count"] == 1
+    assert audit["predecessor_duplicate_event_count"] == 1
+    assert audit["predecessor_duplicate_exact_transition_count"] == 1
+    assert audit["predecessor_unverified_conflict_count"] == 0
+
+
+def test_recover_lineage_keeps_first_recorded_event_for_source_hash_alias() -> None:
+    source = graph()
+    source_alias = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {
+            "source-first": [source],
+            "source-alias": [source_alias],
+            "target": [target],
+        },
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 273,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source-first",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_untyped_graph_sha256(source),
+            "target_graph_sha256": stable_untyped_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 1],
+            "parent_id": "parent-1",
+        },
+        {
+            "move_index": 529,
+            "head_index": 3,
+            "event": "selected_transition",
+            "source_official_hash": "source-alias",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_untyped_graph_sha256(source_alias),
+            "target_graph_sha256": stable_untyped_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 1],
+            "parent_id": "parent-1",
+        },
+    ]
+    audit: dict[str, object] = {}
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
+    )
+
+    action = lineage[0]["actions"][0]
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert action["source_official_hash"] == "source-first"
+    assert action["move_index"] == 273
+    assert action["selected_trace_row_index"] == 0
+    assert action["selected_transition_index"] == 0
+    assert audit["predecessor_target_count"] == 1
+    assert audit["predecessor_duplicate_event_count"] == 1
+    assert audit["predecessor_duplicate_exact_transition_count"] == 0
+    assert audit["predecessor_duplicate_content_equivalent_count"] == 1
+    assert audit["predecessor_source_official_alias_count"] == 1
+    assert audit["predecessor_conflicting_exact_event_count"] == 0
+    assert audit["predecessor_cross_parent_convergence_count"] == 0
+    assert audit["predecessor_unverified_conflict_count"] == 0
+    assert audit["predecessor_index_sha256"]
+
+
+def test_recover_lineage_mirrors_global_first_recorded_cross_parent_target() -> None:
+    source_first = graph()
+    source_later = Graph(
+        x=[[0.0, 0.0], [0.0, 1.0]],
+        edge_index=[[0, 1], [1, 0]],
+        num_nodes=2,
+        comrecgc_parent_id="parent-2",
+        comrecgc_trace_node_ids=("parent-2:0", "parent-2:1"),
+    )
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {
+            "source-first": [source_first],
+            "source-later": [source_later],
+            "shared-target": [target],
+        },
+        "counterfactual_candidates": [{"graph_hash": "shared-target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 11,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source-first",
+            "target_official_hash": "shared-target",
+            "source_graph_sha256": stable_untyped_graph_sha256(source_first),
+            "target_graph_sha256": stable_untyped_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 1],
+            "parent_id": "parent-1",
+        },
+        {
+            "move_index": 29,
+            "head_index": 2,
+            "event": "selected_transition",
+            "source_official_hash": "source-later",
+            "target_official_hash": "shared-target",
+            "source_graph_sha256": stable_untyped_graph_sha256(source_later),
+            "target_graph_sha256": stable_untyped_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 1],
+            "parent_id": "parent-2",
+        },
+    ]
+    audit: dict[str, object] = {}
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        source_graphs_by_parent_id={"parent-1": source_first},
+        recovery_audit=audit,
+    )
+
+    action = lineage[0]["actions"][0]
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert action["parent_id"] == "parent-1"
+    assert action["source_official_hash"] == "source-first"
+    assert action["move_index"] == 11
+    assert action["selected_trace_row_index"] == 0
+    assert action["selected_transition_index"] == 0
+    assert audit["recorded_action_replay_verified_count"] == 2
+    assert audit["predecessor_target_count"] == 1
+    assert audit["predecessor_duplicate_event_count"] == 1
+    assert audit["predecessor_conflicting_exact_event_count"] == 1
+    assert audit["predecessor_cross_parent_convergence_count"] == 1
+    assert audit["predecessor_unverified_conflict_count"] == 0
+    assert audit["selected_event_source_parent_mismatch_count"] == 0
+    assert audit["selected_event_target_parent_mismatch_count"] == 1
+
+
+def test_recover_lineage_global_lookup_rejects_official_hash_collision() -> None:
+    source = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "frozen_graph_closure": {"target": source},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+
+    with pytest.raises(
+        RuntimeError, match="official_hash_collision_between_payload_sections"
+    ):
+        recover_candidate_lineage_from_selected_trace(
+            candidate_payload,
+            [],
+            source_graphs_by_parent_id={"parent-1": source},
+        )
 
 
 def test_recover_lineage_rejects_conflicting_predecessors_for_one_target() -> None:
@@ -838,12 +997,41 @@ def test_recover_lineage_rejects_conflicting_predecessors_for_one_target() -> No
             }
         )
 
-    with pytest.raises(ValueError, match="Ambiguous COMRECGC predecessor"):
+    audit: dict[str, object] = {}
+    with pytest.raises(ValueError, match="Ambiguous legacy COMRECGC predecessor"):
         recover_candidate_lineage_from_selected_trace(
             candidate_payload,
             selected_events,
             source_graphs_by_parent_id={"parent-1": source_a},
+            recovery_audit=audit,
         )
+
+    assert audit["predecessor_conflicting_exact_event_count"] == 1
+    assert audit["predecessor_unverified_conflict_count"] == 1
+    assert audit["predecessor_unresolved_legacy_conflict_count"] == 1
+
+    resolved_audit: dict[str, object] = {}
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        [
+            *selected_events,
+            {
+                **selected_events[0],
+                "move_index": 4,
+                "action_resolution": "exact",
+                "action": ["NLC", 0, 1],
+            },
+        ],
+        source_graphs_by_parent_id={"parent-1": source_a},
+        recovery_audit=resolved_audit,
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["actions"][0]["selected_transition_index"] == 2
+    assert lineage[0]["actions"][0]["action_recovery"] == "recorded_exact"
+    assert resolved_audit["predecessor_recorded_upgrade_count"] == 1
+    assert resolved_audit["predecessor_unverified_conflict_count"] == 1
+    assert resolved_audit["predecessor_unresolved_legacy_conflict_count"] == 0
 
 
 def test_selected_trace_streams_to_reloadable_bounded_chunks(tmp_path) -> None:

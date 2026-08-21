@@ -421,6 +421,19 @@ def recover_completed_generation_freeze(
             "legacy_missing_action_count",
             "legacy_inference_called_count",
             "legacy_inference_ambiguous_count",
+            "predecessor_target_count",
+            "predecessor_duplicate_event_count",
+            "predecessor_duplicate_exact_transition_count",
+            "predecessor_duplicate_content_equivalent_count",
+            "predecessor_source_official_alias_count",
+            "predecessor_conflicting_exact_event_count",
+            "predecessor_cross_parent_convergence_count",
+            "predecessor_recorded_upgrade_count",
+            "predecessor_unverified_conflict_count",
+            "predecessor_unresolved_legacy_conflict_count",
+            "predecessor_selected_parent_mismatch_count",
+            "selected_event_source_parent_mismatch_count",
+            "selected_event_target_parent_mismatch_count",
         )
     }
 
