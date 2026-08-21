@@ -77,6 +77,10 @@ class OrchestratorError(RuntimeError):
     """A fail-closed orchestration error with an actionable message."""
 
 
+class PidfdUnavailableError(OrchestratorError):
+    """The kernel cannot provide race-free PID signalling on this host."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1148,7 +1152,7 @@ def _linux_pidfd_syscall_number(operation: str) -> int:
     machine = _linux_machine()
     numbers = _LINUX_PIDFD_SYSCALLS.get(machine)
     if numbers is None or operation not in numbers:
-        raise OrchestratorError(
+        raise PidfdUnavailableError(
             "Linux pidfd signalling is unsupported on architecture "
             f"{machine or '<unknown>'}; refusing a numeric-PID fallback"
         )
@@ -1159,7 +1163,7 @@ def _load_linux_libc() -> Any:
     try:
         return ctypes.CDLL(None, use_errno=True)
     except OSError as exc:
-        raise OrchestratorError(
+        raise PidfdUnavailableError(
             "Unable to load libc for fail-closed Linux pidfd signalling"
         ) from exc
 
@@ -1170,7 +1174,7 @@ def _raise_pidfd_os_error(operation: str, error_number: int) -> None:
     if value == errno.ESRCH:
         raise ProcessLookupError(value, message)
     if value == errno.ENOSYS:
-        raise OrchestratorError(
+        raise PidfdUnavailableError(
             f"{operation} is unavailable on this Linux kernel (ENOSYS); "
             "refusing a numeric-PID fallback"
         )
@@ -1203,7 +1207,7 @@ def _linux_pidfd_open(pid: int) -> int:
     else:
         syscall = getattr(libc, "syscall", None)
         if not callable(syscall):
-            raise OrchestratorError(
+            raise PidfdUnavailableError(
                 "libc exposes neither pidfd_open nor syscall; "
                 "refusing a numeric-PID fallback"
             )
@@ -1249,7 +1253,7 @@ def _linux_pidfd_send_signal(pidfd: int, signum: int) -> None:
     else:
         syscall = getattr(libc, "syscall", None)
         if not callable(syscall):
-            raise OrchestratorError(
+            raise PidfdUnavailableError(
                 "libc exposes neither pidfd_send_signal nor syscall; "
                 "refusing a numeric-PID fallback"
             )
@@ -1276,9 +1280,13 @@ def _signal_exact_worker(
 ) -> bool:
     """Signal only the exact worker; Linux uses pidfd to close the reuse race."""
 
+    if sys.platform.startswith("linux") and not _linux_procfs_available():
+        raise PidfdUnavailableError(
+            "Linux procfs identity is unavailable; refusing a numeric-PID fallback"
+        )
     if not _pid_matches_worker(pid, spec, lane_id):
         return False
-    if _linux_procfs_available():
+    if sys.platform.startswith("linux"):
         try:
             descriptor = _linux_pidfd_open(pid)
         except ProcessLookupError:
@@ -1599,9 +1607,13 @@ def _signal_exact_child(
     it never calls ``killpg`` from persisted state after a controller restart.
     """
 
+    if sys.platform.startswith("linux") and not _linux_procfs_available():
+        raise PidfdUnavailableError(
+            "Linux procfs identity is unavailable; refusing a numeric-PID fallback"
+        )
     if not _state_child_matches(spec, lane_id, state):
         return False
-    if _linux_procfs_available():
+    if sys.platform.startswith("linux"):
         try:
             descriptor = _linux_pidfd_open(pid)
         except ProcessLookupError:
@@ -2860,21 +2872,59 @@ def stop(spec: LoadedSpec) -> dict[str, Any]:
     stopped: dict[str, Any] = {}
     with file_lock(spec.global_lock_path):
         _load_bound_run_state(spec)
+        requested_at = utc_now()
+        # Publish every cooperative request before attempting any signal.  A
+        # pidfd capability error for one lane must not prevent another live
+        # worker from observing its durable stop marker.
+        for lane in spec.lanes:
+            lane_id = str(lane["id"])
+            atomic_write_json(
+                _lane_paths(spec, lane_id)["stop"],
+                {"requested_at": requested_at, "lane": lane_id},
+            )
         for lane in spec.lanes:
             lane_id = str(lane["id"])
             state = _load_lane_state(spec, lane)
             paths = _lane_paths(spec, lane_id)
-            atomic_write_json(
-                paths["stop"], {"requested_at": utc_now(), "lane": lane_id}
-            )
             pid = _worker_pid(spec, lane_id, state)
-            if pid and _pid_matches_worker(int(pid), spec, lane_id):
+            worker_needs_cooperative_stop = bool(
+                pid
+                and sys.platform.startswith("linux")
+                and not _linux_procfs_available()
+                and _pid_alive(pid)
+            )
+            if pid and (
+                worker_needs_cooperative_stop
+                or _pid_matches_worker(int(pid), spec, lane_id)
+            ):
                 # Re-read the full kernel/starttime/cmdline/PGID identity
                 # immediately before signalling. Linux additionally signals a
                 # pidfd, so PID reuse after validation cannot retarget kill.
-                if not _signal_exact_worker(
-                    int(pid), spec, lane_id, int(signal.SIGTERM)
-                ):
+                try:
+                    signalled = _signal_exact_worker(
+                        int(pid), spec, lane_id, int(signal.SIGTERM)
+                    )
+                except PidfdUnavailableError as exc:
+                    delivery = {
+                        "requested_at": requested_at,
+                        "mode": "cooperative_stop_marker",
+                        "signal_sent": False,
+                        "reason": "pidfd_unavailable",
+                        "detail": str(exc),
+                        "marker": str(paths["stop"]),
+                    }
+                    state["status"] = "STOPPING"
+                    state["stop_delivery"] = delivery
+                    _save_lane_state(spec, state)
+                    stopped[lane_id] = {
+                        "worker_pid": pid,
+                        "signal": None,
+                        "target": "cooperative_stop_marker",
+                        "marker": str(paths["stop"]),
+                        "manual_stop_required": False,
+                    }
+                    continue
+                if not signalled:
                     record = (
                         read_json(paths["pid"])
                         if paths["pid"].is_file() and not paths["pid"].is_symlink()
@@ -2930,17 +2980,48 @@ def stop(spec: LoadedSpec) -> dict[str, Any]:
                     }
                     continue
                 child = state.get("child_pid")
-                if child and _state_child_matches(spec, lane_id, state):
+                child_needs_manual_stop = bool(
+                    child
+                    and sys.platform.startswith("linux")
+                    and not _linux_procfs_available()
+                    and _pid_alive(child)
+                )
+                if child and (
+                    child_needs_manual_stop
+                    or _state_child_matches(spec, lane_id, state)
+                ):
                     # Bind the exact stage leader through pidfd on Linux.  The
                     # stage runner forwards TERM to its own process group; the
                     # controller must not target a persisted numeric PGID.
-                    if not _signal_exact_child(
-                        int(child),
-                        spec,
-                        lane_id,
-                        state,
-                        int(signal.SIGTERM),
-                    ):
+                    try:
+                        child_signalled = _signal_exact_child(
+                            int(child),
+                            spec,
+                            lane_id,
+                            state,
+                            int(signal.SIGTERM),
+                        )
+                    except PidfdUnavailableError as exc:
+                        delivery = {
+                            "requested_at": requested_at,
+                            "mode": "manual_stop_required",
+                            "signal_sent": False,
+                            "reason": "pidfd_unavailable",
+                            "detail": str(exc),
+                            "marker": str(paths["stop"]),
+                        }
+                        state["status"] = "ORPHANED_CHILD"
+                        state["manual_stop_required"] = delivery
+                        _save_lane_state(spec, state)
+                        stopped[lane_id] = {
+                            "orphan_child_pid": child,
+                            "signal": None,
+                            "target": "manual_stop_required",
+                            "manual_stop_required": True,
+                            "marker": str(paths["stop"]),
+                        }
+                        continue
+                    if not child_signalled:
                         _discard_stale_child_reference(
                             state,
                             reason="child identity changed during stop revalidation",

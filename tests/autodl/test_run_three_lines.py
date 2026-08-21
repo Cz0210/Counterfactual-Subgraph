@@ -812,7 +812,9 @@ def test_linux_pidfd_syscall_is_fail_closed_for_unknown_architecture(
     monkeypatch.delattr(orchestrator.os, "pidfd_open", raising=False)
     monkeypatch.setattr(orchestrator, "_load_linux_libc", lambda: FakeLibc())
     monkeypatch.setattr(orchestrator, "_linux_machine", lambda: "mips64")
-    with pytest.raises(OrchestratorError, match="unsupported on architecture"):
+    with pytest.raises(
+        orchestrator.PidfdUnavailableError, match="unsupported on architecture"
+    ):
         orchestrator._linux_pidfd_open(7001)
 
 
@@ -832,7 +834,7 @@ def test_linux_pidfd_syscall_enosys_is_fail_closed(
     monkeypatch.delattr(orchestrator.os, "pidfd_open", raising=False)
     monkeypatch.setattr(orchestrator, "_load_linux_libc", lambda: FakeLibc())
     monkeypatch.setattr(orchestrator, "_linux_machine", lambda: "x86_64")
-    with pytest.raises(OrchestratorError, match="ENOSYS"):
+    with pytest.raises(orchestrator.PidfdUnavailableError, match="ENOSYS"):
         orchestrator._linux_pidfd_open(7001)
 
 
@@ -845,6 +847,7 @@ def test_exact_worker_and_orphan_child_use_pidfd_on_linux(
     sent: list[tuple[int, int]] = []
     closed: list[int] = []
     numeric_kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(orchestrator.sys, "platform", "linux")
     monkeypatch.setattr(orchestrator, "_linux_procfs_available", lambda: True)
     monkeypatch.setattr(
         orchestrator,
@@ -882,6 +885,53 @@ def test_exact_worker_and_orphan_child_use_pidfd_on_linux(
         (descriptor, int(signal.SIGTERM)),
     ]
     assert closed == [descriptor, descriptor]
+    assert numeric_kills == []
+
+
+def test_linux_worker_without_procfs_never_uses_numeric_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = LoadedSpec.load(_write_spec(tmp_path))
+    numeric_kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(orchestrator.sys, "platform", "linux")
+    monkeypatch.setattr(orchestrator, "_linux_procfs_available", lambda: False)
+    monkeypatch.setattr(
+        orchestrator.os,
+        "kill",
+        lambda pid, sig: numeric_kills.append((int(pid), int(sig))),
+    )
+    with pytest.raises(orchestrator.PidfdUnavailableError, match="procfs identity"):
+        orchestrator._signal_exact_worker(
+            7401, spec, "mut_recovery", int(signal.SIGTERM)
+        )
+    assert numeric_kills == []
+
+
+def test_linux_orphan_child_without_procfs_never_uses_numeric_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = LoadedSpec.load(_write_spec(tmp_path))
+    numeric_kills: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(orchestrator.sys, "platform", "linux")
+    monkeypatch.setattr(orchestrator, "_linux_procfs_available", lambda: False)
+    monkeypatch.setattr(
+        orchestrator.os,
+        "kill",
+        lambda pid, sig: numeric_kills.append(("pid", int(pid), int(sig))),
+    )
+    monkeypatch.setattr(
+        orchestrator.os,
+        "killpg",
+        lambda pgid, sig: numeric_kills.append(("pgid", int(pgid), int(sig))),
+    )
+    with pytest.raises(orchestrator.PidfdUnavailableError, match="procfs identity"):
+        orchestrator._signal_exact_child(
+            7402,
+            spec,
+            "mut_recovery",
+            {"child_pid": 7402},
+            int(signal.SIGTERM),
+        )
     assert numeric_kills == []
 
 
@@ -1132,6 +1182,125 @@ def test_stop_does_not_signal_when_worker_identity_changes_at_revalidation(
     assert result["stop_requests"][target_lane_id]["target"] == (
         "none_identity_mismatch"
     )
+
+
+def test_stop_uses_cooperative_marker_when_live_worker_pidfd_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = LoadedSpec.load(_write_spec(tmp_path))
+    target_lane_id = "mut_recovery"
+    target_pid = 7201
+    for lane in spec.lanes:
+        state = orchestrator._initial_lane_state(spec, lane)
+        if lane["id"] == target_lane_id:
+            state.update(
+                {
+                    "status": "RUNNING",
+                    "worker_pid": target_pid,
+                    "worker_identity": {"pid": target_pid},
+                    "started_at": orchestrator.utc_now(),
+                }
+            )
+        orchestrator._save_lane_state(spec, state)
+    _write_bound_run_state(spec, status_value="RUNNING")
+    monkeypatch.setattr(
+        orchestrator,
+        "_pid_matches_worker",
+        lambda pid, _spec, lane_id: int(pid) == target_pid
+        and lane_id == target_lane_id,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_signal_exact_worker",
+        lambda *_args: (_ for _ in ()).throw(
+            orchestrator.PidfdUnavailableError("pidfd_open ENOSYS")
+        ),
+    )
+    numeric_signals: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(
+        orchestrator.os,
+        "kill",
+        lambda pid, sig: numeric_signals.append(("pid", int(pid), int(sig))),
+    )
+    monkeypatch.setattr(
+        orchestrator.os,
+        "killpg",
+        lambda pgid, sig: numeric_signals.append(("pgid", int(pgid), int(sig))),
+    )
+
+    result = stop(spec)
+
+    assert numeric_signals == []
+    assert all(
+        (spec.lane_state_root(str(lane["id"])) / "STOP_REQUESTED.json").is_file()
+        for lane in spec.lanes
+    )
+    request = result["stop_requests"][target_lane_id]
+    assert request["signal"] is None
+    assert request["target"] == "cooperative_stop_marker"
+    assert request["manual_stop_required"] is False
+    state = orchestrator._load_lane_state(spec, spec.lane_by_id[target_lane_id])
+    assert state["status"] == "STOPPING"
+    assert state["stop_delivery"]["mode"] == "cooperative_stop_marker"
+    assert state["stop_delivery"]["signal_sent"] is False
+
+
+def test_stop_requires_manual_action_for_orphan_when_pidfd_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = LoadedSpec.load(_write_spec(tmp_path))
+    target_lane_id = "mut_recovery"
+    target_pid = 7301
+    for lane in spec.lanes:
+        state = orchestrator._initial_lane_state(spec, lane)
+        if lane["id"] == target_lane_id:
+            state.update(
+                {
+                    "status": "ORPHANED_CHILD",
+                    "child_pid": target_pid,
+                    "child_identity": {"pid": target_pid},
+                    "current_stage": "mut_recovery_stage",
+                    "current_command": [sys.executable, "stage.py"],
+                }
+            )
+        orchestrator._save_lane_state(spec, state)
+    _write_bound_run_state(spec, status_value="BLOCKED")
+    monkeypatch.setattr(orchestrator, "_worker_pid", lambda *_args: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_state_child_matches",
+        lambda _spec, lane_id, _state: lane_id == target_lane_id,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_signal_exact_child",
+        lambda *_args: (_ for _ in ()).throw(
+            orchestrator.PidfdUnavailableError("pidfd_open ENOSYS")
+        ),
+    )
+    numeric_signals: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(
+        orchestrator.os,
+        "kill",
+        lambda pid, sig: numeric_signals.append(("pid", int(pid), int(sig))),
+    )
+    monkeypatch.setattr(
+        orchestrator.os,
+        "killpg",
+        lambda pgid, sig: numeric_signals.append(("pgid", int(pgid), int(sig))),
+    )
+
+    result = stop(spec)
+
+    assert numeric_signals == []
+    request = result["stop_requests"][target_lane_id]
+    assert request["signal"] is None
+    assert request["target"] == "manual_stop_required"
+    assert request["manual_stop_required"] is True
+    state = orchestrator._load_lane_state(spec, spec.lane_by_id[target_lane_id])
+    assert state["status"] == "ORPHANED_CHILD"
+    assert state["manual_stop_required"]["mode"] == "manual_stop_required"
+    assert state["manual_stop_required"]["signal_sent"] is False
 
 
 def test_launch_discards_reused_child_pid_without_orphaning(

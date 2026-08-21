@@ -6390,8 +6390,16 @@ The AutoDL Python 3.10 runtime may expose neither `os.pidfd_open` nor
 wrapper.  Linux signalling therefore prefers the Python wrapper, then the libc
 wrapper, then the architecture-allow-listed kernel syscalls (`pidfd_open=434`,
 `pidfd_send_signal=424`) on x86_64/aarch64.  Unknown architectures and
-`ENOSYS` fail closed; Linux never falls back to `kill(numeric_pid, ...)`.
-Persisted orphan-stage shutdown uses the same exact pidfd-bound leader signal
-instead of `killpg` from a recorded PGID.  The production stage runner already
-owns signal forwarding to its live scientific process group, so this closes
-the controller-side PID/PGID reuse window without changing scientific work.
+`ENOSYS`, or an unavailable Linux procfs identity, make direct signalling
+unavailable; Linux never falls back to `kill(numeric_pid, ...)`.  Only a
+genuinely non-Linux host may use the existing double-identity-checked numeric
+signal path.  `stop` publishes every lane's durable stop marker before
+attempting a signal.  A live worker with no safe signalling support remains
+`STOPPING` and observes that marker through its heartbeat loop, where its owned
+`Popen` performs bounded child cleanup.  A persisted orphan with no live worker
+cannot use that cooperative path, so it remains `ORPHANED_CHILD` with
+`manual_stop_required=true` and receives no signal.  When pidfd is available,
+persisted orphan-stage shutdown uses the exact pidfd-bound leader signal
+instead of `killpg` from a recorded PGID.  The production stage runner owns
+signal forwarding to its live scientific process group, closing the
+controller-side PID/PGID reuse window without changing scientific work.
