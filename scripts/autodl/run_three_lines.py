@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import ctypes
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import json
@@ -58,6 +60,17 @@ SECRET_VALUE = re.compile(
 )
 PLACEHOLDER = re.compile(r"^__CONFIGURE_[A-Z0-9_]+__$")
 TOKEN = re.compile(r"\{([a-zA-Z0-9_]+)\}")
+
+# Linux assigns these pidfd operations the same syscall numbers on the two
+# architectures used by this project.  Keep the allow-list deliberately
+# narrow: guessing a syscall number on an unknown architecture is less safe
+# than refusing to signal a formal worker.
+_LINUX_PIDFD_SYSCALLS = {
+    "x86_64": {"pidfd_send_signal": 424, "pidfd_open": 434},
+    "amd64": {"pidfd_send_signal": 424, "pidfd_open": 434},
+    "aarch64": {"pidfd_send_signal": 424, "pidfd_open": 434},
+    "arm64": {"pidfd_send_signal": 424, "pidfd_open": 434},
+}
 
 
 class OrchestratorError(RuntimeError):
@@ -1120,6 +1133,141 @@ def _pid_matches_worker(pid: int, spec: LoadedSpec, lane_id: str) -> bool:
     )
 
 
+def _linux_procfs_available() -> bool:
+    return sys.platform.startswith("linux") and Path("/proc/self/stat").is_file()
+
+
+def _linux_machine() -> str:
+    try:
+        return str(os.uname().machine).strip().lower()
+    except (AttributeError, OSError):
+        return ""
+
+
+def _linux_pidfd_syscall_number(operation: str) -> int:
+    machine = _linux_machine()
+    numbers = _LINUX_PIDFD_SYSCALLS.get(machine)
+    if numbers is None or operation not in numbers:
+        raise OrchestratorError(
+            "Linux pidfd signalling is unsupported on architecture "
+            f"{machine or '<unknown>'}; refusing a numeric-PID fallback"
+        )
+    return int(numbers[operation])
+
+
+def _load_linux_libc() -> Any:
+    try:
+        return ctypes.CDLL(None, use_errno=True)
+    except OSError as exc:
+        raise OrchestratorError(
+            "Unable to load libc for fail-closed Linux pidfd signalling"
+        ) from exc
+
+
+def _raise_pidfd_os_error(operation: str, error_number: int) -> None:
+    value = int(error_number or errno.EIO)
+    message = f"{operation} failed: {os.strerror(value)}"
+    if value == errno.ESRCH:
+        raise ProcessLookupError(value, message)
+    if value == errno.ENOSYS:
+        raise OrchestratorError(
+            f"{operation} is unavailable on this Linux kernel (ENOSYS); "
+            "refusing a numeric-PID fallback"
+        )
+    if value in {errno.EPERM, errno.EACCES}:
+        raise PermissionError(value, message)
+    raise OSError(value, message)
+
+
+def _linux_pidfd_open(pid: int) -> int:
+    """Open a pidfd on Python 3.10/glibc combinations lacking wrappers."""
+
+    if int(pid) <= 1:
+        raise OrchestratorError(f"Unsafe pidfd target: {pid}")
+    python_wrapper = getattr(os, "pidfd_open", None)
+    if callable(python_wrapper):
+        try:
+            return int(python_wrapper(int(pid), 0))
+        except OSError as exc:
+            if exc.errno == errno.ENOSYS:
+                _raise_pidfd_os_error("pidfd_open", int(exc.errno))
+            raise
+
+    libc = _load_linux_libc()
+    libc_wrapper = getattr(libc, "pidfd_open", None)
+    if callable(libc_wrapper):
+        libc_wrapper.argtypes = [ctypes.c_int, ctypes.c_uint]
+        libc_wrapper.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = int(libc_wrapper(int(pid), 0))
+    else:
+        syscall = getattr(libc, "syscall", None)
+        if not callable(syscall):
+            raise OrchestratorError(
+                "libc exposes neither pidfd_open nor syscall; "
+                "refusing a numeric-PID fallback"
+            )
+        syscall.restype = ctypes.c_long
+        ctypes.set_errno(0)
+        result = int(
+            syscall(
+                _linux_pidfd_syscall_number("pidfd_open"),
+                int(pid),
+                0,
+            )
+        )
+    if result < 0:
+        _raise_pidfd_os_error("pidfd_open", ctypes.get_errno())
+    return result
+
+
+def _linux_pidfd_send_signal(pidfd: int, signum: int) -> None:
+    """Signal one pidfd without ever falling back to ``kill(pid, ...)``."""
+
+    python_wrapper = getattr(signal, "pidfd_send_signal", None)
+    if callable(python_wrapper):
+        try:
+            python_wrapper(int(pidfd), int(signum), None, 0)
+            return
+        except OSError as exc:
+            if exc.errno == errno.ENOSYS:
+                _raise_pidfd_os_error("pidfd_send_signal", int(exc.errno))
+            raise
+
+    libc = _load_linux_libc()
+    libc_wrapper = getattr(libc, "pidfd_send_signal", None)
+    if callable(libc_wrapper):
+        libc_wrapper.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        libc_wrapper.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = int(libc_wrapper(int(pidfd), int(signum), None, 0))
+    else:
+        syscall = getattr(libc, "syscall", None)
+        if not callable(syscall):
+            raise OrchestratorError(
+                "libc exposes neither pidfd_send_signal nor syscall; "
+                "refusing a numeric-PID fallback"
+            )
+        syscall.restype = ctypes.c_long
+        ctypes.set_errno(0)
+        result = int(
+            syscall(
+                _linux_pidfd_syscall_number("pidfd_send_signal"),
+                int(pidfd),
+                int(signum),
+                None,
+                0,
+            )
+        )
+    if result < 0:
+        _raise_pidfd_os_error("pidfd_send_signal", ctypes.get_errno())
+
+
 def _signal_exact_worker(
     pid: int,
     spec: LoadedSpec,
@@ -1130,23 +1278,16 @@ def _signal_exact_worker(
 
     if not _pid_matches_worker(pid, spec, lane_id):
         return False
-    if Path("/proc").is_dir():
-        pidfd_open = getattr(os, "pidfd_open", None)
-        pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
-        if not callable(pidfd_open) or not callable(pidfd_send_signal):
-            raise OrchestratorError(
-                "Linux worker signalling requires pidfd_open and "
-                "pidfd_send_signal"
-            )
+    if _linux_procfs_available():
         try:
-            descriptor = int(pidfd_open(pid, 0))
+            descriptor = _linux_pidfd_open(pid)
         except ProcessLookupError:
             return False
         try:
             if not _pid_matches_worker(pid, spec, lane_id):
                 return False
             try:
-                pidfd_send_signal(descriptor, signum, None, 0)
+                _linux_pidfd_send_signal(descriptor, signum)
             except ProcessLookupError:
                 return False
             return True
@@ -1442,6 +1583,43 @@ def _state_child_matches(
         str(state.get("current_stage") or "") or None,
         command if isinstance(command, list) else None,
     )
+
+
+def _signal_exact_child(
+    pid: int,
+    spec: LoadedSpec,
+    lane_id: str,
+    state: Mapping[str, Any],
+    signum: int,
+) -> bool:
+    """Signal one persisted orphan child without a PID/PGID reuse window.
+
+    Production stage runners forward SIGTERM to the process group they own.
+    The controller therefore signals the exact, identity-bound stage leader;
+    it never calls ``killpg`` from persisted state after a controller restart.
+    """
+
+    if not _state_child_matches(spec, lane_id, state):
+        return False
+    if _linux_procfs_available():
+        try:
+            descriptor = _linux_pidfd_open(pid)
+        except ProcessLookupError:
+            return False
+        try:
+            if not _state_child_matches(spec, lane_id, state):
+                return False
+            try:
+                _linux_pidfd_send_signal(descriptor, signum)
+            except ProcessLookupError:
+                return False
+            return True
+        finally:
+            os.close(descriptor)
+    if not _state_child_matches(spec, lane_id, state):
+        return False
+    os.kill(pid, signum)
+    return True
 
 
 def _discard_stale_child_reference(
@@ -2753,12 +2931,16 @@ def stop(spec: LoadedSpec) -> dict[str, Any]:
                     continue
                 child = state.get("child_pid")
                 if child and _state_child_matches(spec, lane_id, state):
-                    child_identity = dict(state["child_identity"])
-                    child_pgid = int(child_identity["pgid"])
-                    # Revalidate once immediately before signalling to narrow
-                    # the PID/PGID reuse window. Never derive the target from a
-                    # merely live integer PID.
-                    if not _state_child_matches(spec, lane_id, state):
+                    # Bind the exact stage leader through pidfd on Linux.  The
+                    # stage runner forwards TERM to its own process group; the
+                    # controller must not target a persisted numeric PGID.
+                    if not _signal_exact_child(
+                        int(child),
+                        spec,
+                        lane_id,
+                        state,
+                        int(signal.SIGTERM),
+                    ):
                         _discard_stale_child_reference(
                             state,
                             reason="child identity changed during stop revalidation",
@@ -2770,12 +2952,10 @@ def stop(spec: LoadedSpec) -> dict[str, Any]:
                         }
                         _save_lane_state(spec, state)
                         continue
-                    os.killpg(child_pgid, signal.SIGTERM)
                     stopped[lane_id] = {
                         "orphan_child_pid": child,
                         "signal": "SIGTERM",
-                        "target": "exact_child_process_group",
-                        "pgid": child_pgid,
+                        "target": "validated_orphan_child_leader",
                     }
                     state["status"] = "STOPPED"
                     state["finished_at"] = utc_now()

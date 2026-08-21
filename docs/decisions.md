@@ -6384,3 +6384,14 @@ all normalized roots.  The expanded persisted-state contract is explicitly
 Later publication, resume, status, stop, and worker
 startup reject spec/root drift instead of rewriting stale state under a new
 configuration.
+
+The AutoDL Python 3.10 runtime may expose neither `os.pidfd_open` nor
+`signal.pidfd_send_signal`, and its glibc may expose neither corresponding C
+wrapper.  Linux signalling therefore prefers the Python wrapper, then the libc
+wrapper, then the architecture-allow-listed kernel syscalls (`pidfd_open=434`,
+`pidfd_send_signal=424`) on x86_64/aarch64.  Unknown architectures and
+`ENOSYS` fail closed; Linux never falls back to `kill(numeric_pid, ...)`.
+Persisted orphan-stage shutdown uses the same exact pidfd-bound leader signal
+instead of `killpg` from a recorded PGID.  The production stage runner already
+owns signal forwarding to its live scientific process group, so this closes
+the controller-side PID/PGID reuse window without changing scientific work.

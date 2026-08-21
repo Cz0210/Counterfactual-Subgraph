@@ -710,4 +710,6 @@ Mutagenicity roadmaps.
   spec-byte digest, schema, run, lane, and normalized roots.
 - [x] Require persisted stage and producer-lane success in addition to
   scientific dependency proofs, with sentinel-first success publication.
+- [x] Provide Python-3.10/glibc-compatible exact pidfd signalling and remove
+  persisted-orphan `killpg` targeting from the controller.
 - [ ] Pass the AutoDL integration smokes, then start the four formal lanes.

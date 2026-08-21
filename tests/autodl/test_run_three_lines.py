@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -764,6 +765,126 @@ def test_linux_proc_stat_parser_handles_parenthesized_command_name() -> None:
     assert pgid == 4444
 
 
+def test_linux_pidfd_syscall_compat_when_python_and_libc_wrappers_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class FakeFunction:
+        restype: object = None
+
+        def __call__(self, *args: object) -> int:
+            calls.append(tuple(args))
+            if int(args[0]) == 434:
+                return 91
+            return 0
+
+    class FakeLibc:
+        syscall = FakeFunction()
+
+    monkeypatch.delattr(orchestrator.os, "pidfd_open", raising=False)
+    monkeypatch.delattr(orchestrator.signal, "pidfd_send_signal", raising=False)
+    monkeypatch.setattr(orchestrator, "_load_linux_libc", lambda: FakeLibc())
+    monkeypatch.setattr(orchestrator, "_linux_machine", lambda: "x86_64")
+
+    descriptor = orchestrator._linux_pidfd_open(7001)
+    orchestrator._linux_pidfd_send_signal(descriptor, int(signal.SIGTERM))
+
+    assert descriptor == 91
+    assert calls == [
+        (434, 7001, 0),
+        (424, 91, int(signal.SIGTERM), None, 0),
+    ]
+
+
+def test_linux_pidfd_syscall_is_fail_closed_for_unknown_architecture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFunction:
+        restype: object = None
+
+        def __call__(self, *_args: object) -> int:
+            raise AssertionError("unknown architecture must fail before syscall")
+
+    class FakeLibc:
+        syscall = FakeFunction()
+
+    monkeypatch.delattr(orchestrator.os, "pidfd_open", raising=False)
+    monkeypatch.setattr(orchestrator, "_load_linux_libc", lambda: FakeLibc())
+    monkeypatch.setattr(orchestrator, "_linux_machine", lambda: "mips64")
+    with pytest.raises(OrchestratorError, match="unsupported on architecture"):
+        orchestrator._linux_pidfd_open(7001)
+
+
+def test_linux_pidfd_syscall_enosys_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFunction:
+        restype: object = None
+
+        def __call__(self, *_args: object) -> int:
+            orchestrator.ctypes.set_errno(errno.ENOSYS)
+            return -1
+
+    class FakeLibc:
+        syscall = FakeFunction()
+
+    monkeypatch.delattr(orchestrator.os, "pidfd_open", raising=False)
+    monkeypatch.setattr(orchestrator, "_load_linux_libc", lambda: FakeLibc())
+    monkeypatch.setattr(orchestrator, "_linux_machine", lambda: "x86_64")
+    with pytest.raises(OrchestratorError, match="ENOSYS"):
+        orchestrator._linux_pidfd_open(7001)
+
+
+def test_exact_worker_and_orphan_child_use_pidfd_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = LoadedSpec.load(_write_spec(tmp_path))
+    descriptor = 91
+    opened: list[int] = []
+    sent: list[tuple[int, int]] = []
+    closed: list[int] = []
+    numeric_kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(orchestrator, "_linux_procfs_available", lambda: True)
+    monkeypatch.setattr(
+        orchestrator,
+        "_linux_pidfd_open",
+        lambda pid: opened.append(int(pid)) or descriptor,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_linux_pidfd_send_signal",
+        lambda fd, sig: sent.append((int(fd), int(sig))),
+    )
+    monkeypatch.setattr(orchestrator.os, "close", lambda fd: closed.append(int(fd)))
+    monkeypatch.setattr(
+        orchestrator.os,
+        "kill",
+        lambda pid, sig: numeric_kills.append((int(pid), int(sig))),
+    )
+    monkeypatch.setattr(orchestrator, "_pid_matches_worker", lambda *_args: True)
+    monkeypatch.setattr(orchestrator, "_state_child_matches", lambda *_args: True)
+
+    assert orchestrator._signal_exact_worker(
+        7001, spec, "mut_recovery", int(signal.SIGTERM)
+    )
+    assert orchestrator._signal_exact_child(
+        7002,
+        spec,
+        "mut_recovery",
+        {"child_pid": 7002},
+        int(signal.SIGTERM),
+    )
+
+    assert opened == [7001, 7002]
+    assert sent == [
+        (descriptor, int(signal.SIGTERM)),
+        (descriptor, int(signal.SIGTERM)),
+    ]
+    assert closed == [descriptor, descriptor]
+    assert numeric_kills == []
+
+
 def test_child_identity_binds_starttime_cmdline_pgid_and_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1132,7 +1253,7 @@ def test_stop_never_signals_a_reused_child_pid(
     assert repaired["stale_child_references"][-1]["signal_sent"] is False
 
 
-def test_stop_signals_only_the_exact_child_process_group(
+def test_stop_signals_only_the_exact_orphan_child_leader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = LoadedSpec.load(_write_spec(tmp_path))
@@ -1163,16 +1284,13 @@ def test_stop_signals_only_the_exact_child_process_group(
     )
     signals: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        orchestrator.os,
-        "killpg",
-        lambda pgid, sig: signals.append((int(pgid), int(sig))),
+        orchestrator.os, "kill", lambda pid, sig: signals.append((int(pid), int(sig)))
     )
     result = stop(spec)
-    assert signals == [(6161, int(orchestrator.signal.SIGTERM))]
+    assert signals == [(6162, int(orchestrator.signal.SIGTERM))]
     request = result["stop_requests"]["mut_recovery"]
     assert request["orphan_child_pid"] == 6162
-    assert request["pgid"] == 6161
-    assert request["target"] == "exact_child_process_group"
+    assert request["target"] == "validated_orphan_child_leader"
 
 
 def test_paired_slurm_wrapper_arguments_are_parseable_and_fail_closed() -> None:
