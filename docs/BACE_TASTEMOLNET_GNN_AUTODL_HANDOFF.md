@@ -6,16 +6,19 @@ Scope: AutoDL only. No HPC GPU or CPU was used for this route. AIDS and
 Mutagenicity remained read-only and were not stopped, restarted, or modified.
 
 Current boundary: BACE B0--B5 and the bounded TasteMolNet CPU foundation smoke
-are complete. BACE B6--B14 are `NOT_STARTED`; a separate pending change set is
-adding their fail-closed route. TasteMolNet heavy work remains blocked by
-license review and `RUN_TASTEMOLNET=0`.
+are complete. B6 ran once as a calibrated-GNN scoring preflight and correctly
+ended `BLOCKED`: no GNN PPO adapter or provenance-clean BACE policy
+initialization exists yet. B7--B14 remain `NOT_STARTED`. TasteMolNet heavy work
+remains blocked by license review and `RUN_TASTEMOLNET=0`.
 
 ## 1. Git branch and commit
 
 - Branch: `feat/bace-tastemolnet-gnn-autodl`.
-- Release and deployed commit:
+- B6 route and currently deployed commit:
+  `8b17fb1096666852b0680f899073dd82f207cce1`.
+- Current subject: `feat: gate frozen GNN BACE route`.
+- B0--B5 scientific artifact commit:
   `8b9628c6fa4125f05cd84f05212aa2b76b34b8a3`.
-- Release subject: `feat: harden AutoDL frozen GNN stages`.
 - Earlier logical commits:
   - `3bc8bb4` — TasteMolNet data and multiclass semantics;
   - `b3dcc30` — generic frozen molecular-GNN oracle;
@@ -42,9 +45,9 @@ separate its older contents from these five task edits. Preserve it as one
 pre-existing user tree and review/stage the five files separately if the paper
 is later brought under version control.
 
-The current feature-worktree changes after `8b9628c` belong to the pending
-B6--B14 fail-closed route. They are task changes, not pre-existing user work,
-and are not part of the deployed release described here.
+The B6--B14 fail-closed route was committed as `8b17fb1`, pushed, deployed to
+AutoDL, and exercised through B6 only. The feature worktree was clean after
+that commit; no pending route code remains outside Git.
 
 ## 3. Files added or modified by this route
 
@@ -79,6 +82,8 @@ Verification for the deployed release:
 
 - local focused release gate: `84 passed`;
 - AutoDL Linux focused release gate: `84 passed`;
+- B6 route focused gate at `8b17fb1`: local `26 passed`, AutoDL Linux
+  `26 passed`;
 - one earlier repository-wide diagnostic found `18 failed, 1557 passed,
   10 skipped, 1 error`; those failures were pre-existing data, checkout, or
   platform-collection issues and were not repeatedly rerun.
@@ -232,16 +237,18 @@ only the WNode distance encoder. Exact classifications are in the v2 audit's
 `bace_existing_artifacts.csv` and `bace_oracle_provenance.csv`.
 
 The B5 runtime RF guard returned `true`. B5 also kept
-`test_loaded=false`. No RF artifact entered B0--B5.
+`test_loaded=false`. No RF artifact entered B0--B6.
 
 ## 13. Current GPU allocation
 
-There is no current BACE or TasteMolNet GPU allocation: all B0--B5 and Taste
-CPU-smoke workers completed and released their resources.
+There is no current BACE or TasteMolNet GPU allocation: all B0--B6 and Taste
+CPU-smoke workers completed or reached their terminal gate and released their
+resources.
 
 | Route/stage | Allocation | State |
 |---|---|---|
 | BACE B2, B3, B5 (historical) | GPU 0, `GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732` | completed `PASS`; lock released |
+| BACE B6 diagnostic (historical) | GPU 0, same UUID | terminal `BLOCKED`; lock released |
 | BACE B4 | CPU | completed `PASS` |
 | TasteMolNet CPU smoke | CPU | completed `PASS` |
 | TasteMolNet heavy route | none | blocked; not launched |
@@ -262,6 +269,7 @@ No active BACE or TasteMolNet tmux session is required now.
 | B3 | `20260821T180839Z-bace-B3_GNN_FULL-95434` | `95529 / 95536` | `PASS`, completed |
 | B4 | `20260821T181040Z-bace-B4_GNN_CALIBRATED-97689` | `97699 / 97702` | `PASS`, completed |
 | B5 | `20260821T181237Z-bace-B5_ORACLE_SMOKE-97877` | `97969 / 97974` | `PASS`, completed |
+| B6 | `20260821T183322Z-bace-B6_PPO_SMOKE-98865` | `98965 / 98970` | `BLOCKED`, exit 78, completed |
 | Taste CPU smoke | `20260821T180648Z-tastemolnet-GNN_CPU_SMOKE-94932` | `94942 / 94943` | `PASS`, completed |
 
 Mutagenicity and AIDS belong to their independent recovery controller. This
@@ -278,8 +286,8 @@ records; use that controller's handoff for their live identities.
 | B3_GNN_FULL | `PASS` | run `20260821T180839Z-bace-B3_GNN_FULL-95434` |
 | B4_GNN_CALIBRATED | `PASS` | run `20260821T181040Z-bace-B4_GNN_CALIBRATED-97689` |
 | B5_ORACLE_SMOKE | `PASS` | run `20260821T181237Z-bace-B5_ORACLE_SMOKE-97877` |
-| B6_PPO_SMOKE | `NOT_STARTED` | pending separate fail-closed route |
-| B7_PPO_FULL | `NOT_STARTED` | downstream-gated |
+| B6_PPO_SMOKE | `BLOCKED` | run `20260821T183322Z-bace-B6_PPO_SMOKE-98865`; scoring diagnostic PASS, PPO not performed |
+| B7_PPO_FULL | `NOT_STARTED` | B6 PASS and real GNN-PPO manifest required |
 | B8_POOL_BASE | `NOT_STARTED` | downstream-gated |
 | B9_POOL_HIGHTEMP | `NOT_STARTED` | downstream-gated |
 | B10_POOL_MERGED | `NOT_STARTED` | downstream-gated |
@@ -293,15 +301,27 @@ valid real deletion evidence, producing 64 deletion records. Batch/single
 maximum probability difference was `5.14e-08`; the RF guard passed and test was
 not loaded.
 
+B6 loaded the calibrated GNN once and scored 32 bounded candidates. The
+diagnostic found 6 strict flips, finite probabilities, and batch/single maximum
+difference `9.2241e-08`; `test_loaded=false`, `rf_oracle_used=false`. It did
+not train PPO (`ppo_training_performed=false`, `ppo_update_count=0`) and did not
+claim a PPO pass. Its primary blocker is
+`BLOCKED_MISSING_GNN_PPO_INTEGRATION`; the secondary blocker is
+`BLOCKED_NO_GNN_CLEAN_BACE_POLICY_INITIALIZATION`. Therefore downstream release
+is false and B7 was not launched.
+
 ## 16. BACE checkpoint and output paths
 
 - Persistent runtime root:
   `/autodl-fs/data/counterfactual-subgraph-runtime`.
 - Persistent control root:
   `/autodl-fs/data/counterfactual-subgraph-runtime/control`.
-- Fast execution clone:
+- B0--B5 fast execution clone:
   `/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55`; despite the
-  directory suffix, its deployed HEAD for these runs was `8b9628c`.
+  directory suffix, its deployed HEAD for those runs was `8b9628c`.
+- B6 execution clone:
+  `/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-8b17fb1`, exact HEAD
+  `8b17fb1096666852b0680f899073dd82f207cce1`.
 - B2 smoke bundle:
   `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/smoke-20260821T180529Z-94533`.
 - B3 uncalibrated full bundle:
@@ -310,6 +330,8 @@ not loaded.
   `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689`.
 - B5 oracle-smoke evidence:
   `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/oracle-smoke-20260821T181237Z-97877`.
+- B6 diagnostic/blocker evidence:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/bace/ours_gnn_gine/b6-ppo-smoke-20260821T183221Z-98865`.
 - BACE final output: not produced; B14 is `NOT_STARTED`.
 
 All state, checkpoints, outputs, and logs are persistent under
@@ -341,22 +363,23 @@ AUTODL_DATA_ROOT=/autodl-fs/data \
 AUTODL_CONTROL_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control \
 AUTODL_PYTHON=/root/miniconda3/envs/smiles_pip118/bin/python \
 RUN_TASTEMOLNET=0 \
-PYTHONPATH=/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55 \
+PYTHONPATH=/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-8b17fb1 \
 /root/miniconda3/envs/smiles_pip118/bin/python \
-/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55/scripts/autodl/status.py \
-  --project-root /root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55 \
+/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-8b17fb1/scripts/autodl/status.py \
+  --project-root /root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-8b17fb1 \
   --data-root /autodl-fs/data --format table --gpu --limit 20
 ```
 
-There is no B0--B5 process to resume. Do not rerun those stages. The safe
-resume action is to wait for the pending B6--B14 fail-closed route to be
-reviewed, committed, and deployed; its exact B6 launcher must replace
-`NO_COMMAND_UNTIL_B6_ROUTE_RELEASE` in the next handoff revision.
+There is no running process to resume. Do not rerun B0--B6. There is no safe
+launcher for B7 yet: first implement and review both a provenance-clean BACE
+policy initializer and a GNN-backed PPO reward/training adapter, then replace
+the B6 diagnostic with a real PPO smoke that produces at least one update and
+a frozen GNN-reward manifest. Until then, the exact resume command is `NONE`.
 
 ## 19. Incomplete items and blockers
 
-- B6--B14 are `NOT_STARTED`; another task agent is adding their fail-closed
-  implementation. No B6 result is claimed here.
+- B6 is terminal `BLOCKED`; its GNN scoring is diagnostic evidence, not PPO
+  training. B7--B14 remain `NOT_STARTED` behind immutable dependency gates.
 - BACE final output does not exist because B14 has not run.
 - TasteMolNet heavy work is blocked by `RUN_TASTEMOLNET=0` and
   `BLOCKED_LICENSE_REVIEW`.
@@ -368,25 +391,24 @@ reviewed, committed, and deployed; its exact B6 launcher must replace
 
 ## 20. Next minimum action
 
-1. Review, commit, and deploy the separate B6--B14 fail-closed route without
-   changing the frozen B0--B5 artifacts.
-2. Run the exact read-only status command above once, then start B6 only if its
-   predecessor, provenance, split, checkpoint, test-leakage, and GPU gates all
-   pass.
+1. Implement a provenance-clean BACE policy initializer and GNN-backed PPO
+   reward/training adapter without changing the frozen B0--B5 artifacts.
+2. Add a real B6 PPO smoke contract with at least one optimizer update and a
+   GNN reward manifest; only a reviewed B6 `PASS` may release B7.
 3. Keep `RUN_TASTEMOLNET=0`; do not launch TasteMolNet heavy work until the
    data license is resolved explicitly.
 
 ## Final machine-readable handoff fields
 
 ```text
-current_stage=B5_ORACLE_SMOKE_PASS__NEXT_B6_PPO_SMOKE_NOT_STARTED
-current_pid=none__all_BACE_B0_B5_and_Taste_CPU_smoke_processes_completed
+current_stage=B6_PPO_SMOKE_BLOCKED__B7_NOT_STARTED
+current_pid=none__B6_launcher_and_child_exited
 tmux_session=none_active_for_BACE_or_TasteMolNet
-assigned_gpus=none_current__historical_BACE_GPU0_GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732
+assigned_gpus=none_current__B6_GPU0_lock_released__historical_UUID_GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732
 bace_gnn_checkpoint=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689
 bace_final_output=NOT_PRODUCED__B14_NOT_STARTED
 tastemolnet_foundation=CPU_SMOKE_PASS__BLOCKED_LICENSE_REVIEW__HEAVY_NOT_LAUNCHED
 handoff_path=docs/BACE_TASTEMOLNET_GNN_AUTODL_HANDOFF.md
-resume_command=NO_COMMAND_UNTIL_B6_ROUTE_RELEASE
+resume_command=NONE__IMPLEMENT_CLEAN_BACE_POLICY_INITIALIZATION_AND_GNN_PPO_ADAPTER_FIRST
 status_command=see_section_18_exact_read_only_command
 ```
