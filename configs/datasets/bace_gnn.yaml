@@ -1,0 +1,54 @@
+schema_version: 1
+dataset:
+  id: bace
+  display_name: BACE
+  active: true
+  task_type: binary_graph_classification
+  num_classes: 2
+  label_map:
+    0: Inactive
+    1: Active
+  source_label: 1
+  counterfactual_mode: untargeted_flip
+
+data:
+  raw_csv: data/raw/BACE/bace.csv
+  processed_root: data/processed/BACE
+  preserve_existing_v4_common4_split: true
+  split_files:
+    train: data/processed/BACE/train.csv
+    validation: data/processed/BACE/val.csv
+    calibration: data/processed/BACE/calibration.csv
+    test: data/processed/BACE/test.csv
+  scaffold_disjoint: true
+  test_is_heldout: true
+
+oracle:
+  backend: gnn
+  classifier_type: gnn
+  rf_oracle_used: false
+  backbone: gine
+  checkpoint: outputs/autodl/oracles/bace_gine
+  probability_source: temperature_scaled_softmax
+  strict_flip: pred_before_equals_source_and_pred_after_differs
+
+training:
+  loss: class_weighted_cross_entropy
+  weighted_sampler: false
+  seed: 7
+  selection_metric: roc_auc
+  temperature_fit_split: validation
+  test_used_for_selection: false
+  health_gate:
+    enabled: true
+    apply_profile: full
+    primary_metric: roc_auc
+    minimum_primary_metric: 0.65
+    require_multiple_predicted_classes: true
+    require_source_class_recall: true
+    require_finite: true
+
+runtime:
+  platform: autodl
+  run_heavy_training: true
+  formal_experiment_requires_provenance_audit: true

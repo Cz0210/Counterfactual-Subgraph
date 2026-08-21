@@ -1,0 +1,65 @@
+schema_version: 1
+dataset:
+  id: tastemolnet
+  display_name: TasteMolNet
+  aliases:
+    - taste
+    - bst
+    - bitter_sweet_tasteless
+  active: true
+  task_type: multiclass_graph_classification
+  num_classes: 3
+  label_map:
+    0: Bitter
+    1: Sweet
+    2: Tasteless
+  source_label: 1
+  source_label_name: Sweet
+  counterfactual_mode: untargeted_flip
+
+data:
+  source_mode: upstream_processed
+  input_csv_env: TASTEMOLNET_CSV
+  upstream_repository: https://github.com/MujeebOnawole/Taste_Prediction_RGCN
+  upstream_commit: 16af8ead8a17b6bd3941d9eb5879c5be75c14114
+  processed_root: data/processed/tastemolnet
+  clean_csv: data/processed/tastemolnet/tastemolnet_clean.csv
+  graph_cache: data/processed/tastemolnet/graphs.pt
+  component_policy: largest_organic_fragment
+  standardization_version: tastemolnet_rdkit_isomeric_v1
+  tautomer_normalization: false
+  neutralization: false
+  remove_stereochemistry: false
+  split_seed: 7
+  split_ratios:
+    train: 0.70
+    validation: 0.10
+    calibration: 0.10
+    test: 0.10
+  scaffold_disjoint: true
+  license_unknown_status: LICENSE_REVIEW_REQUIRED
+  predicted_labels_as_ground_truth_allowed: false
+
+oracle:
+  backend: gnn
+  classifier_type: gnn
+  rf_oracle_used: false
+  backbone: gine
+  checkpoint: outputs/autodl/oracles/tastemolnet_gine
+  probability_source: temperature_scaled_softmax
+  strict_flip: pred_before_equals_source_and_pred_after_differs
+  destination_distribution: true
+
+training:
+  loss: class_weighted_cross_entropy
+  weighted_sampler: false
+  seed: 7
+  selection_metric: macro_ovr_roc_auc
+  temperature_fit_split: validation
+  test_used_for_selection: false
+
+runtime:
+  platform: autodl
+  run_tastemolnet: false
+  foundation_status: READY_NOT_RUN
+  heavy_training_authorization_env: RUN_TASTEMOLNET
