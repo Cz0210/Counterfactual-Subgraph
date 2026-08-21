@@ -1401,11 +1401,6 @@ def _lineage_recovery_context(
             if existing.get("action_recovery") != "recorded_exact" and (
                 event.get("action_recovery") == "recorded_exact"
             ):
-                if not event["graph_parent_identity_exact"]:
-                    audit["predecessor_selected_parent_mismatch_count"] += 1
-                    raise ValueError(
-                        "Recorded COMRECGC predecessor parent identity is not uniquely bound."
-                    )
                 audit["predecessor_recorded_upgrade_count"] += 1
                 unresolved_legacy_conflicts.discard(target_key)
                 event["predecessor_selection"] = (
@@ -1414,11 +1409,6 @@ def _lineage_recovery_context(
                 predecessor.pop(target_key)
                 predecessor[target_key] = event
         else:
-            if not event["graph_parent_identity_exact"]:
-                audit["predecessor_selected_parent_mismatch_count"] += 1
-                raise ValueError(
-                    "First COMRECGC predecessor parent identity is not uniquely bound."
-                )
             event["predecessor_selection"] = (
                 "first_recorded_exact_event_in_selected_trace_order"
                 if event.get("action_recovery") == "recorded_exact"
@@ -1493,6 +1483,7 @@ def iter_candidate_lineage_from_selected_trace(
     predecessor = context["predecessor"]
     observed_source_keys = context["observed_source_keys"]
     source_graphs_required = bool(context["source_graphs_required"])
+    lineage_recovery_audit = context["lineage_recovery_audit"]
     for candidate_index, candidate in enumerate(
         payload.get("counterfactual_candidates") or []
     ):
@@ -1506,7 +1497,8 @@ def iter_candidate_lineage_from_selected_trace(
         (candidate_key, graph) = candidate_matches[0]
         if graph is None:
             raise ValueError(f"Candidate graph is absent during trace recovery: {official_hash}")
-        parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
+        representative_parent_id = str(getattr(graph, "comrecgc_parent_id", ""))
+        lineage_parent_id: str | None = None
         candidate_sha = stable_untyped_graph_sha256(graph)
         current_key = candidate_key
         reversed_path: list[dict[str, Any]] = []
@@ -1516,13 +1508,25 @@ def iter_candidate_lineage_from_selected_trace(
                 raise ValueError("Recovered COMRECGC predecessor graph contains a cycle.")
             seen.add(current_key)
             event = predecessor[current_key]
-            if str(event["parent_id"]) != parent_id:
+            event_parent_id = str(event["parent_id"])
+            if lineage_parent_id is None:
+                # The live recorder owns predecessor identity through the
+                # first selected event stored for the global target hash.  A
+                # reloaded payload holds only one content-equivalent graph
+                # representative, whose parent metadata is not part of the
+                # normalized graph identity and therefore cannot own lineage.
+                lineage_parent_id = event_parent_id
+            elif event_parent_id != lineage_parent_id:
+                lineage_recovery_audit[
+                    "predecessor_selected_parent_mismatch_count"
+                ] += 1
                 raise ValueError(
-                    "Recovered COMRECGC predecessor crosses candidate parent identity."
+                    "Recovered COMRECGC selected predecessor chain crosses event parent identity."
                 )
             reversed_path.append(event)
             current_key = str(event["source_official_hash"])
         path = list(reversed(reversed_path))
+        parent_id = lineage_parent_id or representative_parent_id
         root_graph = graph_by_official_key.get(current_key)
         observed_root = (parent_id, current_key) in observed_source_keys
         frozen_source = frozen_sources.get(parent_id)

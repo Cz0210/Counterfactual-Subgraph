@@ -716,4 +716,6 @@ Mutagenicity roadmaps.
 - [x] Make completed-walk freeze recovery mirror the live global
   first-recorded predecessor index, with exact replay for every repeated event
   and explicit alias/convergence/conflict audit counters.
+- [x] Treat frozen global-hash graph parent metadata as audit-only and bind
+  recovered lineage ownership to a parent-consistent selected-event chain.
 - [ ] Pass the AutoDL integration smokes, then start the four formal lanes.

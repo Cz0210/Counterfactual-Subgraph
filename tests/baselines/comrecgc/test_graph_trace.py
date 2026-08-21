@@ -884,7 +884,13 @@ def test_recover_lineage_mirrors_global_first_recorded_cross_parent_target() -> 
         comrecgc_parent_id="parent-2",
         comrecgc_trace_node_ids=("parent-2:0", "parent-2:1"),
     )
-    target = graph(atom=1)
+    target = Graph(
+        x=[[0.0, 1.0], [0.0, 1.0]],
+        edge_index=[[0, 1], [1, 0]],
+        num_nodes=2,
+        comrecgc_parent_id="parent-2",
+        comrecgc_trace_node_ids=("parent-2:0", "parent-2:1"),
+    )
     candidate_payload = {
         "graph_map": {
             "source-first": [source_first],
@@ -943,6 +949,134 @@ def test_recover_lineage_mirrors_global_first_recorded_cross_parent_target() -> 
     assert audit["predecessor_unverified_conflict_count"] == 0
     assert audit["selected_event_source_parent_mismatch_count"] == 0
     assert audit["selected_event_target_parent_mismatch_count"] == 1
+
+
+def test_recover_lineage_uses_recorded_parent_not_frozen_representative_metadata() -> None:
+    source = graph()
+    live_target = graph(atom=1)
+    recorder = ActionTraceRecorder()
+    recorder.record_enumerated(
+        source_graph=source,
+        target_graph=live_target,
+        action=("NLC", 0, 1),
+    )
+    module = SimpleNamespace(
+        graph_map={"source": [source], "target": [live_target]},
+        transitions={},
+    )
+    wrapped = recorder.wrap_move(
+        lambda *_args, **_kwargs: (["target"], False, None, None, None),
+        module,
+    )
+    wrapped(
+        graphs_hash=["source"],
+        start_graphs_hash=["source"],
+        importance_args={},
+        teleport_probability=0.1,
+    )
+    event = dict(recorder.predecessor_by_official_hash["target"])
+    assert event["parent_id"] == "parent-1"
+
+    frozen_representative = Graph(
+        x=[list(row) for row in live_target.x],
+        edge_index=[list(row) for row in live_target.edge_index],
+        num_nodes=live_target.num_nodes,
+        comrecgc_parent_id="parent-2",
+        comrecgc_trace_node_ids=("parent-2:0", "parent-2:1"),
+    )
+    audit: dict[str, object] = {}
+    lineage = recover_candidate_lineage_from_selected_trace(
+        {
+            "graph_map": {
+                "source": [source],
+                "target": [frozen_representative],
+            },
+            "counterfactual_candidates": [{"graph_hash": "target"}],
+        },
+        [event],
+        source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["parent_id"] == "parent-1"
+    assert lineage[0]["actions"][0]["move_index"] == event["move_index"]
+    assert audit["selected_event_source_parent_mismatch_count"] == 0
+    assert audit["selected_event_target_parent_mismatch_count"] == 1
+    assert audit["predecessor_selected_parent_mismatch_count"] == 0
+
+
+def test_recover_lineage_rejects_mixed_selected_event_parent_chain() -> None:
+    source = Graph(
+        x=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        edge_index=[[0, 1], [1, 0]],
+        num_nodes=2,
+        comrecgc_parent_id="parent-1",
+    )
+    middle = Graph(
+        x=[[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        edge_index=[[0, 1], [1, 0]],
+        num_nodes=2,
+        comrecgc_parent_id="parent-1",
+    )
+    target = Graph(
+        x=[[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
+        edge_index=[[0, 1], [1, 0]],
+        num_nodes=2,
+        comrecgc_parent_id="parent-2",
+    )
+    frozen_source_parent_2 = Graph(
+        x=[list(row) for row in source.x],
+        edge_index=[list(row) for row in source.edge_index],
+        num_nodes=source.num_nodes,
+        comrecgc_parent_id="parent-2",
+    )
+    selected_events = [
+        {
+            "move_index": 1,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "middle",
+            "source_graph_sha256": stable_untyped_graph_sha256(source),
+            "target_graph_sha256": stable_untyped_graph_sha256(middle),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 1],
+            "parent_id": "parent-1",
+        },
+        {
+            "move_index": 2,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "middle",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_untyped_graph_sha256(middle),
+            "target_graph_sha256": stable_untyped_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 2],
+            "parent_id": "parent-2",
+        },
+    ]
+    audit: dict[str, object] = {}
+
+    with pytest.raises(
+        ValueError,
+        match="selected predecessor chain crosses event parent identity",
+    ):
+        recover_candidate_lineage_from_selected_trace(
+            {
+                "graph_map": {
+                    "source": [source],
+                    "middle": [middle],
+                    "target": [target],
+                },
+                "counterfactual_candidates": [{"graph_hash": "target"}],
+            },
+            selected_events,
+            source_graphs_by_parent_id={"parent-2": frozen_source_parent_2},
+            recovery_audit=audit,
+        )
+    assert audit["predecessor_selected_parent_mismatch_count"] == 1
 
 
 def test_recover_lineage_global_lookup_rejects_official_hash_collision() -> None:

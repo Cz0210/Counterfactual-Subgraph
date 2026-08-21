@@ -6431,6 +6431,17 @@ closed.  Frozen-payload official-hash collisions, SHA mismatches, replay
 mismatches, cycles, and candidate paths that would cross parent identity also
 remain fatal.
 
+The graph stored for one global official hash is only a normalized-content
+representative.  Its `comrecgc_parent_id` metadata can come from a later
+content-equivalent parent because parent metadata is deliberately excluded
+from the untyped graph identity.  Recovery therefore audits representative
+source/target parent mismatches but never uses that metadata to select or
+reject the first predecessor.  A candidate with recorded lineage takes its
+parent from the selected predecessor event, exactly like the live recorder;
+the complete selected-event chain must still have one consistent parent or
+recovery fails closed.  Zero-action candidates continue to use their frozen
+graph parent because they have no recorded predecessor event.
+
 This is a recovery-parity repair only.  It changes no random-walk proposal,
 selection, RNG use, candidate order, graph operation, threshold, model, or
 evaluation behavior.  It enables the completed Mutagenicity walk to be frozen
