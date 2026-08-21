@@ -719,3 +719,23 @@ Mutagenicity roadmaps.
 - [x] Treat frozen global-hash graph parent metadata as audit-only and bind
   recovered lineage ownership to a parent-consistent selected-event chain.
 - [ ] Pass the AutoDL integration smokes, then start the four formal lanes.
+
+# BACE and TasteMolNet Frozen-GNN Route (2026-08-22)
+
+- [x] Audit the BACE frozen split and classify legacy oracle provenance.
+- [x] Replace BBBP with TasteMolNet in the active dataset contract while
+  preserving historical artifacts.
+- [x] Add the generic molecular GNN registry, checkpoint bundle, calibrated
+  batched oracle API, and BACE/Taste RF guard.
+- [x] Add shared binary/multiclass strict-flip, CFDrop, margin, and destination
+  distribution semantics.
+- [ ] Prepare the fixed-commit TasteMolNet upstream data with conflict,
+  standardization, license, and scaffold-leakage audits.
+- [x] Add the bounded AutoDL GPU inventory/lock/experiment registry and BACE
+  gated state machine; keep `RUN_TASTEMOLNET=0` by default.
+- [ ] Pass CPU/PyG tests and BACE GINE smoke, then launch the single seed-7
+  BACE full classifier on an idle AutoDL GPU.
+- [ ] Integrate the frozen GNN oracle into BACE proposal/reward/verification
+  and complete B5--B14 without using RF-contaminated artifacts.
+- [ ] Obtain explicit TasteMolNet data-license approval before committing data
+  or enabling any heavy TasteMolNet experiment.

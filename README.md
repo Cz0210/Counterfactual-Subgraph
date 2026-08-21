@@ -16,7 +16,7 @@ This repository is rebuilt from scratch with the following priorities:
 
 ## 1. Project Objective
 
-Given a molecule SMILES `x` and a binary label `y`, train an LLM to generate a fragment `g` such that:
+Given a molecule SMILES `x` and a class label `y`, train an LLM to generate a fragment `g` such that:
 
 - `g` is a valid SMILES;
 - `g` is a connected substructure of `x`;
@@ -80,6 +80,15 @@ See:
 Final experiments use the canonical AIDS/HIV dataset: `data/raw/AIDS/HIV.csv` with `smiles` and `HIV_active` columns. Internal names `hiv`, `hiv_quick`, and `aids` may appear in scripts, but final results must trace back to this canonical CSV. `ogbg_molhiv` is engineering validation only.
 
 See `docs/DATASET_CONTRACT.md`.
+
+The active paper experiment matrix is AIDS, Mutagenicity, BACE, and
+TasteMolNet. AIDS and Mutagenicity retain their historical RF-backed contracts.
+BACE and TasteMolNet use independent task-specific frozen GNN classifiers; RF
+oracles are forbidden for those two active routes. TasteMolNet is a genuine
+three-class Bitter/Sweet/Tasteless task with Sweet as the source class and an
+untargeted strict flip to either other class. Historical BBBP artifacts are
+preserved but BBBP is no longer in the active matrix. See
+`docs/BBBP_TO_TASTEMOLNET_MIGRATION.md`.
 
 ---
 

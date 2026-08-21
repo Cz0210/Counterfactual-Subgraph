@@ -2,9 +2,14 @@
 
 ## 1. Problem Statement
 
-We consider a binary molecular classification setting. Each molecule is represented as a SMILES string and has a label `y ∈ {0,1}`.
+We consider a molecular classification setting with `C >= 2` classes. Each
+molecule is represented as a SMILES string and has a class label
+`y in {0, ..., C-1}`. Historical AIDS and Mutagenicity routes are binary;
+TasteMolNet is a three-class task.
 
-The goal is to train a language model generator that, given a parent molecule `x`, outputs one connected fragment `g` in SMILES format such that deleting `g` from `x` is likely to reverse the predicted label.
+The goal is to train a language model generator that, given a parent molecule
+`x`, outputs one connected fragment `g` in SMILES format such that deleting `g`
+from `x` is likely to move the frozen classifier away from the source class.
 
 This is a **counterfactual generation** problem.
 
@@ -322,3 +327,20 @@ Whenever there is uncertainty during implementation, use the following rule:
 > Prefer the choice that better preserves the deletion-based counterfactual objective, even if it is less convenient from an engineering perspective.
 
 This rule is intended to prevent accidental drift back to non-counterfactual formulations.
+
+---
+
+## 13. Binary and multiclass strict-flip semantics
+
+All new routes use one definition. For source class `y`, a deletion is a strict
+counterfactual only when the parent is predicted as `y` before intervention and
+the residual is predicted as any class other than `y`:
+
+```text
+strict_flip = pred_before == y and pred_after != y
+cf_drop = p_before[y] - p_after[y]
+```
+
+For multiclass tasks, reports also retain every class probability, the
+destination class, and the before/after source-vs-best-alternative margins. A
+multiclass task must not be silently converted to binary or use `1 - label`.

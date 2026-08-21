@@ -6447,3 +6447,52 @@ selection, RNG use, candidate order, graph operation, threshold, model, or
 evaluation behavior.  It enables the completed Mutagenicity walk to be frozen
 without rerunning generation and applies the same evidence standard to AIDS.
 No BACE scientific module or workflow is changed.
+
+---
+
+## 2026-08-22: Use task-specific frozen GNNs for BACE and TasteMolNet
+
+The active fourth dataset changes from BBBP to the three-class TasteMolNet
+task. Historical BBBP artifacts remain immutable; the migration changes only
+the active registry, new automation, and paper-facing templates. TasteMolNet
+uses labels Bitter=0, Sweet=1, and Tasteless=2, with Sweet as the source class.
+Both `1 -> 0` and `1 -> 2` are strict untargeted counterfactuals, so new code
+must use `pred_before == source_label and pred_after != source_label` rather
+than `1 - label`.
+
+BACE and TasteMolNet now require independent task-specific frozen molecular
+GNN classifiers. GINE is the primary backbone; GIN, GCN, and GATv2 share one
+registry and feature/checkpoint contract for later sensitivity studies. The
+classifier, ChemLLM proposer, and MolCLR WNode encoder remain separate model
+roles and have separately recorded checkpoint identities.
+
+The existing BACE Morgan-RF teacher and all candidate, verification, selector,
+or final artifacts bound to it are historical `RF_CONTAMINATED` evidence. They
+cannot enter the new route. The existing scaffold-disjoint BACE
+train/validation/calibration/test split is retained exactly, while the new
+classifier is selected and temperature-calibrated using validation only.
+Calibration remains exclusive to thresholds and selector fitting; test is
+held out until final evaluation.
+
+TasteMolNet data may come from an explicit local CSV, official supplementary
+material, or a fixed upstream processed repository. The initial public source
+is fixed at `MujeebOnawole/Taste_Prediction_RGCN` commit
+`16af8ead8a17b6bd3941d9eb5879c5be75c14114`. Because that repository has no
+standalone license file, its CSV remains untracked and the route records
+`LICENSE_REVIEW_REQUIRED`. This task authorizes data preparation, graph
+foundation, configs, tests, and tiny forward smoke only; heavy TasteMolNet
+training remains disabled by `RUN_TASTEMOLNET=0`.
+
+AutoDL uses a new lightweight GNN run registry and GPU locks instead of the
+three-line recovery controller. It never invokes Slurm, takes at most two GPUs
+that are stably idle, and does not cancel existing work. Paired Slurm wrappers
+are maintained solely to keep repository CLI contracts synchronized.
+
+The frozen BACE CSV is grouped by label, so bounded smoke subsets are selected
+deterministically across all classes rather than taking a raw row prefix.
+Formal BACE checkpoint selection uses validation ROC-AUC. A full classifier is
+not allowed to publish its pass marker unless validation ROC-AUC is at least
+0.65, predictions cover more than one class, source-class recall is positive,
+and all reported probabilities and metrics are finite. The smoke also reloads
+the published bundle and checks batch/single inference and deletion-forward
+contracts; file presence alone is not a scientific pass.
