@@ -19,7 +19,11 @@ from .frozen_payload import (
     payload_file_audit,
     torch_load_payload,
 )
-from .graph_trace import iter_candidate_lineage_from_selected_trace, iter_selected_trace
+from .graph_trace import (
+    iter_candidate_lineage_from_selected_trace,
+    iter_selected_trace,
+    stable_untyped_graph_sha256,
+)
 from .live_graph_state import AuthoritativeGraphStore
 from .runtime import validate_counterfactual_payload
 
@@ -31,11 +35,15 @@ def _json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _materialize(source: Path, destination: Path) -> str:
+def _materialize(
+    source: Path, destination: Path, *, allow_hardlink: bool = True
+) -> str:
     if destination.exists():
         raise FileExistsError(f"Recovery destination already exists: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if not allow_hardlink:
+            raise OSError("independent physical copy required")
         os.link(source, destination)
         mode = "hardlink"
     except OSError:
@@ -80,6 +88,47 @@ def _rng_state_present(root: Path) -> bool:
             else:
                 return True
     return False
+
+
+def _audit_selected_trace_manifest(trace_manifest: Path) -> dict[str, Any]:
+    """Verify and summarize the immutable selected-trace source inventory."""
+
+    manifest = _json(trace_manifest)
+    chunks = manifest.get("chunks")
+    if not isinstance(chunks, list) or not chunks:
+        raise ValueError("Selected-trace manifest has no chunks.")
+    trace_root = trace_manifest.parent.resolve()
+    row_count = 0
+    paths: set[Path] = set()
+    for expected_index, row in enumerate(chunks):
+        if not isinstance(row, Mapping) or int(row.get("index", -1)) != expected_index:
+            raise ValueError("Selected-trace chunk indices are not contiguous.")
+        relative = Path(str(row.get("path") or ""))
+        if relative.is_absolute() or ".." in relative.parts or relative in paths:
+            raise ValueError("Selected-trace chunk path is unsafe or repeated.")
+        paths.add(relative)
+        chunk = trace_root / relative
+        resolved = chunk.resolve(strict=True)
+        if (
+            chunk.is_symlink()
+            or not resolved.is_file()
+            or trace_root not in resolved.parents
+            or resolved.stat().st_size != int(row.get("bytes", -1))
+            or sha256_file(resolved) != str(row.get("sha256") or "")
+        ):
+            raise ValueError(f"Selected-trace chunk identity mismatch: {chunk}")
+        rows = int(row.get("row_count", -1))
+        if rows < 0:
+            raise ValueError(f"Selected-trace chunk row count is invalid: {chunk}")
+        row_count += rows
+    if row_count != int(manifest.get("row_count", -1)):
+        raise ValueError("Selected-trace manifest row total is inconsistent.")
+    return {
+        "manifest_sha256": sha256_file(trace_manifest),
+        "chunk_count": len(chunks),
+        "row_count": row_count,
+        "all_chunk_sha256_verified": True,
+    }
 
 
 def _load_sources(
@@ -130,7 +179,9 @@ def validate_completed_generation_freeze(
     backing_store = root / "graph_state" / "authoritative_graph_store.sqlite3"
     expected = GenerationParameters.for_mode("full").__dict__
 
-    store = AuthoritativeGraphStore(backing_store)
+    selected_trace_audit = _audit_selected_trace_manifest(trace_manifest)
+
+    store = AuthoritativeGraphStore(backing_store, read_only=True)
     try:
         backing_audit = store.integrity_audit()
     finally:
@@ -186,10 +237,27 @@ def validate_completed_generation_freeze(
         historical_transition_audit["unresolved_source_count"] == 0
         and historical_transition_audit["invalid_destination_count"] == 0
     )
+    failure_message = " ".join(
+        str(failure.get("message", "")).strip().lower().split()
+    ).removesuffix(".")
+    accepted_post_generation_failures = {
+        "frozen_payload_missing_graph": (
+            "selected trace references a graph absent from the frozen payload"
+        ),
+        "recorded_action_lineage_ambiguity": (
+            "selected comrecgc transition is not one unique pinned-upstream "
+            "single edit"
+        ),
+    }
+    matched_failure_signatures = sorted(
+        name
+        for name, signature in accepted_post_generation_failures.items()
+        if failure_message == " ".join(signature.lower().split()).removesuffix(".")
+    )
     checks = {
         "failure_is_post_generation_freeze": (
             failure.get("stage") == "project_generation"
-            and "frozen payload" in str(failure.get("message", "")).lower()
+            and len(matched_failure_signatures) == 1
         ),
         "dataset_matches": config.get("dataset") == dataset,
         "mode_is_full": config.get("mode") == "full",
@@ -253,9 +321,11 @@ def validate_completed_generation_freeze(
         "candidate_count": len(candidates),
         "graph_map_count_before_closure": len(graph_map),
         "backing_store_audit": backing_audit,
+        "selected_trace_audit": selected_trace_audit,
         "frozen_payload_closure": closure_audit,
         "closure_error": closure_error,
         "checks": checks,
+        "matched_post_generation_failure_signatures": matched_failure_signatures,
         "FREEZE_ONLY_RECOVERY_SAFE": freeze_only_safe,
         "RESUME_SAFE": False,
         "resume_reason": "Completed-walk freeze recovery is distinct from random-walk resume.",
@@ -314,6 +384,7 @@ def recover_completed_generation_freeze(
     temporary = lineage_index.with_name(f".{lineage_index.name}.{os.getpid()}.tmp")
     lineage_count = 0
     lineage_resolved = 0
+    lineage_recovery_audit: dict[str, Any] = {}
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for expected_index, row in enumerate(
@@ -322,6 +393,7 @@ def recover_completed_generation_freeze(
                     iter_selected_trace(trace_output / source_manifest_path.name),
                     source_graphs_by_parent_id=source_graphs,
                     include_actions=False,
+                    recovery_audit=lineage_recovery_audit,
                 )
             ):
                 if int(row["candidate_index"]) != expected_index:
@@ -340,6 +412,18 @@ def recover_completed_generation_freeze(
             f"Recovered COMRECGC lineage is incomplete: {lineage_resolved}/{lineage_count}."
         )
 
+    lineage_counter_fields = {
+        key: int(lineage_recovery_audit.get(key, 0))
+        for key in (
+            "recorded_action_present_count",
+            "recorded_action_replay_ok_count",
+            "recorded_action_replay_mismatch_count",
+            "legacy_missing_action_count",
+            "legacy_inference_called_count",
+            "legacy_inference_ambiguous_count",
+        )
+    }
+
     lineage_summary = {
         "schema_version": 2,
         "format": "selected_trace_predecessor_index",
@@ -353,12 +437,82 @@ def recover_completed_generation_freeze(
         ),
         "candidate_actions_inlined": False,
         "reconstruction_policy": "stream_one_candidate_from_selected_trace_v1",
+        "lineage_recovery_audit": dict(lineage_recovery_audit),
+        **lineage_counter_fields,
     }
     write_json(trace_output / "candidate_action_lineage.json", lineage_summary)
 
     payload_path = output / "counterfactuals.pt"
+    source_closure_fields = {
+        "canonical_graph_records_persisted": isinstance(
+            payload.get("canonical_graph_records"), Mapping
+        ),
+        "alias_to_canonical_persisted": isinstance(
+            payload.get("alias_to_canonical"), Mapping
+        ),
+        "original_trace_hashes_persisted": isinstance(
+            payload.get("original_trace_hashes"), list
+        ),
+    }
+    if not all(source_closure_fields.values()):
+        raise RuntimeError(
+            "Validated recovery payload omitted a typed frozen-closure field: "
+            f"{source_closure_fields}."
+        )
+    expected_canonical_records = {
+        str(key): stable_untyped_graph_sha256(graph)
+        for key, graph in payload["canonical_graph_records"].items()
+    }
+    expected_aliases = {
+        str(alias): str(canonical)
+        for alias, canonical in payload["alias_to_canonical"].items()
+    }
+    expected_original_trace_hashes = [
+        str(value) for value in payload["original_trace_hashes"]
+    ]
     atomic_torch_save(payload, payload_path)
     reloaded = torch_load_payload(payload_path)
+    persisted_closure_fields = {
+        "canonical_graph_records_persisted": isinstance(
+            reloaded.get("canonical_graph_records"), Mapping
+        ),
+        "alias_to_canonical_persisted": isinstance(
+            reloaded.get("alias_to_canonical"), Mapping
+        ),
+        "original_trace_hashes_persisted": isinstance(
+            reloaded.get("original_trace_hashes"), list
+        ),
+    }
+    if not all(persisted_closure_fields.values()):
+        raise RuntimeError(
+            "Recovered payload omitted a typed frozen-closure field: "
+            f"{persisted_closure_fields}."
+        )
+    actual_canonical_records = {
+        str(key): stable_untyped_graph_sha256(graph)
+        for key, graph in reloaded["canonical_graph_records"].items()
+    }
+    actual_aliases = {
+        str(alias): str(canonical)
+        for alias, canonical in reloaded["alias_to_canonical"].items()
+    }
+    actual_original_trace_hashes = [
+        str(value) for value in reloaded["original_trace_hashes"]
+    ]
+    persisted_roundtrip_fields = {
+        "canonical_graph_records_roundtrip_verified": (
+            actual_canonical_records == expected_canonical_records
+        ),
+        "alias_to_canonical_roundtrip_verified": actual_aliases == expected_aliases,
+        "original_trace_hashes_roundtrip_verified": (
+            actual_original_trace_hashes == expected_original_trace_hashes
+        ),
+    }
+    if not all(persisted_roundtrip_fields.values()):
+        raise RuntimeError(
+            "Recovered payload frozen-closure fields changed across serialization: "
+            f"{persisted_roundtrip_fields}."
+        )
     verified_payload, post_write = build_frozen_payload_closure(
         reloaded,
         iter_selected_trace(trace_output / source_manifest_path.name),
@@ -366,7 +520,30 @@ def recover_completed_generation_freeze(
     )
     if post_write["closure_complete"] is not True:
         raise RuntimeError("Recovered payload failed post-write closure verification.")
-    expected_trace_hashes = set(payload.get("original_trace_hashes") or [])
+    persisted_counts = {
+        "canonical_graph_record_count": len(reloaded["canonical_graph_records"]),
+        "alias_count": len(reloaded["alias_to_canonical"]),
+        "original_trace_hash_count": len(reloaded["original_trace_hashes"]),
+    }
+    for field, actual in persisted_counts.items():
+        if int(post_write.get(field, -1)) != actual:
+            raise RuntimeError(
+                f"Recovered payload {field} differs after serialization: "
+                f"audit={post_write.get(field)}, payload={actual}."
+            )
+    for field in (
+        "closure_digest",
+        "canonical_graph_record_count",
+        "alias_count",
+        "original_trace_hash_count",
+        "selected_trace_rows_sha256",
+        "selected_trace_row_count",
+    ):
+        if (audit["frozen_payload_closure"] or {}).get(field) != post_write.get(field):
+            raise RuntimeError(
+                f"Recovered payload closure changed across serialization: {field}."
+            )
+    expected_trace_hashes = set(expected_original_trace_hashes)
     actual_trace_hashes = set(verified_payload.get("original_trace_hashes") or [])
     resolvable_hashes = payload_graphs_by_official_hash(verified_payload)
     missing_roundtrip_hashes = sorted(expected_trace_hashes - set(resolvable_hashes))
@@ -381,6 +558,11 @@ def recover_completed_generation_freeze(
     store_mode = _materialize(
         source / "graph_state" / "authoritative_graph_store.sqlite3",
         graph_state / "authoritative_graph_store.sqlite3",
+        # Downstream tools may open the recovered store with SQLite.  A hard
+        # link would make any accidental journal/write mutate the immutable
+        # preserved input inode, so the recovery boundary requires a distinct
+        # physical copy even when source and destination share a filesystem.
+        allow_hardlink=False,
     )
     graph_audit_mode = _materialize(
         source / "graph_state_audit.json", output / "graph_state_audit.json"
@@ -391,6 +573,9 @@ def recover_completed_generation_freeze(
     closure_audit = {
         **audit["frozen_payload_closure"],
         **payload_file_audit(payload_path),
+        **persisted_closure_fields,
+        **persisted_roundtrip_fields,
+        **persisted_counts,
         "post_write_reload_verified": True,
         "original_trace_hash_roundtrip_verified": True,
         "original_trace_hash_roundtrip_count": len(expected_trace_hashes),
@@ -400,12 +585,15 @@ def recover_completed_generation_freeze(
         "trace_schema_version": 1,
         "trace_only": True,
         "candidate_count": lineage_count,
+        "selected_transition_count": lineage_count,
         "candidate_lineage_resolved_count": lineage_resolved,
         "selected_trace_path": str(trace_output / source_manifest_path.name),
         "candidate_lineage_path": str(trace_output / "candidate_action_lineage.json"),
         "candidate_lineage_index_path": str(lineage_index),
         "candidate_lineage_format": "selected_trace_predecessor_index",
         "lineage_recovery_policy": "authoritative_backing_freeze_only_v3",
+        "lineage_recovery_audit": dict(lineage_recovery_audit),
+        **lineage_counter_fields,
         "algorithm_rerun": False,
         "frozen_payload_closure": closure_audit,
     }
@@ -432,9 +620,12 @@ def recover_completed_generation_freeze(
         "counterfactuals_sha256": sha256_file(payload_path),
         "counterfactuals_bytes": payload_path.stat().st_size,
         "counterfactual_candidate_count": len(candidates),
+        "selected_transition_count": lineage_count,
         "visited_graph_count": len(graph_map),
         "trace_enabled": True,
         "trace_summary": trace_summary,
+        "lineage_recovery_audit": dict(lineage_recovery_audit),
+        **lineage_counter_fields,
         "graph_state_audit_path": str(output / "graph_state_audit.json"),
         "graph_state_audit_sha256": sha256_file(output / "graph_state_audit.json"),
         "frozen_payload_closure_audit_path": str(
@@ -475,7 +666,10 @@ def recover_completed_generation_freeze(
         },
         "counterfactuals_sha256": manifest["counterfactuals_sha256"],
         "candidate_count": len(candidates),
+        "selected_transition_count": lineage_count,
         "candidate_lineage_resolved_count": lineage_resolved,
+        "lineage_recovery_audit": dict(lineage_recovery_audit),
+        **lineage_counter_fields,
     }
     write_json(output / "freeze_only_recovery.json", recovery)
     write_json(

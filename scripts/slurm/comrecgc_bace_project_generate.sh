@@ -29,10 +29,13 @@ DISTANCE_CHECKPOINT=${DISTANCE_CHECKPOINT:-$ARTIFACT_ROOT/outputs/hpc/bace/basel
 OUTPUT_DIR=${OUTPUT_DIR:-$BASE_ROOT/generation}
 TRACE_DIR=${TRACE_DIR:-$OUTPUT_DIR/trace}
 GRAPH_STATE_DIR=${GRAPH_STATE_DIR:-$OUTPUT_DIR/graph_state}
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-$OUTPUT_DIR/generation_checkpoints}
+CHECKPOINT_MIRROR_ROOT=${CHECKPOINT_MIRROR_ROOT:?CHECKPOINT_MIRROR_ROOT must be an independent persistent path}
 COMRECGC_EXPECTED_COMMIT=${COMRECGC_EXPECTED_COMMIT:-122f9341a360e9f06bb58a2f5823bb596021f6bf}
 COMRECGC_ROOT=${COMRECGC_ROOT:-/share/home/u20526/czx/vendor/COMRECGC/$COMRECGC_EXPECTED_COMMIT}
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
+RESUME=${RESUME:-0}
 
 for path in "$DATASET_DIR/dataset_summary.json" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
@@ -60,7 +63,14 @@ args=(
   --batch-size 128
   --trace-output-dir "$TRACE_DIR"
   --graph-state-dir "$GRAPH_STATE_DIR"
+  --checkpoint-root "$CHECKPOINT_ROOT"
+  --checkpoint-mirror-root "$CHECKPOINT_MIRROR_ROOT"
+  --checkpoint-interval-steps 500
+  --checkpoint-keep-last 2
+  --progress-interval-steps 25
 )
+if [[ "$RESUME" == 1 ]]; then args+=(--resume); fi
+[[ "$(python -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CHECKPOINT_ROOT")" != "$(python -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CHECKPOINT_MIRROR_ROOT")" ]] || { echo 'checkpoint mirror must differ from fast checkpoint root' >&2; exit 2; }
 echo "hostname=$(hostname)"
 echo "python=$(which python)"
 python --version
@@ -72,9 +82,13 @@ if [[ "$DRY_RUN" == 1 || "$VALIDATE_ONLY" == 1 ]]; then
   echo '[COMRECGC_BACE_GENERATE_VALIDATE_OK]'
   exit 0
 fi
-test ! -e "$OUTPUT_DIR" || { echo "output collision: $OUTPUT_DIR" >&2; exit 2; }
+if [[ "$RESUME" == 1 ]]; then
+  test -s "$CHECKPOINT_ROOT/LATEST" || { echo "missing resume checkpoint: $CHECKPOINT_ROOT/LATEST" >&2; exit 2; }
+else
+  test ! -e "$OUTPUT_DIR" || { echo "output collision: $OUTPUT_DIR" >&2; exit 2; }
+fi
 "${args[@]}"
 test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
 test -s "$TRACE_DIR/candidate_action_lineage.json"
-test -s "$GRAPH_STATE_DIR/authoritative_graph_store.sqlite3"
+find "$GRAPH_STATE_DIR" -maxdepth 1 -type f -name 'authoritative_graph_store*.sqlite3' -size +0c -print -quit | grep -q .
 echo '[COMRECGC_BACE_GENERATE_SUCCESS]'

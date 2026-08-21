@@ -13,6 +13,7 @@ import numpy as np
 
 
 COMPACT_TRANSITION_CACHE_PATCH = "compact_transition_action_replay_lru_v1"
+COMPACT_TRANSITION_CHECKPOINT_SCHEMA = "comrecgc_compact_transition_state_v1"
 
 
 def _peak_rss_bytes() -> int:
@@ -335,3 +336,141 @@ class CompactMoveScopedTransitionMap(MutableMapping[Any, Any]):
 
     def clear_expanded(self) -> None:
         self._expanded.clear()
+
+    def export_checkpoint_state(self) -> dict[str, Any]:
+        """Return an exact, graph-object-free state at a completed move boundary."""
+
+        if (
+            self._active_keys
+            or self._active_graphs
+            or self._deferred_deletions
+            or self._actions_by_object_id
+        ):
+            raise RuntimeError(
+                "COMRECGC transition checkpoint requested inside an active move."
+            )
+        entries = [
+            {
+                "source_hash": source_hash,
+                "target_hashes": list(entry.target_hashes),
+                "actions": [list(action) for action in entry.actions],
+                "importance_parts": np.array(entry.importance_parts, copy=True),
+                "embeddings": np.array(entry.embeddings, copy=True),
+            }
+            for source_hash, entry in self._entries.items()
+        ]
+        counters = {
+            name: int(getattr(self, name))
+            for name in (
+                "move_count",
+                "deferred_deletion_count",
+                "applied_deferred_deletion_count",
+                "cancelled_deferred_deletion_count",
+                "missing_lookup_count",
+                "max_transition_size",
+                "max_expanded_entry_count",
+                "max_expanded_graph_count",
+                "cache_hit_count",
+                "cache_miss_count",
+                "reconstructed_graph_count",
+                "captured_action_count",
+            )
+        }
+        return {
+            "schema_version": COMPACT_TRANSITION_CHECKPOINT_SCHEMA,
+            "seed": self._seed,
+            "expanded_capacity": self._expanded_capacity,
+            "current_step": self._current_step,
+            "entries": entries,
+            "expanded_keys": list(self._expanded.keys()),
+            "counters": counters,
+        }
+
+    def restore_checkpoint_state(self, value: Mapping[str, Any]) -> None:
+        """Restore compact entries without replaying model calls or actions."""
+
+        if value.get("schema_version") != COMPACT_TRANSITION_CHECKPOINT_SCHEMA:
+            raise ValueError("Unsupported COMRECGC compact transition checkpoint schema.")
+        if int(value.get("seed", -1)) != self._seed or int(
+            value.get("expanded_capacity", -1)
+        ) != self._expanded_capacity:
+            raise ValueError(
+                "COMRECGC compact transition checkpoint provenance differs from runtime."
+            )
+        if (
+            self._entries
+            or self._expanded
+            or self._active_keys
+            or self._active_graphs
+            or self._deferred_deletions
+            or self._actions_by_object_id
+        ):
+            raise RuntimeError("COMRECGC compact transition restore target is not empty.")
+        for row in value.get("entries") or ():
+            source_hash = row["source_hash"]
+            if source_hash in self._entries:
+                raise ValueError("Duplicate COMRECGC transition source in checkpoint.")
+            target_hashes = tuple(row["target_hashes"])
+            actions = tuple(_freeze_action(action) for action in row["actions"])
+            importance_parts = _stack_numeric_rows(
+                row["importance_parts"], field="importance_parts"
+            )
+            embeddings = _stack_numeric_rows(row["embeddings"], field="embeddings")
+            if not (
+                len(target_hashes)
+                == len(actions)
+                == len(importance_parts)
+                == len(embeddings)
+            ):
+                raise ValueError("COMRECGC compact transition checkpoint rows are misaligned.")
+            self._entries[source_hash] = _CompactTransition(
+                target_hashes=target_hashes,
+                actions=actions,
+                importance_parts=importance_parts,
+                embeddings=embeddings,
+            )
+        expanded_keys = list(value.get("expanded_keys") or ())
+        if len(set(expanded_keys)) != len(expanded_keys) or len(
+            expanded_keys
+        ) > self._expanded_capacity:
+            raise ValueError("COMRECGC expanded transition LRU state is invalid.")
+        for key in expanded_keys:
+            entry = self._entries.get(key)
+            if entry is None:
+                raise ValueError("COMRECGC expanded transition key has no compact entry.")
+            source_graph = self._source_graph(key)
+            target_graphs = [
+                self._rebuild_target(source_graph, action) for action in entry.actions
+            ]
+            self._remember_expanded(
+                key,
+                (
+                    list(entry.target_hashes),
+                    target_graphs,
+                    [row for row in entry.importance_parts],
+                    [row for row in entry.embeddings],
+                ),
+            )
+        counters = value.get("counters")
+        if not isinstance(counters, Mapping):
+            raise ValueError("COMRECGC compact transition counters are missing.")
+        for name in (
+            "move_count",
+            "deferred_deletion_count",
+            "applied_deferred_deletion_count",
+            "cancelled_deferred_deletion_count",
+            "missing_lookup_count",
+            "max_transition_size",
+            "max_expanded_entry_count",
+            "max_expanded_graph_count",
+            "cache_hit_count",
+            "cache_miss_count",
+            "reconstructed_graph_count",
+            "captured_action_count",
+        ):
+            setattr(self, name, int(counters[name]))
+        self._current_step = int(value.get("current_step", self.move_count))
+        if self.move_count != self._current_step:
+            raise ValueError("COMRECGC compact transition move counter is inconsistent.")
+        if self.max_transition_size < len(self._entries):
+            raise ValueError("COMRECGC compact transition maximum size is inconsistent.")

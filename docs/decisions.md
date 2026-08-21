@@ -6268,3 +6268,119 @@ historical runtime-cache mismatch counters remain visible diagnostics rather
 than forcing a scientifically unnecessary 50,000-step rerun. This exception is
 limited to completed walks; checkpoint resume still requires atomic RNG,
 transition, trace, backing-store, and closure state.
+
+---
+
+## 2026-08-21: Treat AutoDL recovery lanes as durable local processes
+
+The three-line recovery uses four local A800 processes rather than Slurm jobs.
+Representing a local PID through the HPC experiment registry's numeric Slurm
+contract would make status, cancellation, and restart evidence ambiguous. A
+single monolithic launcher would also allow one failed lane to lose the other
+lanes' process identity or to start BACE common4 before both required inputs
+were scientifically complete.
+
+The AutoDL controller therefore records `backend=autodl`, an operating-system
+PID, and an explicit null Slurm job id. Every lane owns a persistent state
+document, PID record, advisory writer lock, heartbeat, log, provenance record,
+input-manifest digest, output-manifest digest, and orchestration sentinel.
+State and JSON sentinels use fsync plus atomic replacement. Scientific stage
+success is never inferred from exit code alone: a configured nonempty JSON
+sentinel and its exact required fields must pass before the controller publishes
+its own success sentinel. BACE common4 waits for both the BACE COMRECGC final
+and GlobalGCE WNode sentinels. MUT and AIDS stages are rejected unless their
+specification and runtime environment both prohibit generation.
+
+The persistent filesystem owns state, logs, frozen inputs, outputs, and process
+registry records. Disposable NVMe owns only independent cache/active roots,
+including the fresh checkpointed BACE walk. `resume` skips already proven
+stages, refuses a live second writer or orphan child, and delegates scientific
+checkpoint selection to the checkpoint-aware command. The paired Slurm script
+is intentionally read-only status plumbing required by repository CLI parity;
+it cannot start or resume AutoDL work. These control-plane rules change no
+candidate order, RNG use, random-walk state, graph semantics, threshold, or
+evaluation protocol.
+
+Scientific stages use one production runner with immutable primary,
+`static_project`, and recursively enumerated Step0 input manifests. MUT and
+AIDS formal freeze stages additionally require a non-formal preserved-lineage
+smoke: full closure validation, recorded-action replay without legacy
+inference, and the AIDS original-to-canonical serialization round trip. Smoke
+evidence is bound to a deterministic repair-code content closure rather than a
+pre-commit Git identity, so identical content remains valid after the repair
+commit while any later code change fails closed.
+
+BACE writes trace chunks directly to persistent storage, keeps active SQLite
+and graph state on fast NVMe, and mirrors the latest two atomic checkpoints to
+persistent storage. Its mandatory profile gate compares a formal-configuration
+0-to-1000 run against a checkpoint at 500, continued execution beyond step 525,
+SIGKILL, complete fast-state quarantine, persistent-only restore, and
+500-to-1000 resume. The comparison ignores trace
+materialization labels but requires identical published trace-row and pending-
+event digests, counters, algorithm state, RNG, logical SQLite contents, and
+candidate sequence. The profile report records progress-derived per-step
+timing, GPU/CPU/I/O observations, and named cProfile aggregates; unavailable
+platform observations are marked `NOT_OBSERVED` rather than synthesized.
+Final BACE publication also requires the dedicated artifact audit; common4
+verifies both upstream scientific sentinels and manifests.
+
+Every reusable scientific substage now publishes a separate immutable proof.
+The proof binds the physical completion marker and its required fields, a
+content-verified output manifest, all three input-manifest digests, normalized
+scientific argv, explicit scientific environment, the pinned external commit,
+and a content digest covering all project Python/shell sources plus the HPC
+config and production AutoDL spec.  Top-level sentinels repeat the same input
+and code-closure binding, so a stale success file cannot bypass substage
+verification.  Pre-commit integration smoke may cross only the Git-commit
+identity boundary: its full code/config closure and external commit must remain
+exact.  Marker-only legacy outputs, incomplete proof publication windows, and
+changed config or dirty code all fail closed instead of being adopted.
+
+Child-process control is PID-reuse resistant.  A signalable child is bound to
+its kernel process start time, raw command-line digest, process group, run,
+lane, stage, and normalized command digest.  Status, resume, and stop re-read
+and compare that complete identity; a stale or reused numeric PID is retained
+as audit evidence but is never signalled.  Worker environments also remove
+password, token, API-key, authorization, credential, and private-key variables,
+and the same names are rejected in explicit stage commands and overrides.
+
+The completed Mutagenicity recovery also keeps two frozen cardinalities
+separate.  Its serialized candidate payload contains 100,235 unique
+counterfactual candidates, while the selected trace contains 224,690 recorded
+transitions whose actions replay exactly.  Repeated selection of one candidate
+is valid walk evidence; the formal Gate checks both cardinalities independently
+instead of requiring the unique candidate population to equal transition
+multiplicity.
+
+An AIDS frozen closure may legitimately persist an empty
+`alias_to_canonical` mapping when every original selected-trace official hash
+already names its canonical graph record directly.  The Gate therefore requires
+the alias field to exist with mapping type, permits `alias_count=0`, and still
+requires zero alias cycles/dangling targets.  More importantly, every original
+trace hash must resolve to identical normalized graph content before and after
+real Torch serialization.  Nonempty alias maps remain subject to the same
+round-trip check; recovery must not invent an alias merely to satisfy a
+cardinality test.
+
+Formal AutoDL lanes may now be activated incrementally with repeatable
+`start/resume --lane`.  Omitted lanes remain durably `NOT_STARTED`; selecting
+one for the first time is not a retry, and omitting `--lane` preserves the
+four-lane launch.  Every incremental control action rechecks the global
+code/vendor/GPU gates and only the selected lanes' immutable inputs and fresh
+roots.  Cross-lane release requires both the existing scientific proof and a
+matching persisted producer stage plus terminal producer-lane success.  The
+lane sentinel is published before top-level `SUCCEEDED`, so a crash window can
+wait safely but cannot expose a success state without its physical proof.
+
+Worker control now uses the same fail-closed identity standard as scientific
+children.  A worker PID record binds kernel start time, raw command-line
+digest, process group, expected argv digest, run, lane, and spec digest; Linux
+formal execution requires procfs and a private worker process group.  Resume,
+status, and stop never adopt or signal a live numeric PID whose complete
+identity differs, and stop revalidates immediately before signalling.  The
+first run-state publication also binds the exact spec bytes, schema, path, and
+all normalized roots.  The expanded persisted-state contract is explicitly
+`state_schema_version=2` while the production spec/sentinel schema remains v1.
+Later publication, resume, status, stop, and worker
+startup reject spec/root drift instead of rewriting stale state under a new
+configuration.

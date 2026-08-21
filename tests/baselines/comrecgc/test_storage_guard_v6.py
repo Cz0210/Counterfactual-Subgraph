@@ -107,6 +107,45 @@ def test_disk_full_guard_checkpoints_then_fails_closed(tmp_path, monkeypatch) ->
     assert state.store.checkpoint_calls == 1
 
 
+def test_disk_full_guard_reports_registered_exact_checkpoint_provider(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / "graphs.sqlite3"
+    database.write_bytes(b"state")
+    checkpoint_root = tmp_path / "generation_checkpoints"
+    monkeypatch.setattr(
+        module,
+        "_filesystem_snapshot",
+        lambda _path: _filesystem(
+            free_bytes=10, free_ratio=0.01, free_inodes=1
+        ),
+    )
+    state = _State()
+    guard = StorageGuard(
+        StorageGuardConfig(
+            root=tmp_path,
+            expected_steps=100,
+            check_every_steps=10,
+            min_free_bytes=100,
+            min_free_ratio=0.1,
+            min_free_inodes=100,
+        ),
+        database_path=database,
+        exact_resume_supported=True,
+        generation_checkpoint_root=checkpoint_root,
+    )
+
+    with pytest.raises(ComRecGCStorageGuardStop):
+        guard.check(20, state)
+
+    stop = json.loads(guard.stop_path.read_text(encoding="utf-8"))
+    assert stop["resume_safe"] is True
+    assert stop["random_walk_resume_supported"] is True
+    assert stop["restart_policy"] == "resume_latest_completed_step_checkpoint"
+    assert stop["generation_checkpoint_root"] == str(checkpoint_root.resolve())
+    assert state.store.checkpoint_calls == 1
+
+
 def test_storage_guard_ignores_non_boundary_steps(tmp_path) -> None:
     database = tmp_path / "graphs.sqlite3"
     database.write_bytes(b"state")

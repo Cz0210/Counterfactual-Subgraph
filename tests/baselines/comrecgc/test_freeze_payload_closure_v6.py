@@ -3,8 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.baselines.comrecgc.frozen_payload import (
+    FrozenPayloadClosureError,
     build_frozen_payload_closure,
     payload_graphs_by_official_hash,
 )
@@ -85,6 +87,14 @@ def test_selected_trace_payload_roundtrip_recovers_changed_official_hashes() -> 
     assert first["resolved_by_fingerprint_alias"] == 2
     assert second["unresolved_hash_count"] == 0
     assert second["closure_complete"] is True
+    assert first["closure_digest"] == second["closure_digest"]
+    assert first["trace_manifest_digest"] == second["trace_manifest_digest"]
+    assert frozen["canonical_hash_algorithm"] == (
+        "sha256_stable_json_untyped_graph_v1"
+    )
+    assert frozen["graph_serialization_version"] == (
+        "normalized_untyped_graph_payload_v1"
+    )
     assert set(reloaded["original_trace_hashes"]) == {
         "evicted-source-alias",
         "evicted-target-alias",
@@ -119,3 +129,30 @@ def test_freeze_validator_recover_parity_uses_same_pure_builder() -> None:
     assert payload_graphs_by_official_hash(validated).keys() == (
         payload_graphs_by_official_hash(recovered).keys()
     )
+
+
+def test_persisted_closure_digest_tamper_fails_closed() -> None:
+    source = _graph([1, 2])
+    payload = {
+        "graph_map": {"source": _entry(source)},
+        "counterfactual_candidates": [{"graph_hash": "source"}],
+    }
+    frozen, _audit = build_frozen_payload_closure(
+        payload, (), backing_store_path=None
+    )
+    frozen["closure_digest"] = "0" * 64
+
+    with pytest.raises(FrozenPayloadClosureError, match="closure_digest"):
+        build_frozen_payload_closure(frozen, (), backing_store_path=None)
+
+
+def test_dangling_alias_fails_closed_even_when_not_trace_required() -> None:
+    source = _graph([1, 2])
+    payload = {
+        "graph_map": {"source": _entry(source)},
+        "counterfactual_candidates": [{"graph_hash": "source"}],
+        "alias_to_canonical": {"orphan": "missing-canonical"},
+    }
+
+    with pytest.raises(FrozenPayloadClosureError, match="alias_target_absent"):
+        build_frozen_payload_closure(payload, (), backing_store_path=None)

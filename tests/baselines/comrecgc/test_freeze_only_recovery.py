@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from src.baselines.comrecgc.contracts import GenerationParameters, sha256_file, write_json
-from src.baselines.comrecgc.freeze_recovery import validate_completed_generation_freeze
+from src.baselines.comrecgc import freeze_recovery
+from src.baselines.comrecgc.freeze_recovery import (
+    recover_completed_generation_freeze,
+    validate_completed_generation_freeze,
+)
 from src.baselines.comrecgc.graph_trace import stable_untyped_graph_sha256
 from src.baselines.comrecgc.live_graph_state import AuthoritativeGraphStore
 
@@ -82,6 +89,7 @@ def _source_root(
                     "index": 0,
                     "path": "selected_action_trace_chunks/part-000000.jsonl",
                     "row_count": 1,
+                    "bytes": chunk.stat().st_size,
                     "sha256": sha256_file(chunk),
                 }
             ],
@@ -136,6 +144,91 @@ def test_completed_walk_is_safe_for_freeze_without_rng_resume_state(tmp_path) ->
     assert "source" in payload["graph_map"]
 
 
+def test_completed_mut_walk_accepts_exact_recorded_action_failure_signature(
+    tmp_path,
+) -> None:
+    root = _source_root(tmp_path)
+    config_path = root / "resolved_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["dataset"] = "mutagenicity"
+    write_json(config_path, config)
+    write_json(
+        root / "_RUN_FAILED.json",
+        {
+            "stage": "project_generation",
+            "message": (
+                "Selected COMRECGC transition is not one unique "
+                "pinned-upstream single edit."
+            ),
+        },
+    )
+
+    audit, payload = validate_completed_generation_freeze(
+        source_generation_dir=root,
+        dataset="mutagenicity",
+        dataset_dir=tmp_path / "unused",
+        source_csv=None,
+        expected_project_commit="base",
+    )
+
+    assert audit["FREEZE_ONLY_RECOVERY_SAFE"] is True
+    assert audit["matched_post_generation_failure_signatures"] == [
+        "recorded_action_lineage_ambiguity"
+    ]
+    assert payload is not None
+
+
+def test_known_failure_signature_with_extra_text_remains_fail_closed(
+    tmp_path,
+) -> None:
+    root = _source_root(tmp_path)
+    write_json(
+        root / "_RUN_FAILED.json",
+        {
+            "stage": "project_generation",
+            "message": (
+                "Selected trace references a graph absent from the frozen payload. "
+                "Additional unrelated failure"
+            ),
+        },
+    )
+
+    audit, payload = validate_completed_generation_freeze(
+        source_generation_dir=root,
+        dataset="aids",
+        dataset_dir=tmp_path / "unused",
+        source_csv=tmp_path / "unused.csv",
+        expected_project_commit="base",
+    )
+
+    assert audit["matched_post_generation_failure_signatures"] == []
+    assert audit["FREEZE_ONLY_RECOVERY_SAFE"] is False
+    assert payload is None
+
+
+def test_unknown_post_generation_failure_signature_remains_fail_closed(
+    tmp_path,
+) -> None:
+    root = _source_root(tmp_path)
+    write_json(
+        root / "_RUN_FAILED.json",
+        {"stage": "project_generation", "message": "unrelated runtime failure"},
+    )
+
+    audit, payload = validate_completed_generation_freeze(
+        source_generation_dir=root,
+        dataset="aids",
+        dataset_dir=tmp_path / "unused",
+        source_csv=tmp_path / "unused.csv",
+        expected_project_commit="base",
+    )
+
+    assert audit["checks"]["failure_is_post_generation_freeze"] is False
+    assert audit["matched_post_generation_failure_signatures"] == []
+    assert audit["FREEZE_ONLY_RECOVERY_SAFE"] is False
+    assert payload is None
+
+
 def test_historical_transition_cache_mismatch_is_diagnostic_after_completed_walk(
     tmp_path,
 ) -> None:
@@ -172,3 +265,190 @@ def test_malformed_serialized_transition_blocks_freeze_only(tmp_path) -> None:
     assert audit["serialized_transition_state_present"] is True
     assert audit["checks"]["serialized_transition_closure_complete"] is False
     assert payload is None
+
+
+def _immutable_file_state(path):
+    if not path.exists():
+        return None
+    stat = path.stat()
+    return {
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_file(path),
+    }
+
+
+def test_freeze_validation_never_mutates_readonly_sqlite_snapshot(tmp_path) -> None:
+    root = _source_root(tmp_path)
+    graph_state = root / "graph_state"
+    database = graph_state / "authoritative_graph_store.sqlite3"
+    observed_paths = (database, Path(f"{database}-wal"), Path(f"{database}-shm"))
+    before = {path.name: _immutable_file_state(path) for path in observed_paths}
+    os.chmod(database, 0o444)
+    os.chmod(graph_state, 0o555)
+    try:
+        audit, payload = validate_completed_generation_freeze(
+            source_generation_dir=root,
+            dataset="aids",
+            dataset_dir=tmp_path / "unused",
+            source_csv=tmp_path / "unused.csv",
+            expected_project_commit="base",
+        )
+        after = {path.name: _immutable_file_state(path) for path in observed_paths}
+    finally:
+        os.chmod(graph_state, 0o755)
+        os.chmod(database, 0o644)
+
+    assert audit["FREEZE_ONLY_RECOVERY_SAFE"] is True
+    assert payload is not None
+    assert after == before
+
+
+def test_freeze_recovery_exposes_recorded_action_first_counters(
+    tmp_path, monkeypatch
+) -> None:
+    root = _source_root(tmp_path)
+    source_database = root / "graph_state/authoritative_graph_store.sqlite3"
+    source_database_sha256 = sha256_file(source_database)
+    source = _graph([1, 2], [(0, 1), (1, 0)])
+    monkeypatch.setattr(
+        freeze_recovery,
+        "_load_sources",
+        lambda **_kwargs: ({"parent": source}, "dataset-fingerprint"),
+    )
+
+    output = tmp_path / "recovered"
+    recovery = recover_completed_generation_freeze(
+        source_generation_dir=root,
+        output_dir=output,
+        dataset="aids",
+        dataset_dir=tmp_path / "unused",
+        source_csv=tmp_path / "unused.csv",
+        expected_project_commit="base",
+    )
+
+    recovered_database = output / "graph_state/authoritative_graph_store.sqlite3"
+    assert recovery["materialization"]["backing_store"] == "atomic_copy"
+    assert source_database.stat().st_ino != recovered_database.stat().st_ino
+    assert sha256_file(source_database) == source_database_sha256
+    assert sha256_file(recovered_database) == source_database_sha256
+
+    closure_audit = json.loads(
+        (output / "frozen_payload_closure_audit.json").read_text(encoding="utf-8")
+    )
+    recovered_payload = freeze_recovery.torch_load_payload(
+        output / "counterfactuals.pt"
+    )
+    assert closure_audit["canonical_graph_records_persisted"] is True
+    assert closure_audit["alias_to_canonical_persisted"] is True
+    assert closure_audit["original_trace_hashes_persisted"] is True
+    assert closure_audit["canonical_graph_records_roundtrip_verified"] is True
+    assert closure_audit["alias_to_canonical_roundtrip_verified"] is True
+    assert closure_audit["original_trace_hashes_roundtrip_verified"] is True
+    assert closure_audit["alias_count"] == 0
+    assert closure_audit["original_trace_hash_roundtrip_count"] > 0
+    assert recovered_payload["alias_to_canonical"] == {}
+    assert closure_audit["original_trace_hash_roundtrip_count"] == len(
+        recovered_payload["original_trace_hashes"]
+    )
+
+    documents = [
+        json.loads(
+            (output / "trace" / "candidate_action_lineage.json").read_text(
+                encoding="utf-8"
+            )
+        ),
+        json.loads(
+            (output / "trace" / "trace_summary.json").read_text(encoding="utf-8")
+        ),
+        json.loads((output / "run_manifest.json").read_text(encoding="utf-8")),
+        recovery,
+    ]
+    for document in documents:
+        assert document["recorded_action_present_count"] == 1
+        assert document["recorded_action_replay_ok_count"] == 1
+        assert document["recorded_action_replay_mismatch_count"] == 0
+        assert document["legacy_missing_action_count"] == 0
+        assert document["legacy_inference_called_count"] == 0
+        assert document["lineage_recovery_audit"][
+            "recorded_action_replay_ok_count"
+        ] == 1
+
+
+def test_freeze_recovery_rejects_missing_serialized_original_trace_hashes(
+    tmp_path, monkeypatch
+) -> None:
+    root = _source_root(tmp_path)
+    source = _graph([1, 2], [(0, 1), (1, 0)])
+    monkeypatch.setattr(
+        freeze_recovery,
+        "_load_sources",
+        lambda **_kwargs: ({"parent": source}, "dataset-fingerprint"),
+    )
+    real_save = freeze_recovery.atomic_torch_save
+
+    def save_without_original_hashes(payload, path) -> None:
+        real_save(payload, path)
+        corrupted = copy.deepcopy(freeze_recovery.torch_load_payload(path))
+        corrupted["original_trace_hashes"] = corrupted["original_trace_hashes"][1:]
+        real_save(corrupted, path)
+
+    monkeypatch.setattr(
+        freeze_recovery, "atomic_torch_save", save_without_original_hashes
+    )
+    output = tmp_path / "missing-original-hashes"
+
+    with pytest.raises(
+        RuntimeError, match="frozen-closure fields changed across serialization"
+    ):
+        recover_completed_generation_freeze(
+            source_generation_dir=root,
+            output_dir=output,
+            dataset="aids",
+            dataset_dir=tmp_path / "unused",
+            source_csv=tmp_path / "unused.csv",
+            expected_project_commit="base",
+        )
+
+    assert not (output / "_RUN_COMPLETE.json").exists()
+
+
+def test_freeze_recovery_rejects_canonical_graph_serialization_drift(
+    tmp_path, monkeypatch
+) -> None:
+    root = _source_root(tmp_path)
+    source = _graph([1, 2], [(0, 1), (1, 0)])
+    monkeypatch.setattr(
+        freeze_recovery,
+        "_load_sources",
+        lambda **_kwargs: ({"parent": source}, "dataset-fingerprint"),
+    )
+    real_save = freeze_recovery.atomic_torch_save
+
+    def save_with_graph_drift(payload, path) -> None:
+        real_save(payload, path)
+        corrupted = copy.deepcopy(freeze_recovery.torch_load_payload(path))
+        graph = next(iter(corrupted["canonical_graph_records"].values()))
+        drifted = np.asarray(graph.x).copy()
+        drifted.flat[0] += 100
+        graph.x = drifted
+        real_save(corrupted, path)
+
+    monkeypatch.setattr(
+        freeze_recovery, "atomic_torch_save", save_with_graph_drift
+    )
+    output = tmp_path / "canonical-drift"
+
+    with pytest.raises(
+        RuntimeError, match="frozen-closure fields changed across serialization"
+    ):
+        recover_completed_generation_freeze(
+            source_generation_dir=root,
+            output_dir=output,
+            dataset="aids",
+            dataset_dir=tmp_path / "unused",
+            source_csv=tmp_path / "unused.csv",
+            expected_project_commit="base",
+        )
+
+    assert not (output / "_RUN_COMPLETE.json").exists()

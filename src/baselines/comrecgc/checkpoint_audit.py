@@ -84,7 +84,7 @@ def audit_generation_checkpoint(generation_dir: str | Path) -> dict[str, Any]:
         if not store_path.is_absolute():
             store_path = (manifest_path.parent / store_path).resolve()
         if store_path.is_file():
-            store = AuthoritativeGraphStore(store_path)
+            store = AuthoritativeGraphStore(store_path, read_only=True)
             try:
                 store_audit = store.integrity_audit()
             finally:

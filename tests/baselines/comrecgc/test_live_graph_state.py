@@ -73,3 +73,43 @@ def test_same_official_hash_with_different_graph_fails_collision_gate(tmp_path) 
             owner.graph_map[9] = [graph(8), np.asarray([1.0]), np.asarray([2.0])]
     finally:
         state.close()
+
+
+def test_live_graph_checkpoint_restores_boundary_counters(tmp_path) -> None:
+    owner = module()
+    database = tmp_path / "graphs.sqlite3"
+    state = LiveGraphState(owner, {}, store_path=database, seed=4)
+    owner.graph_map = state.graph_map
+    try:
+        owner.graph_map[3] = [graph(1), np.asarray([1.0]), np.asarray([2.0])]
+        state.move_count = 7
+        state.graph_map.current_step = 7
+        del owner.graph_map[3]
+        exported = state.export_checkpoint_state()
+    finally:
+        state.close()
+
+    restored_owner = module()
+    restored = LiveGraphState(
+        restored_owner, {}, store_path=database, seed=4
+    )
+    restored_owner.graph_map = restored.graph_map
+    try:
+        restored.restore_checkpoint_state(exported)
+        assert restored.move_count == 7
+        assert restored.graph_map.eviction_committed == 1
+        assert restored.contains(3)
+    finally:
+        restored.close()
+
+
+def test_live_graph_checkpoint_rejects_active_pin(tmp_path) -> None:
+    owner = module()
+    state = LiveGraphState(owner, {}, store_path=tmp_path / "graphs.sqlite3", seed=0)
+    owner.graph_map = state.graph_map
+    try:
+        state.graph_map.pin_counts[9] = 1
+        with pytest.raises(RuntimeError, match="inside a move"):
+            state.export_checkpoint_state()
+    finally:
+        state.close()

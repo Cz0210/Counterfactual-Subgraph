@@ -180,3 +180,45 @@ def test_compact_transition_cache_rejects_untracked_target_action() -> None:
 
     with pytest.raises(RuntimeError, match="exact enumerated action"):
         cache["source"] = _transition_rows(source, 1)
+
+
+def test_compact_transition_checkpoint_restores_entries_lru_and_counters() -> None:
+    sources = {
+        "one": [TinyGraph(10), None, None],
+        "two": [TinyGraph(20), None, None],
+    }
+    module = SimpleNamespace(graph_map=sources, graph_index_map={"one": 0, "two": 1})
+    cache = CompactMoveScopedTransitionMap(
+        module, {}, seed=7, expanded_capacity=2, rebuild_target=_rebuild
+    )
+    for key in ("one", "two"):
+        transition = _transition_rows(sources[key][0], 3)
+        _record_actions(cache, transition)
+        cache[key] = transition
+    cache.begin_move(["one"])
+    cache["one"]
+    cache.end_move()
+    expected = cache.export_checkpoint_state()
+
+    restored = CompactMoveScopedTransitionMap(
+        module, {}, seed=7, expanded_capacity=2, rebuild_target=_rebuild
+    )
+    restored.restore_checkpoint_state(expected)
+
+    assert restored.export_checkpoint_state()["expanded_keys"] == ["two", "one"]
+    assert restored.export_checkpoint_state()["counters"] == expected["counters"]
+    assert restored["one"][0] == cache["one"][0]
+
+
+def test_compact_transition_checkpoint_rejects_active_move() -> None:
+    source = TinyGraph(1)
+    module = SimpleNamespace(
+        graph_map={"source": [source, None, None]}, graph_index_map={"source": 0}
+    )
+    cache = CompactMoveScopedTransitionMap(
+        module, {}, seed=0, expanded_capacity=1, rebuild_target=_rebuild
+    )
+    cache.begin_move(["source"])
+    with pytest.raises(RuntimeError, match="inside an active move"):
+        cache.export_checkpoint_state()
+    cache.end_move()

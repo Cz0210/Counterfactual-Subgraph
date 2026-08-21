@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from collections import Counter
 from collections.abc import Iterable, Mapping, MutableMapping
 from pathlib import Path
@@ -14,6 +16,8 @@ from .live_graph_state import AuthoritativeGraphStore
 
 
 FROZEN_PAYLOAD_CLOSURE_POLICY = "canonical_graph_alias_roundtrip_closure_v7"
+CANONICAL_GRAPH_HASH_ALGORITHM = "sha256_stable_json_untyped_graph_v1"
+GRAPH_SERIALIZATION_VERSION = "normalized_untyped_graph_payload_v1"
 
 
 class FrozenPayloadClosureError(RuntimeError):
@@ -126,10 +130,18 @@ def payload_graphs_by_official_hash(payload: Mapping[str, Any]) -> dict[str, Any
 
 def _collect_requirements(
     payload: Mapping[str, Any], selected_events: Iterable[Mapping[str, Any]]
-) -> tuple[dict[str, dict[str, Any]], dict[str, Any], Counter[str]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, Any],
+    Counter[str],
+    str,
+    int,
+]:
     required: dict[str, dict[str, Any]] = {}
     inline_transition_graphs: dict[str, Any] = {}
     kind_counts: Counter[str] = Counter()
+    selected_trace_digest = hashlib.sha256()
+    selected_trace_row_count = 0
 
     def add(
         value: Any,
@@ -236,6 +248,17 @@ def _collect_requirements(
     for event in selected_events:
         if event.get("event") != "selected_transition":
             continue
+        selected_trace_digest.update(
+            json.dumps(
+                event,
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+        selected_trace_digest.update(b"\n")
+        selected_trace_row_count += 1
         add(
             event["source_official_hash"],
             "selected_trace_source",
@@ -249,7 +272,13 @@ def _collect_requirements(
             str(event.get("parent_id") or "") or None,
         )
 
-    return required, inline_transition_graphs, kind_counts
+    return (
+        required,
+        inline_transition_graphs,
+        kind_counts,
+        selected_trace_digest.hexdigest(),
+        selected_trace_row_count,
+    )
 
 
 def build_frozen_payload_closure(
@@ -282,9 +311,13 @@ def build_frozen_payload_closure(
                 {"reason": "ambiguous_stringified_official_hash"}
             )
 
-    required, inline_graphs, kind_counts = _collect_requirements(
-        payload, selected_events
-    )
+    (
+        required,
+        inline_graphs,
+        kind_counts,
+        selected_trace_rows_sha256,
+        selected_trace_row_count,
+    ) = _collect_requirements(payload, selected_events)
     original_trace_hashes = sorted(
         key
         for key, row in required.items()
@@ -299,7 +332,7 @@ def build_frozen_payload_closure(
             raise FileNotFoundError(
                 f"COMRECGC authoritative graph store missing: {store_path}"
             )
-        store = AuthoritativeGraphStore(store_path)
+        store = AuthoritativeGraphStore(store_path, read_only=True)
         stored_keys = store.stored_keys()
         store_key_index = {str(key): key for key in stored_keys}
         if len(store_key_index) != len(stored_keys):
@@ -477,6 +510,24 @@ def build_frozen_payload_closure(
         for alias in sorted(alias_to_canonical)
     }
 
+    available_canonical_hashes = {
+        *map(str, graph_map),
+        *map(str, frozen_graph_closure),
+        *map(str, canonical_graph_records),
+    }
+    dangling_aliases = [
+        {"alias": alias, "canonical_hash": canonical}
+        for alias, canonical in sorted(alias_to_canonical.items())
+        if canonical not in available_canonical_hashes
+    ]
+    if dangling_aliases:
+        raise ComRecGCFrozenPayloadClosureError(
+            {
+                "reason": "graph_alias_target_absent",
+                "dangling_aliases": dangling_aliases[:100],
+            }
+        )
+
     serialized_requirements = [
         {
             "official_hash": key,
@@ -486,9 +537,48 @@ def build_frozen_payload_closure(
         }
         for key, value in sorted(required.items())
     ]
+    canonical_record_digests = {
+        str(key): stable_untyped_graph_sha256(graph)
+        for key, graph in sorted(
+            canonical_graph_records.items(), key=lambda item: str(item[0])
+        )
+    }
+    closure_digest_payload = {
+        "policy": FROZEN_PAYLOAD_CLOSURE_POLICY,
+        "canonical_hash_algorithm": CANONICAL_GRAPH_HASH_ALGORITHM,
+        "graph_serialization_version": GRAPH_SERIALIZATION_VERSION,
+        "canonical_graph_records": canonical_record_digests,
+        "alias_to_canonical": alias_to_canonical,
+        "original_trace_hashes": original_trace_hashes,
+        "requirements_sha256": stable_json_sha256(serialized_requirements),
+        "selected_trace_rows_sha256": selected_trace_rows_sha256,
+        "selected_trace_row_count": selected_trace_row_count,
+    }
+    closure_digest = stable_json_sha256(closure_digest_payload)
+    persisted_closure_digest = payload.get("closure_digest")
+    if (
+        persisted_closure_digest is not None
+        and str(persisted_closure_digest) != closure_digest
+    ):
+        raise ComRecGCFrozenPayloadClosureError(
+            {
+                "reason": "persisted_closure_digest_mismatch",
+                "expected": str(persisted_closure_digest),
+                "actual": closure_digest,
+            }
+        )
+
     audit = {
         "schema_version": "comrecgc_frozen_payload_closure_v7",
         "policy": FROZEN_PAYLOAD_CLOSURE_POLICY,
+        "canonical_hash_algorithm": CANONICAL_GRAPH_HASH_ALGORITHM,
+        "graph_serialization_version": GRAPH_SERIALIZATION_VERSION,
+        "selected_trace_rows_sha256": selected_trace_rows_sha256,
+        "selected_trace_row_count": selected_trace_row_count,
+        "trace_manifest_digest": selected_trace_rows_sha256,
+        "closure_digest": closure_digest,
+        "code_commit": payload.get("project_commit") or payload.get("code_commit"),
+        "external_comrecgc_commit": payload.get("upstream_commit"),
         "required_hash_count": len(required),
         "resolved_from_hot_cache": resolved_from_hot,
         "resolved_from_backing_store": resolved_from_backing,
@@ -515,6 +605,12 @@ def build_frozen_payload_closure(
         "graph_only_closure_count": len(frozen_graph_closure),
         "canonical_graph_record_count": len(canonical_graph_records),
         "alias_count": len(alias_to_canonical),
+        # Reaching this audit proves both checks completed without the
+        # fail-closed exceptions above.  Persist explicit zero counters so the
+        # AutoDL recovery gate can distinguish "checked and absent" from an
+        # implementation that silently omitted the checks.
+        "alias_cycle_count": 0,
+        "dangling_alias_count": 0,
         "original_trace_hash_count": len(original_trace_hashes),
         "requirement_kind_counts": dict(sorted(kind_counts.items())),
         "requirements_sha256": stable_json_sha256(serialized_requirements),
@@ -523,6 +619,7 @@ def build_frozen_payload_closure(
         "closure_complete": not unresolved and not sha_mismatches,
         "candidate_order_changed": False,
         "candidate_payload_changed": False,
+        "graph_replacement_count": 0,
         "scientific_parameters_changed": False,
     }
     if not audit["closure_complete"]:
@@ -534,6 +631,10 @@ def build_frozen_payload_closure(
     frozen["canonical_graph_records"] = canonical_graph_records
     frozen["alias_to_canonical"] = alias_to_canonical
     frozen["original_trace_hashes"] = original_trace_hashes
+    frozen["canonical_hash_algorithm"] = CANONICAL_GRAPH_HASH_ALGORITHM
+    frozen["graph_serialization_version"] = GRAPH_SERIALIZATION_VERSION
+    frozen["trace_manifest_digest"] = selected_trace_rows_sha256
+    frozen["closure_digest"] = closure_digest
     frozen["required_hashes"] = sorted(required)
     frozen["frozen_payload_closure_requirements"] = serialized_requirements
     frozen["frozen_payload_closure"] = {

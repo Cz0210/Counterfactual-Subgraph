@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "run_id": "autodl_three_lines_20260821_v1",
+  "description": "Four-lane AutoDL recovery control plane for preserved MUT/AIDS generation and fresh checkpointed BACE work.",
+  "roots": {
+    "project": "/autodl-fs/data/worktrees/autodl-three-lines-20260821",
+    "external_comrecgc": "/autodl-fs/data/worktrees/COMRECGC-122f9341a360e9f06bb58a2f5823bb596021f6bf",
+    "persistent_run": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1",
+    "fast_run": "/root/autodl-tmp/runs/autodl_three_lines_20260821_v1"
+  },
+  "provenance": {
+    "base_commit": "a7c480a3c8499f6803e762c0fc683a03b5b8fb4a",
+    "branch": "fix/autodl-three-lines-20260821",
+    "code_commit": "HEAD",
+    "external_comrecgc_commit": "122f9341a360e9f06bb58a2f5823bb596021f6bf"
+  },
+  "runtime": {
+    "require_nvidia_smi": true,
+    "require_gpu_count": 4,
+    "heartbeat_seconds": 15,
+    "dependency_poll_seconds": 20,
+    "stop_grace_seconds": 30,
+    "worker_start_timeout_seconds": 10
+  },
+  "policy": {
+    "strict_three_line_topology": true,
+    "require_input_read_only": true,
+    "require_clean_code": true,
+    "require_clean_external": true,
+    "require_formal_stage_verifier": true,
+    "never_submit_slurm": true,
+    "autodl_pid_is_slurm_job_id": false
+  },
+  "lanes": [
+    {
+      "id": "mut_recovery",
+      "gpu_id": 0,
+      "dataset": "Mutagenicity",
+      "method": "ComRecGC",
+      "generation_policy": "preserved_freeze_only",
+      "input_root": "{persistent_root}/inputs/mut_generation",
+      "input_manifest": "{persistent_root}/inputs/mut_generation/MANIFEST.sha256",
+      "output_root": "{persistent_root}/outputs/mut_comrecgc",
+      "cache_root": "{fast_root}/cache/mut_comrecgc",
+      "active_root": "{fast_root}/active/mut_comrecgc",
+      "stages": [
+        {
+          "id": "mut_freeze_recovery",
+          "dependencies": [],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "mut-freeze", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "mut-freeze", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "DISALLOW_GENERATION": "1",
+            "COMRECGC_EXTERNAL_ROOT": "{external_root}",
+            "PYTHONHASHSEED": "0"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/mut_comrecgc/MUT_FREEZE_RECOVERY_PASS.json",
+          "required_success_fields": {"status": "PASS", "generation_rerun_performed": false},
+          "output_manifest": "{persistent_root}/outputs/mut_comrecgc/manifests/mutagenicity_freeze_recovery.sha256",
+          "output_manifest_root": "{persistent_root}/outputs/mut_comrecgc"
+        },
+        {
+          "id": "mut_downstream",
+          "dependencies": ["mut_recovery:mut_freeze_recovery"],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "mut-downstream", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "mut-downstream", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "DISALLOW_GENERATION": "1",
+            "COMRECGC_EXTERNAL_ROOT": "{external_root}",
+            "PYTHONHASHSEED": "0"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/mut_comrecgc/MUT_COMRECGC_COMPLETE.json",
+          "required_success_fields": {"status": "PASS", "generation_rerun_performed": false},
+          "output_manifest": "{persistent_root}/outputs/mut_comrecgc/MANIFEST.sha256"
+        }
+      ]
+    },
+    {
+      "id": "aids_recovery",
+      "gpu_id": 1,
+      "dataset": "AIDS",
+      "method": "ComRecGC",
+      "generation_policy": "preserved_freeze_only",
+      "input_root": "{persistent_root}/inputs/aids_generation",
+      "input_manifest": "{persistent_root}/inputs/aids_generation/MANIFEST.sha256",
+      "output_root": "{persistent_root}/outputs/aids_comrecgc",
+      "cache_root": "{fast_root}/cache/aids_comrecgc",
+      "active_root": "{fast_root}/active/aids_comrecgc",
+      "stages": [
+        {
+          "id": "aids_freeze_recovery",
+          "dependencies": [],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "aids-freeze", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "aids-freeze", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "DISALLOW_GENERATION": "1",
+            "COMRECGC_EXTERNAL_ROOT": "{external_root}",
+            "PYTHONHASHSEED": "0"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/aids_comrecgc/AIDS_FREEZE_RECOVERY_PASS.json",
+          "required_success_fields": {"status": "PASS", "generation_rerun_performed": false},
+          "output_manifest": "{persistent_root}/outputs/aids_comrecgc/manifests/aids_freeze_recovery.sha256",
+          "output_manifest_root": "{persistent_root}/outputs/aids_comrecgc"
+        },
+        {
+          "id": "aids_downstream",
+          "dependencies": ["aids_recovery:aids_freeze_recovery"],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "aids-downstream", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "aids-downstream", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "DISALLOW_GENERATION": "1",
+            "COMRECGC_EXTERNAL_ROOT": "{external_root}",
+            "PYTHONHASHSEED": "0"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/aids_comrecgc/AIDS_COMRECGC_COMPLETE.json",
+          "required_success_fields": {"status": "PASS", "generation_rerun_performed": false},
+          "output_manifest": "{persistent_root}/outputs/aids_comrecgc/MANIFEST.sha256"
+        }
+      ]
+    },
+    {
+      "id": "bace_comrecgc",
+      "gpu_id": 2,
+      "dataset": "BACE",
+      "method": "ComRecGC",
+      "generation_policy": "fresh_step0_checkpointed",
+      "input_root": "{persistent_root}/inputs/bace_preserved",
+      "input_manifest": "{persistent_root}/inputs/bace_preserved/MANIFEST.sha256",
+      "output_root": "{persistent_root}/outputs/bace_comrecgc",
+      "cache_root": "{fast_root}/cache/bace_comrecgc",
+      "active_root": "{fast_root}/active/bace_comrecgc",
+      "stages": [
+        {
+          "id": "bace_generation",
+          "dependencies": [],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-generate", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-generate", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "BACE_FRESH_START_STEP": "0",
+            "BACE_IMPORT_OLD_PARTIAL_STATE": "0",
+            "CHECKPOINT_INTERVAL_STEPS": "500",
+            "COMRECGC_EXTERNAL_ROOT": "{external_root}",
+            "PYTHONHASHSEED": "0",
+            "BACE_TRACE_PERSISTENCE": "persistent_atomic_chunks",
+            "BACE_CHECKPOINT_MIRROR_KEEP_LAST": "2"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/bace_comrecgc/BACE_GENERATION_50000_PASS.json",
+          "required_success_fields": {"status": "PASS", "fresh_start_step": 0, "imported_old_partial_state": false, "completed_step": 50000},
+          "output_manifest": "{persistent_root}/outputs/bace_comrecgc/generation/MANIFEST.sha256",
+          "output_manifest_root": "{persistent_root}/outputs/bace_comrecgc",
+          "progress_json": "{fast_root}/active/bace_comrecgc/generation_fresh/progress.json"
+        },
+        {
+          "id": "bace_comrecgc_final",
+          "dependencies": ["bace_comrecgc:bace_generation"],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-final", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-final", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {"COMRECGC_EXTERNAL_ROOT": "{external_root}", "PYTHONHASHSEED": "0"},
+          "required_success_sentinel": "{persistent_root}/outputs/bace_comrecgc/BACE_COMRECGC_COMPLETE.json",
+          "required_success_fields": {"status": "PASS"},
+          "output_manifest": "{persistent_root}/outputs/bace_comrecgc/MANIFEST.sha256"
+        }
+      ]
+    },
+    {
+      "id": "bace_globalgce_common4",
+      "gpu_id": 3,
+      "dataset": "BACE",
+      "method": "GlobalGCE+common4",
+      "generation_policy": "reuse_frozen_inputs_only",
+      "input_root": "{persistent_root}/inputs/bace_preserved",
+      "input_manifest": "{persistent_root}/inputs/bace_preserved/MANIFEST.sha256",
+      "output_root": "{persistent_root}/outputs/bace_globalgce_common4",
+      "cache_root": "{fast_root}/cache/bace_globalgce_common4",
+      "active_root": "{fast_root}/active/bace_globalgce_common4",
+      "stages": [
+        {
+          "id": "bace_globalgce_wnode",
+          "dependencies": [],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-globalgce", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-globalgce", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "OURS_GENERATION_RERUN": "0",
+            "GCF_GENERATION_RERUN": "0",
+            "GLOBALGCE_SELECTION_RERUN": "0",
+            "PYTHONHASHSEED": "0"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/bace_globalgce_common4/BACE_GLOBALGCE_WNODE_COMPLETE.json",
+          "required_success_fields": {"status": "PASS", "ours_generation_rerun": false, "gcf_generation_rerun": false, "globalgce_selection_rerun": false},
+          "output_manifest": "{persistent_root}/outputs/bace_globalgce_common4/common4/globalgce/MANIFEST.sha256"
+        },
+        {
+          "id": "bace_common4",
+          "dependencies": [
+            "bace_comrecgc:bace_comrecgc_final",
+            "bace_globalgce_common4:bace_globalgce_wnode"
+          ],
+          "command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-common4", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python"],
+          "resume_command": ["/root/miniconda3/envs/smiles_pip118/bin/python", "{project_root}/scripts/autodl/run_three_lines_stage.py", "bace-common4", "--project-root", "{project_root}", "--step0-project-root", "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project", "--external-root", "{external_root}", "--persistent-root", "{persistent_root}", "--fast-root", "{fast_root}", "--python", "/root/miniconda3/envs/smiles_pip118/bin/python", "--resume"],
+          "environment": {
+            "CANONICAL_METHOD_COUNT": "4",
+            "CF_MODE": "strict_flip",
+            "PYTHONHASHSEED": "0"
+          },
+          "required_success_sentinel": "{persistent_root}/outputs/bace_globalgce_common4/BACE_COMMON4_COMPLETE.json",
+          "required_success_fields": {"status": "PASS", "canonical_method_count": 4},
+          "output_manifest": "{persistent_root}/outputs/bace_globalgce_common4/common4/MANIFEST.sha256",
+          "output_manifest_root": "{persistent_root}/outputs/bace_globalgce_common4"
+        }
+      ]
+    }
+  ]
+}

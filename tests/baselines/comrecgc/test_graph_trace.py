@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -10,11 +11,13 @@ import src.baselines.comrecgc.graph_trace as graph_trace_module
 from src.baselines.comrecgc.graph_trace import (
     ActionTraceRecorder,
     TRACE_IMPORTANCE_ABS_TOLERANCE,
+    apply_action_to_normalized_payload,
     assert_trace_parity,
     infer_official_single_edit,
     iter_candidate_lineage_from_selected_trace,
     iter_selected_trace,
     load_selected_trace,
+    normalized_untyped_graph_payload,
     recover_candidate_lineage_from_selected_trace,
     stable_graph_sha256,
     stable_untyped_graph_sha256,
@@ -473,6 +476,264 @@ def test_recover_lineage_infers_action_missing_from_cached_transition() -> None:
     ]
 
 
+def test_recorded_action_bypasses_ambiguous_graph_delta_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Graph(
+        x=[[1.0, 0.0], [1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=2,
+    )
+    target = Graph(
+        x=[[1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=1,
+        comrecgc_trace_node_ids=("source:1",),
+    )
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 7,
+            "head_index": 2,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_graph_sha256(source),
+            "target_graph_sha256": stable_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["INR", 0, 0],
+            "parent_id": "parent-1",
+        }
+    ]
+
+    def fail_if_inferred(*_args: object, **_kwargs: object) -> list[object]:
+        pytest.fail("recorded lineage must not invoke graph-delta inference")
+
+    monkeypatch.setattr(
+        graph_trace_module, "infer_official_single_edit", fail_if_inferred
+    )
+    audit: dict[str, object] = {}
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
+    )
+
+    assert lineage[0]["action_lineage_resolved"] is True
+    assert lineage[0]["actions"][0]["action"] == ["INR", 0, 0]
+    assert lineage[0]["actions"][0]["lineage_source"] == (
+        "recorded_action_replay_v1"
+    )
+    assert audit["recorded_action_selected_count"] == 1
+    assert audit["recorded_action_present_count"] == 1
+    assert audit["recorded_action_replay_ok_count"] == 1
+    assert audit["recorded_action_replay_mismatch_count"] == 0
+    assert audit["recorded_action_replay_verified_count"] == 1
+    assert audit["legacy_inference_called_count"] == 0
+    assert audit["legacy_inference_invocation_count"] == 0
+
+
+def test_recorded_action_exact_replay_is_verified() -> None:
+    source = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 8,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_graph_sha256(source),
+            "target_graph_sha256": stable_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NLC", 0, 1],
+            "parent_id": "parent-1",
+        }
+    ]
+    audit: dict[str, object] = {}
+
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        source_graphs_by_parent_id={"parent-1": source},
+        recovery_audit=audit,
+    )
+
+    action = lineage[0]["actions"][0]
+    assert action["action_recovery"] == "recorded_exact"
+    assert action["action_replay_exact"] is True
+    assert audit["recorded_action_replay_verified_count"] == 1
+    assert audit["recorded_action_replay_failed_count"] == 0
+
+
+def test_recorded_action_replay_mismatch_fails_closed_without_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 9,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_graph_sha256(source),
+            "target_graph_sha256": stable_graph_sha256(target),
+            "action_resolution": "exact",
+            "action": ["NOTHING", 0, 0],
+            "parent_id": "parent-1",
+        }
+    ]
+
+    def fail_if_inferred(*_args: object, **_kwargs: object) -> list[object]:
+        pytest.fail("mismatched recorded action must fail closed without inference")
+
+    monkeypatch.setattr(
+        graph_trace_module, "infer_official_single_edit", fail_if_inferred
+    )
+    audit: dict[str, object] = {}
+    with pytest.raises(
+        ValueError, match="Recorded selected action does not replay"
+    ) as error:
+        recover_candidate_lineage_from_selected_trace(
+            candidate_payload,
+            selected_events,
+            recovery_audit=audit,
+        )
+
+    assert '"official_graph_diff_diagnostic"' in str(error.value)
+    assert '"candidates": [["NLC", 0, 1]]' in str(error.value)
+    assert audit["recorded_action_selected_count"] == 1
+    assert audit["recorded_action_replay_failed_count"] == 1
+    assert audit["recorded_action_replay_mismatch_count"] == 1
+    assert audit["legacy_inference_invocation_count"] == 0
+
+
+def test_missing_recorded_action_invokes_legacy_inference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = graph()
+    target = graph(atom=1)
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 10,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_graph_sha256(source),
+            "target_graph_sha256": stable_graph_sha256(target),
+            "action_resolution": "missing",
+            "action": None,
+            "parent_id": "parent-1",
+        }
+    ]
+    calls = 0
+
+    def tracked_inference(source_graph: object, target_graph: object) -> list[object]:
+        nonlocal calls
+        calls += 1
+        return infer_official_single_edit(source_graph, target_graph)
+
+    monkeypatch.setattr(
+        graph_trace_module, "infer_official_single_edit", tracked_inference
+    )
+    audit: dict[str, object] = {}
+    lineage = recover_candidate_lineage_from_selected_trace(
+        candidate_payload,
+        selected_events,
+        recovery_audit=audit,
+    )
+
+    assert calls == 1
+    assert lineage[0]["actions"][0]["lineage_source"] == (
+        "legacy_graph_diff_inference_v1"
+    )
+    assert audit["missing_action_fallback_count"] == 1
+    assert audit["legacy_missing_action_count"] == 1
+    assert audit["legacy_inference_called_count"] == 1
+    assert audit["legacy_inference_invocation_count"] == 1
+    assert audit["legacy_inference_success_count"] == 1
+
+
+def test_missing_recorded_action_ambiguous_legacy_inference_fails_closed() -> None:
+    source = Graph(
+        x=[[1.0, 0.0], [1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=2,
+    )
+    target = Graph(
+        x=[[1.0, 0.0]],
+        edge_index=[[], []],
+        num_nodes=1,
+        comrecgc_trace_node_ids=("source:1",),
+    )
+    candidate_payload = {
+        "graph_map": {"source": [source], "target": [target]},
+        "counterfactual_candidates": [{"graph_hash": "target"}],
+    }
+    selected_events = [
+        {
+            "move_index": 11,
+            "head_index": 0,
+            "event": "selected_transition",
+            "source_official_hash": "source",
+            "target_official_hash": "target",
+            "source_graph_sha256": stable_graph_sha256(source),
+            "target_graph_sha256": stable_graph_sha256(target),
+            "action_resolution": "missing",
+            "action": None,
+            "parent_id": "parent-1",
+        }
+    ]
+    audit: dict[str, object] = {}
+
+    with pytest.raises(ValueError, match="not one unique pinned-upstream"):
+        recover_candidate_lineage_from_selected_trace(
+            candidate_payload,
+            selected_events,
+            recovery_audit=audit,
+        )
+
+    assert audit["missing_action_fallback_count"] == 1
+    assert audit["legacy_inference_invocation_count"] == 1
+    assert audit["legacy_inference_failure_count"] == 1
+    assert audit["legacy_inference_ambiguous_count"] == 1
+
+
+def test_recorded_action_json_round_trip_replays_exact_target(tmp_path) -> None:
+    source = graph()
+    target = graph(atom=1)
+    action_path = tmp_path / "selected_action.json"
+    action_path.write_text(
+        json.dumps({"action": ["NLC", 0, 1]}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    loaded = json.loads(action_path.read_text(encoding="utf-8"))["action"]
+
+    assert apply_action_to_normalized_payload(source, loaded) == (
+        normalized_untyped_graph_payload(target)
+    )
+
+
 def test_recover_lineage_accepts_exact_frozen_zero_action_source_root() -> None:
     source = graph()
     candidate_payload = {
@@ -665,6 +926,23 @@ def test_trace_resume_reuses_identical_completed_chunks_without_duplicates(tmp_p
     assert manifest["chunks"][0]["materialization"] == "adopt_existing_identical"
 
 
+def test_trace_checkpoint_round_trip_preserves_completed_and_pending_rows(tmp_path) -> None:
+    recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=2)
+    recorder._stream_event({"event": "teleport", "move_index": 0})
+    recorder._stream_event({"event": "teleport", "move_index": 1})
+    recorder._stream_event({"event": "teleport", "move_index": 2})
+    recorder.move_index = 3
+    state = recorder.export_checkpoint_state()
+    assert len(state["chunks"]) == 1
+    assert len(state["pending_events"]) == 1
+
+    restored = ActionTraceRecorder(output_dir=tmp_path, chunk_size=2)
+    restored.restore_checkpoint_state(state)
+    assert restored.export_checkpoint_state() == state
+    restored._stream_event({"event": "teleport", "move_index": 3})
+    assert len(restored.export_checkpoint_state()["chunks"]) == 2
+
+
 def test_full_trace_writes_compact_reloadable_lineage_without_inline_actions(tmp_path) -> None:
     recorder = ActionTraceRecorder(output_dir=tmp_path, chunk_size=1)
     source, target, module = _record_one_transition(recorder)
@@ -696,6 +974,12 @@ def test_full_trace_writes_compact_reloadable_lineage_without_inline_actions(tmp
     assert contract["candidate_actions_inlined"] is False
     assert summary["candidate_lineage_format"] == "selected_trace_predecessor_index"
     assert summary["max_materialized_candidate_lineages"] == 1
+    assert summary["lineage_recovery_audit"][
+        "recorded_action_replay_verified_count"
+    ] == 1
+    assert summary["lineage_recovery_audit"][
+        "legacy_inference_invocation_count"
+    ] == 0
     index_row = __import__("json").loads(
         (tmp_path / contract["candidate_index_path"])
         .read_text(encoding="utf-8")

@@ -16,6 +16,7 @@ from .contracts import atomic_write_bytes, sha256_file, stable_json_sha256, writ
 
 TRACE_IMPORTANCE_ABS_TOLERANCE = 1e-6
 MODEL_CF_IMPORTANCE_THRESHOLD = 0.5
+TRACE_CHECKPOINT_SCHEMA_VERSION = "comrecgc_action_trace_state_v1"
 
 
 def _plain(value: Any) -> Any:
@@ -486,6 +487,118 @@ class ActionTraceRecorder:
 
         return wrapped
 
+    def export_checkpoint_state(self) -> dict[str, Any]:
+        """Capture trace state without forcing a new chunk boundary.
+
+        Weak object/action lookups are deliberately excluded: the compact
+        transition cache is their durable authority and they are only needed
+        while one move is being evaluated.  Completed chunks and pending rows
+        together retain the exact trace stream.
+        """
+
+        chunks = [dict(row) for row in self._chunks]
+        if self._trace_root is not None:
+            for row in chunks:
+                path = self._trace_root / str(row["path"])
+                if (
+                    not path.is_file()
+                    or path.is_symlink()
+                    or path.stat().st_size != int(row["bytes"])
+                    or sha256_file(path) != str(row["sha256"])
+                ):
+                    raise ValueError(
+                        f"COMRECGC trace checkpoint chunk is missing or corrupt: {path}"
+                    )
+        return {
+            "schema_version": TRACE_CHECKPOINT_SCHEMA_VERSION,
+            "chunk_size": int(self.chunk_size),
+            "compact_enumeration": bool(self.compact_enumeration),
+            "enumerated": dict(self.enumerated),
+            "predecessor_by_official_hash": dict(
+                self.predecessor_by_official_hash
+            ),
+            "pending_events": list(self._pending_events),
+            "chunks": chunks,
+            "move_index": int(self.move_index),
+            "enumerated_transition_count": int(self.enumerated_transition_count),
+            "selected_transition_count": int(self.selected_transition_count),
+            "teleport_count": int(self.teleport_count),
+            "transition_cache_hit_count": int(self.transition_cache_hit_count),
+            "transition_cache_miss_count": int(self.transition_cache_miss_count),
+        }
+
+    def restore_checkpoint_state(self, value: Mapping[str, Any]) -> None:
+        """Restore one validated trace prefix into a fresh recorder."""
+
+        if value.get("schema_version") != TRACE_CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError("Unsupported COMRECGC trace checkpoint schema.")
+        if int(value.get("chunk_size", -1)) != int(self.chunk_size) or bool(
+            value.get("compact_enumeration")
+        ) != bool(self.compact_enumeration):
+            raise ValueError("COMRECGC trace checkpoint configuration differs.")
+        if (
+            self.enumerated
+            or self.predecessor_by_official_hash
+            or self._pending_events
+            or self._chunks
+            or self.move_index
+            or self.enumerated_transition_count
+            or self.selected_transition_count
+            or self.teleport_count
+            or self.transition_cache_hit_count
+            or self.transition_cache_miss_count
+        ):
+            raise RuntimeError("COMRECGC trace restore target is not fresh.")
+        chunks = [dict(row) for row in value.get("chunks") or ()]
+        for expected_index, row in enumerate(chunks):
+            if int(row.get("index", -1)) != expected_index:
+                raise ValueError("COMRECGC trace checkpoint chunk order is invalid.")
+            relative = Path(str(row.get("path") or ""))
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or relative.parent != Path("selected_action_trace_chunks")
+            ):
+                raise ValueError("COMRECGC trace checkpoint chunk path is unsafe.")
+            if self._trace_root is not None:
+                path = self._trace_root / relative
+                if (
+                    not path.is_file()
+                    or path.is_symlink()
+                    or path.stat().st_size != int(row.get("bytes", -1))
+                    or sha256_file(path) != str(row.get("sha256"))
+                ):
+                    raise ValueError(
+                        f"COMRECGC trace checkpoint chunk is missing or corrupt: {path}"
+                    )
+        self.enumerated = dict(value.get("enumerated") or {})
+        self.predecessor_by_official_hash = dict(
+            value.get("predecessor_by_official_hash") or {}
+        )
+        self._pending_events = list(value.get("pending_events") or ())
+        self._chunks = chunks
+        for name in (
+            "move_index",
+            "enumerated_transition_count",
+            "selected_transition_count",
+            "teleport_count",
+            "transition_cache_hit_count",
+            "transition_cache_miss_count",
+        ):
+            setattr(self, name, int(value.get(name, 0)))
+        # A move emits either one teleport event or one selected row per head.
+        # The head count is runtime provenance, so the generic recorder only
+        # enforces non-negative counters here; runtime restore checks move_index.
+        if min(
+            self.move_index,
+            self.selected_transition_count,
+            self.teleport_count,
+            self.enumerated_transition_count,
+            self.transition_cache_hit_count,
+            self.transition_cache_miss_count,
+        ) < 0:
+            raise ValueError("COMRECGC trace checkpoint counters are invalid.")
+
     def _lineage_for_hash(self, official_hash: str) -> list[dict[str, Any]] | None:
         reversed_path: list[dict[str, Any]] = []
         current = str(official_hash)
@@ -631,6 +744,9 @@ class ActionTraceRecorder:
                 write_json(frozen_payload_audit_path, frozen_payload_closure)
         lineage_path = root / "candidate_action_lineage.json"
         lineage_index_path: Path | None = None
+        lineage_recovery_audit: dict[str, Any] | None = (
+            {} if source_graphs_by_parent_id is not None else None
+        )
         if compact_candidate_lineage:
             if source_graphs_by_parent_id is None:
                 raise ValueError(
@@ -653,6 +769,7 @@ class ActionTraceRecorder:
                             iter_selected_trace(selected_manifest_path),
                             source_graphs_by_parent_id=source_graphs_by_parent_id,
                             include_actions=False,
+                            recovery_audit=lineage_recovery_audit,
                         )
                     ):
                         if int(row["candidate_index"]) != expected_index:
@@ -710,6 +827,7 @@ class ActionTraceRecorder:
                     payload,
                     iter_selected_trace(selected_manifest_path),
                     source_graphs_by_parent_id=source_graphs_by_parent_id,
+                    recovery_audit=lineage_recovery_audit,
                 )
                 if source_graphs_by_parent_id is not None
                 else self.candidate_lineage(payload)
@@ -763,6 +881,7 @@ class ActionTraceRecorder:
                 if source_graphs_by_parent_id is not None
                 else "runtime_recorded_predecessor_v1"
             ),
+            "lineage_recovery_audit": lineage_recovery_audit,
             "frozen_payload_closure": frozen_payload_closure,
         }
         write_json(root / "trace_summary.json", summary)
@@ -862,9 +981,16 @@ def _is_bridge(
     return second not in seen
 
 
-def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any]:
-    """Recover one pinned-upstream neighbor action from an exact graph delta."""
+def enumerate_official_single_edits(
+    source_graph: Any, target_graph: Any
+) -> list[list[Any]]:
+    """Enumerate exact pinned-upstream edits explaining one graph delta.
 
+    This is intentionally separate from :func:`infer_official_single_edit` so
+    the recorded-action path can include graph-delta candidates in a
+    fail-closed diagnostic without invoking the legacy inference function.
+    Normal recorded-action replay never calls either function.
+    """
     source_x = _feature_rows(source_graph)
     target_x = _feature_rows(target_graph)
     source_edges = _undirected_edges(source_graph)
@@ -889,16 +1015,16 @@ def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any
                 value not in {0.0, 1.0} for value in target_x[node]
             ):
                 raise ValueError("Recovered NLC target is not one-hot encoded.")
-            return ["NLC", node, active[0]]
+            return [["NLC", node, active[0]]]
         if not changed_features and len(added_edges) == 1 and not removed_edges:
             first, second = next(iter(added_edges))
-            return ["EA", first, second]
+            return [["EA", first, second]]
         if not changed_features and len(removed_edges) == 1 and not added_edges:
             edge = next(iter(removed_edges))
             action = "ERR" if _is_bridge(source_edges, edge, source_nodes) else "ER"
-            return [action, edge[0], edge[1]]
+            return [[action, edge[0], edge[1]]]
         if not changed_features and not added_edges and not removed_edges:
-            return ["NOTHING", 0, 0]
+            return [["NOTHING", 0, 0]]
     elif target_nodes == source_nodes + 1:
         if target_x[:-1] != source_x:
             raise ValueError("Recovered node addition changes retained node features.")
@@ -909,13 +1035,13 @@ def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any
             raise ValueError("Recovered node addition also removes an edge.")
         added_edges = target_edges - source_edges
         if not added_edges:
-            return ["INA", active[0], active[0]]
+            return [["INA", active[0], active[0]]]
         if len(added_edges) == 1:
             first, second = next(iter(added_edges))
             new_node = source_nodes
             if new_node in {first, second}:
                 attachment = second if first == new_node else first
-                return ["NA", attachment, active[0]]
+                return [["NA", attachment, active[0]]]
     elif target_nodes == source_nodes - 1:
         matches: list[list[Any]] = []
         for removed in range(source_nodes):
@@ -928,19 +1054,67 @@ def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any
                 matches.append(["INR", removed, removed])
             elif degree == 1:
                 matches.append(["NR", removed, removed])
-        if len(matches) == 1:
-            return matches[0]
+        return matches
+    return []
+
+
+def infer_official_single_edit(source_graph: Any, target_graph: Any) -> list[Any]:
+    """Recover one unique pinned-upstream neighbor action from a graph delta."""
+
+    matches = enumerate_official_single_edits(source_graph, target_graph)
+    if len(matches) == 1:
+        return matches[0]
     raise ValueError(
         "Selected COMRECGC transition is not one unique pinned-upstream single edit."
     )
+
+
+def _official_single_edit_diagnostic(
+    source_graph: Any, target_graph: Any
+) -> dict[str, Any]:
+    """Return graph-delta candidates for errors without selecting a fallback."""
+
+    try:
+        candidates = enumerate_official_single_edits(source_graph, target_graph)
+    except (IndexError, TypeError, ValueError) as exc:
+        return {"candidates": [], "enumeration_error": str(exc)}
+    return {"candidates": candidates, "enumeration_error": None}
 
 
 def _lineage_recovery_context(
     payload: Mapping[str, Any],
     selected_events: Any,
     source_graphs_by_parent_id: Mapping[str, Any] | None,
+    recovery_audit: MutableMapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .frozen_payload import payload_graphs_by_official_hash
+
+    audit: MutableMapping[str, Any]
+    if recovery_audit is None:
+        audit = {}
+    else:
+        audit = recovery_audit
+    audit.clear()
+    audit.update(
+        {
+            "schema_version": "comrecgc_recorded_action_first_v1",
+            "recorded_action_present_count": 0,
+            "recorded_action_replay_ok_count": 0,
+            "recorded_action_replay_mismatch_count": 0,
+            "legacy_missing_action_count": 0,
+            "legacy_inference_called_count": 0,
+            "legacy_inference_ambiguous_count": 0,
+            # Compatibility aliases retained for the v7 reports written before
+            # the cross-site handoff standardized the public counter names.
+            "recorded_action_selected_count": 0,
+            "recorded_action_replay_verified_count": 0,
+            "recorded_action_replay_failed_count": 0,
+            "missing_action_fallback_count": 0,
+            "legacy_inference_invocation_count": 0,
+            "legacy_inference_success_count": 0,
+            "legacy_inference_failure_count": 0,
+        }
+    )
 
     graph_by_stable_key: dict[tuple[str, str], Any] = {}
     graph_by_official_key: dict[tuple[str, str], Any] = {}
@@ -1003,22 +1177,138 @@ def _lineage_recovery_context(
             target_graph, str(event["target_graph_sha256"])
         ):
             raise ValueError("Selected trace target graph SHA256 differs from the frozen payload.")
-        inferred = infer_official_single_edit(source_graph, target_graph)
-        replayed = apply_action_to_normalized_payload(source_graph, inferred)
-        if replayed != normalized_untyped_graph_payload(target_graph):
-            raise ValueError(
-                "Recovered selected action does not replay to the exact target graph."
-            )
         recorded = event.get("action")
-        if recorded is not None and list(recorded) != inferred:
-            raise ValueError(
-                "Recorded selected action disagrees with its exact source/target graph delta."
+        target_payload = normalized_untyped_graph_payload(target_graph)
+        if recorded is not None:
+            audit["recorded_action_present_count"] += 1
+            audit["recorded_action_selected_count"] += 1
+            try:
+                resolved_action = normalized_action(recorded)
+                replayed = apply_action_to_normalized_payload(
+                    source_graph, resolved_action
+                )
+            except (IndexError, TypeError, ValueError) as exc:
+                audit["recorded_action_replay_mismatch_count"] += 1
+                audit["recorded_action_replay_failed_count"] += 1
+                raise ValueError(
+                    "Recorded selected action failed exact pinned-upstream replay: "
+                    + json.dumps(
+                        {
+                            "parent_id": parent_id,
+                            "move_index": event.get("move_index"),
+                            "head_index": event.get("head_index"),
+                            "source_official_hash": event.get(
+                                "source_official_hash"
+                            ),
+                            "target_official_hash": event.get(
+                                "target_official_hash"
+                            ),
+                            "source_graph_sha256": event.get(
+                                "source_graph_sha256"
+                            ),
+                            "target_graph_sha256": event.get(
+                                "target_graph_sha256"
+                            ),
+                            "recorded_action": _plain(recorded),
+                            "replay_error": str(exc),
+                            "dataset": payload.get("dataset")
+                            or getattr(source_graph, "comrecgc_dataset", None),
+                            "transition_id": event.get("transition_id"),
+                            "trace_chunk": event.get("trace_chunk"),
+                            "trace_row": event.get("trace_row"),
+                            "code_commit": payload.get("project_commit")
+                            or payload.get("code_commit"),
+                            "external_comrecgc_commit": payload.get(
+                                "upstream_commit"
+                            ),
+                            "official_graph_diff_diagnostic": (
+                                _official_single_edit_diagnostic(
+                                    source_graph, target_graph
+                                )
+                            ),
+                        },
+                        sort_keys=True,
+                    )
+                ) from exc
+            if replayed != target_payload:
+                audit["recorded_action_replay_mismatch_count"] += 1
+                audit["recorded_action_replay_failed_count"] += 1
+                raise ValueError(
+                    "Recorded selected action does not replay to the exact target graph: "
+                    + json.dumps(
+                        {
+                            "parent_id": parent_id,
+                            "move_index": event.get("move_index"),
+                            "head_index": event.get("head_index"),
+                            "source_official_hash": event.get(
+                                "source_official_hash"
+                            ),
+                            "target_official_hash": event.get(
+                                "target_official_hash"
+                            ),
+                            "source_graph_sha256": event.get(
+                                "source_graph_sha256"
+                            ),
+                            "target_graph_sha256": event.get(
+                                "target_graph_sha256"
+                            ),
+                            "recorded_action": resolved_action,
+                            "replayed_graph_sha256": stable_json_sha256(replayed),
+                            "expected_graph_sha256": stable_json_sha256(
+                                target_payload
+                            ),
+                            "dataset": payload.get("dataset")
+                            or getattr(source_graph, "comrecgc_dataset", None),
+                            "transition_id": event.get("transition_id"),
+                            "trace_chunk": event.get("trace_chunk"),
+                            "trace_row": event.get("trace_row"),
+                            "code_commit": payload.get("project_commit")
+                            or payload.get("code_commit"),
+                            "external_comrecgc_commit": payload.get(
+                                "upstream_commit"
+                            ),
+                            "official_graph_diff_diagnostic": (
+                                _official_single_edit_diagnostic(
+                                    source_graph, target_graph
+                                )
+                            ),
+                        },
+                        sort_keys=True,
+                    )
+                )
+            audit["recorded_action_replay_ok_count"] += 1
+            audit["recorded_action_replay_verified_count"] += 1
+            action_recovery = "recorded_exact"
+            lineage_source = "recorded_action_replay_v1"
+        else:
+            audit["legacy_missing_action_count"] += 1
+            audit["legacy_inference_called_count"] += 1
+            audit["missing_action_fallback_count"] += 1
+            audit["legacy_inference_invocation_count"] += 1
+            try:
+                resolved_action = infer_official_single_edit(
+                    source_graph, target_graph
+                )
+            except ValueError as exc:
+                if "not one unique" in str(exc):
+                    audit["legacy_inference_ambiguous_count"] += 1
+                audit["legacy_inference_failure_count"] += 1
+                raise
+            replayed = apply_action_to_normalized_payload(
+                source_graph, resolved_action
             )
-        event["action"] = inferred
+            if replayed != target_payload:
+                audit["legacy_inference_failure_count"] += 1
+                raise ValueError(
+                    "Recovered selected action does not replay to the exact target graph."
+                )
+            audit["legacy_inference_success_count"] += 1
+            action_recovery = "inferred_exact_graph_delta_v1"
+            lineage_source = "legacy_graph_diff_inference_v1"
+        event["action"] = resolved_action
         event["action_resolution"] = "exact"
-        event["action_recovery"] = (
-            "recorded_exact" if recorded is not None else "inferred_exact_graph_delta_v1"
-        )
+        event["action_recovery"] = action_recovery
+        event["lineage_source"] = lineage_source
         event["action_replay_exact"] = True
         existing = predecessor.get(target_key)
         if existing is not None:
@@ -1050,6 +1340,7 @@ def _lineage_recovery_context(
         "predecessor": predecessor,
         "observed_source_keys": observed_source_keys,
         "source_graphs_required": source_graphs_by_parent_id is not None,
+        "lineage_recovery_audit": audit,
     }
 
 
@@ -1059,11 +1350,15 @@ def iter_candidate_lineage_from_selected_trace(
     *,
     source_graphs_by_parent_id: Mapping[str, Any] | None = None,
     include_actions: bool = True,
+    recovery_audit: MutableMapping[str, Any] | None = None,
 ) -> Any:
     """Yield candidate paths one at a time from one compact predecessor index."""
 
     context = _lineage_recovery_context(
-        payload, selected_events, source_graphs_by_parent_id
+        payload,
+        selected_events,
+        source_graphs_by_parent_id,
+        recovery_audit,
     )
     graph_by_official_key = context["graph_by_official_key"]
     official_matches = context["official_matches"]
@@ -1168,6 +1463,7 @@ def recover_candidate_lineage_from_selected_trace(
     selected_events: Any,
     *,
     source_graphs_by_parent_id: Mapping[str, Any] | None = None,
+    recovery_audit: MutableMapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover complete candidate paths from streamed source/target graph deltas."""
 
@@ -1177,6 +1473,7 @@ def recover_candidate_lineage_from_selected_trace(
             selected_events,
             source_graphs_by_parent_id=source_graphs_by_parent_id,
             include_actions=True,
+            recovery_audit=recovery_audit,
         )
     )
 

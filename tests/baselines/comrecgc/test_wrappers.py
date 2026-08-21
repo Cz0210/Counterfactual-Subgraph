@@ -231,11 +231,29 @@ def test_full_runtime_enables_selected_transition_only_action_index() -> None:
     text = (ROOT / "src/baselines/comrecgc/runtime.py").read_text(encoding="utf-8")
     assert 'compact_enumeration=mode == "full"' in text
     assert '"full_selected_transition_weak_action_index_v1"' in text
-    assert '"generation_resume_supported": False' in text
+    assert '"generation_resume_supported": mode == "full"' in text
+    assert "run_generation_loop(" in text
+    assert "save_generation_checkpoint(" in text
     assert 'preserve_active_transitions=mode == "full"' in text
     assert 'compact_transitions=mode == "full"' in text
     assert "transition_expanded_capacity=parameters.heads" in text
     assert '"active_move_transition_eviction_deferred_v1"' in text
+
+
+def test_bace_generation_wrappers_require_exact_persistent_checkpoint_args() -> None:
+    for name in (
+        "comrecgc_bace_generation_storage_v6.sh",
+        "comrecgc_bace_project_generate.sh",
+    ):
+        text = (ROOT / "scripts" / "slurm" / name).read_text(encoding="utf-8")
+        assert "CHECKPOINT_MIRROR_ROOT must be an independent persistent path" in text
+        assert "--checkpoint-root" in text
+        assert "--checkpoint-mirror-root" in text
+        assert "--checkpoint-interval-steps 500" in text
+        assert "--checkpoint-keep-last 2" in text
+        assert "--progress-interval-steps 25" in text
+        assert "args+=(--resume)" in text
+        assert "export PYTHONHASHSEED=0" in text
     assert '"compact_transition_action_replay_lru_v1"' in (
         ROOT / "src/baselines/comrecgc/transition_cache.py"
     ).read_text(encoding="utf-8")

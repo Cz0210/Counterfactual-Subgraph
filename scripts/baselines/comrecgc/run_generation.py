@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,7 +14,56 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.baselines.comrecgc.contracts import GenerationParameters  # noqa: E402
+from src.baselines.comrecgc.generation_checkpoint import (  # noqa: E402
+    scientific_command_sha256,
+)
 from src.baselines.comrecgc.runtime import run_native_smoke, run_project_generation  # noqa: E402
+
+
+_SECRET_KEY = re.compile(
+    r"(?:^|[_-])(?:password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key)(?:$|[_-])",
+    re.IGNORECASE,
+)
+
+
+def _redact_cli_value(key: str, value: object) -> object:
+    if _SECRET_KEY.search(key):
+        return "<redacted>"
+    if isinstance(value, list):
+        redacted: list[object] = []
+        for item in value:
+            if isinstance(item, str):
+                if "=" in item:
+                    item_key, _item_value = item.split("=", 1)
+                    if _SECRET_KEY.search(item_key):
+                        redacted.append(f"{item_key}=<redacted>")
+                    else:
+                        redacted.append(item)
+                elif _SECRET_KEY.search(item):
+                    redacted.append("<redacted>")
+                else:
+                    redacted.append(item)
+            else:
+                redacted.append(item)
+        return redacted
+    return value
+
+
+def canonical_scientific_argv(args: argparse.Namespace) -> tuple[str, ...]:
+    """Canonicalize all parsed CLI values, excluding only ``--resume``.
+
+    Defaults are included so equivalent explicit/default invocations have one
+    identity. Sensitive assignments are redacted before persistence.
+    """
+
+    canonical = ["scripts/baselines/comrecgc/run_generation.py"]
+    for key, value in sorted(vars(args).items()):
+        if key == "resume":
+            continue
+        redacted = _redact_cli_value(key, value)
+        encoded = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
+        canonical.append(f"--{key.replace('_', '-')}={encoded}")
+    return tuple(canonical)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--checkpoint-root",
+        help="Durable completed-step checkpoints (required with --resume).",
+    )
+    parser.add_argument(
+        "--checkpoint-mirror-root",
+        help="Independent persistent mirror; mandatory for BACE full generation.",
+    )
+    parser.add_argument("--checkpoint-interval-steps", type=int, default=500)
+    parser.add_argument("--checkpoint-keep-last", type=int, default=2)
+    parser.add_argument("--progress-interval-steps", type=int, default=25)
     parser.add_argument(
         "--trace-output-dir",
         help="Optional project-owned action trace directory; does not modify upstream output.",
@@ -63,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    scientific_argv = canonical_scientific_argv(args)
+    command_sha256 = scientific_command_sha256(scientific_argv)
     parameters = GenerationParameters.for_mode(args.mode)
     upstream = Path(args.upstream_root)
     if not upstream.is_absolute():
@@ -113,6 +176,13 @@ def main() -> int:
             storage_min_free_bytes=int(args.storage_min_free_gib * 1024**3),
             storage_min_free_ratio=args.storage_min_free_ratio,
             storage_min_free_inodes=args.storage_min_free_inodes,
+            checkpoint_root=args.checkpoint_root,
+            checkpoint_mirror_root=args.checkpoint_mirror_root,
+            checkpoint_interval_steps=args.checkpoint_interval_steps,
+            checkpoint_keep_last=args.checkpoint_keep_last,
+            progress_interval_steps=args.progress_interval_steps,
+            scientific_argv=scientific_argv,
+            command_sha256=command_sha256,
         )
     print(json.dumps(manifest, sort_keys=True, default=str))
     return 0

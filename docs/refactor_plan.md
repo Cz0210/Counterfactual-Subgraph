@@ -676,3 +676,38 @@ Mutagenicity roadmaps.
 - [ ] Recompute GlobalGCE calibration matrices for min-freq 18/7/4 and stream
   min-freq 2 without a GPU.
 - [ ] Complete GlobalGCE and COMRECGC BACE artifacts, then run common4 audit.
+
+# AutoDL Four-Lane Three-Line Recovery (2026-08-21)
+
+- [x] Add a fixed-run, data-driven four-lane AutoDL process orchestrator.
+- [x] Keep persistent run state, logs, process provenance, heartbeats, locks,
+  and scientific success/failure sentinels outside the disposable NVMe root.
+- [x] Reserve the fast root for lane-local caches and the BACE active state.
+- [x] Enforce one independent GPU, PID file, writer lock, cache, input, output,
+  and command per lane; never represent an AutoDL PID as a Slurm job id.
+- [x] Require `DISALLOW_GENERATION=1` for every preserved MUT/AIDS stage.
+- [x] Gate BACE common4 on both BACE COMRECGC final and GlobalGCE WNode
+  scientific success sentinels.
+- [x] Provide one persistent `start/status/resume/stop` interface and reject
+  an unconfigured command, writable input snapshot, unknown dependency,
+  second writer, or untracked nonempty first-start output root.
+- [x] Fill the exact recovery/downstream commands and add the production stage
+  runner plus paired Slurm wrapper.
+- [x] Add immutable primary/static/Step0 input gates, SHA-bound atomic stage
+  sentinels, and fail-closed partial-output handling.
+- [x] Add mandatory MUT/AIDS preserved-lineage smoke gates and a BACE
+  formal-configuration SIGKILL/fast-loss profile gate bound to repair content.
+- [x] Persist BACE trace chunks and latest-two checkpoint mirrors, and require
+  the BACE artifact gate before common4 publication.
+- [x] Bind every reusable substage and top-level sentinel to current input,
+  command, environment, code/config closure, vendor commit, marker, and output
+  SHA evidence; reject marker-only crash windows and stale outputs.
+- [x] Bind local children to kernel start time, command digest, and process
+  group; never signal a stale or reused PID, and scrub inherited credentials.
+- [x] Support fail-closed incremental `start/resume --lane` activation while
+  keeping omitted lanes `NOT_STARTED` and preserving no-flag four-lane launch.
+- [x] Bind worker identity and persisted run/lane state to exact process,
+  spec-byte digest, schema, run, lane, and normalized roots.
+- [x] Require persisted stage and producer-lane success in addition to
+  scientific dependency proofs, with sentinel-first success publication.
+- [ ] Pass the AutoDL integration smokes, then start the four formal lanes.

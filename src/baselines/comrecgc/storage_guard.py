@@ -79,7 +79,14 @@ def sqlite_state_sizes(database_path: str | Path) -> dict[str, int]:
 class StorageGuard:
     """Monitor one persistent scratch state and stop before SQLite corruption."""
 
-    def __init__(self, config: StorageGuardConfig, *, database_path: str | Path) -> None:
+    def __init__(
+        self,
+        config: StorageGuardConfig,
+        *,
+        database_path: str | Path,
+        exact_resume_supported: bool = False,
+        generation_checkpoint_root: str | Path | None = None,
+    ) -> None:
         config.validate()
         self.config = config
         self.root = config.root.expanduser().resolve()
@@ -94,6 +101,16 @@ class StorageGuard:
         self.heartbeat_path = self.root / "storage_guard_heartbeat.json"
         self.stop_path = self.root / "STORAGE_GUARD_STOP.json"
         self.checkpoint_path = self.root / "storage_guard_checkpoint.json"
+        self.exact_resume_supported = bool(exact_resume_supported)
+        self.generation_checkpoint_root = (
+            str(Path(generation_checkpoint_root).expanduser().resolve())
+            if generation_checkpoint_root is not None
+            else None
+        )
+        if self.exact_resume_supported and self.generation_checkpoint_root is None:
+            raise ValueError(
+                "Exact storage-guard resume requires a generation checkpoint root."
+            )
 
     def snapshot(self, *, current_step: int, state: Any) -> dict[str, Any]:
         filesystem = _filesystem_snapshot(self.root)
@@ -158,13 +175,21 @@ class StorageGuard:
             **audit,
             "wal_checkpoint": wal_checkpoint,
             "checkpoint_atomic": True,
-            "random_walk_resume_supported": False,
-            "resume_safe": False,
-            "restart_policy": "fresh_from_step_0",
+            "random_walk_resume_supported": self.exact_resume_supported,
+            "resume_safe": self.exact_resume_supported,
+            "restart_policy": (
+                "resume_latest_completed_step_checkpoint"
+                if self.exact_resume_supported
+                else "fresh_from_step_0"
+            ),
+            "generation_checkpoint_root": self.generation_checkpoint_root,
             "reason": (
-                "Pinned COMRECGC does not expose complete RNG/transition checkpoints; "
-                "this guard preserves a valid database and fails closed without "
-                "claiming scientific resume support."
+                "The project-owned outer loop publishes a complete RNG, transition, "
+                "trace, graph-state and SQLite checkpoint before this completed-step "
+                "storage check can stop generation."
+                if self.exact_resume_supported
+                else "No complete generation checkpoint provider was registered; "
+                "the guard preserves SQLite and fails closed without claiming resume."
             ),
         }
         write_json(self.checkpoint_path, checkpoint)

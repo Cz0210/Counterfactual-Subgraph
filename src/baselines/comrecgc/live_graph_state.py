@@ -24,6 +24,7 @@ from .graph_trace import stable_untyped_graph_sha256
 
 
 GRAPH_STATE_POLICY = "authoritative_backing_live_graph_resolution_v2"
+LIVE_GRAPH_CHECKPOINT_SCHEMA = "comrecgc_live_graph_state_v1"
 
 
 class ComRecGCLiveGraphResolutionError(RuntimeError):
@@ -61,10 +62,33 @@ def _entry_graph_sha256(value: Any) -> str:
 
 
 class AuthoritativeGraphStore:
-    """Single-writer SQLite graph store with content checksums."""
+    """SQLite graph store with explicit writer and immutable-reader modes."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path).expanduser().resolve()
+        self.read_only = bool(read_only)
+        if self.read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(
+                    f"COMRECGC authoritative graph store missing: {self.path}"
+                )
+            wal_path = Path(f"{self.path}-wal")
+            if wal_path.exists() and wal_path.stat().st_size > 0:
+                raise RuntimeError(
+                    "Immutable COMRECGC graph-store audit rejects a non-empty WAL: "
+                    f"{wal_path}"
+                )
+            self._connection = sqlite3.connect(
+                f"{self.path.as_uri()}?mode=ro&immutable=1",
+                uri=True,
+                timeout=60.0,
+            )
+            self._connection.execute("PRAGMA query_only=ON")
+            self._connection.execute("PRAGMA busy_timeout=60000")
+            self.write_count = 0
+            self.read_count = 0
+            return
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(str(self.path), timeout=60.0)
         self._connection.execute("PRAGMA busy_timeout=60000")
@@ -95,13 +119,26 @@ class AuthoritativeGraphStore:
         self.read_count = 0
 
     def close(self) -> None:
+        if self.read_only:
+            self._connection.close()
+            return
         self._connection.commit()
         self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._connection.close()
 
+    @property
+    def checkpoint_connection(self) -> sqlite3.Connection:
+        """Expose the single writer solely for SQLite's consistent backup API."""
+
+        if self.read_only:
+            raise RuntimeError("Read-only COMRECGC graph stores cannot be checkpointed.")
+        return self._connection
+
     def checkpoint_wal(self, *, truncate: bool = False) -> dict[str, int]:
         """Flush committed WAL pages without weakening durability."""
 
+        if self.read_only:
+            raise RuntimeError("Read-only COMRECGC graph stores cannot checkpoint WAL.")
         mode = "TRUNCATE" if truncate else "PASSIVE"
         busy, log_pages, checkpointed_pages = self._connection.execute(
             f"PRAGMA wal_checkpoint({mode})"
@@ -128,6 +165,8 @@ class AuthoritativeGraphStore:
         return {"value_sha256": str(row[0]), "graph_sha256": str(row[1])}
 
     def put(self, key: Any, value: Any) -> dict[str, str]:
+        if self.read_only:
+            raise RuntimeError("Read-only COMRECGC graph stores reject writes.")
         key_blob = _key_blob(key)
         value_blob = _entry_blob(value)
         value_sha256 = hashlib.sha256(value_blob).hexdigest()
@@ -491,6 +530,55 @@ class LiveGraphMap(dict[Any, Any]):
             ),
         }
 
+    def export_checkpoint_state(self) -> dict[str, Any]:
+        if self.pin_counts or self.deferred_deletions or self.current_graph_hashes:
+            raise RuntimeError("COMRECGC live graph checkpoint requested inside a move.")
+        return {
+            "schema_version": LIVE_GRAPH_CHECKPOINT_SCHEMA,
+            "seed": self.seed,
+            "current_step": self.current_step,
+            "eviction_attempts": self.eviction_attempts,
+            "eviction_committed": self.eviction_committed,
+            "eviction_deferred": self.eviction_deferred,
+            "active_eviction_prevented": self.active_eviction_prevented,
+            "deferred_flushed": self.deferred_flushed,
+            "rehydrations": self.rehydrations,
+            "unresolved_lookups": self.unresolved_lookups,
+            "missing_unmaterialized_eviction_count": (
+                self.missing_unmaterialized_eviction_count
+            ),
+            "max_hot_cache_size": self.max_hot_cache_size,
+            "recent_evictions": list(self.recent_evictions),
+            "store_write_count": self.store.write_count,
+            "store_read_count": self.store.read_count,
+        }
+
+    def restore_checkpoint_state(self, value: Mapping[str, Any]) -> None:
+        if value.get("schema_version") != LIVE_GRAPH_CHECKPOINT_SCHEMA:
+            raise ValueError("Unsupported COMRECGC live graph checkpoint schema.")
+        if int(value.get("seed", -1)) != self.seed:
+            raise ValueError("COMRECGC live graph checkpoint seed differs.")
+        if self.pin_counts or self.deferred_deletions or self.current_graph_hashes:
+            raise RuntimeError("COMRECGC live graph restore target is active.")
+        for name in (
+            "current_step",
+            "eviction_attempts",
+            "eviction_committed",
+            "eviction_deferred",
+            "active_eviction_prevented",
+            "deferred_flushed",
+            "rehydrations",
+            "unresolved_lookups",
+            "missing_unmaterialized_eviction_count",
+            "max_hot_cache_size",
+        ):
+            setattr(self, name, int(value[name]))
+        if self.max_hot_cache_size < dict.__len__(self):
+            raise ValueError("COMRECGC live graph maximum hot size is inconsistent.")
+        self.recent_evictions = deque(value.get("recent_evictions") or (), maxlen=32)
+        self.store.write_count = int(value.get("store_write_count", 0))
+        self.store.read_count = int(value.get("store_read_count", 0))
+
     def __reduce__(self) -> tuple[Any, tuple[dict[Any, Any]]]:
         return dict, (dict(self),)
 
@@ -551,6 +639,18 @@ class LiveGraphState:
             "move_count": self.move_count,
             **self.graph_map.runtime_diagnostics(),
         }
+
+    def export_checkpoint_state(self) -> dict[str, Any]:
+        state = self.graph_map.export_checkpoint_state()
+        if self.move_count != int(state["current_step"]):
+            raise RuntimeError("COMRECGC live graph move counters are inconsistent.")
+        return {**state, "move_count": self.move_count}
+
+    def restore_checkpoint_state(self, value: Mapping[str, Any]) -> None:
+        self.graph_map.restore_checkpoint_state(value)
+        self.move_count = int(value.get("move_count", -1))
+        if self.move_count < 0 or self.move_count != self.graph_map.current_step:
+            raise ValueError("COMRECGC live graph restored move count is inconsistent.")
 
     def close(self) -> None:
         self.store.close()

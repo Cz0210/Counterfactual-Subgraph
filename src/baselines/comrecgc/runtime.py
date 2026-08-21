@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import random
 import shutil
+import socket
 import subprocess
+import sys
+import time
 from collections import Counter
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -38,6 +43,23 @@ from .graph_trace import (
     assert_trace_parity,
     iter_selected_trace,
     stable_graph_sha256,
+)
+from .generation_checkpoint import (
+    GenerationCheckpointError,
+    load_generation_checkpoint,
+    mirror_generation_checkpoint,
+    prune_mirrored_generation_checkpoints,
+    restore_rng_state,
+    restore_sqlite_snapshot,
+    save_generation_checkpoint,
+    scientific_command_sha256,
+)
+from .generation_loop import (
+    GenerationLoopState,
+    restore_official_state,
+    run_generation_loop,
+    save_official_payload,
+    snapshot_official_state,
 )
 from .frozen_payload import (
     build_frozen_payload_closure,
@@ -72,6 +94,13 @@ OFFICIAL_RUNTIME_PATCHES = (
 
 ACTIVE_MOVE_TRANSITION_PATCH = "active_move_transition_eviction_deferred_v1"
 LIVE_GRAPH_STATE_PATCH = "live_graph_authoritative_backing_resolution_v2"
+PROJECT_OWNED_LOOP_PATCH = "project_owned_completed_step_checkpoint_loop_v1"
+
+
+@dataclass(frozen=True, slots=True)
+class PatchedRuntimeHandles:
+    live_graph_state: LiveGraphState | None
+    transition_map: Any | None
 
 
 class _EndpointSafeGraphMap(dict[Any, Any]):
@@ -466,8 +495,9 @@ def patched_official_runtime(
     transition_expanded_capacity: int = 5,
     seed: int = 0,
     graph_state_dir: str | Path | None = None,
+    graph_store_path: str | Path | None = None,
     storage_guard: StorageGuard | None = None,
-) -> Iterator[None]:
+) -> Iterator[PatchedRuntimeHandles]:
     originals = {
         "call": module.call,
         "neighbor_graph_access": module.neighbor_graph_access,
@@ -478,10 +508,16 @@ def patched_official_runtime(
         LiveGraphState(
             module,
             module.graph_map,
-            store_path=Path(graph_state_dir).expanduser().resolve()
-            / "authoritative_graph_store.sqlite3",
+            store_path=(
+                Path(graph_store_path).expanduser().resolve()
+                if graph_store_path is not None
+                else Path(graph_state_dir).expanduser().resolve()
+                / "authoritative_graph_store.sqlite3"
+            ),
             seed=seed,
-            on_step=storage_guard.check if storage_guard is not None else None,
+            # Storage checks run from the project-owned outer loop after
+            # teleport/restart and both upstream assertions, never here.
+            on_step=None,
         )
         if preserve_active_transitions and graph_state_dir is not None
         else None
@@ -548,7 +584,10 @@ def patched_official_runtime(
         patched_move = live_graph_state.wrap_move(patched_move)
     module.move_to_next_graph = patched_move
     try:
-        yield
+        yield PatchedRuntimeHandles(
+            live_graph_state=live_graph_state,
+            transition_map=transition_map,
+        )
     finally:
         try:
             if compatibility_audit is not None:
@@ -643,6 +682,405 @@ def _load_bundle(
             parent_limit=parent_limit,
         )
     raise ValueError(f"Unsupported project dataset: {dataset}")
+
+
+_RUNTIME_CHECKPOINT_STATE_SCHEMA = "comrecgc_bace_runtime_checkpoint_v1"
+_RESOLVED_CONFIG_BINDING_SCHEMA = "comrecgc_resolved_config_binding_v1"
+_RESOLVED_CONFIG_FILENAME = "resolved_config.json"
+_RESOLVED_CONFIG_BINDING_FILENAME = "resolved_config.binding.json"
+
+
+def _runtime_environment(torch: Any) -> dict[str, Any]:
+    try:
+        import torch_geometric
+
+        pyg_version = str(torch_geometric.__version__)
+    except Exception:
+        pyg_version = "unavailable"
+    cuda_count = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+    return {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "python_executable": sys.executable,
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "numpy_version": str(np.__version__),
+        "torch_version": str(torch.__version__),
+        "torch_geometric_version": pyg_version,
+        "torch_cuda_runtime": str(torch.version.cuda),
+        "cudnn_version": (
+            int(torch.backends.cudnn.version())
+            if torch.backends.cudnn.is_available()
+            else None
+        ),
+        "cuda_device_count": cuda_count,
+        "cuda_device_names": [torch.cuda.get_device_name(index) for index in range(cuda_count)],
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    }
+
+
+def _runtime_checkpoint_provenance(config: Mapping[str, Any]) -> dict[str, str]:
+    """Build stable fingerprints; timestamps and output paths are excluded."""
+
+    environment = config["runtime_environment"]
+    compatible_environment = {
+        key: environment[key]
+        for key in (
+            "python_version",
+            "python_implementation",
+            "pythonhashseed",
+            "numpy_version",
+            "torch_version",
+            "torch_geometric_version",
+            "torch_cuda_runtime",
+            "cudnn_version",
+            "cuda_device_count",
+            "cuda_device_names",
+        )
+    }
+    return {
+        "project_commit": str(config["project_commit"]),
+        "upstream_commit": str(config["upstream_commit"]),
+        "dataset": str(config["dataset"]),
+        "mode": str(config["mode"]),
+        "generation_parent_ids_sha256": str(
+            config["generation_parent_ids_sha256"]
+        ),
+        "parameters_sha256": stable_json_sha256(config["parameters"]),
+        "dataset_fingerprint": str(config["dataset_audit"]["dataset_fingerprint"]),
+        "dataset_contract_sha256": stable_json_sha256(
+            {
+                key: config["dataset_audit"][key]
+                for key in (
+                    "dataset",
+                    "dataset_source",
+                    "num_graphs",
+                    "num_label0",
+                    "num_label1",
+                    "node_feature_dim",
+                    "edge_feature_dim",
+                    "atom_types",
+                    "label_semantics",
+                    "generation_source_parent_rows",
+                    "generation_parent_ids_sha256",
+                )
+            }
+        ),
+        "gnn_checkpoint_sha256": str(config["gnn"]["checkpoint_sha256"]),
+        "distance_checkpoint_sha256": str(
+            config["distance_model"]["checkpoint_sha256"]
+        ),
+        "runtime_patch": PROJECT_OWNED_LOOP_PATCH,
+        "runtime_environment_sha256": stable_json_sha256(compatible_environment),
+        "scientific_command_sha256": str(config["command_sha256"]),
+        "total_steps": str(int(config["total_steps"])),
+    }
+
+
+def _resolved_config_content_sha256(config: Mapping[str, Any]) -> str:
+    return stable_json_sha256(
+        {key: value for key, value in config.items() if key != "config_sha256"}
+    )
+
+
+def _validate_resolved_config_binding(
+    config: Mapping[str, Any],
+    *,
+    expected_scientific_argv: Sequence[str],
+    expected_command_sha256: str,
+    expected_total_steps: int,
+) -> None:
+    argv = tuple(str(value) for value in config.get("scientific_argv") or ())
+    if argv != tuple(expected_scientific_argv):
+        raise GenerationCheckpointError(
+            "Resolved config scientific argv differs from the current runtime."
+        )
+    if config.get("command_sha256") != expected_command_sha256:
+        raise GenerationCheckpointError(
+            "Resolved config command SHA256 differs from the current runtime."
+        )
+    if scientific_command_sha256(argv) != expected_command_sha256:
+        raise GenerationCheckpointError(
+            "Resolved config command SHA256 does not match canonical argv."
+        )
+    if int(config.get("total_steps", -1)) != int(expected_total_steps):
+        raise GenerationCheckpointError(
+            "Resolved config total_steps differs from the current runtime."
+        )
+    expected_config_sha256 = _resolved_config_content_sha256(config)
+    if config.get("config_sha256") != expected_config_sha256:
+        raise GenerationCheckpointError("Resolved config content SHA256 mismatch.")
+
+
+def _persistent_resolved_config_paths(mirror_root: Path) -> tuple[Path, Path]:
+    parent = mirror_root.parent
+    return (
+        parent / _RESOLVED_CONFIG_FILENAME,
+        parent / _RESOLVED_CONFIG_BINDING_FILENAME,
+    )
+
+
+def _publish_persistent_resolved_config(
+    config: Mapping[str, Any],
+    *,
+    mirror_root: Path,
+) -> tuple[Path, Path]:
+    """Atomically publish resume metadata before any checkpoint can be mirrored."""
+
+    config_path, binding_path = _persistent_resolved_config_paths(mirror_root)
+    command_sha256 = str(config["command_sha256"])
+    config_sha256 = str(config["config_sha256"])
+    binding = {
+        "schema_version": _RESOLVED_CONFIG_BINDING_SCHEMA,
+        "resolved_config": _RESOLVED_CONFIG_FILENAME,
+        "resolved_config_sha256": None,
+        "config_sha256": config_sha256,
+        "scientific_argv": list(config["scientific_argv"]),
+        "command_sha256": command_sha256,
+        "total_steps": int(config["total_steps"]),
+    }
+    if config_path.is_symlink():
+        raise GenerationCheckpointError(
+            "Persistent resolved_config path must not be a symbolic link."
+        )
+    if config_path.is_file():
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+        if existing != dict(config):
+            raise GenerationCheckpointError(
+                "Persistent resolved_config differs from the current run."
+            )
+    elif config_path.exists() or config_path.is_symlink():
+        raise GenerationCheckpointError(
+            "Persistent resolved_config path is not a physical file."
+        )
+    else:
+        write_json(config_path, dict(config))
+    binding["resolved_config_sha256"] = sha256_file(config_path)
+    if binding_path.is_symlink():
+        raise GenerationCheckpointError(
+            "Persistent resolved_config binding path must not be a symbolic link."
+        )
+    if binding_path.is_file():
+        existing_binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        if existing_binding != binding:
+            raise GenerationCheckpointError(
+                "Persistent resolved_config binding differs from the current run."
+            )
+    elif binding_path.exists() or binding_path.is_symlink():
+        raise GenerationCheckpointError(
+            "Persistent resolved_config binding path is not a physical file."
+        )
+    else:
+        write_json(binding_path, binding)
+    # The formal AutoDL stage historically restores from
+    # ``generation_resume_metadata/resolved_config.json`` while the profile
+    # stage restores from the checkpoint mirror parent. Publish both aliases
+    # before generation can reach checkpoint 1; both are physical, atomically
+    # written files with an adjacent binding, never symlinks.
+    compatibility_root = mirror_root.parent / "generation_resume_metadata"
+    compatibility_config = compatibility_root / _RESOLVED_CONFIG_FILENAME
+    compatibility_binding = compatibility_root / _RESOLVED_CONFIG_BINDING_FILENAME
+    for destination, payload in (
+        (compatibility_config, dict(config)),
+        (compatibility_binding, binding),
+    ):
+        if destination.is_symlink():
+            raise GenerationCheckpointError(
+                "Persistent resolved_config compatibility path is a symbolic link."
+            )
+        if destination.is_file():
+            existing_payload = json.loads(destination.read_text(encoding="utf-8"))
+            if existing_payload != payload:
+                raise GenerationCheckpointError(
+                    "Persistent resolved_config compatibility copy differs."
+                )
+        elif destination.exists():
+            raise GenerationCheckpointError(
+                "Persistent resolved_config compatibility path is not a file."
+            )
+        else:
+            write_json(destination, payload)
+    return config_path, binding_path
+
+
+def _load_persistent_resolved_config(
+    *,
+    mirror_root: Path,
+    expected_scientific_argv: Sequence[str],
+    expected_command_sha256: str,
+    expected_total_steps: int,
+) -> dict[str, Any]:
+    config_path, binding_path = _persistent_resolved_config_paths(mirror_root)
+    if (
+        not config_path.is_file()
+        or config_path.is_symlink()
+        or not binding_path.is_file()
+        or binding_path.is_symlink()
+    ):
+        raise GenerationCheckpointError(
+            "Persistent checkpoint mirror has no complete resolved_config metadata."
+        )
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict) or not isinstance(binding, dict):
+        raise GenerationCheckpointError("Persistent resolved_config metadata is invalid.")
+    _validate_resolved_config_binding(
+        config,
+        expected_scientific_argv=expected_scientific_argv,
+        expected_command_sha256=expected_command_sha256,
+        expected_total_steps=expected_total_steps,
+    )
+    expected_binding = {
+        "schema_version": _RESOLVED_CONFIG_BINDING_SCHEMA,
+        "resolved_config": _RESOLVED_CONFIG_FILENAME,
+        "resolved_config_sha256": sha256_file(config_path),
+        "config_sha256": config["config_sha256"],
+        "scientific_argv": list(expected_scientific_argv),
+        "command_sha256": expected_command_sha256,
+        "total_steps": int(expected_total_steps),
+    }
+    if binding != expected_binding:
+        raise GenerationCheckpointError("Persistent resolved_config binding mismatch.")
+    return config
+
+
+def _checkpoint_algorithm_state(
+    module: Any,
+    *,
+    loop_state: GenerationLoopState,
+    handles: PatchedRuntimeHandles,
+) -> dict[str, Any]:
+    if not isinstance(handles.transition_map, CompactMoveScopedTransitionMap):
+        raise GenerationCheckpointError(
+            "Exact full-generation checkpoints require compact transition storage."
+        )
+    if handles.live_graph_state is None:
+        raise GenerationCheckpointError(
+            "Exact full-generation checkpoints require authoritative live graph state."
+        )
+    transition_state = handles.transition_map.export_checkpoint_state()
+    live_graph_state = handles.live_graph_state.export_checkpoint_state()
+    required_hashes = {
+        *loop_state.start_graph_hashes,
+        *loop_state.current_graph_hashes,
+        *module.graph_index_map.keys(),
+        *module.covering_graphs,
+        *(row.get("graph_hash") for row in module.counterfactual_candidates),
+        *(row["source_hash"] for row in transition_state["entries"]),
+    }
+    missing = [
+        value
+        for value in required_hashes
+        if value is not None and not handles.live_graph_state.contains(value)
+    ]
+    if missing:
+        raise GenerationCheckpointError(
+            "COMRECGC checkpoint graph closure is incomplete: "
+            f"missing_count={len(missing)}, first={missing[0]!r}."
+        )
+    return {
+        "schema_version": _RUNTIME_CHECKPOINT_STATE_SCHEMA,
+        "loop_state": loop_state.to_checkpoint_state(),
+        "official_state": snapshot_official_state(module),
+        "transition_state": transition_state,
+        "live_graph_state": live_graph_state,
+    }
+
+
+def _restore_runtime_checkpoint_state(
+    module: Any,
+    *,
+    algorithm_state: Mapping[str, Any],
+    trace_state: Mapping[str, Any],
+    handles: PatchedRuntimeHandles,
+    trace_recorder: ActionTraceRecorder | None,
+) -> GenerationLoopState:
+    if algorithm_state.get("schema_version") != _RUNTIME_CHECKPOINT_STATE_SCHEMA:
+        raise GenerationCheckpointError(
+            "Unsupported COMRECGC runtime checkpoint state schema."
+        )
+    if not isinstance(handles.transition_map, CompactMoveScopedTransitionMap):
+        raise GenerationCheckpointError(
+            "Checkpoint restore requires compact transition storage."
+        )
+    if handles.live_graph_state is None:
+        raise GenerationCheckpointError(
+            "Checkpoint restore requires authoritative live graph state."
+        )
+    handles.transition_map.restore_checkpoint_state(
+        algorithm_state["transition_state"]
+    )
+    handles.live_graph_state.restore_checkpoint_state(
+        algorithm_state["live_graph_state"]
+    )
+    if trace_recorder is None:
+        if trace_state.get("enabled") is not False:
+            raise GenerationCheckpointError(
+                "Checkpoint contains trace state but tracing is disabled."
+            )
+    else:
+        trace_recorder.restore_checkpoint_state(trace_state)
+    state = GenerationLoopState.from_checkpoint_state(
+        algorithm_state["loop_state"]
+    )
+    if handles.live_graph_state.move_count != state.completed_step:
+        raise GenerationCheckpointError(
+            "Checkpoint walk step differs from live graph move count."
+        )
+    if handles.transition_map.move_count != state.completed_step:
+        raise GenerationCheckpointError(
+            "Checkpoint walk step differs from transition move count."
+        )
+    if trace_recorder is not None and trace_recorder.move_index != state.completed_step:
+        raise GenerationCheckpointError(
+            "Checkpoint walk step differs from trace move count."
+        )
+    return state
+
+
+def _progress_payload(
+    *,
+    current_step: int,
+    max_steps: int,
+    config_sha256: str,
+    run_complete: bool,
+    checkpoint_dir: str | None = None,
+    last_checkpoint_step: int | None = None,
+    started_monotonic: float,
+    process_start_step: int,
+    gpu_id: str,
+    code_commit: str,
+) -> dict[str, Any]:
+    completed = int(current_step)
+    total = int(max_steps)
+    elapsed = max(time.monotonic() - float(started_monotonic), 0.0)
+    process_steps = max(completed - int(process_start_step), 0)
+    steps_per_hour = (
+        float(process_steps * 3600.0 / elapsed) if elapsed > 0.0 else 0.0
+    )
+    heartbeat_at = datetime.now(timezone.utc).isoformat()
+    return {
+        "stage": "generation",
+        "current_step": completed,
+        "max_steps": total,
+        "completed_step": completed,
+        "next_step": min(completed + 1, total + 1),
+        "total_steps": total,
+        "steps_per_hour": steps_per_hour,
+        "elapsed_seconds": elapsed,
+        "last_checkpoint_step": (
+            int(last_checkpoint_step) if last_checkpoint_step is not None else None
+        ),
+        "latest_checkpoint": checkpoint_dir,
+        "heartbeat_at": heartbeat_at,
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "gpu_id": str(gpu_id),
+        "code_commit": str(code_commit),
+        "run_complete": bool(run_complete),
+        "config_sha256": str(config_sha256),
+        "checkpoint_dir": checkpoint_dir,
+        "updated_at": heartbeat_at,
+    }
 
 
 def model_counterfactual_graphs(
@@ -832,8 +1270,35 @@ def run_project_generation(
     storage_min_free_bytes: int = 20 * 1024**3,
     storage_min_free_ratio: float = 0.05,
     storage_min_free_inodes: int = 100_000,
+    checkpoint_root: str | Path | None = None,
+    checkpoint_mirror_root: str | Path | None = None,
+    checkpoint_interval_steps: int = 500,
+    checkpoint_keep_last: int = 2,
+    progress_interval_steps: int = 25,
+    scientific_argv: Sequence[str] | None = None,
+    command_sha256: str | None = None,
 ) -> dict[str, Any]:
     parameters.validate(mode)
+    if int(checkpoint_interval_steps) <= 0:
+        raise ValueError("checkpoint_interval_steps must be positive.")
+    if not 10 <= int(progress_interval_steps) <= 50:
+        raise ValueError("progress_interval_steps must be between 10 and 50.")
+    if resume and mode != "full":
+        raise ValueError("Exact COMRECGC resume is supported only for full generation.")
+    if resume and checkpoint_root is None:
+        raise ValueError("--resume requires --checkpoint-root.")
+    if mode == "full" and dataset == "bace" and checkpoint_mirror_root is None:
+        raise ValueError(
+            "BACE full generation requires --checkpoint-mirror-root on persistent storage."
+        )
+    if int(checkpoint_keep_last) < 2:
+        raise ValueError("checkpoint_keep_last must be at least two.")
+    normalized_scientific_argv = tuple(str(value) for value in scientific_argv or ())
+    if not normalized_scientific_argv:
+        raise ValueError("Generation requires canonical redacted scientific argv.")
+    normalized_command_sha256 = str(command_sha256 or "")
+    if scientific_command_sha256(normalized_scientific_argv) != normalized_command_sha256:
+        raise ValueError("Generation command SHA256 does not match scientific argv.")
     project = Path(project_root).expanduser().resolve()
     root = require_empty_output(output_dir, resume=resume)
     bundle = _load_bundle(
@@ -850,6 +1315,10 @@ def run_project_generation(
     torch, _Batch = _torch_stack()
     if not torch.cuda.is_available() and str(device).startswith("cuda"):
         raise RuntimeError("A CUDA device was requested but is not available.")
+    if mode == "full" and os.environ.get("PYTHONHASHSEED") != "0":
+        raise RuntimeError(
+            "Exact COMRECGC checkpoints require PYTHONHASHSEED=0 before Python starts."
+        )
     random.seed(parameters.seed)
     np.random.seed(parameters.seed)
     torch.manual_seed(parameters.seed)
@@ -871,6 +1340,17 @@ def run_project_generation(
     )
     if mode == "full":
         graph_state_root.mkdir(parents=True, exist_ok=True)
+    resolved_checkpoint_root = (
+        Path(checkpoint_root).expanduser().resolve()
+        if checkpoint_root is not None
+        else (root / "generation_checkpoints" if mode == "full" else None)
+    )
+    resolved_checkpoint_mirror_root = (
+        Path(checkpoint_mirror_root).expanduser().resolve()
+        if checkpoint_mirror_root is not None
+        else None
+    )
+    active_graph_store_path = graph_state_root / "authoritative_graph_store.sqlite3"
     storage_guard: StorageGuard | None = None
     if mode == "full" and storage_guard_root is not None:
         guard_root = Path(storage_guard_root).expanduser().resolve()
@@ -884,8 +1364,13 @@ def run_project_generation(
                 min_free_inodes=int(storage_min_free_inodes),
             ),
             database_path=graph_state_root / "authoritative_graph_store.sqlite3",
+            exact_resume_supported=resolved_checkpoint_root is not None,
+            generation_checkpoint_root=resolved_checkpoint_root,
         )
     started = datetime.now(timezone.utc).isoformat()
+    process_started_monotonic = time.monotonic()
+    process_start_step = 0
+    progress_gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES") or str(device)
     trace_recorder = (
         ActionTraceRecorder(
             output_dir=trace_output_dir,
@@ -952,14 +1437,19 @@ def run_project_generation(
                 "generation_parent_ids": bundle.parent_ids,
                 "generation_parent_ids_sha256": stable_json_sha256(bundle.parent_ids),
                 "parameters": parameters.__dict__,
+                "scientific_argv": list(normalized_scientific_argv),
+                "command_sha256": normalized_command_sha256,
+                "total_steps": int(parameters.steps),
                 "gnn": model_provenance,
                 "distance_model": distance_provenance,
                 "internal_prediction_counts": internal_counts,
+                "runtime_environment": _runtime_environment(torch),
                 "cf_mode": CF_MODE,
                 "calibration_loaded": False,
                 "test_loaded": False,
                 "official_compatibility_patches": [
                     *OFFICIAL_RUNTIME_PATCHES,
+                    PROJECT_OWNED_LOOP_PATCH,
                     *([ACTIVE_MOVE_TRANSITION_PATCH] if mode == "full" else []),
                     *([LIVE_GRAPH_STATE_PATCH] if mode == "full" else []),
                     *([COMPACT_TRANSITION_CACHE_PATCH] if mode == "full" else []),
@@ -977,7 +1467,27 @@ def run_project_generation(
                     ),
                 ],
                 "official_source_modified": False,
-                "generation_resume_supported": False,
+                "generation_resume_supported": mode == "full",
+                "generation_checkpoint_root": (
+                    str(resolved_checkpoint_root)
+                    if resolved_checkpoint_root is not None
+                    else None
+                ),
+                "generation_checkpoint_mirror_root": (
+                    str(resolved_checkpoint_mirror_root)
+                    if resolved_checkpoint_mirror_root is not None
+                    else None
+                ),
+                "generation_checkpoint_interval_steps": (
+                    int(checkpoint_interval_steps) if mode == "full" else None
+                ),
+                "generation_checkpoint_keep_last": int(checkpoint_keep_last),
+                "generation_progress_interval_steps": int(progress_interval_steps),
+                "generation_checkpoint_boundary": (
+                    "after_move_trace_teleport_restart_and_assertions_v1"
+                    if mode == "full"
+                    else None
+                ),
                 "transition_cache_policy": (
                     "authoritative_backing_plus_exact_action_replay_lru_v3"
                     if mode == "full"
@@ -1002,18 +1512,108 @@ def run_project_generation(
                 "transition_model_recomputation": False,
                 "started_at": started,
             }
-            config["config_sha256"] = stable_json_sha256(config)
-            write_json(root / "resolved_config.json", config)
-            write_json(
-                root / "progress.json",
-                {
-                    "stage": "generation",
-                    "current_step": 0,
-                    "max_steps": parameters.steps,
-                    "run_complete": False,
-                    "config_sha256": config["config_sha256"],
-                },
-            )
+            checkpoint_provenance = _runtime_checkpoint_provenance(config)
+            config["checkpoint_provenance"] = checkpoint_provenance
+            existing_config_path = root / _RESOLVED_CONFIG_FILENAME
+            if resume:
+                if existing_config_path.is_file() and not existing_config_path.is_symlink():
+                    existing_config = json.loads(
+                        existing_config_path.read_text(encoding="utf-8")
+                    )
+                elif resolved_checkpoint_mirror_root is not None:
+                    existing_config = _load_persistent_resolved_config(
+                        mirror_root=resolved_checkpoint_mirror_root,
+                        expected_scientific_argv=normalized_scientific_argv,
+                        expected_command_sha256=normalized_command_sha256,
+                        expected_total_steps=parameters.steps,
+                    )
+                    write_json(existing_config_path, existing_config)
+                else:
+                    raise GenerationCheckpointError(
+                        "Resume has no local or persistent resolved_config.json."
+                    )
+                if not isinstance(existing_config, dict):
+                    raise GenerationCheckpointError("Resume resolved_config is invalid.")
+                _validate_resolved_config_binding(
+                    existing_config,
+                    expected_scientific_argv=normalized_scientific_argv,
+                    expected_command_sha256=normalized_command_sha256,
+                    expected_total_steps=parameters.steps,
+                )
+                if existing_config.get("checkpoint_provenance") != checkpoint_provenance:
+                    raise GenerationCheckpointError(
+                        "Resume inputs differ from the original resolved runtime config."
+                    )
+                config = existing_config
+            else:
+                config["config_sha256"] = _resolved_config_content_sha256(config)
+                write_json(existing_config_path, config)
+            if resolved_checkpoint_mirror_root is not None:
+                _publish_persistent_resolved_config(
+                    config,
+                    mirror_root=resolved_checkpoint_mirror_root,
+                )
+            if not resume:
+                write_json(
+                    root / "progress.json",
+                    _progress_payload(
+                        current_step=0,
+                        max_steps=parameters.steps,
+                        run_complete=False,
+                        config_sha256=config["config_sha256"],
+                        last_checkpoint_step=None,
+                        started_monotonic=process_started_monotonic,
+                        process_start_step=process_start_step,
+                        gpu_id=progress_gpu_id,
+                        code_commit=config["project_commit"],
+                    ),
+                )
+
+            loaded_checkpoint = None
+            initial_loop_state: GenerationLoopState | None = None
+            if resume:
+                assert resolved_checkpoint_root is not None
+                loaded_checkpoint = load_generation_checkpoint(
+                    resolved_checkpoint_root,
+                    expected_provenance=checkpoint_provenance,
+                    expected_scientific_argv=normalized_scientific_argv,
+                    expected_command_sha256=normalized_command_sha256,
+                    expected_total_steps=parameters.steps,
+                )
+                if resolved_checkpoint_mirror_root is not None:
+                    mirror_generation_checkpoint(
+                        loaded_checkpoint.validation.checkpoint_dir,
+                        resolved_checkpoint_mirror_root,
+                        expected_provenance=checkpoint_provenance,
+                    )
+                    prune_mirrored_generation_checkpoints(
+                        resolved_checkpoint_root,
+                        resolved_checkpoint_mirror_root,
+                        keep_last=checkpoint_keep_last,
+                        expected_provenance=checkpoint_provenance,
+                    )
+                active_graph_store_path = graph_state_root / (
+                    "authoritative_graph_store."
+                    f"resume-{loaded_checkpoint.completed_step:012d}-{os.getpid()}.sqlite3"
+                )
+                restore_sqlite_snapshot(
+                    loaded_checkpoint.sqlite_snapshot_path,
+                    active_graph_store_path,
+                )
+                restore_official_state(
+                    official, loaded_checkpoint.algorithm_state["official_state"]
+                )
+                initial_loop_state = GenerationLoopState.from_checkpoint_state(
+                    loaded_checkpoint.algorithm_state["loop_state"]
+                )
+                process_start_step = initial_loop_state.completed_step
+                if initial_loop_state.completed_step > int(parameters.steps):
+                    raise GenerationCheckpointError(
+                        "Resume checkpoint is beyond the configured final step."
+                    )
+            if storage_guard is not None:
+                storage_guard.database_path = active_graph_store_path
+
             old_cwd = Path.cwd()
             try:
                 os.chdir(runtime_root)
@@ -1031,10 +1631,120 @@ def run_project_generation(
                     transition_expanded_capacity=parameters.heads,
                     seed=parameters.seed,
                     graph_state_dir=graph_state_root if mode == "full" else None,
+                    graph_store_path=(active_graph_store_path if mode == "full" else None),
                     storage_guard=storage_guard,
-                ):
-                    official.counterfactual_summary_with_randomwalk(
-                        dataset_name=dataset_key,
+                ) as runtime_handles:
+                    if loaded_checkpoint is not None:
+                        initial_loop_state = _restore_runtime_checkpoint_state(
+                            official,
+                            algorithm_state=loaded_checkpoint.algorithm_state,
+                            trace_state=loaded_checkpoint.trace_state,
+                            handles=runtime_handles,
+                            trace_recorder=trace_recorder,
+                        )
+                        # Restoring RNG is deliberately the final mutation
+                        # before entering completed_step + 1.
+                        restore_rng_state(loaded_checkpoint.rng_state)
+
+                    latest_checkpoint_dir: str | None = (
+                        str(loaded_checkpoint.validation.checkpoint_dir)
+                        if loaded_checkpoint is not None
+                        else None
+                    )
+                    last_checkpoint_step: int | None = (
+                        loaded_checkpoint.completed_step
+                        if loaded_checkpoint is not None
+                        else None
+                    )
+
+                    def completed_step_boundary(loop_state: GenerationLoopState) -> None:
+                        nonlocal latest_checkpoint_dir, last_checkpoint_step
+                        checkpoint_due = bool(
+                            mode == "full"
+                            and resolved_checkpoint_root is not None
+                            and (
+                                loop_state.completed_step
+                                % int(checkpoint_interval_steps)
+                                == 0
+                                or (
+                                    storage_guard is not None
+                                    and loop_state.completed_step
+                                    % int(storage_check_every_steps)
+                                    == 0
+                                )
+                                or loop_state.completed_step == int(parameters.steps)
+                            )
+                        )
+                        if checkpoint_due:
+                            algorithm_state = _checkpoint_algorithm_state(
+                                official,
+                                loop_state=loop_state,
+                                handles=runtime_handles,
+                            )
+                            trace_state = (
+                                trace_recorder.export_checkpoint_state()
+                                if trace_recorder is not None
+                                else {
+                                    "schema_version": "comrecgc_trace_disabled_v1",
+                                    "enabled": False,
+                                }
+                            )
+                            validation = save_generation_checkpoint(
+                                resolved_checkpoint_root,
+                                completed_step=loop_state.completed_step,
+                                step_complete=True,
+                                algorithm_state=algorithm_state,
+                                trace_state=trace_state,
+                                sqlite_source=(
+                                    runtime_handles.live_graph_state.store.checkpoint_connection
+                                ),
+                                provenance_fingerprints=checkpoint_provenance,
+                                scientific_argv=normalized_scientific_argv,
+                                command_sha256=normalized_command_sha256,
+                                total_steps=parameters.steps,
+                            )
+                            if resolved_checkpoint_mirror_root is not None:
+                                mirror_generation_checkpoint(
+                                    validation.checkpoint_dir,
+                                    resolved_checkpoint_mirror_root,
+                                    expected_provenance=checkpoint_provenance,
+                                )
+                                prune_mirrored_generation_checkpoints(
+                                    resolved_checkpoint_root,
+                                    resolved_checkpoint_mirror_root,
+                                    keep_last=checkpoint_keep_last,
+                                    expected_provenance=checkpoint_provenance,
+                                )
+                            latest_checkpoint_dir = str(validation.checkpoint_dir)
+                            last_checkpoint_step = loop_state.completed_step
+                        if storage_guard is not None:
+                            storage_guard.check(
+                                loop_state.completed_step,
+                                runtime_handles.live_graph_state,
+                            )
+                        if (
+                            loop_state.completed_step % int(progress_interval_steps) == 0
+                            or checkpoint_due
+                            or loop_state.completed_step == int(parameters.steps)
+                        ):
+                            write_json(
+                                root / "progress.json",
+                                _progress_payload(
+                                    current_step=loop_state.completed_step,
+                                    max_steps=parameters.steps,
+                                    run_complete=False,
+                                    config_sha256=config["config_sha256"],
+                                    checkpoint_dir=latest_checkpoint_dir,
+                                    last_checkpoint_step=last_checkpoint_step,
+                                    started_monotonic=process_started_monotonic,
+                                    process_start_step=process_start_step,
+                                    gpu_id=progress_gpu_id,
+                                    code_commit=config["project_commit"],
+                                ),
+                            )
+
+                    run_generation_loop(
+                        official,
                         input_graphs=GraphListDataset(
                             bundle.graphs, bundle.node_feature_dim
                         ),
@@ -1047,6 +1757,11 @@ def run_project_generation(
                         teleport_probability=parameters.teleport,
                         max_steps=parameters.steps,
                         heads=parameters.heads,
+                        initial_state=initial_loop_state,
+                        on_step_complete=completed_step_boundary,
+                    )
+                    save_official_payload(
+                        official, dataset_name=dataset_key, heads=parameters.heads
                     )
             finally:
                 os.chdir(old_cwd)
@@ -1056,7 +1771,20 @@ def run_project_generation(
             if not official_result.is_file() or official_result.stat().st_size <= 0:
                 raise RuntimeError("Official COMRECGC did not serialize counterfactual candidates.")
             result_path = root / "counterfactuals.pt"
-            materialization = _materialize_official_result(official_result, result_path)
+            if result_path.exists():
+                if not resume:
+                    raise FileExistsError(
+                        f"Refusing to overwrite result: {result_path}"
+                    )
+                # Finalization may have been interrupted after materialization.
+                # Rebuild the project copy atomically from the checkpoint-restored
+                # official state instead of trusting or deleting the old file.
+                _torch_save_atomic(_torch_load(official_result), result_path)
+                materialization = "atomic_resume_finalization_rewrite"
+            else:
+                materialization = _materialize_official_result(
+                    official_result, result_path
+                )
             payload = _torch_load(result_path)
             graph_map, candidates = validate_counterfactual_payload(payload)
             graph_state_audit_path: Path | None = None
@@ -1067,7 +1795,7 @@ def run_project_generation(
             parity_summary: dict[str, Any] | None = None
             frozen_payload_audit_path: Path | None = None
             frozen_payload_audit: dict[str, Any] | None = None
-            backing_store_path = graph_state_root / "authoritative_graph_store.sqlite3"
+            backing_store_path = active_graph_store_path
             if trace_recorder is not None:
                 frozen_payload_audit_path = (
                     root / "frozen_payload_closure_audit.json"
@@ -1166,20 +1894,34 @@ def run_project_generation(
                 "frozen_payload_closure": frozen_payload_audit,
                 "candidate_order_source": "official_frequency_reinforced_order",
                 "algorithm_rerun": True,
+                "resumed_from_checkpoint": (
+                    str(loaded_checkpoint.validation.checkpoint_dir)
+                    if loaded_checkpoint is not None
+                    else None
+                ),
+                "active_graph_store_path": (
+                    str(active_graph_store_path) if mode == "full" else None
+                ),
                 "run_complete": True,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
             write_json(root / "run_manifest.json", manifest)
             write_json(
                 root / "progress.json",
-                {
-                    "stage": "generation",
-                    "current_step": parameters.steps,
-                    "max_steps": parameters.steps,
-                    "run_complete": True,
-                    "config_sha256": config["config_sha256"],
-                },
+                _progress_payload(
+                    current_step=parameters.steps,
+                    max_steps=parameters.steps,
+                    run_complete=True,
+                    config_sha256=config["config_sha256"],
+                    checkpoint_dir=latest_checkpoint_dir,
+                    last_checkpoint_step=last_checkpoint_step,
+                    started_monotonic=process_started_monotonic,
+                    process_start_step=process_start_step,
+                    gpu_id=progress_gpu_id,
+                    code_commit=config["project_commit"],
+                ),
             )
+            (root / "_RUN_FAILED.json").unlink(missing_ok=True)
             write_json(
                 root / "_RUN_COMPLETE.json",
                 {
