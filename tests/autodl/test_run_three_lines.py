@@ -1451,12 +1451,30 @@ def test_stop_signals_only_the_exact_orphan_child_leader(
         "_state_child_matches",
         lambda _spec, lane_id, _state: lane_id == "mut_recovery",
     )
-    signals: list[tuple[int, int]] = []
+    exact_signals: list[tuple[int, str, int]] = []
+    numeric_signals: list[tuple[str, int, int]] = []
     monkeypatch.setattr(
-        orchestrator.os, "kill", lambda pid, sig: signals.append((int(pid), int(sig)))
+        orchestrator,
+        "_signal_exact_child",
+        lambda pid, _spec, lane_id, _state, sig: (
+            exact_signals.append((int(pid), str(lane_id), int(sig))) or True
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator.os,
+        "kill",
+        lambda pid, sig: numeric_signals.append(("pid", int(pid), int(sig))),
+    )
+    monkeypatch.setattr(
+        orchestrator.os,
+        "killpg",
+        lambda pgid, sig: numeric_signals.append(("pgid", int(pgid), int(sig))),
     )
     result = stop(spec)
-    assert signals == [(6162, int(orchestrator.signal.SIGTERM))]
+    assert exact_signals == [
+        (6162, "mut_recovery", int(orchestrator.signal.SIGTERM))
+    ]
+    assert numeric_signals == []
     request = result["stop_requests"]["mut_recovery"]
     assert request["orphan_child_pid"] == 6162
     assert request["target"] == "validated_orphan_child_leader"
