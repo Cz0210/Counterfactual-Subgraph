@@ -105,6 +105,7 @@ def test_every_python_entrypoint_has_paired_slurm_status_wrapper() -> None:
         "exp_run",
         "status",
         "bace_gnn_stage",
+        "bace_frozen_gnn_route",
     ):
         wrapper = PROJECT_ROOT / "scripts" / "slurm" / f"{name}.sh"
         assert wrapper.is_file(), name
@@ -130,6 +131,7 @@ def test_autodl_shells_pin_one_explicit_python_interpreter() -> None:
         "run_bace_gnn_full.sh",
         "run_bace_gnn_calibration.sh",
         "run_bace_gnn_oracle_smoke.sh",
+        "run_bace_frozen_gnn_stage.sh",
     ):
         text = (AUTODL / name).read_text(encoding="utf-8")
         assert 'exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py"' in text

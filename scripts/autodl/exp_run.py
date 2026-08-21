@@ -47,6 +47,7 @@ from src.utils.autodl_runtime import (
 
 
 SCHEMA_VERSION = 1
+SCIENTIFIC_BLOCKED_EXIT_CODE = 78
 _SAFE_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
 _SECRET = re.compile(
     r"(?i)(password|passwd|secret|token|authorization|api[_-]?key|"
@@ -272,18 +273,41 @@ def _assert_gpu_identity(spec: Mapping[str, Any]) -> None:
         )
 
 
-def _validate_success(spec: Mapping[str, Any], *, exit_code: int) -> list[str]:
+def _validate_result_contract(
+    spec: Mapping[str, Any],
+    *,
+    exit_code: int,
+    allow_scientific_blocker: bool = False,
+) -> list[str]:
+    """Validate the declared log/output contract for PASS or BLOCKED results.
+
+    Exit 78 is reserved for a scientifically blocked stage.  A blocker is not
+    accepted merely because the child chose that exit code: its declared log
+    marker and every required evidence file must still exist.  Any other
+    non-zero exit remains an execution failure.
+    """
+
     failures: list[str] = []
-    if exit_code != 0:
+    scientific_blocker = (
+        allow_scientific_blocker and exit_code == SCIENTIFIC_BLOCKED_EXIT_CODE
+    )
+    if exit_code != 0 and not scientific_blocker:
         failures.append(f"scientific command exited {exit_code}")
     log_path = Path(str(spec["log_path"]))
     marker = spec.get("required_log_marker")
+    expected = spec.get("expected_output")
+    required = [str(value) for value in spec.get("required_output_files", [])]
+    if scientific_blocker:
+        if not isinstance(marker, str) or not marker.strip():
+            failures.append("scientific blocker requires a nonempty log marker")
+        if not expected or not required:
+            failures.append(
+                "scientific blocker requires an expected output and evidence files"
+            )
     if marker:
         log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
         if str(marker) not in log_text:
             failures.append(f"required log marker is absent: {marker}")
-    expected = spec.get("expected_output")
-    required = [str(value) for value in spec.get("required_output_files", [])]
     if expected and required:
         failures.extend(verify_required_outputs(Path(str(expected)), required))
     return failures
@@ -390,12 +414,17 @@ def run_worker(spec_path: Path) -> int:
                 log.write(f"[AUTODL_RUN_EXIT] exit_code={exit_code} timestamp={utc_now()}\n")
                 log.flush()
                 os.fsync(log.fileno())
-            failures = _validate_success(spec, exit_code=exit_code)
+            failures = _validate_result_contract(
+                spec,
+                exit_code=exit_code,
+                allow_scientific_blocker=True,
+            )
     except Exception as exc:
         failures.append(f"{type(exc).__name__}: {exc}")
 
-    success = not failures
-    final_state = "PASS" if success else "FAILED"
+    blocked = exit_code == SCIENTIFIC_BLOCKED_EXIT_CODE and not failures
+    success = exit_code == 0 and not failures
+    final_state = "BLOCKED" if blocked else ("PASS" if success else "FAILED")
     _write_stage_gate(layout, spec, status=final_state, failures=failures)
     _write_stage_state(
         layout,
@@ -422,6 +451,13 @@ def run_worker(spec_path: Path) -> int:
         layout.registry_path,
         _registry_event(spec, state=final_state, exit_code=exit_code, pid=os.getpid()),
     )
+    if final_state == "BLOCKED":
+        print(
+            "AUTODL_RUN_BLOCKED: scientific dependency is unavailable; "
+            "see the stage blocker evidence",
+            file=sys.stderr,
+        )
+        return SCIENTIFIC_BLOCKED_EXIT_CODE
     if failures:
         print("AUTODL_RUN_FAILED: " + "; ".join(failures), file=sys.stderr)
         return exit_code if exit_code != 0 else 4

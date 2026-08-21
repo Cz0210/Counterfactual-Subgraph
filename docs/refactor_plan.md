@@ -742,6 +742,9 @@ Mutagenicity roadmaps.
   predicted source cohort from calibration after B3 passes.
 - [ ] Pass CPU/PyG tests and BACE GINE smoke, then launch the single seed-7
   BACE full classifier on an idle AutoDL GPU.
+- [x] Add an honest B6 calibrated-GNN scoring diagnostic that leaves the PPO
+  stage BLOCKED, plus executable B7--B14 blocker contracts; never label that
+  diagnostic PPO or use it to release B7.
 - [ ] Integrate the frozen GNN oracle into BACE proposal/reward/verification
   and complete B6--B14 without using RF-contaminated artifacts.
 - [ ] Obtain explicit TasteMolNet data-license approval before committing data

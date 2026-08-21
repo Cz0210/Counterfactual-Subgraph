@@ -42,3 +42,21 @@ autodl:
     require_connected_deletion_per_parent: true
     expected_num_classes: 2
     test_loaded: false
+  downstream_route:
+    launcher: scripts/autodl/run_bace_frozen_gnn_stage.sh
+    driver: scripts/autodl/bace_frozen_gnn_route.py
+    b6_execution_mode: gnn_scoring_preflight_not_ppo
+    b6_stage_status: BLOCKED
+    b6_blocker: BLOCKED_MISSING_GNN_PPO_INTEGRATION
+    b6_secondary_blocker: BLOCKED_NO_GNN_CLEAN_BACE_POLICY_INITIALIZATION
+    b6_ppo_training_performed: false
+    b6_downstream_release_authorized: false
+    scientific_blocked_exit_code: 78
+    b7_blocker: BLOCKED_MISSING_GNN_PPO_INTEGRATION
+    b8_blocker: BLOCKED_MISSING_GNN_CANDIDATE_SCORER_INTEGRATION
+    b9_blocker: BLOCKED_MISSING_GNN_HIGHTEMP_POOL_INTEGRATION
+    b10_blocker: BLOCKED_MISSING_GNN_POOL_MERGE_INTEGRATION
+    b11_blocker: BLOCKED_MISSING_GNN_CROSS_PARENT_VERIFICATION_INTEGRATION
+    b12_blocker: BLOCKED_MISSING_GNN_SELECTOR_MATRIX_CONTRACT
+    b13_blocker: BLOCKED_MISSING_GNN_HELDOUT_EVALUATION_INTEGRATION
+    b14_blocker: BLOCKED_MISSING_GNN_FINAL_FREEZE_INTEGRATION

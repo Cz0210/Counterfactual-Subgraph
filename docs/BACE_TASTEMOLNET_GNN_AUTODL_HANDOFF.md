@@ -2,28 +2,28 @@
 
 Date: 2026-08-22
 
-Scope: AutoDL only; no HPC GPU or CPU was used for this route.
+Scope: AutoDL only. No HPC GPU or CPU was used for this route. AIDS and
+Mutagenicity remained read-only and were not stopped, restarted, or modified.
 
-Draft status: final release deployment is still in progress. Every dynamic
-field that depends on that deployment is deliberately recorded as
-`PENDING_FINAL_DEPLOY`; it must be replaced from the persistent AutoDL state
-exactly once before this handoff is declared final.
+Current boundary: BACE B0--B5 and the bounded TasteMolNet CPU foundation smoke
+are complete. BACE B6--B14 are `NOT_STARTED`; a separate pending change set is
+adding their fail-closed route. TasteMolNet heavy work remains blocked by
+license review and `RUN_TASTEMOLNET=0`.
 
 ## 1. Git branch and commit
 
 - Branch: `feat/bace-tastemolnet-gnn-autodl`.
-- Foundation commit currently deployed/audited:
-  `861ba55179ef3107b06e8634a98e1070426dfc4a`.
-- Logical commits through that foundation:
+- Release and deployed commit:
+  `8b9628c6fa4125f05cd84f05212aa2b76b34b8a3`.
+- Release subject: `feat: harden AutoDL frozen GNN stages`.
+- Earlier logical commits:
   - `3bc8bb4` — TasteMolNet data and multiclass semantics;
   - `b3dcc30` — generic frozen molecular-GNN oracle;
   - `80c068b` — AutoDL frozen-GNN scheduler;
   - `861ba55` — BACE/TasteMolNet Frozen-GNN route documentation.
-- Final release commit: `PENDING_FINAL_DEPLOY`.
-- The final handoff must record one exact final commit after the current
-  B4/B5, persistent-control, graph-cache, and launcher changes are committed
-  and deployed. Do not repeatedly poll or re-verify Git SHA while experiments
-  are running.
+
+The commit gate was checked once at deployment. Do not repeatedly poll or
+re-verify SHA while experiments are running.
 
 ## 2. Pre-existing dirty files
 
@@ -42,15 +42,16 @@ separate its older contents from these five task edits. Preserve it as one
 pre-existing user tree and review/stage the five files separately if the paper
 is later brought under version control.
 
-The changes currently present after `861ba55` in the feature worktree are task
-changes, not pre-existing user changes. Their final file list belongs to the
-pending final release commit.
+The current feature-worktree changes after `8b9628c` belong to the pending
+B6--B14 fail-closed route. They are task changes, not pre-existing user work,
+and are not part of the deployed release described here.
 
 ## 3. Files added or modified by this route
 
-The commits through `861ba55` add or update the following coherent groups:
+The route through `861ba55` added or updated these coherent groups:
 
-- active registry/configuration: `README.md`, `configs/datasets/{bace_gnn,tastemolnet}.yaml`,
+- active registry/configuration: `README.md`,
+  `configs/datasets/{bace_gnn,tastemolnet}.yaml`,
   `configs/gnn/{gine,gin,gcn,gatv2}.yaml`, and
   `configs/autodl/{bace_gine,tastemolnet_gine}.yaml`;
 - data and multiclass semantics: `src/data/dataset_registry.py`,
@@ -61,41 +62,33 @@ The commits through `861ba55` add or update the following coherent groups:
   `src/oracles/`, `scripts/train_molecular_gnn.py`,
   `scripts/evaluate_molecular_gnn.py`, and
   `scripts/calibrate_gnn_classifier.py`;
-- AutoDL control plane: `src/utils/autodl_runtime.py` and
-  `scripts/autodl/{bootstrap_env,common,detect_runtime,exp_run,gpu_inventory,gpu_lock,status}.py/.sh`
-  plus the BACE/Taste launchers;
-- provenance guard: `scripts/audit_oracle_provenance.py`;
-- paired CLI wrappers under `scripts/slurm/`;
-- focused registry, data, oracle, semantics, provenance, scheduler, and vertical
-  smoke tests under `tests/` and `tests/autodl/`;
-- route documentation: `README.md`, `docs/cf_subgraph_v3_spec.md`,
-  `docs/decisions.md`, `docs/refactor_plan.md`,
-  `docs/AUTODL_EXPERIMENT_LOG.md`,
-  `docs/BACE_TASTEMOLNET_GNN_AUTODL.md`,
-  `docs/BBBP_TO_TASTEMOLNET_MIGRATION.md`, and
-  `docs/TASTEMOLNET_MULTICLASS_BASELINE_AUDIT.md`.
+- AutoDL control plane: `src/utils/autodl_runtime.py`, `scripts/autodl/`, and
+  their thin paired Slurm wrappers;
+- provenance guard, focused tests, and route documentation.
 
-The pending final release additionally includes the persistent control-root
-contract, molecular graph cache, explicit BACE B4/B5 stage entrypoints, their
-paired Slurm wrappers, and focused tests. The exact final diff is
-`PENDING_FINAL_DEPLOY` and must be captured from the final commit rather than
-from a moving worktree.
+Release `8b9628c` additionally hardened the persistent control root, graph
+cache, exact BACE B4/B5 stages, checkpoint invariants, launch contracts, and
+their paired wrappers/tests. Its exact 32-file release delta is recoverable
+with:
 
-Verification already completed before the pending final deploy:
+```bash
+git diff --name-status 861ba55..8b9628c
+```
 
-- local scoped release gate: `459 passed, 9 skipped` with one harmless joblib
-  warning;
-- AutoDL Linux targeted GNN/Taste gate: `16 passed`;
-- one local full-suite diagnostic found `18 failed, 1557 passed, 10 skipped,
-  1 error`; those failures were pre-existing data/checkout/platform collection
-  issues and were not repeatedly rerun.
+Verification for the deployed release:
+
+- local focused release gate: `84 passed`;
+- AutoDL Linux focused release gate: `84 passed`;
+- one earlier repository-wide diagnostic found `18 failed, 1557 passed,
+  10 skipped, 1 error`; those failures were pre-existing data, checkout, or
+  platform-collection issues and were not repeatedly rerun.
 
 ## 4. BBBP replacement scope
 
-The active four-dataset matrix is now intended to be AIDS, Mutagenicity, BACE,
-and TasteMolNet. BBBP is removed only from the active dataset registry, active
-configs, new automation, paper-facing active dataset table, and future formal
-experiment matrix. AIDS and Mutagenicity are unchanged and remain read-only.
+The active four-dataset matrix is AIDS, Mutagenicity, BACE, and TasteMolNet.
+BBBP was removed only from the active dataset registry, active configs, new
+automation, paper-facing active dataset table, and future formal experiment
+matrix. AIDS and Mutagenicity were unchanged and remained read-only.
 
 At migration base there was no tracked active runtime BBBP registry; tracked
 BBBP mentions were historical. The one-time migration audit passed at:
@@ -109,14 +102,14 @@ used that incomplete directory.
 ## 5. BBBP historical preservation
 
 No BBBP data, checkpoint, log, output, paper draft, or Git record was deleted
-or rewritten. Historical tracked material remains in repository Git history;
-pre-existing runtime artifacts remain at their original data/output/log paths.
-The exact repository references observed during the migration are frozen in:
+or rewritten. Historical tracked material remains in Git history;
+pre-existing runtime artifacts remain at their original paths. The exact
+repository references observed during migration are frozen in:
 
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/bace_tastemolnet_gnn_migration_20260822_0119_v2/bbbp_reference_inventory.csv`
 
-There is no newly invented consolidated BBBP directory. The inventory above
-is the source of truth for historical locations.
+There is no invented consolidated BBBP directory. The inventory above is the
+source of truth for historical locations.
 
 ## 6. TasteMolNet source, hash, and license
 
@@ -124,39 +117,38 @@ is the source of truth for historical locations.
   `https://github.com/MujeebOnawole/Taste_Prediction_RGCN`.
 - Fixed upstream commit:
   `16af8ead8a17b6bd3941d9eb5879c5be75c14114`.
-- Selected upstream file: `processed_data/taste_scaffold_split.csv`.
-- One-time SHA-256 of the fixed-commit source CSV:
+- Selected file: `processed_data/taste_scaffold_split.csv`.
+- One-time fixed-source CSV SHA-256:
   `b7308b3277fd07ed6af4b861c0d2ce2d843f92cc81a9e5e4efd65cf4040a291b`.
 - AutoDL upstream copy:
   `/autodl-fs/data/counterfactual-subgraph-runtime/data/tastemolnet/upstream/16af8ead8a17b6bd3941d9eb5879c5be75c14114/taste_scaffold_split.csv`.
 - Prepared foundation:
   `/autodl-fs/data/counterfactual-subgraph-runtime/data/tastemolnet/prepared/16af8ead8a17b6bd3941d9eb5879c5be75c14114`.
-- License status: `LICENSE_REVIEW_REQUIRED`.
+- Data marker: `LICENSE_REVIEW_REQUIRED`.
+- Route status: `BLOCKED_LICENSE_REVIEW`.
 
 The upstream repository and CSV do not provide a standalone explicit data
-license. The CSV and derived records therefore remain untracked. Preparation,
-graph foundation, tests, and a bounded forward smoke are allowed, but full
-TasteMolNet training and publication of derived data remain fail-closed until
-reuse terms are confirmed.
+license. Source and derived rows remain untracked. Preparation, graph cache,
+tests, and a bounded CPU smoke were allowed; full TasteMolNet training and
+publication of derived data remain fail-closed.
 
 ## 7. TasteMolNet cleaning and split statistics
 
-- Input rows: 14,158.
+- Input rows: `14,158`.
 - Input labels: Bitter `3,165`, Sweet `6,085`, Tasteless `4,908`.
-- Upstream groups: train `11,330`, validation `1,415`, test `1,413`; these
-  groups are provenance only, not the project four-way split.
+- Upstream groups: train `11,330`, validation `1,415`, test `1,413`; these are
+  provenance groups, not the project four-way split.
 - Retained conflict-free supported molecules: `13,421`.
 - Excluded during canonicalization/support/conflict filtering: `737`.
-- Project scaffold-disjoint split (seed 7):
-  - train: `9,437`;
-  - validation: `1,328`;
-  - calibration: `1,328`;
-  - test: `1,328`.
+- Project scaffold-disjoint split (seed 7): train `9,437`, validation `1,328`,
+  calibration `1,328`, test `1,328`.
 - All three labels occur in every project split.
-- Cross-split scaffold overlap gate: `PASS`.
-- Exact per-file hashes and detailed exclusion/component counts remain in the
-  prepared directory's manifest/provenance artifacts; do not replace those
-  artifacts with numbers copied from this prose.
+- Cross-split scaffold-overlap gate: `PASS`.
+- Molecular graph cache: `13,421` graphs at
+  `/autodl-fs/data/counterfactual-subgraph-runtime/cache/tastemolnet/16af8ead8a17b6bd3941d9eb5879c5be75c14114/molecular_graph_v1`.
+
+Exact per-file hashes and detailed exclusion/component counts remain in the
+prepared manifest/provenance; they are not replaced by prose here.
 
 ## 8. BACE split and source label
 
@@ -165,10 +157,12 @@ reuse terms are confirmed.
 - Frozen split sizes: train `959`, validation `187`, calibration `129`, test
   `238`; total `1,513` unique valid molecules.
 - Scaffold overlap between every split pair: zero.
-- Source label: `1` (`Active`). Destination is untargeted class `0`.
-- Validation and test remain unchanged. Validation selects the classifier and
-  fits temperature; calibration is reserved for downstream thresholds/rules;
-  test is held out until final frozen evaluation.
+- Source label: `1` (`Active`); strict destination is untargeted class `0`.
+- Molecular graph cache: `1,513` graphs at
+  `/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/scaffold_v1/molecular_graph_v1`.
+- Validation and test remained unchanged. Validation selected the classifier
+  and fitted temperature; calibration is reserved for downstream rules; test
+  was not loaded or evaluated by B2--B5.
 
 ## 9. BACE GINE configuration
 
@@ -181,44 +175,44 @@ reuse terms are confirmed.
 - Optimization: class-weighted cross entropy, AdamW, learning rate `1e-3`,
   weight decay `1e-5`, batch size 64, gradient clipping 5.0, at most 200
   epochs, early-stopping patience 20, seed 7.
-- BACE checkpoint selection override: validation ROC-AUC.
+- Checkpoint selection: validation ROC-AUC.
 - Full health gate: validation ROC-AUC at least 0.65, more than one predicted
   class, positive source-class recall, and finite probabilities/metrics.
-- Alternative registered sensitivity backbones: GIN, GCN, and GATv2. They are
-  not primary BACE results.
+- Registered sensitivity backbones: GIN, GCN, and GATv2; none is presented as
+  the primary BACE result.
 
 ## 10. BACE classifier metrics
 
-No formal B3 metric is claimed in this draft.
+B3 completed with a passing validation-only health gate:
 
 | Metric | Value |
 |---|---|
-| selected epoch | `PENDING_FINAL_DEPLOY` |
-| validation ROC-AUC | `PENDING_FINAL_DEPLOY` |
-| validation accuracy | `PENDING_FINAL_DEPLOY` |
-| validation macro-F1 | `PENDING_FINAL_DEPLOY` |
-| validation source-class recall | `PENDING_FINAL_DEPLOY` |
-| predicted-class support | `PENDING_FINAL_DEPLOY` |
-| health gate | `PENDING_FINAL_DEPLOY` |
+| run ID | `20260821T180839Z-bace-B3_GNN_FULL-95434` |
+| best epoch | `44` |
+| validation ROC-AUC | `0.9010548039440496` |
+| health gate | `PASS` |
+| checkpoint identity | `4edd23cd...1bc47` (abbreviated; full identity is in the frozen model card/manifest) |
+| test loaded | `false` |
+| test evaluated | `false` |
 
-Test metrics must not be added here until B4/B5 and all downstream choices are
-frozen.
+Other exact validation fields remain in `training_metrics.json`; they are not
+reconstructed from rounded console output. No held-out test metric is claimed.
 
 ## 11. Calibration metrics
 
-Planned B4 calibration uses temperature scaling on `val.csv` only, copies the
-uncalibrated B3 bundle to a fresh persistent directory, and must leave B3
-unchanged. Formal evidence is pending.
+B4 copied the B3 bundle to a fresh persistent directory, calibrated on
+`val.csv` only, and passed without loading test:
 
 | Metric | Before | After |
 |---|---:|---:|
-| temperature | — | `PENDING_FINAL_DEPLOY` |
-| validation NLL | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| validation ECE | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| validation Brier | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| argmax invariant | — | `PENDING_FINAL_DEPLOY` |
+| temperature | — | `1.5447202081060156` |
+| validation NLL | `0.47404` | `0.44296` |
+| validation ECE | `0.15040` | `0.04744` |
+| stage/gate | — | `PASS` |
+| test loaded/evaluated | — | `false / false` |
 
-B4 state/gate: `PENDING_FINAL_DEPLOY`.
+The unrounded authoritative values and argmax-invariance evidence are in
+`b4_calibration.json`; the B3 bundle remains unchanged.
 
 ## 12. RF provenance gate
 
@@ -232,160 +226,167 @@ rf_oracle_used = false
 
 The audit classifies the legacy BACE Morgan-RF teacher and every candidate,
 verification, selector, or final artifact bound to it as `RF_CONTAMINATED`.
-They remain diagnostic history only. A legacy GCFExplainer checkpoint without a
-complete task-specific GINE model card is `UNKNOWN_ORACLE_PROVENANCE` and is
-also excluded. MolCLR is `ORACLE_NEUTRAL` because it is only the WNode distance
-encoder. Exact classifications are recorded in the v2 audit's
+A legacy GCFExplainer checkpoint without a complete task-specific GINE model
+card is `UNKNOWN_ORACLE_PROVENANCE`; MolCLR is `ORACLE_NEUTRAL` because it is
+only the WNode distance encoder. Exact classifications are in the v2 audit's
 `bace_existing_artifacts.csv` and `bace_oracle_provenance.csv`.
 
-Focused RF/oracle guard tests passed locally. Formal B5 runtime guard evidence:
-`PENDING_FINAL_DEPLOY`.
+The B5 runtime RF guard returned `true`. B5 also kept
+`test_loaded=false`. No RF artifact entered B0--B5.
 
 ## 13. Current GPU allocation
 
-| Route | GPU index | GPU UUID | State |
-|---|---|---|---|
-| pre-existing Mutagenicity recovery | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| pre-existing AIDS recovery | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| BACE Frozen-GNN | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| TasteMolNet heavy route | none authorized | none authorized | `RUN_TASTEMOLNET=0` |
+There is no current BACE or TasteMolNet GPU allocation: all B0--B5 and Taste
+CPU-smoke workers completed and released their resources.
 
-The BACE runner may claim at most two GPUs that are stably idle for 60 seconds,
-uses UUID-bound locks, and must not kill or displace existing work. A fresh
-one-time `nvidia-smi` snapshot must replace the placeholders immediately before
-final handoff.
+| Route/stage | Allocation | State |
+|---|---|---|
+| BACE B2, B3, B5 (historical) | GPU 0, `GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732` | completed `PASS`; lock released |
+| BACE B4 | CPU | completed `PASS` |
+| TasteMolNet CPU smoke | CPU | completed `PASS` |
+| TasteMolNet heavy route | none | blocked; not launched |
+| Mutagenicity recovery | independent/read-only | not resampled or changed by this route |
+| AIDS recovery | independent/read-only | not resampled or changed by this route |
+
+The historical BACE launcher used the stable-idle/UUID lock policy and did not
+kill or displace existing work.
 
 ## 14. AutoDL PIDs and tmux sessions
 
-| Process/session | PID or child PID | tmux session | State |
-|---|---|---|---|
-| BACE controller/launcher | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| BACE active stage worker | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| Mutagenicity recovery | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| AIDS recovery | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` | `PENDING_FINAL_DEPLOY` |
-| TasteMolNet heavy worker | none | none | disabled |
+All PIDs below are historical completed processes, not current allocations.
+No active BACE or TasteMolNet tmux session is required now.
 
-Do not copy old PID samples into this table. Fill it from the final persistent
-registry and process snapshot after deployment.
+| Stage | Run ID | Historical PID / child PID | Current state |
+|---|---|---|---|
+| B2 | `20260821T180530Z-bace-B2_GNN_SMOKE-94533` | `94627 / 94632` | `PASS`, completed |
+| B3 | `20260821T180839Z-bace-B3_GNN_FULL-95434` | `95529 / 95536` | `PASS`, completed |
+| B4 | `20260821T181040Z-bace-B4_GNN_CALIBRATED-97689` | `97699 / 97702` | `PASS`, completed |
+| B5 | `20260821T181237Z-bace-B5_ORACLE_SMOKE-97877` | `97969 / 97974` | `PASS`, completed |
+| Taste CPU smoke | `20260821T180648Z-tastemolnet-GNN_CPU_SMOKE-94932` | `94942 / 94943` | `PASS`, completed |
+
+Mutagenicity and AIDS belong to their independent recovery controller. This
+route deliberately did not refresh, stop, or overwrite their PID/session
+records; use that controller's handoff for their live identities.
 
 ## 15. BACE stage status
 
-The audit/data evidence exists, but B0/B1 are not reported as formal state
-machine passes until their evidence is registered by the final deployed
-runner. No B0-B5 PASS is claimed in this draft.
-
-| Stage | Formal state | Planned evidence/purpose |
+| Stage | Formal state | Evidence |
 |---|---|---|
-| B0_AUDIT | `PENDING_FINAL_DEPLOY` | v2 migration audit |
-| B1_DATA_READY | `PENDING_FINAL_DEPLOY` | frozen four-way BACE split |
-| B2_GNN_SMOKE | `PENDING_FINAL_DEPLOY` | train/reload/batch-single/deletion smoke |
-| B3_GNN_FULL | `PENDING_FINAL_DEPLOY` | full GINE training and health gate |
-| B4_GNN_CALIBRATED | `PENDING_FINAL_DEPLOY` | validation-only temperature bundle |
-| B5_ORACLE_SMOKE | `PENDING_FINAL_DEPLOY` | 16 correctly predicted source parents and real residuals |
-| B6_PPO_SMOKE | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B7_PPO_FULL | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B8_POOL_BASE | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B9_POOL_HIGHTEMP | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B10_POOL_MERGED | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B11_CROSS_PARENT_VERIFIED | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B12_SELECTOR | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B13_FINAL_EVAL | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
-| B14_FROZEN | `PENDING_FINAL_DEPLOY` | downstream, not executed in this draft |
+| B0_AUDIT | `PASS` | marked `2026-08-21T18:03:09Z`; v2 migration audit |
+| B1_DATA_READY | `PASS` | marked `2026-08-21T18:04:07Z`; frozen split and 1,513-graph cache |
+| B2_GNN_SMOKE | `PASS` | run `20260821T180530Z-bace-B2_GNN_SMOKE-94533` |
+| B3_GNN_FULL | `PASS` | run `20260821T180839Z-bace-B3_GNN_FULL-95434` |
+| B4_GNN_CALIBRATED | `PASS` | run `20260821T181040Z-bace-B4_GNN_CALIBRATED-97689` |
+| B5_ORACLE_SMOKE | `PASS` | run `20260821T181237Z-bace-B5_ORACLE_SMOKE-97877` |
+| B6_PPO_SMOKE | `NOT_STARTED` | pending separate fail-closed route |
+| B7_PPO_FULL | `NOT_STARTED` | downstream-gated |
+| B8_POOL_BASE | `NOT_STARTED` | downstream-gated |
+| B9_POOL_HIGHTEMP | `NOT_STARTED` | downstream-gated |
+| B10_POOL_MERGED | `NOT_STARTED` | downstream-gated |
+| B11_CROSS_PARENT_VERIFIED | `NOT_STARTED` | downstream-gated |
+| B12_SELECTOR | `NOT_STARTED` | downstream-gated |
+| B13_FINAL_EVAL | `NOT_STARTED` | downstream-gated |
+| B14_FROZEN | `NOT_STARTED` | downstream-gated |
+
+B5 selected exactly 16 correctly predicted source-class parents. All 16 had
+valid real deletion evidence, producing 64 deletion records. Batch/single
+maximum probability difference was `5.14e-08`; the RF guard passed and test was
+not loaded.
 
 ## 16. BACE checkpoint and output paths
 
-- Persistent data/runtime root:
+- Persistent runtime root:
   `/autodl-fs/data/counterfactual-subgraph-runtime`.
 - Persistent control root:
   `/autodl-fs/data/counterfactual-subgraph-runtime/control`.
-- Fast code worktree used for execution:
-  `/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55`
-  (the final deployed worktree/commit must replace this if it changes).
-- B2 smoke output: `PENDING_FINAL_DEPLOY`.
-- B3 uncalibrated checkpoint bundle: `PENDING_FINAL_DEPLOY`.
-- B4 calibrated checkpoint bundle: `PENDING_FINAL_DEPLOY`.
-- B5 oracle-smoke evidence: `PENDING_FINAL_DEPLOY`.
-- BACE final output: `PENDING_FINAL_DEPLOY`.
+- Fast execution clone:
+  `/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55`; despite the
+  directory suffix, its deployed HEAD for these runs was `8b9628c`.
+- B2 smoke bundle:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/smoke-20260821T180529Z-94533`.
+- B3 uncalibrated full bundle:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/full-20260821T180836Z-95434`.
+- B4 calibrated frozen-GNN bundle:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689`.
+- B5 oracle-smoke evidence:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/oracle-smoke-20260821T181237Z-97877`.
+- BACE final output: not produced; B14 is `NOT_STARTED`.
 
-All scientific state, checkpoints, outputs, and logs must remain on
+All state, checkpoints, outputs, and logs are persistent under
 `/autodl-fs/data`; the fast NVMe clone is an execution copy only.
 
 ## 17. TasteMolNet `READY_NOT_RUN` status
 
-- Data foundation: prepared at the fixed upstream commit.
-- Multiclass semantics/config/tests: implemented.
-- Heavy-run switch: `RUN_TASTEMOLNET=0`.
-- Heavy GNN training, PPO, candidate pools, verification, selectors, and full
-  baselines: not launched.
-- Authoritative blocker: `LICENSE_REVIEW_REQUIRED`.
+- Prepared rows and cached graphs: `13,421 / 13,421`.
+- CPU smoke run:
+  `20260821T180648Z-tastemolnet-GNN_CPU_SMOKE-94932`.
+- CPU smoke output:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/tastemolnet/gine/seed7/cpu-smoke-20260821T180646Z-94932`.
+- CPU smoke state: `PASS`; `num_classes=3`; test was not loaded/evaluated.
+- Heavy switch: `RUN_TASTEMOLNET=0`.
+- Heavy GNN, PPO, candidate pools, verification, selectors, and full baselines:
+  not launched.
+- Authoritative route status: `BLOCKED_LICENSE_REVIEW`.
 
-Therefore this draft does **not** claim the
-`[TASTEMOLNET_FOUNDATION_READY_NOT_RUN]` pass marker. The accurate state is
-foundation prepared, heavy route disabled, license review required. After
-reuse terms are confirmed, a fresh bounded foundation check may promote it to
-`READY_NOT_RUN`; no historical result should be relabeled retroactively.
+The data and bounded foundation are technically ready, but the route does not
+claim `[TASTEMOLNET_FOUNDATION_READY_NOT_RUN]` while reuse terms remain
+unresolved. No historical result is relabeled.
 
 ## 18. Exact status and resume commands
 
-These commands depend on the final deployed commit, run ID, and persistent
-state. They must not point to `861ba55` after a newer release is deployed.
+Read-only status command for the persistent BACE/Taste control plane:
 
-```text
-status_command=PENDING_FINAL_DEPLOY
-resume_command=PENDING_FINAL_DEPLOY
+```bash
+AUTODL_DATA_ROOT=/autodl-fs/data \
+AUTODL_CONTROL_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control \
+AUTODL_PYTHON=/root/miniconda3/envs/smiles_pip118/bin/python \
+RUN_TASTEMOLNET=0 \
+PYTHONPATH=/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55 \
+/root/miniconda3/envs/smiles_pip118/bin/python \
+/root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55/scripts/autodl/status.py \
+  --project-root /root/autodl-tmp/worktrees/bace-tastemolnet-gnn-autodl-861ba55 \
+  --data-root /autodl-fs/data --format table --gpu --limit 20
 ```
 
-Required environment contract for both commands:
-
-```text
-AUTODL_DATA_ROOT=/autodl-fs/data
-AUTODL_CONTROL_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control
-AUTODL_PYTHON=/root/miniconda3/envs/smiles_pip118/bin/python
-RUN_TASTEMOLNET=0
-```
-
-The final author must paste the exact single status command and exact single
-resume command that were actually exercised; do not provide a menu of guessed
-commands.
+There is no B0--B5 process to resume. Do not rerun those stages. The safe
+resume action is to wait for the pending B6--B14 fail-closed route to be
+reviewed, committed, and deployed; its exact B6 launcher must replace
+`NO_COMMAND_UNTIL_B6_ROUTE_RELEASE` in the next handoff revision.
 
 ## 19. Incomplete items and blockers
 
-- Final release commit and deployment: `PENDING_FINAL_DEPLOY`.
-- Formal B0-B5 stage registration/execution: `PENDING_FINAL_DEPLOY`.
-- BACE classifier, calibration, PID/GPU, checkpoint, and output evidence:
-  `PENDING_FINAL_DEPLOY`.
-- B6-B14 were not executed in this draft and remain downstream-gated.
-- TasteMolNet full training is blocked by `RUN_TASTEMOLNET=0` and
-  `LICENSE_REVIEW_REQUIRED`.
-- The five paper-facing edits live inside a pre-existing untracked paper tree;
-  they require separate review and must not be bulk-staged accidentally.
-- The repository-wide diagnostic failures described in section 3 are
-  pre-existing environment/data issues; they do not justify repeatedly running
-  the full suite or changing AIDS/Mutagenicity.
+- B6--B14 are `NOT_STARTED`; another task agent is adding their fail-closed
+  implementation. No B6 result is claimed here.
+- BACE final output does not exist because B14 has not run.
+- TasteMolNet heavy work is blocked by `RUN_TASTEMOLNET=0` and
+  `BLOCKED_LICENSE_REVIEW`.
+- The five paper-facing edits remain inside a pre-existing untracked paper
+  tree and require separate review; do not bulk-stage that tree.
+- The earlier repository-wide diagnostic failures are pre-existing
+  environment/data issues; they do not justify repeated full-suite runs or any
+  AIDS/Mutagenicity change.
 
 ## 20. Next minimum action
 
-1. Finish one final release commit, push it, and deploy that exact commit to the
-   fast AutoDL execution clone while retaining persistent state under
-   `/autodl-fs/data`.
-2. Register the existing audit/split evidence as B0/B1, run B2 once, and launch
-   B3 immediately if B2 passes. Do not wait for unrelated task lines and do not
-   start TasteMolNet heavy work.
-3. Once B3 is a stable long-running job, capture one status/GPU/PID snapshot,
-   replace every `PENDING_FINAL_DEPLOY` field, write the exact exercised
-   status/resume commands, and stop monitoring for the handoff interval.
+1. Review, commit, and deploy the separate B6--B14 fail-closed route without
+   changing the frozen B0--B5 artifacts.
+2. Run the exact read-only status command above once, then start B6 only if its
+   predecessor, provenance, split, checkpoint, test-leakage, and GPU gates all
+   pass.
+3. Keep `RUN_TASTEMOLNET=0`; do not launch TasteMolNet heavy work until the
+   data license is resolved explicitly.
 
 ## Final machine-readable handoff fields
 
 ```text
-current_stage=PENDING_FINAL_DEPLOY
-current_pid=PENDING_FINAL_DEPLOY
-tmux_session=PENDING_FINAL_DEPLOY
-assigned_gpus=PENDING_FINAL_DEPLOY
-bace_gnn_checkpoint=PENDING_FINAL_DEPLOY
-bace_final_output=PENDING_FINAL_DEPLOY
-tastemolnet_foundation=LICENSE_REVIEW_REQUIRED
+current_stage=B5_ORACLE_SMOKE_PASS__NEXT_B6_PPO_SMOKE_NOT_STARTED
+current_pid=none__all_BACE_B0_B5_and_Taste_CPU_smoke_processes_completed
+tmux_session=none_active_for_BACE_or_TasteMolNet
+assigned_gpus=none_current__historical_BACE_GPU0_GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732
+bace_gnn_checkpoint=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689
+bace_final_output=NOT_PRODUCED__B14_NOT_STARTED
+tastemolnet_foundation=CPU_SMOKE_PASS__BLOCKED_LICENSE_REVIEW__HEAVY_NOT_LAUNCHED
 handoff_path=docs/BACE_TASTEMOLNET_GNN_AUTODL_HANDOFF.md
-resume_command=PENDING_FINAL_DEPLOY
-status_command=PENDING_FINAL_DEPLOY
+resume_command=NO_COMMAND_UNTIL_B6_ROUTE_RELEASE
+status_command=see_section_18_exact_read_only_command
 ```

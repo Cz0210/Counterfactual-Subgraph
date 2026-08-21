@@ -6538,3 +6538,48 @@ streaming SHA-256 in `test_evaluation_status.json`, which must declare
 `NOT_EVALUATED` and `test_loaded=false` and must match the split manifest.
 `test_predictions.csv` is no longer a checkpoint artifact. Final frozen-model
 evaluation remains the only route allowed to load the test split.
+
+---
+
+## 2026-08-22: Keep B6 honest and block legacy-teacher downstream kernels
+
+The repository's stable PPO reward loop and candidate generator instantiate
+the legacy teacher scorers directly. The historical BACE WNode action matrix
+calls `predict_with_teacher`, and its selector/final artifacts preserve that
+teacher identity. Passing a GNN checkpoint path through their existing CLI
+would neither inject `GNNOracle` nor remove the old reward and verification
+semantics.
+
+Until those integrations are implemented, B6 runs a bounded calibrated-GNN
+scoring preflight over B5's real connected deletion records. It performs one
+batched oracle call, recomputes the complete counterfactual record, and proves
+batch/single and B5 probability agreement. It explicitly records that no PPO
+training or PPO reward occurred, then publishes
+`BLOCKED_MISSING_GNN_PPO_INTEGRATION` with state/gate `BLOCKED`. A passing
+diagnostic does not make the `B6_PPO_SMOKE` stage PASS and does not authorize
+B7. B7 accepts only a future manifest proving at least one real PPO update with
+the frozen GNN reward backend and checkpoint identity.
+
+The same B6 evidence records a second independent blocker: there is no safely
+reusable BACE policy initialization. Historical BACE PPO/LoRA artifacts are
+RF-contaminated, unknown-provenance LoRA is rejected, and the oracle-neutral
+ChemLLM base cannot directly satisfy the current PPO entrypoint's required
+LoRA initialization. A GNN-aware reward adapter alone is therefore
+insufficient to claim B6 PASS.
+
+B7--B14 share one fail-closed stage driver. Each action checks the passing
+predecessor's required output contract and the frozen B4 GNN provenance, then
+publishes the exact missing scientific interface. A reserved child exit code
+78 is registered as `BLOCKED` only when its declared log marker and blocker
+evidence are complete; malformed or incomplete blockers remain `FAILED`.
+Historical BACE PPO, candidate, verification, selector, and final artifacts
+remain `RF_CONTAMINATED` and cannot satisfy any new predecessor gate.
+
+Consequences:
+
+- a GNN scoring probe cannot be presented as a PPO smoke or full result;
+- downstream state names are backed by executable input/output checks rather
+  than placeholder PASS markers;
+- deterministic oracle-neutral merge/selector math may be adapted later, but
+  only after new GNN-clean input schemas and provenance exist;
+- the held-out test CSV is not parsed by B6 or any blocked preflight.
