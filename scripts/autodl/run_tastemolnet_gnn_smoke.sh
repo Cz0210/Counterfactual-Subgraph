@@ -24,7 +24,7 @@ if [[ -n "$INPUT_MANIFEST" ]]; then
   INPUT_ARGS=(--input-manifest "$INPUT_MANIFEST")
 fi
 
-exec python "$SCRIPT_DIR/exp_run.py" \
+exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   --project-root "$PROJECT_ROOT" \
   --data-root "$AUTODL_DATA_ROOT" \
   launch \
@@ -39,11 +39,12 @@ exec python "$SCRIPT_DIR/exp_run.py" \
   --required-output-file model_card.json \
   --required-output-file feature_schema.json \
   --required-output-file training_metrics.json \
+  --required-output-file test_evaluation_status.json \
   --required-output-file temperature_scaling.json \
   --required-output-file sha256sums.txt \
   --required-log-marker "[MOLECULAR_GNN_TRAIN_OK]" \
   -- \
-  python "$TRAIN_SCRIPT" \
+  "$AUTODL_PYTHON" "$TRAIN_SCRIPT" \
     --config "$HPC_CONFIG" \
     --config "$GNN_CONFIG" \
     --config "$AUTODL_CONFIG" \
@@ -56,5 +57,4 @@ exec python "$SCRIPT_DIR/exp_run.py" \
     --seed "$PRIMARY_SEED" \
     --max-epochs 1 \
     --train-limit 32 \
-    --validation-limit 16 \
-    --test-limit 16
+    --validation-limit 16

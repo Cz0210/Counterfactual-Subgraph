@@ -300,11 +300,47 @@ def build_runtime_layout(
     *,
     project_root: Path,
     data_root: Path,
+    control_root: Path | None = None,
 ) -> RuntimeLayout:
     project_root = project_root.resolve(strict=True)
     data_root = data_root.resolve(strict=True)
     runtime_root = data_root / "counterfactual-subgraph-runtime"
-    control_root = project_root / "outputs" / "autodl"
+    configured_control_root: Path
+    if control_root is not None:
+        configured_control_root = control_root.expanduser()
+    else:
+        environment_value = os.environ.get("AUTODL_CONTROL_ROOT")
+        configured_control_root = (
+            Path(environment_value).expanduser()
+            if environment_value is not None
+            else runtime_root / "control"
+        )
+    if not configured_control_root.is_absolute():
+        raise AutoDLRuntimeError(
+            "AUTODL_CONTROL_ROOT must be an absolute path, got "
+            f"{configured_control_root}"
+        )
+    if configured_control_root.is_symlink():
+        raise AutoDLRuntimeError(
+            f"AUTODL_CONTROL_ROOT must not be a symlink: {configured_control_root}"
+        )
+    resolved_control_root = configured_control_root.resolve(strict=False)
+    try:
+        resolved_control_root.relative_to(data_root)
+    except ValueError as exc:
+        raise AutoDLRuntimeError(
+            "AUTODL_CONTROL_ROOT must be contained by the selected persistent "
+            f"data root {data_root}, got {resolved_control_root}"
+        ) from exc
+    try:
+        resolved_control_root.relative_to(project_root)
+    except ValueError:
+        pass
+    else:
+        raise AutoDLRuntimeError(
+            "AUTODL_CONTROL_ROOT must not be inside the code worktree: "
+            f"{resolved_control_root}"
+        )
     return RuntimeLayout(
         project_root=project_root,
         data_root=data_root,
@@ -315,10 +351,10 @@ def build_runtime_layout(
         artifacts_dir=runtime_root / "outputs",
         logs_dir=runtime_root / "logs",
         locks_dir=runtime_root / "locks",
-        control_root=control_root,
-        registry_path=control_root / "experiment_registry" / "runs.jsonl",
-        stages_root=control_root / "bace" / "stages",
-        runs_root=control_root / "experiment_registry" / "run_state",
+        control_root=resolved_control_root,
+        registry_path=resolved_control_root / "experiment_registry" / "runs.jsonl",
+        stages_root=resolved_control_root / "bace" / "stages",
+        runs_root=resolved_control_root / "experiment_registry" / "run_state",
     )
 
 
@@ -866,6 +902,55 @@ def assert_bace_stage_can_start(layout: RuntimeLayout, stage: str) -> None:
         raise StageTransitionError(
             f"BACE stage {stage} requires {predecessor} state=PASS and gate=PASS"
         )
+
+
+def resolve_passed_bace_stage_output(
+    layout: RuntimeLayout,
+    stage: str,
+    *,
+    required_relative: Sequence[str] = (),
+) -> Path:
+    """Resolve one immutable upstream output only after its state and gate PASS.
+
+    The path comes from the frozen stage manifest rather than a directory scan.
+    It must be absolute, exist below the persistent artifact root, and contain
+    every explicitly required file.  This is the only supported B3 -> B4 and
+    B4 -> B5 hand-off contract.
+    """
+
+    documents = read_bace_stage(layout, stage)
+    if documents["state"].get("state") != "PASS":
+        raise StageTransitionError(f"BACE stage {stage} state is not PASS")
+    if documents["gate"].get("status") != "PASS":
+        raise StageTransitionError(f"BACE stage {stage} gate is not PASS")
+    manifest = documents["manifest"]
+    if manifest.get("status") != "FROZEN":
+        raise StageTransitionError(f"BACE stage {stage} manifest is not FROZEN")
+    raw_output = manifest.get("expected_output")
+    if not isinstance(raw_output, str) or not raw_output.strip():
+        raise StageTransitionError(
+            f"BACE stage {stage} manifest has no expected_output"
+        )
+    candidate = Path(raw_output).expanduser()
+    if not candidate.is_absolute():
+        raise StageTransitionError(
+            f"BACE stage {stage} expected_output is not absolute: {candidate}"
+        )
+    output = candidate.resolve(strict=True)
+    if not output.is_dir():
+        raise StageTransitionError(
+            f"BACE stage {stage} expected_output is not a directory: {output}"
+        )
+    try:
+        output.relative_to(layout.artifacts_dir.resolve(strict=True))
+    except ValueError as exc:
+        raise StageTransitionError(
+            f"BACE stage {stage} expected_output escapes persistent artifacts: {output}"
+        ) from exc
+    failures = verify_required_outputs(output, required_relative)
+    if failures:
+        raise StageTransitionError("; ".join(failures))
+    return output
 
 
 def update_bace_stage_state(

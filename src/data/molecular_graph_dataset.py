@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
@@ -31,6 +32,7 @@ ID_COLUMN_CANDIDATES = (
 )
 LABEL_COLUMN_CANDIDATES = ("label", "target", "TARGET")
 SPLIT_ALIASES = {"validation": "val", "valid": "val", "val": "val"}
+MOLECULAR_GRAPH_CACHE_SCHEMA_VERSION = "molecular_graph_tensor_cache_v1"
 
 
 def _sha256_file(path: Path) -> str:
@@ -548,6 +550,327 @@ class MolecularGraphDataset:
         )
 
 
+def _graph_cache_payload(
+    dataset: MolecularGraphDataset,
+    *,
+    split_name: str,
+) -> dict[str, Any]:
+    """Flatten one split into a ``weights_only=True`` compatible payload.
+
+    The payload intentionally contains only tensors and Python primitives.  In
+    particular, it never serializes ``MolecularGraphData`` or another custom
+    class, so consumers do not need to weaken PyTorch's safe-loading policy.
+    Edge indices stay local to each graph and are sliced using ``edge_ptr``.
+    """
+
+    torch = _require_torch()
+    normalized_split = _normalize_split(split_name)
+    if not normalized_split:
+        raise ValueError("A molecular graph cache requires a non-empty split name.")
+    if dataset.source_path is None or not dataset.source_sha256:
+        raise ValueError("A molecular graph cache requires source CSV provenance.")
+
+    graphs = list(dataset)
+    node_feature_dim = len(dataset.feature_schema.node_fields)
+    edge_feature_dim = len(dataset.feature_schema.edge_fields)
+    node_rows: list[tuple[int, ...]] = []
+    edge_sources: list[int] = []
+    edge_targets: list[int] = []
+    edge_rows: list[tuple[int, ...]] = []
+    node_ptr = [0]
+    edge_ptr = [0]
+    molecule_ids: list[str] = []
+    smiles_values: list[str] = []
+    record_splits: list[str] = []
+    graph_hashes: list[str] = []
+    labels: list[int] = []
+
+    for graph in graphs:
+        record_split = _normalize_split(graph.split)
+        if record_split not in (None, normalized_split):
+            raise ValueError(
+                "Molecular graph cache split mismatch: "
+                f"expected={normalized_split!r}, observed={record_split!r}, "
+                f"molecule_id={graph.molecule_id!r}."
+            )
+        if any(len(row) != node_feature_dim for row in graph.x):
+            raise ValueError(f"Node feature width mismatch for {graph.molecule_id!r}.")
+        if any(len(row) != edge_feature_dim for row in graph.edge_attr):
+            raise ValueError(f"Edge feature width mismatch for {graph.molecule_id!r}.")
+        node_rows.extend(graph.x)
+        edge_sources.extend(graph.edge_index[0])
+        edge_targets.extend(graph.edge_index[1])
+        edge_rows.extend(graph.edge_attr)
+        node_ptr.append(len(node_rows))
+        edge_ptr.append(len(edge_rows))
+        molecule_ids.append(graph.molecule_id)
+        smiles_values.append(graph.smiles)
+        record_splits.append(record_split or normalized_split)
+        graph_hashes.append(graph.graph_sha256)
+        labels.append(int(graph.y))
+
+    x = torch.tensor(node_rows, dtype=torch.long)
+    edge_index = torch.tensor(
+        (edge_sources, edge_targets), dtype=torch.long
+    ).reshape(2, -1)
+    edge_attr = torch.tensor(edge_rows, dtype=torch.long)
+    if edge_attr.numel() == 0:
+        edge_attr = edge_attr.reshape(0, edge_feature_dim)
+    return {
+        "cache_schema_version": MOLECULAR_GRAPH_CACHE_SCHEMA_VERSION,
+        "split": normalized_split,
+        "graph_count": len(graphs),
+        "num_classes": dataset.num_classes,
+        "feature_schema": dataset.feature_schema.to_dict(),
+        "source_csv": str(dataset.source_path),
+        "source_csv_sha256": dataset.source_sha256,
+        "dataset_fingerprint": dataset.dataset_fingerprint,
+        "x": x,
+        "node_ptr": torch.tensor(node_ptr, dtype=torch.long),
+        "edge_index": edge_index,
+        "edge_attr": edge_attr,
+        "edge_ptr": torch.tensor(edge_ptr, dtype=torch.long),
+        "labels": torch.tensor(labels, dtype=torch.long),
+        "molecule_ids": molecule_ids,
+        "smiles": smiles_values,
+        "record_splits": record_splits,
+        "graph_sha256s": graph_hashes,
+    }
+
+
+def save_molecular_graph_cache(
+    dataset: MolecularGraphDataset,
+    path: str | Path,
+    *,
+    split_name: str,
+) -> dict[str, Any]:
+    """Persist one split to a fresh, atomic, safe-loadable ``.pt`` file."""
+
+    torch = _require_torch()
+    target = Path(path).expanduser().resolve()
+    if target.exists():
+        raise FileExistsError(f"Molecular graph cache must be fresh: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = _graph_cache_payload(dataset, split_name=split_name)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent, delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+    try:
+        torch.save(payload, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "cache_schema_version": MOLECULAR_GRAPH_CACHE_SCHEMA_VERSION,
+        "path": str(target),
+        "sha256": _sha256_file(target),
+        "split": str(payload["split"]),
+        "graph_count": int(payload["graph_count"]),
+        "num_classes": int(payload["num_classes"]),
+        "source_csv": str(payload["source_csv"]),
+        "source_csv_sha256": str(payload["source_csv_sha256"]),
+        "dataset_fingerprint": str(payload["dataset_fingerprint"]),
+        "feature_schema_sha256": str(
+            payload["feature_schema"]["schema_sha256"]
+        ),
+    }
+
+
+def _checked_pointer_values(
+    tensor: Any,
+    *,
+    name: str,
+    graph_count: int,
+    terminal: int,
+) -> list[int]:
+    torch = _require_torch()
+    if not isinstance(tensor, torch.Tensor) or tensor.ndim != 1:
+        raise ValueError(f"Cached {name} must be a rank-1 tensor.")
+    values = [int(value) for value in tensor.tolist()]
+    if len(values) != graph_count + 1:
+        raise ValueError(f"Cached {name} length does not match graph_count.")
+    if not values or values[0] != 0 or values[-1] != terminal:
+        raise ValueError(f"Cached {name} has invalid boundary values.")
+    if any(right < left for left, right in zip(values, values[1:])):
+        raise ValueError(f"Cached {name} is not monotonic.")
+    return values
+
+
+def load_molecular_graph_cache(
+    path: str | Path,
+    *,
+    expected_num_classes: int | None = None,
+    expected_source_sha256: str | None = None,
+    expected_feature_schema: MolecularFeatureSchema | None = None,
+) -> MolecularGraphDataset:
+    """Load and validate a plain-tensor graph cache without custom unpickling."""
+
+    torch = _require_torch()
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Molecular graph cache does not exist: {source}")
+    payload = torch.load(source, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict):
+        raise ValueError("Molecular graph cache payload must be a dictionary.")
+    if payload.get("cache_schema_version") != MOLECULAR_GRAPH_CACHE_SCHEMA_VERSION:
+        raise ValueError("Unsupported molecular graph cache schema version.")
+
+    required = {
+        "split",
+        "graph_count",
+        "num_classes",
+        "feature_schema",
+        "source_csv",
+        "source_csv_sha256",
+        "dataset_fingerprint",
+        "x",
+        "node_ptr",
+        "edge_index",
+        "edge_attr",
+        "edge_ptr",
+        "labels",
+        "molecule_ids",
+        "smiles",
+        "record_splits",
+        "graph_sha256s",
+    }
+    missing = sorted(required.difference(payload))
+    if missing:
+        raise ValueError(f"Molecular graph cache is missing fields: {missing}")
+
+    graph_count = int(payload["graph_count"])
+    num_classes = int(payload["num_classes"])
+    if graph_count <= 0 or num_classes < 2:
+        raise ValueError("Molecular graph cache has invalid graph/class counts.")
+    if expected_num_classes is not None and num_classes != int(expected_num_classes):
+        raise ValueError(
+            f"Molecular graph cache num_classes mismatch: {num_classes} != "
+            f"{int(expected_num_classes)}."
+        )
+    source_sha256 = str(payload["source_csv_sha256"])
+    if expected_source_sha256 is not None and source_sha256 != str(
+        expected_source_sha256
+    ):
+        raise ValueError("Molecular graph cache source CSV SHA256 mismatch.")
+
+    feature_schema = MolecularFeatureSchema.from_dict(payload["feature_schema"])
+    if expected_feature_schema is not None and feature_schema.to_dict() != (
+        expected_feature_schema.to_dict()
+    ):
+        raise ValueError("Molecular graph cache feature schema mismatch.")
+    schema_sha256 = str(feature_schema.to_dict()["schema_sha256"])
+
+    x = payload["x"]
+    edge_index = payload["edge_index"]
+    edge_attr = payload["edge_attr"]
+    labels = payload["labels"]
+    if not isinstance(x, torch.Tensor) or x.ndim != 2:
+        raise ValueError("Cached x must be a rank-2 tensor.")
+    if int(x.shape[1]) != len(feature_schema.node_fields):
+        raise ValueError("Cached x width does not match the feature schema.")
+    if not isinstance(edge_index, torch.Tensor) or tuple(edge_index.shape[:1]) != (2,):
+        raise ValueError("Cached edge_index must have shape [2, num_edges].")
+    if edge_index.ndim != 2:
+        raise ValueError("Cached edge_index must be rank 2.")
+    if not isinstance(edge_attr, torch.Tensor) or edge_attr.ndim != 2:
+        raise ValueError("Cached edge_attr must be a rank-2 tensor.")
+    if int(edge_attr.shape[1]) != len(feature_schema.edge_fields):
+        raise ValueError("Cached edge_attr width does not match the feature schema.")
+    if int(edge_index.shape[1]) != int(edge_attr.shape[0]):
+        raise ValueError("Cached edge_index/edge_attr counts differ.")
+    if not isinstance(labels, torch.Tensor) or tuple(labels.shape) != (graph_count,):
+        raise ValueError("Cached labels shape does not match graph_count.")
+
+    node_ptr = _checked_pointer_values(
+        payload["node_ptr"],
+        name="node_ptr",
+        graph_count=graph_count,
+        terminal=int(x.shape[0]),
+    )
+    edge_ptr = _checked_pointer_values(
+        payload["edge_ptr"],
+        name="edge_ptr",
+        graph_count=graph_count,
+        terminal=int(edge_attr.shape[0]),
+    )
+    sequence_fields = (
+        "molecule_ids",
+        "smiles",
+        "record_splits",
+        "graph_sha256s",
+    )
+    if any(
+        not isinstance(payload[name], list) or len(payload[name]) != graph_count
+        for name in sequence_fields
+    ):
+        raise ValueError("Cached graph metadata lengths do not match graph_count.")
+
+    records: list[MolecularGraphRecord] = []
+    for index in range(graph_count):
+        node_start, node_end = node_ptr[index : index + 2]
+        edge_start, edge_end = edge_ptr[index : index + 2]
+        local_edge_index = edge_index[:, edge_start:edge_end]
+        if local_edge_index.numel() and (
+            int(local_edge_index.min()) < 0
+            or int(local_edge_index.max()) >= node_end - node_start
+        ):
+            raise ValueError(f"Cached graph {index} has out-of-range edge indices.")
+        node_features = tuple(
+            tuple(int(value) for value in row)
+            for row in x[node_start:node_end].tolist()
+        )
+        edge_indices = tuple(
+            tuple(int(value) for value in row)
+            for row in local_edge_index.tolist()
+        )
+        edge_features = tuple(
+            tuple(int(value) for value in row)
+            for row in edge_attr[edge_start:edge_end].tolist()
+        )
+        canonical_smiles = str(payload["smiles"][index])
+        graph_payload = {
+            "canonical_smiles": canonical_smiles,
+            "node_features": node_features,
+            "edge_index": edge_indices,
+            "edge_features": edge_features,
+            "schema_sha256": schema_sha256,
+        }
+        graph_sha256 = _stable_hash(graph_payload)
+        if graph_sha256 != str(payload["graph_sha256s"][index]):
+            raise ValueError(f"Cached graph fingerprint mismatch at index {index}.")
+        label = int(labels[index])
+        graph = MolecularGraphFeatures(
+            canonical_smiles=canonical_smiles,
+            node_features=node_features,
+            edge_index=edge_indices,  # type: ignore[arg-type]
+            edge_features=edge_features,
+            schema_sha256=schema_sha256,
+            graph_sha256=graph_sha256,
+        )
+        records.append(
+            MolecularGraphRecord(
+                molecule_id=str(payload["molecule_ids"][index]),
+                smiles=canonical_smiles,
+                label=label,
+                graph=graph,
+                split=str(payload["record_splits"][index]),
+                source_row_index=index,
+            )
+        )
+
+    dataset = MolecularGraphDataset(
+        records,
+        feature_schema=feature_schema,
+        num_classes=num_classes,
+        source_path=str(payload["source_csv"]),
+        source_sha256=source_sha256,
+    )
+    if dataset.dataset_fingerprint != str(payload["dataset_fingerprint"]):
+        raise ValueError("Molecular graph cache dataset fingerprint mismatch.")
+    return dataset
+
+
 def build_molecular_data_loader(
     dataset: MolecularGraphDataset,
     *,
@@ -574,6 +897,7 @@ def build_molecular_data_loader(
 __all__ = [
     "ID_COLUMN_CANDIDATES",
     "LABEL_COLUMN_CANDIDATES",
+    "MOLECULAR_GRAPH_CACHE_SCHEMA_VERSION",
     "MolecularGraphBatch",
     "MolecularGraphData",
     "MolecularGraphDataset",
@@ -582,4 +906,6 @@ __all__ = [
     "build_molecular_data_loader",
     "collate_molecular_graphs",
     "default_molecular_feature_schema",
+    "load_molecular_graph_cache",
+    "save_molecular_graph_cache",
 ]

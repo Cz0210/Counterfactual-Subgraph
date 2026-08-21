@@ -729,13 +729,20 @@ Mutagenicity roadmaps.
   batched oracle API, and BACE/Taste RF guard.
 - [x] Add shared binary/multiclass strict-flip, CFDrop, margin, and destination
   distribution semantics.
-- [ ] Prepare the fixed-commit TasteMolNet upstream data with conflict,
+- [x] Prepare the fixed-commit TasteMolNet upstream data with conflict,
   standardization, license, and scaffold-leakage audits.
 - [x] Add the bounded AutoDL GPU inventory/lock/experiment registry and BACE
   gated state machine; keep `RUN_TASTEMOLNET=0` by default.
+- [x] Move the AutoDL control plane outside fast code worktrees, freeze the
+  persistent control root and `smiles_pip118` interpreter into detached specs,
+  and add predecessor-bound B4 temperature/B5 oracle-smoke launchers.
+- [x] Make GNN training hold test fully unopened, freezing only path/SHA
+  provenance and an explicit `NOT_EVALUATED` status until final evaluation.
+- [ ] Execute and pass B4 on validation and B5 on the 16-parent correctly
+  predicted source cohort from calibration after B3 passes.
 - [ ] Pass CPU/PyG tests and BACE GINE smoke, then launch the single seed-7
   BACE full classifier on an idle AutoDL GPU.
 - [ ] Integrate the frozen GNN oracle into BACE proposal/reward/verification
-  and complete B5--B14 without using RF-contaminated artifacts.
+  and complete B6--B14 without using RF-contaminated artifacts.
 - [ ] Obtain explicit TasteMolNet data-license approval before committing data
   or enabling any heavy TasteMolNet experiment.

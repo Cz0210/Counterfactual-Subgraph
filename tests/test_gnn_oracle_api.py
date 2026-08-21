@@ -171,6 +171,13 @@ def test_checkpoint_bundle_roundtrip_and_hash_gate(tmp_path: Path) -> None:
         label_map={0: "Inactive", 1: "Active"},
         split_manifest={"test_used_for_checkpoint_selection": False},
         training_metrics={"best_epoch": 1},
+        test_evaluation_status={
+            "status": "NOT_EVALUATED",
+            "test_loaded": False,
+            "reason": "held_out_until_frozen_final_evaluation",
+            "path": "/frozen/test.csv",
+            "sha256": "a" * 64,
+        },
         validation_predictions=[
             {
                 "molecule_id": "a",
@@ -180,7 +187,6 @@ def test_checkpoint_bundle_roundtrip_and_hash_gate(tmp_path: Path) -> None:
                 "probabilities": "[0.73, 0.27]",
             }
         ],
-        test_predictions=[],
         environment={"python": "unit"},
         git_state={"commit": "unit"},
     )
@@ -188,6 +194,8 @@ def test_checkpoint_bundle_roundtrip_and_hash_gate(tmp_path: Path) -> None:
     audit = verify_checkpoint_bundle(checkpoint)
     assert audit["model_card"]["classifier_type"] == "gnn"
     assert audit["model_card"]["rf_oracle_used"] is False
+    assert (checkpoint / "test_evaluation_status.json").is_file()
+    assert not (checkpoint / "test_predictions.csv").exists()
     loaded, metadata = load_gnn_checkpoint_bundle(checkpoint, device="cpu")
     batch = collate_molecular_graphs([_graph("a", 0)], edge_feature_dim=4)
     with torch.no_grad():
@@ -195,6 +203,7 @@ def test_checkpoint_bundle_roundtrip_and_hash_gate(tmp_path: Path) -> None:
             model(batch).numpy(), loaded(batch).numpy(), rtol=0.0, atol=0.0
         )
     assert metadata["checkpoint_id"] == result["checkpoint_id"]
+    assert metadata["test_evaluation_status"]["status"] == "NOT_EVALUATED"
     (checkpoint / "model_card.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="SHA mismatch"):
         verify_checkpoint_bundle(checkpoint)
@@ -234,6 +243,13 @@ def test_checkpoint_model_card_contains_formal_gnn_provenance(tmp_path: Path) ->
         label_map={0: "Inactive", 1: "Active"},
         split_manifest={},
         training_metrics={},
+        test_evaluation_status={
+            "status": "NOT_EVALUATED",
+            "test_loaded": False,
+            "reason": "held_out_until_frozen_final_evaluation",
+            "path": "/frozen/test.csv",
+            "sha256": "a" * 64,
+        },
     )
     card = json.loads((checkpoint / "model_card.json").read_text(encoding="utf-8"))
     assert card["oracle_backend"] == "gnn"

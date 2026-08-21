@@ -24,7 +24,8 @@ data:
   upstream_commit: 16af8ead8a17b6bd3941d9eb5879c5be75c14114
   processed_root: data/processed/tastemolnet
   clean_csv: data/processed/tastemolnet/tastemolnet_clean.csv
-  graph_cache: data/processed/tastemolnet/graphs.pt
+  graph_cache_format: molecular_graph_tensor_cache_v1
+  graph_cache_root_env: TASTEMOLNET_GRAPH_CACHE_ROOT
   component_policy: largest_organic_fragment
   standardization_version: tastemolnet_rdkit_isomeric_v1
   tautomer_normalization: false

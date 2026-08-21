@@ -7,7 +7,8 @@ from pathlib import Path
 from scripts.calibrate_gnn_classifier import main as calibrate_main
 from scripts.evaluate_molecular_gnn import main as evaluate_main
 from scripts.train_molecular_gnn import main as train_main
-from src.oracles.gnn_oracle import GNNOracle, verify_checkpoint_bundle
+from src.data.molecular_graph_dataset import MolecularGraphDataset
+from src.oracles.gnn_oracle import GNNOracle, sha256_file, verify_checkpoint_bundle
 
 
 def _write_split(path: Path, split: str) -> None:
@@ -33,7 +34,7 @@ def _write_split(path: Path, split: str) -> None:
                 )
 
 
-def test_train_calibrate_evaluate_vertical_smoke(tmp_path: Path) -> None:
+def test_train_calibrate_evaluate_vertical_smoke(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "splits"
     data.mkdir()
     _write_split(data / "train.csv", "train")
@@ -69,25 +70,56 @@ def test_train_calibrate_evaluate_vertical_smoke(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     checkpoint = tmp_path / "checkpoint"
-    assert (
-        train_main(
-            [
-                "--config",
-                str(config),
-                "--dataset",
-                "bace",
-                "--data-dir",
-                str(data),
-                "--output-dir",
-                str(checkpoint),
-                "--profile",
-                "smoke",
-                "--device",
-                "cpu",
-            ]
+    loaded_split_paths: list[Path] = []
+    original_from_csv = MolecularGraphDataset.from_csv.__func__
+
+    def tracked_from_csv(cls, csv_path, *args, **kwargs):
+        resolved = Path(csv_path).resolve()
+        loaded_split_paths.append(resolved)
+        if resolved == (data / "test.csv").resolve():
+            raise AssertionError("training must not load the held-out test split")
+        return original_from_csv(cls, csv_path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            MolecularGraphDataset, "from_csv", classmethod(tracked_from_csv)
         )
-        == 0
+        assert (
+            train_main(
+                [
+                    "--config",
+                    str(config),
+                    "--dataset",
+                    "bace",
+                    "--data-dir",
+                    str(data),
+                    "--output-dir",
+                    str(checkpoint),
+                    "--profile",
+                    "smoke",
+                    "--device",
+                    "cpu",
+                ]
+            )
+            == 0
+        )
+    assert loaded_split_paths == [
+        (data / "train.csv").resolve(),
+        (data / "val.csv").resolve(),
+    ]
+    assert not (checkpoint / "test_predictions.csv").exists()
+    test_status = json.loads(
+        (checkpoint / "test_evaluation_status.json").read_text(encoding="utf-8")
     )
+    assert test_status == {
+        "path": str((data / "test.csv").resolve()),
+        "reason": "held_out_until_frozen_final_evaluation",
+        "schema_version": "molecular_gnn_test_evaluation_status_v1",
+        "sha256": sha256_file(data / "test.csv"),
+        "status": "NOT_EVALUATED",
+        "test_loaded": False,
+    }
+    assert len(test_status["sha256"]) == 64
     assert calibrate_main(
         [
             "--checkpoint-dir",

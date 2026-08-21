@@ -6496,3 +6496,45 @@ not allowed to publish its pass marker unless validation ROC-AUC is at least
 and all reported probabilities and metrics are finite. The smoke also reloads
 the published bundle and checks batch/single inference and deletion-forward
 contracts; file presence alone is not a scientific pass.
+
+---
+
+## 2026-08-22: Persist the AutoDL GNN control plane and separate B4/B5 evidence
+
+Fast NVMe clones are execution copies, not durable control roots. The frozen-
+GNN runner now derives its default control root from the selected persistent
+data root, rejects relative, out-of-data-root, symlink-final, and code-worktree
+control paths, and stores the resolved control root in every detached launch
+spec. Detached workers also require the exact launch-spec Python executable;
+AutoDL shell entrypoints pin the `smiles_pip118` interpreter instead of relying
+on a non-interactive shell's `python` resolution.
+
+B4 never calibrates the B3 directory in place. It copies the verified,
+uncalibrated B3 bundle to a fresh persistent output and fits temperature using
+validation only, after requiring the current validation path and SHA-256 to
+equal B3's frozen split manifest. B5 consumes only a PASS/FROZEN B4 manifest output. It selects
+exactly 16 correctly-predicted source-class parents from calibration, loads the
+GNN once for all deletion pairs, and records calibrated parent/residual
+predictions under connected hard-deletion semantics. Every one of those 16
+parents must have at least one valid connected deletion. Test is not loaded, RF
+provenance is rejected, and B6 remains blocked until both B4 and B5 state and
+gate documents are PASS.
+
+A TasteMolNet `LICENSE_REVIEW_REQUIRED` marker is a blocker, not readiness
+evidence. The full launcher exits nonzero without starting work and emits only
+the license-blocked marker; setting the heavy-run switch cannot bypass it.
+
+The BACE/Taste graph cache is a separate offline foundation artifact. It uses
+only tensors and Python primitives, is loaded with `weights_only=True`, binds
+all four split CSV identities and the molecular feature schema in one
+manifest, and must be written to a fresh destination. Training does not yet
+silently substitute this cache for CSV featurization; cache consumption will
+be an explicit later change so provenance cannot drift unnoticed.
+
+The molecular-GNN training bundle is versioned as
+`molecular_gnn_checkpoint_v2`. Training no longer parses, featurizes, predicts,
+or reports metrics for the held-out test CSV. It freezes only the test path and
+streaming SHA-256 in `test_evaluation_status.json`, which must declare
+`NOT_EVALUATED` and `test_loaded=false` and must match the split manifest.
+`test_predictions.csv` is no longer a checkpoint artifact. Final frozen-model
+evaluation remains the only route allowed to load the test split.

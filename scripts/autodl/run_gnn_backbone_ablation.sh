@@ -37,7 +37,7 @@ GPU_LINE="$(autodl_select_one_gpu)" || exit $?
 IFS=$'\t' read -r GPU_INDEX GPU_UUID <<< "$GPU_LINE"
 OUTPUT_DIR="${GNN_ABLATION_OUTPUT:-$(autodl_new_output_dir "$DATASET" "$BACKBONE" "ablation-$PROFILE")}"
 
-exec python "$SCRIPT_DIR/exp_run.py" \
+exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   --project-root "$PROJECT_ROOT" \
   --data-root "$AUTODL_DATA_ROOT" \
   launch \
@@ -53,10 +53,11 @@ exec python "$SCRIPT_DIR/exp_run.py" \
   --required-output-file model.pt \
   --required-output-file model_card.json \
   --required-output-file training_metrics.json \
+  --required-output-file test_evaluation_status.json \
   --required-output-file sha256sums.txt \
   --required-log-marker "[MOLECULAR_GNN_TRAIN_OK]" \
   -- \
-  python "$TRAIN_SCRIPT" \
+  "$AUTODL_PYTHON" "$TRAIN_SCRIPT" \
     --config "$HPC_CONFIG" \
     --config "$GNN_CONFIG" \
     --dataset "$DATASET" \

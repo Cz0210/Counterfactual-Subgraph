@@ -23,7 +23,7 @@ from src.models.molecular_gnn import MolecularGNN, MolecularGNNConfig
 from src.oracles.base_oracle import BaseOracle, OraclePredictionRecord
 
 
-CHECKPOINT_BUNDLE_VERSION = "molecular_gnn_checkpoint_v1"
+CHECKPOINT_BUNDLE_VERSION = "molecular_gnn_checkpoint_v2"
 REQUIRED_CHECKPOINT_FILES = (
     "model.pt",
     "config.yaml",
@@ -33,7 +33,7 @@ REQUIRED_CHECKPOINT_FILES = (
     "split_manifest.json",
     "training_metrics.json",
     "validation_predictions.csv",
-    "test_predictions.csv",
+    "test_evaluation_status.json",
     "temperature_scaling.json",
     "environment.json",
     "git_state.json",
@@ -164,6 +164,36 @@ def verify_checkpoint_bundle(
         raise ValueError("Frozen molecular classifier must declare oracle_backend=gnn.")
     if model_card.get("rf_oracle_used") is not False:
         raise ValueError("Frozen molecular classifier must declare rf_oracle_used=false.")
+    test_status = json.loads(
+        (root / "test_evaluation_status.json").read_text(encoding="utf-8")
+    )
+    if test_status.get("status") != "NOT_EVALUATED":
+        raise ValueError(
+            "Frozen training bundle must declare held-out test status NOT_EVALUATED."
+        )
+    if test_status.get("test_loaded") is not False:
+        raise ValueError(
+            "Frozen training bundle must declare held-out test_loaded=false."
+        )
+    if not str(test_status.get("reason", "")).strip():
+        raise ValueError("Held-out test status must record a non-empty reason.")
+    test_path = str(test_status.get("path", "")).strip()
+    test_sha256 = str(test_status.get("sha256", "")).strip().lower()
+    if not test_path or len(test_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in test_sha256
+    ):
+        raise ValueError("Held-out test status must record its path and SHA-256.")
+    split_manifest = json.loads(
+        (root / "split_manifest.json").read_text(encoding="utf-8")
+    )
+    manifest_test = split_manifest.get("files", {}).get("test", {})
+    if manifest_test and (
+        str(manifest_test.get("path")) != test_path
+        or str(manifest_test.get("sha256", "")).lower() != test_sha256
+    ):
+        raise ValueError(
+            "Held-out test status conflicts with split_manifest.json provenance."
+        )
     return {
         "checkpoint_dir": str(root),
         "required_files": list(REQUIRED_CHECKPOINT_FILES),
@@ -182,8 +212,8 @@ def save_gnn_checkpoint_bundle(
     label_map: Mapping[str | int, str],
     split_manifest: Mapping[str, Any],
     training_metrics: Mapping[str, Any],
+    test_evaluation_status: Mapping[str, Any],
     validation_predictions: Sequence[Mapping[str, Any]] = (),
-    test_predictions: Sequence[Mapping[str, Any]] = (),
     temperature_scaling: Mapping[str, Any] | None = None,
     environment: Mapping[str, Any] | None = None,
     git_state: Mapping[str, Any] | None = None,
@@ -246,7 +276,7 @@ def save_gnn_checkpoint_bundle(
     _atomic_json(root / "split_manifest.json", dict(split_manifest))
     _atomic_json(root / "training_metrics.json", dict(training_metrics))
     _atomic_csv(root / "validation_predictions.csv", validation_predictions)
-    _atomic_csv(root / "test_predictions.csv", test_predictions)
+    _atomic_json(root / "test_evaluation_status.json", dict(test_evaluation_status))
     _atomic_json(
         root / "temperature_scaling.json",
         dict(
@@ -323,6 +353,9 @@ def load_gnn_checkpoint_bundle(
         "label_map": json.loads((root / "label_map.json").read_text(encoding="utf-8")),
         "split_manifest": json.loads(
             (root / "split_manifest.json").read_text(encoding="utf-8")
+        ),
+        "test_evaluation_status": json.loads(
+            (root / "test_evaluation_status.json").read_text(encoding="utf-8")
         ),
     }
     return model, metadata

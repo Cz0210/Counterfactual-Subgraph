@@ -8,6 +8,12 @@ PROJECT_ROOT="$(git -C "$AUTODL_SCRIPT_DIR" rev-parse --show-toplevel)"
 export PROJECT_ROOT
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+export AUTODL_PYTHON="${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}"
+if [[ "$AUTODL_PYTHON" != /* || ! -x "$AUTODL_PYTHON" ]]; then
+  echo "AUTODL_PYTHON must be an absolute executable path: $AUTODL_PYTHON" >&2
+  return 64 2>/dev/null || exit 64
+fi
+
 export AUTODL_MAX_GPUS="${AUTODL_MAX_GPUS:-2}"
 export AUTODL_MIN_FREE_MEMORY_MB="${AUTODL_MIN_FREE_MEMORY_MB:-16000}"
 export AUTODL_IDLE_UTIL_THRESHOLD="${AUTODL_IDLE_UTIL_THRESHOLD:-10}"
@@ -16,21 +22,39 @@ export RUN_TASTEMOLNET="${RUN_TASTEMOLNET:-0}"
 export PRIMARY_GNN_BACKBONE="${PRIMARY_GNN_BACKBONE:-gine}"
 export PRIMARY_SEED="${PRIMARY_SEED:-7}"
 
+TASTEMOLNET_FIXED_UPSTREAM_COMMIT="16af8ead8a17b6bd3941d9eb5879c5be75c14114"
+if [[ -n "${TASTEMOLNET_UPSTREAM_COMMIT:-}" && "${TASTEMOLNET_UPSTREAM_COMMIT:-}" != "$TASTEMOLNET_FIXED_UPSTREAM_COMMIT" ]]; then
+  echo "TASTEMOLNET_UPSTREAM_COMMIT conflicts with the frozen source commit" >&2
+  return 64 2>/dev/null || exit 64
+fi
+export TASTEMOLNET_UPSTREAM_COMMIT="$TASTEMOLNET_FIXED_UPSTREAM_COMMIT"
+unset TASTEMOLNET_FIXED_UPSTREAM_COMMIT
+
 if [[ -z "${AUTODL_DATA_ROOT:-}" ]]; then
   if [[ -d /autodl-fs/data && -w /autodl-fs/data ]]; then
     AUTODL_DATA_ROOT=/autodl-fs/data
   elif [[ -d /root/autodl-fs && -w /root/autodl-fs ]]; then
     AUTODL_DATA_ROOT=/root/autodl-fs
-  elif [[ -d /root/autodl-tmp && -w /root/autodl-tmp ]]; then
-    AUTODL_DATA_ROOT=/root/autodl-tmp
   else
-    AUTODL_DATA_ROOT="$PROJECT_ROOT"
+    echo "No persistent AutoDL data root found; set absolute AUTODL_DATA_ROOT" >&2
+    return 64 2>/dev/null || exit 64
   fi
 fi
 export AUTODL_DATA_ROOT
 export AUTODL_RUNTIME_ROOT="${AUTODL_RUNTIME_ROOT:-$AUTODL_DATA_ROOT/counterfactual-subgraph-runtime}"
 export AUTODL_ARTIFACT_ROOT="${AUTODL_ARTIFACT_ROOT:-$AUTODL_RUNTIME_ROOT/outputs}"
-export AUTODL_CONTROL_ROOT="${AUTODL_CONTROL_ROOT:-$PROJECT_ROOT/outputs/autodl}"
+export AUTODL_CONTROL_ROOT="${AUTODL_CONTROL_ROOT:-$AUTODL_RUNTIME_ROOT/control}"
+for autodl_absolute_path in \
+  "$AUTODL_DATA_ROOT" \
+  "$AUTODL_RUNTIME_ROOT" \
+  "$AUTODL_ARTIFACT_ROOT" \
+  "$AUTODL_CONTROL_ROOT"; do
+  if [[ "$autodl_absolute_path" != /* ]]; then
+    echo "AutoDL runtime paths must be absolute: $autodl_absolute_path" >&2
+    return 64 2>/dev/null || exit 64
+  fi
+done
+unset autodl_absolute_path
 
 AUTODL_STEP0_ROOT_DEFAULT="$AUTODL_DATA_ROOT/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project"
 if [[ -z "${BACE_SPLIT_ROOT:-}" ]]; then
@@ -43,7 +67,16 @@ if [[ -z "${BACE_SPLIT_ROOT:-}" ]]; then
   fi
 fi
 export BACE_SPLIT_ROOT
-export TASTEMOLNET_SPLIT_ROOT="${TASTEMOLNET_SPLIT_ROOT:-$PROJECT_ROOT/data/processed/tastemolnet/splits}"
+export TASTEMOLNET_SPLIT_ROOT="${TASTEMOLNET_SPLIT_ROOT:-$AUTODL_RUNTIME_ROOT/data/tastemolnet/prepared/$TASTEMOLNET_UPSTREAM_COMMIT/splits}"
+export TASTEMOLNET_GRAPH_CACHE_ROOT="${TASTEMOLNET_GRAPH_CACHE_ROOT:-$AUTODL_RUNTIME_ROOT/cache/tastemolnet/$TASTEMOLNET_UPSTREAM_COMMIT/molecular_graph_v1}"
+export TASTEMOLNET_LICENSE_MARKER="${TASTEMOLNET_LICENSE_MARKER:-$AUTODL_RUNTIME_ROOT/data/tastemolnet/prepared/$TASTEMOLNET_UPSTREAM_COMMIT/LICENSE_REVIEW_REQUIRED}"
+for autodl_taste_path in "$TASTEMOLNET_SPLIT_ROOT" "$TASTEMOLNET_GRAPH_CACHE_ROOT" "$TASTEMOLNET_LICENSE_MARKER"; do
+  if [[ "$autodl_taste_path" != /* ]]; then
+    echo "TasteMolNet runtime paths must be absolute: $autodl_taste_path" >&2
+    return 64 2>/dev/null || exit 64
+  fi
+done
+unset autodl_taste_path
 
 autodl_require_file() {
   local path="$1"
@@ -80,7 +113,7 @@ autodl_select_one_gpu() {
   local output rc
   set +e
   output="$(
-    python "$PROJECT_ROOT/scripts/autodl/gpu_inventory.py" \
+    "$AUTODL_PYTHON" "$PROJECT_ROOT/scripts/autodl/gpu_inventory.py" \
       --project-root "$PROJECT_ROOT" \
       --data-root "$AUTODL_DATA_ROOT" \
       --max-gpus 1 \
@@ -107,4 +140,15 @@ autodl_new_output_dir() {
   local stamp
   stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   printf '%s\n' "$AUTODL_ARTIFACT_ROOT/gnn_oracles/$dataset/$backbone/seed${PRIMARY_SEED}/${profile}-${stamp}"
+}
+
+autodl_passed_stage_output() {
+  local stage="$1"
+  shift
+  "$AUTODL_PYTHON" "$PROJECT_ROOT/scripts/autodl/exp_run.py" \
+    --project-root "$PROJECT_ROOT" \
+    --data-root "$AUTODL_DATA_ROOT" \
+    stage-output \
+    --stage "$stage" \
+    "$@"
 }

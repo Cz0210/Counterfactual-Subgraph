@@ -17,6 +17,7 @@ from src.utils.autodl_runtime import (
     append_jsonl_locked,
     assert_bace_stage_can_start,
     assert_tastemolnet_launch_allowed,
+    atomic_write_json,
     build_runtime_layout,
     initialize_bace_stage_tree,
     latest_registry_events,
@@ -24,6 +25,7 @@ from src.utils.autodl_runtime import (
     observe_stable_idle_gpus,
     parse_gpu_inventory,
     read_registry,
+    resolve_passed_bace_stage_output,
     validate_max_gpus,
     verify_required_outputs,
 )
@@ -146,6 +148,74 @@ def test_bace_stage_templates_and_predecessor_gate(tmp_path: Path) -> None:
         layout, stage="B1_DATA_READY", evidence=[split], note="frozen split"
     )
     assert_bace_stage_can_start(layout, "B2_GNN_SMOKE")
+
+
+def test_control_root_defaults_persistent_and_explicit_path_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "persistent-data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    monkeypatch.delenv("AUTODL_CONTROL_ROOT", raising=False)
+    default = build_runtime_layout(project_root=project, data_root=data)
+    assert default.control_root == (
+        data / "counterfactual-subgraph-runtime" / "control"
+    ).resolve()
+    assert project not in default.control_root.parents
+
+    explicit = data / "custom-control"
+    monkeypatch.setenv("AUTODL_CONTROL_ROOT", str(explicit))
+    assert (
+        build_runtime_layout(project_root=project, data_root=data).control_root
+        == explicit.resolve()
+    )
+
+    monkeypatch.setenv("AUTODL_CONTROL_ROOT", "relative/control")
+    with pytest.raises(AutoDLRuntimeError, match="absolute"):
+        build_runtime_layout(project_root=project, data_root=data)
+    monkeypatch.setenv("AUTODL_CONTROL_ROOT", str(tmp_path / "outside"))
+    with pytest.raises(AutoDLRuntimeError, match="persistent data root"):
+        build_runtime_layout(project_root=project, data_root=data)
+
+
+def test_passed_stage_output_comes_only_from_frozen_persistent_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    monkeypatch.delenv("AUTODL_CONTROL_ROOT", raising=False)
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    initialize_bace_stage_tree(layout)
+    output = layout.artifacts_dir / "gnn_oracles" / "bace" / "full"
+    output.mkdir(parents=True)
+    (output / "model.pt").write_bytes(b"model")
+    paths = layout.stages_root / "B3_GNN_FULL"
+    atomic_write_json(paths / "state.json", {"state": "PASS"})
+    atomic_write_json(paths / "gate.json", {"status": "PASS"})
+    atomic_write_json(
+        paths / "manifest.json",
+        {"status": "FROZEN", "expected_output": str(output)},
+    )
+    assert resolve_passed_bace_stage_output(
+        layout, "B3_GNN_FULL", required_relative=["model.pt"]
+    ) == output.resolve()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "model.pt").write_bytes(b"model")
+    atomic_write_json(
+        paths / "manifest.json",
+        {"status": "FROZEN", "expected_output": str(outside)},
+    )
+    with pytest.raises(StageTransitionError, match="escapes persistent artifacts"):
+        resolve_passed_bace_stage_output(
+            layout, "B3_GNN_FULL", required_relative=["model.pt"]
+        )
 
 
 def test_tastemolnet_heavy_run_defaults_fail_closed() -> None:

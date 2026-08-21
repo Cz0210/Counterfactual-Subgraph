@@ -31,6 +31,7 @@ from src.utils.autodl_runtime import (
     latest_registry_events,
     query_gpu_inventory,
     read_registry,
+    resolve_passed_bace_stage_output,
     resolve_project_root,
     sanitized_environment,
     select_data_root,
@@ -293,9 +294,31 @@ def run_worker(spec_path: Path) -> int:
     if not isinstance(spec, dict) or spec.get("schema_version") != SCHEMA_VERSION:
         print(f"Invalid launch spec: {spec_path}", file=sys.stderr)
         return 2
+    if not isinstance(spec.get("python_executable"), str) or not isinstance(
+        spec.get("control_root"), str
+    ):
+        print(
+            "Launch spec omits the frozen Python executable or control root",
+            file=sys.stderr,
+        )
+        return 2
+    expected_python = Path(str(spec["python_executable"])).resolve(strict=True)
+    current_python = Path(sys.executable).resolve(strict=True)
+    if current_python != expected_python:
+        print(
+            "Detached worker interpreter mismatch: "
+            f"expected={expected_python}, current={current_python}",
+            file=sys.stderr,
+        )
+        return 2
     project_root = Path(str(spec["project_root"])).resolve(strict=True)
     data_root = Path(str(spec["data_root"])).resolve(strict=True)
-    layout = build_runtime_layout(project_root=project_root, data_root=data_root).ensure()
+    control_root = Path(str(spec["control_root"]))
+    layout = build_runtime_layout(
+        project_root=project_root,
+        data_root=data_root,
+        control_root=control_root,
+    ).ensure()
     environment = sanitized_environment()
     environment.update({str(key): str(value) for key, value in spec.get("environment", {}).items()})
     environment["PYTHONPATH"] = str(project_root) + (
@@ -459,6 +482,8 @@ def launch(args: argparse.Namespace) -> int:
         "created_at": utc_now(),
         "project_root": str(layout.project_root),
         "data_root": str(layout.data_root),
+        "control_root": str(layout.control_root),
+        "python_executable": str(Path(sys.executable).resolve(strict=True)),
         "dataset": dataset,
         "stage": stage,
         "command": command,
@@ -535,7 +560,13 @@ def launch(args: argparse.Namespace) -> int:
                 "gpu_index": args.gpu_index,
                 "gpu_uuid": args.gpu_uuid,
                 "log_path": str(log_path),
-                "status_command": "python scripts/autodl/status.py",
+                "control_root": str(layout.control_root),
+                "python_executable": str(Path(sys.executable).resolve(strict=True)),
+                "status_command": (
+                    f"{Path(sys.executable).resolve(strict=True)} "
+                    "scripts/autodl/status.py "
+                    f"--data-root {layout.data_root}"
+                ),
             },
             ensure_ascii=False,
             indent=2,
@@ -555,6 +586,12 @@ def parse_args() -> argparse.Namespace:
     commands.add_parser("init-bace")
     status_parser = commands.add_parser("status")
     status_parser.add_argument("--limit", type=int, default=20)
+
+    stage_output = commands.add_parser("stage-output")
+    stage_output.add_argument("--stage", choices=BACE_STAGES, required=True)
+    stage_output.add_argument(
+        "--required-output-file", action="append", default=[]
+    )
 
     mark = commands.add_parser("mark-stage")
     mark.add_argument("--stage", choices=("B0_AUDIT", "B1_DATA_READY"), required=True)
@@ -624,6 +661,15 @@ def main() -> int:
             initialize_bace_stage_tree(layout)
             rows = latest_registry_events(read_registry(layout.registry_path))[: args.limit]
             print(json.dumps({"runs": rows}, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.action == "stage-output":
+            initialize_bace_stage_tree(layout)
+            output = resolve_passed_bace_stage_output(
+                layout,
+                args.stage,
+                required_relative=args.required_output_file,
+            )
+            print(output)
             return 0
         if args.action == "launch":
             return launch(args)

@@ -77,7 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--train-limit", type=int)
     parser.add_argument("--validation-limit", type=int)
-    parser.add_argument("--test-limit", type=int)
     return parser
 
 
@@ -494,7 +493,6 @@ def main(argv: list[str] | None = None) -> int:
     validation_limit = (
         args.validation_limit if args.validation_limit is not None else (32 if smoke else None)
     )
-    test_limit = args.test_limit if args.test_limit is not None else (32 if smoke else None)
     if max_epochs <= 0 or patience <= 0 or batch_size <= 0:
         raise ValueError("Epoch, patience, and batch size values must be positive.")
     class_weighted = bool(training_cfg.get("class_weighted_loss", True))
@@ -522,8 +520,8 @@ def main(argv: list[str] | None = None) -> int:
         limit=validation_limit,
         stratified_limit=smoke,
     )
-    # Test is loaded only after model-selection inputs are fixed; it is never
-    # consulted by the early-stopping loop below.
+    # The held-out test split is never parsed or featurized by this training
+    # entrypoint.  Only its path and streaming SHA-256 are frozen below.
     weights = _class_weights(train_dataset.labels, num_classes)
     sampler = None
     if weighted_sampler:
@@ -635,23 +633,6 @@ def main(argv: list[str] | None = None) -> int:
         num_classes=num_classes,
     )
 
-    test_dataset = MolecularGraphDataset.from_csv(
-        split_paths["test"],
-        num_classes=num_classes,
-        featurizer=featurizer,
-        expected_split="test",
-        limit=test_limit,
-        stratified_limit=smoke,
-    )
-    test_loader = build_molecular_data_loader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-    )
-    frozen_test = _evaluate(
-        model, test_loader, criterion, device=device, num_classes=num_classes
-    )
     health_gate = _classifier_health_gate(
         metrics=final_validation["metrics"],
         probabilities=final_validation["probabilities"],
@@ -659,6 +640,18 @@ def main(argv: list[str] | None = None) -> int:
         profile=profile,
         training_config=training_cfg,
     )
+    split_files = {
+        name: {"path": str(path), "sha256": sha256_file(path)}
+        for name, path in split_paths.items()
+    }
+    test_evaluation_status = {
+        "schema_version": "molecular_gnn_test_evaluation_status_v1",
+        "status": "NOT_EVALUATED",
+        "test_loaded": False,
+        "reason": "held_out_until_frozen_final_evaluation",
+        "path": split_files["test"]["path"],
+        "sha256": split_files["test"]["sha256"],
+    }
     split_manifest = {
         "schema_version": "molecular_gnn_split_manifest_v1",
         "dataset": dataset_id,
@@ -668,14 +661,12 @@ def main(argv: list[str] | None = None) -> int:
             "calibration": "reserved_for_threshold_and_selector_only",
             "test": "frozen_model_final_quality_evaluation",
         },
-        "files": {
-            name: {"path": str(path), "sha256": sha256_file(path)}
-            for name, path in split_paths.items()
-        },
+        "files": split_files,
         "train_manifest": train_dataset.manifest(),
         "validation_manifest": validation_dataset.manifest(),
-        "test_manifest": test_dataset.manifest(),
         "calibration_loaded_for_training": False,
+        "test_loaded_for_training": False,
+        "test_evaluated_during_training": False,
         "test_used_for_checkpoint_selection": False,
     }
     training_metrics = {
@@ -687,7 +678,7 @@ def main(argv: list[str] | None = None) -> int:
         "epochs_completed": len(history),
         "history": history,
         "final_validation": final_validation["metrics"],
-        "frozen_test": frozen_test["metrics"],
+        "test_evaluation": test_evaluation_status,
         "class_weights": weights,
         "class_weighted_loss": class_weighted,
         "weighted_sampler": weighted_sampler,
@@ -720,6 +711,8 @@ def main(argv: list[str] | None = None) -> int:
         "temperature_calibration_split": "validation",
         "calibration_used_for_model_fit_or_selection": False,
         "test_used_for_model_fit_or_selection": False,
+        "test_loaded_during_training": False,
+        "test_evaluated_during_training": False,
         "profile": profile,
         "health_gate": health_gate,
     }
@@ -732,13 +725,11 @@ def main(argv: list[str] | None = None) -> int:
         label_map=_label_map(args, spec),
         split_manifest=split_manifest,
         training_metrics=training_metrics,
+        test_evaluation_status=test_evaluation_status,
         validation_predictions=_prediction_rows(
             validation_dataset,
             final_validation["logits"],
             final_validation["probabilities"],
-        ),
-        test_predictions=_prediction_rows(
-            test_dataset, frozen_test["logits"], frozen_test["probabilities"]
         ),
         environment=_environment(device),
         git_state=git_state,
