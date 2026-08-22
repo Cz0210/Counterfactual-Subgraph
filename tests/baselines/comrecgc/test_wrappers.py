@@ -99,6 +99,16 @@ def test_export_resume_is_explicit_and_defaults_off() -> None:
     assert '"${RESUME_ARGS[@]}"' in text
 
 
+def test_common_recourse_wrapper_exposes_external_engine_without_changing_default() -> None:
+    text = (ROOT / "scripts/slurm/comrecgc_common_recourse.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'ENGINE="${ENGINE:-legacy_in_memory}"' in text
+    assert "external_memory_exact_v1" in text
+    assert "--external-max-rss-gb" in text
+    assert "--expected-sklearn-version" in text
+
+
 def test_unified_eval_supports_explicit_resume_and_smoke_audit_input() -> None:
     text = (ROOT / "scripts/slurm/comrecgc_unified_eval.sh").read_text(encoding="utf-8")
     assert 'RESUME="${RESUME:-false}"' in text

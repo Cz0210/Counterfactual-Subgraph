@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,33 @@ def test_commands_use_native_comrecgc_and_frozen_rf_contract(tmp_path: Path) -> 
     )
     assert evaluation[evaluation.index("--theta-star") + 1] == "0.050000000000000003"
     assert gate[gate.index("--expected-teacher-sha256") + 1] == "e" * 64
+
+
+def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
+    tmp_path: Path,
+) -> None:
+    inputs = replace(
+        _inputs(tmp_path, dataset="aids"),
+        device="cpu",
+        common_recourse_engine="external_memory_exact_v1",
+        external_max_rss_gb=96.0,
+        external_query_block_size=8,
+        external_checkpoint_interval_blocks=1,
+        expected_sklearn_version="1.7.2",
+        common_recourse_resume=True,
+    )
+    command = continuation.build_stage_commands(
+        inputs,
+        project_commit="d" * 40,
+        candidate_count=100262,
+        teacher_sha256="e" * 64,
+    )[0][1]
+    assert command[command.index("--engine") + 1] == "external_memory_exact_v1"
+    assert command[command.index("--device") + 1] == "cpu"
+    assert command[command.index("--external-max-rss-gb") + 1] == "96"
+    assert command[command.index("--external-query-block-size") + 1] == "8"
+    assert command[command.index("--expected-sklearn-version") + 1] == "1.7.2"
+    assert "--resume" in command
 
 
 def test_pass_marker_is_published_only_after_all_frozen_gates(

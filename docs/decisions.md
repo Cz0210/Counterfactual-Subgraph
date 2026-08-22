@@ -76,11 +76,12 @@ hard RSS budget is checked before every worst-case radius query and cluster
 copy.  Version, array dtype/shape/hash, epsilon, `min_samples`, block contract,
 labels, and all checkpoints are fail-closed.
 
-The external-memory engine remains unreleased for a full AIDS cell until its
-pair materializer is connected to `run_common_recourse.py`, the end-to-end
-legacy/external fixture (pairs, labels, selected rows, and hashes) passes in
-the AutoDL environment, and a fresh repair-v4 controller is built.  Repair-v2
-and repair-v3 roots remain immutable.
+The external-memory engine is opt-in and the legacy engine remains the CLI
+default.  A full runner fixture already proves identical pair order, labels,
+official summary, selected rows, and selected-row hash.  It remains unreleased
+for a full AIDS cell until that gate also passes in the AutoDL environment and
+a fresh repair-v4 controller is built.  Repair-v2 and repair-v3 roots remain
+immutable.
 
 ### Consequences
 

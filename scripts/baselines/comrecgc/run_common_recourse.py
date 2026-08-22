@@ -34,6 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--engine",
+        choices=("legacy_in_memory", "external_memory_exact_v1"),
+        default="legacy_in_memory",
+    )
+    parser.add_argument("--external-max-rss-gb", type=float, default=96.0)
+    parser.add_argument("--external-query-block-size", type=int, default=8)
+    parser.add_argument(
+        "--external-checkpoint-interval-blocks", type=int, default=1
+    )
+    parser.add_argument("--expected-sklearn-version", default="1.7.2")
     return parser
 
 
@@ -56,6 +67,11 @@ def main() -> int:
         device=args.device,
         batch_size=args.batch_size,
         resume=args.resume,
+        engine=args.engine,
+        external_max_rss_bytes=int(float(args.external_max_rss_gb) * 1024**3),
+        external_query_block_size=args.external_query_block_size,
+        external_checkpoint_interval_blocks=args.external_checkpoint_interval_blocks,
+        expected_sklearn_version=args.expected_sklearn_version,
     )
     print(json.dumps(manifest, sort_keys=True))
     return 0

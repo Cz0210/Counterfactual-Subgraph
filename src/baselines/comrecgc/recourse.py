@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import math
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -22,6 +23,15 @@ from .contracts import (
     write_json,
 )
 from .model_adapter import AIDSGreedEmbeddingAdapter
+from .external_memory_dbscan import (
+    ExternalDBSCANContract,
+    fit_external_memory_dbscan,
+)
+from .external_memory_recourse import (
+    ExternalPairStore,
+    invoke_official_coverage_summary_external,
+    trace_external_cluster_order,
+)
 from .project_dataset import (
     load_aids_generation_bundle,
     load_bace_generation_bundle,
@@ -226,8 +236,21 @@ def run_common_recourse(
     device: str = "cuda:0",
     batch_size: int = 128,
     resume: bool = False,
+    engine: str = "legacy_in_memory",
+    external_max_rss_bytes: int = 96 * 1024**3,
+    external_query_block_size: int = 8,
+    external_checkpoint_interval_blocks: int = 1,
+    expected_sklearn_version: str = "1.7.2",
 ) -> dict[str, Any]:
     parameters.validate(mode)
+    if engine not in {"legacy_in_memory", "external_memory_exact_v1"}:
+        raise ValueError(f"Unsupported common-recourse engine: {engine}")
+    if engine == "external_memory_exact_v1" and (
+        dataset != "aids" or device != "cpu"
+    ):
+        raise ValueError(
+            "external_memory_exact_v1 is released only for CPU-backed AIDS"
+        )
     root = require_empty_output(output_dir, resume=resume)
     generation_root = Path(generation_dir).expanduser().resolve()
     generation_manifest = json_load(generation_root / "run_manifest.json")
@@ -258,23 +281,31 @@ def run_common_recourse(
     else:
         raise ValueError(f"Unsupported project dataset: {dataset}")
     payload_path = Path(generation_manifest["counterfactuals_path"]).resolve()
-    if sha256_file(payload_path) != generation_manifest["counterfactuals_sha256"]:
+    payload_sha256 = sha256_file(payload_path)
+    if payload_sha256 != generation_manifest["counterfactuals_sha256"]:
         raise ValueError("Generation counterfactual artifact SHA256 mismatch.")
     payload = _torch_load(payload_path)
     graph_map = payload.get("graph_map") or {}
     raw_candidates = list(payload.get("counterfactual_candidates") or [])
     candidate_graphs: list[Any] = []
     generation_indices: list[int] = []
+    candidate_graph_hashes: list[str] = []
     for generation_index, candidate in enumerate(raw_candidates):
         importance = _importance_parts(candidate)
         graph_hash = candidate.get("graph_hash")
         if float(importance[0]) >= 0.5 and graph_hash in graph_map:
             candidate_graphs.append(graph_map[graph_hash][0])
             generation_indices.append(generation_index)
+            candidate_graph_hashes.append(str(graph_hash))
         if len(candidate_graphs) >= int(parameters.cf_size):
             break
     if not candidate_graphs:
         raise RuntimeError("No model-counterfactual candidates are available for clustering.")
+    # Keep only selected graph objects and their frozen order.  The 4.9 GiB
+    # AIDS payload otherwise retains every raw candidate/map entry throughout
+    # clustering and compounds DBSCAN's former neighborhood peak.
+    del payload, graph_map, raw_candidates
+    gc.collect()
     torch, Batch = _torch_stack()
     try:
         from sklearn.cluster import DBSCAN
@@ -298,59 +329,258 @@ def run_common_recourse(
             original_embeddings = embedding_model.embed_model(original_batch).detach().cpu()
         embedding_model.embed_targets(bundle.graphs)
         original_counts = modules["util"].graph_element_counts(bundle.graphs).cpu()
-        pair_indices: list[tuple[int, int]] = []
-        recourse_vectors: list[np.ndarray] = []
-        distance_pair_count = 0
-        for start in range(0, len(candidate_graphs), max(1, int(batch_size))):
-            chunk = candidate_graphs[start : start + max(1, int(batch_size))]
-            with torch.no_grad():
-                raw_distances = embedding_model.predict_outer_with_queries(chunk, batch_size=batch_size).cpu()
-                chunk_embeddings = embedding_model.embed_model(
-                    Batch.from_data_list(chunk).to(device)
-                ).detach().cpu()
-            chunk_counts = modules["util"].graph_element_counts(chunk).cpu()
-            scale = chunk_counts[:, None] + original_counts[None, :]
-            normalized = raw_distances / scale
-            valid_pairs = torch.nonzero(normalized <= float(parameters.theta), as_tuple=False)
-            distance_pair_count += int(normalized.numel())
-            for local_cf, original_index in valid_pairs.tolist():
-                global_cf = start + int(local_cf)
-                pair_indices.append((int(original_index), global_cf))
-                vector = (
-                    (chunk_embeddings[int(local_cf)] - original_embeddings[int(original_index)])
-                    / scale[int(local_cf), int(original_index)]
+        external_artifacts: dict[str, Any] | None = None
+        if engine == "external_memory_exact_v1":
+            chunk_size = max(1, int(batch_size))
+            pair_identity = {
+                "schema_version": "comrecgc_external_pair_materialization_v1",
+                "dataset": dataset,
+                "mode": mode,
+                "parameters": parameters.__dict__,
+                "generation_manifest_sha256": sha256_file(
+                    generation_root / "run_manifest.json"
+                ),
+                "counterfactuals_sha256": generation_manifest[
+                    "counterfactuals_sha256"
+                ],
+                "distance_checkpoint_sha256": sha256_file(distance_checkpoint),
+                "candidate_count": len(candidate_graphs),
+                "candidate_graph_hashes_sha256": stable_json_sha256(
+                    candidate_graph_hashes
+                ),
+                "generation_indices_sha256": stable_json_sha256(
+                    generation_indices
+                ),
+                "parent_ids_sha256": stable_json_sha256(list(bundle.parent_ids)),
+                "parent_count": len(bundle.graphs),
+                "batch_size": chunk_size,
+                "pair_order": "candidate_major_parent_minor",
+                "vector_expression": "(candidate_embedding-parent_embedding)/(candidate_count+parent_count)",
+                "device": "cpu",
+            }
+            pair_store = ExternalPairStore(
+                root=root / "external_memory/pair_store",
+                scientific_identity=pair_identity,
+                max_rss_bytes=int(external_max_rss_bytes),
+                resume=resume,
+            )
+            if pair_store.complete:
+                pair_result = pair_store.finalize()
+            else:
+                for chunk_index, start in enumerate(
+                    range(0, len(candidate_graphs), chunk_size)
+                ):
+                    stop = min(len(candidate_graphs), start + chunk_size)
+                    chunk_identity = {
+                        "chunk_index": chunk_index,
+                        "candidate_start": start,
+                        "candidate_stop": stop,
+                        "candidate_graph_hashes_sha256": stable_json_sha256(
+                            candidate_graph_hashes[start:stop]
+                        ),
+                        "generation_indices_sha256": stable_json_sha256(
+                            generation_indices[start:stop]
+                        ),
+                    }
+                    if chunk_index < pair_store.next_chunk_index:
+                        pair_store.verify_completed_chunk(
+                            chunk_index=chunk_index,
+                            chunk_identity=chunk_identity,
+                        )
+                        continue
+                    if chunk_index != pair_store.next_chunk_index:
+                        raise RuntimeError("External pair-store checkpoint has a gap.")
+                    chunk = candidate_graphs[start:stop]
+                    with torch.no_grad():
+                        raw_distances = embedding_model.predict_outer_with_queries(
+                            chunk, batch_size=batch_size
+                        ).cpu()
+                        chunk_embeddings = embedding_model.embed_model(
+                            Batch.from_data_list(chunk).to(device)
+                        ).detach().cpu()
+                    chunk_counts = modules["util"].graph_element_counts(chunk).cpu()
+                    scale = chunk_counts[:, None] + original_counts[None, :]
+                    normalized = raw_distances / scale
+                    valid_pairs = torch.nonzero(
+                        normalized <= float(parameters.theta), as_tuple=False
+                    )
+                    pair_rows: list[tuple[int, int]] = []
+                    vector_rows: list[np.ndarray] = []
+                    for local_cf, original_index in valid_pairs.tolist():
+                        global_cf = start + int(local_cf)
+                        pair_rows.append((int(original_index), global_cf))
+                        vector = (
+                            (
+                                chunk_embeddings[int(local_cf)]
+                                - original_embeddings[int(original_index)]
+                            )
+                            / scale[int(local_cf), int(original_index)]
+                        )
+                        vector_rows.append(vector.numpy())
+                    pairs_chunk = np.asarray(pair_rows, dtype=np.int64).reshape(-1, 2)
+                    if vector_rows:
+                        vectors_chunk = np.asarray(vector_rows)
+                    else:
+                        vectors_chunk = np.empty(
+                            (0, int(original_embeddings.shape[1])),
+                            dtype=original_embeddings.numpy().dtype,
+                        )
+                    pair_store.append(
+                        chunk_index=chunk_index,
+                        pairs=pairs_chunk,
+                        vectors=vectors_chunk,
+                        chunk_identity=chunk_identity,
+                    )
+                pair_result = pair_store.finalize()
+            distance_pair_count = len(candidate_graphs) * len(bundle.graphs)
+            pair_indices_external = np.load(
+                pair_result.pairs_path, mmap_mode="r", allow_pickle=False
+            )
+            recourse_array_external = np.load(
+                pair_result.vectors_path, mmap_mode="r+", allow_pickle=False
+            )
+            if pair_result.row_count:
+                dbscan_result = fit_external_memory_dbscan(
+                    vectors_path=pair_result.vectors_path,
+                    work_dir=root / "external_memory/dbscan",
+                    contract=ExternalDBSCANContract(
+                        eps=float(parameters.delta),
+                        min_samples=int(parameters.cluster_size),
+                        query_block_size=int(external_query_block_size),
+                        checkpoint_interval_blocks=int(
+                            external_checkpoint_interval_blocks
+                        ),
+                        max_rss_bytes=int(external_max_rss_bytes),
+                        expected_sklearn_version=expected_sklearn_version,
+                    ),
+                    expected_vectors_sha256=pair_result.vectors_sha256,
+                    resume=resume,
                 )
-                recourse_vectors.append(vector.numpy())
-        if recourse_vectors:
-            recourse_array = np.asarray(recourse_vectors)
-            if not np.isfinite(recourse_array).all():
-                raise RuntimeError("Recourse embeddings contain NaN/Inf.")
-            clustering = DBSCAN(eps=float(parameters.delta), min_samples=int(parameters.cluster_size))
-            clustering.fit(recourse_array)
-            official_result = modules["common_recourse"].coverage_summary(
-                db_2=clustering,
-                rec=torch.tensor(recourse_array),
-                idxs=pair_indices,
-                radius=float(parameters.delta),
-                threshold_theta=float(parameters.theta),
-                recourse_size=int(parameters.recourse_size),
-            )
-            selected = trace_official_cluster_order(
-                labels=np.asarray(clustering.labels_),
-                recourse_vectors=recourse_array,
-                pair_indices=pair_indices,
-                radius=float(parameters.delta),
-                theta=float(parameters.theta),
-                recourse_size=int(parameters.recourse_size),
-                official_greedy=modules[
-                    "common_recourse"
-                ].greedy_counterfactual_summary_from_covering_sets,
-            )
-            cluster_labels = np.asarray(clustering.labels_)
+                cluster_labels = np.load(
+                    dbscan_result.labels_path, mmap_mode="r", allow_pickle=False
+                )
+                official_result, official_audit = (
+                    invoke_official_coverage_summary_external(
+                        labels=cluster_labels,
+                        recourse_vectors=recourse_array_external,
+                        pair_indices=pair_indices_external,
+                        radius=float(parameters.delta),
+                        theta=float(parameters.theta),
+                        recourse_size=int(parameters.recourse_size),
+                        official_coverage_summary=modules[
+                            "common_recourse"
+                        ].coverage_summary,
+                        torch_module=torch,
+                        max_rss_bytes=int(external_max_rss_bytes),
+                    )
+                )
+                selected, trace_audit = trace_external_cluster_order(
+                    labels=cluster_labels,
+                    recourse_vectors=recourse_array_external,
+                    pair_indices=pair_indices_external,
+                    radius=float(parameters.delta),
+                    theta=float(parameters.theta),
+                    recourse_size=int(parameters.recourse_size),
+                    official_greedy=modules[
+                        "common_recourse"
+                    ].greedy_counterfactual_summary_from_covering_sets,
+                    max_rss_bytes=int(external_max_rss_bytes),
+                )
+                dbscan_manifest = str(dbscan_result.manifest_path)
+                dbscan_manifest_sha256 = dbscan_result.manifest_sha256
+            else:
+                official_result = ([], [], [])
+                selected = []
+                cluster_labels = np.asarray([], dtype=np.intp)
+                official_audit = {
+                    "official_coverage_summary_invoked": False,
+                    "reason": "no_theta_eligible_pairs",
+                }
+                trace_audit = {
+                    "selected_count": 0,
+                    "reason": "no_theta_eligible_pairs",
+                }
+                dbscan_manifest = None
+                dbscan_manifest_sha256 = None
+            external_artifacts = {
+                "engine": engine,
+                "pair_store_manifest": str(pair_result.manifest_path),
+                "pair_store_manifest_sha256": pair_result.manifest_sha256,
+                "pair_indices_sha256": pair_result.pairs_sha256,
+                "recourse_vectors_sha256": pair_result.vectors_sha256,
+                "dbscan_manifest": dbscan_manifest,
+                "dbscan_manifest_sha256": dbscan_manifest_sha256,
+                "official_coverage_audit": official_audit,
+                "trace_audit": trace_audit,
+                "max_rss_bytes": int(external_max_rss_bytes),
+                "resume_enabled": bool(resume),
+            }
+            theta_eligible_pair_count = pair_result.row_count
         else:
-            official_result = ([], [], [])
-            selected = []
-            cluster_labels = np.asarray([], dtype=int)
+            pair_indices: list[tuple[int, int]] = []
+            recourse_vectors: list[np.ndarray] = []
+            distance_pair_count = 0
+            for start in range(0, len(candidate_graphs), max(1, int(batch_size))):
+                chunk = candidate_graphs[start : start + max(1, int(batch_size))]
+                with torch.no_grad():
+                    raw_distances = embedding_model.predict_outer_with_queries(
+                        chunk, batch_size=batch_size
+                    ).cpu()
+                    chunk_embeddings = embedding_model.embed_model(
+                        Batch.from_data_list(chunk).to(device)
+                    ).detach().cpu()
+                chunk_counts = modules["util"].graph_element_counts(chunk).cpu()
+                scale = chunk_counts[:, None] + original_counts[None, :]
+                normalized = raw_distances / scale
+                valid_pairs = torch.nonzero(
+                    normalized <= float(parameters.theta), as_tuple=False
+                )
+                distance_pair_count += int(normalized.numel())
+                for local_cf, original_index in valid_pairs.tolist():
+                    global_cf = start + int(local_cf)
+                    pair_indices.append((int(original_index), global_cf))
+                    vector = (
+                        (
+                            chunk_embeddings[int(local_cf)]
+                            - original_embeddings[int(original_index)]
+                        )
+                        / scale[int(local_cf), int(original_index)]
+                    )
+                    recourse_vectors.append(vector.numpy())
+            if recourse_vectors:
+                recourse_array = np.asarray(recourse_vectors)
+                if not np.isfinite(recourse_array).all():
+                    raise RuntimeError("Recourse embeddings contain NaN/Inf.")
+                clustering = DBSCAN(
+                    eps=float(parameters.delta),
+                    min_samples=int(parameters.cluster_size),
+                )
+                clustering.fit(recourse_array)
+                official_result = modules["common_recourse"].coverage_summary(
+                    db_2=clustering,
+                    rec=torch.tensor(recourse_array),
+                    idxs=pair_indices,
+                    radius=float(parameters.delta),
+                    threshold_theta=float(parameters.theta),
+                    recourse_size=int(parameters.recourse_size),
+                )
+                selected = trace_official_cluster_order(
+                    labels=np.asarray(clustering.labels_),
+                    recourse_vectors=recourse_array,
+                    pair_indices=pair_indices,
+                    radius=float(parameters.delta),
+                    theta=float(parameters.theta),
+                    recourse_size=int(parameters.recourse_size),
+                    official_greedy=modules[
+                        "common_recourse"
+                    ].greedy_counterfactual_summary_from_covering_sets,
+                )
+                cluster_labels = np.asarray(clustering.labels_)
+            else:
+                official_result = ([], [], [])
+                selected = []
+                cluster_labels = np.asarray([], dtype=int)
+            theta_eligible_pair_count = len(pair_indices)
     # An empty cluster set is a valid scientific result.  Engineering success
     # is determined by complete model/embedding/DBSCAN execution and artifacts,
     # not by forcing positive recourse yield in smoke.
@@ -413,10 +643,10 @@ def run_common_recourse(
             and generation_manifest.get("classifier_family") == "gine"
             and generation_manifest.get("rf_oracle_used") is False
         ),
-        "counterfactuals_sha256": sha256_file(payload_path),
+        "counterfactuals_sha256": payload_sha256,
         "model_counterfactual_candidate_count": len(candidate_graphs),
         "distance_pair_count": distance_pair_count,
-        "theta_eligible_pair_count": len(pair_indices),
+        "theta_eligible_pair_count": theta_eligible_pair_count,
         "dbscan_cluster_count": len({int(value) for value in cluster_labels if int(value) >= 0}),
         "dbscan_noise_point_count": int(np.count_nonzero(cluster_labels < 0)),
         "common_recourse_count": len(output_rows),
@@ -430,6 +660,8 @@ def run_common_recourse(
         "official_greedy_order_preserved": True,
         "embedding_centers_exported_as_graphs": False,
         "representative_policy": "real_pair_nearest_cluster_center",
+        "common_recourse_engine": engine,
+        "external_memory_artifacts": external_artifacts,
         "candidate_set_preselected": True,
         "selection_performed_in_eval": False,
         "calibration_loaded": False,

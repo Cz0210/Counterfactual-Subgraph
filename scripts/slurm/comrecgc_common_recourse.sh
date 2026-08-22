@@ -24,6 +24,10 @@ mkdir -p logs
 DATASET="${DATASET:-}"
 MODE="${MODE:-smoke}"
 RESUME="${RESUME:-false}"
+ENGINE="${ENGINE:-legacy_in_memory}"
+EXTERNAL_MAX_RSS_GB="${EXTERNAL_MAX_RSS_GB:-96}"
+EXTERNAL_QUERY_BLOCK_SIZE="${EXTERNAL_QUERY_BLOCK_SIZE:-8}"
+EXPECTED_SKLEARN_VERSION="${EXPECTED_SKLEARN_VERSION:-1.7.2}"
 [[ "$DATASET" == "aids" || "$DATASET" == "mutagenicity" ]] || exit 2
 [[ "$MODE" == "smoke" || "$MODE" == "full" ]] || exit 2
 if [[ "$MODE" == "smoke" ]]; then PARENT_LIMIT_EXPECTED=64; elif [[ "$DATASET" == "aids" ]]; then PARENT_LIMIT_EXPECTED=1283; else PARENT_LIMIT_EXPECTED=1448; fi
@@ -53,11 +57,16 @@ python scripts/verify_comrecgc_checkout.py --config configs/hpc.yaml \
   --validate-imports
 echo "[COMRECGC_STAGE_CONFIG] stage=common_recourse dataset=$DATASET mode=$MODE output_dir=$OUTPUT_DIR"
 RESUME_ARGS=(); [[ "$RESUME" == "true" ]] && RESUME_ARGS=(--resume)
+ENGINE_ARGS=(--engine "$ENGINE")
+if [[ "$ENGINE" == "external_memory_exact_v1" ]]; then
+  [[ "$DATASET" == "aids" ]] || { echo "[COMRECGC_CONFIG_ERROR] external engine is AIDS-only" >&2; exit 2; }
+  ENGINE_ARGS+=(--external-max-rss-gb "$EXTERNAL_MAX_RSS_GB" --external-query-block-size "$EXTERNAL_QUERY_BLOCK_SIZE" --expected-sklearn-version "$EXPECTED_SKLEARN_VERSION")
+fi
 python scripts/baselines/comrecgc/run_common_recourse.py \
   --config configs/hpc.yaml --set inference.fallback_to_heuristic=false \
   --dataset "$DATASET" --mode "$MODE" --upstream-root "$COMRECGC_ROOT" \
   --dataset-dir "$DATASET_DIR" "${SOURCE_ARGS[@]}" --generation-dir "$GENERATION_DIR" \
   --distance-checkpoint "$DISTANCE_CHECKPOINT" --output-dir "$OUTPUT_DIR" \
-  --parent-limit "$PARENT_LIMIT" --device cuda:0 "${RESUME_ARGS[@]}"
+  --parent-limit "$PARENT_LIMIT" --device "${DEVICE:-cuda:0}" "${ENGINE_ARGS[@]}" "${RESUME_ARGS[@]}"
 test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
 echo "[COMRECGC_COMMON_RECOURSE_SUCCESS]"
