@@ -154,6 +154,12 @@ live writer.  The smoke cannot be used as a paper result.  Repair-v4 writes a
 new root and never resumes or mutates repair-v2 or repair-v3.  Paired Slurm
 scripts are static CLI documentation only and must not be submitted.
 
+The migrated-checkout safe-Git fix and the external-memory recovery core use
+separate exact-commit ancestry validators.  The safe-Git validator remains
+restricted to its reviewed commit; the external validator independently
+requires the complete recovery-core commit.  Neither helper accepts an
+arbitrary caller-provided ancestry token.
+
 ### Consequences
 
 - A resumable interruption cannot silently switch inputs, output root,
