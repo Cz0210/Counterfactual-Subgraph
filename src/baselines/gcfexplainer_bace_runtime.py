@@ -26,6 +26,12 @@ from src.baselines.gcfexplainer_bace_adapter import (
     validate_bace_gnn_profile,
     validate_bace_vrrw_profile,
 )
+from src.baselines.bace_gine_native_adapter import (
+    BACEFrozenGINENativeGraphAdapter,
+)
+from src.baselines.bace_gnn_native_candidates import (
+    freeze_gine_candidate_universe,
+)
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
     GCFExplainerEmptyCandidateSetError,
     GCFExplainerMutagenicityCodecError,
@@ -78,6 +84,55 @@ def _reuse_complete(root: Path, *, resume: bool) -> dict[str, Any] | None:
     if manifest.get("run_complete") is not True:
         raise ValueError(f"Completion marker disagrees with manifest: {root}")
     return manifest
+
+
+def _bace_gnn_checkpoint_identity(path: str | Path) -> tuple[Path, str, str]:
+    """Resolve an official checkpoint file or the frozen project GINE bundle."""
+
+    resolved = Path(path).expanduser().resolve()
+    if resolved.is_dir():
+        model_path = resolved / "model.pt"
+        if not model_path.is_file() or model_path.stat().st_size <= 0:
+            raise FileNotFoundError(
+                f"Frozen BACE GINE bundle has no model.pt: {resolved}"
+            )
+        return resolved, sha256_file(model_path), "frozen_project_gine_bundle"
+    if not resolved.is_file() or resolved.stat().st_size <= 0:
+        raise FileNotFoundError(f"BACE GNN checkpoint is missing: {resolved}")
+    return resolved, sha256_file(resolved), "legacy_official_gnn_file"
+
+
+def _load_bace_native_gnn(
+    *,
+    modules: Mapping[str, Any],
+    checkpoint: Path,
+    checkpoint_kind: str,
+    schema: Any,
+    source_records: Sequence[Mapping[str, Any]],
+    device: str,
+) -> tuple[Any, dict[str, Any]]:
+    if checkpoint_kind == "frozen_project_gine_bundle":
+        model = BACEFrozenGINENativeGraphAdapter(
+            checkpoint,
+            source_records=source_records,
+            graph_schema=schema,
+            device=device,
+        ).eval()
+        return model, model.provenance()
+    model = _load_official_gnn(
+        modules,
+        num_features=schema.node_feature_dim,
+        checkpoint=checkpoint,
+        device=device,
+    )
+    return model, {
+        "checkpoint_path": str(checkpoint),
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "oracle_backend": "official_gnn",
+        "classifier_family": "official_gcn",
+        "rf_oracle_used": False,
+        "eligible_for_bace_gnn_main_results": False,
+    }
 
 
 def train_bace_official_gnn(
@@ -321,11 +376,12 @@ def run_bace_official_vrrw(
     ]
     if len(selected) != int(parent_limit):
         raise ValueError("BACE generation source cohort is smaller than parent_limit.")
-    checkpoint = Path(gnn_checkpoint).expanduser().resolve()
+    checkpoint, checkpoint_sha256, checkpoint_kind = _bace_gnn_checkpoint_identity(
+        gnn_checkpoint
+    )
     neurosed = Path(neurosed_checkpoint).expanduser().resolve()
     projection_manifest = Path(neurosed_manifest).expanduser().resolve()
     for path, label in (
-        (checkpoint, "BACE GNN"),
         (neurosed, "BACE NeuroSED"),
         (projection_manifest, "BACE NeuroSED manifest"),
     ):
@@ -345,7 +401,8 @@ def run_bace_official_vrrw(
         "dataset_dir": str(Path(dataset_dir).expanduser().resolve()),
         "official_root": str(Path(official_root).expanduser().resolve()),
         "gnn_checkpoint": str(checkpoint),
-        "gnn_checkpoint_sha256": sha256_file(checkpoint),
+        "gnn_checkpoint_sha256": checkpoint_sha256,
+        "gnn_checkpoint_kind": checkpoint_kind,
         "neurosed_checkpoint": str(neurosed),
         "neurosed_checkpoint_sha256": sha256_file(neurosed),
         "neurosed_manifest": str(projection_manifest),
@@ -405,10 +462,12 @@ def run_bace_official_vrrw(
     dataset = GraphRecordDataset(graphs, schema.node_feature_dim)
     target_device1 = _device_name(torch, device1)
     target_device2 = _device_name(torch, device2)
-    model = _load_official_gnn(
-        modules,
-        num_features=schema.node_feature_dim,
+    model, model_provenance = _load_bace_native_gnn(
+        modules=modules,
         checkpoint=checkpoint,
+        checkpoint_kind=checkpoint_kind,
+        schema=schema,
+        source_records=selected,
         device=target_device1,
     )
     internal_predictions = _predict_graphs(model, graphs, target_device1)
@@ -489,6 +548,17 @@ def run_bace_official_vrrw(
     candidates = list(payload.get("counterfactual_candidates", []))
     manifest = {
         **config,
+        "oracle_backend": model_provenance.get("oracle_backend"),
+        "classifier_family": model_provenance.get("classifier_family"),
+        "rf_oracle_used": False,
+        "oracle_checkpoint_hash": model_provenance.get(
+            "oracle_checkpoint_hash", checkpoint_sha256
+        ),
+        "model_provenance": model.provenance()
+        if hasattr(model, "provenance")
+        else model_provenance,
+        "eligible_for_bace_gnn_main_results": checkpoint_kind
+        == "frozen_project_gine_bundle",
         "internal_gnn_prediction_counts": dict(Counter(internal_predictions)),
         "internal_gnn_predictions_path": str(root / "internal_gnn_predictions.jsonl"),
         "internal_gnn_predictions_sha256": sha256_file(
@@ -655,9 +725,11 @@ def build_bace_native_summary(
     vrrw_manifest_path = vrrw_root / "run_manifest.json"
     vrrw_manifest = read_json(vrrw_manifest_path)
     selected_sources, lineage = _resolve_parent_lineage(generation, vrrw_manifest, profile)
-    checkpoint = Path(gnn_checkpoint).expanduser().resolve()
+    checkpoint, checkpoint_sha256, checkpoint_kind = _bace_gnn_checkpoint_identity(
+        gnn_checkpoint
+    )
     neurosed = Path(neurosed_checkpoint).expanduser().resolve()
-    if sha256_file(checkpoint) != str(vrrw_manifest.get("gnn_checkpoint_sha256")):
+    if checkpoint_sha256 != str(vrrw_manifest.get("gnn_checkpoint_sha256")):
         raise ValueError("BACE summary GNN checkpoint differs from VRRW lineage.")
     if sha256_file(neurosed) != str(vrrw_manifest.get("neurosed_checkpoint_sha256")):
         raise ValueError("BACE summary NeuroSED checkpoint differs from VRRW lineage.")
@@ -807,7 +879,15 @@ def build_bace_native_summary(
             "inline_graphs" if inline_graphs else "vrrw_graph_hash_reference"
         ),
         "gnn_checkpoint": str(checkpoint),
-        "gnn_checkpoint_sha256": sha256_file(checkpoint),
+        "gnn_checkpoint_sha256": checkpoint_sha256,
+        "gnn_checkpoint_kind": checkpoint_kind,
+        "oracle_backend": vrrw_manifest.get("oracle_backend"),
+        "classifier_family": vrrw_manifest.get("classifier_family"),
+        "rf_oracle_used": False,
+        "oracle_checkpoint_hash": vrrw_manifest.get("oracle_checkpoint_hash"),
+        "eligible_for_bace_gnn_main_results": bool(
+            vrrw_manifest.get("eligible_for_bace_gnn_main_results")
+        ),
         "neurosed_checkpoint": str(neurosed),
         "neurosed_checkpoint_sha256": sha256_file(neurosed),
         "vrrw_manifest_path": str(vrrw_manifest_path),
@@ -1555,10 +1635,102 @@ def export_bace_rf_valid_top20(
     return manifest
 
 
+def export_bace_gine_candidate_universe(
+    *,
+    dataset_dir: str | Path,
+    summary_dir: str | Path,
+    gnn_checkpoint: str | Path,
+    output_dir: str | Path,
+    profile: str,
+    parent_limit: int,
+    minimum_candidates: int = 20,
+    scan_limit: int = 0,
+    device: str = "cuda:0",
+    oracle_batch_size: int = 256,
+) -> dict[str, Any]:
+    """Decode native GCF ranks and freeze a GINE-clean train universe.
+
+    Unlike the historical RF exporter this function does not freeze the first
+    twenty candidates as the final rule set.  It exports every valid strict
+    target graph in official native order; calibration performs all ordering.
+    """
+
+    expected_parent_limit = (
+        64 if profile == "smoke" else EXPECTED_GENERATION_SOURCE_ROWS
+    )
+    if int(parent_limit) != expected_parent_limit:
+        raise ValueError("BACE GINE export parent_limit differs from profile contract.")
+    if int(scan_limit) < 0:
+        raise ValueError("BACE GINE export scan_limit cannot be negative.")
+    schema, _train, _val, generation, _summary = load_bace_gcf_dataset(dataset_dir)
+    summary_root = Path(summary_dir).expanduser().resolve(strict=True)
+    summary_manifest_path = summary_root / "run_manifest.json"
+    summary_manifest = read_json(summary_manifest_path)
+    if summary_manifest.get("run_complete") is not True:
+        raise ValueError("BACE native GCF summary is incomplete.")
+    if summary_manifest.get("eligible_for_bace_gnn_main_results") is not True:
+        raise ValueError("BACE native GCF summary is not frozen-GINE eligible.")
+    parent_ids = [str(value) for value in summary_manifest["generation_parent_ids"]]
+    by_id = {str(record["molecule_id"]): record for record in generation}
+    try:
+        source_records = [by_id[value] for value in parent_ids]
+    except KeyError as exc:
+        raise ValueError("BACE GCF summary references an unknown train parent.") from exc
+    if len(source_records) != int(parent_limit):
+        raise ValueError("BACE GCF GINE export parent lineage count mismatch.")
+    ordered = _load_ranked_summary_graphs(summary_root, summary_manifest)
+    if int(scan_limit):
+        ordered = ordered[: int(scan_limit)]
+    decoded_rows: list[dict[str, Any]] = []
+    for native_value, graph in ordered:
+        native = dict(native_value)
+        origin = _origin_index(graph)
+        if origin is None or not 0 <= int(origin) < len(source_records):
+            decoded_rows.append(
+                {
+                    **native,
+                    "decode_ok": False,
+                    "canonical_smiles": "",
+                    "decode_reason": "missing_or_invalid_source_lineage",
+                }
+            )
+            continue
+        with rdBase.BlockLogs():
+            decoded = decode_generated_fullgraph(
+                graph,
+                source_record=source_records[int(origin)],
+                schema=schema,
+            )
+        decoded_rows.append(
+            {
+                **native,
+                "decode_ok": bool(decoded.decode_ok),
+                "canonical_smiles": str(decoded.canonical_smiles or ""),
+                "decode_reason": decoded.failure_reason,
+                "source_parent_id": decoded.source_parent_id,
+                "projected_new_edge_count": int(decoded.projected_new_edge_count),
+                "retained_edge_count": int(decoded.retained_edge_count),
+                "removed_source_edge_count": int(decoded.removed_source_edge_count),
+            }
+        )
+    return freeze_gine_candidate_universe(
+        method="gcfexplainer",
+        decoded_candidates=decoded_rows,
+        source_manifest=summary_manifest,
+        source_manifest_path=summary_manifest_path,
+        gnn_checkpoint=gnn_checkpoint,
+        output_dir=output_dir,
+        device=device,
+        oracle_batch_size=int(oracle_batch_size),
+        minimum_candidates=int(minimum_candidates),
+    )
+
+
 __all__ = [
     "audit_bace_source_roundtrip",
     "audit_bace_vrrw_candidate_sufficiency",
     "build_bace_native_summary",
+    "export_bace_gine_candidate_universe",
     "export_bace_rf_valid_top20",
     "official_greedy_coverage_order",
     "run_bace_official_vrrw",

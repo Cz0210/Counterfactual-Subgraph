@@ -797,7 +797,6 @@ Mutagenicity roadmaps.
   blocked; do not synthesize a Taste row in the paper matrix.
 - A later explicit approval can release the existing three-class pipeline
   without changing the dataset, label semantics, or frozen evaluation schema.
-
 ## 2026-08-22 — Four-method matrix continuation
 
 - [x] Add a fresh-root, PASS-last continuation from immutable AIDS and
@@ -814,3 +813,15 @@ Mutagenicity roadmaps.
   standardization without generation reruns.
 - [x] Preserve BACE continuation predecessor-lock metadata when composing the
   wider four-by-four controller manifest.
+
+## BACE native baseline Frozen-GINE continuation (2026-08-22)
+
+- [x] Add one calibrated-GINE adapter for official GCFExplainer and ComRecGC
+  one-hot graph edit runtimes.
+- [x] Freeze train-only GINE-clean native candidate universes without RF
+  ranking or calibration/test access.
+- [x] Add four-shard native full-graph GINE/WNode verification, calibration-only
+  selector freeze, held-out evaluation, and PASS-last final freeze.
+- [x] Publish controller-readable resource/marker contracts and AutoDL commands.
+- [ ] Implement and validate GlobalGCE attachment-aware LHS→RHS application;
+  until then keep the BACE GlobalGCE cell `BLOCKED_CODE`.

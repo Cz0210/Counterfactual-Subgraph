@@ -400,6 +400,19 @@ def run_common_recourse(
         "parameters": parameters.__dict__,
         "generation_manifest_path": str(generation_root / "run_manifest.json"),
         "generation_manifest_sha256": sha256_file(generation_root / "run_manifest.json"),
+        "oracle_backend": generation_manifest.get("oracle_backend"),
+        "classifier_family": generation_manifest.get("classifier_family"),
+        "rf_oracle_used": generation_manifest.get("rf_oracle_used"),
+        "oracle_checkpoint_hash": generation_manifest.get(
+            "oracle_checkpoint_hash"
+        ),
+        "eligible_for_bace_gnn_main_results": bool(
+            dataset == "bace"
+            and generation_manifest.get("eligible_for_bace_gnn_main_results") is True
+            and generation_manifest.get("oracle_backend") == "gnn"
+            and generation_manifest.get("classifier_family") == "gine"
+            and generation_manifest.get("rf_oracle_used") is False
+        ),
         "counterfactuals_sha256": sha256_file(payload_path),
         "model_counterfactual_candidate_count": len(candidate_graphs),
         "distance_pair_count": distance_pair_count,

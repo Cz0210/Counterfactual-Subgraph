@@ -7028,7 +7028,6 @@ states plus the final state before writing PASS.
 - The audit records the exact prepared provenance and approval-file identity;
   it never downloads labels, rewrites the prepared dataset, or unlocks work by
   inference from an open-access article license.
-
 ## 2026-08-22 — Adopt recovered COMRECGC generations read-only for paper-cell continuation
 
 - AIDS and Mutagenicity lineage recovery roots are immutable generation inputs;
@@ -7084,3 +7083,36 @@ states plus the final state before writing PASS.
   supplied in a later fresh manifest.
 - The paired Slurm wrapper is static repository CLI parity only. This campaign
   neither connects to nor submits work on HPC.
+
+## [2026-08-22] BACE native baselines share the frozen calibrated GINE
+
+### Background
+
+The historical BACE baseline routes were bound to method-local classifiers or
+RF filtering and therefore cannot enter the new same-classifier main matrix.
+
+### Decision
+
+- GCFExplainer VRRW and ComRecGC generation now call the same calibrated BACE
+  GINE bundle through a project-owned native one-hot-graph decoder. Invalid
+  edited graphs fail to the source class; there is no RF or repair fallback.
+- Native train generation is followed by calibration-only WNode selection and
+  held-out test access only after an immutable top-20 freeze. Full graphs remain
+  full-graph actions; ComRecGC lineage/common-recourse semantics are retained.
+- GlobalGCE is fail-closed with
+  `BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE` because the
+  repository does not yet implement an audited attachment-aware LHS→RHS rule
+  application engine. Historical RF/full-graph conversions are not substitutes.
+- AutoDL foreground commands and terminal artifact contracts are documented in
+  `docs/AUTODL_BACE_BASELINE_GNN_ROUTES.md`. No Slurm wrapper is added because
+  this route is explicitly AutoDL-only and must not access HPC.
+
+### Consequences
+
+GCFExplainer and ComRecGC can now produce provenance-clean BACE cells while
+retaining their native actions. GlobalGCE remains visibly incomplete instead
+of contaminating the matrix with a semantically different substitute.
+
+### Status
+
+Accepted

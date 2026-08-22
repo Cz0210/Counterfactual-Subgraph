@@ -21,6 +21,9 @@ from .contracts import (
     stable_json_sha256,
     write_json,
 )
+from src.baselines.bace_gnn_native_candidates import (
+    freeze_gine_candidate_universe,
+)
 
 
 def _torch_load(path: Path) -> Any:
@@ -202,7 +205,7 @@ def decode_representative(
     from src.baselines.gcfexplainer_mutagenicity_adapter import decode_generated_fullgraph
 
     try:
-        if dataset == "mutagenicity":
+        if dataset in {"mutagenicity", "bace"}:
             source_record = getattr(graph, "comrecgc_source_record")
             from src.baselines.gcfexplainer_mutagenicity_adapter import MutagenicityGraphSchema
 
@@ -450,3 +453,74 @@ def export_representatives(
     marker = "_RUN_COMPLETE.json" if len(selected) >= int(top_k) else "_SMOKE_AUDIT_COMPLETE.json"
     write_json(root / marker, {"run_complete": True, "available_k": len(selected)})
     return summary
+
+
+def export_bace_gine_representatives(
+    *,
+    common_recourse_dir: str | Path,
+    gnn_checkpoint: str | Path,
+    atom_vocabulary: Sequence[str | int],
+    output_dir: str | Path,
+    minimum_candidates: int = 20,
+    device: str = "cuda:0",
+    oracle_batch_size: int = 256,
+) -> dict[str, Any]:
+    """Freeze GINE-clean BACE COMRECGC medoids in native recourse order."""
+
+    recourse_root = Path(common_recourse_dir).expanduser().resolve(strict=True)
+    manifest_path = recourse_root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("run_complete") is not True:
+        raise ValueError("BACE COMRECGC common-recourse run is incomplete.")
+    if manifest.get("eligible_for_bace_gnn_main_results") is not True:
+        raise ValueError("BACE COMRECGC recourse is not frozen-GINE eligible.")
+    rows = json.loads(
+        (recourse_root / "selected_common_recourses.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    graphs = list(
+        _torch_load(recourse_root / "representative_counterfactuals.pt")
+    )
+    if not isinstance(rows, list) or len(rows) != len(graphs) or not rows:
+        raise ValueError(
+            "BACE COMRECGC representative graphs and recourse rows are not aligned."
+        )
+    decoded_rows: list[dict[str, Any]] = []
+    for native, graph in zip(rows, graphs, strict=True):
+        decoded = decode_representative(
+            graph,
+            dataset="bace",
+            atom_vocabulary=atom_vocabulary,
+        )
+        decoded_rows.append(
+            {
+                **dict(native),
+                **decoded,
+                "native_rank": int(native["rank"]),
+                "lineage_validated": True,
+                "transition_uniqueness_enforced": True,
+                "graph_content_identity": "canonical_global_graph_hash",
+                "parent_metadata_is_provenance_only": True,
+            }
+        )
+    return freeze_gine_candidate_universe(
+        method="comrecgc",
+        decoded_candidates=decoded_rows,
+        source_manifest=manifest,
+        source_manifest_path=manifest_path,
+        gnn_checkpoint=gnn_checkpoint,
+        output_dir=output_dir,
+        device=device,
+        oracle_batch_size=int(oracle_batch_size),
+        minimum_candidates=int(minimum_candidates),
+    )
+
+
+__all__ = [
+    "build_frozen_candidate_manifest",
+    "decode_representative",
+    "export_bace_gine_representatives",
+    "export_gate_failure",
+    "export_representatives",
+]

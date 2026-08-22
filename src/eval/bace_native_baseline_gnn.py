@@ -1,0 +1,733 @@
+"""Frozen-GINE/WNode evaluation for native BACE full-graph baselines.
+
+GCFExplainer and ComRecGC both emit complete molecular graphs, although their
+generation/search semantics differ.  This evaluator keeps those native action
+identities and only maps their outputs into the common parent/candidate metric
+schema.  It never converts a graph into a deletion fragment.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+
+from src.baselines.bace_gnn_baseline_contracts import (
+    CF_MODE,
+    DATASET,
+    SOURCE_LABEL,
+    assert_gine_clean_manifest,
+    baseline_spec,
+    normalize_method,
+    oracle_provenance,
+    validate_bace_frozen_gine,
+)
+from src.data.molecular_graph_dataset import MolecularGraphData
+from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
+from src.eval.bace_frozen_gnn_contracts import (
+    NUM_SHARDS,
+    atomic_csv,
+    atomic_json,
+    atomic_jsonl,
+    atomic_marker,
+    file_identity,
+    fresh_output_dir,
+    load_bace_parents,
+    read_json,
+    read_jsonl,
+    select_parent_shard,
+    sha256_file,
+    stable_sha256,
+    utc_now,
+)
+from src.eval.counterfactual_semantics import compute_counterfactual_semantics
+from src.eval.molclr_node_embeddings import checkpoint_identity
+from src.eval.mutagenicity_wnode_selector import run_mutagenicity_wnode_selector
+from src.eval.node_wasserstein_distance import (
+    MolCLRNodeWassersteinConfig,
+    MolCLRNodeWassersteinDistance,
+)
+from src.oracles.oracle_factory import build_oracle
+
+
+CALIBRATION_STAGE = "BASELINE_CALIBRATION_VERIFY"
+TEST_STAGE = "BASELINE_TEST_EVAL"
+SELECTION_STAGE = "BASELINE_CALIBRATION_SELECTOR"
+FINAL_STAGE = "BASELINE_FINAL_FREEZE"
+DISTANCE_NAMESPACE = "bace_native_fullgraph_frozen_gine_wnode_v1"
+
+
+def _graph(
+    featurizer: MolecularGraphFeaturizer,
+    *,
+    smiles: str,
+    molecule_id: str,
+    split: str,
+) -> MolecularGraphData:
+    features = featurizer.featurize(smiles)
+    return MolecularGraphData(
+        x=features.node_features,
+        edge_index=features.edge_index,
+        edge_attr=features.edge_features,
+        y=SOURCE_LABEL,
+        molecule_id=molecule_id,
+        smiles=features.canonical_smiles,
+        split=split,
+        graph_sha256=features.graph_sha256,
+    )
+
+
+def _load_candidates(
+    *,
+    method: str,
+    stage: str,
+    predecessor_root: Path,
+    checkpoint_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], Path]:
+    spec = baseline_spec(method)
+    if stage == CALIBRATION_STAGE:
+        manifest_path = predecessor_root / "run_manifest.json"
+        manifest = read_json(manifest_path)
+        if (
+            manifest.get("stage") != "TRAIN_CANDIDATE_GENERATION"
+            or manifest.get("status") != "PASS"
+            or manifest.get("run_complete") is not True
+        ):
+            raise ValueError("Calibration requires a PASS train candidate universe")
+        assert_gine_clean_manifest(
+            manifest, checkpoint_id=checkpoint_id, require_train_only=True
+        )
+        candidates = read_jsonl(predecessor_root / "candidate_universe.jsonl")
+    else:
+        manifest_path = predecessor_root / "frozen_selection_manifest.json"
+        manifest = read_json(manifest_path)
+        if (
+            manifest.get("stage") != SELECTION_STAGE
+            or manifest.get("status") != "FROZEN"
+            or manifest.get("selection_frozen") is not True
+            or manifest.get("test_loaded") is not False
+            or manifest.get("selector_fitted_on_calibration") is not True
+        ):
+            raise ValueError("Held-out test requires a frozen calibration selector")
+        assert_gine_clean_manifest(
+            manifest, checkpoint_id=checkpoint_id, require_train_only=False
+        )
+        top20 = read_json(predecessor_root / "selected_top20.json")
+        candidates = [dict(row) for row in top20.get("candidates", [])]
+        if [str(row.get("candidate_id")) for row in candidates] != list(
+            manifest.get("ordered_rule_ids") or []
+        ):
+            raise ValueError("Frozen selector and selected_top20 ordering differ")
+    if str(manifest.get("method_id")) != spec.method_id:
+        raise ValueError("Baseline predecessor belongs to a different method")
+    if len(candidates) < 20:
+        raise ValueError("Native BACE baseline evaluation requires at least 20 candidates")
+    ids = [str(row.get("candidate_id") or "") for row in candidates]
+    if any(not value for value in ids) or len(ids) != len(set(ids)):
+        raise ValueError("Native BACE candidate IDs must be non-empty and unique")
+    for row in candidates:
+        if row.get("action_kind") != spec.action_kind:
+            raise ValueError("Candidate action kind changed from its native method")
+        if row.get("action_semantics") != spec.action_semantics:
+            raise ValueError("Candidate action semantics changed from its native method")
+        if not str(row.get("canonical_smiles") or "").strip():
+            raise ValueError("Native full-graph candidate lacks canonical_smiles")
+        if row.get("rf_oracle_used") is not False:
+            raise ValueError("RF candidate provenance is forbidden for BACE")
+    return candidates, manifest, manifest_path
+
+
+def _authorize_split(
+    *, stage: str, split_path: str | Path, selection_manifest: Path | None
+) -> Path:
+    raw = Path(split_path).expanduser()
+    name = raw.name.lower()
+    if stage == CALIBRATION_STAGE:
+        if "calib" not in name or "test" in name:
+            raise ValueError("Calibration verification requires an explicit calibration split")
+    elif stage == TEST_STAGE:
+        # Validate the freeze before resolving/opening the held-out split.
+        if selection_manifest is None:
+            raise ValueError("Test access requires a frozen selection manifest")
+        frozen = read_json(selection_manifest)
+        if (
+            frozen.get("stage") != SELECTION_STAGE
+            or frozen.get("selection_frozen") is not True
+            or frozen.get("test_loaded") is not False
+        ):
+            raise ValueError("Test access rejected an incomplete selection freeze")
+        if "test" not in name:
+            raise ValueError("Held-out evaluation requires an explicitly named test split")
+    else:
+        raise ValueError(f"Unsupported native baseline evaluation stage: {stage}")
+    return raw.resolve(strict=True)
+
+
+def run_fullgraph_verification_shard(
+    *,
+    method: str,
+    stage: str,
+    split_path: str | Path,
+    predecessor_output: str | Path,
+    gnn_checkpoint: str | Path,
+    molclr_root: str | Path,
+    molclr_checkpoint: str | Path,
+    output_dir: str | Path,
+    shard_index: int,
+    wnode_cache_db: str | Path,
+    node_embedding_cache_dir: str | Path,
+    device: str = "cuda:0",
+    oracle_batch_size: int = 256,
+) -> dict[str, Any]:
+    method_id = normalize_method(method)
+    spec = baseline_spec(method_id)
+    if not spec.native_route_available:
+        raise ValueError(f"{spec.blocker_code}: {spec.blocker_reason}")
+    normalized_stage = str(stage).strip().upper()
+    if normalized_stage not in {CALIBRATION_STAGE, TEST_STAGE}:
+        raise ValueError("stage must be calibration or held-out test")
+    predecessor = Path(predecessor_output).expanduser().resolve(strict=True)
+    selection_path = (
+        predecessor / "frozen_selection_manifest.json"
+        if normalized_stage == TEST_STAGE
+        else None
+    )
+    split = _authorize_split(
+        stage=normalized_stage,
+        split_path=split_path,
+        selection_manifest=selection_path,
+    )
+    checkpoint, card, schema = validate_bace_frozen_gine(gnn_checkpoint)
+    candidates, predecessor_manifest, predecessor_manifest_path = _load_candidates(
+        method=method_id,
+        stage=normalized_stage,
+        predecessor_root=predecessor,
+        checkpoint_id=str(card["checkpoint_id"]),
+    )
+    all_parents = load_bace_parents(split)
+    parents = select_parent_shard(all_parents, int(shard_index))
+    if not parents:
+        raise ValueError(f"Native BACE shard {shard_index} is empty")
+    output = fresh_output_dir(output_dir)
+    featurizer = MolecularGraphFeaturizer(schema)
+    oracle = build_oracle(
+        dataset=DATASET,
+        backend="gnn",
+        checkpoint=checkpoint,
+        device=device,
+        batch_size=int(oracle_batch_size),
+    )
+    parent_graphs = [
+        _graph(
+            featurizer,
+            smiles=parent.smiles,
+            molecule_id=parent.parent_id,
+            split="calibration" if normalized_stage == CALIBRATION_STAGE else "test",
+        )
+        for parent in parents
+    ]
+    candidate_graphs = [
+        _graph(
+            featurizer,
+            smiles=str(candidate["canonical_smiles"]),
+            molecule_id=str(candidate["candidate_id"]),
+            split="train_generated_native_fullgraph",
+        )
+        for candidate in candidates
+    ]
+    before_rows = oracle.predict_records(parent_graphs, batch_size=int(oracle_batch_size))
+    after_rows = oracle.predict_records(candidate_graphs, batch_size=int(oracle_batch_size))
+    provider = MolCLRNodeWassersteinDistance(
+        MolCLRNodeWassersteinConfig(
+            molclr_root=Path(molclr_root).expanduser().resolve(strict=True),
+            molclr_ckpt=Path(molclr_checkpoint).expanduser().resolve(strict=True),
+            cache_db=Path(wnode_cache_db).expanduser().resolve(strict=False),
+            node_emb_cache_dir=Path(node_embedding_cache_dir)
+            .expanduser()
+            .resolve(strict=False),
+            device=device,
+            distance_namespace=DISTANCE_NAMESPACE,
+        )
+    )
+    pair_rows: list[dict[str, Any]] = []
+    try:
+        for parent, before in zip(parents, before_rows, strict=True):
+            for candidate, after in zip(candidates, after_rows, strict=True):
+                semantics = compute_counterfactual_semantics(
+                    source_label=SOURCE_LABEL,
+                    pred_before=before["predicted_label"],
+                    pred_after=after["predicted_label"],
+                    probabilities_before=before["probabilities"],
+                    probabilities_after=after["probabilities"],
+                    rule_id=str(candidate["candidate_id"]),
+                )
+                distance: float | None = None
+                failure_reason: str | None = None
+                if semantics.cf_flip:
+                    result = provider.distance_for_action(
+                        parent.smiles,
+                        str(candidate["canonical_smiles"]),
+                        action_context={
+                            "parent_id": parent.parent_id,
+                            "candidate_id": candidate["candidate_id"],
+                            "teacher_sha256": card["checkpoint_id"],
+                            "oracle_checkpoint_id": card["checkpoint_id"],
+                            "action_kind": spec.action_kind,
+                            "action_semantics": spec.action_semantics,
+                        },
+                    )
+                    value = result.get("distance")
+                    if (
+                        result.get("ok") is True
+                        and value is not None
+                        and math.isfinite(float(value))
+                        and float(value) >= 0.0
+                    ):
+                        distance = float(value)
+                    else:
+                        failure_reason = str(
+                            result.get("error") or "wnode_distance_failed"
+                        )
+                else:
+                    failure_reason = "frozen_gine_not_strict_flip"
+                pair_rows.append(
+                    {
+                        "dataset": DATASET,
+                        "method": spec.method,
+                        "method_id": method_id,
+                        "parent_id": parent.parent_id,
+                        "parent_smiles": parent.smiles,
+                        "candidate_id": candidate["candidate_id"],
+                        "canonical_smiles": candidate["canonical_smiles"],
+                        "canonical_fragment": candidate["canonical_smiles"],
+                        "candidate_rank": candidate.get("rank"),
+                        "native_rank": candidate.get("native_rank"),
+                        "action_kind": spec.action_kind,
+                        "action_semantics": spec.action_semantics,
+                        "applicable": True,
+                        "pred_before": int(before["predicted_label"]),
+                        "pred_after": int(after["predicted_label"]),
+                        "p_before": list(before["probabilities"]),
+                        "p_after": list(after["probabilities"]),
+                        "p1_before": float(before["probabilities"][SOURCE_LABEL]),
+                        "p1_after": float(after["probabilities"][SOURCE_LABEL]),
+                        "cf_drop": float(semantics.cf_drop),
+                        "cf_flip": bool(semantics.cf_flip),
+                        "pair_strict_flip": bool(
+                            semantics.cf_flip and distance is not None
+                        ),
+                        "wnode_distance": distance,
+                        "distance_for_selection": (
+                            distance if distance is not None else "+inf"
+                        ),
+                        "failure_reason": failure_reason,
+                        "cf_mode": CF_MODE,
+                        "source_label": SOURCE_LABEL,
+                        "oracle_backend": "gnn",
+                        "classifier_family": "gine",
+                        "rf_oracle_used": False,
+                        "oracle_checkpoint_hash": card["checkpoint_id"],
+                    }
+                )
+        provider_stats = provider.stats_dict()
+    finally:
+        provider.close()
+    expected = len(parents) * len(candidates)
+    if len(pair_rows) != expected:
+        raise RuntimeError("Native full-graph shard is not a complete Cartesian product")
+    atomic_jsonl(output / "pair_details.jsonl", pair_rows)
+    atomic_csv(output / "pair_details.csv", pair_rows)
+    provenance = oracle_provenance(card, checkpoint)
+    manifest = {
+        "schema_version": "bace_native_baseline_verification_shard_v1",
+        "dataset": DATASET,
+        "method": spec.method,
+        "method_id": method_id,
+        "stage": normalized_stage,
+        "status": "PASS",
+        "action_kind": spec.action_kind,
+        "action_semantics": spec.action_semantics,
+        **provenance,
+        "molclr_checkpoint_hash": sha256_file(molclr_checkpoint),
+        "molclr_embedding_checkpoint_identity": checkpoint_identity(
+            molclr_checkpoint
+        ),
+        "predecessor_manifest_identity": file_identity(predecessor_manifest_path),
+        "candidate_source_hash": (
+            predecessor_manifest.get("candidate_universe_hash")
+            if normalized_stage == CALIBRATION_STAGE
+            else predecessor_manifest.get("selected_top20_hash")
+        ),
+        "candidate_ids": [str(row["candidate_id"]) for row in candidates],
+        "candidate_ids_sha256": stable_sha256(
+            [str(row["candidate_id"]) for row in candidates]
+        ),
+        "shard_index": int(shard_index),
+        "num_shards": NUM_SHARDS,
+        "shard_rule": "sorted(parent_id)_position_mod_4",
+        "all_parent_ids_sha256": stable_sha256(
+            sorted(parent.parent_id for parent in all_parents)
+        ),
+        "parent_ids": [parent.parent_id for parent in parents],
+        "parent_count": len(parents),
+        "pair_count": len(pair_rows),
+        "strict_flip_pair_count": sum(
+            bool(row["pair_strict_flip"]) for row in pair_rows
+        ),
+        "pair_details_identity": file_identity(output / "pair_details.jsonl"),
+        "split_identity": file_identity(split),
+        "calibration_loaded": normalized_stage == CALIBRATION_STAGE,
+        "test_loaded": normalized_stage == TEST_STAGE,
+        "selection_frozen_before_test": normalized_stage == TEST_STAGE,
+        "distance_provider_stats": provider_stats,
+        "created_at": utc_now(),
+        "run_complete": True,
+    }
+    atomic_json(output / "run_manifest.json", manifest)
+    atomic_json(output / "oracle_provenance.json", provenance)
+    atomic_marker(output / "PASS", "PASS")
+    return manifest
+
+
+def merge_fullgraph_verification_shards(
+    *,
+    method: str,
+    stage: str,
+    shard_dirs: Sequence[str | Path],
+    predecessor_output: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    method_id = normalize_method(method)
+    spec = baseline_spec(method_id)
+    normalized_stage = str(stage).strip().upper()
+    if normalized_stage not in {CALIBRATION_STAGE, TEST_STAGE}:
+        raise ValueError("Unsupported native baseline merge stage")
+    if len(shard_dirs) != NUM_SHARDS:
+        raise ValueError("Native baseline merge requires exactly four fixed shards")
+    manifests: dict[int, dict[str, Any]] = {}
+    shard_roots: dict[int, Path] = {}
+    pair_rows: list[dict[str, Any]] = []
+    parents: set[str] = set()
+    identities: dict[str, set[str]] = {
+        "oracle": set(),
+        "molclr": set(),
+        "candidates": set(),
+        "source": set(),
+        "all_parents": set(),
+    }
+    for path_like in shard_dirs:
+        root = Path(path_like).expanduser().resolve(strict=True)
+        if not (root / "PASS").is_file():
+            raise ValueError(f"Native baseline shard lacks PASS marker: {root}")
+        manifest = read_json(root / "run_manifest.json")
+        if (
+            manifest.get("status") != "PASS"
+            or manifest.get("run_complete") is not True
+            or manifest.get("stage") != normalized_stage
+            or manifest.get("method_id") != method_id
+            or manifest.get("action_kind") != spec.action_kind
+            or manifest.get("rf_oracle_used") is not False
+        ):
+            raise ValueError(f"Native baseline shard contract mismatch: {root}")
+        index = int(manifest.get("shard_index", -1))
+        if index in manifests or not 0 <= index < NUM_SHARDS:
+            raise ValueError("Duplicate or invalid native baseline shard")
+        local_parents = {str(value) for value in manifest.get("parent_ids", [])}
+        if parents & local_parents:
+            raise ValueError("Native baseline shards overlap in parent identity")
+        parents.update(local_parents)
+        local_rows = read_jsonl(root / "pair_details.jsonl")
+        if len(local_rows) != int(manifest.get("pair_count", -1)):
+            raise ValueError("Native baseline shard row count mismatch")
+        if file_identity(root / "pair_details.jsonl") != manifest.get(
+            "pair_details_identity"
+        ):
+            raise ValueError("Native baseline shard bytes changed after PASS")
+        pair_rows.extend(local_rows)
+        manifests[index] = manifest
+        shard_roots[index] = root
+        identities["oracle"].add(str(manifest.get("oracle_checkpoint_hash")))
+        identities["molclr"].add(str(manifest.get("molclr_checkpoint_hash")))
+        identities["candidates"].add(str(manifest.get("candidate_ids_sha256")))
+        identities["source"].add(str(manifest.get("candidate_source_hash")))
+        identities["all_parents"].add(str(manifest.get("all_parent_ids_sha256")))
+    if set(manifests) != set(range(NUM_SHARDS)):
+        raise ValueError("Native baseline shard set is incomplete")
+    if any(len(values) != 1 for values in identities.values()):
+        raise ValueError(f"Native baseline shard identities differ: {identities}")
+    candidate_ids = list(manifests[0]["candidate_ids"])
+    keys = [(str(row["parent_id"]), str(row["candidate_id"])) for row in pair_rows]
+    if len(keys) != len(set(keys)) or len(keys) != len(parents) * len(candidate_ids):
+        raise ValueError("Native baseline merged Cartesian product is incomplete")
+    pair_rows.sort(key=lambda row: (str(row["parent_id"]), candidate_ids.index(str(row["candidate_id"]))))
+    predecessor = Path(predecessor_output).expanduser().resolve(strict=True)
+    if normalized_stage == CALIBRATION_STAGE:
+        candidates = read_jsonl(predecessor / "candidate_universe.jsonl")
+        predecessor_manifest_path = predecessor / "run_manifest.json"
+        cohort = "calibration"
+    else:
+        candidates = [dict(row) for row in read_json(predecessor / "selected_top20.json")["candidates"]]
+        predecessor_manifest_path = predecessor / "frozen_selection_manifest.json"
+        cohort = "test"
+    if [str(row["candidate_id"]) for row in candidates] != candidate_ids:
+        raise ValueError("Native baseline merged candidate order changed")
+    output = fresh_output_dir(output_dir)
+    atomic_jsonl(output / "pair_matrix.jsonl", pair_rows)
+    atomic_jsonl(output / "selected_candidate_universe.jsonl", candidates)
+    atomic_csv(output / "pair_details.csv", pair_rows)
+    strict_count = sum(bool(row["pair_strict_flip"]) for row in pair_rows)
+    summary = {
+        "method": spec.method,
+        "parent_count": len(parents),
+        "selected_candidate_count": len(candidates),
+        "pair_count": len(pair_rows),
+        "strict_flip_pair_count": strict_count,
+        "calibration_loaded": cohort == "calibration",
+        "test_loaded": cohort == "test",
+        "run_complete": True,
+    }
+    atomic_json(output / "summary.json", summary)
+    manifest = {
+        "schema_version": "bace_native_baseline_verification_merge_v1",
+        "dataset": DATASET,
+        "method": spec.method,
+        "method_id": method_id,
+        "stage": normalized_stage,
+        "status": "PASS",
+        "action_kind": spec.action_kind,
+        "action_semantics": spec.action_semantics,
+        "oracle_backend": "gnn",
+        "classifier_family": "gine",
+        "rf_oracle_used": False,
+        "source_label": SOURCE_LABEL,
+        "cf_mode": CF_MODE,
+        "oracle_checkpoint_hash": next(iter(identities["oracle"])),
+        "molclr_checkpoint_hash": next(iter(identities["molclr"])),
+        "candidate_universe_hash": sha256_file(output / "selected_candidate_universe.jsonl"),
+        "pair_matrix_hash": sha256_file(output / "pair_matrix.jsonl"),
+        "parent_count": len(parents),
+        "selected_candidate_count": len(candidates),
+        "pair_count": len(pair_rows),
+        "strict_flip_pair_count": strict_count,
+        "inputs": {
+            "cohort_name": cohort,
+            "predecessor_manifest": file_identity(predecessor_manifest_path),
+            "shard_manifests": [
+                file_identity(shard_roots[index] / "run_manifest.json")
+                for index in range(NUM_SHARDS)
+            ],
+        },
+        "calibration_loaded": cohort == "calibration",
+        "test_loaded": cohort == "test",
+        "selection_frozen_before_test": cohort == "test",
+        "created_at": utc_now(),
+        "run_complete": True,
+    }
+    atomic_json(output / "run_manifest.json", manifest)
+    atomic_marker(output / "PASS", "PASS")
+    return manifest
+
+
+def run_native_baseline_selector(
+    *, method: str, matrix_output: str | Path, output_dir: str | Path, seed: int = 13
+) -> dict[str, Any]:
+    method_id = normalize_method(method)
+    spec = baseline_spec(method_id)
+    matrix_root = Path(matrix_output).expanduser().resolve(strict=True)
+    matrix_manifest = read_json(matrix_root / "run_manifest.json")
+    if (
+        matrix_manifest.get("stage") != CALIBRATION_STAGE
+        or matrix_manifest.get("status") != "PASS"
+        or matrix_manifest.get("test_loaded") is not False
+        or matrix_manifest.get("method_id") != method_id
+    ):
+        raise ValueError("Native selector requires a PASS calibration matrix")
+    output = Path(output_dir).expanduser().resolve(strict=False)
+    if output.exists():
+        raise FileExistsError(f"Native selector output must be fresh: {output}")
+    run_mutagenicity_wnode_selector(
+        matrix_run_dir=matrix_root,
+        output_dir=output,
+        top_k=20,
+        table_k=10,
+        seed=int(seed),
+        forbid_test=True,
+    )
+    decision = read_json(output / "calibration_decision.json")
+    variant = str(decision.get("selected_variant") or "")
+    selected = read_json(output / "variants" / variant / "selected_top20.json")
+    candidates = [dict(row) for row in selected.get("candidates", [])]
+    ids = [str(row.get("candidate_id") or "") for row in candidates]
+    if len(ids) != 20 or len(ids) != len(set(ids)):
+        raise ValueError("Native selector must freeze exactly twenty unique candidates")
+    thresholds = read_json(output / "thresholds.json")
+    top20 = {
+        "schema_version": "bace_native_baseline_selected_top20_v1",
+        "dataset": DATASET,
+        "method": spec.method,
+        "method_id": method_id,
+        "stage": SELECTION_STAGE,
+        "status": "FROZEN",
+        "candidates": candidates,
+        "candidate_ids": ids,
+        "test_loaded": False,
+    }
+    atomic_json(output / "selected_top20.json", top20)
+    frozen = {
+        "schema_version": "bace_native_baseline_selection_manifest_v1",
+        "dataset": DATASET,
+        "method": spec.method,
+        "method_id": method_id,
+        "stage": SELECTION_STAGE,
+        "status": "FROZEN",
+        "action_kind": spec.action_kind,
+        "action_semantics": spec.action_semantics,
+        "oracle_backend": "gnn",
+        "classifier_family": "gine",
+        "rf_oracle_used": False,
+        "source_label": SOURCE_LABEL,
+        "cf_mode": CF_MODE,
+        "oracle_checkpoint_hash": matrix_manifest["oracle_checkpoint_hash"],
+        "molclr_checkpoint_hash": matrix_manifest["molclr_checkpoint_hash"],
+        "selector_fitted_on_calibration": True,
+        "selection_frozen": True,
+        "calibration_loaded": True,
+        "test_loaded": False,
+        "K": 20,
+        "ordered_rule_ids": ids,
+        "ordered_rule_ids_sha256": stable_sha256(ids),
+        "prefixes": {str(k): ids[:k] for k in range(1, 21)},
+        "thresholds": thresholds,
+        "selected_variant": variant,
+        "calibration_input_hash": sha256_file(matrix_root / "pair_matrix.jsonl"),
+        "candidate_pool_hash": matrix_manifest["candidate_universe_hash"],
+        "selected_top20_hash": sha256_file(output / "selected_top20.json"),
+        "created_at": utc_now(),
+    }
+    atomic_json(output / "frozen_selection_manifest.json", frozen)
+    atomic_marker(output / "PASS", "PASS")
+    return frozen
+
+
+def freeze_native_baseline_final(
+    *, method: str, selection_output: str | Path, test_output: str | Path, output_dir: str | Path
+) -> dict[str, Any]:
+    method_id = normalize_method(method)
+    spec = baseline_spec(method_id)
+    selection_root = Path(selection_output).expanduser().resolve(strict=True)
+    test_root = Path(test_output).expanduser().resolve(strict=True)
+    frozen = read_json(selection_root / "frozen_selection_manifest.json")
+    test_manifest = read_json(test_root / "run_manifest.json")
+    if (
+        frozen.get("stage") != SELECTION_STAGE
+        or frozen.get("status") != "FROZEN"
+        or frozen.get("method_id") != method_id
+        or test_manifest.get("stage") != TEST_STAGE
+        or test_manifest.get("status") != "PASS"
+        or test_manifest.get("method_id") != method_id
+        or test_manifest.get("selection_frozen_before_test") is not True
+        or test_manifest.get("test_loaded") is not True
+    ):
+        raise ValueError("Native baseline final freeze dependencies are incomplete")
+    for field in ("oracle_checkpoint_hash", "molclr_checkpoint_hash"):
+        if frozen.get(field) != test_manifest.get(field):
+            raise ValueError(f"Native baseline selection/test identity changed: {field}")
+    ids = list(frozen["ordered_rule_ids"])
+    pair_rows = read_jsonl(test_root / "pair_matrix.jsonl")
+    by_parent: dict[str, dict[str, float]] = {}
+    for row in pair_rows:
+        parent = str(row["parent_id"])
+        candidate = str(row["candidate_id"])
+        if candidate not in ids:
+            raise ValueError("Test pair escaped frozen candidate ordering")
+        distance = math.inf
+        if row.get("pair_strict_flip"):
+            distance = float(row["wnode_distance"])
+            if not math.isfinite(distance) or distance < 0.0:
+                raise ValueError("Strict test pair lacks finite WNode")
+        by_parent.setdefault(parent, {})[candidate] = distance
+    if not by_parent or any(set(values) != set(ids) for values in by_parent.values()):
+        raise ValueError("Held-out test matrix is not the frozen Cartesian product")
+    matrix = np.asarray(
+        [[by_parent[parent][candidate] for candidate in ids] for parent in sorted(by_parent)],
+        dtype=np.float64,
+    )
+    thresholds = frozen["thresholds"]
+    theta_star = float(thresholds["theta_star"])
+    prefix_metrics = []
+    for k in range(1, 21):
+        best = np.min(matrix[:, :k], axis=1)
+        finite = best[np.isfinite(best)]
+        prefix_metrics.append(
+            {
+                "K": k,
+                "SuppCov": float(np.mean(np.isfinite(best))),
+                "CCRCov": float(np.mean(best <= theta_star)),
+                "avg_cost": float(np.mean(finite)) if finite.size else None,
+                "median_cost": float(np.median(finite)) if finite.size else None,
+            }
+        )
+    output = fresh_output_dir(output_dir)
+    metrics = {
+        "schema_version": "bace_native_baseline_test_metrics_v1",
+        "dataset": DATASET,
+        "method": spec.method,
+        "method_id": method_id,
+        "stage": TEST_STAGE,
+        "status": "PASS",
+        "parent_count": len(by_parent),
+        "ordered_rule_ids": ids,
+        "theta_star": theta_star,
+        "prefix_metrics": prefix_metrics,
+        "selector_refit_on_test": False,
+        "threshold_refit_on_test": False,
+        "test_loaded": True,
+    }
+    atomic_json(output / "final_metrics.json", metrics)
+    atomic_csv(output / "prefix_metrics.csv", prefix_metrics)
+    final = {
+        "schema_version": "bace_native_baseline_final_freeze_v1",
+        "dataset": DATASET,
+        "method": spec.method,
+        "method_id": method_id,
+        "stage": FINAL_STAGE,
+        "status": "PASS",
+        "action_kind": spec.action_kind,
+        "action_semantics": spec.action_semantics,
+        "oracle_backend": "gnn",
+        "classifier_family": "gine",
+        "rf_oracle_used": False,
+        "source_label": SOURCE_LABEL,
+        "cf_mode": CF_MODE,
+        "oracle_checkpoint_hash": frozen["oracle_checkpoint_hash"],
+        "molclr_checkpoint_hash": frozen["molclr_checkpoint_hash"],
+        "selector_fitted_on_calibration": True,
+        "selection_frozen_before_test": True,
+        "test_used_only_after_freeze": True,
+        "all_hashes_frozen": True,
+        "ordered_rule_ids": ids,
+        "selection_manifest_identity": file_identity(selection_root / "frozen_selection_manifest.json"),
+        "test_manifest_identity": file_identity(test_root / "run_manifest.json"),
+        "test_pair_matrix_identity": file_identity(test_root / "pair_matrix.jsonl"),
+        "final_metrics_identity": file_identity(output / "final_metrics.json"),
+        "created_at": utc_now(),
+        "run_complete": True,
+    }
+    atomic_json(output / "FINAL_PASS.json", final)
+    atomic_json(output / "run_manifest.json", final)
+    atomic_marker(output / "PASS", "PASS")
+    return final
+
+
+__all__ = [
+    "CALIBRATION_STAGE",
+    "FINAL_STAGE",
+    "SELECTION_STAGE",
+    "TEST_STAGE",
+    "freeze_native_baseline_final",
+    "merge_fullgraph_verification_shards",
+    "run_fullgraph_verification_shard",
+    "run_native_baseline_selector",
+]

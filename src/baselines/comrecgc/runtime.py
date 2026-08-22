@@ -38,6 +38,9 @@ from .model_adapter import (
     load_bace_gnn,
     load_mutagenicity_gnn,
 )
+from src.baselines.bace_gine_native_adapter import (
+    BACEFrozenGINENativeGraphAdapter,
+)
 from .graph_trace import (
     ActionTraceRecorder,
     assert_trace_parity,
@@ -1401,6 +1404,39 @@ def run_project_generation(
                     device=device,
                 ).eval()
                 distance_provenance = embedding_model.provenance()
+            elif dataset == "bace" and Path(gnn_checkpoint).expanduser().resolve().is_dir():
+                from src.baselines.gcfexplainer_bace_adapter import (
+                    load_bace_gcf_dataset,
+                )
+
+                bace_schema, _train, _val, generation, _summary = load_bace_gcf_dataset(
+                    dataset_dir
+                )
+                source_records = sorted(
+                    generation, key=lambda row: str(row["molecule_id"])
+                )[: int(parent_limit)]
+                if [str(row["molecule_id"]) for row in source_records] != bundle.parent_ids:
+                    raise RuntimeError(
+                        "Frozen GINE source records differ from COMRECGC BACE parent order."
+                    )
+                model = BACEFrozenGINENativeGraphAdapter(
+                    gnn_checkpoint,
+                    source_records=source_records,
+                    graph_schema=bace_schema,
+                    device=device,
+                ).eval()
+                model_provenance = model.provenance()
+                embedding_model = modules["distance"].load_neurosed(
+                    bundle.graphs,
+                    neurosed_model_path=str(Path(distance_checkpoint).expanduser().resolve()),
+                    device=device,
+                ).to(device).eval()
+                distance_provenance = {
+                    "checkpoint_path": str(Path(distance_checkpoint).expanduser().resolve()),
+                    "checkpoint_sha256": sha256_file(distance_checkpoint),
+                    "distance_model": "bace_neurosed",
+                    "checkpoint_retrained": False,
+                }
             else:
                 loader = (
                     load_bace_gnn if dataset == "bace" else load_mutagenicity_gnn
@@ -1441,6 +1477,19 @@ def run_project_generation(
                 "command_sha256": normalized_command_sha256,
                 "total_steps": int(parameters.steps),
                 "gnn": model_provenance,
+                "oracle_backend": model_provenance.get("oracle_backend"),
+                "classifier_family": model_provenance.get("classifier_family"),
+                "rf_oracle_used": False if dataset == "bace" else None,
+                "oracle_checkpoint_hash": model_provenance.get(
+                    "oracle_checkpoint_hash",
+                    model_provenance.get("checkpoint_sha256"),
+                ),
+                "eligible_for_bace_gnn_main_results": bool(
+                    dataset == "bace"
+                    and model_provenance.get("oracle_backend") == "gnn"
+                    and model_provenance.get("classifier_family") == "gine"
+                    and model_provenance.get("rf_oracle_used") is False
+                ),
                 "distance_model": distance_provenance,
                 "internal_prediction_counts": internal_counts,
                 "runtime_environment": _runtime_environment(torch),
@@ -1864,6 +1913,9 @@ def run_project_generation(
                 write_json(root / "trace_parity.json", parity_summary)
             manifest = {
                 **config,
+                "gnn": model.provenance()
+                if hasattr(model, "provenance")
+                else config["gnn"],
                 "counterfactuals_path": str(result_path),
                 "counterfactuals_sha256": sha256_file(result_path),
                 "counterfactuals_bytes": result_path.stat().st_size,
