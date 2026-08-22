@@ -48,6 +48,7 @@ def test_audit_completion_mode_does_not_unlock_blocked_gate(
     )
     gate = json.loads((output / "taste_license_gate.json").read_text())
     assert gate["status"] == BLOCKED
+    assert gate["passed"] is False
     assert gate["heavy_route_authorized"] is False
     stdout = capsys.readouterr().out
     assert "[TASTE_LICENSE_BLOCKED]" in stdout
@@ -77,6 +78,7 @@ def test_public_unlicensed_data_stays_blocked(tmp_path: Path) -> None:
         prepared_root=_prepared(tmp_path), output_dir=tmp_path / "audit"
     )
     assert gate["status"] == BLOCKED
+    assert gate["passed"] is False
     assert gate["heavy_route_authorized"] is False
     assert (tmp_path / "audit" / BLOCKED).is_file()
     assert not (tmp_path / "audit" / "PASS").exists()
@@ -91,7 +93,10 @@ def test_nonempty_user_approval_unlocks_exact_prepared_data(tmp_path: Path) -> N
         approval_file=approval,
     )
     assert gate["status"] == PASS
+    assert gate["passed"] is True
     assert gate["heavy_route_authorized"] is True
+    assert gate["license_basis"] == "user_supplied_approval_or_terms"
+    assert gate["approval_file"] == str(approval.resolve())
     assert gate["approval_evidence"]["sha256"]
 
 
@@ -106,6 +111,8 @@ def test_reviewed_prepared_license_requires_consistent_fields(tmp_path: Path) ->
         output_dir=tmp_path / "audit",
     )
     assert gate["status"] == PASS
+    assert gate["passed"] is True
+    assert gate["license_basis"] == "prepared_provenance_explicit_license"
 
 
 def test_commit_drift_fails_closed(tmp_path: Path) -> None:

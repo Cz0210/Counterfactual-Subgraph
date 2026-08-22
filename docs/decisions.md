@@ -124,6 +124,12 @@ future authorized route must create a fresh fragment bound to the exact PASS
 gate, frozen GINE hashes, shared split/MolCLR identities, and calibration-only
 selector freeze before test.
 
+The audit gate also publishes an explicit boolean `passed` plus its
+`license_basis`/approval-file identity. This is the same fail-closed schema the
+matrix registry consumes; public availability alone never populates those
+fields. A PASS still requires a new runnable fragment and never mutates the
+blocked fragment in place.
+
 ### Consequences
 
 - No current TasteMolNet task can consume a GPU or access train/test bytes.

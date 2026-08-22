@@ -185,7 +185,13 @@ def audit_license(
         "created_at": now,
         "dataset": "tastemolnet",
         "status": status,
+        "passed": status == PASS,
         "license_id": license_id,
+        "license_basis": passed_by,
+        "reuse_basis": passed_by,
+        "approval_file": (
+            approval_identity.get("path") if approval_identity is not None else None
+        ),
         "approval_evidence": approval_identity,
         "heavy_route_authorized": status == PASS,
         "run_tastemolnet": status == PASS,
