@@ -4,6 +4,45 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Re-export Mutagenicity Ours on the frozen matched protocol
+
+### Decision
+
+Treat the exact historical 217-by-20 pair/match bundle as immutable evaluated
+evidence, not as permission to rerun generation, the selector, the RF oracle,
+or MolCLR. After the original-protocol adoption is checksum-verified, aggregate
+those saved strict-flip WNode distances into a fresh standardized cell using
+only the preregistered 601 thresholds from 0 through 0.0535, theta 0.05,
+cost cap 0.0535, and Table/Figure K=10. Candidate order and every pair distance
+remain byte-identical inputs.
+
+Publish `FROZEN_PASS` only after a PASS-last fresh-root freeze closes Figure 3
+K=1..20, the exact dense Figure 4 grid, Table 2 K=10, oracle/split/distance
+identities, `test_used_for_selection=false`, and all artifact hashes. The raw
+test CSV is not opened: this task reads only the already-frozen held-out pair
+artifact. An old 14-point curve or any source/output tamper fails closed.
+
+Place the CPU re-export after the manifest-only original adoption verification
+and before the A/M inventory. Represent the four currently missing terminal
+cells (Mutagenicity GlobalGCE and AIDS Ours/GCFExplainer/GlobalGCE) as distinct
+static `command=null` blocked tasks so dependency graphs can reference them
+without allocating CPU or GPU.
+
+### Consequences
+
+- Mutagenicity Ours no longer remains `STALE_METRIC` once this matched closure
+  passes, while its old native-protocol root remains immutable evidence.
+- The common threshold grid is reused without interpolation or test selection.
+- Missing A/M cells remain explicit and cannot be mistaken for READY work.
+- The paired Slurm entrypoint remains static CLI parity and is not submitted;
+  the active campaign remains AutoDL-only.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-22] Separate native GlobalGCE action parity from frozen-GINE training compatibility
 
 ### Background

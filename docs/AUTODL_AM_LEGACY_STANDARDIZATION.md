@@ -48,6 +48,15 @@ explicitly `STALE_METRIC`, not a final common-protocol PASS. The output records
 independently so a later deterministic matched-protocol re-export can reuse the
 frozen pair matrix without re-running RF or WNode.
 
+That re-export is implemented as `reexport-mut-ours-matched`. It rehashes the
+adopted pair matrix, match instances, frozen candidate order, and prefix
+evidence, then performs aggregation only. It never opens the raw test CSV,
+loads the RF, loads MolCLR, changes candidate order, refits the selector, or
+recomputes a distance. The fresh output is `FROZEN_PASS` only when Figure 3 is
+exactly K=1..20, Figure 4 is the preregistered 601-point K=10 grid, Table 2 is
+K=10 at theta 0.05, and every manifest/freeze hash closes. A legacy 14-point
+curve is rejected rather than padded or interpolated.
+
 ## Foreground commands
 
 Run the one-time adopter from the immutable AutoDL execution worktree **before**
@@ -70,8 +79,8 @@ bash scripts/autodl/run_am_legacy_standardization.sh
 ```
 
 The persistent controller then performs a manifest-only verification. The
-inventory follows that verification automatically; these commands show the
-same contract for manual diagnosis:
+matched re-export and inventory follow that verification automatically; these
+commands show the same contract for manual diagnosis:
 
 ```bash
 export ADOPTED_MUT_OURS_ROOT="$OUTPUT_ROOT"
@@ -79,6 +88,13 @@ export OUTPUT_ROOT="$ARTIFACT_ROOT/am_legacy/adoption-verification/attempt-0"
 export ACTION=verify-mut-ours-adoption
 bash scripts/autodl/run_am_legacy_standardization.sh
 
+export ACTION=reexport-mut-ours-matched
+export ADOPTED_MUT_OURS_ROOT="$ARTIFACT_ROOT/am_legacy/precontroller/mutagenicity_ours_v1"
+export MATCHED_PROTOCOL="$PWD/configs/autodl/mutagenicity_matched_protocol_v1.json"
+export OUTPUT_ROOT="$ARTIFACT_ROOT/am_legacy/mut_ours/matched-reexport/attempt-0"
+bash scripts/autodl/run_am_legacy_standardization.sh
+
+export ADOPTED_MUT_OURS_ROOT="$OUTPUT_ROOT"
 export OUTPUT_ROOT="$ARTIFACT_ROOT/am_legacy/inventory/attempt-0"
 export ACTION=audit-inventory
 bash scripts/autodl/run_am_legacy_standardization.sh
@@ -89,6 +105,7 @@ Success markers are respectively:
 ```text
 [MUT_OURS_LEGACY_ADOPTION_PASS]
 [MUT_OURS_ADOPTION_VERIFY_PASS]
+[MUT_OURS_MATCHED_REEXPORT_PASS]
 [AM_LEGACY_INVENTORY_PASS]
 ```
 
@@ -153,20 +170,29 @@ ComRecGC may consume the same file and hash.
 `configs/autodl/am_legacy_standardization_v1.tasks.json` is a task fragment,
 not a standalone controller manifest. First copy the tracked source spec and
 complete the pre-controller adopter at the exact paths above. Then append the
-fragment's five task objects verbatim to a fresh continuation manifest:
+fragment's task objects verbatim to a fresh continuation manifest:
 
 1. `mut_ours_legacy_adoption_verify` is a CPU, manifest-only verification of
    the already-adopted standardized bundle. It never resolves the raw test
    CSV or frozen test-run root.
-2. `am_legacy_inventory` depends on the exact passing adoption output and
-   publishes a six-cell matrix patch plus bounded filename inventory.
-3. `mut_gcf_legacy_freeze` is generation-free and manifest-only; it depends on
+2. `mut_ours_matched_protocol_reexport` depends on that verification, reads
+   only the checksum-closed frozen evaluation bundle, and publishes a fresh
+   matched-protocol `FROZEN_PASS` cell.
+3. `am_legacy_inventory` depends on the matched output and publishes a six-cell
+   matrix patch plus bounded filename inventory. It no longer reports Ours as
+   `STALE_METRIC` after the matched closure passes.
+4. `mut_gcf_legacy_freeze` is generation-free and manifest-only; it depends on
    the inventory and the matched threshold contract.
-4. `mut_gcf_legacy_calibration` is the explicit calibration-only selector
+5. `mut_gcf_legacy_calibration` is the explicit calibration-only selector
    freeze boundary and occupies one GPU.
-5. `mut_gcf_legacy_heldout` depends on that frozen calibration, declares
+6. `mut_gcf_legacy_heldout` depends on that frozen calibration, declares
    `selector_parameters_frozen=true` and `read_only_test=true`, and only then
    opens the test split on one GPU.
+
+Four additional `command=null` tasks keep the known terminal gaps explicit
+without consuming CPU or GPU: `mut_globalgce_legacy_cell_blocked`,
+`aids_ours_legacy_cell_blocked`, `aids_gcfexplainer_legacy_cell_blocked`, and
+`aids_globalgce_legacy_cell_blocked`.
 
 Both controller inputs use the authoritative production prefix
 `{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/`,
@@ -175,7 +201,7 @@ foreground commands. They intentionally do not use `{artifact_root}` because
 the production controller defines that placeholder as `$RUNTIME/outputs`.
 The source-spec filename does not name a raw split, and the inventory never
 opens molecular rows. The controller owns detachment, heartbeat, retry, and
-registry state for these five tasks.
+registry state for runnable tasks; static blocked tasks never launch a worker.
 
 ## Fail-closed outputs
 

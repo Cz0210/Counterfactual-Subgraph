@@ -17,11 +17,14 @@ import math
 import os
 import re
 import shutil
+import statistics
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
+
+import numpy as np
 
 from src.eval import mutagenicity_wnode_frozen_test as frozen_test
 from src.eval.fullgraph_wnode_artifacts import (
@@ -30,6 +33,10 @@ from src.eval.fullgraph_wnode_artifacts import (
     validate_frozen_candidate_contract,
 )
 from src.eval.molclr_node_embeddings import canonicalize_smiles
+from src.eval.mutagenicity_wnode_selector import (
+    ThresholdLevel,
+    build_coverage_redundancy_matrix,
+)
 
 
 MUTAGENICITY_RF_SHA256 = (
@@ -137,6 +144,29 @@ MUT_OURS_SCIENTIFIC_FILES = (
     "summary.json",
     "run_manifest.json",
     "_RUN_COMPLETE.json",
+)
+MUT_MATCHED_THRESHOLD_COUNT = 601
+MUT_MATCHED_THRESHOLD_MAX = 0.0535
+MUT_MATCHED_THETA_STAR = 0.05
+MUT_MATCHED_COST_CAP = 0.0535
+MUT_MATCHED_TABLE_K = 10
+MUT_MATCHED_TOP_K = 20
+MUT_MATCHED_REQUIRED_STANDARDIZED_FILES = (
+    "figure3_coverage_vs_k.csv",
+    "figure4_coverage_vs_threshold.csv",
+    "table2_ours_k10.csv",
+    "prefix_metrics.csv",
+    "prefix_metrics.json",
+    "parent_best_distances.csv",
+    "destination_distribution.csv",
+    "summary.json",
+    "run_manifest.json",
+    "oracle_manifest.json",
+    "evaluation_manifest.json",
+    "artifact_manifest.json",
+    "final_artifact_audit.json",
+    "freeze_manifest.json",
+    "_FINALIZED.json",
 )
 
 
@@ -1432,6 +1462,903 @@ def adopt_mutagenicity_ours(
     }
 
 
+def _load_mut_matched_protocol(path_like: str | Path) -> dict[str, Any]:
+    """Load the one preregistered 601-point Mutagenicity paper protocol."""
+
+    path = Path(path_like).expanduser().resolve(strict=True)
+    payload = _load_object(path)
+    datasets = payload.get("datasets")
+    if isinstance(datasets, Mapping):
+        raw = datasets.get("Mutagenicity")
+        if not isinstance(raw, Mapping):
+            raise LegacyStandardizationError(
+                "Matched protocol lacks datasets.Mutagenicity"
+            )
+        protocol = dict(raw)
+    else:
+        protocol = dict(payload)
+    if protocol.get("status") not in (None, "PASS"):
+        raise LegacyStandardizationError("Matched threshold contract is not PASS")
+    if str(protocol.get("dataset") or "Mutagenicity").lower() != "mutagenicity":
+        raise LegacyStandardizationError("Matched threshold dataset is not Mutagenicity")
+    values = protocol.get("thresholds")
+    if not isinstance(values, list) or len(values) != MUT_MATCHED_THRESHOLD_COUNT:
+        raise LegacyStandardizationError(
+            "Mut matched protocol must contain exactly 601 thresholds"
+        )
+    try:
+        thresholds = [float(value) for value in values]
+        theta_star = float(protocol["theta_star"])
+        cost_cap = float(protocol["cost_cap"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LegacyStandardizationError(
+            "Mut matched protocol contains non-numeric values"
+        ) from exc
+    expected = [
+        MUT_MATCHED_THRESHOLD_MAX * index / (MUT_MATCHED_THRESHOLD_COUNT - 1)
+        for index in range(MUT_MATCHED_THRESHOLD_COUNT)
+    ]
+    if any(
+        not math.isclose(actual, wanted, rel_tol=0.0, abs_tol=1e-12)
+        for actual, wanted in zip(thresholds, expected)
+    ) or any(right <= left for left, right in zip(thresholds, thresholds[1:])):
+        raise LegacyStandardizationError(
+            "Mut matched protocol is not the strict 601-point 0..0.0535 grid"
+        )
+    if not math.isclose(
+        theta_star, MUT_MATCHED_THETA_STAR, rel_tol=0.0, abs_tol=1e-12
+    ) or not math.isclose(
+        cost_cap, MUT_MATCHED_COST_CAP, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise LegacyStandardizationError(
+            "Mut matched theta_star/cost_cap must be exactly 0.05/0.0535"
+        )
+    if protocol.get("test_used_for_selection") is not False:
+        raise LegacyStandardizationError(
+            "Mut matched protocol must prove test_used_for_selection=false"
+        )
+    if str(protocol.get("threshold_source_split") or "").lower() != (
+        "existing_frozen_protocol"
+    ):
+        raise LegacyStandardizationError(
+            "Mut matched protocol must use existing_frozen_protocol"
+        )
+    threshold_source = str(protocol.get("threshold_source") or "").strip()
+    if not threshold_source:
+        raise LegacyStandardizationError("Mut matched threshold_source is missing")
+    identity = {
+        "thresholds": values,
+        "theta_star": protocol["theta_star"],
+        "cost_cap": protocol["cost_cap"],
+        "threshold_source": threshold_source,
+        "threshold_source_split": protocol["threshold_source_split"],
+        "test_used_for_selection": protocol["test_used_for_selection"],
+    }
+    actual_identity_hash = hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    recorded_hash = _normalize_hash(
+        protocol.get("threshold_config_hash"),
+        label="Mut matched threshold_config_hash",
+    )
+    if actual_identity_hash != recorded_hash:
+        raise LegacyStandardizationError(
+            "Mut matched threshold_config_hash does not identify its exact protocol"
+        )
+    return {
+        "path": str(path),
+        "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "thresholds": thresholds,
+        "theta_star": theta_star,
+        "cost_cap": cost_cap,
+        "threshold_source": threshold_source,
+        "threshold_source_split": "existing_frozen_protocol",
+        "threshold_config_hash": recorded_hash,
+        "test_used_for_selection": False,
+    }
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    return float(sum(values) / len(values)) if values else None
+
+
+def _median(values: Sequence[float]) -> float | None:
+    return float(statistics.median(values)) if values else None
+
+
+def _matched_mut_metrics(
+    *,
+    pair_rows: Sequence[Mapping[str, Any]],
+    selected_rows: Sequence[Mapping[str, Any]],
+    source_prefix_rows: Sequence[Mapping[str, Any]],
+    thresholds: Sequence[float],
+    theta_star: float,
+    cost_cap: float,
+    expected_parent_count: int,
+    expected_candidate_count: int,
+    expected_pair_count: int,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    """Aggregate the immutable pair matrix without invoking scientific models."""
+
+    if len(selected_rows) != expected_candidate_count:
+        raise LegacyStandardizationError("Matched re-export candidate count differs")
+    candidate_ids: list[str] = []
+    for rank, row in enumerate(selected_rows, start=1):
+        if int(row.get("rank") or 0) != rank:
+            raise LegacyStandardizationError("Frozen candidate order is not rank 1..20")
+        candidate_id = str(row.get("candidate_id") or "").strip()
+        if not candidate_id or candidate_id in candidate_ids:
+            raise LegacyStandardizationError("Frozen candidate order is not unique")
+        candidate_ids.append(candidate_id)
+    parent_ids = sorted({str(row.get("parent_id") or "") for row in pair_rows})
+    if "" in parent_ids or len(parent_ids) != expected_parent_count:
+        raise LegacyStandardizationError("Frozen pair matrix parent count differs")
+    if len(pair_rows) != expected_pair_count or expected_pair_count != (
+        expected_parent_count * expected_candidate_count
+    ):
+        raise LegacyStandardizationError("Frozen pair matrix cardinality differs")
+    parent_index = {value: index for index, value in enumerate(parent_ids)}
+    candidate_index = {value: index for index, value in enumerate(candidate_ids)}
+    distances = np.full(
+        (expected_parent_count, expected_candidate_count), np.inf, dtype=np.float64
+    )
+    cf_drops = np.full_like(distances, np.nan)
+    applicable = np.zeros_like(distances, dtype=bool)
+    seen: set[tuple[str, str]] = set()
+    strict_pair_count = 0
+    for row in pair_rows:
+        parent_id = str(row.get("parent_id") or "")
+        candidate_id = str(row.get("candidate_id") or "")
+        key = (parent_id, candidate_id)
+        if key in seen or parent_id not in parent_index or candidate_id not in candidate_index:
+            raise LegacyStandardizationError(
+                f"Frozen pair matrix has duplicate/unexpected key: {key}"
+            )
+        seen.add(key)
+        left = parent_index[parent_id]
+        right = candidate_index[candidate_id]
+        applicable[left, right] = frozen_test._bool_value(row.get("applicable"))
+        strict = frozen_test._bool_value(row.get("pair_strict_flip"))
+        distance = frozen_test._finite_float(row.get("wnode_distance"))
+        cf_drop = frozen_test._finite_float(row.get("cf_drop"))
+        if strict:
+            try:
+                pred_before = int(row.get("pred_before"))
+                pred_after = int(row.get("pred_after"))
+            except (TypeError, ValueError) as exc:
+                raise LegacyStandardizationError(
+                    f"Strict pair lacks binary predictions: {key}"
+                ) from exc
+            if (
+                not applicable[left, right]
+                or pred_before != 1
+                or pred_after != 0
+                or distance is None
+                or distance < 0.0
+                or cf_drop is None
+            ):
+                raise LegacyStandardizationError(
+                    f"Strict pair violates frozen 1->0 WNode contract: {key}"
+                )
+            distances[left, right] = distance
+            cf_drops[left, right] = cf_drop
+            strict_pair_count += 1
+        elif distance is not None:
+            raise LegacyStandardizationError(
+                f"Non-strict pair contains a finite WNode distance: {key}"
+            )
+    expected_keys = {
+        (parent_id, candidate_id)
+        for parent_id in parent_ids
+        for candidate_id in candidate_ids
+    }
+    if seen != expected_keys:
+        raise LegacyStandardizationError("Frozen pair matrix is not complete Cartesian")
+
+    levels = tuple(
+        ThresholdLevel(
+            threshold_id=f"matched-{index:03d}",
+            threshold=float(value),
+            weight=1.0,
+            quantiles=(index / (len(thresholds) - 1),),
+            quantile_labels=(f"matched-{index:03d}",),
+        )
+        for index, value in enumerate(thresholds)
+    )
+    coverage_redundancy = build_coverage_redundancy_matrix(distances, levels)
+    source_prefix = {
+        int(float(row.get("k") or 0)): row for row in source_prefix_rows
+    }
+    if set(source_prefix) != set(range(1, expected_candidate_count + 1)):
+        raise LegacyStandardizationError("Frozen source prefix metrics are not K=1..20")
+
+    best = np.full(expected_parent_count, np.inf, dtype=np.float64)
+    best_cf_drop = np.full(expected_parent_count, np.nan, dtype=np.float64)
+    best_candidate = np.full(expected_parent_count, -1, dtype=np.int64)
+    ever_applicable = np.zeros(expected_parent_count, dtype=bool)
+    prefix_rows: list[dict[str, Any]] = []
+    parent_rows: list[dict[str, Any]] = []
+    best_at_table_k: np.ndarray | None = None
+    previous_coverage = -math.inf
+    for index in range(expected_candidate_count):
+        current_distance = distances[:, index]
+        current_drop = cf_drops[:, index]
+        improved = current_distance < best
+        tied = (
+            np.isfinite(current_distance)
+            & np.isclose(current_distance, best, atol=0.0, rtol=0.0)
+            & (
+                np.nan_to_num(current_drop, nan=-np.inf)
+                > np.nan_to_num(best_cf_drop, nan=-np.inf)
+            )
+        )
+        update = improved | tied
+        best[update] = current_distance[update]
+        best_cf_drop[update] = current_drop[update]
+        best_candidate[update] = index
+        ever_applicable |= applicable[:, index]
+        finite = np.isfinite(best)
+        covered = best <= theta_star
+        finite_values = [float(value) for value in best[finite]]
+        covered_values = [float(value) for value in best[covered]]
+        capped = np.minimum(best, cost_cap)
+        capped[~finite] = cost_cap
+        coverage = float(np.mean(covered))
+        if coverage + 1e-12 < previous_coverage:
+            raise LegacyStandardizationError("Matched prefix coverage decreased")
+        previous_coverage = coverage
+        applicable_count = int(np.count_nonzero(ever_applicable))
+        strict_count = int(np.count_nonzero(finite))
+        count = index + 1
+        selected_redundancy = coverage_redundancy[:count, :count]
+        upper = selected_redundancy[np.triu_indices(count, k=1)]
+        structural_raw = source_prefix[count].get("structural_redundancy")
+        try:
+            structural_redundancy = float(structural_raw)
+        except (TypeError, ValueError) as exc:
+            raise LegacyStandardizationError(
+                f"Frozen structural redundancy is missing at K={count}"
+            ) from exc
+        if not math.isfinite(structural_redundancy) or structural_redundancy < 0.0:
+            raise LegacyStandardizationError(
+                f"Frozen structural redundancy is invalid at K={count}"
+            )
+        threshold_coverages = [float(np.mean(best <= value)) for value in thresholds]
+        row = {
+            "dataset": "Mutagenicity",
+            "method": "Ours",
+            "k": count,
+            "theta": theta_star,
+            "coverage": coverage,
+            "cost": _median(finite_values),
+            "ccrcov_theta_star": coverage,
+            "weighted_multi_threshold_utility": float(
+                sum(threshold_coverages) / len(threshold_coverages)
+            ),
+            "applicable_rate": float(applicable_count / expected_parent_count),
+            "strict_flip_parent_count": strict_count,
+            "flip_rate_among_applicable": (
+                float(strict_count / applicable_count) if applicable_count else 0.0
+            ),
+            "num_theta_star_covered": int(np.count_nonzero(covered)),
+            "fixed_capped_mean_cost": float(np.mean(capped)),
+            "fixed_capped_median_cost": float(np.median(capped)),
+            "conditional_mean_cost": _mean(finite_values),
+            "conditional_median_cost": _median(finite_values),
+            "theta_star_conditional_mean_cost": _mean(covered_values),
+            "theta_star_conditional_median_cost": _median(covered_values),
+            "mean_cf_drop": (
+                float(np.mean(best_cf_drop[finite])) if np.any(finite) else None
+            ),
+            "theta_star_mean_cf_drop": (
+                float(np.mean(best_cf_drop[covered])) if np.any(covered) else None
+            ),
+            "coverage_redundancy": float(np.mean(upper)) if upper.size else 0.0,
+            "structural_redundancy": structural_redundancy,
+            "matched_threshold_count": len(thresholds),
+            "threshold_source_split": "existing_frozen_protocol",
+        }
+        if row["cost"] is None:
+            raise LegacyStandardizationError(
+                f"Matched prefix K={count} has no strict-flip parent"
+            )
+        prefix_rows.append(row)
+        for parent_offset, parent_id in enumerate(parent_ids):
+            chosen = int(best_candidate[parent_offset])
+            parent_rows.append(
+                {
+                    "dataset": "Mutagenicity",
+                    "method": "Ours",
+                    "k": count,
+                    "parent_id": parent_id,
+                    "best_distance": (
+                        float(best[parent_offset]) if finite[parent_offset] else None
+                    ),
+                    "capped_distance": float(capped[parent_offset]),
+                    "best_candidate_id": (
+                        candidate_ids[chosen] if chosen >= 0 else None
+                    ),
+                    "cf_drop": (
+                        float(best_cf_drop[parent_offset])
+                        if math.isfinite(float(best_cf_drop[parent_offset]))
+                        else None
+                    ),
+                    "strict_recourse_available": bool(finite[parent_offset]),
+                    "theta_star_covered": bool(covered[parent_offset]),
+                    "applicable": bool(ever_applicable[parent_offset]),
+                }
+            )
+        if count == MUT_MATCHED_TABLE_K:
+            best_at_table_k = best.copy()
+    if best_at_table_k is None:
+        raise AssertionError("Matched K=10 prefix was not produced")
+    figure4_rows = [
+        {
+            "dataset": "Mutagenicity",
+            "method": "Ours",
+            "k": MUT_MATCHED_TABLE_K,
+            "threshold": float(value),
+            "coverage": float(np.mean(best_at_table_k <= value)),
+            "num_covered": int(np.count_nonzero(best_at_table_k <= value)),
+            "threshold_source": "matched AIDS/Mutagenicity existing frozen protocol",
+            "threshold_source_split": "existing_frozen_protocol",
+        }
+        for value in thresholds
+    ]
+    table_metric = prefix_rows[MUT_MATCHED_TABLE_K - 1]
+    table_row = {
+        **table_metric,
+        "num_test_parents": expected_parent_count,
+        "num_candidates": MUT_MATCHED_TABLE_K,
+        "selected_variant": "A2_MultiThreshold",
+    }
+    diagnostic = {
+        "parent_ids": parent_ids,
+        "candidate_ids": candidate_ids,
+        "strict_pair_count": strict_pair_count,
+        "pair_count": len(pair_rows),
+        "complete_cartesian": True,
+        "table_k": MUT_MATCHED_TABLE_K,
+        "top_k": MUT_MATCHED_TOP_K,
+    }
+    return prefix_rows, parent_rows, figure4_rows, {"table": table_row, **diagnostic}
+
+
+def _validate_matched_mut_ours(root_like: str | Path) -> Path:
+    """Validate the fresh matched-protocol cell without opening held-out rows."""
+
+    root = Path(root_like).expanduser().resolve(strict=True)
+    standardized = root / "standardized"
+    required = [
+        "PASS",
+        "_RUN_COMPLETE.json",
+        "final_gate.json",
+        "run_manifest.json",
+        *(f"standardized/{name}" for name in MUT_MATCHED_REQUIRED_STANDARDIZED_FILES),
+    ]
+    missing = [name for name in required if not (root / name).is_file()]
+    if missing:
+        raise LegacyStandardizationError(
+            f"Matched Mut Ours dependency is incomplete: {missing}"
+        )
+    if (root / "PASS").read_text(encoding="utf-8").strip() != "PASS":
+        raise LegacyStandardizationError("Matched Mut Ours PASS marker is invalid")
+    complete = _load_object(root / "_RUN_COMPLETE.json")
+    gate = _load_object(root / "final_gate.json")
+    manifest = _load_object(standardized / "run_manifest.json")
+    evaluation = _load_object(standardized / "evaluation_manifest.json")
+    audit = _load_object(standardized / "final_artifact_audit.json")
+    frozen = _load_object(standardized / "_FINALIZED.json")
+    if (
+        complete.get("run_complete") is not True
+        or complete.get("status") != "PASS"
+        or gate.get("status") != "PASS"
+        or manifest.get("status") != "FROZEN_PASS"
+        or audit.get("audit_passed") is not True
+        or frozen.get("finalized") is not True
+        or frozen.get("gate_passed") is not True
+    ):
+        raise LegacyStandardizationError("Matched Mut Ours PASS/freeze gate failed")
+    if Path(str(gate.get("standardized_output_root") or "")).resolve() != standardized:
+        raise LegacyStandardizationError("Matched standardized root identity differs")
+    if hashlib.sha256((standardized / "run_manifest.json").read_bytes()).hexdigest() != str(
+        gate.get("standardized_run_manifest_sha256") or ""
+    ) or hashlib.sha256((standardized / "freeze_manifest.json").read_bytes()).hexdigest() != str(
+        gate.get("freeze_manifest_sha256") or ""
+    ):
+        raise LegacyStandardizationError("Matched final gate hash closure differs")
+    protocol = evaluation.get("matched_protocol")
+    if not isinstance(protocol, Mapping):
+        raise LegacyStandardizationError("Matched evaluation protocol is missing")
+    if (
+        int(protocol.get("threshold_count", -1)) != MUT_MATCHED_THRESHOLD_COUNT
+        or float(protocol.get("theta_star", math.nan)) != MUT_MATCHED_THETA_STAR
+        or float(protocol.get("cost_cap", math.nan)) != MUT_MATCHED_COST_CAP
+        or protocol.get("threshold_source_split") != "existing_frozen_protocol"
+        or protocol.get("test_used_for_selection") is not False
+        or evaluation.get("test_used_for_selection") is not False
+        or evaluation.get("threshold_fitted_on_test") is not False
+    ):
+        raise LegacyStandardizationError("Matched evaluation provenance differs")
+    figure3 = _read_csv(standardized / "figure3_coverage_vs_k.csv")
+    figure4 = _read_csv(standardized / "figure4_coverage_vs_threshold.csv")
+    table = _read_csv(standardized / "table2_ours_k10.csv")
+    if [int(row.get("k") or 0) for row in figure3] != list(
+        range(1, MUT_MATCHED_TOP_K + 1)
+    ):
+        raise LegacyStandardizationError("Matched Figure 3 is not K=1..20")
+    if len(figure4) != MUT_MATCHED_THRESHOLD_COUNT:
+        raise LegacyStandardizationError("Matched Figure 4 is not 601 points")
+    actual_thresholds = [float(row.get("threshold") or math.nan) for row in figure4]
+    expected_thresholds = [
+        MUT_MATCHED_THRESHOLD_MAX * index / (MUT_MATCHED_THRESHOLD_COUNT - 1)
+        for index in range(MUT_MATCHED_THRESHOLD_COUNT)
+    ]
+    if any(
+        not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12)
+        for actual, expected in zip(actual_thresholds, expected_thresholds)
+    ) or any(int(row.get("k") or 0) != MUT_MATCHED_TABLE_K for row in figure4):
+        raise LegacyStandardizationError("Matched Figure 4 grid/K differs")
+    figure4_coverage = [float(row.get("coverage") or 0.0) for row in figure4]
+    if any(
+        right + 1e-12 < left
+        for left, right in zip(figure4_coverage, figure4_coverage[1:])
+    ):
+        raise LegacyStandardizationError("Matched Figure 4 coverage decreases")
+    if (
+        len(table) != 1
+        or int(table[0].get("k") or 0) != MUT_MATCHED_TABLE_K
+        or not math.isclose(
+            float(table[0].get("theta") or math.nan),
+            MUT_MATCHED_THETA_STAR,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise LegacyStandardizationError("Matched Table 2 is not K=10/theta=0.05")
+    freeze = _load_object(standardized / "freeze_manifest.json")
+    files = freeze.get("files")
+    if not isinstance(files, Mapping):
+        raise LegacyStandardizationError("Matched freeze file inventory is missing")
+    for name in MUT_MATCHED_REQUIRED_STANDARDIZED_FILES:
+        if name in {"freeze_manifest.json", "_FINALIZED.json"}:
+            continue
+        metadata = files.get(name)
+        target = standardized / name
+        if not isinstance(metadata, Mapping) or not target.is_file():
+            raise LegacyStandardizationError(f"Matched freeze lacks {name}")
+        if int(metadata.get("bytes", -1)) != target.stat().st_size or str(
+            metadata.get("sha256") or ""
+        ) != hashlib.sha256(target.read_bytes()).hexdigest():
+            raise LegacyStandardizationError(f"Matched freeze hash differs: {name}")
+    return root
+
+
+def reexport_mutagenicity_ours_matched(
+    *,
+    adopted_root: str | Path,
+    matched_protocol: str | Path,
+    output_root: str | Path,
+    proc_root: str | Path = "/proc",
+) -> dict[str, Any]:
+    """Re-export the immutable Mut Ours pair bundle on the matched protocol."""
+
+    adopted = _validate_adopted_mut_ours(adopted_root)
+    destination = Path(output_root).expanduser().resolve(strict=False)
+    if destination.exists():
+        raise FileExistsError(f"Output root must be fresh: {destination}")
+    protocol = _load_mut_matched_protocol(matched_protocol)
+    adoption = _load_object(adopted / "raw/adoption_manifest.json")
+    source = Path(str(adoption.get("source_root") or "")).expanduser().resolve(strict=True)
+    scan_live_writers(source, proc_root=proc_root)
+    expected_hashes = adoption.get("source_artifact_sha256")
+    if not isinstance(expected_hashes, Mapping):
+        raise LegacyStandardizationError("Original adoption lacks source hash closure")
+    source_names = (
+        "pair_matrix.jsonl",
+        "match_instances.jsonl",
+        "selected_sequence.jsonl",
+        "prefix_metrics.csv",
+        "thresholds.json",
+        "summary.json",
+        "run_manifest.json",
+    )
+    protected = [source / name for name in source_names]
+    before = _snapshot(protected)
+    cache = HashCache()
+    for name in source_names:
+        path = source / name
+        if not path.is_file() or path.is_symlink():
+            raise LegacyStandardizationError(f"Frozen matched input is absent: {name}")
+        expected = _normalize_hash(
+            expected_hashes.get(name), label=f"adoption source hash {name}"
+        )
+        if cache.sha256(path) != expected:
+            raise LegacyStandardizationError(f"Frozen matched input was tampered: {name}")
+    adopted_manifest = _load_object(adopted / "standardized/run_manifest.json")
+    adopted_oracle = _load_object(adopted / "standardized/oracle_manifest.json")
+    adopted_evaluation = _load_object(adopted / "standardized/evaluation_manifest.json")
+    adopted_audit = _load_object(adopted / "standardized/final_artifact_audit.json")
+    parent_count = int(adopted_audit.get("parent_count", -1))
+    candidate_count = int(adopted_audit.get("candidate_count", -1))
+    pair_count = int(adopted_audit.get("pair_count", -1))
+    if candidate_count != MUT_MATCHED_TOP_K:
+        raise LegacyStandardizationError("Matched re-export requires frozen top-20")
+    pair_rows = frozen_test._read_jsonl(source / "pair_matrix.jsonl")
+    match_rows = frozen_test._read_jsonl(source / "match_instances.jsonl")
+    selected_rows = frozen_test._read_jsonl(source / "selected_sequence.jsonl")
+    frozen_test._audit_match_aggregation(pair_rows, match_rows)
+    prefix_rows, parent_rows, figure4_rows, metric_audit = _matched_mut_metrics(
+        pair_rows=pair_rows,
+        selected_rows=selected_rows,
+        source_prefix_rows=_read_csv(source / "prefix_metrics.csv"),
+        thresholds=protocol["thresholds"],
+        theta_star=protocol["theta_star"],
+        cost_cap=protocol["cost_cap"],
+        expected_parent_count=parent_count,
+        expected_candidate_count=candidate_count,
+        expected_pair_count=pair_count,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent)
+    )
+    raw = temporary / "raw"
+    standardized = temporary / "standardized"
+    raw.mkdir(parents=True)
+    standardized.mkdir(parents=True)
+    oracle_hash = _normalize_hash(
+        adopted_oracle.get("oracle_hash"), label="adopted Mut RF hash"
+    )
+    molclr_hash = _normalize_hash(
+        adopted_evaluation.get("distance_encoder_hash")
+        or adopted_manifest.get("molclr_checkpoint_hash"),
+        label="adopted Mut MolCLR hash",
+    )
+    dataset_hash = _normalize_hash(
+        adopted_manifest.get("dataset_hash"), label="adopted Mut dataset hash"
+    )
+    split_hash = _normalize_hash(
+        adopted_manifest.get("split_hash"), label="adopted Mut split hash"
+    )
+    try:
+        source_manifest = {
+            "schema_version": "mut_ours_matched_reexport_source_v1",
+            "dataset": "Mutagenicity",
+            "method": "Ours",
+            "source_root": str(source),
+            "source_adoption_root": str(adopted),
+            "source_adoption_manifest_sha256": hashlib.sha256(
+                (adopted / "raw/adoption_manifest.json").read_bytes()
+            ).hexdigest(),
+            "source_file_sha256": {
+                name: cache.sha256(source / name) for name in source_names
+            },
+            "pair_count": pair_count,
+            "candidate_count": candidate_count,
+            "parent_count": parent_count,
+            "generation_rerun": False,
+            "selector_rerun": False,
+            "oracle_recomputed": False,
+            "molclr_recomputed": False,
+            "distance_recomputed": False,
+            "candidate_order_changed": False,
+            "heldout_pair_matrix_opened": True,
+            "raw_test_split_opened": False,
+            "test_used_for_selection": False,
+            "matched_protocol": protocol,
+            "created_at": utc_now(),
+        }
+        _atomic_json(raw / "matched_reexport_source_manifest.json", source_manifest)
+        _atomic_csv(standardized / "figure3_coverage_vs_k.csv", prefix_rows)
+        _atomic_csv(standardized / "figure4_coverage_vs_threshold.csv", figure4_rows)
+        _atomic_csv(
+            standardized / "table2_ours_k10.csv", [metric_audit["table"]]
+        )
+        _atomic_csv(standardized / "prefix_metrics.csv", prefix_rows)
+        _atomic_json(
+            standardized / "prefix_metrics.json",
+            {
+                "schema_version": "four_by_four_prefix_metrics_v1",
+                "dataset": "Mutagenicity",
+                "method": "Ours",
+                "k_max": MUT_MATCHED_TOP_K,
+                "metrics": prefix_rows,
+            },
+        )
+        _atomic_csv(standardized / "parent_best_distances.csv", parent_rows)
+        _atomic_csv(
+            standardized / "destination_distribution.csv",
+            [
+                {
+                    "dataset": "Mutagenicity",
+                    "method": "Ours",
+                    "destination_label": "N/A",
+                    "count": "N/A",
+                    "rate": "N/A",
+                    "reason": "binary_1_to_0_task_destination_distribution_not_applicable",
+                }
+            ],
+        )
+        common = {
+            "schema_version": "four_by_four_standardized_cell_v1",
+            "dataset": "Mutagenicity",
+            "method": "Ours",
+            "status": "FROZEN_PASS",
+            "frozen": True,
+            "artifacts_frozen": True,
+            "raw_output_root": str(source),
+            "standardized_output_root": str(destination / "standardized"),
+            "raw_output_complete": True,
+            "generation_adopted": True,
+            "ordering_adopted": True,
+            "evaluation_adopted": True,
+            "generation_rerun": False,
+            "selector_rerun": False,
+            "oracle_recomputed": False,
+            "molclr_recomputed": False,
+            "distance_recomputed": False,
+            "oracle_backend": "rf",
+            "classifier_family": "random_forest",
+            "oracle_checkpoint": adopted_oracle.get("oracle_checkpoint"),
+            "oracle_hash": oracle_hash,
+            "rf_oracle_used": True,
+            "dataset_hash": dataset_hash,
+            "split_hash": split_hash,
+            "test_cohort_hash": split_hash,
+            "distance_line": "MolCLR-Node-Wasserstein",
+            "molclr_checkpoint_hash": molclr_hash,
+            "cf_mode": "strict_flip",
+            "source_label": 1,
+            "target_label": 0,
+            "k_max": MUT_MATCHED_TOP_K,
+            "table2_k": MUT_MATCHED_TABLE_K,
+            "theta_star": MUT_MATCHED_THETA_STAR,
+            "cost_cap": MUT_MATCHED_COST_CAP,
+            "threshold_config_hash": protocol["threshold_config_hash"],
+            "threshold_source": protocol["threshold_source"],
+            "threshold_source_split": "existing_frozen_protocol",
+            "selector_fitted_on_calibration": True,
+            "selector_frozen_before_test": True,
+            "selector_parameters_frozen": True,
+            "test_loaded_only_after_freeze": True,
+            "test_used_only_after_freeze": True,
+            "test_used_for_selection": False,
+            "threshold_fitted_on_test": False,
+            "test_threshold_fitting": False,
+            "test_candidate_selection": False,
+            "test_variant_selection": False,
+            "paper_written": False,
+        }
+        oracle_manifest = {
+            key: common[key]
+            for key in (
+                "dataset",
+                "method",
+                "oracle_backend",
+                "classifier_family",
+                "oracle_checkpoint",
+                "oracle_hash",
+                "rf_oracle_used",
+                "dataset_hash",
+                "split_hash",
+            )
+        }
+        oracle_manifest.update(
+            {"schema_version": 1, "retrained": False, "frozen": True}
+        )
+        evaluation_manifest = {
+            **common,
+            "schema_version": "four_by_four_evaluation_manifest_v1",
+            "distance_encoder_hash": molclr_hash,
+            "complete_cartesian": True,
+            "parent_count": parent_count,
+            "candidate_count": candidate_count,
+            "pair_count": pair_count,
+            "matched_protocol": {
+                "threshold_count": MUT_MATCHED_THRESHOLD_COUNT,
+                "threshold_min": 0.0,
+                "threshold_max": MUT_MATCHED_THRESHOLD_MAX,
+                "theta_star": MUT_MATCHED_THETA_STAR,
+                "cost_cap": MUT_MATCHED_COST_CAP,
+                "threshold_source": protocol["threshold_source"],
+                "threshold_source_split": "existing_frozen_protocol",
+                "threshold_config_hash": protocol["threshold_config_hash"],
+                "test_used_for_selection": False,
+            },
+        }
+        summary = {
+            **common,
+            "schema_version": "mut_ours_matched_reexport_summary_v1",
+            "test_parent_count": parent_count,
+            "candidate_count": candidate_count,
+            "actual_pair_rows": pair_count,
+            "strict_flip_pair_count": metric_audit["strict_pair_count"],
+            "complete_cartesian": True,
+            "figure3_rows": MUT_MATCHED_TOP_K,
+            "figure4_rows": MUT_MATCHED_THRESHOLD_COUNT,
+            "table2_rows": 1,
+            "run_complete": True,
+        }
+        run_manifest = {
+            **common,
+            "reexport_type": "deterministic_frozen_pair_matrix_aggregation",
+            "source_adoption_root": str(adopted),
+            "source_pair_matrix_sha256": cache.sha256(source / "pair_matrix.jsonl"),
+            "source_match_instances_sha256": cache.sha256(
+                source / "match_instances.jsonl"
+            ),
+            "source_selected_sequence_sha256": cache.sha256(
+                source / "selected_sequence.jsonl"
+            ),
+            "raw_test_split_opened": False,
+            "heldout_pair_matrix_opened": True,
+            "run_complete": True,
+            "created_at": utc_now(),
+        }
+        _atomic_json(standardized / "oracle_manifest.json", oracle_manifest)
+        _atomic_json(standardized / "evaluation_manifest.json", evaluation_manifest)
+        _atomic_json(standardized / "summary.json", summary)
+        _atomic_json(standardized / "run_manifest.json", run_manifest)
+        hash_names = (
+            "figure3_coverage_vs_k.csv",
+            "figure4_coverage_vs_threshold.csv",
+            "table2_ours_k10.csv",
+            "prefix_metrics.csv",
+            "prefix_metrics.json",
+            "parent_best_distances.csv",
+            "destination_distribution.csv",
+            "summary.json",
+            "run_manifest.json",
+            "oracle_manifest.json",
+            "evaluation_manifest.json",
+        )
+        scientific_hashes = {
+            name: hashlib.sha256((standardized / name).read_bytes()).hexdigest()
+            for name in hash_names
+        }
+        _atomic_json(
+            standardized / "artifact_manifest.json",
+            {
+                "schema_version": "four_by_four_artifact_manifest_v1",
+                "dataset": "Mutagenicity",
+                "method": "Ours",
+                "file_sha256": scientific_hashes,
+                "file_count": len(scientific_hashes),
+                "self_excluded": "artifact_manifest.json",
+            },
+        )
+        final_audit = {
+            **common,
+            "schema_version": "four_by_four_final_artifact_audit_v1",
+            "passed": True,
+            "audit_passed": True,
+            "final_artifact_audit_passed": True,
+            "file_sha256": scientific_hashes,
+            "source_checksum_closure_passed": True,
+            "source_unchanged": True,
+            "source_read_only": True,
+            "live_writer_audit_passed": True,
+            "complete_cartesian": True,
+            "parent_count": parent_count,
+            "candidate_count": candidate_count,
+            "pair_count": pair_count,
+            "figure3_k_grid": list(range(1, MUT_MATCHED_TOP_K + 1)),
+            "figure4_threshold_count": MUT_MATCHED_THRESHOLD_COUNT,
+            "figure4_threshold_min": 0.0,
+            "figure4_threshold_max": MUT_MATCHED_THRESHOLD_MAX,
+            "table2_k": MUT_MATCHED_TABLE_K,
+            "raw_test_split_opened": False,
+            "heldout_pair_matrix_opened": True,
+            "aggregation_only": True,
+            "candidate_order_changed": False,
+            "audited_at": utc_now(),
+        }
+        _atomic_json(standardized / "final_artifact_audit.json", final_audit)
+        freeze_names = (*hash_names, "artifact_manifest.json", "final_artifact_audit.json")
+        freeze_files = {
+            name: {
+                "bytes": (standardized / name).stat().st_size,
+                "sha256": hashlib.sha256((standardized / name).read_bytes()).hexdigest(),
+            }
+            for name in freeze_names
+        }
+        freeze_manifest = {
+            **common,
+            "schema_version": "four_by_four_freeze_manifest_v1",
+            "finalized": True,
+            "gate_passed": True,
+            "files": freeze_files,
+            "file_count": len(freeze_files),
+        }
+        _atomic_json(standardized / "freeze_manifest.json", freeze_manifest)
+        _atomic_json(
+            standardized / "_FINALIZED.json",
+            {
+                **common,
+                "finalized": True,
+                "gate_passed": True,
+                "freeze_manifest_sha256": hashlib.sha256(
+                    (standardized / "freeze_manifest.json").read_bytes()
+                ).hexdigest(),
+            },
+        )
+        _atomic_json(temporary / "run_manifest.json", run_manifest)
+        _atomic_json(
+            temporary / "final_gate.json",
+            {
+                "schema_version": "four_by_four_cell_final_gate_v1",
+                "dataset": "Mutagenicity",
+                "method": "Ours",
+                "status": "PASS",
+                "standardized_output_root": str(destination / "standardized"),
+                "standardized_run_manifest_sha256": hashlib.sha256(
+                    (standardized / "run_manifest.json").read_bytes()
+                ).hexdigest(),
+                "freeze_manifest_sha256": hashlib.sha256(
+                    (standardized / "freeze_manifest.json").read_bytes()
+                ).hexdigest(),
+                "paper_written": False,
+            },
+        )
+        _atomic_json(
+            temporary / "_RUN_COMPLETE.json",
+            {
+                "run_complete": True,
+                "status": "PASS",
+                "dataset": "Mutagenicity",
+                "method": "Ours",
+                "standardized_output_root": str(destination / "standardized"),
+                "paper_written": False,
+            },
+        )
+        after = _snapshot(protected)
+        if before != after:
+            raise LegacyStandardizationError("Frozen matched source changed during export")
+        final_source_hashes = HashCache()
+        for name in source_names:
+            if final_source_hashes.sha256(source / name) != _normalize_hash(
+                expected_hashes.get(name), label=f"final adoption source hash {name}"
+            ):
+                raise LegacyStandardizationError(
+                    f"Frozen matched input changed during export: {name}"
+                )
+        scan_live_writers(source, proc_root=proc_root)
+        _atomic_text(temporary / "PASS", "PASS\n")
+        os.replace(temporary, destination)
+        _validate_matched_mut_ours(destination)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+        if destination.exists():
+            shutil.rmtree(destination, ignore_errors=True)
+        raise
+    return {
+        "status": "FROZEN_PASS",
+        "dataset": "Mutagenicity",
+        "method": "Ours",
+        "output_root": str(destination),
+        "standardized_output_root": str(destination / "standardized"),
+        "threshold_count": MUT_MATCHED_THRESHOLD_COUNT,
+        "theta_star": MUT_MATCHED_THETA_STAR,
+        "cost_cap": MUT_MATCHED_COST_CAP,
+        "generation_rerun": False,
+        "selector_rerun": False,
+        "oracle_recomputed": False,
+        "molclr_recomputed": False,
+    }
+
+
 def freeze_mutagenicity_gcf_candidates(
     *,
     source_export_root: str | Path,
@@ -2035,8 +2962,19 @@ def audit_legacy_inventory(
                 elif adopted_mut_ours_root is None:
                     effective_status = "INCOMPLETE"
                 else:
-                    adopted = _validate_adopted_mut_ours(adopted_mut_ours_root)
-                    effective_status = "STALE_METRIC"
+                    candidate_root = Path(adopted_mut_ours_root).expanduser().resolve(
+                        strict=True
+                    )
+                    candidate_evaluation = candidate_root / (
+                        "standardized/evaluation_manifest.json"
+                    )
+                    candidate_payload = _load_object(candidate_evaluation)
+                    if isinstance(candidate_payload.get("matched_protocol"), Mapping):
+                        _validate_matched_mut_ours(candidate_root)
+                        effective_status = "FROZEN_PASS"
+                    else:
+                        _validate_adopted_mut_ours(candidate_root)
+                        effective_status = "STALE_METRIC"
             reason = str(raw.get("reason") or "").strip()
             row = {
                 "dataset": dataset,
@@ -2045,7 +2983,7 @@ def audit_legacy_inventory(
                 "raw_output_root": str(source) if source is not None else "",
                 "standardized_output_root": (
                     str(Path(adopted_mut_ours_root).resolve() / "standardized")
-                    if effective_status == "STALE_METRIC"
+                    if effective_status in {"STALE_METRIC", "FROZEN_PASS"}
                     and dataset.lower() == "mutagenicity"
                     and method == "Ours"
                     and adopted_mut_ours_root is not None
@@ -2064,6 +3002,13 @@ def audit_legacy_inventory(
                 row["evaluation_adopted"] = True
                 row["reason"] = (
                     "STRICT_ORIGINAL_PROTOCOL_AUDIT_PASS_BUT_COMMON_THRESHOLD_STALE"
+                )
+            elif effective_status == "FROZEN_PASS":
+                row["generation_adopted"] = True
+                row["ordering_adopted"] = True
+                row["evaluation_adopted"] = True
+                row["reason"] = (
+                    "FROZEN_PAIR_MATRIX_DETERMINISTICALLY_REEXPORTED_ON_MATCHED_601_POINT_PROTOCOL"
                 )
             rows.append(row)
             details.append(
@@ -2255,6 +3200,8 @@ __all__ = [
     "MUT_GCF_NATIVE_RANKS",
     "MUT_GCF_SELECTED_CSV_SHA256",
     "MUT_GCF_SELECTION_METHOD",
+    "MUT_MATCHED_REQUIRED_STANDARDIZED_FILES",
+    "MUT_MATCHED_THRESHOLD_COUNT",
     "MUTAGENICITY_RF_SHA256",
     "MUT_OURS_REQUIRED_SOURCE_FILES",
     "MUT_OURS_REQUIRED_STANDARDIZED_FILES",
@@ -2263,6 +3210,7 @@ __all__ = [
     "freeze_mutagenicity_gcf_candidates",
     "load_source_spec",
     "mut_ours_contract_from_spec",
+    "reexport_mutagenicity_ours_matched",
     "mut_gcf_contract_from_spec",
     "resolve_recorded_path",
     "scan_live_writers",

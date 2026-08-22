@@ -36,7 +36,7 @@
         "table2_ours_k10.csv"
       ],
       "native_action_semantics": "hard_delete_selected_subgraph",
-      "recommended_action": "strict_precontroller_frozen_bundle_adoption"
+      "recommended_action": "strict_precontroller_frozen_bundle_adoption_then_deterministic_matched_reexport"
     },
     {
       "dataset": "Mutagenicity",

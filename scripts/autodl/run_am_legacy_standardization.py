@@ -14,6 +14,7 @@ from src.eval.am_legacy_standardization import (
     freeze_mutagenicity_gcf_candidates,
     mut_gcf_contract_from_spec,
     mut_ours_contract_from_spec,
+    reexport_mutagenicity_ours_matched,
     verify_adopted_mut_ours,
 )
 
@@ -47,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--adopted-root", type=Path, required=True)
     verify.add_argument("--output-root", type=Path, required=True)
 
+    reexport = subparsers.add_parser("reexport-mut-ours-matched")
+    reexport.add_argument("--adopted-root", type=Path, required=True)
+    reexport.add_argument("--matched-protocol", type=Path, required=True)
+    reexport.add_argument("--output-root", type=Path, required=True)
+    reexport.add_argument("--proc-root", type=Path, default=Path("/proc"))
+
     inventory = subparsers.add_parser("audit-inventory")
     inventory.add_argument("--source-spec", type=Path, required=True)
     inventory.add_argument("--output-root", type=Path, required=True)
@@ -79,6 +86,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_root=args.output_root,
         )
         marker = "[MUT_OURS_ADOPTION_VERIFY_PASS]"
+    elif args.action == "reexport-mut-ours-matched":
+        result = reexport_mutagenicity_ours_matched(
+            adopted_root=args.adopted_root,
+            matched_protocol=args.matched_protocol,
+            output_root=args.output_root,
+            proc_root=args.proc_root,
+        )
+        marker = "[MUT_OURS_MATCHED_REEXPORT_PASS]"
     else:
         result = audit_legacy_inventory(
             source_spec=args.source_spec,

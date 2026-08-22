@@ -19,8 +19,10 @@ echo "python=$(command -v python)"
 python --version
 echo "cuda_available=$(python -c 'import torch; print(torch.cuda.is_available())')"
 
-# This command only audits/copies frozen artifacts and performs no inference,
-# so the inference fallback setting is intentionally not applicable.
+# This static parity wrapper also accepts `reexport-mut-ours-matched`. That
+# action aggregates only checksum-closed pair artifacts; it performs no RF,
+# MolCLR, selector, or candidate inference. The AutoDL campaign does not submit
+# this wrapper, and the inference fallback setting is intentionally inapplicable.
 python scripts/autodl/run_am_legacy_standardization.py \
   --config configs/hpc.yaml \
   "$@"

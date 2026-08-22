@@ -14,13 +14,17 @@ from scripts.autodl.run_four_gpu_recovery_controller import (
 )
 from src.eval.am_legacy_standardization import (
     LegacyStandardizationError,
+    MUT_MATCHED_REQUIRED_STANDARDIZED_FILES,
     MUT_OURS_REQUIRED_SOURCE_FILES,
     MUT_OURS_REQUIRED_STANDARDIZED_FILES,
     adopt_mutagenicity_ours,
     audit_legacy_inventory,
     freeze_mutagenicity_gcf_candidates,
+    reexport_mutagenicity_ours_matched,
+    _validate_matched_mut_ours,
     verify_adopted_mut_ours,
 )
+from src.eval.four_by_four_main_results import audit_cell
 from src.eval.mutagenicity_wnode_frozen_test import (
     FrozenTestConfig,
     build_frozen_test_run,
@@ -385,6 +389,116 @@ def test_mut_ours_manifest_only_verification_rehashes_standardized_files(tmp_pat
         )
 
 
+def _matched_reexport_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    source, teacher, checkpoint, proc = _legacy_source(tmp_path)
+    adopted = tmp_path / "adopted-original-protocol"
+    adopt_mutagenicity_ours(
+        source_root=source,
+        output_root=adopted,
+        remap_roots=[tmp_path],
+        expected_teacher_sha256=_sha(teacher),
+        expected_molclr_sha256=_sha(checkpoint),
+        expected_parent_count=2,
+        expected_candidate_count=20,
+        expected_pair_count=40,
+        proc_root=proc,
+    )
+    matched = tmp_path / "matched-fresh"
+    reexport_mutagenicity_ours_matched(
+        adopted_root=adopted,
+        matched_protocol=Path(
+            "configs/autodl/mutagenicity_matched_protocol_v1.json"
+        ),
+        output_root=matched,
+        proc_root=proc,
+    )
+    return source, adopted, matched
+
+
+def test_mut_ours_matched_reexport_has_601_point_frozen_closure(tmp_path):
+    _source, _adopted, matched = _matched_reexport_fixture(tmp_path)
+    assert _validate_matched_mut_ours(matched) == matched.resolve()
+    standardized = matched / "standardized"
+    figure3 = list(csv.DictReader((standardized / "figure3_coverage_vs_k.csv").open()))
+    figure4 = list(
+        csv.DictReader((standardized / "figure4_coverage_vs_threshold.csv").open())
+    )
+    assert [int(row["k"]) for row in figure3] == list(range(1, 21))
+    assert len(figure4) == 601
+    assert float(figure4[0]["threshold"]) == 0.0
+    assert float(figure4[-1]["threshold"]) == pytest.approx(0.0535, abs=1e-15)
+    assert {int(row["k"]) for row in figure4} == {10}
+    manifest = json.loads((standardized / "run_manifest.json").read_text())
+    assert manifest["status"] == "FROZEN_PASS"
+    assert manifest["test_used_for_selection"] is False
+    assert manifest["threshold_fitted_on_test"] is False
+    assert manifest["raw_test_split_opened"] is False
+    assert manifest["distance_recomputed"] is False
+    assert manifest["oracle_recomputed"] is False
+    assert manifest["molclr_recomputed"] is False
+    assert (matched / "PASS").read_text().strip() == "PASS"
+    assert set(MUT_MATCHED_REQUIRED_STANDARDIZED_FILES) <= {
+        path.name for path in standardized.iterdir() if path.is_file()
+    }
+    row = {
+        key: manifest[key]
+        for key in (
+            "dataset",
+            "method",
+            "oracle_backend",
+            "oracle_hash",
+            "dataset_hash",
+            "split_hash",
+            "distance_line",
+            "molclr_checkpoint_hash",
+            "cf_mode",
+            "threshold_config_hash",
+            "status",
+        )
+    }
+    row["standardized_output_root"] = str(standardized.resolve())
+    audited = audit_cell(row)
+    assert audited.dataset == "Mutagenicity"
+    assert audited.method == "Ours"
+
+
+def test_old_14_point_curve_cannot_pass_matched_validation(tmp_path):
+    _source, _adopted, matched = _matched_reexport_fixture(tmp_path)
+    path = matched / "standardized/figure4_coverage_vs_threshold.csv"
+    rows = list(csv.DictReader(path.open()))[:14]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(LegacyStandardizationError, match="not 601 points"):
+        _validate_matched_mut_ours(matched)
+
+
+def test_matched_reexport_requires_fresh_root_and_rejects_pair_tamper(tmp_path):
+    source, adopted, matched = _matched_reexport_fixture(tmp_path)
+    proc = tmp_path / "proc"
+    with pytest.raises(FileExistsError, match="must be fresh"):
+        reexport_mutagenicity_ours_matched(
+            adopted_root=adopted,
+            matched_protocol=Path(
+                "configs/autodl/mutagenicity_matched_protocol_v1.json"
+            ),
+            output_root=matched,
+            proc_root=proc,
+        )
+    with (source / "pair_matrix.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"tampered": true}\n')
+    with pytest.raises(LegacyStandardizationError, match="was tampered"):
+        reexport_mutagenicity_ours_matched(
+            adopted_root=adopted,
+            matched_protocol=Path(
+                "configs/autodl/mutagenicity_matched_protocol_v1.json"
+            ),
+            output_root=tmp_path / "tampered-output",
+            proc_root=proc,
+        )
+
+
 def _inventory_spec(tmp_path: Path) -> Path:
     cells = []
     definitions = (
@@ -473,6 +587,28 @@ def test_inventory_is_precise_and_never_includes_clear(tmp_path):
     assert all(row["rerun_generation"] is False for row in payload["cells"])
 
 
+def test_inventory_promotes_only_valid_matched_mut_ours_root(tmp_path):
+    spec = _inventory_spec(tmp_path)
+    _source, _adopted, matched = _matched_reexport_fixture(tmp_path / "matched")
+    output = tmp_path / "inventory-matched"
+    audit_legacy_inventory(
+        source_spec=spec,
+        output_root=output,
+        adopted_mut_ours_root=matched,
+    )
+    payload = json.loads((output / "matrix_patch.json").read_text())
+    ours = next(
+        row
+        for row in payload["cells"]
+        if row["dataset"] == "Mutagenicity" and row["method"] == "Ours"
+    )
+    assert ours["status"] == "FROZEN_PASS"
+    assert ours["standardized_output_root"] == str(
+        (matched / "standardized").resolve()
+    )
+    assert "601_POINT_PROTOCOL" in ours["reason"]
+
+
 def test_inventory_rejects_clear_in_source_spec(tmp_path):
     spec = _inventory_spec(tmp_path)
     payload = json.loads(spec.read_text())
@@ -512,10 +648,15 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
     manifest = load_controller_manifest(path)
     assert tuple(manifest.by_id) == (
         "mut_ours_legacy_adoption_verify",
+        "mut_ours_matched_protocol_reexport",
         "am_legacy_inventory",
         "mut_gcf_legacy_freeze",
         "mut_gcf_legacy_calibration",
         "mut_gcf_legacy_heldout",
+        "mut_globalgce_legacy_cell_blocked",
+        "aids_ours_legacy_cell_blocked",
+        "aids_gcfexplainer_legacy_cell_blocked",
+        "aids_globalgce_legacy_cell_blocked",
     )
     assert manifest.by_id["mut_gcf_legacy_freeze"].manifest_only is True
     assert manifest.by_id["mut_gcf_legacy_calibration"].resource == "gpu"
@@ -525,18 +666,30 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
         "four_methods_four_datasets_v1/"
     )
     persistent_prefix = matrix_prefix + "am_legacy/"
-    assert all(
-        (task.input_manifest or "").startswith(matrix_prefix)
-        for task in manifest.tasks[:3]
+    assert manifest.by_id[
+        "mut_ours_legacy_adoption_verify"
+    ].input_manifest.startswith(matrix_prefix)
+    assert manifest.by_id["am_legacy_inventory"].input_manifest.startswith(
+        matrix_prefix
     )
     assert all(
         (task.expected_output or "").startswith(persistent_prefix)
         for task in manifest.tasks
+        if task.blocked_reason is None
     )
     assert "{artifact_root}/am_legacy" not in json.dumps(fragment)
     actions = {task.environment.get("ACTION") for task in manifest.tasks}
     assert "adopt-mut-ours" not in actions
     assert "verify-mut-ours-adoption" in actions
+    assert "reexport-mut-ours-matched" in actions
+    reexport = manifest.by_id["mut_ours_matched_protocol_reexport"]
+    inventory = manifest.by_id["am_legacy_inventory"]
+    assert reexport.depends_on == ("mut_ours_legacy_adoption_verify",)
+    assert inventory.depends_on == (reexport.task_id,)
+    assert (
+        inventory.environment["ADOPTED_MUT_OURS_ROOT"]
+        == "{dep_mut_ours_matched_protocol_reexport_output}"
+    )
     freeze = manifest.by_id["mut_gcf_legacy_freeze"]
     calibration = manifest.by_id["mut_gcf_legacy_calibration"]
     heldout = manifest.by_id["mut_gcf_legacy_heldout"]
@@ -551,6 +704,17 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
         calibration.environment["THRESHOLDS_JSON"]
         == "{dep_mut_gcf_legacy_freeze_output}/matched_thresholds.json"
     )
+    blocked_ids = {
+        "mut_globalgce_legacy_cell_blocked",
+        "aids_ours_legacy_cell_blocked",
+        "aids_gcfexplainer_legacy_cell_blocked",
+        "aids_globalgce_legacy_cell_blocked",
+    }
+    for task_id in blocked_ids:
+        task = manifest.by_id[task_id]
+        assert task.command is None
+        assert task.resource == "cpu"
+        assert task.blocked_reason
 
 
 def test_mut_gcf_heldout_cannot_bypass_calibration_freeze(tmp_path):

@@ -873,8 +873,11 @@ Mutagenicity roadmaps.
 - [x] Track the matched 601-point Mutagenicity threshold expectation; mark the
   audited historical Ours bundle `STALE_METRIC` until its frozen pair matrix is
   deterministically re-exported under that common protocol.
-- [x] Exclude CLEAR from every adoption and inventory path and provide two
-  manifest-only CPU tasks for composition into the continuation controller.
+- [x] Deterministically re-export the frozen Mutagenicity Ours 217-by-20 pair
+  bundle on the matched 601-point protocol with no generation, selector,
+  oracle, or MolCLR rerun and a fresh PASS-last standardized freeze.
+- [x] Exclude CLEAR from every adoption and inventory path and provide distinct
+  static blocked tasks for every known missing A/M terminal cell.
 # 2026-08-22 — Deferred main-result ablation hooks
 
 - [x] Keep a single registered GNN backbone axis (`gine`, `gin`, `gcn`,

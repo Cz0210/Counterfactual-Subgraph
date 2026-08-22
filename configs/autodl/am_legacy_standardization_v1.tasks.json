@@ -36,13 +36,69 @@
       }
     },
     {
+      "id": "mut_ours_matched_protocol_reexport",
+      "dataset": "mutagenicity",
+      "stage": "AM_MUT_OURS_MATCHED_REEXPORT",
+      "runner_dataset": "mutagenicity-rf",
+      "runner_stage": "AM_MUT_OURS_MATCHED_REEXPORT",
+      "depends_on": [
+        "mut_ours_legacy_adoption_verify"
+      ],
+      "resource": "cpu",
+      "priority": 36,
+      "data_splits": [
+        "frozen_evaluation_artifact"
+      ],
+      "manifest_only": false,
+      "selector_parameters_frozen": true,
+      "read_only_test": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_am_legacy_standardization.sh"
+      ],
+      "input_manifest": "{dep_mut_ours_legacy_adoption_verify_output}/adoption_verification.json",
+      "config_files": [
+        "{project_root}/configs/autodl/mutagenicity_matched_protocol_v1.json"
+      ],
+      "expected_output": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/mut_ours/matched-reexport/attempt-{attempt}",
+      "required_output_files": [
+        "standardized/figure3_coverage_vs_k.csv",
+        "standardized/figure4_coverage_vs_threshold.csv",
+        "standardized/table2_ours_k10.csv",
+        "standardized/prefix_metrics.csv",
+        "standardized/prefix_metrics.json",
+        "standardized/parent_best_distances.csv",
+        "standardized/destination_distribution.csv",
+        "standardized/summary.json",
+        "standardized/run_manifest.json",
+        "standardized/oracle_manifest.json",
+        "standardized/evaluation_manifest.json",
+        "standardized/final_artifact_audit.json",
+        "standardized/freeze_manifest.json",
+        "standardized/_FINALIZED.json",
+        "final_gate.json",
+        "_RUN_COMPLETE.json",
+        "PASS"
+      ],
+      "required_log_marker": "[MUT_OURS_MATCHED_REEXPORT_PASS]",
+      "environment": {
+        "ACTION": "reexport-mut-ours-matched",
+        "ADOPTED_MUT_OURS_ROOT": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/precontroller/mutagenicity_ours_v1",
+        "MATCHED_PROTOCOL": "{project_root}/configs/autodl/mutagenicity_matched_protocol_v1.json",
+        "OUTPUT_ROOT": "{task_output}",
+        "AUTODL_PYTHON": "{python}",
+        "PROC_ROOT": "/proc",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
       "id": "am_legacy_inventory",
       "dataset": "legacy-am-audit",
       "stage": "AM_LEGACY_INVENTORY",
       "runner_dataset": "legacy-am-audit",
       "runner_stage": "AM_LEGACY_INVENTORY",
       "depends_on": [
-        "mut_ours_legacy_adoption_verify"
+        "mut_ours_matched_protocol_reexport"
       ],
       "resource": "cpu",
       "priority": 36,
@@ -66,7 +122,7 @@
         "ACTION": "audit-inventory",
         "SOURCE_SPEC": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/source_specs/am_legacy_sources_v1.json",
         "OUTPUT_ROOT": "{task_output}",
-        "ADOPTED_MUT_OURS_ROOT": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/precontroller/mutagenicity_ours_v1",
+        "ADOPTED_MUT_OURS_ROOT": "{dep_mut_ours_matched_protocol_reexport_output}",
         "AUTODL_PYTHON": "{python}",
         "PYTHONDONTWRITEBYTECODE": "1"
       }
@@ -215,6 +271,58 @@
         "AUTODL_PYTHON": "{python}",
         "PYTHONDONTWRITEBYTECODE": "1"
       }
+    },
+    {
+      "id": "mut_globalgce_legacy_cell_blocked",
+      "dataset": "mutagenicity",
+      "stage": "AM_MUT_GLOBALGCE_CELL_TERMINAL",
+      "depends_on": [
+        "am_legacy_inventory"
+      ],
+      "resource": "cpu",
+      "priority": 1000,
+      "data_splits": [],
+      "command": null,
+      "blocked_reason": "INCOMPLETE_TRAIN_ONLY_GENERATION_LACKS_FROZEN_SELECTOR_AND_HELDOUT_MATRIX"
+    },
+    {
+      "id": "aids_ours_legacy_cell_blocked",
+      "dataset": "aids",
+      "stage": "AM_AIDS_OURS_CELL_TERMINAL",
+      "depends_on": [
+        "am_legacy_inventory"
+      ],
+      "resource": "cpu",
+      "priority": 1000,
+      "data_splits": [],
+      "command": null,
+      "blocked_reason": "INCOMPLETE_MISSING_FROZEN_SELECTOR_ORDER_AND_FINAL_EVALUATION_CLOSURE"
+    },
+    {
+      "id": "aids_gcfexplainer_legacy_cell_blocked",
+      "dataset": "aids",
+      "stage": "AM_AIDS_GCFEXPLAINER_CELL_TERMINAL",
+      "depends_on": [
+        "am_legacy_inventory"
+      ],
+      "resource": "cpu",
+      "priority": 1000,
+      "data_splits": [],
+      "command": null,
+      "blocked_reason": "MISSING_SOURCE_NOT_TRANSFERRED_TO_AUTODL"
+    },
+    {
+      "id": "aids_globalgce_legacy_cell_blocked",
+      "dataset": "aids",
+      "stage": "AM_AIDS_GLOBALGCE_CELL_TERMINAL",
+      "depends_on": [
+        "am_legacy_inventory"
+      ],
+      "resource": "cpu",
+      "priority": 1000,
+      "data_splits": [],
+      "command": null,
+      "blocked_reason": "MISSING_SOURCE_NOT_TRANSFERRED_TO_AUTODL_AND_NATIVE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE"
     }
   ]
 }
