@@ -287,7 +287,12 @@ def controller_safety_environment(
 
 
 def _effective_launch_environment(task: TaskSpec) -> dict[str, str]:
-    """Merge immutable task variables with non-overridable safety defaults."""
+    """Merge immutable task variables with controller-owned safety ceilings.
+
+    A frozen task may request fewer BLAS/OpenMP threads than the controller's
+    per-worker ceiling.  It may never request more, disable tokenizer safety,
+    or supply a non-positive/non-integer thread count.
+    """
 
     environment = dict(task.environment)
     if task.adopt_existing_run_id is not None:
@@ -295,17 +300,29 @@ def _effective_launch_environment(task: TaskSpec) -> dict[str, str]:
         # retroactively claims that controller defaults were present.
         return environment
     safety = controller_safety_environment()
-    conflicts = {
-        key: (environment[key], value)
-        for key, value in safety.items()
-        if key in environment and environment[key] != value
-    }
+    conflicts: dict[str, tuple[str, str]] = {}
+    for key, ceiling in safety.items():
+        if key not in environment:
+            continue
+        requested = environment[key]
+        if key in THREAD_ENV_KEYS:
+            try:
+                requested_threads = int(requested)
+                ceiling_threads = int(ceiling)
+            except (TypeError, ValueError):
+                conflicts[key] = (requested, ceiling)
+                continue
+            if requested_threads <= 0 or requested_threads > ceiling_threads:
+                conflicts[key] = (requested, ceiling)
+        elif requested != ceiling:
+            conflicts[key] = (requested, ceiling)
     if conflicts:
         raise ControllerError(
             f"{task.task_id} may not override controller safety environment: "
             f"{conflicts}"
         )
-    environment.update(safety)
+    for key, value in safety.items():
+        environment.setdefault(key, value)
     return environment
 
 
