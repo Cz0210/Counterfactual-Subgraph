@@ -7345,3 +7345,10 @@ used by B12/B13.
   task IDs, emits one post-cell CPU audit, and writes the dependency contract
   consumed by the no-fabrication exporter. A blocked cell keeps both tasks
   non-READY; it is never represented by a numeric zero.
+# 2026-08-22 — Keep BACE primary routes ahead of legacy post-processing
+
+- Mutagenicity GCF candidate freeze remains an early CPU task, but its
+  calibration and held-out GPU stages use priorities 300/301. BACE GCF,
+  ComRecGC, and B11 therefore receive the initial four cards as preregistered;
+  the generation-free legacy evaluation enters the queue only after the BACE
+  primary chain releases capacity.

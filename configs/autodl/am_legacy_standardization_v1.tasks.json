@@ -125,7 +125,7 @@
         "mut_gcf_legacy_freeze"
       ],
       "resource": "gpu",
-      "priority": 38,
+      "priority": 300,
       "data_splits": [
         "calibration"
       ],
@@ -172,7 +172,7 @@
         "mut_gcf_legacy_calibration"
       ],
       "resource": "gpu",
-      "priority": 39,
+      "priority": 301,
       "data_splits": [
         "test"
       ],
