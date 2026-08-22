@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -19,7 +20,12 @@ from src.utils.autodl_four_by_four_am_repair import (
     VERIFY_COMRECGC_SAFE_GIT_FIX_COMMIT,
     verify_fix_ancestry,
 )
-from src.utils.autodl_four_by_four_repair import RepairManifestError, sha256_file
+from src.baselines.comrecgc.contracts import stable_json_sha256
+from src.utils.autodl_four_by_four_repair import (
+    RepairManifestError,
+    scan_live_writers,
+    sha256_file,
+)
 
 
 SPEC_SCHEMA = "aids_comrecgc_external_memory_repair_spec_v4"
@@ -43,6 +49,19 @@ EXTERNAL_MAX_RSS_GB = 96
 EXTERNAL_QUERY_BLOCK_SIZE = 8
 MINIMUM_HEADROOM_BYTES = 128 * 1024**3
 PROCESS_TRANSIENT_SIGNALS = ("Signals.SIGKILL: 9", "Signals.SIGTERM: 15")
+EQUIVALENCE_CHECKS = frozenset(
+    {
+        "candidate_count_exact",
+        "external_labels_equal_sklearn",
+        "legacy_external_labels_elementwise_exact",
+        "official_coverage_summary_exact",
+        "pair_order_elementwise_exact",
+        "recourse_vectors_elementwise_exact",
+        "selected_rows_exact",
+        "selected_rows_hash_exact",
+        "theta_eligible_pair_count_exact",
+    }
+)
 
 
 def _utc_now() -> str:
@@ -440,6 +459,145 @@ def verify_same_root_resume_failure(
     }
 
 
+def _verify_equivalence_smoke(
+    *,
+    gate_path: Path,
+    runtime_root: Path,
+    project_root: Path,
+    execution_commit: str,
+    generation_root: Path,
+    proc_root: Path,
+) -> dict[str, Any]:
+    """Bind release to one physical, immutable real-data equivalence gate."""
+
+    gate = v3._read_object(gate_path)
+    root = gate_path.parent.resolve(strict=True)
+    expected_parent = (runtime_root / "outputs/autodl/profiling").resolve(
+        strict=True
+    )
+    try:
+        root.relative_to(expected_parent)
+    except ValueError as exc:
+        raise RepairManifestError("equivalence smoke is outside profiling root") from exc
+    if gate_path.is_symlink() or root.is_symlink():
+        raise RepairManifestError("equivalence smoke gate/root must be physical")
+    checks = gate.get("checks")
+    expected_parameters = {
+        "theta": 0.1,
+        "delta": 0.02,
+        "recourse_size": 100,
+        "cf_size": 100000,
+        "cluster_size": 3,
+        "seed": 0,
+    }
+    failures: list[str] = []
+    if (
+        gate.get("schema_version")
+        != "aids_comrecgc_real_external_equivalence_v1"
+        or gate.get("status") != "PASS"
+    ):
+        failures.append("identity/status")
+    if gate.get("project_commit") != execution_commit:
+        failures.append("execution commit/root")
+    if (
+        gate.get("diagnostic_only") is not True
+        or gate.get("eligible_for_main_results") is not False
+        or gate.get("formal_generation_budget_used") is not False
+        or gate.get("full_recourse_parameters") != expected_parameters
+        or gate.get("parent_limit") != 64
+        or gate.get("candidate_limit") != 31
+        or gate.get("batch_size") != 8
+    ):
+        failures.append("diagnostic/full-parameter contract")
+    if (
+        not isinstance(checks, Mapping)
+        or set(checks) != EQUIVALENCE_CHECKS
+        or any(checks.get(key) is not True for key in EQUIVALENCE_CHECKS)
+    ):
+        failures.append("nine exact equivalence checks")
+    pass_path = root / "PASS"
+    if not pass_path.is_file() or pass_path.read_bytes() != b"PASS\n":
+        failures.append("PASS-last marker")
+
+    source_manifest_path = generation_root / "run_manifest.json"
+    source_manifest = v3._read_object(source_manifest_path)
+    source_payload_sha = str(source_manifest.get("counterfactuals_sha256") or "")
+    if (
+        gate.get("source_generation_manifest_sha256")
+        != sha256_file(source_manifest_path)
+        or gate.get("source_counterfactuals_sha256") != source_payload_sha
+    ):
+        failures.append("frozen generation identity")
+
+    artifacts = {
+        "derived_counterfactuals_sha256": root
+        / "diagnostic_generation/counterfactuals.pt",
+        "legacy_run_manifest_sha256": root / "legacy/run_manifest.json",
+        "external_run_manifest_sha256": root / "external/run_manifest.json",
+        "external_terminal_sha256": root / "external/_RUN_COMPLETE.json",
+        "pair_order_sha256": root / "legacy_intermediates/pairs.npy",
+        "recourse_vectors_sha256": root / "legacy_intermediates/vectors.npy",
+        "labels_sha256": root / "legacy_intermediates/labels.npy",
+    }
+    artifact_audit: dict[str, Any] = {}
+    for field, path in artifacts.items():
+        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+            failures.append(field)
+            continue
+        actual = sha256_file(path)
+        if gate.get(field) != actual:
+            failures.append(field)
+        artifact_audit[field] = {
+            "path": str(path.resolve(strict=True)),
+            "size": int(path.stat().st_size),
+            "sha256": actual,
+        }
+    selected_path = root / "external/selected_common_recourses.json"
+    try:
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RepairManifestError("equivalence selected rows are unreadable") from exc
+    if gate.get("selected_rows_sha256") != stable_json_sha256(selected):
+        failures.append("selected rows stable hash")
+    script_path = v3._absolute(gate.get("script_path"), label="smoke script", kind="file")
+    if gate.get("script_sha256") != sha256_file(script_path):
+        failures.append("smoke script hash")
+    if not isinstance(gate.get("pair_count"), int) or int(gate["pair_count"]) <= 0:
+        failures.append("nonempty real pair gate")
+    external_terminal = v3._read_object(root / "external/_RUN_COMPLETE.json")
+    if (
+        external_terminal.get("schema_version")
+        != "comrecgc_common_recourse_terminal_v2"
+        or external_terminal.get("run_complete") is not True
+        or external_terminal.get("common_recourse_engine")
+        != "external_memory_exact_v1"
+        or not isinstance(external_terminal.get("artifact_sha256"), Mapping)
+    ):
+        failures.append("external terminal closure")
+    try:
+        writer_audit = scan_live_writers(root, proc_root=proc_root)
+    except Exception as exc:
+        raise RepairManifestError(f"equivalence writer audit failed: {exc}") from exc
+    if failures:
+        raise RepairManifestError(
+            f"AIDS real equivalence smoke is not releasable: {sorted(set(failures))}"
+        )
+    return {
+        "schema_version": "aids_comrecgc_repair_v4_equivalence_adoption_v1",
+        "status": "PASS",
+        "gate_path": str(gate_path),
+        "gate_sha256": sha256_file(gate_path),
+        "root": str(root),
+        "execution_commit": execution_commit,
+        "source_counterfactuals_sha256": source_payload_sha,
+        "checks": dict(checks),
+        "pair_count": int(gate["pair_count"]),
+        "artifact_audit": artifact_audit,
+        "live_writer_audit": writer_audit,
+        "verified_at": _utc_now(),
+    }
+
+
 def _load_spec(path: str | Path) -> tuple[Path, dict[str, Any]]:
     source = v3._absolute(path, label="spec", kind="file")
     spec = v3._read_object(source)
@@ -522,6 +680,19 @@ def build_payload(
         adopted[GENERATION_SOURCE_KEY]["semantic"].get("generation_root"),
         label="generation root",
         kind="dir",
+    )
+    equivalence_gate = v3._absolute(
+        spec.get("equivalence_smoke_gate"),
+        label="equivalence smoke gate",
+        kind="file",
+    )
+    equivalence_evidence = _verify_equivalence_smoke(
+        gate_path=equivalence_gate,
+        runtime_root=runtime_root,
+        project_root=project_root,
+        execution_commit=str(external_fix["execution_head"]),
+        generation_root=generation_root,
+        proc_root=proc_root,
     )
     threshold_contract = v3._absolute(
         adopted[THRESHOLD_SOURCE_KEY]["semantic"].get("threshold_contract"),
@@ -658,6 +829,7 @@ def build_payload(
             "execution_commit": external_fix["execution_head"],
             "safe_git_fix_gate": safe_fix,
             "external_memory_fix_gate": external_fix,
+            "equivalence_smoke_evidence": equivalence_evidence,
             "fresh_output_root": str(fresh_root),
             "source_controller_id": SOURCE_CONTROLLER_ID,
             "source_evidence": adopted,
@@ -754,6 +926,16 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         }
     ):
         raise RepairManifestError("repair-v4 scientific contract changed")
+    equivalence = _mapping(
+        contract.get("equivalence_smoke_evidence"), label="equivalence evidence"
+    )
+    if (
+        equivalence.get("status") != "PASS"
+        or equivalence.get("execution_commit") != contract.get("execution_commit")
+        or set(_mapping(equivalence.get("checks"), label="equivalence checks"))
+        != EQUIVALENCE_CHECKS
+    ):
+        raise RepairManifestError("repair-v4 equivalence evidence is incomplete")
     return {
         "status": "PASS",
         "controller_id": manifest.controller_id,

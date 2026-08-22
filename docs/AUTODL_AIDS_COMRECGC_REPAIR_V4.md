@@ -26,8 +26,11 @@ The smoke uses a fresh derived diagnostic payload/root and is marked
 ## Build the frozen manifest
 
 Copy the template to a fresh persistent configuration file and replace only
-`__IMMUTABLE_EXECUTION_WORKTREE__` with the absolute immutable checkout path.
-Do not edit the scientific paths or resource values.
+`__IMMUTABLE_EXECUTION_WORKTREE__` with the absolute immutable checkout path
+and `__FRESH_EQUIVALENCE_GATE_JSON__` with the exact successful real-data
+diagnostic gate.  Do not edit the scientific paths or resource values.  The
+builder rehashes the gate, its source identity, and its evidence artifacts;
+the path alone is insufficient.
 
 ```bash
 export AUTODL_DATA_ROOT=/autodl-fs/data
