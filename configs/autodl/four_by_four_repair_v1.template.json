@@ -1,0 +1,82 @@
+{
+  "schema_version": "four_by_four_repair_spec_v1",
+  "controller_id": "four_methods_four_datasets_repair_v1",
+  "paper_frozen": true,
+  "run_tastemolnet": 0,
+  "runtime_root": "__CONFIGURE_RUNTIME_ROOT__",
+  "project_root": "__CONFIGURE_IMMUTABLE_EXECUTION_WORKTREE__",
+  "python": "/root/miniconda3/envs/smiles_pip118/bin/python",
+  "proc_root": "/proc",
+  "fresh_output_root": "__CONFIGURE_RUNTIME_ROOT__/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_repair_v1",
+  "required_execution_commits": [
+    "__CONFIGURE_MUT_GCF_AUTODL_PYTHON_FIX_COMMIT__",
+    "__CONFIGURE_COMRECGC_SAFE_DIRECTORY_FIX_COMMIT__",
+    "__CONFIGURE_BACE_STANDARDIZER_FIX_COMMIT__"
+  ],
+  "source_controller": {
+    "manifest": "__CONFIGURE_V1_CONTROLLER_MANIFEST__",
+    "root": "__CONFIGURE_V1_CONTROLLER_ROOT__"
+  },
+  "sources": {
+    "bace_b14": {
+      "task_id": "bace_b14_frozen",
+      "output_root": "__CONFIGURE_EXACT_V1_BACE_B14_PASS_ATTEMPT__"
+    },
+    "mut_gcf_freeze": {
+      "task_id": "mut_gcf_legacy_freeze",
+      "output_root": "__CONFIGURE_EXACT_V1_MUT_GCF_FREEZE_PASS_ATTEMPT__"
+    },
+    "mut_comrec_generation": {
+      "output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z"
+    },
+    "aids_comrec_generation": {
+      "output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/aids_comrecgc_lineage_v2_20260822T020238Z"
+    }
+  },
+  "bace": {
+    "gnn_checkpoint": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+    "dataset_dir": "__CONFIGURE_BACE_DATASET_DIR__",
+    "calibration_split": "__CONFIGURE_BACE_CALIBRATION_SPLIT__",
+    "test_split": "__CONFIGURE_BACE_TEST_SPLIT__",
+    "molclr_root": "__CONFIGURE_MOLCLR_ROOT__",
+    "molclr_checkpoint": "__CONFIGURE_MOLCLR_CHECKPOINT__",
+    "neurosed_checkpoint": "__CONFIGURE_BACE_NEUROSED_CHECKPOINT__",
+    "comrecgc_official_root": "__CONFIGURE_COMRECGC_OFFICIAL_ROOT__",
+    "omp_threads": 4,
+    "expected_hashes": {
+      "dataset": "__CONFIGURE_BACE_DATASET_HASH__",
+      "split": "__CONFIGURE_BACE_SPLIT_HASH__",
+      "molclr": "__CONFIGURE_BACE_MOLCLR_HASH__",
+      "threshold": "__CONFIGURE_BACE_THRESHOLD_HASH__"
+    }
+  },
+  "mut_gcf": {
+    "calibration_csv": "__CONFIGURE_MUT_CALIBRATION_CSV__",
+    "test_csv": "__CONFIGURE_MUT_TEST_CSV__",
+    "teacher_path": "__CONFIGURE_MUT_RF_MODEL__",
+    "molclr_root": "__CONFIGURE_MOLCLR_ROOT__",
+    "molclr_checkpoint": "__CONFIGURE_MOLCLR_CHECKPOINT__"
+  },
+  "am_comrecgc": {
+    "shared": {
+      "upstream_root": "__CONFIGURE_COMRECGC_OFFICIAL_ROOT__",
+      "molclr_root": "__CONFIGURE_MOLCLR_ROOT__",
+      "molclr_checkpoint": "__CONFIGURE_MOLCLR_CHECKPOINT__"
+    },
+    "mutagenicity": {
+      "dataset_dir": "__CONFIGURE_MUT_DATASET_DIR__",
+      "dataset_csv": "__CONFIGURE_MUT_DATASET_CSV__",
+      "teacher_path": "__CONFIGURE_MUT_RF_MODEL__",
+      "distance_checkpoint": "__CONFIGURE_MUT_DISTANCE_CHECKPOINT__",
+      "thresholds_source": "__CONFIGURE_MUT_FROZEN_THRESHOLD_CONTRACT__"
+    },
+    "aids": {
+      "dataset_dir": "__CONFIGURE_AIDS_DATASET_DIR__",
+      "dataset_csv": "__CONFIGURE_AIDS_DATASET_CSV__",
+      "source_csv": "__CONFIGURE_AIDS_SOURCE_CSV__",
+      "teacher_path": "__CONFIGURE_AIDS_RF_MODEL__",
+      "distance_checkpoint": "__CONFIGURE_AIDS_DISTANCE_CHECKPOINT__",
+      "thresholds_source": "__CONFIGURE_AIDS_FROZEN_THRESHOLD_CONTRACT__"
+    }
+  }
+}
