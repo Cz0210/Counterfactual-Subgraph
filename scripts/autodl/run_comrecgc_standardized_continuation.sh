@@ -24,7 +24,19 @@ for path in "$SOURCE_GENERATION_ROOT" "$COMRECGC_UPSTREAM_ROOT" "$DATASET_DIR" \
   "$MOLCLR_CHECKPOINT" "$THRESHOLDS_PATH" "$OUTPUT_ROOT"; do
   [[ "$path" == /* ]] || { echo "absolute path required: $path" >&2; exit 64; }
 done
-[[ ! -e "$OUTPUT_ROOT" ]] || { echo "fresh OUTPUT_ROOT already exists: $OUTPUT_ROOT" >&2; exit 73; }
+if [[ -e "$OUTPUT_ROOT" ]]; then
+  if [[ "${COMMON_RECOURSE_ENGINE:-}" != "external_memory_exact_v1" \
+        || "${COMRECGC_COMMON_RECOURSE_RESUME:-0}" != "1" \
+        || "$DATASET" != "aids" \
+        || ! -d "$OUTPUT_ROOT" \
+        || -L "$OUTPUT_ROOT" \
+        || ! -s "$OUTPUT_ROOT/continuation_resume_contract.json" \
+        || -e "$OUTPUT_ROOT/PASS" ]]; then
+    echo "existing OUTPUT_ROOT is not an eligible exact resume: $OUTPUT_ROOT" >&2
+    exit 73
+  fi
+  echo "[COMRECGC_STANDARDIZED_CONTINUATION_RESUME] dataset=$DATASET output=$OUTPUT_ROOT"
+fi
 
 args=(
   --dataset "$DATASET"

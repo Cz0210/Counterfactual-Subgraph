@@ -332,6 +332,7 @@ def run_common_recourse(
         external_artifacts: dict[str, Any] | None = None
         if engine == "external_memory_exact_v1":
             chunk_size = max(1, int(batch_size))
+            dataset_audit = bundle.audit()
             pair_identity = {
                 "schema_version": "comrecgc_external_pair_materialization_v1",
                 "dataset": dataset,
@@ -353,6 +354,9 @@ def run_common_recourse(
                 ),
                 "parent_ids_sha256": stable_json_sha256(list(bundle.parent_ids)),
                 "parent_count": len(bundle.graphs),
+                "dataset_fingerprint": bundle.dataset_fingerprint,
+                "dataset_audit": dataset_audit,
+                "dataset_audit_sha256": stable_json_sha256(dataset_audit),
                 "batch_size": chunk_size,
                 "pair_order": "candidate_major_parent_minor",
                 "vector_expression": "(candidate_embedding-parent_embedding)/(candidate_count+parent_count)",
@@ -674,7 +678,35 @@ def run_common_recourse(
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json(root / "run_manifest.json", manifest)
-    write_json(root / "_RUN_COMPLETE.json", {"run_complete": True})
+    closure_files = {
+        "run_manifest.json": sha256_file(root / "run_manifest.json"),
+        "selected_common_recourses.json": sha256_file(
+            root / "selected_common_recourses.json"
+        ),
+        "selected_common_recourses.csv": sha256_file(
+            root / "selected_common_recourses.csv"
+        ),
+        "representative_counterfactuals.pt": sha256_file(
+            root / "representative_counterfactuals.pt"
+        ),
+    }
+    if external_artifacts is not None:
+        closure_files["external_memory/pair_store/run_manifest.json"] = str(
+            external_artifacts["pair_store_manifest_sha256"]
+        )
+        if external_artifacts.get("dbscan_manifest") is not None:
+            closure_files["external_memory/dbscan/run_manifest.json"] = str(
+                external_artifacts["dbscan_manifest_sha256"]
+            )
+    write_json(
+        root / "_RUN_COMPLETE.json",
+        {
+            "schema_version": "comrecgc_common_recourse_terminal_v2",
+            "run_complete": True,
+            "common_recourse_engine": engine,
+            "artifact_sha256": closure_files,
+        },
+    )
     return manifest
 
 

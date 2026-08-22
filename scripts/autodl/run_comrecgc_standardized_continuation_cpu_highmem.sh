@@ -88,8 +88,16 @@ for command_file in "$COMRECGC_PROC_ROOT"/[0-9]*/cmdline; do
 done
 
 if [[ -e "$OUTPUT_ROOT" ]]; then
-  echo "[COMRECGC_HIGHMEM_GATE_FAIL] OUTPUT_ROOT must be fresh: $OUTPUT_ROOT" >&2
-  exit 2
+  if [[ "${COMMON_RECOURSE_ENGINE:-}" != "external_memory_exact_v1" \
+        || "${COMRECGC_COMMON_RECOURSE_RESUME:-0}" != "1" \
+        || ! -d "$OUTPUT_ROOT" \
+        || -L "$OUTPUT_ROOT" \
+        || ! -s "$OUTPUT_ROOT/continuation_resume_contract.json" \
+        || -e "$OUTPUT_ROOT/PASS" ]]; then
+    echo "[COMRECGC_HIGHMEM_GATE_FAIL] OUTPUT_ROOT must be fresh or an exact v4 resume: $OUTPUT_ROOT" >&2
+    exit 2
+  fi
+  echo "[COMRECGC_HIGHMEM_RESUME_GATE_PASS] output=$OUTPUT_ROOT"
 fi
 
 export CUDA_VISIBLE_DEVICES=""

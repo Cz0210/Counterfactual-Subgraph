@@ -76,6 +76,20 @@ hard RSS budget is checked before every worst-case radius query and cluster
 copy.  Version, array dtype/shape/hash, epsilon, `min_samples`, block contract,
 labels, and all checkpoints are fail-closed.
 
+Pair consolidation, neighbor/core promotion, and final-label promotion use a
+two-phase ready checkpoint.  Recovery accepts either the checksum-bound
+partial name or its already-renamed final name, including a crash between two
+promotions, and rejects mixed or tampered artifacts.  Pair-store identity also
+binds the project dataset fingerprint and complete bundle audit, so same-path
+changes to `graphs.pt`, `dataset_summary.json`, or the AIDS source CSV cannot
+reuse earlier chunks.
+
+The standardized continuation freezes hashes for all scientific inputs and
+all stage commands.  A child-complete/parent-interrupted window is reconciled
+only after the common terminal closes its run manifest, selected rows,
+representative payload, pair arrays, DBSCAN arrays, and nested manifests by
+checksum.  Other partial downstream stages fail closed.
+
 The external-memory engine is opt-in and the legacy engine remains the CLI
 default.  A full runner fixture already proves identical pair order, labels,
 official summary, selected rows, and selected-row hash.  It remains unreleased

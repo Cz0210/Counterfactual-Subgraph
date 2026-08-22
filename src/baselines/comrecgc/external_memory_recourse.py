@@ -84,6 +84,47 @@ def _atomic_npy(path: Path, values: np.ndarray) -> str:
         temporary.unlink(missing_ok=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _reconcile_promoted_pair_array(
+    *,
+    partial: Path,
+    final: Path,
+    shape: tuple[int, ...],
+    dtype: np.dtype[Any],
+    expected_sha256: str,
+    label: str,
+) -> None:
+    if partial.exists() and final.exists():
+        raise ExternalMemoryDBSCANError(
+            f"{label} has both partial and final consolidation artifacts"
+        )
+    source = final if final.exists() else partial
+    if not source.exists() or source.is_symlink():
+        raise ExternalMemoryDBSCANError(
+            f"{label} checkpointed consolidation artifact is missing"
+        )
+    values = np.load(source, mmap_mode="r", allow_pickle=False)
+    if values.shape != shape or values.dtype != dtype:
+        raise ExternalMemoryDBSCANError(
+            f"{label} consolidation schema mismatch: {values.shape}/{values.dtype}"
+        )
+    del values
+    if _sha256_file(source) != expected_sha256:
+        raise ExternalMemoryDBSCANError(
+            f"{label} consolidation checksum mismatch"
+        )
+    if source == partial:
+        os.replace(partial, final)
+        _fsync_directory(final.parent)
+
+
 def _load_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -152,6 +193,7 @@ class ExternalPairStore:
         else:
             self.state = {
                 "schema_version": PAIR_STORE_SCHEMA,
+                "phase": "chunks",
                 "scientific_identity": self.identity,
                 "scientific_identity_sha256": self.identity_hash,
                 "next_chunk_index": 0,
@@ -319,37 +361,96 @@ class ExternalPairStore:
         vectors_partial = self.root / "recourse_vectors.partial.npy"
         pairs_final = self.root / "pair_indices.npy"
         vectors_final = self.root / "recourse_vectors.npy"
-        if any(path.exists() for path in (pairs_partial, vectors_partial, pairs_final, vectors_final)):
-            raise ExternalMemoryDBSCANError("pair-store consolidation target already exists")
-        pairs_out = np.lib.format.open_memmap(
-            pairs_partial, mode="w+", dtype=np.int64, shape=(total, 2)
+        phase = str(self.state.get("phase") or "chunks")
+        if phase == "chunks":
+            if pairs_final.exists() or vectors_final.exists():
+                raise ExternalMemoryDBSCANError(
+                    "uncheckpointed final consolidation artifact exists"
+                )
+            # A crash while filling a partial file precedes the ready
+            # checkpoint.  Chunks are the immutable source of truth, so these
+            # exact scratch names are safely rebuilt from them.
+            for partial in (pairs_partial, vectors_partial):
+                if partial.exists():
+                    if partial.is_symlink():
+                        raise ExternalMemoryDBSCANError(
+                            "pair-store partial consolidation is a symlink"
+                        )
+                    partial.unlink()
+            pairs_out = np.lib.format.open_memmap(
+                pairs_partial, mode="w+", dtype=np.int64, shape=(total, 2)
+            )
+            vectors_out = np.lib.format.open_memmap(
+                vectors_partial, mode="w+", dtype=dtype, shape=(total, vector_dim)
+            )
+            cursor = 0
+            for row in chunks:
+                pair_path = Path(str(row["pairs_path"])).resolve(strict=True)
+                vector_path = Path(str(row["vectors_path"])).resolve(strict=True)
+                if (
+                    _sha256_file(pair_path) != row["pairs_sha256"]
+                    or _sha256_file(vector_path) != row["vectors_sha256"]
+                ):
+                    raise ExternalMemoryDBSCANError(
+                        "pair chunk changed before consolidation"
+                    )
+                pair_chunk = np.load(pair_path, mmap_mode="r", allow_pickle=False)
+                vector_chunk = np.load(vector_path, mmap_mode="r", allow_pickle=False)
+                stop = cursor + int(row["row_count"])
+                pairs_out[cursor:stop] = pair_chunk
+                vectors_out[cursor:stop] = vector_chunk
+                cursor = stop
+                _check_rss(self.max_rss_bytes, phase="pair_store.consolidate")
+            pairs_out.flush()
+            vectors_out.flush()
+            del pairs_out, vectors_out
+            for path in (pairs_partial, vectors_partial):
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+            ready = {
+                **self.state,
+                "phase": "consolidation_ready",
+                "consolidation_row_count": total,
+                "consolidation_vector_dim": vector_dim,
+                "consolidation_vectors_dtype": str(dtype),
+                "consolidation_pairs_sha256": _sha256_file(pairs_partial),
+                "consolidation_vectors_sha256": _sha256_file(vectors_partial),
+                "updated_at": _utc_now(),
+            }
+            _atomic_json(self.state_path, ready)
+            self.state = ready
+            phase = "consolidation_ready"
+        if phase != "consolidation_ready":
+            raise ExternalMemoryDBSCANError(
+                f"unknown pair-store consolidation phase: {phase}"
+            )
+        if (
+            int(self.state.get("consolidation_row_count", -1)) != total
+            or int(self.state.get("consolidation_vector_dim", -1)) != vector_dim
+            or self.state.get("consolidation_vectors_dtype") != str(dtype)
+        ):
+            raise ExternalMemoryDBSCANError(
+                "pair-store consolidation checkpoint schema mismatch"
+            )
+        pairs_sha256 = str(self.state.get("consolidation_pairs_sha256") or "")
+        vectors_sha256 = str(self.state.get("consolidation_vectors_sha256") or "")
+        _reconcile_promoted_pair_array(
+            partial=pairs_partial,
+            final=pairs_final,
+            shape=(total, 2),
+            dtype=np.dtype(np.int64),
+            expected_sha256=pairs_sha256,
+            label="pair indices",
         )
-        vectors_out = np.lib.format.open_memmap(
-            vectors_partial, mode="w+", dtype=dtype, shape=(total, vector_dim)
+        _reconcile_promoted_pair_array(
+            partial=vectors_partial,
+            final=vectors_final,
+            shape=(total, vector_dim),
+            dtype=dtype,
+            expected_sha256=vectors_sha256,
+            label="recourse vectors",
         )
-        cursor = 0
-        for row in chunks:
-            pair_path = Path(str(row["pairs_path"])).resolve(strict=True)
-            vector_path = Path(str(row["vectors_path"])).resolve(strict=True)
-            if (
-                _sha256_file(pair_path) != row["pairs_sha256"]
-                or _sha256_file(vector_path) != row["vectors_sha256"]
-            ):
-                raise ExternalMemoryDBSCANError("pair chunk changed before consolidation")
-            pair_chunk = np.load(pair_path, mmap_mode="r", allow_pickle=False)
-            vector_chunk = np.load(vector_path, mmap_mode="r", allow_pickle=False)
-            stop = cursor + int(row["row_count"])
-            pairs_out[cursor:stop] = pair_chunk
-            vectors_out[cursor:stop] = vector_chunk
-            cursor = stop
-            _check_rss(self.max_rss_bytes, phase="pair_store.consolidate")
-        pairs_out.flush()
-        vectors_out.flush()
-        for path in (pairs_partial, vectors_partial):
-            with path.open("rb") as handle:
-                os.fsync(handle.fileno())
-        os.replace(pairs_partial, pairs_final)
-        os.replace(vectors_partial, vectors_final)
+        _fsync_directory(self.root)
         manifest = {
             "schema_version": PAIR_STORE_SCHEMA,
             "run_complete": True,
@@ -361,9 +462,9 @@ class ExternalPairStore:
             "vector_dim": vector_dim,
             "vectors_dtype": str(dtype),
             "pairs_path": str(pairs_final),
-            "pairs_sha256": _sha256_file(pairs_final),
+            "pairs_sha256": pairs_sha256,
             "vectors_path": str(vectors_final),
-            "vectors_sha256": _sha256_file(vectors_final),
+            "vectors_sha256": vectors_sha256,
             "candidate_major_parent_minor_order": True,
             "peak_rss_bytes_observed": max(
                 int(self.state.get("peak_rss_bytes", 0)), _rss_bytes()

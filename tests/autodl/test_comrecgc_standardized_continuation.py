@@ -85,6 +85,11 @@ def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.Conti
     upstream.mkdir()
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
+    _file(dataset_dir / "dataset_summary.json", "{}\n")
+    _file(
+        dataset_dir
+        / ("graphs.pt" if dataset == "aids" else "generation_source_graphs.pt")
+    )
     molclr_root = tmp_path / "molclr"
     molclr_root.mkdir()
     return continuation.ContinuationInputs(
@@ -251,6 +256,9 @@ def test_pass_marker_is_published_only_after_all_frozen_gates(
         lambda *_args, **_kwargs: {"passed": True, "actual_commit": continuation.UPSTREAM_COMMIT},
     )
     monkeypatch.setattr(continuation, "_git_head", lambda: "f" * 40)
+    monkeypatch.setattr(
+        continuation, "_validate_common_recourse_completion", lambda **_kwargs: None
+    )
     observed: list[str] = []
 
     def fake_stage(**kwargs) -> None:
@@ -301,3 +309,123 @@ def test_failure_keeps_evidence_and_never_publishes_pass(
     failure = json.loads((inputs.output_root / "FAILED.json").read_text())
     assert failure["status"] == "FAILED"
     assert not (inputs.output_root / "PASS").exists()
+
+
+def test_exact_resume_adopts_only_hash_bound_completed_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = replace(
+        _inputs(tmp_path, dataset="aids"),
+        device="cpu",
+        common_recourse_engine="external_memory_exact_v1",
+        common_recourse_resume=True,
+    )
+    monkeypatch.setattr(
+        continuation,
+        "verify_checkout",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "actual_commit": continuation.UPSTREAM_COMMIT,
+        },
+    )
+    monkeypatch.setattr(continuation, "_git_head", lambda: "f" * 40)
+    monkeypatch.setattr(
+        continuation, "_validate_common_recourse_completion", lambda **_kwargs: None
+    )
+
+    def checkpoint_pass(**kwargs) -> None:
+        marker = Path(kwargs["marker"])
+        _json(marker, {kwargs["required_field"]: True})
+        _json(
+            kwargs["checkpoint_path"],
+            {
+                "schema_version": 2,
+                "status": "PASS",
+                "stage": kwargs["stage"],
+                "argv_sha256": continuation.stable_json_sha256(
+                    list(kwargs["argv"])
+                ),
+                "marker": str(marker),
+                "required_field": kwargs["required_field"],
+                "marker_sha256": continuation.sha256_file(marker),
+            },
+        )
+
+    first_observed: list[str] = []
+
+    def interrupt_after_common(**kwargs) -> None:
+        first_observed.append(kwargs["stage"])
+        if kwargs["stage"] == "common_recourse":
+            checkpoint_pass(**kwargs)
+            checkpoint = json.loads(kwargs["checkpoint_path"].read_text())
+            checkpoint["status"] = "RUNNING"
+            checkpoint.pop("marker_sha256")
+            _json(kwargs["checkpoint_path"], checkpoint)
+            return
+        raise RuntimeError("diagnostic interruption")
+
+    monkeypatch.setattr(continuation, "_run_stage", interrupt_after_common)
+    with pytest.raises(RuntimeError, match="diagnostic interruption"):
+        continuation.run_continuation(inputs)
+    assert first_observed == ["common_recourse", "chemistry"]
+    assert (inputs.output_root / "FAILED.json").is_file()
+
+    resumed_observed: list[str] = []
+
+    def finish_after_resume(**kwargs) -> None:
+        resumed_observed.append(kwargs["stage"])
+        checkpoint_pass(**kwargs)
+        if kwargs["stage"] == "freeze":
+            standardized = inputs.output_root / "standardized"
+            _json(
+                standardized / "run_manifest.json",
+                {
+                    "dataset_key": "aids",
+                    "cf_mode": continuation.CF_MODE,
+                    "distance_line": continuation.DISTANCE_LINE,
+                    "teacher_sha256": continuation.sha256_file(inputs.teacher_path),
+                    "molclr_checkpoint_sha256": "1" * 64,
+                    "dataset_csv_sha256": "2" * 64,
+                },
+            )
+            _json(standardized / "freeze_manifest.json", {"dataset_key": "aids"})
+
+    monkeypatch.setattr(continuation, "_run_stage", finish_after_resume)
+    result = continuation.run_continuation(inputs)
+    assert resumed_observed == ["chemistry", "unified_eval", "full_gate", "freeze"]
+    assert result["status"] == "PASS"
+    common_checkpoint = json.loads(
+        (inputs.output_root / "stage_checkpoints/common_recourse.json").read_text()
+    )
+    assert common_checkpoint["reconciled_after_child_completion"] is True
+    assert list((inputs.output_root / "failure_history").glob("FAILED.*.json"))
+
+
+def test_exact_resume_fails_closed_on_same_path_input_content_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = replace(
+        _inputs(tmp_path, dataset="aids"),
+        device="cpu",
+        common_recourse_engine="external_memory_exact_v1",
+        common_recourse_resume=True,
+    )
+    monkeypatch.setattr(
+        continuation,
+        "verify_checkout",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "actual_commit": continuation.UPSTREAM_COMMIT,
+        },
+    )
+    monkeypatch.setattr(continuation, "_git_head", lambda: "f" * 40)
+    monkeypatch.setattr(
+        continuation,
+        "_run_stage",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("interrupt")),
+    )
+    with pytest.raises(RuntimeError, match="interrupt"):
+        continuation.run_continuation(inputs)
+    inputs.distance_checkpoint.write_text("changed-distance", encoding="utf-8")
+    with pytest.raises(ValueError, match="RESUME_SCIENTIFIC_CONTRACT_MISMATCH"):
+        continuation.run_continuation(inputs)

@@ -11,6 +11,7 @@ import pytest
 from src.baselines.comrecgc.contracts import RecourseParameters, sha256_file, stable_json_sha256
 from src.baselines.comrecgc import recourse
 from src.baselines.comrecgc.external_memory_dbscan import _rss_bytes
+from scripts.autodl import run_comrecgc_standardized_continuation as continuation
 
 
 torch = pytest.importorskip("torch")
@@ -129,6 +130,14 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         graphs=parents,
         parent_ids=["AIDS_0", "AIDS_1"],
         atom_vocabulary=["C"],
+        dataset_fingerprint="fixture-dataset-fingerprint",
+        audit=lambda: {
+            "dataset_fingerprint": "fixture-dataset-fingerprint",
+            "generation_parent_ids_sha256": stable_json_sha256(
+                ["AIDS_0", "AIDS_1"]
+            ),
+            "source_files": [str(dataset_dir), str(source_csv)],
+        },
     )
 
     monkeypatch.setattr(recourse, "_torch_load", lambda _path: payload)
@@ -216,3 +225,33 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
     ]
     assert external_manifest["common_recourse_engine"] == "external_memory_exact_v1"
     assert external_manifest["external_memory_artifacts"]["pair_indices_sha256"]
+    terminal_path = external_root / "_RUN_COMPLETE.json"
+    terminal = json.loads(terminal_path.read_text())
+    continuation._validate_common_recourse_completion(
+        marker=terminal_path, terminal=terminal
+    )
+    checkpoint = external_root / "stage-checkpoint.json"
+    argv = ["run_common_recourse", "--engine", "external_memory_exact_v1"]
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "RUNNING",
+                "stage": "common_recourse",
+                "argv_sha256": stable_json_sha256(argv),
+                "marker": str(terminal_path),
+                "required_field": "run_complete",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert continuation._validate_completed_stage(
+        stage="common_recourse",
+        argv=argv,
+        marker=terminal_path,
+        required_field="run_complete",
+        checkpoint_path=checkpoint,
+    ) is True
+    reconciled = json.loads(checkpoint.read_text())
+    assert reconciled["status"] == "PASS"
+    assert reconciled["reconciled_after_child_completion"] is True
