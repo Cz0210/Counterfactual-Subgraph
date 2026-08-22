@@ -792,3 +792,13 @@ Mutagenicity roadmaps.
   blocked; do not synthesize a Taste row in the paper matrix.
 - A later explicit approval can release the existing three-class pipeline
   without changing the dataset, label semantics, or frozen evaluation schema.
+
+## 2026-08-22 — Four-method matrix continuation
+
+- [x] Add a fresh-root, PASS-last continuation from immutable AIDS and
+  Mutagenicity COMRECGC recovery payloads into standardized Figure 3/Figure 4/
+  Table 2 artifacts.
+- [ ] Register the resulting cells only after their project-full gate and freeze
+  manifests pass the common 4×4 provenance contract.
+- [ ] Schedule the two dataset continuations independently so a semantic failure
+  in one dataset releases its GPU without blocking the other dataset.

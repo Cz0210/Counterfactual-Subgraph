@@ -6984,3 +6984,22 @@ states plus the final state before writing PASS.
 - The audit records the exact prepared provenance and approval-file identity;
   it never downloads labels, rewrites the prepared dataset, or unlocks work by
   inference from an open-access article license.
+
+## 2026-08-22 — Adopt recovered COMRECGC generations read-only for paper-cell continuation
+
+- AIDS and Mutagenicity lineage recovery roots are immutable generation inputs;
+  the continuation does not regenerate random walks or write into those roots.
+- `scripts/autodl/run_comrecgc_standardized_continuation.py` validates the
+  recovery, closure, and upstream-commit gates, records a small-file adoption
+  manifest, then reruns native common-recourse clustering, deterministic
+  chemistry validation, unified RF/WNode held-out evaluation, the project-full
+  gate, and atomic standardized freeze under one fresh output root.
+- The multi-gigabyte counterfactual payload is not repeatedly hashed by the
+  adoption preflight. Its frozen claimed identity is cross-checked across the
+  existing recovery gates; the first scientific consumer still performs its
+  own exact payload verification once.
+- Parent metadata remains provenance only. Graph content and transition lineage
+  retain the previously frozen global-graph-identity resolver and uniqueness
+  checks.
+- This campaign runs only on AutoDL. The paired Slurm wrapper is retained solely
+  as static CLI parity required by repository policy and is not submitted.
