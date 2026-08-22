@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -244,6 +245,105 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
     assert command[command.index("--external-query-block-size") + 1] == "8"
     assert command[command.index("--expected-sklearn-version") + 1] == "1.7.2"
     assert "--resume" in command
+
+
+def _external_common_terminal(root: Path) -> Path:
+    pair_root = root / "external_memory/pair_store"
+    pairs = _file(pair_root / "pairs.npy", "pairs")
+    vectors = _file(pair_root / "vectors.npy", "vectors")
+    pair_manifest = pair_root / "run_manifest.json"
+    _json(
+        pair_manifest,
+        {
+            "run_complete": True,
+            "pairs_path": str(pairs),
+            "pairs_sha256": continuation.sha256_file(pairs),
+            "vectors_path": str(vectors),
+            "vectors_sha256": continuation.sha256_file(vectors),
+        },
+    )
+    selected_json = _file(root / "selected_common_recourses.json", "[]\n")
+    selected_csv = _file(root / "selected_common_recourses.csv", "rank\n")
+    representatives = _file(root / "representative_counterfactuals.pt", "pt")
+    run_manifest = root / "run_manifest.json"
+    _json(
+        run_manifest,
+        {
+            "run_complete": True,
+            "common_recourse_engine": "external_memory_exact_v1",
+            "theta_eligible_pair_count": 0,
+            "external_memory_artifacts": {
+                "pair_store_manifest": str(pair_manifest),
+                "pair_store_manifest_sha256": continuation.sha256_file(pair_manifest),
+                "dbscan_manifest": None,
+            },
+        },
+    )
+    marker = root / "_RUN_COMPLETE.json"
+    _json(
+        marker,
+        {
+            "schema_version": "comrecgc_common_recourse_terminal_v2",
+            "run_complete": True,
+            "common_recourse_engine": "external_memory_exact_v1",
+            "artifact_sha256": {
+                "run_manifest.json": continuation.sha256_file(run_manifest),
+                "selected_common_recourses.json": continuation.sha256_file(
+                    selected_json
+                ),
+                "selected_common_recourses.csv": continuation.sha256_file(
+                    selected_csv
+                ),
+                "representative_counterfactuals.pt": continuation.sha256_file(
+                    representatives
+                ),
+                "external_memory/pair_store/run_manifest.json": (
+                    continuation.sha256_file(pair_manifest)
+                ),
+            },
+        },
+    )
+    return marker
+
+
+@pytest.mark.parametrize("failure_kind", ("missing_closure", "tampered_artifact"))
+def test_fresh_external_common_stage_requires_full_hash_closure_before_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    root = tmp_path / "common"
+    root.mkdir()
+    marker = _external_common_terminal(root)
+    if failure_kind == "missing_closure":
+        terminal = json.loads(marker.read_text(encoding="utf-8"))
+        terminal.pop("artifact_sha256")
+        _json(marker, terminal)
+    else:
+        _file(root / "selected_common_recourses.json", "[{\"tampered\":true}]\n")
+    output_root = tmp_path / "continuation"
+    output_root.mkdir()
+    checkpoint = output_root / "common-recourse-checkpoint.json"
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="RESUME_COMMON_TERMINAL"):
+        continuation._run_stage(
+            stage="common_recourse",
+            argv=[
+                "python",
+                "run_common_recourse.py",
+                "--engine",
+                "external_memory_exact_v1",
+            ],
+            marker=marker,
+            required_field="run_complete",
+            environment={},
+            output_root=output_root,
+            checkpoint_path=checkpoint,
+        )
+    stage = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert stage["status"] == "FAILED"
+    assert not (output_root / "PASS").exists()
 
 
 def test_pass_marker_is_published_only_after_all_frozen_gates(
