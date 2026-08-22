@@ -18,8 +18,8 @@
         "bash",
         "{project_root}/scripts/autodl/run_am_legacy_standardization.sh"
       ],
-      "input_manifest": "{artifact_root}/am_legacy/precontroller/mutagenicity_ours_v1/standardized/run_manifest.json",
-      "expected_output": "{artifact_root}/am_legacy/adoption-verification/attempt-{attempt}",
+      "input_manifest": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/precontroller/mutagenicity_ours_v1/standardized/run_manifest.json",
+      "expected_output": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/adoption-verification/attempt-{attempt}",
       "required_output_files": [
         "adoption_verification.json",
         "_RUN_COMPLETE.json",
@@ -29,7 +29,7 @@
       "environment": {
         "ACTION": "verify-mut-ours-adoption",
         "OUTPUT_ROOT": "{task_output}",
-        "ADOPTED_MUT_OURS_ROOT": "{artifact_root}/am_legacy/precontroller/mutagenicity_ours_v1",
+        "ADOPTED_MUT_OURS_ROOT": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/precontroller/mutagenicity_ours_v1",
         "AUTODL_PYTHON": "{python}",
         "PROC_ROOT": "/proc",
         "PYTHONDONTWRITEBYTECODE": "1"
@@ -52,8 +52,8 @@
         "bash",
         "{project_root}/scripts/autodl/run_am_legacy_standardization.sh"
       ],
-      "input_manifest": "{artifact_root}/am_legacy/source_specs/am_legacy_sources_v1.json",
-      "expected_output": "{artifact_root}/am_legacy/inventory/attempt-{attempt}",
+      "input_manifest": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/source_specs/am_legacy_sources_v1.json",
+      "expected_output": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/inventory/attempt-{attempt}",
       "required_output_files": [
         "matrix_patch.csv",
         "matrix_patch.json",
@@ -64,9 +64,9 @@
       "required_log_marker": "[AM_LEGACY_INVENTORY_PASS]",
       "environment": {
         "ACTION": "audit-inventory",
-        "SOURCE_SPEC": "{artifact_root}/am_legacy/source_specs/am_legacy_sources_v1.json",
+        "SOURCE_SPEC": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/source_specs/am_legacy_sources_v1.json",
         "OUTPUT_ROOT": "{task_output}",
-        "ADOPTED_MUT_OURS_ROOT": "{artifact_root}/am_legacy/precontroller/mutagenicity_ours_v1",
+        "ADOPTED_MUT_OURS_ROOT": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/precontroller/mutagenicity_ours_v1",
         "AUTODL_PYTHON": "{python}",
         "PYTHONDONTWRITEBYTECODE": "1"
       }

@@ -513,10 +513,19 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
     )
     assert all(task.resource == "cpu" for task in manifest.tasks)
     assert all(task.manifest_only for task in manifest.tasks)
+    persistent_prefix = (
+        "{runtime_root}/outputs/autodl/paper_matrix/"
+        "four_methods_four_datasets_v1/am_legacy/"
+    )
     assert all(
-        (task.input_manifest or "").startswith("{artifact_root}/")
+        (task.input_manifest or "").startswith(persistent_prefix)
         for task in manifest.tasks
     )
+    assert all(
+        (task.expected_output or "").startswith(persistent_prefix)
+        for task in manifest.tasks
+    )
+    assert "{artifact_root}/am_legacy" not in json.dumps(fragment)
     actions = {task.environment.get("ACTION") for task in manifest.tasks}
     assert "adopt-mut-ours" not in actions
     assert "verify-mut-ours-adoption" in actions

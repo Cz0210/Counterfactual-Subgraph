@@ -145,10 +145,14 @@ fragment's two task objects verbatim to a fresh continuation manifest:
 2. `am_legacy_inventory` depends on the exact passing adoption output and
    publishes a six-cell matrix patch plus bounded filename inventory.
 
-Both controller inputs live under the persistent artifact root rather than the
-fast execution worktree. The source-spec filename intentionally does not name a
-raw split, and the inventory never opens molecular rows. The controller owns
-detachment, heartbeat, retry, and registry state for these two tasks.
+Both controller inputs use the authoritative production prefix
+`{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/`,
+which expands to the same `$ARTIFACT_ROOT/am_legacy/` location used by the
+foreground commands. They intentionally do not use `{artifact_root}` because
+the production controller defines that placeholder as `$RUNTIME/outputs`.
+The source-spec filename does not name a raw split, and the inventory never
+opens molecular rows. The controller owns detachment, heartbeat, retry, and
+registry state for these two tasks.
 
 ## Fail-closed outputs
 

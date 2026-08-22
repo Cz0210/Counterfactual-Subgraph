@@ -7253,6 +7253,11 @@ manifest-only controller task. The controller receives only the resulting
 persistent standardized manifest, runs a manifest-only closure verification,
 and then inventories the remaining raw roots. The source-spec copy is also
 persisted outside the fast execution worktree before launch.
+The task fragment addresses those files through the full
+`{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1`
+prefix. The shorter `{artifact_root}` placeholder is not interchangeable: in
+the production scheduler it denotes `{runtime_root}/outputs`, not the matrix
+root chosen by the foreground adoption command.
 
 Mutagenicity GCFExplainer retains an exact completed Top20 export but lacks its
 standalone frozen-candidate manifest. A deterministic, generation-free freeze
