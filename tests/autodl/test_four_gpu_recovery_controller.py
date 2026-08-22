@@ -140,8 +140,9 @@ def test_four_gpu_ceiling_is_explicit_not_a_global_default() -> None:
         validate_max_gpus(4)
 
 
-def test_controller_thread_defaults_are_bounded_and_not_user_overridable(
+def test_controller_thread_defaults_are_ceilings_and_reject_unsafe_overrides(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert controller_safety_environment(cpu_count=112) == {
         "OMP_NUM_THREADS": "27",
@@ -158,6 +159,15 @@ def test_controller_thread_defaults_are_bounded_and_not_user_overridable(
     unsafe.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     with pytest.raises(ControllerError, match="may not override"):
         load_controller_manifest(unsafe)
+
+    payload["tasks"][0]["environment"]["OMP_NUM_THREADS"] = "1"
+    payload["tasks"][0]["environment"]["MKL_NUM_THREADS"] = "1"
+    bounded = tmp_path / "bounded-controller.json"
+    bounded.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    monkeypatch.setattr(controller_module.os, "cpu_count", lambda: 112)
+    manifest = load_controller_manifest(bounded)
+    assert manifest.tasks[0].environment["OMP_NUM_THREADS"] == "1"
+    assert manifest.tasks[0].environment["MKL_NUM_THREADS"] == "1"
 
 
 def test_scheduler_is_work_conserving_but_never_violates_dependencies() -> None:
