@@ -100,10 +100,13 @@ Build a new `four_methods_four_datasets_repair_v1` manifest containing only:
 At build time and again as controller tasks, verify each adopted controller
 terminal has state/gate PASS, one exact passing attempt root, required physical
 files, and no writable procfs descriptor below it. Apply an equivalent small
-manifest/PASS/writer closure to recovered generations while leaving the large
-payload SHA-256 to the scientific continuation's existing exactly-once gate.
-Write every repair under a fresh root and never include Taste or final result
-rendering.
+five-manifest/payload-stat/writer closure to recovered generations; those
+historical roots do not need or receive a synthetic bare `PASS`. Require
+cross-manifest agreement on the claimed payload SHA-256, but leave the actual
+large-payload SHA-256 computation to the scientific continuation's existing
+exactly-once gate. Do not depend on the append-only experiment registry for
+terminal identity. Write every repair under a fresh root and never include
+Taste or final result rendering.
 
 Run the repair controller in the same AutoDL runtime layout so both controllers
 share UUID locks. Fix `runtime.max_cpu_tasks=2`. Do not copy a `continuation`

@@ -24,9 +24,12 @@ Every adopted source is checked twice: once before the manifest is written and
 again as a controller task. A controller source must have task state `PASS`,
 gate `PASS`, one unambiguous passing attempt equal to the configured absolute
 root, required physical files, and no live writable file descriptor below that
-root. Recovered COMRECGC generations must close their PASS/recovery manifests
-and pass the same writer audit. Their large tensor payload is not rehashed by
-the builder; the scientific continuation retains its existing exactly-once
+root. Historical recovered COMRECGC roots have no bare `PASS` file. They are
+accepted only when the five existing recovery manifests close consistently,
+the physical `counterfactuals.pt` stat agrees with their byte claim, all
+recorded payload SHA-256 claims agree, and the same writer audit passes. The
+builder neither requires the mutable experiment registry nor rehashes the
+large tensor; the scientific continuation retains its existing exactly-once
 payload SHA-256 gate.
 
 ## Concurrency contract

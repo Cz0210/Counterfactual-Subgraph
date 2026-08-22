@@ -283,11 +283,14 @@ def verify_comrecgc_generation_terminal(
     expected_output_root: str | Path,
     proc_root: str | Path = "/proc",
 ) -> dict[str, Any]:
-    """Verify the small PASS closure around one recovered COMRECGC payload.
+    """Verify the historical manifest closure around one recovered payload.
 
     The potentially large ``counterfactuals.pt`` is deliberately not hashed
     here.  The scientific continuation already computes that payload hash
-    exactly once while holding before/after stat snapshots.
+    exactly once while holding before/after stat snapshots.  Historical
+    recovery roots do not contain a bare ``PASS`` file, so terminal identity
+    comes from the five immutable recovery manifests plus physical payload
+    metadata and their claimed-SHA agreement.
     """
 
     if dataset not in {"aids", "mutagenicity"}:
@@ -299,7 +302,6 @@ def verify_comrecgc_generation_terminal(
         "freeze_only_recovery.json",
         "frozen_payload_closure_audit.json",
         "adoption_manifest.json",
-        "PASS",
     )
     files = _required_files(root, names)
     run_manifest = _read_object(root / "run_manifest.json")
@@ -307,21 +309,84 @@ def verify_comrecgc_generation_terminal(
     recovery = _read_object(root / "freeze_only_recovery.json")
     closure = _read_object(root / "frozen_payload_closure_audit.json")
     adoption = _read_object(root / "adoption_manifest.json")
+    payload_logical = Path(str(run_manifest.get("counterfactuals_path") or "")).expanduser()
+    payload_inside_root = False
+    payload_nonempty = False
+    payload_stat: dict[str, Any] = {}
+    try:
+        if payload_logical.is_symlink():
+            raise ValueError("payload symlink")
+        payload = payload_logical.resolve(strict=True)
+        payload.relative_to(root)
+        payload_inside_root = payload == root / "counterfactuals.pt"
+        payload_nonempty = payload.is_file() and payload.stat().st_size > 0
+        payload_stat = {
+            "path": str(payload),
+            "size": int(payload.stat().st_size),
+            "mtime_ns": int(payload.stat().st_mtime_ns),
+            "device": int(payload.stat().st_dev),
+            "inode": int(payload.stat().st_ino),
+        }
+    except (FileNotFoundError, OSError, ValueError):
+        payload = payload_logical
+    claimed_payload_sha = str(run_manifest.get("counterfactuals_sha256") or "")
+    claimed_payload_bytes = run_manifest.get("counterfactuals_bytes")
+    recorded_recovery_output = recovery.get("output_dir")
+    try:
+        recovery_output_matches = (
+            isinstance(recorded_recovery_output, str)
+            and Path(recorded_recovery_output).expanduser().resolve(strict=True) == root
+        )
+    except (FileNotFoundError, OSError):
+        recovery_output_matches = False
     checks = {
         "run_manifest.dataset": run_manifest.get("dataset") == dataset,
         "run_manifest.mode": run_manifest.get("mode") == "full",
         "run_manifest.generation_mode": (
             run_manifest.get("generation_mode") == "adopted_read_only_cache"
         ),
+        "run_manifest.run_complete": run_manifest.get("run_complete") is True,
+        "run_manifest.freeze_only_recovery": (
+            run_manifest.get("freeze_only_recovery") is True
+        ),
+        "run_manifest.algorithm_rerun": run_manifest.get("algorithm_rerun") is False,
+        "run_manifest.counterfactuals_path": payload_inside_root,
+        "run_manifest.counterfactuals_nonempty": payload_nonempty,
+        "run_manifest.counterfactuals_sha256_format": (
+            re.fullmatch(r"[0-9a-f]{64}", claimed_payload_sha) is not None
+        ),
+        "run_manifest.counterfactuals_bytes": (
+            isinstance(claimed_payload_bytes, int)
+            and not isinstance(claimed_payload_bytes, bool)
+            and claimed_payload_bytes == payload_stat.get("size")
+        ),
         "_RUN_COMPLETE.run_complete": complete.get("run_complete") is True,
         "_RUN_COMPLETE.freeze_only_recovery": (
             complete.get("freeze_only_recovery") is True
         ),
+        "_RUN_COMPLETE.counterfactuals_sha256": (
+            complete.get("counterfactuals_sha256") == claimed_payload_sha
+        ),
         "freeze_only_recovery.recovery_completed": (
             recovery.get("recovery_completed") is True
         ),
+        "freeze_only_recovery.schema_version": (
+            recovery.get("schema_version")
+            == "comrecgc_completed_generation_freeze_audit_v4"
+        ),
+        "freeze_only_recovery.dataset": recovery.get("dataset") == dataset,
+        "freeze_only_recovery.FREEZE_ONLY_RECOVERY_SAFE": (
+            recovery.get("FREEZE_ONLY_RECOVERY_SAFE") is True
+        ),
+        "freeze_only_recovery.fresh_rerun_required": (
+            recovery.get("fresh_rerun_required") is False
+        ),
+        "freeze_only_recovery.output_dir": recovery_output_matches,
         "freeze_only_recovery.algorithm_rerun": (
             recovery.get("algorithm_rerun") is False
+        ),
+        "freeze_only_recovery.counterfactuals_sha256": (
+            recovery.get("counterfactuals_sha256") == claimed_payload_sha
         ),
         "frozen_payload_closure.closure_complete": (
             closure.get("closure_complete") is True
@@ -329,15 +394,20 @@ def verify_comrecgc_generation_terminal(
         "frozen_payload_closure.post_write_reload_verified": (
             closure.get("post_write_reload_verified") is True
         ),
+        "frozen_payload_closure.payload_checksum": (
+            closure.get("payload_checksum") == claimed_payload_sha
+        ),
+        "frozen_payload_closure.payload_bytes": (
+            closure.get("payload_bytes") == payload_stat.get("size")
+        ),
         "adoption_manifest.generation_mode": (
             adoption.get("generation_mode") == "adopted_read_only_cache"
         ),
-        "PASS": (root / "PASS").read_text(encoding="utf-8").strip() == "PASS",
     }
     failed = sorted(key for key, passed in checks.items() if not passed)
     if failed:
         raise RepairManifestError(
-            f"Recovered COMRECGC generation terminal is not PASS: {failed}"
+            f"Recovered COMRECGC generation terminal is not closed: {failed}"
         )
     try:
         writer_audit = scan_live_writers(root, proc_root=proc_root)
@@ -351,6 +421,11 @@ def verify_comrecgc_generation_terminal(
         "source_output_root": str(root),
         "checks": checks,
         "required_files": files,
+        "closure_member_count": len(files) + 1,
+        "closure_members": [*files, "counterfactuals.pt"],
+        "payload_stat": payload_stat,
+        "payload_claimed_sha256": claimed_payload_sha,
+        "payload_claimed_sha256_cross_manifest_agreement": True,
         "large_payload_sha256_computed": False,
         "large_payload_hash_policy": "scientific_continuation_computes_exactly_once",
         "live_writer_audit": writer_audit,

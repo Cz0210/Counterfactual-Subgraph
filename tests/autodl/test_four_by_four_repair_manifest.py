@@ -28,6 +28,12 @@ from src.utils.autodl_four_by_four_repair import (
 )
 
 
+HISTORICAL_RECOVERY_CONTRACT = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures/autodl/comrecgc_recovery_terminal_contract.json"
+)
+
+
 def _json(path: Path, payload: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -42,31 +48,57 @@ def _text(path: Path, value: str = "fixture\n") -> Path:
 
 def _generation_terminal(root: Path, dataset: str) -> None:
     root.mkdir(parents=True)
+    payload = _text(root / "counterfactuals.pt", "historical-payload-fixture\n")
+    payload_sha256 = sha256_file(payload)
+    payload_bytes = payload.stat().st_size
     _json(
         root / "run_manifest.json",
         {
             "dataset": dataset,
             "mode": "full",
             "generation_mode": "adopted_read_only_cache",
+            "run_complete": True,
+            "freeze_only_recovery": True,
+            "algorithm_rerun": False,
+            "counterfactuals_path": str(payload),
+            "counterfactuals_sha256": payload_sha256,
+            "counterfactuals_bytes": payload_bytes,
         },
     )
     _json(
         root / "_RUN_COMPLETE.json",
-        {"run_complete": True, "freeze_only_recovery": True},
+        {
+            "run_complete": True,
+            "freeze_only_recovery": True,
+            "counterfactuals_sha256": payload_sha256,
+        },
     )
     _json(
         root / "freeze_only_recovery.json",
-        {"recovery_completed": True, "algorithm_rerun": False},
+        {
+            "schema_version": "comrecgc_completed_generation_freeze_audit_v4",
+            "dataset": dataset,
+            "FREEZE_ONLY_RECOVERY_SAFE": True,
+            "fresh_rerun_required": False,
+            "recovery_completed": True,
+            "algorithm_rerun": False,
+            "output_dir": str(root),
+            "counterfactuals_sha256": payload_sha256,
+        },
     )
     _json(
         root / "frozen_payload_closure_audit.json",
-        {"closure_complete": True, "post_write_reload_verified": True},
+        {
+            "closure_complete": True,
+            "post_write_reload_verified": True,
+            "payload_checksum": payload_sha256,
+            "payload_bytes": payload_bytes,
+        },
     )
     _json(
         root / "adoption_manifest.json",
         {"generation_mode": "adopted_read_only_cache"},
     )
-    _text(root / "PASS", "PASS\n")
 
 
 def _source_terminal(root: Path, name: str) -> None:
@@ -441,6 +473,17 @@ def test_generation_terminal_is_small_closure_only_and_publishes_fresh_adoption(
     )
     assert evidence["status"] == "PASS"
     assert evidence["large_payload_sha256_computed"] is False
+    assert evidence["closure_member_count"] == 6
+    assert evidence["closure_members"] == [
+        "run_manifest.json",
+        "_RUN_COMPLETE.json",
+        "freeze_only_recovery.json",
+        "frozen_payload_closure_audit.json",
+        "adoption_manifest.json",
+        "counterfactuals.pt",
+    ]
+    assert not (paths["mut_generation"] / "PASS").exists()
+    assert not (paths["mut_generation"] / "fresh_recovery_audit.json").exists()
     output = root / "adoption-output"
     payload = publish_source_adoption(
         name="mut_comrec_generation", evidence=evidence, output_dir=output
@@ -451,6 +494,67 @@ def test_generation_terminal_is_small_closure_only_and_publishes_fresh_adoption(
     with pytest.raises(FileExistsError, match="must be fresh"):
         publish_source_adoption(
             name="mut_comrec_generation", evidence=evidence, output_dir=output
+        )
+
+
+def test_historical_recovery_contract_accepts_no_bare_pass_or_registry(
+    repair_fixture,
+):
+    _root, _spec, paths = repair_fixture
+    fixture = json.loads(HISTORICAL_RECOVERY_CONTRACT.read_text(encoding="utf-8"))
+    historical = fixture["historical_roots"]
+    contract = fixture["terminal_contract"]
+
+    assert fixture["schema_version"] == (
+        "comrecgc_historical_recovery_terminal_contract_v1"
+    )
+    assert [row["run_id"] for row in historical] == [
+        "20260822T025620Z-mut-lineage-v3-6ddd743",
+        "20260822T020238Z-aids-lineage-v2-6ddd743",
+    ]
+    assert contract["terminal_registry_required_by_builder"] is False
+    assert contract["forbidden_bare_terminal"] == "PASS"
+
+    roots = {
+        "mutagenicity": paths["mut_generation"],
+        "aids": paths["aids_generation"],
+    }
+    for historical_root in historical:
+        dataset = historical_root["dataset"]
+        source = roots[dataset]
+        assert not (source / "PASS").exists()
+        assert not (source / "fresh_recovery_audit.json").exists()
+        for dotted_field, expected in contract["required_values"].items():
+            document, field = dotted_field.split(".", 1)
+            payload = json.loads((source / f"{document}.json").read_text())
+            assert payload[field] == expected
+        evidence = verify_comrecgc_generation_terminal(
+            dataset=dataset,
+            expected_output_root=source,
+            proc_root=paths["proc"],
+        )
+        assert set(evidence["required_files"]) == set(
+            contract["required_small_manifests"]
+        )
+        assert evidence["payload_stat"]["path"] == str(
+            (source / contract["large_payload"]).resolve()
+        )
+        assert evidence["large_payload_sha256_computed"] is False
+
+
+def test_generation_terminal_rejects_cross_manifest_payload_claim_mismatch(
+    repair_fixture,
+):
+    _root, _spec, paths = repair_fixture
+    complete_path = paths["aids_generation"] / "_RUN_COMPLETE.json"
+    complete = json.loads(complete_path.read_text(encoding="utf-8"))
+    complete["counterfactuals_sha256"] = "0" * 64
+    _json(complete_path, complete)
+    with pytest.raises(RepairManifestError, match="not closed"):
+        verify_comrecgc_generation_terminal(
+            dataset="aids",
+            expected_output_root=paths["aids_generation"],
+            proc_root=paths["proc"],
         )
 
 

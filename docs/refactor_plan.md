@@ -23,6 +23,9 @@
 - [x] Retry only BACE Ours artifact standardization from the passing B14 root.
 - [x] Share global GPU UUID locks with v1, cap repair CPU task concurrency at
   two, omit Taste/final rendering, and inherit no old continuation guard.
+- [x] Match the historical COMRECGC recovery terminal contract: five immutable
+  manifests plus physical payload stat and claimed-SHA agreement, with no
+  synthetic bare `PASS` or mutable-registry dependency.
 
 ## 2026-08-22: BACE four-by-four cell closure
 

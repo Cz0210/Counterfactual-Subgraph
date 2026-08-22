@@ -1,0 +1,46 @@
+{
+  "schema_version": "comrecgc_historical_recovery_terminal_contract_v1",
+  "captured_at": "2026-08-22T00:00:00Z",
+  "historical_roots": [
+    {
+      "dataset": "mutagenicity",
+      "output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z",
+      "run_id": "20260822T025620Z-mut-lineage-v3-6ddd743"
+    },
+    {
+      "dataset": "aids",
+      "output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/aids_comrecgc_lineage_v2_20260822T020238Z",
+      "run_id": "20260822T020238Z-aids-lineage-v2-6ddd743"
+    }
+  ],
+  "terminal_contract": {
+    "forbidden_bare_terminal": "PASS",
+    "large_payload": "counterfactuals.pt",
+    "large_payload_builder_sha256_computed": false,
+    "required_small_manifests": [
+      "run_manifest.json",
+      "_RUN_COMPLETE.json",
+      "freeze_only_recovery.json",
+      "frozen_payload_closure_audit.json",
+      "adoption_manifest.json"
+    ],
+    "required_values": {
+      "_RUN_COMPLETE.freeze_only_recovery": true,
+      "_RUN_COMPLETE.run_complete": true,
+      "adoption_manifest.generation_mode": "adopted_read_only_cache",
+      "freeze_only_recovery.FREEZE_ONLY_RECOVERY_SAFE": true,
+      "freeze_only_recovery.algorithm_rerun": false,
+      "freeze_only_recovery.fresh_rerun_required": false,
+      "freeze_only_recovery.recovery_completed": true,
+      "freeze_only_recovery.schema_version": "comrecgc_completed_generation_freeze_audit_v4",
+      "frozen_payload_closure_audit.closure_complete": true,
+      "frozen_payload_closure_audit.post_write_reload_verified": true,
+      "run_manifest.algorithm_rerun": false,
+      "run_manifest.freeze_only_recovery": true,
+      "run_manifest.generation_mode": "adopted_read_only_cache",
+      "run_manifest.mode": "full",
+      "run_manifest.run_complete": true
+    },
+    "terminal_registry_required_by_builder": false
+  }
+}
