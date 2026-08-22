@@ -7018,3 +7018,8 @@ states plus the final state before writing PASS.
   completion may return zero for orchestration while the immutable gate remains
   `BLOCKED_LICENSE_REVIEW`; only `heavy_route_authorized=true` can release Taste
   training or evaluation.
+- The final live manifest is composed from independently reviewed task
+  fragments. Composition rejects duplicate IDs and every unresolved
+  `__CONFIGURE_` placeholder, records fragment hashes once, validates the
+  resulting manifest with the production loader, and removes an invalid
+  partial manifest rather than leaving a launchable file.
