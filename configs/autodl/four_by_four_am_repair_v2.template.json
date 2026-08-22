@@ -1,0 +1,35 @@
+{
+  "schema_version": "four_by_four_am_repair_spec_v2",
+  "controller_id": "four_methods_four_datasets_am_repair_v2",
+  "paper_frozen": true,
+  "run_tastemolnet": 0,
+  "runtime_root": "/autodl-fs/data/counterfactual-subgraph-runtime",
+  "control_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+  "project_root": "__CONFIGURE_IMMUTABLE_EXECUTION_WORKTREE_CONTAINING_BOTH_REPAIR_COMMITS__",
+  "python": "/root/miniconda3/envs/smiles_pip118/bin/python",
+  "proc_root": "/proc",
+  "fresh_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_am_repair_v2",
+  "verify_comrecgc_checkout_safe_git_fix_commit": "d8b113281d24e9340bfe2379e7451ffa8adff70a",
+  "source_controller": {
+    "manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_repair_v1.json",
+    "root": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_repair_v1"
+  },
+  "sources": {
+    "mut_generation": {
+      "task_id": "repair_source_mut_comrec_generation",
+      "output_root": "__CONFIGURE_EXACT_REPAIR_V1_MUT_GENERATION_ADOPTION_PASS_ATTEMPT__"
+    },
+    "mut_threshold": {
+      "task_id": "mutagenicity_comrecgc_threshold_freeze",
+      "output_root": "__CONFIGURE_EXACT_REPAIR_V1_MUT_THRESHOLD_PASS_ATTEMPT__"
+    },
+    "aids_generation": {
+      "task_id": "repair_source_aids_comrec_generation",
+      "output_root": "__CONFIGURE_EXACT_REPAIR_V1_AIDS_GENERATION_ADOPTION_PASS_ATTEMPT__"
+    },
+    "aids_threshold": {
+      "task_id": "aids_comrecgc_threshold_freeze",
+      "output_root": "__CONFIGURE_EXACT_REPAIR_V1_AIDS_THRESHOLD_PASS_ATTEMPT__"
+    }
+  }
+}

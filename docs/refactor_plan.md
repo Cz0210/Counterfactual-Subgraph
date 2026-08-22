@@ -1,5 +1,18 @@
 # Refactor Plan
 
+## 2026-08-22: AIDS/Mutagenicity-only ComRecGC repair v2
+
+- [x] Add a six-task fresh controller fragment containing only four exact
+  repair-v1 PASS source gates and two A/M standardized continuations.
+- [x] Reuse the repair-v1 scientific environment instead of accepting another
+  manually configured dataset/RF/MolCLR/distance/upstream path set.
+- [x] Gate build and runtime execution on ancestry of the reviewed
+  `verify_comrecgc_checkout` safe-Git fix.
+- [x] Preserve threshold-before-test dependencies, shared GPU UUID locks,
+  `max_cpu_tasks=2`, fresh outputs, and the absence of old continuation guards.
+- [x] Exclude BACE, GCFExplainer, TasteMolNet, final exports, HPC execution, and
+  `paper/` changes from this bounded retry.
+
 ## 2026-08-22: Reuse scoped Git trust in the standalone COMRECGC gate
 
 - [x] Expose the shared process-private COMRECGC commit reader used by checkout

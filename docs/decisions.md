@@ -4,6 +4,46 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Isolate the two A/M ComRecGC retries in a six-task controller
+
+### Background
+
+The bounded repair-v1 controller successfully froze the Mutagenicity and AIDS
+recovered-generation adoptions and their shared-protocol threshold contracts,
+but both fresh standardized continuations encountered the same Git ownership
+compatibility bug in `verify_comrecgc_checkout`. Retrying the larger repair-v1
+graph would mix unrelated completed BACE/GCF work with this narrow code repair.
+
+### Decision
+
+Add `four_methods_four_datasets_am_repair_v2` with exactly four read-only
+repair-v1 PASS source gates followed by two fresh A/M ComRecGC standardized
+held-out jobs. Copy scientific paths from repair-v1's immutable task
+definitions and cross-check them against the adopted generation roots; do not
+accept a second hand-entered set of dataset, RF, MolCLR, distance, or upstream
+paths. Exact-adopt the repair-v1 601-point threshold outputs without refitting.
+
+Require the spec to name the reviewed Git-safety fix commit
+`d8b113281d24e9340bfe2379e7451ffa8adff70a` exactly, verify that it is an
+ancestor of the execution checkout while building, and repeat that check in
+each runtime source gate. Share the global GPU UUID locks, cap CPU tasks at
+two, retain fresh outputs, and omit BACE, GCFExplainer, TasteMolNet,
+final-export tasks, and every old continuation guard.
+
+### Consequences
+
+- Passing repair-v1 source and threshold attempts remain immutable evidence.
+- Only the two failed A/M standardized cells are recomputed.
+- Test access remains downstream of an exact PASS threshold-freeze gate.
+- A worktree missing the reviewed checkout fix fails before either GPU task can
+  become READY.
+- The AutoDL-only campaign has a paired Slurm wrapper solely for CLI parity;
+  it is not submitted to HPC and `paper/` remains untouched.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Reuse process-scoped Git trust in every COMRECGC checkout gate
 
 ### Background
