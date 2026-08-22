@@ -38,6 +38,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device1", default="cuda:0")
     parser.add_argument("--device2", default="cuda:0")
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--acceleration-mode", choices=("legacy", "ordered_v2"), default="legacy"
+    )
+    parser.add_argument("--gine-batch-size", type=int, default=256)
+    parser.add_argument("--graph-cache-capacity", type=int, default=0)
+    parser.add_argument("--cpu-neighbor-workers", type=int, default=1)
+    parser.add_argument("--progress-every", type=int, default=1000)
+    parser.add_argument(
+        "--acceleration-gate",
+        help="Required PASS gate for a full ordered_v2 M=50000 run",
+    )
     args = parser.parse_args(argv)
     result = run_bace_official_vrrw(
         dataset_dir=args.dataset_dir,
@@ -59,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
         device1=args.device1,
         device2=args.device2,
         resume=args.resume,
+        acceleration_mode=args.acceleration_mode,
+        gine_batch_size=args.gine_batch_size,
+        graph_cache_capacity=args.graph_cache_capacity,
+        cpu_neighbor_workers=args.cpu_neighbor_workers,
+        progress_every=args.progress_every,
+        acceleration_gate=args.acceleration_gate,
     )
     print(json.dumps(result, sort_keys=True), flush=True)
     print("[BACE_GCFEXPLAINER_VRRW_OK]", flush=True)

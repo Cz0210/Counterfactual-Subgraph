@@ -34,7 +34,11 @@ from src.utils.autodl_runtime import (
     AutoDLRuntimeError,
     BACE_STAGES,
     FOUR_GPU_RECOVERY_LIMIT,
+    GPU_LOCK_EXCLUSIVE,
+    GPU_LOCK_MODES,
     GPUObservation,
+    SHARED_GPU_MAX_VRAM_FRACTION,
+    available_project_gpu_slots,
     append_jsonl_locked,
     assert_bace_stage_can_start,
     atomic_write_json,
@@ -42,6 +46,7 @@ from src.utils.autodl_runtime import (
     command_digest,
     fsync_directory,
     gpu_lock_available,
+    inspect_shared_gpu_slots,
     observe_stable_idle_gpus,
     query_gpu_inventory,
     read_bace_stage,
@@ -49,6 +54,7 @@ from src.utils.autodl_runtime import (
     resolve_project_root,
     sanitized_environment,
     select_data_root,
+    shared_gpu_slot_admission,
     sha256_file,
     sha256_paths,
     stage_paths,
@@ -211,6 +217,8 @@ class TaskSpec:
     freezes_selector: bool
     selector_parameters_frozen: bool
     read_only_test: bool
+    gpu_lock_mode: str = GPU_LOCK_EXCLUSIVE
+    gpu_memory_reservation_mb: int = 0
 
     @property
     def instance_ids(self) -> tuple[str, ...]:
@@ -239,6 +247,13 @@ class HostResources:
     load_1m: float
     available_ram_gb: float
     free_disk_gb: float
+
+
+@dataclass(frozen=True)
+class GPUAllocation:
+    task_id: str
+    instance_id: str
+    gpu: GPUObservation
 
 
 def _safe_id(value: str, *, label: str) -> str:
@@ -404,6 +419,8 @@ def _parse_task(raw: Any) -> TaskSpec:
     ):
         raise ControllerError(f"{task_id}.environment must contain scalar values")
     for key in environment:
+        if key.startswith("CUDA_MPS"):
+            raise ControllerError(f"{task_id} may not enable CUDA MPS")
         if SECRET_KEY.search(key) and key not in ALLOWED_SECRET_LIKE_ENV_KEYS:
             raise ControllerError(f"{task_id} has credential-like environment key")
     if str(environment.get("PYTHONDONTWRITEBYTECODE", "1")) != "1":
@@ -420,6 +437,29 @@ def _parse_task(raw: Any) -> TaskSpec:
     resource = str(raw.get("resource", "gpu")).lower()
     if resource not in {"gpu", "cpu"}:
         raise ControllerError(f"{task_id}.resource must be gpu or cpu")
+    gpu_lock_mode = str(raw.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE))
+    if gpu_lock_mode not in GPU_LOCK_MODES:
+        raise ControllerError(f"{task_id}.gpu_lock_mode is invalid")
+    gpu_memory_reservation_mb = raw.get("gpu_memory_reservation_mb", 0)
+    if (
+        isinstance(gpu_memory_reservation_mb, bool)
+        or not isinstance(gpu_memory_reservation_mb, int)
+        or gpu_memory_reservation_mb < 0
+    ):
+        raise ControllerError(f"{task_id}.gpu_memory_reservation_mb is invalid")
+    if resource == "cpu" and (
+        gpu_lock_mode != GPU_LOCK_EXCLUSIVE or gpu_memory_reservation_mb != 0
+    ):
+        raise ControllerError(f"{task_id} CPU task cannot request a GPU slot")
+    if resource == "gpu" and gpu_lock_mode == GPU_LOCK_EXCLUSIVE:
+        if gpu_memory_reservation_mb != 0:
+            raise ControllerError(
+                f"{task_id} exclusive GPU task must use reservation=0"
+            )
+    elif resource == "gpu" and gpu_memory_reservation_mb <= 0:
+        raise ControllerError(
+            f"{task_id} shared-lowmem task requires a positive reservation"
+        )
     priority = raw.get("priority", 100)
     if not isinstance(priority, int):
         raise ControllerError(f"{task_id}.priority must be an integer")
@@ -524,6 +564,8 @@ def _parse_task(raw: Any) -> TaskSpec:
         command=command,
         depends_on=_as_string_tuple(raw.get("depends_on", []), label=f"{task_id}.depends_on"),
         resource=resource,
+        gpu_lock_mode=gpu_lock_mode,
+        gpu_memory_reservation_mb=gpu_memory_reservation_mb,
         priority=priority,
         enabled=bool(raw.get("enabled", True)),
         blocked_reason=blocked_reason,
@@ -922,6 +964,8 @@ def _task_manifest_payload(task: TaskSpec, manifest_sha256: str) -> dict[str, An
         "stage": task.stage,
         "depends_on": list(task.depends_on),
         "resource": task.resource,
+        "gpu_lock_mode": task.gpu_lock_mode,
+        "gpu_memory_reservation_mb": task.gpu_memory_reservation_mb,
         "priority": task.priority,
         "enabled": task.enabled,
         "blocked_reason": task.blocked_reason,
@@ -1776,7 +1820,25 @@ def audit_gpu_locks(
         if probe_advisory_lock:
             available = gpu_lock_available(lock_root, gpu.uuid)
         process_pids = sorted(process.pid for process in gpu.processes)
-        if metadata.get("state") == "CORRUPT":
+        shared_slots = inspect_shared_gpu_slots(lock_root, gpu.uuid)
+        active_shared = [row for row in shared_slots if row.get("active") is True]
+        shared_errors = [row for row in shared_slots if row.get("error")]
+        shared_child_pids = sorted(
+            {
+                int(row.get("metadata", {}).get("child_pid"))
+                for row in active_shared
+                if isinstance(row.get("metadata", {}).get("child_pid"), int)
+                and not isinstance(row.get("metadata", {}).get("child_pid"), bool)
+                and int(row.get("metadata", {}).get("child_pid")) > 0
+            }
+        )
+        if shared_errors:
+            audit = "SHARED_SLOT_INVALID"
+        elif active_shared and not set(process_pids).issubset(shared_child_pids):
+            audit = "SHARED_SLOT_PID_MISMATCH"
+        elif active_shared:
+            audit = "SHARED_LOW_MEMORY"
+        elif metadata.get("state") == "CORRUPT":
             audit = "CORRUPT_METADATA"
         elif metadata.get("state") == "LOCKED" and not owner_pid_valid:
             # Reclaiming LOCKED metadata requires an explicit PID whose death
@@ -1820,6 +1882,8 @@ def audit_gpu_locks(
                 "lock_owner_alive": owner_alive,
                 "advisory_lock_available": available,
                 "audit": audit,
+                "shared_slots": shared_slots,
+                "shared_child_pids": shared_child_pids,
             }
         )
     return rows
@@ -2841,6 +2905,10 @@ def _launch_instance(
                 gpu.uuid,
                 "--gpu-required",
                 "--heavy",
+                "--gpu-lock-mode",
+                task.gpu_lock_mode,
+                "--gpu-memory-reservation-mb",
+                str(task.gpu_memory_reservation_mb),
             )
         )
     launch_command.extend(("--", *command))
@@ -2918,6 +2986,10 @@ def _launch_instance(
             "tmux_session": response.get("tmux_session"),
             "gpu_index": gpu.index if gpu else None,
             "gpu_uuid": gpu.uuid if gpu else None,
+            "gpu_lock_mode": task.gpu_lock_mode if gpu else GPU_LOCK_EXCLUSIVE,
+            "gpu_memory_reservation_mb": (
+                task.gpu_memory_reservation_mb if gpu else 0
+            ),
             "log_path": str(log_path),
             "expected_output": str(expected_output),
             "required_absolute_output_files": [
@@ -3124,6 +3196,72 @@ class _ControllerLock:
             self.handle = None
 
 
+def plan_gpu_allocations(
+    candidates: Sequence[tuple[str, str]],
+    tasks: Mapping[str, TaskSpec],
+    observations: Sequence[GPUObservation],
+    *,
+    stable_idle_uuids: frozenset[str],
+    exclusive_safe_uuids: frozenset[str],
+    lock_root: Path,
+    capacity: int,
+) -> list[GPUAllocation]:
+    """Plan exclusive/shared allocations without weakening launch-time locks."""
+
+    if capacity <= 0:
+        return []
+    allocations: list[GPUAllocation] = []
+    planned_exclusive: set[str] = set()
+    planned_slots: set[tuple[str, str]] = set()
+    planned_reservation: dict[str, int] = {}
+    for task_id, instance_id in candidates:
+        if len(allocations) >= capacity:
+            break
+        task = tasks[task_id]
+        for gpu in sorted(observations, key=lambda value: value.index):
+            if task.gpu_lock_mode == GPU_LOCK_EXCLUSIVE:
+                if (
+                    gpu.uuid not in stable_idle_uuids
+                    or gpu.uuid not in exclusive_safe_uuids
+                    or gpu.uuid in planned_exclusive
+                    or any(value[0] == gpu.uuid for value in planned_slots)
+                ):
+                    continue
+                planned_exclusive.add(gpu.uuid)
+                allocations.append(GPUAllocation(task_id, instance_id, gpu))
+                break
+
+            slot_key = (gpu.uuid, task.gpu_lock_mode)
+            if gpu.uuid in planned_exclusive or slot_key in planned_slots:
+                continue
+            admitted, _reason, detail = shared_gpu_slot_admission(
+                lock_root,
+                gpu,
+                lock_mode=task.gpu_lock_mode,
+                memory_reservation_mb=task.gpu_memory_reservation_mb,
+                maximum_vram_fraction=SHARED_GPU_MAX_VRAM_FRACTION,
+            )
+            if not admitted:
+                continue
+            # The first shared task on an otherwise empty GPU retains the 60-s
+            # idle-stability requirement. A second task may join only a
+            # validated project-owned shared slot.
+            if not detail.get("active_slots") and gpu.uuid not in stable_idle_uuids:
+                continue
+            projected = int(detail["projected_memory_mb"]) + planned_reservation.get(
+                gpu.uuid, 0
+            )
+            if projected > int(detail["ceiling_memory_mb"]):
+                continue
+            planned_slots.add(slot_key)
+            planned_reservation[gpu.uuid] = planned_reservation.get(gpu.uuid, 0) + int(
+                task.gpu_memory_reservation_mb
+            )
+            allocations.append(GPUAllocation(task_id, instance_id, gpu))
+            break
+    return allocations
+
+
 def controller_tick(
     layout: Any,
     root: Path,
@@ -3203,6 +3341,8 @@ def controller_tick(
     cpu_candidates = cpu_candidates[:cpu_capacity]
     observations: Sequence[GPUObservation] = ()
     selected: list[GPUObservation] = []
+    allocations: list[GPUAllocation] = []
+    stable_idle_uuids: frozenset[str] = frozenset()
     gpu_audit: list[dict[str, Any]] = []
     if gpu_candidates and not dry_run and not resource_failures:
         def sampling_sleep(seconds: float) -> None:
@@ -3224,17 +3364,27 @@ def controller_tick(
             sleep=sampling_sleep,
         )
         observations = stable.observations
+        stable_idle_uuids = stable.stable_idle_uuids
         gpu_audit = audit_gpu_locks(
             layout.locks_dir,
             observations,
             probe_advisory_lock=True,
         )
-        selected = stable.selected(
-            max_gpus=FOUR_GPU_RECOVERY_LIMIT,
+        capacity = available_project_gpu_slots(
+            layout.locks_dir,
+            FOUR_GPU_RECOVERY_LIMIT,
             hard_limit=FOUR_GPU_RECOVERY_LIMIT,
-            lock_root=layout.locks_dir,
-            eligible_uuids=allocation_safe_gpu_uuids(gpu_audit),
         )
+        allocations = plan_gpu_allocations(
+            gpu_candidates,
+            by_id,
+            observations,
+            stable_idle_uuids=stable_idle_uuids,
+            exclusive_safe_uuids=allocation_safe_gpu_uuids(gpu_audit),
+            lock_root=layout.locks_dir,
+            capacity=capacity,
+        )
+        selected = [allocation.gpu for allocation in allocations]
     else:
         try:
             observations = gpu_sampler()
@@ -3272,7 +3422,12 @@ def controller_tick(
                 shard_manifest=shard_paths.get(task_id, {}).get(instance_id),
                 extra_context=_dependency_output_context(root, task, states),
             )
-        for (task_id, instance_id), gpu in zip(gpu_candidates, selected, strict=False):
+        allocated_keys: set[tuple[str, str]] = set()
+        for allocation in allocations:
+            task_id = allocation.task_id
+            instance_id = allocation.instance_id
+            gpu = allocation.gpu
+            allocated_keys.add((task_id, instance_id))
             task = by_id[task_id]
             _launch_instance(
                 layout,
@@ -3286,8 +3441,10 @@ def controller_tick(
                 shard_manifest=shard_paths.get(task_id, {}).get(instance_id),
                 extra_context=_dependency_output_context(root, task, states),
             )
-        if len(selected) < len(gpu_candidates):
-            for task_id, _instance_id in gpu_candidates[len(selected) :]:
+        if len(allocations) < len(gpu_candidates):
+            for task_id, _instance_id in gpu_candidates:
+                if (task_id, _instance_id) in allocated_keys:
+                    continue
                 state = states[task_id]
                 if state.get("state") not in ACTIVE_STATES:
                     _set_task_state(
@@ -3296,7 +3453,11 @@ def controller_tick(
                         by_id[task_id],
                         state,
                         "WAITING_RESOURCE",
-                        reason="WAITING_FOR_60S_STABLE_IDLE_GPU",
+                        reason=(
+                            "WAITING_FOR_60S_STABLE_IDLE_GPU"
+                            if by_id[task_id].gpu_lock_mode == GPU_LOCK_EXCLUSIVE
+                            else "WAITING_FOR_GPU_LOCK_SLOT_OR_70_PERCENT_VRAM_GATE"
+                        ),
                     )
         for task_id, _instance_id in deferred_cpu_candidates:
             state = states[task_id]

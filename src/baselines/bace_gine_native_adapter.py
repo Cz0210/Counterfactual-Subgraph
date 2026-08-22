@@ -15,9 +15,18 @@ repaired, silently dropped, or scored by a fallback classifier.
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
+import time
 from typing import Any, Mapping, Sequence
 
+from src.baselines.gcfexplainer_acceleration import (
+    GCFAccelerationConfig,
+    LEGACY_ACCELERATION_MODE,
+    OrderedLRU,
+    ordered_parallel_map,
+)
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
     decode_generated_fullgraph,
 )
@@ -77,6 +86,7 @@ class BACEFrozenGINENativeGraphAdapter:
         source_records: Sequence[Mapping[str, Any]],
         graph_schema: Any,
         device: str | Any,
+        acceleration: GCFAccelerationConfig | None = None,
     ) -> None:
         torch = _require_torch()
         root = Path(checkpoint_dir).expanduser().resolve()
@@ -103,12 +113,28 @@ class BACEFrozenGINENativeGraphAdapter:
         self.source_records = tuple(dict(record) for record in source_records)
         self.graph_schema = graph_schema
         self.device = device
+        self.acceleration = acceleration or GCFAccelerationConfig()
         self.featurizer = MolecularGraphFeaturizer(metadata["feature_schema"])
         self.hidden_dim = int(getattr(model.config, "hidden_dim"))
         self.edge_feature_dim = len(metadata["feature_schema"].edge_fields)
         self.decode_failures: Counter[str] = Counter()
         self.decode_success_count = 0
         self.call_count = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.unique_gine_graph_count = 0
+        self.phase_seconds: Counter[str] = Counter()
+        self._portable_cache = OrderedLRU(self.acceleration.graph_cache_capacity)
+        self._prediction_cache = OrderedLRU(self.acceleration.graph_cache_capacity)
+        self._cpu_pool = (
+            ThreadPoolExecutor(
+                max_workers=self.acceleration.cpu_neighbor_workers,
+                thread_name_prefix="gcf-adapter",
+            )
+            if self.acceleration.mode != LEGACY_ACCELERATION_MODE
+            and self.acceleration.cpu_neighbor_workers > 1
+            else None
+        )
         self.model.to(device)
         self.model.eval()
         # Keep one tensor anchor for dtype/device creation without guessing the
@@ -172,6 +198,8 @@ class BACEFrozenGINENativeGraphAdapter:
         if not graphs:
             raise ValueError("Native BACE GINE adapter received an empty batch.")
         self.call_count += 1
+        if self.acceleration.mode != LEGACY_ACCELERATION_MODE:
+            return self._accelerated_call(graphs)
         valid_positions: list[int] = []
         valid_graphs: list[MolecularGraphData] = []
         for index, graph in enumerate(graphs):
@@ -222,6 +250,130 @@ class BACEFrozenGINENativeGraphAdapter:
         )
         return node_hidden, graph_hidden, internal_log_probs
 
+    def _accelerated_call(self, graphs: Sequence[Any]) -> tuple[Any, Any, Any]:
+        """Order-preserving decode/cache/chunk path, enabled only behind replay gates."""
+
+        torch = self._torch
+        workers = self.acceleration.cpu_neighbor_workers
+        decode_started = time.perf_counter()
+        decoded = ordered_parallel_map(
+            self._decode,
+            list(graphs),
+            workers=workers,
+            executor=self._cpu_pool,
+        )
+        self.phase_seconds["decode"] += time.perf_counter() - decode_started
+
+        valid_by_smiles: dict[str, list[int]] = {}
+        for index, (smiles, failure) in enumerate(decoded):
+            if failure is not None or smiles is None:
+                self.decode_failures[str(failure or "unknown_decode_failure")] += 1
+                continue
+            valid_by_smiles.setdefault(smiles, []).append(index)
+        featurize_started = time.perf_counter()
+        portable_by_smiles: dict[str, MolecularGraphData] = {}
+        missing_portable: list[str] = []
+        for smiles in valid_by_smiles:
+            cached = self._portable_cache.get(smiles)
+            if cached is None:
+                missing_portable.append(smiles)
+            else:
+                portable_by_smiles[smiles] = cached
+
+        def make_portable(item: tuple[int, str]) -> tuple[str, MolecularGraphData | Exception]:
+            row_index, smiles = item
+            try:
+                return smiles, self._portable_graph(smiles, row_index=row_index)
+            except Exception as exc:  # failures retain the legacy reject policy.
+                return smiles, exc
+
+        portable_results = ordered_parallel_map(
+            make_portable,
+            list(enumerate(missing_portable)),
+            workers=workers,
+            executor=self._cpu_pool,
+        )
+        for smiles, value in portable_results:
+            if isinstance(value, Exception):
+                for _position in valid_by_smiles.pop(smiles, []):
+                    self.decode_failures[
+                        f"gine_featurize_failed:{type(value).__name__}"
+                    ] += 1
+                continue
+            portable_by_smiles[smiles] = value
+            self._portable_cache.put(smiles, value)
+        self.decode_success_count += sum(len(values) for values in valid_by_smiles.values())
+        self.phase_seconds["featurize"] += time.perf_counter() - featurize_started
+
+        graph_hidden = torch.zeros(
+            (len(graphs), self.hidden_dim),
+            dtype=self._parameter.dtype,
+            device=self._parameter.device,
+        )
+        project_logits = torch.empty(
+            (len(graphs), 2),
+            dtype=self._parameter.dtype,
+            device=self._parameter.device,
+        )
+        project_logits[:, 0] = -20.0
+        project_logits[:, 1] = 20.0
+
+        results: dict[str, tuple[Any, Any]] = {}
+        misses: list[str] = []
+        for smiles in valid_by_smiles:
+            cached = self._prediction_cache.get(smiles)
+            if cached is None:
+                misses.append(smiles)
+                self.cache_misses += 1
+            else:
+                results[smiles] = cached
+                self.cache_hits += len(valid_by_smiles[smiles])
+
+        inference_started = time.perf_counter()
+        batch_size = self.acceleration.gine_batch_size
+        for start in range(0, len(misses), batch_size):
+            names = misses[start : start + batch_size]
+            rows = [portable_by_smiles[name] for name in names]
+            batch = collate_molecular_graphs(
+                rows, edge_feature_dim=self.edge_feature_dim
+            ).to(self.device)
+            valid_hidden = self.model.encode_graph(batch)
+            valid_logits = self.model.classifier(valid_hidden) / self.temperature
+            for offset, smiles in enumerate(names):
+                cached_result = (
+                    valid_hidden[offset].detach().cpu().clone(),
+                    valid_logits[offset].detach().cpu().clone(),
+                )
+                results[smiles] = cached_result
+                self._prediction_cache.put(smiles, cached_result)
+                self.unique_gine_graph_count += 1
+        self.phase_seconds["gine"] += time.perf_counter() - inference_started
+
+        assemble_started = time.perf_counter()
+        for smiles, positions in valid_by_smiles.items():
+            hidden_cpu, logits_cpu = results[smiles]
+            positions_tensor = torch.tensor(
+                positions, dtype=torch.long, device=graph_hidden.device
+            )
+            hidden = hidden_cpu.to(
+                device=graph_hidden.device, dtype=graph_hidden.dtype
+            ).expand(len(positions), -1)
+            logits = logits_cpu.to(
+                device=project_logits.device, dtype=project_logits.dtype
+            ).expand(len(positions), -1)
+            graph_hidden.index_copy_(0, positions_tensor, hidden)
+            project_logits.index_copy_(0, positions_tensor, logits)
+        self.phase_seconds["assemble"] += time.perf_counter() - assemble_started
+
+        internal_logits = project_logits[:, torch.tensor([1, 0], device=project_logits.device)]
+        internal_log_probs = torch.log_softmax(internal_logits, dim=-1)
+        node_hidden = torch.zeros(
+            (sum(int(getattr(graph, "num_nodes", 0)) for graph in graphs), self.hidden_dim),
+            dtype=self._parameter.dtype,
+            device=self._parameter.device,
+        )
+        return node_hidden, graph_hidden, internal_log_probs
+
     def provenance(self) -> dict[str, Any]:
         return {
             "adapter_version": ADAPTER_VERSION,
@@ -241,6 +393,16 @@ class BACEFrozenGINENativeGraphAdapter:
             "decode_success_count": self.decode_success_count,
             "decode_failure_count": int(sum(self.decode_failures.values())),
             "decode_failure_reasons": dict(sorted(self.decode_failures.items())),
+            "acceleration": {
+                **asdict(self.acceleration),
+                "fingerprint": self.acceleration.fingerprint,
+                "cache_hits": self.cache_hits,
+                "cache_misses": self.cache_misses,
+                "unique_gine_graph_count": self.unique_gine_graph_count,
+                "portable_cache_entries": len(self._portable_cache),
+                "prediction_cache_entries": len(self._prediction_cache),
+                "phase_seconds": dict(sorted(self.phase_seconds.items())),
+            },
         }
 
 

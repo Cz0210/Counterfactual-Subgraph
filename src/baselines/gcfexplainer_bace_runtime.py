@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import csv
+from contextlib import ExitStack
+from dataclasses import asdict
 import hashlib
 import math
 import os
 import random
+import resource
 import shutil
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -25,6 +29,18 @@ from src.baselines.gcfexplainer_bace_adapter import (
     load_bace_gcf_dataset,
     validate_bace_gnn_profile,
     validate_bace_vrrw_profile,
+)
+from src.baselines.gcfexplainer_acceleration import (
+    BufferedVRRWLogging,
+    GCFAccelerationConfig,
+    LEGACY_ACCELERATION_MODE,
+    ORDERED_ACCELERATION_MODE,
+    OrderedImportanceAcceleration,
+    OrderedNeighbourAcceleration,
+    VRRWPhaseProfiler,
+    build_vrrw_equivalence_trace,
+    scientific_replay_contract_sha256,
+    validate_full_acceleration_gate,
 )
 from src.baselines.bace_gine_native_adapter import (
     BACEFrozenGINENativeGraphAdapter,
@@ -110,6 +126,7 @@ def _load_bace_native_gnn(
     schema: Any,
     source_records: Sequence[Mapping[str, Any]],
     device: str,
+    acceleration: GCFAccelerationConfig | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     if checkpoint_kind == "frozen_project_gine_bundle":
         model = BACEFrozenGINENativeGraphAdapter(
@@ -117,6 +134,7 @@ def _load_bace_native_gnn(
             source_records=source_records,
             graph_schema=schema,
             device=device,
+            acceleration=acceleration,
         ).eval()
         return model, model.provenance()
     model = _load_official_gnn(
@@ -357,6 +375,12 @@ def run_bace_official_vrrw(
     device1: str = "cuda:0",
     device2: str = "cuda:0",
     resume: bool = True,
+    acceleration_mode: str = LEGACY_ACCELERATION_MODE,
+    gine_batch_size: int = 256,
+    graph_cache_capacity: int = 0,
+    cpu_neighbor_workers: int = 1,
+    progress_every: int = 1000,
+    acceleration_gate: str | Path | None = None,
 ) -> dict[str, Any]:
     schema, _train, _val, generation, dataset_summary = load_bace_gcf_dataset(
         dataset_dir
@@ -379,6 +403,26 @@ def run_bace_official_vrrw(
     checkpoint, checkpoint_sha256, checkpoint_kind = _bace_gnn_checkpoint_identity(
         gnn_checkpoint
     )
+    acceleration = GCFAccelerationConfig(
+        mode=str(acceleration_mode),
+        gine_batch_size=int(gine_batch_size),
+        graph_cache_capacity=int(graph_cache_capacity),
+        cpu_neighbor_workers=int(cpu_neighbor_workers),
+        progress_every=int(progress_every),
+    )
+    if (
+        acceleration.mode == ORDERED_ACCELERATION_MODE
+        and checkpoint_kind != "frozen_project_gine_bundle"
+    ):
+        raise ValueError("ordered_v2 is supported only by the frozen BACE GINE adapter")
+    acceleration_gate_payload: dict[str, Any] | None = None
+    acceleration_gate_path: Path | None = None
+    if profile == "full" and acceleration.mode == ORDERED_ACCELERATION_MODE:
+        if acceleration_gate is None:
+            raise ValueError(
+                "Full ordered_v2 VRRW requires the 500/1000 equivalence and A/B gate"
+            )
+        acceleration_gate_path = Path(acceleration_gate).expanduser().resolve(strict=True)
     neurosed = Path(neurosed_checkpoint).expanduser().resolve()
     projection_manifest = Path(neurosed_manifest).expanduser().resolve()
     for path, label in (
@@ -431,7 +475,36 @@ def run_bace_official_vrrw(
         "calibration_loaded": False,
         "test_loaded": False,
         "official_compatibility_patches": [VRRW_ALPHA_ENDPOINT_PATCH],
+        "acceleration": {
+            **asdict(acceleration),
+            "fingerprint": acceleration.fingerprint,
+            "full_gate_path": (
+                str(acceleration_gate_path) if acceleration_gate_path is not None else None
+            ),
+            "full_gate_sha256": (
+                sha256_file(acceleration_gate_path)
+                if acceleration_gate_path is not None
+                else None
+            ),
+            "full_gate_status": (
+                acceleration_gate_payload.get("status")
+                if acceleration_gate_payload is not None
+                else None
+            ),
+            "mps_enabled": False,
+            "random_stream_reordered": False,
+            "transition_order_reordered": False,
+        },
     }
+    if acceleration_gate_path is not None:
+        acceleration_gate_payload = validate_full_acceleration_gate(
+            acceleration_gate_path,
+            config=acceleration,
+            scientific_contract_sha256=scientific_replay_contract_sha256(config),
+        )
+        config["acceleration"]["full_gate_status"] = acceleration_gate_payload.get(
+            "status"
+        )
     root = Path(output_dir).expanduser().resolve()
     complete = _reuse_complete(root, resume=resume)
     if complete is not None:
@@ -469,6 +542,7 @@ def run_bace_official_vrrw(
         schema=schema,
         source_records=selected,
         device=target_device1,
+        acceleration=acceleration,
     )
     internal_predictions = _predict_graphs(model, graphs, target_device1)
     write_jsonl(
@@ -509,8 +583,17 @@ def run_bace_official_vrrw(
     runtime_root = root / "official_runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
     old_cwd = Path.cwd()
+    profiler = VRRWPhaseProfiler(
+        vrrw=vrrw,
+        importance=importance,
+        progress_every=acceleration.progress_every,
+    )
+    importance_acceleration: OrderedImportanceAcceleration | None = None
+    random_walk_started: float | None = None
+    random_walk_finished: float | None = None
     try:
         os.chdir(runtime_root)
+        prepare_started = time.perf_counter()
         importance_args = importance.prepare_and_get(
             dataset,
             model,
@@ -521,19 +604,39 @@ def run_bace_official_vrrw(
             device2=target_device2,
             dataset_name="bace",
         )
+        prepare_seconds = time.perf_counter() - prepare_started
         vrrw.importance_args = importance_args
         print("[GCFEXPLAINER_OFFICIAL_COMPAT_PATCH]", flush=True)
         print(f"patch={VRRW_ALPHA_ENDPOINT_PATCH}", flush=True)
         print("dataset=bace", flush=True)
         print(f"alpha={float(alpha)}", flush=True)
         print("official_source_modified=false", flush=True)
-        with _official_vrrw_alpha_endpoint_patch(vrrw):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(target_device1)
+        with ExitStack() as stack:
+            if acceleration.cpu_neighbor_workers > 1:
+                stack.enter_context(
+                    OrderedNeighbourAcceleration(
+                        vrrw, workers=acceleration.cpu_neighbor_workers
+                    )
+                )
+            if acceleration.mode == ORDERED_ACCELERATION_MODE:
+                stack.enter_context(BufferedVRRWLogging(vrrw))
+                importance_acceleration = stack.enter_context(
+                    OrderedImportanceAcceleration(
+                        importance, capacity=acceleration.graph_cache_capacity
+                    )
+                )
+            stack.enter_context(profiler)
+            stack.enter_context(_official_vrrw_alpha_endpoint_patch(vrrw))
+            random_walk_started = time.perf_counter()
             vrrw.counterfactual_summary_with_randomwalk(
-                input_graphs=graphs,
-                importance_args=importance_args,
-                teleport_probability=float(teleport),
-                max_steps=int(m),
-            )
+                    input_graphs=graphs,
+                    importance_args=importance_args,
+                    teleport_probability=float(teleport),
+                    max_steps=int(m),
+                )
+            random_walk_finished = time.perf_counter()
     finally:
         os.chdir(old_cwd)
         distance.load_neurosed = original_load_neurosed
@@ -544,8 +647,65 @@ def run_bace_official_vrrw(
     result_path = root / "counterfactuals.pt"
     shutil.copy2(official_result, result_path)
     payload = _torch_load_compat(result_path)
+    equivalence_trace = build_vrrw_equivalence_trace(
+        payload=payload,
+        torch=torch,
+        np=np,
+        budget=int(m),
+    )
+    write_json(root / "equivalence_trace.json", equivalence_trace)
     graph_map = dict(payload.get("graph_map", {}))
     candidates = list(payload.get("counterfactual_candidates", []))
+    gpu_total_bytes = 0
+    peak_allocated_bytes = 0
+    peak_reserved_bytes = 0
+    if torch.cuda.is_available():
+        device_object = torch.device(target_device1)
+        device_index = (
+            torch.cuda.current_device()
+            if device_object.index is None
+            else int(device_object.index)
+        )
+        gpu_total_bytes = int(torch.cuda.get_device_properties(device_index).total_memory)
+        peak_allocated_bytes = int(torch.cuda.max_memory_allocated(device_index))
+        peak_reserved_bytes = int(torch.cuda.max_memory_reserved(device_index))
+    phase_profile = profiler.report()
+    phase_profile.update(
+        {
+            "schema_version": 1,
+            "prepare_importance_seconds": prepare_seconds,
+            "random_walk_seconds": (
+                random_walk_finished - random_walk_started
+                if random_walk_started is not None and random_walk_finished is not None
+                else None
+            ),
+            "max_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+            "gpu_uuid": os.environ.get("AUTODL_PHYSICAL_GPU_UUID"),
+            "gpu_index": os.environ.get("AUTODL_PHYSICAL_GPU_INDEX"),
+            "gpu_total_bytes": gpu_total_bytes,
+            "peak_gpu_allocated_bytes": peak_allocated_bytes,
+            "peak_gpu_reserved_bytes": peak_reserved_bytes,
+            "peak_vram_fraction": (
+                peak_reserved_bytes / gpu_total_bytes if gpu_total_bytes else 0.0
+            ),
+            "adapter": (
+                model.provenance().get("acceleration", {})
+                if hasattr(model, "provenance")
+                else {}
+            ),
+            "importance_cache": (
+                importance_acceleration.report()
+                if importance_acceleration is not None
+                else {
+                    "calls": 0,
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                    "cache_entries": 0,
+                }
+            ),
+        }
+    )
+    write_json(root / "performance_profile.json", phase_profile)
     manifest = {
         **config,
         "oracle_backend": model_provenance.get("oracle_backend"),
@@ -569,6 +729,10 @@ def run_bace_official_vrrw(
         "traversed_step_count": len(payload.get("traversed_hashes", [])),
         "counterfactuals_path": str(result_path),
         "counterfactuals_sha256": sha256_file(result_path),
+        "equivalence_trace_path": str(root / "equivalence_trace.json"),
+        "equivalence_trace_sha256": sha256_file(root / "equivalence_trace.json"),
+        "performance_profile_path": str(root / "performance_profile.json"),
+        "performance_profile_sha256": sha256_file(root / "performance_profile.json"),
         "official_algorithms_reused": [
             "vrrw.counterfactual_summary_with_randomwalk",
             "vrrw.move_to_next_graph",

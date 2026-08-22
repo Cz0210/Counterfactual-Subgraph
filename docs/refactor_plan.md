@@ -19,6 +19,22 @@
   focused tamper/source-hash/fresh-root/registry/export tests, and a deployment
   runbook.
 
+## 2026-08-23: BACE GCFExplainer replay-gated acceleration
+
+- [x] Instrument fresh VRRW roots with phase timings, throughput, RSS, GPU peak
+  memory, cache counters, and canonical equivalence digests.
+- [x] Preserve edit and transition order while adding ordered CPU neighbour
+  construction, canonical graph caches, bounded GINE batches, and buffered
+  progress.
+- [x] Require 500/1000 exact canonical replay and a same-GPU >=20% A/B gate
+  before an optimized 50,000-step launch.
+- [x] Add two opt-in low-memory slots per UUID, legacy-exclusive compatibility,
+  process ownership checks, positive reservations, and a strict 70% VRAM cap.
+- [x] Keep MPS disabled, legacy mode default, existing outputs immutable, and
+  all deployment commands AutoDL-only.
+- [ ] Run the fresh 500/1000 same-card smoke on AutoDL after the current legacy
+  full job releases a suitable GPU/lock; deploy 50k only if the gate passes.
+
 ## 2026-08-22: Mutagenicity GCF off-grid theta-star export compatibility
 
 - [x] Reproduce the repair-v1 failure against the real 601-point frozen grid,

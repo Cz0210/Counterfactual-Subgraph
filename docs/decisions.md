@@ -60,6 +60,49 @@ documented CLI and exists solely for repository parity.
 - ComRecGC remains a separate native cell and ongoing ComRecGC work is not
   interrupted.
 
+## [2026-08-23] Gate BACE GCF acceleration by exact replay and shared-slot safety
+
+### Background
+
+The official BACE GCFExplainer VRRW retains the preregistered 50,000-step
+budget but spends substantial wall time constructing edit neighbours, decoding
+the same molecular graphs, and repeatedly scoring them through the frozen
+GINE.  Its GINE call already batches each individual neighbourhood, so simply
+raising GPU concurrency would not address the CPU/cache bottleneck and could
+silently change random-walk order.
+
+### Decision
+
+Keep legacy mode as the default. Add an opt-in `ordered_v2` path that enumerates
+the exact official actions in the exact official order, restores concurrent
+pure neighbour results by input position, caches canonical graph/lineage
+feature, GINE, and NeuroSED coverage results, chunks GINE inference, and
+buffers progress reporting. It must not
+consume randomness or modify official vendored source.
+
+Refuse a full optimized run unless fresh legacy/optimized 500- and 1000-step
+runs have identical canonical graph-transition/candidate/RNG digests and a
+sequential A/B on one physical GPU is at least 20% faster with peak reserved
+VRAM at or below 70%. Preserve `M=50000` and reject a gate/config fingerprint
+mismatch.
+
+Add explicit `exclusive`, `shared_lowmem_slot_0`, and
+`shared_lowmem_slot_1` lock modes. Shared workers retain a shared advisory lock
+on the legacy UUID file, so any legacy/new exclusive owner still excludes
+them. At most two shared slots exist, compute PIDs must be attributable to
+active slot metadata, and both scheduler and worker independently enforce the
+70% reservation ceiling. CUDA MPS remains disabled.
+
+### Consequences
+
+- The already-running legacy GCF process is not stopped or modified.
+- Low GPU utilization alone never authorizes colocation; manifests must opt in
+  with a positive reservation and pass admission.
+- Failed equivalence or throughput evidence cannot emit a PASS gate and the
+  legacy result remains authoritative.
+- This change is AutoDL-only. No HPC job was submitted or contacted, and the
+  task-specific no-HPC boundary supersedes creation of a new Slurm wrapper.
+
 ### Status
 
 Accepted

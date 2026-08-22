@@ -20,6 +20,9 @@ from src.utils.autodl_runtime import (
     AutoDLRuntimeError,
     BACE_STAGES,
     GPUFileLock,
+    GPUSharedSlotLock,
+    GPU_LOCK_EXCLUSIVE,
+    GPU_LOCK_MODES,
     ProjectGPUSlotLock,
     StageTransitionError,
     append_jsonl_locked,
@@ -89,6 +92,8 @@ def _parse_environment(values: Sequence[str]) -> dict[str, str]:
         if "=" not in value:
             raise AutoDLRuntimeError(f"--env requires KEY=VALUE, got {value!r}")
         key, content = value.split("=", 1)
+        if key.startswith("CUDA_MPS"):
+            raise AutoDLRuntimeError("AutoDL shared slots never enable CUDA MPS")
         if not key or (
             _SECRET.search(key)
             and key not in _SAFE_ENVIRONMENT_KEYS_WITH_SECRET_SUBSTRINGS
@@ -121,6 +126,8 @@ def _registry_event(spec: Mapping[str, Any], *, state: str, exit_code: int | Non
         "stage": spec["stage"],
         "gpu_index": spec.get("gpu_index"),
         "gpu_uuid": spec.get("gpu_uuid"),
+        "gpu_lock_mode": spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE),
+        "gpu_memory_reservation_mb": spec.get("gpu_memory_reservation_mb", 0),
         "git_commit": spec.get("git_commit"),
         "config_hash": spec.get("config_hash"),
         "input_hash": spec.get("input_hash"),
@@ -175,6 +182,8 @@ def _write_stage_manifest(layout: Any, spec: Mapping[str, Any]) -> None:
             "git_commit": spec["git_commit"],
             "gpu_index": spec["gpu_index"],
             "gpu_uuid": spec["gpu_uuid"],
+            "gpu_lock_mode": spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE),
+            "gpu_memory_reservation_mb": spec.get("gpu_memory_reservation_mb", 0),
             "created_at": spec["created_at"],
         },
     )
@@ -264,6 +273,8 @@ def _write_run_state(layout: Any, spec: Mapping[str, Any], state: str, **fields:
             "tmux_session": spec.get("tmux_session"),
             "gpu_index": spec.get("gpu_index"),
             "gpu_uuid": spec.get("gpu_uuid"),
+            "gpu_lock_mode": spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE),
+            "gpu_memory_reservation_mb": spec.get("gpu_memory_reservation_mb", 0),
             "log_path": spec["log_path"],
             **fields,
         },
@@ -280,6 +291,10 @@ def _assert_gpu_identity(spec: Mapping[str, Any]) -> None:
             "Assigned physical GPU index/UUID no longer match nvidia-smi"
         )
     gpu = matches[0]
+    if spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE) != GPU_LOCK_EXCLUSIVE:
+        # The shared lock performs atomic process-ownership and 70%-VRAM
+        # admission.  A shared GPU is intentionally not idle here.
+        return
     if not gpu.is_idle(
         min_free_memory_mb=int(spec["min_free_memory_mb"]),
         max_utilization_percent=int(spec["idle_util_threshold"]),
@@ -386,9 +401,13 @@ def run_worker(spec_path: Path) -> int:
     ).ensure()
     environment = sanitized_environment()
     environment.update({str(key): str(value) for key, value in spec.get("environment", {}).items()})
+    for key in list(environment):
+        if key.startswith("CUDA_MPS"):
+            environment.pop(key, None)
     environment["PYTHONPATH"] = str(project_root) + (
         f":{environment['PYTHONPATH']}" if environment.get("PYTHONPATH") else ""
     )
+    environment["AUTODL_MPS_ENABLED"] = "0"
     lock_context: Any = nullcontext()
     slot_context: Any = nullcontext()
     if spec.get("gpu_index") is not None:
@@ -398,12 +417,24 @@ def run_worker(spec_path: Path) -> int:
             hard_limit=int(spec.get("gpu_hard_limit", 2)),
             owner={"run_id": spec["run_id"], "stage": spec["stage"]},
         )
-        lock_context = GPUFileLock(
-            layout.locks_dir,
-            gpu_index=int(spec["gpu_index"]),
-            gpu_uuid=str(spec["gpu_uuid"]),
-            owner={"run_id": spec["run_id"], "stage": spec["stage"]},
-        )
+        lock_mode = str(spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE))
+        if lock_mode == GPU_LOCK_EXCLUSIVE:
+            lock_context = GPUFileLock(
+                layout.locks_dir,
+                gpu_index=int(spec["gpu_index"]),
+                gpu_uuid=str(spec["gpu_uuid"]),
+                owner={"run_id": spec["run_id"], "stage": spec["stage"]},
+            )
+        else:
+            lock_context = GPUSharedSlotLock(
+                layout.locks_dir,
+                gpu_index=int(spec["gpu_index"]),
+                gpu_uuid=str(spec["gpu_uuid"]),
+                lock_mode=lock_mode,
+                memory_reservation_mb=int(spec.get("gpu_memory_reservation_mb", 0)),
+                hold_coordination_until_child_pid=True,
+                owner={"run_id": spec["run_id"], "stage": spec["stage"]},
+            )
         environment["CUDA_VISIBLE_DEVICES"] = str(spec["gpu_index"])
         environment["AUTODL_PHYSICAL_GPU_INDEX"] = str(spec["gpu_index"])
         environment["AUTODL_PHYSICAL_GPU_UUID"] = str(spec["gpu_uuid"])
@@ -432,6 +463,12 @@ def run_worker(spec_path: Path) -> int:
                             "stage": spec["stage"],
                             "gpu_index": spec.get("gpu_index"),
                             "gpu_uuid": spec.get("gpu_uuid"),
+                            "gpu_lock_mode": spec.get(
+                                "gpu_lock_mode", GPU_LOCK_EXCLUSIVE
+                            ),
+                            "gpu_memory_reservation_mb": spec.get(
+                                "gpu_memory_reservation_mb", 0
+                            ),
                             "command": spec["command"],
                             "timestamp": utc_now(),
                         },
@@ -450,6 +487,8 @@ def run_worker(spec_path: Path) -> int:
                     start_new_session=True,
                 )
                 child_pid = child.pid
+                if isinstance(lock_context, GPUSharedSlotLock):
+                    lock_context.update_child_pid(child_pid)
                 _write_stage_state(layout, spec, "RUNNING", run_id=spec["run_id"], pid=os.getpid(), child_pid=child_pid)
                 _write_run_state(layout, spec, "RUNNING", pid=os.getpid(), child_pid=child_pid)
                 exit_code = int(child.wait())
@@ -535,6 +574,16 @@ def launch(args: argparse.Namespace) -> int:
         raise AutoDLRuntimeError("--gpu-index and --gpu-uuid must be provided together")
     if args.gpu_required and args.gpu_index is None:
         raise AutoDLRuntimeError("This stage requires a physical GPU assignment")
+    if args.gpu_lock_mode not in GPU_LOCK_MODES:
+        raise AutoDLRuntimeError(f"Unsupported GPU lock mode: {args.gpu_lock_mode}")
+    if args.gpu_index is None:
+        if args.gpu_lock_mode != GPU_LOCK_EXCLUSIVE or args.gpu_memory_reservation_mb != 0:
+            raise AutoDLRuntimeError("CPU tasks cannot declare a GPU shared slot/reservation")
+    elif args.gpu_lock_mode == GPU_LOCK_EXCLUSIVE:
+        if args.gpu_memory_reservation_mb != 0:
+            raise AutoDLRuntimeError("Exclusive GPU tasks must use reservation=0")
+    elif args.gpu_memory_reservation_mb <= 0:
+        raise AutoDLRuntimeError("Shared-lowmem GPU tasks require a positive reservation")
     environment = _parse_environment(args.env)
     config_paths = [path.expanduser().resolve(strict=True) for path in args.config_file]
     input_manifest = args.input_manifest.expanduser().resolve(strict=True) if args.input_manifest else None
@@ -593,6 +642,8 @@ def launch(args: argparse.Namespace) -> int:
         "environment": environment,
         "gpu_index": args.gpu_index,
         "gpu_uuid": args.gpu_uuid,
+        "gpu_lock_mode": args.gpu_lock_mode,
+        "gpu_memory_reservation_mb": args.gpu_memory_reservation_mb,
         "min_free_memory_mb": args.min_free_memory_mb,
         "idle_util_threshold": args.idle_util_threshold,
         "max_gpus": args.max_gpus,
@@ -667,6 +718,8 @@ def launch(args: argparse.Namespace) -> int:
                 "tmux_session": tmux_session,
                 "gpu_index": args.gpu_index,
                 "gpu_uuid": args.gpu_uuid,
+                "gpu_lock_mode": args.gpu_lock_mode,
+                "gpu_memory_reservation_mb": args.gpu_memory_reservation_mb,
                 "log_path": str(log_path),
                 "control_root": str(layout.control_root),
                 "python_executable": str(Path(sys.executable).resolve(strict=True)),
@@ -713,6 +766,12 @@ def parse_args() -> argparse.Namespace:
     launch_parser.add_argument("--gpu-index", type=int)
     launch_parser.add_argument("--gpu-uuid")
     launch_parser.add_argument("--gpu-required", action="store_true")
+    launch_parser.add_argument(
+        "--gpu-lock-mode",
+        choices=tuple(sorted(GPU_LOCK_MODES)),
+        default=GPU_LOCK_EXCLUSIVE,
+    )
+    launch_parser.add_argument("--gpu-memory-reservation-mb", type=int, default=0)
     launch_parser.add_argument("--heavy", action="store_true")
     launch_parser.add_argument("--config-file", type=Path, action="append", default=[])
     launch_parser.add_argument("--input-manifest", type=Path)

@@ -40,6 +40,14 @@ from typing import Any, TextIO
 # prevents an unrelated call site from silently expanding its resource scope.
 MAX_AUTODL_GPUS = 2
 FOUR_GPU_RECOVERY_LIMIT = 4
+GPU_LOCK_EXCLUSIVE = "exclusive"
+GPU_LOCK_SHARED_SLOT_0 = "shared_lowmem_slot_0"
+GPU_LOCK_SHARED_SLOT_1 = "shared_lowmem_slot_1"
+GPU_LOCK_MODES = frozenset(
+    {GPU_LOCK_EXCLUSIVE, GPU_LOCK_SHARED_SLOT_0, GPU_LOCK_SHARED_SLOT_1}
+)
+SHARED_GPU_MAX_TASKS = 2
+SHARED_GPU_MAX_VRAM_FRACTION = 0.70
 
 BACE_STAGES: tuple[str, ...] = (
     "B0_AUDIT",
@@ -609,6 +617,28 @@ def _gpu_lock_path(lock_root: Path, gpu_uuid: str) -> Path:
     return lock_root / f"gpu-{component}.lock"
 
 
+def _gpu_shared_slot_path(lock_root: Path, gpu_uuid: str, slot: int) -> Path:
+    component = _SAFE_LOCK_COMPONENT.sub("_", gpu_uuid).strip("._")
+    if not component or slot not in range(SHARED_GPU_MAX_TASKS):
+        raise GPULockError(f"Unsafe GPU UUID/shared slot: {gpu_uuid!r}/{slot}")
+    return lock_root / f"gpu-{component}.shared-slot-{slot}.lock"
+
+
+def _gpu_coordination_path(lock_root: Path, gpu_uuid: str) -> Path:
+    component = _SAFE_LOCK_COMPONENT.sub("_", gpu_uuid).strip("._")
+    if not component:
+        raise GPULockError(f"Unsafe or empty GPU UUID: {gpu_uuid!r}")
+    return lock_root / f"gpu-{component}.coordination.lock"
+
+
+def _shared_slot_index(lock_mode: str) -> int:
+    if lock_mode == GPU_LOCK_SHARED_SLOT_0:
+        return 0
+    if lock_mode == GPU_LOCK_SHARED_SLOT_1:
+        return 1
+    raise GPULockError(f"Not a shared-lowmem GPU lock mode: {lock_mode}")
+
+
 class GPUFileLock(AbstractContextManager["GPUFileLock"]):
     """Nonblocking advisory lock keyed by immutable physical GPU UUID."""
 
@@ -686,6 +716,424 @@ class GPUFileLock(AbstractContextManager["GPUFileLock"]):
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self.release()
+
+
+class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
+    """One of two opt-in low-memory slots under a shared UUID lock.
+
+    The legacy UUID lock is held with ``LOCK_SH`` for the full worker lifetime,
+    so any old/new exclusive worker (``LOCK_EX``) remains mutually exclusive.
+    A short UUID coordination lock makes reservation admission and slot
+    acquisition atomic across the two shared launchers.
+    """
+
+    def __init__(
+        self,
+        lock_root: Path,
+        *,
+        gpu_index: int,
+        gpu_uuid: str,
+        lock_mode: str,
+        memory_reservation_mb: int,
+        maximum_vram_fraction: float = SHARED_GPU_MAX_VRAM_FRACTION,
+        hold_coordination_until_child_pid: bool = False,
+        owner: Mapping[str, Any] | None = None,
+        inventory_reader: Callable[[], list[GPUObservation]] = query_gpu_inventory,
+    ) -> None:
+        self.lock_root = lock_root
+        self.gpu_index = int(gpu_index)
+        self.gpu_uuid = str(gpu_uuid)
+        self.lock_mode = str(lock_mode)
+        self.slot = _shared_slot_index(self.lock_mode)
+        if (
+            isinstance(memory_reservation_mb, bool)
+            or int(memory_reservation_mb) <= 0
+        ):
+            raise GPULockError("Shared GPU memory reservation must be positive")
+        self.memory_reservation_mb = int(memory_reservation_mb)
+        self.maximum_vram_fraction = float(maximum_vram_fraction)
+        if not 0.0 < self.maximum_vram_fraction <= SHARED_GPU_MAX_VRAM_FRACTION:
+            raise GPULockError("Shared GPU VRAM ceiling cannot exceed 70%")
+        self.owner = dict(owner or {})
+        self.hold_coordination_until_child_pid = bool(
+            hold_coordination_until_child_pid
+        )
+        self.inventory_reader = inventory_reader
+        self.uuid_path = _gpu_lock_path(lock_root, gpu_uuid)
+        self.slot_path = _gpu_shared_slot_path(lock_root, gpu_uuid, self.slot)
+        self.coordination_path = _gpu_coordination_path(lock_root, gpu_uuid)
+        self._uuid_handle: TextIO | None = None
+        self._slot_handle: TextIO | None = None
+        self._coordination_handle: TextIO | None = None
+
+    def _observation(self) -> GPUObservation:
+        matches = [
+            value
+            for value in self.inventory_reader()
+            if value.index == self.gpu_index and value.uuid == self.gpu_uuid
+        ]
+        if len(matches) != 1:
+            raise GPULockError("Shared GPU physical index/UUID identity changed")
+        return matches[0]
+
+    def _other_reservations(self) -> tuple[int, set[int]]:
+        total = 0
+        child_pids: set[int] = set()
+        for slot in range(SHARED_GPU_MAX_TASKS):
+            if slot == self.slot:
+                continue
+            path = _gpu_shared_slot_path(self.lock_root, self.gpu_uuid, slot)
+            if path.is_symlink():
+                raise GPULockError(f"Shared GPU slot path must not be a symlink: {path}")
+            if not path.is_file():
+                continue
+            probe = path.open("a+", encoding="utf-8")
+            try:
+                try:
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    active = True
+                else:
+                    active = False
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+            finally:
+                probe.close()
+            if not active:
+                continue
+            try:
+                metadata = read_json_object(path)
+            except AutoDLRuntimeError as exc:
+                raise GPULockError(f"Shared GPU slot metadata is invalid: {path}") from exc
+            if metadata.get("state") != "LOCKED":
+                raise GPULockError(
+                    f"Active shared GPU slot lacks LOCKED metadata: {path}"
+                )
+            value = metadata.get("memory_reservation_mb")
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise GPULockError(f"Shared GPU slot reservation is invalid: {path}")
+            total += value
+            child_pid = metadata.get("child_pid")
+            if (
+                isinstance(child_pid, int)
+                and not isinstance(child_pid, bool)
+                and child_pid > 0
+            ):
+                child_pids.add(child_pid)
+        return total, child_pids
+
+    def acquire(self) -> "GPUSharedSlotLock":
+        self.lock_root.mkdir(parents=True, exist_ok=True)
+        for path in (self.uuid_path, self.slot_path, self.coordination_path):
+            if path.is_symlink():
+                raise GPULockError(f"GPU lock path must not be a symlink: {path}")
+        coordination = self.coordination_path.open("a+", encoding="utf-8")
+        uuid_handle: TextIO | None = None
+        slot_handle: TextIO | None = None
+        try:
+            fcntl.flock(coordination.fileno(), fcntl.LOCK_EX)
+            uuid_handle = self.uuid_path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(uuid_handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise GPULockError(
+                    f"GPU {self.gpu_index} ({self.gpu_uuid}) has an exclusive owner"
+                ) from exc
+            slot_handle = self.slot_path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(slot_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise GPULockError(
+                    f"GPU shared slot {self.slot} is already locked"
+                ) from exc
+            observation = self._observation()
+            reserved_before, active_children = self._other_reservations()
+            process_pids = {process.pid for process in observation.processes}
+            if not process_pids.issubset(active_children):
+                raise GPULockError(
+                    "Shared GPU has a compute process not owned by an active slot: "
+                    f"processes={sorted(process_pids)} active_children={sorted(active_children)}"
+                )
+            accounted_before = max(observation.memory_used_mb, reserved_before)
+            projected = accounted_before + self.memory_reservation_mb
+            ceiling = int(observation.memory_total_mb * self.maximum_vram_fraction)
+            if projected > ceiling:
+                raise GPULockError(
+                    "Shared GPU admission exceeds the strict VRAM ceiling: "
+                    f"projected={projected}MiB ceiling={ceiling}MiB"
+                )
+            payload = {
+                "schema_version": 2,
+                "state": "LOCKED",
+                "lock_mode": self.lock_mode,
+                "shared_slot": self.slot,
+                "gpu_index": self.gpu_index,
+                "gpu_uuid": self.gpu_uuid,
+                "pid": os.getpid(),
+                "child_pid": None,
+                "memory_reservation_mb": self.memory_reservation_mb,
+                "maximum_vram_fraction": self.maximum_vram_fraction,
+                "observed_memory_used_mb_at_admission": observation.memory_used_mb,
+                "projected_memory_mb_at_admission": projected,
+                "acquired_at": utc_now(),
+                **self.owner,
+            }
+            slot_handle.seek(0)
+            slot_handle.truncate()
+            json.dump(payload, slot_handle, sort_keys=True)
+            slot_handle.write("\n")
+            slot_handle.flush()
+            os.fsync(slot_handle.fileno())
+            self._uuid_handle = uuid_handle
+            self._slot_handle = slot_handle
+            if self.hold_coordination_until_child_pid:
+                self._coordination_handle = coordination
+                coordination = None
+            return self
+        except Exception:
+            if slot_handle is not None:
+                try:
+                    fcntl.flock(slot_handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    slot_handle.close()
+            if uuid_handle is not None:
+                try:
+                    fcntl.flock(uuid_handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    uuid_handle.close()
+            raise
+        finally:
+            if coordination is not None:
+                fcntl.flock(coordination.fileno(), fcntl.LOCK_UN)
+                coordination.close()
+
+    def update_child_pid(self, child_pid: int) -> None:
+        if self._slot_handle is None or child_pid <= 0:
+            raise GPULockError("Cannot update an inactive shared GPU slot")
+        handle = self._slot_handle
+        handle.seek(0)
+        payload = json.load(handle)
+        payload["child_pid"] = int(child_pid)
+        payload["child_pid_recorded_at"] = utc_now()
+        handle.seek(0)
+        handle.truncate()
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        if self._coordination_handle is not None:
+            fcntl.flock(self._coordination_handle.fileno(), fcntl.LOCK_UN)
+            self._coordination_handle.close()
+            self._coordination_handle = None
+
+    def release(self) -> None:
+        if self._slot_handle is None or self._uuid_handle is None:
+            if self._coordination_handle is not None:
+                fcntl.flock(self._coordination_handle.fileno(), fcntl.LOCK_UN)
+                self._coordination_handle.close()
+                self._coordination_handle = None
+            return
+        slot_handle = self._slot_handle
+        slot_handle.seek(0)
+        slot_handle.truncate()
+        json.dump(
+            {
+                "schema_version": 2,
+                "state": "RELEASED",
+                "lock_mode": self.lock_mode,
+                "shared_slot": self.slot,
+                "gpu_index": self.gpu_index,
+                "gpu_uuid": self.gpu_uuid,
+                "pid": os.getpid(),
+                "released_at": utc_now(),
+            },
+            slot_handle,
+            sort_keys=True,
+        )
+        slot_handle.write("\n")
+        slot_handle.flush()
+        os.fsync(slot_handle.fileno())
+        fcntl.flock(slot_handle.fileno(), fcntl.LOCK_UN)
+        slot_handle.close()
+        fcntl.flock(self._uuid_handle.fileno(), fcntl.LOCK_UN)
+        self._uuid_handle.close()
+        self._slot_handle = None
+        self._uuid_handle = None
+        if self._coordination_handle is not None:
+            fcntl.flock(self._coordination_handle.fileno(), fcntl.LOCK_UN)
+            self._coordination_handle.close()
+            self._coordination_handle = None
+
+    def __enter__(self) -> "GPUSharedSlotLock":
+        return self.acquire()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.release()
+
+
+def shared_gpu_slot_admission(
+    lock_root: Path,
+    observation: GPUObservation,
+    *,
+    lock_mode: str,
+    memory_reservation_mb: int,
+    maximum_vram_fraction: float = SHARED_GPU_MAX_VRAM_FRACTION,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Read-only admission probe for one shared-lowmem scheduler decision."""
+
+    try:
+        slot = _shared_slot_index(lock_mode)
+    except GPULockError as exc:
+        return False, str(exc), {}
+    if memory_reservation_mb <= 0:
+        return False, "shared GPU memory reservation must be positive", {}
+    if not 0.0 < maximum_vram_fraction <= SHARED_GPU_MAX_VRAM_FRACTION:
+        return False, "shared GPU VRAM ceiling cannot exceed 70%", {}
+    lock_root.mkdir(parents=True, exist_ok=True)
+    uuid_path = _gpu_lock_path(lock_root, observation.uuid)
+    slot_path = _gpu_shared_slot_path(lock_root, observation.uuid, slot)
+    coordination_path = _gpu_coordination_path(lock_root, observation.uuid)
+    if any(path.is_symlink() for path in (uuid_path, slot_path, coordination_path)):
+        return False, "shared GPU lock path is a symlink", {}
+    coordination = coordination_path.open("a+", encoding="utf-8")
+    uuid_handle: TextIO | None = None
+    slot_handle: TextIO | None = None
+    active_reservations = 0
+    active_children: set[int] = set()
+    active_slots: list[int] = []
+    try:
+        fcntl.flock(coordination.fileno(), fcntl.LOCK_EX)
+        uuid_handle = uuid_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(uuid_handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False, "exclusive UUID lock is held", {}
+        slot_handle = slot_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(slot_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False, f"shared slot {slot} is held", {}
+        for candidate in range(SHARED_GPU_MAX_TASKS):
+            if candidate == slot:
+                continue
+            candidate_path = _gpu_shared_slot_path(
+                lock_root, observation.uuid, candidate
+            )
+            if not candidate_path.is_file() or candidate_path.is_symlink():
+                continue
+            probe = candidate_path.open("a+", encoding="utf-8")
+            try:
+                try:
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    active = True
+                else:
+                    active = False
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+            finally:
+                probe.close()
+            if not active:
+                continue
+            metadata = read_json_object(candidate_path)
+            if metadata.get("state") != "LOCKED":
+                return False, "active shared slot lacks LOCKED metadata", {}
+            reservation = metadata.get("memory_reservation_mb")
+            if (
+                isinstance(reservation, bool)
+                or not isinstance(reservation, int)
+                or reservation <= 0
+            ):
+                return False, "active shared slot has invalid reservation", {}
+            active_reservations += reservation
+            active_slots.append(candidate)
+            child_pid = metadata.get("child_pid")
+            if isinstance(child_pid, int) and not isinstance(child_pid, bool) and child_pid > 0:
+                active_children.add(child_pid)
+        process_pids = {process.pid for process in observation.processes}
+        if not process_pids.issubset(active_children):
+            return False, "GPU has a compute process not owned by an active shared slot", {
+                "process_pids": sorted(process_pids),
+                "active_shared_child_pids": sorted(active_children),
+            }
+        accounted_before = max(observation.memory_used_mb, active_reservations)
+        projected = accounted_before + int(memory_reservation_mb)
+        ceiling = int(observation.memory_total_mb * maximum_vram_fraction)
+        detail = {
+            "slot": slot,
+            "active_slots": sorted(active_slots),
+            "active_shared_child_pids": sorted(active_children),
+            "observed_memory_used_mb": observation.memory_used_mb,
+            "active_reservations_mb": active_reservations,
+            "requested_reservation_mb": int(memory_reservation_mb),
+            "projected_memory_mb": projected,
+            "ceiling_memory_mb": ceiling,
+            "maximum_vram_fraction": maximum_vram_fraction,
+        }
+        if projected > ceiling:
+            return False, "shared GPU admission exceeds the strict 70% VRAM ceiling", detail
+        return True, "AVAILABLE", detail
+    except (AutoDLRuntimeError, OSError, ValueError) as exc:
+        return False, f"shared GPU admission failed: {type(exc).__name__}: {exc}", {}
+    finally:
+        if slot_handle is not None:
+            try:
+                fcntl.flock(slot_handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            slot_handle.close()
+        if uuid_handle is not None:
+            try:
+                fcntl.flock(uuid_handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            uuid_handle.close()
+        fcntl.flock(coordination.fileno(), fcntl.LOCK_UN)
+        coordination.close()
+
+
+def inspect_shared_gpu_slots(
+    lock_root: Path, gpu_uuid: str
+) -> list[dict[str, Any]]:
+    """Inspect two shared slots without changing their metadata."""
+
+    rows: list[dict[str, Any]] = []
+    lock_root.mkdir(parents=True, exist_ok=True)
+    for slot in range(SHARED_GPU_MAX_TASKS):
+        path = _gpu_shared_slot_path(lock_root, gpu_uuid, slot)
+        if path.is_symlink():
+            rows.append(
+                {"slot": slot, "path": str(path), "active": None, "error": "SYMLINK"}
+            )
+            continue
+        handle = path.open("a+", encoding="utf-8")
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                active = True
+            else:
+                active = False
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        metadata: dict[str, Any] = {}
+        error: str | None = None
+        if path.stat().st_size > 0:
+            try:
+                metadata = read_json_object(path)
+            except AutoDLRuntimeError:
+                error = "CORRUPT_METADATA"
+        if active and metadata.get("state") != "LOCKED":
+            error = error or "ACTIVE_WITHOUT_LOCKED_METADATA"
+        rows.append(
+            {
+                "slot": slot,
+                "path": str(path),
+                "active": active,
+                "error": error,
+                "metadata": metadata,
+            }
+        )
+    return rows
 
 
 class ProjectGPUSlotLock(AbstractContextManager["ProjectGPUSlotLock"]):
