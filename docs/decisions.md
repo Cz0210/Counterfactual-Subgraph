@@ -168,6 +168,49 @@ ambiguous, incomplete, or inconsistent exact row raises a descriptive
 
 Accepted
 
+## 2026-08-23 — Keep BACE ComRecGC as one trajectory and parallelize only pure preprocessing
+
+### Background
+
+The live 50,000-step BACE ComRecGC generation was profiled read-only at roughly
+one saturated CPU core while the assigned GPU was almost entirely idle. Splitting
+`0..49999` into independent generation-index jobs was considered as a possible
+eight-way acceleration.
+
+### Decision
+
+Generation-index sharding is rejected. Pinned upstream ComRecGC consumes one
+shared RNG stream and mutates shared graph, transition, candidate frequency/order,
+coverage, and restart state at every step. Independent ranges or seeds are
+different trajectories and have no exact frequency/order/lineage merge.
+
+The only admitted parallel boundary is the pure native-graph decode and RDKit
+featurization below a single random-walk producer. The opt-in engine uses a
+bounded spawn process pool, returns results in input order, keeps CUDA and RNG
+out of workers, and retains Frozen-GINE batching in the main process. Separate
+bounded source/candidate caches bind graph content to source-sidecar lineage and
+frozen feature/checkpoint provenance. Historical sequential preprocessing stays
+the default.
+
+An optimized 50k run is not scientifically released until fresh 500-step and
+1000-step legacy/optimized replays both pass candidate order/frequency/importance,
+graph-state, coverage, trajectory, and selected-action-trace parity. Diagnostic
+runs are permanently paper-ineligible and PASS markers are written only after
+the fail-closed audit.
+
+### Consequences
+
+- Existing live processes, outputs, and legacy checkpoints remain immutable.
+- A legacy checkpoint is not a resume source for a fresh optimized command.
+- One failed equivalence gate blocks the optimized full route but does not alter
+  the legacy run.
+- The resource scheduler may reserve a shared low-memory slot for the gates,
+  but this change does not modify scheduler/lock semantics.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Isolate the two A/M ComRecGC retries in a six-task controller
 
 ### Background

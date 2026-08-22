@@ -13,7 +13,7 @@ import sys
 import time
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -40,6 +40,7 @@ from .model_adapter import (
 )
 from src.baselines.bace_gine_native_adapter import (
     BACEFrozenGINENativeGraphAdapter,
+    LEGACY_PREPROCESS_ENGINE,
 )
 from .graph_trace import (
     ActionTraceRecorder,
@@ -1264,6 +1265,11 @@ def run_project_generation(
     parameters: GenerationParameters,
     device: str = "cuda:0",
     batch_size: int = 128,
+    bace_preprocess_engine: str = LEGACY_PREPROCESS_ENGINE,
+    bace_preprocess_workers: int = 0,
+    bace_preprocess_max_inflight: int = 64,
+    bace_source_cache_capacity: int = 0,
+    bace_candidate_cache_capacity: int = 0,
     resume: bool = False,
     trace_output_dir: str | Path | None = None,
     parity_reference_path: str | Path | None = None,
@@ -1280,8 +1286,49 @@ def run_project_generation(
     progress_interval_steps: int = 25,
     scientific_argv: Sequence[str] | None = None,
     command_sha256: str | None = None,
+    diagnostic_equivalence_steps: int | None = None,
+    equivalence_gate_role: str | None = None,
 ) -> dict[str, Any]:
-    parameters.validate(mode)
+    diagnostic_steps = (
+        int(diagnostic_equivalence_steps)
+        if diagnostic_equivalence_steps is not None
+        else None
+    )
+    if diagnostic_steps is None:
+        if equivalence_gate_role is not None:
+            raise ValueError(
+                "equivalence_gate_role requires diagnostic_equivalence_steps."
+            )
+        parameters.validate(mode)
+    else:
+        if dataset != "bace" or mode != "full" or diagnostic_steps not in {500, 1000}:
+            raise ValueError(
+                "Equivalence diagnostics require BACE full runtime and 500/1000 steps."
+            )
+        if equivalence_gate_role not in {"legacy", "optimized"}:
+            raise ValueError("Equivalence diagnostics require a legacy/optimized role.")
+        if (
+            equivalence_gate_role == "legacy"
+            and bace_preprocess_engine != LEGACY_PREPROCESS_ENGINE
+        ):
+            raise ValueError("Legacy equivalence role requires the legacy engine.")
+        if (
+            equivalence_gate_role == "optimized"
+            and bace_preprocess_engine == LEGACY_PREPROCESS_ENGINE
+        ):
+            raise ValueError("Optimized equivalence role requires the opt-in engine.")
+        expected = GenerationParameters.for_mode("full")
+        if parameters != replace(expected, steps=diagnostic_steps):
+            raise ValueError("Equivalence diagnostic parameters differ from full prefix.")
+    if dataset != "bace" and (
+        bace_preprocess_engine != LEGACY_PREPROCESS_ENGINE
+        or int(bace_preprocess_workers) != 0
+        or int(bace_source_cache_capacity) != 0
+        or int(bace_candidate_cache_capacity) != 0
+    ):
+        raise ValueError(
+            "BACE preprocessing controls are forbidden for non-BACE datasets."
+        )
     if int(checkpoint_interval_steps) <= 0:
         raise ValueError("checkpoint_interval_steps must be positive.")
     if not 10 <= int(progress_interval_steps) <= 50:
@@ -1424,6 +1471,11 @@ def run_project_generation(
                     source_records=source_records,
                     graph_schema=bace_schema,
                     device=device,
+                    preprocess_engine=bace_preprocess_engine,
+                    preprocess_workers=bace_preprocess_workers,
+                    preprocess_max_inflight=bace_preprocess_max_inflight,
+                    source_cache_capacity=bace_source_cache_capacity,
+                    candidate_cache_capacity=bace_candidate_cache_capacity,
                 ).eval()
                 model_provenance = model.provenance()
                 embedding_model = modules["distance"].load_neurosed(
@@ -1486,12 +1538,36 @@ def run_project_generation(
                 ),
                 "eligible_for_bace_gnn_main_results": bool(
                     dataset == "bace"
+                    and diagnostic_steps is None
                     and model_provenance.get("oracle_backend") == "gnn"
                     and model_provenance.get("classifier_family") == "gine"
                     and model_provenance.get("rf_oracle_used") is False
                 ),
                 "distance_model": distance_provenance,
                 "internal_prediction_counts": internal_counts,
+                "bace_preprocessing": (
+                    {
+                        "engine": bace_preprocess_engine,
+                        "workers": int(bace_preprocess_workers),
+                        "max_inflight": int(bace_preprocess_max_inflight),
+                        "source_cache_capacity": int(bace_source_cache_capacity),
+                        "candidate_cache_capacity": int(
+                            bace_candidate_cache_capacity
+                        ),
+                        "scientific_order_preserved": True,
+                        "rng_calls_added": 0,
+                    }
+                    if dataset == "bace"
+                    else None
+                ),
+                "diagnostic_only": diagnostic_steps is not None,
+                "diagnostic_equivalence_steps": diagnostic_steps,
+                "equivalence_gate_role": equivalence_gate_role,
+                **(
+                    {"paper_eligible": False}
+                    if diagnostic_steps is not None
+                    else {}
+                ),
                 "runtime_environment": _runtime_environment(torch),
                 "cf_mode": CF_MODE,
                 "calibration_loaded": False,
@@ -1597,6 +1673,17 @@ def run_project_generation(
             else:
                 config["config_sha256"] = _resolved_config_content_sha256(config)
                 write_json(existing_config_path, config)
+                if diagnostic_steps is not None:
+                    write_json(
+                        root / "DIAGNOSTIC_ONLY.json",
+                        {
+                            "diagnostic_only": True,
+                            "paper_eligible": False,
+                            "steps": diagnostic_steps,
+                            "role": equivalence_gate_role,
+                            "config_sha256": config["config_sha256"],
+                        },
+                    )
             if resolved_checkpoint_mirror_root is not None:
                 _publish_persistent_resolved_config(
                     config,
@@ -1997,6 +2084,10 @@ def run_project_generation(
         write_json(root / "failure_summary.json", failure)
         write_json(root / "_RUN_FAILED.json", failure)
         raise
+    finally:
+        active_model = locals().get("model")
+        if active_model is not None and hasattr(active_model, "close"):
+            active_model.close()
 
 
 def run_native_smoke(

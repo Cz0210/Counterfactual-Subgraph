@@ -38,6 +38,58 @@ def test_canonical_command_parameter_change_changes_identity() -> None:
     assert scientific_command_sha256(original) != scientific_command_sha256(changed)
 
 
+def test_preprocess_engine_and_worker_settings_are_checkpoint_identity() -> None:
+    legacy = canonical_scientific_argv(_args())
+    optimized = canonical_scientific_argv(
+        _args(
+            "--bace-preprocess-engine",
+            "ordered_bounded_rdkit_process_pool_v1",
+            "--bace-preprocess-workers",
+            "4",
+            "--bace-source-cache-capacity",
+            "1024",
+            "--bace-candidate-cache-capacity",
+            "8192",
+        )
+    )
+
+    assert legacy != optimized
+    assert scientific_command_sha256(legacy) != scientific_command_sha256(
+        optimized
+    )
+
+
+def test_diagnostic_equivalence_prefix_is_explicit_command_identity() -> None:
+    legacy = canonical_scientific_argv(
+        _args(
+            "--mode",
+            "full",
+            "--diagnostic-equivalence-steps",
+            "500",
+            "--equivalence-gate-role",
+            "legacy",
+        )
+    )
+    optimized = canonical_scientific_argv(
+        _args(
+            "--mode",
+            "full",
+            "--diagnostic-equivalence-steps",
+            "500",
+            "--equivalence-gate-role",
+            "optimized",
+            "--bace-preprocess-engine",
+            "ordered_bounded_rdkit_process_pool_v1",
+            "--bace-preprocess-workers",
+            "4",
+        )
+    )
+
+    assert legacy != optimized
+    assert any("diagnostic-equivalence-steps=500" in item for item in legacy)
+    assert any('equivalence-gate-role="legacy"' in item for item in legacy)
+
+
 def test_canonical_command_redacts_sensitive_set_values() -> None:
     argv = canonical_scientific_argv(
         _args("--set", "api_token=do-not-persist", "--set", "seed=7")
