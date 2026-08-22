@@ -4,6 +4,34 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Accept explicit CUDA indices in the shared MolCLR loader
+
+### Background
+
+The BACE frozen-GNN preparation route assigns a concrete GPU to MolCLR node
+embedding work and therefore passes devices such as `cuda:0`. The shared MolCLR
+loader accepted only `auto`, `cpu`, or the unindexed `cuda` spelling, so the
+preparation step failed before loading its checkpoint.
+
+### Decision
+
+Treat `cuda:N` as part of the shared MolCLR device contract. Before constructing
+the PyTorch device, require CUDA availability and verify that `N` is within the
+visible device count. Continue to reject malformed device strings and invisible
+indices rather than silently falling back to another GPU.
+
+### Consequences
+
+- AutoDL and Slurm callers can retain their explicit GPU assignment.
+- A bad or unavailable CUDA index fails before checkpoint loading with a clear
+  error.
+- MolCLR embeddings, checkpoints, cache keys, distance semantics, and BACE
+  scientific gates are unchanged.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Admit only the controller-owned tokenizer scheduling key
 
 ### Background

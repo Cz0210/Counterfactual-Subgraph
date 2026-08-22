@@ -207,10 +207,33 @@ def _resolve_device(device: str) -> str:
     torch = _require_torch()
     if device == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda" and not torch.cuda.is_available():
-        raise MolCLREmbeddingError("--device cuda was requested, but CUDA is not available.")
-    if device not in {"cuda", "cpu"}:
-        raise ValueError(f"Unsupported device: {device!r}. Expected auto/cuda/cpu.")
+    if device == "cpu":
+        return device
+
+    cuda_index: int | None = None
+    if device.startswith("cuda:"):
+        index_text = device.removeprefix("cuda:")
+        if not index_text.isdecimal():
+            raise ValueError(
+                f"Unsupported device: {device!r}. Expected auto/cpu/cuda/cuda:N."
+            )
+        cuda_index = int(index_text)
+    elif device != "cuda":
+        raise ValueError(
+            f"Unsupported device: {device!r}. Expected auto/cpu/cuda/cuda:N."
+        )
+
+    if not torch.cuda.is_available():
+        raise MolCLREmbeddingError(
+            f"--device {device} was requested, but CUDA is not available."
+        )
+    if cuda_index is not None:
+        device_count = int(torch.cuda.device_count())
+        if cuda_index >= device_count:
+            raise MolCLREmbeddingError(
+                f"--device {device} was requested, but only {device_count} CUDA "
+                f"device(s) are visible."
+            )
     return device
 
 
