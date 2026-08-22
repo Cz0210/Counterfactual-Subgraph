@@ -7003,3 +7003,14 @@ states plus the final state before writing PASS.
   checks.
 - This campaign runs only on AutoDL. The paired Slurm wrapper is retained solely
   as static CLI parity required by repository policy and is not submitted.
+
+## 2026-08-22 — Isolate the four-by-four controller from recovery history
+
+- The four-method × four-dataset campaign reuses the hardened manifest-driven
+  scheduler and status implementation, but persists under the separate
+  `four_methods_four_datasets_continuation` control namespace.
+- Its launcher never stops or mutates an earlier recovery controller. A new
+  controller ID, manifest, state tree, heartbeat, and run registry are required
+  for every continuation release.
+- Taste heavy work remains an explicit manifest gate; setting a launcher
+  environment variable cannot synthesize license approval.

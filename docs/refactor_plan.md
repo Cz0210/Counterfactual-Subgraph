@@ -802,3 +802,5 @@ Mutagenicity roadmaps.
   manifests pass the common 4×4 provenance contract.
 - [ ] Schedule the two dataset continuations independently so a semantic failure
   in one dataset releases its GPU without blocking the other dataset.
+- [x] Add isolated persistent controller/status/launcher entrypoints for the
+  four-method matrix while retaining the audited UUID-lock scheduler engine.
