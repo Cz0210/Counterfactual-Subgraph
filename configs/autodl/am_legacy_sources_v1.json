@@ -1,0 +1,209 @@
+{
+  "schema_version": "am_legacy_sources_v1",
+  "policy": {
+    "generation_rerun": false,
+    "fresh_standardized_roots": true,
+    "clear_excluded": true,
+    "paper_written": false
+  },
+  "path_remap_roots": [
+    "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project",
+    "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/static_project"
+  ],
+  "cells": [
+    {
+      "dataset": "Mutagenicity",
+      "method": "Ours",
+      "status": "ADOPTABLE_PASS",
+      "source_roots": [
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/mutagenicity/final/ours_wnode_a2_test_v1"
+      ],
+      "expected_teacher_sha256": "af213aa766626decaf99876b43ede725412a355adf37f1aa0d56233d8653e204",
+      "expected_molclr_sha256": "93bc4f02ea8847cd44fa21ec3f65600ff2f4a7ae6d3a85e8519a5bcc56afc20a",
+      "expected_parent_count": 217,
+      "expected_candidate_count": 20,
+      "expected_pair_count": 4340,
+      "generation_adopted": true,
+      "ordering_adopted": true,
+      "evaluation_adopted": true,
+      "reason": "EXACT_FINAL_MANIFEST_REQUIRES_STRICT_REPLAY_AUDIT",
+      "probe_basenames": [
+        "final_result_manifest.json",
+        "run_manifest.json",
+        "pair_matrix.jsonl",
+        "figure3_coverage_vs_k.csv",
+        "figure4_coverage_vs_threshold.csv",
+        "table2_ours_k10.csv"
+      ],
+      "native_action_semantics": "hard_delete_selected_subgraph",
+      "recommended_action": "strict_precontroller_frozen_bundle_adoption"
+    },
+    {
+      "dataset": "Mutagenicity",
+      "method": "GCFExplainer",
+      "status": "INCOMPLETE",
+      "source_roots": [
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/mutagenicity/baselines/gcfexplainer/full_v2/summary_export_native5000_v2/export"
+      ],
+      "expected_csv_sha256": "e968fa140a4e34ad6abc6430b17f539e5d568b319d4856d74763496e9181f341",
+      "expected_order_sha256": "e8758517a1c81fa150298497a8a799806abbe5a8c17ba048790636aacf4a1a46",
+      "expected_native_ranks": [
+        112,
+        120,
+        177,
+        179,
+        195,
+        217,
+        388,
+        442,
+        605,
+        701,
+        794,
+        810,
+        1034,
+        1095,
+        1417,
+        1786,
+        1788,
+        1975,
+        3815,
+        4198
+      ],
+      "expected_selection_method": "native_gcf_summary_rank_filtered_by_validity",
+      "expected_teacher_sha256": "af213aa766626decaf99876b43ede725412a355adf37f1aa0d56233d8653e204",
+      "expected_candidate_count": 20,
+      "generation_adopted": true,
+      "ordering_adopted": false,
+      "evaluation_adopted": false,
+      "reason": "INCOMPLETE_VERIFIED_RAW_EXPORT_REQUIRES_DETERMINISTIC_FREEZE_CALIBRATION_AND_HELDOUT_WNODE_CLOSURE",
+      "missing_capabilities": [
+        "frozen_calibration_order",
+        "complete_heldout_wnode_matrix",
+        "final_artifact_audit"
+      ],
+      "probe_basenames": [
+        "selected_top20.csv",
+        "candidate_filter_audit.jsonl",
+        "filter_summary.json",
+        "run_manifest.json",
+        "_RUN_COMPLETE.json",
+        "frozen_candidate_manifest.json"
+      ],
+      "native_action_semantics": "nearest_full_graph_counterfactual",
+      "recommended_action": "reuse_raw_generation_then_run_missing_calibration_and_heldout_evaluation",
+      "foreground_wrapper": "scripts/autodl/run_mut_gcf_legacy_evaluation.sh",
+      "foreground_actions": [
+        "freeze-mut-gcf-candidates",
+        "calibration",
+        "heldout"
+      ]
+    },
+    {
+      "dataset": "Mutagenicity",
+      "method": "GlobalGCE",
+      "status": "INCOMPLETE",
+      "source_roots": [
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/current/globalgce/mutagenicity"
+      ],
+      "generation_adopted": true,
+      "ordering_adopted": false,
+      "evaluation_adopted": false,
+      "reason": "INCOMPLETE_TRAIN_ONLY_GENERATION_LACKS_FROZEN_SELECTOR_AND_HELDOUT_MATRIX",
+      "missing_capabilities": [
+        "calibration_selector",
+        "frozen_rule_order",
+        "complete_heldout_wnode_matrix",
+        "final_artifact_audit"
+      ],
+      "probe_basenames": [
+        "candidate_pool.jsonl",
+        "per_rule.csv",
+        "summary.json",
+        "run_manifest.json",
+        "final_artifact_audit.json"
+      ],
+      "native_action_semantics": "lhs_rhs_transformation_rule",
+      "recommended_action": "reuse_raw_generation_then_run_native_calibration_and_heldout_evaluation"
+    },
+    {
+      "dataset": "AIDS",
+      "method": "Ours",
+      "status": "INCOMPLETE",
+      "source_roots": [
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/full_candidate_pools/stable300_label1_merged_base_temp07"
+      ],
+      "generation_adopted": true,
+      "ordering_adopted": false,
+      "evaluation_adopted": false,
+      "reason": "INCOMPLETE_MISSING_FROZEN_SELECTOR_ORDER_AND_FINAL_EVALUATION_CLOSURE",
+      "missing_capabilities": [
+        "frozen_calibration_order",
+        "complete_heldout_wnode_matrix",
+        "final_artifact_audit"
+      ],
+      "probe_basenames": [
+        "candidate_pool.jsonl",
+        "selected_sequence.jsonl",
+        "summary.json",
+        "run_manifest.json",
+        "final_artifact_audit.json"
+      ],
+      "native_action_semantics": "hard_delete_selected_subgraph",
+      "recommended_action": "reuse_candidate_pool_then_run_missing_selector_and_heldout_evaluation"
+    },
+    {
+      "dataset": "AIDS",
+      "method": "GCFExplainer",
+      "status": "MISSING",
+      "source_roots": [
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/gcfexplainer/official_aids/1591969"
+      ],
+      "generation_adopted": true,
+      "ordering_adopted": false,
+      "evaluation_adopted": false,
+      "reason": "MISSING_SOURCE_NOT_TRANSFERRED_TO_AUTODL; LOCAL_NATIVE_OUTPUT_LACKS_PROJECT_RF_WNODE_CALIBRATION_TEST_CLOSURE",
+      "missing_capabilities": [
+        "project_rf_oracle_provenance",
+        "frozen_calibration_order",
+        "complete_heldout_wnode_matrix",
+        "final_artifact_audit"
+      ],
+      "probe_basenames": [
+        "counterfactuals.pt",
+        "summary.json",
+        "run_manifest.json",
+        "final_artifact_audit.json"
+      ],
+      "native_action_semantics": "nearest_full_graph_counterfactual",
+      "recommended_action": "transfer_local_native_output_with_checksum_manifest_before_any_reuse_audit"
+    },
+    {
+      "dataset": "AIDS",
+      "method": "GlobalGCE",
+      "status": "MISSING",
+      "source_roots": [
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/eval/globalgce/aids_official_top30/label1"
+      ],
+      "generation_adopted": true,
+      "ordering_adopted": false,
+      "evaluation_adopted": false,
+      "reason": "MISSING_SOURCE_NOT_TRANSFERRED_TO_AUTODL; BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE",
+      "missing_capabilities": [
+        "native_lhs_rhs_attachment_mapping",
+        "nonempty_per_rule_evidence",
+        "frozen_calibration_order",
+        "complete_heldout_wnode_matrix"
+      ],
+      "probe_basenames": [
+        "per_graph.csv",
+        "per_rule.csv",
+        "summary.json",
+        "run_manifest.json",
+        "final_artifact_audit.json"
+      ],
+      "native_action_semantics": "lhs_rhs_transformation_rule",
+      "recommended_action": "transfer_local raw with checksum manifest, then implement and test native attachment mapping before evaluation",
+      "notes": "Do not coerce GlobalGCE transformations into Ours deletion semantics."
+    }
+  ]
+}

@@ -73,6 +73,8 @@ See:
 - `docs/EXPERIMENT_TRACKING.md`
 - `docs/EXPERIMENT_LOG.md`
 - `docs/AUTODL_BACE_FROZEN_GNN_DOWNSTREAM.md` (foreground B7 prep and B8--B14)
+- `docs/AUTODL_AM_LEGACY_STANDARDIZATION.md` (strict frozen-result adoption and
+  fail-closed AIDS/Mutagenicity legacy inventory)
 
 ---
 

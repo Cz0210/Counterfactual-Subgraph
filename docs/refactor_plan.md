@@ -849,3 +849,15 @@ Mutagenicity roadmaps.
 - [ ] Populate the registry on AutoDL from persistent artifacts and exact
   expectations, then let the continuation controller schedule only missing or
   stale cells.
+- [x] Add strict, fresh-root adoption for the exact frozen Mutagenicity Ours
+  final result, including checksum closure, independent frozen-test replay
+  audit, RF/MolCLR identity, and selector-before-test provenance.
+- [x] Inventory the remaining AIDS/Mutagenicity legacy raw cells without
+  rerunning generation; keep missing calibration/evaluation evidence
+  `INCOMPLETE` and missing native GlobalGCE attachment semantics
+  `BLOCKED_CODE`.
+- [x] Freeze the exact Mutagenicity GCF Top20 exporter output into a fresh
+  checksum-closed candidate package without rerunning generation; keep AIDS
+  baseline roots absent from the AutoDL payload explicitly `MISSING`.
+- [x] Exclude CLEAR from every adoption and inventory path and provide two
+  manifest-only CPU tasks for composition into the continuation controller.

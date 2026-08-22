@@ -159,7 +159,8 @@ if calibration.get("threshold_provenance", {}).get("thresholds_json_sha256") != 
 print(json.dumps(result, sort_keys=True))
 PY
 
-mkdir -p "$TEST_MATRIX_DIR" "$(dirname "$WNODE_CACHE_DB")" "$NODE_EMB_CACHE_DIR" "$PROJECT_ROOT/logs"
+RUNTIME_LOG_DIR="${RUNTIME_LOG_DIR:-$PROJECT_ROOT/logs}"
+mkdir -p "$TEST_MATRIX_DIR" "$(dirname "$WNODE_CACHE_DB")" "$NODE_EMB_CACHE_DIR" "$RUNTIME_LOG_DIR"
 
 echo "===== GCFEXPLAINER MUTAGENICITY FROZEN WNODE TEST ====="
 echo "hostname=$(hostname)"

@@ -7230,3 +7230,38 @@ of contaminating the matrix with a semantically different substitute.
 ### Status
 
 Accepted
+
+## 2026-08-22 — Separate legacy raw reuse from frozen-cell adoption
+
+Legacy AIDS/Mutagenicity artifacts now record three independent facts:
+generation reuse, calibration/order reuse, and held-out evaluation reuse. A
+candidate pool is not a paper cell. A PNG or an old combined CSV is not a
+checksum/provenance closure. Only the exact Mutagenicity Ours final result is
+eligible for immediate adoption because it has a frozen selector, complete
+held-out Cartesian matrix, fixed thresholds, RF/MolCLR identities, and a
+`final_result_manifest.json` file closure that can be independently audited.
+
+That result is copied into a fresh root only after checking all source bytes,
+the absence of live writers, selector-before-test provenance, strict-flip
+semantics, and deterministic metric reconstruction. The original output is
+never amended with a retroactive audit. Physical-file hashes are cached during
+one adoption so the multi-file closure is not pointlessly recomputed.
+
+The reconstruction necessarily reads the already-frozen held-out cohort. It
+therefore runs once before controller launch and is not mislabeled as a
+manifest-only controller task. The controller receives only the resulting
+persistent standardized manifest, runs a manifest-only closure verification,
+and then inventories the remaining raw roots. The source-spec copy is also
+persisted outside the fast execution worktree before launch.
+
+Mutagenicity GCFExplainer retains an exact completed Top20 export but lacks its
+standalone frozen-candidate manifest. A deterministic, generation-free freeze
+step now verifies the exporter completion/filter audit, exact CSV/order/native
+ranks, and frozen RF identity before publishing a fresh package for the
+existing calibration/test kernels. Mutagenicity GlobalGCE and AIDS Ours remain
+`INCOMPLETE`. The locally observed AIDS GCFExplainer and GlobalGCE evidence was
+not transferred in the AutoDL Step0 payload, so the AutoDL source registry
+marks both `MISSING_SOURCE_NOT_TRANSFERRED`; GlobalGCE additionally remains
+code-blocked by absent native LHS-to-RHS attachment mapping after any future
+transfer. It may not be coerced into deletion semantics. CLEAR remains
+excluded and can never stand in for ComRecGC.

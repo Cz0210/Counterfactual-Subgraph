@@ -1,0 +1,75 @@
+{
+  "schema_version": "four_gpu_controller_task_fragment_v1",
+  "fragment_id": "aids-mutagenicity-legacy-standardization-v1",
+  "merge_contract": "Append tasks verbatim to a fresh continuation manifest; task ids must remain unique.",
+  "tasks": [
+    {
+      "id": "mut_ours_legacy_adoption_verify",
+      "dataset": "legacy-am-audit",
+      "stage": "MUT_OURS_LEGACY_ADOPTION_VERIFY",
+      "runner_dataset": "legacy-am-audit",
+      "runner_stage": "MUT_OURS_LEGACY_ADOPTION_VERIFY",
+      "depends_on": [],
+      "resource": "cpu",
+      "priority": 35,
+      "data_splits": [],
+      "manifest_only": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_am_legacy_standardization.sh"
+      ],
+      "input_manifest": "{artifact_root}/am_legacy/precontroller/mutagenicity_ours_v1/standardized/run_manifest.json",
+      "expected_output": "{artifact_root}/am_legacy/adoption-verification/attempt-{attempt}",
+      "required_output_files": [
+        "adoption_verification.json",
+        "_RUN_COMPLETE.json",
+        "PASS"
+      ],
+      "required_log_marker": "[MUT_OURS_ADOPTION_VERIFY_PASS]",
+      "environment": {
+        "ACTION": "verify-mut-ours-adoption",
+        "OUTPUT_ROOT": "{task_output}",
+        "ADOPTED_MUT_OURS_ROOT": "{artifact_root}/am_legacy/precontroller/mutagenicity_ours_v1",
+        "AUTODL_PYTHON": "{python}",
+        "PROC_ROOT": "/proc",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "am_legacy_inventory",
+      "dataset": "legacy-am-audit",
+      "stage": "AM_LEGACY_INVENTORY",
+      "runner_dataset": "legacy-am-audit",
+      "runner_stage": "AM_LEGACY_INVENTORY",
+      "depends_on": [
+        "mut_ours_legacy_adoption_verify"
+      ],
+      "resource": "cpu",
+      "priority": 36,
+      "data_splits": [],
+      "manifest_only": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_am_legacy_standardization.sh"
+      ],
+      "input_manifest": "{artifact_root}/am_legacy/source_specs/am_legacy_sources_v1.json",
+      "expected_output": "{artifact_root}/am_legacy/inventory/attempt-{attempt}",
+      "required_output_files": [
+        "matrix_patch.csv",
+        "matrix_patch.json",
+        "legacy_artifact_inventory.json",
+        "_RUN_COMPLETE.json",
+        "PASS"
+      ],
+      "required_log_marker": "[AM_LEGACY_INVENTORY_PASS]",
+      "environment": {
+        "ACTION": "audit-inventory",
+        "SOURCE_SPEC": "{artifact_root}/am_legacy/source_specs/am_legacy_sources_v1.json",
+        "OUTPUT_ROOT": "{task_output}",
+        "ADOPTED_MUT_OURS_ROOT": "{artifact_root}/am_legacy/precontroller/mutagenicity_ours_v1",
+        "AUTODL_PYTHON": "{python}",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    }
+  ]
+}
