@@ -91,6 +91,15 @@ def _fixture(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
             "is_ancestor": "true",
         },
     )
+    monkeypatch.setattr(
+        repair,
+        "_verify_external_fix_ancestry",
+        lambda **kwargs: {
+            "required_fix_commit": kwargs["required_fix_commit"],
+            "execution_head": "f" * 40,
+            "is_ancestor": "true",
+        },
+    )
 
     def source_evidence(*, source_key, **_kwargs):
         semantic = (
@@ -387,16 +396,13 @@ def test_builder_requires_complete_crash_resume_core_ancestry(
         == "d5c1d67339df4b9642beaf2b10908ed92bac30de"
     )
 
-    def ancestry(*, required_fix_commit, **_kwargs):
-        if required_fix_commit == repair.EXTERNAL_MEMORY_FIX_COMMIT:
-            raise RepairManifestError("complete crash-resume core is not an ancestor")
-        return {
-            "required_fix_commit": required_fix_commit,
-            "execution_head": "f" * 40,
-            "is_ancestor": "true",
-        }
-
-    monkeypatch.setattr(repair, "verify_fix_ancestry", ancestry)
+    monkeypatch.setattr(
+        repair,
+        "_verify_external_fix_ancestry",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RepairManifestError("complete crash-resume core is not an ancestor")
+        ),
+    )
     with pytest.raises(RepairManifestError, match="crash-resume core"):
         repair.build_payload(spec_path=paths["spec"])
 
@@ -406,6 +412,24 @@ def test_builder_requires_complete_crash_resume_core_ancestry(
     _json(paths["spec"], spec)
     with pytest.raises(RepairManifestError, match="forbidden"):
         repair.build_payload(spec_path=paths["spec"])
+
+
+def test_external_fix_ancestry_gate_is_independent_of_safe_git_gate() -> None:
+    project = Path(__file__).resolve().parents[2]
+    evidence = repair._verify_external_fix_ancestry(
+        project_root=project,
+        required_fix_commit=repair.EXTERNAL_MEMORY_FIX_COMMIT,
+    )
+    assert evidence["is_ancestor"] == "true"
+    assert evidence["required_fix_commit"] == repair.EXTERNAL_MEMORY_FIX_COMMIT
+    assert evidence["execution_head"] == subprocess.check_output(
+        ["git", "-C", str(project), "rev-parse", "HEAD"], text=True
+    ).strip()
+    with pytest.raises(RepairManifestError, match="must equal reviewed commit"):
+        repair._verify_external_fix_ancestry(
+            project_root=project,
+            required_fix_commit="0" * 40,
+        )
 
 
 def test_manifest_is_fresh_and_published_at_exact_namespace_path(

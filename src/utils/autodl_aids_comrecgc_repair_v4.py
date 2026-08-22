@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from typing import Any, Mapping
 
@@ -18,6 +19,7 @@ from src.utils import autodl_aids_comrecgc_repair_v3 as v3
 from src.utils.autodl_four_by_four_am_repair import (
     STANDARDIZED_REQUIRED_FILES,
     VERIFY_COMRECGC_SAFE_GIT_FIX_COMMIT,
+    _git_head as _am_git_head,
     verify_fix_ancestry,
 )
 from src.baselines.comrecgc.contracts import stable_json_sha256
@@ -66,6 +68,47 @@ EQUIVALENCE_CHECKS = frozenset(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _verify_external_fix_ancestry(
+    *, project_root: str | Path, required_fix_commit: str
+) -> dict[str, str]:
+    """Require the reviewed external-memory recovery core as an ancestor."""
+
+    if required_fix_commit != EXTERNAL_MEMORY_FIX_COMMIT:
+        raise RepairManifestError(
+            f"external-memory fix must equal reviewed commit {EXTERNAL_MEMORY_FIX_COMMIT}"
+        )
+    root = v3._absolute(project_root, label="project root", kind="dir")
+    head = _am_git_head(root)
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                required_fix_commit,
+                "HEAD",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RepairManifestError("cannot verify external-memory fix ancestry") from exc
+    if completed.returncode != 0:
+        raise RepairManifestError(
+            "complete external-memory crash/recovery core is not an ancestor of "
+            f"execution HEAD {head}: {completed.stderr.strip()}"
+        )
+    return {
+        "required_fix_commit": required_fix_commit,
+        "execution_head": head,
+        "is_ancestor": "true",
+    }
 
 
 def _mapping(value: Any, *, label: str) -> Mapping[str, Any]:
@@ -334,7 +377,7 @@ def verify_source(
         required_fix_commit=VERIFY_COMRECGC_SAFE_GIT_FIX_COMMIT,
         proc_root=proc_root,
     )
-    external_fix = verify_fix_ancestry(
+    external_fix = _verify_external_fix_ancestry(
         project_root=project_root,
         required_fix_commit=EXTERNAL_MEMORY_FIX_COMMIT,
     )
@@ -634,7 +677,7 @@ def build_payload(
         project_root=project_root,
         required_fix_commit=VERIFY_COMRECGC_SAFE_GIT_FIX_COMMIT,
     )
-    external_fix = verify_fix_ancestry(
+    external_fix = _verify_external_fix_ancestry(
         project_root=project_root,
         required_fix_commit=EXTERNAL_MEMORY_FIX_COMMIT,
     )

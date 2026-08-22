@@ -31,6 +31,8 @@
 - [x] Make the repair-v4 builder adopt that physical smoke gate by SHA, exact
   integrated commit, frozen source payload, nine true equivalence checks, and
   no-live-writer evidence; a missing or changed gate blocks manifest creation.
+- [x] Keep the scoped safe-Git ancestry gate and external-memory recovery-core
+  ancestry gate separate; each accepts only its own reviewed exact commit.
 - [ ] Build and launch a fresh CPU-only repair-v4 controller; never resume or
   mutate the failed repair-v2/repair-v3 roots.
 
