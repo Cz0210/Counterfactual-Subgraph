@@ -748,7 +748,16 @@ Mutagenicity roadmaps.
 - [x] Add an honest B6 calibrated-GNN scoring diagnostic that leaves the PPO
   stage BLOCKED, plus executable B7--B14 blocker contracts; never label that
   diagnostic PPO or use it to release B7.
-- [ ] Integrate the frozen GNN oracle into BACE proposal/reward/verification
-  and complete B6--B14 without using RF-contaminated artifacts.
+- [x] Add fail-closed initializer provenance, a fresh raw-base LoRA and bounded
+  train-only oracle-neutral SFT path for BACE; reject unknown/RF adapters.
+- [x] Inject one cached/batched frozen GINE reward adapter into the existing
+  stable decoded-chemistry PPO loop without adding a second optimizer stack.
+- [x] Add a real fresh-root B6-v2 five-update gate and a conservative 300-step
+  B7 contract with checkpoints 50--300; retain old B6 blocker evidence.
+- [x] Add explicit B6--B14 split-access and dependency-release contracts that
+  cannot turn READY evidence into a scientific PASS.
+- [ ] Run and pass the real 7B LoRA B6-v2 on AutoDL, then release B7.
+- [ ] Integrate the new GNN schema into B8--B14 candidate generation,
+  verification, selector, and final evaluation without RF-contaminated inputs.
 - [ ] Obtain explicit TasteMolNet data-license approval before committing data
   or enabling any heavy TasteMolNet experiment.

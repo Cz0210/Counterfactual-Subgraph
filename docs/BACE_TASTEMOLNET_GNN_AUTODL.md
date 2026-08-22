@@ -188,6 +188,64 @@ bypass a blocked B7. A future implementation must produce the exact required
 output contract recorded in each blocker's `stage_requirements.json`; changing
 the state document alone never releases the next stage.
 
+### Fresh B6-v2 and B7 route
+
+The old `B6_PPO_SMOKE` output and blocker above remain historical evidence.
+They are not overwritten or promoted.  The additive `B6_PPO_SMOKE_V2` route
+first audits initializer provenance, constructs a complete clean LoRA when
+needed, and then calls the existing stable decoded-chemistry PPO loop with a
+frozen GINE reward adapter.  The formal runner uses real ChemLLM policy,
+reference, and value models; local contract tests may use small tensors but no
+small model exists in the AutoDL runner.
+
+The controller-facing entrypoint is foreground and requires its exact fresh
+persistent output directory:
+
+```bash
+export OUTPUT_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/<fresh-run>
+export CHEMLLM_MODEL_PATH=/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat
+export BACE_GNN_CHECKPOINT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689
+export BACE_TRAIN_CSV="$BACE_SPLIT_ROOT/train.csv"
+
+bash scripts/autodl/run_bace_gnn_ppo_stage.sh BACE_POLICY_PROVENANCE_AUDIT
+export BACE_POLICY_AUDIT_SELECTION=/path/to/audit-run/initializer_selection.json
+bash scripts/autodl/run_bace_gnn_ppo_stage.sh BACE_CLEAN_INITIALIZER_BUILD
+
+export BACE_POLICY_INITIALIZER=/path/to/clean-initializer/adapter
+export BACE_POLICY_PROVENANCE_MANIFEST=/path/to/clean-initializer/policy_provenance.json
+bash scripts/autodl/run_bace_gnn_ppo_stage.sh B6_PPO_SMOKE_V2
+
+export BACE_B6_V2_MANIFEST=/path/to/b6-v2/ppo_smoke_manifest.json
+bash scripts/autodl/run_bace_gnn_ppo_stage.sh B7_PPO_FULL
+```
+
+Set `BACE_POLICY_AUDIT_CSV` when the audit CSV must use the exact persistent
+`outputs/autodl/audits/bace_policy_initializer_provenance_<timestamp>.csv`
+name; `audit_manifest.json` binds that resolved path.
+The initializer build requires `BACE_POLICY_AUDIT_SELECTION`, verifies the
+audit PASS plus CSV/selection hashes and exact selected base path, and reuses
+the audit's base-model content hash.  It therefore does not rescan the 7B
+checkpoint.
+
+Use a different fresh `OUTPUT_ROOT` for every action.  B6-v2 writes
+`ppo_smoke_manifest.json`; B7 writes `ppo_manifest.json` and checkpoints
+`50,100,150,200,250,300`.  Both also write `run_manifest.json`,
+`policy_provenance.json`, `candidate_pool.jsonl`, `oracle_provenance.json`,
+`reward_manifest.json`, `ppo_gate.json`, and a PASS file only after every gate
+succeeds.  The optional `BACE_GNN_PPO_ADAPTER_CANARY` action is real training
+but explicitly cannot satisfy the B6-v2 predecessor contract.
+The PPO manifest also binds the final and last-periodic adapter config/weights
+by resolved path, size, and SHA-256 and publishes
+`policy_checkpoint_hash_schema=bace_lora_checkpoint_identity_v1` plus its
+canonical JSON payload.  B8/B9 must use that disk-artifact identity rather
+than `policy_parameter_hash_after`.
+
+`check_bace_gnn_downstream_release.py` provides an honest dependency/split
+preflight for B8--B14.  Its output state is only `READY`; the corresponding
+scientific stage must still run and produce its own verified PASS artifacts.
+The B14 boundary is `manifest_only`; it audits B13/frozen manifests and never
+loads the raw test split a second time.
+
 ## TasteMolNet execution boundary
 
 `RUN_TASTEMOLNET=0` is the default. This task may prepare provenance, clean

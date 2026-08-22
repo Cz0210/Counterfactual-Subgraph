@@ -6601,3 +6601,69 @@ Recovery manifests now distinguish selected trace multiplicity from unique
 candidate population. Fresh-root adoption records source checksums and proves
 that serialization, lineage resolution, and freeze were rerun without a bare
 symlink; historical output roots remain untouched.
+
+---
+
+## 2026-08-22: Add a provenance-clean BACE GNN-PPO route without rewriting stable PPO
+
+The historical `B6_PPO_SMOKE` diagnostic remains immutable and BLOCKED.  A
+new, fresh-root `B6_PPO_SMOKE_V2` route is additive: it injects a frozen,
+validation-temperature-calibrated BACE GINE reward adapter into the existing
+`run_stable_decoded_chem_ppo_loop`.  The shared loop still owns generation,
+policy/reference/value forwards, clipping, KL control, gradients, AdamW, and
+checkpointing.  The BACE entrypoint contains no private or substitute PPO
+optimizer.
+
+Policy initialization now fails closed on provenance.  An audit classifies
+every supplied candidate as `CLEAN_CHEMLLM_BASE`,
+`CLEAN_ORACLE_NEUTRAL_SFT`, `RF_CONTAMINATED`, `UNKNOWN`, or `MISSING`.
+Unknown adapters are ineligible.  The raw ChemLLM base may be converted to a
+fresh, zero-update LoRA needed by the stable loop, or a single bounded LoRA SFT
+may be built from the exact frozen BACE train CSV.  That optional SFT uses only
+deterministic chemistry targets, an internal scaffold/parent-disjoint
+validation split, and no RF, GNN ranking, formal validation, calibration, or
+test input.  Its manifest distinguishes the train-derived internal validation
+that it does load from the untouched formal validation split that it does not.
+Adapter bytes, source identity, and training-data identity are
+bound in `policy_provenance.json`; later PPO stages reuse that manifest rather
+than repeatedly hashing the base model.  The AutoDL build requires the passing
+audit selection, verifies the audit CSV/selection hashes and exact selected
+path, and reuses that one formal base-model content hash.
+
+The reward adapter loads the GINE checkpoint once, caches calibrated parent
+predictions by canonical SMILES plus checkpoint/temperature/schema identity,
+and batches all valid connected hard-deletion residuals in each rollout.  It
+uses source-class confidence drop plus strict-flip bonus and records complete
+candidate-level chemistry, deletion, prediction, reward, checkpoint, policy,
+and reference provenance.  Parent predictions and the classifier are detached
+from policy gradients; RF is rejected before training.  Provenance likewise
+distinguishes `calibration_dataset_loaded=false` from the required
+`frozen_temperature_calibration_loaded=true` and binds the latter's hash.
+
+`B6_PPO_SMOKE_V2` requires five to ten observed callbacks after real shared-
+loop optimizer steps, changed trainable policy bytes, unchanged reference
+bytes, a reloadable LoRA checkpoint, a saved candidate pool and reward
+manifest, at least one valid GNN-scored deletion, finite rewards/metrics, no
+held-out split, and KL below the hard limit.  `B7_PPO_FULL` is released only by
+that exact passing manifest and runs 300 train-only updates with conservative
+stable settings and checkpoints at 50, 100, 150, 200, 250, and 300.  A one-step
+adapter canary is explicitly non-formal and cannot release B7.
+Final and last-periodic LoRA config/weight artifacts are each deserialized,
+checked finite, and bound by absolute path, byte size, and SHA-256.  A stable
+`bace_lora_checkpoint_identity_v1` hash over file names/sizes/hashes is the
+policy identity consumed by downstream candidate shards; an in-memory
+parameter hash is never substituted for this disk identity.
+
+B8--B14 retain their existing scientific kernels/blockers.  The new boundary
+module can publish only `READY` after exact PASS dependencies and split rules;
+it cannot publish a scientific PASS.  Test access requires a complete frozen
+B12 calibration selector with ordered top-20 rule and model/input hashes.
+B14 is manifest-only: it verifies B13 and frozen hashes without reopening raw
+test bytes.
+
+The AutoDL stage shell is a foreground payload.  The persistent controller
+alone owns nohup, PID/heartbeat, GPU UUID locks, and retries.  `OUTPUT_ROOT`
+must be the controller's exact fresh expected output below the persistent
+runtime root.  No new HPC/Slurm launcher is added in this change because the
+active execution path is AutoDL-only; any repository-paired Slurm wrapper is a
+static CLI contract and is not invoked by this route.
