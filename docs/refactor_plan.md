@@ -785,3 +785,10 @@ Mutagenicity roadmaps.
   boundary.
 - [ ] Fill the persistent controller manifest with Commit A MUT/AIDS and Commit
   B BACE foreground argv/evidence contracts, validate it, and launch on AutoDL.
+# 2026-08-22 — Four-by-four main experiment continuation
+
+- Keep TasteMolNet heavy stages behind the new offline license gate. Continue
+  BACE and adoptable AIDS/Mutagenicity work while that independent gate is
+  blocked; do not synthesize a Taste row in the paper matrix.
+- A later explicit approval can release the existing three-class pipeline
+  without changing the dataset, label semantics, or frozen evaluation schema.

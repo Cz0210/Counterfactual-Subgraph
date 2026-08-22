@@ -6973,3 +6973,14 @@ adopt only the latest complete, hash-valid, incomplete periodic checkpoint
 into a fresh output root. OOM retry changes batch size and therefore restarts
 from the clean initializer. The final B7 gate binds all six periodic resume
 states plus the final state before writing PASS.
+# 2026-08-22 — TasteMolNet publication route remains explicitly license-gated
+
+- Added an offline, fresh-output license audit for the exact prepared
+  TasteMolNet source. Public repository/paper/CSV availability is evidence of
+  accessibility, not permission to reuse the compiled data in a formal paper.
+- The heavy route remains `BLOCKED_LICENSE_REVIEW` unless the prepared
+  provenance already binds an explicit reviewed license or the user supplies a
+  nonempty approval/terms file through `TASTEMOLNET_LICENSE_APPROVAL_FILE`.
+- The audit records the exact prepared provenance and approval-file identity;
+  it never downloads labels, rewrites the prepared dataset, or unlocks work by
+  inference from an open-access article license.
