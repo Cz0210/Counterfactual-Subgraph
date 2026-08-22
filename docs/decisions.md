@@ -7417,3 +7417,14 @@ used by B12/B13.
   matched AIDS/Mut frozen protocol. A small fresh-output builder clones that
   exact grid/theta/cap/hash to the AIDS expectation before the one-time matrix
   audit; it does not inspect or derive thresholds from held-out curves.
+
+# 2026-08-22 — Gate AIDS/Mut ComRecGC held-out evaluation behind threshold freeze
+
+- The combined registry emits the canonical
+  `MolCLR-Node-Wasserstein` 601-point frozen threshold contract. A small
+  manifest-only task validates and republishes that exact contract before the
+  ComRecGC continuation is allowed to open the held-out cohort.
+- The ComRecGC continuation is therefore a post-freeze, read-only test task;
+  it no longer declares calibration access inside the held-out task. Taste
+  licensing and its four blocked placeholders are manifest-only and declare
+  no raw split access while the license gate remains blocked.

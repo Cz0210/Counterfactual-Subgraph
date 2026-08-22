@@ -75,6 +75,7 @@ def _comrecgc_task(
     priority: int,
 ) -> dict[str, Any]:
     task_id = f"{dataset}_comrecgc_standardized"
+    threshold_task_id = f"{dataset}_comrecgc_threshold_freeze"
     expected = str(output_root / dataset / "comrecgc" / "attempt-{attempt}")
     environment = {
         "AUTODL_PYTHON": "{python}",
@@ -87,7 +88,9 @@ def _comrecgc_task(
         "DISTANCE_CHECKPOINT": str(distance_checkpoint),
         "MOLCLR_ROOT": str(molclr_root),
         "MOLCLR_CHECKPOINT": str(molclr_checkpoint),
-        "THRESHOLDS_PATH": str(thresholds_path),
+        "THRESHOLDS_PATH": (
+            f"{{dep_{threshold_task_id}_output}}/frozen_threshold_contract.json"
+        ),
         "OUTPUT_ROOT": expected,
         "DEVICE": "cuda:0",
     }
@@ -96,13 +99,15 @@ def _comrecgc_task(
     return {
         "id": task_id,
         "dataset": dataset,
-        "stage": "COMRECGC_STANDARDIZED_CONTINUATION",
+        "stage": "AM_COMRECGC_HELDOUT_EVAL",
         "runner_dataset": f"paper-cell-{dataset}-comrecgc",
-        "runner_stage": "COMRECGC_STANDARDIZED_CONTINUATION",
-        "depends_on": [],
+        "runner_stage": "AM_COMRECGC_HELDOUT_EVAL",
+        "depends_on": [threshold_task_id],
         "resource": "gpu",
         "priority": priority,
-        "data_splits": ["calibration", "test"],
+        "data_splits": ["test"],
+        "selector_parameters_frozen": True,
+        "read_only_test": True,
         "command": [
             "bash",
             "{project_root}/scripts/autodl/run_comrecgc_standardized_continuation.sh",
@@ -122,6 +127,53 @@ def _comrecgc_task(
             f"[COMRECGC_STANDARDIZED_CONTINUATION_PASS] dataset={dataset}"
         ),
         "environment": environment,
+    }
+
+
+def _threshold_freeze_task(
+    *,
+    dataset: str,
+    thresholds_path: Path,
+    output_root: Path,
+    priority: int,
+) -> dict[str, Any]:
+    task_id = f"{dataset}_comrecgc_threshold_freeze"
+    expected = str(output_root / dataset / "threshold-freeze" / "attempt-{attempt}")
+    return {
+        "id": task_id,
+        "dataset": dataset,
+        "stage": "AM_COMRECGC_THRESHOLD_FREEZE",
+        "runner_dataset": f"paper-threshold-{dataset}",
+        "runner_stage": "AM_COMRECGC_THRESHOLD_FREEZE",
+        "depends_on": [],
+        "resource": "cpu",
+        "priority": priority,
+        "data_splits": [],
+        "manifest_only": True,
+        "freezes_selector": True,
+        "command": [
+            "{python}",
+            "{project_root}/scripts/autodl/verify_frozen_threshold_contract.py",
+            "--config",
+            "configs/hpc.yaml",
+            "--dataset",
+            dataset,
+            "--source",
+            str(thresholds_path),
+            "--output",
+            "{task_output}",
+        ],
+        "input_manifest": str(thresholds_path),
+        "expected_output": expected,
+        "required_output_files": [
+            "frozen_threshold_contract.json",
+            "threshold_adoption_audit.json",
+            "PASS",
+        ],
+        "required_log_marker": (
+            f"[FROZEN_THRESHOLD_CONTRACT_PASS] dataset={dataset}"
+        ),
+        "environment": {"AUTODL_PYTHON": "{python}"},
     }
 
 
@@ -158,6 +210,7 @@ def build_tasks(args: argparse.Namespace) -> dict[str, Any]:
             "resource": "cpu",
             "priority": 5,
             "data_splits": [],
+            "manifest_only": True,
             "command": [
                 "bash",
                 "{project_root}/scripts/autodl/run_tastemolnet_license_audit.sh",
@@ -173,6 +226,12 @@ def build_tasks(args: argparse.Namespace) -> dict[str, Any]:
             "required_log_marker": "[TASTE_LICENSE_AUDIT_COMPLETE]",
             "environment": license_environment,
         },
+        _threshold_freeze_task(
+            dataset="mutagenicity",
+            thresholds_path=args.mut_thresholds_path,
+            output_root=run_root / "cells",
+            priority=190,
+        ),
         _comrecgc_task(
             dataset="mutagenicity",
             source_generation_root=args.mut_source_generation_root,
@@ -187,6 +246,12 @@ def build_tasks(args: argparse.Namespace) -> dict[str, Any]:
             output_root=run_root / "cells",
             source_csv=None,
             priority=200,
+        ),
+        _threshold_freeze_task(
+            dataset="aids",
+            thresholds_path=args.aids_thresholds_path,
+            output_root=run_root / "cells",
+            priority=191,
         ),
         _comrecgc_task(
             dataset="aids",
@@ -213,7 +278,8 @@ def build_tasks(args: argparse.Namespace) -> dict[str, Any]:
                 "depends_on": ["tastemolnet_license_audit"],
                 "resource": "gpu",
                 "priority": 1000 + offset,
-                "data_splits": ["train", "validation", "calibration", "test"],
+                "data_splits": [],
+                "manifest_only": True,
                 "command": None,
                 "blocked_reason": "BLOCKED_LICENSE_REVIEW",
             }

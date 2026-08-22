@@ -867,6 +867,9 @@ Mutagenicity roadmaps.
 - [x] Register persistent Mut GCF freeze -> calibration selector freeze ->
   held-out evaluation tasks and extend the production no-test-before-freeze
   stage gate for that AM route.
+- [x] Freeze and hash-check the shared AIDS/Mut 601-point threshold contract
+  before either ComRecGC held-out continuation, with production controller
+  enforcement of the selector-before-test dependency.
 - [x] Track the matched 601-point Mutagenicity threshold expectation; mark the
   audited historical Ours bundle `STALE_METRIC` until its frozen pair matrix is
   deterministically re-exported under that common protocol.

@@ -137,6 +137,7 @@ SELECTOR_FREEZE_STAGES = {
     "B12_SELECTOR",
     "BACE_BASELINE_SELECTOR",
     "AM_MUT_GCF_CALIBRATION_FREEZE",
+    "AM_COMRECGC_THRESHOLD_FREEZE",
 }
 POST_FREEZE_TEST_STAGES = {
     "B13_TEST_PARENT_MANIFEST",
@@ -149,6 +150,7 @@ POST_FREEZE_TEST_STAGES = {
     "BACE_BASELINE_TEST_MERGE",
     "BACE_BASELINE_FINAL_FREEZE",
     "AM_MUT_GCF_HELDOUT_EVAL",
+    "AM_COMRECGC_HELDOUT_EVAL",
 }
 class ControllerError(AutoDLRuntimeError):
     """The controller cannot proceed without weakening an invariant."""
