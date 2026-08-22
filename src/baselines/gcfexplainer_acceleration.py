@@ -29,6 +29,7 @@ SUPPORTED_ACCELERATION_MODES = frozenset(
     {LEGACY_ACCELERATION_MODE, ORDERED_ACCELERATION_MODE}
 )
 EQUIVALENCE_BUDGETS = (500, 1000)
+QUICK_EQUIVALENCE_BUDGETS = (50, 100)
 MINIMUM_AB_SPEEDUP_FRACTION = 0.20
 MAXIMUM_SHARED_VRAM_FRACTION = 0.70
 
@@ -370,7 +371,14 @@ def canonical_graph_tensor_digest(graph: Any) -> str:
 class OrderedImportanceAcceleration(
     AbstractContextManager["OrderedImportanceAcceleration"]
 ):
-    """Cache pure GINE/NeuroSED rows and reassemble every batch in input order."""
+    """Cache only complete ordered importance batches.
+
+    The official VRRW hashes raw GNN embedding bytes.  Removing cached rows
+    from a mixed hit/miss call changes the GINE/NeuroSED batch shape and can
+    therefore alter those bytes even when every mathematical row is the same.
+    A cache hit is safe only when the entire ordered graph-tensor sequence was
+    seen before; a miss always delegates the original, unmodified sequence.
+    """
 
     def __init__(self, importance: Any, *, capacity: int) -> None:
         if capacity <= 0:
@@ -388,45 +396,39 @@ class OrderedImportanceAcceleration(
 
         def cached_call(graphs: Sequence[Any], wargs: Mapping[str, Any]) -> Any:
             self.calls += 1
-            keys = [canonical_graph_tensor_digest(graph) for graph in graphs]
-            rows: dict[str, tuple[Any, Any, Any]] = {}
-            missing_keys: list[str] = []
-            missing_graphs: list[Any] = []
-            for key, graph in zip(keys, graphs, strict=True):
-                if key in rows:
-                    self.hits += 1
-                    continue
-                value = self.cache.get(key)
-                if value is not None:
-                    rows[key] = value
-                    self.hits += 1
-                    continue
-                rows[key] = None  # type: ignore[assignment]
-                missing_keys.append(key)
-                missing_graphs.append(graph)
-                self.misses += 1
-            if missing_graphs:
-                importance_rows, embeddings, coverage = original(
-                    missing_graphs, wargs
-                )
-                for index, key in enumerate(missing_keys):
-                    value = (
-                        importance_rows[index].copy(),
-                        embeddings[index].copy(),
-                        coverage[index].detach().cpu().clone(),
-                    )
-                    rows[key] = value
-                    self.cache.put(key, value)
-            try:
-                import numpy as np
-                import torch
-            except ImportError as exc:  # pragma: no cover
-                raise RuntimeError("Ordered importance cache requires NumPy/Torch") from exc
-            return (
-                np.stack([rows[key][0] for key in keys]),
-                np.stack([rows[key][1] for key in keys]),
-                torch.stack([rows[key][2] for key in keys]),
+            graph_keys = [
+                canonical_graph_tensor_digest(graph) for graph in graphs
+            ]
+            batch_key = _stable_json_sha256(
+                {"wargs_object_id": id(wargs), "ordered_graphs": graph_keys}
             )
+            cached = self.cache.get(batch_key)
+            if cached is not None:
+                cached_wargs, importance_rows, embeddings, coverage = cached
+                # Retaining and checking the exact mapping object prevents a
+                # recycled ``id`` from becoming a false cache hit after the
+                # original call context has been collected.
+                if cached_wargs is wargs:
+                    self.hits += len(graphs)
+                    return (
+                        importance_rows.copy(),
+                        embeddings.copy(),
+                        coverage.detach().cpu().clone(),
+                    )
+
+            self.misses += len(graphs)
+            result = original(graphs, wargs)
+            importance_rows, embeddings, coverage = result
+            self.cache.put(
+                batch_key,
+                (
+                    wargs,
+                    importance_rows.copy(),
+                    embeddings.copy(),
+                    coverage.detach().cpu().clone(),
+                ),
+            )
+            return result
 
         self.importance.call = cached_call
         return self
@@ -442,6 +444,8 @@ class OrderedImportanceAcceleration(
             "cache_hits": self.hits,
             "cache_misses": self.misses,
             "cache_entries": len(self.cache),
+            "cache_scope": "exact_ordered_full_batch_v1",
+            "partial_row_reuse": False,
         }
 
 
@@ -559,8 +563,10 @@ def compare_vrrw_equivalence(
     *,
     budget: int,
 ) -> dict[str, Any]:
-    if int(budget) not in EQUIVALENCE_BUDGETS:
-        raise ValueError(f"Equivalence budget must be one of {EQUIVALENCE_BUDGETS}")
+    accepted_budgets = QUICK_EQUIVALENCE_BUDGETS + EQUIVALENCE_BUDGETS
+    if int(budget) not in accepted_budgets:
+        raise ValueError(f"Equivalence budget must be one of {accepted_budgets}")
+    diagnostic_only = int(budget) in QUICK_EQUIVALENCE_BUDGETS
     documents: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for root in (legacy_root, optimized_root):
         manifest = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
@@ -596,6 +602,8 @@ def compare_vrrw_equivalence(
         "schema_version": 1,
         "status": "PASS" if not failures else "FAILED",
         "budget": int(budget),
+        "diagnostic_only": diagnostic_only,
+        "eligible_for_full_acceleration_gate": not diagnostic_only,
         "equivalence": "CANONICAL_EXACT" if not failures else "NOT_EQUIVALENT",
         "legacy_root": str(legacy_root.resolve()),
         "optimized_root": str(optimized_root.resolve()),
@@ -751,6 +759,7 @@ __all__ = [
     "MAXIMUM_SHARED_VRAM_FRACTION",
     "MINIMUM_AB_SPEEDUP_FRACTION",
     "ORDERED_ACCELERATION_MODE",
+    "QUICK_EQUIVALENCE_BUDGETS",
     "OrderedLRU",
     "OrderedImportanceAcceleration",
     "OrderedNeighbourAcceleration",

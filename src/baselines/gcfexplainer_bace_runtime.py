@@ -442,6 +442,7 @@ def run_bace_official_vrrw(
         "dataset": DATASET,
         "dataset_name": "bace",
         "profile": str(profile),
+        "diagnostic_only": str(profile) == "equivalence_quick",
         "dataset_dir": str(Path(dataset_dir).expanduser().resolve()),
         "official_root": str(Path(official_root).expanduser().resolve()),
         "gnn_checkpoint": str(checkpoint),
@@ -717,8 +718,10 @@ def run_bace_official_vrrw(
         "model_provenance": model.provenance()
         if hasattr(model, "provenance")
         else model_provenance,
-        "eligible_for_bace_gnn_main_results": checkpoint_kind
-        == "frozen_project_gine_bundle",
+        "eligible_for_bace_gnn_main_results": (
+            checkpoint_kind == "frozen_project_gine_bundle"
+            and str(profile) != "equivalence_quick"
+        ),
         "internal_gnn_prediction_counts": dict(Counter(internal_predictions)),
         "internal_gnn_predictions_path": str(root / "internal_gnn_predictions.jsonl"),
         "internal_gnn_predictions_sha256": sha256_file(

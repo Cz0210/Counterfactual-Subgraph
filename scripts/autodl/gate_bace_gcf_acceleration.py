@@ -27,7 +27,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     equivalence = commands.add_parser("equivalence")
     equivalence.add_argument("--legacy-root", type=Path, required=True)
     equivalence.add_argument("--optimized-root", type=Path, required=True)
-    equivalence.add_argument("--budget", type=int, choices=(500, 1000), required=True)
+    equivalence.add_argument(
+        "--budget", type=int, choices=(50, 100, 500, 1000), required=True
+    )
     equivalence.add_argument("--output", type=Path, required=True)
 
     benchmark = commands.add_parser("benchmark")

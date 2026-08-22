@@ -638,7 +638,10 @@ def validate_bace_vrrw_profile(
     theta: float,
     seed: int,
 ) -> None:
-    if profile == "smoke":
+    if profile == "equivalence_quick":
+        expected_parent = 64
+        allowed_m = {50, 100}
+    elif profile == "smoke":
         expected_parent = 64
         allowed_m = {500, 1000}
     elif profile == "full":

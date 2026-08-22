@@ -410,6 +410,48 @@ documented CLI and exists solely for repository parity.
   closure change fails the exception.
 - ComRecGC remains a separate native cell and ongoing ComRecGC work is not
   interrupted.
+## [2026-08-23] Preserve the complete legacy GINE batch in BACE GCF replay
+
+### Background
+
+The first fresh 500-step `ordered_v2` replay was not equivalent to legacy.
+The random-number-generator end states and the first selected graph were
+identical, but the second transition diverged.  A replay of the first source
+neighbourhood proved that CPU action construction, positional restoration, and
+RDKit decoding preserved all 5,913 actions and graph tensors exactly.  Of the
+555 valid decoded rows, however, only 311 canonical SMILES were unique.
+`ordered_v2` deduplicated those rows and evaluated them in 256/55-row chunks,
+whereas legacy evaluated all 555 rows, including duplicates, in one batch.
+The official implementation uses raw graph-embedding bytes as transition
+identity, so low-bit changes caused by the different GINE batch shape changed
+the graph hash used by VRRW.
+
+### Decision
+
+Keep parallel RDKit decode only, restore its output by original position, and
+then reproduce the complete duplicate-preserving legacy featurization and GINE
+batch.  Do not perform per-SMILES prediction reuse or GINE chunking in the
+equivalence path.  The importance cache may reuse only an exact, complete,
+ordered batch with the same call context; on any partial miss it delegates the
+original unmodified sequence.
+
+Add diagnostic-only 50/100-step profiles for quick replay after code changes.
+These runs can reject a patch early but can never authorize the 50,000-step
+run: fresh 500/1000 replay plus the throughput/VRAM gate remains mandatory.
+
+### Consequences
+
+- CPU neighbour parallelism remains available without changing action order or
+  the RNG stream.
+- The unsafe canonical-SMILES deduplication, partial-row cache, and GINE
+  chunking optimizations are removed from `ordered_v2`.
+- The prior failed 500-step root and the running legacy full root remain
+  immutable; no formal replay or full task is launched by this code change.
+- The paired Slurm entry remains explicitly pinned to legacy semantics.
+
+### Status
+
+Accepted
 
 ## [2026-08-23] Gate BACE GCF acceleration by exact replay and shared-slot safety
 

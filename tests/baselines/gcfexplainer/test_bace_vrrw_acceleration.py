@@ -7,6 +7,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from src.baselines.bace_gine_native_adapter import BACEFrozenGINENativeGraphAdapter
+from src.baselines.gcfexplainer_bace_adapter import validate_bace_vrrw_profile
 from src.baselines.gcfexplainer_acceleration import (
     BufferedVRRWLogging,
     GCFAccelerationConfig,
@@ -20,6 +21,7 @@ from src.baselines.gcfexplainer_acceleration import (
     validate_full_acceleration_gate,
 )
 from src.data.molecular_graph_featurizer import default_molecular_feature_schema
+from scripts.autodl.gate_bace_gcf_acceleration import parse_args as parse_gate_args
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -44,6 +46,70 @@ def test_acceleration_config_is_opt_in_and_fingerprinted() -> None:
         GCFAccelerationConfig(mode="legacy", cpu_neighbor_workers=2)
 
 
+@pytest.mark.parametrize("budget", [50, 100])
+def test_equivalence_quick_profile_is_diagnostic_and_bounded(budget: int) -> None:
+    validate_bace_vrrw_profile(
+        "equivalence_quick",
+        parent_limit=64,
+        m=budget,
+        alpha=1.0,
+        theta=0.05,
+        seed=13,
+    )
+    with pytest.raises(ValueError, match="expected"):
+        validate_bace_vrrw_profile(
+            "equivalence_quick",
+            parent_limit=64,
+            m=500,
+            alpha=1.0,
+            theta=0.05,
+            seed=13,
+        )
+
+
+def test_quick_equivalence_gate_accepts_only_diagnostic_or_formal_budgets() -> None:
+    for budget in (50, 100, 500, 1000):
+        args = parse_gate_args(
+            [
+                "equivalence",
+                "--legacy-root",
+                "/legacy",
+                "--optimized-root",
+                "/optimized",
+                "--budget",
+                str(budget),
+                "--output",
+                "/gate.json",
+            ]
+        )
+        assert args.budget == budget
+    with pytest.raises(SystemExit):
+        parse_gate_args(
+            [
+                "equivalence",
+                "--legacy-root",
+                "/legacy",
+                "--optimized-root",
+                "/optimized",
+                "--budget",
+                "49",
+                "--output",
+                "/gate.json",
+            ]
+        )
+
+
+def test_quick_replay_shell_is_diagnostic_only() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    text = (
+        project_root / "scripts/autodl/run_bace_gcf_quick_replay.sh"
+    ).read_text(encoding="utf-8")
+    assert "for budget in 50 100" in text
+    assert "--profile equivalence_quick" in text
+    assert '"eligible_for_full_acceleration_gate": False' in text
+    assert "gate_bace_gcf_acceleration.py aggregate" not in text
+
+
 def test_ordered_parallel_map_never_reorders_results() -> None:
     values = list(range(100))
     assert ordered_parallel_map(lambda value: value * value, values, workers=4) == [
@@ -61,7 +127,7 @@ def test_buffered_logging_keeps_iteration_sequence() -> None:
     assert calls == ["legacy"]
 
 
-def test_ordered_adapter_deduplicates_and_reuses_gine_results(
+def test_ordered_adapter_preserves_duplicate_rows_and_legacy_batch_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     torch = pytest.importorskip("torch")
@@ -73,9 +139,11 @@ def test_ordered_adapter_deduplicates_and_reuses_gine_results(
             self.config = SimpleNamespace(hidden_dim=2)
             self.classifier = torch.nn.Linear(2, 2, bias=False)
             self.encode_calls = 0
+            self.batch_sizes = []
 
         def encode_graph(self, batch: object) -> object:
             self.encode_calls += 1
+            self.batch_sizes.append(batch.size)
             return torch.ones((batch.size, 2), dtype=self.anchor.dtype)
 
     class FakeBatch:
@@ -134,10 +202,16 @@ def test_ordered_adapter_deduplicates_and_reuses_gine_results(
     first = adapter(graphs)[2]
     second = adapter(graphs)[2]
     assert torch.equal(first, second)
-    assert model.encode_calls == 1
+    assert model.encode_calls == 2
+    assert model.batch_sizes == [2, 2]
     provenance = adapter.provenance()["acceleration"]
-    assert provenance["unique_gine_graph_count"] == 1
-    assert provenance["cache_hits"] == 2
+    assert provenance["unique_gine_graph_count"] == 4
+    assert provenance["cache_hits"] == 0
+    assert provenance["portable_cache_entries"] == 0
+    assert provenance["prediction_cache_entries"] == 0
+    assert provenance["batch_semantics"] == "legacy_full_valid_row_batch_v1"
+    assert provenance["in_call_smiles_deduplication"] is False
+    assert provenance["gine_chunking"] is False
 
 
 def test_parallel_neighbour_builder_preserves_official_action_order() -> None:
@@ -187,7 +261,7 @@ def test_parallel_neighbour_builder_preserves_official_action_order() -> None:
     assert removal_graphs == removal_actions
 
 
-def test_importance_cache_preserves_order_and_includes_lineage_identity() -> None:
+def test_importance_cache_reuses_only_an_exact_complete_ordered_batch() -> None:
     np = pytest.importorskip("numpy")
     torch = pytest.importorskip("torch")
 
@@ -218,11 +292,21 @@ def test_importance_cache_preserves_order_and_includes_lineage_identity() -> Non
     assert canonical_graph_tensor_digest(first) != canonical_graph_tensor_digest(second)
     importance = Importance()
     with OrderedImportanceAcceleration(importance, capacity=10) as cache:
-        expected = importance.call([first, second], {})
-        actual = importance.call([second, first], {})
-    assert importance.calls == 1
-    assert actual[0].tolist() == [expected[0][1].tolist(), expected[0][0].tolist()]
-    assert cache.report()["cache_hits"] == 2
+        wargs = {}
+        expected = importance.call([first, second], wargs)
+        exact_hit = importance.call([first, second], wargs)
+        reversed_miss = importance.call([second, first], wargs)
+    assert importance.calls == 2
+    assert exact_hit[0].tolist() == expected[0].tolist()
+    # A partial row cache would synthesize [row1,row0] here.  The safe cache
+    # delegates the complete reversed batch, whose fake outputs are [row0,row1].
+    assert reversed_miss[0].tolist() == expected[0].tolist()
+    report = cache.report()
+    assert report["cache_hits"] == 2
+    assert report["cache_misses"] == 4
+    assert report["cache_entries"] == 2
+    assert report["cache_scope"] == "exact_ordered_full_batch_v1"
+    assert report["partial_row_reuse"] is False
 
 
 def _equivalence_root(
@@ -297,6 +381,51 @@ def test_equivalence_and_same_gpu_twenty_percent_gate(tmp_path: Path) -> None:
     )
     assert benchmark["status"] == "PASS"
     assert benchmark["speedup_fraction"] == pytest.approx(1 / 3)
+
+
+@pytest.mark.parametrize("budget", [50, 100])
+def test_quick_equivalence_is_explicitly_diagnostic_only(
+    tmp_path: Path, budget: int
+) -> None:
+    legacy = tmp_path / f"legacy-{budget}"
+    optimized = tmp_path / f"optimized-{budget}"
+    _equivalence_root(legacy, mode="legacy", budget=budget, fingerprint="legacy")
+    _equivalence_root(
+        optimized, mode="ordered_v2", budget=budget, fingerprint="optimized"
+    )
+    comparison = compare_vrrw_equivalence(legacy, optimized, budget=budget)
+    assert comparison["status"] == "PASS"
+    assert comparison["diagnostic_only"] is True
+    assert comparison["eligible_for_full_acceleration_gate"] is False
+
+
+def test_quick_markers_cannot_build_the_full_gate(tmp_path: Path) -> None:
+    markers = []
+    for budget in (50, 100):
+        marker = tmp_path / f"quick-{budget}.json"
+        _write_json(
+            marker,
+            {
+                "status": "PASS",
+                "budget": budget,
+                "diagnostic_only": True,
+                "eligible_for_full_acceleration_gate": False,
+                "optimized_config_fingerprint": "same",
+                "scientific_replay_contract_sha256": "same-science",
+            },
+        )
+        markers.append(marker)
+    gate = build_acceleration_gate(
+        equivalence_markers=markers,
+        benchmark={
+            "status": "PASS",
+            "same_gpu_uuid": True,
+            "speedup_fraction": 1.0,
+            "peak_vram_fraction": 0.1,
+        },
+    )
+    assert gate["status"] == "FAILED"
+    assert "requires_exact_500_and_1000_equivalence_markers" in gate["failures"]
 
 
 def test_full_gate_requires_both_budgets_and_same_config(tmp_path: Path) -> None:

@@ -25,7 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--neurosed-checkpoint", required=True)
     parser.add_argument("--neurosed-manifest", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--profile", choices=("smoke", "full"), required=True)
+    parser.add_argument(
+        "--profile",
+        choices=("equivalence_quick", "smoke", "full"),
+        required=True,
+    )
     parser.add_argument("--parent-limit", type=int, required=True)
     parser.add_argument("--m", type=int, required=True)
     parser.add_argument("--alpha", type=float, default=1.0)

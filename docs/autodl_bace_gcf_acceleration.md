@@ -4,12 +4,38 @@
 
 本路线只适用于 AutoDL，不提交或连接 HPC。已有的 50,000-step VRRW 进程和输出保持只读；优化运行必须使用 fresh root。MPS 默认且始终关闭。
 
-优化不改变 `M=50000`、seed、父分子顺序、edit action 枚举、sampling/random 调用次数、transition 插入顺序或 frozen BACE GINE。`ordered_v2` 只做以下等价变换：
+优化不改变 `M=50000`、seed、父分子顺序、edit action 枚举、sampling/random 调用次数、transition 插入顺序或 frozen BACE GINE。
+
+首次 m500 replay 已明确失败：legacy 和 ordered-v2 的 RNG 末态及第一个 transition 相同，但第二个 transition 不同。逐项回放证明 5,913 个 action、graph tensor 和并行 RDKit decode 顺序完全一致；差异来自 555 个 valid row 中有 244 个重复 row，旧优化将其去重为 311 个 SMILES 并按 256/55 分批，而 legacy 一次性评价完整 555-row batch。官方 VRRW 以 raw embedding bytes 作为图 identity，因此改变 batch shape 造成的低位差异会改变 transition。
+
+修复后的 `ordered_v2` 只做以下等价变换：
 
 - 按原位置恢复结果的 CPU 邻居构造；
-- canonical graph/lineage 对应的 RDKit 特征、frozen-GINE 与 NeuroSED coverage 结果 LRU 缓存；
-- 固定大小 GINE batch；
+- 按原顺序保留重复 row，并使用与 legacy 完全相同的单个 valid-row GINE batch；
+- 仅对完整、顺序相同且 call context 相同的 importance batch 做缓存；任何 partial miss 均原样调用完整 batch；
 - 每固定 step 输出一次缓冲进度和分阶段计时。
+
+明确禁止 canonical-SMILES 行级去重、partial-row importance cache 和 GINE chunking。这三项会改变 native raw-byte identity，不是安全优化。
+
+## 快速诊断 replay
+
+修复后先运行 fresh 50/100-step diagnostic replay：
+
+```bash
+AUTODL_PHYSICAL_GPU_UUID=<由 exp_run 注入> \
+AUTODL_PYTHON=/root/miniconda3/envs/smiles_pip118/bin/python \
+BACE_GCF_DATASET_DIR=<frozen BACE GCF dataset> \
+GCF_OFFICIAL_ROOT=<vendored official root> \
+BACE_GINE_CHECKPOINT=<frozen calibrated GINE bundle> \
+BACE_NEUROSED_CHECKPOINT=<repaired NeuroSED checkpoint> \
+BACE_NEUROSED_MANIFEST=<matching projection manifest> \
+BACE_GCF_QUICK_REPLAY_OUTPUT=<fresh persistent root> \
+scripts/autodl/run_bace_gcf_quick_replay.sh
+```
+
+输出 `QUICK_REPLAY_PASS.json` 始终带有
+`diagnostic_only=true` 和 `eligible_for_full_acceleration_gate=false`。即使
+50/100 均 PASS，也不能替代下面正式的 500/1000 gate。
 
 ## 50k 前置硬门禁
 
@@ -71,3 +97,6 @@ full `ordered_v2` 必须显式传入该 gate；否则 fail closed。未通过 ga
 - 原有 `counterfactuals.pt`、`run_manifest.json`、`_RUN_COMPLETE.json`。
 
 AutoDL-only 指令与仓库默认 Slurm 同步规则在本轮冲突，因此没有新增 HPC wrapper；没有连接、提交或修改任何 HPC 作业。
+
+现有 paired Slurm full wrapper 已静态同步新增 CLI，并显式固定为 legacy
+模式；本轮未提交、连接或运行 HPC 作业。

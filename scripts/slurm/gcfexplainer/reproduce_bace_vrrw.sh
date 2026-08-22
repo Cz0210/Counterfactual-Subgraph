@@ -39,6 +39,8 @@ echo "theta=0.05"
 echo "seed=13"
 echo "calibration_loaded=false"
 echo "test_loaded=false"
+echo "acceleration_mode=legacy"
+echo "batch_semantics=legacy_full_valid_row_batch_v1"
 
 python scripts/baselines/gcfexplainer/run_bace_vrrw.py \
   --config configs/hpc.yaml \
@@ -60,6 +62,10 @@ python scripts/baselines/gcfexplainer/run_bace_vrrw.py \
   --seed 13 \
   --device1 cuda:0 \
   --device2 cuda:0 \
+  --acceleration-mode legacy \
+  --gine-batch-size 256 \
+  --graph-cache-capacity 0 \
+  --cpu-neighbor-workers 1 \
   --resume
 
 test -s "$VRRW_DIR/counterfactuals.pt"

@@ -88,14 +88,28 @@
 - [x] Add AutoDL execution and protected static Slurm CLI-parity wrappers,
   focused tamper/source-hash/fresh-root/registry/export tests, and a deployment
   runbook.
+## 2026-08-23: Repair BACE GCF ordered-v2 batch-shape equivalence
+
+- [x] Locate the first m500 divergence and verify that RNG state, action order,
+  graph tensor order, and parallel RDKit decode remain exact.
+- [x] Identify canonical-SMILES deduplication and 256-row GINE chunking as the
+  first semantic change: legacy scores all duplicate-preserving valid rows in
+  one batch and hashes raw embedding bytes.
+- [x] Preserve the complete legacy GINE batch and allow only exact whole-batch
+  importance cache hits.
+- [x] Add diagnostic-only 50/100 profiles and a fresh quick replay wrapper that
+  cannot produce the formal acceleration gate.
+- [x] Keep the paired Slurm full route explicit in legacy mode.
+- [ ] Run fresh 50/100 quick replay on AutoDL, followed by the mandatory fresh
+  500/1000 replay only if both quick gates pass.
 
 ## 2026-08-23: BACE GCFExplainer replay-gated acceleration
 
 - [x] Instrument fresh VRRW roots with phase timings, throughput, RSS, GPU peak
   memory, cache counters, and canonical equivalence digests.
 - [x] Preserve edit and transition order while adding ordered CPU neighbour
-  construction, canonical graph caches, bounded GINE batches, and buffered
-  progress.
+  construction and buffered progress.  Subsequent m500 evidence removed
+  canonical-row GINE caching/chunking because it changed raw embedding bytes.
 - [x] Require 500/1000 exact canonical replay and a same-GPU >=20% A/B gate
   before an optimized 50,000-step launch.
 - [x] Add two opt-in low-memory slots per UUID, legacy-exclusive compatibility,
