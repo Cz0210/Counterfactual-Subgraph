@@ -272,6 +272,36 @@ def test_test_split_is_unreachable_until_selector_freeze() -> None:
     )
     validate_no_test_before_freeze((selector, heldout))
 
+    am_selector = _task(
+        "am-selector",
+        stage="AM_MUT_GCF_CALIBRATION_FREEZE",
+        freezes_selector=True,
+    )
+    am_heldout = _task(
+        "am-heldout",
+        stage="AM_MUT_GCF_HELDOUT_EVAL",
+        depends_on=("am-selector",),
+        data_splits=("test",),
+        selector_parameters_frozen=True,
+        read_only_test=True,
+    )
+    validate_no_test_before_freeze((am_selector, am_heldout))
+
+    baseline_selector = _task(
+        "baseline-selector",
+        stage="BACE_BASELINE_SELECTOR",
+        freezes_selector=True,
+    )
+    baseline_heldout = _task(
+        "baseline-heldout",
+        stage="BACE_BASELINE_TEST_VERIFY",
+        depends_on=("baseline-selector",),
+        data_splits=("test",),
+        selector_parameters_frozen=True,
+        read_only_test=True,
+    )
+    validate_no_test_before_freeze((baseline_selector, baseline_heldout))
+
     postfreeze_manifest = _task(
         "test-manifest",
         stage="B13_TEST_PARENT_MANIFEST",

@@ -135,6 +135,7 @@ TOKEN = re.compile(r"\{([A-Za-z0-9_]+)\}")
 TEST_PATH = re.compile(r"(?i)(?:^|[/_.-])test(?:[/_.-]|$)")
 SELECTOR_FREEZE_STAGES = {
     "B12_SELECTOR",
+    "BACE_BASELINE_SELECTOR",
     "AM_MUT_GCF_CALIBRATION_FREEZE",
 }
 POST_FREEZE_TEST_STAGES = {
@@ -149,9 +150,6 @@ POST_FREEZE_TEST_STAGES = {
     "BACE_BASELINE_FINAL_FREEZE",
     "AM_MUT_GCF_HELDOUT_EVAL",
 }
-SELECTOR_FREEZE_STAGES = {"B12_SELECTOR", "BACE_BASELINE_SELECTOR"}
-
-
 class ControllerError(AutoDLRuntimeError):
     """The controller cannot proceed without weakening an invariant."""
 
