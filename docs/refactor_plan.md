@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-08-23: AIDS ComRecGC exact external-memory repair-v4
+
+- [x] Reconstruct sklearn DBSCAN labels from bounded radius-query passes and
+  prove elementwise equality, including ambiguous border assignment.
+- [x] Add atomic candidate-major pair/vector chunks, consolidation, checksums,
+  interruption resume, and a hard RSS admission gate.
+- [x] Preserve legacy cluster order, strict-radius filtering, official greedy
+  calls, and retained-pair medoid selection on an exact fixture.
+- [ ] Wire the engine into the full AIDS `run_common_recourse.py` route without
+  changing the default legacy engine.
+- [ ] Run end-to-end legacy/external smoke equivalence on AutoDL and freeze the
+  complete pair/label/selected-row digests.
+- [ ] Build and launch a fresh CPU-only repair-v4 controller; never resume or
+  mutate the failed repair-v2/repair-v3 roots.
+
 ## 2026-08-23: User-approved frozen v4 AIDS/Mutagenicity adoption
 
 - [x] Pin the exact five machine-readable v4 source files and six authorized
