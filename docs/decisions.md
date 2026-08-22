@@ -7067,3 +7067,20 @@ states plus the final state before writing PASS.
   `__CONFIGURE_` placeholder, records fragment hashes once, validates the
   resulting manifest with the production loader, and removes an invalid
   partial manifest rather than leaving a launchable file.
+- When the BACE B11--B14 continuation is the base fragment, composition also
+  preserves its validated predecessor-quiescence policy. This keeps the old v2
+  controller lock guard active for the wider four-by-four controller instead
+  of silently dropping the anti-double-writer boundary.
+
+## 2026-08-22 — Freeze exact core tasks for the partial four-by-four run
+
+- A fresh task-fragment builder resolves the immutable AIDS/Mutagenicity
+  recovery roots, RF teachers, distance models, MolCLR inputs, threshold
+  contracts, and Taste prepared provenance before publishing controller tasks.
+- AIDS/Mutagenicity COMRECGC continue only from the recovered generations and
+  write fresh standardized cells; they do not rerun generation.
+- The Taste license audit is a CPU evidence task. All four Taste heavy cells
+  remain static `BLOCKED_LICENSE_REVIEW` tasks until an explicit approval is
+  supplied in a later fresh manifest.
+- The paired Slurm wrapper is static repository CLI parity only. This campaign
+  neither connects to nor submits work on HPC.

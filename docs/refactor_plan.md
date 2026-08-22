@@ -809,3 +809,8 @@ Mutagenicity roadmaps.
   in one dataset releases its GPU without blocking the other dataset.
 - [x] Add isolated persistent controller/status/launcher entrypoints for the
   four-method matrix while retaining the audited UUID-lock scheduler engine.
+- [x] Add a fresh, exact-path core task-fragment builder for the Taste license
+  audit, four blocked Taste cells, and recovered AIDS/Mutagenicity COMRECGC
+  standardization without generation reruns.
+- [x] Preserve BACE continuation predecessor-lock metadata when composing the
+  wider four-by-four controller manifest.
