@@ -257,6 +257,21 @@ def test_builder_rejects_budget_or_license_scope_drift(
         repair.build_payload(spec_path=paths["spec"])
 
 
+def test_controller_schema_rejects_test_hook_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    payload, _summary = repair.build_payload(spec_path=paths["spec"])
+    standard = next(
+        task
+        for task in payload["tasks"]
+        if task["id"] == repair.STANDARDIZATION_TASK_ID
+    )
+    standard["environment"]["AIDS_COMRECGC_V4_TEST_MODE"] = "1"
+    with pytest.raises(RepairManifestError, match="environment is incomplete"):
+        repair.validate_payload(payload)
+
+
 def test_builder_requires_complete_crash_resume_core_ancestry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -460,6 +475,33 @@ def test_supervisor_is_bounded_same_root_and_pass_last(
         assert "not a resumable process loss" in completed.stderr
     else:
         assert "bounded resume exhausted" in completed.stderr
+
+
+def test_supervisor_rejects_ambient_invalid_test_mode(tmp_path: Path) -> None:
+    output = tmp_path / "same-root"
+    output.mkdir()
+    supervisor = (
+        Path(__file__).resolve().parents[2]
+        / "scripts/autodl/run_aids_comrecgc_repair_v4_supervisor.sh"
+    )
+    completed = subprocess.run(
+        ["bash", str(supervisor)],
+        env={
+            **os.environ,
+            "AUTODL_PYTHON": sys.executable,
+            "DATASET": "aids",
+            "OUTPUT_ROOT": str(output),
+            "COMMON_RECOURSE_ENGINE": "external_memory_exact_v1",
+            "COMRECGC_COMMON_RECOURSE_RESUME": "1",
+            "AIDS_COMRECGC_V4_MAX_SAME_ROOT_RESUMES": "1",
+            "AIDS_COMRECGC_V4_TEST_MODE": "unexpected",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 64
+    assert "test mode must be exactly 0 or 1" in completed.stderr
 
 
 def test_controller_restart_reconciles_live_supervisor_without_new_attempt(

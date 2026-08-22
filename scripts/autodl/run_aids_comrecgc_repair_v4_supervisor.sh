@@ -10,15 +10,24 @@ PYTHON="${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}"
 INNER="$SCRIPT_DIR/run_comrecgc_standardized_continuation_cpu_highmem.sh"
 VERIFY_CLI="$PROJECT_ROOT/scripts/autodl/build_aids_comrecgc_repair_v4_manifest.py"
 
-if [[ "${AIDS_COMRECGC_V4_TEST_MODE:-0}" == "1" ]]; then
-  : "${AIDS_COMRECGC_V4_TEST_INNER:?test inner is required}"
-  : "${AIDS_COMRECGC_V4_TEST_VERIFY:?test verifier is required}"
-  INNER="$AIDS_COMRECGC_V4_TEST_INNER"
-  VERIFY_CLI="$AIDS_COMRECGC_V4_TEST_VERIFY"
-elif [[ -n "${AIDS_COMRECGC_V4_TEST_INNER:-}${AIDS_COMRECGC_V4_TEST_VERIFY:-}" ]]; then
-  echo "[AIDS_V4_SUPERVISOR_FAIL] test hooks require explicit test mode" >&2
-  exit 64
-fi
+case "${AIDS_COMRECGC_V4_TEST_MODE:-0}" in
+  0)
+    if [[ -n "${AIDS_COMRECGC_V4_TEST_INNER:-}${AIDS_COMRECGC_V4_TEST_VERIFY:-}" ]]; then
+      echo "[AIDS_V4_SUPERVISOR_FAIL] test hooks require explicit test mode" >&2
+      exit 64
+    fi
+    ;;
+  1)
+    : "${AIDS_COMRECGC_V4_TEST_INNER:?test inner is required}"
+    : "${AIDS_COMRECGC_V4_TEST_VERIFY:?test verifier is required}"
+    INNER="$AIDS_COMRECGC_V4_TEST_INNER"
+    VERIFY_CLI="$AIDS_COMRECGC_V4_TEST_VERIFY"
+    ;;
+  *)
+    echo "[AIDS_V4_SUPERVISOR_FAIL] test mode must be exactly 0 or 1" >&2
+    exit 64
+    ;;
+esac
 
 : "${OUTPUT_ROOT:?OUTPUT_ROOT is required}"
 [[ "${DATASET:-}" == "aids" ]] || { echo "[AIDS_V4_SUPERVISOR_FAIL] DATASET must be aids" >&2; exit 64; }
