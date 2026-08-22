@@ -1145,3 +1145,37 @@ Mutagenicity roadmaps.
 - [ ] Run the bridge smoke on AutoDL before releasing exclusive full training.
 - [ ] Freeze and standardize the BACE GlobalGCE cell after all scientific gates
   pass; do not treat bridge smoke alone as a paper result.
+
+# 2026-08-23 — Mut trace-off parity continuation
+
+- [x] Bind the exact lineage-v3 trace-on source by recomputed config, dataset,
+  parent order, classifier, distance, payload, and trace identities.
+- [x] Add an exclusive-GPU trace-disabled 50k reference with stable scientific
+  root, completed-step checkpoint mirror, bounded transient resume, and no
+  trace/parity arguments in generation.
+- [x] Separate the 7f algorithm identity from the reviewed 66487c0 checkpoint
+  execution identity; freeze source/AST inventories and require a fresh
+  same-seed 500-step candidate/action/RNG equivalence gate before the 50k run.
+- [x] Reject self-comparison, copied claims without real run/checkpoint proof,
+  trace stripping, test/calibration access, changed execution commit, and
+  mutable AIDS dependency manifests.
+- [x] Adopt repair-v2 common recourse only through its exact FAILED controller
+  task and resume chemistry/evaluation/freeze CPU-only in a fresh root.
+- [x] Keep all controller task outputs attempt-qualified while downstream tasks
+  consume dependency-selected attempt roots.
+- [ ] Fill the future AIDS repair manifest SHA only after its bounded-memory
+  implementation and terminal output pass; then build and launch the persistent
+  Mut controller from an immutable AutoDL worktree.
+
+# 2026-08-23 — AIDS bounded-memory common recourse
+
+- [ ] Persist theta-eligible `(parent, candidate, vector)` rows in immutable,
+  hashed, resumable disk shards without per-row Python objects.
+- [ ] Implement exact external-memory DBSCAN with bounded radius-neighbor
+  batches, deterministic core connectivity, and sklearn-compatible border/tie
+  assignment and label canonicalization.
+- [ ] Stream cluster coverage, centroid, and medoid aggregation without a full
+  `torch.tensor(recourse_array)` or per-cluster vector copy.
+- [ ] Prove legacy/new exact parity on adversarial small fixtures, chunk-size
+  invariance, checkpoint/resume equivalence, dense bounded-RSS behavior, and
+  PASS-last failure injection before launching a fresh AIDS repair-v4 root.

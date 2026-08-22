@@ -142,6 +142,75 @@ reference.
 
 Accepted
 
+## 2026-08-23 — Require an independent trace-off Mutagenicity reference
+
+### Decision
+
+The frozen Mutagenicity ComRecGC lineage-v3 payload remains the immutable
+trace-on authority and honestly records algorithm commit
+`7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4`.  Exact resume requires the
+separate reviewed checkpoint-instrumentation release
+`66487c062c86d53ef2f762ce04d0fb965af5af08`; neither its manifest nor the paper
+cell may claim that this execution commit is the historical 7f commit. Before
+the full run, an exclusive-GPU, fresh 500-step legacy/instrumented prefix gate
+freezes both worktrees' scientific source and top-level AST hashes and requires
+identical candidate payload, step/action trace, prediction/coverage state, and
+Python/NumPy/Torch RNG state. All source deltas stay visible and are classified;
+runtime equivalence, not a false source-identity assertion, constrains their
+effect on the Mut trace-off route to completed-step checkpoint/resume support.
+
+Chemistry standardization may resume only after a fresh 50,000-step, seed-0,
+trace-disabled reference uses the same frozen data order, RF-backed project
+route, GNN/distance checkpoints, and generation parameters, then passes the
+existing full normalized trace-parity assertion against the 7f trace-on
+payload. The reference is an exclusive-GPU job with completed-step checkpoints
+and a separately mirrored checkpoint authority; trace fields are neither
+removed nor synthesized.
+
+The continuation adopts the already-complete repair-v2 common-recourse output
+read-only only after parity passes, then reruns chemistry/evaluation/freeze in
+a fresh CPU-only root.  Every retry writes an immutable attempt gate while the
+scientific generation root stays fixed so `--resume` retains one canonical
+command identity.  The historical lineage-v3, repair-v2, and threshold roots
+are never modified.
+
+The dependency on AIDS is injected as an exact future repair manifest,
+controller, task, output, wrapper, and manifest SHA-256.  The OOM-failed
+repair-v3 controller is explicitly rejected and cannot release Mutagenicity.
+Both routes use the same host-memory flock/cgroup/proc contract, but their
+headroom thresholds are independently frozen: bounded external-memory AIDS-v4
+uses 128 GiB, while the Mut continuation retains its conservative generation
+gate. They are never required to lie about having the same peak-memory model.
+
+### Consequences
+
+- No copied payload or self-comparison can satisfy the trace-parity gate.
+- The 50k replay cannot start unless the independent 500-step instrumentation
+  gate passes and is revalidated against the source inventories frozen in the
+  controller manifest.
+- Calibration and held-out test data remain unloaded during both 50k runs.
+- The controller can recover from a fully mirrored generation checkpoint, and
+  publishes PASS only after checkpoint, provenance, payload, and parity audits.
+- Deployment is blocked until a memory-bounded AIDS repair succeeds and its
+  immutable manifest SHA is supplied to the Mutagenicity spec.
+
+### Status
+
+Accepted; implementation tested, deployment dependency pending.
+
+## 2026-08-23 — Replace AIDS dense common-recourse materialization
+
+The serial CPU-only repair-v3 exceeded the 480 GiB cgroup limit and was killed;
+exclusive scheduling cannot solve that scientific-stage memory requirement.
+The next AIDS repair must preserve the exact DBSCAN/greedy semantics while
+using disk-backed pair/vector shards, bounded exact radius-neighbor passes,
+disk-backed union/find labels, and streaming coverage/centroid/medoid
+aggregation.  Independent per-shard clustering, approximate neighbors,
+OPTICS/BIRCH substitution, reduced candidate budgets, and reuse of the failed
+root are forbidden.  Release requires legacy parity on core/border/noise/tie
+fixtures, chunk-size invariance, crash/resume equivalence, and a bounded-RSS
+dense stress gate in a fresh repair root.
+
 This file records major design decisions for the counterfactual subgraph v3 project.
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.

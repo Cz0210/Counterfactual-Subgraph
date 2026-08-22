@@ -1,0 +1,68 @@
+{
+  "schema_version": "mut_comrecgc_traceoff_parity_spec_v1",
+  "controller_id": "four_methods_four_datasets_mut_traceoff_parity_v1",
+  "paper_frozen": true,
+  "run_tastemolnet": 0,
+  "runtime_root": "/autodl-fs/data/counterfactual-subgraph-runtime",
+  "control_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+  "project_root": "__IMMUTABLE_EXECUTION_WORKTREE__",
+  "python": "/root/miniconda3/envs/smiles_pip118/bin/python3.10",
+  "proc_root": "/proc",
+  "cgroup_memory_root": "/sys/fs/cgroup/memory",
+  "min_cgroup_free_bytes": 472446402560,
+  "highmem_lock_path": "/autodl-fs/data/counterfactual-subgraph-runtime/locks/comrecgc_common_recourse_highmem.lock",
+  "flock_bin": "/usr/bin/flock",
+  "fresh_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_mut_traceoff_parity_v1",
+  "verify_comrecgc_checkout_safe_git_fix_commit": "d8b113281d24e9340bfe2379e7451ffa8adff70a",
+  "traced_source_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z",
+  "instrumentation_equivalence": {
+    "legacy_project_root": "__IMMUTABLE_7F7ED51_SCIENCE_WORKTREE__",
+    "instrumentation_project_root": "__IMMUTABLE_66487C0_CHECKPOINT_WORKTREE__",
+    "steps": 500
+  },
+  "repair_v2": {
+    "manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_am_repair_v2.json",
+    "root": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_am_repair_v2",
+    "failed_mut_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_am_repair_v2/cells/mutagenicity/comrecgc/standardized/attempt-0"
+  },
+  "repair_v1": {
+    "manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_repair_v1.json",
+    "root": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_repair_v1",
+    "mut_threshold_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_repair_v1/cells/mutagenicity/comrecgc/threshold-freeze/attempt-0"
+  },
+  "aids_dependency": {
+    "controller_id": "four_methods_four_datasets_aids_comrecgc_repair_v4",
+    "task_id": "aids_comrecgc_standardized_external_memory",
+    "wrapper": "run_aids_comrecgc_repair_v4_supervisor.sh",
+    "terminal_contract": "comrecgc_standardized_v1",
+    "min_cgroup_free_bytes": 137438953472,
+    "manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_aids_comrecgc_repair_v4.json",
+    "expected_manifest_sha256": "__FILL_AFTER_AIDS_V4_MANIFEST_FREEZE__",
+    "root": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_aids_comrecgc_repair_v4",
+    "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_aids_comrecgc_repair_v4/cells/aids/comrecgc/standardized/attempt-0"
+  },
+  "replay": {
+    "upstream_root": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/vendor/COMRECGC/122f9341a360e9f06bb58a2f5823bb596021f6bf",
+    "dataset_dir": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/mutagenicity/baselines/gcfexplainer/smoke_v1/dataset",
+    "gnn_checkpoint": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/mutagenicity/baselines/gcfexplainer/full_v2/gnn/model_best.pth",
+    "distance_checkpoint": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/pretrained/gcfexplainer/mutagenicity/neurosed/best_model.pt",
+    "parent_limit": 1448,
+    "batch_size": 128,
+    "trace_enabled": false,
+    "parameters": {
+      "candidate_capacity": 100000,
+      "heads": 5,
+      "sample_size": 10000,
+      "seed": 0,
+      "steps": 50000,
+      "teleport": 0.1,
+      "theta": 0.1
+    }
+  },
+  "standardization": {
+    "dataset_csv": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/datasets/mutagenicity_v1_teacher_consistent/test_source_label1_teacher_correct.csv",
+    "teacher_path": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/oracle/mutagenicity_rf_v1/mutagenicity_rf_model.pkl",
+    "molclr_root": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR",
+    "molclr_checkpoint": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth"
+  }
+}
