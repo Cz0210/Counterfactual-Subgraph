@@ -34,6 +34,29 @@ def _write(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_text(path: Path, value: str) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -120,7 +143,7 @@ def verify(*, dataset: str, source: Path, output: Path) -> dict[str, Any]:
     }
     _write(output / "frozen_threshold_contract.json", frozen)
     _write(output / "threshold_adoption_audit.json", audit)
-    (output / "PASS").write_text("PASS\n", encoding="utf-8")
+    _write_text(output / "PASS", "PASS\n")
     return audit
 
 
