@@ -6843,3 +6843,31 @@ are first-class required outputs, while large checkpoint identity is frozen
 from the launch spec instead of re-hashed on each tick. AutoDL shells and child
 specs use `PYTHONDONTWRITEBYTECODE=1` so immutable execution clones remain
 byte-for-byte unchanged by imports.
+
+---
+
+## 2026-08-22: Separate deterministic adapter coverage from formal B6 yield
+
+The one-update BACE adapter canary previously required its very small
+PPO-generated sample to contain a connected deletion.  A run could therefore
+complete the real optimizer, parameter-change, checkpoint, and reload checks
+yet fail solely because two sampled strings happened not to yield a legal
+deletion.  Increasing that sample count would reduce but not remove the
+probabilistic gate.
+
+The canary now inspects the exact eight fixed source-class parents already read
+from the frozen BACE train CSV.  It deterministically enumerates bounded
+parent-derived fragments, selects the first fragment with a valid connected
+hard deletion under the production chemistry primitive, and sends the selected
+rows through the same already-loaded `BatchedGNNPPORewardAdapter` used by the
+subsequent stable-PPO update.  PASS requires an observed residual prediction
+batch, an increased GNN-scored-deletion counter, one unchanged oracle load, the
+train CSV hash and parent identities, and explicit absence of RF,
+formal-calibration-dataset, and test access.  It does not read B5 evidence.
+
+This preflight is integration evidence only: it is marked non-formal and cannot
+release B7.  The canary still requires a real stable optimizer update, changed
+policy bytes, unchanged reference bytes, and reloadable checkpoints.  Formal
+`B6_PPO_SMOKE_V2` ignores the preflight and retains its existing requirement
+that at least one of B6's own PPO-generated candidates receives a real GNN
+deletion score.

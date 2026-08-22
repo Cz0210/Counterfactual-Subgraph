@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -14,6 +16,7 @@ from src.rewards.gnn_ppo_reward import (
     BatchedGNNPPORewardAdapter,
     GNNPPORewardConfig,
 )
+from src.train.bace_gnn_ppo import run_canary_connected_deletion_preflight
 
 
 class _FakeFrozenGINE(BaseOracle):
@@ -141,3 +144,44 @@ def test_reward_provenance_contains_every_required_scientific_field(
     assert not (set(REWARD_PROVENANCE_FIELDS) - set(row))
     assert row["policy_initializer_hash"] == "clean-policy-hash"
     assert row["reference_policy_hash"] == "frozen-reference-hash"
+
+
+def test_canary_preflight_uses_same_real_adapter_on_eight_train_parents(
+    tmp_path: Path,
+) -> None:
+    adapter, oracle = _adapter(tmp_path)
+    train_csv = tmp_path / "train.csv"
+    train_csv.write_text("molecule_id,parent_smiles,label\n", encoding="utf-8")
+    examples = [
+        SimpleNamespace(
+            index=index,
+            molecule_id=f"train-{index}",
+            parent_smiles="CCCO",
+            original_label=1,
+        )
+        for index in range(8)
+    ]
+    manifest = run_canary_connected_deletion_preflight(
+        reward_adapter=adapter,
+        examples=examples,
+        train_csv=train_csv,
+        frozen_train_contract={
+            "checkpoint_split_manifest": str(tmp_path / "split_manifest.json"),
+            "checkpoint_split_manifest_sha256": "a" * 64,
+            "train_csv": str(train_csv.resolve()),
+            "train_csv_sha256": hashlib.sha256(train_csv.read_bytes()).hexdigest(),
+            "calibration_loaded": False,
+            "test_loaded": False,
+        },
+    )
+    assert manifest["status"] == "PASS"
+    assert manifest["source_parent_count"] == 8
+    assert manifest["source_split"] == "train"
+    assert manifest["real_gnn_inference_observed"] is True
+    assert manifest["adapter_instance_reused"] is True
+    assert manifest["gnn_scored_deletion_count"] >= 1
+    assert manifest["calibration_loaded"] is False
+    assert manifest["test_loaded"] is False
+    assert adapter.oracle_load_count == 1
+    assert oracle.batch_sizes[0] == 1  # one canonical parent cache miss
+    assert oracle.batch_sizes[-1] >= 8  # real residual GNN batch

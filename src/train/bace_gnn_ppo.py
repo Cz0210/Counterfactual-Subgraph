@@ -10,9 +10,14 @@ from pathlib import Path
 import tempfile
 from typing import Any, Mapping, Sequence
 
+from src.chem import enumerate_connected_hard_deletions, parse_smiles
+from src.chem.projection import build_parent_projection_candidates
+
 
 B6_V2_SCHEMA = "bace_b6_ppo_smoke_v2"
 B7_SCHEMA = "bace_b7_ppo_full_v1"
+CANARY_SCHEMA = "bace_gnn_ppo_adapter_canary_v2"
+CANARY_PARENT_COUNT = 8
 REWARD_PROVENANCE_FIELDS = (
     "dataset",
     "parent_id",
@@ -201,6 +206,238 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").lower()
+    return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
+
+
+def run_canary_connected_deletion_preflight(
+    *,
+    reward_adapter: Any,
+    examples: Sequence[Any],
+    train_csv: str | Path,
+    frozen_train_contract: Mapping[str, Any],
+    max_candidates_per_parent: int = 128,
+) -> dict[str, Any]:
+    """Exercise the live reward adapter on deterministic train-only deletions.
+
+    This is an adapter-integration canary, not PPO-generated scientific
+    evidence.  It inspects the exact eight fixed canary parents, deterministically
+    chooses the first parent-derived fragment with a valid connected hard
+    deletion, and submits those fragments through the *same already-loaded*
+    ``BatchedGNNPPORewardAdapter`` used by the subsequent stable PPO update.
+    Formal B6 never consumes this evidence.
+    """
+
+    source = Path(train_csv).expanduser().resolve(strict=True)
+    source_sha256 = _sha256_file(source)
+    if (
+        frozen_train_contract.get("train_csv") != str(source)
+        or frozen_train_contract.get("train_csv_sha256") != source_sha256
+        or not _is_sha256(frozen_train_contract.get("checkpoint_split_manifest_sha256"))
+        or frozen_train_contract.get("calibration_loaded") is not False
+        or frozen_train_contract.get("test_loaded") is not False
+    ):
+        raise ValueError("Canary preflight rejected the frozen train-split contract")
+    selected_examples = list(examples)
+    if len(selected_examples) != CANARY_PARENT_COUNT:
+        raise ValueError(
+            "BACE adapter canary preflight requires exactly "
+            f"{CANARY_PARENT_COUNT} frozen train parents; got {len(selected_examples)}"
+        )
+    if max_candidates_per_parent <= 0:
+        raise ValueError("Canary preflight candidate bound must be positive")
+
+    parent_rows: list[dict[str, Any]] = []
+    score_inputs: list[tuple[str, str, str]] = []
+    seen_parent_ids: set[str] = set()
+    for position, example in enumerate(selected_examples):
+        parent_smiles = str(getattr(example, "parent_smiles", "") or "").strip()
+        molecule_id = getattr(example, "molecule_id", None)
+        fallback_index = getattr(example, "index", position)
+        parent_id = str(molecule_id if molecule_id not in (None, "") else fallback_index)
+        if not parent_smiles:
+            raise ValueError(f"Canary train parent {parent_id!r} has no SMILES")
+        if parent_id in seen_parent_ids:
+            raise ValueError(f"Canary train parent identity is duplicated: {parent_id}")
+        seen_parent_ids.add(parent_id)
+        if int(getattr(example, "original_label", -1)) != 1:
+            raise ValueError(f"Canary parent {parent_id!r} is not source label 1")
+
+        parsed = parse_smiles(
+            parent_smiles,
+            sanitize=True,
+            canonicalize=True,
+            allow_capped_fragments=False,
+        )
+        canonical_parent = str(parsed.canonical_smiles or "") if parsed.sanitized else ""
+        candidates = (
+            build_parent_projection_candidates(
+                parsed.mol,
+                parent_smiles=canonical_parent,
+                max_candidates=int(max_candidates_per_parent),
+                min_atoms=2,
+                min_atom_ratio=0.0,
+                max_atom_ratio=0.75,
+                enable_khop3=False,
+            )
+            if parsed.mol is not None and canonical_parent
+            else ()
+        )
+        ordered_candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                int(candidate.atom_count),
+                str(candidate.smiles),
+                tuple(int(index) for index in candidate.atom_indices),
+                str(candidate.source),
+            ),
+        )
+        chosen = None
+        chosen_valid_deletion_count = 0
+        for candidate in ordered_candidates:
+            outcomes = enumerate_connected_hard_deletions(
+                canonical_parent,
+                str(candidate.smiles),
+                parent_id=parent_id,
+                candidate_id=f"canary-preflight:{position}",
+            )
+            valid_count = sum(
+                1
+                for outcome in outcomes
+                if bool(outcome.valid and outcome.residual_smiles)
+            )
+            if valid_count > 0:
+                chosen = candidate
+                chosen_valid_deletion_count = valid_count
+                break
+        parent_row = {
+            "position": position,
+            "parent_id": parent_id,
+            "parent_smiles_sha256": _sha256_text(canonical_parent or parent_smiles),
+            "source_split": "train",
+            "source_label": 1,
+            "candidate_count": len(ordered_candidates),
+            "selected_fragment": str(chosen.smiles) if chosen is not None else None,
+            "selected_fragment_sha256": (
+                _sha256_text(str(chosen.smiles)) if chosen is not None else None
+            ),
+            "selected_fragment_source": (
+                str(chosen.source) if chosen is not None else None
+            ),
+            "prevalidated_connected_deletion_count": chosen_valid_deletion_count,
+        }
+        parent_rows.append(parent_row)
+        if chosen is not None:
+            score_inputs.append((parent_id, canonical_parent, str(chosen.smiles)))
+
+    oracle_loads_before = int(getattr(reward_adapter, "oracle_load_count", -1))
+    prediction_batches_before = int(
+        getattr(reward_adapter, "oracle_prediction_batches", -1)
+    )
+    scored_deletions_before = int(
+        getattr(reward_adapter, "scored_deletion_count", -1)
+    )
+    score_rows = (
+        reward_adapter.score_batch(
+            parent_smiles=[row[1] for row in score_inputs],
+            generated_fragments=[row[2] for row in score_inputs],
+            labels=[1] * len(score_inputs),
+            metas=[{"molecule_id": row[0], "source_split": "train"} for row in score_inputs],
+        )
+        if score_inputs
+        else []
+    )
+    oracle_loads_after = int(getattr(reward_adapter, "oracle_load_count", -1))
+    prediction_batches_after = int(
+        getattr(reward_adapter, "oracle_prediction_batches", -1)
+    )
+    scored_deletions_after = int(
+        getattr(reward_adapter, "scored_deletion_count", -1)
+    )
+    prediction_batch_delta = prediction_batches_after - prediction_batches_before
+    scored_deletion_delta = scored_deletions_after - scored_deletions_before
+    scored_rows = [row for row in score_rows if bool(row.get("gnn_scored_deletion"))]
+    oracle_provenance = dict(reward_adapter.provenance())
+    train_only_contract = bool(
+        oracle_provenance.get("dataset") == "bace"
+        and oracle_provenance.get("oracle_backend") == "gnn"
+        and oracle_provenance.get("rf_oracle_used") is False
+        and oracle_provenance.get("calibration_loaded") is False
+        and oracle_provenance.get("calibration_dataset_loaded") is False
+        and oracle_provenance.get("frozen_temperature_calibration_loaded") is True
+        and oracle_provenance.get("test_loaded") is False
+    )
+    real_gnn_inference = bool(
+        score_inputs
+        and scored_rows
+        and prediction_batch_delta >= 1
+        and scored_deletion_delta >= 1
+        and oracle_loads_before == 1
+        and oracle_loads_after == 1
+    )
+    status = "PASS" if train_only_contract and real_gnn_inference else "FAIL"
+    return {
+        "schema_version": "bace_gnn_ppo_canary_connected_deletion_preflight_v1",
+        "stage": "BACE_GNN_PPO_ADAPTER_CANARY",
+        "status": status,
+        "purpose": "adapter_integration_only_not_formal_ppo_candidate_evidence",
+        "formal_b6_v2": False,
+        "releases_b7": False,
+        "dataset": "bace",
+        "source_split": "train",
+        "source_label": 1,
+        "train_csv": str(source),
+        "train_csv_sha256": source_sha256,
+        "checkpoint_split_manifest": frozen_train_contract.get(
+            "checkpoint_split_manifest"
+        ),
+        "checkpoint_split_manifest_sha256": frozen_train_contract.get(
+            "checkpoint_split_manifest_sha256"
+        ),
+        "frozen_train_contract_pass": True,
+        "source_parent_count": len(selected_examples),
+        "source_parent_ids_sha256": _sha256_text(
+            json.dumps(
+                [row["parent_id"] for row in parent_rows],
+                sort_keys=False,
+                separators=(",", ":"),
+            )
+        ),
+        "parents": parent_rows,
+        "connected_candidate_parent_count": len(score_inputs),
+        "adapter_score_row_count": len(score_rows),
+        "gnn_scored_deletion_count": len(scored_rows),
+        "adapter_instance_reused": oracle_loads_before == oracle_loads_after == 1,
+        "oracle_load_count_before": oracle_loads_before,
+        "oracle_load_count_after": oracle_loads_after,
+        "oracle_prediction_batches_before": prediction_batches_before,
+        "oracle_prediction_batches_after": prediction_batches_after,
+        "oracle_prediction_batch_delta": prediction_batch_delta,
+        "scored_deletion_count_before": scored_deletions_before,
+        "scored_deletion_count_after": scored_deletions_after,
+        "scored_deletion_count_delta": scored_deletion_delta,
+        "real_gnn_inference_observed": real_gnn_inference,
+        "train_only_contract_pass": train_only_contract,
+        "oracle_backend": oracle_provenance.get("oracle_backend"),
+        "oracle_checkpoint_hash": oracle_provenance.get("checkpoint_id"),
+        "rf_oracle_used": oracle_provenance.get("rf_oracle_used"),
+        "calibration_loaded": oracle_provenance.get("calibration_loaded"),
+        "calibration_dataset_loaded": oracle_provenance.get(
+            "calibration_dataset_loaded"
+        ),
+        "frozen_temperature_calibration_loaded": oracle_provenance.get(
+            "frozen_temperature_calibration_loaded"
+        ),
+        "test_loaded": oracle_provenance.get("test_loaded"),
+        "score_rows": score_rows,
+    }
+
+
 class BacePPOObserver:
     """Collect the existing stable loop's real post-optimizer callbacks."""
 
@@ -318,6 +555,7 @@ def build_ppo_gate(
     periodic_checkpoint_reload: Mapping[str, Any],
     reward_manifest: Mapping[str, Any],
     oracle_provenance: Mapping[str, Any],
+    canary_preflight: Mapping[str, Any] | None = None,
     expected_checkpoints: Sequence[int] = (),
     hard_kl: float = 0.8,
 ) -> dict[str, Any]:
@@ -461,10 +699,59 @@ def build_ppo_gate(
         "expected_checkpoints_saved": set(expected_checkpoints).issubset(observed_checkpoint_steps),
     }
     if stage == "BACE_GNN_PPO_ADAPTER_CANARY":
+        preflight = dict(canary_preflight or {})
+        preflight_parents = preflight.get("parents")
+        preflight_parent_contract = bool(
+            isinstance(preflight_parents, list)
+            and len(preflight_parents) == CANARY_PARENT_COUNT
+            and all(
+                isinstance(parent, Mapping)
+                and parent.get("source_split") == "train"
+                and parent.get("source_label") == 1
+                and _is_sha256(parent.get("parent_smiles_sha256"))
+                for parent in preflight_parents
+            )
+        )
+        preflight_real_gnn_inference = bool(
+            preflight.get("status") == "PASS"
+            and preflight.get("stage") == "BACE_GNN_PPO_ADAPTER_CANARY"
+            and preflight.get("dataset") == "bace"
+            and preflight.get("source_split") == "train"
+            and int(preflight.get("source_parent_count", 0)) == CANARY_PARENT_COUNT
+            and _is_sha256(preflight.get("train_csv_sha256"))
+            and _is_sha256(preflight.get("checkpoint_split_manifest_sha256"))
+            and _is_sha256(preflight.get("source_parent_ids_sha256"))
+            and preflight.get("frozen_train_contract_pass") is True
+            and preflight_parent_contract
+            and preflight.get("adapter_instance_reused") is True
+            and int(preflight.get("oracle_load_count_before", 0)) == 1
+            and int(preflight.get("oracle_load_count_after", 0)) == 1
+            and int(preflight.get("oracle_prediction_batch_delta", 0)) >= 1
+            and int(preflight.get("scored_deletion_count_delta", 0)) >= 1
+            and int(preflight.get("gnn_scored_deletion_count", 0)) >= 1
+            and preflight.get("real_gnn_inference_observed") is True
+            and preflight.get("train_only_contract_pass") is True
+            and preflight.get("oracle_backend") == "gnn"
+            and preflight.get("rf_oracle_used") is False
+            and preflight.get("calibration_loaded") is False
+            and preflight.get("calibration_dataset_loaded") is False
+            and preflight.get("frozen_temperature_calibration_loaded") is True
+            and preflight.get("test_loaded") is False
+            and preflight.get("formal_b6_v2") is False
+            and preflight.get("releases_b7") is False
+        )
         stage_requirements = {
             **common,
             "minimum_update_count_met": ppo_update_count >= 1,
             "bounded_update_count_met": ppo_update_count <= 2,
+            "ppo_generated_gnn_scored_deletion_count": int(
+                reward_manifest.get("gnn_scored_deletion_count", 0)
+            ),
+            "canary_preflight_real_gnn_inference": preflight_real_gnn_inference,
+            "canary_preflight_schema_version": preflight.get("schema_version"),
+            "canary_preflight_train_csv_sha256": preflight.get(
+                "train_csv_sha256"
+            ),
             "formal_b6_v2": False,
             "releases_b7": False,
         }
@@ -485,7 +772,7 @@ def build_ppo_gate(
             "all_reward_values_finite",
             "all_update_metrics_finite",
             "at_least_one_valid_candidate",
-            "at_least_one_gnn_scored_deletion",
+            "canary_preflight_real_gnn_inference",
             "reward_provenance_complete",
             "gnn_oracle_backend",
             "bace_classifier_contract_pass",
@@ -497,7 +784,7 @@ def build_ppo_gate(
             "candidate_oracle_contract_pass",
             "kl_within_hard_limit",
         )
-        schema = "bace_gnn_ppo_adapter_canary_v1"
+        schema = CANARY_SCHEMA
     elif stage == "B6_PPO_SMOKE_V2":
         stage_requirements = {
             **common,
@@ -608,11 +895,14 @@ def build_ppo_gate(
 __all__ = [
     "B6_V2_SCHEMA",
     "B7_SCHEMA",
+    "CANARY_PARENT_COUNT",
+    "CANARY_SCHEMA",
     "BacePPOObserver",
     "REWARD_PROVENANCE_FIELDS",
     "atomic_json",
     "build_ppo_gate",
     "build_reward_manifest",
     "model_parameter_hash",
+    "run_canary_connected_deletion_preflight",
     "validate_adapter_checkpoint_reload",
 ]

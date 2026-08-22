@@ -757,6 +757,9 @@ Mutagenicity roadmaps.
 - [x] Add explicit B6--B14 split-access and dependency-release contracts that
   cannot turn READY evidence into a scientific PASS.
 - [ ] Run and pass the real 7B LoRA B6-v2 on AutoDL, then release B7.
+- [x] Decouple the non-formal adapter canary from stochastic generated-deletion
+  yield by adding a same-adapter, eight-parent train-only connected-deletion
+  GNN preflight; keep formal B6 dependent on PPO-generated deletion evidence.
 - [x] Implement the provenance-clean B8/B9 fixed train-parent shards, B10
   deterministic merge, batched-GINE/all-match/MolCLR-WNode B11 and B13
   verification, calibration-only B12 freeze, and manifest-only B14 gate.

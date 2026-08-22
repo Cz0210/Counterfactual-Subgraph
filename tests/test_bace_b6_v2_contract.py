@@ -123,6 +123,47 @@ def _checkpoint_artifact(checkpoint_hash: str = "a" * 64) -> dict:
     }
 
 
+def _canary_preflight(*, real_gnn_inference: bool = True) -> dict:
+    delta = 1 if real_gnn_inference else 0
+    return {
+        "schema_version": "bace_gnn_ppo_canary_connected_deletion_preflight_v1",
+        "stage": "BACE_GNN_PPO_ADAPTER_CANARY",
+        "status": "PASS" if real_gnn_inference else "FAIL",
+        "dataset": "bace",
+        "source_split": "train",
+        "source_parent_count": 8,
+        "train_csv_sha256": "d" * 64,
+        "checkpoint_split_manifest_sha256": "e" * 64,
+        "source_parent_ids_sha256": "f" * 64,
+        "frozen_train_contract_pass": True,
+        "parents": [
+            {
+                "parent_id": f"train-{index}",
+                "source_split": "train",
+                "source_label": 1,
+                "parent_smiles_sha256": "a" * 64,
+            }
+            for index in range(8)
+        ],
+        "adapter_instance_reused": True,
+        "oracle_load_count_before": 1,
+        "oracle_load_count_after": 1,
+        "oracle_prediction_batch_delta": delta,
+        "scored_deletion_count_delta": delta,
+        "gnn_scored_deletion_count": delta,
+        "real_gnn_inference_observed": real_gnn_inference,
+        "train_only_contract_pass": True,
+        "oracle_backend": "gnn",
+        "rf_oracle_used": False,
+        "calibration_loaded": False,
+        "calibration_dataset_loaded": False,
+        "frozen_temperature_calibration_loaded": True,
+        "test_loaded": False,
+        "formal_b6_v2": False,
+        "releases_b7": False,
+    }
+
+
 def test_b6_v2_requires_real_updates_parameter_change_and_reload(
     tmp_path: Path,
 ) -> None:
@@ -220,6 +261,44 @@ def test_canary_is_independent_non_formal_and_cannot_release_b7() -> None:
         metrics=_metrics(),
     )
     observer.on_finish(final_output_dir=Path("canary"), global_step=1)
+    ppo_row = _reward_row()
+    ppo_row.update(
+        {
+            "deletion_valid": False,
+            "gnn_scored_deletion": False,
+            "cf_flip": False,
+        }
+    )
+    gate = build_ppo_gate(
+        stage="BACE_GNN_PPO_ADAPTER_CANARY",
+        policy_parameter_hash_before="policy-before",
+        policy_parameter_hash_after="policy-after",
+        reference_parameter_hash_before="reference",
+        reference_parameter_hash_after="reference",
+        observer=observer,
+        checkpoint_reload=_checkpoint_artifact(),
+        periodic_checkpoint_reload=_checkpoint_artifact(),
+        reward_manifest=build_reward_manifest([ppo_row], oracle_provenance=_oracle_provenance()),
+        oracle_provenance=_oracle_provenance(),
+        canary_preflight=_canary_preflight(),
+    )
+    assert gate["status"] == "PASS"
+    assert gate["stage"] == "BACE_GNN_PPO_ADAPTER_CANARY"
+    assert gate["formal_b6_v2"] is False
+    assert gate["releases_b7"] is False
+    assert gate["ppo_generated_gnn_scored_deletion_count"] == 0
+    assert gate["canary_preflight_real_gnn_inference"] is True
+
+
+def test_canary_cannot_pass_without_real_same_adapter_gnn_inference() -> None:
+    observer = BacePPOObserver()
+    observer.on_update(
+        step_index=1,
+        batch_ids=["p0"],
+        reward_logs=[_reward_row()],
+        metrics=_metrics(),
+    )
+    observer.on_finish(final_output_dir=Path("canary"), global_step=1)
     gate = build_ppo_gate(
         stage="BACE_GNN_PPO_ADAPTER_CANARY",
         policy_parameter_hash_before="policy-before",
@@ -233,11 +312,54 @@ def test_canary_is_independent_non_formal_and_cannot_release_b7() -> None:
             [_reward_row()], oracle_provenance=_oracle_provenance()
         ),
         oracle_provenance=_oracle_provenance(),
+        canary_preflight=_canary_preflight(real_gnn_inference=False),
     )
-    assert gate["status"] == "PASS"
-    assert gate["stage"] == "BACE_GNN_PPO_ADAPTER_CANARY"
-    assert gate["formal_b6_v2"] is False
-    assert gate["releases_b7"] is False
+    assert gate["status"] == "FAIL"
+    assert "canary_preflight_real_gnn_inference" in gate["failures"]
+
+
+def test_b6_generated_candidate_gnn_gate_ignores_canary_preflight() -> None:
+    observer = BacePPOObserver()
+    no_gnn_row = _reward_row()
+    no_gnn_row.update(
+        {
+            "deletion_valid": False,
+            "gnn_scored_deletion": False,
+            "cf_flip": False,
+        }
+    )
+    for step in range(1, 6):
+        observer.on_update(
+            step_index=step,
+            batch_ids=["p0"],
+            reward_logs=[no_gnn_row],
+            metrics=_metrics(),
+        )
+    observer.on_checkpoint(
+        step_index=5,
+        checkpoint_dir=Path("checkpoint-5"),
+        checkpoint_kind="periodic",
+    )
+    observer.on_finish(final_output_dir=Path("b6"), global_step=5)
+    gate = build_ppo_gate(
+        stage="B6_PPO_SMOKE_V2",
+        policy_parameter_hash_before="policy-before",
+        policy_parameter_hash_after="policy-after",
+        reference_parameter_hash_before="reference",
+        reference_parameter_hash_after="reference",
+        observer=observer,
+        checkpoint_reload=_checkpoint_artifact(),
+        periodic_checkpoint_reload=_checkpoint_artifact(),
+        reward_manifest=build_reward_manifest(
+            [no_gnn_row], oracle_provenance=_oracle_provenance()
+        ),
+        oracle_provenance=_oracle_provenance(),
+        canary_preflight=_canary_preflight(),
+        expected_checkpoints=(5,),
+    )
+    assert gate["status"] == "FAIL"
+    assert gate["at_least_one_gnn_scored_deletion"] is False
+    assert "at_least_one_gnn_scored_deletion" in gate["failures"]
 
 
 def test_b7_contract_requires_300_updates_and_all_six_periodic_checkpoints() -> None:

@@ -45,6 +45,7 @@ from src.train.bace_gnn_ppo import (  # noqa: E402
     build_ppo_gate,
     build_reward_manifest,
     model_parameter_hash,
+    run_canary_connected_deletion_preflight,
     validate_adapter_checkpoint_reload,
 )
 from src.train.bace_policy_init import (  # noqa: E402
@@ -298,9 +299,10 @@ def run(args: Any) -> int:
         only_positive=True,
         max_prompt_examples=int(args.max_prompt_examples),
     )
-    if args.stage in {"BACE_GNN_PPO_ADAPTER_CANARY", "B6_PPO_SMOKE_V2"}:
-        if not 8 <= len(examples) <= 16:
-            raise ValueError(f"{args.stage} requires 8-16 BACE train source parents")
+    if args.stage == "BACE_GNN_PPO_ADAPTER_CANARY" and len(examples) != 8:
+        raise ValueError("BACE adapter canary requires exactly 8 BACE train source parents")
+    if args.stage == "B6_PPO_SMOKE_V2" and not 8 <= len(examples) <= 16:
+        raise ValueError("B6_PPO_SMOKE_V2 requires 8-16 BACE train source parents")
     deps = import_training_dependencies()
     deps["set_seed"](int(args.seed))
     torch = deps["torch"]
@@ -360,6 +362,19 @@ def run(args: Any) -> int:
             oracle_batch_size=int(args.oracle_batch_size),
         ),
     )
+    canary_preflight = None
+    if args.stage == "BACE_GNN_PPO_ADAPTER_CANARY":
+        canary_preflight = run_canary_connected_deletion_preflight(
+            reward_adapter=reward_adapter,
+            examples=examples,
+            train_csv=train_csv,
+            frozen_train_contract=train_contract,
+        )
+        atomic_json(output / "canary_connected_deletion_preflight.json", canary_preflight)
+        if canary_preflight.get("status") != "PASS":
+            raise RuntimeError(
+                "BACE adapter canary connected-deletion GNN preflight failed"
+            )
     observer = BacePPOObserver()
     run_stable_decoded_chem_ppo_loop(
         deps=deps,
@@ -400,6 +415,7 @@ def run(args: Any) -> int:
         periodic_checkpoint_reload=periodic_checkpoint_reload,
         reward_manifest=reward_manifest,
         oracle_provenance=oracle_provenance,
+        canary_preflight=canary_preflight,
         expected_checkpoints=expected,
         hard_kl=0.8,
     )
@@ -445,6 +461,11 @@ def run(args: Any) -> int:
         "candidate_pool": str(output / "candidate_pool.jsonl"),
         "reward_manifest": str(output / "reward_manifest.json"),
         "oracle_provenance": str(output / "oracle_provenance.json"),
+        "canary_connected_deletion_preflight": (
+            str(output / "canary_connected_deletion_preflight.json")
+            if canary_preflight is not None
+            else None
+        ),
         "output_root": str(output),
         "stable_loop": "scripts.train_ppo_stable.run_stable_decoded_chem_ppo_loop",
         "shared_algorithm_reimplemented": False,

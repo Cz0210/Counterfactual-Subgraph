@@ -233,7 +233,16 @@ Use a different fresh `OUTPUT_ROOT` for every action.  B6-v2 writes
 `policy_provenance.json`, `candidate_pool.jsonl`, `oracle_provenance.json`,
 `reward_manifest.json`, `ppo_gate.json`, and a PASS file only after every gate
 succeeds.  The optional `BACE_GNN_PPO_ADAPTER_CANARY` action is real training
-but explicitly cannot satisfy the B6-v2 predecessor contract.
+but explicitly cannot satisfy the B6-v2 predecessor contract.  Its adapter
+coverage is deterministic rather than generation-luck based: the same loaded
+GNN reward adapter scores parent-derived connected deletions from the exact
+eight fixed train-only canary parents, with the train CSV hash and parent
+identities frozen in `canary_connected_deletion_preflight.json`.  This
+preflight reads neither B5/calibration nor test evidence.  It proves only that
+the live adapter performs real residual GNN inference; the canary must still
+complete a real stable-PPO update and checkpoint reload.  Formal B6-v2 does
+not consume this preflight and continues to require a GNN-scored deletion from
+its own PPO-generated candidate rows.
 The PPO manifest also binds the final and last-periodic adapter config/weights
 by resolved path, size, and SHA-256 and publishes
 `policy_checkpoint_hash_schema=bace_lora_checkpoint_identity_v1` plus its
