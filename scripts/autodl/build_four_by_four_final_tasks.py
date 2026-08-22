@@ -17,6 +17,16 @@ from src.eval.four_by_four_registry import canonical_dataset, canonical_method
 DATASETS = ("AIDS", "Mutagenicity", "BACE", "TasteMolNet")
 METHODS = ("Ours", "GCFExplainer", "GlobalGCE", "ComRecGC")
 MATRIX_TASK_ID = "final_matrix_audit"
+BACE_STANDARDIZED_CELL_TASKS = {
+    "Ours": "bace_ours_standardized",
+    "GCFExplainer": "bace_gcfexplainer_standardized",
+    "ComRecGC": "bace_comrecgc_standardized",
+}
+BACE_SCIENCE_TERMINALS = {
+    "Ours": "bace_b14_frozen",
+    "GCFExplainer": "bace_gcfexplainer_final_freeze",
+    "ComRecGC": "bace_comrecgc_final_freeze",
+}
 
 
 def _safe_id(value: str) -> str:
@@ -71,6 +81,15 @@ def _parse_cells(values: list[str]) -> dict[tuple[str, str], str]:
         )
     if len(set(cells.values())) != 16:
         raise ValueError("Each cell requires one distinct terminal task")
+    for method, expected_task in BACE_STANDARDIZED_CELL_TASKS.items():
+        task_id = cells[("BACE", method)]
+        if task_id != expected_task:
+            science_task = BACE_SCIENCE_TERMINALS[method]
+            raise ValueError(
+                f"BACE/{method} must bind standardized task "
+                f"{expected_task!r}; received {task_id!r}. Raw science terminal "
+                f"{science_task!r} is not one registry-complete cell"
+            )
     return cells
 
 
@@ -153,6 +172,7 @@ def build(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
         "schema_version": "four_by_four_export_dependencies_v1",
         "matrix_task_id": MATRIX_TASK_ID,
         "matrix_status": _token(MATRIX_TASK_ID) + "/matrix_status.json",
+        "bace_standardized_cell_tasks": dict(BACE_STANDARDIZED_CELL_TASKS),
         "cells": {
             f"{dataset}/{method}": cells[(dataset, method)]
             for dataset in DATASETS

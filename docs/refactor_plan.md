@@ -1,5 +1,17 @@
 # Refactor Plan
 
+## 2026-08-22: BACE four-by-four cell closure
+
+- [x] Keep B14 and native baseline final roots as immutable scientific
+  terminals rather than treating them as paper-ready cells.
+- [x] Add deterministic, CPU-only BACE Ours/GCFExplainer/ComRecGC
+  standardization tasks with SHA256 identity traversal and no raw test access.
+- [x] Export the complete common cell schema, file inventory, freeze marker,
+  final audit, and PASS-last marker under fresh roots.
+- [x] Reject final-matrix mappings that bypass the standardization layer.
+- [x] Preserve GlobalGCE's reviewed code blocker without generating a
+  substitute result.
+
 ## 1. Purpose
 
 This document records the intended roadmap for rebuilding the counterfactual subgraph v3 project from an empty repository.

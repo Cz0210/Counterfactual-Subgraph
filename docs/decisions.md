@@ -43,6 +43,46 @@ Accepted
 
 ---
 
+## [2026-08-22] Separate BACE scientific freezes from paper-matrix cell freezes
+
+### Background
+
+The new BACE Ours B14 and native GCFExplainer/ComRecGC final roots prove the
+scientific classifier, selector, and held-out-test boundaries, but do not
+directly implement the complete four-by-four standardized cell schema. Mapping
+those raw terminal tasks into the final matrix would leave Figure 3, Figure 4,
+Table 2, auxiliary CSVs, and their file-hash closure unproven.
+
+### Decision
+
+Add one artifact-only standardization layer after each eligible BACE terminal.
+It follows SHA256-pinned selection, test, verification-shard, pair-matrix, and
+final-metrics identities; validates the frozen BACE GINE and RF exclusion; and
+replays only deterministic prefix aggregation. The raw held-out test CSV is
+never opened, and no rule ordering, threshold, prediction, embedding, or
+distance is recomputed. Missing auxiliary values are explicit `N/A`, never
+numeric substitutions.
+
+The final matrix builder rejects direct BACE mappings to `bace_b14_frozen`,
+`bace_gcfexplainer_final_freeze`, or `bace_comrecgc_final_freeze`. It must bind
+the corresponding `*_standardized` terminal task. GlobalGCE remains
+`BLOCKED_CODE` and is not fabricated.
+
+### Consequences
+
+- Scientific and presentation freezes remain separately auditable.
+- BACE standardized cells carry the same complete hash-closed schema as the
+  other datasets.
+- Calibration/test leakage cannot be introduced by the exporter.
+- Any threshold-grid disagreement between methods remains visible to the
+  cross-cell registry gate instead of being silently normalized.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-22] Separate native GlobalGCE action parity from frozen-GINE training compatibility
 
 ### Background
