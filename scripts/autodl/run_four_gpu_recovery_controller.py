@@ -69,6 +69,12 @@ from src.train.stable_ppo_resume import (
     find_latest_stable_ppo_resume_checkpoint,
     read_stable_ppo_resume_manifest,
 )
+from src.utils.autodl_gpu_colocation_gate import (
+    GPUColocationGateError,
+    MAXIMUM_SHARED_TASKS_PER_GPU,
+    validate_authorized_pair,
+    validate_gpu_colocation_gate,
+)
 from src.utils.autodl_bace_continuation import (
     BaceContinuationError,
     PredecessorControllerGuard,
@@ -219,6 +225,9 @@ class TaskSpec:
     read_only_test: bool
     gpu_lock_mode: str = GPU_LOCK_EXCLUSIVE
     gpu_memory_reservation_mb: int = 0
+    gpu_shared_workload_class: str | None = None
+    gpu_colocation_gate: str | None = None
+    gpu_colocation_gate_sha256: str | None = None
 
     @property
     def instance_ids(self) -> tuple[str, ...]:
@@ -460,6 +469,48 @@ def _parse_task(raw: Any) -> TaskSpec:
         raise ControllerError(
             f"{task_id} shared-lowmem task requires a positive reservation"
         )
+    gpu_shared_workload_class = raw.get("gpu_shared_workload_class")
+    gpu_colocation_gate = raw.get("gpu_colocation_gate")
+    gpu_colocation_gate_sha256 = raw.get("gpu_colocation_gate_sha256")
+    shared_lowmem = resource == "gpu" and gpu_lock_mode != GPU_LOCK_EXCLUSIVE
+    if shared_lowmem:
+        if (
+            not isinstance(gpu_shared_workload_class, str)
+            or not gpu_shared_workload_class.strip()
+            or not isinstance(gpu_colocation_gate, str)
+            or not gpu_colocation_gate
+            or not isinstance(gpu_colocation_gate_sha256, str)
+            or not gpu_colocation_gate_sha256
+        ):
+            raise ControllerError(
+                f"{task_id} shared-lowmem task requires workload class, "
+                "co-location gate, and expected gate SHA256"
+            )
+        try:
+            gate_evidence = validate_gpu_colocation_gate(
+                gpu_colocation_gate,
+                expected_sha256=gpu_colocation_gate_sha256,
+                workload_class=gpu_shared_workload_class.strip(),
+                memory_reservation_mb=gpu_memory_reservation_mb,
+            )
+        except (GPUColocationGateError, OSError) as exc:
+            raise ControllerError(
+                f"{task_id} shared-lowmem co-location gate failed: {exc}"
+            ) from exc
+        gpu_shared_workload_class = gpu_shared_workload_class.strip()
+        gpu_colocation_gate = gate_evidence["path"]
+        gpu_colocation_gate_sha256 = gate_evidence["sha256"]
+    elif any(
+        value is not None
+        for value in (
+            gpu_shared_workload_class,
+            gpu_colocation_gate,
+            gpu_colocation_gate_sha256,
+        )
+    ):
+        raise ControllerError(
+            f"{task_id} co-location gate fields are forbidden outside shared-lowmem"
+        )
     priority = raw.get("priority", 100)
     if not isinstance(priority, int):
         raise ControllerError(f"{task_id}.priority must be an integer")
@@ -566,6 +617,9 @@ def _parse_task(raw: Any) -> TaskSpec:
         resource=resource,
         gpu_lock_mode=gpu_lock_mode,
         gpu_memory_reservation_mb=gpu_memory_reservation_mb,
+        gpu_shared_workload_class=gpu_shared_workload_class,
+        gpu_colocation_gate=gpu_colocation_gate,
+        gpu_colocation_gate_sha256=gpu_colocation_gate_sha256,
         priority=priority,
         enabled=bool(raw.get("enabled", True)),
         blocked_reason=blocked_reason,
@@ -688,6 +742,7 @@ def validate_no_test_before_freeze(tasks: Sequence[TaskSpec]) -> None:
             *task.config_files,
             *(task.environment.values()),
             task.input_manifest or "",
+            task.gpu_colocation_gate or "",
         ]
         if task.shards is not None:
             path_fields.append(task.shards.parent_manifest)
@@ -809,6 +864,9 @@ def load_controller_manifest(path: Path) -> ControllerManifest:
             task.adopt_gpu_uuid or "",
             task.adopt_project_root or "",
             task.adopt_git_commit or "",
+            task.gpu_shared_workload_class or "",
+            task.gpu_colocation_gate or "",
+            task.gpu_colocation_gate_sha256 or "",
         )
         if any("paper/" in value.replace("\\", "/").lower() for value in strings):
             raise ControllerError(f"{task.task_id} attempts to access frozen paper files")
@@ -966,6 +1024,9 @@ def _task_manifest_payload(task: TaskSpec, manifest_sha256: str) -> dict[str, An
         "resource": task.resource,
         "gpu_lock_mode": task.gpu_lock_mode,
         "gpu_memory_reservation_mb": task.gpu_memory_reservation_mb,
+        "gpu_shared_workload_class": task.gpu_shared_workload_class,
+        "gpu_colocation_gate": task.gpu_colocation_gate,
+        "gpu_colocation_gate_sha256": task.gpu_colocation_gate_sha256,
         "priority": task.priority,
         "enabled": task.enabled,
         "blocked_reason": task.blocked_reason,
@@ -2741,6 +2802,41 @@ def _launch_instance(
 ) -> None:
     if task.command is None or task.input_manifest is None or task.expected_output is None:
         raise ControllerError(f"Task {task.task_id} has no launch contract")
+    colocation_evidence: dict[str, Any] | None = None
+    if task.gpu_lock_mode != GPU_LOCK_EXCLUSIVE:
+        if (
+            gpu is None
+            or task.gpu_shared_workload_class is None
+            or task.gpu_colocation_gate is None
+            or task.gpu_colocation_gate_sha256 is None
+        ):
+            raise ControllerError(
+                f"Task {task.task_id} shared-lowmem launch lacks its frozen gate contract"
+            )
+        try:
+            colocation_evidence = validate_gpu_colocation_gate(
+                task.gpu_colocation_gate,
+                expected_sha256=task.gpu_colocation_gate_sha256,
+                workload_class=task.gpu_shared_workload_class,
+                memory_reservation_mb=task.gpu_memory_reservation_mb,
+                gpu_name=gpu.name,
+                gpu_total_memory_mb=gpu.memory_total_mb,
+            )
+        except (GPUColocationGateError, OSError) as exc:
+            raise ControllerError(
+                f"Task {task.task_id} launch-time co-location gate failed: {exc}"
+            ) from exc
+    elif any(
+        value is not None
+        for value in (
+            task.gpu_shared_workload_class,
+            task.gpu_colocation_gate,
+            task.gpu_colocation_gate_sha256,
+        )
+    ):
+        raise ControllerError(
+            f"Task {task.task_id} exclusive/CPU launch carries co-location fields"
+        )
     instance = state["instances"][instance_id]
     attempt = int(instance.get("attempt", 0))
     context = _runtime_context(
@@ -2794,6 +2890,10 @@ def _launch_instance(
         )
         for value in task.config_files
     ]
+    if colocation_evidence is not None:
+        gate_path = Path(colocation_evidence["path"]).resolve(strict=True)
+        if gate_path not in config_files:
+            config_files.append(gate_path)
     frozen_task_manifest = _task_paths(root, task.task_id)["manifest"].resolve(
         strict=True
     )
@@ -2911,6 +3011,17 @@ def _launch_instance(
                 str(task.gpu_memory_reservation_mb),
             )
         )
+        if colocation_evidence is not None:
+            launch_command.extend(
+                (
+                    "--gpu-shared-workload-class",
+                    str(task.gpu_shared_workload_class),
+                    "--gpu-colocation-gate",
+                    str(colocation_evidence["path"]),
+                    "--gpu-colocation-gate-sha256",
+                    str(colocation_evidence["sha256"]),
+                )
+            )
     launch_command.extend(("--", *command))
     environment_for_runner = sanitized_environment()
     environment_for_runner.update(
@@ -2989,6 +3100,15 @@ def _launch_instance(
             "gpu_lock_mode": task.gpu_lock_mode if gpu else GPU_LOCK_EXCLUSIVE,
             "gpu_memory_reservation_mb": (
                 task.gpu_memory_reservation_mb if gpu else 0
+            ),
+            "gpu_shared_workload_class": (
+                task.gpu_shared_workload_class if gpu else None
+            ),
+            "gpu_colocation_gate": (
+                colocation_evidence["path"] if colocation_evidence else None
+            ),
+            "gpu_colocation_gate_sha256": (
+                colocation_evidence["sha256"] if colocation_evidence else None
             ),
             "log_path": str(log_path),
             "expected_output": str(expected_output),
@@ -3214,10 +3334,33 @@ def plan_gpu_allocations(
     planned_exclusive: set[str] = set()
     planned_slots: set[tuple[str, str]] = set()
     planned_reservation: dict[str, int] = {}
+    planned_shared_gate_hashes: dict[str, list[str]] = {}
+    planned_shared_classes: dict[str, list[str]] = {}
     for task_id, instance_id in candidates:
         if len(allocations) >= capacity:
             break
         task = tasks[task_id]
+        colocation_evidence: dict[str, Any] | None = None
+        if task.gpu_lock_mode != GPU_LOCK_EXCLUSIVE:
+            if (
+                task.gpu_shared_workload_class is None
+                or task.gpu_colocation_gate is None
+                or task.gpu_colocation_gate_sha256 is None
+            ):
+                raise ControllerError(
+                    f"{task.task_id} shared-lowmem planning lacks a gate contract"
+                )
+            try:
+                colocation_evidence = validate_gpu_colocation_gate(
+                    task.gpu_colocation_gate,
+                    expected_sha256=task.gpu_colocation_gate_sha256,
+                    workload_class=task.gpu_shared_workload_class,
+                    memory_reservation_mb=task.gpu_memory_reservation_mb,
+                )
+            except (GPUColocationGateError, OSError) as exc:
+                raise ControllerError(
+                    f"{task.task_id} shared-lowmem planning gate failed: {exc}"
+                ) from exc
         for gpu in sorted(observations, key=lambda value: value.index):
             if task.gpu_lock_mode == GPU_LOCK_EXCLUSIVE:
                 if (
@@ -3243,6 +3386,33 @@ def plan_gpu_allocations(
             )
             if not admitted:
                 continue
+            assert colocation_evidence is not None
+            gate_hashes = [
+                *detail.get("active_colocation_gate_sha256", []),
+                *planned_shared_gate_hashes.get(gpu.uuid, []),
+                str(task.gpu_colocation_gate_sha256),
+            ]
+            if len(set(gate_hashes)) != 1:
+                continue
+            pair_hashes = detail.get("active_authorized_pair_sha256", [])
+            if pair_hashes and any(
+                value
+                != colocation_evidence["authorized_workload_pair_sha256"]
+                for value in pair_hashes
+            ):
+                continue
+            workload_classes = [
+                *detail.get("active_shared_workload_classes", []),
+                *planned_shared_classes.get(gpu.uuid, []),
+                str(task.gpu_shared_workload_class),
+            ]
+            if len(workload_classes) > MAXIMUM_SHARED_TASKS_PER_GPU:
+                continue
+            if len(workload_classes) == MAXIMUM_SHARED_TASKS_PER_GPU:
+                try:
+                    validate_authorized_pair(colocation_evidence, workload_classes)
+                except GPUColocationGateError:
+                    continue
             # The first shared task on an otherwise empty GPU retains the 60-s
             # idle-stability requirement. A second task may join only a
             # validated project-owned shared slot.
@@ -3256,6 +3426,12 @@ def plan_gpu_allocations(
             planned_slots.add(slot_key)
             planned_reservation[gpu.uuid] = planned_reservation.get(gpu.uuid, 0) + int(
                 task.gpu_memory_reservation_mb
+            )
+            planned_shared_gate_hashes.setdefault(gpu.uuid, []).append(
+                str(task.gpu_colocation_gate_sha256)
+            )
+            planned_shared_classes.setdefault(gpu.uuid, []).append(
+                str(task.gpu_shared_workload_class)
             )
             allocations.append(GPUAllocation(task_id, instance_id, gpu))
             break

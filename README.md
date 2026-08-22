@@ -132,6 +132,12 @@ controller directories dynamically, shares one GPU/UUID-lock probe across the
 page, and is intended to be accessed through an SSH tunnel. See
 `docs/AUTODL_FOUR_BY_FOUR_DASHBOARD.md`.
 
+Optimized BACE ComRecGC 50k and two-task `shared_lowmem` scheduling have
+separate immutable evidence gates. Exact 500/1000 replay closure is mandatory
+for the former; measured same-GPU >=20% co-location speedup with result/health/
+VRAM parity is mandatory for the latter. See
+`docs/AUTODL_ACCELERATION_RELEASE_GATES.md`.
+
 The future TasteMolNet baseline routes share one explicit three-class GINE,
 untargeted Sweet-to-non-Sweet strict-flip contract while remaining terminally
 license-blocked in the current controller. See

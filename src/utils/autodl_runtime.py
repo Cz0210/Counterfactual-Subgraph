@@ -831,9 +831,12 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
             raise GPULockError("Shared GPU physical index/UUID identity changed")
         return matches[0]
 
-    def _other_reservations(self) -> tuple[int, dict[int, int]]:
+    def _other_reservations(
+        self,
+    ) -> tuple[int, dict[int, int], list[dict[str, Any]]]:
         total = 0
         child_identities: dict[int, int] = {}
+        active_metadata: list[dict[str, Any]] = []
         for slot in range(SHARED_GPU_MAX_TASKS):
             if slot == self.slot:
                 continue
@@ -867,6 +870,7 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise GPULockError(f"Shared GPU slot reservation is invalid: {path}")
             total += value
+            active_metadata.append(metadata)
             child_pid = metadata.get("child_pid")
             child_start_ticks = metadata.get("child_start_ticks")
             if (
@@ -882,7 +886,7 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
                 raise GPULockError(
                     f"Active shared GPU slot lacks a live child identity: {path}"
                 )
-        return total, child_identities
+        return total, child_identities, active_metadata
 
     def acquire(self) -> "GPUSharedSlotLock":
         self.lock_root.mkdir(parents=True, exist_ok=True)
@@ -909,7 +913,78 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
                     f"GPU shared slot {self.slot} is already locked"
                 ) from exc
             observation = self._observation()
-            reserved_before, active_children = self._other_reservations()
+            reserved_before, active_children, active_metadata = (
+                self._other_reservations()
+            )
+            gate_owner_keys = (
+                "gpu_colocation_gate_sha256",
+                "gpu_shared_workload_class",
+                "gpu_colocation_authorized_pair_sha256",
+                "gpu_colocation_authorized_pair",
+            )
+            if any(key not in self.owner for key in gate_owner_keys):
+                raise GPULockError(
+                    "Shared GPU owner requires a complete co-location gate contract"
+                )
+            requested_pair = self.owner["gpu_colocation_authorized_pair"]
+            if (
+                not isinstance(requested_pair, list)
+                or len(requested_pair) != SHARED_GPU_MAX_TASKS
+                or any(
+                    not isinstance(value, str) or not value
+                    for value in requested_pair
+                )
+            ):
+                raise GPULockError("Shared GPU authorized workload pair is invalid")
+            if requested_pair != sorted(requested_pair):
+                raise GPULockError("Shared GPU authorized workload pair is not canonical")
+            gate_sha256 = self.owner["gpu_colocation_gate_sha256"]
+            pair_sha256 = self.owner["gpu_colocation_authorized_pair_sha256"]
+            expected_pair_sha256 = hashlib.sha256(
+                json.dumps(
+                    requested_pair,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                not isinstance(gate_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", gate_sha256) is None
+                or not isinstance(pair_sha256, str)
+                or pair_sha256 != expected_pair_sha256
+            ):
+                raise GPULockError("Shared GPU co-location gate digest is invalid")
+            for metadata in active_metadata:
+                for key in (
+                    "gpu_colocation_gate_sha256",
+                    "gpu_colocation_authorized_pair_sha256",
+                    "gpu_shared_workload_class",
+                ):
+                    if not isinstance(metadata.get(key), str) or not metadata[key]:
+                        raise GPULockError(
+                            "Active shared GPU slot lacks co-location gate metadata"
+                        )
+                if (
+                    metadata["gpu_colocation_gate_sha256"]
+                    != self.owner["gpu_colocation_gate_sha256"]
+                    or metadata["gpu_colocation_authorized_pair_sha256"]
+                    != self.owner["gpu_colocation_authorized_pair_sha256"]
+                ):
+                    raise GPULockError(
+                        "Shared GPU slots use different co-location benchmark gates"
+                    )
+            if active_metadata:
+                actual_pair = sorted(
+                    [
+                        str(active_metadata[0]["gpu_shared_workload_class"]),
+                        str(self.owner["gpu_shared_workload_class"]),
+                    ]
+                )
+                if actual_pair != sorted(str(value) for value in requested_pair):
+                    raise GPULockError(
+                        "Shared GPU workload pair differs from benchmark evidence"
+                    )
             process_pids = {process.pid for process in observation.processes}
             unattributed = sorted(
                 pid
@@ -1084,6 +1159,9 @@ def shared_gpu_slot_admission(
     active_reservations = 0
     active_children: dict[int, int] = {}
     active_slots: list[int] = []
+    active_colocation_gate_sha256: list[str] = []
+    active_shared_workload_classes: list[str] = []
+    active_authorized_pair_sha256: list[str] = []
     try:
         fcntl.flock(coordination.fileno(), fcntl.LOCK_EX)
         uuid_handle = uuid_path.open("a+", encoding="utf-8")
@@ -1129,6 +1207,23 @@ def shared_gpu_slot_admission(
                 return False, "active shared slot has invalid reservation", {}
             active_reservations += reservation
             active_slots.append(candidate)
+            gate_sha256 = metadata.get("gpu_colocation_gate_sha256")
+            workload_class = metadata.get("gpu_shared_workload_class")
+            authorized_pair_sha256 = metadata.get(
+                "gpu_colocation_authorized_pair_sha256"
+            )
+            if not all(
+                isinstance(value, str) and value
+                for value in (
+                    gate_sha256,
+                    workload_class,
+                    authorized_pair_sha256,
+                )
+            ):
+                return False, "active shared slot lacks co-location gate metadata", {}
+            active_colocation_gate_sha256.append(gate_sha256)
+            active_shared_workload_classes.append(workload_class)
+            active_authorized_pair_sha256.append(authorized_pair_sha256)
             child_pid = metadata.get("child_pid")
             child_start_ticks = metadata.get("child_start_ticks")
             if (
@@ -1166,6 +1261,15 @@ def shared_gpu_slot_admission(
             "active_slots": sorted(active_slots),
             "active_shared_child_pids": sorted(active_children),
             "attributed_compute_pids": sorted(process_pids),
+            "active_colocation_gate_sha256": sorted(
+                active_colocation_gate_sha256
+            ),
+            "active_shared_workload_classes": sorted(
+                active_shared_workload_classes
+            ),
+            "active_authorized_pair_sha256": sorted(
+                active_authorized_pair_sha256
+            ),
             "observed_memory_used_mb": observation.memory_used_mb,
             "active_reservations_mb": active_reservations,
             "requested_reservation_mb": int(memory_reservation_mb),

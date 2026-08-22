@@ -49,6 +49,10 @@ from src.utils.autodl_runtime import (
     verify_required_outputs,
     mark_bace_stage_pass,
 )
+from src.utils.autodl_gpu_colocation_gate import (
+    GPUColocationGateError,
+    validate_gpu_colocation_gate,
+)
 
 
 SCHEMA_VERSION = 1
@@ -128,6 +132,9 @@ def _registry_event(spec: Mapping[str, Any], *, state: str, exit_code: int | Non
         "gpu_uuid": spec.get("gpu_uuid"),
         "gpu_lock_mode": spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE),
         "gpu_memory_reservation_mb": spec.get("gpu_memory_reservation_mb", 0),
+        "gpu_shared_workload_class": spec.get("gpu_shared_workload_class"),
+        "gpu_colocation_gate": spec.get("gpu_colocation_gate"),
+        "gpu_colocation_gate_sha256": spec.get("gpu_colocation_gate_sha256"),
         "git_commit": spec.get("git_commit"),
         "config_hash": spec.get("config_hash"),
         "input_hash": spec.get("input_hash"),
@@ -184,6 +191,9 @@ def _write_stage_manifest(layout: Any, spec: Mapping[str, Any]) -> None:
             "gpu_uuid": spec["gpu_uuid"],
             "gpu_lock_mode": spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE),
             "gpu_memory_reservation_mb": spec.get("gpu_memory_reservation_mb", 0),
+            "gpu_shared_workload_class": spec.get("gpu_shared_workload_class"),
+            "gpu_colocation_gate": spec.get("gpu_colocation_gate"),
+            "gpu_colocation_gate_sha256": spec.get("gpu_colocation_gate_sha256"),
             "created_at": spec["created_at"],
         },
     )
@@ -275,6 +285,9 @@ def _write_run_state(layout: Any, spec: Mapping[str, Any], state: str, **fields:
             "gpu_uuid": spec.get("gpu_uuid"),
             "gpu_lock_mode": spec.get("gpu_lock_mode", GPU_LOCK_EXCLUSIVE),
             "gpu_memory_reservation_mb": spec.get("gpu_memory_reservation_mb", 0),
+            "gpu_shared_workload_class": spec.get("gpu_shared_workload_class"),
+            "gpu_colocation_gate": spec.get("gpu_colocation_gate"),
+            "gpu_colocation_gate_sha256": spec.get("gpu_colocation_gate_sha256"),
             "log_path": spec["log_path"],
             **fields,
         },
@@ -410,6 +423,7 @@ def run_worker(spec_path: Path) -> int:
     environment["AUTODL_MPS_ENABLED"] = "0"
     lock_context: Any = nullcontext()
     slot_context: Any = nullcontext()
+    colocation_evidence: dict[str, Any] | None = None
     if spec.get("gpu_index") is not None:
         slot_context = ProjectGPUSlotLock(
             layout.locks_dir,
@@ -426,6 +440,35 @@ def run_worker(spec_path: Path) -> int:
                 owner={"run_id": spec["run_id"], "stage": spec["stage"]},
             )
         else:
+            matches = [
+                value
+                for value in query_gpu_inventory()
+                if value.index == int(spec["gpu_index"])
+                and value.uuid == str(spec["gpu_uuid"])
+            ]
+            if len(matches) != 1:
+                raise AutoDLRuntimeError(
+                    "Shared-lowmem GPU identity changed before gate validation"
+                )
+            try:
+                colocation_evidence = validate_gpu_colocation_gate(
+                    str(spec.get("gpu_colocation_gate") or ""),
+                    expected_sha256=str(
+                        spec.get("gpu_colocation_gate_sha256") or ""
+                    ),
+                    workload_class=str(
+                        spec.get("gpu_shared_workload_class") or ""
+                    ),
+                    memory_reservation_mb=int(
+                        spec.get("gpu_memory_reservation_mb", 0)
+                    ),
+                    gpu_name=matches[0].name,
+                    gpu_total_memory_mb=matches[0].memory_total_mb,
+                )
+            except (GPUColocationGateError, OSError) as exc:
+                raise AutoDLRuntimeError(
+                    f"Shared-lowmem launch-time benchmark gate failed: {exc}"
+                ) from exc
             lock_context = GPUSharedSlotLock(
                 layout.locks_dir,
                 gpu_index=int(spec["gpu_index"]),
@@ -433,7 +476,20 @@ def run_worker(spec_path: Path) -> int:
                 lock_mode=lock_mode,
                 memory_reservation_mb=int(spec.get("gpu_memory_reservation_mb", 0)),
                 hold_coordination_until_child_pid=True,
-                owner={"run_id": spec["run_id"], "stage": spec["stage"]},
+                owner={
+                    "run_id": spec["run_id"],
+                    "stage": spec["stage"],
+                    "gpu_shared_workload_class": spec[
+                        "gpu_shared_workload_class"
+                    ],
+                    "gpu_colocation_gate_sha256": colocation_evidence["sha256"],
+                    "gpu_colocation_authorized_pair_sha256": colocation_evidence[
+                        "authorized_workload_pair_sha256"
+                    ],
+                    "gpu_colocation_authorized_pair": colocation_evidence[
+                        "authorized_workload_pair"
+                    ],
+                },
             )
         environment["CUDA_VISIBLE_DEVICES"] = str(spec["gpu_index"])
         environment["AUTODL_PHYSICAL_GPU_INDEX"] = str(spec["gpu_index"])
@@ -584,8 +640,51 @@ def launch(args: argparse.Namespace) -> int:
             raise AutoDLRuntimeError("Exclusive GPU tasks must use reservation=0")
     elif args.gpu_memory_reservation_mb <= 0:
         raise AutoDLRuntimeError("Shared-lowmem GPU tasks require a positive reservation")
+    shared_lowmem = (
+        args.gpu_index is not None and args.gpu_lock_mode != GPU_LOCK_EXCLUSIVE
+    )
+    colocation_fields = (
+        args.gpu_shared_workload_class,
+        args.gpu_colocation_gate,
+        args.gpu_colocation_gate_sha256,
+    )
+    colocation_evidence: dict[str, Any] | None = None
+    if shared_lowmem:
+        if any(value in (None, "") for value in colocation_fields):
+            raise AutoDLRuntimeError(
+                "Shared-lowmem launch requires workload class, benchmark gate, and SHA256"
+            )
+        matches = [
+            value
+            for value in query_gpu_inventory()
+            if value.index == int(args.gpu_index)
+            and value.uuid == str(args.gpu_uuid)
+        ]
+        if len(matches) != 1:
+            raise AutoDLRuntimeError("Shared-lowmem GPU index/UUID identity is invalid")
+        try:
+            colocation_evidence = validate_gpu_colocation_gate(
+                args.gpu_colocation_gate,
+                expected_sha256=str(args.gpu_colocation_gate_sha256),
+                workload_class=str(args.gpu_shared_workload_class),
+                memory_reservation_mb=int(args.gpu_memory_reservation_mb),
+                gpu_name=matches[0].name,
+                gpu_total_memory_mb=matches[0].memory_total_mb,
+            )
+        except (GPUColocationGateError, OSError) as exc:
+            raise AutoDLRuntimeError(
+                f"Shared-lowmem benchmark gate failed: {exc}"
+            ) from exc
+    elif any(value is not None for value in colocation_fields):
+        raise AutoDLRuntimeError(
+            "Co-location gate fields are forbidden outside shared-lowmem launches"
+        )
     environment = _parse_environment(args.env)
     config_paths = [path.expanduser().resolve(strict=True) for path in args.config_file]
+    if colocation_evidence is not None:
+        gate_path = Path(colocation_evidence["path"])
+        if gate_path not in config_paths:
+            config_paths.append(gate_path)
     input_manifest = args.input_manifest.expanduser().resolve(strict=True) if args.input_manifest else None
     expected_output = args.expected_output.expanduser().resolve(strict=False) if args.expected_output else None
     if expected_output is not None and expected_output.exists() and any(expected_output.iterdir() if expected_output.is_dir() else [expected_output]):
@@ -644,6 +743,14 @@ def launch(args: argparse.Namespace) -> int:
         "gpu_uuid": args.gpu_uuid,
         "gpu_lock_mode": args.gpu_lock_mode,
         "gpu_memory_reservation_mb": args.gpu_memory_reservation_mb,
+        "gpu_shared_workload_class": args.gpu_shared_workload_class,
+        "gpu_colocation_gate": (
+            colocation_evidence["path"] if colocation_evidence else None
+        ),
+        "gpu_colocation_gate_sha256": (
+            colocation_evidence["sha256"] if colocation_evidence else None
+        ),
+        "gpu_colocation_gate_evidence": colocation_evidence,
         "min_free_memory_mb": args.min_free_memory_mb,
         "idle_util_threshold": args.idle_util_threshold,
         "max_gpus": args.max_gpus,
@@ -772,6 +879,9 @@ def parse_args() -> argparse.Namespace:
         default=GPU_LOCK_EXCLUSIVE,
     )
     launch_parser.add_argument("--gpu-memory-reservation-mb", type=int, default=0)
+    launch_parser.add_argument("--gpu-shared-workload-class")
+    launch_parser.add_argument("--gpu-colocation-gate", type=Path)
+    launch_parser.add_argument("--gpu-colocation-gate-sha256")
     launch_parser.add_argument("--heavy", action="store_true")
     launch_parser.add_argument("--config-file", type=Path, action="append", default=[])
     launch_parser.add_argument("--input-manifest", type=Path)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from scripts.autodl.run_four_gpu_recovery_controller import (
     _parse_task,
     plan_gpu_allocations,
 )
+from tests.autodl.test_gpu_colocation_benchmark_gate import build_test_gate
 from src.utils.autodl_runtime import (
     GPUFileLock,
     GPUObservation,
@@ -36,6 +39,18 @@ def _identity_reader(mapping: dict[int, tuple[int, int]]):
     return lambda pid: mapping.get(pid)
 
 
+def _owner(workload_class: str) -> dict[str, object]:
+    pair = ["bace_comrecgc_generation", "bace_gcfexplainer_vrrw"]
+    return {
+        "gpu_colocation_gate_sha256": "a" * 64,
+        "gpu_shared_workload_class": workload_class,
+        "gpu_colocation_authorized_pair_sha256": hashlib.sha256(
+            json.dumps(pair, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "gpu_colocation_authorized_pair": pair,
+    }
+
+
 def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path) -> None:
     inventory = lambda: [_gpu()]
     identities = _identity_reader({123: (1, 1000), 456: (1, 2000)})
@@ -45,6 +60,7 @@ def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path)
         gpu_uuid="GPU-shared",
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=25000,
+        owner=_owner("bace_gcfexplainer_vrrw"),
         inventory_reader=inventory,
         process_identity_reader=identities,
     )
@@ -54,6 +70,7 @@ def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path)
         gpu_uuid="GPU-shared",
         lock_mode="shared_lowmem_slot_1",
         memory_reservation_mb=25000,
+        owner=_owner("bace_comrecgc_generation"),
         inventory_reader=inventory,
         process_identity_reader=identities,
     )
@@ -73,6 +90,7 @@ def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path)
         gpu_uuid="GPU-shared",
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=58000,
+        owner=_owner("bace_gcfexplainer_vrrw"),
         inventory_reader=inventory,
     )
     with pytest.raises(GPULockError, match="70%|ceiling"):
@@ -103,6 +121,7 @@ def test_second_slot_accepts_only_recorded_first_child(tmp_path: Path) -> None:
         gpu_uuid="GPU-shared",
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=10000,
+        owner=_owner("bace_gcfexplainer_vrrw"),
         inventory_reader=inventory,
         process_identity_reader=identities,
     )
@@ -140,6 +159,7 @@ def test_second_slot_accepts_compute_grandchild_of_recorded_launcher(
         gpu_uuid="GPU-shared",
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=10000,
+        owner=_owner("bace_gcfexplainer_vrrw"),
         inventory_reader=inventory,
         process_identity_reader=identities,
     )
@@ -170,6 +190,7 @@ def test_second_slot_rejects_pid_reuse_in_recorded_launcher(tmp_path: Path) -> N
         gpu_uuid="GPU-shared",
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=10000,
+        owner=_owner("bace_gcfexplainer_vrrw"),
         inventory_reader=inventory,
         process_identity_reader=first_identities,
     )
@@ -192,7 +213,52 @@ def test_second_slot_rejects_pid_reuse_in_recorded_launcher(tmp_path: Path) -> N
         assert detail["unattributed_compute_pids"] == [123]
 
 
+def test_atomic_slot_lock_rejects_unbenchmarked_pair_or_gate(tmp_path: Path) -> None:
+    inventory = lambda: [_gpu()]
+    identities = _identity_reader({123: (1, 1000)})
+    first = GPUSharedSlotLock(
+        tmp_path,
+        gpu_index=0,
+        gpu_uuid="GPU-shared",
+        lock_mode="shared_lowmem_slot_0",
+        memory_reservation_mb=10000,
+        owner=_owner("bace_gcfexplainer_vrrw"),
+        inventory_reader=inventory,
+        process_identity_reader=identities,
+    )
+    with first:
+        first.update_child_pid(123)
+        wrong_pair = GPUSharedSlotLock(
+            tmp_path,
+            gpu_index=0,
+            gpu_uuid="GPU-shared",
+            lock_mode="shared_lowmem_slot_1",
+            memory_reservation_mb=10000,
+            owner=_owner("bace_gcfexplainer_vrrw"),
+            inventory_reader=inventory,
+            process_identity_reader=identities,
+        )
+        with pytest.raises(GPULockError, match="pair differs"):
+            wrong_pair.acquire()
+
+        different_gate_owner = _owner("bace_comrecgc_generation")
+        different_gate_owner["gpu_colocation_gate_sha256"] = "c" * 64
+        wrong_gate = GPUSharedSlotLock(
+            tmp_path,
+            gpu_index=0,
+            gpu_uuid="GPU-shared",
+            lock_mode="shared_lowmem_slot_1",
+            memory_reservation_mb=10000,
+            owner=different_gate_owner,
+            inventory_reader=inventory,
+            process_identity_reader=identities,
+        )
+        with pytest.raises(GPULockError, match="different.*gates"):
+            wrong_gate.acquire()
+
+
 def test_controller_can_plan_two_explicit_slots_on_one_gpu(tmp_path: Path) -> None:
+    gate_path, gate_sha256 = build_test_gate(tmp_path)
     tasks = {}
     for slot in (0, 1):
         task = _parse_task(
@@ -203,6 +269,13 @@ def test_controller_can_plan_two_explicit_slots_on_one_gpu(tmp_path: Path) -> No
                 "resource": "gpu",
                 "gpu_lock_mode": f"shared_lowmem_slot_{slot}",
                 "gpu_memory_reservation_mb": 12000,
+                "gpu_shared_workload_class": (
+                    "bace_gcfexplainer_vrrw"
+                    if slot == 0
+                    else "bace_comrecgc_generation"
+                ),
+                "gpu_colocation_gate": str(gate_path),
+                "gpu_colocation_gate_sha256": gate_sha256,
             }
         )
         tasks[task.task_id] = task
@@ -221,7 +294,7 @@ def test_controller_can_plan_two_explicit_slots_on_one_gpu(tmp_path: Path) -> No
     ]
 
 
-def test_task_manifest_shared_mode_is_fail_closed() -> None:
+def test_task_manifest_shared_mode_is_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(ControllerError, match="positive reservation"):
         _parse_task(
             {
@@ -240,5 +313,31 @@ def test_task_manifest_shared_mode_is_fail_closed() -> None:
                 "stage": "BAD",
                 "resource": "gpu",
                 "gpu_memory_reservation_mb": 100,
+            }
+        )
+    with pytest.raises(ControllerError, match="requires workload class"):
+        _parse_task(
+            {
+                "id": "bad-ungated-shared",
+                "dataset": "bace",
+                "stage": "BAD",
+                "resource": "gpu",
+                "gpu_lock_mode": "shared_lowmem_slot_0",
+                "gpu_memory_reservation_mb": 1000,
+            }
+        )
+    gate_path, gate_sha256 = build_test_gate(tmp_path)
+    with pytest.raises(ControllerError, match="SHA256 mismatch"):
+        _parse_task(
+            {
+                "id": "bad-gate-hash",
+                "dataset": "bace",
+                "stage": "BAD",
+                "resource": "gpu",
+                "gpu_lock_mode": "shared_lowmem_slot_0",
+                "gpu_memory_reservation_mb": 12000,
+                "gpu_shared_workload_class": "bace_gcfexplainer_vrrw",
+                "gpu_colocation_gate": str(gate_path),
+                "gpu_colocation_gate_sha256": "0" * 64,
             }
         )

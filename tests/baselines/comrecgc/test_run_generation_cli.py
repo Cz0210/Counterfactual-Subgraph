@@ -59,6 +59,30 @@ def test_preprocess_engine_and_worker_settings_are_checkpoint_identity() -> None
     )
 
 
+def test_full_acceleration_gate_path_and_hash_are_checkpoint_identity() -> None:
+    original = canonical_scientific_argv(
+        _args(
+            "--mode",
+            "full",
+            "--bace-acceleration-gate",
+            "/persistent/gate.json",
+            "--bace-acceleration-gate-sha256",
+            "a" * 64,
+        )
+    )
+    changed = canonical_scientific_argv(
+        _args(
+            "--mode",
+            "full",
+            "--bace-acceleration-gate",
+            "/persistent/gate.json",
+            "--bace-acceleration-gate-sha256",
+            "b" * 64,
+        )
+    )
+    assert original != changed
+
+
 def test_diagnostic_equivalence_prefix_is_explicit_command_identity() -> None:
     legacy = canonical_scientific_argv(
         _args(

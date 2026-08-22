@@ -41,6 +41,8 @@ BACE_PREPROCESS_WORKERS=${BACE_PREPROCESS_WORKERS:-0}
 BACE_PREPROCESS_MAX_INFLIGHT=${BACE_PREPROCESS_MAX_INFLIGHT:-64}
 BACE_SOURCE_CACHE_CAPACITY=${BACE_SOURCE_CACHE_CAPACITY:-0}
 BACE_CANDIDATE_CACHE_CAPACITY=${BACE_CANDIDATE_CACHE_CAPACITY:-0}
+BACE_ACCELERATION_GATE=${BACE_ACCELERATION_GATE:-}
+BACE_ACCELERATION_GATE_SHA256=${BACE_ACCELERATION_GATE_SHA256:-}
 
 for path in "$DATASET_DIR/dataset_summary.json" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
@@ -79,6 +81,15 @@ args=(
   --checkpoint-keep-last 2
   --progress-interval-steps 25
 )
+if [[ "$BACE_PREPROCESS_ENGINE" != "legacy_sequential_rdkit_v1" ]]; then
+  : "${BACE_ACCELERATION_GATE:?optimized full requires BACE_ACCELERATION_GATE}"
+  : "${BACE_ACCELERATION_GATE_SHA256:?optimized full requires BACE_ACCELERATION_GATE_SHA256}"
+  test -s "$BACE_ACCELERATION_GATE" || { echo "missing acceleration gate: $BACE_ACCELERATION_GATE" >&2; exit 2; }
+  args+=(
+    --bace-acceleration-gate "$BACE_ACCELERATION_GATE"
+    --bace-acceleration-gate-sha256 "$BACE_ACCELERATION_GATE_SHA256"
+  )
+fi
 if [[ "$RESUME" == 1 ]]; then args+=(--resume); fi
 [[ "$(python -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CHECKPOINT_ROOT")" != "$(python -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CHECKPOINT_MIRROR_ROOT")" ]] || { echo 'checkpoint mirror must differ from fast checkpoint root' >&2; exit 2; }
 echo "hostname=$(hostname)"

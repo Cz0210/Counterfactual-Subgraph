@@ -117,6 +117,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bace-preprocess-max-inflight", type=int, default=64)
     parser.add_argument("--bace-source-cache-capacity", type=int, default=0)
     parser.add_argument("--bace-candidate-cache-capacity", type=int, default=0)
+    parser.add_argument(
+        "--bace-acceleration-gate",
+        help=(
+            "Immutable exact-500+1000 PASS gate; mandatory only for a formal "
+            "BACE full run using the optimized preprocessing engine."
+        ),
+    )
+    parser.add_argument(
+        "--bace-acceleration-gate-sha256",
+        help="Expected SHA256 of --bace-acceleration-gate.",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--checkpoint-root",
@@ -220,6 +231,8 @@ def main() -> int:
             bace_preprocess_max_inflight=args.bace_preprocess_max_inflight,
             bace_source_cache_capacity=args.bace_source_cache_capacity,
             bace_candidate_cache_capacity=args.bace_candidate_cache_capacity,
+            bace_acceleration_gate=args.bace_acceleration_gate,
+            bace_acceleration_gate_sha256=args.bace_acceleration_gate_sha256,
             resume=args.resume,
             trace_output_dir=args.trace_output_dir,
             parity_reference_path=args.parity_reference,

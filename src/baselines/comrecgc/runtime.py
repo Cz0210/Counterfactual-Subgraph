@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 import numpy as np
 
 from .cache_trust import load_aids_tensor_payload
+from .bace_preprocessing import PREPROCESS_ENGINE
 from .contracts import (
     CF_MODE,
     METHOD,
@@ -65,6 +66,7 @@ from .generation_loop import (
     save_official_payload,
     snapshot_official_state,
 )
+from .full_acceleration_gate import validate_full_acceleration_gate
 from .frozen_payload import (
     build_frozen_payload_closure,
     payload_file_audit,
@@ -1270,6 +1272,8 @@ def run_project_generation(
     bace_preprocess_max_inflight: int = 64,
     bace_source_cache_capacity: int = 0,
     bace_candidate_cache_capacity: int = 0,
+    bace_acceleration_gate: str | Path | None = None,
+    bace_acceleration_gate_sha256: str | None = None,
     resume: bool = False,
     trace_output_dir: str | Path | None = None,
     parity_reference_path: str | Path | None = None,
@@ -1350,7 +1354,6 @@ def run_project_generation(
     if scientific_command_sha256(normalized_scientific_argv) != normalized_command_sha256:
         raise ValueError("Generation command SHA256 does not match scientific argv.")
     project = Path(project_root).expanduser().resolve()
-    root = require_empty_output(output_dir, resume=resume)
     bundle = _load_bundle(
         dataset,
         dataset_dir=Path(dataset_dir).expanduser().resolve(),
@@ -1362,6 +1365,44 @@ def run_project_generation(
             f"Project generation parent count mismatch: actual={len(bundle.graphs)}, "
             f"expected={int(parent_limit)}"
         )
+    acceleration_gate_evidence: dict[str, Any] | None = None
+    formal_optimized = (
+        dataset == "bace"
+        and mode == "full"
+        and diagnostic_steps is None
+        and bace_preprocess_engine == PREPROCESS_ENGINE
+    )
+    supplied_gate = bace_acceleration_gate is not None or bool(
+        bace_acceleration_gate_sha256
+    )
+    if formal_optimized:
+        if bace_acceleration_gate is None or not bace_acceleration_gate_sha256:
+            raise ValueError(
+                "Formal optimized BACE full generation requires an exact "
+                "500+1000 acceleration gate path and SHA256."
+            )
+        acceleration_gate_evidence = validate_full_acceleration_gate(
+            bace_acceleration_gate,
+            expected_gate_sha256=str(bace_acceleration_gate_sha256),
+            gnn_checkpoint=gnn_checkpoint,
+            distance_checkpoint=distance_checkpoint,
+            generation_parent_ids_sha256=stable_json_sha256(bundle.parent_ids),
+            dataset_audit=bundle.audit(),
+            parent_limit=int(parent_limit),
+            parameters=parameters,
+            preprocess_engine=bace_preprocess_engine,
+            batch_size=int(batch_size),
+            preprocess_workers=int(bace_preprocess_workers),
+            preprocess_max_inflight=int(bace_preprocess_max_inflight),
+            source_cache_capacity=int(bace_source_cache_capacity),
+            candidate_cache_capacity=int(bace_candidate_cache_capacity),
+        )
+    elif supplied_gate:
+        raise ValueError(
+            "BACE acceleration gate fields are forbidden outside a formal "
+            "optimized 50k run."
+        )
+    root = require_empty_output(output_dir, resume=resume)
     torch, _Batch = _torch_stack()
     if not torch.cuda.is_available() and str(device).startswith("cuda"):
         raise RuntimeError("A CUDA device was requested but is not available.")
@@ -1560,6 +1601,7 @@ def run_project_generation(
                     if dataset == "bace"
                     else None
                 ),
+                "bace_full_acceleration_gate": acceleration_gate_evidence,
                 "diagnostic_only": diagnostic_steps is not None,
                 "diagnostic_equivalence_steps": diagnostic_steps,
                 "equivalence_gate_role": equivalence_gate_role,

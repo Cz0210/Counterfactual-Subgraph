@@ -45,9 +45,18 @@ full `ordered_v2` 必须显式传入该 gate；否则 fail closed。未通过 ga
 {
   "resource": "gpu",
   "gpu_lock_mode": "shared_lowmem_slot_0",
-  "gpu_memory_reservation_mb": 12000
+  "gpu_memory_reservation_mb": 12000,
+  "gpu_shared_workload_class": "bace_gcfexplainer_vrrw",
+  "gpu_colocation_gate": "/abs/persistent/GPU_COLOCATION_BENCHMARK_GATE.json",
+  "gpu_colocation_gate_sha256": "<sha256>"
 }
 ```
+
+这里的 gate 与 GCF `ordered_v2` 自身的 legacy-vs-optimized 性能 gate 不同；
+它必须来自真实的单任务/同卡双任务 10--15 分钟 A/B。要求 aggregate throughput
+至少提升 20%、canonical result 与 scientific config 不变、无 OOM/error、CPU
+不持续饱和、磁盘无明显抖动、MPS 关闭。详见
+`docs/AUTODL_ACCELERATION_RELEASE_GATES.md`。
 
 `gpu_lock_mode` 只能为 `exclusive`、`shared_lowmem_slot_0`、`shared_lowmem_slot_1`。同一 GPU 最多两个 shared task；共享 task 全生命周期持有 legacy UUID 文件的 shared advisory lock，因此与历史/新 exclusive task 互斥。第二个任务只有在现存 GPU compute PID 能由 active shared-slot metadata 精确解释时才可加入：slot 记录 launcher child PID 及 Linux `/proc` start-ticks，CUDA PID 可以是该 child 或其经完整父链验证的后代。父链断裂、PID 复用或无法读取 `/proc` 均 fail closed。准入使用 `max(nvidia-smi used, active reservations) + new reservation <= 70% total VRAM`，并在真正 worker acquire 时再次原子检查。
 

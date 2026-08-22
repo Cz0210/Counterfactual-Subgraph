@@ -1,5 +1,25 @@
 # Refactor Plan
 
+## 2026-08-23: Acceleration release gates
+
+- [x] Require one immutable exact-500 + exact-1000 aggregate gate before an
+  optimized BACE ComRecGC 50,000-step run.
+- [x] Recheck raw payload/completion/trace/audit hashes, frozen oracle,
+  distance, cohort, batch size, and preprocessing config before output-root
+  creation; keep legacy sequential full runs unchanged.
+- [x] Require two 10--15 minute single-task profiles plus one same-GPU paired
+  profile before any `shared_lowmem` task can be declared.
+- [x] Compute aggregate throughput from the per-task values, bind benchmark
+  keys to scientific-config and canonical-result SHA, and require >=20% gain,
+  no result drift/OOM/error/CPU saturation/disk instability, and no MPS.
+- [x] Revalidate the co-location gate at controller schema, controller launch,
+  exp-run launch, and worker lock acquisition; bind both slots to the same
+  gate and exact authorized workload pair.
+- [x] Add focused negative tests, CLI docs, and paired Slurm wrappers without
+  deploying or interrupting existing AutoDL diagnostic/legacy jobs.
+- [ ] Publish either PASS gate only after the real AutoDL evidence completes;
+  until then optimized full/shared routes remain blocked.
+
 ## 2026-08-23: User-approved frozen v4 AIDS/Mutagenicity adoption
 
 - [x] Pin the exact five machine-readable v4 source files and six authorized

@@ -46,6 +46,7 @@ from src.utils.autodl_runtime import (
     validate_max_gpus,
     verify_required_absolute_outputs,
 )
+from tests.autodl.test_gpu_colocation_benchmark_gate import build_test_gate
 
 
 def _task(
@@ -930,6 +931,75 @@ def test_launch_delegates_to_exp_run_with_frozen_python_and_four_gpu_limit(
     payload_start = command.index("--") + 1
     assert command[payload_start] == str(interpreter)
     assert state["instances"]["main"]["state"] == "STARTING"
+
+
+def test_shared_launch_revalidates_gate_bytes_after_task_freeze(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    input_manifest = layout.data_dir / "input.json"
+    input_manifest.write_text('{"status":"FROZEN"}\n', encoding="utf-8")
+    gate_path, gate_sha256 = build_test_gate(tmp_path)
+    base = _task("shared-launch")
+    task = TaskSpec(
+        **{
+            **base.__dict__,
+            "gpu_lock_mode": "shared_lowmem_slot_0",
+            "gpu_memory_reservation_mb": 12000,
+            "gpu_shared_workload_class": "bace_gcfexplainer_vrrw",
+            "gpu_colocation_gate": str(gate_path),
+            "gpu_colocation_gate_sha256": gate_sha256,
+            "input_manifest": str(input_manifest),
+        }
+    )
+    state = _state(task, "READY")
+    root = layout.control_root / "four_gpu_recovery" / "controller"
+    task_root = root / "tasks" / task.task_id
+    task_root.mkdir(parents=True)
+    (task_root / "manifest.json").write_text(
+        json.dumps(_task_manifest_payload(task, "0" * 64)) + "\n",
+        encoding="utf-8",
+    )
+    # Schema validation already succeeded when the task was frozen.  A later
+    # byte change must still fail immediately before exp_run is invoked.
+    gate_path.write_text(gate_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    class _Manifest:
+        controller_id = "controller"
+        sha256 = "0" * 64
+        runtime = {
+            "min_free_memory_mb": 16000,
+            "idle_util_threshold": 10,
+            "worker_launcher": "nohup",
+        }
+
+    gpu = GPUObservation(
+        index=0,
+        uuid="GPU-shared",
+        name="NVIDIA A800 80GB PCIe",
+        memory_total_mb=81920,
+        memory_used_mb=0,
+        memory_free_mb=81920,
+        utilization_gpu_percent=0,
+    )
+    with pytest.raises(ControllerError, match="launch-time.*SHA256 mismatch"):
+        _launch_instance(
+            layout,
+            root,
+            _Manifest(),  # type: ignore[arg-type]
+            task,
+            state,
+            "main",
+            python_executable=Path(sys.executable).resolve(),
+            gpu=gpu,
+            shard_manifest=None,
+            runner=lambda *_args, **_kwargs: pytest.fail("runner must not start"),
+        )
 
 
 def test_launch_expands_task_output_before_command_and_numeric_shard_index(
