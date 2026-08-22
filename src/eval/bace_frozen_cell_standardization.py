@@ -443,6 +443,130 @@ def _load_frozen_inputs(
     )
 
 
+def _assert_ours_verification_v1_freeze_boundary(
+    *,
+    inputs: FrozenInputs,
+    shard: Mapping[str, Any],
+    shard_index: int,
+) -> None:
+    """Accept the original B13 shard spelling only with its full evidence chain.
+
+    ``bace_frozen_gnn_verification_shard_v1`` predates the presentation
+    standardizer.  Its writer called the boundary
+    ``selector_frozen_before_split_load`` rather than the later redundant
+    ``selection_frozen_before_test`` field.  The alias is not accepted on its
+    own: the shard candidate universe must be the exact B12 frozen sequence,
+    and the B13 merge must name that physical B12 output as its predecessor.
+    """
+
+    if inputs.method_slug != "ours":
+        raise BACECellStandardizationError(
+            f"test shard {shard_index} lacks selection_frozen_before_test"
+        )
+    _require_fields(
+        inputs.test_manifest,
+        {
+            "schema_version": "bace_frozen_gnn_test_evaluation_manifest_v1",
+            "selection_frozen_before_test": True,
+            "test_used_only_after_freeze": True,
+            "selector_refit_on_test": False,
+            "threshold_refit_on_test": False,
+            "test_loaded": True,
+            "calibration_loaded": False,
+        },
+        label="historical BACE Ours B13 test evaluation",
+    )
+    _require_fields(
+        shard,
+        {
+            "schema_version": "bace_frozen_gnn_verification_shard_v1",
+            "stage": "B13_FINAL_EVAL",
+            "cohort": "test",
+            "selector_frozen_before_split_load": True,
+            "selector_fitted_on_calibration": True,
+            "test_loaded": True,
+            "calibration_loaded": False,
+        },
+        label=f"historical BACE Ours test shard {shard_index}",
+    )
+    merge = inputs.test_merge_manifest
+    _require_fields(
+        merge,
+        {
+            "schema_version": "bace_frozen_gnn_verification_merge_v1",
+            "dataset": "bace",
+            "stage": "B13_FINAL_EVAL",
+            "status": "PASS",
+            "selector_fitted_on_calibration": True,
+            "test_loaded": True,
+            "calibration_loaded": False,
+            "test_used_only_after_freeze": True,
+        },
+        label="historical BACE Ours B13 merge",
+    )
+    merge_inputs = merge.get("inputs")
+    if not isinstance(merge_inputs, Mapping) or merge_inputs.get("cohort_name") != "test":
+        raise BACECellStandardizationError(
+            "Historical BACE Ours B13 merge does not bind the test cohort"
+        )
+    raw_predecessor = str(merge_inputs.get("predecessor_manifest") or "").strip()
+    if not raw_predecessor or not Path(raw_predecessor).expanduser().is_absolute():
+        raise BACECellStandardizationError(
+            "Historical BACE Ours B13 merge lacks an absolute B12 predecessor"
+        )
+    try:
+        predecessor = Path(raw_predecessor).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise BACECellStandardizationError(
+            "Historical BACE Ours B13 merge B12 predecessor is unavailable"
+        ) from exc
+    if predecessor.is_symlink() or not predecessor.is_dir():
+        raise BACECellStandardizationError(
+            "Historical BACE Ours B13 merge B12 predecessor is not physical"
+        )
+    if predecessor != inputs.selection_manifest_path.parent:
+        raise BACECellStandardizationError(
+            "Historical BACE Ours B13 merge does not point to the B14-pinned B12 root"
+        )
+
+    ordered = [
+        str(value) for value in inputs.selection_manifest.get("ordered_rule_ids", [])
+    ]
+    candidate_ids = [str(value) for value in shard.get("candidate_ids", [])]
+    if len(ordered) != MAX_K or candidate_ids != ordered:
+        raise BACECellStandardizationError(
+            f"Historical BACE Ours test shard {shard_index} changed the frozen rule order"
+        )
+    ordered_hash = stable_sha256(ordered)
+    if (
+        shard.get("candidate_count") != MAX_K
+        or shard.get("candidate_ids_sha256") != ordered_hash
+        or inputs.selection_manifest.get("ordered_rule_ids_sha256") != ordered_hash
+        or inputs.test_manifest.get("ordered_rule_ids") != ordered
+        or inputs.test_manifest.get("ordered_rule_ids_sha256") != ordered_hash
+    ):
+        raise BACECellStandardizationError(
+            f"Historical BACE Ours test shard {shard_index} changed the frozen rule identity"
+        )
+    selected_top20_hash = _valid_sha(
+        inputs.selection_manifest.get("selected_top20_hash"),
+        label="historical B12 selected_top20_hash",
+    )
+    if shard.get("candidate_source_hash") != selected_top20_hash:
+        raise BACECellStandardizationError(
+            f"Historical BACE Ours test shard {shard_index} changed the frozen candidate source"
+        )
+    for field in (
+        "policy_checkpoint_hash",
+        "oracle_checkpoint_hash",
+        "molclr_checkpoint_hash",
+    ):
+        if shard.get(field) != inputs.selection_manifest.get(field):
+            raise BACECellStandardizationError(
+                f"Historical BACE Ours test shard {shard_index} changed {field}"
+            )
+
+
 def _split_contract(inputs: FrozenInputs, checkpoint: Mapping[str, Any]) -> dict[str, Any]:
     manifests = (inputs.test_merge_manifest.get("inputs") or {}).get("shard_manifests")
     if not isinstance(manifests, list) or len(manifests) != 4:
@@ -461,7 +585,6 @@ def _split_contract(inputs: FrozenInputs, checkpoint: Mapping[str, Any]) -> dict
                 "dataset": "bace",
                 "status": "PASS",
                 "test_loaded": True,
-                "selection_frozen_before_test": True,
                 "oracle_backend": ORACLE_BACKEND,
                 "rf_oracle_used": False,
                 "cf_mode": CF_MODE,
@@ -469,6 +592,12 @@ def _split_contract(inputs: FrozenInputs, checkpoint: Mapping[str, Any]) -> dict
             },
             label=f"test shard {index}",
         )
+        if shard.get("selection_frozen_before_test") is not True:
+            _assert_ours_verification_v1_freeze_boundary(
+                inputs=inputs,
+                shard=shard,
+                shard_index=index,
+            )
         all_parent_hashes.add(
             _valid_sha(shard.get("all_parent_ids_sha256"), label="all_parent_ids_sha256")
         )

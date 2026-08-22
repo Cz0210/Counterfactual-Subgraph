@@ -37,6 +37,42 @@ path continues to source `.bashrc` and activate `smiles_pip118` unchanged.
 
 Accepted
 
+## [2026-08-22] Recognize the original B13 shard freeze-boundary spelling
+
+### Background
+
+The frozen BACE Ours B12, B13, and B14 artifacts passed their scientific
+gates, but the later paper-cell standardizer rejected every B13 verification
+shard because it required `selection_frozen_before_test=true`.  The production
+`bace_frozen_gnn_verification_shard_v1` writer used the earlier, more precise
+field name `selector_frozen_before_split_load=true`.  The final B13 manifest
+separately records `selection_frozen_before_test=true` and SHA256-binds the
+physical B12 selection manifest.
+
+### Decision
+
+Accept the original shard spelling only for BACE Ours and only for the exact
+`bace_frozen_gnn_verification_shard_v1` schema.  The compatibility path also
+requires a test cohort, no calibration load, the B13 merge's
+`test_used_only_after_freeze=true`, an exact physical B12 predecessor root,
+the complete B12 ordered-rule/hash/candidate-source identity, and identical
+policy, GINE, and MolCLR hashes.  The existing B13 top-level B12 path/size/SHA
+binding remains mandatory.  A missing or false shard boundary, a different
+predecessor, or any candidate/model identity drift fails closed.
+
+### Consequences
+
+- The immutable PASS artifacts are consumed without editing or rerunning B12
+  or B13.
+- The compatibility does not infer a freeze from stage names or controller
+  status and does not weaken test-leakage protection.
+- Newer baseline schemas still require their explicit
+  `selection_frozen_before_test` evidence.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Bind continuation predecessors to the source manifest namespace
 
 ### Decision

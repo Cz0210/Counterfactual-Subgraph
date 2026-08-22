@@ -49,6 +49,15 @@ The gate additionally requires:
 - identical GINE, MolCLR, dataset/split, candidate-order, and threshold
   identities through the chain.
 
+The original Ours B13 shard writer records the pre-test boundary as
+`selector_frozen_before_split_load=true`; the B13 top-level manifest records
+the equivalent `selection_frozen_before_test=true`. The standardizer accepts
+that original spelling only for schema
+`bace_frozen_gnn_verification_shard_v1` and only when the merge points to the
+same physical B12 root pinned by B14, all four shards carry the exact frozen
+rule order/source hash, and policy/GINE/MolCLR identities agree. A field alias
+alone is never promotion evidence.
+
 Metrics absent from the frozen terminal evidence (`StructRed`, `CovRed`,
 `ValidRate`, and `AvgSize`) are emitted as `N/A` with an explicit reason. They
 are never filled with zero or inferred values.

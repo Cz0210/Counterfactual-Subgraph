@@ -1,0 +1,59 @@
+{
+  "fixture_version": "bace_ours_b13_verification_v1_structure_20260822",
+  "source_evidence": {
+    "b12_manifest_sha256": "c85b0bcaadc386e5c7aad8fed036eda5eae73108014c7bfba1826d7663ec2bc0",
+    "b13_merge_manifest_sha256": "aa159c8d8b23b13ffd9714dfe6186cf0bd7c92e9c6390825e3c7b519b75c682c",
+    "b13_test_evaluation_manifest_sha256": "0b33503d1af4adbe30d2daed370988445ada7eeeba39c9d88eaa83e1031f8a2c",
+    "b13_shard_manifest_sha256s": [
+      "1839bcfe298434d9f8b25e63e031cabbb6efb32e930150b74e6417c1ecab7f34",
+      "3a0d1eb6d994a2d1441a1f0a0c7a3475a4362011541bec7f6431e7a2095ab721",
+      "f98fab794116aea2a57eb2a3c05bf031dd2d78e1a2fc480b5ca6010996e25111",
+      "e3e4f553a71882182567261343602566b80de904c562202bb081a88e48c5a90d"
+    ]
+  },
+  "b12_selection": {
+    "schema_version": "bace_frozen_gnn_selection_manifest_v1",
+    "stage": "B12_SELECTOR",
+    "status": "FROZEN",
+    "selection_frozen": true,
+    "selector_fitted_on_calibration": true,
+    "test_loaded": false,
+    "test_used": false
+  },
+  "b13_test_evaluation": {
+    "schema_version": "bace_frozen_gnn_test_evaluation_manifest_v1",
+    "stage": "B13_FINAL_EVAL",
+    "status": "PASS",
+    "selection_frozen_before_test": true,
+    "test_used_only_after_freeze": true,
+    "selector_refit_on_test": false,
+    "threshold_refit_on_test": false,
+    "test_loaded": true,
+    "calibration_loaded": false
+  },
+  "b13_merge": {
+    "schema_version": "bace_frozen_gnn_verification_merge_v1",
+    "stage": "B13_FINAL_EVAL",
+    "status": "PASS",
+    "selector_fitted_on_calibration": true,
+    "test_used_only_after_freeze": true,
+    "test_loaded": true,
+    "calibration_loaded": false,
+    "inputs": {
+      "cohort_name": "test"
+    }
+  },
+  "b13_shard": {
+    "schema_version": "bace_frozen_gnn_verification_shard_v1",
+    "stage": "B13_FINAL_EVAL",
+    "status": "PASS",
+    "cohort": "test",
+    "selector_frozen_before_split_load": true,
+    "selector_fitted_on_calibration": true,
+    "test_loaded": true,
+    "calibration_loaded": false,
+    "absent_fields": [
+      "selection_frozen_before_test"
+    ]
+  }
+}

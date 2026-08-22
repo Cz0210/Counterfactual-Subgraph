@@ -24,6 +24,13 @@ from src.eval.four_by_four_main_results import audit_cell
 from src.eval.four_by_four_registry import AuditConfig, audit_registry
 
 
+HISTORICAL_B13_FIXTURE = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "bace_ours_b13_verification_v1_structure.json"
+)
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -347,6 +354,83 @@ def _source(tmp_path: Path, *, method: str, checkpoint_id: str, test_hash: str) 
     return root
 
 
+def _refresh_ours_b13_identities(root: Path) -> None:
+    selection_path = root / "frozen_selection_manifest.json"
+    merge_path = root / "matrix_manifest.json"
+    test_path = root / "test_evaluation_manifest.json"
+    final_path = root / "FINAL_PASS.json"
+    merge = json.loads(merge_path.read_text(encoding="utf-8"))
+    merge["inputs"]["shard_manifests"] = [
+        _identity(root / f"shard-{index}" / "verification_manifest.json")
+        for index in range(4)
+    ]
+    _write_json(merge_path, merge)
+    test = json.loads(test_path.read_text(encoding="utf-8"))
+    test["frozen_selection_manifest_identity"] = _identity(selection_path)
+    test["verification_manifest_identity"] = _identity(merge_path)
+    _write_json(test_path, test)
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    final["b12_manifest_identity"] = _identity(selection_path)
+    final["b13_manifest_identity"] = _identity(test_path)
+    _write_json(final_path, final)
+
+
+def _apply_historical_ours_b13_structure(root: Path) -> dict[str, object]:
+    fixture = json.loads(HISTORICAL_B13_FIXTURE.read_text(encoding="utf-8"))
+    selection_path = root / "frozen_selection_manifest.json"
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    selection.update(fixture["b12_selection"])
+    ordered = [str(value) for value in selection["ordered_rule_ids"]]
+    selection["ordered_rule_ids_sha256"] = stable_sha256(ordered)
+    selection["selected_top20_hash"] = "c" * 64
+    selection["policy_checkpoint_hash"] = "d" * 64
+    _write_json(selection_path, selection)
+
+    shard_fixture = dict(fixture["b13_shard"])
+    absent = [str(value) for value in shard_fixture.pop("absent_fields")]
+    for index in range(4):
+        path = root / f"shard-{index}" / "verification_manifest.json"
+        shard = json.loads(path.read_text(encoding="utf-8"))
+        for field in absent:
+            shard.pop(field, None)
+        shard.update(shard_fixture)
+        shard.update(
+            {
+                "candidate_ids": ordered,
+                "candidate_ids_sha256": stable_sha256(ordered),
+                "candidate_count": len(ordered),
+                "candidate_source_hash": selection["selected_top20_hash"],
+                "policy_checkpoint_hash": selection["policy_checkpoint_hash"],
+                "oracle_checkpoint_hash": selection["oracle_checkpoint_hash"],
+                "molclr_checkpoint_hash": selection["molclr_checkpoint_hash"],
+            }
+        )
+        _write_json(path, shard)
+
+    merge_path = root / "matrix_manifest.json"
+    merge = json.loads(merge_path.read_text(encoding="utf-8"))
+    merge.pop("selection_frozen_before_test", None)
+    merge.update(
+        {
+            key: value
+            for key, value in fixture["b13_merge"].items()
+            if key != "inputs"
+        }
+    )
+    merge["inputs"].update(fixture["b13_merge"]["inputs"])
+    merge["inputs"]["predecessor_manifest"] = str(selection_path.parent.resolve())
+    _write_json(merge_path, merge)
+
+    test_path = root / "test_evaluation_manifest.json"
+    test = json.loads(test_path.read_text(encoding="utf-8"))
+    test.update(fixture["b13_test_evaluation"])
+    test["ordered_rule_ids"] = ordered
+    test["ordered_rule_ids_sha256"] = stable_sha256(ordered)
+    _write_json(test_path, test)
+    _refresh_ours_b13_identities(root)
+    return fixture
+
+
 @pytest.mark.parametrize("method", ["Ours", "GCFExplainer", "ComRecGC"])
 def test_standardization_is_artifact_only_and_registry_complete(
     tmp_path: Path, method: str
@@ -411,6 +495,62 @@ def test_standardization_rejects_preregistered_threshold_mismatch(tmp_path: Path
             gnn_checkpoint=checkpoint,
             output_dir=tmp_path / "out",
             expected_threshold_hash="f" * 64,
+        )
+
+
+def test_ours_historical_b13_shard_schema_proves_freeze_boundary(
+    tmp_path: Path,
+) -> None:
+    checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
+    source = _source(
+        tmp_path,
+        method="Ours",
+        checkpoint_id=checkpoint_id,
+        test_hash=test_hash,
+    )
+    fixture = _apply_historical_ours_b13_structure(source)
+    result = standardize_bace_frozen_cell(
+        method="Ours",
+        source_final_root=source,
+        gnn_checkpoint=checkpoint,
+        output_dir=tmp_path / "historical-standardized",
+    )
+    assert fixture["b13_shard"]["selector_frozen_before_split_load"] is True
+    assert "selection_frozen_before_test" in fixture["b13_shard"]["absent_fields"]
+    summary = json.loads(
+        (tmp_path / "historical-standardized" / "summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["selection_frozen_before_test"] is True
+    assert result["raw_test_opened"] is False
+
+
+def test_ours_historical_b13_shard_schema_rejects_missing_freeze_evidence(
+    tmp_path: Path,
+) -> None:
+    checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
+    source = _source(
+        tmp_path,
+        method="Ours",
+        checkpoint_id=checkpoint_id,
+        test_hash=test_hash,
+    )
+    _apply_historical_ours_b13_structure(source)
+    shard_path = source / "shard-0" / "verification_manifest.json"
+    shard = json.loads(shard_path.read_text(encoding="utf-8"))
+    shard["selector_frozen_before_split_load"] = False
+    _write_json(shard_path, shard)
+    _refresh_ours_b13_identities(source)
+    with pytest.raises(
+        BACECellStandardizationError,
+        match="selector_frozen_before_split_load=False",
+    ):
+        standardize_bace_frozen_cell(
+            method="Ours",
+            source_final_root=source,
+            gnn_checkpoint=checkpoint,
+            output_dir=tmp_path / "must-not-exist",
         )
 
 

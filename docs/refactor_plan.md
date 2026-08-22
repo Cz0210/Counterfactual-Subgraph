@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-08-22: BACE Ours historical B13 standardization compatibility
+
+- [x] Audit the immutable B12 selection, B13 top-level, merge, and four shard
+  manifests from the failed AutoDL standardization attempt.
+- [x] Recognize `selector_frozen_before_split_load=true` only for the exact
+  original Ours verification-shard schema and require the full B12 candidate,
+  predecessor, policy, GINE, and MolCLR identity closure.
+- [x] Add a recorded historical structure fixture plus a negative regression
+  proving that absent freeze evidence still fails closed.
+
 ## 2026-08-22: BACE four-by-four cell closure
 
 - [x] Keep B14 and native baseline final roots as immutable scientific
