@@ -21,6 +21,21 @@
 - [x] Add a migrated-owner regression proving the verifier supplies an exact
   temporary `safe.directory` without changing global Git configuration.
 
+## 2026-08-22: Repository-owned AutoDL four-by-four dashboard
+
+- [x] Replace the standalone fixed `autodl_three_lines` data source with
+  physical-directory discovery under the persistent four-by-four namespace.
+- [x] Reuse the controller status/UUID-lock model and query GPU inventory once
+  per page snapshot across every discovered controller.
+- [x] Add a predominantly Chinese, GET-only loopback UI with controller/task/
+  output/PID/reason fields and explicit heartbeat freshness.
+- [x] Refresh every five seconds and immediately after tab visibility or
+  network restoration without caching API responses.
+- [x] Add a nohup AutoDL launcher, health endpoint, terminal/JSON once mode,
+  SSH-tunnel documentation, and focused security/discovery tests.
+- [x] Keep the dashboard AutoDL-only and deliberately omit a long-lived HPC
+  Web-service wrapper.
+
 ## 2026-08-22: BACE Ours historical B13 standardization compatibility
 
 - [x] Audit the immutable B12 selection, B13 top-level, merge, and four shard

@@ -77,6 +77,55 @@ or frozen payloads.
 
 Accepted
 
+## [2026-08-22] Discover persistent AutoDL controllers in a loopback-only dashboard
+
+### Background
+
+The standalone read-only task board remained alive and generated a fresh API
+timestamp, but it was launched without `--run`. It therefore continued to read
+its hard-coded `autodl_three_lines_20260821_v1` tree and two fixed auxiliary
+launchers while the active main and repair controllers wrote a different
+persistent namespace. The page refresh label made a fresh HTTP sample look like
+fresh scientific state even though the selected source was historical.
+
+### Decision
+
+Own the dashboard in the repository and discover every physical controller
+directory under the exact `four_methods_four_datasets_continuation` namespace.
+Reject symlinks and manifest/directory identity mismatches. Reuse the hardened
+task/status reader, query `nvidia-smi` and UUID locks once per snapshot, and
+display controller process identity, heartbeat age, queue state, task PID,
+output, and failure/dependency reason. Keep status tokens and scientific IDs
+unchanged while translating ordinary UI labels to Chinese.
+
+The HTTP service remains GET-only and refuses every non-loopback bind. Friends
+access it through independent SSH local-forwarding sessions. Direct public bind
+is not an acceptable substitute for authentication/TLS, and sharing root
+credentials is explicitly documented as full-machine access rather than
+dashboard-only access. Browser refresh, source sampling, and controller
+freshness are shown as distinct clocks.
+
+The dashboard is an AutoDL-only persistent operations service. No new Slurm
+wrapper is created for this long-lived Web listener; adding such a wrapper
+would conflict with the explicit no-HPC scope and create an inappropriate
+network service on a compute allocation. Existing read-only Slurm status CLI
+parity is unchanged.
+
+### Consequences
+
+- Main, repair, and later fresh controllers can be viewed together without
+  editing the dashboard launch command for every controller ID.
+- A healthy page can no longer silently present the old three-line run as the
+  current campaign.
+- Multiple viewers are supported by loopback SSH tunnels without exposing the
+  unauthenticated port publicly.
+- The service remains independent of scientific controller ownership and
+  cannot mutate or signal their processes.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Pin Mutagenicity GCF evaluation to the AutoDL controller Python
 
 ### Background

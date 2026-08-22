@@ -116,6 +116,13 @@ GPU UUID locks with the still-running main controller, caps its CPU task
 concurrency at two, and deliberately inherits no old BACE continuation guard.
 See `docs/AUTODL_FOUR_BY_FOUR_REPAIR_CONTINUATION.md`.
 
+The current persistent controllers can be inspected through the loopback-only,
+GET-only Chinese AutoDL dashboard at
+`scripts/autodl/serve_four_by_four_dashboard.py`. It discovers physical
+controller directories dynamically, shares one GPU/UUID-lock probe across the
+page, and is intended to be accessed through an SSH tunnel. See
+`docs/AUTODL_FOUR_BY_FOUR_DASHBOARD.md`.
+
 The future TasteMolNet baseline routes share one explicit three-class GINE,
 untargeted Sweet-to-non-Sweet strict-flip contract while remaining terminally
 license-blocked in the current controller. See

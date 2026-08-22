@@ -162,7 +162,33 @@ def _load_tasks(
     return rows
 
 
-def collect_status(layout: Any, *, controller_id: str) -> dict[str, Any]:
+def collect_gpu_status(layout: Any) -> tuple[list[dict[str, Any]], str | None]:
+    """Collect one shared GPU/UUID-lock snapshot for read-only status clients."""
+
+    try:
+        observations = query_gpu_inventory()
+        rows = audit_gpu_locks(
+            layout.locks_dir, observations, probe_advisory_lock=False
+        )
+        by_index = {item.index: item for item in observations}
+        for row in rows:
+            observation = by_index.get(row.get("gpu_index"))
+            if observation is not None:
+                row["gpu_name"] = observation.name
+        return (
+            rows,
+            None,
+        )
+    except AutoDLRuntimeError as exc:
+        return [], str(exc)
+
+
+def collect_status(
+    layout: Any,
+    *,
+    controller_id: str,
+    shared_gpu_status: tuple[list[dict[str, Any]], str | None] | None = None,
+) -> dict[str, Any]:
     root = layout.control_root / CONTROLLER_NAME / controller_id
     controller_state: dict[str, Any]
     if (root / "controller_state.json").is_file():
@@ -178,15 +204,10 @@ def collect_status(layout: Any, *, controller_id: str) -> dict[str, Any]:
     tasks = _load_tasks(root, layout, priorities)
     by_stage = {str(row.get("stage")): row for row in tasks}
     by_dataset = {str(row.get("dataset")): row for row in tasks}
-    try:
-        observations = query_gpu_inventory()
-        gpus = audit_gpu_locks(
-            layout.locks_dir, observations, probe_advisory_lock=False
-        )
-        gpu_error = None
-    except AutoDLRuntimeError as exc:
-        gpus = []
-        gpu_error = str(exc)
+    if shared_gpu_status is None:
+        gpus, gpu_error = collect_gpu_status(layout)
+    else:
+        gpus, gpu_error = shared_gpu_status
     bace = [
         by_stage.get(
             stage,
