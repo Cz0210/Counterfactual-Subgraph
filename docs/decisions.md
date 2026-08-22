@@ -98,8 +98,8 @@ The emitted evaluation contract fixes MolCLR Node-Wasserstein, strict flip,
 K=1..20, Table 2 K=10, method-native actions, shared within-dataset classifier
 identity, and the standardized export filenames. It is a schema and promotion
 boundary, not a substitute evaluator and not permission to fabricate missing
-results. No Slurm wrapper is added because this audit is AutoDL-local and the
-active task forbids HPC.
+results. Paired Slurm wrappers remain static CLI-parity files required by
+repository policy; the active campaign does not submit them or access HPC.
 
 ### Consequences
 
@@ -7171,8 +7171,8 @@ RF filtering and therefore cannot enter the new same-classifier main matrix.
   repository does not yet implement an audited attachment-aware LHS→RHS rule
   application engine. Historical RF/full-graph conversions are not substitutes.
 - AutoDL foreground commands and terminal artifact contracts are documented in
-  `docs/AUTODL_BACE_BASELINE_GNN_ROUTES.md`. No Slurm wrapper is added because
-  this route is explicitly AutoDL-only and must not access HPC.
+  `docs/AUTODL_BACE_BASELINE_GNN_ROUTES.md`. Its paired Slurm wrapper is static
+  CLI parity only and is never submitted by this AutoDL-only campaign.
 
 ### Consequences
 
