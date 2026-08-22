@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -162,6 +164,42 @@ def test_bridge_smoke_cli_keeps_explicit_native_vocabularies() -> None:
     assert args.stage == "globalgce-bridge-smoke"
     assert args.atom_symbol == ["C", "O"]
     assert args.bond_name == ["no_edge", "single"]
+
+
+def test_bridge_smoke_cli_prints_controller_pass_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    from scripts.autodl import run_bace_baseline_gnn_route as route_cli
+
+    monkeypatch.setattr(
+        route_cli,
+        "run_frozen_gine_bridge_smoke",
+        lambda **_kwargs: {"status": "PASS"},
+    )
+    assert route_cli.main(
+        [
+            "globalgce-bridge-smoke",
+            "--method",
+            "GlobalGCE",
+            "--gnn-checkpoint",
+            str(tmp_path / "gine"),
+            "--output-dir",
+            str(tmp_path / "fresh-smoke"),
+            "--parent-smiles",
+            "CCO",
+            "--atom-symbol",
+            "C",
+            "--atom-symbol",
+            "O",
+            "--device",
+            "cpu",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert '"status": "PASS"' in output
+    assert "[BACE_GLOBALGCE_BRIDGE_PASS]" in output
 
 
 def test_official_target_one_is_only_a_loss_view_of_frozen_class_zero() -> None:

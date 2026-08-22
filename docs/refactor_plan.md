@@ -1197,3 +1197,11 @@ Mutagenicity roadmaps.
 - [ ] Prove legacy/new exact parity on adversarial small fixtures, chunk-size
   invariance, checkpoint/resume equivalence, dense bounded-RSS behavior, and
   PASS-last failure injection before launching a fresh AIDS repair-v4 root.
+
+# 2026-08-23 — GlobalGCE bridge controller evidence
+
+- [x] Preserve the evaluator's atomic `PASS` and `BRIDGE_PASS` artifacts.
+- [x] Emit the generic controller's exact bridge PASS marker from the thin CLI.
+- [x] Cover the JSON result and marker with a focused CLI regression test.
+- [ ] Launch only in a fresh controller/output root; retain the original
+  marker-missing attempt as immutable evidence.

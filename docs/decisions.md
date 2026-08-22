@@ -43,6 +43,34 @@ remains blocked until the ongoing AutoDL evidence produces the required roots.
 
 Accepted
 
+## 2026-08-23 — GlobalGCE bridge smoke log marker
+
+### Context
+
+The first AutoDL frozen-GINE bridge smoke completed every scientific check,
+wrote `PASS` and `BRIDGE_PASS`, and exited zero. The generic controller still
+classified the task as failed because its separate log-evidence contract
+required `[BACE_GLOBALGCE_BRIDGE_PASS]`, while the CLI printed only the JSON
+result.
+
+### Decision
+
+After the JSON result, the thin `globalgce-bridge-smoke` CLI prints the exact
+controller marker. The evaluator remains side-effect-free apart from its
+atomic artifacts. A fresh task/controller root is required; the failed
+controller state is not rewritten or relabelled.
+
+### Consequences
+
+- Frozen-GINE weights, gradients, native LHS-to-RHS semantics, and scientific
+  outputs are unchanged.
+- PASS-last artifact checks and the independent log marker now agree.
+- The previous failed attempt remains immutable diagnostic evidence.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Bound AIDS ComRecGC DBSCAN memory without changing labels
 
 ### Background

@@ -399,6 +399,11 @@ def main(argv: list[str] | None = None) -> int:
     else:  # pragma: no cover - argparse makes this unreachable.
         raise AssertionError(args.stage)
     print(json.dumps(result, sort_keys=True), flush=True)
+    # The controller's PASS-last contract checks a human-readable log marker in
+    # addition to the on-disk BRIDGE_PASS sentinel.  Keep that evidence in the
+    # thin CLI rather than making the reusable evaluator print to stdout.
+    if args.stage == "globalgce-bridge-smoke":
+        print("[BACE_GLOBALGCE_BRIDGE_PASS]", flush=True)
     return 0
 
 
