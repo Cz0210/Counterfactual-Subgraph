@@ -823,6 +823,9 @@ Mutagenicity roadmaps.
 - [x] Add four-shard native full-graph GINE/WNode verification, calibration-only
   selector freeze, held-out evaluation, and PASS-last final freeze.
 - [x] Publish controller-readable resource/marker contracts and AutoDL commands.
+- [x] Add a one-way native-to-generic fragment adapter with passing-attempt
+  dependency tokens, non-primary runner datasets, baseline-specific
+  test-after-selector gates, and static no-resource GlobalGCE blocking.
 - [ ] Implement and validate GlobalGCE attachment-aware LHS→RHS application;
   until then keep the BACE GlobalGCE cell `BLOCKED_CODE`.
 

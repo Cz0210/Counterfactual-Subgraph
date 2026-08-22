@@ -19,6 +19,10 @@ from src.baselines.bace_gnn_baseline_contracts import (  # noqa: E402
 from src.baselines.bace_gnn_baseline_tasks import (  # noqa: E402
     build_bace_baseline_controller_fragment,
 )
+from src.baselines.bace_gnn_baseline_generic_adapter import (  # noqa: E402
+    atomic_write_generic_fragment,
+    build_bace_baseline_generic_controller_fragment,
+)
 from src.baselines.comrecgc.exporter import (  # noqa: E402
     export_bace_gine_representatives,
 )
@@ -39,6 +43,42 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", required=True)
 
 
+def _fragment_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--method", required=True)
+    parser.add_argument("--python", required=True)
+    parser.add_argument("--project-root", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--gnn-checkpoint", required=True)
+    parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--calibration-split", required=True)
+    parser.add_argument("--test-split", required=True)
+    parser.add_argument("--molclr-root", required=True)
+    parser.add_argument("--molclr-checkpoint", required=True)
+    parser.add_argument("--neurosed-checkpoint", required=True)
+    parser.add_argument("--official-root")
+    parser.add_argument("--neurosed-manifest")
+    parser.add_argument("--omp-threads", type=int, default=4)
+
+
+def _fragment_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "method": args.method,
+        "python": args.python,
+        "project_root": args.project_root,
+        "output_root": args.output_dir,
+        "gnn_checkpoint": args.gnn_checkpoint,
+        "dataset_dir": args.dataset_dir,
+        "calibration_split": args.calibration_split,
+        "test_split": args.test_split,
+        "molclr_root": args.molclr_root,
+        "molclr_checkpoint": args.molclr_checkpoint,
+        "neurosed_checkpoint": args.neurosed_checkpoint,
+        "official_root": args.official_root,
+        "neurosed_manifest": args.neurosed_manifest,
+        "omp_threads": args.omp_threads,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
@@ -49,20 +89,15 @@ def build_parser() -> argparse.ArgumentParser:
     describe.add_argument("--method", required=True)
 
     fragment = sub.add_parser("task-fragment")
-    fragment.add_argument("--method", required=True)
-    fragment.add_argument("--python", required=True)
-    fragment.add_argument("--project-root", required=True)
-    fragment.add_argument("--output-dir", required=True)
-    fragment.add_argument("--gnn-checkpoint", required=True)
-    fragment.add_argument("--dataset-dir", required=True)
-    fragment.add_argument("--calibration-split", required=True)
-    fragment.add_argument("--test-split", required=True)
-    fragment.add_argument("--molclr-root", required=True)
-    fragment.add_argument("--molclr-checkpoint", required=True)
-    fragment.add_argument("--neurosed-checkpoint", required=True)
-    fragment.add_argument("--official-root")
-    fragment.add_argument("--neurosed-manifest")
-    fragment.add_argument("--omp-threads", type=int, default=4)
+    _fragment_arguments(fragment)
+
+    generic_fragment = sub.add_parser("generic-task-fragment")
+    _fragment_arguments(generic_fragment)
+    generic_fragment.add_argument(
+        "--fragment-output",
+        required=True,
+        help="Fresh absolute JSON path consumed by build_four_by_four_manifest.py",
+    )
 
     preflight = sub.add_parser("preflight")
     _common(preflight)
@@ -159,22 +194,20 @@ def main(argv: list[str] | None = None) -> int:
             "blocker_reason": spec.blocker_reason,
         }
     elif args.stage == "task-fragment":
-        result = build_bace_baseline_controller_fragment(
-            method=args.method,
-            python=args.python,
-            project_root=args.project_root,
-            output_root=args.output_dir,
-            gnn_checkpoint=args.gnn_checkpoint,
-            dataset_dir=args.dataset_dir,
-            calibration_split=args.calibration_split,
-            test_split=args.test_split,
-            molclr_root=args.molclr_root,
-            molclr_checkpoint=args.molclr_checkpoint,
-            neurosed_checkpoint=args.neurosed_checkpoint,
-            official_root=args.official_root,
-            neurosed_manifest=args.neurosed_manifest,
-            omp_threads=args.omp_threads,
+        result = build_bace_baseline_controller_fragment(**_fragment_kwargs(args))
+    elif args.stage == "generic-task-fragment":
+        fragment = build_bace_baseline_generic_controller_fragment(
+            **_fragment_kwargs(args)
         )
+        destination = atomic_write_generic_fragment(args.fragment_output, fragment)
+        result = {
+            "status": "PASS",
+            "schema_version": fragment["schema_version"],
+            "method": fragment["method"],
+            "method_id": fragment["method_id"],
+            "task_count": len(fragment["tasks"]),
+            "fragment_output": str(destination),
+        }
     elif args.stage == "preflight":
         result = write_route_preflight(
             method=args.method,

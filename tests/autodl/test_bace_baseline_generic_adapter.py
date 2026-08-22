@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+from scripts.autodl.run_bace_baseline_gnn_route import main as route_main
+from scripts.autodl.run_four_gpu_recovery_controller import (
+    initialize_controller_state,
+    load_controller_manifest,
+)
+from src.baselines.bace_gnn_baseline_generic_adapter import (
+    B11_SHARD_PRIORITY,
+    GENERIC_FRAGMENT_SCHEMA,
+    build_bace_baseline_generic_controller_fragment,
+)
+from src.baselines.bace_gnn_baseline_tasks import (
+    build_bace_baseline_controller_fragment,
+)
+
+
+def _paths(tmp_path: Path) -> dict[str, Path]:
+    fixture = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
+    root = Path("/persistent") / fixture
+    return {
+        "python": root / "env/bin/python",
+        "project_root": root / "project",
+        "output_root": root / "outputs/bace-baselines",
+        "gnn_checkpoint": root / "gine",
+        "dataset_dir": root / "dataset",
+        "calibration_split": root / "bace_calibration.csv",
+        "test_split": root / "bace_test.csv",
+        "molclr_root": root / "molclr",
+        "molclr_checkpoint": root / "molclr.pt",
+        "neurosed_checkpoint": root / "neurosed.pt",
+        "official_root": root / "official",
+        "neurosed_manifest": root / "neurosed.json",
+    }
+
+
+def _generic(tmp_path: Path, method: str) -> dict:
+    return build_bace_baseline_generic_controller_fragment(
+        method=method, **_paths(tmp_path)
+    )
+
+
+def _production_manifest(tmp_path: Path, tasks: list[dict]) -> Path:
+    path = tmp_path / "controller.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "controller_id": "bace-baseline-generic-adapter-test",
+                "paper_frozen": True,
+                "runtime": {
+                    "max_gpus": 4,
+                    "stable_idle_seconds": 60,
+                    "sample_interval_seconds": 5,
+                    "poll_seconds": 60,
+                    "max_transient_retries": 1,
+                },
+                "resource_gates": {},
+                "tasks": tasks,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_native_fragment_contract_is_not_changed(tmp_path: Path) -> None:
+    native = build_bace_baseline_controller_fragment(
+        method="GCFExplainer", **_paths(tmp_path)
+    )
+    first = native["tasks"][0]
+    assert native["schema_version"] == "bace_baseline_controller_fragment_v1"
+    assert "task_id" in first and "id" not in first
+    assert "argv" in first and "command" not in first
+    assert first["resource"] == {"kind": "cpu", "gpus": 0}
+
+
+def test_generic_adapter_binds_attempt_roots_and_every_dependency(
+    tmp_path: Path,
+) -> None:
+    fragment = _generic(tmp_path, "GCFExplainer")
+    assert fragment["schema_version"] == GENERIC_FRAGMENT_SCHEMA
+    tasks = {task["id"]: task for task in fragment["tasks"]}
+    assert tasks["bace_gcfexplainer_train_vrrw"]["priority"] < B11_SHARD_PRIORITY
+    assert tasks["bace_gcfexplainer_train_summary"]["priority"] < B11_SHARD_PRIORITY
+    assert (
+        tasks["bace_gcfexplainer_train_vrrw"]["priority"]
+        < tasks["bace_gcfexplainer_train_summary"]["priority"]
+        < tasks["bace_gcfexplainer_train_candidates"]["priority"]
+        < B11_SHARD_PRIORITY
+    )
+    for task in tasks.values():
+        assert task["runner_dataset"] == "bace-baseline-gcfexplainer"
+        assert task["runner_dataset"] != "bace"
+        assert task["resource"] in {"cpu", "gpu"}
+        assert task["expected_output"].endswith("attempt-{attempt}")
+        assert task["required_output_files"]
+        assert task["required_log_marker"]
+        serialized = json.dumps(task, sort_keys=True)
+        for dependency in task["depends_on"]:
+            assert f"{{dep_{dependency}_output}}" in serialized
+        assert "{task_output}" in task["command"]
+    summary = tasks["bace_gcfexplainer_train_summary"]
+    assert (
+        "{dep_bace_gcfexplainer_train_vrrw_output}" in summary["command"]
+    )
+    test_shard = tasks["bace_gcfexplainer_test_shard_0"]
+    assert test_shard["selector_parameters_frozen"] is True
+    assert test_shard["read_only_test"] is True
+
+
+def test_gcf_comrecgc_and_static_globalgce_pass_production_loader(
+    tmp_path: Path,
+) -> None:
+    gcf = _generic(tmp_path / "gcf", "GCFExplainer")
+    comrecgc = _generic(tmp_path / "comrecgc", "ComRecGC")
+    globalgce = _generic(tmp_path / "globalgce", "GlobalGCE")
+    tasks = [*gcf["tasks"], *comrecgc["tasks"], *globalgce["tasks"]]
+    manifest = load_controller_manifest(_production_manifest(tmp_path, tasks))
+
+    by_id = manifest.by_id
+    assert len(by_id) == len(tasks)
+    assert by_id["bace_gcfexplainer_train_vrrw"].priority < B11_SHARD_PRIORITY
+    assert by_id["bace_comrecgc_train_generation"].priority < B11_SHARD_PRIORITY
+    assert (
+        by_id["bace_comrecgc_train_generation"].priority
+        < by_id["bace_comrecgc_train_common_recourse"].priority
+        < by_id["bace_comrecgc_train_candidates"].priority
+        < B11_SHARD_PRIORITY
+    )
+    terminal = by_id["bace_globalgce_terminal"]
+    assert terminal.command is None
+    assert terminal.resource == "cpu"
+    assert terminal.blocked_reason == (
+        "BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE"
+    )
+    assert terminal.blocked_reason is not None
+    root, states = initialize_controller_state(
+        type("Layout", (), {"control_root": tmp_path / "control"})(), manifest
+    )
+    assert root.is_dir()
+    assert states[terminal.task_id]["state"] == "BLOCKED"
+    assert all(
+        instance["state"] == "NOT_STARTED"
+        for instance in states[terminal.task_id]["instances"].values()
+    )
+
+
+def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    destination = tmp_path / "fragments/globalgce.json"
+    argv = [
+        "generic-task-fragment",
+        "--method",
+        "GlobalGCE",
+        "--python",
+        str(paths["python"]),
+        "--project-root",
+        str(paths["project_root"]),
+        "--output-dir",
+        str(paths["output_root"]),
+        "--gnn-checkpoint",
+        str(paths["gnn_checkpoint"]),
+        "--dataset-dir",
+        str(paths["dataset_dir"]),
+        "--calibration-split",
+        str(paths["calibration_split"]),
+        "--test-split",
+        str(paths["test_split"]),
+        "--molclr-root",
+        str(paths["molclr_root"]),
+        "--molclr-checkpoint",
+        str(paths["molclr_checkpoint"]),
+        "--neurosed-checkpoint",
+        str(paths["neurosed_checkpoint"]),
+        "--official-root",
+        str(paths["official_root"]),
+        "--neurosed-manifest",
+        str(paths["neurosed_manifest"]),
+        "--fragment-output",
+        str(destination),
+    ]
+    assert route_main(argv) == 0
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == GENERIC_FRAGMENT_SCHEMA
+    assert payload["tasks"][0]["command"] is None

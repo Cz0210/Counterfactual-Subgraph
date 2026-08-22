@@ -33,22 +33,52 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py describe --method ComRecGC
 $PY scripts/autodl/run_bace_baseline_gnn_route.py describe --method GlobalGCE
 ```
 
-Generate a dependency-complete JSON fragment for the generic four-GPU
-controller with `task-fragment`. It emits exact argv/env/input/output/marker
-contracts. The controller injects only `CUDA_VISIBLE_DEVICES` after acquiring a
-GPU UUID lock. For GlobalGCE, the fragment has `tasks=[]` and one static
-`BLOCKED_CODE` terminal, so it cannot consume a scheduler slot:
+`task-fragment` emits the native method-facing schema
+`bace_baseline_controller_fragment_v1`. That schema intentionally retains
+`task_id`, `argv`, resource objects, and native output roots; it is not accepted
+directly by `build_four_by_four_manifest.py`.
+
+Use `generic-task-fragment` to write a fresh composer input in
+`bace_baseline_generic_controller_fragment_v1` schema. The adapter preserves
+the native fragment, maps every dependency to the controller's
+`{dep_<task_id>_output}` token, replaces task-owned output arguments with
+`{task_output}`, and gives every task an immutable `attempt-{attempt}` output.
+It also records exact required files, a log marker, split access, and a
+non-primary runner dataset. The controller injects `CUDA_VISIBLE_DEVICES` only
+after acquiring a GPU UUID lock.
+
+GCFExplainer and ComRecGC train-route GPU tasks have priority below the B11
+shard priority (90). Their two READY roots therefore claim two lanes first,
+while B11 remains free to use the other lanes. Their later four-way
+verification tasks sort after B11, preventing one baseline from taking all
+four cards. GlobalGCE becomes one static `command=null`, `BLOCKED_CODE` task;
+it is terminal at initialization and never enters READY or consumes a CPU/GPU
+slot.
+
+Example:
 
 ```bash
-$PY scripts/autodl/run_bace_baseline_gnn_route.py task-fragment \
+$PY scripts/autodl/run_bace_baseline_gnn_route.py generic-task-fragment \
   --method "$METHOD" --python "$PY" --project-root "$PWD" \
   --output-dir "$OUTPUT_ROOT" --gnn-checkpoint "$BACE_GINE" \
   --dataset-dir "$DATASET_DIR" --calibration-split "$BACE_CALIBRATION" \
   --test-split "$BACE_TEST" --molclr-root "$MOLCLR_ROOT" \
   --molclr-checkpoint "$MOLCLR_CKPT" \
   --neurosed-checkpoint "$NEUROSED" --official-root "$OFFICIAL_ROOT" \
-  --neurosed-manifest "$NEUROSED_MANIFEST"
+  --neurosed-manifest "$NEUROSED_MANIFEST" \
+  --fragment-output "$CONTROL/fragments/bace-${METHOD}.generic.json"
+
+$PY scripts/autodl/build_four_by_four_manifest.py \
+  --controller-id "$CONTROLLER_ID" \
+  --task-fragment "$CONTROL/fragments/bace-${METHOD}.generic.json" \
+  --output "$CONTROL/manifests/${CONTROLLER_ID}.json"
 ```
+
+The production manifest loader recognizes the baseline selector as a genuine
+calibration freeze and permits only the three explicit baseline held-out
+stages after that selector. Each held-out task must still declare both
+`selector_parameters_frozen=true` and `read_only_test=true`; path-based test
+leak detection remains active.
 
 Preflight (CPU, fresh output):
 

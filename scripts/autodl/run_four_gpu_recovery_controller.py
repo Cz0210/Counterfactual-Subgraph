@@ -137,7 +137,14 @@ POST_FREEZE_TEST_STAGES = {
     "B13_TEST_PARENT_MANIFEST",
     "B13_FINAL_EVAL_SHARDS",
     "B13_FINAL_EVAL",
+    # Method-native BACE baseline routes freeze their own calibration selector
+    # and then perform held-out evaluation without publishing primary B13/B14
+    # state.  These stages retain the same ancestor/frozen/read-only checks.
+    "BACE_BASELINE_TEST_VERIFY",
+    "BACE_BASELINE_TEST_MERGE",
+    "BACE_BASELINE_FINAL_FREEZE",
 }
+SELECTOR_FREEZE_STAGES = {"B12_SELECTOR", "BACE_BASELINE_SELECTOR"}
 
 
 class ControllerError(AutoDLRuntimeError):
@@ -625,7 +632,7 @@ def validate_no_test_before_freeze(tasks: Sequence[TaskSpec]) -> None:
     selector_ids = {
         task.task_id
         for task in tasks
-        if task.stage == "B12_SELECTOR" and task.freezes_selector
+        if task.stage in SELECTOR_FREEZE_STAGES and task.freezes_selector
     }
     for task in tasks:
         uses_test = "test" in task.data_splits

@@ -4,6 +4,52 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Adapt native BACE baseline fragments at the controller boundary
+
+### Background
+
+The BACE GCFExplainer, ComRecGC, and fail-closed GlobalGCE route builder emits
+a method-facing fragment with `task_id`, `argv`, resource objects, native
+output roots, and file-marker lists.  The persistent generic four-GPU
+controller instead requires `id`, `command`, scalar resources, passing-attempt
+dependency tokens, immutable retry roots, input manifests, log markers, and
+explicit calibration/test access declarations.  Feeding the native fragment
+to the generic composer therefore failed schema validation or would have bound
+downstream work to a mutable non-attempt path.
+
+### Decision
+
+Keep the native fragment unchanged and add a one-way generic adapter plus an
+explicit `generic-task-fragment` CLI.  Translate every predecessor path to
+`{dep_<task_id>_output}`, every task output to `{task_output}`, and every
+expected output to a fresh `attempt-{attempt}` root.  Fold native auxiliary
+checkpoint/cache paths into the owning attempt, require stage-specific files
+and stdout markers, and use a non-primary `runner_dataset` so baseline work
+cannot publish primary BACE recovery state.
+
+Treat each baseline calibration selector as an explicit selector freeze and
+allow only named baseline test verification, merge, and final-freeze stages
+after that ancestor, still requiring frozen-selector and read-only-test flags.
+Prioritize the two native train routes before priority-90 B11 shards, while
+placing later four-way baseline verification after B11.  Represent unavailable
+GlobalGCE as one static `command=null` task with its exact `BLOCKED_CODE`, so it
+is terminal at controller initialization and never becomes READY.
+
+### Consequences
+
+- OOM/transient retries cannot leave a downstream baseline task bound to an
+  earlier failed attempt directory.
+- The original method-facing fragment remains available for direct inspection
+  and no method action semantics are changed.
+- GCFExplainer and ComRecGC can share the work-conserving controller with B11
+  without overwriting primary BACE stage state.
+- GlobalGCE remains honestly blocked rather than consuming a scheduler slot or
+  being substituted with a full-graph/deletion action.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Continue BACE B11--B14 through flattened exact adoptions
 
 ### Background
