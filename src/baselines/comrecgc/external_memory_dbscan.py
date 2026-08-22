@@ -144,6 +144,14 @@ def _fsync_memmap(value: np.memmap) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _rss_bytes() -> int:
     status = Path("/proc/self/status")
     if status.is_file():
@@ -273,6 +281,37 @@ def _validate_partial(
         raise ExternalMemoryDBSCANError(
             f"{label} shape/dtype mismatch: {value.shape}/{value.dtype}"
         )
+
+
+def _reconcile_promoted_array(
+    *,
+    partial: Path,
+    final: Path,
+    shape: Sequence[int],
+    dtype: Any,
+    expected_sha256: str,
+    label: str,
+) -> Path:
+    """Finish one checkpointed rename without trusting either filename."""
+
+    if partial.exists() and final.exists():
+        raise ExternalMemoryDBSCANError(
+            f"{label} has both partial and final artifacts"
+        )
+    source = final if final.exists() else partial
+    if not source.exists() or source.is_symlink():
+        raise ExternalMemoryDBSCANError(
+            f"{label} checkpointed artifact is missing"
+        )
+    value = _open_npy_memmap(source, mode="r")
+    _validate_partial(value, shape=shape, dtype=dtype, label=label)
+    del value
+    if _sha256_file(source) != str(expected_sha256):
+        raise ExternalMemoryDBSCANError(f"{label} checkpoint hash mismatch")
+    if source == partial:
+        os.replace(partial, final)
+        _fsync_directory(final.parent)
+    return final
 
 
 def fit_external_memory_dbscan(
@@ -408,6 +447,37 @@ def fit_external_memory_dbscan(
     labels_final = root / "labels.npy"
 
     phase = str(state.get("phase"))
+    if phase == "neighbor_counts_finalize":
+        _reconcile_promoted_array(
+            partial=counts_partial,
+            final=counts_final,
+            shape=(n_samples,),
+            dtype=np.intp,
+            expected_sha256=str(state.get("neighbor_counts_sha256") or ""),
+            label="neighbor counts",
+        )
+        _reconcile_promoted_array(
+            partial=root / "core_mask.partial.npy",
+            final=core_path,
+            shape=(n_samples,),
+            dtype=np.bool_,
+            expected_sha256=str(state.get("core_mask_sha256") or ""),
+            label="core mask",
+        )
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="core_union",
+            next_offset=0,
+            peak_rss_bytes=peak,
+            extra={
+                "effective_query_block_size": int(
+                    state.get("effective_query_block_size", contract.query_block_size)
+                )
+            },
+        )
+        phase = "core_union"
+        state = _load_object(state_path)
     if phase == "neighbor_counts":
         if counts_partial.exists():
             counts = _open_npy_memmap(counts_partial, mode="r+")
@@ -464,14 +534,43 @@ def fit_external_memory_dbscan(
                 )
                 blocks_since_checkpoint = 0
         _fsync_memmap(counts)
-        os.replace(counts_partial, counts_final)
         core = np.asarray(counts >= int(contract.min_samples), dtype=np.bool_)
         temporary_core = core_path.with_name("core_mask.partial.npy")
         with temporary_core.open("wb") as handle:
             np.save(handle, core, allow_pickle=False)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_core, core_path)
+        counts_sha256 = _sha256_file(counts_partial)
+        core_sha256 = _sha256_file(temporary_core)
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="neighbor_counts_finalize",
+            next_offset=n_samples,
+            peak_rss_bytes=peak,
+            extra={
+                "effective_query_block_size": block,
+                "neighbor_counts_sha256": counts_sha256,
+                "core_mask_sha256": core_sha256,
+            },
+        )
+        del counts
+        _reconcile_promoted_array(
+            partial=counts_partial,
+            final=counts_final,
+            shape=(n_samples,),
+            dtype=np.intp,
+            expected_sha256=counts_sha256,
+            label="neighbor counts",
+        )
+        _reconcile_promoted_array(
+            partial=temporary_core,
+            final=core_path,
+            shape=(n_samples,),
+            dtype=np.bool_,
+            expected_sha256=core_sha256,
+            label="core mask",
+        )
         _checkpoint(
             state_path,
             identity=identity,
@@ -563,6 +662,29 @@ def fit_external_memory_dbscan(
 
     parent = _open_npy_memmap(parent_partial, mode="r+")
     component_roots = np.unique(np.asarray(parent[core_indices], dtype=np.intp))
+    if phase == "labels_finalize":
+        _reconcile_promoted_array(
+            partial=labels_partial,
+            final=labels_final,
+            shape=(n_samples,),
+            dtype=np.intp,
+            expected_sha256=str(state.get("labels_sha256") or ""),
+            label="labels",
+        )
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="complete",
+            next_offset=n_samples,
+            peak_rss_bytes=peak,
+            extra={
+                "effective_query_block_size": int(
+                    state.get("effective_query_block_size", contract.query_block_size)
+                )
+            },
+        )
+        phase = "complete"
+        state = _load_object(state_path)
     if phase == "labels":
         if labels_partial.exists():
             labels = _open_npy_memmap(labels_partial, mode="r+")
@@ -627,7 +749,27 @@ def fit_external_memory_dbscan(
                 )
                 blocks_since_checkpoint = 0
         _fsync_memmap(labels)
-        os.replace(labels_partial, labels_final)
+        labels_sha256 = _sha256_file(labels_partial)
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="labels_finalize",
+            next_offset=n_samples,
+            peak_rss_bytes=peak,
+            extra={
+                "effective_query_block_size": block,
+                "labels_sha256": labels_sha256,
+            },
+        )
+        del labels
+        _reconcile_promoted_array(
+            partial=labels_partial,
+            final=labels_final,
+            shape=(n_samples,),
+            dtype=np.intp,
+            expected_sha256=labels_sha256,
+            label="labels",
+        )
         _checkpoint(
             state_path,
             identity=identity,

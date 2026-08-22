@@ -6,6 +6,8 @@
   prove elementwise equality, including ambiguous border assignment.
 - [x] Add atomic candidate-major pair/vector chunks, consolidation, checksums,
   interruption resume, and a hard RSS admission gate.
+- [x] Bind resume identity to the complete dataset/source audit and reconcile
+  every partial-to-final rename through a checksum-validated two-phase state.
 - [x] Preserve legacy cluster order, strict-radius filtering, official greedy
   calls, and retained-pair medoid selection on an exact fixture.
 - [x] Wire the engine into the full AIDS `run_common_recourse.py` route without
@@ -13,6 +15,8 @@
 - [x] Prove a full runner fixture has identical pair order, sklearn labels,
   official summary, selected rows, and stable selected-row hash across legacy
   and external engines.
+- [x] Add hash-bound whole-stage resume, including child-complete/parent-killed
+  reconciliation and same-path scientific-input drift rejection.
 - [ ] Run end-to-end legacy/external smoke equivalence on AutoDL and freeze the
   complete pair/label/selected-row digests.
 - [ ] Build and launch a fresh CPU-only repair-v4 controller; never resume or

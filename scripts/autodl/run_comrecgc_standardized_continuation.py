@@ -667,55 +667,336 @@ def _run_stage(
     required_field: str,
     environment: Mapping[str, str],
     output_root: Path,
+    checkpoint_path: Path | None = None,
 ) -> None:
-    write_json(
-        output_root / "stage_state.json",
-        {
-            "schema_version": 1,
-            "status": "RUNNING",
-            "stage": stage,
-            "argv_sha256": stable_json_sha256(list(argv)),
-            "started_at": _utc_now(),
-        },
-    )
-    subprocess.run(
-        list(argv),
-        cwd=PROJECT_ROOT,
-        env=dict(environment),
-        check=True,
-    )
-    payload = _load_object(_require_file(marker))
-    if payload.get(required_field) is not True:
-        raise ValueError(
-            f"Stage {stage} completion field {required_field!r} is not true: {marker}"
+    argv_sha256 = stable_json_sha256(list(argv))
+    running = {
+        "schema_version": 2,
+        "status": "RUNNING",
+        "stage": stage,
+        "argv_sha256": argv_sha256,
+        "marker": str(marker),
+        "required_field": required_field,
+        "started_at": _utc_now(),
+    }
+    write_json(output_root / "stage_state.json", running)
+    if checkpoint_path is not None:
+        write_json(checkpoint_path, running)
+    try:
+        subprocess.run(
+            list(argv),
+            cwd=PROJECT_ROOT,
+            env=dict(environment),
+            check=True,
         )
-    write_json(
-        output_root / "stage_state.json",
-        {
-            "schema_version": 1,
-            "status": "PASS",
-            "stage": stage,
-            "marker": str(marker),
-            "marker_sha256": sha256_file(marker),
-            "completed_at": _utc_now(),
-        },
+        payload = _load_object(_require_file(marker))
+        if payload.get(required_field) is not True:
+            raise ValueError(
+                f"Stage {stage} completion field {required_field!r} is not true: {marker}"
+            )
+    except Exception as exc:
+        failed = {
+            **running,
+            "status": "FAILED",
+            "error_class": type(exc).__name__,
+            "message": str(exc),
+            "failed_at": _utc_now(),
+        }
+        write_json(output_root / "stage_state.json", failed)
+        if checkpoint_path is not None:
+            write_json(checkpoint_path, failed)
+        raise
+    passed = {
+        **running,
+        "status": "PASS",
+        "marker_sha256": sha256_file(marker),
+        "completed_at": _utc_now(),
+    }
+    write_json(output_root / "stage_state.json", passed)
+    if checkpoint_path is not None:
+        write_json(checkpoint_path, passed)
+
+
+def _resume_contract(
+    *,
+    inputs: ContinuationInputs,
+    adoption: Mapping[str, Any],
+    checkout: Mapping[str, Any],
+    project_commit: str,
+    teacher_sha256: str,
+    commands: Sequence[tuple[str, list[str], Path, str]],
+) -> dict[str, Any]:
+    """Freeze everything that may influence a resumed stage trajectory."""
+
+    adoption_path = inputs.output_root / "generation_adoption_manifest.json"
+    checkout_path = inputs.output_root / "upstream_checkout_audit.json"
+    dataset_files = (
+        ("graphs.pt", "dataset_summary.json")
+        if inputs.dataset == "aids"
+        else ("generation_source_graphs.pt", "dataset_summary.json")
     )
+    scientific_files: dict[str, Path] = {
+        "distance_checkpoint": inputs.distance_checkpoint,
+        "dataset_csv": inputs.dataset_csv,
+        "teacher_path": inputs.teacher_path,
+        "molclr_checkpoint": inputs.molclr_checkpoint,
+        "thresholds_path": inputs.thresholds_path,
+        **{
+            f"dataset_dir/{name}": _require_file(inputs.dataset_dir / name)
+            for name in dataset_files
+        },
+    }
+    if inputs.source_csv is not None:
+        scientific_files["source_csv"] = inputs.source_csv
+    scientific_input_files = {
+        key: {
+            "path": str(path.resolve(strict=True)),
+            "sha256": sha256_file(path),
+        }
+        for key, path in sorted(scientific_files.items())
+    }
+    return {
+        "schema_version": "comrecgc_standardized_stage_resume_v1",
+        "dataset": inputs.dataset,
+        "output_root": str(inputs.output_root),
+        "project_commit": project_commit,
+        "upstream_commit": checkout.get("actual_commit"),
+        "generation_adoption_manifest_sha256": sha256_file(adoption_path),
+        "upstream_checkout_audit_sha256": sha256_file(checkout_path),
+        "source_generation_manifest_sha256": adoption[
+            "source_run_manifest_sha256"
+        ],
+        "source_payload_sha256": adoption["counterfactuals_sha256_actual"],
+        "teacher_sha256": teacher_sha256,
+        "scientific_input_files": scientific_input_files,
+        "common_recourse_engine": inputs.common_recourse_engine,
+        "external_max_rss_gb": float(inputs.external_max_rss_gb),
+        "external_query_block_size": int(inputs.external_query_block_size),
+        "external_checkpoint_interval_blocks": int(
+            inputs.external_checkpoint_interval_blocks
+        ),
+        "expected_sklearn_version": inputs.expected_sklearn_version,
+        "stages": [
+            {
+                "stage": stage,
+                "argv_sha256": stable_json_sha256(argv),
+                "marker": str(marker),
+                "required_field": required_field,
+            }
+            for stage, argv, marker, required_field in commands
+        ],
+    }
+
+
+def _validate_completed_stage(
+    *,
+    stage: str,
+    argv: Sequence[str],
+    marker: Path,
+    required_field: str,
+    checkpoint_path: Path,
+) -> bool:
+    checkpoint = _load_object(_require_file(checkpoint_path))
+    payload = _load_object(_require_file(marker))
+    if stage == "common_recourse":
+        _validate_common_recourse_completion(marker=marker, terminal=payload)
+    failures: list[str] = []
+    if checkpoint.get("schema_version") != 2:
+        failures.append("schema_version")
+    status = checkpoint.get("status")
+    if status not in {"RUNNING", "FAILED", "PASS"} or checkpoint.get("stage") != stage:
+        failures.append("status_or_stage")
+    if checkpoint.get("argv_sha256") != stable_json_sha256(list(argv)):
+        failures.append("argv_sha256")
+    if checkpoint.get("marker") != str(marker):
+        failures.append("marker_path")
+    if checkpoint.get("required_field") != required_field:
+        failures.append("required_field")
+    if payload.get(required_field) is not True:
+        failures.append("marker_completion")
+    marker_sha256 = sha256_file(marker)
+    if status == "PASS" and checkpoint.get("marker_sha256") != marker_sha256:
+        failures.append("marker_sha256")
+    if failures:
+        raise ValueError(
+            f"RESUME_STAGE_CHECKPOINT_MISMATCH:{stage}:fields={failures}"
+        )
+    if status != "PASS":
+        write_json(
+            checkpoint_path,
+            {
+                "schema_version": 2,
+                "status": "PASS",
+                "stage": stage,
+                "argv_sha256": stable_json_sha256(list(argv)),
+                "marker": str(marker),
+                "required_field": required_field,
+                "marker_sha256": marker_sha256,
+                "reconciled_after_child_completion": True,
+                "completed_at": _utc_now(),
+            },
+        )
+        return True
+    return False
+
+
+def _validate_common_recourse_completion(
+    *, marker: Path, terminal: Mapping[str, Any]
+) -> None:
+    """Close every large external-memory artifact before stage reconciliation."""
+
+    root = marker.parent.resolve(strict=True)
+    if (
+        terminal.get("schema_version")
+        != "comrecgc_common_recourse_terminal_v2"
+        or terminal.get("run_complete") is not True
+        or terminal.get("common_recourse_engine") != "external_memory_exact_v1"
+    ):
+        raise ValueError("RESUME_COMMON_TERMINAL_CONTRACT_MISMATCH")
+    closure = terminal.get("artifact_sha256")
+    if not isinstance(closure, Mapping):
+        raise ValueError("RESUME_COMMON_TERMINAL_CLOSURE_MISSING")
+    required = {
+        "run_manifest.json",
+        "selected_common_recourses.json",
+        "selected_common_recourses.csv",
+        "representative_counterfactuals.pt",
+        "external_memory/pair_store/run_manifest.json",
+    }
+    if not required.issubset(closure):
+        raise ValueError("RESUME_COMMON_TERMINAL_CLOSURE_INCOMPLETE")
+    for relative, expected_sha256 in closure.items():
+        logical = root / str(relative)
+        resolved = _require_file(logical)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("RESUME_COMMON_TERMINAL_PATH_ESCAPE") from exc
+        if sha256_file(resolved) != str(expected_sha256):
+            raise ValueError(
+                f"RESUME_COMMON_TERMINAL_HASH_MISMATCH:{relative}"
+            )
+    manifest = _load_object(root / "run_manifest.json")
+    external = manifest.get("external_memory_artifacts")
+    if (
+        manifest.get("run_complete") is not True
+        or manifest.get("common_recourse_engine") != "external_memory_exact_v1"
+        or not isinstance(external, Mapping)
+    ):
+        raise ValueError("RESUME_COMMON_RUN_MANIFEST_MISMATCH")
+    pair_manifest_path = _require_file(
+        root / "external_memory/pair_store/run_manifest.json"
+    )
+    if (
+        str(external.get("pair_store_manifest")) != str(pair_manifest_path)
+        or str(external.get("pair_store_manifest_sha256"))
+        != sha256_file(pair_manifest_path)
+    ):
+        raise ValueError("RESUME_COMMON_PAIR_MANIFEST_BINDING_MISMATCH")
+    pair_manifest = _load_object(pair_manifest_path)
+    if pair_manifest.get("run_complete") is not True:
+        raise ValueError("RESUME_COMMON_PAIR_MANIFEST_INCOMPLETE")
+    for path_field, hash_field in (
+        ("pairs_path", "pairs_sha256"),
+        ("vectors_path", "vectors_sha256"),
+    ):
+        artifact = _require_file(Path(str(pair_manifest.get(path_field) or "")))
+        if (
+            artifact.parent != pair_manifest_path.parent
+            or sha256_file(artifact) != pair_manifest.get(hash_field)
+        ):
+            raise ValueError(
+                f"RESUME_COMMON_PAIR_ARTIFACT_MISMATCH:{path_field}"
+            )
+    dbscan_manifest_raw = external.get("dbscan_manifest")
+    if dbscan_manifest_raw is None:
+        if int(manifest.get("theta_eligible_pair_count", -1)) != 0:
+            raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_MISSING")
+        return
+    dbscan_manifest_path = _require_file(
+        root / "external_memory/dbscan/run_manifest.json"
+    )
+    if (
+        str(dbscan_manifest_raw) != str(dbscan_manifest_path)
+        or str(external.get("dbscan_manifest_sha256"))
+        != sha256_file(dbscan_manifest_path)
+    ):
+        raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_BINDING_MISMATCH")
+    dbscan_manifest = _load_object(dbscan_manifest_path)
+    if dbscan_manifest.get("run_complete") is not True:
+        raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_INCOMPLETE")
+    for path_field, hash_field in (
+        ("neighbor_counts_path", "neighbor_counts_sha256"),
+        ("core_mask_path", "core_mask_sha256"),
+        ("labels_path", "labels_sha256"),
+    ):
+        artifact = _require_file(Path(str(dbscan_manifest.get(path_field) or "")))
+        if (
+            artifact.parent != dbscan_manifest_path.parent
+            or sha256_file(artifact) != dbscan_manifest.get(hash_field)
+        ):
+            raise ValueError(
+                f"RESUME_COMMON_DBSCAN_ARTIFACT_MISMATCH:{path_field}"
+            )
+
+
+def _archive_previous_failure(output_root: Path) -> None:
+    failure = output_root / "FAILED.json"
+    if not failure.exists():
+        return
+    history = output_root / "failure_history"
+    history.mkdir(parents=True, exist_ok=True)
+    destination = history / f"FAILED.{os.stat(failure).st_mtime_ns}.json"
+    if destination.exists():
+        raise FileExistsError(f"Failure history collision: {destination}")
+    os.replace(failure, destination)
+    directory_fd = os.open(history, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
-    if inputs.output_root.exists():
-        raise FileExistsError(f"Fresh OUTPUT_ROOT already exists: {inputs.output_root}")
-    inputs.output_root.parent.mkdir(parents=True, exist_ok=True)
-    inputs.output_root.mkdir(mode=0o755)
+    resuming = inputs.output_root.exists()
+    if resuming:
+        if (
+            not inputs.common_recourse_resume
+            or inputs.common_recourse_engine != "external_memory_exact_v1"
+            or inputs.dataset != "aids"
+            or inputs.output_root.is_symlink()
+            or not inputs.output_root.is_dir()
+            or (inputs.output_root / "PASS").exists()
+        ):
+            raise FileExistsError(
+                f"Fresh OUTPUT_ROOT already exists and is not resumable: {inputs.output_root}"
+            )
+    else:
+        inputs.output_root.parent.mkdir(parents=True, exist_ok=True)
+        inputs.output_root.mkdir(mode=0o755)
     try:
-        adoption = validate_adopted_generation(inputs)
+        adoption_path = inputs.output_root / "generation_adoption_manifest.json"
+        checkout_path = inputs.output_root / "upstream_checkout_audit.json"
+        resume_contract_path = inputs.output_root / "continuation_resume_contract.json"
+        if resuming:
+            adoption = _load_object(_require_file(adoption_path))
+            _verify_adopted_generation_integrity(adoption)
+        else:
+            adoption = validate_adopted_generation(inputs)
         checkout = verify_checkout(
             inputs.upstream_root,
             expected_commit=UPSTREAM_COMMIT,
             validate_imports=True,
         )
-        write_json(inputs.output_root / "generation_adoption_manifest.json", adoption)
-        write_json(inputs.output_root / "upstream_checkout_audit.json", checkout)
+        if not resuming:
+            write_json(adoption_path, adoption)
+            write_json(checkout_path, checkout)
+        else:
+            # Bind the live checkout verification to the immutable first-run
+            # audit without rewriting it during recovery.
+            frozen_checkout = _load_object(_require_file(checkout_path))
+            if checkout.get("actual_commit") != frozen_checkout.get("actual_commit"):
+                raise ValueError("RESUME_UPSTREAM_COMMIT_MISMATCH")
         project_commit = _git_head()
         # The frozen teacher is hashed exactly once here.  The shared evaluator
         # performs its own scientific input check; this driver reuses the same
@@ -733,7 +1014,44 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
             candidate_count=int(adoption["counterfactual_candidate_count"]),
             teacher_sha256=teacher_sha256,
         )
+        contract = _resume_contract(
+            inputs=inputs,
+            adoption=adoption,
+            checkout=_load_object(checkout_path),
+            project_commit=project_commit,
+            teacher_sha256=teacher_sha256,
+            commands=commands,
+        )
+        if resuming:
+            frozen_contract = _load_object(_require_file(resume_contract_path))
+            if frozen_contract != contract:
+                changed = sorted(
+                    key
+                    for key in set(frozen_contract) | set(contract)
+                    if frozen_contract.get(key) != contract.get(key)
+                )
+                raise ValueError(
+                    f"RESUME_SCIENTIFIC_CONTRACT_MISMATCH:fields={changed}"
+                )
+            _archive_previous_failure(inputs.output_root)
+        else:
+            write_json(resume_contract_path, contract)
+        checkpoints = inputs.output_root / "stage_checkpoints"
         for stage, argv, marker, field in commands:
+            checkpoint_path = checkpoints / f"{stage}.json"
+            if resuming and marker.exists():
+                _validate_completed_stage(
+                    stage=stage,
+                    argv=argv,
+                    marker=marker,
+                    required_field=field,
+                    checkpoint_path=checkpoint_path,
+                )
+                continue
+            if resuming and marker.parent.exists() and stage != "common_recourse":
+                raise ValueError(
+                    f"RESUME_NONCHECKPOINTED_PARTIAL_STAGE:{stage}:{marker.parent}"
+                )
             _run_stage(
                 stage=stage,
                 argv=argv,
@@ -741,6 +1059,7 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
                 required_field=field,
                 environment=environment,
                 output_root=inputs.output_root,
+                checkpoint_path=checkpoint_path,
             )
 
         standardized = inputs.output_root / "standardized"

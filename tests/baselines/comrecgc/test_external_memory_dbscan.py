@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -263,4 +264,94 @@ def test_rss_budget_fails_closed_before_unbounded_query(tmp_path: Path) -> None:
             vectors_path=vectors,
             work_dir=tmp_path / "external",
             contract=contract,
+        )
+
+
+@pytest.mark.parametrize(
+    ("transition_phase", "partial_name", "final_name"),
+    (
+        (
+            "neighbor_counts_finalize",
+            "neighbor_counts.partial.npy",
+            "neighbor_counts.npy",
+        ),
+        ("labels_finalize", "labels.partial.npy", "labels.npy"),
+    ),
+)
+def test_two_phase_array_promotion_recovers_after_first_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition_phase: str,
+    partial_name: str,
+    final_name: str,
+) -> None:
+    values = np.random.default_rng(121).normal(size=(67, 3)).astype(np.float32)
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _contract(block=4)
+    root = tmp_path / transition_phase
+    original_checkpoint = external._checkpoint
+    interrupted = {"done": False}
+
+    def interrupt_after_ready(*args, **kwargs):
+        original_checkpoint(*args, **kwargs)
+        if kwargs.get("phase") == transition_phase and not interrupted["done"]:
+            interrupted["done"] = True
+            raise RuntimeError(f"crash-after-{transition_phase}")
+
+    monkeypatch.setattr(external, "_checkpoint", interrupt_after_ready)
+    with pytest.raises(RuntimeError, match=f"crash-after-{transition_phase}"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+        )
+    state = json.loads((root / "checkpoint.json").read_text())
+    assert state["phase"] == transition_phase
+    os.replace(root / partial_name, root / final_name)
+
+    monkeypatch.setattr(external, "_checkpoint", original_checkpoint)
+    resumed = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=root,
+        contract=contract,
+        resume=True,
+    )
+    expected = DBSCAN(eps=contract.eps, min_samples=contract.min_samples).fit_predict(
+        values
+    )
+    assert np.array_equal(np.load(resumed.labels_path), expected)
+
+
+def test_two_phase_array_promotion_rejects_tampered_renamed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = np.random.default_rng(122).normal(size=(31, 2)).astype(np.float32)
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _contract(block=3)
+    root = tmp_path / "tampered"
+    original_checkpoint = external._checkpoint
+
+    def interrupt_after_ready(*args, **kwargs):
+        original_checkpoint(*args, **kwargs)
+        if kwargs.get("phase") == "neighbor_counts_finalize":
+            raise RuntimeError("crash-after-ready")
+
+    monkeypatch.setattr(external, "_checkpoint", interrupt_after_ready)
+    with pytest.raises(RuntimeError, match="crash-after-ready"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    os.replace(root / "neighbor_counts.partial.npy", root / "neighbor_counts.npy")
+    with (root / "neighbor_counts.npy").open("r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        byte = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([byte[0] ^ 1]))
+    monkeypatch.setattr(external, "_checkpoint", original_checkpoint)
+    with pytest.raises(external.ExternalMemoryDBSCANError, match="hash mismatch"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
         )

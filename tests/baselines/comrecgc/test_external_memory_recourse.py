@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from src.baselines.comrecgc import external_memory_recourse as external_recourse
 from src.baselines.comrecgc.external_memory_dbscan import _rss_bytes
 from src.baselines.comrecgc.external_memory_recourse import (
     ExternalPairStore,
@@ -154,6 +157,38 @@ def test_pair_store_rejects_parent_order_drift_within_candidate(tmp_path: Path) 
         )
 
 
+def test_pair_store_resume_rejects_dataset_content_fingerprint_drift(
+    tmp_path: Path,
+) -> None:
+    budget = _rss_bytes() + 128 * 1024**2
+    store = ExternalPairStore(
+        root=tmp_path / "store",
+        scientific_identity={
+            "dataset": "aids",
+            "dataset_fingerprint": "graphs-summary-source-hash-v1",
+            "dataset_audit_sha256": "a" * 64,
+        },
+        max_rss_bytes=budget,
+    )
+    store.append(
+        chunk_index=0,
+        pairs=np.asarray([[0, 0]], dtype=np.int64),
+        vectors=np.asarray([[0.0]], dtype=np.float32),
+        chunk_identity={"candidate_start": 0},
+    )
+    with pytest.raises(Exception, match="identity mismatch"):
+        ExternalPairStore(
+            root=tmp_path / "store",
+            scientific_identity={
+                "dataset": "aids",
+                "dataset_fingerprint": "graphs-summary-source-hash-v2",
+                "dataset_audit_sha256": "b" * 64,
+            },
+            max_rss_bytes=budget,
+            resume=True,
+        )
+
+
 def test_official_coverage_receives_zero_copy_vector_view(tmp_path: Path) -> None:
     import torch
 
@@ -191,8 +226,6 @@ def test_official_coverage_receives_zero_copy_vector_view(tmp_path: Path) -> Non
 
 
 def test_cluster_summary_rss_gate_covers_largest_cluster_copy() -> None:
-    import pytest
-
     labels = np.zeros(100, dtype=np.intp)
     vectors = np.zeros((100, 32), dtype=np.float32)
     pairs = np.column_stack(
@@ -209,3 +242,89 @@ def test_cluster_summary_rss_gate_covers_largest_cluster_copy() -> None:
             official_greedy=_greedy,
             max_rss_bytes=_rss_bytes() + 1024,
         )
+
+
+def test_pair_consolidation_two_phase_recovers_after_first_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = {"dataset": "aids", "dataset_fingerprint": "frozen"}
+    budget = _rss_bytes() + 256 * 1024**2
+    root = tmp_path / "crash"
+    store = ExternalPairStore(
+        root=root, scientific_identity=identity, max_rss_bytes=budget
+    )
+    store.append(
+        chunk_index=0,
+        pairs=np.asarray([[0, 0], [1, 0]], dtype=np.int64),
+        vectors=np.asarray([[0.1], [0.2]], dtype=np.float32),
+        chunk_identity={"candidate_start": 0, "candidate_stop": 1},
+    )
+    original_atomic = external_recourse._atomic_json
+
+    def interrupt_after_ready(path, payload):
+        original_atomic(path, payload)
+        if path == store.state_path and payload.get("phase") == "consolidation_ready":
+            raise RuntimeError("crash-after-consolidation-ready")
+
+    monkeypatch.setattr(external_recourse, "_atomic_json", interrupt_after_ready)
+    with pytest.raises(RuntimeError, match="crash-after-consolidation-ready"):
+        store.finalize()
+    state = json.loads((root / "checkpoint.json").read_text())
+    assert state["phase"] == "consolidation_ready"
+    os.replace(root / "pair_indices.partial.npy", root / "pair_indices.npy")
+
+    monkeypatch.setattr(external_recourse, "_atomic_json", original_atomic)
+    resumed = ExternalPairStore(
+        root=root,
+        scientific_identity=identity,
+        max_rss_bytes=budget,
+        resume=True,
+    ).finalize()
+    assert np.array_equal(
+        np.load(resumed.pairs_path), np.asarray([[0, 0], [1, 0]], dtype=np.int64)
+    )
+    assert np.array_equal(
+        np.load(resumed.vectors_path), np.asarray([[0.1], [0.2]], dtype=np.float32)
+    )
+
+
+def test_pair_consolidation_rejects_tampered_promoted_array(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity = {"dataset": "aids", "dataset_fingerprint": "frozen"}
+    budget = _rss_bytes() + 256 * 1024**2
+    root = tmp_path / "tampered"
+    store = ExternalPairStore(
+        root=root, scientific_identity=identity, max_rss_bytes=budget
+    )
+    store.append(
+        chunk_index=0,
+        pairs=np.asarray([[0, 0]], dtype=np.int64),
+        vectors=np.asarray([[0.1]], dtype=np.float32),
+        chunk_identity={"candidate_start": 0, "candidate_stop": 1},
+    )
+    original_atomic = external_recourse._atomic_json
+
+    def interrupt_after_ready(path, payload):
+        original_atomic(path, payload)
+        if path == store.state_path and payload.get("phase") == "consolidation_ready":
+            raise RuntimeError("crash-after-consolidation-ready")
+
+    monkeypatch.setattr(external_recourse, "_atomic_json", interrupt_after_ready)
+    with pytest.raises(RuntimeError, match="crash-after-consolidation-ready"):
+        store.finalize()
+    os.replace(root / "pair_indices.partial.npy", root / "pair_indices.npy")
+    with (root / "pair_indices.npy").open("r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        byte = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([byte[0] ^ 1]))
+    monkeypatch.setattr(external_recourse, "_atomic_json", original_atomic)
+    resumed = ExternalPairStore(
+        root=root,
+        scientific_identity=identity,
+        max_rss_bytes=budget,
+        resume=True,
+    )
+    with pytest.raises(Exception, match="checksum mismatch"):
+        resumed.finalize()
