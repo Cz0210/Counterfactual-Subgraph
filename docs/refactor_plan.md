@@ -869,3 +869,11 @@ Mutagenicity roadmaps.
   scaffold, coverage, and multiclass destination overlap.
 - [ ] Run backbone/selector/reward/candidate-pool ablations only after the
   primary four-by-four matrix is scientifically unblocked and frozen.
+- [x] Add a presentation-only Figure 3/Figure 4/Table 2 exporter that requires
+  16/16 registry PASS plus per-cell hash/provenance closure, rejects CLEAR,
+  preserves raw thresholds and Taste destinations, and emits no plausible
+  numeric output for a partial matrix.
+- [x] Add a generic CPU controller fragment whose final export task depends on
+  16 distinct cell terminal PASS tasks and one post-cell matrix audit.
+- [ ] Run the final exporter only after Taste licensing and every code gate
+  release the full 16-cell matrix.

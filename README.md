@@ -100,6 +100,13 @@ evaluation contract, artifact inventory, stale-artifact list, and adoption
 report without recomputing scientific results. See
 `docs/AUTODL_FOUR_BY_FOUR_MATRIX_AUDIT.md`.
 
+Final Figure 3, Figure 4, and Table 2 aggregation is separately gated by
+`scripts/autodl/export_four_by_four_main_results.py`. It produces no numerical
+or graphical final output until the registry and all standardized artifact
+closures prove 16/16 eligible cells; incomplete campaigns receive a
+non-numeric staging audit only. See
+`docs/AUTODL_FOUR_BY_FOUR_MAIN_RESULTS_EXPORT.md`.
+
 ---
 
 ## 3. Planned Repository Layout

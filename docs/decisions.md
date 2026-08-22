@@ -50,6 +50,46 @@ is terminal at controller initialization and never becomes READY.
 
 Accepted
 
+---
+
+## [2026-08-22] Gate the four-by-four paper renderer on complete standardized closure
+
+### Decision
+
+Add one presentation-only exporter for the four datasets and four named
+methods. It reads `matrix_status.json` and emits per-dataset Figure 3,
+Figure 4, and Table 2 files plus four-dataset panels only after the registry
+proves 16/16 `FROZEN_PASS`/`ADOPTABLE_PASS` cells and each standardized root
+independently closes its manifest identities, file hashes, calibration-only
+selection, and test-after-freeze evidence. The exporter copies reported values;
+it does not recompute science. Figure 4 uses raw empirical threshold rows with
+no interpolation or smoothing, and Taste destination-distribution fields are
+preserved.
+
+`CLEAR` is rejected and cannot satisfy the ComRecGC cell. A partial or invalid
+matrix produces only a non-numeric staging audit and a blocked marker. No zero,
+blank-looking number, image, TeX table, or final PASS marker is emitted. The
+export path is forbidden below `paper/`.
+
+The generic controller task is named
+`four_by_four_main_results_export`. It is CPU-only and depends on 16 distinct
+cell terminal PASS task IDs plus a final matrix-audit task. Therefore a Taste
+license block or any code-blocked cell naturally prevents final rendering
+without consuming a GPU or manufacturing workload.
+
+### Consequences
+
+- The final renderer cannot hide missing cells behind presentation artifacts.
+- Oracle, held-out split, distance, threshold, and strict-flip drift fail before
+  plotting.
+- The user-owned paper tree remains frozen until a separate authorized update.
+- The paired Slurm wrapper remains static CLI parity; the active run is
+  AutoDL-only.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Continue BACE B11--B14 through flattened exact adoptions
 
 ### Background
