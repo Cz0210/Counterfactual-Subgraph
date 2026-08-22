@@ -215,9 +215,11 @@ Sanitize both task and instance IDs by replacing non-alphanumeric characters
 with `_`. Dependency context must also be available while expanding
 `shards.parent_manifest`; B8/B9 use the passing B7-prep train manifest, B11
 uses its calibration manifest, and B13 uses the post-B12 test manifest. Never
-substitute `attempt-0` literals. The foreground driver accepts controller
-`{shard_id}` values such as `shard-000` and validates `{shard_manifest}`
-against its independent sorted-position-modulo-four assignment.
+substitute `attempt-0` literals. The controller keeps `{shard_id}` values such
+as `shard-000` for stable instance/output naming and passes the separate
+numeric `{shard_index}` value (0 through 3) to the foreground driver.  The
+driver validates `{shard_manifest}` against its independent
+sorted-position-modulo-four assignment.
 
 B14's injected command has exactly `--b12-output`, `--b13-output`, and
 `--output-dir`; it must not receive a split path, data root, parent manifest,

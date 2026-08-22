@@ -312,6 +312,7 @@ def test_controller_contract_uses_actual_dependency_instance_outputs() -> None:
     rendered = json.dumps(contract, sort_keys=True)
     assert "attempt-0" not in rendered
     assert contract["execution"]["never_bind_attempt_zero_literal"] is True
+    assert "numeric value 0..3" in contract["execution"]["shard_index_token"]
     assert contract["controller_task_order"][-4:] == [
         "bace_b13_test_parent_manifest",
         "bace_b13_verification_shards",
@@ -322,7 +323,7 @@ def test_controller_contract_uses_actual_dependency_instance_outputs() -> None:
         command = contract[stage]["command"]
         assert command.count("{dep_bace_b7_ppo_full_output}") == 2
         assert "{shard_manifest}" in command
-        assert "{shard_id}" in command
+        assert "{shard_index}" in command
     b10_command = contract["B10_POOL_MERGED"]["command"]
     expected_b10 = {
         f"{{dep_bace_b8_pool_base_shard_00{index}_output}}"

@@ -245,6 +245,34 @@ def test_test_split_is_unreachable_until_selector_freeze() -> None:
     )
     validate_no_test_before_freeze((selector, heldout))
 
+    postfreeze_manifest = _task(
+        "test-manifest",
+        stage="B13_TEST_PARENT_MANIFEST",
+        depends_on=("selector",),
+        data_splits=("test",),
+        selector_parameters_frozen=True,
+        read_only_test=True,
+    )
+    postfreeze_shards = _task(
+        "test-shards",
+        stage="B13_FINAL_EVAL_SHARDS",
+        depends_on=("test-manifest",),
+        data_splits=("test",),
+        selector_parameters_frozen=True,
+        read_only_test=True,
+    )
+    validate_no_test_before_freeze((selector, postfreeze_manifest, postfreeze_shards))
+
+    missing_selector = TaskSpec(
+        **{
+            **postfreeze_shards.__dict__,
+            "task_id": "missing-selector",
+            "depends_on": (),
+        }
+    )
+    with pytest.raises(ControllerError, match="frozen B12"):
+        validate_no_test_before_freeze((missing_selector,))
+
     hidden = TaskSpec(
         **{
             **_task("hidden").__dict__,
@@ -353,6 +381,90 @@ def test_retryable_parent_consumers_resolve_the_passing_attempt_output(
     )
 
 
+def test_sharded_dependency_tokens_bind_each_actual_passing_attempt(
+    tmp_path: Path,
+) -> None:
+    shards = FixedShardSpec(4, "/persistent/parents.json", "train")
+    parent = _task("bace_b8_pool_base", stage="B8_POOL_BASE", shards=shards)
+    child = _task(
+        "bace_b10_pool_merged",
+        stage="B10_POOL_MERGED",
+        depends_on=(parent.task_id,),
+    )
+    parent_state = _state(parent, "PASS")
+    for index, instance in enumerate(parent_state["instances"].values()):
+        instance["state"] = "PASS"
+        instance["attempt"] = index % 2
+        instance["expected_output"] = str(
+            tmp_path / f"shard-{index:03d}" / f"attempt-{index % 2}"
+        )
+    context = _dependency_output_context(
+        tmp_path,
+        child,
+        {parent.task_id: parent_state, child.task_id: _state(child, "READY")},
+    )
+    assert context["dep_bace_b8_pool_base_shard_000_output"].endswith(
+        "/shard-000/attempt-0"
+    )
+    assert context["dep_bace_b8_pool_base_shard_001_output"].endswith(
+        "/shard-001/attempt-1"
+    )
+    assert context["dep_bace_b8_pool_base_output"].endswith(
+        "/tasks/bace_b8_pool_base"
+    )
+
+
+def test_prepare_shards_expands_parent_manifest_from_dependency_output(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    prep_output = layout.artifacts_dir / "bace" / "prep" / "attempt-1"
+    prep_output.mkdir(parents=True)
+    (prep_output / "train_parent_ids.frozen.json").write_text(
+        json.dumps(
+            {
+                "status": "FROZEN",
+                "dataset": "bace",
+                "split": "train",
+                "parent_ids": ["p3", "p1", "p2", "p4"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prep = _task("bace_b7_prep_shard_manifests", stage="B7_PREP_SHARDS")
+    child = _task(
+        "bace_b8_pool_base",
+        stage="B8_POOL_BASE",
+        depends_on=(prep.task_id,),
+        shards=FixedShardSpec(
+            4,
+            "{dep_bace_b7_prep_shard_manifests_output}/train_parent_ids.frozen.json",
+            "train",
+        ),
+        data_splits=("train",),
+    )
+    prep_state = _state(prep, "PASS")
+    prep_state["instances"]["main"]["expected_output"] = str(prep_output)
+    states = {
+        prep.task_id: prep_state,
+        child.task_id: _state(child, "READY"),
+    }
+    paths = _prepare_shards(
+        layout,
+        layout.control_root / "four_gpu_recovery" / "controller",
+        child,
+        Path(sys.executable).resolve(),
+        states,
+    )
+    assert sorted(paths) == [f"shard-{index:03d}" for index in range(4)]
+
+
 def test_stale_uuid_lock_metadata_is_audited_but_not_deleted(tmp_path: Path) -> None:
     gpu = _gpu(0)
     lock_path = tmp_path / "gpu-GPU-uuid-0.lock"
@@ -447,6 +559,82 @@ def test_launch_delegates_to_exp_run_with_frozen_python_and_four_gpu_limit(
     payload_start = command.index("--") + 1
     assert command[payload_start] == str(interpreter)
     assert state["instances"]["main"]["state"] == "STARTING"
+
+
+def test_launch_expands_task_output_before_command_and_numeric_shard_index(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    input_manifest = layout.data_dir / "input.json"
+    input_manifest.write_text('{"status":"FROZEN"}\n', encoding="utf-8")
+    shards = FixedShardSpec(4, str(layout.data_dir / "parents.json"), "train")
+    base = _task("launch-shard", stage="B8_POOL_BASE", shards=shards)
+    task = TaskSpec(
+        **{
+            **base.__dict__,
+            "command": (
+                "{python}",
+                "payload.py",
+                "--output-dir",
+                "{task_output}",
+                "--shard-index",
+                "{shard_index}",
+            ),
+            "input_manifest": str(input_manifest),
+        }
+    )
+    state = _state(task, "READY")
+    root = layout.control_root / "four_gpu_recovery" / "controller"
+    task_root = root / "tasks" / task.task_id
+    task_root.mkdir(parents=True)
+    (task_root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    def fake_runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "run_id": "controller-launch-shard-003-a0",
+                    "launcher_pid": 123,
+                    "tmux_session": None,
+                }
+            ),
+            stderr="",
+        )
+
+    class _Manifest:
+        controller_id = "controller"
+        sha256 = "0" * 64
+        runtime = {
+            "min_free_memory_mb": 16000,
+            "idle_util_threshold": 10,
+            "worker_launcher": "nohup",
+        }
+
+    _launch_instance(
+        layout,
+        root,
+        _Manifest(),  # type: ignore[arg-type]
+        task,
+        state,
+        "shard-003",
+        python_executable=Path(sys.executable).resolve(),
+        gpu=_gpu(3),
+        shard_manifest=layout.data_dir / "shard-003.json",
+        runner=fake_runner,
+    )
+    payload = captured["command"][captured["command"].index("--") + 1 :]
+    expected = str(layout.artifacts_dir / "task" / "shard-003" / "attempt-0")
+    assert payload[payload.index("--output-dir") + 1] == expected
+    assert payload[payload.index("--shard-index") + 1] == "3"
 
 
 def test_existing_exp_run_is_strictly_adopted_and_not_relaunched(
@@ -609,7 +797,8 @@ def test_committed_integration_template_is_valid_and_keeps_taste_blocked() -> No
     assert manifest.by_id["tastemolnet_foundation"].blocked_reason == (
         "TASTEMOLNET_FOUNDATION_BLOCKED_LICENSE_REVIEW"
     )
-    assert manifest.by_id["bace_b11_cross_parent_verified"].shards is not None
+    assert manifest.by_id["bace_b11_verification_shards"].shards is not None
+    assert manifest.by_id["bace_b11_cross_parent_verified"].shards is None
     assert manifest.by_id["bace_b6_ppo_smoke"].stage == "B6_PPO_SMOKE_V2"
     assert manifest.by_id["bace_b6_ppo_smoke"].depends_on == (
         "bace_gnn_ppo_adapter_canary",
@@ -619,15 +808,33 @@ def test_committed_integration_template_is_valid_and_keeps_taste_blocked() -> No
     )
     assert manifest.by_id["bace_b9_pool_hightemp"].depends_on == (
         "bace_b7_ppo_full",
+        "bace_b7_prep_shard_manifests",
+        "bace_b7_prep_output_preflight",
     )
-    assert manifest.by_id["bace_b13_final_eval"].shards is not None
-    assert manifest.by_id["bace_b13_final_eval"].shards.count == 4
-    assert "{shard_id}" in manifest.by_id["bace_b13_final_eval"].runner_stage
+    assert manifest.by_id["bace_b13_verification_shards"].shards is not None
+    assert manifest.by_id["bace_b13_verification_shards"].shards.count == 4
+    assert "{shard_id}" in manifest.by_id["bace_b13_verification_shards"].runner_stage
+    assert manifest.by_id["bace_b13_final_eval"].shards is None
+    assert manifest.by_id["bace_b11_cross_parent_verified"].depends_on == (
+        "bace_b11_verification_shards",
+        "bace_b10_pool_merged",
+    )
+    assert manifest.by_id["bace_b13_test_parent_manifest"].depends_on == (
+        "bace_b12_selector",
+    )
+    assert manifest.by_id["bace_b13_verification_shards"].depends_on == (
+        "bace_b12_selector",
+        "bace_b13_test_parent_manifest",
+    )
+    assert manifest.by_id["bace_b13_final_eval"].depends_on == (
+        "bace_b13_verification_shards",
+        "bace_b12_selector",
+    )
     assert manifest.by_id["bace_b14_frozen"].manifest_only is True
     assert manifest.by_id["bace_b14_frozen"].data_splits == ()
     for prep_id in (
-        "bace_b7_prep_calibration_gnn_before",
-        "bace_b7_prep_molclr_embeddings",
+        "bace_b7_prep_gnn_before",
+        "bace_b7_prep_molclr_parent",
         "bace_b7_prep_shard_manifests",
         "bace_b7_prep_output_preflight",
     ):
@@ -681,6 +888,95 @@ def test_template_matches_commit_b_wrapper_environment_contract() -> None:
         task.environment["PYTHONDONTWRITEBYTECODE"] == "1"
         for task in manifest.tasks
     )
+
+
+def test_template_injects_exact_commit_d_output_and_marker_contracts() -> None:
+    root = Path(__file__).resolve().parents[2]
+    template = json.loads(
+        (root / "configs/autodl/four_gpu_recovery.template.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    contract = json.loads(
+        (root / "configs/autodl/bace_frozen_gnn_downstream_tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    tasks = {task["id"]: task for task in template["tasks"]}
+    output_contracts = {
+        "bace_b7_prep_gnn_before": contract["b7_parallel_prep"][
+            "required_outputs_by_action"
+        ]["CALIBRATION_GNN_BEFORE_CACHE"],
+        "bace_b7_prep_molclr_parent": contract["b7_parallel_prep"][
+            "required_outputs_by_action"
+        ]["CALIBRATION_MOLCLR_PARENT_CACHE"],
+        "bace_b7_prep_shard_manifests": contract["b7_parallel_prep"][
+            "required_outputs_by_action"
+        ]["FIXED_SHARD_MANIFESTS"],
+        "bace_b7_prep_output_preflight": contract["b7_parallel_prep"][
+            "required_outputs_by_action"
+        ]["OUTPUT_PREFLIGHT"],
+        "bace_b8_pool_base": contract["B8_POOL_BASE"]["required_outputs"],
+        "bace_b9_pool_hightemp": contract["B9_POOL_HIGHTEMP"]["required_outputs"],
+        "bace_b10_pool_merged": contract["B10_POOL_MERGED"]["required_outputs"],
+        "bace_b11_verification_shards": contract[
+            "B11_CROSS_PARENT_VERIFIED"
+        ]["required_shard_outputs"],
+        "bace_b11_cross_parent_verified": contract[
+            "B11_CROSS_PARENT_VERIFIED"
+        ]["required_merge_outputs"],
+        "bace_b12_selector": contract["B12_SELECTOR"]["required_outputs"],
+        "bace_b13_test_parent_manifest": contract["B13_TEST_PARENT_MANIFEST"][
+            "required_outputs"
+        ],
+        "bace_b13_verification_shards": contract["B13_FINAL_EVAL"][
+            "required_shard_outputs"
+        ],
+        "bace_b13_final_eval": contract["B13_FINAL_EVAL"][
+            "required_merge_outputs"
+        ],
+        "bace_b14_frozen": contract["B14_FROZEN"]["required_outputs"],
+    }
+    for task_id, expected in output_contracts.items():
+        task = tasks[task_id]
+        assert task["required_output_files"] == expected
+        assert task["command"][:2] == [
+            "bash",
+            "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        ]
+        assert "{task_output}" in task["command"]
+        assert not str(task.get("blocked_reason", "")).startswith(
+            "INTEGRATION_REQUIRED"
+        )
+
+    marker_contracts = {
+        "bace_b8_pool_base": contract["B8_POOL_BASE"]["required_log_marker"],
+        "bace_b9_pool_hightemp": contract["B9_POOL_HIGHTEMP"][
+            "required_log_marker"
+        ],
+        "bace_b10_pool_merged": contract["B10_POOL_MERGED"][
+            "required_log_marker"
+        ],
+        "bace_b11_verification_shards": contract[
+            "B11_CROSS_PARENT_VERIFIED"
+        ]["required_shard_log_marker"],
+        "bace_b11_cross_parent_verified": contract[
+            "B11_CROSS_PARENT_VERIFIED"
+        ]["required_merge_log_marker"],
+        "bace_b12_selector": contract["B12_SELECTOR"]["required_log_marker"],
+        "bace_b13_test_parent_manifest": contract["B13_TEST_PARENT_MANIFEST"][
+            "required_log_marker"
+        ],
+        "bace_b13_verification_shards": contract["B13_FINAL_EVAL"][
+            "required_shard_log_marker"
+        ],
+        "bace_b13_final_eval": contract["B13_FINAL_EVAL"][
+            "required_merge_log_marker"
+        ],
+        "bace_b14_frozen": contract["B14_FROZEN"]["required_log_marker"],
+    }
+    for task_id, expected in marker_contracts.items():
+        assert tasks[task_id]["required_log_marker"] == expected
 
 
 def test_absolute_audit_evidence_is_physical_nonempty_and_persistent(

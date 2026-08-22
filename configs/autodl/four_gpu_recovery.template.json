@@ -334,7 +334,7 @@
       }
     },
     {
-      "id": "bace_b7_prep_calibration_gnn_before",
+      "id": "bace_b7_prep_gnn_before",
       "dataset": "bace",
       "stage": "B7_PREP_CALIBRATION_GNN_BEFORE",
       "depends_on": ["bace_b6_ppo_smoke"],
@@ -343,23 +343,87 @@
       "resource": "gpu",
       "priority": 51,
       "data_splits": ["calibration"],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "CALIBRATION_GNN_BEFORE_CACHE",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--calibration-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/calibration.csv",
+        "--gnn-checkpoint",
+        "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
+        "--output-dir",
+        "{task_output}",
+        "--batch-size",
+        "{batch_size}"
+      ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_COMMIT_D_CALIBRATION_GNN_BEFORE"
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b7-prep/gnn-before/attempt-{attempt}",
+      "required_output_files": [
+        "calibration_parent_gnn_before.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH",
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_DOWNSTREAM_BATCH_SIZE",
+        "initial_batch_size": 256,
+        "retry_batch_size": 128
+      }
     },
     {
-      "id": "bace_b7_prep_molclr_embeddings",
+      "id": "bace_b7_prep_molclr_parent",
       "dataset": "bace",
-      "stage": "B7_PREP_MOLCLR_EMBEDDINGS",
+      "stage": "B7_PREP_MOLCLR_PARENT",
       "depends_on": ["bace_b6_ppo_smoke"],
       "runner_dataset": "bace-gnn-clean-prep",
-      "runner_stage": "B7_PREP_MOLCLR_EMBEDDINGS",
+      "runner_stage": "B7_PREP_MOLCLR_PARENT",
       "resource": "gpu",
       "priority": 52,
-      "data_splits": ["train", "calibration"],
+      "data_splits": ["calibration"],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "CALIBRATION_MOLCLR_PARENT_CACHE",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--calibration-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/calibration.csv",
+        "--molclr-root",
+        "__CONFIGURE_ABSOLUTE_MOLCLR_ROOT__",
+        "--molclr-checkpoint",
+        "__CONFIGURE_ABSOLUTE_MOLCLR_CHECKPOINT__",
+        "--node-embedding-cache-dir",
+        "__CONFIGURE_ABSOLUTE_NODE_EMBEDDING_CACHE_DIR__",
+        "--output-dir",
+        "{task_output}"
+      ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_COMMIT_D_MOLCLR_EMBEDDINGS"
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b7-prep/molclr-parent/attempt-{attempt}",
+      "required_output_files": [
+        "calibration_parent_molclr_cache.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH"
     },
     {
       "id": "bace_b7_prep_shard_manifests",
@@ -371,9 +435,38 @@
       "resource": "cpu",
       "priority": 53,
       "data_splits": ["train", "calibration"],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "FIXED_SHARD_MANIFESTS",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--train-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/train.csv",
+        "--calibration-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/calibration.csv",
+        "--output-dir",
+        "{task_output}"
+      ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_COMMIT_D_SHARD_MANIFESTS"
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b7-prep/shard-manifests/attempt-{attempt}",
+      "required_output_files": [
+        "train_parent_ids.frozen.json",
+        "calibration_parent_ids.frozen.json",
+        "train_parent_shards.jsonl",
+        "calibration_parent_shards.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH"
     },
     {
       "id": "bace_b7_prep_output_preflight",
@@ -386,27 +479,96 @@
       "priority": 54,
       "data_splits": [],
       "manifest_only": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "OUTPUT_PREFLIGHT",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--planned-output-root",
+        "{artifact_root}/bace/frozen_gnn_downstream/b8-base",
+        "--planned-output-root",
+        "{artifact_root}/bace/frozen_gnn_downstream/b9-hightemp",
+        "--planned-output-root",
+        "{artifact_root}/bace/frozen_gnn_downstream/b11-shards",
+        "--output-dir",
+        "{task_output}"
+      ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_COMMIT_D_OUTPUT_PREFLIGHT"
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b7-prep/output-preflight/attempt-{attempt}",
+      "required_output_files": [
+        "output_preflight.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      }
     },
     {
       "id": "bace_b8_pool_base",
       "dataset": "bace",
       "stage": "B8_POOL_BASE",
-      "depends_on": ["bace_b7_ppo_full"],
+      "depends_on": [
+        "bace_b7_ppo_full",
+        "bace_b7_prep_shard_manifests",
+        "bace_b7_prep_output_preflight"
+      ],
       "resource": "gpu",
       "priority": 60,
       "runner_dataset": "bace-controller-shard",
       "runner_stage": "B8_POOL_BASE-{shard_id}",
       "publish_bace_stage": false,
       "data_splits": ["train"],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "pool-shard",
+        "--stage",
+        "B8_POOL_BASE",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--train-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/train.csv",
+        "--b7-output",
+        "{dep_bace_b7_ppo_full_output}",
+        "--policy-checkpoint",
+        "{dep_bace_b7_ppo_full_output}",
+        "--base-model-path",
+        "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
+        "--gnn-checkpoint",
+        "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
+        "--output-dir",
+        "{task_output}",
+        "--batch-size",
+        "1",
+        "--resume"
+      ],
       "input_manifest": "{dep_bace_b7_ppo_full_output}/ppo_manifest.json",
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B8_GNN_CLEAN_POOL_COMMAND",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b8-base/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "candidate_pool.jsonl",
+        "pool_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B8_POOL_BASE_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH",
       "shards": {
         "count": 4,
-        "parent_manifest": "{runtime_root}/data/bace/train_parent_ids.frozen.json",
+        "parent_manifest": "{dep_bace_b7_prep_shard_manifests_output}/train_parent_ids.frozen.json",
         "split": "train",
         "parent_id_key": "parent_ids"
       }
@@ -415,19 +577,61 @@
       "id": "bace_b9_pool_hightemp",
       "dataset": "bace",
       "stage": "B9_POOL_HIGHTEMP",
-      "depends_on": ["bace_b7_ppo_full"],
+      "depends_on": [
+        "bace_b7_ppo_full",
+        "bace_b7_prep_shard_manifests",
+        "bace_b7_prep_output_preflight"
+      ],
       "resource": "gpu",
       "priority": 70,
       "runner_dataset": "bace-controller-shard",
       "runner_stage": "B9_POOL_HIGHTEMP-{shard_id}",
       "publish_bace_stage": false,
       "data_splits": ["train"],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "pool-shard",
+        "--stage",
+        "B9_POOL_HIGHTEMP",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--train-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/train.csv",
+        "--b7-output",
+        "{dep_bace_b7_ppo_full_output}",
+        "--policy-checkpoint",
+        "{dep_bace_b7_ppo_full_output}",
+        "--base-model-path",
+        "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
+        "--gnn-checkpoint",
+        "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
+        "--output-dir",
+        "{task_output}",
+        "--batch-size",
+        "1",
+        "--resume"
+      ],
       "input_manifest": "{dep_bace_b7_ppo_full_output}/ppo_manifest.json",
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B9_GNN_CLEAN_POOL_COMMAND",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b9-hightemp/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "candidate_pool.jsonl",
+        "pool_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B9_POOL_HIGHTEMP_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH",
       "shards": {
         "count": 4,
-        "parent_manifest": "{runtime_root}/data/bace/train_parent_ids.frozen.json",
+        "parent_manifest": "{dep_bace_b7_prep_shard_manifests_output}/train_parent_ids.frozen.json",
         "split": "train",
         "parent_id_key": "parent_ids"
       }
@@ -443,33 +647,169 @@
       "resource": "cpu",
       "priority": 80,
       "data_splits": ["train"],
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B10_DETERMINISTIC_MERGE_COMMAND"
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "merge-pools",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_003_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_003_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b8_pool_base_shard_000_output}/pool_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b10-merged/attempt-{attempt}",
+      "required_output_files": [
+        "candidate_pool.jsonl",
+        "candidate_universe.jsonl",
+        "merge_manifest.json",
+        "pool_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B10_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      }
     },
     {
-      "id": "bace_b11_cross_parent_verified",
+      "id": "bace_b11_verification_shards",
       "dataset": "bace",
-      "stage": "B11_CROSS_PARENT_VERIFIED",
+      "stage": "B11_VERIFICATION_SHARDS",
       "runner_dataset": "bace-controller-shard",
       "runner_stage": "B11_CROSS_PARENT_VERIFIED-{shard_id}",
       "publish_bace_stage": false,
-      "depends_on": ["bace_b10_pool_merged"],
+      "depends_on": [
+        "bace_b10_pool_merged",
+        "bace_b7_prep_gnn_before",
+        "bace_b7_prep_molclr_parent",
+        "bace_b7_prep_shard_manifests"
+      ],
       "resource": "gpu",
       "priority": 90,
       "data_splits": ["calibration"],
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B11_GNN_WNODE_VERIFIER_COMMAND",
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "verify-shard",
+        "--stage",
+        "B11_CROSS_PARENT_VERIFIED",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--split-path",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/calibration.csv",
+        "--predecessor-output",
+        "{dep_bace_b10_pool_merged_output}",
+        "--gnn-checkpoint",
+        "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
+        "--molclr-root",
+        "__CONFIGURE_ABSOLUTE_MOLCLR_ROOT__",
+        "--molclr-checkpoint",
+        "__CONFIGURE_ABSOLUTE_MOLCLR_CHECKPOINT__",
+        "--wnode-cache-db",
+        "__CONFIGURE_ABSOLUTE_WNODE_CACHE_DB__",
+        "--node-embedding-cache-dir",
+        "__CONFIGURE_ABSOLUTE_NODE_EMBEDDING_CACHE_DIR__",
+        "--parent-before-cache",
+        "{dep_bace_b7_prep_gnn_before_output}/calibration_parent_gnn_before.jsonl",
+        "--oracle-batch-size",
+        "{batch_size}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b10_pool_merged_output}/merge_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b11-shards/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "pair_details.jsonl",
+        "match_instances.jsonl",
+        "verification_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B11_CROSS_PARENT_VERIFIED_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH",
       "shards": {
         "count": 4,
-        "parent_manifest": "{runtime_root}/data/bace/calibration_parent_ids.frozen.json",
+        "parent_manifest": "{dep_bace_b7_prep_shard_manifests_output}/calibration_parent_ids.frozen.json",
         "split": "calibration",
         "parent_id_key": "parent_ids"
       },
       "oom_retry": {
         "enabled": true,
-        "batch_env": "VERIFY_BATCH_SIZE",
+        "batch_env": "BACE_DOWNSTREAM_ORACLE_BATCH_SIZE",
         "initial_batch_size": 128,
         "retry_batch_size": 64
+      }
+    },
+    {
+      "id": "bace_b11_cross_parent_verified",
+      "dataset": "bace",
+      "stage": "B11_CROSS_PARENT_VERIFIED",
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B11_CROSS_PARENT_VERIFIED",
+      "publish_bace_stage": false,
+      "depends_on": ["bace_b11_verification_shards", "bace_b10_pool_merged"],
+      "resource": "cpu",
+      "priority": 91,
+      "data_splits": ["calibration"],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "merge-verification",
+        "--stage",
+        "B11_CROSS_PARENT_VERIFIED",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_003_output}",
+        "--predecessor-output",
+        "{dep_bace_b10_pool_merged_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b11_verification_shards_shard_000_output}/verification_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b11-merged/attempt-{attempt}",
+      "required_output_files": [
+        "pair_matrix.jsonl",
+        "match_instances.jsonl",
+        "selected_candidate_universe.jsonl",
+        "summary.json",
+        "run_manifest.json",
+        "matrix_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B11_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
       }
     },
     {
@@ -484,14 +824,74 @@
       "priority": 100,
       "data_splits": ["calibration"],
       "freezes_selector": true,
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B12_CALIBRATION_SELECTOR_COMMAND"
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "select",
+        "--matrix-output",
+        "{dep_bace_b11_cross_parent_verified_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b11_cross_parent_verified_output}/run_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b12-selector/attempt-{attempt}",
+      "required_output_files": [
+        "selected_top20.json",
+        "frozen_selection_manifest.json",
+        "thresholds.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B12_SELECTOR_FROZEN]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      }
     },
     {
-      "id": "bace_b13_final_eval",
+      "id": "bace_b13_test_parent_manifest",
       "dataset": "bace",
-      "stage": "B13_FINAL_EVAL",
+      "stage": "B13_TEST_PARENT_MANIFEST",
       "depends_on": ["bace_b12_selector"],
+      "runner_dataset": "bace-gnn-clean-eval-prep",
+      "runner_stage": "B13_TEST_PARENT_MANIFEST",
+      "resource": "cpu",
+      "priority": 105,
+      "data_splits": ["test"],
+      "selector_parameters_frozen": true,
+      "read_only_test": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prepare-test-shards",
+        "--b12-output",
+        "{dep_bace_b12_selector_output}",
+        "--test-split",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/test.csv",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b13-test-parent-manifest/attempt-{attempt}",
+      "required_output_files": [
+        "test_parent_ids.frozen.json",
+        "test_shard_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B13_TEST_PARENT_MANIFEST_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH"
+    },
+    {
+      "id": "bace_b13_verification_shards",
+      "dataset": "bace",
+      "stage": "B13_FINAL_EVAL_SHARDS",
+      "depends_on": ["bace_b12_selector", "bace_b13_test_parent_manifest"],
       "runner_dataset": "bace-gnn-clean-eval-shard",
       "runner_stage": "B13_FINAL_EVAL-{shard_id}",
       "publish_bace_stage": false,
@@ -500,20 +900,121 @@
       "data_splits": ["test"],
       "selector_parameters_frozen": true,
       "read_only_test": true,
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B13_ONE_SHOT_HELDOUT_COMMAND",
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "verify-shard",
+        "--stage",
+        "B13_FINAL_EVAL",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--split-path",
+        "__CONFIGURE_ABSOLUTE_BACE_SPLIT_ROOT__/test.csv",
+        "--predecessor-output",
+        "{dep_bace_b12_selector_output}",
+        "--frozen-selection-manifest",
+        "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
+        "--gnn-checkpoint",
+        "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
+        "--molclr-root",
+        "__CONFIGURE_ABSOLUTE_MOLCLR_ROOT__",
+        "--molclr-checkpoint",
+        "__CONFIGURE_ABSOLUTE_MOLCLR_CHECKPOINT__",
+        "--wnode-cache-db",
+        "__CONFIGURE_ABSOLUTE_WNODE_CACHE_DB__",
+        "--node-embedding-cache-dir",
+        "__CONFIGURE_ABSOLUTE_NODE_EMBEDDING_CACHE_DIR__",
+        "--oracle-batch-size",
+        "{batch_size}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b13-shards/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "pair_details.jsonl",
+        "match_instances.jsonl",
+        "verification_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B13_FINAL_EVAL_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      },
+      "blocked_reason": "CONFIGURE_ABSOLUTE_BACE_DOWNSTREAM_INPUT_PATHS_BEFORE_LAUNCH",
       "shards": {
         "count": 4,
-        "parent_manifest": "{runtime_root}/data/bace/test_parent_ids.frozen.json",
+        "parent_manifest": "{dep_bace_b13_test_parent_manifest_output}/test_parent_ids.frozen.json",
         "split": "test",
         "parent_id_key": "parent_ids"
+      },
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_DOWNSTREAM_ORACLE_BATCH_SIZE",
+        "initial_batch_size": 128,
+        "retry_batch_size": 64
+      }
+    },
+    {
+      "id": "bace_b13_final_eval",
+      "dataset": "bace",
+      "stage": "B13_FINAL_EVAL",
+      "depends_on": ["bace_b13_verification_shards", "bace_b12_selector"],
+      "runner_dataset": "bace-gnn-clean-eval",
+      "runner_stage": "B13_FINAL_EVAL",
+      "publish_bace_stage": false,
+      "resource": "cpu",
+      "priority": 111,
+      "data_splits": ["test"],
+      "selector_parameters_frozen": true,
+      "read_only_test": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "merge-verification",
+        "--stage",
+        "B13_FINAL_EVAL",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_003_output}",
+        "--predecessor-output",
+        "{dep_bace_b12_selector_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b13_verification_shards_shard_000_output}/verification_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b13-final/attempt-{attempt}",
+      "required_output_files": [
+        "pair_matrix.jsonl",
+        "match_instances.jsonl",
+        "matrix_manifest.json",
+        "final_metrics.json",
+        "test_evaluation_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B13_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
       }
     },
     {
       "id": "bace_b14_frozen",
       "dataset": "bace",
       "stage": "B14_FROZEN",
-      "depends_on": ["bace_b13_final_eval"],
+      "depends_on": ["bace_b12_selector", "bace_b13_final_eval"],
       "runner_dataset": "bace-gnn-clean",
       "runner_stage": "B14_FROZEN",
       "publish_bace_stage": false,
@@ -521,8 +1022,31 @@
       "priority": 120,
       "data_splits": [],
       "manifest_only": true,
-      "command": null,
-      "blocked_reason": "INTEGRATION_REQUIRED_B14_FREEZE_GATE_COMMAND"
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "freeze",
+        "--b12-output",
+        "{dep_bace_b12_selector_output}",
+        "--b13-output",
+        "{dep_bace_b13_final_eval_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b13_final_eval_output}/matrix_manifest.json",
+      "expected_output": "{artifact_root}/bace/frozen_gnn_downstream/b14-frozen/attempt-{attempt}",
+      "required_output_files": [
+        "FINAL_PASS.json",
+        "freeze_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B14_FINAL_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "{data_root}",
+        "AUTODL_CONTROL_ROOT": "{control_root}",
+        "AUTODL_PYTHON": "{python}"
+      }
     },
     {
       "id": "tastemolnet_foundation",

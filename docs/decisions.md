@@ -4,6 +4,48 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Bind downstream controller edges to passing attempt outputs
+
+### Background
+
+The first four-GPU controller could expose a single aggregate dependency path,
+but the BACE Frozen-GNN downstream route consumes eight B8/B9 shard outputs and
+four B11/B13 verification outputs independently.  It also materializes parent
+shards from manifests produced by earlier controller tasks.  A retry can change
+the immutable attempt directory, so a literal attempt-zero path or a controller
+task directory is not sufficient scientific input evidence.
+
+### Decision
+
+Expand each task's immutable `expected_output` before expanding its command and
+environment, and expose that resolved path as `task_output`.  Expose a numeric
+`shard_index` separately from the stable `shard-000` instance ID.  For every
+dependency instance in `PASS`, expose an instance-specific token such as
+`dep_bace_b8_pool_base_shard_000_output`; the token always names the output of
+the attempt that actually passed.  Expand a fixed-shard task's parent manifest
+with the same dependency context before reading or partitioning it.
+
+Represent B11 and B13 as non-publishing four-shard tasks followed by one
+official deterministic merge.  The held-out test path is permitted only for
+the post-B12 test-parent manifest, B13 shards, and B13 merge, each of which must
+declare read-only access and have the frozen B12 selector as an ancestor.  B14
+accepts only the frozen B12/B13 artifact roots and remains a manifest-only gate.
+
+### Consequences
+
+- OOM retries cannot leave a downstream consumer bound to a failed attempt.
+- B10/B11/B13 merges receive exact immutable shard roots rather than directory
+  scans or aggregate task folders.
+- The controller can materialize train, calibration, and post-freeze test
+  shards from upstream outputs without hard-coded attempt paths.
+- Test bytes remain unreachable until B12 has passed and frozen its selector.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-22] Freeze the BACE GNN downstream route at stage boundaries
 
 ### Background

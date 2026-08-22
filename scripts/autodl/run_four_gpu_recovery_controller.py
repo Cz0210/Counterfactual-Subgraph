@@ -106,6 +106,11 @@ SECRET_KEY = re.compile(
 SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
 TOKEN = re.compile(r"\{([A-Za-z0-9_]+)\}")
 TEST_PATH = re.compile(r"(?i)(?:^|[/_.-])test(?:[/_.-]|$)")
+POST_FREEZE_TEST_STAGES = {
+    "B13_TEST_PARENT_MANIFEST",
+    "B13_FINAL_EVAL_SHARDS",
+    "B13_FINAL_EVAL",
+}
 
 
 class ControllerError(AutoDLRuntimeError):
@@ -568,7 +573,7 @@ def validate_no_test_before_freeze(tasks: Sequence[TaskSpec]) -> None:
             )
         if not uses_test:
             continue
-        if task.stage != "B13_FINAL_EVAL":
+        if task.stage not in POST_FREEZE_TEST_STAGES:
             raise ControllerError(
                 f"{task.task_id} accesses test before/after the one-shot B13 boundary"
             )
@@ -1472,6 +1477,8 @@ def _runtime_context(
     batch_size = task.oom_retry.initial_batch_size
     if attempt == 1:
         batch_size = task.oom_retry.retry_batch_size
+    shard_match = re.fullmatch(r"shard-(\d+)", instance_id)
+    shard_index = str(int(shard_match.group(1))) if shard_match else ""
     context = {
         "project_root": str(layout.project_root),
         "data_root": str(layout.data_root),
@@ -1483,6 +1490,7 @@ def _runtime_context(
         "stage": task.stage,
         "instance_id": instance_id,
         "shard_id": instance_id,
+        "shard_index": shard_index,
         "shard_manifest": str(shard_manifest) if shard_manifest else "",
         "attempt": str(attempt),
         "batch_size": str(batch_size) if batch_size is not None else "",
@@ -1520,6 +1528,7 @@ def _prepare_shards(
     root: Path,
     task: TaskSpec,
     python_executable: Path,
+    states: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Path]:
     if task.shards is None:
         return {}
@@ -1530,7 +1539,11 @@ def _prepare_shards(
         0,
         python_executable=python_executable,
         shard_manifest=None,
-        extra=None,
+        extra=(
+            _dependency_output_context(root, task, states)
+            if states is not None
+            else None
+        ),
     )
     source = _absolute_expanded_path(
         task.shards.parent_manifest,
@@ -1547,7 +1560,7 @@ def _prepare_shards(
         expected_split=task.shards.split,
         parent_id_key=task.shards.parent_id_key,
         allow_test=(
-            task.stage == "B13_FINAL_EVAL"
+            task.stage in POST_FREEZE_TEST_STAGES
             and task.selector_parameters_frozen
             and task.read_only_test
         ),
@@ -1614,6 +1627,13 @@ def bind_adopted_runs(
         context["project_root"] = str(declared_project_root)
         if task.command is None or task.input_manifest is None or task.expected_output is None:
             raise ControllerError(f"Adopted task lacks a complete contract: {task.task_id}")
+        expected_output = _absolute_expanded_path(
+            task.expected_output,
+            context,
+            label=f"{task.task_id}.expected_output",
+            must_exist=False,
+        )
+        context["task_output"] = str(expected_output)
         expected_command = [
             _expand(value, context, label=f"{task.task_id}.command")
             for value in task.command
@@ -1623,12 +1643,6 @@ def bind_adopted_runs(
             context,
             label=f"{task.task_id}.input_manifest",
             must_exist=True,
-        )
-        expected_output = _absolute_expanded_path(
-            task.expected_output,
-            context,
-            label=f"{task.task_id}.expected_output",
-            must_exist=False,
         )
         expected_config_files = [
             _absolute_expanded_path(
@@ -2108,6 +2122,13 @@ def _launch_instance(
         shard_manifest=shard_manifest,
         extra=extra_context,
     )
+    expected_output = _absolute_expanded_path(
+        task.expected_output,
+        context,
+        label=f"{task.task_id}.expected_output",
+        must_exist=False,
+    )
+    context["task_output"] = str(expected_output)
     command = [
         _expand(value, context, label=f"{task.task_id}.command")
         for value in task.command
@@ -2121,12 +2142,6 @@ def _launch_instance(
         context,
         label=f"{task.task_id}.input_manifest",
         must_exist=True,
-    )
-    expected_output = _absolute_expanded_path(
-        task.expected_output,
-        context,
-        label=f"{task.task_id}.expected_output",
-        must_exist=False,
     )
     _assert_persistent_input(input_manifest, layout, label="input manifest")
     try:
@@ -2298,13 +2313,24 @@ def _dependency_output_context(
 ) -> dict[str, str]:
     context: dict[str, str] = {}
     for dependency in task.depends_on:
-        instances = list((states[dependency].get("instances") or {}).values())
+        instances_by_id = states[dependency].get("instances") or {}
+        instances = list(instances_by_id.values())
         outputs = [
             str(instance["expected_output"])
             for instance in instances
             if instance.get("state") == "PASS" and instance.get("expected_output")
         ]
         key = "dep_" + re.sub(r"[^A-Za-z0-9_]", "_", dependency) + "_output"
+        for instance_id, instance in sorted(instances_by_id.items()):
+            if instance.get("state") != "PASS" or not instance.get("expected_output"):
+                continue
+            instance_key = (
+                key.removesuffix("_output")
+                + "_"
+                + re.sub(r"[^A-Za-z0-9_]", "_", str(instance_id))
+                + "_output"
+            )
+            context[instance_key] = str(instance["expected_output"])
         if len(instances) == 1 and len(outputs) == 1:
             context[key] = outputs[0]
         else:
@@ -2472,7 +2498,7 @@ def controller_tick(
         if task.shards and task_id not in shard_paths:
             try:
                 shard_paths[task_id] = _prepare_shards(
-                    layout, root, task, python_executable
+                    layout, root, task, python_executable, states
                 )
             except Exception as exc:
                 _set_task_state(
