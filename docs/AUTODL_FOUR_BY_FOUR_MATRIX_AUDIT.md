@@ -187,11 +187,12 @@ does not synthesize a missing evaluator or result.
 Each per-dataset threshold artifact is directly consumable by
 `run_slot_unified_eval.py --thresholds-json` only when its `status` is `PASS`;
 then it has top-level `thresholds`, `theta_star`, and `cost_cap` plus an explicit
-calibration source and source hash. If these values were not supplied by frozen
-expectations, the file says `MISSING_NOT_INFERRED` and deliberately omits the
-numeric fields. A test-derived or incompletely attributed contract becomes
-`INVALID_FAIL_CLOSED`. The registry never mines Figure 4/test curves for these
-values.
+calibration source and source hash, or an existing frozen protocol with the
+same source identity and test-selection exclusion. If these values were not
+supplied by frozen expectations, the file says `MISSING_NOT_INFERRED` and
+deliberately omits the numeric fields. A test-derived or incompletely
+attributed contract becomes `INVALID_FAIL_CLOSED`. The registry never mines
+Figure 4/test curves for these values.
 
 Inventory hashing is deliberately bounded by `--max-hash-bytes` (64 MiB per
 file by default). Larger files are listed as `SKIPPED_SIZE_LIMIT`; model and raw
@@ -232,5 +233,6 @@ artifacts when any cell is not passing. A TasteMolNet license block remains a
 `BLOCKED_LICENSE` row with unavailable identities/results; it is never rendered
 as numeric zero.
 
-No Slurm wrapper is provided: this entrypoint is a CPU-only, AutoDL-local,
-read-only audit and the active execution instruction explicitly forbids HPC.
+A paired Slurm wrapper is retained only as static CLI parity required by the
+repository policy. The active execution is CPU-only and AutoDL-local; this
+campaign does not submit the wrapper or access HPC.

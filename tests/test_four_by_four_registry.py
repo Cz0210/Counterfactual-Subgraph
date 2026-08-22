@@ -538,6 +538,27 @@ def test_threshold_contract_rejects_test_selected_values() -> None:
     assert "thresholds" not in contracts["AIDS"]
 
 
+def test_threshold_contract_accepts_explicit_existing_frozen_protocol() -> None:
+    contract = build_threshold_contracts(
+        {
+            "datasets": {
+                "AIDS": {
+                    "thresholds": [0.0, 0.05, 0.0535],
+                    "theta_star": 0.05,
+                    "cost_cap": 0.0535,
+                    "threshold_source": "audited AIDS v4 frozen protocol",
+                    "threshold_source_split": "existing_frozen_protocol",
+                    "threshold_config_hash": "a" * 64,
+                    "test_used_for_selection": False,
+                }
+            }
+        }
+    )["AIDS"]
+    assert contract["status"] == "PASS"
+    assert contract["threshold_source_split"] == "existing_frozen_protocol"
+    assert contract["theta_star"] == 0.05
+
+
 def test_final_export_gate_returns_nonzero_but_preserves_truthful_partial_matrix(
     tmp_path: Path,
 ) -> None:

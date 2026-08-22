@@ -89,8 +89,9 @@ generation-adoption gate in addition to finding raw files.
 
 Emit one evaluator-ready threshold JSON per dataset. Numeric `thresholds`,
 `theta_star`, and `cost_cap` appear only when frozen expectations explicitly
-bind them to a calibration source, a SHA-256 identity, and
-`test_used_for_selection=false`. Missing contracts remain
+bind them to a calibration source, or to an existing frozen protocol, with a
+SHA-256 identity and `test_used_for_selection=false`. The registry never
+reconstructs protocol values from test curves. Missing contracts remain
 `MISSING_NOT_INFERRED`; test-derived or malformed inputs become
 `INVALID_FAIL_CLOSED` and omit all numeric threshold fields.
 

@@ -704,7 +704,7 @@ def _license_pass(gate: Mapping[str, Any] | None) -> bool:
 def build_threshold_contracts(
     expectations: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Materialize evaluator-ready thresholds only from explicit calibration evidence."""
+    """Materialize thresholds from calibration or an explicit frozen protocol."""
 
     dataset_expectations = dict((expectations or {}).get("datasets") or {})
     contracts: dict[str, dict[str, Any]] = {}
@@ -770,8 +770,11 @@ def build_threshold_contracts(
             "calibration",
             "frozen_calibration",
             "legacy_frozen_calibration",
+            "frozen_protocol",
+            "existing_frozen_protocol",
+            "legacy_frozen_protocol",
         }:
-            errors.append("threshold_source_split_must_be_calibration")
+            errors.append("threshold_source_split_must_be_calibration_or_frozen_protocol")
         if test_used is not False:
             errors.append("test_selection_exclusion_not_explicit_false")
         if not threshold_source:
