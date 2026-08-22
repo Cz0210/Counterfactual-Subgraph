@@ -653,6 +653,7 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
         "mut_gcf_legacy_freeze",
         "mut_gcf_legacy_calibration",
         "mut_gcf_legacy_heldout",
+        "mut_gcf_legacy_standardized",
         "mut_globalgce_legacy_cell_blocked",
         "aids_ours_legacy_cell_blocked",
         "aids_gcfexplainer_legacy_cell_blocked",
@@ -694,7 +695,11 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
     calibration = manifest.by_id["mut_gcf_legacy_calibration"]
     heldout = manifest.by_id["mut_gcf_legacy_heldout"]
     assert calibration.depends_on == (freeze.task_id,)
-    assert heldout.depends_on == (calibration.task_id,)
+    standardized = manifest.by_id["mut_gcf_legacy_standardized"]
+    assert heldout.depends_on == (calibration.task_id, freeze.task_id)
+    assert standardized.depends_on == (heldout.task_id, freeze.task_id)
+    assert standardized.resource == "cpu"
+    assert standardized.manifest_only is True
     assert calibration.freezes_selector is True
     assert calibration.data_splits == ("calibration",)
     assert heldout.selector_parameters_frozen is True

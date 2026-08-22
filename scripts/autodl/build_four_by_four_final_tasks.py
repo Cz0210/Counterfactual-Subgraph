@@ -27,6 +27,8 @@ BACE_SCIENCE_TERMINALS = {
     "GCFExplainer": "bace_gcfexplainer_final_freeze",
     "ComRecGC": "bace_comrecgc_final_freeze",
 }
+MUT_GCF_STANDARDIZED_TASK = "mut_gcf_legacy_standardized"
+MUT_GCF_RAW_TERMINAL = "mut_gcf_legacy_heldout"
 
 
 def _safe_id(value: str) -> str:
@@ -90,6 +92,17 @@ def _parse_cells(values: list[str]) -> dict[tuple[str, str], str]:
                 f"{expected_task!r}; received {task_id!r}. Raw science terminal "
                 f"{science_task!r} is not one registry-complete cell"
             )
+    mut_gcf = cells[("Mutagenicity", "GCFExplainer")]
+    if mut_gcf != MUT_GCF_STANDARDIZED_TASK:
+        detail = (
+            "raw held-out output is not a standardized cell"
+            if mut_gcf == MUT_GCF_RAW_TERMINAL
+            else f"expected {MUT_GCF_STANDARDIZED_TASK!r}"
+        )
+        raise ValueError(
+            "Mutagenicity/GCFExplainer must bind the deterministic standardized "
+            f"closure, not {mut_gcf!r}: {detail}"
+        )
     return cells
 
 

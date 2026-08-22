@@ -4,6 +4,44 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Standardize the frozen Mutagenicity GCF held-out export before matrix adoption
+
+### Background
+
+The AutoDL Mutagenicity GCF continuation writes its audited held-out artifacts
+under `<task-output>/final`. The four-by-four registry accepts either a cell
+root or its `standardized/` child, and the raw export retains both K=10 and
+K=20 Figure-4 threshold blocks. Binding the held-out task directly would
+therefore be neither a complete standardized cell nor a valid one-grid Figure-4
+input. Its command also referenced the frozen-candidate task through a template
+token without declaring that task as a direct dependency.
+
+### Decision
+
+Keep generation, candidate order, teacher predictions, WNode distances, and
+held-out metrics unchanged. Add one CPU, manifest-only task after the held-out
+and frozen-candidate tasks. It verifies source checksums and no-live-writer
+evidence, copies K=1..20 prefix artifacts, selects the preregistered K=10 rows
+from the saved 601-point Figure-4 matrix, normalizes only the public method
+identity, and publishes the complete common cell schema with frozen RF,
+MolCLR, cohort, threshold, and leakage hashes.
+
+The held-out task now declares the frozen-candidate task as a direct dependency.
+The final matrix builder rejects `mut_gcf_legacy_heldout` as a cell root;
+`mut_gcf_legacy_standardized` is the only accepted binding.
+
+### Consequences
+
+- No GCF generation, prediction, distance, candidate selection, or threshold
+  fitting is repeated.
+- Controller dependency tokens are available when the held-out task launches.
+- Figure 4 uses exactly the shared K=10 601-point empirical grid.
+- A raw held-out container cannot masquerade as a paper-ready standardized cell.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Re-export Mutagenicity Ours on the frozen matched protocol
 
 ### Decision

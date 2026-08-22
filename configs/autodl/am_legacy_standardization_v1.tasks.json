@@ -225,7 +225,8 @@
       "runner_dataset": "mutagenicity-rf",
       "runner_stage": "AM_MUT_GCF_HELDOUT_EVAL",
       "depends_on": [
-        "mut_gcf_legacy_calibration"
+        "mut_gcf_legacy_calibration",
+        "mut_gcf_legacy_freeze"
       ],
       "resource": "gpu",
       "priority": 301,
@@ -271,6 +272,69 @@
         "AUTODL_PYTHON": "{python}",
         "PYTHONDONTWRITEBYTECODE": "1"
       }
+    },
+    {
+      "id": "mut_gcf_legacy_standardized",
+      "dataset": "mutagenicity",
+      "stage": "AM_MUT_GCF_STANDARDIZED",
+      "runner_dataset": "paper-cell-mutagenicity-gcfexplainer",
+      "runner_stage": "AM_MUT_GCF_STANDARDIZED",
+      "depends_on": [
+        "mut_gcf_legacy_heldout",
+        "mut_gcf_legacy_freeze"
+      ],
+      "resource": "cpu",
+      "priority": 302,
+      "data_splits": [],
+      "manifest_only": true,
+      "command": [
+        "{python}",
+        "{project_root}/scripts/autodl/standardize_mut_gcf_legacy_cell.py",
+        "--config",
+        "configs/hpc.yaml",
+        "--heldout-root",
+        "{dep_mut_gcf_legacy_heldout_output}",
+        "--frozen-root",
+        "{dep_mut_gcf_legacy_freeze_output}",
+        "--output-dir",
+        "{task_output}",
+        "--proc-root",
+        "/proc"
+      ],
+      "input_manifest": "{dep_mut_gcf_legacy_heldout_output}/final/run_manifest.json",
+      "expected_output": "{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/mut_gcf/standardized/attempt-{attempt}",
+      "required_output_files": [
+        "figure3_coverage_vs_k.csv",
+        "figure4_coverage_vs_threshold.csv",
+        "table2_gcfexplainer_k10.csv",
+        "prefix_metrics.csv",
+        "prefix_metrics.json",
+        "parent_best_distances.csv",
+        "destination_distribution.csv",
+        "summary.json",
+        "run_manifest.json",
+        "oracle_manifest.json",
+        "evaluation_manifest.json",
+        "artifact_manifest.json",
+        "final_artifact_audit.json",
+        "freeze_manifest.json",
+        "_FINALIZED.json",
+        "PASS"
+      ],
+      "required_log_marker": "[MUT_GCF_LEGACY_STANDARDIZATION_PASS]",
+      "environment": {
+        "PYTHONPATH": "{project_root}",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "TOKENIZERS_PARALLELISM": "false"
+      },
+      "semantic_failure_markers": [
+        "frozen artifact hash differs",
+        "raw test opened",
+        "threshold grid differs",
+        "candidate order changed",
+        "test used for selection"
+      ]
     },
     {
       "id": "mut_globalgce_legacy_cell_blocked",

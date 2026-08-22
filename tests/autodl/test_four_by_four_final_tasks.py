@@ -27,6 +27,12 @@ def _args(tmp_path):
         for dataset in DATASETS
         for method in METHODS
     ]
+    cells = [
+        "Mutagenicity/GCFExplainer=mut_gcf_legacy_standardized"
+        if value.startswith("Mutagenicity/GCFExplainer=")
+        else value
+        for value in cells
+    ]
     return argparse.Namespace(
         controller_id="four_methods_four_datasets_continuation_v1",
         cell_task=cells,
@@ -73,4 +79,16 @@ def test_final_matrix_audit_rejects_raw_bace_science_terminal(
         for value in args.cell_task
     ]
     with pytest.raises(ValueError, match="must bind standardized task"):
+        build(args)
+
+
+def test_final_matrix_audit_rejects_raw_mut_gcf_heldout_root(tmp_path):
+    args = _args(tmp_path)
+    args.cell_task = [
+        "Mutagenicity/GCFExplainer=mut_gcf_legacy_heldout"
+        if value.startswith("Mutagenicity/GCFExplainer=")
+        else value
+        for value in args.cell_task
+    ]
+    with pytest.raises(ValueError, match="standardized closure"):
         build(args)
