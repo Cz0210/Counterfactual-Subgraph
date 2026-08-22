@@ -107,6 +107,23 @@ active slot metadata, and both scheduler and worker independently enforce the
 
 Accepted
 
+## 2026-08-23 — Attribute shared-GPU CUDA grandchildren without weakening PID safety
+
+- A shared-slot launcher may legitimately execute a shell which then starts the
+  CUDA Python process.  Exact equality with the recorded direct child PID was
+  therefore too conservative and prevented the second slot from being used.
+- Slot metadata now records the direct child's Linux procfs start-time tick.
+  Every `nvidia-smi` compute PID must equal that child or reach it through a
+  bounded, live `/proc/<pid>/stat` parent chain; the recorded start tick must
+  still match at the root.
+- Missing procfs data, broken/cyclic ancestry, PID reuse, and unrelated compute
+  processes remain fail-closed.  This is attribution only; the two-task and
+  70%-VRAM limits are unchanged.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Reconstruct an off-grid Mutagenicity GCF theta exactly
 
 ### Background

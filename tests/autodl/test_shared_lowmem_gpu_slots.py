@@ -32,8 +32,13 @@ def _gpu(*, used: int = 0, processes: tuple[GPUProcess, ...] = ()) -> GPUObserva
     )
 
 
+def _identity_reader(mapping: dict[int, tuple[int, int]]):
+    return lambda pid: mapping.get(pid)
+
+
 def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path) -> None:
     inventory = lambda: [_gpu()]
+    identities = _identity_reader({123: (1, 1000), 456: (1, 2000)})
     slot0 = GPUSharedSlotLock(
         tmp_path,
         gpu_index=0,
@@ -41,6 +46,7 @@ def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path)
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=25000,
         inventory_reader=inventory,
+        process_identity_reader=identities,
     )
     slot1 = GPUSharedSlotLock(
         tmp_path,
@@ -49,13 +55,17 @@ def test_two_shared_slots_block_exclusive_and_enforce_70_percent(tmp_path: Path)
         lock_mode="shared_lowmem_slot_1",
         memory_reservation_mb=25000,
         inventory_reader=inventory,
+        process_identity_reader=identities,
     )
     exclusive = GPUFileLock(
         tmp_path, gpu_index=0, gpu_uuid="GPU-shared", owner={"run_id": "exclusive"}
     )
-    with slot0, slot1:
-        with pytest.raises(GPULockError, match="project-locked"):
-            exclusive.acquire()
+    with slot0:
+        slot0.update_child_pid(123)
+        with slot1:
+            slot1.update_child_pid(456)
+            with pytest.raises(GPULockError, match="project-locked"):
+                exclusive.acquire()
 
     too_large = GPUSharedSlotLock(
         tmp_path,
@@ -86,6 +96,7 @@ def test_shared_admission_rejects_external_compute_process(tmp_path: Path) -> No
 
 def test_second_slot_accepts_only_recorded_first_child(tmp_path: Path) -> None:
     inventory = lambda: [_gpu()]
+    identities = _identity_reader({123: (1, 1000)})
     first = GPUSharedSlotLock(
         tmp_path,
         gpu_index=0,
@@ -93,6 +104,7 @@ def test_second_slot_accepts_only_recorded_first_child(tmp_path: Path) -> None:
         lock_mode="shared_lowmem_slot_0",
         memory_reservation_mb=10000,
         inventory_reader=inventory,
+        process_identity_reader=identities,
     )
     with first:
         first.update_child_pid(123)
@@ -105,9 +117,79 @@ def test_second_slot_accepts_only_recorded_first_child(tmp_path: Path) -> None:
             observation,
             lock_mode="shared_lowmem_slot_1",
             memory_reservation_mb=10000,
+            process_identity_reader=identities,
         )
         assert admitted is True, reason
         assert detail["active_shared_child_pids"] == [123]
+
+
+def test_second_slot_accepts_compute_grandchild_of_recorded_launcher(
+    tmp_path: Path,
+) -> None:
+    inventory = lambda: [_gpu()]
+    identities = _identity_reader(
+        {
+            123: (50, 1000),
+            456: (123, 2000),
+            50: (1, 500),
+        }
+    )
+    first = GPUSharedSlotLock(
+        tmp_path,
+        gpu_index=0,
+        gpu_uuid="GPU-shared",
+        lock_mode="shared_lowmem_slot_0",
+        memory_reservation_mb=10000,
+        inventory_reader=inventory,
+        process_identity_reader=identities,
+    )
+    with first:
+        first.update_child_pid(123)
+        observation = _gpu(
+            used=9000,
+            processes=(GPUProcess(pid=456, process_name="python", used_memory_mb=9000),),
+        )
+        admitted, reason, detail = shared_gpu_slot_admission(
+            tmp_path,
+            observation,
+            lock_mode="shared_lowmem_slot_1",
+            memory_reservation_mb=10000,
+            process_identity_reader=identities,
+        )
+        assert admitted is True, reason
+        assert detail["active_shared_child_pids"] == [123]
+        assert detail["attributed_compute_pids"] == [456]
+
+
+def test_second_slot_rejects_pid_reuse_in_recorded_launcher(tmp_path: Path) -> None:
+    inventory = lambda: [_gpu()]
+    first_identities = _identity_reader({123: (1, 1000)})
+    first = GPUSharedSlotLock(
+        tmp_path,
+        gpu_index=0,
+        gpu_uuid="GPU-shared",
+        lock_mode="shared_lowmem_slot_0",
+        memory_reservation_mb=10000,
+        inventory_reader=inventory,
+        process_identity_reader=first_identities,
+    )
+    with first:
+        first.update_child_pid(123)
+        reused = _identity_reader({123: (1, 9999)})
+        observation = _gpu(
+            used=9000,
+            processes=(GPUProcess(pid=123, process_name="python", used_memory_mb=9000),),
+        )
+        admitted, reason, detail = shared_gpu_slot_admission(
+            tmp_path,
+            observation,
+            lock_mode="shared_lowmem_slot_1",
+            memory_reservation_mb=10000,
+            process_identity_reader=reused,
+        )
+        assert admitted is False
+        assert "not owned" in reason
+        assert detail["unattributed_compute_pids"] == [123]
 
 
 def test_controller_can_plan_two_explicit_slots_on_one_gpu(tmp_path: Path) -> None:

@@ -1045,3 +1045,12 @@ Mutagenicity roadmaps.
   the same wrappers run under Slurm without `AUTODL_PYTHON`.
 - [ ] Relaunch calibration from a fresh continuation task/output root; retain
   the exit-127 attempt as immutable failure evidence.
+
+# 2026-08-23 — Shared low-memory GPU process attribution
+
+- [x] Record direct child PID plus Linux start-time ticks in shared-slot
+  metadata.
+- [x] Attribute CUDA child/grandchild processes through a bounded live procfs
+  ancestry walk while rejecting PID reuse and unrelated processes.
+- [x] Keep two tasks per physical GPU, strict 70% admission, UUID locking, and
+  MPS-disabled behavior unchanged.

@@ -105,6 +105,57 @@ class StageTransitionError(AutoDLRuntimeError):
     """A requested stage transition violates the frozen BACE order."""
 
 
+def _linux_process_identity(pid: int) -> tuple[int, int] | None:
+    """Return ``(ppid, start_ticks)`` from procfs, or ``None`` if unavailable.
+
+    Shared GPU attribution must tolerate a launcher shell between the recorded
+    child and the CUDA process, while still defending against PID reuse.  The
+    Linux start-time tick is stable for one process lifetime and is therefore
+    recorded together with the child PID in slot metadata.
+    """
+
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        closing = stat.rfind(")")
+        if closing < 0:
+            return None
+        fields = stat[closing + 2 :].split()
+        # ``fields`` starts at procfs field 3 (state).  PPID is field 4 and
+        # starttime is field 22.
+        return int(fields[1]), int(fields[19])
+    except (IndexError, OSError, UnicodeError, ValueError):
+        return None
+
+
+def _process_is_attributable(
+    pid: int,
+    owners: Mapping[int, int],
+    *,
+    identity_reader: Callable[[int], tuple[int, int] | None] = _linux_process_identity,
+) -> bool:
+    """Confirm that ``pid`` is one recorded child or its live descendant."""
+
+    current = int(pid)
+    visited: set[int] = set()
+    for _depth in range(128):
+        if current in visited or current <= 0:
+            return False
+        visited.add(current)
+        identity = identity_reader(current)
+        if identity is None:
+            return False
+        parent_pid, start_ticks = identity
+        expected_start = owners.get(current)
+        if expected_start is not None:
+            return int(start_ticks) == int(expected_start)
+        if parent_pid == current:
+            return False
+        current = int(parent_pid)
+    return False
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -739,6 +790,9 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
         hold_coordination_until_child_pid: bool = False,
         owner: Mapping[str, Any] | None = None,
         inventory_reader: Callable[[], list[GPUObservation]] = query_gpu_inventory,
+        process_identity_reader: Callable[
+            [int], tuple[int, int] | None
+        ] = _linux_process_identity,
     ) -> None:
         self.lock_root = lock_root
         self.gpu_index = int(gpu_index)
@@ -759,6 +813,7 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
             hold_coordination_until_child_pid
         )
         self.inventory_reader = inventory_reader
+        self.process_identity_reader = process_identity_reader
         self.uuid_path = _gpu_lock_path(lock_root, gpu_uuid)
         self.slot_path = _gpu_shared_slot_path(lock_root, gpu_uuid, self.slot)
         self.coordination_path = _gpu_coordination_path(lock_root, gpu_uuid)
@@ -776,9 +831,9 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
             raise GPULockError("Shared GPU physical index/UUID identity changed")
         return matches[0]
 
-    def _other_reservations(self) -> tuple[int, set[int]]:
+    def _other_reservations(self) -> tuple[int, dict[int, int]]:
         total = 0
-        child_pids: set[int] = set()
+        child_identities: dict[int, int] = {}
         for slot in range(SHARED_GPU_MAX_TASKS):
             if slot == self.slot:
                 continue
@@ -813,13 +868,21 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
                 raise GPULockError(f"Shared GPU slot reservation is invalid: {path}")
             total += value
             child_pid = metadata.get("child_pid")
+            child_start_ticks = metadata.get("child_start_ticks")
             if (
                 isinstance(child_pid, int)
                 and not isinstance(child_pid, bool)
                 and child_pid > 0
+                and isinstance(child_start_ticks, int)
+                and not isinstance(child_start_ticks, bool)
+                and child_start_ticks > 0
             ):
-                child_pids.add(child_pid)
-        return total, child_pids
+                child_identities[child_pid] = child_start_ticks
+            else:
+                raise GPULockError(
+                    f"Active shared GPU slot lacks a live child identity: {path}"
+                )
+        return total, child_identities
 
     def acquire(self) -> "GPUSharedSlotLock":
         self.lock_root.mkdir(parents=True, exist_ok=True)
@@ -848,10 +911,20 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
             observation = self._observation()
             reserved_before, active_children = self._other_reservations()
             process_pids = {process.pid for process in observation.processes}
-            if not process_pids.issubset(active_children):
+            unattributed = sorted(
+                pid
+                for pid in process_pids
+                if not _process_is_attributable(
+                    pid,
+                    active_children,
+                    identity_reader=self.process_identity_reader,
+                )
+            )
+            if unattributed:
                 raise GPULockError(
                     "Shared GPU has a compute process not owned by an active slot: "
-                    f"processes={sorted(process_pids)} active_children={sorted(active_children)}"
+                    f"unattributed={unattributed} "
+                    f"active_children={sorted(active_children)}"
                 )
             accounted_before = max(observation.memory_used_mb, reserved_before)
             projected = accounted_before + self.memory_reservation_mb
@@ -862,7 +935,7 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
                     f"projected={projected}MiB ceiling={ceiling}MiB"
                 )
             payload = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "state": "LOCKED",
                 "lock_mode": self.lock_mode,
                 "shared_slot": self.slot,
@@ -870,6 +943,7 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
                 "gpu_uuid": self.gpu_uuid,
                 "pid": os.getpid(),
                 "child_pid": None,
+                "child_start_ticks": None,
                 "memory_reservation_mb": self.memory_reservation_mb,
                 "maximum_vram_fraction": self.maximum_vram_fraction,
                 "observed_memory_used_mb_at_admission": observation.memory_used_mb,
@@ -909,10 +983,17 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
     def update_child_pid(self, child_pid: int) -> None:
         if self._slot_handle is None or child_pid <= 0:
             raise GPULockError("Cannot update an inactive shared GPU slot")
+        identity = self.process_identity_reader(int(child_pid))
+        if identity is None:
+            raise GPULockError(
+                "Cannot record shared GPU child identity from /proc"
+            )
+        _parent_pid, child_start_ticks = identity
         handle = self._slot_handle
         handle.seek(0)
         payload = json.load(handle)
         payload["child_pid"] = int(child_pid)
+        payload["child_start_ticks"] = int(child_start_ticks)
         payload["child_pid_recorded_at"] = utc_now()
         handle.seek(0)
         handle.truncate()
@@ -937,7 +1018,7 @@ class GPUSharedSlotLock(AbstractContextManager["GPUSharedSlotLock"]):
         slot_handle.truncate()
         json.dump(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "state": "RELEASED",
                 "lock_mode": self.lock_mode,
                 "shared_slot": self.slot,
@@ -977,6 +1058,9 @@ def shared_gpu_slot_admission(
     lock_mode: str,
     memory_reservation_mb: int,
     maximum_vram_fraction: float = SHARED_GPU_MAX_VRAM_FRACTION,
+    process_identity_reader: Callable[
+        [int], tuple[int, int] | None
+    ] = _linux_process_identity,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Read-only admission probe for one shared-lowmem scheduler decision."""
 
@@ -998,7 +1082,7 @@ def shared_gpu_slot_admission(
     uuid_handle: TextIO | None = None
     slot_handle: TextIO | None = None
     active_reservations = 0
-    active_children: set[int] = set()
+    active_children: dict[int, int] = {}
     active_slots: list[int] = []
     try:
         fcntl.flock(coordination.fileno(), fcntl.LOCK_EX)
@@ -1046,12 +1130,32 @@ def shared_gpu_slot_admission(
             active_reservations += reservation
             active_slots.append(candidate)
             child_pid = metadata.get("child_pid")
-            if isinstance(child_pid, int) and not isinstance(child_pid, bool) and child_pid > 0:
-                active_children.add(child_pid)
+            child_start_ticks = metadata.get("child_start_ticks")
+            if (
+                isinstance(child_pid, int)
+                and not isinstance(child_pid, bool)
+                and child_pid > 0
+                and isinstance(child_start_ticks, int)
+                and not isinstance(child_start_ticks, bool)
+                and child_start_ticks > 0
+            ):
+                active_children[child_pid] = child_start_ticks
+            else:
+                return False, "active shared slot lacks a live child identity", {}
         process_pids = {process.pid for process in observation.processes}
-        if not process_pids.issubset(active_children):
+        unattributed = sorted(
+            pid
+            for pid in process_pids
+            if not _process_is_attributable(
+                pid,
+                active_children,
+                identity_reader=process_identity_reader,
+            )
+        )
+        if unattributed:
             return False, "GPU has a compute process not owned by an active shared slot", {
                 "process_pids": sorted(process_pids),
+                "unattributed_compute_pids": unattributed,
                 "active_shared_child_pids": sorted(active_children),
             }
         accounted_before = max(observation.memory_used_mb, active_reservations)
@@ -1061,6 +1165,7 @@ def shared_gpu_slot_admission(
             "slot": slot,
             "active_slots": sorted(active_slots),
             "active_shared_child_pids": sorted(active_children),
+            "attributed_compute_pids": sorted(process_pids),
             "observed_memory_used_mb": observation.memory_used_mb,
             "active_reservations_mb": active_reservations,
             "requested_reservation_mb": int(memory_reservation_mb),

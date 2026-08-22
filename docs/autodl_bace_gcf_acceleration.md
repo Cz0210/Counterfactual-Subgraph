@@ -49,7 +49,7 @@ full `ordered_v2` 必须显式传入该 gate；否则 fail closed。未通过 ga
 }
 ```
 
-`gpu_lock_mode` 只能为 `exclusive`、`shared_lowmem_slot_0`、`shared_lowmem_slot_1`。同一 GPU 最多两个 shared task；共享 task 全生命周期持有 legacy UUID 文件的 shared advisory lock，因此与历史/新 exclusive task 互斥。第二个任务只有在现存 GPU compute PID 能由 active shared-slot metadata 精确解释时才可加入。准入使用 `max(nvidia-smi used, active reservations) + new reservation <= 70% total VRAM`，并在真正 worker acquire 时再次原子检查。
+`gpu_lock_mode` 只能为 `exclusive`、`shared_lowmem_slot_0`、`shared_lowmem_slot_1`。同一 GPU 最多两个 shared task；共享 task 全生命周期持有 legacy UUID 文件的 shared advisory lock，因此与历史/新 exclusive task 互斥。第二个任务只有在现存 GPU compute PID 能由 active shared-slot metadata 精确解释时才可加入：slot 记录 launcher child PID 及 Linux `/proc` start-ticks，CUDA PID 可以是该 child 或其经完整父链验证的后代。父链断裂、PID 复用或无法读取 `/proc` 均 fail closed。准入使用 `max(nvidia-smi used, active reservations) + new reservation <= 70% total VRAM`，并在真正 worker acquire 时再次原子检查。
 
 首次占用空卡仍需连续空闲 60 秒。共享槽不启用 MPS，也不允许 `CUDA_MPS*` 环境变量。A/B gate PASS 仅证明该优化配置可候选部署，不授权停止正在运行的 legacy 任务。
 
