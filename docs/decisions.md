@@ -7270,3 +7270,16 @@ marks both `MISSING_SOURCE_NOT_TRANSFERRED`; GlobalGCE additionally remains
 code-blocked by absent native LHS-to-RHS attachment mapping after any future
 transfer. It may not be coerced into deletion semantics. CLEAR remains
 excluded and can never stand in for ComRecGC.
+# 2026-08-22 — Preserve dormant backbone and selected-rule stability axes
+
+- The four-by-four primary controller does not schedule backbone ablations.
+  `scripts/autodl/run_backbone_ablation.py` records the full
+  GINE/GIN/GCN/GATv2 × seed/config axes and emits tasks only with an explicit
+  enable flag; TasteMolNet additionally requires an explicit license PASS.
+- Frozen selector comparisons use `scripts/compare_selected_rule_stability.py`.
+  Exact rule Jaccard, Morgan bidirectional mean-max similarity, scaffold
+  Jaccard, coverage-set Jaccard, and destination-distribution similarity are
+  computed from two frozen manifests without opening held-out molecules.
+- These entry points are intentionally absent from the primary controller
+  manifest. Static Slurm wrappers exist only for repository CLI parity and are
+  not submitted by the AutoDL-only campaign.

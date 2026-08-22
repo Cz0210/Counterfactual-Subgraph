@@ -861,3 +861,11 @@ Mutagenicity roadmaps.
   baseline roots absent from the AutoDL payload explicitly `MISSING`.
 - [x] Exclude CLEAR from every adoption and inventory path and provide two
   manifest-only CPU tasks for composition into the continuation controller.
+# 2026-08-22 — Deferred main-result ablation hooks
+
+- [x] Keep a single registered GNN backbone axis (`gine`, `gin`, `gcn`,
+  `gatv2`) and a dormant AutoDL task-plan builder.
+- [x] Add a frozen-rule stability comparator covering exact, chemical,
+  scaffold, coverage, and multiclass destination overlap.
+- [ ] Run backbone/selector/reward/candidate-pool ablations only after the
+  primary four-by-four matrix is scientifically unblocked and frozen.
