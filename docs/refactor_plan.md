@@ -757,8 +757,14 @@ Mutagenicity roadmaps.
 - [x] Add explicit B6--B14 split-access and dependency-release contracts that
   cannot turn READY evidence into a scientific PASS.
 - [ ] Run and pass the real 7B LoRA B6-v2 on AutoDL, then release B7.
-- [ ] Integrate the new GNN schema into B8--B14 candidate generation,
-  verification, selector, and final evaluation without RF-contaminated inputs.
+- [x] Implement the provenance-clean B8/B9 fixed train-parent shards, B10
+  deterministic merge, batched-GINE/all-match/MolCLR-WNode B11 and B13
+  verification, calibration-only B12 freeze, and manifest-only B14 gate.
+- [x] Add B6-released B7-parallel calibration caches, fixed shard manifests,
+  output preflight, and a foreground command/output contract for the AutoDL
+  four-GPU controller.
+- [ ] Execute B6-v2 and B7, then let the controller advance the implemented
+  B8--B14 route without using RF-contaminated artifacts or pre-freeze test data.
 - [ ] Obtain explicit TasteMolNet data-license approval before committing data
   or enabling any heavy TasteMolNet experiment.
 - [x] Add a manifest-driven, persistent four-GPU AutoDL recovery controller

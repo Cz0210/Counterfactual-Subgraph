@@ -4,6 +4,66 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Freeze the BACE GNN downstream route at stage boundaries
+
+### Background
+
+The first AutoDL BACE frozen-GNN driver intentionally stopped after a real GNN
+scoring diagnostic because the historical PPO, pool, verification, selector,
+and held-out evaluator were tied to Morgan-RF provenance.  B6-v2 and B7 now
+provide a train-only GNN-reward policy, but B8--B14 still need a route that can
+reuse the stable chemistry, generation, GNN, and MolCLR kernels without
+promoting any RF artifact or opening test before selector freeze.
+
+### Decision
+
+Run B8 and B9 as eight fixed train-parent shards.  Parent assignment is the
+position of `parent_id` in the globally sorted source-parent list modulo four,
+and therefore never changes with available GPU count.  Each shard binds the
+current final LoRA adapter config and weights by path, size, SHA256, and the B7
+on-disk `policy_checkpoint_hash`; B10 requires all eight PASS manifests, equal
+policy/GNN identities, equal parent closure, and equal within-stage generation
+config before a deterministic merge.
+
+Run B11 and B13 as complete parent-by-rule-by-match hard-deletion shards.  The
+frozen BACE GINE predicts parents and residuals in batches; every exact valid
+match is retained; a pair uses the minimum MolCLR Node-Wasserstein distance
+among connected strict flips and otherwise has selection distance `+inf`.
+B11 reads calibration only.  B12 reuses the oracle-neutral prefix selector,
+freezes exactly 20 ordered rule IDs, rule hashes, all K=1..20 prefixes, and its
+calibration-derived threshold/config identities.  B13 may resolve and open the
+held-out test split only after validating that B12 freeze.  A dedicated CPU
+gate then freezes `test_parent_ids.frozen.json` for controller shard
+materialization; test identities are never prepared alongside B7.  B14 accepts no raw
+split argument and checks only frozen B12/B13 manifests and declared artifact
+identities.
+
+Permit four bounded, read-only actions after B6-v2 while B7 trains: calibration
+GNN-before cache, calibration original-graph MolCLR cache, fixed train and
+calibration shard manifests, and fresh-output/disk preflight.  These actions
+never load a policy checkpoint, generate candidates, select a rule, or open
+test.  Every scientific stage publishes data and manifests first and an atomic
+fsynced `PASS` marker last; a failed fresh invocation retains atomic
+`FAIL.json`/`FAILED` evidence.
+
+### Consequences
+
+- RF and unknown provenance fail closed at every promotion boundary.
+- B8/B9 can consume only the exact adapter bytes frozen by B7.
+- B11 and B13 preserve all match evidence while the selector sees one
+  deterministic minimum-distance pair value.
+- Test cannot influence policy, candidate generation, calibration thresholds,
+  variant choice, rule order, or hashes.
+- B14 can be rerun without reopening either raw calibration or raw test data.
+- The four-GPU controller receives a foreground command/output contract and
+  remains the sole owner of locks, retry policy, logs, and process lifetime.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-09] Expand BACE GCF native ranking from the frozen VRRW pool
 
 ### Background

@@ -72,6 +72,7 @@ See:
 
 - `docs/EXPERIMENT_TRACKING.md`
 - `docs/EXPERIMENT_LOG.md`
+- `docs/AUTODL_BACE_FROZEN_GNN_DOWNSTREAM.md` (foreground B7 prep and B8--B14)
 
 ---
 
