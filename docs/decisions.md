@@ -48,6 +48,73 @@ dummy task.  Generated BACE continuation manifests enable it explicitly.
 
 Accepted
 
+---
+
+## [2026-08-22] Gate the four-by-four paper matrix through read-only artifact evidence
+
+### Background
+
+The active paper matrix now spans four methods and four datasets, while the
+persistent output trees contain formal runs, intermediate artifacts, failed
+attempts, and legacy render-only presentations. Similar path names and complete
+looking CSVs are not enough to prove oracle, split, distance, threshold, or
+test-leakage compatibility. In particular, the historical combined four-method
+presentation contains CLEAR, which must not be relabeled as ComRecGC.
+
+### Decision
+
+Add a dependency-light, read-only registry that always emits the exact sixteen
+cells for AIDS, Mutagenicity, BACE, and TasteMolNet crossed with Ours,
+GCFExplainer, GlobalGCE, and ComRecGC. Directory names are inventory hints only.
+A passing cell requires self-identifying manifests, raw evidence, a passing
+final artifact audit, complete Figure 3/Figure 4/Table 2 CSV contracts, frozen
+dataset/test/oracle/MolCLR/threshold identities, strict flip, and explicit
+test-selection exclusion. Cross-method identity disagreement within a dataset
+fails closed. CLEAR remains an unassigned inventory artifact.
+
+Record raw legacy evidence as a `generation_adoption_candidate` only when it
+can plausibly feed deterministic re-evaluation; this is never a scientific or
+paper PASS. TasteMolNet remains license-blocked unless an explicit PASS gate
+contains a reuse basis for the exact data. Scan any number of output roots, but
+hash only bounded evidence files and read large-model identities from frozen
+manifests. Write the registry to a fresh root atomically and never mutate a
+scanned artifact.
+
+Treat a continuation container with top-level `final_gate.json`,
+`_RUN_COMPLETE.json`, and last-published `PASS` plus a nested `standardized/`
+freeze as one candidate. Promotion requires cross-checking the recorded nested
+root, manifest hashes, freeze inventory, and final artifact audit; the layout
+or marker name alone is not evidence. Require an explicit raw-completeness or
+generation-adoption gate in addition to finding raw files.
+
+Emit one evaluator-ready threshold JSON per dataset. Numeric `thresholds`,
+`theta_star`, and `cost_cap` appear only when frozen expectations explicitly
+bind them to a calibration source, a SHA-256 identity, and
+`test_used_for_selection=false`. Missing contracts remain
+`MISSING_NOT_INFERRED`; test-derived or malformed inputs become
+`INVALID_FAIL_CLOSED` and omit all numeric threshold fields.
+
+The emitted evaluation contract fixes MolCLR Node-Wasserstein, strict flip,
+K=1..20, Table 2 K=10, method-native actions, shared within-dataset classifier
+identity, and the standardized export filenames. It is a schema and promotion
+boundary, not a substitute evaluator and not permission to fabricate missing
+results. No Slurm wrapper is added because this audit is AutoDL-local and the
+active task forbids HPC.
+
+### Consequences
+
+- Legacy render-only figures and CSVs cannot silently enter the new matrix.
+- A missing or stale cell is explicit and can be scheduled without rerunning a
+  valid cell.
+- Mixed RF/GNN classifier families remain visible while all methods within one
+  dataset must share one exact classifier.
+- The final figure/table gate can distinguish 16/16 complete from a valid
+  partial audit without filling blocked cells with zeros.
+### Status
+
+Accepted
+
+---
 ## [2026-08-22] Accept explicit CUDA indices in the shared MolCLR loader
 
 ### Background

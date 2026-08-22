@@ -825,3 +825,24 @@ Mutagenicity roadmaps.
 - [x] Publish controller-readable resource/marker contracts and AutoDL commands.
 - [ ] Implement and validate GlobalGCE attachment-aware LHS→RHS application;
   until then keep the BACE GlobalGCE cell `BLOCKED_CODE`.
+
+# Four-method × four-dataset paper matrix (2026-08-22)
+
+- [x] Add an exact 16-cell registry with a closed state enum.
+- [x] Add bounded, read-only multi-root artifact inventory and explicit
+  candidate-root support.
+- [x] Keep CLEAR distinct from ComRecGC and prevent render-only legacy CSVs from
+  becoming paper PASS evidence.
+- [x] Cross-check top-level continuation gates against nested standardized
+  freeze manifests without inferring dataset or method from directory names.
+- [x] Gate adoption on dataset/test/oracle/distance/threshold provenance and
+  cross-method identity parity within each dataset.
+- [x] Emit the unified WNode/strict-flip/K=1..20/Table2-K10 evaluation and
+  standardized-export contract without synthesizing missing metrics.
+- [x] Emit per-dataset evaluator-ready threshold contracts only from explicit
+  calibration-frozen provenance; omit numerics when the contract is missing or
+  test-derived.
+- [x] Keep TasteMolNet blocked unless an explicit exact-data reuse basis passes.
+- [ ] Populate the registry on AutoDL from persistent artifacts and exact
+  expectations, then let the continuation controller schedule only missing or
+  stale cells.

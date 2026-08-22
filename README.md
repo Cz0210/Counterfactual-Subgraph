@@ -91,6 +91,13 @@ untargeted strict flip to either other class. Historical BBBP artifacts are
 preserved but BBBP is no longer in the active matrix. See
 `docs/BBBP_TO_TASTEMOLNET_MIGRATION.md`.
 
+The active 4 × 4 paper matrix has a fail-closed, read-only AutoDL registry at
+`scripts/autodl/audit_four_methods_four_datasets.py`. It inventories multiple
+output roots and writes the exact 16-cell status, oracle registry, frozen
+evaluation contract, artifact inventory, stale-artifact list, and adoption
+report without recomputing scientific results. See
+`docs/AUTODL_FOUR_BY_FOUR_MATRIX_AUDIT.md`.
+
 ---
 
 ## 3. Planned Repository Layout
