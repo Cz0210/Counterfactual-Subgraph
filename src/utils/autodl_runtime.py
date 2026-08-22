@@ -1,13 +1,14 @@
 """Small, fail-closed runtime primitives for local AutoDL experiments.
 
-This module is intentionally independent from the four-lane recovery controller
-in :mod:`scripts.autodl.run_three_lines`.  The recovery controller owns its
-MUT/AIDS/BACE lanes; this module only supports the new frozen-GNN experiments.
+This module is shared by the frozen-GNN launchers and the manifest-driven
+four-GPU recovery controller.  Scientific policy remains outside these small
+runtime primitives.
 
 The helpers here keep policy separate from scientific code:
 
 * a GPU is eligible only after every sample in a stability window is idle;
-* at most two physical GPUs may be selected;
+* ordinary callers select at most two GPUs; the recovery controller must opt in
+  explicitly to the audited four-GPU hard ceiling;
 * a UUID-scoped advisory lock serializes project-owned GPU workers;
 * registry and stage documents are written atomically and durably; and
 * BACE stages form a fixed, predecessor-gated state machine.
@@ -33,7 +34,12 @@ import time
 from typing import Any, TextIO
 
 
+# Frozen-GNN launchers retain the conservative two-GPU default.  The recovery
+# controller may opt in to the separately audited four-GPU ceiling by passing
+# ``hard_limit=FOUR_GPU_RECOVERY_LIMIT``.  Keeping the higher limit explicit
+# prevents an unrelated call site from silently expanding its resource scope.
 MAX_AUTODL_GPUS = 2
+FOUR_GPU_RECOVERY_LIMIT = 4
 
 BACE_STAGES: tuple[str, ...] = (
     "B0_AUDIT",
@@ -490,10 +496,15 @@ def query_gpu_inventory(
     return observations
 
 
-def validate_max_gpus(value: int) -> int:
-    if value < 1 or value > MAX_AUTODL_GPUS:
+def validate_max_gpus(value: int, *, hard_limit: int = MAX_AUTODL_GPUS) -> int:
+    if hard_limit < 1 or hard_limit > FOUR_GPU_RECOVERY_LIMIT:
         raise GPUInventoryError(
-            f"AUTODL_MAX_GPUS must be in [1, {MAX_AUTODL_GPUS}], got {value}"
+            "GPU hard limit must be in "
+            f"[1, {FOUR_GPU_RECOVERY_LIMIT}], got {hard_limit}"
+        )
+    if value < 1 or value > hard_limit:
+        raise GPUInventoryError(
+            f"AUTODL_MAX_GPUS must be in [1, {hard_limit}], got {value}"
         )
     return value
 
@@ -511,10 +522,16 @@ class StableGPUInventory:
         *,
         max_gpus: int,
         lock_root: Path | None = None,
+        hard_limit: int = MAX_AUTODL_GPUS,
     ) -> list[GPUObservation]:
-        limit = validate_max_gpus(max_gpus)
+        limit = validate_max_gpus(max_gpus, hard_limit=hard_limit)
         if lock_root is not None:
-            limit = min(limit, available_project_gpu_slots(lock_root, limit))
+            limit = min(
+                limit,
+                available_project_gpu_slots(
+                    lock_root, limit, hard_limit=hard_limit
+                ),
+            )
         if limit <= 0:
             return []
         selected: list[GPUObservation] = []
@@ -676,10 +693,12 @@ class ProjectGPUSlotLock(AbstractContextManager["ProjectGPUSlotLock"]):
         lock_root: Path,
         *,
         max_slots: int,
+        hard_limit: int = MAX_AUTODL_GPUS,
         owner: Mapping[str, Any] | None = None,
     ) -> None:
         self.lock_root = lock_root
-        self.max_slots = validate_max_gpus(max_slots)
+        self.hard_limit = hard_limit
+        self.max_slots = validate_max_gpus(max_slots, hard_limit=hard_limit)
         self.owner = dict(owner or {})
         self.slot: int | None = None
         self.path: Path | None = None
@@ -750,10 +769,15 @@ class ProjectGPUSlotLock(AbstractContextManager["ProjectGPUSlotLock"]):
         self.release()
 
 
-def available_project_gpu_slots(lock_root: Path, max_slots: int) -> int:
+def available_project_gpu_slots(
+    lock_root: Path,
+    max_slots: int,
+    *,
+    hard_limit: int = MAX_AUTODL_GPUS,
+) -> int:
     """Count currently acquirable project slots without changing metadata."""
 
-    maximum = validate_max_gpus(max_slots)
+    maximum = validate_max_gpus(max_slots, hard_limit=hard_limit)
     lock_root.mkdir(parents=True, exist_ok=True)
     handles: list[TextIO] = []
     try:
@@ -1032,6 +1056,75 @@ def verify_required_outputs(expected_output: Path, required_relative: Sequence[s
         path = root / relative
         if not path.is_file() or path.stat().st_size <= 0:
             failures.append(f"required output is missing or empty: {path}")
+    return failures
+
+
+def verify_required_output_alternatives(
+    expected_output: Path,
+    required_groups: Sequence[Sequence[str]],
+) -> list[str]:
+    """Require at least one nonempty file from each declared alternative group."""
+
+    failures: list[str] = []
+    if not required_groups:
+        return failures
+    if not expected_output.exists():
+        return [f"expected output is absent: {expected_output}"]
+    root = expected_output.resolve(strict=True)
+    for group in required_groups:
+        if not group:
+            failures.append("required output alternative group is empty")
+            continue
+        safe: list[Path] = []
+        unsafe = False
+        for value in group:
+            relative = Path(value)
+            if relative.is_absolute() or ".." in relative.parts:
+                failures.append(f"unsafe required output path: {value}")
+                unsafe = True
+                continue
+            safe.append(root / relative)
+        if unsafe:
+            continue
+        if not any(path.is_file() and path.stat().st_size > 0 for path in safe):
+            failures.append(
+                "none of the required output alternatives is nonempty: "
+                + " | ".join(str(path) for path in safe)
+            )
+    return failures
+
+
+def verify_required_absolute_outputs(
+    required_paths: Sequence[Path], *, allowed_root: Path
+) -> list[str]:
+    """Require nonempty physical files under one persistent output root.
+
+    Most result evidence belongs below ``expected_output`` and should use
+    :func:`verify_required_outputs`.  This narrow companion exists for
+    append-only audit artifacts whose externally prescribed absolute path is
+    outside that task directory.  Symlinks and paths escaping ``allowed_root``
+    fail closed.
+    """
+
+    failures: list[str] = []
+    root = allowed_root.expanduser().resolve(strict=True)
+    for raw_path in required_paths:
+        candidate = raw_path.expanduser()
+        if not candidate.is_absolute():
+            failures.append(f"required absolute output path is relative: {candidate}")
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (FileNotFoundError, ValueError):
+            failures.append(
+                f"required absolute output is absent or outside {root}: {candidate}"
+            )
+            continue
+        if candidate.is_symlink() or not resolved.is_file() or resolved.stat().st_size <= 0:
+            failures.append(
+                f"required absolute output is not a nonempty physical file: {candidate}"
+            )
     return failures
 
 

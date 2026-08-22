@@ -41,6 +41,8 @@ from src.utils.autodl_runtime import (
     update_bace_stage_state,
     utc_now,
     validate_max_gpus,
+    verify_required_output_alternatives,
+    verify_required_absolute_outputs,
     verify_required_outputs,
     mark_bace_stage_pass,
 )
@@ -159,6 +161,10 @@ def _write_stage_manifest(layout: Any, spec: Mapping[str, Any]) -> None:
             "input_hash": spec["input_hash"],
             "expected_output": spec["expected_output"],
             "required_output_files": spec["required_output_files"],
+            "required_output_any": spec.get("required_output_any", []),
+            "required_absolute_output_files": spec.get(
+                "required_absolute_output_files", []
+            ),
             "required_log_marker": spec["required_log_marker"],
             "git_commit": spec["git_commit"],
             "gpu_index": spec["gpu_index"],
@@ -225,6 +231,10 @@ def _write_stage_gate(
                 "required_log_marker": spec["required_log_marker"],
                 "expected_output": spec["expected_output"],
                 "required_output_files": spec["required_output_files"],
+                "required_output_any": spec.get("required_output_any", []),
+                "required_absolute_output_files": spec.get(
+                    "required_absolute_output_files", []
+                ),
             },
             "failures": list(failures),
         },
@@ -297,10 +307,20 @@ def _validate_result_contract(
     marker = spec.get("required_log_marker")
     expected = spec.get("expected_output")
     required = [str(value) for value in spec.get("required_output_files", [])]
+    required_any = [
+        [str(value) for value in group]
+        for group in spec.get("required_output_any", [])
+    ]
+    required_absolute = [
+        Path(str(value))
+        for value in spec.get("required_absolute_output_files", [])
+    ]
     if scientific_blocker:
         if not isinstance(marker, str) or not marker.strip():
             failures.append("scientific blocker requires a nonempty log marker")
-        if not expected or not required:
+        if not expected or (
+            not required and not required_any and not required_absolute
+        ):
             failures.append(
                 "scientific blocker requires an expected output and evidence files"
             )
@@ -310,6 +330,21 @@ def _validate_result_contract(
             failures.append(f"required log marker is absent: {marker}")
     if expected and required:
         failures.extend(verify_required_outputs(Path(str(expected)), required))
+    if expected and required_any:
+        failures.extend(
+            verify_required_output_alternatives(
+                Path(str(expected)), required_any
+            )
+        )
+    if required_absolute:
+        failures.extend(
+            verify_required_absolute_outputs(
+                required_absolute,
+                allowed_root=Path(str(spec["data_root"]))
+                / "counterfactual-subgraph-runtime"
+                / "outputs",
+            )
+        )
     return failures
 
 
@@ -354,6 +389,7 @@ def run_worker(spec_path: Path) -> int:
         slot_context = ProjectGPUSlotLock(
             layout.locks_dir,
             max_slots=int(spec["max_gpus"]),
+            hard_limit=int(spec.get("gpu_hard_limit", 2)),
             owner={"run_id": spec["run_id"], "stage": spec["stage"]},
         )
         lock_context = GPUFileLock(
@@ -472,7 +508,7 @@ def _layout_from_args(args: argparse.Namespace) -> Any:
 
 def launch(args: argparse.Namespace) -> int:
     layout = _layout_from_args(args)
-    validate_max_gpus(args.max_gpus)
+    validate_max_gpus(args.max_gpus, hard_limit=args.gpu_hard_limit)
     initialize_bace_stage_tree(layout)
     dataset = args.dataset.strip().lower()
     stage = args.stage.strip()
@@ -499,6 +535,31 @@ def launch(args: argparse.Namespace) -> int:
     expected_output = args.expected_output.expanduser().resolve(strict=False) if args.expected_output else None
     if expected_output is not None and expected_output.exists() and any(expected_output.iterdir() if expected_output.is_dir() else [expected_output]):
         raise AutoDLRuntimeError(f"Expected output must be fresh/absent: {expected_output}")
+    required_output_any = [
+        [part for part in value.split("|") if part]
+        for value in args.required_output_any
+    ]
+    if any(len(group) < 2 for group in required_output_any):
+        raise AutoDLRuntimeError(
+            "--required-output-any needs at least two pipe-separated paths"
+        )
+    required_absolute_output_files = [
+        path.expanduser().resolve(strict=False)
+        for path in args.required_absolute_output_file
+    ]
+    allowed_absolute_root = layout.artifacts_dir.resolve(strict=True)
+    for path in required_absolute_output_files:
+        try:
+            path.relative_to(allowed_absolute_root)
+        except ValueError as exc:
+            raise AutoDLRuntimeError(
+                "Required absolute output must stay under persistent artifacts: "
+                f"{path}"
+            ) from exc
+        if path.exists() or path.is_symlink():
+            raise AutoDLRuntimeError(
+                f"Required absolute output must be fresh/absent: {path}"
+            )
     run_id = _safe_id(args.run_id or _new_run_id(dataset, stage), label="run_id")
     launcher = args.launcher
     if launcher == "auto":
@@ -529,6 +590,7 @@ def launch(args: argparse.Namespace) -> int:
         "min_free_memory_mb": args.min_free_memory_mb,
         "idle_util_threshold": args.idle_util_threshold,
         "max_gpus": args.max_gpus,
+        "gpu_hard_limit": args.gpu_hard_limit,
         "git_commit": _git_value(layout.project_root, "rev-parse", "HEAD"),
         "config_files": [str(path) for path in config_paths],
         "config_hash": sha256_paths(config_paths),
@@ -536,6 +598,10 @@ def launch(args: argparse.Namespace) -> int:
         "input_hash": sha256_file(input_manifest) if input_manifest else None,
         "expected_output": str(expected_output) if expected_output else None,
         "required_output_files": list(args.required_output_file),
+        "required_output_any": required_output_any,
+        "required_absolute_output_files": [
+            str(path) for path in required_absolute_output_files
+        ],
         "required_log_marker": args.required_log_marker,
         "log_path": str(log_path),
         "launcher": launcher,
@@ -646,6 +712,19 @@ def parse_args() -> argparse.Namespace:
     launch_parser.add_argument("--input-manifest", type=Path)
     launch_parser.add_argument("--expected-output", type=Path)
     launch_parser.add_argument("--required-output-file", action="append", default=[])
+    launch_parser.add_argument(
+        "--required-output-any",
+        action="append",
+        default=[],
+        help="Pipe-separated relative paths; at least one file must be nonempty",
+    )
+    launch_parser.add_argument(
+        "--required-absolute-output-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="Fresh absolute evidence file under the persistent artifact root",
+    )
     launch_parser.add_argument("--required-log-marker")
     launch_parser.add_argument("--log-path", type=Path)
     launch_parser.add_argument("--env", action="append", default=[])
@@ -655,6 +734,15 @@ def parse_args() -> argparse.Namespace:
         "--max-gpus",
         type=int,
         default=int(os.environ.get("AUTODL_MAX_GPUS", "2")),
+    )
+    launch_parser.add_argument(
+        "--gpu-hard-limit",
+        type=int,
+        default=2,
+        help=(
+            "Explicit audited ceiling; ordinary frozen-GNN launchers keep 2, "
+            "the four-GPU recovery controller passes 4"
+        ),
     )
     launch_parser.add_argument(
         "--min-free-memory-mb",

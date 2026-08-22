@@ -7,6 +7,9 @@ AUTODL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(git -C "$AUTODL_SCRIPT_DIR" rev-parse --show-toplevel)"
 export PROJECT_ROOT
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# AutoDL execution clones are immutable evidence.  Never let imports create
+# __pycache__ inside the code worktree.
+export PYTHONDONTWRITEBYTECODE=1
 
 export AUTODL_PYTHON="${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}"
 if [[ "$AUTODL_PYTHON" != /* || ! -x "$AUTODL_PYTHON" ]]; then

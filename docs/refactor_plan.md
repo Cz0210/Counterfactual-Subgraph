@@ -761,3 +761,12 @@ Mutagenicity roadmaps.
   verification, selector, and final evaluation without RF-contaminated inputs.
 - [ ] Obtain explicit TasteMolNet data-license approval before committing data
   or enabling any heavy TasteMolNet experiment.
+- [x] Add a manifest-driven, persistent four-GPU AutoDL recovery controller
+  that reuses `exp_run`, UUID locks, atomic gates, and append-only registry
+  semantics; include deterministic train/calibration sharding and gated
+  four-shard B13 held-out evaluation.
+- [x] Bind existing Commit-A writers by exact launch-spec provenance, publish
+  the user-facing JSONL/Markdown registry mirrors, and keep execution clones
+  free of Python bytecode writes.
+- [ ] Fill the persistent controller manifest with Commit A MUT/AIDS and Commit
+  B BACE foreground argv/evidence contracts, validate it, and launch on AutoDL.

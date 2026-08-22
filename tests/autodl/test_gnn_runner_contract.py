@@ -106,6 +106,8 @@ def test_every_python_entrypoint_has_paired_slurm_status_wrapper() -> None:
         "status",
         "bace_gnn_stage",
         "bace_frozen_gnn_route",
+        "run_four_gpu_recovery_controller",
+        "status_four_gpu_recovery",
     ):
         wrapper = PROJECT_ROOT / "scripts" / "slurm" / f"{name}.sh"
         assert wrapper.is_file(), name
@@ -118,6 +120,7 @@ def test_every_python_entrypoint_has_paired_slurm_status_wrapper() -> None:
 def test_autodl_shells_pin_one_explicit_python_interpreter() -> None:
     common = (AUTODL / "common.sh").read_text(encoding="utf-8")
     assert "/root/miniconda3/envs/smiles_pip118/bin/python" in common
+    assert "export PYTHONDONTWRITEBYTECODE=1" in common
     assert '[[ "$AUTODL_PYTHON" != /* || ! -x "$AUTODL_PYTHON" ]]' in common
     bare_python = re.compile(r"(^|[;&|()]|\s)python(?:\s|$)")
     for script in AUTODL.glob("*.sh"):

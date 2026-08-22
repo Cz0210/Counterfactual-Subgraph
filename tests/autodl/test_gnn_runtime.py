@@ -27,6 +27,7 @@ from src.utils.autodl_runtime import (
     read_registry,
     resolve_passed_bace_stage_output,
     validate_max_gpus,
+    verify_required_output_alternatives,
     verify_required_outputs,
 )
 
@@ -251,3 +252,17 @@ def test_required_bundle_paths_are_nonempty_and_cannot_escape(tmp_path: Path) ->
     failures = verify_required_outputs(output, ["missing.json", "../escape"])
     assert any("missing" in failure for failure in failures)
     assert any("unsafe" in failure for failure in failures)
+
+
+def test_required_bundle_supports_one_of_several_weight_formats(tmp_path: Path) -> None:
+    output = tmp_path / "checkpoint"
+    output.mkdir()
+    (output / "adapter_model.safetensors").write_bytes(b"weights")
+    assert verify_required_output_alternatives(
+        output, [["adapter_model.safetensors", "adapter_model.bin"]]
+    ) == []
+    failures = verify_required_output_alternatives(
+        output, [["missing.safetensors", "missing.bin"]]
+    )
+    assert len(failures) == 1
+    assert "none of the required output alternatives" in failures[0]

@@ -6667,3 +6667,61 @@ must be the controller's exact fresh expected output below the persistent
 runtime root.  No new HPC/Slurm launcher is added in this change because the
 active execution path is AutoDL-only; any repository-paired Slurm wrapper is a
 static CLI contract and is not invoked by this route.
+
+---
+
+## 2026-08-22: Reuse `exp_run` beneath one persistent four-GPU DAG
+
+The four-GPU recovery controller is a scheduler, not a second scientific
+worker implementation. Task commands, dependencies, immutable inputs, output
+contracts, resource class, bounded OOM policy, and fixed parent sharding are
+declared in a frozen persistent manifest. Every detached task is launched
+through the existing AutoDL `exp_run` boundary, which remains responsible for
+physical GPU UUID locks, project slots, tmux/nohup workers, atomic stage/run
+documents, gates, and the canonical append-only registry.
+
+The ordinary frozen-GNN launchers retain their two-GPU hard ceiling. Only the
+new controller explicitly opts into the audited four-GPU ceiling. It samples
+idle GPUs for at least 60 seconds, gates CPU/RAM/persistent disk, and audits PID
+generation plus GPU-lock metadata without deleting locks or signalling any
+process. One CUDA OOM may retry with a lower manifest-bound batch and a fresh
+attempt-qualified output; semantic failures never retry.
+
+B11-style parallelism uses a single frozen parent-ID manifest to materialize
+deterministic, disjoint, exhaustive shard manifests. Held-out test access is
+rejected before a frozen B12 selector and is allowed only for the one-shot,
+read-only B13 task. TasteMolNet stays blocked on license review, and all paper
+paths remain frozen. The default integration template is intentionally
+BLOCKED until Commit A/B foreground argv and evidence contracts are filled, so
+the controller cannot accidentally execute placeholder or legacy-RF science.
+The clean PPO route is named `B6_PPO_SMOKE_V2` and uses controller/`exp_run`
+generic stage documents; it never overwrites the legacy blocked B6 record.
+After B7, B8 base and B9 high-temperature pools expose four fixed train-parent
+shards each and may fill the four-card queue concurrently; B10 alone joins both
+passing pools.
+`B14_FROZEN` is manifest-only: it verifies the passing B13 bundle, selector
+freeze, and bound hashes without loading calibration or held-out test bytes.
+
+MUT/AIDS jobs that were launched before controller deployment may be bound by
+an explicit `adopt_existing_run_id`. Adoption is not a loose PID import: the
+controller verifies the immutable `exp_run` launch spec, input SHA, output and
+gate contract, interpreter, environment, dataset/stage, and CPU/GPU binding.
+It then monitors or accepts that one run and never schedules a second writer.
+The adopted run's immutable execution worktree is verified independently and
+need not equal the newer controller worktree. Exact launch environment equality
+is required; undeclared extra variables reject adoption.
+
+The clean BACE queue includes the provenance audit, clean initializer, adapter
+canary, fresh `B6_PPO_SMOKE_V2`, and B7. The canary is required before B6 but
+cannot itself release B7. Commit-D preparation work may fan out after B6 beside
+B7 without becoming a B7 dependency. B13 alone receives four frozen test-parent
+shards after B12; test-looking argv, config, environment, and manifest paths are
+rejected everywhere else. B14 remains manifest-only.
+
+The controller mirrors each transition and each tick to the user-facing
+runtime registry under `outputs/autodl/experiment_registry` and appends a
+human-readable runtime experiment log. External timestamped policy-audit CSVs
+are first-class required outputs, while large checkpoint identity is frozen
+from the launch spec instead of re-hashed on each tick. AutoDL shells and child
+specs use `PYTHONDONTWRITEBYTECODE=1` so immutable execution clones remain
+byte-for-byte unchanged by imports.
