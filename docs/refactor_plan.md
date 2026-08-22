@@ -17,6 +17,14 @@
   and external engines.
 - [x] Add hash-bound whole-stage resume, including child-complete/parent-killed
   reconciliation and same-path scientific-input drift rejection.
+- [x] Require the same nested artifact hash closure on the fresh-success path
+  before the common-recourse stage can publish a PASS checkpoint.
+- [x] Add an AIDS-only three-task repair-v4 builder plus a bounded supervisor
+  that permits exactly one evidence-gated same-root retry after process loss;
+  semantic, contract, sklearn, and RSS failures remain terminal.
+- [x] Prove the supervisor's real shell behavior and controller restart
+  reconciliation with production-shaped tests: one retry can finish PASS-last,
+  a second process loss terminates, and restart adopts the live run ID/attempt.
 - [ ] Run end-to-end legacy/external smoke equivalence on AutoDL and freeze the
   complete pair/label/selected-row digests.
 - [ ] Build and launch a fresh CPU-only repair-v4 controller; never resume or

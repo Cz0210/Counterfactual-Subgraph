@@ -67,6 +67,59 @@ immutable.
 
 Accepted (algorithm core; full-route release still gated)
 
+## [2026-08-23] Supervise AIDS external-memory repair in one persistent run root
+
+### Background
+
+The generic controller creates a new attempt root for an ordinary retry, while
+the external-memory implementation can resume only when its exact pair-store,
+DBSCAN, dataset, input-content, argv, and stage identities remain bound to the
+same output root.  A process loss after an atomic child completion can also
+occur before the parent writes its stage PASS checkpoint.
+
+### Decision
+
+Build a dedicated three-task AutoDL controller named
+`four_methods_four_datasets_aids_comrecgc_repair_v4`.  Two CPU manifest-only
+tasks revalidate the immutable repair-v2 generation and threshold sources.  A
+single CPU scientific task then runs the unchanged full AIDS parameters under
+the shared high-memory flock, at least 128 GiB of cgroup headroom, a 96 GiB
+external-engine RSS budget, query blocks of eight, and one OMP/MKL thread.
+
+Wrap that scientific task in a bounded same-process supervisor.  It may invoke
+the exact `--resume` route once, in the same exp-run, attempt, and output root,
+only after a hash-bound common-stage checkpoint and explicit SIGKILL/SIGTERM
+evidence pass the retry gate.  Semantic, dataset/input drift, sklearn, RSS,
+lineage, and leakage failures are never retried.  A second process loss is
+terminal.  Restarting the outer controller reconciles a still-live supervisor
+by PID start-time and launch identity instead of allocating a new attempt.
+
+Both fresh completion and resumed completion validate the same terminal-v2
+closure before publishing a stage PASS: the run manifest, selected JSON/CSV,
+representative payload, pair arrays/manifest, and (when present) DBSCAN
+arrays/manifest must all match their recorded SHA-256 values.  The builder is
+pinned to the complete recovery-core commit
+`d5c1d67339df4b9642beaf2b10908ed92bac30de` and fails when only an earlier
+external-memory implementation is present.
+
+The full repair remains gated on a fresh, diagnostic-only AutoDL
+legacy-versus-external equivalence smoke.  It writes a new repair-v4 root and
+never resumes or mutates repair-v2 or repair-v3.  Paired Slurm scripts are
+static CLI documentation only and must not be submitted.
+
+### Consequences
+
+- A resumable interruption cannot silently switch inputs, output root,
+  scientific parameters, or external-memory artifacts.
+- Controller restart and child-process restart are separate, bounded recovery
+  cases with explicit evidence.
+- The repair uses no GPU and does not consume a GPU lock.
+- A successful diagnostic smoke is necessary but is not a paper result.
+
+### Status
+
+Accepted (deployment remains smoke-gated)
+
 ## [2026-08-23] Serialize the AIDS ComRecGC retry on CPU under a cgroup RAM gate
 
 ### Background
