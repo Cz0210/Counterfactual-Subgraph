@@ -19,10 +19,19 @@ def _file(path: Path, value: str = "x") -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _fake_procfs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(continuation, "_PROC_ROOT", proc)
+    return proc
+
+
 def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.ContinuationInputs:
     source = tmp_path / "source"
     source.mkdir()
     payload = _file(source / "counterfactuals.pt")
+    payload_sha256 = continuation.sha256_file(payload)
     parent_limit = 1283 if dataset == "aids" else 1448
     _json(
         source / "run_manifest.json",
@@ -36,7 +45,7 @@ def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.Conti
             "upstream_commit": continuation.UPSTREAM_COMMIT,
             "generation_mode": "adopted_read_only_cache",
             "counterfactuals_path": str(payload),
-            "counterfactuals_sha256": "a" * 64,
+            "counterfactuals_sha256": payload_sha256,
             "counterfactual_candidate_count": 100,
             "project_commit": "b" * 40,
         },
@@ -46,7 +55,7 @@ def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.Conti
         {
             "run_complete": True,
             "freeze_only_recovery": True,
-            "counterfactuals_sha256": "a" * 64,
+            "counterfactuals_sha256": payload_sha256,
         },
     )
     _json(
@@ -55,7 +64,7 @@ def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.Conti
             "recovery_completed": True,
             "completed_steps": 50_000,
             "algorithm_rerun": False,
-            "counterfactuals_sha256": "a" * 64,
+            "counterfactuals_sha256": payload_sha256,
         },
     )
     _json(
@@ -96,7 +105,7 @@ def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.Conti
     )
 
 
-def test_adopts_recovered_generation_without_hashing_large_payload(
+def test_adopts_recovered_generation_hashes_large_payload_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     inputs = _inputs(tmp_path)
@@ -106,8 +115,6 @@ def test_adopts_recovered_generation_without_hashing_large_payload(
     def recording_sha(path: str | Path) -> str:
         resolved = Path(path).resolve()
         hashed.append(resolved)
-        if resolved.name == "counterfactuals.pt":
-            raise AssertionError("adoption preflight must not rescan the multi-GB payload")
         return original(resolved)
 
     monkeypatch.setattr(continuation, "sha256_file", recording_sha)
@@ -115,8 +122,47 @@ def test_adopts_recovered_generation_without_hashing_large_payload(
     assert result["status"] == "PASS"
     assert result["generation_adopted"] is True
     assert result["generation_rerun"] is False
-    assert result["counterfactuals_sha256_claimed"] == "a" * 64
+    expected = original(inputs.source_generation_root / "counterfactuals.pt")
+    assert result["counterfactuals_sha256_claimed"] == expected
+    assert result["counterfactuals_sha256_actual"] == expected
+    assert result["counterfactuals_sha256_computation_count"] == 1
+    assert hashed.count((inputs.source_generation_root / "counterfactuals.pt").resolve()) == 1
     assert hashed
+
+
+def test_rejects_tampered_counterfactual_payload(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    (inputs.source_generation_root / "counterfactuals.pt").write_text(
+        "tampered", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="COUNTERFACTUALS_PAYLOAD_SHA256_MISMATCH"):
+        continuation.validate_adopted_generation(inputs)
+
+
+def test_rejects_live_procfs_writer(
+    tmp_path: Path, _fake_procfs: Path
+) -> None:
+    inputs = _inputs(tmp_path)
+    pid = _fake_procfs / "424242"
+    (pid / "fd").mkdir(parents=True)
+    (pid / "fdinfo").mkdir()
+    (pid / "fd" / "7").symlink_to(
+        inputs.source_generation_root / "counterfactuals.pt"
+    )
+    (pid / "fdinfo" / "7").write_text("flags:\t0100001\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="LIVE_WRITER_DETECTED"):
+        continuation.validate_adopted_generation(inputs)
+
+
+def test_rejects_closure_manifest_change_after_entry_gate(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    adoption = continuation.validate_adopted_generation(inputs)
+    closure = inputs.source_generation_root / "frozen_payload_closure_audit.json"
+    payload = json.loads(closure.read_text(encoding="utf-8"))
+    payload["tampered"] = True
+    _json(closure, payload)
+    with pytest.raises(ValueError, match="SOURCE_CLOSURE_CHANGED"):
+        continuation._verify_adopted_generation_integrity(adoption)
 
 
 def test_parent_metadata_never_enters_generation_content_identity(tmp_path: Path) -> None:

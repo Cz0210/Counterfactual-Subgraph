@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat as stat_module
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -44,6 +45,15 @@ DATASET_CONTRACTS: dict[str, dict[str, int]] = {
         "evaluation_parent_count": 217,
     },
 }
+
+_PROC_ROOT = Path("/proc")
+_CRITICAL_SOURCE_MANIFESTS = (
+    "run_manifest.json",
+    "_RUN_COMPLETE.json",
+    "freeze_only_recovery.json",
+    "frozen_payload_closure_audit.json",
+    "adoption_manifest.json",
+)
 
 
 @dataclass(frozen=True)
@@ -101,13 +111,231 @@ def _git_head(project_root: Path = PROJECT_ROOT) -> str:
     ).strip()
 
 
+def _stat_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _snapshot_frozen_file(path: Path, *, include_sha256: bool) -> dict[str, Any]:
+    logical = Path(os.path.abspath(os.fspath(path.expanduser())))
+    logical_stat = logical.lstat()
+    resolved = logical.resolve(strict=True)
+    resolved_stat = resolved.stat()
+    if not stat_module.S_ISREG(resolved_stat.st_mode) or resolved_stat.st_size <= 0:
+        raise ValueError(f"Frozen source file is not a nonempty regular file: {logical}")
+    snapshot: dict[str, Any] = {
+        "logical_path": str(logical),
+        "resolved_path": str(resolved),
+        "logical_lstat": _stat_identity(logical_stat),
+        "resolved_stat": _stat_identity(resolved_stat),
+    }
+    if include_sha256:
+        snapshot["sha256"] = sha256_file(resolved)
+    return snapshot
+
+
+def _snapshot_critical_manifests(source: Path) -> dict[str, dict[str, Any]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    for name in _CRITICAL_SOURCE_MANIFESTS:
+        logical = source / name
+        resolved = _require_file(logical)
+        try:
+            resolved.relative_to(source)
+        except ValueError as exc:
+            raise ValueError(
+                f"Frozen closure manifest resolves outside source root: {logical}"
+            ) from exc
+        snapshots[name] = _snapshot_frozen_file(logical, include_sha256=True)
+    return snapshots
+
+
+def _assert_snapshots_equal(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if dict(expected) == dict(observed):
+        return
+    changed = sorted(
+        key
+        for key in set(expected) | set(observed)
+        if expected.get(key) != observed.get(key)
+    )
+    raise ValueError(f"SOURCE_CLOSURE_CHANGED:{label}:changed={changed}")
+
+
+def _scan_live_source_writers(
+    source: Path,
+    *,
+    protected_snapshots: Sequence[Mapping[str, Any]],
+    proc_root: Path = _PROC_ROOT,
+) -> dict[str, Any]:
+    """Fail closed when procfs exposes a writable FD for the frozen source."""
+
+    proc = proc_root.expanduser()
+    if not proc.is_dir():
+        raise ValueError(
+            "LIVE_WRITER_AUDIT_UNAVAILABLE: Linux procfs is required for adoption"
+        )
+    protected_inodes = {
+        (
+            int(snapshot["resolved_stat"]["device"]),
+            int(snapshot["resolved_stat"]["inode"]),
+        )
+        for snapshot in protected_snapshots
+    }
+    writers: list[dict[str, Any]] = []
+    scanned_processes = 0
+    for pid_dir in proc.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        fd_dir = pid_dir / "fd"
+        try:
+            descriptors = list(fd_dir.iterdir())
+        except FileNotFoundError:
+            continue
+        except PermissionError as exc:
+            raise ValueError(
+                f"LIVE_WRITER_AUDIT_UNAVAILABLE: cannot inspect pid={pid_dir.name}"
+            ) from exc
+        scanned_processes += 1
+        for descriptor in descriptors:
+            if not descriptor.name.isdigit():
+                continue
+            try:
+                descriptor_stat = descriptor.stat()
+                target = descriptor.resolve(strict=True)
+            except FileNotFoundError:
+                continue
+            except PermissionError as exc:
+                raise ValueError(
+                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
+                    f"cannot inspect pid={pid_dir.name} fd={descriptor.name}"
+                ) from exc
+            inode = (int(descriptor_stat.st_dev), int(descriptor_stat.st_ino))
+            try:
+                target.relative_to(source)
+                inside_source = True
+            except ValueError:
+                inside_source = False
+            if not inside_source and inode not in protected_inodes:
+                continue
+            fdinfo = pid_dir / "fdinfo" / descriptor.name
+            try:
+                lines = fdinfo.read_text(
+                    encoding="utf-8", errors="strict"
+                ).splitlines()
+            except FileNotFoundError:
+                continue
+            except (PermissionError, UnicodeError, OSError) as exc:
+                raise ValueError(
+                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
+                    f"cannot read pid={pid_dir.name} fd={descriptor.name} flags"
+                ) from exc
+            flags_text = next(
+                (
+                    line.split(":", 1)[1].strip()
+                    for line in lines
+                    if line.startswith("flags:")
+                ),
+                None,
+            )
+            try:
+                flags = int(flags_text, 8) if flags_text is not None else None
+            except ValueError as exc:
+                raise ValueError(
+                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
+                    f"invalid pid={pid_dir.name} fd={descriptor.name} flags"
+                ) from exc
+            if flags is None:
+                raise ValueError(
+                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
+                    f"missing pid={pid_dir.name} fd={descriptor.name} flags"
+                )
+            if (flags & os.O_ACCMODE) in {os.O_WRONLY, os.O_RDWR}:
+                writers.append(
+                    {
+                        "pid": int(pid_dir.name),
+                        "fd": int(descriptor.name),
+                        "path": str(target),
+                        "flags_octal": flags_text,
+                    }
+                )
+    if writers:
+        raise ValueError(f"LIVE_WRITER_DETECTED:{writers[:8]}")
+    return {
+        "procfs_verified": True,
+        "proc_root": str(proc.resolve(strict=True)),
+        "scanned_process_count": scanned_processes,
+        "writable_fd_count": 0,
+        "writers": [],
+    }
+
+
+def _verify_adopted_generation_integrity(adoption: Mapping[str, Any]) -> dict[str, Any]:
+    integrity = adoption.get("source_integrity")
+    if not isinstance(integrity, Mapping):
+        raise ValueError("Missing source_integrity evidence from adoption entry gate")
+    source = _require_directory(Path(str(adoption["source_generation_root"])))
+    expected_manifests = integrity.get("critical_manifests_after_payload_hash")
+    expected_payload = integrity.get("payload_after_sha256")
+    if not isinstance(expected_manifests, Mapping) or not isinstance(
+        expected_payload, Mapping
+    ):
+        raise ValueError("Incomplete source_integrity evidence from adoption entry gate")
+    payload_path = Path(str(adoption["counterfactuals_path"]))
+    payload_now = _snapshot_frozen_file(payload_path, include_sha256=False)
+    protected = [*expected_manifests.values(), expected_payload]
+    writer_before = _scan_live_source_writers(
+        source,
+        protected_snapshots=protected,
+        proc_root=_PROC_ROOT,
+    )
+    manifests_now = _snapshot_critical_manifests(source)
+    writer_after = _scan_live_source_writers(
+        source,
+        protected_snapshots=[*manifests_now.values(), payload_now],
+        proc_root=_PROC_ROOT,
+    )
+    _assert_snapshots_equal(
+        expected_manifests,
+        manifests_now,
+        label="critical_manifests_after_continuation",
+    )
+    _assert_snapshots_equal(
+        expected_payload,
+        payload_now,
+        label="payload_stat_after_continuation",
+    )
+    return {
+        "schema_version": 1,
+        "status": "PASS",
+        "payload_sha256_recomputed": False,
+        "payload_stat_unchanged": True,
+        "critical_manifest_stat_and_hash_unchanged": True,
+        "critical_manifests": manifests_now,
+        "payload": payload_now,
+        "live_writer_audit_before_snapshot": writer_before,
+        "live_writer_audit_after_snapshot": writer_after,
+        "verified_at": _utc_now(),
+    }
+
+
 def validate_adopted_generation(inputs: ContinuationInputs) -> dict[str, Any]:
-    """Validate small frozen gates without rehashing the multi-GB payload twice."""
+    """Validate the frozen closure and hash its large payload exactly once."""
 
     if inputs.dataset not in DATASET_CONTRACTS:
         raise ValueError(f"Unsupported dataset: {inputs.dataset}")
     source = _require_directory(inputs.source_generation_root)
     contract = DATASET_CONTRACTS[inputs.dataset]
+    closure_before = _snapshot_critical_manifests(source)
     manifest_path = _require_file(source / "run_manifest.json")
     complete_path = _require_file(source / "_RUN_COMPLETE.json")
     recovery_path = _require_file(source / "freeze_only_recovery.json")
@@ -172,6 +400,37 @@ def validate_adopted_generation(inputs: ContinuationInputs) -> dict[str, Any]:
     if failures:
         raise ValueError("Frozen generation adoption failed: " + "; ".join(failures))
 
+    payload_before = _snapshot_frozen_file(payload, include_sha256=False)
+    protected_before = [*closure_before.values(), payload_before]
+    writer_before = _scan_live_source_writers(
+        source,
+        protected_snapshots=protected_before,
+        proc_root=_PROC_ROOT,
+    )
+    actual_payload_sha = sha256_file(payload)
+    payload_after = _snapshot_frozen_file(payload, include_sha256=False)
+    closure_after = _snapshot_critical_manifests(source)
+    writer_after = _scan_live_source_writers(
+        source,
+        protected_snapshots=[*closure_after.values(), payload_after],
+        proc_root=_PROC_ROOT,
+    )
+    _assert_snapshots_equal(
+        closure_before,
+        closure_after,
+        label="critical_manifests_around_payload_hash",
+    )
+    _assert_snapshots_equal(
+        payload_before,
+        payload_after,
+        label="payload_stat_around_sha256",
+    )
+    if actual_payload_sha != claimed_payload_sha:
+        raise ValueError(
+            "COUNTERFACTUALS_PAYLOAD_SHA256_MISMATCH:"
+            f"actual={actual_payload_sha}:claimed={claimed_payload_sha}"
+        )
+
     return {
         "schema_version": 1,
         "status": "PASS",
@@ -180,13 +439,22 @@ def validate_adopted_generation(inputs: ContinuationInputs) -> dict[str, Any]:
         "generation_mode": "adopted_read_only_cache",
         "generation_rerun": False,
         "source_generation_root": str(source),
-        "source_run_manifest_sha256": sha256_file(manifest_path),
-        "source_complete_sha256": sha256_file(complete_path),
-        "source_recovery_sha256": sha256_file(recovery_path),
-        "source_closure_sha256": sha256_file(closure_path),
-        "source_adoption_manifest_sha256": sha256_file(original_adoption_path),
+        "source_run_manifest_sha256": closure_after["run_manifest.json"]["sha256"],
+        "source_complete_sha256": closure_after["_RUN_COMPLETE.json"]["sha256"],
+        "source_recovery_sha256": closure_after["freeze_only_recovery.json"][
+            "sha256"
+        ],
+        "source_closure_sha256": closure_after[
+            "frozen_payload_closure_audit.json"
+        ]["sha256"],
+        "source_adoption_manifest_sha256": closure_after["adoption_manifest.json"][
+            "sha256"
+        ],
         "counterfactuals_path": str(payload),
         "counterfactuals_sha256_claimed": claimed_payload_sha,
+        "counterfactuals_sha256_actual": actual_payload_sha,
+        "counterfactuals_sha256_verified": True,
+        "counterfactuals_sha256_computation_count": 1,
         "counterfactual_candidate_count": candidate_count,
         "source_project_commit": manifest.get("project_commit"),
         "upstream_commit": manifest.get("upstream_commit"),
@@ -196,6 +464,15 @@ def validate_adopted_generation(inputs: ContinuationInputs) -> dict[str, Any]:
         "downstream_chemistry_rerun": True,
         "downstream_unified_evaluation_rerun": True,
         "source_checksums": original_adoption.get("source_checksums"),
+        "source_integrity": {
+            "schema_version": 1,
+            "critical_manifests_before_payload_hash": closure_before,
+            "critical_manifests_after_payload_hash": closure_after,
+            "payload_before_sha256": payload_before,
+            "payload_after_sha256": payload_after,
+            "live_writer_audit_before_payload_hash": writer_before,
+            "live_writer_audit_after_payload_hash": writer_after,
+        },
         "validated_at": _utc_now(),
     }
 
@@ -457,6 +734,10 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
         if freeze_manifest.get("dataset_key") != inputs.dataset:
             raise ValueError("Freeze dataset identity mismatch")
 
+        source_integrity_final = _verify_adopted_generation_integrity(adoption)
+        source_integrity_final_path = inputs.output_root / "source_integrity_final.json"
+        write_json(source_integrity_final_path, source_integrity_final)
+
         final = {
             "schema_version": 1,
             "status": "PASS",
@@ -477,6 +758,11 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
             "source_generation_manifest_sha256": adoption[
                 "source_run_manifest_sha256"
             ],
+            "source_payload_sha256": adoption["counterfactuals_sha256_actual"],
+            "source_payload_sha256_verified_once": True,
+            "source_integrity_final_sha256": sha256_file(
+                source_integrity_final_path
+            ),
             "standardized_run_manifest_sha256": sha256_file(
                 standardized / "run_manifest.json"
             ),

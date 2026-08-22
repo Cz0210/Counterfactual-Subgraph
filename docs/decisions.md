@@ -7558,3 +7558,17 @@ used by B12/B13.
   it no longer declares calibration access inside the held-out task. Taste
   licensing and its four blocked placeholders are manifest-only and declare
   no raw split access while the license gate remains blocked.
+
+# 2026-08-22 — Verify adopted COMRECGC payload bytes before continuation
+
+- The fresh standardized continuation computes the actual SHA-256 of the
+  adopted `counterfactuals.pt` exactly once at its entry gate and requires it
+  to equal the identity independently recorded by the run, completion, and
+  freeze-recovery manifests.
+- Critical frozen-closure manifests are protected by stat and SHA-256 snapshots
+  before and after that payload pass, then checked again before final `PASS`.
+  The large payload is not rehashed at the final check; its device, inode,
+  mode, size, mtime, and ctime must remain unchanged.
+- Linux procfs is mandatory. Any process holding a writable file descriptor
+  below the adopted root, or to a protected inode through another path, blocks
+  adoption. Missing or unreadable procfs evidence also fails closed.
