@@ -36,9 +36,11 @@ def _fixture(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
     # scientific path containing ``test``.  Pytest's own tmp_path embeds the test
     # function name, so keep the synthetic runtime in an independently named
     # private temporary directory and retain its owner for the fixture lifetime.
-    temporary = tempfile.TemporaryDirectory(
-        prefix="aids-v4-fixture-", dir="/private/tmp"
-    )
+    # Use a direct system-temporary child rather than pytest's ``tmp_path``.
+    # The latter embeds the test function name (which the production
+    # no-test-before-freeze validator correctly rejects), while an explicit
+    # macOS-only ``/private/tmp`` would make this release test fail on AutoDL.
+    temporary = tempfile.TemporaryDirectory(prefix="aids-v4-fixture-")
     fixture_root = Path(temporary.name)
     runtime = fixture_root / "runtime"
     (runtime / "outputs/autodl").mkdir(parents=True)
