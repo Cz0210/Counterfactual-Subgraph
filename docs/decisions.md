@@ -4,6 +4,50 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Continue BACE B11--B14 through flattened exact adoptions
+
+### Background
+
+The first four-GPU controller completed B6--B10 but retained the original
+MolCLR-parent preparation failure as immutable evidence.  A corrected MolCLR
+preparation later passed in a separate fresh run.  B11 could not be released
+inside the original dependency graph, and the controller intentionally rejects
+binding one historical run to a multi-instance sharded task.  Therefore B8 and
+B9 could not be adopted by copying their aggregate task definitions.
+
+### Decision
+
+Build a new continuation manifest only after the source controller is
+quiescent and its B10 task and gate are both `PASS`.  Exact-adopt B6, B7, the
+three passing original preparation runs, corrected MolCLR preparation, B10,
+and every B8/B9 shard.  Represent the eight B8/B9 runs as eight ordinary
+single-instance adopted evidence tasks; never synthesize an aggregate run or
+rewrite source state.  Run B11--B14 as fresh tasks under a new controller ID,
+output root, and WNode cache, using the corrected MolCLR node cache.
+
+The continuation controller acquires the predecessor controller lock before
+initialization and retains it for its full lifetime.  This prevents the old
+controller from restarting concurrently.  A new optional boolean runtime flag,
+`keep_alive_when_blocked` (default `false`), keeps a controller heartbeat and
+poll loop alive after all non-Taste tasks become terminal without launching a
+dummy task.  Generated BACE continuation manifests enable it explicitly.
+
+### Consequences
+
+- Every adopted run is revalidated against its exact launch spec, hashes,
+  output contract, GPU identity, log marker, and immutable attempt path.
+- The failed v2 MolCLR attempt remains failed and unmodified; only the separate
+  corrected PASS run becomes B11 evidence.
+- B11 starts only after a fresh continuation-output preflight and cannot share
+  a writer namespace with the old controller.
+- B13 retains its post-B12-only test dependency; TasteMolNet remains
+  license-blocked and paper access remains forbidden.
+- Invalid non-boolean keep-alive values fail manifest validation.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Accept explicit CUDA indices in the shared MolCLR loader
 
 ### Background

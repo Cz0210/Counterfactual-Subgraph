@@ -783,6 +783,11 @@ Mutagenicity roadmaps.
   controller with passing-attempt shard tokens, dependency-produced parent
   manifests, explicit B11/B13 shard-to-merge joins, and a post-B12-only test
   boundary.
+- [x] Add a fresh B11--B14 continuation builder that exact-adopts B6--B10,
+  flattens eight historical B8/B9 shard runs into single-instance evidence
+  tasks, and substitutes the passing MolCLR repair without mutating v2.
+- [x] Hold the predecessor controller lock for the full continuation lifetime
+  and support an opt-in terminal heartbeat/poll mode without dummy work.
 - [ ] Fill the persistent controller manifest with Commit A MUT/AIDS and Commit
   B BACE foreground argv/evidence contracts, validate it, and launch on AutoDL.
 # 2026-08-22 — Four-by-four main experiment continuation

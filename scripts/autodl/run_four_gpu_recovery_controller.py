@@ -14,6 +14,7 @@ verification, or selector science.  Those entrypoints are integration inputs.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -61,6 +62,12 @@ from src.utils.autodl_runtime import (
 from src.train.stable_ppo_resume import (
     find_latest_stable_ppo_resume_checkpoint,
     read_stable_ppo_resume_manifest,
+)
+from src.utils.autodl_bace_continuation import (
+    BaceContinuationError,
+    PredecessorControllerGuard,
+    build_bace_continuation_payload,
+    validate_continuation_policy,
 )
 
 
@@ -122,6 +129,7 @@ SECRET_KEY = re.compile(
     r"(?i)(password|passwd|secret|token|authorization|api[_-]?key|"
     r"credential|private[_-]?key)"
 )
+ALLOWED_SECRET_LIKE_ENV_KEYS = frozenset({"TOKENIZERS_PARALLELISM"})
 SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
 TOKEN = re.compile(r"\{([A-Za-z0-9_]+)\}")
 TEST_PATH = re.compile(r"(?i)(?:^|[/_.-])test(?:[/_.-]|$)")
@@ -384,7 +392,7 @@ def _parse_task(raw: Any) -> TaskSpec:
     ):
         raise ControllerError(f"{task_id}.environment must contain scalar values")
     for key in environment:
-        if SECRET_KEY.search(key):
+        if SECRET_KEY.search(key) and key not in ALLOWED_SECRET_LIKE_ENV_KEYS:
             raise ControllerError(f"{task_id} has credential-like environment key")
     if str(environment.get("PYTHONDONTWRITEBYTECODE", "1")) != "1":
         raise ControllerError(
@@ -691,6 +699,12 @@ def load_controller_manifest(path: Path) -> ControllerManifest:
     controller_id = _safe_id(
         str(payload.get("controller_id", "")), label="controller_id"
     )
+    try:
+        validate_continuation_policy(
+            payload.get("continuation"), controller_id=controller_id
+        )
+    except BaceContinuationError as exc:
+        raise ControllerError(str(exc)) from exc
     runtime = payload.get("runtime", {})
     resources = payload.get("resource_gates", {})
     if not isinstance(runtime, dict) or not isinstance(resources, dict):
@@ -715,6 +729,9 @@ def load_controller_manifest(path: Path) -> ControllerManifest:
     )
     if max_transient_retries not in {0, DEFAULT_MAX_TRANSIENT_RETRIES}:
         raise ControllerError("max_transient_retries must be 0 or 1")
+    keep_alive_when_blocked = runtime.get("keep_alive_when_blocked", False)
+    if not isinstance(keep_alive_when_blocked, bool):
+        raise ControllerError("runtime.keep_alive_when_blocked must be boolean")
     tasks_value = payload.get("tasks")
     if not isinstance(tasks_value, list) or not tasks_value:
         raise ControllerError("Manifest requires a nonempty tasks list")
@@ -2896,6 +2913,23 @@ def _summarize_controller_state(counts: Mapping[str, int]) -> str:
     return "NOT_STARTED"
 
 
+def keep_alive_after_all_terminal(
+    runtime: Mapping[str, Any], states: Sequence[Mapping[str, Any]]
+) -> bool:
+    """Keep polling terminal state without manufacturing a placeholder task."""
+
+    if runtime.get("keep_alive_when_blocked", False) is not True or not states:
+        return False
+    instances = [
+        instance
+        for state in states
+        for instance in (state.get("instances") or {}).values()
+    ]
+    return all(state.get("state") in TERMINAL_STATES for state in states) and not any(
+        instance.get("state") in ACTIVE_STATES for instance in instances
+    )
+
+
 def _write_controller_snapshot(
     root: Path,
     manifest: ControllerManifest,
@@ -3237,12 +3271,184 @@ def _build_layout(args: argparse.Namespace) -> Any:
     ).ensure()
 
 
+def _fresh_manifest_write(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish validated manifest bytes without replacing an existing file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise ControllerError(f"Continuation manifest target already exists: {path}")
+    candidate = path.with_name(f".{path.name}.candidate-{os.getpid()}")
+    if candidate.exists() or candidate.is_symlink():
+        raise ControllerError(f"Stale continuation manifest candidate exists: {candidate}")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    try:
+        with candidate.open("x", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        load_controller_manifest(candidate)
+        try:
+            os.link(candidate, path)
+        except FileExistsError as exc:
+            raise ControllerError(
+                f"Continuation manifest target appeared concurrently: {path}"
+            ) from exc
+        fsync_directory(path.parent)
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def build_bace_continuation(args: argparse.Namespace) -> int:
+    """Freeze one continuation manifest after B10 and the MolCLR repair pass."""
+
+    layout = _build_layout(args)
+    source = load_controller_manifest(args.source_manifest)
+    controller_id = _safe_id(str(args.controller_id), label="controller_id")
+    if controller_id == source.controller_id:
+        raise ControllerError("Continuation requires a new controller ID")
+    source_root = _controller_root(layout, source.controller_id)
+    controller_root = _controller_root(layout, controller_id)
+    if controller_root.exists() or controller_root.is_symlink():
+        raise ControllerError(
+            f"Fresh continuation controller root already exists: {controller_root}"
+        )
+    output_root = (
+        args.output_root.expanduser().resolve(strict=False)
+        if args.output_root is not None
+        else (
+            layout.artifacts_dir
+            / "autodl"
+            / "four_gpu_recovery"
+            / controller_id
+            / "bace"
+            / "frozen_gnn_downstream"
+        ).resolve(strict=False)
+    )
+    wnode_cache_db = (
+        args.wnode_cache_db.expanduser().resolve(strict=False)
+        if args.wnode_cache_db is not None
+        else (
+            layout.cache_dir
+            / "bace"
+            / "frozen_gnn_downstream"
+            / controller_id
+            / "wnode"
+            / "wnode_cache.sqlite3"
+        ).resolve(strict=False)
+    )
+    output_manifest = (
+        args.output_manifest.expanduser().resolve(strict=False)
+        if args.output_manifest is not None
+        else (
+            layout.control_root
+            / CONTROLLER_NAME
+            / "manifests"
+            / f"{controller_id}.json"
+        ).resolve(strict=False)
+    )
+    for path, parent, label in (
+        (output_root, layout.artifacts_dir, "continuation output root"),
+        (wnode_cache_db, layout.cache_dir, "continuation WNode cache"),
+        (output_manifest, layout.control_root, "continuation manifest"),
+    ):
+        try:
+            path.relative_to(parent.resolve(strict=True))
+        except ValueError as exc:
+            raise ControllerError(f"{label} escapes persistent runtime: {path}") from exc
+    if output_root.exists() or output_root.is_symlink():
+        raise ControllerError(f"Continuation output root is not fresh: {output_root}")
+    if wnode_cache_db.exists() or wnode_cache_db.is_symlink():
+        raise ControllerError(f"Continuation WNode cache is not fresh: {wnode_cache_db}")
+
+    build_kwargs = {
+        "source_manifest": source.path,
+        "source_controller_root": source_root,
+        "runs_root": layout.runs_root,
+        "molclr_repair_run_id": str(args.molclr_repair_run_id),
+        "controller_id": controller_id,
+        "output_root": output_root,
+        "wnode_cache_db": wnode_cache_db,
+    }
+    preliminary = build_bace_continuation_payload(**build_kwargs)
+    policy = validate_continuation_policy(
+        preliminary.get("continuation"), controller_id=controller_id
+    )
+    if policy is None:
+        raise ControllerError("Continuation builder omitted its safety policy")
+    persistent_inputs = (
+        (Path(str(policy["molclr_repair_output"])), layout.artifacts_dir, "MolCLR repair output"),
+        (
+            Path(str(policy["molclr_node_embedding_cache"])),
+            layout.cache_dir,
+            "MolCLR repair cache",
+        ),
+    )
+    for path, parent, label in persistent_inputs:
+        try:
+            path.resolve(strict=True).relative_to(parent.resolve(strict=True))
+        except (FileNotFoundError, ValueError) as exc:
+            raise ControllerError(f"{label} escapes its persistent runtime root") from exc
+    for task in preliminary["tasks"]:
+        if not isinstance(task, dict) or task.get("adopt_existing_run_id") is None:
+            continue
+        adopted_output = Path(str(task.get("expected_output", ""))).expanduser()
+        try:
+            adopted_output.resolve(strict=True).relative_to(
+                layout.artifacts_dir.resolve(strict=True)
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise ControllerError(
+                f"Adopted output escapes persistent artifacts: {adopted_output}"
+            ) from exc
+    # Hold the predecessor lock while re-reading every PASS run and publishing
+    # the manifest.  A later controller launch reacquires and retains this same
+    # lock for its full lifetime, so the v2 writer can never run in parallel.
+    with PredecessorControllerGuard(policy, require_fresh_targets=True):
+        payload = build_bace_continuation_payload(**build_kwargs)
+        if payload.get("continuation") != preliminary.get("continuation"):
+            raise ControllerError("Continuation evidence changed while acquiring lock")
+        _fresh_manifest_write(output_manifest, payload)
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "controller_id": controller_id,
+                "manifest": str(output_manifest),
+                "manifest_sha256": sha256_file(output_manifest),
+                "source_controller_id": source.controller_id,
+                "fresh_output_root": str(output_root),
+                "fresh_wnode_cache_db": str(wnode_cache_db),
+                "adopted_run_count": len(policy["adopted_run_ids"]),
+                "b8_b9_adoption": "8_FLATTENED_MAIN_TASKS",
+                "next_fresh_stage": "B11_CROSS_PARENT_VERIFIED",
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def run_controller(args: argparse.Namespace) -> int:
     layout = _build_layout(args)
     manifest = load_controller_manifest(args.manifest)
     python_executable = _resolve_python(args.python)
-    root, states = initialize_controller_state(layout, manifest)
-    with _ControllerLock(root / "controller.lock"):
+    raw_manifest = _load_json_or_yaml(manifest.path)
+    policy = validate_continuation_policy(
+        raw_manifest.get("continuation"), controller_id=manifest.controller_id
+    )
+    root = _controller_root(layout, manifest.controller_id)
+    first_launch = not (root / "controller_manifest.json").is_file()
+    with ExitStack() as stack:
+        if policy is not None:
+            stack.enter_context(
+                PredecessorControllerGuard(
+                    policy, require_fresh_targets=first_launch
+                )
+            )
+        root, states = initialize_controller_state(layout, manifest)
+        stack.enter_context(_ControllerLock(root / "controller.lock"))
         bind_adopted_runs(
             layout,
             root,
@@ -3274,9 +3480,12 @@ def run_controller(args: argparse.Namespace) -> int:
                 for instance in (state.get("instances") or {}).values()
                 if instance.get("state") in ACTIVE_STATES
             ]
-            if non_taste and all(
+            all_terminal = non_taste and all(
                 state.get("state") in TERMINAL_STATES for state in non_taste
-            ) and not active_instances:
+            ) and not active_instances
+            if all_terminal and not keep_alive_after_all_terminal(
+                manifest.runtime, non_taste
+            ):
                 return 0 if all(
                     state.get("state") in {"PASS", "SKIPPED"} for state in non_taste
                 ) else 4
@@ -3320,6 +3529,13 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="action", required=True)
     validate = commands.add_parser("validate")
     validate.add_argument("--manifest", type=Path, required=True)
+    continuation = commands.add_parser("build-bace-continuation")
+    continuation.add_argument("--source-manifest", type=Path, required=True)
+    continuation.add_argument("--molclr-repair-run-id", required=True)
+    continuation.add_argument("--controller-id", required=True)
+    continuation.add_argument("--output-manifest", type=Path)
+    continuation.add_argument("--output-root", type=Path)
+    continuation.add_argument("--wnode-cache-db", type=Path)
     run = commands.add_parser("run")
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--once", action="store_true")
@@ -3332,10 +3548,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.action == "validate":
             return validate_manifest(args)
+        if args.action == "build-bace-continuation":
+            return build_bace_continuation(args)
         if args.action == "run":
             return run_controller(args)
         raise ControllerError(f"Unknown action: {args.action}")
-    except (ControllerError, AutoDLRuntimeError, OSError, ValueError) as exc:
+    except (
+        BaceContinuationError,
+        ControllerError,
+        AutoDLRuntimeError,
+        OSError,
+        ValueError,
+    ) as exc:
         print(f"FOUR_GPU_RECOVERY_FAILED: {exc}", file=sys.stderr)
         return 2
 

@@ -12,7 +12,8 @@
     "worker_launcher": "auto",
     "max_cpu_tasks": 2,
     "launch_grace_seconds": 180,
-    "max_transient_retries": 1
+    "max_transient_retries": 1,
+    "keep_alive_when_blocked": false
   },
   "resource_gates": {
     "min_available_ram_gb": 32,
