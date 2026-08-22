@@ -4,6 +4,8 @@ import csv
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -803,6 +805,81 @@ def test_mut_gcf_foreground_wrapper_cannot_run_generation():
         "ssh ",
     ):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "scripts/slurm/gcfexplainer/build_mutagenicity_wnode_calibration_matrix.sh",
+        "scripts/slurm/gcfexplainer/evaluate_mutagenicity_wnode_frozen_test.sh",
+    ),
+)
+def test_mut_gcf_wrappers_use_controller_pinned_python_on_autodl(relative_path):
+    source = Path(relative_path).read_text(encoding="utf-8")
+
+    assert 'if [[ -n "${AUTODL_PYTHON:-}" ]]; then' in source
+    assert 'case "$AUTODL_PYTHON" in' in source
+    assert 'if [[ ! -x "$AUTODL_PYTHON" ]]; then' in source
+    assert 'export PATH="${AUTODL_PYTHON%/*}${PATH:+:$PATH}"' in source
+    assert 'ACTIVE_PYTHON="$(command -v python || true)"' in source
+    assert '[[ "$ACTIVE_PYTHON" -ef "$AUTODL_PYTHON" ]]' in source
+    assert "else\n  set +u\n  source ~/.bashrc\n  conda activate smiles_pip118\n  set -u\nfi" in source
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "scripts/slurm/gcfexplainer/build_mutagenicity_wnode_calibration_matrix.sh",
+        "scripts/slurm/gcfexplainer/evaluate_mutagenicity_wnode_frozen_test.sh",
+    ),
+)
+def test_mut_gcf_wrappers_reject_relative_autodl_python(relative_path):
+    result = subprocess.run(
+        ["bash", relative_path],
+        cwd=Path.cwd(),
+        env={
+            "AUTODL_PYTHON": "python",
+            "PATH": "/usr/bin:/bin",
+            "PROJECT_ROOT": str(Path.cwd()),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "AUTODL_PYTHON must be an absolute path" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "scripts/slurm/gcfexplainer/build_mutagenicity_wnode_calibration_matrix.sh",
+        "scripts/slurm/gcfexplainer/evaluate_mutagenicity_wnode_frozen_test.sh",
+    ),
+)
+def test_mut_gcf_wrappers_skip_conda_with_valid_autodl_python(
+    relative_path, tmp_path
+):
+    pinned_python = tmp_path / "python"
+    pinned_python.symlink_to(sys.executable)
+    result = subprocess.run(
+        ["bash", relative_path],
+        cwd=Path.cwd(),
+        env={
+            "AUTODL_PYTHON": str(pinned_python),
+            "PATH": "/usr/bin:/bin",
+            "PROJECT_ROOT": str(Path.cwd()),
+            "FULLGRAPH_CANDIDATES_PATH": str(tmp_path / "missing.csv"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 3
+    assert "Required input does not exist" in result.stderr
+    assert "conda: command not found" not in result.stderr
 
 
 def test_mut_gcf_raw_export_is_frozen_without_generation(tmp_path):

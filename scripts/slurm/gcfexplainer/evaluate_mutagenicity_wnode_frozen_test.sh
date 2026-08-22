@@ -23,10 +23,30 @@ PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd)"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-set +u
-source ~/.bashrc
-conda activate smiles_pip118
-set -u
+if [[ -n "${AUTODL_PYTHON:-}" ]]; then
+  case "$AUTODL_PYTHON" in
+    /*) ;;
+    *)
+      echo "[ERROR] AUTODL_PYTHON must be an absolute path: $AUTODL_PYTHON" >&2
+      exit 2
+      ;;
+  esac
+  if [[ ! -x "$AUTODL_PYTHON" ]]; then
+    echo "[ERROR] AUTODL_PYTHON is not executable: $AUTODL_PYTHON" >&2
+    exit 2
+  fi
+  export PATH="${AUTODL_PYTHON%/*}${PATH:+:$PATH}"
+  ACTIVE_PYTHON="$(command -v python || true)"
+  if [[ -z "$ACTIVE_PYTHON" ]] || ! [[ "$ACTIVE_PYTHON" -ef "$AUTODL_PYTHON" ]]; then
+    echo "[ERROR] PATH python does not resolve to AUTODL_PYTHON: active=${ACTIVE_PYTHON:-missing} expected=$AUTODL_PYTHON" >&2
+    exit 2
+  fi
+else
+  set +u
+  source ~/.bashrc
+  conda activate smiles_pip118
+  set -u
+fi
 
 FROZEN_ROOT="${FROZEN_ROOT:-outputs/hpc/mutagenicity/frozen_candidates/gcfexplainer_native5000_top20_v1}"
 FULLGRAPH_CANDIDATES_PATH="${FULLGRAPH_CANDIDATES_PATH:-$FROZEN_ROOT/export/selected_top20.csv}"

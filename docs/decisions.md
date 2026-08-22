@@ -4,6 +4,39 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Pin Mutagenicity GCF evaluation to the AutoDL controller Python
+
+### Background
+
+The four-by-four AutoDL continuation launches the frozen Mutagenicity GCF
+calibration and held-out evaluators through their portable Slurm wrappers. A
+non-interactive AutoDL worker does not expose the `conda` shell function after
+reading `.bashrc`, even though the controller already supplies an absolute,
+validated `AUTODL_PYTHON`. Calibration therefore exited before creating its
+fresh output root; no scientific computation or partial artifact was written.
+
+### Decision
+
+When `AUTODL_PYTHON` is present, both shared evaluators require it to be an
+absolute executable, prepend its `bin` directory to `PATH`, and fail unless
+`command -v python` identifies the same file. They skip shell-level Conda
+activation in that branch. When the variable is absent, the existing Slurm
+path continues to source `.bashrc` and activate `smiles_pip118` unchanged.
+
+### Consequences
+
+- AutoDL uses the controller-pinned interpreter without relying on interactive
+  shell initialization.
+- HPC keeps its existing Conda activation contract.
+- Calibration and held-out evaluation share one fail-closed runtime rule;
+  candidate generation, RF/MolCLR inputs, thresholds, and metrics are unchanged.
+- The failed AutoDL attempt remains immutable evidence and must be superseded
+  only by a fresh continuation task and output root.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Bind continuation predecessors to the source manifest namespace
 
 ### Decision

@@ -920,3 +920,13 @@ Mutagenicity roadmaps.
   roots using controller dependency tokens.
 - [x] Generate the strict final-export dependency contract from the same cell
   mapping, preventing a reporting task from silently changing cell identity.
+
+# 2026-08-22 — AutoDL Mutagenicity GCF runtime portability
+
+- [x] Make the calibration and held-out Slurm evaluators use the absolute
+  controller-pinned Python on AutoDL without depending on a non-interactive
+  `conda` shell function.
+- [x] Preserve the existing `.bashrc` plus `smiles_pip118` activation path when
+  the same wrappers run under Slurm without `AUTODL_PYTHON`.
+- [ ] Relaunch calibration from a fresh continuation task/output root; retain
+  the exit-127 attempt as immutable failure evidence.
