@@ -528,6 +528,42 @@ def test_b7_contract_requires_300_updates_and_all_six_periodic_checkpoints() -> 
     assert gate["status"] == "PASS"
 
 
+def test_b7_gate_rejects_last_50_reward_collapse() -> None:
+    observer = BacePPOObserver()
+    for step in range(1, 301):
+        observer.on_update(
+            step_index=step,
+            batch_ids=["p0"],
+            reward_logs=[_reward_row()],
+            metrics=_metrics(reward_mean=1.0 if step <= 250 else -2.0),
+        )
+    for step in (50, 100, 150, 200, 250, 300):
+        observer.on_checkpoint(
+            step_index=step,
+            checkpoint_dir=Path(f"checkpoint-{step}"),
+            checkpoint_kind="periodic",
+        )
+    observer.on_finish(final_output_dir=Path("final"), global_step=300)
+    gate = build_ppo_gate(
+        stage="B7_PPO_FULL",
+        policy_parameter_hash_before="policy-before",
+        policy_parameter_hash_after="policy-after",
+        reference_parameter_hash_before="reference",
+        reference_parameter_hash_after="reference",
+        observer=observer,
+        checkpoint_reload=_checkpoint_artifact(),
+        periodic_checkpoint_reload=_checkpoint_artifact(),
+        reward_manifest=build_reward_manifest(
+            [_reward_row()], oracle_provenance=_oracle_provenance()
+        ),
+        oracle_provenance=_oracle_provenance(),
+        expected_checkpoints=(50, 100, 150, 200, 250, 300),
+    )
+    assert gate["last_50_reward_collapse"] is True
+    assert "last_50_reward_collapse" in gate["failures"]
+    assert gate["status"] == "FAIL"
+
+
 def test_b7_deeply_revalidates_b6_manifest_and_physical_adapter_bytes(
     tmp_path: Path,
 ) -> None:

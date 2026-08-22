@@ -256,8 +256,7 @@
         "BACE_SPLIT_ROOT": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE",
         "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
         "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": "/root/autodl-tmp/worktrees/run-bace-ppo-a625841"
+        "PYTHONDONTWRITEBYTECODE": "1"
       },
       "adopt_existing_run_id": "20260822T033440Z-bace-ppo-canary-a625841",
       "adopt_gpu_index": 3,
