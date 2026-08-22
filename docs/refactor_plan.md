@@ -8,8 +8,11 @@
   interruption resume, and a hard RSS admission gate.
 - [x] Preserve legacy cluster order, strict-radius filtering, official greedy
   calls, and retained-pair medoid selection on an exact fixture.
-- [ ] Wire the engine into the full AIDS `run_common_recourse.py` route without
+- [x] Wire the engine into the full AIDS `run_common_recourse.py` route without
   changing the default legacy engine.
+- [x] Prove a full runner fixture has identical pair order, sklearn labels,
+  official summary, selected rows, and stable selected-row hash across legacy
+  and external engines.
 - [ ] Run end-to-end legacy/external smoke equivalence on AutoDL and freeze the
   complete pair/label/selected-row digests.
 - [ ] Build and launch a fresh CPU-only repair-v4 controller; never resume or

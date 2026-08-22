@@ -44,6 +44,20 @@ if [[ "$DATASET" == "aids" ]]; then
   : "${SOURCE_CSV:?SOURCE_CSV is required for AIDS}"
   args+=(--source-csv "$SOURCE_CSV" --theta-star "${THETA_STAR:-0.05}" --cost-cap "${COST_CAP:-0.0535}")
 fi
+if [[ -n "${COMMON_RECOURSE_ENGINE:-}" ]]; then
+  args+=(--common-recourse-engine "$COMMON_RECOURSE_ENGINE")
+fi
+if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
+  args+=(
+    --external-max-rss-gb "${COMRECGC_EXTERNAL_MAX_RSS_GB:-96}"
+    --external-query-block-size "${COMRECGC_EXTERNAL_QUERY_BLOCK_SIZE:-8}"
+    --external-checkpoint-interval-blocks "${COMRECGC_EXTERNAL_CHECKPOINT_INTERVAL_BLOCKS:-1}"
+    --expected-sklearn-version "${COMRECGC_EXPECTED_SKLEARN_VERSION:-1.7.2}"
+  )
+  if [[ "${COMRECGC_COMMON_RECOURSE_RESUME:-0}" == "1" ]]; then
+    args+=(--common-recourse-resume)
+  fi
+fi
 
 export PYTHONPATH="$PROJECT_ROOT"
 export PYTHONDONTWRITEBYTECODE=1

@@ -313,8 +313,8 @@ class ExternalPairStore:
         vector_dim = dimensions.pop()
         dtype = np.dtype(dtypes.pop())
         total = sum(int(row["row_count"]) for row in chunks)
-        if total <= 0:
-            raise ExternalMemoryDBSCANError("no theta-eligible recourse pairs")
+        if total < 0:
+            raise ExternalMemoryDBSCANError("negative pair-store row count")
         pairs_partial = self.root / "pair_indices.partial.npy"
         vectors_partial = self.root / "recourse_vectors.partial.npy"
         pairs_final = self.root / "pair_indices.npy"

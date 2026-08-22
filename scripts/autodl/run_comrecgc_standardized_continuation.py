@@ -73,6 +73,12 @@ class ContinuationInputs:
     device: str
     theta_star: float | None
     cost_cap: float | None
+    common_recourse_engine: str = "legacy_in_memory"
+    external_max_rss_gb: float = 96.0
+    external_query_block_size: int = 8
+    external_checkpoint_interval_blocks: int = 1
+    expected_sklearn_version: str = "1.7.2"
+    common_recourse_resume: bool = False
 
 
 def _utc_now() -> str:
@@ -527,7 +533,24 @@ def build_stage_commands(
         str(contract["generation_parent_limit"]),
         "--device",
         inputs.device,
+        "--engine",
+        inputs.common_recourse_engine,
     ]
+    if inputs.common_recourse_engine == "external_memory_exact_v1":
+        common_argv.extend(
+            [
+                "--external-max-rss-gb",
+                format(float(inputs.external_max_rss_gb), ".17g"),
+                "--external-query-block-size",
+                str(int(inputs.external_query_block_size)),
+                "--external-checkpoint-interval-blocks",
+                str(int(inputs.external_checkpoint_interval_blocks)),
+                "--expected-sklearn-version",
+                inputs.expected_sklearn_version,
+            ]
+        )
+    if inputs.common_recourse_resume:
+        common_argv.append("--resume")
     chemistry_argv = [
         python,
         str(PROJECT_ROOT / "scripts/baselines/comrecgc/audit_mutagenicity_chemistry.py"),
@@ -822,6 +845,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--theta-star", type=float)
     parser.add_argument("--cost-cap", type=float)
+    parser.add_argument(
+        "--common-recourse-engine",
+        choices=("legacy_in_memory", "external_memory_exact_v1"),
+        default="legacy_in_memory",
+    )
+    parser.add_argument("--external-max-rss-gb", type=float, default=96.0)
+    parser.add_argument("--external-query-block-size", type=int, default=8)
+    parser.add_argument(
+        "--external-checkpoint-interval-blocks", type=int, default=1
+    )
+    parser.add_argument("--expected-sklearn-version", default="1.7.2")
+    parser.add_argument("--common-recourse-resume", action="store_true")
     return parser
 
 
@@ -847,6 +882,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         device=str(args.device),
         theta_star=args.theta_star,
         cost_cap=args.cost_cap,
+        common_recourse_engine=args.common_recourse_engine,
+        external_max_rss_gb=args.external_max_rss_gb,
+        external_query_block_size=args.external_query_block_size,
+        external_checkpoint_interval_blocks=args.external_checkpoint_interval_blocks,
+        expected_sklearn_version=args.expected_sklearn_version,
+        common_recourse_resume=args.common_recourse_resume,
     )
     run_continuation(values)
     return 0
