@@ -64,19 +64,19 @@ def _fragment(tmp_path: Path, method: str) -> dict[str, object]:
         "neurosed_checkpoint": tmp_path / "neurosed.pt",
         "official_root": tmp_path / "official",
         "neurosed_manifest": tmp_path / "neurosed.json",
+        "globalgce_source_manifest": tmp_path / "source_graph_manifest.jsonl",
+        "globalgce_native_train_csv": tmp_path / "train.csv",
     }
     return build_bace_baseline_controller_fragment(method=method, **paths)
 
 
-def test_globalgce_action_preflight_passes_but_full_training_fails_closed(
+def test_globalgce_action_and_frozen_gine_bridge_preflight_are_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = baseline_spec("GlobalGCE")
-    assert spec.native_route_available is False
+    assert spec.native_route_available is True
     assert spec.action_kind == "lhs_rhs_graph_transformation_rule"
-    assert spec.blocker_code == (
-        "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
-    )
+    assert spec.blocker_code is None
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     for name in ("model.pt", "temperature_scaling.json", "feature_schema.json"):
@@ -108,12 +108,16 @@ def test_globalgce_action_preflight_passes_but_full_training_fails_closed(
         output_dir=tmp_path / "preflight",
         official_root=tmp_path / "official",
     )
-    assert result["status"] == "BLOCKED_CODE"
+    assert result["status"] == "READY"
     assert result["native_action_status"] == "PASS"
     assert result["training_compatibility"][
         "exact_frozen_gine_gradient_to_continuous_rhs"
-    ] is False
-    assert (tmp_path / "preflight/BLOCKED_CODE").read_text().strip() == spec.blocker_code
+    ] is True
+    assert "official_gtgnn" in result["training_compatibility"][
+        "forbidden_fallbacks"
+    ]
+    assert (tmp_path / "preflight/READY").read_text().strip() == "READY"
+    assert not (tmp_path / "preflight/BLOCKED_CODE").exists()
     assert (tmp_path / "preflight/NATIVE_ACTION_READY").is_file()
     assert not (tmp_path / "preflight/PASS").exists()
 
@@ -200,21 +204,24 @@ def test_comrecgc_preflight_requires_explicit_checkout(
     assert not (tmp_path / "preflight").exists()
 
 
-def test_globalgce_controller_fragment_runs_action_preflight_without_gpu(
+def test_globalgce_controller_fragment_runs_bridge_then_full_native_route(
     tmp_path: Path,
 ) -> None:
     fragment = _fragment(tmp_path, "GlobalGCE")
-    assert len(fragment["tasks"]) == 1
-    preflight = fragment["tasks"][0]
+    tasks = {row["task_id"]: row for row in fragment["tasks"]}
+    preflight = tasks["bace_globalgce_preflight"]
     assert preflight["task_id"] == "bace_globalgce_preflight"
     assert preflight["resource"] == {"kind": "cpu", "gpus": 0}
-    assert preflight["required_markers"] == ["NATIVE_ACTION_READY", "BLOCKED_CODE"]
+    assert preflight["required_markers"] == ["NATIVE_ACTION_READY", "READY"]
     assert "--official-root" in preflight["argv"]
-    terminal = fragment["static_terminal"]
-    assert terminal["state"] == "BLOCKED_CODE"
-    assert terminal["resource"] == {"kind": "none", "gpus": 0}
-    assert terminal["argv"] == []
-    assert terminal["dependencies"] == ["bace_globalgce_preflight"]
+    bridge = tasks["bace_globalgce_bridge_smoke"]
+    assert bridge["resource"] == {"kind": "gpu", "gpus": 1}
+    assert bridge["dependencies"] == ["bace_globalgce_preflight"]
+    generation = tasks["bace_globalgce_train_candidates"]
+    assert generation["dependencies"] == ["bace_globalgce_bridge_smoke"]
+    assert "--source-manifest" in generation["argv"]
+    assert generation["argv"][generation["argv"].index("--min-freq") + 1] == "7"
+    assert fragment["static_terminal"] is None
 
 
 @pytest.mark.parametrize("method", ["GCFExplainer", "ComRecGC"])

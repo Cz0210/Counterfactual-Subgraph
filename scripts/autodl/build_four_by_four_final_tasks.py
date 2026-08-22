@@ -20,11 +20,13 @@ MATRIX_TASK_ID = "final_matrix_audit"
 BACE_STANDARDIZED_CELL_TASKS = {
     "Ours": "bace_ours_standardized",
     "GCFExplainer": "bace_gcfexplainer_standardized",
+    "GlobalGCE": "bace_globalgce_standardized",
     "ComRecGC": "bace_comrecgc_standardized",
 }
 BACE_SCIENCE_TERMINALS = {
     "Ours": "bace_b14_frozen",
     "GCFExplainer": "bace_gcfexplainer_final_freeze",
+    "GlobalGCE": "bace_globalgce_final_freeze",
     "ComRecGC": "bace_comrecgc_final_freeze",
 }
 MUT_GCF_STANDARDIZED_TASK = "mut_gcf_legacy_standardized"

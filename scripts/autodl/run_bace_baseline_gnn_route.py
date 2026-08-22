@@ -29,6 +29,12 @@ from src.baselines.comrecgc.exporter import (  # noqa: E402
 from src.baselines.gcfexplainer_bace_runtime import (  # noqa: E402
     export_bace_gine_candidate_universe,
 )
+from src.baselines.globalgce_bace_adapter import (  # noqa: E402
+    EXPECTED_TRAIN_SOURCE_COUNT,
+    build_bace_frozen_gine_rule_pool,
+)
+from src.baselines.globalgce_mutagenicity_adapter import PoolBuildConfig  # noqa: E402
+from src.baselines.globalgce_min_freq import resolve_globalgce_min_freq  # noqa: E402
 from src.eval.bace_native_baseline_gnn import (  # noqa: E402
     freeze_native_baseline_final,
     merge_fullgraph_verification_shards,
@@ -37,6 +43,9 @@ from src.eval.bace_native_baseline_gnn import (  # noqa: E402
 )
 from src.eval.bace_globalgce_native_gine import (  # noqa: E402
     run_native_gine_forward_canary,
+)
+from src.eval.bace_globalgce_frozen_gine_bridge import (  # noqa: E402
+    run_frozen_gine_bridge_smoke,
 )
 
 
@@ -60,6 +69,8 @@ def _fragment_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--neurosed-checkpoint", required=True)
     parser.add_argument("--official-root")
     parser.add_argument("--neurosed-manifest")
+    parser.add_argument("--globalgce-source-manifest")
+    parser.add_argument("--globalgce-native-train-csv")
     parser.add_argument("--omp-threads", type=int, default=4)
 
 
@@ -78,6 +89,8 @@ def _fragment_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "neurosed_checkpoint": args.neurosed_checkpoint,
         "official_root": args.official_root,
         "neurosed_manifest": args.neurosed_manifest,
+        "globalgce_source_manifest": args.globalgce_source_manifest,
+        "globalgce_native_train_csv": args.globalgce_native_train_csv,
         "omp_threads": args.omp_threads,
     }
 
@@ -113,6 +126,39 @@ def build_parser() -> argparse.ArgumentParser:
     globalgce_forward.add_argument("--parent-smiles", required=True)
     globalgce_forward.add_argument("--device", default="cpu")
     globalgce_forward.add_argument("--oracle-batch-size", type=int, default=256)
+
+    globalgce_bridge = sub.add_parser("globalgce-bridge-smoke")
+    _common(globalgce_bridge)
+    globalgce_bridge.add_argument("--parent-smiles", required=True)
+    globalgce_bridge.add_argument("--atom-symbol", action="append", required=True)
+    globalgce_bridge.add_argument(
+        "--bond-name",
+        action="append",
+        default=None,
+    )
+    globalgce_bridge.add_argument("--device", default="cuda:0")
+
+    globalgce_train = sub.add_parser("globalgce-train-rules")
+    _common(globalgce_train)
+    globalgce_train.add_argument("--source-manifest", required=True)
+    globalgce_train.add_argument("--native-train-csv", required=True)
+    globalgce_train.add_argument("--official-root", required=True)
+    globalgce_train.add_argument("--expected-parent-count", type=int, default=360)
+    globalgce_train.add_argument("--seed", type=int, default=13)
+    globalgce_train.add_argument("--epochs", type=int, default=100)
+    globalgce_train.add_argument("--top-k-native", type=int, default=20)
+    globalgce_train.add_argument("--learning-rate", type=float, default=0.1)
+    globalgce_train.add_argument("--dropout", type=float, default=0.5)
+    globalgce_train.add_argument("--device", default="cuda:0")
+    globalgce_train.add_argument("--min-freq", type=int, default=None)
+    globalgce_train.add_argument("--min-freq-manifest")
+    globalgce_train.add_argument("--gspan-flush-every", type=int, default=256)
+    globalgce_train.add_argument(
+        "--gspan-max-in-memory-candidates", type=int, default=256
+    )
+    globalgce_train.add_argument(
+        "--resume", action=argparse.BooleanOptionalAction, default=True
+    )
 
     gcf = sub.add_parser("gcf-export")
     _common(gcf)
@@ -238,6 +284,52 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             device=args.device,
             oracle_batch_size=args.oracle_batch_size,
+        )
+    elif args.stage == "globalgce-bridge-smoke":
+        if baseline_spec(args.method).method_id != "globalgce":
+            raise ValueError("globalgce-bridge-smoke requires method=GlobalGCE")
+        result = run_frozen_gine_bridge_smoke(
+            gnn_checkpoint=args.gnn_checkpoint,
+            parent_smiles=args.parent_smiles,
+            atom_symbols=tuple(args.atom_symbol),
+            bond_names=tuple(
+                args.bond_name or ("no_edge", "single", "double", "triple")
+            ),
+            output_dir=args.output_dir,
+            device=args.device,
+        )
+    elif args.stage == "globalgce-train-rules":
+        if baseline_spec(args.method).method_id != "globalgce":
+            raise ValueError("globalgce-train-rules requires method=GlobalGCE")
+        if int(args.expected_parent_count) != EXPECTED_TRAIN_SOURCE_COUNT:
+            raise ValueError("GlobalGCE full route requires all 360 BACE train parents")
+        minimum_frequency = resolve_globalgce_min_freq(
+            "BACE",
+            explicit_min_freq=args.min_freq,
+            calibration_manifest=args.min_freq_manifest,
+        )
+        result = build_bace_frozen_gine_rule_pool(
+            source_manifest=args.source_manifest,
+            native_train_csv=args.native_train_csv,
+            official_root=args.official_root,
+            gnn_checkpoint=args.gnn_checkpoint,
+            output_dir=args.output_dir,
+            min_freq=minimum_frequency.value,
+            config=PoolBuildConfig(
+                expected_parent_count=int(args.expected_parent_count),
+                seed=int(args.seed),
+                epochs=int(args.epochs),
+                top_k_native=int(args.top_k_native),
+                learning_rate=float(args.learning_rate),
+                dropout=float(args.dropout),
+                device=str(args.device),
+                resume=bool(args.resume),
+                forbid_calibration_test=True,
+                gspan_flush_every=int(args.gspan_flush_every),
+                gspan_max_in_memory_candidates=int(
+                    args.gspan_max_in_memory_candidates
+                ),
+            ),
         )
     elif args.stage == "gcf-export":
         if baseline_spec(args.method).method_id != "gcfexplainer":

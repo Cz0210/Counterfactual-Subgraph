@@ -40,6 +40,7 @@ OFFICIAL_SOURCE_SHA256 = {
 }
 ACTION_ENGINE_VERSION = "globalgce_native_attachment_rule_v2"
 OFFICIAL_TENSOR_PARITY_VERSION = "globalgce_official_tensor_parity_v1"
+RULE_SELECTOR_CHEMISTRY_VERSION = "globalgce_native_rule_selector_chemistry_v1"
 
 
 class GlobalGCENativeRuleError(ValueError):
@@ -326,6 +327,75 @@ class GlobalGCENativeRule:
             "rhs_edge_attr": self.rhs_edge_attr.tolist(),
             "atom_symbols": list(self.atom_symbols),
             "bond_names": list(self.bond_names),
+        }
+
+    def selector_chemistry(self, *, n_bits: int = 2048) -> dict[str, Any]:
+        """Build a deterministic redundancy representation of the native rule.
+
+        GlobalGCE actions are LHS-to-RHS transformations, not fragments.  The
+        shared selector therefore fingerprints aligned labelled node and edge
+        changes instead of inventing a deletion/full-graph SMILES.  These bits
+        are calibration-only redundancy evidence; native application remains
+        the sole scientific action.
+        """
+
+        bit_count = int(n_bits)
+        if bit_count < 128:
+            raise GlobalGCENativeRuleError(
+                "Native rule selector fingerprint requires at least 128 bits"
+            )
+        lhs_nodes = [_hard_label(row) for row in self.lhs_feature]
+        rhs_nodes = [_hard_label(row) for row in self.rhs_feature]
+        tokens: list[str] = []
+        for index, (lhs_label, rhs_label) in enumerate(
+            zip(lhs_nodes, rhs_nodes, strict=True)
+        ):
+            tokens.append(f"node:{index}:{lhs_label}>{rhs_label}")
+        for left in range(self.maximum_nodes):
+            for right in range(left + 1, self.maximum_nodes):
+                position = _edge_position(left, right)
+                lhs_present = int(float(self.lhs_adjacency[left, right]) > 0.5)
+                rhs_present = int(float(self.rhs_adjacency[left, right]) > 0.5)
+                lhs_bond = (
+                    _hard_label(self.lhs_edge_attr[position]) if lhs_present else 0
+                )
+                rhs_bond = (
+                    _hard_label(self.rhs_edge_attr[position]) if rhs_present else 0
+                )
+                if lhs_present or rhs_present or lhs_bond != rhs_bond:
+                    tokens.append(
+                        f"edge:{left}:{right}:{lhs_present}:{lhs_bond}>"
+                        f"{rhs_present}:{rhs_bond}"
+                    )
+        active_lhs = sum(label > 0 for label in lhs_nodes)
+        active_rhs = sum(label > 0 for label in rhs_nodes)
+        tokens.extend(
+            (
+                f"lhs_active:{active_lhs}",
+                f"rhs_active:{active_rhs}",
+                f"node_delta:{active_rhs - active_lhs}",
+            )
+        )
+        bits: set[int] = set()
+        for token in sorted(tokens):
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            for offset in range(0, 8, 2):
+                bits.add(
+                    int.from_bytes(digest[offset : offset + 2], "big") % bit_count
+                )
+        if not bits:
+            raise GlobalGCENativeRuleError("Native rule selector fingerprint is empty")
+        return {
+            "schema_version": RULE_SELECTOR_CHEMISTRY_VERSION,
+            "role": "native_lhs_rhs_rule_redundancy_only",
+            "fingerprint_kind": "hashed_aligned_label_transition_bits",
+            "fingerprint_n_bits": bit_count,
+            "fingerprint_bits": sorted(bits),
+            "heavy_atom_count": max(active_lhs, active_rhs),
+            "canonical_fragment_applicable": False,
+            "canonical_fragment_reason": (
+                "GlobalGCE action is an attachment-aware LHS-to-RHS rule"
+            ),
         }
 
 
@@ -898,6 +968,7 @@ __all__ = [
     "NativeParentTensors",
     "OFFICIAL_GLOBALGCE_COMMIT",
     "OFFICIAL_SOURCE_SHA256",
+    "RULE_SELECTOR_CHEMISTRY_VERSION",
     "apply_official_rule_tensors",
     "apply_rule_to_parent",
     "build_parent_native_tensors",

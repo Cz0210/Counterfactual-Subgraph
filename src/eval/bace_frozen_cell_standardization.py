@@ -42,6 +42,7 @@ MAX_K = 20
 METHODS = {
     "ours": "Ours",
     "gcfexplainer": "GCFExplainer",
+    "globalgce": "GlobalGCE",
     "comrecgc": "ComRecGC",
 }
 METHOD_SLUGS = {value: key for key, value in METHODS.items()}
@@ -174,13 +175,15 @@ def _method_slug(method: str) -> str:
         "ours": "ours",
         "gcfexplainer": "gcfexplainer",
         "gcf": "gcfexplainer",
+        "globalgce": "globalgce",
         "comrecgc": "comrecgc",
     }
     try:
         return aliases[token]
     except KeyError as exc:
         raise BACECellStandardizationError(
-            f"Only frozen Ours/GCFExplainer/ComRecGC terminals are supported: {method!r}"
+            "Only frozen Ours/GCFExplainer/GlobalGCE/ComRecGC terminals are "
+            f"supported: {method!r}"
         ) from exc
 
 

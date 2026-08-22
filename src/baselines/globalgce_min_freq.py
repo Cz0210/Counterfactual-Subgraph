@@ -17,6 +17,10 @@ OFFICIAL_MIN_FREQ: dict[str, int] = {
     "ENZYMES": 35,
 }
 FALLBACK_RATIO_GRID = (0.005, 0.01, 0.02, 0.05)
+# Primary BACE route is preregistered from train-cohort size only: round(2% *
+# 360)=7.  It is never selected from held-out curves, and remains one member
+# of the immutable train-derived grid returned by ``bace_min_freq_grid``.
+BACE_PRIMARY_MIN_FREQ = 7
 
 
 class GlobalGCEMinFreqConfigurationError(ValueError):

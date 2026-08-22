@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.baselines.bace_gnn_baseline_contracts import baseline_spec
+from src.baselines.globalgce_min_freq import BACE_PRIMARY_MIN_FREQ
 
 
 NUM_SHARDS = 4
@@ -33,6 +34,8 @@ def build_bace_baseline_controller_fragment(
     neurosed_checkpoint: str | Path,
     official_root: str | Path | None = None,
     neurosed_manifest: str | Path | None = None,
+    globalgce_source_manifest: str | Path | None = None,
+    globalgce_native_train_csv: str | Path | None = None,
     omp_threads: int = 4,
 ) -> dict[str, Any]:
     """Return tasks ready to splice into a dependency-aware controller manifest.
@@ -122,7 +125,7 @@ def build_bace_baseline_controller_fragment(
         globalgce_official = _absolute(official_root, field="official_root")
         preflight_argv.extend(["--official-root", globalgce_official])
         preflight_inputs.append(globalgce_official)
-        preflight_markers = ["NATIVE_ACTION_READY", "BLOCKED_CODE"]
+        preflight_markers = ["NATIVE_ACTION_READY", "READY"]
     elif spec.method_id == "comrecgc":
         comrecgc_official = _absolute(
             official_root or f"{project}/external/COMRECGC",
@@ -162,7 +165,108 @@ def build_bace_baseline_controller_fragment(
             },
         }
 
-    if spec.method_id == "gcfexplainer":
+    if spec.method_id == "globalgce":
+        if (
+            official_root is None
+            or globalgce_source_manifest is None
+            or globalgce_native_train_csv is None
+        ):
+            raise ValueError(
+                "GlobalGCE route requires official_root, source_manifest, and native_train_csv"
+            )
+        official = _absolute(official_root, field="official_root")
+        source_manifest = _absolute(
+            globalgce_source_manifest, field="globalgce_source_manifest"
+        )
+        native_train_csv = _absolute(
+            globalgce_native_train_csv, field="globalgce_native_train_csv"
+        )
+        bridge_id = f"{prefix}_bridge_smoke"
+        bridge_out = f"{root}/bridge_smoke"
+        add(
+            bridge_id,
+            resource="gpu",
+            argv=[
+                py,
+                script,
+                "globalgce-bridge-smoke",
+                "--method",
+                spec.method,
+                "--gnn-checkpoint",
+                checkpoint,
+                "--output-dir",
+                bridge_out,
+                "--parent-smiles",
+                "CCO",
+                "--atom-symbol",
+                "C",
+                "--atom-symbol",
+                "O",
+                "--atom-symbol",
+                "Cl",
+                "--atom-symbol",
+                "H",
+                "--atom-symbol",
+                "N",
+                "--atom-symbol",
+                "F",
+                "--atom-symbol",
+                "Br",
+                "--atom-symbol",
+                "S",
+                "--atom-symbol",
+                "I",
+                "--device",
+                "cuda:0",
+            ],
+            output=bridge_out,
+            markers=["PASS", "BRIDGE_PASS"],
+            dependencies=[preflight_id],
+            inputs=[checkpoint, official],
+        )
+        candidate_id = f"{prefix}_train_candidates"
+        candidate_out = f"{root}/train_candidates"
+        add(
+            candidate_id,
+            resource="gpu",
+            argv=[
+                py,
+                script,
+                "globalgce-train-rules",
+                "--method",
+                spec.method,
+                "--gnn-checkpoint",
+                checkpoint,
+                "--source-manifest",
+                source_manifest,
+                "--native-train-csv",
+                native_train_csv,
+                "--official-root",
+                official,
+                "--output-dir",
+                candidate_out,
+                "--expected-parent-count",
+                "360",
+                "--seed",
+                "13",
+                "--min-freq",
+                str(BACE_PRIMARY_MIN_FREQ),
+                "--epochs",
+                "100",
+                "--top-k-native",
+                "20",
+                "--device",
+                "cuda:0",
+                "--resume",
+            ],
+            output=candidate_out,
+            markers=["PASS"],
+            dependencies=[bridge_id],
+            inputs=[source_manifest, native_train_csv, official, checkpoint],
+        )
+        tasks[-1]["resume_argv"] = list(tasks[-1]["argv"])
+        tasks[-1]["retry_policy"] = "resume_same_root_from_verified_checkpoint"
+    elif spec.method_id == "gcfexplainer":
         if official_root is None or neurosed_manifest is None:
             raise ValueError("GCFExplainer task fragment requires official_root and neurosed_manifest")
         official = _absolute(official_root, field="official_root")

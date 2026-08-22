@@ -69,21 +69,9 @@ BASELINE_SPECS: dict[str, NativeBaselineSpec] = {
         method_id="globalgce",
         action_kind="lhs_rhs_graph_transformation_rule",
         action_semantics="native_lhs_to_rhs_attachment_aware_v1",
-        generation_resource="cpu",
-        verification_resource="cpu",
-        native_route_available=False,
-        blocker_code=(
-            "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
-        ),
-        blocker_reason=(
-            "The native attachment-aware LHS-to-RHS action engine now matches pinned "
-            "GlobalGCE tensor semantics, but official rule training requires a "
-            "differentiable classifier loss over continuous reconstructed dense "
-            "tensors. The frozen BACE GINE accepts RDKit-derived categorical long "
-            "features after discrete graph sanitization, so its exact score has no "
-            "gradient path to the RHS decoder. GTGNN/RF fallback and an unreviewed "
-            "straight-through surrogate are forbidden."
-        ),
+        generation_resource="gpu",
+        verification_resource="gpu",
+        native_route_available=True,
     ),
 }
 
@@ -250,22 +238,22 @@ def write_route_preflight(
 
         native_action = run_official_tensor_parity(official_root)
         training_compatibility = {
-            "status": "BLOCKED_CODE",
-            "blocker_code": spec.blocker_code,
+            "status": "READY",
+            "blocker_code": None,
             "exact_frozen_gine_forward_available": True,
             "exact_frozen_gine_forward_adapter": (
-                "src.eval.bace_globalgce_native_gine."
-                "BACEGlobalGCEFrozenGINEForwardEvaluator"
+                "src.baselines.globalgce_frozen_gine_bridge."
+                "FrozenGINEDifferentiableBridge"
             ),
-            "forward_canary_cli_stage": "globalgce-forward-canary",
-            "exact_frozen_gine_gradient_to_continuous_rhs": False,
+            "forward_canary_cli_stage": "globalgce-bridge-smoke",
+            "exact_frozen_gine_gradient_to_continuous_rhs": True,
             "official_loss_requires_rhs_gradient": True,
             "forbidden_fallbacks": [
                 "official_gtgnn",
                 "random_forest",
                 "fullgraph_substitution",
                 "deletion_substitution",
-                "unreviewed_straight_through_estimator",
+                "trainable_classifier",
             ],
         }
     payload = {
@@ -304,8 +292,11 @@ def write_route_preflight(
         atomic_json(output / "official_source_audit.json", native_action)
         atomic_json(output / "official_tensor_parity.json", native_action)
         atomic_marker(output / "NATIVE_ACTION_READY", "NATIVE_ACTION_READY")
-        atomic_json(output / "BLOCKED_CODE.json", payload)
-        atomic_marker(output / "BLOCKED_CODE", str(spec.blocker_code))
+        if spec.native_route_available:
+            atomic_marker(output / "READY", "READY")
+        else:
+            atomic_json(output / "BLOCKED_CODE.json", payload)
+            atomic_marker(output / "BLOCKED_CODE", str(spec.blocker_code))
     elif spec.native_route_available:
         atomic_marker(output / "READY", "READY")
     else:

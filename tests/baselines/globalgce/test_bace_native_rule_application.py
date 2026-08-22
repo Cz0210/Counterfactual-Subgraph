@@ -163,6 +163,20 @@ def test_boundary_attachment_and_appended_node_are_preserved() -> None:
     assert all(row["connected"] and row["sanitized"] for row in valid)
 
 
+def test_native_rule_selector_chemistry_is_deterministic_and_not_a_fragment() -> None:
+    rule = _rule(add_node=True)
+    first = rule.selector_chemistry()
+    second = rule.selector_chemistry()
+    assert first == second
+    assert first["schema_version"] == (
+        "globalgce_native_rule_selector_chemistry_v1"
+    )
+    assert first["role"] == "native_lhs_rhs_rule_redundancy_only"
+    assert first["canonical_fragment_applicable"] is False
+    assert first["heavy_atom_count"] == 3
+    assert first["fingerprint_bits"]
+
+
 def test_ambiguous_mapping_and_invalid_shapes_fail_closed() -> None:
     torch = pytest.importorskip("torch")
     rule = _rule()
@@ -197,18 +211,14 @@ def test_adjacency_with_no_edge_label_fails_chemistry_closed() -> None:
     assert all("no-edge bond label" in row["failure_reason"] for row in rows)
 
 
-def test_blocked_training_contract_forbids_rf_gtgnn_and_ste() -> None:
+def test_bridge_training_contract_enables_native_route_and_forbids_fallbacks() -> None:
     from src.baselines.bace_gnn_baseline_contracts import baseline_spec
 
     spec = baseline_spec("GlobalGCE")
-    assert spec.native_route_available is False
-    assert spec.blocker_code == (
-        "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
-    )
-    text = str(spec.blocker_reason).lower()
-    assert "categorical long" in text
-    assert "gtgnn/rf" in text
-    assert "straight-through" in text
+    assert spec.native_route_available is True
+    assert spec.blocker_code is None
+    assert spec.blocker_reason is None
+    assert spec.action_kind == "lhs_rhs_graph_transformation_rule"
 
 
 class _FakeBACEGINE:

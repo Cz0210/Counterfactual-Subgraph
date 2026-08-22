@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.baselines.globalgce_min_freq import (
+    BACE_PRIMARY_MIN_FREQ,
     GlobalGCEMinFreqConfigurationError,
     bace_min_freq_grid,
     resolve_globalgce_min_freq,
@@ -15,6 +16,8 @@ from src.baselines.globalgce_min_freq import (
 
 def test_bace_grid_is_fixed_from_train_count() -> None:
     assert bace_min_freq_grid(360) == (2, 4, 7, 18)
+    assert BACE_PRIMARY_MIN_FREQ == 7
+    assert BACE_PRIMARY_MIN_FREQ in bace_min_freq_grid(360)
 
 
 def test_bace_requires_explicit_or_calibration_manifest(tmp_path: Path) -> None:

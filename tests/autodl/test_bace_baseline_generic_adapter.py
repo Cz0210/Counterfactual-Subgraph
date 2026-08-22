@@ -4,7 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from scripts.autodl.run_bace_baseline_gnn_route import main as route_main
+from scripts.autodl.run_bace_baseline_gnn_route import (
+    build_parser as build_route_parser,
+    main as route_main,
+)
 from scripts.autodl.run_four_gpu_recovery_controller import (
     initialize_controller_state,
     load_controller_manifest,
@@ -35,6 +38,8 @@ def _paths(tmp_path: Path) -> dict[str, Path]:
         "neurosed_checkpoint": root / "neurosed.pt",
         "official_root": root / "official",
         "neurosed_manifest": root / "neurosed.json",
+        "globalgce_source_manifest": root / "source_graph_manifest.jsonl",
+        "globalgce_native_train_csv": root / "train.csv",
     }
 
 
@@ -113,7 +118,7 @@ def test_generic_adapter_binds_attempt_roots_and_every_dependency(
     assert test_shard["read_only_test"] is True
 
 
-def test_gcf_comrecgc_and_static_globalgce_pass_production_loader(
+def test_all_three_native_routes_pass_production_loader(
     tmp_path: Path,
 ) -> None:
     gcf = _generic(tmp_path / "gcf", "GCFExplainer")
@@ -132,22 +137,38 @@ def test_gcf_comrecgc_and_static_globalgce_pass_production_loader(
         < by_id["bace_comrecgc_train_candidates"].priority
         < B11_SHARD_PRIORITY
     )
-    terminal = by_id["bace_globalgce_terminal"]
-    assert terminal.command is None
-    assert terminal.resource == "cpu"
-    assert terminal.blocked_reason == (
-        "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
-    )
-    assert terminal.blocked_reason is not None
+    bridge = by_id["bace_globalgce_bridge_smoke"]
+    assert bridge.resource == "gpu"
+    assert bridge.depends_on == ("bace_globalgce_preflight",)
+    global_train = by_id["bace_globalgce_train_candidates"]
+    assert global_train.resource == "gpu"
+    assert global_train.depends_on == ("bace_globalgce_bridge_smoke",)
     root, states = initialize_controller_state(
         type("Layout", (), {"control_root": tmp_path / "control"})(), manifest
     )
     assert root.is_dir()
-    assert states[terminal.task_id]["state"] == "BLOCKED"
-    assert all(
-        instance["state"] == "NOT_STARTED"
-        for instance in states[terminal.task_id]["instances"].values()
-    )
+    assert states[bridge.task_id]["state"] == "NOT_STARTED"
+
+
+def test_generated_globalgce_entrypoint_commands_parse_exactly(tmp_path: Path) -> None:
+    fragment = _generic(tmp_path, "GlobalGCE")
+    parser = build_route_parser()
+    parsed_stages: set[str] = set()
+    for task in fragment["tasks"]:
+        command = task["command"]
+        if not str(command[1]).endswith("run_bace_baseline_gnn_route.py"):
+            continue
+        parsed = parser.parse_args(command[2:])
+        parsed_stages.add(str(parsed.stage))
+    assert parsed_stages == {
+        "preflight",
+        "globalgce-bridge-smoke",
+        "globalgce-train-rules",
+        "verify-shard",
+        "merge",
+        "select",
+        "freeze",
+    }
 
 
 def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> None:
@@ -181,6 +202,10 @@ def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> Non
         str(paths["official_root"]),
         "--neurosed-manifest",
         str(paths["neurosed_manifest"]),
+        "--globalgce-source-manifest",
+        str(paths["globalgce_source_manifest"]),
+        "--globalgce-native-train-csv",
+        str(paths["globalgce_native_train_csv"]),
         "--fragment-output",
         str(destination),
     ]
@@ -190,4 +215,5 @@ def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> Non
     by_id = {row["id"]: row for row in payload["tasks"]}
     assert by_id["bace_globalgce_preflight"]["command"] is not None
     assert by_id["bace_globalgce_preflight"]["resource"] == "cpu"
-    assert by_id["bace_globalgce_terminal"]["command"] is None
+    assert by_id["bace_globalgce_bridge_smoke"]["resource"] == "gpu"
+    assert by_id["bace_globalgce_train_candidates"]["resource"] == "gpu"

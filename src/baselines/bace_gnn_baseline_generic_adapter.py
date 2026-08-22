@@ -86,14 +86,32 @@ def _rewrite_argument(
 
 def _required_output_files(task_id: str) -> list[str]:
     if task_id.endswith("_preflight"):
-        return [
+        files = [
             "route_contract.json",
             "oracle_provenance.json",
             "state.json",
             "READY",
         ]
+        if task_id.startswith("bace_globalgce_"):
+            files.extend(
+                [
+                    "official_source_audit.json",
+                    "official_tensor_parity.json",
+                    "NATIVE_ACTION_READY",
+                ]
+            )
+        return files
     if task_id.endswith("_train_vrrw"):
         return ["run_manifest.json", "counterfactuals.pt", "_RUN_COMPLETE.json"]
+    if task_id.endswith("_bridge_smoke"):
+        return [
+            "bridge_gradient_audit.json",
+            "oracle_provenance.json",
+            "run_manifest.json",
+            "state.json",
+            "PASS",
+            "BRIDGE_PASS",
+        ]
     if task_id.endswith("_train_summary"):
         return [
             "run_manifest.json",
@@ -158,6 +176,8 @@ def _required_log_marker(task_id: str) -> str:
         return "[BACE_GCFEXPLAINER_VRRW_OK]"
     if task_id.endswith("_train_summary"):
         return "[BACE_GCFEXPLAINER_NATIVE_SUMMARY_OK]"
+    if task_id.endswith("_bridge_smoke"):
+        return "[BACE_GLOBALGCE_BRIDGE_PASS]"
     if task_id.endswith(("_train_generation", "_train_common_recourse")):
         return '"run_complete": true'
     if task_id.endswith("_selection"):
@@ -172,6 +192,8 @@ def _stage_contract(task_id: str) -> tuple[str, list[str], bool, bool, bool]:
         return "BACE_BASELINE_PREFLIGHT", [], False, False, False
     if task_id.endswith(("_train_vrrw", "_train_generation")):
         return "BACE_BASELINE_TRAIN_GENERATION", ["train"], False, False, False
+    if task_id.endswith("_bridge_smoke"):
+        return "BACE_GLOBALGCE_FROZEN_GINE_BRIDGE_SMOKE", [], False, False, False
     if task_id.endswith("_train_summary"):
         return "BACE_BASELINE_TRAIN_SUMMARY", ["train"], False, False, False
     if task_id.endswith("_train_common_recourse"):
@@ -202,6 +224,8 @@ def _priority(task_id: str, *, method_id: str) -> int:
         return 60 + method_offset
     if task_id.endswith(("_train_vrrw", "_train_generation")):
         return 80 + method_offset
+    if task_id.endswith("_bridge_smoke"):
+        return 78 + method_offset
     if task_id.endswith(("_train_summary", "_train_common_recourse")):
         return 82 + method_offset
     if task_id.endswith("_train_candidates"):

@@ -19,15 +19,21 @@ CONTROLLER_TASKS = {
         "bace_gcfexplainer_final_freeze",
         161,
     ),
+    "GlobalGCE": (
+        "bace_globalgce_standardized",
+        "bace_globalgce_final_freeze",
+        162,
+    ),
     "ComRecGC": (
         "bace_comrecgc_standardized",
         "bace_comrecgc_final_freeze",
-        162,
+        163,
     ),
 }
 METHOD_SLUGS = {
     "Ours": "ours",
     "GCFExplainer": "gcfexplainer",
+    "GlobalGCE": "globalgce",
     "ComRecGC": "comrecgc",
 }
 REQUIRED_FILES = [
@@ -151,7 +157,7 @@ def build_fragment(
         "controller_id": controller,
         "paper_frozen": True,
         "raw_test_access": False,
-        "globalgce_policy": "unchanged_BLOCKED_CODE_no_fabrication",
+        "globalgce_policy": "native_frozen_gine_lhs_rhs_route_only",
         "tasks": tasks,
     }
 

@@ -17,28 +17,25 @@ Failures publish `BLOCKED` or `BLOCKED_CODE`; they never publish `PASS`.
 | --- | --- | --- | --- | --- | --- |
 | GCFExplainer | full counterfactual graph | GPU | GPU (4 deterministic shards) | CPU | READY |
 | ComRecGC | lineage-validated common-recourse graph medoid | GPU | GPU (4 deterministic shards) | CPU | READY |
-| GlobalGCE | attachment-aware LHS→RHS transformation | CPU parity preflight | not released | not released | `BLOCKED_CODE` after native-action PASS |
+| GlobalGCE | attachment-aware LHS→RHS transformation | exclusive GPU after bridge smoke | GPU (4 deterministic shards) | CPU | READY behind bridge gate |
 
-GlobalGCE is blocked by
-`BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE`.
-The attachment-aware action itself is implemented and checked against pinned
+The user-approved frozen-GINE bridge releases GlobalGCE only after two
+independent gates. The attachment-aware action is checked against pinned
 upstream commit `157e65c2850bc787f229a1ee8c60564906b933f2`: exact labelled LHS
 subgraph matches determine the official mask order, the RHS overwrites only
 that mask square, new RHS nodes are appended, and boundary attachments to
 existing parent nodes remain unchanged. Every match is retained and molecule
 shape, atom/bond vocabulary, connectivity, sanitization, and match identity
-fail closed.
-
-The remaining block is upstream training, not action application. Official
-GlobalGCE trains the continuous RHS decoder through a classifier loss on its
-dense reconstructed tensors. The frozen BACE GINE instead consumes categorical
-integer features deterministically rebuilt from a sanitized RDKit molecule.
-Hard decoding and sanitization break the exact gradient from GINE back to the
-continuous RHS decoder. The project therefore provides exact calibrated-GINE
-forward scoring in `src/eval/bace_globalgce_native_gine.py`, but does not claim
-that forward evaluator is a training adapter. Falling back to the official
-GTGNN, RF, full-graph replacement, deletion, or an unreviewed straight-through
-estimator is forbidden.
+fail closed. The differentiable bridge then evaluates the exact frozen
+`MolecularGNN` weights with a straight-through expected-embedding relaxation.
+Classifier parameters stay `requires_grad=false`, are excluded from the
+optimizer, remain in evaluation mode, and retain their physical checkpoint
+hash. Gradients may reach only the official GlobalGCE soft node/adjacency/bond
+and decoder parameters. A hard one-hot graph must numerically match the normal
+calibrated GINE forward, while every final hard rule product is sanitized and
+re-scored by that same ordinary oracle. Official GTGNN, RF, a trainable
+classifier, surrogate GNN, full-graph substitution, and deletion substitution
+remain forbidden.
 
 The machine-readable summary is available without starting science work:
 
@@ -62,14 +59,18 @@ It also records exact required files, a log marker, split access, and a
 non-primary runner dataset. The controller injects `CUDA_VISIBLE_DEVICES` only
 after acquiring a GPU UUID lock.
 
-GCFExplainer and ComRecGC train-route GPU tasks have priority below the B11
+GCFExplainer, ComRecGC, and GlobalGCE train-route GPU tasks have priority below the B11
 shard priority (90). Their two READY roots therefore claim two lanes first,
 while B11 remains free to use the other lanes. Their later four-way
 verification tasks sort after B11, preventing one baseline from taking all
-four cards. GlobalGCE contributes one bounded CPU preflight followed by one
-static `command=null`, `BLOCKED_CODE` terminal. The preflight proves pinned
-source and native tensor parity; the terminal reserves priority 82 for a future
-reviewed training adapter but never enters READY or consumes a GPU.
+four cards. GlobalGCE contributes a bounded CPU parity preflight, an exclusive
+GPU bridge smoke, native rule training on the full frozen train cohort, then
+the same calibration-freeze/test-after-freeze chain. It does not enter full
+training unless the bridge smoke publishes `BRIDGE_PASS`.
+
+The primary route passes preregistered train-only `min_freq=7`
+(`round(0.02 * 360)`) and rejects any native BACE train CSV other than the
+frozen 869-row vocabulary. Neither identity is selected from test data.
 
 Example:
 
@@ -82,6 +83,8 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py generic-task-fragment \
   --molclr-checkpoint "$MOLCLR_CKPT" \
   --neurosed-checkpoint "$NEUROSED" --official-root "$OFFICIAL_ROOT" \
   --neurosed-manifest "$NEUROSED_MANIFEST" \
+  --globalgce-source-manifest "$BACE_SOURCE_MANIFEST" \
+  --globalgce-native-train-csv "$BACE_TRAIN_CSV" \
   --fragment-output "$CONTROL/fragments/bace-${METHOD}.generic.json"
 
 $PY scripts/autodl/build_four_by_four_manifest.py \
@@ -117,10 +120,28 @@ path.
 GlobalGCE required preflight artifacts are `route_contract.json`,
 `oracle_provenance.json`, `official_source_audit.json`,
 `official_tensor_parity.json`, `state.json`, `NATIVE_ACTION_READY`,
-`BLOCKED_CODE.json`, and terminal `BLOCKED_CODE`. The coexistence of
-`NATIVE_ACTION_READY` and `BLOCKED_CODE` is deliberate: it proves the action
-engine while preserving the independent full-training blocker. Other native
-baseline preflights retain their terminal `READY` contract.
+and terminal `READY`. The following bridge smoke publishes
+`bridge_gradient_audit.json`, `BRIDGE_PASS`, and `PASS` only when hard-forward
+parity, a nonzero transformation gradient, zero classifier gradients, an
+unchanged checkpoint hash, and finite outputs all hold.
+
+```bash
+$PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-bridge-smoke \
+  --method GlobalGCE --gnn-checkpoint "$BACE_GINE" \
+  --parent-smiles CCO --atom-symbol C --atom-symbol O \
+  --atom-symbol Cl --atom-symbol H --atom-symbol N --atom-symbol F \
+  --atom-symbol Br --atom-symbol S --atom-symbol I \
+  --output-dir "$OUTPUT_ROOT/bridge-smoke" --device cuda:0
+
+$PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-train-rules \
+  --method GlobalGCE --gnn-checkpoint "$BACE_GINE" \
+  --source-manifest "$BACE_SOURCE_MANIFEST" \
+  --native-train-csv "$BACE_TRAIN_CSV" \
+  --official-root "$GLOBALGCE_OFFICIAL" \
+  --output-dir "$OUTPUT_ROOT/train-candidates" \
+  --expected-parent-count 360 --epochs 100 --top-k-native 20 \
+  --device cuda:0 --resume
+```
 
 If an audited native rule JSON already exists, the bounded forward canary
 applies every exact LHS match and scores all valid products in one loaded-once
@@ -135,9 +156,8 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-forward-canary \
 ```
 
 The canary writes `native_gine_forward.json`, `run_manifest.json`,
-`state.json`, and publishes `FORWARD_EVAL_PASS` last. Its manifest explicitly
-keeps `full_rule_training_status=BLOCKED_CODE`; a successful forward canary is
-not a BACE GlobalGCE full-route PASS.
+`state.json`, and publishes `FORWARD_EVAL_PASS` last. It is diagnostic evidence;
+only the bridge smoke plus full native rule route can release the paper cell.
 
 ## GCFExplainer foreground route
 

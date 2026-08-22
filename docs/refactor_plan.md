@@ -1087,3 +1087,23 @@ Mutagenicity roadmaps.
   persistent audits pass.
 - [ ] After both gates pass, launch a fresh optimized 50k root with the existing
   full-state 500-step checkpoint/mirror contract; retain the live legacy root.
+
+# 2026-08-23 — BACE GlobalGCE frozen-GINE bridge
+
+- [x] Preserve pinned official attachment-aware LHS-to-RHS tensor parity.
+- [x] Add a no-surrogate differentiable bridge over the exact calibrated GINE;
+  freeze classifier parameters and keep hard-forward numerical parity.
+- [x] Gate full training behind gradient/checkpoint/finite-output bridge smoke.
+- [x] Preregister BACE `min_freq=7` from the 360-parent train-only grid and
+  require the exact 869-row native train vocabulary.
+- [x] Freeze native rule tensors from train only and preserve their payload
+  through the calibration selector and held-out evaluator.
+- [x] Add rule-native redundancy fingerprints rather than relabeling rules as
+  deletion fragments or full counterfactual graphs.
+- [x] Add four-shard calibration/test application with batched frozen-GINE
+  scoring, min-legal-WNode match selection, and test-after-freeze enforcement.
+- [x] Add the fourth BACE deterministic standardization task and final-matrix
+  raw-terminal guard.
+- [ ] Run the bridge smoke on AutoDL before releasing exclusive full training.
+- [ ] Freeze and standardize the BACE GlobalGCE cell after all scientific gates
+  pass; do not treat bridge smoke alone as a paper result.

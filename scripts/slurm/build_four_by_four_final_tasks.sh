@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Static CLI-parity wrapper; the active execution is AutoDL-only.
+# Static CLI-parity wrapper; BACE GlobalGCE now follows the same standardized
+# terminal guard as the other three methods. Active execution is AutoDL-only.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out

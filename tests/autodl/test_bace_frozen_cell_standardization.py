@@ -317,6 +317,10 @@ def _source(tmp_path: Path, *, method: str, checkpoint_id: str, test_hash: str) 
                 "full_counterfactual_graph",
                 "official_vrrw_neurosed_greedy_fullgraph_v1",
             ),
+            "GlobalGCE": (
+                "lhs_rhs_graph_transformation_rule",
+                "native_lhs_to_rhs_attachment_aware_v1",
+            ),
             "ComRecGC": (
                 "native_common_recourse_fullgraph",
                 "official_comrecgc_lineage_unique_transition_medoid_v1",
@@ -431,7 +435,9 @@ def _apply_historical_ours_b13_structure(root: Path) -> dict[str, object]:
     return fixture
 
 
-@pytest.mark.parametrize("method", ["Ours", "GCFExplainer", "ComRecGC"])
+@pytest.mark.parametrize(
+    "method", ["Ours", "GCFExplainer", "GlobalGCE", "ComRecGC"]
+)
 def test_standardization_is_artifact_only_and_registry_complete(
     tmp_path: Path, method: str
 ) -> None:
@@ -554,14 +560,14 @@ def test_ours_historical_b13_shard_schema_rejects_missing_freeze_evidence(
         )
 
 
-def test_fragment_binds_only_three_frozen_science_terminals(tmp_path: Path) -> None:
+def test_fragment_binds_all_four_frozen_science_terminals(tmp_path: Path) -> None:
     checkpoint, _checkpoint_id, _test_hash = _checkpoint(tmp_path)
     fragment = build_fragment(
         controller_id="four_methods_four_datasets_continuation_v1",
         output_root=tmp_path / "runs",
         gnn_checkpoint=checkpoint,
     )
-    assert len(fragment["tasks"]) == 3
+    assert len(fragment["tasks"]) == 4
     assert {
         task["id"]: tuple(task["depends_on"]) for task in fragment["tasks"]
     } == {
@@ -616,5 +622,10 @@ def test_fragment_binds_only_three_frozen_science_terminals(tmp_path: Path) -> N
         },
     )
     loaded = load_controller_manifest(manifest_path)
-    assert set(CONTROLLER_TASKS) == {"Ours", "GCFExplainer", "ComRecGC"}
-    assert len(loaded.tasks) == 6
+    assert set(CONTROLLER_TASKS) == {
+        "Ours",
+        "GCFExplainer",
+        "GlobalGCE",
+        "ComRecGC",
+    }
+    assert len(loaded.tasks) == 8

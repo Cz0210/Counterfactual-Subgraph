@@ -15,6 +15,7 @@ def _args(tmp_path):
     bace_standardized = {
         "Ours": "bace_ours_standardized",
         "GCFExplainer": "bace_gcfexplainer_standardized",
+        "GlobalGCE": "bace_globalgce_standardized",
         "ComRecGC": "bace_comrecgc_standardized",
     }
     cells = [
@@ -66,6 +67,7 @@ def test_final_matrix_audit_rejects_duplicate_terminal_task(tmp_path):
     [
         ("Ours", "bace_b14_frozen"),
         ("GCFExplainer", "bace_gcfexplainer_final_freeze"),
+        ("GlobalGCE", "bace_globalgce_final_freeze"),
         ("ComRecGC", "bace_comrecgc_final_freeze"),
     ],
 )

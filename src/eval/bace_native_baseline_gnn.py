@@ -24,6 +24,10 @@ from src.baselines.bace_gnn_baseline_contracts import (
     oracle_provenance,
     validate_bace_frozen_gine,
 )
+from src.baselines.globalgce_bace_native_rules import (
+    GlobalGCENativeRule,
+    apply_rule_to_parent,
+)
 from src.data.molecular_graph_dataset import MolecularGraphData
 from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
 from src.eval.bace_frozen_gnn_contracts import (
@@ -132,11 +136,343 @@ def _load_candidates(
             raise ValueError("Candidate action kind changed from its native method")
         if row.get("action_semantics") != spec.action_semantics:
             raise ValueError("Candidate action semantics changed from its native method")
-        if not str(row.get("canonical_smiles") or "").strip():
+        if spec.method_id == "globalgce":
+            GlobalGCENativeRule.from_payload(row)
+        elif not str(row.get("canonical_smiles") or "").strip():
             raise ValueError("Native full-graph candidate lacks canonical_smiles")
         if row.get("rf_oracle_used") is not False:
             raise ValueError("RF candidate provenance is forbidden for BACE")
     return candidates, manifest, manifest_path
+
+
+def _fullgraph_pair_rows(
+    *,
+    parents: Sequence[Any],
+    before_rows: Sequence[Mapping[str, Any]],
+    candidates: Sequence[dict[str, Any]],
+    featurizer: MolecularGraphFeaturizer,
+    oracle: Any,
+    provider: MolCLRNodeWassersteinDistance,
+    card: Mapping[str, Any],
+    spec: Any,
+    method_id: str,
+    oracle_batch_size: int,
+) -> list[dict[str, Any]]:
+    candidate_graphs = [
+        _graph(
+            featurizer,
+            smiles=str(candidate["canonical_smiles"]),
+            molecule_id=str(candidate["candidate_id"]),
+            split="train_generated_native_fullgraph",
+        )
+        for candidate in candidates
+    ]
+    after_rows = oracle.predict_records(
+        candidate_graphs, batch_size=int(oracle_batch_size)
+    )
+    pair_rows: list[dict[str, Any]] = []
+    for parent, before in zip(parents, before_rows, strict=True):
+        for candidate, after in zip(candidates, after_rows, strict=True):
+            semantics = compute_counterfactual_semantics(
+                source_label=SOURCE_LABEL,
+                pred_before=before["predicted_label"],
+                pred_after=after["predicted_label"],
+                probabilities_before=before["probabilities"],
+                probabilities_after=after["probabilities"],
+                rule_id=str(candidate["candidate_id"]),
+            )
+            distance: float | None = None
+            failure_reason: str | None = None
+            if semantics.cf_flip:
+                result = provider.distance_for_action(
+                    parent.smiles,
+                    str(candidate["canonical_smiles"]),
+                    action_context={
+                        "parent_id": parent.parent_id,
+                        "candidate_id": candidate["candidate_id"],
+                        "teacher_sha256": card["checkpoint_id"],
+                        "oracle_checkpoint_id": card["checkpoint_id"],
+                        "action_kind": spec.action_kind,
+                        "action_semantics": spec.action_semantics,
+                    },
+                )
+                value = result.get("distance")
+                if (
+                    result.get("ok") is True
+                    and value is not None
+                    and math.isfinite(float(value))
+                    and float(value) >= 0.0
+                ):
+                    distance = float(value)
+                else:
+                    failure_reason = str(result.get("error") or "wnode_distance_failed")
+            else:
+                failure_reason = "frozen_gine_not_strict_flip"
+            pair_rows.append(
+                {
+                    "dataset": DATASET,
+                    "method": spec.method,
+                    "method_id": method_id,
+                    "parent_id": parent.parent_id,
+                    "parent_smiles": parent.smiles,
+                    "candidate_id": candidate["candidate_id"],
+                    "canonical_smiles": candidate["canonical_smiles"],
+                    "canonical_fragment": candidate["canonical_smiles"],
+                    "candidate_rank": candidate.get("rank"),
+                    "native_rank": candidate.get("native_rank"),
+                    "action_kind": spec.action_kind,
+                    "action_semantics": spec.action_semantics,
+                    "applicable": True,
+                    "pred_before": int(before["predicted_label"]),
+                    "pred_after": int(after["predicted_label"]),
+                    "p_before": list(before["probabilities"]),
+                    "p_after": list(after["probabilities"]),
+                    "p1_before": float(before["probabilities"][SOURCE_LABEL]),
+                    "p1_after": float(after["probabilities"][SOURCE_LABEL]),
+                    "cf_drop": float(semantics.cf_drop),
+                    "cf_flip": bool(semantics.cf_flip),
+                    "pair_strict_flip": bool(semantics.cf_flip and distance is not None),
+                    "wnode_distance": distance,
+                    "distance_for_selection": distance if distance is not None else "+inf",
+                    "failure_reason": failure_reason,
+                    "cf_mode": CF_MODE,
+                    "source_label": SOURCE_LABEL,
+                    "oracle_backend": "gnn",
+                    "classifier_family": "gine",
+                    "rf_oracle_used": False,
+                    "oracle_checkpoint_hash": card["checkpoint_id"],
+                }
+            )
+    return pair_rows
+
+
+def _globalgce_pair_rows(
+    *,
+    parents: Sequence[Any],
+    before_rows: Sequence[Mapping[str, Any]],
+    candidates: Sequence[dict[str, Any]],
+    featurizer: MolecularGraphFeaturizer,
+    oracle: Any,
+    provider: MolCLRNodeWassersteinDistance,
+    card: Mapping[str, Any],
+    spec: Any,
+    method_id: str,
+    oracle_batch_size: int,
+) -> list[dict[str, Any]]:
+    rules = [GlobalGCENativeRule.from_payload(candidate) for candidate in candidates]
+    applications: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    match_audits: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    unique_graphs: dict[str, MolecularGraphData] = {}
+    failures: dict[tuple[int, int], str] = {}
+    for parent_index, parent in enumerate(parents):
+        for candidate_index, rule in enumerate(rules):
+            key = (parent_index, candidate_index)
+            try:
+                rows = apply_rule_to_parent(parent.smiles, rule)
+            except Exception as exc:
+                rows = []
+                failures[key] = f"{type(exc).__name__}:{exc}"
+            valid: list[dict[str, Any]] = []
+            audited: list[dict[str, Any]] = []
+            for row in rows:
+                audit_row = dict(row)
+                if audit_row.get("valid") is not True:
+                    audited.append(audit_row)
+                    continue
+                canonical = str(audit_row.get("canonical_smiles") or "").strip()
+                try:
+                    graph = _graph(
+                        featurizer,
+                        smiles=canonical,
+                        molecule_id=(
+                            f"{parent.parent_id}:{rule.rule_id}:"
+                            f"{audit_row['match_id']}"
+                        ),
+                        split="native_globalgce_rule_application",
+                    )
+                except Exception as exc:
+                    reason = f"gine_featurize_failed:{type(exc).__name__}:{exc}"
+                    failures[key] = reason
+                    audit_row["valid"] = False
+                    audit_row["failure_reason"] = reason
+                    audited.append(audit_row)
+                    continue
+                record = dict(audit_row)
+                record["canonical_smiles"] = graph.smiles
+                valid.append(record)
+                audited.append(record)
+                unique_graphs.setdefault(graph.smiles, graph)
+            applications[key] = valid
+            match_audits[key] = audited
+            if not valid and key not in failures:
+                failures[key] = "no_legal_native_lhs_match_or_sanitized_rhs"
+    ordered_smiles = sorted(unique_graphs)
+    after_predictions = oracle.predict_records(
+        [unique_graphs[smiles] for smiles in ordered_smiles],
+        batch_size=int(oracle_batch_size),
+    )
+    prediction_by_smiles = dict(zip(ordered_smiles, after_predictions, strict=True))
+    pair_rows: list[dict[str, Any]] = []
+    for parent_index, (parent, before) in enumerate(
+        zip(parents, before_rows, strict=True)
+    ):
+        for candidate_index, (candidate, rule) in enumerate(
+            zip(candidates, rules, strict=True)
+        ):
+            key = (parent_index, candidate_index)
+            valid = applications[key]
+            audited_matches = match_audits[key]
+            evaluated: list[dict[str, Any]] = []
+            for application in valid:
+                after = prediction_by_smiles[str(application["canonical_smiles"])]
+                semantics = compute_counterfactual_semantics(
+                    source_label=SOURCE_LABEL,
+                    pred_before=before["predicted_label"],
+                    pred_after=after["predicted_label"],
+                    probabilities_before=before["probabilities"],
+                    probabilities_after=after["probabilities"],
+                    rule_id=str(candidate["candidate_id"]),
+                )
+                distance: float | None = None
+                distance_failure: str | None = None
+                if semantics.cf_flip:
+                    distance_result = provider.distance_for_action(
+                        parent.smiles,
+                        str(application["canonical_smiles"]),
+                        action_context={
+                            "parent_id": parent.parent_id,
+                            "candidate_id": candidate["candidate_id"],
+                            "match_id": application["match_id"],
+                            "teacher_sha256": card["checkpoint_id"],
+                            "oracle_checkpoint_id": card["checkpoint_id"],
+                            "action_kind": spec.action_kind,
+                            "action_semantics": spec.action_semantics,
+                        },
+                    )
+                    value = distance_result.get("distance")
+                    if (
+                        distance_result.get("ok") is True
+                        and value is not None
+                        and math.isfinite(float(value))
+                        and float(value) >= 0.0
+                    ):
+                        distance = float(value)
+                    else:
+                        distance_failure = str(
+                            distance_result.get("error") or "wnode_distance_failed"
+                        )
+                evaluated.append(
+                    {
+                        "application": application,
+                        "after": after,
+                        "semantics": semantics,
+                        "distance": distance,
+                        "distance_failure": distance_failure,
+                    }
+                )
+            legal = [row for row in evaluated if row["distance"] is not None]
+            legal.sort(
+                key=lambda row: (
+                    float(row["distance"]),
+                    str(row["application"]["match_id"]),
+                    str(row["application"]["canonical_smiles"]),
+                )
+            )
+            if legal:
+                chosen = legal[0]
+            elif evaluated:
+                chosen = min(
+                    evaluated,
+                    key=lambda row: (
+                        not bool(row["semantics"].cf_flip),
+                        str(row["application"]["match_id"]),
+                        str(row["application"]["canonical_smiles"]),
+                    ),
+                )
+            else:
+                chosen = None
+            distance = None if not legal else float(legal[0]["distance"])
+            after = chosen["after"] if chosen is not None else None
+            semantics = chosen["semantics"] if chosen is not None else None
+            application = chosen["application"] if chosen is not None else None
+            pair_rows.append(
+                {
+                    "dataset": DATASET,
+                    "method": spec.method,
+                    "method_id": method_id,
+                    "parent_id": parent.parent_id,
+                    "parent_smiles": parent.smiles,
+                    "candidate_id": candidate["candidate_id"],
+                    "canonical_smiles": (
+                        application["canonical_smiles"] if application is not None else ""
+                    ),
+                    "canonical_fragment": "N/A",
+                    "canonical_fragment_reason": (
+                        "GlobalGCE action is an attachment-aware LHS-to-RHS rule"
+                    ),
+                    "candidate_rank": candidate.get("rank"),
+                    "native_rank": candidate.get("native_rank"),
+                    "native_rule_index": rule.native_rule_index,
+                    "rule_content_hash": candidate.get("rule_content_hash"),
+                    "action_kind": spec.action_kind,
+                    "action_semantics": spec.action_semantics,
+                    "applicable": bool(valid),
+                    "native_match_attempt_count": len(audited_matches),
+                    "native_match_count": len(valid),
+                    "native_invalid_match_count": sum(
+                        row.get("valid") is not True for row in audited_matches
+                    ),
+                    "native_match_audit": audited_matches,
+                    "selected_match_id": (
+                        application.get("match_id") if application is not None else None
+                    ),
+                    "selected_mapping": (
+                        application.get("mapping") if application is not None else None
+                    ),
+                    "boundary_attachments_preserved": (
+                        application.get("boundary_attachments_preserved")
+                        if application is not None
+                        else None
+                    ),
+                    "pred_before": int(before["predicted_label"]),
+                    "pred_after": (
+                        int(after["predicted_label"]) if after is not None else None
+                    ),
+                    "p_before": list(before["probabilities"]),
+                    "p_after": list(after["probabilities"]) if after is not None else [],
+                    "p1_before": float(before["probabilities"][SOURCE_LABEL]),
+                    "p1_after": (
+                        float(after["probabilities"][SOURCE_LABEL])
+                        if after is not None
+                        else None
+                    ),
+                    "cf_drop": float(semantics.cf_drop) if semantics is not None else None,
+                    "cf_flip": bool(semantics.cf_flip) if semantics is not None else False,
+                    "pair_strict_flip": bool(distance is not None),
+                    "wnode_distance": distance,
+                    "distance_for_selection": distance if distance is not None else "+inf",
+                    "failure_reason": (
+                        None
+                        if distance is not None
+                        else (
+                            chosen.get("distance_failure")
+                            if chosen is not None and chosen.get("distance_failure")
+                            else (
+                                "frozen_gine_not_strict_flip"
+                                if chosen is not None
+                                else failures.get(key)
+                            )
+                        )
+                    ),
+                    "cf_mode": CF_MODE,
+                    "source_label": SOURCE_LABEL,
+                    "oracle_backend": "gnn",
+                    "classifier_family": "gine",
+                    "rf_oracle_used": False,
+                    "oracle_checkpoint_hash": card["checkpoint_id"],
+                }
+            )
+    return pair_rows
 
 
 def _authorize_split(
@@ -228,17 +564,7 @@ def run_fullgraph_verification_shard(
         )
         for parent in parents
     ]
-    candidate_graphs = [
-        _graph(
-            featurizer,
-            smiles=str(candidate["canonical_smiles"]),
-            molecule_id=str(candidate["candidate_id"]),
-            split="train_generated_native_fullgraph",
-        )
-        for candidate in candidates
-    ]
     before_rows = oracle.predict_records(parent_graphs, batch_size=int(oracle_batch_size))
-    after_rows = oracle.predict_records(candidate_graphs, batch_size=int(oracle_batch_size))
     provider = MolCLRNodeWassersteinDistance(
         MolCLRNodeWassersteinConfig(
             molclr_root=Path(molclr_root).expanduser().resolve(strict=True),
@@ -251,86 +577,24 @@ def run_fullgraph_verification_shard(
             distance_namespace=DISTANCE_NAMESPACE,
         )
     )
-    pair_rows: list[dict[str, Any]] = []
     try:
-        for parent, before in zip(parents, before_rows, strict=True):
-            for candidate, after in zip(candidates, after_rows, strict=True):
-                semantics = compute_counterfactual_semantics(
-                    source_label=SOURCE_LABEL,
-                    pred_before=before["predicted_label"],
-                    pred_after=after["predicted_label"],
-                    probabilities_before=before["probabilities"],
-                    probabilities_after=after["probabilities"],
-                    rule_id=str(candidate["candidate_id"]),
-                )
-                distance: float | None = None
-                failure_reason: str | None = None
-                if semantics.cf_flip:
-                    result = provider.distance_for_action(
-                        parent.smiles,
-                        str(candidate["canonical_smiles"]),
-                        action_context={
-                            "parent_id": parent.parent_id,
-                            "candidate_id": candidate["candidate_id"],
-                            "teacher_sha256": card["checkpoint_id"],
-                            "oracle_checkpoint_id": card["checkpoint_id"],
-                            "action_kind": spec.action_kind,
-                            "action_semantics": spec.action_semantics,
-                        },
-                    )
-                    value = result.get("distance")
-                    if (
-                        result.get("ok") is True
-                        and value is not None
-                        and math.isfinite(float(value))
-                        and float(value) >= 0.0
-                    ):
-                        distance = float(value)
-                    else:
-                        failure_reason = str(
-                            result.get("error") or "wnode_distance_failed"
-                        )
-                else:
-                    failure_reason = "frozen_gine_not_strict_flip"
-                pair_rows.append(
-                    {
-                        "dataset": DATASET,
-                        "method": spec.method,
-                        "method_id": method_id,
-                        "parent_id": parent.parent_id,
-                        "parent_smiles": parent.smiles,
-                        "candidate_id": candidate["candidate_id"],
-                        "canonical_smiles": candidate["canonical_smiles"],
-                        "canonical_fragment": candidate["canonical_smiles"],
-                        "candidate_rank": candidate.get("rank"),
-                        "native_rank": candidate.get("native_rank"),
-                        "action_kind": spec.action_kind,
-                        "action_semantics": spec.action_semantics,
-                        "applicable": True,
-                        "pred_before": int(before["predicted_label"]),
-                        "pred_after": int(after["predicted_label"]),
-                        "p_before": list(before["probabilities"]),
-                        "p_after": list(after["probabilities"]),
-                        "p1_before": float(before["probabilities"][SOURCE_LABEL]),
-                        "p1_after": float(after["probabilities"][SOURCE_LABEL]),
-                        "cf_drop": float(semantics.cf_drop),
-                        "cf_flip": bool(semantics.cf_flip),
-                        "pair_strict_flip": bool(
-                            semantics.cf_flip and distance is not None
-                        ),
-                        "wnode_distance": distance,
-                        "distance_for_selection": (
-                            distance if distance is not None else "+inf"
-                        ),
-                        "failure_reason": failure_reason,
-                        "cf_mode": CF_MODE,
-                        "source_label": SOURCE_LABEL,
-                        "oracle_backend": "gnn",
-                        "classifier_family": "gine",
-                        "rf_oracle_used": False,
-                        "oracle_checkpoint_hash": card["checkpoint_id"],
-                    }
-                )
+        evaluator = (
+            _globalgce_pair_rows
+            if method_id == "globalgce"
+            else _fullgraph_pair_rows
+        )
+        pair_rows = evaluator(
+            parents=parents,
+            before_rows=before_rows,
+            candidates=candidates,
+            featurizer=featurizer,
+            oracle=oracle,
+            provider=provider,
+            card=card,
+            spec=spec,
+            method_id=method_id,
+            oracle_batch_size=int(oracle_batch_size),
+        )
         provider_stats = provider.stats_dict()
     finally:
         provider.close()

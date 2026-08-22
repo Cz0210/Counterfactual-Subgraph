@@ -12,6 +12,7 @@ from src.eval.mutagenicity_wnode_selector import (
     ThresholdLevel,
     VariantConfig,
     audit_mutagenicity_wnode_selector,
+    build_candidate_chemistry,
     build_coverage_redundancy_matrix,
     choose_variant,
     compute_prefix_metrics,
@@ -26,6 +27,44 @@ from src.eval.mutagenicity_wnode_selector import (
     weighted_coverage_jaccard,
     weighted_multi_threshold_utility,
 )
+
+
+def test_native_rule_chemistry_uses_explicit_bits_without_fragment_smiles() -> None:
+    base = {
+        "canonical_fragment": "N/A",
+        "action_kind": "lhs_rhs_graph_transformation_rule",
+        "selector_chemistry": {
+            "schema_version": "globalgce_native_rule_selector_chemistry_v1",
+            "role": "native_lhs_rhs_rule_redundancy_only",
+            "fingerprint_kind": "hashed_aligned_label_transition_bits",
+            "fingerprint_n_bits": 2048,
+            "heavy_atom_count": 3,
+            "canonical_fragment_applicable": False,
+        },
+    }
+    rows = [
+        {
+            **base,
+            "candidate_id": "rule-a",
+            "selector_chemistry": {
+                **base["selector_chemistry"],
+                "fingerprint_bits": [1, 5, 9],
+            },
+        },
+        {
+            **base,
+            "candidate_id": "rule-b",
+            "selector_chemistry": {
+                **base["selector_chemistry"],
+                "fingerprint_bits": [5, 9, 11],
+                "heavy_atom_count": 4,
+            },
+        },
+    ]
+    chemistry = build_candidate_chemistry(rows)
+    assert chemistry.heavy_atom_counts.tolist() == [3, 4]
+    assert chemistry.normalized_sizes.tolist() == pytest.approx([0.75, 1.0])
+    assert chemistry.structural_similarity[0, 1] == pytest.approx(0.5)
 
 
 def _matrix_data() -> MatrixData:
@@ -293,6 +332,7 @@ def _write_fake_matrix(path: Path) -> Path:
             "source_parent_count": 6 - index,
             "source_cf_drop_mean": 0.8 - index * 0.05,
             "source_reward_mean": 1.0 - index * 0.05,
+            "native_action_payload": {"candidate_index": index},
         }
         for index, fragment in enumerate(candidate_fragments)
     ]
@@ -391,6 +431,9 @@ def test_full_fake_selector_writes_nested_top_prefix_and_passes_audit(
         top2 = json.loads((variant_dir / "selected_top10.json").read_text())
         top3 = json.loads((variant_dir / "selected_top20.json").read_text())
         assert top2["candidate_ids"] == top3["candidate_ids"][:2]
+        assert all(
+            "native_action_payload" in row for row in top3["candidates"]
+        )
 
     audit = audit_mutagenicity_wnode_selector(
         run_dir=output_dir,

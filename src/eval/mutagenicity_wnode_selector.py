@@ -788,6 +788,75 @@ def build_candidate_chemistry(
     radius: int = 2,
     n_bits: int = 2048,
 ) -> ChemistryData:
+    native_flags = [isinstance(row.get("selector_chemistry"), dict) for row in candidate_rows]
+    if any(native_flags) and not all(native_flags):
+        raise ValueError(
+            "Candidate universe mixes native-rule and fragment chemistry schemas."
+        )
+    if native_flags and all(native_flags):
+        def parse_native(row: dict[str, Any]) -> tuple[set[int], int, int]:
+            payload = dict(row["selector_chemistry"])
+            if (
+                payload.get("schema_version")
+                != "globalgce_native_rule_selector_chemistry_v1"
+                or payload.get("role")
+                != "native_lhs_rhs_rule_redundancy_only"
+                or payload.get("fingerprint_kind")
+                != "hashed_aligned_label_transition_bits"
+                or payload.get("canonical_fragment_applicable") is not False
+            ):
+                raise ValueError("Invalid native GlobalGCE selector chemistry contract.")
+            width = int(payload.get("fingerprint_n_bits") or 0)
+            if width < 128:
+                raise ValueError("Native rule selector fingerprint width is invalid.")
+            raw_bits = payload.get("fingerprint_bits")
+            if not isinstance(raw_bits, list) or not raw_bits:
+                raise ValueError("Native rule selector fingerprint is empty.")
+            bits = {int(value) for value in raw_bits}
+            if len(bits) != len(raw_bits) or min(bits) < 0 or max(bits) >= width:
+                raise ValueError("Native rule selector fingerprint bits are invalid.")
+            heavy = int(payload.get("heavy_atom_count") or 0)
+            if heavy <= 0:
+                raise ValueError("Native rule selector heavy-atom count is invalid.")
+            return bits, heavy, width
+
+        parsed = [parse_native(dict(row)) for row in candidate_rows]
+        widths = {width for _, _, width in parsed}
+        if len(widths) != 1:
+            raise ValueError("Native rule selector fingerprint widths differ.")
+        normalization_rows = (
+            size_normalization_rows
+            if size_normalization_rows is not None
+            else candidate_rows
+        )
+        if not normalization_rows or not all(
+            isinstance(row.get("selector_chemistry"), dict)
+            for row in normalization_rows
+        ):
+            raise ValueError(
+                "Native rule size normalization requires the same chemistry schema."
+            )
+        normalization = [parse_native(dict(row)) for row in normalization_rows]
+        if {width for _, _, width in normalization} != widths:
+            raise ValueError("Native rule normalization fingerprint width changed.")
+        maximum = max(heavy for _, heavy, _ in normalization)
+        fingerprints = [bits for bits, _, _ in parsed]
+        similarity = np.eye(len(fingerprints), dtype=np.float64)
+        for left_index, left in enumerate(fingerprints):
+            for right_index in range(left_index + 1, len(fingerprints)):
+                right = fingerprints[right_index]
+                union = left | right
+                value = float(len(left & right) / len(union)) if union else 0.0
+                similarity[left_index, right_index] = value
+                similarity[right_index, left_index] = value
+        heavy_array = np.asarray(
+            [heavy for _, heavy, _ in parsed], dtype=np.int64
+        )
+        return ChemistryData(
+            heavy_atom_counts=heavy_array,
+            normalized_sizes=heavy_array.astype(np.float64) / float(maximum),
+            structural_similarity=similarity,
+        )
     if Chem is None or DataStructs is None or rdFingerprintGenerator is None:
         raise RuntimeError("RDKit is required for selector chemistry metrics.")
     generator = rdFingerprintGenerator.GetMorganGenerator(
@@ -1387,11 +1456,14 @@ def _selected_sequence_rows(
         current_multi = float(
             metrics[rank - 1]["weighted_multi_threshold_utility"]
         )
-        rows.append(
+        selected = dict(candidate)
+        selected.update(
             {
                 "rank": rank,
                 "candidate_id": str(candidate["candidate_id"]),
-                "canonical_fragment": str(candidate["canonical_fragment"]),
+                "canonical_fragment": str(
+                    candidate.get("canonical_fragment") or "N/A"
+                ),
                 "source_parent_count": int(candidate.get("source_parent_count") or 0),
                 "source_cf_drop_mean": _finite_float(
                     candidate.get("source_cf_drop_mean")
@@ -1415,6 +1487,7 @@ def _selected_sequence_rows(
                 ),
             }
         )
+        rows.append(selected)
         previous_multi = current_multi
     return rows
 

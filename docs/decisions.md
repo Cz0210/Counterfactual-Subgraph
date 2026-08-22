@@ -250,6 +250,55 @@ the fail-closed audit.
 
 Accepted
 
+## [2026-08-23] Release BACE GlobalGCE through the exact frozen-GINE bridge
+
+### Context
+
+The previous BACE route correctly preserved GlobalGCE's native attachment-aware
+LHS-to-RHS action, but stopped before training because the official decoder is
+continuous while the paper GINE consumes categorical molecular features. The
+project owner explicitly approved an auditable differentiable bridge, while
+forbidding an RF, surrogate classifier, trainable explainee, or action rewrite.
+
+### Decision
+
+Use the physical calibrated BACE GINE weights directly. Freeze every classifier
+parameter, keep the classifier in evaluation mode, and exclude it from the
+GlobalGCE optimizer. A straight-through expected-embedding view carries
+gradients from the official classifier loss to soft node, adjacency, bond, and
+decoder variables; its hard one-hot value is the normal project GINE forward.
+The bridge may release full rule training only after proving hard-forward
+parity, nonzero transformation gradients, zero classifier gradients, stable
+checkpoint bytes, and finite outputs.
+
+For the primary BACE run, freeze `min_freq=7` before execution. This is the
+train-only value `round(0.02 * 360)` from the registered BACE frequency grid;
+it is not selected from calibration or test curves. The full 360-parent source
+cohort and 869-row native train vocabulary are both fail-closed inputs.
+
+Rules remain native LHS-to-RHS tensors. Calibration enumerates every exact
+labelled LHS match, applies the official attachment-preserving mask/RHS write,
+scores hard sanitized products with the same frozen GINE in batches, and takes
+the minimum legal WNode match. The selector carries the complete native rule
+payload and uses an explicit aligned node/edge-transition fingerprint only for
+its redundancy term; it never presents a rule as a deletion fragment or full
+counterfactual graph. Test remains inaccessible until the calibration selector
+is frozen. The final cell is standardized only from frozen terminal artifacts.
+
+### Consequences
+
+- GlobalGCE now has CPU parity preflight, exclusive-GPU bridge smoke and full
+  training, four calibration shards, CPU freeze, four held-out shards, final
+  freeze, and deterministic standardization tasks.
+- Official GTGNN, RF, trainable/surrogate classifiers, full-graph replacement,
+  deletion replacement, and test-based selection remain fail-closed.
+- A bridge smoke PASS is necessary but is not a paper-cell PASS; final hard
+  products and the complete calibration/test closure are still mandatory.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Isolate the two A/M ComRecGC retries in a six-task controller
 
 ### Background

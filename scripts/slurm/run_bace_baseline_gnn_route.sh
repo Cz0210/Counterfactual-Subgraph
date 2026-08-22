@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Static CLI-parity wrapper. The active four-by-four campaign is AutoDL-only.
-# GlobalGCE and ComRecGC preflight callers must pass an explicit audited
-# --official-root; this wrapper never assumes an upstream checkout/submodule is
-# populated.  The existing generic "$@" forwarding needs no CLI shape change.
+# GlobalGCE and ComRecGC callers must pass an explicit audited --official-root;
+# GlobalGCE full fragments additionally pass its frozen train source manifest
+# and native train CSV. This wrapper never assumes a submodule is populated;
+# generic "$@" forwarding preserves exact AutoDL/Slurm CLI parity.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out

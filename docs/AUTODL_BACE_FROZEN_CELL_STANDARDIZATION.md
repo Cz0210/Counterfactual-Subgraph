@@ -2,21 +2,20 @@
 
 The BACE scientific terminal roots are intentionally not paper-matrix cells.
 `bace_b14_frozen`, `bace_gcfexplainer_final_freeze`, and
-`bace_comrecgc_final_freeze` prove the scientific freeze, but they do not carry
+`bace_globalgce_final_freeze`, and `bace_comrecgc_final_freeze` prove the
+scientific freeze, but they do not carry
 the complete common Figure 3, Figure 4, Table 2, registry, and hash-closure
 schema.
 
-`scripts/autodl/build_bace_cell_standardization_tasks.py` adds three fresh,
+`scripts/autodl/build_bace_cell_standardization_tasks.py` adds four fresh,
 CPU-only, manifest-only continuation tasks:
 
 | Matrix cell | Scientific dependency | Standardized terminal task |
 |---|---|---|
 | BACE / Ours | `bace_b14_frozen` | `bace_ours_standardized` |
 | BACE / GCFExplainer | `bace_gcfexplainer_final_freeze` | `bace_gcfexplainer_standardized` |
+| BACE / GlobalGCE | `bace_globalgce_final_freeze` | `bace_globalgce_standardized` |
 | BACE / ComRecGC | `bace_comrecgc_final_freeze` | `bace_comrecgc_standardized` |
-
-GlobalGCE is not synthesized by this layer. Its reviewed `BLOCKED_CODE`
-terminal remains unchanged.
 
 ## Safety boundary
 
@@ -75,8 +74,8 @@ python scripts/autodl/build_bace_cell_standardization_tasks.py \
 Optional `--expected-*-hash` arguments bind a preregistered dataset, test
 split, MolCLR, or threshold-grid identity. A mismatch fails closed.
 
-The final matrix audit must map BACE Ours/GCFExplainer/ComRecGC to the three
-standardized terminal task IDs above. `build_four_by_four_final_tasks.py`
+The final matrix audit must map all four BACE methods to the four standardized
+terminal task IDs above. `build_four_by_four_final_tasks.py`
 rejects direct mappings to raw B14/baseline terminal tasks.
 
 ## Standardized output

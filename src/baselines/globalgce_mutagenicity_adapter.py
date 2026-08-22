@@ -208,6 +208,7 @@ class NativeGeneratorProtocol(Protocol):
         on_chunk: (
             Callable[[int, int, int, list[dict[str, Any]]], None] | None
         ),
+        rules_only: bool = False,
     ) -> "NativeGenerationResult":
         ...
 
@@ -1827,6 +1828,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
         native_train_csv: str | Path | None = None,
         dataset_name: str = DATASET_NAME,
         min_freq: int | None = None,
+        frozen_gine_checkpoint: str | Path | None = None,
+        source_label: int = SOURCE_LABEL,
+        target_label: int = TARGET_LABEL,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
@@ -1838,6 +1842,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
         ).expanduser().resolve()
         self.dataset_name = str(dataset_name)
         self.min_freq = int(min_freq) if min_freq is not None else None
+        self.frozen_gine_checkpoint = (
+            None
+            if frozen_gine_checkpoint is None
+            else Path(frozen_gine_checkpoint).expanduser().resolve()
+        )
+        self.source_label = int(source_label)
+        self.target_label = int(target_label)
+        if {self.source_label, self.target_label} != {0, 1}:
+            raise ValueError("GlobalGCE binary source/target labels must be {0,1}.")
         if self.min_freq is not None and self.min_freq < 2:
             raise ValueError("GlobalGCE min_freq must be at least two.")
 
@@ -1862,6 +1875,18 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "native_train_csv": _file_identity(self.native_train_csv),
             "official_src": str(self.official_src),
             "official_source_files": source_files,
+            "prediction_backend": (
+                "frozen_gine_differentiable_bridge"
+                if self.frozen_gine_checkpoint is not None
+                else "official_native_gtgnn"
+            ),
+            "frozen_gine_checkpoint": (
+                _file_identity(self.frozen_gine_checkpoint / "model.pt")
+                if self.frozen_gine_checkpoint is not None
+                else None
+            ),
+            "source_label": self.source_label,
+            "target_label": self.target_label,
         }
 
     def probe_codec(
@@ -1949,6 +1974,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         on_chunk: (
             Callable[[int, int, int, list[dict[str, Any]]], None] | None
         ) = None,
+        rules_only: bool = False,
     ) -> NativeGenerationResult:
         if int(generation_chunk_size) <= 0:
             raise ValueError("generation_chunk_size must be positive.")
@@ -2015,7 +2041,18 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         _write_json(output_dir / "source_codec_summary.json", codec_summary)
         require_source_codec_gate(codec_summary)
-        gnn_checkpoint = output_dir / "native_gnn.pt"
+        use_frozen_gine = self.frozen_gine_checkpoint is not None
+        if use_frozen_gine:
+            frozen_gine_root = self.frozen_gine_checkpoint
+            if frozen_gine_root is None or not (frozen_gine_root / "model.pt").is_file():
+                raise FileNotFoundError(
+                    "Frozen-GINE GlobalGCE bridge checkpoint is incomplete: "
+                    f"{frozen_gine_root}"
+                )
+            gnn_checkpoint = frozen_gine_root / "model.pt"
+        else:
+            frozen_gine_root = None
+            gnn_checkpoint = output_dir / "native_gnn.pt"
         model_checkpoint = output_dir / "globalgce_model.pt"
         rules_checkpoint = output_dir / "globalgce_rules.pt"
         frequent_subgraphs = output_dir / "frequent_subgraphs.pkl"
@@ -2041,6 +2078,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "dropout": float(dropout),
                 "selected_parent_count": len(parents),
             }
+            if use_frozen_gine:
+                expected_state["prediction_backend"] = (
+                    "frozen_gine_differentiable_bridge"
+                )
             for key, expected in expected_state.items():
                 if training_state.get(key) != expected:
                     raise ValueError(
@@ -2063,43 +2104,70 @@ class OfficialGlobalGCEMutagenicityGenerator:
                         f"mismatch for {path.name}: actual={actual_hash}, "
                         f"expected={training_state.get(hash_key)!r}."
                     )
-        native_train_loader = DataLoader(
-            Subset(native_dataset, native_train_idx),
-            batch_size=128,
-            shuffle=True,
-            generator=torch.Generator().manual_seed(int(seed)),
-        )
-        native_val_loader = DataLoader(
-            Subset(native_dataset, native_val_idx),
-            batch_size=128,
-            shuffle=False,
-        )
-        gnn_model = modules["GTGNN"](
-            native_dataset.node_feat_dim,
-            32,
-            2,
-            native_dataset.edge_attr_dim,
-            resolved_device,
-            str(gnn_checkpoint),
-        ).to(resolved_device)
-        if can_resume_trained_model:
-            gnn_model.load_state_dict(
-                torch.load(gnn_checkpoint, map_location=resolved_device)
+        if use_frozen_gine:
+            from src.baselines.globalgce_frozen_gine_bridge import (
+                FrozenGINEDifferentiableBridge,
+                GlobalGCEClassZeroTargetAdapter,
             )
-            gnn_summary = dict(training_state.get("gnn_training") or {})
+
+            bridge = FrozenGINEDifferentiableBridge.from_checkpoint(
+                frozen_gine_root,
+                atom_symbols=tuple(source_dataset.atom_symbols),
+                bond_names=tuple(source_dataset.bond_names),
+                device=resolved_device,
+            )
+            gnn_model = GlobalGCEClassZeroTargetAdapter(bridge)
+            gnn_summary = {
+                "prediction_backend": "frozen_gine_differentiable_bridge",
+                "classifier_family": "gine",
+                "oracle_backend": "gnn",
+                "rf_oracle_used": False,
+                "checkpoint_dir": str(frozen_gine_root),
+                "checkpoint_id": bridge.checkpoint_id,
+                "classifier_parameters_frozen": True,
+                "official_internal_target_label": 1,
+                "frozen_bace_source_label": self.source_label,
+                "frozen_bace_target_label": self.target_label,
+                "class_order_adapter": "official_1_maps_to_frozen_gine_0",
+            }
         else:
-            gnn_summary = _train_native_gnn(
-                gnn_model,
-                native_train_loader,
-                native_val_loader,
-                torch_module=torch,
-                epochs=int(epochs),
-                learning_rate=float(learning_rate),
-                checkpoint=gnn_checkpoint,
+            native_train_loader = DataLoader(
+                Subset(native_dataset, native_train_idx),
+                batch_size=128,
+                shuffle=True,
+                generator=torch.Generator().manual_seed(int(seed)),
             )
-        gnn_model.eval()
-        for parameter in gnn_model.parameters():
-            parameter.requires_grad_(False)
+            native_val_loader = DataLoader(
+                Subset(native_dataset, native_val_idx),
+                batch_size=128,
+                shuffle=False,
+            )
+            gnn_model = modules["GTGNN"](
+                native_dataset.node_feat_dim,
+                32,
+                2,
+                native_dataset.edge_attr_dim,
+                resolved_device,
+                str(gnn_checkpoint),
+            ).to(resolved_device)
+            if can_resume_trained_model:
+                gnn_model.load_state_dict(
+                    torch.load(gnn_checkpoint, map_location=resolved_device)
+                )
+                gnn_summary = dict(training_state.get("gnn_training") or {})
+            else:
+                gnn_summary = _train_native_gnn(
+                    gnn_model,
+                    native_train_loader,
+                    native_val_loader,
+                    torch_module=torch,
+                    epochs=int(epochs),
+                    learning_rate=float(learning_rate),
+                    checkpoint=gnn_checkpoint,
+                )
+            gnn_model.eval()
+            for parameter in gnn_model.parameters():
+                parameter.requires_grad_(False)
 
         if can_resume_trained_model:
             source_train_idx = [
@@ -2113,6 +2181,48 @@ class OfficialGlobalGCEMutagenicityGenerator:
             native_source_indices = set(
                 source_train_idx + source_val_idx
             )
+        elif use_frozen_gine:
+            from src.data.molecular_graph_dataset import MolecularGraphData
+            from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
+            from src.oracles.oracle_factory import build_oracle
+
+            oracle = build_oracle(
+                dataset=str(self.dataset_name).lower(),
+                backend="gnn",
+                checkpoint=frozen_gine_root,
+                device=resolved_device,
+                batch_size=256,
+                num_classes=2,
+                source_label=self.source_label,
+            )
+            featurizer = MolecularGraphFeaturizer(bridge.feature_schema)
+            source_graphs = []
+            for parent in parents:
+                features = featurizer.featurize(parent.smiles)
+                source_graphs.append(
+                    MolecularGraphData(
+                        x=features.node_features,
+                        edge_index=features.edge_index,
+                        edge_attr=features.edge_features,
+                        y=self.source_label,
+                        molecule_id=parent.parent_id,
+                        smiles=features.canonical_smiles,
+                        split="train",
+                        graph_sha256=features.graph_sha256,
+                    )
+                )
+            predictions = oracle.predict_records(source_graphs, batch_size=256)
+            native_source_indices = {
+                index
+                for index, prediction in enumerate(predictions)
+                if int(prediction["predicted_label"]) == self.source_label
+            }
+            source_train_idx = [
+                index for index in source_train_idx if index in native_source_indices
+            ]
+            source_val_idx = [
+                index for index in source_val_idx if index in native_source_indices
+            ]
         else:
             source_prediction_loader = DataLoader(
                 source_dataset,
@@ -2147,7 +2257,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             ]
         if not source_train_idx or not source_val_idx:
             raise RuntimeError(
-                "Native GlobalGCE GNN did not retain both internal train and "
+                "GlobalGCE classifier did not retain both internal train and "
                 "validation source-label partitions."
             )
         source_dataset.train_idx = list(source_train_idx)
@@ -2237,9 +2347,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 gspan_max_in_memory_candidates=int(gspan_max_in_memory_candidates),
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
-            _write_json(
-                training_state_path,
-                {
+            training_state_payload = {
                     "seed": int(seed),
                     "epochs": int(epochs),
                     "top_k_native": int(top_k_native),
@@ -2256,8 +2364,13 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "rules_checkpoint_sha256": _sha256_file(rules_checkpoint),
                     "trained_once": True,
                     "rule_selection_performed_once": True,
-                },
-            )
+                }
+            if use_frozen_gine:
+                training_state_payload["prediction_backend"] = (
+                    "frozen_gine_differentiable_bridge"
+                )
+                training_state_payload["rf_oracle_used"] = False
+            _write_json(training_state_path, training_state_payload)
         rules = torch.load(rules_checkpoint, map_location=resolved_device)
         rules = _detach_tensor_tree(rules)
         globalgce_model.eval()
@@ -2272,18 +2385,33 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         codec_metadata = GlobalGCECodecMetadata.from_dataset(source_dataset)
         native_run_id = (
-            f"mutagenicity_seed{seed}_epochs{epochs}_topk{top_k_native}"
+            f"{self.dataset_name.lower()}_seed{seed}_epochs{epochs}_topk{top_k_native}"
         )
         training_summary = {
             "official_entrypoints": [
                 "data.data_preprocess-compatible dense molecular tensors",
-                "models.GTGNN.GTGNN",
+                (
+                    "project.FrozenGINEDifferentiableBridge"
+                    if use_frozen_gine
+                    else "models.GTGNN.GTGNN"
+                ),
                 "models.GlobalGCE.GlobalGCE",
                 "models.models_utils.train_globalgce",
                 "models.GlobalGCE.generate_cfs",
                 "concate_inputs_with_local_recourse",
             ],
-            "native_gnn_required": True,
+            "native_gnn_required": not use_frozen_gine,
+            "prediction_backend": (
+                "frozen_gine_differentiable_bridge"
+                if use_frozen_gine
+                else "official_native_gtgnn"
+            ),
+            "classifier_family": "gine" if use_frozen_gine else "gtgnn",
+            "oracle_backend": "gnn",
+            "rf_oracle_used": False if use_frozen_gine else None,
+            "classifier_parameters_frozen": True,
+            "frozen_bace_source_label": self.source_label,
+            "frozen_bace_target_label": self.target_label,
             "native_gnn_train_csv": str(self.native_train_csv),
             "native_gnn_train_rows": len(native_parents),
             "native_gnn_internal_train_ids_hash": _ids_hash(
@@ -2316,6 +2444,107 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "calibration_loaded": False,
             "test_loaded": False,
         }
+        if use_frozen_gine:
+            from src.baselines.globalgce_bace_native_rules import (
+                GlobalGCENativeRule,
+                stable_rule_id,
+            )
+
+            required_rule_tensors = (
+                "feat",
+                "adj",
+                "edge_attr",
+                "features_reconst",
+                "adj_reconst",
+                "edge_attrs_reconst",
+            )
+            missing_rule_tensors = [
+                name for name in required_rule_tensors if rules.get(name) is None
+            ]
+            if missing_rule_tensors:
+                raise RuntimeError(
+                    "Frozen-GINE GlobalGCE rule checkpoint is incomplete: "
+                    f"{missing_rule_tensors}"
+                )
+            rule_count = int(rules["feat"].shape[0])
+            if any(int(rules[name].shape[0]) != rule_count for name in required_rule_tensors):
+                raise RuntimeError("GlobalGCE frozen rule tensor counts differ")
+            rule_rows: list[dict[str, Any]] = []
+            rejected_rule_rows: list[dict[str, Any]] = []
+            for rule_index in range(rule_count):
+                raw_rule = {
+                    "native_rule_index": rule_index,
+                    "lhs_feature": rules["feat"][rule_index].detach().cpu().tolist(),
+                    "lhs_adjacency": rules["adj"][rule_index].detach().cpu().tolist(),
+                    "lhs_edge_attr": rules["edge_attr"][rule_index].detach().cpu().tolist(),
+                    "rhs_feature": rules["features_reconst"][rule_index]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "rhs_adjacency": rules["adj_reconst"][rule_index]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "rhs_edge_attr": rules["edge_attrs_reconst"][rule_index]
+                    .detach()
+                    .cpu()
+                    .tolist(),
+                    "atom_symbols": list(source_dataset.atom_symbols),
+                    "bond_names": list(source_dataset.bond_names),
+                }
+                candidate_id = stable_rule_id(raw_rule)
+                raw_rule["rule_id"] = candidate_id
+                row = {
+                    "candidate_id": candidate_id,
+                    "rank": rule_index + 1,
+                    "native_rank": rule_index + 1,
+                    "action_kind": "lhs_rhs_graph_transformation_rule",
+                    "action_semantics": "native_lhs_to_rhs_attachment_aware_v1",
+                    "oracle_backend": "gnn",
+                    "classifier_family": "gine",
+                    "rf_oracle_used": False,
+                    "oracle_checkpoint_hash": bridge.checkpoint_id,
+                    "source_split": "train",
+                    "rule": raw_rule,
+                }
+                try:
+                    parsed_rule = GlobalGCENativeRule.from_payload(row)
+                except Exception as exc:
+                    rejected_rule_rows.append(
+                        {
+                            "native_rule_index": rule_index,
+                            "candidate_id": candidate_id,
+                            "reason": f"{type(exc).__name__}:{exc}",
+                        }
+                    )
+                    continue
+                row["rule_content_hash"] = parsed_rule.content_hash()
+                row["canonical_fragment"] = "N/A"
+                row["canonical_fragment_reason"] = (
+                    "GlobalGCE uses a native attachment-aware LHS-to-RHS rule"
+                )
+                row["selector_chemistry"] = parsed_rule.selector_chemistry()
+                rule_rows.append(row)
+            _write_jsonl(output_dir / "native_rule_catalog.jsonl", rule_rows)
+            _write_jsonl(
+                output_dir / "native_rule_rejections.jsonl", rejected_rule_rows
+            )
+            training_summary.update(
+                {
+                    "native_rule_count": rule_count,
+                    "valid_native_rule_count": len(rule_rows),
+                    "rejected_native_rule_count": len(rejected_rule_rows),
+                    "native_rule_catalog": str(
+                        (output_dir / "native_rule_catalog.jsonl").resolve()
+                    ),
+                    "native_rule_catalog_sha256": _sha256_file(
+                        output_dir / "native_rule_catalog.jsonl"
+                    ),
+                    "native_rule_rejections": str(
+                        (output_dir / "native_rule_rejections.jsonl").resolve()
+                    ),
+                }
+            )
         log_globalgce_phase_memory(
             phase="training_and_rule_selection_ready",
             chunk_index=-1,
@@ -2325,6 +2554,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         if on_training_ready is not None:
             on_training_ready(dict(training_summary))
+
+        if rules_only:
+            if not use_frozen_gine:
+                raise ValueError("rules_only is reserved for the frozen-GINE route")
+            if int(training_summary.get("valid_native_rule_count") or 0) < 20:
+                raise RuntimeError(
+                    "Frozen-GINE GlobalGCE produced fewer than twenty valid native rules"
+                )
+            return NativeGenerationResult([], training_summary)
 
         rows_by_parent = _augmented_rows_by_source_parent(
             augmented_dataset,

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Static CLI-parity wrapper. The AutoDL continuation does not submit this file.
+# Static CLI-parity wrapper for all four frozen BACE cells, including native
+# GlobalGCE. The AutoDL continuation does not submit this file.
 #SBATCH --job-name=bace_cell_tasks
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
