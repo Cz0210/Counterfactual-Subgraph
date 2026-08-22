@@ -107,7 +107,7 @@ this validates its exporter manifests/filter audit and cannot invoke generation:
 export ACTION=freeze-mut-gcf-candidates
 export SOURCE_SPEC="$ARTIFACT_ROOT/am_legacy/source_specs/am_legacy_sources_v1.json"
 export MATCHED_THRESHOLD_CONTRACT="$ARTIFACT_ROOT/threshold_contracts/mutagenicity.json"
-export OUTPUT_ROOT="$ARTIFACT_ROOT/am_legacy/mut_gcf_frozen_top20/attempt-0"
+export OUTPUT_ROOT="$ARTIFACT_ROOT/am_legacy/mut_gcf/freeze/attempt-0"
 bash scripts/autodl/run_am_legacy_standardization.sh
 ```
 
@@ -116,14 +116,14 @@ calibration:
 
 ```bash
 export ACTION=calibration
-export FROZEN_ROOT="$ARTIFACT_ROOT/am_legacy/mut_gcf_frozen_top20/attempt-0"
+export FROZEN_ROOT="$ARTIFACT_ROOT/am_legacy/mut_gcf/freeze/attempt-0"
 export FULLGRAPH_CANDIDATES_PATH="$FROZEN_ROOT/export/selected_top20.csv"
 export FROZEN_MANIFEST="$FROZEN_ROOT/frozen_candidate_manifest.json"
 export CALIBRATION_CSV=/autodl-fs/data/.../calibration_source_label1_teacher_correct.csv
 export TEACHER_PATH=/autodl-fs/data/.../mutagenicity_rf_model.pkl
 export MOLCLR_ROOT=/autodl-fs/data/.../MolCLR
 export MOLCLR_CKPT="$MOLCLR_ROOT/ckpt/pretrained_gin/checkpoints/model.pth"
-export THRESHOLDS_JSON=/autodl-fs/data/.../ours_wnode_a2_test_v1/thresholds.json
+export THRESHOLDS_JSON="$FROZEN_ROOT/matched_thresholds.json"
 export WNODE_CACHE_DB=/autodl-fs/data/counterfactual-subgraph-runtime/cache/mut_gcf_wnode.sqlite
 export NODE_EMB_CACHE_DIR=/autodl-fs/data/counterfactual-subgraph-runtime/cache/molclr_nodes
 export OUTPUT_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/mut_gcf/calibration/attempt-0
@@ -135,7 +135,8 @@ After `[MUT_GCF_LEGACY_CALIBRATION_PASS]`, set `ACTION=heldout`,
 `OUTPUT_ROOT`. Success requires the underlying final artifact audit and emits
 `[MUT_GCF_LEGACY_HELDOUT_PASS]`. This held-out task must be placed behind its
 dataset-specific frozen-selector dependency by the new main controller; the
-older BACE-specialized recovery controller intentionally rejects it.
+controller recognizes this AM selector/test boundary and rejects any held-out
+task that is not transitively downstream of the frozen calibration task.
 
 The registry audit should receive
 `configs/autodl/mutagenicity_matched_protocol_v1.json` as its explicit
