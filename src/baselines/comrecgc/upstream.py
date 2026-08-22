@@ -62,11 +62,17 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def read_upstream_commit(path: str | Path) -> str:
+    """Read ``HEAD`` using the process-private exact-path trust boundary."""
+
+    return _git(Path(path), "rev-parse", "HEAD")
+
+
 def validate_upstream_checkout(path: str | Path) -> Path:
     root = Path(path).expanduser().resolve()
     if not (root / ".git").exists():
         raise FileNotFoundError(f"COMRECGC checkout is missing: {root}")
-    commit = _git(root, "rev-parse", "HEAD")
+    commit = read_upstream_commit(root)
     if commit != UPSTREAM_COMMIT:
         raise ContractError(
             f"COMRECGC checkout commit mismatch: actual={commit}, expected={UPSTREAM_COMMIT}"

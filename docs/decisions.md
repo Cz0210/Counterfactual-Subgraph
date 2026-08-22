@@ -4,6 +4,39 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Reuse process-scoped Git trust in every COMRECGC checkout gate
+
+### Background
+
+The shared COMRECGC validator correctly accepted the immutable migrated
+checkout through a process-private exact-path `safe.directory`.  The
+standalone checkout gate then repeated `git rev-parse HEAD` with a separate raw
+subprocess.  Git rejected that second query as dubious ownership, so both AIDS
+and Mutagenicity standardization failed after the shared validation had passed.
+
+### Decision
+
+Expose one semantic commit reader from the shared upstream module.  Both the
+shared validator and the standalone gate use that reader, which retains the
+private temporary global-config file, exact resolved checkout path, disabled
+system config, and automatic cleanup.  Remove the gate's duplicate raw Git
+implementation; do not change global Git configuration, checkout ownership,
+or frozen payloads.
+
+### Consequences
+
+- Migrated-owner checkout verification is consistent across preflight and
+  standardized continuation paths.
+- Wrong commits, dirty tracked source, corrupt vendor manifests, and missing
+  required files still fail closed.
+- Scientific lineage, RF oracle, dataset, split, threshold, and evaluation
+  semantics are unchanged.
+- Existing failed attempts remain immutable and require fresh controller tasks.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Pin Mutagenicity GCF evaluation to the AutoDL controller Python
 
 ### Background
