@@ -14,6 +14,46 @@ from scripts.audit_tastemolnet_license import (
 )
 
 
+def test_audit_completion_mode_does_not_unlock_blocked_gate(
+    tmp_path: Path, capsys
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "provenance_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset": "tastemolnet",
+                "upstream_commit": UPSTREAM_COMMIT,
+                "license_id": None,
+                "license_status": "LICENSE_REVIEW_REQUIRED",
+                "raw_data_commit_allowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "audit"
+    from scripts import audit_tastemolnet_license as module
+
+    assert (
+        module.main(
+            [
+                "--prepared-root",
+                str(prepared),
+                "--output-dir",
+                str(output),
+                "--audit-completion-mode",
+            ]
+        )
+        == 0
+    )
+    gate = json.loads((output / "taste_license_gate.json").read_text())
+    assert gate["status"] == BLOCKED
+    assert gate["heavy_route_authorized"] is False
+    stdout = capsys.readouterr().out
+    assert "[TASTE_LICENSE_BLOCKED]" in stdout
+    assert "[TASTE_LICENSE_AUDIT_COMPLETE] status=BLOCKED_LICENSE_REVIEW" in stdout
+
+
 def _prepared(tmp_path: Path, **overrides: object) -> Path:
     root = tmp_path / "prepared"
     root.mkdir()

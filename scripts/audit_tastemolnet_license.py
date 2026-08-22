@@ -229,6 +229,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--approval-file", default=os.environ.get("TASTEMOLNET_LICENSE_APPROVAL_FILE")
     )
     parser.add_argument("--upstream-checkout")
+    parser.add_argument(
+        "--audit-completion-mode",
+        action="store_true",
+        help=(
+            "Return success after publishing a complete BLOCKED audit. This does "
+            "not change taste_license_gate.json or authorize heavy work."
+        ),
+    )
     return parser
 
 
@@ -243,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(gate, sort_keys=True), flush=True)
     marker = "TASTE_LICENSE_PASS" if gate["status"] == PASS else "TASTE_LICENSE_BLOCKED"
     print(f"[{marker}]", flush=True)
+    if args.audit_completion_mode:
+        print(f"[TASTE_LICENSE_AUDIT_COMPLETE] status={gate['status']}", flush=True)
+        return 0
     return 0 if gate["status"] == PASS else 65
 
 

@@ -7014,3 +7014,7 @@ states plus the final state before writing PASS.
   for every continuation release.
 - Taste heavy work remains an explicit manifest gate; setting a launcher
   environment variable cannot synthesize license approval.
+- The controller runs the Taste license inspection as a CPU audit task. Audit
+  completion may return zero for orchestration while the immutable gate remains
+  `BLOCKED_LICENSE_REVIEW`; only `heavy_route_authorized=true` can release Taste
+  training or evaluation.
