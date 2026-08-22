@@ -22,6 +22,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from src.eval.user_approved_frozen_v4 import (
+    APPROVAL_ID as FROZEN_V4_APPROVAL_ID,
+    WAIVABLE_REGISTRY_REASONS as FROZEN_V4_WAIVABLE_REASONS,
+    validate_adopted_cell as validate_frozen_v4_adopted_cell,
+)
+
 
 DATASETS = ("AIDS", "Mutagenicity", "BACE", "TasteMolNet")
 METHODS = ("Ours", "GCFExplainer", "GlobalGCE", "ComRecGC")
@@ -113,6 +119,7 @@ ANCHOR_NAMES = frozenset(
         "per_candidate_eval.jsonl",
         "combined_manifest.json",
         "combined_audit.json",
+        "registry_exception.json",
         "final_gate.json",
         "freeze_manifest.json",
         "_RUN_COMPLETE.json",
@@ -202,6 +209,11 @@ MATRIX_FIELDS = (
     "k_max",
     "table2_k",
     "threshold_config_hash",
+    "registry_exception",
+    "registry_exception_manifest",
+    "registry_exception_hash",
+    "registry_exception_waivers",
+    "identity_evidence_status",
     "status",
     "adoption_reason",
     "rerun_reason",
@@ -903,6 +915,7 @@ def _load_layout_payloads(
         "final_artifact_audit.json",
         "oracle_manifest.json",
         "evaluation_manifest.json",
+        "registry_exception.json",
         "freeze_manifest.json",
         "_FINALIZED.json",
     ]
@@ -1314,8 +1327,47 @@ def _audit_candidate(
         ):
             reasons.append(f"EXPECTED_{field_name.upper()}_MISMATCH")
 
+    exception_label = (
+        "standardized/registry_exception.json"
+        if layout.nested_standardized
+        else "registry_exception.json"
+    )
+    exception_payload = payload_by_name.get(exception_label)
+    exception_valid = False
+    exception_waivers: list[str] = []
+    exception_hash = ""
+    if exception_payload is not None:
+        try:
+            exception_hash = sha256_file(standardized_root / "registry_exception.json")
+        except OSError:
+            reasons.append("USER_APPROVED_FROZEN_V4_EXCEPTION_HASH_FAILED")
+        valid, exception_reasons, _ = validate_frozen_v4_adopted_cell(
+            standardized_root
+        )
+        if not valid:
+            reasons.extend(
+                f"USER_APPROVED_FROZEN_V4_INVALID:{reason}"
+                for reason in exception_reasons
+            )
+        elif exception_payload.get("exception_kind") != FROZEN_V4_APPROVAL_ID:
+            reasons.append("USER_APPROVED_FROZEN_V4_EXCEPTION_KIND_MISMATCH")
+        else:
+            exception_waivers = sorted(
+                reason for reason in set(reasons) if reason in FROZEN_V4_WAIVABLE_REASONS
+            )
+            nonwaivable = sorted(
+                reason for reason in set(reasons) if reason not in FROZEN_V4_WAIVABLE_REASONS
+            )
+            if nonwaivable:
+                reasons = nonwaivable
+            else:
+                reasons = []
+                exception_valid = True
+
     if status is not CellStatus.RUNNING:
-        if "FAILED_SENTINEL_PRESENT" in reasons:
+        if exception_valid:
+            status = CellStatus.ADOPTABLE_PASS
+        elif "FAILED_SENTINEL_PRESENT" in reasons:
             status = CellStatus.FAILED
         elif any(
             reason in {"RF_ORACLE_CONTRACT_MISMATCH", "GNN_ORACLE_CONTRACT_MISMATCH"}
@@ -1390,9 +1442,24 @@ def _audit_candidate(
         "k_max": k_max if k_max is not None else "",
         "table2_k": table2_k if table2_k is not None else "",
         "threshold_config_hash": threshold_hash,
+        "registry_exception": FROZEN_V4_APPROVAL_ID if exception_valid else "",
+        "registry_exception_manifest": (
+            str(standardized_root / "registry_exception.json")
+            if exception_payload is not None
+            else ""
+        ),
+        "registry_exception_hash": exception_hash,
+        "registry_exception_waivers": ";".join(exception_waivers),
+        "identity_evidence_status": (
+            "USER_APPROVED_LEGACY_IDENTITIES_NOT_EMBEDDED"
+            if exception_valid
+            else ""
+        ),
         "status": status.value,
         "adoption_reason": (
-            "all required frozen evidence and protocol checks passed"
+            "exact checksum-pinned USER_APPROVED_FROZEN_V4 numeric rows adopted under the declared registry exception"
+            if exception_valid
+            else "all required frozen evidence and protocol checks passed"
             if status in PASS_STATUSES
             else ""
         ),
@@ -1519,6 +1586,11 @@ def _empty_cell(dataset: str, method: str, status: CellStatus) -> dict[str, Any]
         "k_max": 20,
         "table2_k": 10,
         "threshold_config_hash": "",
+        "registry_exception": "",
+        "registry_exception_manifest": "",
+        "registry_exception_hash": "",
+        "registry_exception_waivers": "",
+        "identity_evidence_status": "",
         "status": status.value,
         "adoption_reason": "",
         "rerun_reason": reason,

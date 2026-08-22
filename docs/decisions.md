@@ -4,6 +4,66 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## 2026-08-23 — Adopt exactly six user-approved AIDS/Mut frozen-v4 cells
+
+### Background
+
+The generic four-by-four registry correctly rejected the combined legacy v4
+tables because they are render-only artifacts and do not embed complete raw
+method outputs, dataset/test-split hashes, RF checkpoint hashes, MolCLR hashes,
+or selector-before-test evidence. The user has now explicitly designated the
+exact `aids_mutagenicity_wnode_gcf_style_matched_aids_v4` values as frozen
+results that must not be rerun. Silently weakening the generic adoption gate or
+inventing the missing identities would make the matrix look more complete than
+its evidence.
+
+### Decision
+
+Add one checksum-pinned exception named `USER_APPROVED_FROZEN_V4`, scoped only
+to AIDS and Mutagenicity crossed with Ours, GCFExplainer, and GlobalGCE. The
+five approved CSV/JSON files are read once each, hashed from those cached bytes,
+validated against their frozen source/manifests, and copied byte-for-byte into
+a fresh persistent source bundle. Exact source numeric strings are then
+schema-projected into six fresh standardized roots; no metric, distance,
+candidate order, rule order, threshold, or scientific value is recomputed.
+
+The exception publishes its absent raw/dataset/split/oracle/MolCLR and
+selector/test-order provenance as unavailable rather than synthesizing hashes
+or claims. Registry and final-export code may waive only those enumerated
+legacy-evidence requirements after independently revalidating the pinned
+source copy, deterministic row projection, output hash closure, RF backend,
+WNode/strict-flip contract, K grids, and exception scope. The resulting status
+is `ADOPTABLE_PASS`, not an ordinary provenance-complete `FROZEN_PASS`.
+
+CLEAR is source inventory only and is never adopted or mapped to ComRecGC. The
+adoption emits a future-controller supersession manifest for not-started
+duplicate work, but it neither mutates an existing controller nor stops a live
+task. The active route is AutoDL-only; its paired Slurm file exits before the
+documented CLI and exists solely for repository parity.
+
+### Alternatives considered
+
+1. Rerun all six methods despite the user's explicit frozen-result boundary.
+2. Mark the combined render-only root as a generic PASS without a cell closure.
+3. Fabricate legacy dataset, split, RF, or MolCLR hashes to satisfy the current
+   schema.
+4. Substitute CLEAR for the still-separate ComRecGC cell.
+
+### Consequences
+
+- Six A/M cells can enter the paper matrix as visibly exception-backed
+  `ADOPTABLE_PASS` artifacts without changing any frozen value.
+- Missing legacy identities remain machine-readable blockers/waivers rather
+  than false provenance.
+- Any source hash, scope, numeric projection, RF/action identity, or output
+  closure change fails the exception.
+- ComRecGC remains a separate native cell and ongoing ComRecGC work is not
+  interrupted.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Reconstruct an off-grid Mutagenicity GCF theta exactly
 
 ### Background

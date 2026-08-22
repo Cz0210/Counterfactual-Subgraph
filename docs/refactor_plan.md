@@ -1,5 +1,24 @@
 # Refactor Plan
 
+## 2026-08-23: User-approved frozen v4 AIDS/Mutagenicity adoption
+
+- [x] Pin the exact five machine-readable v4 source files and six authorized
+  AIDS/Mutagenicity cells in a tracked policy; do not open image/PDF files.
+- [x] Read and SHA each adopted source file once, reuse the cached bytes for
+  validation/copying/manifests, and reject any stat drift or writable AutoDL
+  file descriptor.
+- [x] Project exact numeric strings into fresh standardized roots without
+  reranking, recomputing metrics, selecting candidates, or rendering figures.
+- [x] Keep absent raw, dataset, split, oracle-checkpoint, and MolCLR identities
+  explicitly unavailable under the narrow `USER_APPROVED_FROZEN_V4` exception.
+- [x] Extend registry and final-export verification to accept only that exact
+  checksum/scope-bound exception while retaining every normal fail-closed gate.
+- [x] Exclude CLEAR and ComRecGC from the exception; a new controller may omit
+  not-started duplicate repair work but this adoption never stops a live task.
+- [x] Add AutoDL execution and protected static Slurm CLI-parity wrappers,
+  focused tamper/source-hash/fresh-root/registry/export tests, and a deployment
+  runbook.
+
 ## 2026-08-22: Mutagenicity GCF off-grid theta-star export compatibility
 
 - [x] Reproduce the repair-v1 failure against the real 601-point frozen grid,

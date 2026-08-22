@@ -101,6 +101,15 @@ evaluation contract, artifact inventory, stale-artifact list, and adoption
 report without recomputing scientific results. See
 `docs/AUTODL_FOUR_BY_FOUR_MATRIX_AUDIT.md`.
 
+The exact checksum-pinned legacy v4 AIDS/Mutagenicity tables may be adopted for
+only `Ours`, `GCFExplainer`, and `GlobalGCE` through
+`scripts/autodl/adopt_user_approved_frozen_v4.py`. This is an explicit
+`USER_APPROVED_FROZEN_V4` registry exception: numeric strings are copied from
+the five approved CSV/JSON source files without scientific recomputation, while
+missing legacy raw/provenance identities remain visibly unavailable. CLEAR is
+excluded and is never relabeled as ComRecGC. See
+`docs/AUTODL_USER_APPROVED_FROZEN_V4_ADOPTION.md`.
+
 Final Figure 3, Figure 4, and Table 2 aggregation is separately gated by
 `scripts/autodl/export_four_by_four_main_results.py`. It produces no numerical
 or graphical final output until the registry and all standardized artifact

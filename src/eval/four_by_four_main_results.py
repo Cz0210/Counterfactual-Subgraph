@@ -36,6 +36,11 @@ from src.eval.four_by_four_registry import (
     sha256_file,
     stable_json_sha256,
 )
+from src.eval.user_approved_frozen_v4 import (
+    APPROVAL_ID as FROZEN_V4_APPROVAL_ID,
+    EXCEPTION_SCHEMA as FROZEN_V4_EXCEPTION_SCHEMA,
+    validate_adopted_cell as validate_frozen_v4_adopted_cell,
+)
 
 
 EXPORT_SCHEMA_VERSION = "four_methods_four_datasets_main_results_v1"
@@ -371,7 +376,12 @@ def _explicit_true_or_calibration(
 
 
 def _validate_manifest_identity(
-    payloads: Sequence[Mapping[str, Any]], row: Mapping[str, Any], dataset: str, method: str
+    payloads: Sequence[Mapping[str, Any]],
+    row: Mapping[str, Any],
+    dataset: str,
+    method: str,
+    *,
+    root: Path,
 ) -> None:
     dataset_values = {
         canonical_dataset(value)
@@ -394,6 +404,34 @@ def _validate_manifest_identity(
         raise MainResultsError(
             f"{dataset}/{method}: manifest method identity is not uniquely {method}"
         )
+    exception_payloads = [
+        payload
+        for payload in payloads
+        if payload.get("schema_version") == FROZEN_V4_EXCEPTION_SCHEMA
+    ]
+    frozen_v4_exception = False
+    if exception_payloads:
+        if len(exception_payloads) != 1:
+            raise MainResultsError(
+                f"{dataset}/{method}: duplicate frozen-v4 registry exceptions"
+            )
+        valid, reasons, _ = validate_frozen_v4_adopted_cell(root)
+        exception_path = root / "registry_exception.json"
+        if not valid:
+            raise MainResultsError(
+                f"{dataset}/{method}: invalid frozen-v4 registry exception: {list(reasons)}"
+            )
+        if (
+            row.get("registry_exception") != FROZEN_V4_APPROVAL_ID
+            or str(row.get("registry_exception_hash") or "").lower()
+            != sha256_file(exception_path)
+            or row.get("identity_evidence_status")
+            != "USER_APPROVED_LEGACY_IDENTITIES_NOT_EMBEDDED"
+        ):
+            raise MainResultsError(
+                f"{dataset}/{method}: matrix row is not bound to the validated frozen-v4 exception"
+            )
+        frozen_v4_exception = True
     hash_keys = {
         "oracle_hash": (
             "oracle_hash",
@@ -421,15 +459,25 @@ def _validate_manifest_identity(
     }
     for row_key, manifest_keys in hash_keys.items():
         expected = str(row.get(row_key) or "").lower()
+        observed = _identity_hash_values(payloads, manifest_keys)
+        if frozen_v4_exception and row_key in {
+            "oracle_hash",
+            "dataset_hash",
+            "molclr_checkpoint_hash",
+        }:
+            if expected or observed:
+                raise MainResultsError(
+                    f"{dataset}/{method}: waived {row_key} must remain explicitly unavailable"
+                )
+            continue
         if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
             raise MainResultsError(f"{dataset}/{method}: matrix lacks {row_key}")
-        observed = _identity_hash_values(payloads, manifest_keys)
         if observed != {expected}:
             raise MainResultsError(
                 f"{dataset}/{method}: {row_key} closure mismatch: {sorted(observed)}"
             )
     expected_split = str(row.get("split_hash") or "").lower()
-    if re.fullmatch(r"[0-9a-f]{64}", expected_split) is None:
+    if not frozen_v4_exception and re.fullmatch(r"[0-9a-f]{64}", expected_split) is None:
         raise MainResultsError(f"{dataset}/{method}: matrix lacks split_hash")
     cohort_hashes = _identity_hash_values(
         payloads,
@@ -438,7 +486,12 @@ def _validate_manifest_identity(
     observed_split = cohort_hashes or _identity_hash_values(
         payloads, ("test_split_hash", "split_hash")
     )
-    if observed_split != {expected_split}:
+    if frozen_v4_exception:
+        if expected_split or observed_split:
+            raise MainResultsError(
+                f"{dataset}/{method}: waived split_hash must remain explicitly unavailable"
+            )
+    elif observed_split != {expected_split}:
         raise MainResultsError(
             f"{dataset}/{method}: split_hash closure mismatch: {sorted(observed_split)}"
         )
@@ -463,6 +516,8 @@ def _validate_manifest_identity(
     if dataset in {"BACE", "TasteMolNet"}:
         if not _explicit_false(payloads, ("rf_oracle_used", "RF_ORACLE_USED")):
             raise MainResultsError(f"{dataset}/{method}: RF exclusion is not proven")
+    if frozen_v4_exception:
+        return
     if not _explicit_false(
         payloads, ("test_used_for_selection", "selection_used_test")
     ):
@@ -530,14 +585,18 @@ def audit_cell(row: Mapping[str, Any]) -> CellArtifacts:
     )
     payload_by_name = {name: _read_json_object(paths[name]) for name in json_names}
     payloads = list(payload_by_name.values())
-    for optional_name in ("freeze_manifest.json", "_FINALIZED.json"):
+    for optional_name in (
+        "freeze_manifest.json",
+        "registry_exception.json",
+        "_FINALIZED.json",
+    ):
         optional_path = root / optional_name
         if optional_path.is_file() and optional_path.stat().st_size > 0:
             payloads.append(_read_json_object(optional_path))
     final_audit = payload_by_name["final_artifact_audit.json"]
     if final_audit.get("passed") is not True and final_audit.get("audit_passed") is not True:
         raise MainResultsError(f"{dataset}/{method}: final artifact audit is not PASS")
-    _validate_manifest_identity(payloads, row, dataset, method)
+    _validate_manifest_identity(payloads, row, dataset, method, root=root)
 
     figure3, _ = _method_rows(paths["figure3_coverage_vs_k.csv"], expected_method=method, kind="figure3")
     figure4, _ = _method_rows(paths["figure4_coverage_vs_threshold.csv"], expected_method=method, kind="figure4")

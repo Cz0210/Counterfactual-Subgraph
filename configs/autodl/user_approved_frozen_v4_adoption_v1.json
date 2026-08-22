@@ -1,0 +1,43 @@
+{
+  "approval_id": "USER_APPROVED_FROZEN_V4",
+  "approval_scope": [
+    "AIDS/Ours",
+    "AIDS/GCFExplainer",
+    "AIDS/GlobalGCE",
+    "Mutagenicity/Ours",
+    "Mutagenicity/GCFExplainer",
+    "Mutagenicity/GlobalGCE"
+  ],
+  "excluded_methods": [
+    "CLEAR",
+    "ComRecGC"
+  ],
+  "registry_status": "ADOPTABLE_PASS",
+  "schema_version": "user_approved_frozen_v4_policy_v1",
+  "source_files": {
+    "_RUN_COMPLETE.json": {
+      "sha256": "1bbe549233064c1e9465a4af49806f085653b0c4828e3088a3b66dde9a8c5ba1"
+    },
+    "combined_manifest.json": {
+      "sha256": "bde6e85c1c250a0ce3346b7f3202a177898eeee7dcfb2871a955c0f0b0688e9a"
+    },
+    "figure3_gcf_style_aids_mut_data.csv": {
+      "sha256": "d63b36fb05d6f59dae9ce8adb5a1eeb28e3cfc03618ab0e181c7a9366f8acf73"
+    },
+    "figure4_gcf_style_aids_mut_data.csv": {
+      "sha256": "452a5286a7bb06d3fe9bca33d186b579c357ccfdd4ad0031f4a18b5e389659e9"
+    },
+    "table2_gcf_style_aids_mut.csv": {
+      "sha256": "3a2768037cc8f3895fe45dea9a33d019912b7ff30f436202194d5b3d2bcc26ea"
+    }
+  },
+  "source_root_basename": "aids_mutagenicity_wnode_gcf_style_matched_aids_v4",
+  "user_approved_waivers": [
+    "legacy_raw_method_output_closure_not_embedded",
+    "dataset_hash_not_embedded",
+    "test_split_hash_not_embedded",
+    "oracle_checkpoint_and_hash_not_embedded",
+    "molclr_checkpoint_hash_not_embedded",
+    "selector_and_test_order_provenance_not_embedded"
+  ]
+}
