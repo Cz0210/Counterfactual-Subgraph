@@ -15,6 +15,11 @@ from pathlib import Path
 import tempfile
 from typing import Any, Sequence
 
+from src.baselines.tastemolnet_multiclass_tasks import (
+    BLOCKER as TASTE_LICENSE_BLOCKER,
+    build_blocked_baseline_tasks,
+)
+
 
 METHODS = ("ours", "gcfexplainer", "globalgce", "comrecgc")
 
@@ -269,21 +274,29 @@ def build_tasks(args: argparse.Namespace) -> dict[str, Any]:
             priority=201,
         ),
     ]
-    for offset, method in enumerate(METHODS):
-        tasks.append(
-            {
-                "id": f"tastemolnet_{method}",
-                "dataset": "tastemolnet",
-                "stage": f"TASTEMOLNET_{method.upper()}",
-                "depends_on": ["tastemolnet_license_audit"],
-                "resource": "gpu",
-                "priority": 1000 + offset,
-                "data_splits": [],
-                "manifest_only": True,
-                "command": None,
-                "blocked_reason": "BLOCKED_LICENSE_REVIEW",
-            }
+    # Ours remains a terminal placeholder in this foundation-only controller.
+    # The three native baselines carry richer method-specific multiclass
+    # contracts, but are equally non-runnable while the exact-data license is
+    # unresolved.  Static blocks request no GPU and declare no raw split access.
+    tasks.append(
+        {
+            "id": "tastemolnet_ours",
+            "dataset": "tastemolnet",
+            "stage": "TASTEMOLNET_OURS",
+            "depends_on": ["tastemolnet_license_audit"],
+            "resource": "cpu",
+            "priority": 1000,
+            "data_splits": [],
+            "manifest_only": True,
+            "command": None,
+            "blocked_reason": TASTE_LICENSE_BLOCKER,
+        }
+    )
+    tasks.extend(
+        build_blocked_baseline_tasks(
+            license_task_id="tastemolnet_license_audit"
         )
+    )
     payload = {
         "schema_version": 1,
         "controller_id": args.controller_id,

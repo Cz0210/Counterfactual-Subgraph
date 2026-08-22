@@ -57,6 +57,51 @@ Accepted
 
 ---
 
+## [2026-08-22] Freeze TasteMolNet multiclass baseline adapters behind a fresh-release license gate
+
+### Background
+
+TasteMolNet is a three-class Bitter/Sweet/Tasteless dataset with Sweet as the
+source class. Historical binary assumptions such as `1-label` would discard
+valid Sweet-to-Tasteless counterfactuals. At the same time, the exact prepared
+CSV still has no approved research-reuse basis, so even a correct adapter must
+not cause candidate generation, inference, training, or test access.
+
+### Decision
+
+Add pure, training-free contracts for GCFExplainer, GlobalGCE, and ComRecGC.
+All three require the same frozen three-class GINE and define a strict flip as
+`pred_before == 1 and pred_after != 1`. Preserve GCFExplainer full-graph
+actions. Merge GlobalGCE target-0 and target-2 native rules by exact action
+identity before calibration, failing on hash/action disagreement. Preserve
+ComRecGC global graph identity and unique pinned-upstream single-edit lineage;
+parent metadata is provenance only.
+
+Publish only terminal `BLOCKED_LICENSE_REVIEW`, CPU/manifest-only controller
+tasks with `command=null` and no data-split declarations. Record an all-of
+fresh-release contract in the fragment. The blocked-fragment builder refuses a
+PASS license gate so an old blocked artifact cannot be relabeled in place; a
+future authorized route must create a fresh fragment bound to the exact PASS
+gate, frozen GINE hashes, shared split/MolCLR identities, and calibration-only
+selector freeze before test.
+
+### Consequences
+
+- No current TasteMolNet task can consume a GPU or access train/test bytes.
+- Sweet-to-Bitter and Sweet-to-Tasteless remain first-class destinations and
+  are reported overall and per rule.
+- RF provenance and separate binary explainees fail closed.
+- Approval of the data license is necessary but not sufficient to release a
+  route; classifier and native-input provenance must also close.
+- The static Slurm wrapper exists only for CLI parity and is not submitted by
+  the AutoDL-only campaign.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-22] Adapt native BACE baseline fragments at the controller boundary
 
 ### Background

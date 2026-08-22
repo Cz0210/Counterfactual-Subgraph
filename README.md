@@ -107,6 +107,11 @@ closures prove 16/16 eligible cells; incomplete campaigns receive a
 non-numeric staging audit only. See
 `docs/AUTODL_FOUR_BY_FOUR_MAIN_RESULTS_EXPORT.md`.
 
+The future TasteMolNet baseline routes share one explicit three-class GINE,
+untargeted Sweet-to-non-Sweet strict-flip contract while remaining terminally
+license-blocked in the current controller. See
+`docs/AUTODL_TASTEMOLNET_MULTICLASS_BASELINE_ADAPTERS.md`.
+
 ---
 
 ## 3. Planned Repository Layout

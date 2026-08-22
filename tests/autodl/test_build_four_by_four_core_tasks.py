@@ -80,8 +80,18 @@ def test_builds_exact_core_fragment_and_keeps_taste_heavy_blocked(
         task = by_id[f"tastemolnet_{method}"]
         assert task["command"] is None
         assert task["blocked_reason"] == "BLOCKED_LICENSE_REVIEW"
-        assert task["manifest_only"] is True
+        assert task["resource"] == "cpu"
         assert task["data_splits"] == []
+        assert task["manifest_only"] is True
+    assert by_id["tastemolnet_gcfexplainer"]["native_action_kind"] == (
+        "full_counterfactual_graph"
+    )
+    assert by_id["tastemolnet_globalgce"]["multiclass_adapter_contract"][
+        "target_branches"
+    ] == [0, 2]
+    assert by_id["tastemolnet_comrecgc"]["multiclass_adapter_contract"][
+        "graph_content_identity"
+    ] == "canonical_global_graph_hash"
     mut = by_id["mutagenicity_comrecgc_standardized"]
     aids = by_id["aids_comrecgc_standardized"]
     assert mut["runner_dataset"] == "paper-cell-mutagenicity-comrecgc"
