@@ -10,7 +10,7 @@ The complete local candidate controller manifest is
 validation passed with 22 tasks, a four-GPU ceiling, no `__CONFIGURE_*`
 placeholders, and exactly one blocked task: TasteMolNet license review.  The
 candidate manifest SHA-256 is
-`e041c268973ee42ecaea0c51f863b3d434f6f053de03ea61d823430a66d44fb1`.
+`ac4eca7ca364fb8b90c2f15da84cc0f6a3f56a0b4248a8a1d820f3bbd20ebf17`.
 AutoDL path existence and exact `exp_run` adoption equality were deliberately
 not fabricated by this local-only drafting step; they must pass the controller's
 read-only launch validation before deployment.
@@ -293,15 +293,26 @@ adopted as PASS.  The fresh canary is:
   `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841`;
 - execution worktree: `/root/autodl-tmp/worktrees/run-bace-ppo-a625841`;
 - commit: `a6258413619fe2f762980c7172ed20a9917a0e2f`;
+- exact launch environment additionally binds
+  `PYTHONPATH=/root/autodl-tmp/worktrees/run-bace-ppo-a625841`;
 - required deterministic preflight:
   `canary_connected_deletion_preflight.json`;
-- current state: `__CURRENT_BACE_CANARY_STATE__`.
+- terminal state: `PASS`.
 
-The controller adopts and observes this writer; it does not infer PASS.  B6-v2
-starts only after the canary's complete PASS contract.  B6-v2 must prove 5--10
-real optimizer updates, changed policy bytes, unchanged reference bytes,
-reloadable checkpoint, finite rewards, at least one valid GNN-scored deletion,
-saved pool/reward provenance, no RF, and no calibration/test loading.
+The controller must still revalidate the canary's exact launch spec and full
+PASS contract before importing that PASS.  Formal B6-v2 is a **fresh controller
+task**, with input evidence closed over
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841/canary_manifest.json`;
+its environment separately binds the adopted clean initializer.  B6-v2 must
+prove 5--10 real optimizer updates, changed policy bytes, unchanged reference
+bytes, reloadable checkpoint, finite rewards, at least one valid GNN-scored
+deletion, saved pool/reward provenance, no RF, and no calibration/test loading.
+
+The pre-release B6 run
+`20260822T034345Z-bace-b6-v2-a625841` is terminal `PASS`.  It is bounded
+pre-release validation evidence only: do not adopt it and do not let it publish controller
+B6 authority.  The hardened controller must launch both formal B6 and B7 from
+the same final immutable development commit.
 
 B6-v2 output pattern:
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{attempt}`.

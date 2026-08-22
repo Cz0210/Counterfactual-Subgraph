@@ -1,0 +1,1205 @@
+{
+  "schema_version": 1,
+  "controller_id": "autodl-four-gpu-recovery-20260822T033351Z-v1",
+  "paper_frozen": true,
+  "runtime": {
+    "max_gpus": 4,
+    "stable_idle_seconds": 60,
+    "sample_interval_seconds": 5,
+    "poll_seconds": 60,
+    "min_free_memory_mb": 16000,
+    "idle_util_threshold": 10,
+    "worker_launcher": "auto",
+    "max_cpu_tasks": 2
+  },
+  "resource_gates": {
+    "min_available_ram_gb": 32,
+    "min_free_disk_gb": 20,
+    "max_cpu_load_fraction": 0.9
+  },
+  "tasks": [
+    {
+      "id": "mut_recovery",
+      "dataset": "mutagenicity",
+      "stage": "MUT_LINEAGE_RECOVERY_V2",
+      "runner_dataset": "mutagenicity",
+      "runner_stage": "MUT_LINEAGE_RECOVERY_V2",
+      "depends_on": [],
+      "resource": "gpu",
+      "priority": 10,
+      "adopt_existing_run_id": "20260822T025620Z-mut-lineage-v3-6ddd743",
+      "adopt_gpu_index": 0,
+      "adopt_gpu_uuid": "GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732",
+      "adopt_project_root": "/root/autodl-tmp/worktrees/run-mut-lineage-6ddd743",
+      "adopt_git_commit": "6ddd74339dbd9b1f0e57ba341ae4529cc2864fce",
+      "adopt_max_gpus": 2,
+      "adopt_heavy": true,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_comrecgc_fresh_recovery.sh"
+      ],
+      "input_manifest": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/mut_generation/MANIFEST.sha256",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z",
+      "required_output_files": [
+        "adoption_manifest.json",
+        "run_manifest.json",
+        "freeze_only_recovery.json",
+        "_RUN_COMPLETE.json"
+      ],
+      "required_log_marker": "[COMRECGC_FRESH_RECOVERY_PASS] dataset=mutagenicity",
+      "environment": {
+        "DATASET": "mutagenicity",
+        "DATASET_DIR": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/mutagenicity/baselines/gcfexplainer/smoke_v1/dataset",
+        "DISALLOW_GENERATION": "1",
+        "EXPECTED_PROJECT_COMMIT": "7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4",
+        "EXPECTED_STEPS": "50000",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "SOURCE_GENERATION_DIR": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/mut_generation"
+      }
+    },
+    {
+      "id": "aids_recovery",
+      "dataset": "aids",
+      "stage": "AIDS_LINEAGE_RECOVERY_V2",
+      "runner_dataset": "aids",
+      "runner_stage": "AIDS_LINEAGE_RECOVERY_V2",
+      "depends_on": [],
+      "resource": "gpu",
+      "priority": 20,
+      "adopt_existing_run_id": "20260822T020238Z-aids-lineage-v2-6ddd743",
+      "adopt_gpu_index": 1,
+      "adopt_gpu_uuid": "GPU-244f35a8-354a-ef1e-f589-bde7f8a7a690",
+      "adopt_project_root": "/root/autodl-tmp/worktrees/run-aids-lineage-6ddd743",
+      "adopt_git_commit": "6ddd74339dbd9b1f0e57ba341ae4529cc2864fce",
+      "adopt_max_gpus": 2,
+      "adopt_heavy": true,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_comrecgc_fresh_recovery.sh"
+      ],
+      "input_manifest": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/aids_generation/MANIFEST.sha256",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/aids_comrecgc_lineage_v2_20260822T020238Z",
+      "required_output_files": [
+        "adoption_manifest.json",
+        "run_manifest.json",
+        "freeze_only_recovery.json",
+        "_RUN_COMPLETE.json"
+      ],
+      "required_log_marker": "[COMRECGC_FRESH_RECOVERY_PASS] dataset=aids",
+      "environment": {
+        "DATASET": "aids",
+        "DATASET_DIR": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/current/gcfexplainer/aids/dataset",
+        "DISALLOW_GENERATION": "1",
+        "EXPECTED_PROJECT_COMMIT": "a418692b75b888297222d31d87f49148505e10d0",
+        "EXPECTED_STEPS": "50000",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/aids_comrecgc_lineage_v2_20260822T020238Z",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "SOURCE_CSV": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/static_project/outputs/hpc/sft_v3_hiv_runs/sft_v3_hiv_20260508_resplit/dataset/sft_v3_hiv_ppo_prompts_train_label1.csv",
+        "SOURCE_GENERATION_DIR": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/aids_generation"
+      }
+    },
+    {
+      "id": "bace_policy_provenance_audit",
+      "dataset": "bace",
+      "stage": "BACE_POLICY_PROVENANCE_AUDIT",
+      "runner_dataset": "bace-gnn-clean-audit",
+      "runner_stage": "BACE_POLICY_PROVENANCE_AUDIT",
+      "external_bace_stage": "B5_ORACLE_SMOKE",
+      "depends_on": [],
+      "resource": "cpu",
+      "priority": 30,
+      "adopt_existing_run_id": "20260822T030124Z-bace-policy-audit-1c889b9",
+      "adopt_gpu_index": null,
+      "adopt_gpu_uuid": null,
+      "adopt_project_root": "/root/autodl-tmp/worktrees/run-bace-prep-1c889b9",
+      "adopt_git_commit": "1c889b971d290f7d8425fca24085dc8a212387f9",
+      "adopt_max_gpus": 4,
+      "adopt_heavy": false,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
+        "BACE_POLICY_PROVENANCE_AUDIT"
+      ],
+      "input_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/bace/stages/B5_ORACLE_SMOKE/manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/provenance-audit/20260822T030124Z-bace-policy-audit-1c889b9",
+      "required_output_files": [
+        "initializer_selection.json",
+        "audit_manifest.json",
+        "PASS"
+      ],
+      "required_absolute_output_files": [
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/bace_policy_initializer_provenance_20260822T030124Z.csv"
+      ],
+      "required_log_marker": "[BACE_POLICY_PROVENANCE_AUDIT_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "BACE_GNN_CHECKPOINT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "BACE_POLICY_AUDIT_CSV": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/bace_policy_initializer_provenance_20260822T030124Z.csv",
+        "BACE_SPLIT_ROOT": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE",
+        "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/provenance-audit/20260822T030124Z-bace-policy-audit-1c889b9",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_clean_initializer",
+      "dataset": "bace",
+      "stage": "BACE_CLEAN_INITIALIZER_BUILD",
+      "runner_dataset": "bace-gnn-clean-init",
+      "runner_stage": "BACE_CLEAN_INITIALIZER_BUILD",
+      "depends_on": [
+        "bace_policy_provenance_audit"
+      ],
+      "resource": "gpu",
+      "priority": 35,
+      "adopt_existing_run_id": "20260822T030604Z-bace-clean-init-1c889b9",
+      "adopt_gpu_index": 2,
+      "adopt_gpu_uuid": "GPU-901b50ea-30b2-4a0c-505f-bf94980e1484",
+      "adopt_project_root": "/root/autodl-tmp/worktrees/run-bace-prep-1c889b9",
+      "adopt_git_commit": "1c889b971d290f7d8425fca24085dc8a212387f9",
+      "adopt_max_gpus": 4,
+      "adopt_heavy": true,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
+        "BACE_CLEAN_INITIALIZER_BUILD"
+      ],
+      "input_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/provenance-audit/20260822T030124Z-bace-policy-audit-1c889b9/audit_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9",
+      "required_output_files": [
+        "policy_provenance.json",
+        "adapter/adapter_config.json",
+        "PASS"
+      ],
+      "required_output_any": [
+        [
+          "adapter/adapter_model.safetensors",
+          "adapter/adapter_model.bin"
+        ]
+      ],
+      "required_log_marker": "[BACE_CLEAN_POLICY_INITIALIZER_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "BACE_GNN_CHECKPOINT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "BACE_INITIALIZER_MODE": "raw-base",
+        "BACE_POLICY_AUDIT_SELECTION": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/provenance-audit/20260822T030124Z-bace-policy-audit-1c889b9/initializer_selection.json",
+        "BACE_SPLIT_ROOT": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE",
+        "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_gnn_ppo_adapter_canary",
+      "dataset": "bace",
+      "stage": "BACE_GNN_PPO_ADAPTER_CANARY",
+      "runner_dataset": "bace-gnn-clean-canary",
+      "runner_stage": "BACE_GNN_PPO_ADAPTER_CANARY",
+      "depends_on": [
+        "bace_clean_initializer"
+      ],
+      "resource": "gpu",
+      "priority": 38,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
+        "BACE_GNN_PPO_ADAPTER_CANARY"
+      ],
+      "input_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/policy_provenance.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841",
+      "required_output_files": [
+        "run_manifest.json",
+        "policy_provenance.json",
+        "candidate_pool.jsonl",
+        "oracle_provenance.json",
+        "reward_manifest.json",
+        "ppo_gate.json",
+        "canary_connected_deletion_preflight.json",
+        "canary_manifest.json",
+        "adapter_config.json",
+        "PASS"
+      ],
+      "required_output_any": [
+        [
+          "adapter_model.safetensors",
+          "adapter_model.bin"
+        ]
+      ],
+      "required_log_marker": "[BACE_GNN_PPO_ADAPTER_CANARY_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "BACE_GNN_CHECKPOINT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "BACE_POLICY_INITIALIZER": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter",
+        "BACE_POLICY_PROVENANCE_MANIFEST": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/policy_provenance.json",
+        "BACE_PPO_BATCH_SIZE": "2",
+        "BACE_SPLIT_ROOT": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE",
+        "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": "/root/autodl-tmp/worktrees/run-bace-ppo-a625841"
+      },
+      "adopt_existing_run_id": "20260822T033440Z-bace-ppo-canary-a625841",
+      "adopt_gpu_index": 3,
+      "adopt_gpu_uuid": "GPU-2803b403-c056-187e-6047-683d02d3693b",
+      "adopt_project_root": "/root/autodl-tmp/worktrees/run-bace-ppo-a625841",
+      "adopt_git_commit": "a6258413619fe2f762980c7172ed20a9917a0e2f",
+      "adopt_max_gpus": 4,
+      "adopt_heavy": true
+    },
+    {
+      "id": "bace_b6_ppo_smoke",
+      "dataset": "bace",
+      "stage": "B6_PPO_SMOKE_V2",
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B6_PPO_SMOKE_V2",
+      "publish_bace_stage": false,
+      "external_bace_stage": "B5_ORACLE_SMOKE",
+      "depends_on": [
+        "bace_gnn_ppo_adapter_canary"
+      ],
+      "resource": "gpu",
+      "priority": 40,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
+        "B6_PPO_SMOKE_V2"
+      ],
+      "input_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841/canary_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{attempt}",
+      "required_output_files": [
+        "run_manifest.json",
+        "policy_provenance.json",
+        "candidate_pool.jsonl",
+        "oracle_provenance.json",
+        "reward_manifest.json",
+        "ppo_gate.json",
+        "ppo_smoke_manifest.json",
+        "adapter_config.json",
+        "PASS"
+      ],
+      "required_output_any": [
+        [
+          "adapter_model.safetensors",
+          "adapter_model.bin"
+        ]
+      ],
+      "required_log_marker": "[BACE_B6_V2_PASS]",
+      "environment": {
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "BACE_SPLIT_ROOT": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE",
+        "BACE_GNN_CHECKPOINT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "BACE_POLICY_INITIALIZER": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter",
+        "BACE_POLICY_PROVENANCE_MANIFEST": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/policy_provenance.json",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{attempt}",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_PPO_BATCH_SIZE",
+        "initial_batch_size": 4,
+        "retry_batch_size": 2
+      }
+    },
+    {
+      "id": "bace_b7_ppo_full",
+      "dataset": "bace",
+      "stage": "B7_PPO_FULL",
+      "depends_on": [
+        "bace_b6_ppo_smoke"
+      ],
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B7_PPO_FULL",
+      "publish_bace_stage": false,
+      "resource": "gpu",
+      "priority": 50,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
+        "B7_PPO_FULL"
+      ],
+      "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b7-full/attempt-{attempt}",
+      "required_output_files": [
+        "run_manifest.json",
+        "policy_provenance.json",
+        "candidate_pool.jsonl",
+        "oracle_provenance.json",
+        "reward_manifest.json",
+        "ppo_gate.json",
+        "ppo_manifest.json",
+        "adapter_config.json",
+        "checkpoint-50/adapter_config.json",
+        "checkpoint-100/adapter_config.json",
+        "checkpoint-150/adapter_config.json",
+        "checkpoint-200/adapter_config.json",
+        "checkpoint-250/adapter_config.json",
+        "checkpoint-300/adapter_config.json",
+        "PASS"
+      ],
+      "required_output_any": [
+        [
+          "adapter_model.safetensors",
+          "adapter_model.bin"
+        ],
+        [
+          "checkpoint-50/adapter_model.safetensors",
+          "checkpoint-50/adapter_model.bin"
+        ],
+        [
+          "checkpoint-100/adapter_model.safetensors",
+          "checkpoint-100/adapter_model.bin"
+        ],
+        [
+          "checkpoint-150/adapter_model.safetensors",
+          "checkpoint-150/adapter_model.bin"
+        ],
+        [
+          "checkpoint-200/adapter_model.safetensors",
+          "checkpoint-200/adapter_model.bin"
+        ],
+        [
+          "checkpoint-250/adapter_model.safetensors",
+          "checkpoint-250/adapter_model.bin"
+        ],
+        [
+          "checkpoint-300/adapter_model.safetensors",
+          "checkpoint-300/adapter_model.bin"
+        ]
+      ],
+      "required_log_marker": "[BACE_B7_PASS]",
+      "environment": {
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "BACE_SPLIT_ROOT": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE",
+        "BACE_GNN_CHECKPOINT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "BACE_POLICY_INITIALIZER": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter",
+        "BACE_POLICY_PROVENANCE_MANIFEST": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/policy_provenance.json",
+        "BACE_B6_V2_MANIFEST": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b7-full/attempt-{attempt}",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_PPO_BATCH_SIZE",
+        "initial_batch_size": 4,
+        "retry_batch_size": 2
+      }
+    },
+    {
+      "id": "bace_b7_prep_gnn_before",
+      "dataset": "bace",
+      "stage": "B7_PREP_CALIBRATION_GNN_BEFORE",
+      "depends_on": [
+        "bace_b6_ppo_smoke"
+      ],
+      "runner_dataset": "bace-gnn-clean-prep",
+      "runner_stage": "B7_PREP_CALIBRATION_GNN_BEFORE",
+      "resource": "gpu",
+      "priority": 51,
+      "data_splits": [
+        "calibration"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "CALIBRATION_GNN_BEFORE_CACHE",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--calibration-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/calibration.csv",
+        "--gnn-checkpoint",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "--output-dir",
+        "{task_output}",
+        "--batch-size",
+        "{batch_size}"
+      ],
+      "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/gnn-before/attempt-{attempt}",
+      "required_output_files": [
+        "calibration_parent_gnn_before.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_DOWNSTREAM_BATCH_SIZE",
+        "initial_batch_size": 256,
+        "retry_batch_size": 128
+      }
+    },
+    {
+      "id": "bace_b7_prep_molclr_parent",
+      "dataset": "bace",
+      "stage": "B7_PREP_MOLCLR_PARENT",
+      "depends_on": [
+        "bace_b6_ppo_smoke"
+      ],
+      "runner_dataset": "bace-gnn-clean-prep",
+      "runner_stage": "B7_PREP_MOLCLR_PARENT",
+      "resource": "gpu",
+      "priority": 52,
+      "data_splits": [
+        "calibration"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "CALIBRATION_MOLCLR_PARENT_CACHE",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--calibration-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/calibration.csv",
+        "--molclr-root",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR",
+        "--molclr-checkpoint",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth",
+        "--node-embedding-cache-dir",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/molclr-parent/attempt-{attempt}",
+      "required_output_files": [
+        "calibration_parent_molclr_cache.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b7_prep_shard_manifests",
+      "dataset": "bace",
+      "stage": "B7_PREP_SHARD_MANIFESTS",
+      "depends_on": [
+        "bace_b6_ppo_smoke"
+      ],
+      "runner_dataset": "bace-gnn-clean-prep",
+      "runner_stage": "B7_PREP_SHARD_MANIFESTS",
+      "resource": "cpu",
+      "priority": 53,
+      "data_splits": [
+        "train",
+        "calibration"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "FIXED_SHARD_MANIFESTS",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--train-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/train.csv",
+        "--calibration-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/calibration.csv",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/shard-manifests/attempt-{attempt}",
+      "required_output_files": [
+        "train_parent_ids.frozen.json",
+        "calibration_parent_ids.frozen.json",
+        "train_parent_shards.jsonl",
+        "calibration_parent_shards.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b7_prep_output_preflight",
+      "dataset": "bace",
+      "stage": "B7_PREP_OUTPUT_PREFLIGHT",
+      "depends_on": [
+        "bace_b6_ppo_smoke"
+      ],
+      "runner_dataset": "bace-gnn-clean-prep",
+      "runner_stage": "B7_PREP_OUTPUT_PREFLIGHT",
+      "resource": "cpu",
+      "priority": 54,
+      "data_splits": [],
+      "manifest_only": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prep",
+        "--prep-action",
+        "OUTPUT_PREFLIGHT",
+        "--b6-output",
+        "{dep_bace_b6_ppo_smoke_output}",
+        "--planned-output-root",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b8-base",
+        "--planned-output-root",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b9-hightemp",
+        "--planned-output-root",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b11-shards",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/output-preflight/attempt-{attempt}",
+      "required_output_files": [
+        "output_preflight.jsonl",
+        "prep_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B7_PARALLEL_PREP_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b8_pool_base",
+      "dataset": "bace",
+      "stage": "B8_POOL_BASE",
+      "depends_on": [
+        "bace_b7_ppo_full",
+        "bace_b7_prep_shard_manifests",
+        "bace_b7_prep_output_preflight"
+      ],
+      "resource": "gpu",
+      "priority": 60,
+      "runner_dataset": "bace-controller-shard",
+      "runner_stage": "B8_POOL_BASE-{shard_id}",
+      "publish_bace_stage": false,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "pool-shard",
+        "--stage",
+        "B8_POOL_BASE",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--train-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/train.csv",
+        "--b7-output",
+        "{dep_bace_b7_ppo_full_output}",
+        "--policy-checkpoint",
+        "{dep_bace_b7_ppo_full_output}",
+        "--base-model-path",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "--gnn-checkpoint",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "--output-dir",
+        "{task_output}",
+        "--batch-size",
+        "1",
+        "--resume"
+      ],
+      "input_manifest": "{dep_bace_b7_ppo_full_output}/ppo_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b8-base/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "candidate_pool.jsonl",
+        "pool_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B8_POOL_BASE_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "shards": {
+        "count": 4,
+        "parent_manifest": "{dep_bace_b7_prep_shard_manifests_output}/train_parent_ids.frozen.json",
+        "split": "train",
+        "parent_id_key": "parent_ids"
+      }
+    },
+    {
+      "id": "bace_b9_pool_hightemp",
+      "dataset": "bace",
+      "stage": "B9_POOL_HIGHTEMP",
+      "depends_on": [
+        "bace_b7_ppo_full",
+        "bace_b7_prep_shard_manifests",
+        "bace_b7_prep_output_preflight"
+      ],
+      "resource": "gpu",
+      "priority": 70,
+      "runner_dataset": "bace-controller-shard",
+      "runner_stage": "B9_POOL_HIGHTEMP-{shard_id}",
+      "publish_bace_stage": false,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "pool-shard",
+        "--stage",
+        "B9_POOL_HIGHTEMP",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--train-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/train.csv",
+        "--b7-output",
+        "{dep_bace_b7_ppo_full_output}",
+        "--policy-checkpoint",
+        "{dep_bace_b7_ppo_full_output}",
+        "--base-model-path",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
+        "--gnn-checkpoint",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "--output-dir",
+        "{task_output}",
+        "--batch-size",
+        "1",
+        "--resume"
+      ],
+      "input_manifest": "{dep_bace_b7_ppo_full_output}/ppo_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b9-hightemp/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "candidate_pool.jsonl",
+        "pool_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B9_POOL_HIGHTEMP_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "shards": {
+        "count": 4,
+        "parent_manifest": "{dep_bace_b7_prep_shard_manifests_output}/train_parent_ids.frozen.json",
+        "split": "train",
+        "parent_id_key": "parent_ids"
+      }
+    },
+    {
+      "id": "bace_b10_pool_merged",
+      "dataset": "bace",
+      "stage": "B10_POOL_MERGED",
+      "depends_on": [
+        "bace_b8_pool_base",
+        "bace_b9_pool_hightemp"
+      ],
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B10_POOL_MERGED",
+      "publish_bace_stage": false,
+      "resource": "cpu",
+      "priority": 80,
+      "data_splits": [
+        "train"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "merge-pools",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b8_pool_base_shard_003_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b9_pool_hightemp_shard_003_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b8_pool_base_shard_000_output}/pool_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b10-merged/attempt-{attempt}",
+      "required_output_files": [
+        "candidate_pool.jsonl",
+        "candidate_universe.jsonl",
+        "merge_manifest.json",
+        "pool_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B10_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b11_verification_shards",
+      "dataset": "bace",
+      "stage": "B11_VERIFICATION_SHARDS",
+      "runner_dataset": "bace-controller-shard",
+      "runner_stage": "B11_CROSS_PARENT_VERIFIED-{shard_id}",
+      "publish_bace_stage": false,
+      "depends_on": [
+        "bace_b10_pool_merged",
+        "bace_b7_prep_gnn_before",
+        "bace_b7_prep_molclr_parent",
+        "bace_b7_prep_shard_manifests"
+      ],
+      "resource": "gpu",
+      "priority": 90,
+      "data_splits": [
+        "calibration"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "verify-shard",
+        "--stage",
+        "B11_CROSS_PARENT_VERIFIED",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--split-path",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/calibration.csv",
+        "--predecessor-output",
+        "{dep_bace_b10_pool_merged_output}",
+        "--gnn-checkpoint",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "--molclr-root",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR",
+        "--molclr-checkpoint",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth",
+        "--wnode-cache-db",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/wnode/wnode_cache.sqlite3",
+        "--node-embedding-cache-dir",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings",
+        "--parent-before-cache",
+        "{dep_bace_b7_prep_gnn_before_output}/calibration_parent_gnn_before.jsonl",
+        "--oracle-batch-size",
+        "{batch_size}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b10_pool_merged_output}/merge_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b11-shards/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "pair_details.jsonl",
+        "match_instances.jsonl",
+        "verification_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B11_CROSS_PARENT_VERIFIED_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "shards": {
+        "count": 4,
+        "parent_manifest": "{dep_bace_b7_prep_shard_manifests_output}/calibration_parent_ids.frozen.json",
+        "split": "calibration",
+        "parent_id_key": "parent_ids"
+      },
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_DOWNSTREAM_ORACLE_BATCH_SIZE",
+        "initial_batch_size": 128,
+        "retry_batch_size": 64
+      }
+    },
+    {
+      "id": "bace_b11_cross_parent_verified",
+      "dataset": "bace",
+      "stage": "B11_CROSS_PARENT_VERIFIED",
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B11_CROSS_PARENT_VERIFIED",
+      "publish_bace_stage": false,
+      "depends_on": [
+        "bace_b11_verification_shards",
+        "bace_b10_pool_merged"
+      ],
+      "resource": "cpu",
+      "priority": 91,
+      "data_splits": [
+        "calibration"
+      ],
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "merge-verification",
+        "--stage",
+        "B11_CROSS_PARENT_VERIFIED",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b11_verification_shards_shard_003_output}",
+        "--predecessor-output",
+        "{dep_bace_b10_pool_merged_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b11_verification_shards_shard_000_output}/verification_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b11-merged/attempt-{attempt}",
+      "required_output_files": [
+        "pair_matrix.jsonl",
+        "match_instances.jsonl",
+        "selected_candidate_universe.jsonl",
+        "summary.json",
+        "run_manifest.json",
+        "matrix_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B11_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b12_selector",
+      "dataset": "bace",
+      "stage": "B12_SELECTOR",
+      "depends_on": [
+        "bace_b11_cross_parent_verified"
+      ],
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B12_SELECTOR",
+      "publish_bace_stage": false,
+      "resource": "cpu",
+      "priority": 100,
+      "data_splits": [
+        "calibration"
+      ],
+      "freezes_selector": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "select",
+        "--matrix-output",
+        "{dep_bace_b11_cross_parent_verified_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b11_cross_parent_verified_output}/run_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b12-selector/attempt-{attempt}",
+      "required_output_files": [
+        "selected_top20.json",
+        "frozen_selection_manifest.json",
+        "thresholds.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B12_SELECTOR_FROZEN]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b13_test_parent_manifest",
+      "dataset": "bace",
+      "stage": "B13_TEST_PARENT_MANIFEST",
+      "depends_on": [
+        "bace_b12_selector"
+      ],
+      "runner_dataset": "bace-gnn-clean-eval-prep",
+      "runner_stage": "B13_TEST_PARENT_MANIFEST",
+      "resource": "cpu",
+      "priority": 105,
+      "data_splits": [
+        "test"
+      ],
+      "selector_parameters_frozen": true,
+      "read_only_test": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "prepare-test-shards",
+        "--b12-output",
+        "{dep_bace_b12_selector_output}",
+        "--test-split",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/test.csv",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b13-test-parent-manifest/attempt-{attempt}",
+      "required_output_files": [
+        "test_parent_ids.frozen.json",
+        "test_shard_manifest.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B13_TEST_PARENT_MANIFEST_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b13_verification_shards",
+      "dataset": "bace",
+      "stage": "B13_FINAL_EVAL_SHARDS",
+      "depends_on": [
+        "bace_b12_selector",
+        "bace_b13_test_parent_manifest"
+      ],
+      "runner_dataset": "bace-gnn-clean-eval-shard",
+      "runner_stage": "B13_FINAL_EVAL-{shard_id}",
+      "publish_bace_stage": false,
+      "resource": "gpu",
+      "priority": 110,
+      "data_splits": [
+        "test"
+      ],
+      "selector_parameters_frozen": true,
+      "read_only_test": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "verify-shard",
+        "--stage",
+        "B13_FINAL_EVAL",
+        "--shard-index",
+        "{shard_index}",
+        "--parent-shard-manifest",
+        "{shard_manifest}",
+        "--split-path",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/data/processed/BACE/test.csv",
+        "--predecessor-output",
+        "{dep_bace_b12_selector_output}",
+        "--frozen-selection-manifest",
+        "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
+        "--gnn-checkpoint",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689",
+        "--molclr-root",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR",
+        "--molclr-checkpoint",
+        "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth",
+        "--wnode-cache-db",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/wnode/wnode_cache.sqlite3",
+        "--node-embedding-cache-dir",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings",
+        "--oracle-batch-size",
+        "{batch_size}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b13-shards/{shard_id}/attempt-{attempt}",
+      "required_output_files": [
+        "pair_details.jsonl",
+        "match_instances.jsonl",
+        "verification_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B13_FINAL_EVAL_SHARD_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "shards": {
+        "count": 4,
+        "parent_manifest": "{dep_bace_b13_test_parent_manifest_output}/test_parent_ids.frozen.json",
+        "split": "test",
+        "parent_id_key": "parent_ids"
+      },
+      "oom_retry": {
+        "enabled": true,
+        "batch_env": "BACE_DOWNSTREAM_ORACLE_BATCH_SIZE",
+        "initial_batch_size": 128,
+        "retry_batch_size": 64
+      }
+    },
+    {
+      "id": "bace_b13_final_eval",
+      "dataset": "bace",
+      "stage": "B13_FINAL_EVAL",
+      "depends_on": [
+        "bace_b13_verification_shards",
+        "bace_b12_selector"
+      ],
+      "runner_dataset": "bace-gnn-clean-eval",
+      "runner_stage": "B13_FINAL_EVAL",
+      "publish_bace_stage": false,
+      "resource": "cpu",
+      "priority": 111,
+      "data_splits": [
+        "test"
+      ],
+      "selector_parameters_frozen": true,
+      "read_only_test": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "merge-verification",
+        "--stage",
+        "B13_FINAL_EVAL",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_000_output}",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_001_output}",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_002_output}",
+        "--shard-dir",
+        "{dep_bace_b13_verification_shards_shard_003_output}",
+        "--predecessor-output",
+        "{dep_bace_b12_selector_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b13_verification_shards_shard_000_output}/verification_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b13-final/attempt-{attempt}",
+      "required_output_files": [
+        "pair_matrix.jsonl",
+        "match_instances.jsonl",
+        "matrix_manifest.json",
+        "final_metrics.json",
+        "test_evaluation_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B13_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "bace_b14_frozen",
+      "dataset": "bace",
+      "stage": "B14_FROZEN",
+      "depends_on": [
+        "bace_b12_selector",
+        "bace_b13_final_eval"
+      ],
+      "runner_dataset": "bace-gnn-clean",
+      "runner_stage": "B14_FROZEN",
+      "publish_bace_stage": false,
+      "resource": "cpu",
+      "priority": 120,
+      "data_splits": [],
+      "manifest_only": true,
+      "command": [
+        "bash",
+        "{project_root}/scripts/autodl/run_bace_frozen_gnn_downstream.sh",
+        "freeze",
+        "--b12-output",
+        "{dep_bace_b12_selector_output}",
+        "--b13-output",
+        "{dep_bace_b13_final_eval_output}",
+        "--output-dir",
+        "{task_output}"
+      ],
+      "input_manifest": "{dep_bace_b13_final_eval_output}/matrix_manifest.json",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b14-frozen/attempt-{attempt}",
+      "required_output_files": [
+        "FINAL_PASS.json",
+        "freeze_manifest.json",
+        "oracle_provenance.json",
+        "PASS"
+      ],
+      "required_log_marker": "[BACE_B14_FINAL_PASS]",
+      "environment": {
+        "AUTODL_DATA_ROOT": "/autodl-fs/data",
+        "AUTODL_CONTROL_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+        "AUTODL_PYTHON": "/root/miniconda3/envs/smiles_pip118/bin/python",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      }
+    },
+    {
+      "id": "tastemolnet_foundation",
+      "dataset": "tastemolnet",
+      "stage": "FOUNDATION_ONLY",
+      "depends_on": [],
+      "resource": "cpu",
+      "priority": 1000,
+      "data_splits": [
+        "train",
+        "validation",
+        "calibration"
+      ],
+      "command": null,
+      "blocked_reason": "TASTEMOLNET_FOUNDATION_BLOCKED_LICENSE_REVIEW"
+    }
+  ]
+}
