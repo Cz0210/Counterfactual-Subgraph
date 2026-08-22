@@ -14,6 +14,7 @@ from src.baselines.bace_gnn_baseline_contracts import (
 from src.baselines.bace_gnn_baseline_tasks import (
     build_bace_baseline_controller_fragment,
 )
+from src.baselines.comrecgc.contracts import UPSTREAM_COMMIT
 from src.baselines.bace_gine_native_adapter import (
     BACEFrozenGINENativeGraphAdapter,
 )
@@ -117,6 +118,88 @@ def test_globalgce_action_preflight_passes_but_full_training_fails_closed(
     assert not (tmp_path / "preflight/PASS").exists()
 
 
+def test_comrecgc_preflight_validates_pinned_checkout_before_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    for name in ("model.pt", "temperature_scaling.json", "feature_schema.json"):
+        (checkpoint / name).write_text(name, encoding="utf-8")
+    card = {
+        "dataset": "bace",
+        "backbone": "gine",
+        "oracle_backend": "gnn",
+        "rf_oracle_used": False,
+        "num_classes": 2,
+        "source_label": 1,
+        "checkpoint_id": CHECKPOINT_ID,
+    }
+    monkeypatch.setattr(
+        "src.baselines.bace_gnn_baseline_contracts._checkpoint_contract",
+        lambda _path: (card, object()),
+    )
+    upstream_root = tmp_path / "COMRECGC"
+    upstream_root.mkdir()
+    observed: list[Path] = []
+
+    def validate_checkout(path: str | Path) -> Path:
+        resolved = Path(path).resolve()
+        observed.append(resolved)
+        return resolved
+
+    monkeypatch.setattr(
+        "src.baselines.bace_gnn_baseline_contracts.validate_upstream_checkout",
+        validate_checkout,
+    )
+
+    result = write_route_preflight(
+        method="ComRecGC",
+        checkpoint_dir=checkpoint,
+        output_dir=tmp_path / "preflight",
+        official_root=upstream_root,
+    )
+
+    assert observed == [upstream_root.resolve()]
+    assert result["status"] == "READY"
+    assert result["upstream_checkout_validation"] == {
+        "status": "PASS",
+        "path": str(upstream_root.resolve()),
+        "commit": UPSTREAM_COMMIT,
+        "git_safe_directory_scope": "process_exact_path",
+    }
+    assert (tmp_path / "preflight/READY").is_file()
+
+
+def test_comrecgc_preflight_requires_explicit_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    for name in ("model.pt", "temperature_scaling.json", "feature_schema.json"):
+        (checkpoint / name).write_text(name, encoding="utf-8")
+    card = {
+        "dataset": "bace",
+        "backbone": "gine",
+        "oracle_backend": "gnn",
+        "rf_oracle_used": False,
+        "num_classes": 2,
+        "source_label": 1,
+        "checkpoint_id": CHECKPOINT_ID,
+    }
+    monkeypatch.setattr(
+        "src.baselines.bace_gnn_baseline_contracts._checkpoint_contract",
+        lambda _path: (card, object()),
+    )
+
+    with pytest.raises(ValueError, match="explicit official_root"):
+        write_route_preflight(
+            method="ComRecGC",
+            checkpoint_dir=checkpoint,
+            output_dir=tmp_path / "preflight",
+        )
+    assert not (tmp_path / "preflight").exists()
+
+
 def test_globalgce_controller_fragment_runs_action_preflight_without_gpu(
     tmp_path: Path,
 ) -> None:
@@ -157,6 +240,11 @@ def test_ready_controller_fragments_have_exact_dependencies_and_markers(
     assert final["required_markers"] == ["PASS", "FINAL_PASS.json"]
     assert final["dependencies"] == [f"{prefix}_selection", f"{prefix}_test_merge"]
     if method == "ComRecGC":
+        preflight = tasks["bace_comrecgc_preflight"]
+        official = str((tmp_path / "official").resolve())
+        official_index = preflight["argv"].index("--official-root")
+        assert preflight["argv"][official_index + 1] == official
+        assert official in preflight["inputs"]
         generation = tasks["bace_comrecgc_train_generation"]
         assert generation["resume_argv"][-1] == "--resume"
         assert generation["retry_policy"] == (

@@ -12,6 +12,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.baselines.comrecgc.contracts import (
+    UPSTREAM_COMMIT as COMRECGC_UPSTREAM_COMMIT,
+)
+from src.baselines.comrecgc.upstream import validate_upstream_checkout
 from src.eval.bace_frozen_gnn_contracts import (
     atomic_json,
     atomic_marker,
@@ -222,6 +226,17 @@ def write_route_preflight(
 
     spec = baseline_spec(method)
     checkpoint, card, _schema = validate_bace_frozen_gine(checkpoint_dir)
+    upstream_checkout_validation: dict[str, Any] | None = None
+    if spec.method_id == "comrecgc":
+        if official_root is None:
+            raise ValueError("ComRecGC preflight requires an explicit official_root")
+        validated_upstream = validate_upstream_checkout(official_root)
+        upstream_checkout_validation = {
+            "status": "PASS",
+            "path": str(validated_upstream),
+            "commit": COMRECGC_UPSTREAM_COMMIT,
+            "git_safe_directory_scope": "process_exact_path",
+        }
     output = fresh_output_dir(output_dir)
     provenance = oracle_provenance(card, checkpoint)
     native_action: dict[str, Any] | None = None
@@ -279,6 +294,7 @@ def write_route_preflight(
         ),
         "native_action_parity": native_action,
         "training_compatibility": training_compatibility,
+        "upstream_checkout_validation": upstream_checkout_validation,
         "created_at": utc_now(),
     }
     atomic_json(output / "route_contract.json", payload)

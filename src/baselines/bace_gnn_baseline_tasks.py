@@ -115,6 +115,7 @@ def build_bace_baseline_controller_fragment(
     ]
     preflight_inputs = [checkpoint]
     preflight_markers = ["READY"]
+    comrecgc_official: str | None = None
     if spec.method_id == "globalgce":
         if official_root is None:
             raise ValueError("GlobalGCE task fragment requires official_root")
@@ -122,6 +123,13 @@ def build_bace_baseline_controller_fragment(
         preflight_argv.extend(["--official-root", globalgce_official])
         preflight_inputs.append(globalgce_official)
         preflight_markers = ["NATIVE_ACTION_READY", "BLOCKED_CODE"]
+    elif spec.method_id == "comrecgc":
+        comrecgc_official = _absolute(
+            official_root or f"{project}/external/COMRECGC",
+            field="official_root",
+        )
+        preflight_argv.extend(["--official-root", comrecgc_official])
+        preflight_inputs.append(comrecgc_official)
     add(
         preflight_id,
         resource="cpu",
@@ -262,10 +270,9 @@ def build_bace_baseline_controller_fragment(
             inputs=[dataset, summary_out, checkpoint],
         )
     else:
-        official = _absolute(
-            official_root or f"{project}/external/COMRECGC",
-            field="official_root",
-        )
+        if comrecgc_official is None:  # pragma: no cover - guarded by method specs
+            raise AssertionError("ComRecGC official checkout was not resolved")
+        official = comrecgc_official
         generation_id = f"{prefix}_train_generation"
         generation_out = f"{root}/train_generation"
         add(

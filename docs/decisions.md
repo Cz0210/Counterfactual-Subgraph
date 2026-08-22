@@ -7664,3 +7664,47 @@ used by B12/B13.
 - Linux procfs is mandatory. Any process holding a writable file descriptor
   below the adopted root, or to a protected inode through another path, blocks
   adoption. Missing or unreadable procfs evidence also fails closed.
+
+## 2026-08-22 — Scope migrated ComRecGC checkout trust to each Git subprocess
+
+### Background
+
+The AutoDL Step0 vendor checkout is intentionally read-only and retains its
+archive owner (`501:50`), while the controller runs as `root`. Git therefore
+rejected the otherwise pinned checkout as dubious ownership before BACE
+ComRecGC generation loaded any data or model. The generic BACE route preflight
+validated only the frozen GINE and incorrectly published `READY` without
+opening the ComRecGC checkout.
+
+### Decision
+
+AutoDL's Git 2.34.1 ownership-check backport does not honor `safe.directory`
+from `git -c`. Every Git query made by the shared ComRecGC checkout validator
+therefore redirects `GIT_CONFIG_GLOBAL` for that child process to a private,
+short-lived config containing only the resolved exact checkout and disables
+system-config lookup. The file is deleted when the subprocess scope closes.
+Do not write the user's global Git configuration and do not change the
+immutable vendor payload's ownership or mode. Continue to require the pinned
+commit, clean tracked source, allowed runtime-data exceptions, required files,
+and vendor-manifest hashes.
+
+The BACE ComRecGC preflight now receives the same explicit upstream root as
+generation and calls the same checkout validator before publishing `READY`.
+Its controller fragment records that checkout as an input. The existing
+`--official-root` CLI option and generic paired Slurm argument forwarding are
+unchanged; only the Slurm comment is synchronized, and this AutoDL-only repair
+does not submit any HPC job.
+
+### Consequences
+
+- Migrated ownership no longer causes a false execution failure.
+- A missing, dirty, corrupt, or wrong-commit checkout fails on CPU before a GPU
+  is allocated.
+- Repository trust is limited to the exact resolved path and lifetime of each
+  validation subprocess.
+- Classifier, split, lineage, generation, and evaluation semantics are
+  unchanged.
+
+### Status
+
+Accepted

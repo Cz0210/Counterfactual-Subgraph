@@ -16,6 +16,7 @@ from src.baselines.comrecgc.contracts import (
     GenerationParameters,
     RecourseParameters,
     ContractError,
+    UPSTREAM_COMMIT,
     ordered_ids_sha256,
     write_json,
 )
@@ -136,6 +137,58 @@ def test_upstream_payload_contract() -> None:
     assert candidates[0]["graph_hash"] == "hash"
     with pytest.raises(RuntimeError):
         validate_counterfactual_payload({"graph_map": {}, "counterfactual_candidates": []})
+
+
+def test_upstream_git_scopes_dubious_owner_override_to_exact_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "migrated-read-only-checkout"
+    root.mkdir()
+    (root / ".git").mkdir()
+    for filename in ("comrecgc.py", "common_recourse.py", "data.py", "gnn.py"):
+        (root / filename).write_text(f"# {filename}\n", encoding="utf-8")
+
+    expected_prefix = ["git", "-C", str(root.resolve())]
+    observed: list[list[str]] = []
+    temporary_configs: list[Path] = []
+    original_global_config = upstream.os.environ.get("GIT_CONFIG_GLOBAL")
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        observed.append(list(argv))
+        environment = kwargs.pop("env")
+        assert isinstance(environment, dict)
+        safe_config = Path(str(environment["GIT_CONFIG_GLOBAL"]))
+        temporary_configs.append(safe_config)
+        expected_config = f'[safe]\n\tdirectory = "{root.resolve()}"\n'
+        if (
+            list(argv[:3]) != expected_prefix
+            or safe_config.read_text(encoding="utf-8") != expected_config
+            or environment["GIT_CONFIG_NOSYSTEM"] != "1"
+        ):
+            raise upstream.subprocess.CalledProcessError(
+                128,
+                argv,
+                stderr="fatal: detected dubious ownership in repository",
+            )
+        assert kwargs == {
+            "check": True,
+            "capture_output": True,
+            "text": True,
+            "timeout": 30,
+        }
+        stdout = UPSTREAM_COMMIT if argv[-2:] == ["rev-parse", "HEAD"] else ""
+        return SimpleNamespace(stdout=f"{stdout}\n")
+
+    monkeypatch.setattr(upstream.subprocess, "run", fake_run)
+
+    assert upstream.validate_upstream_checkout(root) == root.resolve()
+    assert observed == [
+        [*expected_prefix, "rev-parse", "HEAD"],
+        [*expected_prefix, "status", "--porcelain", "--untracked-files=all"],
+    ]
+    assert all("--global" not in argv for argv in observed)
+    assert all(not path.exists() for path in temporary_configs)
+    assert upstream.os.environ.get("GIT_CONFIG_GLOBAL") == original_global_config
 
 
 def test_native_source_rows_are_eagerly_materialized() -> None:

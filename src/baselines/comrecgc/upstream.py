@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import PurePosixPath
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
@@ -29,13 +31,34 @@ UPSTREAM_MODULES = (
 
 
 def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    resolved_root = root.expanduser().resolve()
+    config_value = str(resolved_root)
+    if any(ord(character) < 32 for character in config_value):
+        raise ValueError("COMRECGC checkout path contains a control character")
+    quoted_value = config_value.replace("\\", "\\\\").replace('"', '\\"')
+    # The ownership check backported to AutoDL's Git 2.34.1 ignores `git -c`
+    # for safe.directory.  Redirect the global-config *lookup* for this child
+    # process to one private exact-path file instead of modifying ~/.gitconfig
+    # or the immutable vendor checkout.
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="comrecgc-safe-directory-",
+        suffix=".gitconfig",
+    ) as safe_config:
+        safe_config.write(f'[safe]\n\tdirectory = "{quoted_value}"\n')
+        safe_config.flush()
+        environment = os.environ.copy()
+        environment["GIT_CONFIG_GLOBAL"] = safe_config.name
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        result = subprocess.run(
+            ["git", "-C", str(resolved_root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+        )
     return result.stdout.strip()
 
 

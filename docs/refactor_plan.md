@@ -849,6 +849,10 @@ Mutagenicity roadmaps.
   preflight followed by a static no-resource training block.
 - [x] Implement and validate pinned-official-parity GlobalGCE attachment-aware
   LHS→RHS application plus exact frozen-GINE forward scoring.
+- [x] Admit a migrated read-only ComRecGC checkout through an exact,
+  process-scoped Git `safe.directory` override while preserving the pinned
+  commit, dirty-tree, and vendor-manifest gates; run that same checkout gate in
+  BACE preflight before allocating a GPU.
 - [ ] Design and scientifically approve a differentiable bridge from the
   official continuous RHS decoder to the frozen RDKit/categorical GINE input;
   until then keep BACE GlobalGCE full training fail-closed as
