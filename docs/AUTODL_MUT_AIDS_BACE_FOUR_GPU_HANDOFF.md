@@ -5,25 +5,33 @@ Scope: AutoDL only; no HPC GPU or CPU; TasteMolNet heavy work disabled; `paper/`
 frozen.  This document is a deployment handoff, not a claim that every
 scientific stage has already passed.
 
-The complete local candidate controller manifest is
-`configs/autodl/four_gpu_recovery.live_candidate.json`.  Its local static
-validation passed with 22 tasks, a four-GPU ceiling, no `__CONFIGURE_*`
-placeholders, and exactly one blocked task: TasteMolNet license review.  The
-candidate manifest SHA-256 is
-`ac4eca7ca364fb8b90c2f15da84cc0f6a3f56a0b4248a8a1d820f3bbd20ebf17`.
-AutoDL path existence and exact `exp_run` adoption equality were deliberately
-not fabricated by this local-only drafting step; they must pass the controller's
-read-only launch validation before deployment.
+The authoritative controller is now the v2 deployment
+`autodl-four-gpu-recovery-20260822T044445Z-v2`.  Its frozen 22-task manifest is
+read-only at:
+
+```text
+/autodl-fs/data/counterfactual-subgraph-runtime/control/four_gpu_recovery/manifests/autodl-four-gpu-recovery-20260822T044445Z-v2-0ad1494.json
+```
+
+The active v2 controller is a persistent `nohup` process with PID `120431` and
+kernel start ticks `680917595`.  At this handoff it has adopted the five exact
+historical runs, retained Mutagenicity `PASS`, continued monitoring AIDS, and
+launched a fresh final-commit B6-v2 on GPU 0.  B7 and B8--B14 are correctly
+waiting for the formal B6-v2 gate; no downstream PASS is claimed here.
 
 ## 1. Baseline and final development commit
 
 - Frozen starting authority: `8b17fb1096666852b0680f899073dd82f207cce1`.
-- Manifest/handoff integration base: `2dc911168ee647c1cd19a16efe07d58d7ab0f1d3`.
-- Deterministic canary repair to include before deployment:
+- Manifest/handoff integration base:
+  `2dc911168ee647c1cd19a16efe07d58d7ab0f1d3`.
+- Deterministic canary repair:
   `a6258413619fe2f762980c7172ed20a9917a0e2f`.
-- Final integrated development commit: `__FINAL_DEVELOPMENT_COMMIT__`.
+- Isolated v2 controller roots:
+  `3abb9bb2440292938b9cd822c92d4f5d65874b7e`.
+- Final deployed science/controller commit:
+  `0ad149420577c683baa2ef03f78f70ee6841f3a1`.
 - Final immutable controller/BACE execution worktree:
-  `/root/autodl-tmp/worktrees/run-four-gpu-__FINAL_COMMIT_SHORT__`.
+  `/root/autodl-tmp/worktrees/run-four-gpu-recovery-0ad149420577`.
 
 Do not edit that execution worktree after launching scientific tasks.  Continue
 later development in a separate worktree.
@@ -60,10 +68,18 @@ diagnostic flips is PPO success evidence.
   `7ad80f91f8a494856024fdfccfbbe84bf8d17a64`.
 - Passing-attempt tokens, fixed shards, B11/B13 joins, and post-B12 test edge:
   `2dc911168ee647c1cd19a16efe07d58d7ab0f1d3`.
+- Fresh v2 output/cache namespace isolation:
+  `3abb9bb2440292938b9cd822c92d4f5d65874b7e`.
+- Exact allowlist for the controller-owned
+  `TOKENIZERS_PARALLELISM=false` scheduling key:
+  `0ad149420577c683baa2ef03f78f70ee6841f3a1`.
 
 The controller delegates workers to `exp_run`, uses UUID locks, samples idle
 GPUs for at least 60 seconds, permits at most one OOM down-batch retry, never
-retries semantic failures, and keeps TasteMolNet and paper blocked.
+retries semantic failures, and keeps TasteMolNet and paper blocked.  The final
+environment repair allows only the exact safe scheduling key above; token,
+secret, password, authorization, and API-key-like environment names remain
+rejected.
 
 ## 5. Exact implementation diff file list
 
@@ -183,9 +199,25 @@ M tests/test_bace_b6_v2_contract.py
 M tests/test_bace_gnn_ppo_reward.py
 ```
 
-The live candidate manifest is intentionally not part of the reusable code
-commit.  Freeze and copy its exact bytes to the persistent control root only
-after the final commit and read-only AutoDL preflight.
+`3abb9bb`:
+
+```text
+M configs/autodl/four_gpu_recovery.live_candidate.json
+M tests/autodl/test_four_gpu_recovery_controller.py
+```
+
+`0ad1494`:
+
+```text
+M docs/decisions.md
+M docs/refactor_plan.md
+M scripts/autodl/exp_run.py
+M tests/autodl/test_exp_run.py
+```
+
+The deployed manifest is the exact frozen copy named at the top of this
+handoff.  Do not edit it in place; a future semantic manifest change requires
+a new controller ID and fresh output/cache namespace.
 
 ## 6. MUT/AIDS historical replay tests
 
@@ -203,10 +235,11 @@ Expected positive test markers are:
 [AIDS_HISTORICAL_LINEAGE_REPLAY_PASS]
 ```
 
-This handoff worktree did not rerun pytest because its local Python lacks the
-`pytest` package.  It did run the stdlib-backed controller manifest validator,
-which returned `status=PASS`.  Do not infer a new scientific PASS from that
-static validation.
+The focused release suite in the final immutable AutoDL worktree completed with
+`65 passed`.  That includes the historical replay, controller, BACE gate,
+leakage, environment-key, and downstream contract checks.  Static/controller
+tests are engineering evidence; the stage states below still come only from
+their scientific gates.
 
 ## 7. Mutagenicity fresh recovery
 
@@ -220,7 +253,8 @@ static validation.
   `/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/mut_generation`.
 - Expected source commit:
   `7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4b`.
-- Controller state at final handoff: `__CURRENT_MUT_STATE__`.
+- Controller state at this handoff: `PASS` at `2026-08-22T04:36:05Z`; no MUT
+  worker remains and its GPU was released.
 
 The failed v2 fresh root remains immutable failure evidence and is not reused.
 
@@ -236,7 +270,9 @@ The failed v2 fresh root remains immutable failure evidence and is not reused.
   `/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/aids_generation`.
 - Expected source commit:
   `a418692b75b888297222d31d87f49148505e10d0`.
-- Controller state at final handoff: `__CURRENT_AIDS_STATE__`.
+- Controller state at this handoff: `RUNNING` on GPU 1.  The adopted `exp_run`
+  worker is PID `111811` and its scientific child is PID `111879`.  This route
+  is CPU-heavy while retaining its adopted GPU UUID lock; it has not failed.
 
 ## 9. Read-only generation-cache adoption
 
@@ -259,8 +295,7 @@ must fail closed instead of regenerating silently inside an adopted root.
   `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9`.
 - Selected initializer mode: `raw-base` from
   `/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat`.
-- Final observed states: audit `__CURRENT_BACE_AUDIT_STATE__`, initializer
-  `__CURRENT_BACE_INITIALIZER_STATE__`.
+- Final observed states: audit `PASS`; initializer `PASS`.
 
 ## 11. Initializer and oracle provenance
 
@@ -299,8 +334,8 @@ adopted as PASS.  The fresh canary is:
   `canary_connected_deletion_preflight.json`;
 - terminal state: `PASS`.
 
-The controller must still revalidate the canary's exact launch spec and full
-PASS contract before importing that PASS.  Formal B6-v2 is a **fresh controller
+The v2 controller revalidated the canary's exact launch spec and full PASS
+contract before importing that PASS.  Formal B6-v2 is a **fresh controller
 task**, with input evidence closed over
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841/canary_manifest.json`;
 its environment separately binds the adopted clean initializer.  B6-v2 must
@@ -310,13 +345,24 @@ deletion, saved pool/reward provenance, no RF, and no calibration/test loading.
 
 The pre-release B6 run
 `20260822T034345Z-bace-b6-v2-a625841` is terminal `PASS`.  It is bounded
-pre-release validation evidence only: do not adopt it and do not let it publish controller
-B6 authority.  The hardened controller must launch both formal B6 and B7 from
-the same final immutable development commit.
+pre-release validation evidence only: do not adopt it and do not let it publish
+controller B6 authority.  The hardened controller has now launched formal B6
+from the final immutable commit; B7 will be launched by that same worktree only
+after B6 passes.
 
-B6-v2 output pattern:
-`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{attempt}`.
-Final state: `__CURRENT_BACE_B6_V2_STATE__`.
+B6-v2 controller run ID:
+`autodl-four-gpu-recovery-20260822T044445Z-v2-bace_b6_ppo_smoke-main-a0`.
+Current fresh output:
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b6-v2/attempt-0`.
+State at this handoff: `RUNNING` on GPU 0, with `exp_run` worker PID `120622`
+and scientific child PID `120630`.  No formal B6-v2 `PASS` is claimed yet.
+
+The immutable v1 controller evidence remains at controller ID
+`autodl-four-gpu-recovery-20260822T033351Z-v1`: its formal B6 launch failed
+before scientific code started because `exp_run` rejected the safe scheduling
+key `TOKENIZERS_PARALLELISM`.  The v1 failure and its empty/fresh attempt
+evidence must remain unchanged.  Commit `0ad1494` fixes that launch boundary
+without weakening credential-key rejection.
 
 ## 13. B7 configuration and state
 
@@ -336,23 +382,30 @@ checkpoints=50,100,150,200,250,300
 ```
 
 B7 output pattern:
-`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b7-full/attempt-{attempt}`.
-Final state: `__CURRENT_BACE_B7_STATE__`.
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-{attempt}`.
+State at this handoff: `PENDING`, waiting only for formal B6-v2 `PASS`; B7 has
+not been launched and no B7 `PASS` is claimed.
 
 ## 14. Four GPU bindings, PID, and launcher
 
-| GPU | UUID | Adopted/current role | PID | launcher/session | state |
+| GPU | UUID | Current role | PID | launcher/session | state |
 |---:|---|---|---|---|---|
-| 0 | `GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732` | MUT v3 adoption / `__CURRENT_GPU0_TASK__` | `__CURRENT_GPU0_PID__` | `__CURRENT_GPU0_LAUNCHER__` | `__CURRENT_GPU0_STATE__` |
-| 1 | `GPU-244f35a8-354a-ef1e-f589-bde7f8a7a690` | AIDS v2 adoption / `__CURRENT_GPU1_TASK__` | `__CURRENT_GPU1_PID__` | `__CURRENT_GPU1_LAUNCHER__` | `__CURRENT_GPU1_STATE__` |
-| 2 | `GPU-901b50ea-30b2-4a0c-505f-bf94980e1484` | clean initializer historical / `__CURRENT_GPU2_TASK__` | `__CURRENT_GPU2_PID__` | `__CURRENT_GPU2_LAUNCHER__` | `__CURRENT_GPU2_STATE__` |
-| 3 | `GPU-2803b403-c056-187e-6047-683d02d3693b` | fresh canary adoption / `__CURRENT_GPU3_TASK__` | `__CURRENT_GPU3_PID__` | `__CURRENT_GPU3_LAUNCHER__` | `__CURRENT_GPU3_STATE__` |
+| 0 | `GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732` | `bace_b6_ppo_smoke` | `120622 / 120630` | v2 `exp_run` / child | `RUNNING` |
+| 1 | `GPU-244f35a8-354a-ef1e-f589-bde7f8a7a690` | adopted `aids_recovery` | `111811 / 111879` | adopted `exp_run` / child | `RUNNING` |
+| 2 | `GPU-901b50ea-30b2-4a0c-505f-bf94980e1484` | no READY task until B6 gate | `-` | `-` | `IDLE` |
+| 3 | `GPU-2803b403-c056-187e-6047-683d02d3693b` | no READY task until B6 gate | `-` | `-` | `IDLE` |
 
 AutoDL previously had no `tmux`; the launcher therefore uses `nohup` unless
 `tmux` becomes available.  Never kill a PID based only on this table: validate
 the controller state, kernel process identity, and GPU UUID process first.
-Controller PID: `__CONTROLLER_PID__`; tmux/session:
-`__CONTROLLER_TMUX_OR_NOHUP__`.
+Authoritative v2 controller PID: `120431`; kernel start ticks: `680917595`;
+launcher: `nohup` (no tmux session).
+
+The old v1 PID `119510` is monitor-only: it owns no new BACE science after its
+pre-science launch failure and is only observing the already-adopted AIDS run.
+The host returned `pidfd` `ENOSYS`, so no signal was sent.  Leave it alone; it
+will exit naturally when AIDS becomes terminal.  Do not use PID-only killing
+for either controller or any worker.
 
 ## 15. Dependency-aware current queue
 
@@ -372,9 +425,11 @@ BACE audit adoption -> clean initializer adoption -> fresh canary adoption
   -> B14 manifest-only freeze
 ```
 
-The next READY task and current B8--B14 states must be taken from the status
-command, not inferred here: `__CURRENT_NEXT_READY_TASK__` and
-`__CURRENT_BACE_B8_B14_STATES__`.
+At this handoff the only freshly launched BACE task is B6-v2.  B7 and its four
+bounded prep tasks wait for B6 `PASS`; B8--B14 remain dependency-gated and
+unstarted.  When B6 passes, the controller can immediately fill newly eligible
+GPU slots without waiting for AIDS.  Always use the status command for the live
+next-READY task rather than inferring it from this snapshot.
 
 ## 16. TasteMolNet license block
 
@@ -400,13 +455,15 @@ chemllm=/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-1
 bace_gnn=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689
 molclr_root=/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR
 molclr_checkpoint=/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth
-new_science_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1
-fresh_wnode_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/wnode/wnode_cache.sqlite3
-fresh_node_embedding_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings
+new_science_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2
+fresh_wnode_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/wnode/wnode_cache.sqlite3
+fresh_node_embedding_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/node_embeddings
 registry=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/experiment_registry/runs.jsonl
 status_registry=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/experiment_registry/status_updates.jsonl
 experiment_log=/autodl-fs/data/counterfactual-subgraph-runtime/docs/AUTODL_FOUR_GPU_EXPERIMENT_LOG.md
 runtime_handoff=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/handoffs/AUTODL_MUT_AIDS_BACE_FOUR_GPU_HANDOFF.md
+controller_root=/autodl-fs/data/counterfactual-subgraph-runtime/control/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2
+controller_manifest=/autodl-fs/data/counterfactual-subgraph-runtime/control/four_gpu_recovery/manifests/autodl-four-gpu-recovery-20260822T044445Z-v2-0ad1494.json
 ```
 
 The WNode DB and node-embedding directory are fresh persistent targets.  Their
@@ -419,11 +476,11 @@ invent or redirect a path.
 After the final immutable worktree and manifest are deployed:
 
 ```bash
-PROJECT=/root/autodl-tmp/worktrees/run-four-gpu-__FINAL_COMMIT_SHORT__
+PROJECT=/root/autodl-tmp/worktrees/run-four-gpu-recovery-0ad149420577
 PY=/root/miniconda3/envs/smiles_pip118/bin/python
 DATA=/autodl-fs/data
 CONTROL=/autodl-fs/data/counterfactual-subgraph-runtime/control
-CID=autodl-four-gpu-recovery-20260822T033351Z-v1
+CID=autodl-four-gpu-recovery-20260822T044445Z-v2
 
 PYTHONPATH="$PROJECT" "$PY" \
   "$PROJECT/scripts/autodl/status_four_gpu_recovery.py" \
@@ -438,24 +495,18 @@ For one JSON snapshot, replace `--watch 60` with `--format json`.
 
 ## 20. Deployment, launch, and safe restart
 
-Freeze the candidate bytes at:
-
-```text
-/autodl-fs/data/counterfactual-subgraph-runtime/control/four_gpu_recovery_manifest_20260822T033351Z.json
-```
-
-Before the first launch, run the same validator with the final worktree and
-verify all five adoption specs against the persistent `launch_spec.json`; this
-is especially important for the currently running canary because adoption
-requires exact command, environment, output contract, interpreter, commit,
-GPU, and input hash equality.
+The v2 manifest has already passed validation and is frozen read-only.  For a
+restart, first use section 19 and verify PID `120431` with start ticks
+`680917595`, heartbeat freshness, and the controller lock.  Do not restart
+while that identity is live.  Once it is proven dead and the controller lock is
+naturally released, reuse exactly the same manifest and controller ID:
 
 ```bash
-PROJECT=/root/autodl-tmp/worktrees/run-four-gpu-__FINAL_COMMIT_SHORT__
+PROJECT=/root/autodl-tmp/worktrees/run-four-gpu-recovery-0ad149420577
 PY=/root/miniconda3/envs/smiles_pip118/bin/python
 DATA=/autodl-fs/data
 CONTROL=/autodl-fs/data/counterfactual-subgraph-runtime/control
-MANIFEST="$CONTROL/four_gpu_recovery_manifest_20260822T033351Z.json"
+MANIFEST="$CONTROL/four_gpu_recovery/manifests/autodl-four-gpu-recovery-20260822T044445Z-v2-0ad1494.json"
 
 PYTHONPATH="$PROJECT" "$PY" \
   "$PROJECT/scripts/autodl/run_four_gpu_recovery_controller.py" \
@@ -478,28 +529,35 @@ command with the same manifest and controller ID.  It resumes from persistent
 `controller_state.json`, registry records, and passing-attempt manifests; it
 must not rewrite a completed shard or adopt a different writer.
 
-Final dynamic summary to fill immediately before returning to the user:
+The remaining v1 monitor PID `119510` is not the v2 restart target.  Do not
+signal it solely to make the process list look clean; its v1 state and launch
+failure are historical evidence, and it should finish naturally with AIDS.
+
+Handoff snapshot:
 
 ```text
-development_commit=__FINAL_DEVELOPMENT_COMMIT__
+development_commit=0ad149420577c683baa2ef03f78f70ee6841f3a1
 lineage_run_commit=6ddd74339dbd9b1f0e57ba341ae4529cc2864fce
-bace_run_commit=__FINAL_DEVELOPMENT_COMMIT__
-controller_pid=__CONTROLLER_PID__
-controller_tmux=__CONTROLLER_TMUX_OR_NOHUP__
-gpu0_task=__CURRENT_GPU0_TASK__
-gpu1_task=__CURRENT_GPU1_TASK__
-gpu2_task=__CURRENT_GPU2_TASK__
-gpu3_task=__CURRENT_GPU3_TASK__
+bace_run_commit=0ad149420577c683baa2ef03f78f70ee6841f3a1
+controller_id=autodl-four-gpu-recovery-20260822T044445Z-v2
+controller_pid=120431
+controller_start_ticks=680917595
+controller_tmux=nohup
+controller_manifest=/autodl-fs/data/counterfactual-subgraph-runtime/control/four_gpu_recovery/manifests/autodl-four-gpu-recovery-20260822T044445Z-v2-0ad1494.json
+gpu0_task=bace_b6_ppo_smoke RUNNING worker=120622 child=120630
+gpu1_task=aids_recovery RUNNING worker=111811 child=111879
+gpu2_task=IDLE waiting_for_b6_gate
+gpu3_task=IDLE waiting_for_b6_gate
 mut_output_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z
 aids_output_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/aids_comrecgc_lineage_v2_20260822T020238Z
 bace_initializer=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter
 bace_gnn_checkpoint=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689
-bace_b6_v2_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{passing-attempt}
-bace_b7_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b7-full/attempt-{passing-attempt}
-bace_final_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b14-frozen/attempt-{passing-attempt}
+bace_b6_v2_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b6-v2/attempt-0
+bace_b7_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-{passing-attempt}
+bace_final_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b14-frozen/attempt-{passing-attempt}
 taste_status=BLOCKED_LICENSE_REVIEW
 paper_status=PAPER_FROZEN_PENDING_BACE_FINAL_AND_TASTE_LICENSE
 handoff_path=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/handoffs/AUTODL_MUT_AIDS_BACE_FOUR_GPU_HANDOFF.md
 status_command=see section 19
-controller_restart_command=repeat section 20 launcher only after dead-controller proof
+controller_restart_command=repeat section 20 exact v2 launcher only after dead-controller proof
 ```
