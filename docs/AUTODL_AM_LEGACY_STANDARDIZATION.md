@@ -9,7 +9,7 @@ matrix and is rejected if it appears in the source specification.
 
 | Dataset | Method | Status before continuation | Reusable portion |
 | --- | --- | --- | --- |
-| Mutagenicity | Ours | `ADOPTABLE_PASS` after strict audit | generation, frozen calibration order, held-out evaluation |
+| Mutagenicity | Ours | `STALE_METRIC` after strict original-protocol audit | generation, frozen calibration order, held-out pair matrix; original thresholds differ from the common matched protocol |
 | Mutagenicity | GCFExplainer | `INCOMPLETE` | raw generation only |
 | Mutagenicity | GlobalGCE | `INCOMPLETE` | train-only raw generation only |
 | AIDS | Ours | `INCOMPLETE` | candidate pool only |
@@ -39,10 +39,14 @@ The adopter reads the exact Step0 final root from
   exactly K=10;
 - source size and modification-time snapshots are unchanged after copying.
 
-Only then does it atomically publish a fresh standardized cell with
+Only then does it atomically publish a fresh audited cell with
 `final_artifact_audit_passed=true`. It copies final data; it does not rerun the
-held-out evaluator. The output records `generation_adopted`,
-`ordering_adopted`, and `evaluation_adopted` independently.
+held-out evaluator. Because that historical bundle uses theta/cap
+`0.038576.../0.098322...` and only 14 Figure-4 rows, its matrix status is
+explicitly `STALE_METRIC`, not a final common-protocol PASS. The output records
+`generation_adopted`, `ordering_adopted`, and `evaluation_adopted`
+independently so a later deterministic matched-protocol re-export can reuse the
+frozen pair matrix without re-running RF or WNode.
 
 ## Foreground commands
 
@@ -102,6 +106,7 @@ this validates its exporter manifests/filter audit and cannot invoke generation:
 ```bash
 export ACTION=freeze-mut-gcf-candidates
 export SOURCE_SPEC="$ARTIFACT_ROOT/am_legacy/source_specs/am_legacy_sources_v1.json"
+export MATCHED_THRESHOLD_CONTRACT="$ARTIFACT_ROOT/threshold_contracts/mutagenicity.json"
 export OUTPUT_ROOT="$ARTIFACT_ROOT/am_legacy/mut_gcf_frozen_top20/attempt-0"
 bash scripts/autodl/run_am_legacy_standardization.sh
 ```
@@ -132,18 +137,35 @@ After `[MUT_GCF_LEGACY_CALIBRATION_PASS]`, set `ACTION=heldout`,
 dataset-specific frozen-selector dependency by the new main controller; the
 older BACE-specialized recovery controller intentionally rejects it.
 
+The registry audit should receive
+`configs/autodl/mutagenicity_matched_protocol_v1.json` as its explicit
+expectations input. It deterministically emits the shared contract at
+`$ARTIFACT_ROOT/threshold_contracts/mutagenicity.json`: 601 empirical grid
+points from 0 through 0.0535, `theta_star=0.05`, `cost_cap=0.0535`,
+`threshold_source_split=existing_frozen_protocol`, and
+`test_used_for_selection=false`. The GCF freeze task validates this exact file
+and republishes a downstream-compatible `matched_thresholds.json`; core
+ComRecGC may consume the same file and hash.
+
 ## Continuation-controller contract
 
 `configs/autodl/am_legacy_standardization_v1.tasks.json` is a task fragment,
 not a standalone controller manifest. First copy the tracked source spec and
 complete the pre-controller adopter at the exact paths above. Then append the
-fragment's two task objects verbatim to a fresh continuation manifest:
+fragment's five task objects verbatim to a fresh continuation manifest:
 
 1. `mut_ours_legacy_adoption_verify` is a CPU, manifest-only verification of
    the already-adopted standardized bundle. It never resolves the raw test
    CSV or frozen test-run root.
 2. `am_legacy_inventory` depends on the exact passing adoption output and
    publishes a six-cell matrix patch plus bounded filename inventory.
+3. `mut_gcf_legacy_freeze` is generation-free and manifest-only; it depends on
+   the inventory and the matched threshold contract.
+4. `mut_gcf_legacy_calibration` is the explicit calibration-only selector
+   freeze boundary and occupies one GPU.
+5. `mut_gcf_legacy_heldout` depends on that frozen calibration, declares
+   `selector_parameters_frozen=true` and `read_only_test=true`, and only then
+   opens the test split on one GPU.
 
 Both controller inputs use the authoritative production prefix
 `{runtime_root}/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/am_legacy/`,
@@ -152,7 +174,7 @@ foreground commands. They intentionally do not use `{artifact_root}` because
 the production controller defines that placeholder as `$RUNTIME/outputs`.
 The source-spec filename does not name a raw split, and the inventory never
 opens molecular rows. The controller owns detachment, heartbeat, retry, and
-registry state for these two tasks.
+registry state for these five tasks.
 
 ## Fail-closed outputs
 

@@ -14,7 +14,7 @@
     {
       "dataset": "Mutagenicity",
       "method": "Ours",
-      "status": "ADOPTABLE_PASS",
+      "status": "STALE_METRIC",
       "source_roots": [
         "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/outputs/hpc/mutagenicity/final/ours_wnode_a2_test_v1"
       ],
@@ -26,7 +26,7 @@
       "generation_adopted": true,
       "ordering_adopted": true,
       "evaluation_adopted": true,
-      "reason": "EXACT_FINAL_MANIFEST_REQUIRES_STRICT_REPLAY_AUDIT",
+      "reason": "STRICT_ORIGINAL_PROTOCOL_AUDIT_ELIGIBLE_BUT_STALE_FOR_MATCHED_601_POINT_COMMON_PROTOCOL",
       "probe_basenames": [
         "final_result_manifest.json",
         "run_manifest.json",

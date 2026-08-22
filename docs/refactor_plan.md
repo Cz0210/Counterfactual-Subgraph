@@ -859,6 +859,12 @@ Mutagenicity roadmaps.
 - [x] Freeze the exact Mutagenicity GCF Top20 exporter output into a fresh
   checksum-closed candidate package without rerunning generation; keep AIDS
   baseline roots absent from the AutoDL payload explicitly `MISSING`.
+- [x] Register persistent Mut GCF freeze -> calibration selector freeze ->
+  held-out evaluation tasks and extend the production no-test-before-freeze
+  stage gate for that AM route.
+- [x] Track the matched 601-point Mutagenicity threshold expectation; mark the
+  audited historical Ours bundle `STALE_METRIC` until its frozen pair matrix is
+  deterministically re-exported under that common protocol.
 - [x] Exclude CLEAR from every adoption and inventory path and provide two
   manifest-only CPU tasks for composition into the continuation controller.
 # 2026-08-22 — Deferred main-result ablation hooks

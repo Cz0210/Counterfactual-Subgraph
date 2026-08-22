@@ -23,10 +23,12 @@ case "$ACTION" in
     ;;
   freeze-mut-gcf-candidates)
     : "${SOURCE_SPEC:?Set SOURCE_SPEC to the persistent legacy source specification}"
+    : "${MATCHED_THRESHOLD_CONTRACT:?Set MATCHED_THRESHOLD_CONTRACT to the matrix-audit Mutagenicity threshold contract}"
     exec "$AUTODL_PYTHON" scripts/autodl/run_am_legacy_standardization.py \
       --config configs/hpc.yaml \
       freeze-mut-gcf-candidates \
       --source-spec "$SOURCE_SPEC" \
+      --matched-threshold-contract "$MATCHED_THRESHOLD_CONTRACT" \
       --output-root "$OUTPUT_ROOT" \
       --proc-root "$PROC_ROOT"
     ;;

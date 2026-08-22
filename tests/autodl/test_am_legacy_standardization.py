@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autodl.run_four_gpu_recovery_controller import load_controller_manifest
+from scripts.autodl.run_four_gpu_recovery_controller import (
+    ControllerError,
+    load_controller_manifest,
+)
 from src.eval.am_legacy_standardization import (
     LegacyStandardizationError,
     MUT_OURS_REQUIRED_SOURCE_FILES,
@@ -313,7 +316,7 @@ def test_mut_ours_is_strictly_adopted_without_changing_source(tmp_path):
         expected_pair_count=40,
         proc_root=proc,
     )
-    assert result["status"] == "ADOPTABLE_PASS"
+    assert result["status"] == "STALE_METRIC"
     audit = json.loads(
         (output / "standardized/final_artifact_audit.json").read_text()
     )
@@ -385,7 +388,7 @@ def test_mut_ours_manifest_only_verification_rehashes_standardized_files(tmp_pat
 def _inventory_spec(tmp_path: Path) -> Path:
     cells = []
     definitions = (
-        ("Mutagenicity", "Ours", "ADOPTABLE_PASS", "STRICT_AUDIT_PENDING"),
+        ("Mutagenicity", "Ours", "STALE_METRIC", "STRICT_AUDIT_PENDING"),
         ("Mutagenicity", "GCFExplainer", "INCOMPLETE", "MISSING_CALIBRATION"),
         ("Mutagenicity", "GlobalGCE", "INCOMPLETE", "MISSING_HELDOUT_MATRIX"),
         ("AIDS", "Ours", "INCOMPLETE", "MISSING_SELECTOR_ORDER"),
@@ -424,12 +427,12 @@ def test_inventory_is_precise_and_never_includes_clear(tmp_path):
         if path.suffix == ".csv":
             path.write_text("method,value\nOurs,1\n", encoding="utf-8")
         else:
-            _json(path, {"status": "ADOPTABLE_PASS"})
-    _json(standardized / "summary.json", {"status": "ADOPTABLE_PASS"})
+            _json(path, {"status": "STALE_METRIC"})
+    _json(standardized / "summary.json", {"status": "STALE_METRIC"})
     _json(
         standardized / "run_manifest.json",
         {
-            "status": "ADOPTABLE_PASS",
+            "status": "STALE_METRIC",
             "dataset": "Mutagenicity",
             "method": "Ours",
         },
@@ -464,7 +467,7 @@ def test_inventory_is_precise_and_never_includes_clear(tmp_path):
     assert result["cell_count"] == 6
     payload = json.loads((output / "matrix_patch.json").read_text())
     statuses = {(row["dataset"], row["method"]): row["status"] for row in payload["cells"]}
-    assert statuses[("Mutagenicity", "Ours")] == "ADOPTABLE_PASS"
+    assert statuses[("Mutagenicity", "Ours")] == "STALE_METRIC"
     assert statuses[("AIDS", "GlobalGCE")] == "BLOCKED_CODE"
     assert not any(row["method"].lower() == "clear" for row in payload["cells"])
     assert all(row["rerun_generation"] is False for row in payload["cells"])
@@ -510,16 +513,21 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
     assert tuple(manifest.by_id) == (
         "mut_ours_legacy_adoption_verify",
         "am_legacy_inventory",
+        "mut_gcf_legacy_freeze",
+        "mut_gcf_legacy_calibration",
+        "mut_gcf_legacy_heldout",
     )
-    assert all(task.resource == "cpu" for task in manifest.tasks)
-    assert all(task.manifest_only for task in manifest.tasks)
-    persistent_prefix = (
+    assert manifest.by_id["mut_gcf_legacy_freeze"].manifest_only is True
+    assert manifest.by_id["mut_gcf_legacy_calibration"].resource == "gpu"
+    assert manifest.by_id["mut_gcf_legacy_heldout"].resource == "gpu"
+    matrix_prefix = (
         "{runtime_root}/outputs/autodl/paper_matrix/"
-        "four_methods_four_datasets_v1/am_legacy/"
+        "four_methods_four_datasets_v1/"
     )
+    persistent_prefix = matrix_prefix + "am_legacy/"
     assert all(
-        (task.input_manifest or "").startswith(persistent_prefix)
-        for task in manifest.tasks
+        (task.input_manifest or "").startswith(matrix_prefix)
+        for task in manifest.tasks[:3]
     )
     assert all(
         (task.expected_output or "").startswith(persistent_prefix)
@@ -529,6 +537,86 @@ def test_controller_task_fragment_is_merge_compatible(tmp_path):
     actions = {task.environment.get("ACTION") for task in manifest.tasks}
     assert "adopt-mut-ours" not in actions
     assert "verify-mut-ours-adoption" in actions
+    freeze = manifest.by_id["mut_gcf_legacy_freeze"]
+    calibration = manifest.by_id["mut_gcf_legacy_calibration"]
+    heldout = manifest.by_id["mut_gcf_legacy_heldout"]
+    assert calibration.depends_on == (freeze.task_id,)
+    assert heldout.depends_on == (calibration.task_id,)
+    assert calibration.freezes_selector is True
+    assert calibration.data_splits == ("calibration",)
+    assert heldout.selector_parameters_frozen is True
+    assert heldout.read_only_test is True
+    assert heldout.data_splits == ("test",)
+    assert (
+        calibration.environment["THRESHOLDS_JSON"]
+        == "{dep_mut_gcf_legacy_freeze_output}/matched_thresholds.json"
+    )
+
+
+def test_mut_gcf_heldout_cannot_bypass_calibration_freeze(tmp_path):
+    fragment = json.loads(
+        Path("configs/autodl/am_legacy_standardization_v1.tasks.json").read_text()
+    )
+    for task in fragment["tasks"]:
+        if task["id"] == "mut_gcf_legacy_heldout":
+            task["depends_on"] = ["mut_gcf_legacy_freeze"]
+    merged = {
+        "schema_version": 1,
+        "controller_id": "am-legacy-bypass-test",
+        "paper_frozen": True,
+        "runtime": {
+            "max_gpus": 4,
+            "stable_idle_seconds": 60,
+            "sample_interval_seconds": 5,
+            "poll_seconds": 60,
+            "max_transient_retries": 1,
+        },
+        "resource_gates": {},
+        "tasks": fragment["tasks"],
+    }
+    path = tmp_path / "controller.json"
+    _json(path, merged)
+    with pytest.raises(ControllerError, match="frozen B12/AM selector dependency"):
+        load_controller_manifest(path)
+
+
+def test_tracked_mut_matched_protocol_is_exact_and_self_identifying():
+    payload = json.loads(
+        Path("configs/autodl/mutagenicity_matched_protocol_v1.json").read_text()
+    )["datasets"]["Mutagenicity"]
+    values = [float(value) for value in payload["thresholds"]]
+    assert len(values) == 601
+    assert all(
+        left < right for left, right in zip(values, values[1:])
+    )
+    assert all(
+        abs(value - 0.0535 * index / 600) <= 1e-12
+        for index, value in enumerate(values)
+    )
+    assert payload["theta_star"] == 0.05
+    assert payload["cost_cap"] == 0.0535
+    assert payload["threshold_source_split"] == "existing_frozen_protocol"
+    assert payload["test_used_for_selection"] is False
+    identity = {
+        key: payload[key]
+        for key in (
+            "thresholds",
+            "theta_star",
+            "cost_cap",
+            "threshold_source",
+            "threshold_source_split",
+            "test_used_for_selection",
+        )
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert digest == payload["threshold_config_hash"]
 
 
 def test_mut_gcf_foreground_wrapper_cannot_run_generation():
@@ -631,6 +719,32 @@ def test_mut_gcf_raw_export_is_frozen_without_generation(tmp_path):
     )
     proc = tmp_path / "proc"
     proc.mkdir()
+    matched = tmp_path / "mutagenicity.json"
+    grid = [0.0535 * index / 600 for index in range(601)]
+    _json(
+        matched,
+        {
+            "schema_version": "four_by_four_frozen_threshold_contract_v1",
+            "status": "PASS",
+            "dataset": "Mutagenicity",
+            "distance_line": "MolCLR-Node-Wasserstein",
+            "cf_mode": "strict_flip",
+            "thresholds": grid,
+            "theta_star": 0.05,
+            "cost_cap": 0.0535,
+            "threshold_source": "matched existing frozen protocol",
+            "threshold_source_split": "existing_frozen_protocol",
+            "threshold_config_hash": "b" * 64,
+            "test_used_for_selection": False,
+        },
+    )
+    ours_schema = tmp_path / "ours-schema"
+    ours_schema.mkdir()
+    for k in (10, 20):
+        (ours_schema / f"table2_ours_k{k}.csv").write_text(
+            "dataset,method,k\nMutagenicity,Ours,%d\n" % k,
+            encoding="utf-8",
+        )
     output = tmp_path / "frozen"
     result = freeze_mutagenicity_gcf_candidates(
         source_export_root=source,
@@ -639,6 +753,8 @@ def test_mut_gcf_raw_export_is_frozen_without_generation(tmp_path):
         expected_order_sha256=order_sha,
         expected_native_ranks=native_ranks,
         expected_teacher_sha256=teacher_sha,
+        matched_threshold_contract=matched,
+        ours_schema_source_root=ours_schema,
         proc_root=proc,
     )
     assert result["status"] == "PASS"
@@ -646,3 +762,7 @@ def test_mut_gcf_raw_export_is_frozen_without_generation(tmp_path):
     frozen = json.loads((output / "frozen_candidate_manifest.json").read_text())
     assert frozen["schema_version"] == "mut_gcf_frozen_top20_v1"
     assert frozen["selected_native_ranks"] == native_ranks
+    thresholds = json.loads((output / "matched_thresholds.json").read_text())
+    assert len(thresholds["thresholds"]) == 601
+    assert thresholds["theta_star"] == 0.05
+    assert thresholds["cost_cap"] == 0.0535

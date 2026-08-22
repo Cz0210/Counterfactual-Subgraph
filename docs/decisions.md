@@ -7280,6 +7280,10 @@ checksum/provenance closure. Only the exact Mutagenicity Ours final result is
 eligible for immediate adoption because it has a frozen selector, complete
 held-out Cartesian matrix, fixed thresholds, RF/MolCLR identities, and a
 `final_result_manifest.json` file closure that can be independently audited.
+This preserves the original scientific closure but does not make it a final
+common-protocol cell: its historical theta/cap and 14-point Figure 4 differ
+from the matched 601-point protocol, so its standardized status is explicitly
+`STALE_METRIC` pending deterministic pair-matrix re-export.
 
 That result is copied into a fresh root only after checking all source bytes,
 the absence of live writers, selector-before-test provenance, strict-flip
@@ -7323,3 +7327,12 @@ excluded and can never stand in for ComRecGC.
 - These entry points are intentionally absent from the primary controller
   manifest. Static Slurm wrappers exist only for repository CLI parity and are
   not submitted by the AutoDL-only campaign.
+
+The matched Mutagenicity expectation is tracked in
+`configs/autodl/mutagenicity_matched_protocol_v1.json`: a hash-bound 601-point
+linear 0..0.0535 grid, theta 0.05, cap 0.0535,
+`existing_frozen_protocol`, and `test_used_for_selection=false`. The persistent
+fragment schedules generation-free GCF freeze, calibration-only selector
+freeze, and post-freeze held-out evaluation in dependency order. The generic
+controller recognizes those AM stages in the same no-test-before-freeze gate
+used by B12/B13.

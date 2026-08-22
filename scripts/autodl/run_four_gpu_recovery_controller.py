@@ -133,6 +133,10 @@ ALLOWED_SECRET_LIKE_ENV_KEYS = frozenset({"TOKENIZERS_PARALLELISM"})
 SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]+")
 TOKEN = re.compile(r"\{([A-Za-z0-9_]+)\}")
 TEST_PATH = re.compile(r"(?i)(?:^|[/_.-])test(?:[/_.-]|$)")
+SELECTOR_FREEZE_STAGES = {
+    "B12_SELECTOR",
+    "AM_MUT_GCF_CALIBRATION_FREEZE",
+}
 POST_FREEZE_TEST_STAGES = {
     "B13_TEST_PARENT_MANIFEST",
     "B13_FINAL_EVAL_SHARDS",
@@ -143,6 +147,7 @@ POST_FREEZE_TEST_STAGES = {
     "BACE_BASELINE_TEST_VERIFY",
     "BACE_BASELINE_TEST_MERGE",
     "BACE_BASELINE_FINAL_FREEZE",
+    "AM_MUT_GCF_HELDOUT_EVAL",
 }
 SELECTOR_FREEZE_STAGES = {"B12_SELECTOR", "BACE_BASELINE_SELECTOR"}
 
@@ -626,7 +631,7 @@ def _transitive_dependencies(task_id: str, tasks: Mapping[str, TaskSpec]) -> set
 
 
 def validate_no_test_before_freeze(tasks: Sequence[TaskSpec]) -> None:
-    """Keep held-out test bytes unreachable until the B12 selector is frozen."""
+    """Keep held-out test bytes unreachable until a declared selector freeze."""
 
     by_id = {task.task_id: task for task in tasks}
     selector_ids = {
@@ -658,7 +663,7 @@ def validate_no_test_before_freeze(tasks: Sequence[TaskSpec]) -> None:
         ancestors = _transitive_dependencies(task.task_id, by_id)
         if not selector_ids.intersection(ancestors):
             raise ControllerError(
-                f"{task.task_id} test access requires a frozen B12 selector dependency"
+                f"{task.task_id} test access requires a frozen B12/AM selector dependency"
             )
         if not task.selector_parameters_frozen or not task.read_only_test:
             raise ControllerError(

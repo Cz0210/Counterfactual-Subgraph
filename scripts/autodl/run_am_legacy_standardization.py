@@ -37,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     freeze_gcf = subparsers.add_parser("freeze-mut-gcf-candidates")
     freeze_gcf.add_argument("--source-spec", type=Path, required=True)
+    freeze_gcf.add_argument(
+        "--matched-threshold-contract", type=Path, required=True
+    )
     freeze_gcf.add_argument("--output-root", type=Path, required=True)
     freeze_gcf.add_argument("--proc-root", type=Path, default=Path("/proc"))
 
@@ -66,6 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = freeze_mutagenicity_gcf_candidates(
             **contract,
             output_root=args.output_root,
+            matched_threshold_contract=args.matched_threshold_contract,
             proc_root=args.proc_root,
         )
         marker = "[MUT_GCF_LEGACY_FREEZE_PASS]"

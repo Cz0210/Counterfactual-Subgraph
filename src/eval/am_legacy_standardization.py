@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -1163,7 +1164,7 @@ def adopt_mutagenicity_ours(
             "schema_version": "am_legacy_adoption_v1",
             "dataset": "Mutagenicity",
             "method": "Ours",
-            "status": "ADOPTABLE_PASS",
+            "status": "STALE_METRIC",
             "source_root": str(source),
             "source_final_result_manifest": str(final_manifest_path),
             "source_final_result_manifest_sha256": cache.sha256(final_manifest_path),
@@ -1295,7 +1296,7 @@ def adopt_mutagenicity_ours(
                 "molclr_checkpoint_hash": actual_molclr,
                 "dataset_hash": dataset_hash,
                 "split_hash": split_hash,
-                "status": "ADOPTABLE_PASS",
+                "status": "STALE_METRIC",
                 "generation_adopted": True,
                 "ordering_adopted": True,
                 "evaluation_adopted": True,
@@ -1305,7 +1306,7 @@ def adopt_mutagenicity_ours(
             "schema_version": "four_by_four_standardized_cell_v1",
             "dataset": "Mutagenicity",
             "method": "Ours",
-            "status": "ADOPTABLE_PASS",
+            "status": "STALE_METRIC",
             "raw_output_root": str(source),
             "standardized_output_root": str(destination / "standardized"),
             "oracle_backend": "rf",
@@ -1356,7 +1357,7 @@ def adopt_mutagenicity_ours(
             "passed": True,
             "dataset": "Mutagenicity",
             "method": "Ours",
-            "status": "ADOPTABLE_PASS",
+            "status": "STALE_METRIC",
             "source_checksum_closure_passed": True,
             "source_frozen_test_audit_passed": True,
             "source_test_run_recorded": _identity_path(test_run_identity),
@@ -1408,7 +1409,7 @@ def adopt_mutagenicity_ours(
             {
                 "run_complete": True,
                 "audit_passed": True,
-                "status": "ADOPTABLE_PASS",
+                "status": "STALE_METRIC",
                 "standardized_root": str(destination / "standardized"),
                 "paper_written": False,
             },
@@ -1419,7 +1420,7 @@ def adopt_mutagenicity_ours(
         shutil.rmtree(temporary, ignore_errors=True)
         raise
     return {
-        "status": "ADOPTABLE_PASS",
+        "status": "STALE_METRIC",
         "dataset": "Mutagenicity",
         "method": "Ours",
         "output_root": str(destination),
@@ -1441,6 +1442,8 @@ def freeze_mutagenicity_gcf_candidates(
     expected_selection_method: str = MUT_GCF_SELECTION_METHOD,
     expected_teacher_sha256: str = MUTAGENICITY_RF_SHA256,
     expected_candidate_count: int = 20,
+    matched_threshold_contract: str | Path | None = None,
+    ours_schema_source_root: str | Path | None = None,
     proc_root: str | Path = "/proc",
 ) -> dict[str, Any]:
     """Freeze the already-exported GCF Top20 without running generation.
@@ -1457,6 +1460,84 @@ def freeze_mutagenicity_gcf_candidates(
         raise FileExistsError(f"Output root must be fresh: {destination}")
     if not source.is_dir():
         raise FileNotFoundError(source)
+    if matched_threshold_contract is None:
+        raise LegacyStandardizationError(
+            "Mut GCF freeze requires the matrix-audit matched threshold contract"
+        )
+    threshold_path = Path(matched_threshold_contract).expanduser().resolve(strict=True)
+    threshold_payload = _load_object(threshold_path)
+    thresholds = threshold_payload.get("thresholds")
+    if not isinstance(thresholds, list) or len(thresholds) != 601:
+        raise LegacyStandardizationError(
+            "Mut matched threshold contract must contain exactly 601 points"
+        )
+    try:
+        threshold_values = [float(value) for value in thresholds]
+        theta_star = float(threshold_payload["theta_star"])
+        cost_cap = float(threshold_payload["cost_cap"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LegacyStandardizationError(
+            "Mut matched threshold contract has non-numeric values"
+        ) from exc
+    expected_grid = [0.0535 * index / 600 for index in range(601)]
+    if any(
+        not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12)
+        for actual, expected in zip(threshold_values, expected_grid)
+    ):
+        raise LegacyStandardizationError(
+            "Mut matched threshold contract is not the frozen 601-point 0..0.0535 grid"
+        )
+    if not math.isclose(theta_star, 0.05, rel_tol=0.0, abs_tol=1e-12) or not math.isclose(
+        cost_cap, 0.0535, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise LegacyStandardizationError(
+            "Mut matched theta_star/cost_cap must be 0.05/0.0535"
+        )
+    allowed_splits = {
+        "calibration",
+        "frozen_calibration",
+        "existing_frozen_protocol",
+        "legacy_frozen_protocol",
+        "frozen_protocol",
+    }
+    semantic_threshold_checks = {
+        "status": threshold_payload.get("status") == "PASS",
+        "dataset": str(threshold_payload.get("dataset") or "").lower()
+        == "mutagenicity",
+        "distance_line": threshold_payload.get("distance_line")
+        == "MolCLR-Node-Wasserstein",
+        "cf_mode": threshold_payload.get("cf_mode") == "strict_flip",
+        "test_used_for_selection": threshold_payload.get("test_used_for_selection")
+        is False,
+        "threshold_source_split": str(
+            threshold_payload.get("threshold_source_split") or ""
+        ).lower()
+        in allowed_splits,
+        "threshold_config_hash": bool(
+            re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(threshold_payload.get("threshold_config_hash") or "").lower(),
+            )
+        ),
+    }
+    failed_threshold_checks = [
+        name for name, passed in semantic_threshold_checks.items() if not passed
+    ]
+    if failed_threshold_checks:
+        raise LegacyStandardizationError(
+            f"Mut matched threshold provenance failed: {failed_threshold_checks}"
+        )
+    if ours_schema_source_root is None:
+        raise LegacyStandardizationError(
+            "Mut GCF freeze requires the frozen Ours source for table schema only"
+        )
+    ours_schema_source = Path(ours_schema_source_root).expanduser().resolve(strict=True)
+    table_schema_paths = [
+        ours_schema_source / "table2_ours_k10.csv",
+        ours_schema_source / "table2_ours_k20.csv",
+    ]
+    if any(not path.is_file() or path.is_symlink() for path in table_schema_paths):
+        raise LegacyStandardizationError("Mut Ours Table 2 schema references are missing")
     required = (
         "selected_top20.csv",
         "run_manifest.json",
@@ -1585,7 +1666,7 @@ def freeze_mutagenicity_gcf_candidates(
             "Mut GCF filter audit selected ranks differ from frozen CSV"
         )
 
-    protected = list(paths.values())
+    protected = [*paths.values(), threshold_path, *table_schema_paths]
     before = _snapshot(protected)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(
@@ -1596,6 +1677,28 @@ def freeze_mutagenicity_gcf_candidates(
         export.mkdir(parents=True)
         copied_csv = export / "selected_top20.csv"
         shutil.copy2(paths["selected_top20.csv"], copied_csv)
+        matched_thresholds = {
+            "schema_version": "mut_matched_frozen_threshold_contract_v1",
+            "dataset": "Mutagenicity",
+            "distance_line": "MolCLR-Node-Wasserstein",
+            "cf_mode": "strict_flip",
+            "status": "PASS",
+            "thresholds": threshold_values,
+            "theta_star": theta_star,
+            "cost_cap": cost_cap,
+            "threshold_source": "frozen_calibration_matched_existing_protocol",
+            "threshold_source_split": threshold_payload["threshold_source_split"],
+            "threshold_config_hash": threshold_payload["threshold_config_hash"],
+            "source_threshold_contract": str(threshold_path),
+            "source_threshold_contract_sha256": cache.sha256(threshold_path),
+            "test_used_for_selection": False,
+        }
+        _atomic_json(temporary / "matched_thresholds.json", matched_thresholds)
+        schema_reference = temporary / "schema_reference"
+        schema_reference.mkdir()
+        shutil.copy2(temporary / "matched_thresholds.json", schema_reference / "thresholds.json")
+        for path in table_schema_paths:
+            shutil.copy2(path, schema_reference / path.name)
         frozen_manifest = {
             "schema_version": "mut_gcf_frozen_top20_v1",
             "dataset": "Mutagenicity",
@@ -1621,6 +1724,7 @@ def freeze_mutagenicity_gcf_candidates(
             "source_candidate_filter_audit_sha256": cache.sha256(
                 paths["candidate_filter_audit.jsonl"]
             ),
+            "matched_threshold_contract_sha256": cache.sha256(threshold_path),
             "generation_rerun": False,
             "selection_rerun": False,
             "frozen_at": utc_now(),
@@ -1652,6 +1756,7 @@ def freeze_mutagenicity_gcf_candidates(
                 name: cache.sha256(path) for name, path in paths.items()
             },
             "frozen_candidate_contract": validation,
+            "matched_threshold_contract": matched_thresholds,
             "generation_rerun": False,
             "selection_rerun": False,
             "calibration_loaded": False,
@@ -1666,6 +1771,7 @@ def freeze_mutagenicity_gcf_candidates(
                 "audit_passed": True,
                 "candidate_count": int(expected_candidate_count),
                 "selected_candidate_order_sha256": order_sha,
+                "matched_threshold_contract_sha256": cache.sha256(threshold_path),
                 "generation_rerun": False,
             },
         )
@@ -1687,6 +1793,8 @@ def freeze_mutagenicity_gcf_candidates(
         "output_root": str(destination),
         "frozen_manifest": str(destination / "frozen_candidate_manifest.json"),
         "selected_candidates": str(destination / "export/selected_top20.csv"),
+        "matched_thresholds": str(destination / "matched_thresholds.json"),
+        "schema_reference": str(destination / "schema_reference"),
         "generation_rerun": False,
     }
 
@@ -1787,7 +1895,7 @@ def _validate_adopted_mut_ours(root_like: str | Path) -> Path:
     if (
         complete.get("run_complete") is not True
         or audit.get("final_artifact_audit_passed") is not True
-        or manifest.get("status") != "ADOPTABLE_PASS"
+        or manifest.get("status") != "STALE_METRIC"
         or str(manifest.get("dataset") or "").lower() != "mutagenicity"
         or manifest.get("method") != "Ours"
         or oracle.get("oracle_backend") != "rf"
@@ -1928,7 +2036,7 @@ def audit_legacy_inventory(
                     effective_status = "INCOMPLETE"
                 else:
                     adopted = _validate_adopted_mut_ours(adopted_mut_ours_root)
-                    effective_status = "ADOPTABLE_PASS"
+                    effective_status = "STALE_METRIC"
             reason = str(raw.get("reason") or "").strip()
             row = {
                 "dataset": dataset,
@@ -1937,7 +2045,7 @@ def audit_legacy_inventory(
                 "raw_output_root": str(source) if source is not None else "",
                 "standardized_output_root": (
                     str(Path(adopted_mut_ours_root).resolve() / "standardized")
-                    if effective_status == "ADOPTABLE_PASS"
+                    if effective_status == "STALE_METRIC"
                     and dataset.lower() == "mutagenicity"
                     and method == "Ours"
                     and adopted_mut_ours_root is not None
@@ -1950,11 +2058,13 @@ def audit_legacy_inventory(
                 "rerun_generation": False,
                 "clear_excluded": True,
             }
-            if effective_status == "ADOPTABLE_PASS":
+            if effective_status == "STALE_METRIC":
                 row["generation_adopted"] = True
                 row["ordering_adopted"] = True
                 row["evaluation_adopted"] = True
-                row["reason"] = "STRICT_FROZEN_CELL_ADOPTION_PASS"
+                row["reason"] = (
+                    "STRICT_ORIGINAL_PROTOCOL_AUDIT_PASS_BUT_COMMON_THRESHOLD_STALE"
+                )
             rows.append(row)
             details.append(
                 {
@@ -2094,6 +2204,23 @@ def mut_gcf_contract_from_spec(source_spec: str | Path) -> dict[str, Any]:
         raise LegacyStandardizationError(
             f"Expected exactly one existing Mutagenicity/GCF export root: {roots}"
         )
+    ours_matches = [
+        candidate
+        for candidate in spec.get("cells", [])
+        if isinstance(candidate, Mapping)
+        and str(candidate.get("dataset") or "").lower() == "mutagenicity"
+        and str(candidate.get("method") or "") == "Ours"
+    ]
+    ours_roots = [
+        Path(value).expanduser().resolve()
+        for candidate in ours_matches
+        for value in candidate.get("source_roots", [])
+        if Path(value).expanduser().is_dir()
+    ]
+    if len(ours_roots) != 1:
+        raise LegacyStandardizationError(
+            f"Expected one frozen Mutagenicity/Ours schema source: {ours_roots}"
+        )
     ranks = row.get("expected_native_ranks", MUT_GCF_NATIVE_RANKS)
     if not isinstance(ranks, list) and not isinstance(ranks, tuple):
         raise LegacyStandardizationError(
@@ -2101,6 +2228,7 @@ def mut_gcf_contract_from_spec(source_spec: str | Path) -> dict[str, Any]:
         )
     return {
         "source_export_root": roots[0],
+        "ours_schema_source_root": ours_roots[0],
         "expected_csv_sha256": str(
             row.get("expected_csv_sha256") or MUT_GCF_SELECTED_CSV_SHA256
         ),

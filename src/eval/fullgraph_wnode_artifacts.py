@@ -1298,16 +1298,8 @@ def load_frozen_threshold_contract(path: str | Path) -> dict[str, Any]:
         raise ValueError("Frozen thresholds must be finite and nonnegative.")
     if thresholds != sorted(thresholds) or len(thresholds) != len(set(thresholds)):
         raise ValueError("Frozen thresholds must be unique and increasing.")
-    if not any(
-        math.isclose(
-            value,
-            float(theta_star),
-            rel_tol=0.0,
-            abs_tol=FLOAT_TOLERANCE,
-        )
-        for value in thresholds
-    ):
-        raise ValueError("Frozen theta_star is absent from the threshold list.")
+    if float(theta_star) < thresholds[0] or float(theta_star) > thresholds[-1]:
+        raise ValueError("Frozen theta_star is outside the threshold grid.")
     if not math.isclose(
         float(cost_cap),
         float(thresholds[-1]),
@@ -1852,11 +1844,8 @@ def export_final_artifacts(
         cost_cap=cost_cap,
         thresholds=frozen_thresholds,
     )
-    if not any(
-        math.isclose(value, float(theta_star), rel_tol=0.0, abs_tol=FLOAT_TOLERANCE)
-        for value in frozen_thresholds
-    ):
-        raise ValueError("theta_star must be present in the frozen threshold list.")
+    if float(theta_star) < frozen_thresholds[0] or float(theta_star) > frozen_thresholds[-1]:
+        raise ValueError("theta_star must be inside the frozen threshold grid.")
     requested_k = sorted(set(int(value) for value in k_values))
     if requested_k != list(range(1, int(expected_candidate_count) + 1)):
         raise ValueError(
