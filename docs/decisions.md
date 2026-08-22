@@ -7411,3 +7411,9 @@ used by B12/B13.
   ComRecGC, and B11 therefore receive the initial four cards as preregistered;
   the generation-free legacy evaluation enters the queue only after the BACE
   primary chain releases capacity.
+# 2026-08-22 — Materialize the shared AIDS/Mut matched threshold contract once
+
+- The tracked 601-point Mutagenicity protocol already identifies the audited
+  matched AIDS/Mut frozen protocol. A small fresh-output builder clones that
+  exact grid/theta/cap/hash to the AIDS expectation before the one-time matrix
+  audit; it does not inspect or derive thresholds from held-out curves.
