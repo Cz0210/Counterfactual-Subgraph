@@ -10,6 +10,20 @@
 - [x] Add a recorded historical structure fixture plus a negative regression
   proving that absent freeze evidence still fails closed.
 
+## 2026-08-22: Bounded four-by-four repair continuation
+
+- [x] Add a reproducible repair-only manifest builder with build-time and
+  runtime source-terminal PASS/output/writer verification.
+- [x] Reuse the generic native BACE ComRecGC GINE fragment and append only its
+  artifact standardization terminal.
+- [x] Retry Mutagenicity GCF calibration/test/standardization from the exact
+  passing v1 freeze without rerunning candidate generation.
+- [x] Retry AIDS/Mutagenicity COMRECGC threshold verification and standardized
+  continuation from immutable recovered generations.
+- [x] Retry only BACE Ours artifact standardization from the passing B14 root.
+- [x] Share global GPU UUID locks with v1, cap repair CPU task concurrency at
+  two, omit Taste/final rendering, and inherit no old continuation guard.
+
 ## 2026-08-22: BACE four-by-four cell closure
 
 - [x] Keep B14 and native baseline final roots as immutable scientific

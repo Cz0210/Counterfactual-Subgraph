@@ -73,6 +73,59 @@ predecessor, or any candidate/model identity drift fails closed.
 
 Accepted
 
+## [2026-08-22] Isolate failed four-by-four closures in a bounded repair controller
+
+### Background
+
+The first four-by-four continuation retained valid PASS evidence, but four
+recoverable closures needed fresh execution: BACE ComRecGC native generation,
+Mutagenicity GCF calibration/test export, AIDS/Mutagenicity ComRecGC
+standardization, and the artifact-only BACE Ours standardizer. Restarting the
+original controller or editing failed attempts would mix execution code and
+immutable evidence. The original controller can also remain alive with a GCF
+GPU task, so a second scheduler must coordinate resource ownership globally.
+
+### Decision
+
+Build a new `four_methods_four_datasets_repair_v1` manifest containing only:
+
+- the existing generic BACE ComRecGC native GINE task fragment plus its
+  standardized cell terminal;
+- Mutagenicity GCF calibration, held-out evaluation, and standardization from
+  the exact passing v1 freeze;
+- fresh Mutagenicity/AIDS ComRecGC threshold verification and standardized
+  continuation from recovered read-only generation roots; and
+- artifact-only standardization of the exact passing BACE Ours B14 root.
+
+At build time and again as controller tasks, verify each adopted controller
+terminal has state/gate PASS, one exact passing attempt root, required physical
+files, and no writable procfs descriptor below it. Apply an equivalent small
+manifest/PASS/writer closure to recovered generations while leaving the large
+payload SHA-256 to the scientific continuation's existing exactly-once gate.
+Write every repair under a fresh root and never include Taste or final result
+rendering.
+
+Run the repair controller in the same AutoDL runtime layout so both controllers
+share UUID locks. Fix `runtime.max_cpu_tasks=2`. Do not copy a `continuation`
+object into the repair manifest, so it does not acquire the old BACE
+predecessor guard. Require the execution worktree to contain explicitly listed
+AutoDL-Python, COMRECGC safe-directory, and BACE standardizer fix commits.
+
+### Consequences
+
+- The main v1 controller and repair controller may coexist without assigning
+  the same physical GPU.
+- Old PASS and FAILED attempts remain read-only evidence.
+- No B0--B14 scientific task is repeated for BACE Ours; only its deterministic
+  artifact exporter is retried.
+- Test access remains downstream of a fresh calibration/threshold freeze.
+- A missing PASS terminal, output-anchor mismatch, live writer, missing fix
+  commit, or non-fresh destination blocks manifest publication.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Bind continuation predecessors to the source manifest namespace
 
 ### Decision

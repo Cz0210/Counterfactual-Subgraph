@@ -108,6 +108,14 @@ closures prove 16/16 eligible cells; incomplete campaigns receive a
 non-numeric staging audit only. See
 `docs/AUTODL_FOUR_BY_FOUR_MAIN_RESULTS_EXPORT.md`.
 
+Failed four-by-four terminal closures can be retried without reopening the
+main controller or any PASS/FAILED root by the bounded, source-audited repair
+manifest builder at
+`scripts/autodl/build_four_by_four_repair_manifest.py`. It shares project-wide
+GPU UUID locks with the still-running main controller, caps its CPU task
+concurrency at two, and deliberately inherits no old BACE continuation guard.
+See `docs/AUTODL_FOUR_BY_FOUR_REPAIR_CONTINUATION.md`.
+
 The future TasteMolNet baseline routes share one explicit three-class GINE,
 untargeted Sweet-to-non-Sweet strict-flip contract while remaining terminally
 license-blocked in the current controller. See
