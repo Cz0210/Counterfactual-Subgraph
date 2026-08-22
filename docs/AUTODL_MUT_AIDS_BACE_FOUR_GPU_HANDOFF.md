@@ -15,9 +15,14 @@ read-only at:
 
 The active v2 controller is a persistent `nohup` process with PID `120431` and
 kernel start ticks `680917595`.  At this handoff it has adopted the five exact
-historical runs, retained Mutagenicity `PASS`, continued monitoring AIDS, and
-launched a fresh final-commit B6-v2 on GPU 0.  B7 and B8--B14 are correctly
-waiting for the formal B6-v2 gate; no downstream PASS is claimed here.
+historical runs, retained Mutagenicity `PASS`, continued monitoring AIDS,
+passed the fresh final-commit B6-v2 gate, and is running B7 on GPU 0.  Three B7
+preparation tasks passed.  The original v2 MolCLR-parent preparation attempt
+failed before scientific computation because the shared loader rejected the
+valid explicit device `cuda:0`; its failure evidence is preserved.  A bounded
+fresh-root repair on commit `d26fe279fcb7778e8e021864878c7851d8900a12`
+passed, but it does not rewrite the v2 dependency state.  No B7 or downstream
+scientific PASS is claimed before its own gate.
 
 ## 1. Baseline and final development commit
 
@@ -32,6 +37,10 @@ waiting for the formal B6-v2 gate; no downstream PASS is claimed here.
   `0ad149420577c683baa2ef03f78f70ee6841f3a1`.
 - Final immutable controller/BACE execution worktree:
   `/root/autodl-tmp/worktrees/run-four-gpu-recovery-0ad149420577`.
+- MolCLR explicit-device repair commit:
+  `d26fe279fcb7778e8e021864878c7851d8900a12`.
+- Immutable MolCLR repair execution worktree:
+  `/root/autodl-tmp/worktrees/run-bace-molclr-prep-d26fe279fcb7`.
 
 Do not edit that execution worktree after launching scientific tasks.  Continue
 later development in a separate worktree.
@@ -73,6 +82,8 @@ diagnostic flips is PPO success evidence.
 - Exact allowlist for the controller-owned
   `TOKENIZERS_PARALLELISM=false` scheduling key:
   `0ad149420577c683baa2ef03f78f70ee6841f3a1`.
+- Fail-closed support for indexed MolCLR CUDA devices:
+  `d26fe279fcb7778e8e021864878c7851d8900a12`.
 
 The controller delegates workers to `exp_run`, uses UUID locks, samples idle
 GPUs for at least 60 seconds, permits at most one OOM down-batch retry, never
@@ -215,6 +226,14 @@ M scripts/autodl/exp_run.py
 M tests/autodl/test_exp_run.py
 ```
 
+`d26fe27`:
+
+```text
+M docs/decisions.md
+M src/embeddings/molclr_gnn_embedding.py
+A tests/embeddings/test_molclr_device_resolution.py
+```
+
 The deployed manifest is the exact frozen copy named at the top of this
 handoff.  Do not edit it in place; a future semantic manifest change requires
 a new controller ID and fresh output/cache namespace.
@@ -346,16 +365,41 @@ deletion, saved pool/reward provenance, no RF, and no calibration/test loading.
 The pre-release B6 run
 `20260822T034345Z-bace-b6-v2-a625841` is terminal `PASS`.  It is bounded
 pre-release validation evidence only: do not adopt it and do not let it publish
-controller B6 authority.  The hardened controller has now launched formal B6
-from the final immutable commit; B7 will be launched by that same worktree only
-after B6 passes.
+controller B6 authority.  The hardened controller separately launched and
+passed formal B6 from the final immutable commit, and only that formal result
+released B7.
 
 B6-v2 controller run ID:
 `autodl-four-gpu-recovery-20260822T044445Z-v2-bace_b6_ppo_smoke-main-a0`.
 Current fresh output:
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b6-v2/attempt-0`.
-State at this handoff: `RUNNING` on GPU 0, with `exp_run` worker PID `120622`
-and scientific child PID `120630`.  No formal B6-v2 `PASS` is claimed yet.
+State at this handoff: formal `PASS`.  Its gate records:
+
+```text
+ppo_training_performed=true
+ppo_update_count=5
+optimizer_step_count=5
+candidate_count=20
+valid_candidate_count=9
+gnn_scored_deletion_count=3
+strict_flip_count=1
+policy_parameter_hash_before != policy_parameter_hash_after
+reference_parameter_hash_before == reference_parameter_hash_after
+checkpoint_saved=true
+checkpoint_reload_pass=true
+candidate_pool_saved=true
+reward_manifest_saved=true
+oracle_backend=gnn
+rf_oracle_used=false
+calibration_loaded=false
+test_loaded=false
+failures=[]
+```
+
+The remaining formal contract checks also passed: checkpoint save/reload,
+finite rewards, candidate/reward provenance, GNN oracle, RF guard, and
+calibration/test leakage guards.  PIDs `120622 / 120630` are historical B6
+worker/child identities and no longer own GPU 0.
 
 The immutable v1 controller evidence remains at controller ID
 `autodl-four-gpu-recovery-20260822T033351Z-v1`: its formal B6 launch failed
@@ -381,25 +425,72 @@ reward_clip=[-5,5]
 checkpoints=50,100,150,200,250,300
 ```
 
-B7 output pattern:
-`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-{attempt}`.
-State at this handoff: `PENDING`, waiting only for formal B6-v2 `PASS`; B7 has
-not been launched and no B7 `PASS` is claimed.
+B7 current output:
+`/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-0`.
+B7 controller run ID:
+`autodl-four-gpu-recovery-20260822T044445Z-v2-bace_b7_ppo_full-main-a0`.
+State at this handoff: `RUNNING` on GPU 0, with `exp_run` worker PID `121554`
+and scientific child PID `121562`.  No B7 `PASS` is claimed yet.
+
+### B7 preparation and MolCLR repair
+
+The following v2 preparation attempts are terminal `PASS`:
+
+```text
+bace_b7_prep_gnn_before:
+  /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/gnn-before/attempt-0
+bace_b7_prep_shard_manifests:
+  /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/shard-manifests/attempt-0
+bace_b7_prep_output_preflight:
+  /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/output-preflight/attempt-0
+```
+
+The original v2 `bace_b7_prep_molclr_parent` attempt is terminal `FAILED` and
+must stay immutable:
+
+```text
+/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/molclr-parent/attempt-0
+```
+
+It failed at device parsing because the shared MolCLR loader accepted `cuda`
+but rejected the scheduler's valid explicit device `cuda:0`.  It did not
+justify changing MolCLR weights, embeddings, cache identity, or scientific
+semantics.  Commit `d26fe279fcb7778e8e021864878c7851d8900a12` adds bounded,
+fail-closed `cuda:N` validation.  The corrected isolated run is:
+
+```text
+run_id=bace-molclr-parent-repair-v2-d26fe27-20260822T052100Z
+state=PASS
+worktree=/root/autodl-tmp/worktrees/run-bace-molclr-prep-d26fe279fcb7
+output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery_repairs/bace-molclr-parent-v2-20260822T052100Z-d26fe27
+node_embedding_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/molclr-device-v2-d26fe27/node_embeddings
+parent_count=66
+test_loaded=false
+```
+
+This repair is positive replacement evidence, not permission to mutate the
+failed v2 task state or its attempt root.
 
 ## 14. Four GPU bindings, PID, and launcher
 
 | GPU | UUID | Current role | PID | launcher/session | state |
 |---:|---|---|---|---|---|
-| 0 | `GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732` | `bace_b6_ppo_smoke` | `120622 / 120630` | v2 `exp_run` / child | `RUNNING` |
-| 1 | `GPU-244f35a8-354a-ef1e-f589-bde7f8a7a690` | adopted `aids_recovery` | `111811 / 111879` | adopted `exp_run` / child | `RUNNING` |
-| 2 | `GPU-901b50ea-30b2-4a0c-505f-bf94980e1484` | no READY task until B6 gate | `-` | `-` | `IDLE` |
-| 3 | `GPU-2803b403-c056-187e-6047-683d02d3693b` | no READY task until B6 gate | `-` | `-` | `IDLE` |
+| 0 | `GPU-0e4e08dd-f7cc-da83-c0f6-a663440c0732` | `bace_b7_ppo_full` | `121554 / 121562` | v2 `exp_run` / child | `RUNNING`; about 21.6 GiB, 99% util at snapshot |
+| 1 | `GPU-244f35a8-354a-ef1e-f589-bde7f8a7a690` | adopted `aids_recovery` | `111811 / 111879` | adopted `exp_run` / child | `RUNNING`; UUID lock retained |
+| 2 | `GPU-901b50ea-30b2-4a0c-505f-bf94980e1484` | no READY task until B7 gate | `-` | `-` | `IDLE` |
+| 3 | `GPU-2803b403-c056-187e-6047-683d02d3693b` | no READY task until B7 gate | `-` | `-` | `IDLE` |
 
 AutoDL previously had no `tmux`; the launcher therefore uses `nohup` unless
 `tmux` becomes available.  Never kill a PID based only on this table: validate
 the controller state, kernel process identity, and GPU UUID process first.
 Authoritative v2 controller PID: `120431`; kernel start ticks: `680917595`;
 launcher: `nohup` (no tmux session).
+
+At the `2026-08-22T05:32:47Z` snapshot, PID `120431` was alive and its
+heartbeat age was 18 seconds.  The dashboard's raw/workload aggregate state is
+`FAILED` solely because the immutable original MolCLR attempt is terminal
+`FAILED`; this is not evidence that B7 or AIDS failed.  Use task-level states
+and the heartbeat to interpret this mixed terminal/running controller.
 
 The old v1 PID `119510` is monitor-only: it owns no new BACE science after its
 pre-science launch failure and is only observing the already-adopted AIDS run.
@@ -425,11 +516,32 @@ BACE audit adoption -> clean initializer adoption -> fresh canary adoption
   -> B14 manifest-only freeze
 ```
 
-At this handoff the only freshly launched BACE task is B6-v2.  B7 and its four
-bounded prep tasks wait for B6 `PASS`; B8--B14 remain dependency-gated and
-unstarted.  When B6 passes, the controller can immediately fill newly eligible
-GPU slots without waiting for AIDS.  Always use the status command for the live
-next-READY task rather than inferring it from this snapshot.
+At this handoff B6-v2 is `PASS`, B7 is `RUNNING`, three bounded prep tasks are
+`PASS`, and the original v2 MolCLR prep is `FAILED`.  Once B7 passes, the
+current v2 controller can safely and automatically advance B8, B9, and B10;
+these stages do not need the failed MolCLR-parent dependency.  Let that
+controller finish its B8/B9 fixed shards and B10 merge without interference.
+
+The exact downstream snapshot is:
+
+```text
+B8 base shards=WAITING_DEPENDENCY
+B9 high-temperature shards=WAITING_DEPENDENCY
+B10 merge=WAITING
+B11 verification through B14 freeze=BLOCKED
+```
+
+The current v2 graph cannot release B11 because B11 still has the historical
+failed `bace_b7_prep_molclr_parent` task as a dependency.  Do not rewrite that
+task to `PASS`, inject the repaired output into its attempt directory, or start
+a parallel duplicate controller.  After the current v2 controller has reached
+B10 `PASS` and has no eligible duplicate work left, create one new continuation
+controller with a new controller ID and fresh controller/output namespace.  It
+must exact-adopt the passing B6, B7, three original prep outputs, all B8/B9
+shards, B10, and the corrected MolCLR repair output, then release B11--B14 from
+those immutable identities.  Exact adoption must fail closed on any path,
+commit, config, checksum, split, or gate mismatch.  Always use the status
+command for live state rather than inferring it from this snapshot.
 
 ## 16. TasteMolNet license block
 
@@ -458,6 +570,8 @@ molclr_checkpoint=/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-
 new_science_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2
 fresh_wnode_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/wnode/wnode_cache.sqlite3
 fresh_node_embedding_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/node_embeddings
+molclr_repair_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery_repairs/bace-molclr-parent-v2-20260822T052100Z-d26fe27
+molclr_repair_node_embedding_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/molclr-device-v2-d26fe27/node_embeddings
 registry=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/experiment_registry/runs.jsonl
 status_registry=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/experiment_registry/status_updates.jsonl
 experiment_log=/autodl-fs/data/counterfactual-subgraph-runtime/docs/AUTODL_FOUR_GPU_EXPERIMENT_LOG.md
@@ -536,28 +650,46 @@ failure are historical evidence, and it should finish naturally with AIDS.
 Handoff snapshot:
 
 ```text
-development_commit=0ad149420577c683baa2ef03f78f70ee6841f3a1
+development_commit=d26fe279fcb7778e8e021864878c7851d8900a12
 lineage_run_commit=6ddd74339dbd9b1f0e57ba341ae4529cc2864fce
 bace_run_commit=0ad149420577c683baa2ef03f78f70ee6841f3a1
+molclr_repair_commit=d26fe279fcb7778e8e021864878c7851d8900a12
 controller_id=autodl-four-gpu-recovery-20260822T044445Z-v2
 controller_pid=120431
 controller_start_ticks=680917595
 controller_tmux=nohup
+controller_snapshot_time=2026-08-22T05:32:47Z
+controller_heartbeat_age=18s
+controller_raw_workload_state=FAILED solely_from_preserved_molclr_attempt_0
 controller_manifest=/autodl-fs/data/counterfactual-subgraph-runtime/control/four_gpu_recovery/manifests/autodl-four-gpu-recovery-20260822T044445Z-v2-0ad1494.json
-gpu0_task=bace_b6_ppo_smoke RUNNING worker=120622 child=120630
-gpu1_task=aids_recovery RUNNING worker=111811 child=111879
-gpu2_task=IDLE waiting_for_b6_gate
-gpu3_task=IDLE waiting_for_b6_gate
+gpu0_task=bace_b7_ppo_full RUNNING worker=121554 child=121562 memory_about_21.6GiB util_about_99pct
+gpu1_task=aids_recovery RUNNING worker=111811 child=111879 uuid_lock_retained
+gpu2_task=IDLE waiting_for_b7_gate
+gpu3_task=IDLE waiting_for_b7_gate
 mut_output_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/mutagenicity_comrecgc_lineage_v3_20260822T025620Z
 aids_output_root=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery/aids_comrecgc_lineage_v2_20260822T020238Z
 bace_initializer=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter
 bace_gnn_checkpoint=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/bace/gine/seed7/calibrated-20260821T181039Z-97689
 bace_b6_v2_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b6-v2/attempt-0
-bace_b7_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-{passing-attempt}
-bace_final_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b14-frozen/attempt-{passing-attempt}
+bace_b6_v2_state=PASS
+bace_b7_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-0
+bace_b7_state=RUNNING
+bace_molclr_v2_attempt_state=FAILED_PRESERVED
+bace_molclr_repair_run=bace-molclr-parent-repair-v2-d26fe27-20260822T052100Z
+bace_molclr_repair_worktree=/root/autodl-tmp/worktrees/run-bace-molclr-prep-d26fe279fcb7
+bace_molclr_repair_output=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery_repairs/bace-molclr-parent-v2-20260822T052100Z-d26fe27
+bace_molclr_repair_cache=/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/molclr-device-v2-d26fe27/node_embeddings
+bace_molclr_repair_state=PASS parent_count=66 test_loaded=false
+bace_current_controller_safe_limit=B10
+bace_b8_b9_state=WAITING_DEPENDENCY
+bace_b10_state=WAITING
+bace_b11_state=BLOCKED_FAILED_HISTORICAL_MOLCLR_DEPENDENCY
+bace_b12_b14_state=BLOCKED
+bace_final_output=not_created; future continuation controller fresh root required after B10 PASS
 taste_status=BLOCKED_LICENSE_REVIEW
 paper_status=PAPER_FROZEN_PENDING_BACE_FINAL_AND_TASTE_LICENSE
 handoff_path=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/handoffs/AUTODL_MUT_AIDS_BACE_FOUR_GPU_HANDOFF.md
 status_command=see section 19
 controller_restart_command=repeat section 20 exact v2 launcher only after dead-controller proof
+continuation_controller=build only after current v2 B10 PASS; exact-adopt immutable PASS outputs and corrected MolCLR repair; never run in parallel
 ```
