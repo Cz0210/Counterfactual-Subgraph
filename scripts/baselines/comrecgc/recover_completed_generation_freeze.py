@@ -60,6 +60,7 @@ def main() -> int:
     )
     write_json(args.audit_output, result)
     print(json.dumps(result, sort_keys=True, default=str))
+    print(f"[COMRECGC_FRESH_RECOVERY_PASS] dataset={args.dataset}")
     return 0
 
 

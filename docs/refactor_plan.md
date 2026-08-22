@@ -718,6 +718,9 @@ Mutagenicity roadmaps.
   and explicit alias/convergence/conflict audit counters.
 - [x] Treat frozen global-hash graph parent metadata as audit-only and bind
   recovered lineage ownership to a parent-consistent selected-event chain.
+- [x] Strictly remap a uniquely determined recorded NLC representative index,
+  separate selected-transition and unique-candidate recovery counts, and emit
+  a checksum-bound fresh-root adoption manifest.
 - [ ] Pass the AutoDL integration smokes, then start the four formal lanes.
 
 # BACE and TasteMolNet Frozen-GNN Route (2026-08-22)

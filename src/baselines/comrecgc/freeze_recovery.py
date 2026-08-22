@@ -28,6 +28,34 @@ from .live_graph_state import AuthoritativeGraphStore
 from .runtime import validate_counterfactual_payload
 
 
+def recovery_population_counts(
+    *,
+    candidate_count: int,
+    candidate_lineage_resolved_count: int,
+    lineage_recovery_audit: Mapping[str, Any],
+) -> dict[str, int]:
+    """Keep unique candidates separate from selected-trace multiplicity."""
+
+    selected = int(lineage_recovery_audit.get("selected_transition_count", -1))
+    recorded = int(lineage_recovery_audit.get("recorded_action_present_count", -1))
+    legacy = int(lineage_recovery_audit.get("legacy_missing_action_count", -1))
+    if selected < 0 or recorded < 0 or legacy < 0 or selected != recorded + legacy:
+        raise ValueError(
+            "Recovered COMRECGC selected-transition counters are inconsistent: "
+            f"selected={selected}, recorded={recorded}, legacy={legacy}."
+        )
+    if int(candidate_count) != int(candidate_lineage_resolved_count):
+        raise ValueError(
+            "Recovered COMRECGC candidate lineage population is incomplete: "
+            f"{candidate_lineage_resolved_count}/{candidate_count}."
+        )
+    return {
+        "candidate_count": int(candidate_count),
+        "candidate_lineage_resolved_count": int(candidate_lineage_resolved_count),
+        "selected_transition_count": selected,
+    }
+
+
 def _json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -412,12 +440,19 @@ def recover_completed_generation_freeze(
             f"Recovered COMRECGC lineage is incomplete: {lineage_resolved}/{lineage_count}."
         )
 
+    population_counts = recovery_population_counts(
+        candidate_count=lineage_count,
+        candidate_lineage_resolved_count=lineage_resolved,
+        lineage_recovery_audit=lineage_recovery_audit,
+    )
+
     lineage_counter_fields = {
         key: int(lineage_recovery_audit.get(key, 0))
         for key in (
             "recorded_action_present_count",
             "recorded_action_replay_ok_count",
             "recorded_action_replay_mismatch_count",
+            "recorded_action_index_remap_count",
             "legacy_missing_action_count",
             "legacy_inference_called_count",
             "legacy_inference_ambiguous_count",
@@ -583,6 +618,31 @@ def recover_completed_generation_freeze(
     resolved_config_mode = _materialize(
         source / "resolved_config.json", output / "resolved_config.json"
     )
+    source_checksums = {
+        relative: sha256_file(source / relative)
+        for relative in (
+            "counterfactuals.pt",
+            "resolved_config.json",
+            "graph_state_audit.json",
+            "graph_state/authoritative_graph_store.sqlite3",
+            "trace/selected_action_trace_manifest.json",
+        )
+    }
+    adoption_manifest = {
+        "schema_version": "comrecgc_fresh_root_adoption_v1",
+        "generation_mode": "adopted_read_only_cache",
+        "adopted_from": str(source),
+        "source_checksums": source_checksums,
+        "source_dataset_fingerprint": dataset_fingerprint,
+        "source_candidate_count": int(audit["candidate_count"]),
+        "source_trace_row_count": int(audit["selected_trace_audit"]["row_count"]),
+        "serialization_rerun": True,
+        "lineage_resolution_rerun": True,
+        "freeze_rerun": True,
+        "bare_symlink_used": False,
+        "fresh_output_root": str(output),
+    }
+    write_json(output / "adoption_manifest.json", adoption_manifest)
     closure_audit = {
         **audit["frozen_payload_closure"],
         **payload_file_audit(payload_path),
@@ -598,7 +658,7 @@ def recover_completed_generation_freeze(
         "trace_schema_version": 1,
         "trace_only": True,
         "candidate_count": lineage_count,
-        "selected_transition_count": lineage_count,
+        "selected_transition_count": population_counts["selected_transition_count"],
         "candidate_lineage_resolved_count": lineage_resolved,
         "selected_trace_path": str(trace_output / source_manifest_path.name),
         "candidate_lineage_path": str(trace_output / "candidate_action_lineage.json"),
@@ -633,7 +693,7 @@ def recover_completed_generation_freeze(
         "counterfactuals_sha256": sha256_file(payload_path),
         "counterfactuals_bytes": payload_path.stat().st_size,
         "counterfactual_candidate_count": len(candidates),
-        "selected_transition_count": lineage_count,
+        "selected_transition_count": population_counts["selected_transition_count"],
         "visited_graph_count": len(graph_map),
         "trace_enabled": True,
         "trace_summary": trace_summary,
@@ -651,6 +711,12 @@ def recover_completed_generation_freeze(
         "freeze_only_recovery": True,
         "source_generation_dir": str(source),
         "source_dataset_fingerprint": dataset_fingerprint,
+        "generation_mode": "adopted_read_only_cache",
+        "adoption_manifest_path": str(output / "adoption_manifest.json"),
+        "adoption_manifest_sha256": sha256_file(output / "adoption_manifest.json"),
+        "serialization_rerun": True,
+        "lineage_resolution_rerun": True,
+        "freeze_rerun": True,
         "run_complete": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -679,7 +745,7 @@ def recover_completed_generation_freeze(
         },
         "counterfactuals_sha256": manifest["counterfactuals_sha256"],
         "candidate_count": len(candidates),
-        "selected_transition_count": lineage_count,
+        "selected_transition_count": population_counts["selected_transition_count"],
         "candidate_lineage_resolved_count": lineage_resolved,
         "lineage_recovery_audit": dict(lineage_recovery_audit),
         **lineage_counter_fields,

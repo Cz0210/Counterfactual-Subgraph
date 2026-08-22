@@ -351,6 +351,18 @@ def test_freeze_recovery_exposes_recorded_action_first_counters(
     assert closure_audit["original_trace_hash_roundtrip_count"] == len(
         recovered_payload["original_trace_hashes"]
     )
+    adoption = json.loads(
+        (output / "adoption_manifest.json").read_text(encoding="utf-8")
+    )
+    assert adoption["generation_mode"] == "adopted_read_only_cache"
+    assert adoption["adopted_from"] == str(root.resolve())
+    assert adoption["serialization_rerun"] is True
+    assert adoption["lineage_resolution_rerun"] is True
+    assert adoption["freeze_rerun"] is True
+    assert adoption["bare_symlink_used"] is False
+    assert adoption["source_checksums"][
+        "graph_state/authoritative_graph_store.sqlite3"
+    ] == source_database_sha256
 
     documents = [
         json.loads(

@@ -63,4 +63,5 @@ test -s "$AUDIT_OUTPUT"
 if [[ "$ACTION" == "recover" ]]; then
   test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
   test -s "$OUTPUT_DIR/frozen_payload_closure_audit.json"
+  test -s "$OUTPUT_DIR/adoption_manifest.json"
 fi

@@ -1,0 +1,19 @@
+{
+  "source": {
+    "run_root": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/mut_generation",
+    "manifest_sha256": "6781ef4cf68f03820cbd7196ee4716cf6f331a40332da917d8d06ccdaffe7815",
+    "counterfactuals_sha256": "11f1e5a2537cc93d401726b6d83b5667a9a5d8c7b0b2a6adc6204c547bfc518c",
+    "trace_manifest_sha256": "669abb5d638c1f1f224aa75b11455182616e4d3de0f61e9157e86f2c70734f30",
+    "sqlite_sha256": "09cc587529dd82e2997a90ce950f2020b54b463f6443661c7aa896421a41585c"
+  },
+  "sqlite_entry_count": 124206,
+  "trace_chunk_count": 449,
+  "trace_row_count": 229752,
+  "candidate_count": 100235,
+  "candidate_lineage_resolved_count": 100235,
+  "selected_transition_count": 224690,
+  "recorded_action_present_count": 224690,
+  "legacy_missing_action_count": 0,
+  "recorded_action_replay_ok_count": 224690,
+  "recorded_action_replay_mismatch_count": 0
+}

@@ -1082,6 +1082,43 @@ def _official_single_edit_diagnostic(
     return {"candidates": candidates, "enumeration_error": None}
 
 
+def _remap_recorded_node_label_change(
+    source_graph: Any,
+    target_graph: Any,
+    recorded_action: Sequence[Any],
+) -> list[Any] | None:
+    """Remap only an otherwise exact recorded NLC across graph representatives.
+
+    The pinned COMRECGC hash is a global content identity.  An isomorphic
+    representative can therefore number equivalent nodes differently from the
+    representative on which the compact trace action was recorded.  Recovery
+    remains fail closed: the official source-to-target delta must have exactly
+    one single edit, that edit must still be an NLC with the recorded label,
+    and replay on the pinned source representative must equal the exact frozen
+    downstream payload.  No other recorded-action mismatch is inferred.
+    """
+
+    recorded = normalized_action(recorded_action)
+    if len(recorded) != 3 or str(recorded[0]) != "NLC":
+        return None
+    candidates = enumerate_official_single_edits(source_graph, target_graph)
+    if len(candidates) != 1:
+        return None
+    candidate = normalized_action(candidates[0])
+    if (
+        len(candidate) != 3
+        or str(candidate[0]) != "NLC"
+        or int(candidate[2]) != int(recorded[2])
+    ):
+        return None
+    if (
+        apply_action_to_normalized_payload(source_graph, candidate)
+        != normalized_untyped_graph_payload(target_graph)
+    ):
+        return None
+    return candidate
+
+
 def _lineage_recovery_context(
     payload: Mapping[str, Any],
     selected_events: Any,
@@ -1098,13 +1135,14 @@ def _lineage_recovery_context(
     audit.clear()
     audit.update(
         {
-            "schema_version": "comrecgc_recorded_action_first_v2",
+            "schema_version": "comrecgc_recorded_action_first_v3",
             "predecessor_selection_policy": (
                 "global_first_recorded_exact_event_in_selected_trace_order_v1"
             ),
             "recorded_action_present_count": 0,
             "recorded_action_replay_ok_count": 0,
             "recorded_action_replay_mismatch_count": 0,
+            "recorded_action_index_remap_count": 0,
             "legacy_missing_action_count": 0,
             "legacy_inference_called_count": 0,
             "legacy_inference_ambiguous_count": 0,
@@ -1130,6 +1168,7 @@ def _lineage_recovery_context(
             "selected_event_source_parent_mismatch_count": 0,
             "selected_event_target_parent_mismatch_count": 0,
             "predecessor_selected_parent_mismatch_count": 0,
+            "selected_transition_count": 0,
         }
     )
 
@@ -1186,6 +1225,7 @@ def _lineage_recovery_context(
         event["selected_trace_row_index"] = selected_trace_row_index
         event["selected_transition_index"] = selected_transition_index
         selected_transition_index += 1
+        audit["selected_transition_count"] += 1
         parent_id = str(event.get("parent_id") or "")
         if not parent_id:
             raise ValueError("Selected trace event has no COMRECGC parent identity.")
@@ -1269,55 +1309,78 @@ def _lineage_recovery_context(
                     )
                 ) from exc
             if replayed != target_payload:
-                audit["recorded_action_replay_mismatch_count"] += 1
-                audit["recorded_action_replay_failed_count"] += 1
-                raise ValueError(
-                    "Recorded selected action does not replay to the exact target graph: "
-                    + json.dumps(
-                        {
-                            "parent_id": parent_id,
-                            "move_index": event.get("move_index"),
-                            "head_index": event.get("head_index"),
-                            "source_official_hash": event.get(
-                                "source_official_hash"
-                            ),
-                            "target_official_hash": event.get(
-                                "target_official_hash"
-                            ),
-                            "source_graph_sha256": event.get(
-                                "source_graph_sha256"
-                            ),
-                            "target_graph_sha256": event.get(
-                                "target_graph_sha256"
-                            ),
-                            "recorded_action": resolved_action,
-                            "replayed_graph_sha256": stable_json_sha256(replayed),
-                            "expected_graph_sha256": stable_json_sha256(
-                                target_payload
-                            ),
-                            "dataset": payload.get("dataset")
-                            or getattr(source_graph, "comrecgc_dataset", None),
-                            "transition_id": event.get("transition_id"),
-                            "trace_chunk": event.get("trace_chunk"),
-                            "trace_row": event.get("trace_row"),
-                            "code_commit": payload.get("project_commit")
-                            or payload.get("code_commit"),
-                            "external_comrecgc_commit": payload.get(
-                                "upstream_commit"
-                            ),
-                            "official_graph_diff_diagnostic": (
-                                _official_single_edit_diagnostic(
-                                    source_graph, target_graph
-                                )
-                            ),
-                        },
-                        sort_keys=True,
-                    )
+                remapped_action = _remap_recorded_node_label_change(
+                    source_graph, target_graph, resolved_action
                 )
+                if remapped_action is not None:
+                    event["recorded_action"] = list(resolved_action)
+                    event["recorded_action_index_remap"] = {
+                        "operation": "NLC",
+                        "recorded_node_index": int(resolved_action[1]),
+                        "resolved_node_index": int(remapped_action[1]),
+                        "label": int(remapped_action[2]),
+                    }
+                    resolved_action = remapped_action
+                    replayed = apply_action_to_normalized_payload(
+                        source_graph, resolved_action
+                    )
+                    audit["recorded_action_index_remap_count"] += 1
+                else:
+                    audit["recorded_action_replay_mismatch_count"] += 1
+                    audit["recorded_action_replay_failed_count"] += 1
+                    raise ValueError(
+                        "Recorded selected action does not replay to the exact target graph: "
+                        + json.dumps(
+                            {
+                                "parent_id": parent_id,
+                                "move_index": event.get("move_index"),
+                                "head_index": event.get("head_index"),
+                                "source_official_hash": event.get(
+                                    "source_official_hash"
+                                ),
+                                "target_official_hash": event.get(
+                                    "target_official_hash"
+                                ),
+                                "source_graph_sha256": event.get(
+                                    "source_graph_sha256"
+                                ),
+                                "target_graph_sha256": event.get(
+                                    "target_graph_sha256"
+                                ),
+                                "recorded_action": resolved_action,
+                                "replayed_graph_sha256": stable_json_sha256(
+                                    replayed
+                                ),
+                                "expected_graph_sha256": stable_json_sha256(
+                                    target_payload
+                                ),
+                                "dataset": payload.get("dataset")
+                                or getattr(source_graph, "comrecgc_dataset", None),
+                                "transition_id": event.get("transition_id"),
+                                "trace_chunk": event.get("trace_chunk"),
+                                "trace_row": event.get("trace_row"),
+                                "code_commit": payload.get("project_commit")
+                                or payload.get("code_commit"),
+                                "external_comrecgc_commit": payload.get(
+                                    "upstream_commit"
+                                ),
+                                "official_graph_diff_diagnostic": (
+                                    _official_single_edit_diagnostic(
+                                        source_graph, target_graph
+                                    )
+                                ),
+                            },
+                            sort_keys=True,
+                        )
+                    )
             audit["recorded_action_replay_ok_count"] += 1
             audit["recorded_action_replay_verified_count"] += 1
-            action_recovery = "recorded_exact"
-            lineage_source = "recorded_action_replay_v1"
+            if event.get("recorded_action_index_remap") is not None:
+                action_recovery = "recorded_exact_global_index_remap_v1"
+                lineage_source = "recorded_action_global_index_remap_v1"
+            else:
+                action_recovery = "recorded_exact"
+                lineage_source = "recorded_action_replay_v1"
         else:
             audit["legacy_missing_action_count"] += 1
             audit["legacy_inference_called_count"] += 1
@@ -1392,14 +1455,17 @@ def _lineage_recovery_context(
                 # that same binding, but never hide the convergence: every
                 # later event was independently SHA-checked and replayed above.
                 audit["predecessor_conflicting_exact_event_count"] += 1
-                if (
-                    existing.get("action_recovery") != "recorded_exact"
-                    and event.get("action_recovery") != "recorded_exact"
+                if not str(existing.get("action_recovery", "")).startswith(
+                    "recorded_exact"
+                ) and not str(event.get("action_recovery", "")).startswith(
+                    "recorded_exact"
                 ):
                     audit["predecessor_unverified_conflict_count"] += 1
                     unresolved_legacy_conflicts.add(target_key)
-            if existing.get("action_recovery") != "recorded_exact" and (
-                event.get("action_recovery") == "recorded_exact"
+            if not str(existing.get("action_recovery", "")).startswith(
+                "recorded_exact"
+            ) and (
+                str(event.get("action_recovery", "")).startswith("recorded_exact")
             ):
                 audit["predecessor_recorded_upgrade_count"] += 1
                 unresolved_legacy_conflicts.discard(target_key)
@@ -1411,7 +1477,7 @@ def _lineage_recovery_context(
         else:
             event["predecessor_selection"] = (
                 "first_recorded_exact_event_in_selected_trace_order"
-                if event.get("action_recovery") == "recorded_exact"
+                if str(event.get("action_recovery", "")).startswith("recorded_exact")
                 else "legacy_inferred_placeholder_in_selected_trace_order"
             )
             predecessor[target_key] = event

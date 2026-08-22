@@ -6583,3 +6583,21 @@ Consequences:
 - deterministic oracle-neutral merge/selector math may be adapted later, but
   only after new GNN-clean input schemas and provenance exist;
 - the held-out test CSV is not parsed by B6 or any blocked preflight.
+
+---
+
+## 2026-08-22: Resolve COMRECGC trace actions against global graph identity
+
+COMRECGC official hashes identify global graph content; representative parent
+metadata remains provenance only. A recorded node-label-change may name an
+equivalent node index from another representative. Recovery may remap that
+index only when the pinned source and downstream SHA identities already match,
+the official graph delta enumerates exactly one single edit, that edit is also
+`NLC` with the same label, and replay produces the exact downstream payload.
+Every other mismatch remains fail closed, and both recorded and resolved node
+indices are persisted.
+
+Recovery manifests now distinguish selected trace multiplicity from unique
+candidate population. Fresh-root adoption records source checksums and proves
+that serialization, lineage resolution, and freeze were rerun without a bare
+symlink; historical output roots remain untouched.
