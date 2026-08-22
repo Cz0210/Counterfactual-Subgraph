@@ -1,5 +1,40 @@
 # Decisions Log
 
+## [2026-08-23] Bind BACE GlobalGCE native training to the frozen 869-ID view
+
+### Background
+
+The first full frozen-GINE route stopped before training because the processed
+`BACE/train.csv` correctly contains all 959 train rows, while the previously
+prepared train/validation graph bundle freezes a teacher-consistent 869-row
+native train vocabulary.  The same graph manifest contains 360 project-label-1
+sources, 509 project-label-0 targets, and 162 validation rows.  Treating the
+raw CSV row count as the vocabulary count was therefore incorrect.
+
+### Decision
+
+Audit both dataset manifests and artifact hashes, derive the native vocabulary
+from the exact 869 train molecule IDs, and join those IDs to the 959-row
+processed train CSV by molecule ID, label, and canonical SMILES.  Select the
+360 generation parents only where project label is 1 and frozen-GINE label is
+0.  Validation rows are audited but never loaded into the native trainer;
+calibration/test rows are rejected.  The 90 excluded rows remain recorded
+train-only exclusions.  The generic GlobalGCE loader accepts this exact-ID
+filter as an opt-in input, leaving Mutagenicity behavior unchanged.
+
+### Consequences
+
+- No row is truncated by position and no oracle, budget, rule semantics, or
+  `min_freq=7` setting changes.
+- A missing ID, label/SMILES drift, changed order hash, split leakage, or
+  manifest/artifact hash drift fails before an output root is published.
+- The failed v3 controller/root remains immutable; any retry uses a fresh v4
+  controller and output root.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Separate optimization code from scientific release authority
 
 ### Background

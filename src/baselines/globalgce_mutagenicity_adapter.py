@@ -695,7 +695,11 @@ def _ids_hash(parents: Sequence[TrainParent], indices: Sequence[int]) -> str:
     return hashlib.sha256(_json_dumps(ids).encode("utf-8")).hexdigest()
 
 
-def _load_general_train_rows(path: Path) -> list[TrainParent]:
+def _load_general_train_rows(
+    path: Path,
+    *,
+    allowed_parent_ids: Sequence[str] | None = None,
+) -> list[TrainParent]:
     _reject_non_train_path(path, description="Native GNN train CSV")
     rows = _read_csv(path)
     if not rows:
@@ -718,6 +722,20 @@ def _load_general_train_rows(path: Path) -> list[TrainParent]:
             raise ValueError(f"Invalid native train SMILES at {path}:{row_number}")
         seen.add(parent_id)
         parents.append(TrainParent(parent_id, canonical, label, "train"))
+    if allowed_parent_ids is not None:
+        normalized_ids = tuple(str(value).strip() for value in allowed_parent_ids)
+        if not normalized_ids or any(not value for value in normalized_ids):
+            raise ValueError("Native GNN parent-ID filter must be non-empty.")
+        if len(normalized_ids) != len(set(normalized_ids)):
+            raise ValueError("Native GNN parent-ID filter contains duplicates.")
+        requested = set(normalized_ids)
+        missing = sorted(requested - seen)
+        if missing:
+            raise ValueError(
+                "Native GNN parent-ID filter is not a subset of the train CSV: "
+                f"missing_count={len(missing)}, examples={missing[:5]}"
+            )
+        parents = [parent for parent in parents if parent.parent_id in requested]
     if {parent.label for parent in parents} != {0, 1}:
         raise ValueError(
             "Official GlobalGCE requires a two-class native GNN train set. "
@@ -1771,6 +1789,7 @@ def _prepare_native_and_source_datasets(
     seed: int,
     torch_module: Any,
     dataset_name: str = DATASET_NAME,
+    native_train_parent_ids: Sequence[str] | None = None,
 ) -> tuple[
     list[TrainParent],
     list[int],
@@ -1780,7 +1799,10 @@ def _prepare_native_and_source_datasets(
     list[int],
     _DenseMoleculeDataset,
 ]:
-    native_parents = _load_general_train_rows(native_train_csv)
+    native_parents = _load_general_train_rows(
+        native_train_csv,
+        allowed_parent_ids=native_train_parent_ids,
+    )
     native_train_idx, native_val_idx = _stratified_native_split(
         native_parents,
         seed=int(seed),
@@ -1831,6 +1853,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         frozen_gine_checkpoint: str | Path | None = None,
         source_label: int = SOURCE_LABEL,
         target_label: int = TARGET_LABEL,
+        native_train_parent_ids: Sequence[str] | None = None,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
@@ -1849,6 +1872,22 @@ class OfficialGlobalGCEMutagenicityGenerator:
         )
         self.source_label = int(source_label)
         self.target_label = int(target_label)
+        self.native_train_parent_ids = (
+            None
+            if native_train_parent_ids is None
+            else tuple(
+                sorted(str(value).strip() for value in native_train_parent_ids)
+            )
+        )
+        if self.native_train_parent_ids is not None:
+            if not self.native_train_parent_ids or any(
+                not value for value in self.native_train_parent_ids
+            ):
+                raise ValueError("Native GNN parent-ID filter must be non-empty.")
+            if len(self.native_train_parent_ids) != len(
+                set(self.native_train_parent_ids)
+            ):
+                raise ValueError("Native GNN parent-ID filter contains duplicates.")
         if {self.source_label, self.target_label} != {0, 1}:
             raise ValueError("GlobalGCE binary source/target labels must be {0,1}.")
         if self.min_freq is not None and self.min_freq < 2:
@@ -1873,6 +1912,18 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "dataset_name": self.dataset_name,
             "min_freq": self.min_freq,
             "native_train_csv": _file_identity(self.native_train_csv),
+            "native_train_parent_id_count": (
+                None
+                if self.native_train_parent_ids is None
+                else len(self.native_train_parent_ids)
+            ),
+            "native_train_parent_ids_hash": (
+                None
+                if self.native_train_parent_ids is None
+                else hashlib.sha256(
+                    _json_dumps(list(self.native_train_parent_ids)).encode("utf-8")
+                ).hexdigest()
+            ),
             "official_src": str(self.official_src),
             "official_source_files": source_files,
             "prediction_backend": (
@@ -1919,6 +1970,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             seed=int(seed),
             torch_module=torch,
             dataset_name=self.dataset_name,
+            native_train_parent_ids=self.native_train_parent_ids,
         )
         attribute_audit_path = (
             Path(output_path).expanduser().resolve().parent
@@ -2030,6 +2082,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             seed=int(seed),
             torch_module=torch,
             dataset_name=self.dataset_name,
+            native_train_parent_ids=self.native_train_parent_ids,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         codec_summary = probe_source_graph_codec(

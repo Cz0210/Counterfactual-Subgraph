@@ -1,5 +1,19 @@
 # Refactor Plan
 
+## 2026-08-23: BACE GlobalGCE frozen train-view repair
+
+- [x] Distinguish the 959-row processed train input from the frozen 869-ID
+  teacher-consistent native train vocabulary.
+- [x] Recompute the 360 source / 509 target / 162 validation cohort contract
+  and bind ordered ID hashes plus both dataset manifests and artifact hashes.
+- [x] Add an opt-in exact parent-ID filter to native GlobalGCE dataset loading;
+  preserve the existing default for other datasets.
+- [x] Reject calibration/test rows, validation loading, missing IDs, and
+  label/canonical-SMILES drift before training.
+- [x] Add focused mapping and leakage tests and keep AutoDL/Slurm CLI parity.
+- [ ] Build a fresh immutable execution worktree and v4 controller; never
+  resume or rewrite the failed v3 train root.
+
 ## 2026-08-23: Acceleration release gates
 
 - [x] Require one immutable exact-500 + exact-1000 aggregate gate before an

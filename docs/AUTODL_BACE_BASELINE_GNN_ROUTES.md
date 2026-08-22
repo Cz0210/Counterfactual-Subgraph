@@ -143,6 +143,13 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-train-rules \
   --device cuda:0 --resume
 ```
 
+The native CSV is the complete 959-row processed train split.  Before creating
+the training root, the adapter verifies the prepared graph bundle and selects
+its exact 869 frozen train IDs (360 project-label-1/GINE-label-0 sources plus
+509 targets).  Its 162 validation rows are hash-audited but are not passed to
+training; calibration and test rows are forbidden.  This is an ID-bound view,
+not positional truncation.
+
 If an audited native rule JSON already exists, the bounded forward canary
 applies every exact LHS match and scores all valid products in one loaded-once
 calibrated-GINE batch. It uses neither calibration/test rows nor an RF:

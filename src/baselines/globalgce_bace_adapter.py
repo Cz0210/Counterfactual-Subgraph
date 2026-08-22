@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import csv
 import json
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from .globalgce_mutagenicity_adapter import (
     NativeGeneratorProtocol,
@@ -13,6 +14,7 @@ from .globalgce_mutagenicity_adapter import (
     PoolBuildConfig,
     TrainParent,
     TeacherProtocol,
+    _load_general_train_rows,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
 )
@@ -39,15 +41,46 @@ from src.eval.bace_frozen_gnn_contracts import (
 DATASET_NAME = "BACE"
 EXPECTED_TRAIN_SOURCE_COUNT = 360
 EXPECTED_NATIVE_TRAIN_COUNT = 869
+EXPECTED_NATIVE_INPUT_TRAIN_COUNT = 959
+EXPECTED_TRAIN_TARGET_COUNT = 509
+EXPECTED_VALIDATION_COUNT = 162
+EXPECTED_VALIDATION_SOURCE_COUNT = 92
+EXPECTED_VALIDATION_TARGET_COUNT = 70
 
 
-def _read_source_manifest(
-    path_like: str | Path,
+@dataclass(frozen=True, slots=True)
+class BACEGlobalGCETrainContract:
+    source_parents: tuple[TrainParent, ...]
+    native_train_parent_ids: tuple[str, ...]
+    audit: dict[str, Any]
+
+
+def _json_object(path: Path, *, description: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{description} must be a JSON object: {path}")
+    return payload
+
+
+def _require_artifact(
+    manifest: Mapping[str, Any],
     *,
-    expected_parent_count: int,
-) -> list[TrainParent]:
+    section: str,
+    path: Path,
+) -> dict[str, Any]:
+    declared = dict((manifest.get(section) or {}).get(path.name) or {})
+    declared_size = declared.get("bytes", declared.get("size", -1))
+    if (
+        declared.get("sha256") != sha256_file(path)
+        or int(declared_size) != path.stat().st_size
+    ):
+        raise ValueError(f"BACE artifact manifest/hash closure failed: {path.name}")
+    return file_identity(path)
+
+
+def _read_source_manifest(path_like: str | Path) -> list[dict[str, Any]]:
     path = Path(path_like).expanduser().resolve(strict=True)
-    parents: list[TrainParent] = []
+    rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -62,22 +95,226 @@ def _read_source_manifest(
                 raise ValueError(
                     f"BACE source manifest has missing/duplicate identity at row {line_number}"
                 )
+            split = str(row.get("split") or "").strip().lower()
+            label = int(row.get("label", -1))
+            gnn_label = int(row.get("gnn_label", -1))
+            if split not in {"train", "val"}:
+                raise ValueError("BACE source manifest contains calibration/test data")
             if (
-                str(row.get("split") or "").strip().lower() != "train"
+                label not in {0, 1}
+                or gnn_label != (0 if label == 1 else 1)
                 or int(row.get("source_label", -1)) != 1
-                or int(row.get("gnn_label", -1)) != 1
                 or int(row.get("target_label", -1)) != 0
             ):
-                raise ValueError("BACE GlobalGCE source manifest is not frozen-GINE train-only")
+                raise ValueError("BACE source manifest label mapping is not frozen")
             seen.add(parent_id)
-            parents.append(TrainParent(parent_id, smiles, 1, "train"))
-    parents.sort(key=lambda row: row.parent_id)
-    if len(parents) != int(expected_parent_count):
+            rows.append(row)
+    return rows
+
+
+def audit_bace_globalgce_train_contract(
+    *,
+    source_manifest: str | Path,
+    native_train_csv: str | Path,
+) -> BACEGlobalGCETrainContract:
+    """Bind the 959-row processed train CSV to the frozen 869-row GCF view.
+
+    The GCF dataset preparation already froze teacher-consistent train/val
+    membership.  GlobalGCE may reuse its exact 869 train IDs as the native
+    vocabulary, but it must not load the 162 validation IDs or any
+    calibration/test rows.
+    """
+
+    source_path = Path(source_manifest).expanduser().resolve(strict=True)
+    native_path = Path(native_train_csv).expanduser().resolve(strict=True)
+    source_run_path = source_path.parent / "run_manifest.json"
+    source_summary_path = source_path.parent / "dataset_summary.json"
+    native_run_path = native_path.parent / "run_manifest.json"
+    native_summary_path = native_path.parent / "bace_dataset_summary.json"
+    for required in (
+        source_run_path,
+        source_summary_path,
+        native_run_path,
+        native_summary_path,
+    ):
+        if not required.is_file():
+            raise FileNotFoundError(f"Missing BACE frozen dataset contract: {required}")
+
+    source_run = _json_object(source_run_path, description="BACE GCF run manifest")
+    source_summary = _json_object(
+        source_summary_path, description="BACE GCF dataset summary"
+    )
+    source_identity = _require_artifact(
+        source_run, section="artifacts", path=source_path
+    )
+    source_summary_identity = _require_artifact(
+        source_run, section="artifacts", path=source_summary_path
+    )
+    required_source_contract = {
+        "dataset": "BACE",
+        "adapter": "official_gcfexplainer_bace_project_data",
+        "train_rows": EXPECTED_NATIVE_TRAIN_COUNT,
+        "train_source_rows": EXPECTED_TRAIN_SOURCE_COUNT,
+        "train_target_rows": EXPECTED_TRAIN_TARGET_COUNT,
+        "val_rows": EXPECTED_VALIDATION_COUNT,
+        "val_source_rows": EXPECTED_VALIDATION_SOURCE_COUNT,
+        "val_target_rows": EXPECTED_VALIDATION_TARGET_COUNT,
+        "generation_source_rows": EXPECTED_TRAIN_SOURCE_COUNT,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "run_complete": True,
+    }
+    for key, expected in required_source_contract.items():
+        if source_summary.get(key) != expected or source_run.get(key) != expected:
+            raise ValueError(
+                f"BACE GCF dataset contract mismatch for {key}: "
+                f"summary={source_summary.get(key)!r}, "
+                f"manifest={source_run.get(key)!r}, expected={expected!r}"
+            )
+    if source_summary.get("gnn_label_mapping") != {
+        "project_1": 0,
+        "project_0": 1,
+    }:
+        raise ValueError("BACE GCF GINE label mapping changed")
+
+    source_rows = _read_source_manifest(source_path)
+    train_rows = [row for row in source_rows if row["split"] == "train"]
+    val_rows = [row for row in source_rows if row["split"] == "val"]
+    source_rows_360 = [
+        row
+        for row in train_rows
+        if int(row["label"]) == 1 and int(row["gnn_label"]) == 0
+    ]
+    target_rows_509 = [
+        row
+        for row in train_rows
+        if int(row["label"]) == 0 and int(row["gnn_label"]) == 1
+    ]
+    val_source = [row for row in val_rows if int(row["label"]) == 1]
+    val_target = [row for row in val_rows if int(row["label"]) == 0]
+    actual_counts = (
+        len(train_rows),
+        len(source_rows_360),
+        len(target_rows_509),
+        len(val_rows),
+        len(val_source),
+        len(val_target),
+    )
+    expected_counts = (
+        EXPECTED_NATIVE_TRAIN_COUNT,
+        EXPECTED_TRAIN_SOURCE_COUNT,
+        EXPECTED_TRAIN_TARGET_COUNT,
+        EXPECTED_VALIDATION_COUNT,
+        EXPECTED_VALIDATION_SOURCE_COUNT,
+        EXPECTED_VALIDATION_TARGET_COUNT,
+    )
+    if actual_counts != expected_counts:
         raise ValueError(
-            "BACE GlobalGCE source-parent count mismatch: "
-            f"actual={len(parents)}, expected={expected_parent_count}"
+            "BACE GCF source/train/validation count mismatch: "
+            f"actual={actual_counts}, expected={expected_counts}"
         )
-    return parents
+    train_ids = [str(row["molecule_id"]) for row in train_rows]
+    val_ids = [str(row["molecule_id"]) for row in val_rows]
+    source_ids = [str(row["molecule_id"]) for row in source_rows_360]
+    for key, values in (
+        ("train_ids_hash", train_ids),
+        ("val_ids_hash", val_ids),
+        ("generation_source_cohort_hash", source_ids),
+    ):
+        observed = stable_sha256(values)
+        if source_summary.get(key) != observed or source_run.get(key) != observed:
+            raise ValueError(f"BACE GCF ordered cohort hash mismatch: {key}")
+    if set(train_ids) & set(val_ids):
+        raise ValueError("BACE GCF train/validation molecule ID overlap")
+
+    native_run = _json_object(native_run_path, description="BACE processed manifest")
+    native_summary = _json_object(
+        native_summary_path, description="BACE processed dataset summary"
+    )
+    native_identity = _require_artifact(
+        native_run, section="files", path=native_path
+    )
+    native_summary_identity = _require_artifact(
+        native_run, section="files", path=native_summary_path
+    )
+    if (
+        native_run.get("dataset") != "BACE"
+        or native_run.get("schema_version") != "bace_processed_manifest_v1"
+        or native_summary.get("schema_version") != "bace_processed_v1"
+        or native_run.get("dataset_fingerprint")
+        != native_summary.get("dataset_fingerprint")
+        or native_summary.get("split_seed") != 13
+        or native_summary.get("split_counts")
+        != {"train": 959, "val": 187, "calibration": 129, "test": 238}
+    ):
+        raise ValueError("BACE processed dataset/split manifest closure failed")
+    native_parents = _load_general_train_rows(native_path)
+    if len(native_parents) != EXPECTED_NATIVE_INPUT_TRAIN_COUNT:
+        raise ValueError(
+            "BACE processed train row count mismatch: "
+            f"actual={len(native_parents)}, expected={EXPECTED_NATIVE_INPUT_TRAIN_COUNT}"
+        )
+    native_by_id = {parent.parent_id: parent for parent in native_parents}
+    missing = sorted(set(train_ids) - set(native_by_id))
+    leaked_val = sorted(set(val_ids) & set(native_by_id))
+    if missing or leaked_val:
+        raise ValueError(
+            "BACE frozen train-ID join failed: "
+            f"missing_train={missing[:5]}, leaked_val={leaked_val[:5]}"
+        )
+    source_by_id = {str(row["molecule_id"]): row for row in train_rows}
+    for parent_id in train_ids:
+        native = native_by_id[parent_id]
+        frozen = source_by_id[parent_id]
+        if (
+            native.label != int(frozen["label"])
+            or native.smiles != str(frozen["canonical_smiles"])
+        ):
+            raise ValueError(f"BACE frozen train row drift: {parent_id}")
+    selected_native = [native_by_id[parent_id] for parent_id in train_ids]
+    if Counter(parent.label for parent in selected_native) != Counter({0: 509, 1: 360}):
+        raise ValueError("BACE frozen native train label counts changed")
+    excluded_ids = sorted(set(native_by_id) - set(train_ids))
+    if len(excluded_ids) != 90:
+        raise ValueError("BACE teacher-consistency exclusion count changed")
+
+    parents = tuple(
+        sorted(
+            (
+                TrainParent(
+                    str(row["molecule_id"]),
+                    str(row["canonical_smiles"]),
+                    1,
+                    "train",
+                )
+                for row in source_rows_360
+            ),
+            key=lambda parent: parent.parent_id,
+        )
+    )
+    return BACEGlobalGCETrainContract(
+        source_parents=parents,
+        native_train_parent_ids=tuple(sorted(train_ids)),
+        audit={
+            "schema_version": "bace_globalgce_train_contract_v2",
+            "source_manifest": source_identity,
+            "source_dataset_manifest": file_identity(source_run_path),
+            "source_dataset_summary": source_summary_identity,
+            "native_train_csv": native_identity,
+            "native_dataset_manifest": file_identity(native_run_path),
+            "native_dataset_summary": native_summary_identity,
+            "native_input_train_rows": len(native_parents),
+            "native_selected_train_rows": len(train_ids),
+            "native_excluded_train_rows": len(excluded_ids),
+            "native_selected_label_counts": {"0": 509, "1": 360},
+            "source_parent_rows": len(parents),
+            "validation_manifest_rows_audited_not_loaded": len(val_rows),
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "native_train_parent_ids_hash": stable_sha256(sorted(train_ids)),
+            "excluded_train_parent_ids_hash": stable_sha256(excluded_ids),
+        },
+    )
 
 
 class OfficialGlobalGCEBACEGenerator(OfficialGlobalGCEMutagenicityGenerator):
@@ -90,6 +327,7 @@ class OfficialGlobalGCEBACEGenerator(OfficialGlobalGCEMutagenicityGenerator):
         native_train_csv: str | Path,
         min_freq: int,
         frozen_gine_checkpoint: str | Path | None = None,
+        native_train_parent_ids: Sequence[str] | None = None,
     ) -> None:
         super().__init__(
             official_root,
@@ -99,6 +337,7 @@ class OfficialGlobalGCEBACEGenerator(OfficialGlobalGCEMutagenicityGenerator):
             frozen_gine_checkpoint=frozen_gine_checkpoint,
             source_label=1,
             target_label=0,
+            native_train_parent_ids=native_train_parent_ids,
         )
 
 
@@ -172,16 +411,12 @@ def build_bace_frozen_gine_rule_pool(
         raise ValueError("BACE GlobalGCE source manifest must be train-only")
     if any(token in native_path.name.lower() for token in ("test", "calibration")):
         raise ValueError("BACE GlobalGCE native vocabulary CSV must be train-only")
-    with native_path.open(newline="", encoding="utf-8") as handle:
-        native_train_count = sum(1 for _row in csv.DictReader(handle))
-    if native_train_count != EXPECTED_NATIVE_TRAIN_COUNT:
-        raise ValueError(
-            "BACE GlobalGCE native train row count mismatch: "
-            f"actual={native_train_count}, expected={EXPECTED_NATIVE_TRAIN_COUNT}"
-        )
-    parents = _read_source_manifest(
-        source_path, expected_parent_count=EXPECTED_TRAIN_SOURCE_COUNT
+    train_contract = audit_bace_globalgce_train_contract(
+        source_manifest=source_path,
+        native_train_csv=native_path,
     )
+    parents = list(train_contract.source_parents)
+    native_train_count = int(train_contract.audit["native_selected_train_rows"])
     source_dataset_manifest_path = source_path.parent / "run_manifest.json"
     if not source_dataset_manifest_path.is_file():
         raise FileNotFoundError(
@@ -214,6 +449,7 @@ def build_bace_frozen_gine_rule_pool(
         native_train_csv=native_path,
         min_freq=int(min_freq),
         frozen_gine_checkpoint=checkpoint,
+        native_train_parent_ids=train_contract.native_train_parent_ids,
     )
     root = Path(output_dir).expanduser().resolve(strict=False)
     fingerprint_payload = {
@@ -222,6 +458,10 @@ def build_bace_frozen_gine_rule_pool(
         "source_dataset_manifest": file_identity(source_dataset_manifest_path),
         "native_train_csv": file_identity(native_path),
         "native_train_row_count": native_train_count,
+        "native_input_train_row_count": int(
+            train_contract.audit["native_input_train_rows"]
+        ),
+        "native_train_contract": train_contract.audit,
         "official_source_audit": official_audit,
         "native_generator": generator.config_identity(),
         "oracle": provenance,
@@ -400,10 +640,12 @@ def build_bace_frozen_gine_rule_pool(
 
 
 __all__ = [
+    "BACEGlobalGCETrainContract",
     "DATASET_NAME",
     "EXPECTED_NATIVE_TRAIN_COUNT",
     "EXPECTED_TRAIN_SOURCE_COUNT",
     "OfficialGlobalGCEBACEGenerator",
+    "audit_bace_globalgce_train_contract",
     "audit_bace_train_pool",
     "build_bace_frozen_gine_rule_pool",
     "build_bace_train_pool",
