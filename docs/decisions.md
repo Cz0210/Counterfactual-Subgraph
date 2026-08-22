@@ -4,6 +4,59 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Separate native GlobalGCE action parity from frozen-GINE training compatibility
+
+### Background
+
+Pinned GlobalGCE commit `157e65c2850bc787f229a1ee8c60564906b933f2`
+does not define its local recourse as an arbitrary maximum-common-subgraph
+replacement. Its `generate_fs_mask` / `get_graph_masks` mapping and
+`concate_inputs_with_local_recourse` tensor write overwrite the labelled LHS
+mask square with a reconstructed RHS, append required nodes, and preserve
+attachments from matched nodes to the rest of the parent graph. The former
+BACE route lacked a production implementation of this action.
+
+The official training loss also differentiates through continuous decoded
+feature, adjacency, and edge tensors into its own dense ground-truth GNN. The
+frozen BACE GINE has a different input boundary: RDKit sanitization followed by
+discrete categorical integer node and bond features. An exact calibrated GINE
+forward is available after hard decoding, but that operation has no exact
+gradient back to the continuous GlobalGCE RHS decoder.
+
+### Decision
+
+Implement the native action as an exact labelled LHS subgraph-isomorphism and
+official-order RHS tensor overwrite. Verify it in production against functions
+AST-extracted from a commit- and SHA-256-validated explicit upstream checkout,
+so tensor parity does not require importing unrelated PyG training modules.
+Preserve every distinct match, boundary attachments, atom/bond labels, and
+provenance; fail closed on invalid shapes, asymmetric tensors, ambiguous or
+colliding match identities, disconnected products, or RDKit sanitization
+failure.
+
+Provide a loaded-once frozen BACE GINE forward evaluator for native products,
+including strict-flip provenance and a selector-freeze guard before held-out
+test access. Keep full rule training statically blocked as
+`BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE`.
+Do not substitute the official GTGNN, RF, full-graph/deletion actions, or an
+unreviewed straight-through estimator. Deployment must pass an explicit
+official root because the final project bundle does not populate that checkout.
+
+### Consequences
+
+- Native application and calibrated-GINE forward evaluation can be audited
+  independently of the unresolved training bridge.
+- The generic controller runs one bounded CPU parity preflight and then reaches
+  a static blocker; it exposes no READY GlobalGCE GPU task.
+- Releasing the reserved priority-82 rule-training stage requires a reviewed
+  differentiable design and new scientific tests, not a scheduler-only change.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-22] Adapt native BACE baseline fragments at the controller boundary
 
 ### Background
@@ -31,9 +84,10 @@ Treat each baseline calibration selector as an explicit selector freeze and
 allow only named baseline test verification, merge, and final-freeze stages
 after that ancestor, still requiring frozen-selector and read-only-test flags.
 Prioritize the two native train routes before priority-90 B11 shards, while
-placing later four-way baseline verification after B11.  Represent unavailable
-GlobalGCE as one static `command=null` task with its exact `BLOCKED_CODE`, so it
-is terminal at controller initialization and never becomes READY.
+placing later four-way baseline verification after B11. For GlobalGCE, permit
+one bounded CPU native-action parity preflight and follow it with a static
+`command=null` task carrying the independent exact training `BLOCKED_CODE`;
+never create a READY GPU task while that scientific blocker remains.
 
 ### Consequences
 
@@ -43,8 +97,9 @@ is terminal at controller initialization and never becomes READY.
   and no method action semantics are changed.
 - GCFExplainer and ComRecGC can share the work-conserving controller with B11
   without overwriting primary BACE stage state.
-- GlobalGCE remains honestly blocked rather than consuming a scheduler slot or
-  being substituted with a full-graph/deletion action.
+- GlobalGCE consumes only the bounded CPU parity preflight, then remains
+  honestly blocked rather than consuming a GPU or being substituted with a
+  full-graph/deletion action.
 
 ### Status
 
@@ -7253,10 +7308,13 @@ RF filtering and therefore cannot enter the new same-classifier main matrix.
 - Native train generation is followed by calibration-only WNode selection and
   held-out test access only after an immutable top-20 freeze. Full graphs remain
   full-graph actions; ComRecGC lineage/common-recourse semantics are retained.
-- GlobalGCE is fail-closed with
-  `BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE` because the
-  repository does not yet implement an audited attachment-aware LHS→RHS rule
-  application engine. Historical RF/full-graph conversions are not substitutes.
+- GlobalGCE initially failed closed because its attachment-aware LHS→RHS rule
+  application engine was absent. That action engine and pinned-source tensor
+  parity are now implemented, but full training remains fail-closed with
+  `BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE`;
+  the accepted decision above records the exact continuous-decoder/discrete-
+  GINE gradient boundary. Historical RF/full-graph conversions remain invalid
+  substitutes.
 - AutoDL foreground commands and terminal artifact contracts are documented in
   `docs/AUTODL_BACE_BASELINE_GNN_ROUTES.md`. Its paired Slurm wrapper is static
   CLI parity only and is never submitted by this AutoDL-only campaign.
@@ -7264,8 +7322,9 @@ RF filtering and therefore cannot enter the new same-classifier main matrix.
 ### Consequences
 
 GCFExplainer and ComRecGC can now produce provenance-clean BACE cells while
-retaining their native actions. GlobalGCE remains visibly incomplete instead
-of contaminating the matrix with a semantically different substitute.
+retaining their native actions. GlobalGCE native application and GINE forward
+evaluation are auditable, while its full cell remains visibly incomplete
+instead of contaminating the matrix with a semantically different substitute.
 
 ### Status
 

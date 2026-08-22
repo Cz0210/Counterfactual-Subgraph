@@ -67,14 +67,14 @@ def _fragment(tmp_path: Path, method: str) -> dict[str, object]:
     return build_bace_baseline_controller_fragment(method=method, **paths)
 
 
-def test_globalgce_fails_closed_without_native_attachment_engine(
+def test_globalgce_action_preflight_passes_but_full_training_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = baseline_spec("GlobalGCE")
     assert spec.native_route_available is False
     assert spec.action_kind == "lhs_rhs_graph_transformation_rule"
     assert spec.blocker_code == (
-        "BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE"
+        "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
     )
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -93,25 +93,45 @@ def test_globalgce_fails_closed_without_native_attachment_engine(
         "src.baselines.bace_gnn_baseline_contracts._checkpoint_contract",
         lambda _path: (card, object()),
     )
+    monkeypatch.setattr(
+        "src.baselines.globalgce_bace_native_rules.run_official_tensor_parity",
+        lambda _root: {
+            "schema_version": "globalgce_official_tensor_parity_v1",
+            "status": "PASS",
+            "official_commit": "157e65c2850bc787f229a1ee8c60564906b933f2",
+        },
+    )
     result = write_route_preflight(
         method="GlobalGCE",
         checkpoint_dir=checkpoint,
         output_dir=tmp_path / "preflight",
+        official_root=tmp_path / "official",
     )
     assert result["status"] == "BLOCKED_CODE"
+    assert result["native_action_status"] == "PASS"
+    assert result["training_compatibility"][
+        "exact_frozen_gine_gradient_to_continuous_rhs"
+    ] is False
     assert (tmp_path / "preflight/BLOCKED_CODE").read_text().strip() == spec.blocker_code
+    assert (tmp_path / "preflight/NATIVE_ACTION_READY").is_file()
     assert not (tmp_path / "preflight/PASS").exists()
 
 
-def test_globalgce_controller_fragment_is_static_and_uses_no_resources(
+def test_globalgce_controller_fragment_runs_action_preflight_without_gpu(
     tmp_path: Path,
 ) -> None:
     fragment = _fragment(tmp_path, "GlobalGCE")
-    assert fragment["tasks"] == []
+    assert len(fragment["tasks"]) == 1
+    preflight = fragment["tasks"][0]
+    assert preflight["task_id"] == "bace_globalgce_preflight"
+    assert preflight["resource"] == {"kind": "cpu", "gpus": 0}
+    assert preflight["required_markers"] == ["NATIVE_ACTION_READY", "BLOCKED_CODE"]
+    assert "--official-root" in preflight["argv"]
     terminal = fragment["static_terminal"]
     assert terminal["state"] == "BLOCKED_CODE"
     assert terminal["resource"] == {"kind": "none", "gpus": 0}
     assert terminal["argv"] == []
+    assert terminal["dependencies"] == ["bace_globalgce_preflight"]
 
 
 @pytest.mark.parametrize("method", ["GCFExplainer", "ComRecGC"])

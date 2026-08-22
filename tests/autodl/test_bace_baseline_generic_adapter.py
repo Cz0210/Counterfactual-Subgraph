@@ -136,7 +136,7 @@ def test_gcf_comrecgc_and_static_globalgce_pass_production_loader(
     assert terminal.command is None
     assert terminal.resource == "cpu"
     assert terminal.blocked_reason == (
-        "BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE"
+        "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
     )
     assert terminal.blocked_reason is not None
     root, states = initialize_controller_state(
@@ -187,4 +187,7 @@ def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> Non
     assert route_main(argv) == 0
     payload = json.loads(destination.read_text(encoding="utf-8"))
     assert payload["schema_version"] == GENERIC_FRAGMENT_SCHEMA
-    assert payload["tasks"][0]["command"] is None
+    by_id = {row["id"]: row for row in payload["tasks"]}
+    assert by_id["bace_globalgce_preflight"]["command"] is not None
+    assert by_id["bace_globalgce_preflight"]["resource"] == "cpu"
+    assert by_id["bace_globalgce_terminal"]["command"] is None

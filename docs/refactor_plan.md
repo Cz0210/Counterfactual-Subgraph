@@ -825,9 +825,14 @@ Mutagenicity roadmaps.
 - [x] Publish controller-readable resource/marker contracts and AutoDL commands.
 - [x] Add a one-way native-to-generic fragment adapter with passing-attempt
   dependency tokens, non-primary runner datasets, baseline-specific
-  test-after-selector gates, and static no-resource GlobalGCE blocking.
-- [ ] Implement and validate GlobalGCE attachment-aware LHS→RHS application;
-  until then keep the BACE GlobalGCE cell `BLOCKED_CODE`.
+  test-after-selector gates, and a bounded CPU GlobalGCE native-action
+  preflight followed by a static no-resource training block.
+- [x] Implement and validate pinned-official-parity GlobalGCE attachment-aware
+  LHS→RHS application plus exact frozen-GINE forward scoring.
+- [ ] Design and scientifically approve a differentiable bridge from the
+  official continuous RHS decoder to the frozen RDKit/categorical GINE input;
+  until then keep BACE GlobalGCE full training fail-closed as
+  `BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE`.
 
 # Four-method × four-dataset paper matrix (2026-08-22)
 

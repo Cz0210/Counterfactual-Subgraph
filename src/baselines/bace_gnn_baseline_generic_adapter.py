@@ -262,31 +262,108 @@ def adapt_bace_baseline_controller_fragment(
         if not blocker.startswith("BLOCKED_"):
             raise ValueError("Blocked native route lacks a stable blocker code")
         task_id = str(terminal.get("task_id") or f"bace_{spec.method_id}_terminal")
+        generic_tasks: list[dict[str, Any]] = []
+        native_tasks = fragment.get("tasks")
+        if native_tasks:
+            if spec.method_id != "globalgce" or not isinstance(native_tasks, list):
+                raise ValueError("Blocked route unexpectedly contains runnable tasks")
+            if len(native_tasks) != 1 or not isinstance(native_tasks[0], Mapping):
+                raise ValueError("GlobalGCE blocked route requires one native preflight")
+            preflight = dict(native_tasks[0])
+            preflight_id = str(preflight.get("task_id") or "")
+            output = str(preflight.get("output_root") or "")
+            argv = preflight.get("argv")
+            if (
+                not preflight_id.endswith("_preflight")
+                or not Path(output).is_absolute()
+                or not isinstance(argv, list)
+                or not argv
+            ):
+                raise ValueError("GlobalGCE native preflight contract is malformed")
+            command = [
+                _rewrite_argument(
+                    str(value),
+                    task_id=preflight_id,
+                    dependencies=[],
+                    outputs={preflight_id: output},
+                    native_root=native_root,
+                )
+                for value in argv
+            ]
+            inputs = preflight.get("inputs")
+            if not isinstance(inputs, list) or not inputs:
+                raise ValueError("GlobalGCE native preflight has no frozen input")
+            checkpoint = Path(str(inputs[0]))
+            if not checkpoint.is_absolute():
+                raise ValueError("GlobalGCE native preflight checkpoint is not absolute")
+            generic_tasks.append(
+                {
+                    "id": preflight_id,
+                    "dataset": "bace",
+                    "stage": "BACE_GLOBALGCE_NATIVE_ACTION_PREFLIGHT",
+                    "runner_dataset": runner_dataset,
+                    "runner_stage": "BACE_GLOBALGCE_NATIVE_ACTION_PREFLIGHT",
+                    "depends_on": [],
+                    "resource": "cpu",
+                    "priority": 61,
+                    "enabled": True,
+                    "data_splits": [],
+                    "manifest_only": True,
+                    "command": command,
+                    "input_manifest": str(checkpoint / "model_card.json"),
+                    "expected_output": output.rstrip("/") + "/attempt-{attempt}",
+                    "required_output_files": [
+                        "route_contract.json",
+                        "oracle_provenance.json",
+                        "official_source_audit.json",
+                        "official_tensor_parity.json",
+                        "state.json",
+                        "NATIVE_ACTION_READY",
+                        "BLOCKED_CODE.json",
+                        "BLOCKED_CODE",
+                    ],
+                    "required_log_marker": '"native_action_status": "PASS"',
+                    "environment": {
+                        "PYTHONPATH": "{project_root}",
+                        "RUN_TASTEMOLNET": "0",
+                        "PYTHONHASHSEED": "0",
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
+                    "native_action_kind": spec.action_kind,
+                    "native_action_semantics": spec.action_semantics,
+                }
+            )
+        terminal_dependencies = [
+            str(value) for value in terminal.get("dependencies", [])
+        ]
+        generic_tasks.append(
+            {
+                "id": task_id,
+                "dataset": "bace",
+                "stage": "BACE_BASELINE_BLOCKED_CODE",
+                "runner_dataset": runner_dataset,
+                "runner_stage": "BACE_BASELINE_BLOCKED_CODE",
+                "depends_on": terminal_dependencies,
+                "resource": "cpu",
+                # Reserve priority 82 for the first GPU rule-training stage if
+                # a reviewed exact-gradient adapter later releases the block.
+                "priority": 82,
+                "enabled": True,
+                "blocked_reason": blocker,
+                "blocker_code": blocker,
+                "blocker_detail": str(terminal.get("reason") or ""),
+                "data_splits": [],
+                "manifest_only": True,
+                "command": None,
+            }
+        )
         return {
             "schema_version": GENERIC_FRAGMENT_SCHEMA,
             "dataset": "bace",
             "method": spec.method,
             "method_id": spec.method_id,
-            "tasks": [
-                {
-                    "id": task_id,
-                    "dataset": "bace",
-                    "stage": "BACE_BASELINE_BLOCKED_CODE",
-                    "runner_dataset": runner_dataset,
-                    "runner_stage": "BACE_BASELINE_BLOCKED_CODE",
-                    "depends_on": [],
-                    "resource": "cpu",
-                    "priority": 62,
-                    "enabled": True,
-                    "blocked_reason": blocker,
-                    "blocker_code": blocker,
-                    "blocker_detail": str(terminal.get("reason") or ""),
-                    "data_splits": [],
-                    "manifest_only": True,
-                    "command": None,
-                }
-            ],
-            "root_task_ids": [task_id],
+            "tasks": generic_tasks,
+            "root_task_ids": list(fragment.get("root_task_ids") or [task_id]),
             "terminal_task_ids": [task_id],
             "native_fragment_preserved": True,
         }

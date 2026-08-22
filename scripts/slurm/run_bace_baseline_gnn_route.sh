@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Static CLI-parity wrapper. The active four-by-four campaign is AutoDL-only.
+# GlobalGCE preflight callers must pass an explicit audited --official-root;
+# this wrapper never assumes the upstream checkout/submodule is populated.
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out

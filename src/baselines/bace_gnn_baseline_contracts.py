@@ -68,11 +68,17 @@ BASELINE_SPECS: dict[str, NativeBaselineSpec] = {
         generation_resource="cpu",
         verification_resource="cpu",
         native_route_available=False,
-        blocker_code="BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE",
+        blocker_code=(
+            "BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE"
+        ),
         blocker_reason=(
-            "The current project adapter exports LHS/RHS rule identities but has no "
-            "audited attachment-aware rule application engine. A full-graph or deletion "
-            "substitution would change GlobalGCE's native action semantics."
+            "The native attachment-aware LHS-to-RHS action engine now matches pinned "
+            "GlobalGCE tensor semantics, but official rule training requires a "
+            "differentiable classifier loss over continuous reconstructed dense "
+            "tensors. The frozen BACE GINE accepts RDKit-derived categorical long "
+            "features after discrete graph sanitization, so its exact score has no "
+            "gradient path to the RHS decoder. GTGNN/RF fallback and an unreviewed "
+            "straight-through surrogate are forbidden."
         ),
     ),
 }
@@ -210,6 +216,7 @@ def write_route_preflight(
     method: str,
     checkpoint_dir: str | Path,
     output_dir: str | Path,
+    official_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Publish a controller-readable READY or BLOCKED_CODE terminal contract."""
 
@@ -217,6 +224,35 @@ def write_route_preflight(
     checkpoint, card, _schema = validate_bace_frozen_gine(checkpoint_dir)
     output = fresh_output_dir(output_dir)
     provenance = oracle_provenance(card, checkpoint)
+    native_action: dict[str, Any] | None = None
+    training_compatibility: dict[str, Any] | None = None
+    if spec.method_id == "globalgce":
+        if official_root is None:
+            raise ValueError("GlobalGCE preflight requires an explicit official_root")
+        from src.baselines.globalgce_bace_native_rules import (
+            run_official_tensor_parity,
+        )
+
+        native_action = run_official_tensor_parity(official_root)
+        training_compatibility = {
+            "status": "BLOCKED_CODE",
+            "blocker_code": spec.blocker_code,
+            "exact_frozen_gine_forward_available": True,
+            "exact_frozen_gine_forward_adapter": (
+                "src.eval.bace_globalgce_native_gine."
+                "BACEGlobalGCEFrozenGINEForwardEvaluator"
+            ),
+            "forward_canary_cli_stage": "globalgce-forward-canary",
+            "exact_frozen_gine_gradient_to_continuous_rhs": False,
+            "official_loss_requires_rhs_gradient": True,
+            "forbidden_fallbacks": [
+                "official_gtgnn",
+                "random_forest",
+                "fullgraph_substitution",
+                "deletion_substitution",
+                "unreviewed_straight_through_estimator",
+            ],
+        }
     payload = {
         "schema_version": ROUTE_ID,
         "dataset": DATASET,
@@ -238,12 +274,23 @@ def write_route_preflight(
         "pass_marker_published_last": True,
         "blocker_code": spec.blocker_code,
         "blocker_reason": spec.blocker_reason,
+        "native_action_status": (
+            "PASS" if native_action is not None else "N/A"
+        ),
+        "native_action_parity": native_action,
+        "training_compatibility": training_compatibility,
         "created_at": utc_now(),
     }
     atomic_json(output / "route_contract.json", payload)
     atomic_json(output / "oracle_provenance.json", provenance)
     atomic_json(output / "state.json", payload)
-    if spec.native_route_available:
+    if native_action is not None:
+        atomic_json(output / "official_source_audit.json", native_action)
+        atomic_json(output / "official_tensor_parity.json", native_action)
+        atomic_marker(output / "NATIVE_ACTION_READY", "NATIVE_ACTION_READY")
+        atomic_json(output / "BLOCKED_CODE.json", payload)
+        atomic_marker(output / "BLOCKED_CODE", str(spec.blocker_code))
+    elif spec.native_route_available:
         atomic_marker(output / "READY", "READY")
     else:
         atomic_json(output / "BLOCKED_CODE.json", payload)

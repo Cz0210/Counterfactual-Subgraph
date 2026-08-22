@@ -17,13 +17,28 @@ Failures publish `BLOCKED` or `BLOCKED_CODE`; they never publish `PASS`.
 | --- | --- | --- | --- | --- | --- |
 | GCFExplainer | full counterfactual graph | GPU | GPU (4 deterministic shards) | CPU | READY |
 | ComRecGC | lineage-validated common-recourse graph medoid | GPU | GPU (4 deterministic shards) | CPU | READY |
-| GlobalGCE | attachment-aware LHS→RHS transformation | CPU | CPU | CPU | `BLOCKED_CODE` |
+| GlobalGCE | attachment-aware LHS→RHS transformation | CPU parity preflight | not released | not released | `BLOCKED_CODE` after native-action PASS |
 
 GlobalGCE is blocked by
-`BLOCKED_GLOBALGCE_LHS_RHS_ATTACHMENT_MAPPING_UNAVAILABLE`. The existing
-adapter records LHS/RHS identities but does not implement an audited atom and
-bond attachment mapping. A full-graph or deletion replacement would change the
-method and is therefore forbidden.
+`BLOCKED_GLOBALGCE_FROZEN_GINE_DIFFERENTIABLE_RULE_TRAINING_UNAVAILABLE`.
+The attachment-aware action itself is implemented and checked against pinned
+upstream commit `157e65c2850bc787f229a1ee8c60564906b933f2`: exact labelled LHS
+subgraph matches determine the official mask order, the RHS overwrites only
+that mask square, new RHS nodes are appended, and boundary attachments to
+existing parent nodes remain unchanged. Every match is retained and molecule
+shape, atom/bond vocabulary, connectivity, sanitization, and match identity
+fail closed.
+
+The remaining block is upstream training, not action application. Official
+GlobalGCE trains the continuous RHS decoder through a classifier loss on its
+dense reconstructed tensors. The frozen BACE GINE instead consumes categorical
+integer features deterministically rebuilt from a sanitized RDKit molecule.
+Hard decoding and sanitization break the exact gradient from GINE back to the
+continuous RHS decoder. The project therefore provides exact calibrated-GINE
+forward scoring in `src/eval/bace_globalgce_native_gine.py`, but does not claim
+that forward evaluator is a training adapter. Falling back to the official
+GTGNN, RF, full-graph replacement, deletion, or an unreviewed straight-through
+estimator is forbidden.
 
 The machine-readable summary is available without starting science work:
 
@@ -51,9 +66,10 @@ GCFExplainer and ComRecGC train-route GPU tasks have priority below the B11
 shard priority (90). Their two READY roots therefore claim two lanes first,
 while B11 remains free to use the other lanes. Their later four-way
 verification tasks sort after B11, preventing one baseline from taking all
-four cards. GlobalGCE becomes one static `command=null`, `BLOCKED_CODE` task;
-it is terminal at initialization and never enters READY or consumes a CPU/GPU
-slot.
+four cards. GlobalGCE contributes one bounded CPU preflight followed by one
+static `command=null`, `BLOCKED_CODE` terminal. The preflight proves pinned
+source and native tensor parity; the terminal reserves priority 82 for a future
+reviewed training adapter but never enters READY or consumes a GPU.
 
 Example:
 
@@ -84,14 +100,44 @@ Preflight (CPU, fresh output):
 
 ```bash
 $PY scripts/autodl/run_bace_baseline_gnn_route.py preflight \
-  --method "$METHOD" \
+  --method GlobalGCE \
   --gnn-checkpoint "$BACE_GINE" \
+  --official-root "$GLOBALGCE_OFFICIAL" \
   --output-dir "$OUTPUT_ROOT/preflight"
 ```
 
-Required preflight artifacts are `route_contract.json`,
-`oracle_provenance.json`, `state.json`, and terminal `READY` or
-`BLOCKED_CODE`.
+`$GLOBALGCE_OFFICIAL` is an explicit read-only input, not an assumed populated
+submodule. It must resolve to exact commit
+`157e65c2850bc787f229a1ee8c60564906b933f2`; the preflight also verifies the
+audited SHA-256 values of the native model, frequent-subgraph, model utility,
+data, and utility sources. The final git bundle does not include this checkout,
+so deployment must transfer or initialize it separately and pass the exact
+path.
+
+GlobalGCE required preflight artifacts are `route_contract.json`,
+`oracle_provenance.json`, `official_source_audit.json`,
+`official_tensor_parity.json`, `state.json`, `NATIVE_ACTION_READY`,
+`BLOCKED_CODE.json`, and terminal `BLOCKED_CODE`. The coexistence of
+`NATIVE_ACTION_READY` and `BLOCKED_CODE` is deliberate: it proves the action
+engine while preserving the independent full-training blocker. Other native
+baseline preflights retain their terminal `READY` contract.
+
+If an audited native rule JSON already exists, the bounded forward canary
+applies every exact LHS match and scores all valid products in one loaded-once
+calibrated-GINE batch. It uses neither calibration/test rows nor an RF:
+
+```bash
+$PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-forward-canary \
+  --method GlobalGCE --gnn-checkpoint "$BACE_GINE" \
+  --rule-json "$RULE_JSON" --parent-id "$PARENT_ID" \
+  --parent-smiles "$PARENT_SMILES" \
+  --output-dir "$FRESH_CANARY_ROOT" --device cuda:0
+```
+
+The canary writes `native_gine_forward.json`, `run_manifest.json`,
+`state.json`, and publishes `FORWARD_EVAL_PASS` last. Its manifest explicitly
+keeps `full_rule_training_status=BLOCKED_CODE`; a successful forward canary is
+not a BACE GlobalGCE full-route PASS.
 
 ## GCFExplainer foreground route
 

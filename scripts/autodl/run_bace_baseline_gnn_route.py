@@ -35,6 +35,9 @@ from src.eval.bace_native_baseline_gnn import (  # noqa: E402
     run_fullgraph_verification_shard,
     run_native_baseline_selector,
 )
+from src.eval.bace_globalgce_native_gine import (  # noqa: E402
+    run_native_gine_forward_canary,
+)
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
@@ -101,6 +104,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight = sub.add_parser("preflight")
     _common(preflight)
+    preflight.add_argument("--official-root")
+
+    globalgce_forward = sub.add_parser("globalgce-forward-canary")
+    _common(globalgce_forward)
+    globalgce_forward.add_argument("--rule-json", required=True)
+    globalgce_forward.add_argument("--parent-id", required=True)
+    globalgce_forward.add_argument("--parent-smiles", required=True)
+    globalgce_forward.add_argument("--device", default="cpu")
+    globalgce_forward.add_argument("--oracle-batch-size", type=int, default=256)
 
     gcf = sub.add_parser("gcf-export")
     _common(gcf)
@@ -213,6 +225,19 @@ def main(argv: list[str] | None = None) -> int:
             method=args.method,
             checkpoint_dir=args.gnn_checkpoint,
             output_dir=args.output_dir,
+            official_root=args.official_root,
+        )
+    elif args.stage == "globalgce-forward-canary":
+        if baseline_spec(args.method).method_id != "globalgce":
+            raise ValueError("globalgce-forward-canary requires method=GlobalGCE")
+        result = run_native_gine_forward_canary(
+            parent_id=args.parent_id,
+            parent_smiles=args.parent_smiles,
+            rule_json=args.rule_json,
+            gnn_checkpoint=args.gnn_checkpoint,
+            output_dir=args.output_dir,
+            device=args.device,
+            oracle_batch_size=args.oracle_batch_size,
         )
     elif args.stage == "gcf-export":
         if baseline_spec(args.method).method_id != "gcfexplainer":

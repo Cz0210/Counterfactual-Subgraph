@@ -63,26 +63,6 @@ def build_bace_baseline_controller_fragment(
         "PYTHONHASHSEED": "0",
     }
 
-    if not spec.native_route_available:
-        return {
-            "schema_version": "bace_baseline_controller_fragment_v1",
-            "dataset": "bace",
-            "method": spec.method,
-            "method_id": spec.method_id,
-            "tasks": [],
-            "static_terminal": {
-                "task_id": f"{prefix}_terminal",
-                "state": "BLOCKED_CODE",
-                "blocker_code": spec.blocker_code,
-                "reason": spec.blocker_reason,
-                "resource": {"kind": "none", "gpus": 0},
-                "dependencies": [],
-                "argv": [],
-                "output_root": None,
-                "required_markers": [],
-            },
-        }
-
     script = f"{project}/scripts/autodl/run_bace_baseline_gnn_route.py"
     tasks: list[dict[str, Any]] = []
 
@@ -122,25 +102,57 @@ def build_bace_baseline_controller_fragment(
 
     preflight_id = f"{prefix}_preflight"
     preflight_out = f"{root}/preflight"
+    preflight_argv = [
+        py,
+        script,
+        "preflight",
+        "--method",
+        spec.method,
+        "--gnn-checkpoint",
+        checkpoint,
+        "--output-dir",
+        preflight_out,
+    ]
+    preflight_inputs = [checkpoint]
+    preflight_markers = ["READY"]
+    if spec.method_id == "globalgce":
+        if official_root is None:
+            raise ValueError("GlobalGCE task fragment requires official_root")
+        globalgce_official = _absolute(official_root, field="official_root")
+        preflight_argv.extend(["--official-root", globalgce_official])
+        preflight_inputs.append(globalgce_official)
+        preflight_markers = ["NATIVE_ACTION_READY", "BLOCKED_CODE"]
     add(
         preflight_id,
         resource="cpu",
-        argv=[
-            py,
-            script,
-            "preflight",
-            "--method",
-            spec.method,
-            "--gnn-checkpoint",
-            checkpoint,
-            "--output-dir",
-            preflight_out,
-        ],
+        argv=preflight_argv,
         output=preflight_out,
-        markers=["READY"],
+        markers=preflight_markers,
         dependencies=[],
-        inputs=[checkpoint],
+        inputs=preflight_inputs,
     )
+
+    if not spec.native_route_available:
+        return {
+            "schema_version": "bace_baseline_controller_fragment_v1",
+            "dataset": "bace",
+            "method": spec.method,
+            "method_id": spec.method_id,
+            "root_task_ids": [preflight_id],
+            "terminal_task_ids": [f"{prefix}_terminal"],
+            "tasks": tasks,
+            "static_terminal": {
+                "task_id": f"{prefix}_terminal",
+                "state": "BLOCKED_CODE",
+                "blocker_code": spec.blocker_code,
+                "reason": spec.blocker_reason,
+                "resource": {"kind": "none", "gpus": 0},
+                "dependencies": [preflight_id],
+                "argv": [],
+                "output_root": None,
+                "required_markers": [],
+            },
+        }
 
     if spec.method_id == "gcfexplainer":
         if official_root is None or neurosed_manifest is None:
