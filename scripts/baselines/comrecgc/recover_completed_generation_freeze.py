@@ -57,6 +57,7 @@ def main() -> int:
         source_csv=args.source_csv,
         expected_steps=args.expected_steps,
         expected_project_commit=args.expected_project_commit,
+        audit_output=args.audit_output,
     )
     write_json(args.audit_output, result)
     print(json.dumps(result, sort_keys=True, default=str))

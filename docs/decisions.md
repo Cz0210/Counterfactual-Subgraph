@@ -6602,6 +6602,22 @@ candidate population. Fresh-root adoption records source checksums and proves
 that serialization, lineage resolution, and freeze were rerun without a bare
 symlink; historical output roots remain untouched.
 
+An unsafe completed-generation validation now atomically persists its complete
+audit before the recovery command exits nonzero.  The recovery path passes the
+single in-memory validation result directly into that failure evidence, so a
+large frozen graph/trace closure is never scanned a second time merely to learn
+which checks failed.  A failed fresh root remains immutable evidence and a later
+repair must use another fresh versioned root.
+
+The first Mutagenicity fresh-root v2 attempt failed only because its launch
+supplied an expected source commit with one extra trailing character (41
+characters versus the 40-character commit in the checksum-bound source
+configuration).  The strict commit gate and science resolver remain unchanged.
+The audit now records actual/expected values, types, representations, and
+lengths, and the historical mismatch/config checksum are frozen as a
+reproducer.  The retry must use another fresh root and the exact 40-character
+source commit.
+
 ---
 
 ## 2026-08-22: Add a provenance-clean BACE GNN-PPO route without rewriting stable PPO

@@ -28,6 +28,35 @@ from .live_graph_state import AuthoritativeGraphStore
 from .runtime import validate_counterfactual_payload
 
 
+class UnsafeCompletedGenerationFreezeError(RuntimeError):
+    """Raised after a complete unsafe freeze-validation audit is persisted."""
+
+    def __init__(
+        self,
+        *,
+        audit: Mapping[str, Any],
+        audit_output: str | Path | None,
+    ) -> None:
+        self.audit = dict(audit)
+        self.audit_output = (
+            Path(audit_output).expanduser().resolve()
+            if audit_output is not None
+            else None
+        )
+        failed_checks = sorted(
+            str(name)
+            for name, passed in (self.audit.get("checks") or {}).items()
+            if passed is not True
+        )
+        closure_error = self.audit.get("closure_error")
+        location = str(self.audit_output) if self.audit_output is not None else "none"
+        super().__init__(
+            "COMRECGC completed generation is not safe for freeze-only recovery; "
+            f"validation_audit={location}; closure_error={closure_error!r}; "
+            f"failed_checks={failed_checks}."
+        )
+
+
 def recovery_population_counts(
     *,
     candidate_count: int,
@@ -282,6 +311,30 @@ def validate_completed_generation_freeze(
         for name, signature in accepted_post_generation_failures.items()
         if failure_message == " ".join(signature.lower().split()).removesuffix(".")
     )
+    actual_project_commit = config.get("project_commit")
+    project_commit_matches = (
+        expected_project_commit is None
+        or actual_project_commit == expected_project_commit
+    )
+    project_commit_identity = {
+        "actual": actual_project_commit,
+        "expected": expected_project_commit,
+        "actual_type": type(actual_project_commit).__name__,
+        "expected_type": type(expected_project_commit).__name__,
+        "actual_repr": repr(actual_project_commit),
+        "expected_repr": repr(expected_project_commit),
+        "actual_length": (
+            len(actual_project_commit)
+            if isinstance(actual_project_commit, str)
+            else None
+        ),
+        "expected_length": (
+            len(expected_project_commit)
+            if isinstance(expected_project_commit, str)
+            else None
+        ),
+        "matches": project_commit_matches,
+    }
     checks = {
         "failure_is_post_generation_freeze": (
             failure.get("stage") == "project_generation"
@@ -290,10 +343,7 @@ def validate_completed_generation_freeze(
         "dataset_matches": config.get("dataset") == dataset,
         "mode_is_full": config.get("mode") == "full",
         "generation_config_match": config.get("parameters") == expected,
-        "project_commit_matches": (
-            expected_project_commit is None
-            or config.get("project_commit") == expected_project_commit
-        ),
+        "project_commit_matches": project_commit_matches,
         "random_walk_complete": random_walk_complete,
         "official_payload_present": payload_path.is_file() and bool(graph_map),
         "candidate_payload_present": bool(candidates),
@@ -319,6 +369,9 @@ def validate_completed_generation_freeze(
         "schema_version": "comrecgc_completed_generation_freeze_audit_v4",
         "source_generation_dir": str(root),
         "dataset": dataset,
+        "actual_project_commit": actual_project_commit,
+        "expected_project_commit": expected_project_commit,
+        "project_commit_identity": project_commit_identity,
         "completed_steps": graph_audit.get("move_count"),
         "expected_steps": int(expected_steps),
         "random_walk_complete": random_walk_complete,
@@ -372,6 +425,7 @@ def recover_completed_generation_freeze(
     source_csv: str | Path | None,
     expected_steps: int = 50_000,
     expected_project_commit: str | None = None,
+    audit_output: str | Path | None = None,
 ) -> dict[str, Any]:
     """Freeze an already complete walk into a new versioned generation root."""
 
@@ -384,7 +438,20 @@ def recover_completed_generation_freeze(
         expected_project_commit=expected_project_commit,
     )
     if payload is None or audit["FREEZE_ONLY_RECOVERY_SAFE"] is not True:
-        raise RuntimeError("COMRECGC completed generation is not safe for freeze-only recovery.")
+        # Validation is the expensive pass over the complete frozen graph and
+        # selected-trace closure.  Persist that exact result before failing so
+        # callers never need to repeat the scan merely to recover diagnostics.
+        failure_audit_output = (
+            Path(audit_output).expanduser().resolve()
+            if audit_output is not None
+            else Path(output_dir).expanduser().resolve()
+            / "fresh_recovery_audit.json"
+        )
+        write_json(failure_audit_output, audit)
+        raise UnsafeCompletedGenerationFreezeError(
+            audit=audit,
+            audit_output=failure_audit_output,
+        )
 
     source = Path(source_generation_dir).expanduser().resolve()
     output = require_empty_output(output_dir)

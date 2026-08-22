@@ -12,6 +12,7 @@ import pytest
 from src.baselines.comrecgc.contracts import GenerationParameters, sha256_file, write_json
 from src.baselines.comrecgc import freeze_recovery
 from src.baselines.comrecgc.freeze_recovery import (
+    UnsafeCompletedGenerationFreezeError,
     recover_completed_generation_freeze,
     validate_completed_generation_freeze,
 )
@@ -178,6 +179,66 @@ def test_completed_mut_walk_accepts_exact_recorded_action_failure_signature(
     assert payload is not None
 
 
+def test_project_commit_gate_reports_wrong_expected_and_accepts_actual(
+    tmp_path,
+) -> None:
+    root = _source_root(tmp_path)
+    fixture = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "fixtures/comrecgc_lineage/mutagenicity_recovery_counts.json"
+        ).read_text(encoding="utf-8")
+    )
+    regression = fixture["failed_v2_project_commit_gate"]
+    actual_commit = regression["actual_project_commit"]
+    incorrect_expected = regression["incorrect_expected_project_commit"]
+    config_path = root / "resolved_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["dataset"] = "mutagenicity"
+    config["project_commit"] = actual_commit
+    write_json(config_path, config)
+
+    wrong, wrong_payload = validate_completed_generation_freeze(
+        source_generation_dir=root,
+        dataset="mutagenicity",
+        dataset_dir=tmp_path / "unused",
+        source_csv=None,
+        expected_project_commit=incorrect_expected,
+    )
+    actual, actual_payload = validate_completed_generation_freeze(
+        source_generation_dir=root,
+        dataset="mutagenicity",
+        dataset_dir=tmp_path / "unused",
+        source_csv=None,
+        expected_project_commit=actual_commit,
+    )
+
+    assert wrong["actual_project_commit"] == actual_commit
+    assert wrong["expected_project_commit"] == incorrect_expected
+    assert wrong["project_commit_identity"] == {
+        "actual": actual_commit,
+        "expected": incorrect_expected,
+        "actual_type": "str",
+        "expected_type": "str",
+        "actual_repr": repr(actual_commit),
+        "expected_repr": repr(incorrect_expected),
+        "actual_length": regression["actual_length"],
+        "expected_length": regression["incorrect_expected_length"],
+        "matches": False,
+    }
+    assert wrong["checks"]["project_commit_matches"] is False
+    assert wrong["FREEZE_ONLY_RECOVERY_SAFE"] is False
+    assert wrong_payload is None
+    assert actual["actual_project_commit"] == actual_commit
+    assert actual["expected_project_commit"] == actual_commit
+    assert actual["project_commit_identity"]["matches"] is True
+    assert actual["project_commit_identity"]["actual_repr"] == repr(actual_commit)
+    assert actual["project_commit_identity"]["expected_repr"] == repr(actual_commit)
+    assert actual["checks"]["project_commit_matches"] is True
+    assert actual["FREEZE_ONLY_RECOVERY_SAFE"] is True
+    assert actual_payload is not None
+
+
 def test_known_failure_signature_with_extra_text_remains_fail_closed(
     tmp_path,
 ) -> None:
@@ -265,6 +326,67 @@ def test_malformed_serialized_transition_blocks_freeze_only(tmp_path) -> None:
     assert audit["serialized_transition_state_present"] is True
     assert audit["checks"]["serialized_transition_closure_complete"] is False
     assert payload is None
+
+
+def test_unsafe_recovery_persists_one_complete_validation_audit_before_failure(
+    tmp_path, monkeypatch
+) -> None:
+    root = _source_root(tmp_path, malformed_serialized_transition=True)
+    output = tmp_path / "failed-fresh-root"
+    audit_output = output / "fresh_recovery_audit.json"
+    real_validate = freeze_recovery.validate_completed_generation_freeze
+    validation_calls = 0
+
+    def counted_validate(**kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        return real_validate(**kwargs)
+
+    monkeypatch.setattr(
+        freeze_recovery,
+        "validate_completed_generation_freeze",
+        counted_validate,
+    )
+
+    with pytest.raises(UnsafeCompletedGenerationFreezeError) as raised:
+        recover_completed_generation_freeze(
+            source_generation_dir=root,
+            output_dir=output,
+            dataset="aids",
+            dataset_dir=tmp_path / "unused",
+            source_csv=tmp_path / "unused.csv",
+            expected_project_commit="base",
+            audit_output=audit_output,
+        )
+
+    persisted = json.loads(audit_output.read_text(encoding="utf-8"))
+    assert validation_calls == 1
+    assert persisted == raised.value.audit
+    assert raised.value.audit_output == audit_output.resolve()
+    assert persisted["FREEZE_ONLY_RECOVERY_SAFE"] is False
+    assert persisted["checks"]["serialized_transition_closure_complete"] is False
+    assert "closure_error" in persisted
+    assert not (output / "_RUN_COMPLETE.json").exists()
+    assert not list(output.glob(".*.tmp"))
+
+
+def test_unsafe_recovery_defaults_failure_audit_inside_fresh_root(tmp_path) -> None:
+    root = _source_root(tmp_path, malformed_serialized_transition=True)
+    output = tmp_path / "failed-default-audit-root"
+
+    with pytest.raises(UnsafeCompletedGenerationFreezeError) as raised:
+        recover_completed_generation_freeze(
+            source_generation_dir=root,
+            output_dir=output,
+            dataset="aids",
+            dataset_dir=tmp_path / "unused",
+            source_csv=tmp_path / "unused.csv",
+            expected_project_commit="base",
+        )
+
+    expected = (output / "fresh_recovery_audit.json").resolve()
+    assert raised.value.audit_output == expected
+    assert json.loads(expected.read_text(encoding="utf-8")) == raised.value.audit
 
 
 def _immutable_file_state(path):

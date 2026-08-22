@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.autodl.run_three_lines_stage import MUT_SOURCE_COMMIT
 from src.baselines.comrecgc.freeze_recovery import recovery_population_counts
 
 
@@ -38,6 +39,27 @@ def test_mutagenicity_historical_failure_payload() -> None:
         "selected_transition_count": 224690,
     }
     assert counts["selected_transition_count"] != counts["candidate_count"]
+
+
+def test_mutagenicity_failed_v2_was_bound_to_one_extra_commit_character() -> None:
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    source = document["source"]
+    regression = document["failed_v2_project_commit_gate"]
+    actual = regression["actual_project_commit"]
+    incorrect = regression["incorrect_expected_project_commit"]
+
+    assert source["resolved_config_sha256"] == (
+        "7d89926de8d17907982189af1cb80862a813fd35bd9626557616738d8eefa0dd"
+    )
+    assert source["resolved_config_project_commit"] == actual
+    assert MUT_SOURCE_COMMIT == actual
+    assert len(actual) == regression["actual_length"] == 40
+    assert len(incorrect) == regression["incorrect_expected_length"] == 41
+    assert incorrect == actual + "b"
+    assert regression["only_failed_check"] == "project_commit_matches"
+    assert regression["closure_error"] is None
+    assert regression["frozen_payload_closure_complete"] is True
+    assert regression["sha_mismatch_count"] == 0
 
 
 def test_recovery_population_counts_fail_closed_on_inconsistent_trace_count() -> None:

@@ -2,6 +2,8 @@
   "source": {
     "run_root": "/autodl-fs/data/runs/autodl_three_lines_20260821_v1/inputs/mut_generation",
     "manifest_sha256": "6781ef4cf68f03820cbd7196ee4716cf6f331a40332da917d8d06ccdaffe7815",
+    "resolved_config_sha256": "7d89926de8d17907982189af1cb80862a813fd35bd9626557616738d8eefa0dd",
+    "resolved_config_project_commit": "7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4",
     "counterfactuals_sha256": "11f1e5a2537cc93d401726b6d83b5667a9a5d8c7b0b2a6adc6204c547bfc518c",
     "trace_manifest_sha256": "669abb5d638c1f1f224aa75b11455182616e4d3de0f61e9157e86f2c70734f30",
     "sqlite_sha256": "09cc587529dd82e2997a90ce950f2020b54b463f6443661c7aa896421a41585c"
@@ -15,5 +17,16 @@
   "recorded_action_present_count": 224690,
   "legacy_missing_action_count": 0,
   "recorded_action_replay_ok_count": 224690,
-  "recorded_action_replay_mismatch_count": 0
+  "recorded_action_replay_mismatch_count": 0,
+  "failed_v2_project_commit_gate": {
+    "diagnostic_audit_path": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/mut_lineage_validate_20260822T022837Z/audit.json",
+    "actual_project_commit": "7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4",
+    "incorrect_expected_project_commit": "7f7ed51a1176de1c23344cda0fbf0e6c5ba210b4b",
+    "actual_length": 40,
+    "incorrect_expected_length": 41,
+    "only_failed_check": "project_commit_matches",
+    "closure_error": null,
+    "frozen_payload_closure_complete": true,
+    "sha_mismatch_count": 0
+  }
 }
