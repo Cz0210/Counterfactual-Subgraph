@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import re
 import sys
@@ -18,6 +19,10 @@ from src.baselines.comrecgc.generation_checkpoint import (  # noqa: E402
     scientific_command_sha256,
 )
 from src.baselines.comrecgc.runtime import run_native_smoke, run_project_generation  # noqa: E402
+from src.baselines.bace_gine_native_adapter import (  # noqa: E402
+    LEGACY_PREPROCESS_ENGINE,
+)
+from src.baselines.comrecgc.bace_preprocessing import PREPROCESS_ENGINE  # noqa: E402
 
 
 _SECRET_KEY = re.compile(
@@ -75,6 +80,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset", choices=("aids", "mutagenicity", "bace"), required=True
     )
     parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
+    parser.add_argument(
+        "--diagnostic-equivalence-steps",
+        type=int,
+        choices=(500, 1000),
+        help=(
+            "Diagnostic-only BACE full-runtime prefix used by the A/B "
+            "equivalence gate; never eligible for paper artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--equivalence-gate-role",
+        choices=("legacy", "optimized"),
+        help="Required role label for a diagnostic equivalence prefix.",
+    )
     parser.add_argument("--project-root", default=str(PROJECT_ROOT))
     parser.add_argument("--upstream-root", default="external/COMRECGC")
     parser.add_argument("--dataset-dir")
@@ -85,6 +104,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-limit", type=int)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument(
+        "--bace-preprocess-engine",
+        choices=(LEGACY_PREPROCESS_ENGINE, PREPROCESS_ENGINE),
+        default=LEGACY_PREPROCESS_ENGINE,
+        help=(
+            "Opt-in BACE-only pure CPU preprocessing engine. The default "
+            "preserves the historical sequential adapter."
+        ),
+    )
+    parser.add_argument("--bace-preprocess-workers", type=int, default=0)
+    parser.add_argument("--bace-preprocess-max-inflight", type=int, default=64)
+    parser.add_argument("--bace-source-cache-capacity", type=int, default=0)
+    parser.add_argument("--bace-candidate-cache-capacity", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--checkpoint-root",
@@ -127,6 +159,22 @@ def main() -> int:
     scientific_argv = canonical_scientific_argv(args)
     command_sha256 = scientific_command_sha256(scientific_argv)
     parameters = GenerationParameters.for_mode(args.mode)
+    if args.diagnostic_equivalence_steps is not None:
+        if args.mode != "full" or args.dataset != "bace":
+            raise ValueError(
+                "Diagnostic equivalence prefixes require --dataset bace --mode full."
+            )
+        if args.equivalence_gate_role is None:
+            raise ValueError(
+                "--diagnostic-equivalence-steps requires --equivalence-gate-role."
+            )
+        parameters = replace(
+            parameters, steps=int(args.diagnostic_equivalence_steps)
+        )
+    elif args.equivalence_gate_role is not None:
+        raise ValueError(
+            "--equivalence-gate-role requires --diagnostic-equivalence-steps."
+        )
     upstream = Path(args.upstream_root)
     if not upstream.is_absolute():
         upstream = Path(args.project_root) / upstream
@@ -167,6 +215,11 @@ def main() -> int:
             parameters=parameters,
             device=args.device,
             batch_size=args.batch_size,
+            bace_preprocess_engine=args.bace_preprocess_engine,
+            bace_preprocess_workers=args.bace_preprocess_workers,
+            bace_preprocess_max_inflight=args.bace_preprocess_max_inflight,
+            bace_source_cache_capacity=args.bace_source_cache_capacity,
+            bace_candidate_cache_capacity=args.bace_candidate_cache_capacity,
             resume=args.resume,
             trace_output_dir=args.trace_output_dir,
             parity_reference_path=args.parity_reference,
@@ -183,6 +236,8 @@ def main() -> int:
             progress_interval_steps=args.progress_interval_steps,
             scientific_argv=scientific_argv,
             command_sha256=command_sha256,
+            diagnostic_equivalence_steps=args.diagnostic_equivalence_steps,
+            equivalence_gate_role=args.equivalence_gate_role,
         )
     print(json.dumps(manifest, sort_keys=True, default=str))
     return 0

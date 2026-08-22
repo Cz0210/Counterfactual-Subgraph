@@ -1010,3 +1010,21 @@ Mutagenicity roadmaps.
   the same wrappers run under Slurm without `AUTODL_PYTHON`.
 - [ ] Relaunch calibration from a fresh continuation task/output root; retain
   the exit-127 attempt as immutable failure evidence.
+
+# 2026-08-23 — BACE ComRecGC equivalent generation acceleration
+
+- [x] Profile the live generation without signals, ptrace, or writes to its root;
+  identify the single-core CPU/RDKit boundary and persist the evidence.
+- [x] Prove from the pinned upstream state machine that generation-index/seed
+  shards cannot be merged into the original 50k trajectory.
+- [x] Add an opt-in ordered bounded RDKit process pool below one producer,
+  with no worker RNG/CUDA state and separate provenance-bound LRU caches.
+- [x] Add fail-closed 500/1000 diagnostic replay and artifact-parity auditors;
+  diagnostic outputs can never become paper cells.
+- [x] Add production-like RDKit fixtures, cache/order/shardability tests, and
+  static CLI/Slurm parity without submitting to HPC.
+- [ ] Run fresh 500 and 1000 legacy-vs-optimized BACE gates under the AutoDL
+  shared-lowmem scheduler; do not mark the optimized full route ready until both
+  persistent audits pass.
+- [ ] After both gates pass, launch a fresh optimized 50k root with the existing
+  full-state 500-step checkpoint/mirror contract; retain the live legacy root.

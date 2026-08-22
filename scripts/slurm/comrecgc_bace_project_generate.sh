@@ -36,6 +36,11 @@ COMRECGC_ROOT=${COMRECGC_ROOT:-/share/home/u20526/czx/vendor/COMRECGC/$COMRECGC_
 DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
 RESUME=${RESUME:-0}
+BACE_PREPROCESS_ENGINE=${BACE_PREPROCESS_ENGINE:-legacy_sequential_rdkit_v1}
+BACE_PREPROCESS_WORKERS=${BACE_PREPROCESS_WORKERS:-0}
+BACE_PREPROCESS_MAX_INFLIGHT=${BACE_PREPROCESS_MAX_INFLIGHT:-64}
+BACE_SOURCE_CACHE_CAPACITY=${BACE_SOURCE_CACHE_CAPACITY:-0}
+BACE_CANDIDATE_CACHE_CAPACITY=${BACE_CANDIDATE_CACHE_CAPACITY:-0}
 
 for path in "$DATASET_DIR/dataset_summary.json" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
@@ -61,6 +66,11 @@ args=(
   --parent-limit 360
   --device cuda:0
   --batch-size 128
+  --bace-preprocess-engine "$BACE_PREPROCESS_ENGINE"
+  --bace-preprocess-workers "$BACE_PREPROCESS_WORKERS"
+  --bace-preprocess-max-inflight "$BACE_PREPROCESS_MAX_INFLIGHT"
+  --bace-source-cache-capacity "$BACE_SOURCE_CACHE_CAPACITY"
+  --bace-candidate-cache-capacity "$BACE_CANDIDATE_CACHE_CAPACITY"
   --trace-output-dir "$TRACE_DIR"
   --graph-state-dir "$GRAPH_STATE_DIR"
   --checkpoint-root "$CHECKPOINT_ROOT"

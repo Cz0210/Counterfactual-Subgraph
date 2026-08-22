@@ -14,8 +14,11 @@ repaired, silently dropped, or scored by a fallback classifier.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 from pathlib import Path
+import time
 from typing import Any, Mapping, Sequence
 
 from src.baselines.gcfexplainer_mutagenicity_adapter import (
@@ -24,10 +27,21 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
 from src.data.molecular_graph_dataset import MolecularGraphData, collate_molecular_graphs
 from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
 from src.oracles.gnn_oracle import load_gnn_checkpoint_bundle, sha256_file
+from src.baselines.comrecgc.bace_preprocessing import (
+    NativeGraphPreprocessRequest,
+    NativeGraphPreprocessResult,
+    PREPROCESS_ENGINE,
+    initialize_preprocess_worker,
+    ordered_bounded_submit,
+    preprocess_native_graph,
+    preprocess_native_graph_worker,
+)
+from src.baselines.comrecgc.contracts import stable_json_sha256
 
 
 INVALID_GRAPH_POLICY = "source_class_reject_no_fallback_v1"
 ADAPTER_VERSION = "bace_frozen_gine_native_graph_adapter_v1"
+LEGACY_PREPROCESS_ENGINE = "legacy_sequential_rdkit_v1"
 
 
 def _require_torch() -> Any:
@@ -77,6 +91,11 @@ class BACEFrozenGINENativeGraphAdapter:
         source_records: Sequence[Mapping[str, Any]],
         graph_schema: Any,
         device: str | Any,
+        preprocess_engine: str = LEGACY_PREPROCESS_ENGINE,
+        preprocess_workers: int = 0,
+        preprocess_max_inflight: int = 64,
+        source_cache_capacity: int = 0,
+        candidate_cache_capacity: int = 0,
     ) -> None:
         torch = _require_torch()
         root = Path(checkpoint_dir).expanduser().resolve()
@@ -104,6 +123,55 @@ class BACEFrozenGINENativeGraphAdapter:
         self.graph_schema = graph_schema
         self.device = device
         self.featurizer = MolecularGraphFeaturizer(metadata["feature_schema"])
+        self.preprocess_engine = str(preprocess_engine)
+        if self.preprocess_engine not in {
+            LEGACY_PREPROCESS_ENGINE,
+            PREPROCESS_ENGINE,
+        }:
+            raise ValueError(
+                "Unknown BACE native preprocessing engine: "
+                f"{self.preprocess_engine!r}."
+            )
+        self.preprocess_workers = int(preprocess_workers)
+        self.preprocess_max_inflight = int(preprocess_max_inflight)
+        self.source_cache_capacity = int(source_cache_capacity)
+        self.candidate_cache_capacity = int(candidate_cache_capacity)
+        if self.preprocess_workers < 0:
+            raise ValueError("preprocess_workers cannot be negative.")
+        if self.preprocess_max_inflight <= 0:
+            raise ValueError("preprocess_max_inflight must be positive.")
+        if self.source_cache_capacity < 0 or self.candidate_cache_capacity < 0:
+            raise ValueError("BACE preprocessing cache capacities cannot be negative.")
+        if self.preprocess_engine == LEGACY_PREPROCESS_ENGINE and any(
+            (
+                self.preprocess_workers,
+                self.source_cache_capacity,
+                self.candidate_cache_capacity,
+            )
+        ):
+            raise ValueError(
+                "Legacy BACE preprocessing rejects worker/cache settings; "
+                "select the equivalent process-pool engine explicitly."
+            )
+        self._preprocess_executor: ProcessPoolExecutor | None = None
+        self._source_cache: OrderedDict[str, NativeGraphPreprocessResult] = (
+            OrderedDict()
+        )
+        self._candidate_cache: OrderedDict[str, NativeGraphPreprocessResult] = (
+            OrderedDict()
+        )
+        self.preprocess_stats: Counter[str] = Counter()
+        self.preprocess_wall_seconds = 0.0
+        feature_schema_payload = metadata["feature_schema"].to_dict()
+        self.feature_schema_sha256 = str(feature_schema_payload["schema_sha256"])
+        self._source_content_sha256: tuple[str | None, ...] = (
+            tuple(
+                self._record_content_sha256(record)
+                for record in self.source_records
+            )
+            if self.preprocess_engine == PREPROCESS_ENGINE
+            else tuple(None for _record in self.source_records)
+        )
         self.hidden_dim = int(getattr(model.config, "hidden_dim"))
         self.edge_feature_dim = len(metadata["feature_schema"].edge_fields)
         self.decode_failures: Counter[str] = Counter()
@@ -125,6 +193,234 @@ class BACEFrozenGINENativeGraphAdapter:
         self.model.to(device)
         self._parameter = next(self.model.parameters())
         return self
+
+    @staticmethod
+    def _plain_rows(value: Any, *, cast: Any) -> tuple[tuple[Any, ...], ...]:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        return tuple(tuple(cast(item) for item in row) for row in value)
+
+    @classmethod
+    def _content_sha256(
+        cls,
+        *,
+        x: Sequence[Sequence[Any]],
+        edge_index: Sequence[Sequence[Any]],
+        num_nodes: int,
+    ) -> str:
+        if len(edge_index) != 2:
+            raise ValueError("Native graph edge_index must contain two rows.")
+        directed_edges = sorted(
+            (int(source), int(target))
+            for source, target in zip(edge_index[0], edge_index[1], strict=True)
+        )
+        return stable_json_sha256(
+            {
+                "num_nodes": int(num_nodes),
+                "x": [[float(item) for item in row] for row in x],
+                "directed_edges": [list(edge) for edge in directed_edges],
+            }
+        )
+
+    @classmethod
+    def _record_content_sha256(cls, record: Mapping[str, Any]) -> str:
+        return cls._content_sha256(
+            x=record["x"],
+            edge_index=record["edge_index"],
+            num_nodes=int(record["num_nodes"]),
+        )
+
+    def _request(self, graph: Any) -> NativeGraphPreprocessRequest:
+        source_identity = getattr(graph, "gcf_origin_index", None)
+        if source_identity is None:
+            source_identity = getattr(graph, "comrecgc_source_index", None)
+        if source_identity is None:
+            raise ValueError("missing_source_index")
+        source_index = _scalar_int(source_identity)
+        x = self._plain_rows(getattr(graph, "x"), cast=float)
+        edge_index = self._plain_rows(getattr(graph, "edge_index"), cast=int)
+        if len(edge_index) != 2:
+            raise ValueError("Native graph edge_index must contain two rows.")
+        lineage = getattr(graph, "comrecgc_node_origin", None)
+        if lineage is None:
+            lineage = getattr(graph, "gcf_node_origin", None)
+        if lineage is None:
+            raise ValueError("generated_missing_source_lineage")
+        if hasattr(lineage, "detach"):
+            lineage = lineage.detach().cpu()
+        if hasattr(lineage, "tolist"):
+            lineage = lineage.tolist()
+        node_origin = tuple(int(value) for value in lineage)
+        num_nodes = int(getattr(graph, "num_nodes", len(x)))
+        content_sha256 = self._content_sha256(
+            x=x,
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+        )
+        is_source = bool(
+            0 <= source_index < len(self._source_content_sha256)
+            and content_sha256 == self._source_content_sha256[source_index]
+            and node_origin == tuple(range(num_nodes))
+        )
+        cache_kind = "source" if is_source else "candidate"
+        cache_key = stable_json_sha256(
+            {
+                "schema_version": "bace_native_preprocess_cache_key_v1",
+                "global_graph_content_sha256": content_sha256,
+                # Parent/source metadata is provenance, not graph identity, but
+                # it changes chemical sidecar reconstruction and must therefore
+                # bind a cached preprocessing result.
+                "source_index": source_index,
+                "node_origin": list(node_origin),
+                "feature_schema_sha256": self.feature_schema_sha256,
+                "checkpoint_id": self.checkpoint_id,
+            }
+        )
+        return NativeGraphPreprocessRequest(
+            cache_key=cache_key,
+            cache_kind=cache_kind,
+            source_index=source_index,
+            num_nodes=num_nodes,
+            x=x,
+            edge_index=(edge_index[0], edge_index[1]),
+            node_origin=node_origin,
+        )
+
+    def _cache_for(
+        self, kind: str
+    ) -> tuple[OrderedDict[str, NativeGraphPreprocessResult], int]:
+        if kind == "source":
+            return self._source_cache, self.source_cache_capacity
+        if kind == "candidate":
+            return self._candidate_cache, self.candidate_cache_capacity
+        raise ValueError(f"Unknown native preprocessing cache kind: {kind!r}")
+
+    def _cache_get(
+        self, request: NativeGraphPreprocessRequest
+    ) -> NativeGraphPreprocessResult | None:
+        cache, capacity = self._cache_for(request.cache_kind)
+        if capacity <= 0 or request.cache_key not in cache:
+            self.preprocess_stats[f"{request.cache_kind}_cache_miss_count"] += 1
+            return None
+        result = cache.pop(request.cache_key)
+        cache[request.cache_key] = result
+        self.preprocess_stats[f"{request.cache_kind}_cache_hit_count"] += 1
+        return result
+
+    def _cache_put(self, result: NativeGraphPreprocessResult) -> None:
+        cache, capacity = self._cache_for(result.cache_kind)
+        if capacity <= 0:
+            return
+        cache.pop(result.cache_key, None)
+        cache[result.cache_key] = result
+        while len(cache) > capacity:
+            cache.popitem(last=False)
+            self.preprocess_stats[f"{result.cache_kind}_cache_eviction_count"] += 1
+
+    def _executor(self) -> ProcessPoolExecutor:
+        if self.preprocess_workers <= 0:
+            raise RuntimeError("Inline preprocessing does not create an executor.")
+        if self._preprocess_executor is None:
+            self._preprocess_executor = ProcessPoolExecutor(
+                max_workers=self.preprocess_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=initialize_preprocess_worker,
+                initargs=(
+                    self.source_records,
+                    self.graph_schema,
+                    self.metadata["feature_schema"],
+                ),
+            )
+        return self._preprocess_executor
+
+    def close(self) -> None:
+        """Release optional CPU workers without touching scientific artifacts."""
+
+        if self._preprocess_executor is not None:
+            self._preprocess_executor.shutdown(wait=True, cancel_futures=False)
+            self._preprocess_executor = None
+
+    def _optimized_preprocess(
+        self, graphs: Sequence[Any]
+    ) -> list[NativeGraphPreprocessResult]:
+        started = time.monotonic()
+        requests: list[NativeGraphPreprocessRequest | None] = []
+        resolved: dict[str, NativeGraphPreprocessResult] = {}
+        uncached: OrderedDict[str, NativeGraphPreprocessRequest] = OrderedDict()
+        invalid_results: list[NativeGraphPreprocessResult | None] = []
+        for index, graph in enumerate(graphs):
+            try:
+                request = self._request(graph)
+            except Exception as exc:
+                reason = str(exc).strip()
+                if reason not in {
+                    "missing_source_index",
+                    "generated_missing_source_lineage",
+                }:
+                    reason = f"missing_source_index:{type(exc).__name__}"
+                requests.append(None)
+                invalid_results.append(
+                    NativeGraphPreprocessResult(
+                        cache_key=f"uncacheable-{index}",
+                        cache_kind="candidate",
+                        features=None,
+                        failure_reason=reason,
+                    )
+                )
+                continue
+            requests.append(request)
+            invalid_results.append(None)
+            cached = self._cache_get(request)
+            if cached is not None:
+                resolved[request.cache_key] = cached
+            elif request.cache_key not in uncached:
+                uncached[request.cache_key] = request
+            else:
+                self.preprocess_stats["within_batch_coalesced_count"] += 1
+
+        if uncached:
+            values = list(uncached.values())
+            self.preprocess_stats["unique_preprocess_count"] += len(values)
+            if self.preprocess_workers > 0:
+                produced = ordered_bounded_submit(
+                    self._executor(),
+                    preprocess_native_graph_worker,
+                    values,
+                    max_inflight=self.preprocess_max_inflight,
+                )
+                self.preprocess_stats["process_pool_submitted_count"] += len(values)
+            else:
+                produced = (
+                    preprocess_native_graph(
+                        request,
+                        source_records=self.source_records,
+                        graph_schema=self.graph_schema,
+                        featurizer=self.featurizer,
+                    )
+                    for request in values
+                )
+                self.preprocess_stats["inline_preprocess_count"] += len(values)
+            for result in produced:
+                expected = uncached[result.cache_key]
+                if result.cache_kind != expected.cache_kind:
+                    raise RuntimeError(
+                        "BACE preprocessing worker changed cache-kind provenance."
+                    )
+                resolved[result.cache_key] = result
+                self._cache_put(result)
+
+        output: list[NativeGraphPreprocessResult] = []
+        for request, invalid in zip(requests, invalid_results, strict=True):
+            if invalid is not None:
+                output.append(invalid)
+            else:
+                assert request is not None
+                output.append(resolved[request.cache_key])
+        self.preprocess_stats["request_count"] += len(graphs)
+        self.preprocess_wall_seconds += time.monotonic() - started
+        return output
 
     def _decode(self, graph: Any) -> tuple[str | None, str | None]:
         try:
@@ -165,6 +461,21 @@ class BACEFrozenGINENativeGraphAdapter:
             graph_sha256=features.graph_sha256,
         )
 
+    @staticmethod
+    def _portable_features(
+        features: Any, *, row_index: int
+    ) -> MolecularGraphData:
+        return MolecularGraphData(
+            x=features.node_features,
+            edge_index=features.edge_index,
+            edge_attr=features.edge_features,
+            y=1,
+            molecule_id=f"native-bace-{row_index}",
+            smiles=features.canonical_smiles,
+            split="train_native_graph_edit",
+            graph_sha256=features.graph_sha256,
+        )
+
     def __call__(self, data: Any, edge_weight: Any = None) -> tuple[Any, Any, Any]:
         del edge_weight
         torch = self._torch
@@ -174,17 +485,35 @@ class BACEFrozenGINENativeGraphAdapter:
         self.call_count += 1
         valid_positions: list[int] = []
         valid_graphs: list[MolecularGraphData] = []
-        for index, graph in enumerate(graphs):
-            smiles, failure = self._decode(graph)
-            if failure is not None or smiles is None:
-                self.decode_failures[str(failure or "unknown_decode_failure")] += 1
-                continue
-            try:
-                valid_graphs.append(self._portable_graph(smiles, row_index=index))
-            except Exception as exc:
-                self.decode_failures[f"gine_featurize_failed:{type(exc).__name__}"] += 1
-                continue
-            valid_positions.append(index)
+        if self.preprocess_engine == LEGACY_PREPROCESS_ENGINE:
+            for index, graph in enumerate(graphs):
+                smiles, failure = self._decode(graph)
+                if failure is not None or smiles is None:
+                    self.decode_failures[
+                        str(failure or "unknown_decode_failure")
+                    ] += 1
+                    continue
+                try:
+                    valid_graphs.append(
+                        self._portable_graph(smiles, row_index=index)
+                    )
+                except Exception as exc:
+                    self.decode_failures[
+                        f"gine_featurize_failed:{type(exc).__name__}"
+                    ] += 1
+                    continue
+                valid_positions.append(index)
+        else:
+            for index, result in enumerate(self._optimized_preprocess(graphs)):
+                if result.failure_reason is not None or result.features is None:
+                    self.decode_failures[
+                        str(result.failure_reason or "unknown_decode_failure")
+                    ] += 1
+                    continue
+                valid_graphs.append(
+                    self._portable_features(result.features, row_index=index)
+                )
+                valid_positions.append(index)
 
         graph_hidden = torch.zeros(
             (len(graphs), self.hidden_dim),
@@ -241,6 +570,18 @@ class BACEFrozenGINENativeGraphAdapter:
             "decode_success_count": self.decode_success_count,
             "decode_failure_count": int(sum(self.decode_failures.values())),
             "decode_failure_reasons": dict(sorted(self.decode_failures.items())),
+            "preprocess_engine": self.preprocess_engine,
+            "preprocess_workers": self.preprocess_workers,
+            "preprocess_max_inflight": self.preprocess_max_inflight,
+            "source_cache_capacity": self.source_cache_capacity,
+            "candidate_cache_capacity": self.candidate_cache_capacity,
+            "source_cache_entry_count": len(self._source_cache),
+            "candidate_cache_entry_count": len(self._candidate_cache),
+            "preprocess_stats": dict(sorted(self.preprocess_stats.items())),
+            "preprocess_wall_seconds": self.preprocess_wall_seconds,
+            "preprocess_order_preserved": True,
+            "preprocess_rng_calls_added": 0,
+            "preprocess_cuda_context_in_workers": False,
         }
 
 
@@ -248,4 +589,5 @@ __all__ = [
     "ADAPTER_VERSION",
     "BACEFrozenGINENativeGraphAdapter",
     "INVALID_GRAPH_POLICY",
+    "LEGACY_PREPROCESS_ENGINE",
 ]
