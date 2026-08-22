@@ -1,5 +1,44 @@
 # Decisions Log
 
+## [2026-08-23] Serialize the AIDS ComRecGC retry on CPU under a cgroup RAM gate
+
+### Background
+
+AM repair-v2's AIDS `run_common_recourse.py` child received `SIGKILL` while the
+Mutagenicity common-recourse stage ran concurrently. The AutoDL cgroup-v1
+limit was 480 GiB; its recorded maximum exceeded that limit, failure count was
+nonzero, and `oom_kill=1`. Mutagenicity independently completed its clustering
+but correctly failed chemistry preregistration because lineage-v3 has streamed
+trace integrity rather than a true trace-on/trace-off parity artifact.
+
+### Decision
+
+Create an AIDS-only repair-v3 controller with two exact repair-v2 source-gate
+adoptions and one fresh standardized continuation. Run every task as CPU,
+clear CUDA visibility, set `gpu_required=false`, and limit controller CPU
+concurrency to one. Hold a project-persistent exclusive high-memory lock for
+the whole scientific task, require explicit cgroup-v1 headroom before creating
+the output root, and reject any already-running legacy common-recourse process.
+
+Do not include a Mutagenicity retry and do not reinterpret trace integrity as
+trace parity. A no-generation-rerun parity preflight is possible only if an
+independently frozen trace-disabled full-budget payload with identical
+scientific identity is located; the audited AutoDL inputs contain no such
+reference.
+
+### Consequences
+
+- Repair-v2 roots and its `SIGKILL` evidence remain immutable.
+- AIDS consumes no GPU lock and cannot overlap another cooperating full
+  common-recourse job in host memory.
+- Mutagenicity remains a scientific evidence blocker rather than an
+  engineering retry.
+- BACE, TasteMolNet, `paper/`, and HPC execution remain outside this repair.
+
+### Status
+
+Accepted
+
 This file records major design decisions for the counterfactual subgraph v3 project.
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.

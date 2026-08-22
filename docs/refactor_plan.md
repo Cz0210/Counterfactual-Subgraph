@@ -35,6 +35,21 @@
 - [ ] Run the fresh 500/1000 same-card smoke on AutoDL after the current legacy
   full job releases a suitable GPU/lock; deploy 50k only if the gate passes.
 
+## 2026-08-23: AIDS ComRecGC CPU/high-memory repair v3
+
+- [x] Classify repair-v2 AIDS `SIGKILL` from cgroup limit/peak/fail/OOM evidence
+  as a host-memory scheduling failure rather than a scientific failure.
+- [x] Add an exact three-task AIDS-only fresh controller with
+  `resource=cpu`, `gpu_required=false`, and `max_cpu_tasks=1`.
+- [x] Hold one persistent common-recourse high-memory lock, require cgroup-v1
+  headroom, and reject a legacy uncoordinated common-recourse process.
+- [x] Preserve repair-v2 source gates and the failed attempt as immutable
+  evidence; do not reuse or overwrite its partial output.
+- [x] Keep Mutagenicity blocked on real trace-on/trace-off parity and document
+  the exact missing independent reference input instead of weakening the gate.
+- [ ] Build and launch the fresh controller from an immutable AutoDL execution
+  worktree after integration approval.
+
 ## 2026-08-22: Mutagenicity GCF off-grid theta-star export compatibility
 
 - [x] Reproduce the repair-v1 failure against the real 601-point frozen grid,

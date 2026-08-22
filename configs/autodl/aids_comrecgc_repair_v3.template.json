@@ -1,0 +1,26 @@
+{
+  "schema_version": "aids_comrecgc_cpu_highmem_repair_spec_v3",
+  "controller_id": "four_methods_four_datasets_aids_comrecgc_repair_v3",
+  "paper_frozen": true,
+  "run_tastemolnet": 0,
+  "runtime_root": "/autodl-fs/data/counterfactual-subgraph-runtime",
+  "control_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
+  "project_root": "__IMMUTABLE_EXECUTION_WORKTREE__",
+  "python": "/root/miniconda3/envs/smiles_pip118/bin/python",
+  "proc_root": "/proc",
+  "cgroup_memory_root": "/sys/fs/cgroup/memory",
+  "min_cgroup_free_bytes": 472446402560,
+  "highmem_lock_path": "/autodl-fs/data/counterfactual-subgraph-runtime/locks/comrecgc_common_recourse_highmem.lock",
+  "flock_bin": "/usr/bin/flock",
+  "fresh_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_aids_comrecgc_repair_v3",
+  "verify_comrecgc_checkout_safe_git_fix_commit": "d8b113281d24e9340bfe2379e7451ffa8adff70a",
+  "source_controller": {
+    "manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_am_repair_v2.json",
+    "root": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_am_repair_v2"
+  },
+  "source_outputs": {
+    "aids_generation": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_am_repair_v2/source-adoptions/aids_generation/attempt-0",
+    "aids_threshold": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_am_repair_v2/source-adoptions/aids_threshold/attempt-0"
+  },
+  "failed_aids_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_am_repair_v2/cells/aids/comrecgc/standardized/attempt-0"
+}
