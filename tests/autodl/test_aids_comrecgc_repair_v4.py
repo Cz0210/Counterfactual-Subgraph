@@ -63,6 +63,15 @@ def _fixture(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
     failed_output.mkdir()
     generation = fixture_root / "generation"
     generation.mkdir()
+    generation_payload = _file(generation / "counterfactuals.pt", "payload")
+    generation_payload_sha = repair.sha256_file(generation_payload)
+    generation_manifest = _json(
+        generation / "run_manifest.json",
+        {
+            "counterfactuals_path": str(generation_payload),
+            "counterfactuals_sha256": generation_payload_sha,
+        },
+    )
     threshold = _file(fixture_root / "threshold.json", "{}\n")
     source_outputs = {
         repair.GENERATION_SOURCE_KEY: fixture_root / "source-generation",
@@ -89,7 +98,7 @@ def _fixture(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
                 "kind": "generation_adoption",
                 "dataset": "aids",
                 "generation_root": str(generation),
-                "generation_payload_claimed_sha256": "a" * 64,
+                "generation_payload_claimed_sha256": generation_payload_sha,
             }
             if source_key == repair.GENERATION_SOURCE_KEY
             else {
@@ -162,6 +171,76 @@ def _fixture(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
             **{key: str(value) for key, value in science_files.items()},
         },
     )
+    smoke_root = runtime / "outputs/autodl/profiling/aids-real-equivalence"
+    smoke_root.mkdir(parents=True)
+    smoke_files = {
+        "derived_counterfactuals_sha256": _file(
+            smoke_root / "diagnostic_generation/counterfactuals.pt", "derived"
+        ),
+        "legacy_run_manifest_sha256": _file(
+            smoke_root / "legacy/run_manifest.json", "{}\n"
+        ),
+        "external_run_manifest_sha256": _file(
+            smoke_root / "external/run_manifest.json", "{}\n"
+        ),
+        "pair_order_sha256": _file(
+            smoke_root / "legacy_intermediates/pairs.npy", "pairs"
+        ),
+        "recourse_vectors_sha256": _file(
+            smoke_root / "legacy_intermediates/vectors.npy", "vectors"
+        ),
+        "labels_sha256": _file(
+            smoke_root / "legacy_intermediates/labels.npy", "labels"
+        ),
+    }
+    selected_rows = _file(
+        smoke_root / "external/selected_common_recourses.json", "[]\n"
+    )
+    external_terminal = _json(
+        smoke_root / "external/_RUN_COMPLETE.json",
+        {
+            "schema_version": "comrecgc_common_recourse_terminal_v2",
+            "run_complete": True,
+            "common_recourse_engine": "external_memory_exact_v1",
+            "artifact_sha256": {"run_manifest.json": "a" * 64},
+        },
+    )
+    smoke_script = _file(fixture_root / "smoke.py", "# diagnostic\n")
+    smoke_gate_payload = {
+        "schema_version": "aids_comrecgc_real_external_equivalence_v1",
+        "status": "PASS",
+        "project_commit": "f" * 40,
+        "script_path": str(smoke_script),
+        "script_sha256": repair.sha256_file(smoke_script),
+        "diagnostic_only": True,
+        "eligible_for_main_results": False,
+        "formal_generation_budget_used": False,
+        "full_recourse_parameters": {
+            "theta": 0.1,
+            "delta": 0.02,
+            "recourse_size": 100,
+            "cf_size": 100000,
+            "cluster_size": 3,
+            "seed": 0,
+        },
+        "parent_limit": 64,
+        "candidate_limit": 31,
+        "batch_size": 8,
+        "source_generation_manifest_sha256": repair.sha256_file(
+            generation_manifest
+        ),
+        "source_counterfactuals_sha256": generation_payload_sha,
+        "checks": {key: True for key in repair.EQUIVALENCE_CHECKS},
+        "pair_count": 1,
+        "selected_rows_sha256": repair.stable_json_sha256([]),
+        **{
+            field: repair.sha256_file(path)
+            for field, path in smoke_files.items()
+        },
+        "external_terminal_sha256": repair.sha256_file(external_terminal),
+    }
+    smoke_gate = _json(smoke_root / "equivalence_gate.json", smoke_gate_payload)
+    _file(smoke_root / "PASS", "PASS\n")
     spec = _json(
         fixture_root / "spec.json",
         {
@@ -183,6 +262,7 @@ def _fixture(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
                 runtime / "locks/comrecgc_common_recourse_highmem.lock"
             ),
             "flock_bin": str(flock),
+            "equivalence_smoke_gate": str(smoke_gate),
             "fresh_output_root": str(runtime / "outputs/autodl/repairs/aids-v4"),
             "source_controller": {
                 "manifest": str(source_manifest),
@@ -246,6 +326,10 @@ def test_payload_is_exact_cpu_external_memory_full_budget(
     assert contract["scientific_budget_reduced"] is False
     assert contract["legacy_roots_mutated"] is False
     assert contract["failed_task_evidence"]["source_signal"] == "SIGKILL"
+    assert contract["equivalence_smoke_evidence"]["status"] == "PASS"
+    assert set(contract["equivalence_smoke_evidence"]["checks"]) == (
+        repair.EQUIVALENCE_CHECKS
+    )
 
 
 def test_builder_rejects_budget_or_license_scope_drift(
@@ -272,6 +356,26 @@ def test_controller_schema_rejects_test_hook_mode(
     standard["environment"]["AIDS_COMRECGC_V4_TEST_MODE"] = "1"
     with pytest.raises(RepairManifestError, match="environment is incomplete"):
         repair.validate_payload(payload)
+
+
+def test_builder_rejects_missing_or_false_real_equivalence_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    spec = json.loads(paths["spec"].read_text(encoding="utf-8"))
+    gate_path = Path(spec["equivalence_smoke_gate"])
+    gate = json.loads(gate_path.read_text(encoding="utf-8"))
+    gate["checks"]["pair_order_elementwise_exact"] = False
+    _json(gate_path, gate)
+    with pytest.raises(RepairManifestError, match="nine exact equivalence checks"):
+        repair.build_payload(spec_path=paths["spec"])
+
+    paths = _fixture(tmp_path / "missing", monkeypatch)
+    spec = json.loads(paths["spec"].read_text(encoding="utf-8"))
+    spec["equivalence_smoke_gate"] = str(tmp_path / "absent-gate.json")
+    _json(paths["spec"], spec)
+    with pytest.raises(FileNotFoundError):
+        repair.build_payload(spec_path=paths["spec"])
 
 
 def test_builder_requires_complete_crash_resume_core_ancestry(
@@ -329,6 +433,7 @@ def test_template_and_static_slurm_are_autodl_only_and_cli_synced() -> None:
     assert template["controller_id"] == repair.CONTROLLER_ID
     assert template["external_max_rss_gb"] == 96
     assert template["expected_sklearn_version"] == "1.7.2"
+    assert template["equivalence_smoke_gate"] == "__FRESH_EQUIVALENCE_GATE_JSON__"
     assert "mutagenicity" not in template
     wrapper = (
         root / "scripts/slurm/build_aids_comrecgc_repair_v4_manifest.sh"

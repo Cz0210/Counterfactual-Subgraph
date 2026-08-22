@@ -15,6 +15,7 @@
   "expected_sklearn_version": "1.7.2",
   "highmem_lock_path": "/autodl-fs/data/counterfactual-subgraph-runtime/locks/comrecgc_common_recourse_highmem.lock",
   "flock_bin": "/usr/bin/flock",
+  "equivalence_smoke_gate": "__FRESH_EQUIVALENCE_GATE_JSON__",
   "fresh_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/repairs/four_methods_four_datasets_aids_comrecgc_repair_v4",
   "source_controller": {
     "manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_am_repair_v2.json",

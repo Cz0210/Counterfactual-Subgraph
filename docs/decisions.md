@@ -146,9 +146,13 @@ pinned to the complete recovery-core commit
 external-memory implementation is present.
 
 The full repair remains gated on a fresh, diagnostic-only AutoDL
-legacy-versus-external equivalence smoke.  It writes a new repair-v4 root and
-never resumes or mutates repair-v2 or repair-v3.  Paired Slurm scripts are
-static CLI documentation only and must not be submitted.
+legacy-versus-external equivalence smoke.  The builder binds its physical
+PASS-last gate by SHA-256, requires the same integrated execution commit and
+frozen source-payload hash, requires all nine pair/vector/label/selection
+checks to be true, rehashes every diagnostic evidence artifact, and rejects a
+live writer.  The smoke cannot be used as a paper result.  Repair-v4 writes a
+new root and never resumes or mutates repair-v2 or repair-v3.  Paired Slurm
+scripts are static CLI documentation only and must not be submitted.
 
 ### Consequences
 

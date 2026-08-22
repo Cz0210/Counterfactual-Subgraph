@@ -45,8 +45,12 @@
 - [x] Prove the supervisor's real shell behavior and controller restart
   reconciliation with production-shaped tests: one retry can finish PASS-last,
   a second process loss terminates, and restart adopts the live run ID/attempt.
-- [ ] Run end-to-end legacy/external smoke equivalence on AutoDL and freeze the
-  complete pair/label/selected-row digests.
+- [x] Run end-to-end legacy/external smoke equivalence on real AutoDL AIDS data
+  and freeze the exact pair/vector/label/selected-row digests in a
+  diagnostic-only PASS-last gate.
+- [x] Make the repair-v4 builder adopt that physical smoke gate by SHA, exact
+  integrated commit, frozen source payload, nine true equivalence checks, and
+  no-live-writer evidence; a missing or changed gate blocks manifest creation.
 - [ ] Build and launch a fresh CPU-only repair-v4 controller; never resume or
   mutate the failed repair-v2/repair-v3 roots.
 
