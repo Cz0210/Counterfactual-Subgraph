@@ -1182,10 +1182,16 @@ def test_committed_integration_template_is_valid_and_keeps_taste_blocked() -> No
 
 def test_live_candidate_accepts_exact_adoptions_but_keeps_b6_b7_fresh() -> None:
     root = Path(__file__).resolve().parents[2]
+    manifest_path = root / "configs/autodl/four_gpu_recovery.live_candidate.json"
     manifest = load_controller_manifest(
-        root / "configs/autodl/four_gpu_recovery.live_candidate.json"
+        manifest_path
     )
 
+    old_controller_id = "autodl-four-gpu-recovery-20260822T033351Z-v1"
+    assert manifest.controller_id == (
+        "autodl-four-gpu-recovery-20260822T044445Z-v2"
+    )
+    assert old_controller_id not in manifest_path.read_text(encoding="utf-8")
     assert len(manifest.tasks) == 22
     assert manifest.runtime["launch_grace_seconds"] == 180
     assert manifest.runtime["max_transient_retries"] == 1
@@ -1228,6 +1234,37 @@ def test_live_candidate_accepts_exact_adoptions_but_keeps_b6_b7_fresh() -> None:
             manifest.by_id[prep_id].priority
             > manifest.by_id["bace_b7_ppo_full"].priority
         )
+
+    expected_adoptions = {
+        "mut_recovery": "20260822T025620Z-mut-lineage-v3-6ddd743",
+        "aids_recovery": "20260822T020238Z-aids-lineage-v2-6ddd743",
+        "bace_policy_provenance_audit": (
+            "20260822T030124Z-bace-policy-audit-1c889b9"
+        ),
+        "bace_clean_initializer": "20260822T030604Z-bace-clean-init-1c889b9",
+        "bace_gnn_ppo_adapter_canary": (
+            "20260822T033440Z-bace-ppo-canary-a625841"
+        ),
+    }
+    assert {
+        task.task_id: task.adopt_existing_run_id
+        for task in manifest.tasks
+        if task.adopt_existing_run_id is not None
+    } == expected_adoptions
+
+    controller_scoped_prefixes = (
+        "/outputs/autodl/four_gpu_recovery/",
+        "/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-",
+    )
+    for task in manifest.tasks:
+        strings = (
+            *(task.command or ()),
+            task.expected_output or "",
+            *task.environment.values(),
+        )
+        for value in strings:
+            if any(prefix in value for prefix in controller_scoped_prefixes):
+                assert manifest.controller_id in value, (task.task_id, value)
 
 
 def test_template_matches_commit_b_wrapper_environment_contract() -> None:

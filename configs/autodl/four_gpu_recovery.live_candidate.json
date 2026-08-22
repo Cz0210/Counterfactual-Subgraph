@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "controller_id": "autodl-four-gpu-recovery-20260822T033351Z-v1",
+  "controller_id": "autodl-four-gpu-recovery-20260822T044445Z-v2",
   "paper_frozen": true,
   "runtime": {
     "max_gpus": 4,
@@ -288,7 +288,7 @@
         "B6_PPO_SMOKE_V2"
       ],
       "input_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/adapter-canary/20260822T033440Z-bace-ppo-canary-a625841/canary_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b6-v2/attempt-{attempt}",
       "required_output_files": [
         "run_manifest.json",
         "policy_provenance.json",
@@ -315,7 +315,7 @@
         "CHEMLLM_MODEL_PATH": "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/ChemLLM-7B-Chat",
         "BACE_POLICY_INITIALIZER": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter",
         "BACE_POLICY_PROVENANCE_MANIFEST": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/policy_provenance.json",
-        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b6-v2/attempt-{attempt}",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b6-v2/attempt-{attempt}",
         "PYTHONDONTWRITEBYTECODE": "1"
       },
       "oom_retry": {
@@ -346,7 +346,7 @@
         "B7_PPO_FULL"
       ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b7-full/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-{attempt}",
       "required_output_files": [
         "run_manifest.json",
         "policy_provenance.json",
@@ -432,7 +432,7 @@
         "BACE_POLICY_INITIALIZER": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/adapter",
         "BACE_POLICY_PROVENANCE_MANIFEST": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/bace/gnn_ppo/clean-initializer/20260822T030604Z-bace-clean-init-1c889b9/policy_provenance.json",
         "BACE_B6_V2_MANIFEST": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/gnn_ppo/b7-full/attempt-{attempt}",
+        "OUTPUT_ROOT": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/gnn_ppo/b7-full/attempt-{attempt}",
         "PYTHONDONTWRITEBYTECODE": "1"
       },
       "oom_retry": {
@@ -474,7 +474,7 @@
         "{batch_size}"
       ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/gnn-before/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/gnn-before/attempt-{attempt}",
       "required_output_files": [
         "calibration_parent_gnn_before.jsonl",
         "prep_manifest.json",
@@ -523,12 +523,12 @@
         "--molclr-checkpoint",
         "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth",
         "--node-embedding-cache-dir",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/node_embeddings",
         "--output-dir",
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/molclr-parent/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/molclr-parent/attempt-{attempt}",
       "required_output_files": [
         "calibration_parent_molclr_cache.jsonl",
         "prep_manifest.json",
@@ -573,7 +573,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/shard-manifests/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/shard-manifests/attempt-{attempt}",
       "required_output_files": [
         "train_parent_ids.frozen.json",
         "calibration_parent_ids.frozen.json",
@@ -612,16 +612,16 @@
         "--b6-output",
         "{dep_bace_b6_ppo_smoke_output}",
         "--planned-output-root",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b8-base",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b8-base",
         "--planned-output-root",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b9-hightemp",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b9-hightemp",
         "--planned-output-root",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b11-shards",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b11-shards",
         "--output-dir",
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b7-prep/output-preflight/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b7-prep/output-preflight/attempt-{attempt}",
       "required_output_files": [
         "output_preflight.jsonl",
         "prep_manifest.json",
@@ -679,7 +679,7 @@
         "--resume"
       ],
       "input_manifest": "{dep_bace_b7_ppo_full_output}/ppo_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b8-base/{shard_id}/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b8-base/{shard_id}/attempt-{attempt}",
       "required_output_files": [
         "candidate_pool.jsonl",
         "pool_manifest.json",
@@ -744,7 +744,7 @@
         "--resume"
       ],
       "input_manifest": "{dep_bace_b7_ppo_full_output}/ppo_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b9-hightemp/{shard_id}/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b9-hightemp/{shard_id}/attempt-{attempt}",
       "required_output_files": [
         "candidate_pool.jsonl",
         "pool_manifest.json",
@@ -805,7 +805,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b8_pool_base_shard_000_output}/pool_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b10-merged/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b10-merged/attempt-{attempt}",
       "required_output_files": [
         "candidate_pool.jsonl",
         "candidate_universe.jsonl",
@@ -861,9 +861,9 @@
         "--molclr-checkpoint",
         "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth",
         "--wnode-cache-db",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/wnode/wnode_cache.sqlite3",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/wnode/wnode_cache.sqlite3",
         "--node-embedding-cache-dir",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/node_embeddings",
         "--parent-before-cache",
         "{dep_bace_b7_prep_gnn_before_output}/calibration_parent_gnn_before.jsonl",
         "--oracle-batch-size",
@@ -872,7 +872,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b10_pool_merged_output}/merge_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b11-shards/{shard_id}/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b11-shards/{shard_id}/attempt-{attempt}",
       "required_output_files": [
         "pair_details.jsonl",
         "match_instances.jsonl",
@@ -936,7 +936,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b11_verification_shards_shard_000_output}/verification_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b11-merged/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b11-merged/attempt-{attempt}",
       "required_output_files": [
         "pair_matrix.jsonl",
         "match_instances.jsonl",
@@ -981,7 +981,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b11_cross_parent_verified_output}/run_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b12-selector/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b12-selector/attempt-{attempt}",
       "required_output_files": [
         "selected_top20.json",
         "frozen_selection_manifest.json",
@@ -1025,7 +1025,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b13-test-parent-manifest/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b13-test-parent-manifest/attempt-{attempt}",
       "required_output_files": [
         "test_parent_ids.frozen.json",
         "test_shard_manifest.json",
@@ -1080,16 +1080,16 @@
         "--molclr-checkpoint",
         "/autodl-fs/data/incoming/counterfactual-subgraph-autodl-step0-20260820-141726/payload/project/pretrained_models/MolCLR/ckpt/pretrained_gin/checkpoints/model.pth",
         "--wnode-cache-db",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/wnode/wnode_cache.sqlite3",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/wnode/wnode_cache.sqlite3",
         "--node-embedding-cache-dir",
-        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T033351Z-v1/node_embeddings",
+        "/autodl-fs/data/counterfactual-subgraph-runtime/cache/bace/frozen_gnn_downstream/autodl-four-gpu-recovery-20260822T044445Z-v2/node_embeddings",
         "--oracle-batch-size",
         "{batch_size}",
         "--output-dir",
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b12_selector_output}/frozen_selection_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b13-shards/{shard_id}/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b13-shards/{shard_id}/attempt-{attempt}",
       "required_output_files": [
         "pair_details.jsonl",
         "match_instances.jsonl",
@@ -1155,7 +1155,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b13_verification_shards_shard_000_output}/verification_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b13-final/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b13-final/attempt-{attempt}",
       "required_output_files": [
         "pair_matrix.jsonl",
         "match_instances.jsonl",
@@ -1200,7 +1200,7 @@
         "{task_output}"
       ],
       "input_manifest": "{dep_bace_b13_final_eval_output}/matrix_manifest.json",
-      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T033351Z-v1/bace/frozen_gnn_downstream/b14-frozen/attempt-{attempt}",
+      "expected_output": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/four_gpu_recovery/autodl-four-gpu-recovery-20260822T044445Z-v2/bace/frozen_gnn_downstream/b14-frozen/attempt-{attempt}",
       "required_output_files": [
         "FINAL_PASS.json",
         "freeze_manifest.json",
