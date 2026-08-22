@@ -92,6 +92,7 @@ def compose_manifest(
         raise FileExistsError(f"Manifest output must be fresh: {destination}")
     runtime = dict(DEFAULT_RUNTIME)
     resource_gates = dict(DEFAULT_RESOURCE_GATES)
+    continuation: dict[str, Any] | None = None
     if base_manifest is not None:
         base = _read(base_manifest.expanduser().resolve(strict=True))
         if not isinstance(base, dict):
@@ -100,6 +101,11 @@ def compose_manifest(
             runtime.update(base["runtime"])
         if isinstance(base.get("resource_gates"), dict):
             resource_gates.update(base["resource_gates"])
+        raw_continuation = base.get("continuation")
+        if raw_continuation is not None:
+            if not isinstance(raw_continuation, dict):
+                raise ValueError("Base manifest continuation must be one object")
+            continuation = dict(raw_continuation)
     # The continuation never exits merely because the remaining work is
     # license/code blocked.  It keeps heartbeat and queue state without a dummy
     # process or GPU allocation.
@@ -140,6 +146,12 @@ def compose_manifest(
         "task_fragment_provenance": provenance,
         "tasks": tasks,
     }
+    if continuation is not None:
+        # Preserve the BACE predecessor quiescence policy when its continuation
+        # manifest is used as the base of the wider four-by-four controller.
+        # The production loader revalidates this object against the new, fresh
+        # controller ID before the composed manifest is published.
+        payload["continuation"] = continuation
     _atomic_json(destination, payload)
     try:
         manifest = load_controller_manifest(destination)

@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from scripts.autodl import build_four_by_four_manifest as builder
+from src.utils.autodl_bace_continuation import (
+    CONTINUATION_KIND,
+    SOURCE_REQUIRED_TASKS,
+)
 
 
 def _write(path: Path, payload) -> Path:
@@ -91,3 +95,44 @@ def test_failed_validation_removes_partial_manifest(
             output=output,
         )
     assert not output.exists()
+
+
+def test_preserves_bace_continuation_quiescence_policy_from_base(
+    tmp_path: Path,
+) -> None:
+    continuation = {
+        "kind": CONTINUATION_KIND,
+        "source_controller_id": "old-v2",
+        "source_controller_root": "/persistent/control/old-v2",
+        "source_manifest": "/persistent/control/manifests/old-v2.json",
+        "source_manifest_sha256": "a" * 64,
+        "required_source_task_ids": list(SOURCE_REQUIRED_TASKS),
+        "molclr_repair_run_id": "molclr-repair-pass",
+        "molclr_repair_output": "/persistent/outputs/molclr-repair",
+        "molclr_node_embedding_cache": "/persistent/cache/molclr",
+        "adopted_run_ids": ["molclr-repair-pass"],
+        "fresh_output_root": "/persistent/outputs/bace-continuation",
+        "fresh_wnode_cache_db": "/persistent/cache/wnode.sqlite3",
+        "paper_frozen": True,
+        "run_tastemolnet": False,
+    }
+    base = _write(
+        tmp_path / "base.json",
+        {
+            "runtime": {"keep_alive_when_blocked": True},
+            "resource_gates": {},
+            "continuation": continuation,
+        },
+    )
+    fragment = _write(tmp_path / "fragment.json", [_blocked_task("taste_ours")])
+    output = tmp_path / "manifest.json"
+
+    builder.compose_manifest(
+        controller_id="four-methods-four-datasets-v1",
+        fragments=[fragment],
+        output=output,
+        base_manifest=base,
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["continuation"] == continuation
