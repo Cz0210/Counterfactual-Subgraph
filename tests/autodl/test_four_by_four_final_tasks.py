@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import argparse
+
+import pytest
+
+from scripts.autodl.build_four_by_four_final_tasks import DATASETS, METHODS, build
+
+
+def _args(tmp_path):
+    expectations = tmp_path / "expectations.json"
+    expectations.write_text("{}\n")
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    cells = [
+        f"{dataset}/{method}=cell_{dataset.lower()}_{method.lower()}"
+        for dataset in DATASETS
+        for method in METHODS
+    ]
+    return argparse.Namespace(
+        controller_id="four_methods_four_datasets_continuation_v1",
+        cell_task=cells,
+        taste_license_task_id="tastemolnet_license_audit",
+        expectations_json=str(expectations),
+        scan_root=[str(scan)],
+        output_root=str(tmp_path / "results"),
+    )
+
+
+def test_final_matrix_audit_binds_all_cells_and_export_contract(tmp_path):
+    fragment, contract = build(_args(tmp_path))
+    task = fragment["tasks"][0]
+    assert len(contract["cells"]) == 16
+    assert len(set(contract["cells"].values())) == 16
+    assert task["id"] == contract["matrix_task_id"] == "final_matrix_audit"
+    assert "--explicit-cell" in task["command"]
+    assert task["data_splits"] == []
+    assert "--require-complete" not in task["command"]
+
+
+def test_final_matrix_audit_rejects_duplicate_terminal_task(tmp_path):
+    args = _args(tmp_path)
+    args.cell_task[-1] = args.cell_task[-1].split("=", 1)[0] + "=" + args.cell_task[0].split("=", 1)[1]
+    with pytest.raises(ValueError, match="distinct"):
+        build(args)

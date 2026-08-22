@@ -883,3 +883,9 @@ Mutagenicity roadmaps.
   16 distinct cell terminal PASS tasks and one post-cell matrix audit.
 - [ ] Run the final exporter only after Taste licensing and every code gate
   release the full 16-cell matrix.
+# 2026-08-22 — Final matrix dependency closure
+
+- [x] Bind the post-cell registry audit to sixteen distinct successful attempt
+  roots using controller dependency tokens.
+- [x] Generate the strict final-export dependency contract from the same cell
+  mapping, preventing a reporting task from silently changing cell identity.

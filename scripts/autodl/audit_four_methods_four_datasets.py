@@ -65,6 +65,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional mapping from '<dataset>/<method>' to candidate roots.",
     )
     parser.add_argument(
+        "--explicit-cell",
+        action="append",
+        default=[],
+        metavar="DATASET/METHOD=ROOT",
+        help=(
+            "One explicit candidate root. Repeatable and intended for controller "
+            "dependency-output tokens after they have been expanded."
+        ),
+    )
+    parser.add_argument(
         "--taste-license-gate-json",
         default=None,
         help="Explicit TasteMolNet license PASS gate; absent means BLOCKED_LICENSE.",
@@ -94,6 +104,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     expectations = _json_object(args.expectations_json, label="expectations")
     explicit_payload = _json_object(args.explicit_cells_json, label="explicit cells")
     explicit_cells = dict(explicit_payload.get("cells") or explicit_payload)
+    for declaration in args.explicit_cell:
+        if "=" not in declaration:
+            raise ValueError(
+                "--explicit-cell must use the exact DATASET/METHOD=ROOT form"
+            )
+        identity, root = declaration.split("=", 1)
+        identity = identity.strip()
+        root = root.strip()
+        if not identity or "/" not in identity or not root:
+            raise ValueError(
+                "--explicit-cell must use the exact DATASET/METHOD=ROOT form"
+            )
+        if identity in explicit_cells:
+            raise ValueError(f"Duplicate explicit cell declaration: {identity}")
+        explicit_cells[identity] = root
     taste_gate = (
         _json_object(args.taste_license_gate_json, label="Taste license gate")
         if args.taste_license_gate_json

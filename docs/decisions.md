@@ -7336,3 +7336,12 @@ fragment schedules generation-free GCF freeze, calibration-only selector
 freeze, and post-freeze held-out evaluation in dependency order. The generic
 controller recognizes those AM stages in the same no-test-before-freeze gate
 used by B12/B13.
+# 2026-08-22 — Bind the final matrix audit to passing controller outputs
+
+- The registry CLI accepts repeatable explicit `DATASET/METHOD=ROOT` bindings
+  so the controller can pass exact successful attempt roots without a mutable
+  intermediate map.
+- `build_four_by_four_final_tasks.py` requires all sixteen distinct terminal
+  task IDs, emits one post-cell CPU audit, and writes the dependency contract
+  consumed by the no-fabrication exporter. A blocked cell keeps both tasks
+  non-READY; it is never represented by a numeric zero.
