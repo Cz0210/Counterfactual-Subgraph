@@ -20,6 +20,16 @@ At that time the AIDS and Mutagenicity full common-recourse computations ran
 concurrently. This is a host-memory scheduling failure, not a scientific
 failure. The failed attempt and all old roots remain immutable.
 
+The repair-v2 controller's periodically reconciled task instance may omit its
+denormalized `exit_code`. The authoritative terminal representation is the
+matching immutable `experiment_registry/run_state/<run_id>/state.json`, which
+records `state=FAILED` and `exit_code=1` for the wrapper. Repair v3 accepts a
+controller-instance exit code only when it is absent or exactly `1`, and still
+requires all of the following together: the exact FAILED controller gate and
+run ID, exp-run exit `1`, the attempt's `CalledProcessError` naming child
+`SIGKILL: 9`, and the cgroup limit/peak/fail/OOM counters. No arbitrary
+execution failure satisfies this gate.
+
 Mutagenicity failed for a separate scientific reason. Its 100-rule
 common-recourse stage completed, but its chemistry preregistration requires a
 real trace-on/trace-off parity artifact. The frozen lineage-v3 root contains
@@ -90,7 +100,7 @@ gate.
 ```bash
 set -euo pipefail
 
-PY=/root/miniconda3/envs/smiles_pip118/bin/python
+PY=/root/miniconda3/envs/smiles_pip118/bin/python3.10
 RUNTIME=/autodl-fs/data/counterfactual-subgraph-runtime
 CONTROL=$RUNTIME/control
 PROJECT=/root/autodl-tmp/worktrees/run-aids-comrecgc-repair-v3-<commit>

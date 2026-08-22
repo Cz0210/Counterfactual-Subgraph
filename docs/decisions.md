@@ -20,6 +20,13 @@ concurrency to one. Hold a project-persistent exclusive high-memory lock for
 the whole scientific task, require explicit cgroup-v1 headroom before creating
 the output root, and reject any already-running legacy common-recourse process.
 
+Use the immutable exp-run registry terminal as the authoritative wrapper exit
+record. The long-lived controller's reconciled task cache is allowed to omit
+its redundant `exit_code`, but if present it must be `1`; the exp-run terminal
+must always be FAILED with exit `1` and match the exact controller run, output,
+PIDs, log, and launch specification. This evidence is accepted only jointly
+with the child `SIGKILL: 9` failure artifact and cgroup OOM proof.
+
 Do not include a Mutagenicity retry and do not reinterpret trace integrity as
 trace parity. A no-generation-rerun parity preflight is possible only if an
 independently frozen trace-disabled full-budget payload with identical

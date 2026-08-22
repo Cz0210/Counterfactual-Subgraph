@@ -179,7 +179,9 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         {
             "status": "FAILED",
             "dataset": "aids",
+            "error_class": "CalledProcessError",
             "message": "run_common_recourse.py died with <Signals.SIGKILL: 9>",
+            "output_root": str(failed_root),
         },
     )
     source_tasks = [
@@ -193,6 +195,8 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "id": "aids_comrecgc_standardized",
             "dataset": "aids",
             "stage": "AM_COMRECGC_HELDOUT_EVAL",
+            "runner_dataset": "paper-cell-aids-comrecgc-am-repair-v2",
+            "runner_stage": "AM_COMRECGC_HELDOUT_EVAL",
             "depends_on": [
                 "am_v2_source_aids_comrec_generation",
                 "am_v2_source_aids_comrec_threshold",
@@ -267,17 +271,83 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             },
         )
         _json(task_root / "gate.json", {"status": "PASS"})
+    failed_task_root = source_controller_root / "tasks/aids_comrecgc_standardized"
+    log_path = root / "logs/aids-comrecgc.log"
+    _text(log_path, "scientific command exited 1\n")
     _json(
-        source_controller_root / "tasks/aids_comrecgc_standardized/state.json",
+        failed_task_root / "state.json",
         {
             "task_id": "aids_comrecgc_standardized",
             "state": "FAILED",
+            "reason": "main:EXECUTION",
             "instances": {
                 "main": {
                     "state": "FAILED",
-                    "exit_code": 1,
+                    "attempt": 0,
+                    "run_id": repair.FAILED_SOURCE_RUN_ID,
+                    "failure_class": "EXECUTION",
+                    "failure_reason": "scientific command exited 1",
+                    "expected_output": str(failed_root),
+                    "worker_pid": 101,
+                    "child_pid": 102,
+                    "log_path": str(log_path),
+                }
+            },
+        },
+    )
+    _json(
+        failed_task_root / "gate.json",
+        {
+            "status": "FAILED",
+            "task_id": "aids_comrecgc_standardized",
+            "reason": "main:EXECUTION",
+            "runs": [
+                {
+                    "run_id": repair.FAILED_SOURCE_RUN_ID,
+                    "attempt": 0,
+                    "state": "FAILED",
                     "expected_output": str(failed_root),
                 }
+            ],
+        },
+    )
+    exp_root = (
+        control
+        / "experiment_registry/run_state"
+        / repair.FAILED_SOURCE_RUN_ID
+    )
+    _json(
+        exp_root / "state.json",
+        {
+            "state": "FAILED",
+            "run_id": repair.FAILED_SOURCE_RUN_ID,
+            "dataset": "paper-cell-aids-comrecgc-am-repair-v2",
+            "stage": "AM_COMRECGC_HELDOUT_EVAL",
+            "exit_code": 1,
+            "failures": ["scientific command exited 1"],
+            "pid": 101,
+            "child_pid": 102,
+            "log_path": str(log_path),
+        },
+    )
+    _json(
+        exp_root / "launch_spec.json",
+        {
+            "run_id": repair.FAILED_SOURCE_RUN_ID,
+            "dataset": "paper-cell-aids-comrecgc-am-repair-v2",
+            "stage": "AM_COMRECGC_HELDOUT_EVAL",
+            "expected_output": str(failed_root),
+            "log_path": str(log_path),
+            "command": [
+                "bash",
+                str(
+                    Path.cwd()
+                    / "scripts/autodl/run_comrecgc_standardized_continuation.sh"
+                ),
+            ],
+            "environment": {
+                "DATASET": "aids",
+                "OUTPUT_ROOT": str(failed_root),
             },
         },
     )
@@ -325,6 +395,8 @@ def _fixture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "source_manifest": source_manifest,
         "source_controller_root": source_controller_root,
         "failed_root": failed_root,
+        "failed_task_root": failed_task_root,
+        "exp_root": exp_root,
     }
 
 
@@ -354,6 +426,45 @@ def test_payload_is_exact_cpu_only_serial_fresh_repair(
         ]
         is True
     )
+    failure = payload["aids_comrecgc_repair_v3_contract"]["failed_task_evidence"]
+    assert failure["source_exit_code"] == 1
+    assert failure["source_signal"] == "SIGKILL"
+    assert failure["controller_cached_exit_code_present"] is False
+    assert failure["cgroup_oom_jointly_verified"] is True
+
+
+def test_authoritative_exp_run_exit_and_optional_controller_cache_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _fixture(monkeypatch)
+    exp_state = json.loads((paths["exp_root"] / "state.json").read_text())
+    exp_state["exit_code"] = 2
+    _json(paths["exp_root"] / "state.json", exp_state)
+    with pytest.raises(
+        RepairManifestError,
+        match="authoritative exp_run exit representation",
+    ):
+        build_payload(spec_path=paths["spec"])
+
+    paths = _fixture(monkeypatch)
+    controller_state = json.loads(
+        (paths["failed_task_root"] / "state.json").read_text()
+    )
+    controller_state["instances"]["main"]["exit_code"] = 9
+    _json(paths["failed_task_root"] / "state.json", controller_state)
+    with pytest.raises(RepairManifestError, match="controller cached exit_code"):
+        build_payload(spec_path=paths["spec"])
+
+    paths = _fixture(monkeypatch)
+    controller_state = json.loads(
+        (paths["failed_task_root"] / "state.json").read_text()
+    )
+    controller_state["instances"]["main"]["exit_code"] = 1
+    _json(paths["failed_task_root"] / "state.json", controller_state)
+    payload, _ = build_payload(spec_path=paths["spec"])
+    failure = payload["aids_comrecgc_repair_v3_contract"]["failed_task_evidence"]
+    assert failure["controller_cached_exit_code_present"] is True
+    assert failure["controller_cached_exit_code"] == 1
 
 
 def test_cgroup_oom_and_sigkill_evidence_fail_closed(
@@ -469,6 +580,7 @@ def test_template_slurm_and_docs_keep_route_autodl_only() -> None:
     )
     assert template["controller_id"] == CONTROLLER_ID
     assert template["min_cgroup_free_bytes"] >= MINIMUM_HEADROOM_BYTES
+    assert template["python"].endswith("/python3.10")
     assert "mutagenicity" not in template
     for relative in (
         "scripts/slurm/build_aids_comrecgc_repair_v3_manifest.sh",

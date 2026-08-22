@@ -6,7 +6,7 @@
   "runtime_root": "/autodl-fs/data/counterfactual-subgraph-runtime",
   "control_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
   "project_root": "__IMMUTABLE_EXECUTION_WORKTREE__",
-  "python": "/root/miniconda3/envs/smiles_pip118/bin/python",
+  "python": "/root/miniconda3/envs/smiles_pip118/bin/python3.10",
   "proc_root": "/proc",
   "cgroup_memory_root": "/sys/fs/cgroup/memory",
   "min_cgroup_free_bytes": 472446402560,

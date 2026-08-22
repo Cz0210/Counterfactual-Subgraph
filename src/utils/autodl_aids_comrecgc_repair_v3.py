@@ -45,6 +45,11 @@ THRESHOLD_SOURCE_KEY = "aids_threshold"
 GENERATION_GATE_TASK_ID = "am_v3_source_aids_comrec_generation"
 THRESHOLD_GATE_TASK_ID = "am_v3_source_aids_comrec_threshold"
 STANDARDIZATION_TASK_ID = "aids_comrecgc_standardized_cpu_highmem"
+FAILED_SOURCE_TASK_ID = "aids_comrecgc_standardized"
+FAILED_SOURCE_RUN_ID = (
+    "four_methods_four_datasets_am_repair_v2-"
+    "aids_comrecgc_standardized-main-a0"
+)
 SOURCE_TASK_IDS = {
     GENERATION_SOURCE_KEY: "am_v2_source_aids_comrec_generation",
     THRESHOLD_SOURCE_KEY: "am_v2_source_aids_comrec_threshold",
@@ -295,16 +300,40 @@ def _cgroup_oom_evidence(root: Path) -> dict[str, Any]:
 
 
 def _failed_aids_task(
-    *, manifest: ControllerManifest, controller_root: Path, expected_root: Path
+    *,
+    manifest: ControllerManifest,
+    controller_root: Path,
+    expected_root: Path,
+    oom_evidence: Mapping[str, Any],
 ) -> tuple[TaskSpec, dict[str, Any]]:
-    task_id = "aids_comrecgc_standardized"
+    task_id = FAILED_SOURCE_TASK_ID
     if task_id not in manifest.by_id:
         raise RepairManifestError("repair-v2 has no AIDS standardization task")
     task = manifest.by_id[task_id]
-    state = _read_object(controller_root / "tasks" / task_id / "state.json")
+    task_root = controller_root / "tasks" / task_id
+    state = _read_object(task_root / "state.json")
+    gate = _read_object(task_root / "gate.json")
+    instances = _mapping(state.get("instances"), label="task instances")
+    if set(instances) != {"main"}:
+        raise RepairManifestError("repair-v2 AIDS task must have exactly one main instance")
     instance = _mapping(
-        _mapping(state.get("instances"), label="task instances").get("main"),
+        instances.get("main"),
         label="task main instance",
+    )
+    run_id = str(instance.get("run_id") or "")
+    control_root = controller_root.parent.parent
+    registry_root = control_root / "experiment_registry/run_state" / run_id
+    exp_state_path = registry_root / "state.json"
+    launch_spec_path = registry_root / "launch_spec.json"
+    exp_state = _read_object(exp_state_path)
+    launch_spec = _read_object(launch_spec_path)
+    gate_runs = gate.get("runs")
+    gate_run = (
+        gate_runs[0]
+        if isinstance(gate_runs, list)
+        and len(gate_runs) == 1
+        and isinstance(gate_runs[0], Mapping)
+        else {}
     )
     failures: list[str] = []
     if task.dataset != "aids" or task.stage != "AM_COMRECGC_HELDOUT_EVAL":
@@ -313,27 +342,107 @@ def _failed_aids_task(
         failures.append("old resource/split contract")
     if state.get("state") != "FAILED" or instance.get("state") != "FAILED":
         failures.append("terminal state")
-    if int(instance.get("exit_code", -1)) != 1:
-        failures.append("exit_code")
+    if (
+        instance.get("failure_class") != "EXECUTION"
+        or "scientific command exited 1"
+        not in str(instance.get("failure_reason") or "")
+    ):
+        failures.append("controller failure representation")
+    # The long-lived repair-v2 controller drops this denormalized field during
+    # terminal reconciliation.  If retained it must agree; the immutable
+    # exp_run terminal below is the authoritative exit-code record.
+    if "exit_code" in instance and (
+        isinstance(instance["exit_code"], bool) or instance["exit_code"] != 1
+    ):
+        failures.append("controller cached exit_code")
+    if (
+        run_id != FAILED_SOURCE_RUN_ID
+        or instance.get("attempt") != 0
+        or gate.get("status") != "FAILED"
+        or gate.get("task_id") != task_id
+        or gate.get("reason") != "main:EXECUTION"
+        or gate_run.get("run_id") != run_id
+        or gate_run.get("attempt") != 0
+        or gate_run.get("state") != "FAILED"
+    ):
+        failures.append("controller gate/run identity")
     if Path(str(instance.get("expected_output") or "")).resolve(strict=True) != expected_root:
         failures.append("failed output identity")
+    if Path(str(gate_run.get("expected_output") or "")).resolve(strict=True) != expected_root:
+        failures.append("gate output identity")
+    exp_exit = exp_state.get("exit_code")
+    exp_failures = exp_state.get("failures")
+    if (
+        exp_state.get("state") != "FAILED"
+        or exp_state.get("run_id") != run_id
+        or isinstance(exp_exit, bool)
+        or exp_exit != 1
+        or not isinstance(exp_failures, list)
+        or "scientific command exited 1" not in exp_failures
+        or exp_state.get("dataset") != task.runner_dataset
+        or exp_state.get("stage") != task.runner_stage
+        or exp_state.get("pid") != instance.get("worker_pid")
+        or exp_state.get("child_pid") != instance.get("child_pid")
+        or exp_state.get("log_path") != instance.get("log_path")
+    ):
+        failures.append("authoritative exp_run exit representation")
+    launch_command = launch_spec.get("command")
+    launch_environment = _mapping(
+        launch_spec.get("environment"), label="failed launch environment"
+    )
+    if (
+        launch_spec.get("run_id") != run_id
+        or launch_spec.get("dataset") != task.runner_dataset
+        or launch_spec.get("stage") != task.runner_stage
+        or Path(str(launch_spec.get("expected_output") or "")).resolve(strict=True)
+        != expected_root
+        or launch_spec.get("log_path") != instance.get("log_path")
+        or not isinstance(launch_command, list)
+        or len(launch_command) != 2
+        or launch_command[0] != "bash"
+        or not str(launch_command[1]).endswith(
+            "/scripts/autodl/run_comrecgc_standardized_continuation.sh"
+        )
+        or launch_environment.get("DATASET") != "aids"
+        or launch_environment.get("OUTPUT_ROOT") != str(expected_root)
+    ):
+        failures.append("exp_run launch identity")
     failure = _read_object(expected_root / "FAILED.json")
     message = str(failure.get("message") or "")
     if (
         failure.get("status") != "FAILED"
         or failure.get("dataset") != "aids"
+        or failure.get("error_class") != "CalledProcessError"
+        or failure.get("output_root") != str(expected_root)
         or "run_common_recourse.py" not in message
         or "Signals.SIGKILL: 9" not in message
     ):
         failures.append("SIGKILL evidence")
+    if (
+        oom_evidence.get("peak_reached_limit") is not True
+        or int(oom_evidence.get("oom_kill_count", 0)) < 1
+        or int(oom_evidence.get("memory_failcnt", 0)) < 1
+        or int(oom_evidence.get("memory_max_usage_in_bytes", 0))
+        < int(oom_evidence.get("memory_limit_in_bytes", 0))
+    ):
+        failures.append("cgroup OOM evidence")
     if failures:
         raise RepairManifestError(f"repair-v2 AIDS failure is not the reviewed OOM: {failures}")
+    controller_cached_exit = instance.get("exit_code")
     return task, {
         "source_task_id": task_id,
+        "source_run_id": run_id,
         "source_failed_output": str(expected_root),
         "source_failed_json_sha256": sha256_file(expected_root / "FAILED.json"),
+        "source_exp_run_state": str(exp_state_path.resolve(strict=True)),
+        "source_exp_run_state_sha256": sha256_file(exp_state_path),
+        "source_launch_spec": str(launch_spec_path.resolve(strict=True)),
+        "source_launch_spec_sha256": sha256_file(launch_spec_path),
+        "controller_cached_exit_code": controller_cached_exit,
+        "controller_cached_exit_code_present": "exit_code" in instance,
         "source_exit_code": 1,
         "source_signal": "SIGKILL",
+        "cgroup_oom_jointly_verified": True,
         "scientific_failure": False,
     }
 
@@ -550,6 +659,7 @@ def build_payload(
         manifest=source_manifest_value,
         controller_root=source_controller_root,
         expected_root=failed_root,
+        oom_evidence=oom_evidence,
     )
     environment = _scientific_environment(
         source_task=source_task,
