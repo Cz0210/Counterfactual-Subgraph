@@ -694,6 +694,16 @@ def _run_stage(
             raise ValueError(
                 f"Stage {stage} completion field {required_field!r} is not true: {marker}"
             )
+        if stage == "common_recourse":
+            try:
+                engine_index = list(argv).index("--engine")
+                expected_engine = str(argv[engine_index + 1])
+            except (ValueError, IndexError) as exc:
+                raise ValueError(
+                    "COMMON_RECOURSE_ENGINE_MISSING_FROM_STAGE_ARGV"
+                ) from exc
+            if expected_engine == "external_memory_exact_v1":
+                _validate_common_recourse_completion(marker=marker, terminal=payload)
     except Exception as exc:
         failed = {
             **running,
