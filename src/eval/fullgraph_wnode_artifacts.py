@@ -1041,6 +1041,7 @@ def reconstruct_official_summary(
     thresholds: Sequence[float],
     theta_star: float,
     expected_theta_star_covered: int | None = None,
+    recomputed_theta_star_row: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     comparisons: list[dict[str, Any]] = []
     for threshold in thresholds:
@@ -1092,28 +1093,126 @@ def reconstruct_official_summary(
             "Official K20 threshold summary reconstruction failed: "
             f"{json.dumps(failures[:2], ensure_ascii=False)}"
         )
-    theta_row = next(
+    theta_matches = [
         row
         for row in recomputed_k20
-        if math.isclose(
+        if (_as_float(row.get("threshold")) is not None)
+        and math.isclose(
             float(row["threshold"]),
             float(theta_star),
             rel_tol=0.0,
             abs_tol=FLOAT_TOLERANCE,
         )
-    )
+    ]
+    if len(theta_matches) > 1:
+        raise RuntimeError(
+            "Recomputed K20 summary contains multiple theta-star rows."
+        )
+    if theta_matches:
+        theta_row = theta_matches[0]
+        theta_row_source = "frozen_threshold_grid"
+        if recomputed_theta_star_row is not None:
+            supplied = dict(recomputed_theta_star_row)
+            mismatched = [
+                field
+                for field in OFFICIAL_FIELDS
+                if not _same_value(theta_row.get(field), supplied.get(field), field)
+            ]
+            supplied_threshold = _as_float(supplied.get("threshold"))
+            if supplied_threshold is None or not math.isclose(
+                supplied_threshold,
+                float(theta_star),
+                rel_tol=0.0,
+                abs_tol=FLOAT_TOLERANCE,
+            ):
+                mismatched.append("threshold")
+            if mismatched:
+                raise RuntimeError(
+                    "Explicit recomputed theta-star row disagrees with its frozen "
+                    f"grid row: {sorted(set(mismatched))}"
+                )
+    else:
+        if recomputed_theta_star_row is None:
+            raise RuntimeError(
+                "theta_star is not an exact member of the frozen threshold grid; "
+                "an explicit recomputed theta-star row is required."
+            )
+        theta_row = dict(recomputed_theta_star_row)
+        theta_row_source = "recomputed_prefix_theta_star"
+        supplied_threshold = _as_float(theta_row.get("threshold"))
+        if supplied_threshold is None or not math.isclose(
+            supplied_threshold,
+            float(theta_star),
+            rel_tol=0.0,
+            abs_tol=FLOAT_TOLERANCE,
+        ):
+            raise RuntimeError(
+                "Explicit recomputed theta-star row threshold differs from theta_star."
+            )
+        if _text(theta_row.get("threshold_source")) != (
+            "frozen_calibration_theta_star"
+        ):
+            raise RuntimeError(
+                "Explicit recomputed theta-star row lacks the historical "
+                "frozen_calibration_theta_star provenance."
+            )
+        missing = [
+            field
+            for field in ("k", "threshold", *OFFICIAL_FIELDS)
+            if field not in theta_row
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Explicit recomputed theta-star row is incomplete: {missing}"
+            )
+
+    num_parents = _as_int(theta_row.get("num_parents"))
+    num_candidates = _as_int(theta_row.get("num_candidates"))
+    num_covered = _as_int(theta_row.get("num_close_cf_covered"))
+    coverage = _as_float(theta_row.get("close_cf_coverage"))
+    if (
+        num_parents is None
+        or num_parents <= 0
+        or num_candidates is None
+        or num_candidates <= 0
+        or num_covered is None
+        or num_covered < 0
+        or num_covered > num_parents
+        or coverage is None
+    ):
+        raise RuntimeError("Theta-star row has invalid coverage identity fields.")
+    if theta_row_source == "recomputed_prefix_theta_star":
+        if _as_int(theta_row.get("k")) != num_candidates:
+            raise RuntimeError(
+                "Explicit recomputed theta-star row does not describe its full K prefix."
+            )
+        if not recomputed_k20:
+            raise RuntimeError("Frozen K20 threshold reconstruction is empty.")
+        anchor = recomputed_k20[0]
+        for field in ("num_parents", "num_candidates", "num_valid_pairs"):
+            if not _same_value(anchor.get(field), theta_row.get(field), field):
+                raise RuntimeError(
+                    "Explicit recomputed theta-star row differs from the frozen "
+                    f"K20 identity field {field}."
+                )
+    expected_coverage_from_count = num_covered / num_parents
+    if not math.isclose(
+        coverage,
+        expected_coverage_from_count,
+        rel_tol=0.0,
+        abs_tol=FLOAT_TOLERANCE,
+    ):
+        raise RuntimeError("Theta-star coverage is not covered/num_parents.")
     if expected_theta_star_covered is not None:
-        actual = int(theta_row["num_close_cf_covered"])
+        actual = num_covered
         if actual != int(expected_theta_star_covered):
             raise RuntimeError(
                 f"Theta-star covered count mismatch: {actual} != "
                 f"{expected_theta_star_covered}."
             )
-        expected_coverage = int(expected_theta_star_covered) / int(
-            theta_row["num_parents"]
-        )
+        expected_coverage = int(expected_theta_star_covered) / num_parents
         if not math.isclose(
-            float(theta_row["close_cf_coverage"]),
+            coverage,
             expected_coverage,
             rel_tol=0.0,
             abs_tol=FLOAT_TOLERANCE,
@@ -1126,10 +1225,9 @@ def reconstruct_official_summary(
         "threshold_count": len(thresholds),
         "comparisons": comparisons,
         "theta_star": float(theta_star),
-        "theta_star_num_close_cf_covered": int(
-            theta_row["num_close_cf_covered"]
-        ),
-        "theta_star_close_cf_coverage": float(theta_row["close_cf_coverage"]),
+        "theta_star_row_source": theta_row_source,
+        "theta_star_num_close_cf_covered": num_covered,
+        "theta_star_close_cf_coverage": coverage,
     }
 
 
@@ -1925,6 +2023,11 @@ def export_final_artifacts(
         thresholds=frozen_thresholds,
         theta_star=float(theta_star),
         expected_theta_star_covered=expected_theta_count,
+        recomputed_theta_star_row=next(
+            row
+            for row in prefix_metrics
+            if int(row["k"]) == int(expected_candidate_count)
+        ),
     )
 
     ordered_details = sorted(
@@ -2382,6 +2485,9 @@ def audit_final_artifacts(
                     and int(expected_parent_count) == 217
                     else None
                 ),
+                recomputed_theta_star_row=recomputed_by_k[
+                    int(expected_candidate_count)
+                ],
             )
         manifest_verified = True
     return {

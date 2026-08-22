@@ -155,6 +155,33 @@ dataset-specific frozen-selector dependency by the new main controller; the
 controller recognizes this AM selector/test boundary and rejects any held-out
 task that is not transitively downstream of the frozen calibration task.
 
+The matched 601-point Figure-4 grid does not contain the preregistered
+`theta_star=0.05`. This is intentional and is not repaired by snapping to
+`0.049933333333333337` or `0.0500225`. The final exporter keeps all 601 grid
+rows unchanged and obtains the exact 0.05 Table-2/prefix value from the same
+held-out pair matrix's separately recomputed full-K prefix row. That row is
+accepted only with `threshold_source=frozen_calibration_theta_star` and exact
+K20 parent/candidate/pair identity closure.
+
+If a controller has already made `mut_gcf_legacy_heldout` terminal `FAILED`,
+do not edit or resume that attempt and do not unblock its dependent task by
+hand. Build a fresh minimal continuation with four nodes:
+
+1. exact-adopt the immutable PASS `mut_gcf_legacy_freeze` terminal;
+2. exact-adopt the immutable PASS repair-v1 `mut_gcf_legacy_calibration`
+   terminal, including its output root and `audit.json`;
+3. rerun the existing `heldout` action on one GPU under a fresh output root,
+   depending on both source gates and using the same frozen candidates, RF,
+   MolCLR, threshold contract, calibration output, test CSV, and hashes; and
+4. run `standardize_mut_gcf_legacy_cell.py` on CPU under another fresh root,
+   depending on the new held-out PASS and the frozen-candidate source gate.
+
+The fresh held-out task must retain `data_splits=["test"]`,
+`selector_parameters_frozen=true`, and `read_only_test=true`. It may reuse a
+new task-local cache, but must not write the failed attempt's matrix, cache, or
+final directory. The standardization task remains manifest-only and opens no
+raw split.
+
 The registry audit should receive
 `configs/autodl/mutagenicity_matched_protocol_v1.json` as its explicit
 expectations input. It deterministically emits the shared contract at

@@ -4,6 +4,50 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Reconstruct an off-grid Mutagenicity GCF theta exactly
+
+### Background
+
+The repair-v1 Mutagenicity GCF held-out evaluator completed and audited all
+`217 x 20 = 4,340` WNode pairs.  Its final exporter then raised
+`StopIteration`.  The frozen matched protocol contains 601 empirical Figure-4
+thresholds from 0 through 0.0535, but `theta_star=0.05` is deliberately not a
+member of that grid.  The prefix artifact builder already computes the exact
+theta-star metric separately from the same pair matrix; the reconstruction
+helper incorrectly assumed it could always find that row in the Figure-4 grid.
+
+### Decision
+
+Preserve every frozen grid row and official-summary comparison unchanged.  If
+theta star is absent from the grid, require the caller to supply the exact
+full-K prefix row that `compute_prefix_artifacts` recomputed at theta star.
+Accept that compatibility path only when its threshold is exactly theta star,
+its provenance is `frozen_calibration_theta_star`, it contains the historical
+official fields, `k == num_candidates`, its parent/candidate/valid-pair
+identities equal the K20 grid, and coverage equals covered parents divided by
+all parents.  The exporter and its independent final audit both pass their
+freshly recomputed K20 prefix row.
+
+Never choose the nearest grid threshold, interpolate, insert an extra Figure-4
+row, alter the selector, or inspect test results to choose theta.  A missing,
+ambiguous, incomplete, or inconsistent exact row raises a descriptive
+`RuntimeError` rather than leaking `StopIteration`.
+
+### Consequences
+
+- The official 601-row reconstruction and exported Figure-4 schema remain
+  unchanged.
+- Table 2 and prefix metrics use the preregistered exact `theta_star=0.05`, not
+  either neighboring empirical-grid value.
+- RF predictions, WNode distances, candidate order, calibration freeze, test
+  cohort, and scientific metrics are unchanged.
+- The failed repair-v1 attempt remains immutable; recovery requires a fresh
+  controller task/output root on a checkout containing this fix.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Isolate the two A/M ComRecGC retries in a six-task controller
 
 ### Background

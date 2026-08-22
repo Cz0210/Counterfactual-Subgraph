@@ -49,6 +49,11 @@ FRAGMENTS = (
 THRESHOLDS = (0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.10)
 THETA_STAR = 0.04
 COST_CAP = 0.10
+HISTORICAL_MUT_THETA_STAR = 0.05
+HISTORICAL_MUT_COST_CAP = 0.0535
+HISTORICAL_MUT_THRESHOLDS = tuple(
+    HISTORICAL_MUT_COST_CAP * index / 600 for index in range(601)
+)
 
 
 def _write_csv(path: Path, rows: list[dict], fields: list[str] | None = None) -> None:
@@ -344,6 +349,87 @@ def test_export_writes_figure_table_provenance_and_hashes(tmp_path: Path) -> Non
     assert result["manifest_hashes_verified"] is True
 
 
+def test_export_historical_mut_grid_without_theta_is_schema_compatible(
+    tmp_path: Path,
+) -> None:
+    inputs = _make_inputs(tmp_path)
+    details = _pair_rows()
+    official = summarize_wnode_thresholds(
+        method="fake_fullgraph",
+        details=details,
+        threshold_rows=[
+            {
+                "threshold": threshold,
+                "threshold_source": "frozen_calibration",
+                "quantile": None,
+            }
+            for threshold in HISTORICAL_MUT_THRESHOLDS
+        ],
+        total_parents=3,
+        total_candidates=20,
+        source_label=1,
+        target_label=0,
+    )
+    _write_csv(
+        inputs["test_run"] / "combined" / "combined_threshold_summary.csv",
+        official,
+    )
+    (inputs["ours"] / "thresholds.json").write_text(
+        json.dumps(
+            {
+                "theta_star": HISTORICAL_MUT_THETA_STAR,
+                "cost_cap": HISTORICAL_MUT_COST_CAP,
+                "raw_quantile_thresholds": [
+                    {"threshold": value} for value in HISTORICAL_MUT_THRESHOLDS
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output = tmp_path / "historical-mut-export"
+    export_final_artifacts(
+        test_run_dir=inputs["test_run"],
+        calibration_run_dir=inputs["calibration"],
+        frozen_candidates_csv=inputs["candidates"],
+        ours_schema_root=inputs["ours"],
+        output_dir=output,
+        method_name="GCFExplainer-Top20",
+        dataset="Mutagenicity",
+        source_label=1,
+        target_label=0,
+        test_job_id="production-like-fixture",
+        theta_star=HISTORICAL_MUT_THETA_STAR,
+        cost_cap=HISTORICAL_MUT_COST_CAP,
+        thresholds=HISTORICAL_MUT_THRESHOLDS,
+        k_values=range(1, 21),
+        expected_parent_count=3,
+        expected_candidate_count=20,
+        expected_pair_count=60,
+        forbid_selection=True,
+        forbid_fitting=True,
+    )
+    reconstruction = json.loads(
+        (output / "official_summary_reconstruction_audit.json").read_text()
+    )
+    assert reconstruction["threshold_count"] == 601
+    assert reconstruction["theta_star_row_source"] == "recomputed_prefix_theta_star"
+    assert len(_read_csv(output / "test_threshold_summary.csv")) == 601
+    assert len(_read_csv(output / "figure4_coverage_vs_threshold.csv")) == 1202
+    final_audit = audit_final_artifacts(
+        run_dir=output,
+        frozen_candidates_csv=inputs["candidates"],
+        ours_schema_root=inputs["ours"],
+        expected_parent_count=3,
+        expected_candidate_count=20,
+        expected_pair_count=60,
+        theta_star=HISTORICAL_MUT_THETA_STAR,
+        cost_cap=HISTORICAL_MUT_COST_CAP,
+        thresholds=HISTORICAL_MUT_THRESHOLDS,
+    )
+    assert final_audit["manifest_hashes_verified"] is True
+
+
 def test_gcfexplainer_table_slug_is_stable() -> None:
     assert _method_slug("GCFExplainer-Top20") == "gcfexplainer"
 
@@ -410,6 +496,111 @@ def test_official_integer_and_float_reconstruction() -> None:
             official_rows=changed,
             thresholds=THRESHOLDS,
             theta_star=THETA_STAR,
+        )
+
+
+def test_historical_mut_gcf_grid_uses_exact_separate_theta_row(
+    tmp_path: Path,
+) -> None:
+    """The frozen 601-point grid brackets 0.05 but does not contain it."""
+
+    assert not any(
+        abs(threshold - HISTORICAL_MUT_THETA_STAR) <= 1e-12
+        for threshold in HISTORICAL_MUT_THRESHOLDS
+    )
+
+    candidates_path = tmp_path / "selected_top20.csv"
+    _write_csv(candidates_path, _candidate_rows())
+    candidates, _ = load_ranked_candidates(candidates_path, expected_count=20)
+    details = _pair_rows()
+    parent_ids, _ = validate_complete_cartesian(
+        details,
+        candidates,
+        expected_parent_count=3,
+        expected_pair_count=60,
+    )
+    prefix, threshold_rows, _ = compute_prefix_artifacts(
+        details=details,
+        candidates=candidates,
+        parent_ids=parent_ids,
+        thresholds=HISTORICAL_MUT_THRESHOLDS,
+        theta_star=HISTORICAL_MUT_THETA_STAR,
+        cost_cap=HISTORICAL_MUT_COST_CAP,
+        source_label=1,
+        target_label=0,
+        method_name="GCFExplainer-Top20",
+    )
+    k20_rows = [row for row in threshold_rows if int(row["k"]) == 20]
+    theta_row = prefix[-1]
+    assert theta_row["threshold"] == HISTORICAL_MUT_THETA_STAR
+    assert theta_row["threshold_source"] == "frozen_calibration_theta_star"
+
+    result = reconstruct_official_summary(
+        recomputed_k20=k20_rows,
+        official_rows=k20_rows,
+        thresholds=HISTORICAL_MUT_THRESHOLDS,
+        theta_star=HISTORICAL_MUT_THETA_STAR,
+        recomputed_theta_star_row=theta_row,
+    )
+    assert result["official_summary_reconstruction_passed"] is True
+    assert result["theta_star_row_source"] == "recomputed_prefix_theta_star"
+    assert result["theta_star_num_close_cf_covered"] == 2
+
+    with pytest.raises(RuntimeError, match="explicit recomputed theta-star row"):
+        reconstruct_official_summary(
+            recomputed_k20=k20_rows,
+            official_rows=k20_rows,
+            thresholds=HISTORICAL_MUT_THRESHOLDS,
+            theta_star=HISTORICAL_MUT_THETA_STAR,
+        )
+
+    nearest_grid_row = min(
+        k20_rows,
+        key=lambda row: abs(
+            float(row["threshold"]) - HISTORICAL_MUT_THETA_STAR
+        ),
+    )
+    with pytest.raises(RuntimeError, match="threshold differs"):
+        reconstruct_official_summary(
+            recomputed_k20=k20_rows,
+            official_rows=k20_rows,
+            thresholds=HISTORICAL_MUT_THRESHOLDS,
+            theta_star=HISTORICAL_MUT_THETA_STAR,
+            recomputed_theta_star_row=nearest_grid_row,
+        )
+
+    wrong_provenance = dict(theta_row)
+    wrong_provenance["threshold_source"] = "frozen_calibration"
+    with pytest.raises(RuntimeError, match="lacks the historical"):
+        reconstruct_official_summary(
+            recomputed_k20=k20_rows,
+            official_rows=k20_rows,
+            thresholds=HISTORICAL_MUT_THRESHOLDS,
+            theta_star=HISTORICAL_MUT_THETA_STAR,
+            recomputed_theta_star_row=wrong_provenance,
+        )
+
+    incomplete = dict(theta_row)
+    incomplete.pop("num_valid_pairs")
+    with pytest.raises(RuntimeError, match="is incomplete"):
+        reconstruct_official_summary(
+            recomputed_k20=k20_rows,
+            official_rows=k20_rows,
+            thresholds=HISTORICAL_MUT_THRESHOLDS,
+            theta_star=HISTORICAL_MUT_THETA_STAR,
+            recomputed_theta_star_row=incomplete,
+        )
+
+    identity_drift = dict(theta_row)
+    identity_drift["k"] = 19
+    identity_drift["num_candidates"] = 19
+    with pytest.raises(RuntimeError, match="identity field num_candidates"):
+        reconstruct_official_summary(
+            recomputed_k20=k20_rows,
+            official_rows=k20_rows,
+            thresholds=HISTORICAL_MUT_THRESHOLDS,
+            theta_star=HISTORICAL_MUT_THETA_STAR,
+            recomputed_theta_star_row=identity_drift,
         )
 
 

@@ -1,5 +1,18 @@
 # Refactor Plan
 
+## 2026-08-22: Mutagenicity GCF off-grid theta-star export compatibility
+
+- [x] Reproduce the repair-v1 failure against the real 601-point frozen grid,
+  which brackets but does not contain `theta_star=0.05`.
+- [x] Keep all 601 official grid rows byte-semantically unchanged and source
+  the exact theta-star metric only from the already-recomputed full-prefix row.
+- [x] Reject a missing explicit theta row, nearest-grid substitution, wrong
+  threshold provenance, incomplete fields, or parent/candidate identity drift.
+- [x] Cover both direct reconstruction and the complete exporter/final-audit
+  round trip with a production-shaped 601-point fixture.
+- [x] Keep repair-v1 FAILED roots immutable and document a fresh held-out plus
+  standardization continuation recipe.
+
 ## 2026-08-22: AIDS/Mutagenicity-only ComRecGC repair v2
 
 - [x] Add a six-task fresh controller fragment containing only four exact
