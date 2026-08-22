@@ -4,6 +4,35 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Admit only the controller-owned tokenizer scheduling key
+
+### Background
+
+The four-GPU controller deliberately injects `TOKENIZERS_PARALLELISM=false`
+to bound CPU pressure.  `exp_run` rejected that launch before scientific code
+started because its credential-name detector matched the `TOKEN` substring in
+`TOKENIZERS`.  Removing the scheduling limit or broadly weakening token-name
+screening would make the controller or credential boundary less safe.
+
+### Decision
+
+Allow exactly the case-sensitive key `TOKENIZERS_PARALLELISM` through
+`exp_run` environment parsing.  Keep the existing credential detector for all
+other keys, including `TOKEN`, `API_TOKEN`, `SECRET`, `PASSWORD`, and
+`AUTHORIZATION`; case variants of the scheduler key are not implicitly
+accepted.
+
+### Consequences
+
+- Controller-owned bounded thread settings can reach a fresh AutoDL task.
+- The failed pre-science launch remains evidence and needs no artifact rewrite.
+- Credential-like environment keys continue to fail before a run root is
+  created.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Bind downstream controller edges to passing attempt outputs
 
 ### Background

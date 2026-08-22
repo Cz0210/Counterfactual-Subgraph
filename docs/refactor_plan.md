@@ -777,6 +777,8 @@ Mutagenicity roadmaps.
 - [x] Bind existing Commit-A writers by exact launch-spec provenance, publish
   the user-facing JSONL/Markdown registry mirrors, and keep execution clones
   free of Python bytecode writes.
+- [x] Allow the exact scheduler-owned `TOKENIZERS_PARALLELISM` environment key
+  through `exp_run` without weakening credential-like environment rejection.
 - [x] Integrate the Frozen-GNN downstream foreground contract into the
   controller with passing-attempt shard tokens, dependency-produced parent
   manifests, explicit B11/B13 shard-to-merge joins, and a post-B12-only test

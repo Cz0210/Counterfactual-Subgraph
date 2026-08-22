@@ -55,6 +55,9 @@ _SECRET = re.compile(
     r"(?i)(password|passwd|secret|token|authorization|api[_-]?key|"
     r"credential|private[_-]?key)"
 )
+_SAFE_ENVIRONMENT_KEYS_WITH_SECRET_SUBSTRINGS = frozenset(
+    {"TOKENIZERS_PARALLELISM"}
+)
 
 
 def _git_value(project_root: Path, *arguments: str) -> str | None:
@@ -86,7 +89,10 @@ def _parse_environment(values: Sequence[str]) -> dict[str, str]:
         if "=" not in value:
             raise AutoDLRuntimeError(f"--env requires KEY=VALUE, got {value!r}")
         key, content = value.split("=", 1)
-        if not key or _SECRET.search(key):
+        if not key or (
+            _SECRET.search(key)
+            and key not in _SAFE_ENVIRONMENT_KEYS_WITH_SECRET_SUBSTRINGS
+        ):
             raise AutoDLRuntimeError(f"Unsafe environment key: {key!r}")
         result[key] = content
     return result
