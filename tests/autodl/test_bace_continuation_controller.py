@@ -10,6 +10,9 @@ from typing import Any
 import pytest
 
 from scripts.autodl.run_four_gpu_recovery_controller import (
+    ControllerError,
+    _controller_root,
+    _source_controller_root_from_manifest,
     keep_alive_after_all_terminal,
     load_controller_manifest,
 )
@@ -18,12 +21,78 @@ from src.utils.autodl_bace_continuation import (
     assert_continuation_predecessor_quiescent,
     build_bace_continuation_payload,
 )
-from src.utils.autodl_runtime import sha256_file, sha256_paths
+from src.utils.autodl_runtime import build_runtime_layout, sha256_file, sha256_paths
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _namespaced_source_fixture(tmp_path: Path) -> tuple[Any, Any, Path]:
+    project_root = tmp_path / "project"
+    data_root = tmp_path / "data"
+    project_root.mkdir()
+    data_root.mkdir()
+    control_root = data_root / "counterfactual-subgraph-runtime" / "control"
+    layout = build_runtime_layout(
+        project_root=project_root,
+        data_root=data_root,
+        control_root=control_root,
+    ).ensure()
+    payload = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "configs/autodl/four_gpu_recovery.live_candidate.json"
+        ).read_text(encoding="utf-8")
+    )
+    source_id = payload["controller_id"]
+    namespace_root = control_root / "four_gpu_recovery"
+    source_manifest = namespace_root / "manifests" / f"{source_id}-0ad1494.json"
+    _write_json(source_manifest, payload)
+    source = load_controller_manifest(source_manifest)
+    source_root = namespace_root / source_id
+    source_root.mkdir(parents=True)
+    snapshot = dict(payload)
+    snapshot["source_manifest"] = str(source.path)
+    snapshot["source_manifest_sha256"] = source.sha256
+    _write_json(source_root / "controller_manifest.json", snapshot)
+    return layout, source, source_root
+
+
+def test_four_by_four_alias_resolves_source_from_old_persistent_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout, source, source_root = _namespaced_source_fixture(tmp_path)
+    monkeypatch.setattr(
+        "scripts.autodl.run_four_gpu_recovery_controller.CONTROLLER_NAME",
+        "four_methods_four_datasets_continuation",
+    )
+
+    assert _source_controller_root_from_manifest(layout, source) == source_root
+    assert _controller_root(layout, "four_methods_four_datasets_continuation_v1") == (
+        layout.control_root
+        / "four_methods_four_datasets_continuation"
+        / "four_methods_four_datasets_continuation_v1"
+    )
+
+
+def test_source_controller_namespace_resolution_fails_closed(
+    tmp_path: Path,
+) -> None:
+    layout, source, source_root = _namespaced_source_fixture(tmp_path)
+    snapshot_path = source_root / "controller_manifest.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["controller_id"] = "different-controller"
+    _write_json(snapshot_path, snapshot)
+    with pytest.raises(ControllerError, match="controller_id mismatch"):
+        _source_controller_root_from_manifest(layout, source)
+
+    outside = tmp_path / "outside.json"
+    _write_json(outside, json.loads(source.path.read_text(encoding="utf-8")))
+    outside_source = load_controller_manifest(outside)
+    with pytest.raises(ControllerError, match="escapes persistent control root"):
+        _source_controller_root_from_manifest(layout, outside_source)
 
 
 def _materialize_required_outputs(output: Path, task: dict[str, Any]) -> None:

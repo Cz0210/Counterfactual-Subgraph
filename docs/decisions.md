@@ -4,6 +4,27 @@ This file records major design decisions for the counterfactual subgraph v3 proj
 
 It should be updated whenever a meaningful implementation, algorithmic, or interface decision is made.
 
+## [2026-08-22] Bind continuation predecessors to the source manifest namespace
+
+### Decision
+
+Derive the predecessor controller root from the exact persistent layout
+`<control_root>/<source-namespace>/manifests/<manifest>` and the manifest's
+validated `controller_id`. Verify the persisted controller snapshot binds the
+same ID, manifest path, and SHA-256. The active alias continues to determine
+only the fresh continuation root. Paths outside the control root, malformed or
+symlinked namespace components, and snapshot mismatches fail closed.
+
+### Consequences
+
+- The four-by-four alias reads the completed `four_gpu_recovery` predecessor
+  instead of incorrectly searching its new namespace.
+- No namespace name is hard-coded, and path traversal cannot redirect adoption.
+
+### Status
+
+Accepted
+
 ## [2026-08-22] Standardize the frozen Mutagenicity GCF held-out export before matrix adoption
 
 ### Background

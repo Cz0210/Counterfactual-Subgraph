@@ -12,6 +12,14 @@
 - [x] Preserve GlobalGCE's reviewed code blocker without generating a
   substitute result.
 
+## 2026-08-22: Continuation predecessor namespace binding
+
+- [x] Resolve the BACE predecessor controller from the exact persistent source
+  manifest namespace while keeping the new four-by-four controller in its own
+  namespace.
+- [x] Reject source manifests outside the control root, malformed namespace
+  layouts, symlinked roots, and controller snapshot identity mismatches.
+
 ## 1. Purpose
 
 This document records the intended roadmap for rebuilding the counterfactual subgraph v3 project from an empty repository.

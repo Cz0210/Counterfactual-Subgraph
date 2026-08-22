@@ -838,6 +838,65 @@ def _controller_root(layout: Any, controller_id: str) -> Path:
     return layout.control_root / CONTROLLER_NAME / controller_id
 
 
+def _source_controller_root_from_manifest(
+    layout: Any, source: ControllerManifest
+) -> Path:
+    """Resolve the predecessor root from its persistent manifest namespace."""
+
+    control_root = layout.control_root.resolve(strict=True)
+    source_manifest = source.path.resolve(strict=True)
+    try:
+        relative = source_manifest.relative_to(control_root)
+    except ValueError as exc:
+        raise ControllerError(
+            f"Source manifest escapes persistent control root: {source_manifest}"
+        ) from exc
+    if len(relative.parts) != 3 or relative.parts[1] != "manifests":
+        raise ControllerError(
+            "Source manifest must use <control_root>/<namespace>/manifests/<file>"
+        )
+    namespace = _safe_id(relative.parts[0], label="source controller namespace")
+    namespace_root = control_root / namespace
+    manifest_root = namespace_root / "manifests"
+    if (
+        namespace_root.is_symlink()
+        or not namespace_root.is_dir()
+        or manifest_root.is_symlink()
+        or not manifest_root.is_dir()
+    ):
+        raise ControllerError("Source manifest namespace is not a physical directory")
+
+    source_root = namespace_root / source.controller_id
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise ControllerError(
+            f"Source controller root is absent or non-physical: {source_root}"
+        )
+    resolved_root = source_root.resolve(strict=True)
+    try:
+        resolved_root.relative_to(namespace_root.resolve(strict=True))
+    except ValueError as exc:
+        raise ControllerError("Source controller root escapes its namespace") from exc
+
+    snapshot_path = resolved_root / "controller_manifest.json"
+    if snapshot_path.is_symlink() or not snapshot_path.is_file():
+        raise ControllerError("Source controller manifest snapshot is absent or non-physical")
+    snapshot = read_json_object(snapshot_path)
+    if snapshot.get("controller_id") != source.controller_id:
+        raise ControllerError("Source controller snapshot controller_id mismatch")
+    recorded_manifest = snapshot.get("source_manifest")
+    if not isinstance(recorded_manifest, str) or not recorded_manifest:
+        raise ControllerError("Source controller snapshot has no source_manifest")
+    try:
+        recorded_path = Path(recorded_manifest).expanduser().resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise ControllerError("Source controller snapshot manifest is unavailable") from exc
+    if recorded_path != source_manifest:
+        raise ControllerError("Source controller snapshot points to another manifest")
+    if snapshot.get("source_manifest_sha256") != source.sha256:
+        raise ControllerError("Source controller snapshot manifest SHA256 mismatch")
+    return resolved_root
+
+
 def _task_root(root: Path, task_id: str) -> Path:
     return root / "tasks" / task_id
 
@@ -3318,7 +3377,7 @@ def build_bace_continuation(args: argparse.Namespace) -> int:
     controller_id = _safe_id(str(args.controller_id), label="controller_id")
     if controller_id == source.controller_id:
         raise ControllerError("Continuation requires a new controller ID")
-    source_root = _controller_root(layout, source.controller_id)
+    source_root = _source_controller_root_from_manifest(layout, source)
     controller_root = _controller_root(layout, controller_id)
     if controller_root.exists() or controller_root.is_symlink():
         raise ControllerError(
