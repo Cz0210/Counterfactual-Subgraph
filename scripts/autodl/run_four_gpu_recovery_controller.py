@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -57,6 +58,10 @@ from src.utils.autodl_runtime import (
     verify_required_output_alternatives,
     verify_required_outputs,
 )
+from src.train.stable_ppo_resume import (
+    find_latest_stable_ppo_resume_checkpoint,
+    read_stable_ppo_resume_manifest,
+)
 
 
 SCHEMA_VERSION = 1
@@ -91,6 +96,20 @@ OOM_MARKERS = (
     "cudnn_status_alloc_failed",
     "hip out of memory",
 )
+TRANSIENT_IO_MARKERS = (
+    "input/output error",
+    "errno 5",
+    "stale file handle",
+    "transport endpoint is not connected",
+    "connection reset by peer",
+    "connection timed out",
+    "resource temporarily unavailable",
+)
+TRANSIENT_FAILURE_CLASSES = frozenset({"TRANSIENT_IO", "TRANSIENT_PROCESS_LOSS"})
+ALLOCATION_SAFE_GPU_AUDITS = frozenset({"AVAILABLE", "STALE_METADATA"})
+DEFAULT_LAUNCH_GRACE_SECONDS = 180
+DEFAULT_MAX_TRANSIENT_RETRIES = 1
+THREAD_ENV_KEYS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS")
 DEFAULT_SEMANTIC_MARKERS = (
     "provenance gate failed",
     "semantic gate failed",
@@ -209,6 +228,50 @@ def _safe_id(value: str, *, label: str) -> str:
     if normalized != value:
         raise ControllerError(f"{label} contains unsafe characters: {value!r}")
     return normalized[:120]
+
+
+def controller_safety_environment(
+    *, cpu_count: int | None = None
+) -> dict[str, str]:
+    """Return the controller-owned CPU/tokenizer limits for one task.
+
+    Four concurrent GPU workers must not each inherit the full host thread
+    pool.  These values are controller policy, not user-tunable scientific
+    inputs, and are frozen into every newly launched task's evidence.
+    """
+
+    total = os.cpu_count() if cpu_count is None else cpu_count
+    if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+        total = 1
+    threads = max(1, total // FOUR_GPU_RECOVERY_LIMIT - 1)
+    return {
+        "OMP_NUM_THREADS": str(threads),
+        "MKL_NUM_THREADS": str(threads),
+        "TOKENIZERS_PARALLELISM": "false",
+    }
+
+
+def _effective_launch_environment(task: TaskSpec) -> dict[str, str]:
+    """Merge immutable task variables with non-overridable safety defaults."""
+
+    environment = dict(task.environment)
+    if task.adopt_existing_run_id is not None:
+        # Adoption verifies the exact historical launch environment and never
+        # retroactively claims that controller defaults were present.
+        return environment
+    safety = controller_safety_environment()
+    conflicts = {
+        key: (environment[key], value)
+        for key, value in safety.items()
+        if key in environment and environment[key] != value
+    }
+    if conflicts:
+        raise ControllerError(
+            f"{task.task_id} may not override controller safety environment: "
+            f"{conflicts}"
+        )
+    environment.update(safety)
+    return environment
 
 
 def _load_json_or_yaml(path: Path) -> dict[str, Any]:
@@ -642,6 +705,16 @@ def load_controller_manifest(path: Path) -> ControllerManifest:
         raise ControllerError("poll_seconds must be at least 60")
     if float(runtime.get("sample_interval_seconds", 5)) <= 0:
         raise ControllerError("sample_interval_seconds must be positive")
+    launch_grace_seconds = int(
+        runtime.get("launch_grace_seconds", DEFAULT_LAUNCH_GRACE_SECONDS)
+    )
+    if launch_grace_seconds < 30 or launch_grace_seconds > 900:
+        raise ControllerError("launch_grace_seconds must be in [30, 900]")
+    max_transient_retries = int(
+        runtime.get("max_transient_retries", DEFAULT_MAX_TRANSIENT_RETRIES)
+    )
+    if max_transient_retries not in {0, DEFAULT_MAX_TRANSIENT_RETRIES}:
+        raise ControllerError("max_transient_retries must be 0 or 1")
     tasks_value = payload.get("tasks")
     if not isinstance(tasks_value, list) or not tasks_value:
         raise ControllerError("Manifest requires a nonempty tasks list")
@@ -650,6 +723,9 @@ def load_controller_manifest(path: Path) -> ControllerManifest:
     validate_no_test_before_freeze(tasks)
     _validate_bace_order(tasks)
     for task in tasks:
+        # Evaluate safety-owned launch defaults while the manifest is loaded so
+        # a conflicting user environment fails before any state is created.
+        _effective_launch_environment(task)
         if task.dataset in {"paper", "manuscript"}:
             raise ControllerError("The controller may not schedule paper work")
         strings: Iterable[str] = (
@@ -690,6 +766,27 @@ def load_controller_manifest(path: Path) -> ControllerManifest:
                 raise ControllerError(
                     f"Runnable task {task.task_id} requires an immutable output contract"
                 )
+            if (
+                max_transient_retries
+                and task.adopt_existing_run_id is None
+                and "{attempt}" not in task.expected_output
+            ):
+                raise ControllerError(
+                    f"Runnable task {task.task_id} transient retry output must include "
+                    "{attempt} to remain immutable"
+                )
+            if (
+                max_transient_retries
+                and task.adopt_existing_run_id is None
+                and any(
+                    "{attempt}" not in value
+                    for value in task.required_absolute_output_files
+                )
+            ):
+                raise ControllerError(
+                    f"Runnable task {task.task_id} transient retry absolute outputs must "
+                    "include {attempt}"
+                )
             if not task.required_log_marker:
                 raise ControllerError(
                     f"Runnable task {task.task_id} requires a PASS log marker"
@@ -728,6 +825,7 @@ def _task_paths(root: Path, task_id: str) -> dict[str, Path]:
 
 
 def _task_manifest_payload(task: TaskSpec, manifest_sha256: str) -> dict[str, Any]:
+    effective_environment = _effective_launch_environment(task)
     return {
         "schema_version": SCHEMA_VERSION,
         "controller_manifest_sha256": manifest_sha256,
@@ -760,6 +858,12 @@ def _task_manifest_payload(task: TaskSpec, manifest_sha256: str) -> dict[str, An
         ),
         "required_log_marker": task.required_log_marker,
         "environment": dict(sorted(task.environment.items())),
+        "controller_safety_environment": (
+            {}
+            if task.adopt_existing_run_id is not None
+            else controller_safety_environment()
+        ),
+        "effective_launch_environment": dict(sorted(effective_environment.items())),
         "config_files": list(task.config_files),
         "semantic_failure_markers": list(task.semantic_failure_markers),
         "data_splits": list(task.data_splits),
@@ -799,11 +903,17 @@ def _initial_instance(instance_id: str) -> dict[str, Any]:
         "worker_pid": None,
         "child_pid": None,
         "worker_identity": None,
+        "launcher_identity": None,
         "gpu_index": None,
         "gpu_uuid": None,
         "heartbeat_at": None,
         "failure_class": None,
         "failure_reason": None,
+        "oom_retry_count": 0,
+        "transient_retry_count": 0,
+        "retry_kind": None,
+        "resume_from_checkpoint": None,
+        "resume_source_output": None,
     }
 
 
@@ -917,6 +1027,10 @@ def _write_task_gate(
                     "gpu_index": instance.get("gpu_index"),
                     "gpu_uuid": instance.get("gpu_uuid"),
                     "expected_output": instance.get("expected_output"),
+                    "retry_kind": instance.get("retry_kind"),
+                    "resume_from_checkpoint": instance.get(
+                        "resume_from_checkpoint"
+                    ),
                 }
                 for instance_id, instance in sorted(instances.items())
             ],
@@ -950,6 +1064,10 @@ def _append_event(
             "command": list(task.command) if task and task.command else None,
             "gpu_index": instance.get("gpu_index") if instance else None,
             "gpu_uuid": instance.get("gpu_uuid") if instance else None,
+            "retry_kind": instance.get("retry_kind") if instance else None,
+            "resume_from_checkpoint": (
+                instance.get("resume_from_checkpoint") if instance else None
+            ),
             "manifest_sha256": manifest.sha256,
         },
     )
@@ -1083,7 +1201,18 @@ def _registry_export_row(
         "retry": {
             "attempt": int(instance.get("attempt", 0)),
             "oom_retry_limit": 1 if task.oom_retry.enabled else 0,
+            "transient_retry_limit": int(
+                manifest.runtime.get(
+                    "max_transient_retries", DEFAULT_MAX_TRANSIENT_RETRIES
+                )
+            ),
+            "kind": instance.get("retry_kind"),
+            "oom_retry_count": int(instance.get("oom_retry_count", 0)),
+            "transient_retry_count": int(
+                instance.get("transient_retry_count", 0)
+            ),
             "failure_class": instance.get("failure_class"),
+            "resume_from_checkpoint": instance.get("resume_from_checkpoint"),
         },
         "retry_count": int(instance.get("attempt", 0)),
         "dependencies": list(task.depends_on),
@@ -1334,13 +1463,111 @@ def classify_failure(
         return "SEMANTIC"
     if any(marker in normalized for marker in OOM_MARKERS):
         return "OOM"
+    if any(marker in normalized for marker in TRANSIENT_IO_MARKERS):
+        return "TRANSIENT_IO"
     return "EXECUTION"
 
 
-def oom_retry_allowed(failure_class: str, attempt: int, policy: OOMRetry) -> bool:
+def oom_retry_allowed(
+    failure_class: str, oom_retry_count: int, policy: OOMRetry
+) -> bool:
     """Authorize only the first OOM retry; semantic/execution failures never retry."""
 
-    return failure_class == "OOM" and policy.enabled and attempt == 0
+    return failure_class == "OOM" and policy.enabled and oom_retry_count == 0
+
+
+def transient_retry_allowed(
+    failure_class: str,
+    transient_retry_count: int,
+    *,
+    max_transient_retries: int,
+) -> bool:
+    """Authorize one fresh-root retry for recognized transient failures."""
+
+    return (
+        failure_class in TRANSIENT_FAILURE_CLASSES
+        and max_transient_retries == DEFAULT_MAX_TRANSIENT_RETRIES
+        and transient_retry_count < max_transient_retries
+    )
+
+
+def _reset_instance_for_retry(
+    instance: dict[str, Any],
+    task: TaskSpec,
+    *,
+    retry_kind: str,
+    retry_reason: str,
+) -> None:
+    attempt = int(instance.get("attempt", 0))
+    resume_from_checkpoint: str | None = None
+    resume_source_output: str | None = None
+    # Preserve B7 progress only for a same-batch transient retry.  An OOM
+    # retry deliberately starts from the clean initializer because its lower
+    # batch changes the frozen dataloader trajectory.
+    if retry_kind in TRANSIENT_FAILURE_CLASSES and task.stage == "B7_PPO_FULL":
+        raw_source_output = instance.get("expected_output")
+        if isinstance(raw_source_output, str):
+            source_output = Path(raw_source_output)
+            latest = find_latest_stable_ppo_resume_checkpoint(source_output)
+            if latest is not None:
+                resume_from_checkpoint = str(latest)
+                resume_source_output = str(source_output.resolve(strict=True))
+                retry_reason += f" from checkpoint {latest.name}"
+    instance.update(
+        {
+            "state": "NOT_STARTED",
+            "attempt": attempt + 1,
+            "run_id": None,
+            "launcher_pid": None,
+            "launcher_identity": None,
+            "worker_pid": None,
+            "child_pid": None,
+            "worker_identity": None,
+            "tmux_session": None,
+            "gpu_index": None,
+            "gpu_uuid": None,
+            "log_path": None,
+            "started_at": None,
+            "heartbeat_at": None,
+            "failure_class": f"{retry_kind}_RETRY",
+            "failure_reason": retry_reason,
+            "oom_retry_count": int(instance.get("oom_retry_count", 0))
+            + int(retry_kind == "OOM"),
+            "transient_retry_count": int(
+                instance.get("transient_retry_count", 0)
+            )
+            + int(retry_kind in TRANSIENT_FAILURE_CLASSES),
+            "retry_kind": retry_kind,
+            "resume_from_checkpoint": resume_from_checkpoint,
+            "resume_source_output": resume_source_output,
+        }
+    )
+
+
+def _fail_or_retry_process_loss(
+    instance: dict[str, Any],
+    task: TaskSpec,
+    *,
+    reason: str,
+    max_transient_retries: int,
+) -> None:
+    transient_retry_count = int(instance.get("transient_retry_count", 0))
+    failure_class = "TRANSIENT_PROCESS_LOSS"
+    if not bool(instance.get("adopted")) and transient_retry_allowed(
+        failure_class,
+        transient_retry_count,
+        max_transient_retries=max_transient_retries,
+    ):
+        _reset_instance_for_retry(
+            instance,
+            task,
+            retry_kind=failure_class,
+            retry_reason="one bounded dead-worker retry authorized: " + reason,
+        )
+        return
+    instance["state"] = "FAILED"
+    instance["failure_class"] = "STALE_PROCESS"
+    instance["failure_reason"] = reason
 
 
 def read_process_identity(pid: int) -> dict[str, Any] | None:
@@ -1376,6 +1603,52 @@ def process_identity_matches(expected: Mapping[str, Any], pid: int) -> bool:
     )
 
 
+def tmux_session_alive(session: str) -> bool:
+    """Return whether one exact detached worker tmux session still exists."""
+
+    executable = shutil.which("tmux")
+    if executable is None or not session:
+        return False
+    completed = subprocess.run(
+        [executable, "has-session", "-t", session],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _timestamp_age_seconds(value: Any, *, now_epoch: float) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, now_epoch - parsed.timestamp())
+
+
+def _launcher_evidence_alive(instance: dict[str, Any]) -> bool:
+    launcher_pid = instance.get("launcher_pid")
+    if isinstance(launcher_pid, int):
+        expected = instance.get("launcher_identity")
+        if isinstance(expected, Mapping):
+            if process_identity_matches(expected, launcher_pid):
+                return True
+        else:
+            identity = read_process_identity(launcher_pid)
+            if identity is not None:
+                instance["launcher_identity"] = identity
+                return True
+    session = instance.get("tmux_session")
+    return isinstance(session, str) and tmux_session_alive(session)
+
+
 def _gpu_lock_path(lock_root: Path, gpu_uuid: str) -> Path:
     component = re.sub(r"[^A-Za-z0-9_.-]+", "_", gpu_uuid).strip("._")
     return lock_root / f"gpu-{component}.lock"
@@ -1403,8 +1676,13 @@ def audit_gpu_locks(
             except AutoDLRuntimeError:
                 metadata = {"state": "CORRUPT"}
         owner_pid = metadata.get("pid")
+        owner_pid_valid = (
+            isinstance(owner_pid, int)
+            and not isinstance(owner_pid, bool)
+            and owner_pid > 0
+        )
         owner_alive = (
-            isinstance(owner_pid, int) and read_process_identity(owner_pid) is not None
+            owner_pid_valid and read_process_identity(owner_pid) is not None
         )
         available: bool | None = None
         if probe_advisory_lock:
@@ -1412,16 +1690,32 @@ def audit_gpu_locks(
         process_pids = sorted(process.pid for process in gpu.processes)
         if metadata.get("state") == "CORRUPT":
             audit = "CORRUPT_METADATA"
-        elif metadata.get("state") != "LOCKED":
-            audit = "AVAILABLE" if not process_pids else "EXTERNAL_BUSY"
-        elif available is True and not owner_alive and not process_pids:
-            audit = "STALE_METADATA"
-        elif owner_alive and available in {False, None}:
-            audit = "HELD"
+        elif metadata.get("state") == "LOCKED" and not owner_pid_valid:
+            # Reclaiming LOCKED metadata requires an explicit PID whose death
+            # can be proven. Missing, boolean, string, or non-positive owners
+            # are malformed evidence and must never become STALE_METADATA.
+            audit = "MALFORMED_LOCK_METADATA"
         elif process_pids:
-            audit = "GPU_PROCESS_PRESENT"
+            audit = (
+                "GPU_PROCESS_PRESENT"
+                if metadata.get("state") == "LOCKED"
+                else "EXTERNAL_BUSY"
+            )
+        elif available is False:
+            # Advisory ownership wins over stale/non-LOCKED JSON metadata.  A
+            # worker can hold the UUID during setup before a compute process
+            # appears, and that race must never be treated as AVAILABLE.
+            audit = "HELD" if owner_alive else "INDETERMINATE"
+        elif metadata.get("state") == "LOCKED":
+            audit = (
+                "STALE_METADATA"
+                if available is True and not owner_alive
+                else "INDETERMINATE"
+            )
+        elif available is True:
+            audit = "AVAILABLE"
         else:
-            audit = "INDETERMINATE"
+            audit = "UNVERIFIED_AVAILABLE"
         rows.append(
             {
                 "gpu_index": gpu.index,
@@ -1434,12 +1728,33 @@ def audit_gpu_locks(
                 "lock_path": str(path),
                 "lock_state": metadata.get("state", "ABSENT"),
                 "lock_owner_pid": owner_pid,
+                "lock_owner_pid_valid": owner_pid_valid,
                 "lock_owner_alive": owner_alive,
                 "advisory_lock_available": available,
                 "audit": audit,
             }
         )
     return rows
+
+
+def allocation_safe_gpu_uuids(
+    audit_rows: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return UUIDs whose lock metadata is safe to allocate right now.
+
+    Advisory-lock availability alone is insufficient: a previous owner PID may
+    still be alive after accidentally closing its file descriptor, and PID
+    reuse must fail closed.  ``STALE_METADATA`` is the only reclaimable locked
+    metadata state because the audit proves both that the owner PID is absent
+    and that the UUID has no compute process.
+    """
+
+    return frozenset(
+        str(row["gpu_uuid"])
+        for row in audit_rows
+        if row.get("audit") in ALLOCATION_SAFE_GPU_AUDITS
+        and isinstance(row.get("gpu_uuid"), str)
+    )
 
 
 def _expand(value: str, context: Mapping[str, str], *, label: str) -> str:
@@ -1472,10 +1787,11 @@ def _runtime_context(
     *,
     python_executable: Path,
     shard_manifest: Path | None,
+    retry_kind: str | None = None,
     extra: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     batch_size = task.oom_retry.initial_batch_size
-    if attempt == 1:
+    if retry_kind == "OOM":
         batch_size = task.oom_retry.retry_batch_size
     shard_match = re.fullmatch(r"shard-(\d+)", instance_id)
     shard_index = str(int(shard_match.group(1))) if shard_match else ""
@@ -1808,6 +2124,10 @@ def _reconcile_instance(
     layout: Any,
     task: TaskSpec,
     instance: dict[str, Any],
+    *,
+    launch_grace_seconds: int = DEFAULT_LAUNCH_GRACE_SECONDS,
+    max_transient_retries: int = DEFAULT_MAX_TRANSIENT_RETRIES,
+    now_epoch: float | None = None,
 ) -> None:
     if instance.get("state") not in ACTIVE_STATES:
         return
@@ -1817,34 +2137,108 @@ def _reconcile_instance(
         instance["failure_class"] = "CONTROLLER"
         instance["failure_reason"] = "active instance has no run_id"
         return
+    current_epoch = time.time() if now_epoch is None else float(now_epoch)
+    age = _timestamp_age_seconds(instance.get("started_at"), now_epoch=current_epoch)
+    within_launch_grace = (
+        age is not None and age <= float(launch_grace_seconds)
+    )
     run_state = _read_run_state(layout, run_id)
     if run_state is None:
-        launcher_pid = instance.get("launcher_pid")
-        if isinstance(launcher_pid, int) and read_process_identity(launcher_pid):
+        if within_launch_grace and _launcher_evidence_alive(instance):
+            instance["state"] = "STARTING"
             instance["heartbeat_at"] = utc_now()
             return
-        instance["state"] = "FAILED"
-        instance["failure_class"] = "STALE_PROCESS"
-        instance["failure_reason"] = "run state absent and launcher PID is not alive"
+        if within_launch_grace:
+            # Preserve the last worker-originated activity timestamp.  The
+            # controller must not manufacture a fresh heartbeat when it has no
+            # live process evidence.
+            instance["failure_reason"] = "waiting within detached launch grace"
+            return
+        _fail_or_retry_process_loss(
+            instance,
+            task,
+            reason="run state absent after bounded launch grace",
+            max_transient_retries=max_transient_retries,
+        )
         return
     observed = str(run_state.get("state", ""))
     instance["worker_pid"] = run_state.get("pid")
     instance["child_pid"] = run_state.get("child_pid")
-    if observed in ACTIVE_STATES:
+    if observed == "STARTING":
         pid = run_state.get("pid")
+        worker_alive = False
+        if isinstance(pid, int) and not isinstance(pid, bool):
+            identity = read_process_identity(pid)
+            if identity is not None:
+                expected_identity = instance.get("worker_identity")
+                if expected_identity is not None and not process_identity_matches(
+                    expected_identity, pid
+                ):
+                    _fail_or_retry_process_loss(
+                        instance,
+                        task,
+                        reason="worker PID generation/command changed",
+                        max_transient_retries=max_transient_retries,
+                    )
+                    return
+                instance["worker_identity"] = identity
+                worker_alive = True
+        if worker_alive:
+            instance["state"] = "STARTING"
+            instance["heartbeat_at"] = utc_now()
+            return
+        if within_launch_grace:
+            instance["state"] = "STARTING"
+            if _launcher_evidence_alive(instance):
+                instance["heartbeat_at"] = utc_now()
+            else:
+                instance["heartbeat_at"] = run_state.get(
+                    "updated_at"
+                ) or instance.get("heartbeat_at")
+            instance["failure_reason"] = "waiting within detached launch grace"
+            return
+        _fail_or_retry_process_loss(
+            instance,
+            task,
+            reason="STARTING worker has no live PID after bounded launch grace",
+            max_transient_retries=max_transient_retries,
+        )
+        return
+    if observed == "RUNNING":
+        pid = run_state.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            _fail_or_retry_process_loss(
+                instance,
+                task,
+                reason="RUNNING exp_run state has no worker PID",
+                max_transient_retries=max_transient_retries,
+            )
+            return
+        identity = read_process_identity(pid)
+        if identity is None:
+            _fail_or_retry_process_loss(
+                instance,
+                task,
+                reason="RUNNING exp_run worker PID is absent",
+                max_transient_retries=max_transient_retries,
+            )
+            return
         expected_identity = instance.get("worker_identity")
-        if isinstance(pid, int):
-            if expected_identity is None:
-                identity = read_process_identity(pid)
-                if identity is not None:
-                    instance["worker_identity"] = identity
-            elif not process_identity_matches(expected_identity, pid):
-                instance["state"] = "FAILED"
-                instance["failure_class"] = "STALE_PROCESS"
-                instance["failure_reason"] = "worker PID generation/command changed"
-                return
-        instance["state"] = observed
+        if expected_identity is not None and not process_identity_matches(
+            expected_identity, pid
+        ):
+            _fail_or_retry_process_loss(
+                instance,
+                task,
+                reason="worker PID generation/command changed",
+                max_transient_retries=max_transient_retries,
+            )
+            return
+        instance["worker_identity"] = identity
+        instance["state"] = "RUNNING"
+        # This heartbeat is backed by a live PID generation check.
         instance["heartbeat_at"] = utc_now()
+        instance["failure_reason"] = None
         return
     if observed == "PASS":
         contract_failures = _verify_passed_instance_contract(layout, task, instance)
@@ -1871,25 +2265,28 @@ def _reconcile_instance(
         semantic_markers=task.semantic_failure_markers,
     )
     attempt = int(instance.get("attempt", 0))
-    if (
-        not bool(instance.get("adopted"))
-        and oom_retry_allowed(failure_class, attempt, task.oom_retry)
+    oom_retry_count = int(instance.get("oom_retry_count", 0))
+    transient_retry_count = int(instance.get("transient_retry_count", 0))
+    retry_kind: str | None = None
+    retry_reason: str | None = None
+    if not bool(instance.get("adopted")) and oom_retry_allowed(
+        failure_class, oom_retry_count, task.oom_retry
     ):
-        instance.update(
-            {
-                "state": "NOT_STARTED",
-                "attempt": 1,
-                "run_id": None,
-                "launcher_pid": None,
-                "worker_pid": None,
-                "child_pid": None,
-                "worker_identity": None,
-                "gpu_index": None,
-                "gpu_uuid": None,
-                "heartbeat_at": None,
-                "failure_class": "OOM_RETRY",
-                "failure_reason": "one bounded lower-batch retry authorized",
-            }
+        retry_kind = "OOM"
+        retry_reason = "one bounded lower-batch OOM retry authorized"
+    elif not bool(instance.get("adopted")) and transient_retry_allowed(
+        failure_class,
+        transient_retry_count,
+        max_transient_retries=max_transient_retries,
+    ):
+        retry_kind = "TRANSIENT_IO"
+        retry_reason = "one bounded transient I/O retry authorized"
+    if retry_kind is not None:
+        _reset_instance_for_retry(
+            instance,
+            task,
+            retry_kind=retry_kind,
+            retry_reason=str(retry_reason),
         )
         return
     instance["state"] = "FAILED"
@@ -1932,6 +2329,14 @@ def scheduler_candidates(
         state = states[task.task_id]
         if state.get("state") not in {"READY", "WAITING_RESOURCE", "RUNNING"}:
             continue
+        instance_values = list((state.get("instances") or {}).values())
+        if any(
+            instance.get("state") in {"FAILED", "BLOCKED"}
+            for instance in instance_values
+        ):
+            # Drain already-running siblings after one shard fails, but never
+            # spend another GPU on a shard whose aggregate can no longer pass.
+            continue
         if any(states[dependency].get("state") != "PASS" for dependency in task.depends_on):
             continue
         for instance_id, instance in sorted((state.get("instances") or {}).items()):
@@ -1948,7 +2353,10 @@ def _aggregate_task_state(
     state: dict[str, Any],
     states: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    if state.get("state") in TERMINAL_STATES:
+    persisted_instances = list((state.get("instances") or {}).values())
+    if state.get("state") in TERMINAL_STATES and not any(
+        instance.get("state") in ACTIVE_STATES for instance in persisted_instances
+    ):
         return
     dependency_states = {
         dependency: str(states[dependency].get("state"))
@@ -1992,7 +2400,27 @@ def _aggregate_task_state(
         return
     instances = list((state.get("instances") or {}).values())
     instance_states = [str(instance.get("state")) for instance in instances]
-    if any(value == "FAILED" for value in instance_states):
+    has_active = any(value in ACTIVE_STATES for value in instance_states)
+    has_failed = any(value == "FAILED" for value in instance_states)
+    has_blocked = any(value == "BLOCKED" for value in instance_states)
+    if has_active and (has_failed or has_blocked):
+        terminal_siblings = [
+            f"{instance.get('instance_id')}:{instance.get('state')}"
+            for instance in instances
+            if instance.get("state") in {"FAILED", "BLOCKED"}
+        ]
+        _set_task_state(
+            root,
+            manifest,
+            task,
+            state,
+            "RUNNING",
+            reason=(
+                "DRAINING_ACTIVE_SIBLINGS_AFTER_TERMINAL_INSTANCE: "
+                + ", ".join(terminal_siblings)
+            ),
+        )
+    elif has_failed:
         failures = [
             f"{instance.get('instance_id')}:{instance.get('failure_class')}"
             for instance in instances
@@ -2001,7 +2429,7 @@ def _aggregate_task_state(
         _set_task_state(
             root, manifest, task, state, "FAILED", reason=", ".join(failures)
         )
-    elif any(value == "BLOCKED" for value in instance_states):
+    elif has_blocked:
         _set_task_state(
             root,
             manifest,
@@ -2014,7 +2442,7 @@ def _aggregate_task_state(
         if task.publish_bace_stage and task.stage in BACE_STAGES and task.shards:
             _publish_sharded_bace_pass(layout, root, manifest, task, state)
         _set_task_state(root, manifest, task, state, "PASS")
-    elif any(value in ACTIVE_STATES for value in instance_states):
+    elif has_active:
         _set_task_state(root, manifest, task, state, "RUNNING")
     elif any(value == "NOT_STARTED" for value in instance_states):
         _set_task_state(root, manifest, task, state, "READY")
@@ -2095,6 +2523,56 @@ def _publish_sharded_bace_pass(
     )
 
 
+def _validated_b7_resume_checkpoint(
+    layout: Any,
+    task: TaskSpec,
+    instance: Mapping[str, Any],
+) -> Path | None:
+    raw = instance.get("resume_from_checkpoint")
+    if raw is None:
+        return None
+    if (
+        task.stage != "B7_PPO_FULL"
+        or instance.get("retry_kind") not in TRANSIENT_FAILURE_CLASSES
+        or int(instance.get("transient_retry_count", 0)) != 1
+    ):
+        raise ControllerError(
+            "Only one recognized transient B7 retry may consume a checkpoint"
+        )
+    unresolved = Path(str(raw)).expanduser()
+    if unresolved.is_symlink():
+        raise ControllerError("B7 resume checkpoint may not be a symlink")
+    checkpoint = unresolved.resolve(strict=True)
+    try:
+        checkpoint.relative_to(layout.artifacts_dir)
+    except ValueError as exc:
+        raise ControllerError(
+            f"B7 resume checkpoint escapes persistent artifacts: {checkpoint}"
+        ) from exc
+    source_raw = instance.get("resume_source_output")
+    if not isinstance(source_raw, str):
+        raise ControllerError("B7 resume checkpoint has no frozen source output")
+    source_output = Path(source_raw).expanduser().resolve(strict=True)
+    if checkpoint.parent != source_output:
+        raise ControllerError("B7 resume checkpoint escaped its failed attempt root")
+    try:
+        resume_manifest = read_stable_ppo_resume_manifest(checkpoint)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ControllerError(f"B7 resume checkpoint failed validation: {exc}") from exc
+    contract = resume_manifest.get("resume_contract")
+    if not isinstance(contract, dict) or contract.get("stage") != "B7_PPO_FULL":
+        raise ControllerError("B7 resume checkpoint has the wrong stage contract")
+    completed = int(resume_manifest["completed_steps"])
+    max_steps = contract.get("max_steps")
+    if (
+        isinstance(max_steps, bool)
+        or not isinstance(max_steps, int)
+        or completed >= max_steps
+    ):
+        raise ControllerError("B7 resume checkpoint is not an incomplete periodic state")
+    return checkpoint
+
+
 def _launch_instance(
     layout: Any,
     root: Path,
@@ -2120,6 +2598,11 @@ def _launch_instance(
         attempt,
         python_executable=python_executable,
         shard_manifest=shard_manifest,
+        retry_kind=(
+            str(instance.get("retry_kind"))
+            if instance.get("retry_kind") is not None
+            else None
+        ),
         extra=extra_context,
     )
     expected_output = _absolute_expanded_path(
@@ -2162,6 +2645,20 @@ def _launch_instance(
     frozen_task_manifest = _task_paths(root, task.task_id)["manifest"].resolve(
         strict=True
     )
+    frozen_task_document = read_json_object(frozen_task_manifest)
+    frozen_environment = frozen_task_document.get("effective_launch_environment")
+    if not isinstance(frozen_environment, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in frozen_environment.items()
+    ):
+        raise ControllerError(
+            f"Frozen task evidence lacks effective launch environment: {task.task_id}"
+        )
+    current_effective_environment = _effective_launch_environment(task)
+    if frozen_environment != current_effective_environment:
+        raise ControllerError(
+            f"Controller safety environment changed after task freeze: {task.task_id}"
+        )
     if frozen_task_manifest not in config_files:
         config_files.append(frozen_task_manifest)
     runner_stage = _expand(task.runner_stage, context, label="runner_stage")
@@ -2225,12 +2722,19 @@ def _launch_instance(
             ) from exc
         required_absolute_outputs.append(path)
         launch_command.extend(("--required-absolute-output-file", str(path)))
-    environment = dict(task.environment)
+    environment = dict(frozen_environment)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    if "BACE_PPO_RESUME_FROM_CHECKPOINT" in task.environment:
+        raise ControllerError(
+            "BACE_PPO_RESUME_FROM_CHECKPOINT is controller-owned retry state"
+        )
+    resume_checkpoint = _validated_b7_resume_checkpoint(layout, task, instance)
+    if resume_checkpoint is not None:
+        environment["BACE_PPO_RESUME_FROM_CHECKPOINT"] = str(resume_checkpoint)
     if task.oom_retry.enabled:
         batch_size = (
             task.oom_retry.retry_batch_size
-            if attempt == 1
+            if instance.get("retry_kind") == "OOM"
             else task.oom_retry.initial_batch_size
         )
         environment[task.oom_retry.batch_env] = str(batch_size)
@@ -2269,11 +2773,41 @@ def _launch_instance(
         check=False,
     )
     if completed.returncode != 0:
-        instance["state"] = "FAILED"
-        instance["failure_class"] = "LAUNCH"
-        instance["failure_reason"] = (
+        launch_failure = (
             completed.stderr.strip() or completed.stdout.strip() or "exp_run launch failed"
         )
+        failure_class = classify_failure(
+            launch_failure,
+            semantic_markers=task.semantic_failure_markers,
+        )
+        if transient_retry_allowed(
+            failure_class,
+            int(instance.get("transient_retry_count", 0)),
+            max_transient_retries=int(
+                manifest.runtime.get(
+                    "max_transient_retries", DEFAULT_MAX_TRANSIENT_RETRIES
+                )
+            ),
+        ):
+            instance.update(
+                {
+                    "state": "NOT_STARTED",
+                    "attempt": attempt + 1,
+                    "transient_retry_count": int(
+                        instance.get("transient_retry_count", 0)
+                    )
+                    + 1,
+                    "retry_kind": "TRANSIENT_IO",
+                    "resume_from_checkpoint": None,
+                    "resume_source_output": None,
+                    "failure_class": "TRANSIENT_IO_RETRY",
+                    "failure_reason": "one bounded transient launch retry authorized",
+                }
+            )
+        else:
+            instance["state"] = "FAILED"
+            instance["failure_class"] = "LAUNCH"
+            instance["failure_reason"] = launch_failure
         _write_task_state(root, state)
         return
     try:
@@ -2287,6 +2821,12 @@ def _launch_instance(
             "state": "STARTING",
             "run_id": response.get("run_id"),
             "launcher_pid": response.get("launcher_pid"),
+            "launcher_identity": (
+                read_process_identity(int(response["launcher_pid"]))
+                if isinstance(response.get("launcher_pid"), int)
+                and not isinstance(response.get("launcher_pid"), bool)
+                else None
+            ),
             "tmux_session": response.get("tmux_session"),
             "gpu_index": gpu.index if gpu else None,
             "gpu_uuid": gpu.uuid if gpu else None,
@@ -2340,6 +2880,22 @@ def _dependency_output_context(
     return context
 
 
+def _summarize_controller_state(counts: Mapping[str, int]) -> str:
+    """Return the dashboard state for one explicit set of task counts."""
+
+    if counts.get("FAILED"):
+        return "FAILED"
+    if counts.get("RUNNING") or counts.get("STARTING"):
+        return "RUNNING"
+    if counts.get("READY") or counts.get("WAITING_RESOURCE"):
+        return "WAITING_RESOURCE"
+    if counts.get("WAITING_DEPENDENCY") or counts.get("BLOCKED"):
+        return "BLOCKED"
+    if counts.get("PASS"):
+        return "PASS"
+    return "NOT_STARTED"
+
+
 def _write_controller_snapshot(
     root: Path,
     manifest: ControllerManifest,
@@ -2350,30 +2906,29 @@ def _write_controller_snapshot(
     gpu_audit: Sequence[Mapping[str, Any]],
 ) -> None:
     counts: dict[str, int] = {}
-    for state in states.values():
+    workload_counts: dict[str, int] = {}
+    for task_id, state in states.items():
         value = str(state.get("state"))
         counts[value] = counts.get(value, 0) + 1
-    if counts.get("FAILED"):
-        overall = "FAILED"
-    elif counts.get("RUNNING") or counts.get("STARTING"):
-        overall = "RUNNING"
-    elif counts.get("READY") or counts.get("WAITING_RESOURCE"):
-        overall = "WAITING_RESOURCE"
-    elif counts.get("WAITING_DEPENDENCY") or counts.get("BLOCKED"):
-        overall = "BLOCKED"
-    elif counts.get("PASS"):
-        overall = "PASS"
-    else:
-        overall = "NOT_STARTED"
+        task = manifest.by_id[task_id]
+        if task.dataset not in {"taste", "tastemolnet"}:
+            workload_counts[value] = workload_counts.get(value, 0) + 1
+    overall = _summarize_controller_state(counts)
+    workload_state = _summarize_controller_state(workload_counts)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "controller_id": manifest.controller_id,
         "manifest_sha256": manifest.sha256,
         "state": overall,
+        # Keep the raw state (including the immutable Taste license gate), but
+        # expose the executable science workload separately so a successful
+        # run is not presented as a failed experiment solely due to Taste.
+        "workload_state": workload_state,
         "pid": os.getpid(),
         "process_identity": read_process_identity(os.getpid()),
         "heartbeat_at": utc_now(),
         "task_counts": counts,
+        "workload_task_counts": workload_counts,
         "tasks": {
             task_id: {
                 "state": state.get("state"),
@@ -2411,6 +2966,7 @@ def _write_controller_snapshot(
             "process_identity": payload["process_identity"],
             "heartbeat_at": payload["heartbeat_at"],
             "state": overall,
+            "workload_state": workload_state,
         },
     )
 
@@ -2480,7 +3036,21 @@ def controller_tick(
     for task in manifest.tasks:
         state = states[task.task_id]
         for instance in (state.get("instances") or {}).values():
-            _reconcile_instance(layout, task, instance)
+            _reconcile_instance(
+                layout,
+                task,
+                instance,
+                launch_grace_seconds=int(
+                    manifest.runtime.get(
+                        "launch_grace_seconds", DEFAULT_LAUNCH_GRACE_SECONDS
+                    )
+                ),
+                max_transient_retries=int(
+                    manifest.runtime.get(
+                        "max_transient_retries", DEFAULT_MAX_TRANSIENT_RETRIES
+                    )
+                ),
+            )
         _write_task_state(root, state)
     # Repeated topological passes let a newly completed parent unlock children
     # in this same work-conserving tick.
@@ -2528,6 +3098,7 @@ def controller_tick(
     cpu_candidates = cpu_candidates[:cpu_capacity]
     observations: Sequence[GPUObservation] = ()
     selected: list[GPUObservation] = []
+    gpu_audit: list[dict[str, Any]] = []
     if gpu_candidates and not dry_run and not resource_failures:
         def sampling_sleep(seconds: float) -> None:
             _write_heartbeat_pulse(root, manifest, state="SAMPLING_GPU_IDLE")
@@ -2548,16 +3119,27 @@ def controller_tick(
             sleep=sampling_sleep,
         )
         observations = stable.observations
+        gpu_audit = audit_gpu_locks(
+            layout.locks_dir,
+            observations,
+            probe_advisory_lock=True,
+        )
         selected = stable.selected(
             max_gpus=FOUR_GPU_RECOVERY_LIMIT,
             hard_limit=FOUR_GPU_RECOVERY_LIMIT,
             lock_root=layout.locks_dir,
+            eligible_uuids=allocation_safe_gpu_uuids(gpu_audit),
         )
     else:
         try:
             observations = gpu_sampler()
         except AutoDLRuntimeError:
             observations = ()
+        gpu_audit = audit_gpu_locks(
+            layout.locks_dir,
+            observations,
+            probe_advisory_lock=not dry_run,
+        )
 
     if resource_failures:
         for task_id, _instance_id in candidates:
@@ -2628,9 +3210,6 @@ def controller_tick(
             root, layout, manifest, by_id[task_id], states[task_id], states
         )
 
-    gpu_audit = audit_gpu_locks(
-        layout.locks_dir, observations, probe_advisory_lock=not dry_run
-    )
     _write_controller_snapshot(
         root,
         manifest,
@@ -2689,9 +3268,15 @@ def run_controller(args: argparse.Namespace) -> int:
                 for task_id, state in states.items()
                 if manifest.by_id[task_id].dataset not in {"taste", "tastemolnet"}
             ]
+            active_instances = [
+                instance
+                for state in non_taste
+                for instance in (state.get("instances") or {}).values()
+                if instance.get("state") in ACTIVE_STATES
+            ]
             if non_taste and all(
                 state.get("state") in TERMINAL_STATES for state in non_taste
-            ):
+            ) and not active_instances:
                 return 0 if all(
                     state.get("state") in {"PASS", "SKIPPED"} for state in non_taste
                 ) else 4

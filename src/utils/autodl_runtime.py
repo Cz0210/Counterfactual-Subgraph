@@ -523,6 +523,7 @@ class StableGPUInventory:
         max_gpus: int,
         lock_root: Path | None = None,
         hard_limit: int = MAX_AUTODL_GPUS,
+        eligible_uuids: frozenset[str] | None = None,
     ) -> list[GPUObservation]:
         limit = validate_max_gpus(max_gpus, hard_limit=hard_limit)
         if lock_root is not None:
@@ -537,6 +538,8 @@ class StableGPUInventory:
         selected: list[GPUObservation] = []
         for observation in self.observations:
             if observation.uuid not in self.stable_idle_uuids:
+                continue
+            if eligible_uuids is not None and observation.uuid not in eligible_uuids:
                 continue
             if lock_root is not None and not gpu_lock_available(lock_root, observation.uuid):
                 continue

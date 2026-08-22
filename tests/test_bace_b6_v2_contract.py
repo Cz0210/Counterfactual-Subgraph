@@ -7,16 +7,19 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import torch
 from safetensors.torch import save_file
 
 from src.train.bace_gnn_ppo import (
+    B6_V2_SCHEMA,
     BacePPOObserver,
     REWARD_PROVENANCE_FIELDS,
     build_ppo_gate,
     build_reward_manifest,
     model_parameter_hash,
     validate_adapter_checkpoint_reload,
+    validate_b6_v2_predecessor,
 )
 
 
@@ -162,6 +165,132 @@ def _canary_preflight(*, real_gnn_inference: bool = True) -> dict:
         "formal_b6_v2": False,
         "releases_b7": False,
     }
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _materialize_passing_b6_root(root: Path) -> tuple[Path, dict[str, str]]:
+    gnn_checkpoint = root / "frozen-gine"
+    gnn_checkpoint.mkdir(parents=True)
+    periodic = root / "checkpoint-5"
+    periodic.mkdir(parents=True)
+    adapter_config = {"peft_type": "LORA", "r": 8}
+    _write_json(root / "adapter_config.json", adapter_config)
+    _write_json(periodic / "adapter_config.json", adapter_config)
+    weights = {"lora_weight": torch.tensor([0.25])}
+    save_file(weights, root / "adapter_model.safetensors")
+    save_file(weights, periodic / "adapter_model.safetensors")
+    final_reload = validate_adapter_checkpoint_reload(root)
+    periodic_reload = validate_adapter_checkpoint_reload(periodic)
+
+    observer = BacePPOObserver()
+    for step in range(1, 6):
+        observer.on_update(
+            step_index=step,
+            batch_ids=["p0"],
+            reward_logs=[_reward_row()],
+            metrics=_metrics(),
+        )
+    observer.on_checkpoint(
+        step_index=5,
+        checkpoint_dir=periodic,
+        checkpoint_kind="periodic",
+    )
+    observer.on_finish(final_output_dir=root, global_step=5)
+    checkpoint_id = "gine-sha"
+    policy_initializer_hash = "4" * 64
+    reference_policy_hash = "3" * 64
+    oracle = {
+        **_oracle_provenance(),
+        "schema_version": "bace_gnn_ppo_oracle_provenance_v1",
+        "checkpoint_dir": str(gnn_checkpoint),
+        "checkpoint_id": checkpoint_id,
+        "backbone": "gine",
+        "temperature": 1.2,
+        "temperature_calibration_hash": "temperature-sha",
+        "feature_schema_hash": "feature-sha",
+        "oracle_load_count": 1,
+        "gnn_scored_deletion_count": 1,
+    }
+    row = {
+        **_reward_row(),
+        "oracle_checkpoint_hash": checkpoint_id,
+        "policy_initializer_hash": policy_initializer_hash,
+        "reference_policy_hash": reference_policy_hash,
+    }
+    candidate_path = root / "candidate_pool.jsonl"
+    candidate_path.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    oracle_path = root / "oracle_provenance.json"
+    _write_json(oracle_path, oracle)
+    reward = build_reward_manifest([row], oracle_provenance=oracle)
+    reward_path = root / "reward_manifest.json"
+    _write_json(reward_path, reward)
+    gate = build_ppo_gate(
+        stage="B6_PPO_SMOKE_V2",
+        policy_parameter_hash_before="1" * 64,
+        policy_parameter_hash_after="2" * 64,
+        reference_parameter_hash_before=reference_policy_hash,
+        reference_parameter_hash_after=reference_policy_hash,
+        observer=observer,
+        checkpoint_reload=final_reload,
+        periodic_checkpoint_reload=periodic_reload,
+        reward_manifest=reward,
+        oracle_provenance=oracle,
+        expected_checkpoints=(5,),
+    )
+    assert gate["schema_version"] == B6_V2_SCHEMA
+    assert gate["status"] == "PASS"
+    gate_path = root / "ppo_gate.json"
+    _write_json(gate_path, gate)
+    identities = {
+        "checkpoint_id": checkpoint_id,
+        "gnn_checkpoint": str(gnn_checkpoint),
+        "policy_initializer_hash": policy_initializer_hash,
+        "git_commit": "5" * 40,
+    }
+    manifest = {
+        **gate,
+        **identities,
+        "reference_policy_hash": reference_policy_hash,
+        "stable_loop": "scripts.train_ppo_stable.run_stable_decoded_chem_ppo_loop",
+        "shared_algorithm_reimplemented": False,
+        "policy_checkpoint_hash": final_reload["policy_checkpoint_hash"],
+        "policy_checkpoint_hash_payload": final_reload[
+            "policy_checkpoint_hash_payload"
+        ],
+        "final_adapter_config_identity": final_reload["adapter_config"],
+        "final_adapter_weights_identity": final_reload["adapter_weights"],
+        "last_periodic_checkpoint_step": 5,
+        "last_periodic_policy_checkpoint_hash": periodic_reload[
+            "policy_checkpoint_hash"
+        ],
+        "last_periodic_policy_checkpoint_hash_payload": periodic_reload[
+            "policy_checkpoint_hash_payload"
+        ],
+        "last_periodic_adapter_config_identity": periodic_reload["adapter_config"],
+        "last_periodic_adapter_weights_identity": periodic_reload["adapter_weights"],
+        "candidate_pool": str(candidate_path),
+        "candidate_pool_sha256": _sha256(candidate_path),
+        "reward_manifest": str(reward_path),
+        "reward_manifest_sha256": _sha256(reward_path),
+        "oracle_provenance": str(oracle_path),
+        "oracle_provenance_sha256": _sha256(oracle_path),
+        "ppo_gate_sha256": _sha256(gate_path),
+        "output_root": str(root),
+    }
+    manifest_path = root / "ppo_smoke_manifest.json"
+    _write_json(manifest_path, manifest)
+    (root / "PASS").write_text("[BACE_B6_V2_PASS]\n", encoding="utf-8")
+    return manifest_path, identities
 
 
 def test_b6_v2_requires_real_updates_parameter_change_and_reload(
@@ -397,6 +526,54 @@ def test_b7_contract_requires_300_updates_and_all_six_periodic_checkpoints() -> 
     assert gate["expected_checkpoints_saved"] is True
     assert gate["last_50_reward_collapse"] is False
     assert gate["status"] == "PASS"
+
+
+def test_b7_deeply_revalidates_b6_manifest_and_physical_adapter_bytes(
+    tmp_path: Path,
+) -> None:
+    manifest_path, identities = _materialize_passing_b6_root(tmp_path)
+    result = validate_b6_v2_predecessor(
+        manifest_path,
+        checkpoint_id=identities["checkpoint_id"],
+        gnn_checkpoint=identities["gnn_checkpoint"],
+        policy_initializer_hash=identities["policy_initializer_hash"],
+        git_commit=identities["git_commit"],
+    )
+    assert result["manifest"]["ppo_update_count"] == 5
+    assert result["validated_policy_checkpoint"]["checkpoint_reload_pass"] is True
+
+    # Keep the adapter valid and reloadable while changing its physical bytes;
+    # a shallow manifest-only check would miss this mutation.
+    save_file(
+        {"lora_weight": torch.tensor([0.75])},
+        tmp_path / "adapter_model.safetensors",
+    )
+    with pytest.raises(ValueError, match="mutated B6-v2 final adapter bytes"):
+        validate_b6_v2_predecessor(
+            manifest_path,
+            checkpoint_id=identities["checkpoint_id"],
+            gnn_checkpoint=identities["gnn_checkpoint"],
+            policy_initializer_hash=identities["policy_initializer_hash"],
+            git_commit=identities["git_commit"],
+        )
+
+
+def test_b7_rejects_b6_candidate_bytes_drift(tmp_path: Path) -> None:
+    manifest_path, identities = _materialize_passing_b6_root(tmp_path)
+    candidate_path = tmp_path / "candidate_pool.jsonl"
+    original = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate_path.write_text(
+        json.dumps({**original, "reward_total": 4.2}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="artifact hash drift"):
+        validate_b6_v2_predecessor(
+            manifest_path,
+            checkpoint_id=identities["checkpoint_id"],
+            gnn_checkpoint=identities["gnn_checkpoint"],
+            policy_initializer_hash=identities["policy_initializer_hash"],
+            git_commit=identities["git_commit"],
+        )
 
 
 def test_official_runner_calls_shared_stable_loop_and_has_no_private_optimizer() -> None:

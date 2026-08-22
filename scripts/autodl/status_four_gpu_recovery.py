@@ -292,6 +292,7 @@ def render_table(payload: dict[str, Any]) -> str:
         f"AutoDL four-GPU recovery @ {payload['refreshed_at']}",
         f"CONTROLLER {controller.get('controller_id')} "
         f"state={controller.get('state')} pid={controller.get('pid', '-')} "
+        f"workload_state={controller.get('workload_state', controller.get('state'))} "
         f"heartbeat_age={controller.get('heartbeat_age_seconds', '-')}s",
         "",
         "GPU / UUID LOCK AUDIT",

@@ -146,6 +146,9 @@ case "$ACTION" in
         exit 64
       fi
       PPO_COMMAND+=(--b6-v2-manifest "$BACE_B6_V2_MANIFEST")
+      if [[ -n "${BACE_PPO_RESUME_FROM_CHECKPOINT:-}" ]]; then
+        PPO_COMMAND+=(--resume-from-checkpoint "$BACE_PPO_RESUME_FROM_CHECKPOINT")
+      fi
     fi
     exec "${PPO_COMMAND[@]}"
     ;;

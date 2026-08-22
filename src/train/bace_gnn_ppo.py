@@ -484,6 +484,39 @@ class BacePPOObserver:
             for key, value in kwargs.items()
         }
 
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "bace_ppo_observer_v1",
+            "updates": [dict(value) for value in self.updates],
+            "checkpoints": [dict(value) for value in self.checkpoints],
+            "finish": dict(self.finish) if self.finish is not None else None,
+        }
+
+    def load_state_dict(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("schema_version") != "bace_ppo_observer_v1":
+            raise ValueError("BACE PPO observer resume schema is invalid")
+        updates = payload.get("updates")
+        checkpoints = payload.get("checkpoints")
+        finish = payload.get("finish")
+        if not isinstance(updates, list) or not all(
+            isinstance(value, dict) for value in updates
+        ):
+            raise ValueError("BACE PPO observer updates are malformed")
+        if not isinstance(checkpoints, list) or not all(
+            isinstance(value, dict) for value in checkpoints
+        ):
+            raise ValueError("BACE PPO observer checkpoints are malformed")
+        if finish is not None and not isinstance(finish, dict):
+            raise ValueError("BACE PPO observer finish state is malformed")
+        steps = [value.get("step_index") for value in updates]
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in steps):
+            raise ValueError("BACE PPO observer update steps are malformed")
+        if steps != list(range(1, len(steps) + 1)):
+            raise ValueError("BACE PPO observer update history is not contiguous")
+        self.updates = [dict(value) for value in updates]
+        self.checkpoints = [dict(value) for value in checkpoints]
+        self.finish = dict(finish) if finish is not None else None
+
 
 def _finite(value: Any) -> bool:
     try:
@@ -540,6 +573,285 @@ def build_reward_manifest(
             and row.get("test_loaded") is False
             for row in rows
         ),
+    }
+
+
+def _physical_file(path: Path, *, label: str) -> Path:
+    candidate = path.expanduser()
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError(f"B6-v2 {label} must be one physical file: {candidate}")
+    resolved = candidate.resolve(strict=True)
+    if resolved.stat().st_size <= 0:
+        raise ValueError(f"B6-v2 {label} is empty: {resolved}")
+    return resolved
+
+
+def _json_object(path: Path, *, label: str) -> dict[str, Any]:
+    physical = _physical_file(path, label=label)
+    try:
+        payload = json.loads(physical.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"B6-v2 {label} is invalid JSON: {physical}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"B6-v2 {label} must contain one JSON object")
+    return payload
+
+
+def _jsonl_objects(path: Path, *, label: str) -> list[dict[str, Any]]:
+    physical = _physical_file(path, label=label)
+    rows: list[dict[str, Any]] = []
+    with physical.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"B6-v2 {label} has invalid JSON on line {line_number}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"B6-v2 {label} line {line_number} is not one object"
+                )
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"B6-v2 {label} has no candidate rows")
+    return rows
+
+
+def validate_b6_v2_predecessor(
+    manifest_path: str | Path,
+    *,
+    checkpoint_id: str,
+    gnn_checkpoint: str | Path,
+    policy_initializer_hash: str,
+    git_commit: str,
+) -> dict[str, Any]:
+    """Deeply validate the complete on-disk B6-v2 gate before releasing B7."""
+
+    unresolved = Path(manifest_path).expanduser()
+    if unresolved.is_symlink() or unresolved.parent.is_symlink():
+        raise ValueError("B7 rejected symlinked B6-v2 predecessor manifest")
+    path = _physical_file(unresolved, label="predecessor manifest")
+    root = path.parent
+    if root.is_symlink() or path.name != "ppo_smoke_manifest.json":
+        raise ValueError("B7 rejected non-canonical B6-v2 predecessor root")
+    payload = _json_object(path, label="predecessor manifest")
+    expected_gnn_checkpoint = str(Path(gnn_checkpoint).expanduser().resolve(strict=True))
+    required_exact = {
+        "schema_version": B6_V2_SCHEMA,
+        "stage": "B6_PPO_SMOKE_V2",
+        "status": "PASS",
+        "failures": [],
+        "oracle_backend": "gnn",
+        "dataset": "bace",
+        "classifier_type": "gnn",
+        "source_label": 1,
+        "num_classes": 2,
+        "rf_oracle_used": False,
+        "calibration_loaded": False,
+        "calibration_dataset_loaded": False,
+        "frozen_temperature_calibration_loaded": True,
+        "test_loaded": False,
+        "checkpoint_id": checkpoint_id,
+        "gnn_checkpoint": expected_gnn_checkpoint,
+        "policy_initializer_hash": policy_initializer_hash,
+        "git_commit": git_commit,
+        "stable_loop": "scripts.train_ppo_stable.run_stable_decoded_chem_ppo_loop",
+        "shared_algorithm_reimplemented": False,
+    }
+    failures = [
+        f"{key}={payload.get(key)!r}"
+        for key, expected in required_exact.items()
+        if payload.get(key) != expected
+    ]
+    required_true = (
+        "ppo_training_performed",
+        "minimum_update_count_met",
+        "bounded_update_count_met",
+        "policy_parameters_changed",
+        "reference_parameters_unchanged",
+        "checkpoint_saved",
+        "checkpoint_reload_pass",
+        "periodic_checkpoint_reload_pass",
+        "checkpoint_artifact_bound",
+        "periodic_checkpoint_artifact_bound",
+        "final_matches_last_periodic_checkpoint",
+        "candidate_pool_saved",
+        "reward_manifest_saved",
+        "all_reward_values_finite",
+        "all_update_metrics_finite",
+        "at_least_one_valid_candidate",
+        "at_least_one_gnn_scored_deletion",
+        "reward_provenance_complete",
+        "gnn_oracle_backend",
+        "bace_classifier_contract_pass",
+        "rf_guard_pass",
+        "calibration_not_loaded",
+        "calibration_dataset_not_loaded",
+        "frozen_temperature_calibration_present",
+        "test_not_loaded",
+        "candidate_oracle_contract_pass",
+        "kl_within_hard_limit",
+    )
+    failures.extend(
+        f"{key} is not true" for key in required_true if payload.get(key) is not True
+    )
+    update_count = payload.get("ppo_update_count")
+    optimizer_steps = payload.get("optimizer_step_count")
+    if (
+        isinstance(update_count, bool)
+        or not isinstance(update_count, int)
+        or not 5 <= update_count <= 10
+    ):
+        failures.append(f"ppo_update_count={update_count!r}")
+    if optimizer_steps != update_count:
+        failures.append(f"optimizer_step_count={optimizer_steps!r}")
+    before = payload.get("policy_parameter_hash_before")
+    after = payload.get("policy_parameter_hash_after")
+    if not isinstance(before, str) or not isinstance(after, str) or before == after:
+        failures.append("policy parameter hashes do not prove an update")
+    ref_before = payload.get("reference_parameter_hash_before")
+    ref_after = payload.get("reference_parameter_hash_after")
+    if not isinstance(ref_before, str) or ref_before != ref_after:
+        failures.append("reference parameter hashes are not frozen")
+    if failures:
+        raise ValueError("B7 rejected B6-v2 predecessor: " + ", ".join(failures))
+
+    pass_path = _physical_file(root / "PASS", label="PASS marker")
+    if pass_path.read_text(encoding="utf-8") != "[BACE_B6_V2_PASS]\n":
+        raise ValueError("B7 rejected malformed B6-v2 PASS marker")
+    gate_path = _physical_file(root / "ppo_gate.json", label="PPO gate")
+    gate = _json_object(gate_path, label="PPO gate")
+    for key, value in gate.items():
+        if payload.get(key) != value:
+            raise ValueError(f"B7 rejected B6-v2 manifest/gate drift: {key}")
+
+    final_reload = validate_adapter_checkpoint_reload(root)
+    if (
+        final_reload["policy_checkpoint_hash"] != payload.get("policy_checkpoint_hash")
+        or final_reload["policy_checkpoint_hash_payload"]
+        != payload.get("policy_checkpoint_hash_payload")
+        or final_reload["adapter_config"]
+        != payload.get("final_adapter_config_identity")
+        or final_reload["adapter_weights"]
+        != payload.get("final_adapter_weights_identity")
+    ):
+        raise ValueError("B7 rejected mutated B6-v2 final adapter bytes")
+    last_step = payload.get("last_periodic_checkpoint_step")
+    if last_step != update_count:
+        raise ValueError("B7 rejected inconsistent B6-v2 periodic checkpoint step")
+    periodic_root = root / f"checkpoint-{last_step}"
+    periodic_reload = validate_adapter_checkpoint_reload(periodic_root)
+    if (
+        periodic_reload["policy_checkpoint_hash"]
+        != payload.get("last_periodic_policy_checkpoint_hash")
+        or periodic_reload["policy_checkpoint_hash_payload"]
+        != payload.get("last_periodic_policy_checkpoint_hash_payload")
+        or periodic_reload["adapter_config"]
+        != payload.get("last_periodic_adapter_config_identity")
+        or periodic_reload["adapter_weights"]
+        != payload.get("last_periodic_adapter_weights_identity")
+        or periodic_reload["policy_checkpoint_hash"]
+        != final_reload["policy_checkpoint_hash"]
+    ):
+        raise ValueError("B7 rejected mutated B6-v2 periodic adapter bytes")
+
+    oracle_path = _physical_file(root / "oracle_provenance.json", label="oracle provenance")
+    reward_path = _physical_file(root / "reward_manifest.json", label="reward manifest")
+    candidate_path = _physical_file(root / "candidate_pool.jsonl", label="candidate pool")
+    oracle = _json_object(oracle_path, label="oracle provenance")
+    stored_reward = _json_object(reward_path, label="reward manifest")
+    rows = _jsonl_objects(candidate_path, label="candidate pool")
+    rebuilt_reward = build_reward_manifest(rows, oracle_provenance=oracle)
+    if stored_reward != rebuilt_reward:
+        raise ValueError("B7 rejected B6-v2 reward/candidate provenance drift")
+    expected_oracle = {
+        "schema_version": "bace_gnn_ppo_oracle_provenance_v1",
+        "dataset": "bace",
+        "oracle_backend": "gnn",
+        "classifier_type": "gnn",
+        "rf_oracle_used": False,
+        "checkpoint_dir": expected_gnn_checkpoint,
+        "checkpoint_id": checkpoint_id,
+        "backbone": "gine",
+        "num_classes": 2,
+        "source_label": 1,
+        "calibration_loaded": False,
+        "calibration_dataset_loaded": False,
+        "frozen_temperature_calibration_loaded": True,
+        "test_loaded": False,
+        "oracle_load_count": 1,
+    }
+    oracle_mismatches = [
+        key for key, expected in expected_oracle.items() if oracle.get(key) != expected
+    ]
+    if not _finite(oracle.get("temperature")):
+        oracle_mismatches.append("temperature")
+    for hash_key in ("temperature_calibration_hash", "feature_schema_hash"):
+        value = oracle.get(hash_key)
+        if not isinstance(value, str) or not value:
+            oracle_mismatches.append(hash_key)
+    scored_count = oracle.get("gnn_scored_deletion_count")
+    if (
+        isinstance(scored_count, bool)
+        or not isinstance(scored_count, int)
+        or scored_count < 1
+    ):
+        oracle_mismatches.append("gnn_scored_deletion_count")
+    reference_policy_hash = payload.get("reference_policy_hash")
+    if not isinstance(reference_policy_hash, str) or len(reference_policy_hash) != 64:
+        oracle_mismatches.append("reference_policy_hash")
+    invalid_rows = [
+        index
+        for index, row in enumerate(rows)
+        if row.get("dataset") != "bace"
+        or row.get("source_label") != 1
+        or row.get("oracle_backend") != "gnn"
+        or row.get("rf_oracle_used") is not False
+        or row.get("calibration_loaded") is not False
+        or row.get("calibration_dataset_loaded") is not False
+        or row.get("frozen_temperature_calibration_loaded") is not True
+        or row.get("test_loaded") is not False
+        or row.get("oracle_checkpoint_hash") != checkpoint_id
+        or row.get("policy_initializer_hash") != policy_initializer_hash
+        or row.get("reference_policy_hash") != reference_policy_hash
+    ]
+    if invalid_rows:
+        oracle_mismatches.append(f"candidate_rows={invalid_rows[:5]}")
+    if oracle_mismatches:
+        raise ValueError(
+            "B7 rejected B6-v2 oracle provenance: "
+            + ", ".join(sorted(set(oracle_mismatches)))
+        )
+    artifact_hashes = {
+        "ppo_gate_sha256": _sha256_file(gate_path),
+        "candidate_pool_sha256": _sha256_file(candidate_path),
+        "reward_manifest_sha256": _sha256_file(reward_path),
+        "oracle_provenance_sha256": _sha256_file(oracle_path),
+    }
+    mismatched_hashes = [
+        key for key, value in artifact_hashes.items() if payload.get(key) != value
+    ]
+    if mismatched_hashes:
+        raise ValueError(
+            "B7 rejected B6-v2 artifact hash drift: " + ", ".join(mismatched_hashes)
+        )
+    if payload.get("candidate_pool") != str(candidate_path):
+        raise ValueError("B7 rejected non-canonical B6-v2 candidate pool path")
+    if payload.get("reward_manifest") != str(reward_path):
+        raise ValueError("B7 rejected non-canonical B6-v2 reward manifest path")
+    if payload.get("oracle_provenance") != str(oracle_path):
+        raise ValueError("B7 rejected non-canonical B6-v2 oracle provenance path")
+    if payload.get("output_root") != str(root):
+        raise ValueError("B7 rejected non-canonical B6-v2 output root")
+    return {
+        "path": str(path),
+        "sha256": _sha256_file(path),
+        "manifest": payload,
+        "validated_policy_checkpoint": final_reload,
+        "validated_artifact_hashes": artifact_hashes,
     }
 
 
@@ -905,4 +1217,5 @@ __all__ = [
     "model_parameter_hash",
     "run_canary_connected_deletion_preflight",
     "validate_adapter_checkpoint_reload",
+    "validate_b6_v2_predecessor",
 ]

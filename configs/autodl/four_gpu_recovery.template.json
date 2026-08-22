@@ -10,7 +10,9 @@
     "min_free_memory_mb": 16000,
     "idle_util_threshold": 10,
     "worker_launcher": "auto",
-    "max_cpu_tasks": 2
+    "max_cpu_tasks": 2,
+    "launch_grace_seconds": 180,
+    "max_transient_retries": 1
   },
   "resource_gates": {
     "min_available_ram_gb": 32,
@@ -101,6 +103,8 @@
       "id": "bace_policy_provenance_audit",
       "dataset": "bace",
       "stage": "BACE_POLICY_PROVENANCE_AUDIT",
+      "runner_dataset": "bace-gnn-clean-audit",
+      "runner_stage": "BACE_POLICY_PROVENANCE_AUDIT",
       "external_bace_stage": "B5_ORACLE_SMOKE",
       "depends_on": [],
       "resource": "cpu",
@@ -119,7 +123,7 @@
         "PASS"
       ],
       "required_absolute_output_files": [
-        "{artifact_root}/autodl/audits/bace_policy_initializer_provenance___CONFIGURE_AUDIT_TIMESTAMP__.csv"
+        "{artifact_root}/autodl/audits/bace_policy_initializer_provenance___CONFIGURE_AUDIT_TIMESTAMP___attempt-{attempt}.csv"
       ],
       "required_log_marker": "[BACE_POLICY_PROVENANCE_AUDIT_PASS]",
       "environment": {
@@ -129,7 +133,7 @@
         "BACE_GNN_CHECKPOINT": "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
         "BACE_GNN_CHECKPOINT_HASH": "__CONFIGURE_B4_CHECKPOINT_SHA256__",
         "CHEMLLM_MODEL_PATH": "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
-        "BACE_POLICY_AUDIT_CSV": "{artifact_root}/autodl/audits/bace_policy_initializer_provenance___CONFIGURE_AUDIT_TIMESTAMP__.csv",
+        "BACE_POLICY_AUDIT_CSV": "{artifact_root}/autodl/audits/bace_policy_initializer_provenance___CONFIGURE_AUDIT_TIMESTAMP___attempt-{attempt}.csv",
         "OUTPUT_ROOT": "{artifact_root}/bace/gnn_ppo/provenance-audit/attempt-{attempt}"
       },
       "blocked_reason": "CONFIGURE_ABSOLUTE_COMMIT_B_INPUT_PATHS_BEFORE_LAUNCH"
@@ -138,6 +142,8 @@
       "id": "bace_clean_initializer",
       "dataset": "bace",
       "stage": "BACE_CLEAN_INITIALIZER_BUILD",
+      "runner_dataset": "bace-gnn-clean-init",
+      "runner_stage": "BACE_CLEAN_INITIALIZER_BUILD",
       "depends_on": ["bace_policy_provenance_audit"],
       "resource": "gpu",
       "priority": 35,
@@ -147,7 +153,7 @@
         "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
         "BACE_CLEAN_INITIALIZER_BUILD"
       ],
-      "input_manifest": "{artifact_root}/bace/gnn_ppo/provenance-audit/attempt-0/audit_manifest.json",
+      "input_manifest": "{dep_bace_policy_provenance_audit_output}/audit_manifest.json",
       "expected_output": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-{attempt}",
       "required_output_files": [
         "policy_provenance.json",
@@ -165,7 +171,7 @@
         "BACE_GNN_CHECKPOINT": "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
         "BACE_GNN_CHECKPOINT_HASH": "__CONFIGURE_B4_CHECKPOINT_SHA256__",
         "CHEMLLM_MODEL_PATH": "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
-        "BACE_POLICY_AUDIT_SELECTION": "{artifact_root}/bace/gnn_ppo/provenance-audit/attempt-0/initializer_selection.json",
+        "BACE_POLICY_AUDIT_SELECTION": "{dep_bace_policy_provenance_audit_output}/initializer_selection.json",
         "OUTPUT_ROOT": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-{attempt}"
       },
       "blocked_reason": "CONFIGURE_ABSOLUTE_COMMIT_B_INPUT_PATHS_BEFORE_LAUNCH"
@@ -185,7 +191,7 @@
         "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
         "BACE_GNN_PPO_ADAPTER_CANARY"
       ],
-      "input_manifest": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/policy_provenance.json",
+      "input_manifest": "{dep_bace_clean_initializer_output}/policy_provenance.json",
       "expected_output": "{artifact_root}/bace/gnn_ppo/adapter-canary/attempt-{attempt}",
       "required_output_files": [
         "run_manifest.json",
@@ -194,6 +200,7 @@
         "oracle_provenance.json",
         "reward_manifest.json",
         "ppo_gate.json",
+        "canary_connected_deletion_preflight.json",
         "canary_manifest.json",
         "adapter_config.json",
         "PASS"
@@ -209,8 +216,8 @@
         "BACE_GNN_CHECKPOINT": "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
         "BACE_GNN_CHECKPOINT_HASH": "__CONFIGURE_B4_CHECKPOINT_SHA256__",
         "CHEMLLM_MODEL_PATH": "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
-        "BACE_POLICY_INITIALIZER": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/adapter",
-        "BACE_POLICY_PROVENANCE_MANIFEST": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/policy_provenance.json",
+        "BACE_POLICY_INITIALIZER": "{dep_bace_clean_initializer_output}/adapter",
+        "BACE_POLICY_PROVENANCE_MANIFEST": "{dep_bace_clean_initializer_output}/policy_provenance.json",
         "OUTPUT_ROOT": "{artifact_root}/bace/gnn_ppo/adapter-canary/attempt-{attempt}"
       },
       "blocked_reason": "CONFIGURE_ABSOLUTE_COMMIT_B_INPUT_PATHS_BEFORE_LAUNCH"
@@ -223,7 +230,7 @@
       "runner_stage": "B6_PPO_SMOKE_V2",
       "publish_bace_stage": false,
       "external_bace_stage": "B5_ORACLE_SMOKE",
-      "depends_on": ["bace_gnn_ppo_adapter_canary"],
+      "depends_on": ["bace_gnn_ppo_adapter_canary", "bace_clean_initializer"],
       "resource": "gpu",
       "priority": 40,
       "data_splits": ["train"],
@@ -232,7 +239,7 @@
         "{project_root}/scripts/autodl/run_bace_gnn_ppo_stage.sh",
         "B6_PPO_SMOKE_V2"
       ],
-      "input_manifest": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/policy_provenance.json",
+      "input_manifest": "{dep_bace_clean_initializer_output}/policy_provenance.json",
       "expected_output": "{artifact_root}/bace/gnn_ppo/b6-v2/attempt-{attempt}",
       "required_output_files": [
         "run_manifest.json",
@@ -256,8 +263,8 @@
         "BACE_GNN_CHECKPOINT": "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
         "BACE_GNN_CHECKPOINT_HASH": "__CONFIGURE_B4_CHECKPOINT_SHA256__",
         "CHEMLLM_MODEL_PATH": "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
-        "BACE_POLICY_INITIALIZER": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/adapter",
-        "BACE_POLICY_PROVENANCE_MANIFEST": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/policy_provenance.json",
+        "BACE_POLICY_INITIALIZER": "{dep_bace_clean_initializer_output}/adapter",
+        "BACE_POLICY_PROVENANCE_MANIFEST": "{dep_bace_clean_initializer_output}/policy_provenance.json",
         "OUTPUT_ROOT": "{artifact_root}/bace/gnn_ppo/b6-v2/attempt-{attempt}"
       },
       "blocked_reason": "CONFIGURE_ABSOLUTE_COMMIT_B_INPUT_PATHS_BEFORE_LAUNCH",
@@ -272,7 +279,7 @@
       "id": "bace_b7_ppo_full",
       "dataset": "bace",
       "stage": "B7_PPO_FULL",
-      "depends_on": ["bace_b6_ppo_smoke"],
+      "depends_on": ["bace_b6_ppo_smoke", "bace_clean_initializer"],
       "runner_dataset": "bace-gnn-clean",
       "runner_stage": "B7_PPO_FULL",
       "publish_bace_stage": false,
@@ -294,13 +301,41 @@
         "reward_manifest.json",
         "ppo_gate.json",
         "ppo_manifest.json",
+        "resume_provenance.json",
+        "stable_ppo_resume_manifest.json",
+        "stable_ppo_training_state.pt",
+        "decoded_chem_value_head.pt",
         "adapter_config.json",
         "checkpoint-50/adapter_config.json",
+        "checkpoint-50/stable_ppo_resume_manifest.json",
+        "checkpoint-50/stable_ppo_training_state.pt",
+        "checkpoint-50/candidate_pool.jsonl",
+        "checkpoint-50/decoded_chem_value_head.pt",
         "checkpoint-100/adapter_config.json",
+        "checkpoint-100/stable_ppo_resume_manifest.json",
+        "checkpoint-100/stable_ppo_training_state.pt",
+        "checkpoint-100/candidate_pool.jsonl",
+        "checkpoint-100/decoded_chem_value_head.pt",
         "checkpoint-150/adapter_config.json",
+        "checkpoint-150/stable_ppo_resume_manifest.json",
+        "checkpoint-150/stable_ppo_training_state.pt",
+        "checkpoint-150/candidate_pool.jsonl",
+        "checkpoint-150/decoded_chem_value_head.pt",
         "checkpoint-200/adapter_config.json",
+        "checkpoint-200/stable_ppo_resume_manifest.json",
+        "checkpoint-200/stable_ppo_training_state.pt",
+        "checkpoint-200/candidate_pool.jsonl",
+        "checkpoint-200/decoded_chem_value_head.pt",
         "checkpoint-250/adapter_config.json",
+        "checkpoint-250/stable_ppo_resume_manifest.json",
+        "checkpoint-250/stable_ppo_training_state.pt",
+        "checkpoint-250/candidate_pool.jsonl",
+        "checkpoint-250/decoded_chem_value_head.pt",
         "checkpoint-300/adapter_config.json",
+        "checkpoint-300/stable_ppo_resume_manifest.json",
+        "checkpoint-300/stable_ppo_training_state.pt",
+        "checkpoint-300/candidate_pool.jsonl",
+        "checkpoint-300/decoded_chem_value_head.pt",
         "PASS"
       ],
       "required_output_any": [
@@ -320,8 +355,8 @@
         "BACE_GNN_CHECKPOINT": "__CONFIGURE_ABSOLUTE_B4_CHECKPOINT__",
         "BACE_GNN_CHECKPOINT_HASH": "__CONFIGURE_B4_CHECKPOINT_SHA256__",
         "CHEMLLM_MODEL_PATH": "__CONFIGURE_ABSOLUTE_CHEMLLM_MODEL__",
-        "BACE_POLICY_INITIALIZER": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/adapter",
-        "BACE_POLICY_PROVENANCE_MANIFEST": "{artifact_root}/bace/gnn_ppo/clean-initializer/attempt-0/policy_provenance.json",
+        "BACE_POLICY_INITIALIZER": "{dep_bace_clean_initializer_output}/adapter",
+        "BACE_POLICY_PROVENANCE_MANIFEST": "{dep_bace_clean_initializer_output}/policy_provenance.json",
         "BACE_B6_V2_MANIFEST": "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json",
         "OUTPUT_ROOT": "{artifact_root}/bace/gnn_ppo/b7-full/attempt-{attempt}"
       },

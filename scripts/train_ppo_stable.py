@@ -33,6 +33,11 @@ from src.rewards.teacher_semantic import (
 )
 from src.utils.io import ensure_directory, write_jsonl
 from src.utils.logging_utils import RunContext, configure_run_logger, write_runtime_manifest
+from src.train.stable_ppo_resume import (
+    load_stable_ppo_resume_checkpoint,
+    restore_stable_ppo_training_state,
+    save_stable_ppo_resume_checkpoint,
+)
 
 from scripts.train_ppo import (
     DEFAULT_WANDB_RUN_NAME,
@@ -1218,6 +1223,8 @@ def run_stable_decoded_chem_ppo_loop(
     logger: Any,
     run_observer: Any | None = None,
     stop_after_dataset_exhausted: bool = False,
+    resume_from_checkpoint: Path | None = None,
+    resume_contract: dict[str, Any] | None = None,
 ) -> Path:
     torch = deps["torch"]
 
@@ -1308,7 +1315,57 @@ def run_stable_decoded_chem_ppo_loop(
     completed_steps = 0
     last_validation_step: int | None = None
 
-    for step_index in range(1, int(args.max_steps) + 1):
+    if resume_from_checkpoint is not None and resume_contract is None:
+        raise ValueError("Stable PPO resume_from_checkpoint requires resume_contract")
+    if resume_contract is not None and (
+        run_observer is None
+        or not callable(getattr(run_observer, "state_dict", None))
+    ):
+        raise ValueError("Stable PPO checkpointing requires a stateful run observer")
+    if resume_from_checkpoint is not None and resume_contract is not None:
+        if not callable(getattr(run_observer, "load_state_dict", None)):
+            raise ValueError("Stable PPO resume requires a stateful run observer")
+        bundle = load_stable_ppo_resume_checkpoint(
+            checkpoint_dir=resume_from_checkpoint,
+            torch_module=torch,
+            expected_contract=resume_contract,
+            map_location=rollout_device,
+        )
+        if bundle.completed_steps >= int(args.max_steps):
+            raise ValueError(
+                "Stable PPO resume checkpoint must precede the configured max_steps"
+            )
+        batches_per_cycle = len(dataloader)
+        if batches_per_cycle <= 0:
+            raise ValueError("Stable PPO cannot resume an empty dataloader")
+        for _ in range(bundle.completed_steps % batches_per_cycle):
+            try:
+                next(dataloader_iterator)
+            except StopIteration:  # pragma: no cover - guarded by modulo/len
+                dataloader_iterator = iter(dataloader)
+                next(dataloader_iterator)
+        restore_stable_ppo_training_state(
+            bundle=bundle,
+            optimizer=optimizer,
+            value_model=value_model,
+            torch_module=torch,
+        )
+        run_observer.load_state_dict(bundle.observer_state)
+        candidate_pool_rows = [dict(row) for row in bundle.candidate_pool_rows]
+        validation_state = StableValidationState(**bundle.validation_state)
+        current_kl_penalty = float(bundle.current_kl_penalty)
+        completed_steps = int(bundle.completed_steps)
+        last_validation_step = bundle.last_validation_step
+        chemistry_reward_called = completed_steps > 0
+        chemistry_reward_update_called = completed_steps > 0
+        logger.info(
+            "[STABLE_PPO_RESUME] checkpoint=%s completed_steps=%s candidate_count=%s",
+            bundle.checkpoint_dir,
+            completed_steps,
+            len(candidate_pool_rows),
+        )
+
+    for step_index in range(completed_steps + 1, int(args.max_steps) + 1):
         try:
             batch = next(dataloader_iterator)
         except StopIteration:
@@ -1671,6 +1728,7 @@ def run_stable_decoded_chem_ppo_loop(
             metrics=update_metrics,
         )
 
+        periodic_checkpoint_dir: Path | None = None
         if step_index % max(1, int(args.save_steps)) == 0:
             checkpoint_dir = output_dir / f"checkpoint-{step_index}"
             save_decoded_chem_checkpoint(
@@ -1687,6 +1745,7 @@ def run_stable_decoded_chem_ppo_loop(
                 checkpoint_dir=checkpoint_dir,
                 checkpoint_kind="periodic",
             )
+            periodic_checkpoint_dir = checkpoint_dir
 
         if (
             stable_config.val_dataset_path
@@ -1733,6 +1792,23 @@ def run_stable_decoded_chem_ppo_loop(
             if stop_from_eval:
                 should_stop = True
                 early_stop_reason = "validation_patience"
+
+        # Publish the resumable state only after every same-step observer and
+        # validation update has completed.  The JSON manifest is written last
+        # by the helper, so a crash cannot expose a partially resumable step.
+        if periodic_checkpoint_dir is not None and resume_contract is not None:
+            save_stable_ppo_resume_checkpoint(
+                checkpoint_dir=periodic_checkpoint_dir,
+                torch_module=torch,
+                optimizer=optimizer,
+                completed_steps=step_index,
+                current_kl_penalty=current_kl_penalty,
+                validation_state=asdict(validation_state),
+                last_validation_step=last_validation_step,
+                candidate_pool_rows=candidate_pool_rows,
+                observer_state=run_observer.state_dict(),
+                resume_contract=resume_contract,
+            )
 
         if should_stop:
             logger.info(
@@ -1813,6 +1889,19 @@ def run_stable_decoded_chem_ppo_loop(
         validation_state=validation_state,
         early_stop_reason=early_stop_reason,
     )
+    if resume_contract is not None:
+        save_stable_ppo_resume_checkpoint(
+            checkpoint_dir=final_output_dir,
+            torch_module=torch,
+            optimizer=optimizer,
+            completed_steps=completed_steps,
+            current_kl_penalty=current_kl_penalty,
+            validation_state=asdict(validation_state),
+            last_validation_step=last_validation_step,
+            candidate_pool_rows=candidate_pool_rows,
+            observer_state=run_observer.state_dict(),
+            resume_contract=resume_contract,
+        )
     return final_output_dir
 
 

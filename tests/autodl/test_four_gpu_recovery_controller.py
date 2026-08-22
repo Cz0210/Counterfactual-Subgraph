@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import scripts.autodl.run_four_gpu_recovery_controller as controller_module
 from scripts.autodl.run_four_gpu_recovery_controller import (
     ControllerError,
     ControllerManifest,
@@ -16,18 +17,24 @@ from scripts.autodl.run_four_gpu_recovery_controller import (
     OOMRetry,
     TaskSpec,
     _launch_instance,
+    _aggregate_task_state,
     _dependency_output_context,
     _prepare_shards,
     _reconcile_instance,
+    _summarize_controller_state,
+    _task_manifest_payload,
+    allocation_safe_gpu_uuids,
     audit_gpu_locks,
     bind_adopted_runs,
     classify_failure,
+    controller_safety_environment,
     dependency_order,
     load_controller_manifest,
     materialize_fixed_parent_shards,
     oom_retry_allowed,
     publish_user_registry,
     scheduler_candidates,
+    transient_retry_allowed,
     validate_no_test_before_freeze,
 )
 from scripts.autodl.status_four_gpu_recovery import _load_tasks, render_table
@@ -130,6 +137,26 @@ def test_four_gpu_ceiling_is_explicit_not_a_global_default() -> None:
     assert validate_max_gpus(FOUR_GPU_RECOVERY_LIMIT, hard_limit=4) == 4
     with pytest.raises(GPUInventoryError, match=r"\[1, 2\]"):
         validate_max_gpus(4)
+
+
+def test_controller_thread_defaults_are_bounded_and_not_user_overridable(
+    tmp_path: Path,
+) -> None:
+    assert controller_safety_environment(cpu_count=112) == {
+        "OMP_NUM_THREADS": "27",
+        "MKL_NUM_THREADS": "27",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "configs/autodl/four_gpu_recovery.template.json"
+    )
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["tasks"][0]["environment"]["OMP_NUM_THREADS"] = "112"
+    unsafe = tmp_path / "unsafe-controller.json"
+    unsafe.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(ControllerError, match="may not override"):
+        load_controller_manifest(unsafe)
 
 
 def test_scheduler_is_work_conserving_but_never_violates_dependencies() -> None:
@@ -354,6 +381,211 @@ def test_oom_has_exactly_one_lower_batch_retry_and_semantic_never_retries() -> N
     assert classify_failure("semantic gate failed: wrong oracle") == "SEMANTIC"
 
 
+def test_transient_io_has_exactly_one_fresh_attempt_retry() -> None:
+    assert classify_failure("OSError: [Errno 5] Input/output error") == "TRANSIENT_IO"
+    assert transient_retry_allowed(
+        "TRANSIENT_IO", 0, max_transient_retries=1
+    )
+    assert not transient_retry_allowed(
+        "TRANSIENT_IO", 1, max_transient_retries=1
+    )
+    assert transient_retry_allowed(
+        "TRANSIENT_PROCESS_LOSS", 0, max_transient_retries=1
+    )
+    assert not transient_retry_allowed("EXECUTION", 0, max_transient_retries=1)
+
+
+def test_workload_state_can_pass_while_raw_taste_gate_remains_blocked() -> None:
+    assert _summarize_controller_state({"PASS": 3, "BLOCKED": 1}) == "BLOCKED"
+    assert _summarize_controller_state({"PASS": 3}) == "PASS"
+
+
+def test_dead_starting_and_running_workers_retry_once_then_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    task = _task("dead-worker", dataset="mutagenicity")
+    run_root = layout.runs_root / "dead-starting"
+    run_root.mkdir(parents=True)
+    (run_root / "state.json").write_text(
+        json.dumps(
+            {
+                "state": "STARTING",
+                "pid": None,
+                "child_pid": None,
+                "updated_at": "2020-01-01T00:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    starting = {
+        "state": "STARTING",
+        "run_id": "dead-starting",
+        "started_at": "2020-01-01T00:00:00Z",
+        "heartbeat_at": "2099-01-01T00:00:00Z",
+        "launcher_pid": None,
+        "tmux_session": None,
+    }
+    # Even a surviving detached launcher/tmux cannot substitute for an
+    # exp_run worker after the bounded launch grace expires.
+    monkeypatch.setattr(
+        controller_module, "_launcher_evidence_alive", lambda _instance: True
+    )
+    _reconcile_instance(
+        layout,
+        task,
+        starting,
+        launch_grace_seconds=60,
+        now_epoch=1_700_000_000.0,
+    )
+    assert starting["state"] == "NOT_STARTED"
+    assert starting["attempt"] == 1
+    assert starting["failure_class"] == "TRANSIENT_PROCESS_LOSS_RETRY"
+    assert starting["retry_kind"] == "TRANSIENT_PROCESS_LOSS"
+    assert starting["heartbeat_at"] is None
+
+    missing_state = {
+        "state": "STARTING",
+        "run_id": "missing-run-state",
+        "started_at": "2020-01-01T00:00:00Z",
+        "heartbeat_at": "2099-01-01T00:00:00Z",
+    }
+    _reconcile_instance(
+        layout,
+        task,
+        missing_state,
+        launch_grace_seconds=60,
+        now_epoch=1_700_000_000.0,
+    )
+    assert missing_state["state"] == "NOT_STARTED"
+    assert missing_state["retry_kind"] == "TRANSIENT_PROCESS_LOSS"
+    assert missing_state["heartbeat_at"] is None
+
+    running_root = layout.runs_root / "dead-running"
+    running_root.mkdir(parents=True)
+    (running_root / "state.json").write_text(
+        json.dumps({"state": "RUNNING", "pid": 2_000_000_000}) + "\n",
+        encoding="utf-8",
+    )
+    running = {
+        "state": "RUNNING",
+        "run_id": "dead-running",
+        "started_at": "2020-01-01T00:00:00Z",
+        "attempt": 1,
+        "transient_retry_count": 1,
+    }
+    _reconcile_instance(layout, task, running)
+    assert running["state"] == "FAILED"
+    assert running["failure_class"] == "STALE_PROCESS"
+    assert running["failure_reason"] == "RUNNING exp_run worker PID is absent"
+
+
+def test_b7_transient_failure_records_latest_checkpoint_for_fresh_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    source_output = layout.artifacts_dir / "bace" / "attempt-0"
+    checkpoint = source_output / "checkpoint-50"
+    checkpoint.mkdir(parents=True)
+    run_root = layout.runs_root / "b7-failed"
+    run_root.mkdir(parents=True)
+    log = layout.logs_dir / "b7-failed.log"
+    log.write_text("OSError: [Errno 5] Input/output error\n", encoding="utf-8")
+    (run_root / "state.json").write_text(
+        json.dumps(
+            {
+                "state": "FAILED",
+                "pid": None,
+                "child_pid": None,
+                "log_path": str(log),
+                "failures": ["scientific command exited 1"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "find_latest_stable_ppo_resume_checkpoint",
+        lambda output: checkpoint,
+    )
+    task = _task("b7", stage="B7_PPO_FULL")
+    instance = {
+        "state": "RUNNING",
+        "run_id": "b7-failed",
+        "attempt": 0,
+        "adopted": False,
+        "expected_output": str(source_output),
+    }
+    _reconcile_instance(
+        layout,
+        task,
+        instance,
+        max_transient_retries=1,
+    )
+    assert instance["state"] == "NOT_STARTED"
+    assert instance["attempt"] == 1
+    assert instance["retry_kind"] == "TRANSIENT_IO"
+    assert instance["resume_from_checkpoint"] == str(checkpoint)
+    assert instance["resume_source_output"] == str(source_output.resolve())
+
+
+def test_failed_shard_drains_live_siblings_before_terminal_aggregate(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    task = _task(
+        "sharded",
+        dataset="mutagenicity",
+        shards=FixedShardSpec(4, "/persistent/parents.json", "calibration"),
+    )
+    state = _state(task, "RUNNING")
+    instances = state["instances"]
+    instances["shard-000"].update(
+        {"state": "FAILED", "failure_class": "SEMANTIC"}
+    )
+    instances["shard-001"]["state"] = "RUNNING"
+    root = layout.control_root / "four_gpu_recovery" / "controller"
+    (root / "tasks" / task.task_id).mkdir(parents=True)
+    manifest_path = tmp_path / "controller.json"
+    manifest_path.write_text("{}\n", encoding="utf-8")
+    manifest = ControllerManifest(
+        path=manifest_path,
+        sha256="0" * 64,
+        controller_id="controller",
+        tasks=(task,),
+        runtime={"max_gpus": 4},
+        resource_gates={},
+    )
+    states = {task.task_id: state}
+    _aggregate_task_state(root, layout, manifest, task, state, states)
+    assert state["state"] == "RUNNING"
+    assert "DRAINING_ACTIVE_SIBLINGS" in state["reason"]
+    assert scheduler_candidates((task,), states) == []
+
+    instances["shard-001"]["state"] = "PASS"
+    _aggregate_task_state(root, layout, manifest, task, state, states)
+    assert state["state"] == "FAILED"
+
+
 def test_retryable_parent_consumers_resolve_the_passing_attempt_output(
     tmp_path: Path,
 ) -> None:
@@ -465,6 +697,38 @@ def test_prepare_shards_expands_parent_manifest_from_dependency_output(
     assert sorted(paths) == [f"shard-{index:03d}" for index in range(4)]
 
 
+def test_template_clean_policy_dependencies_follow_the_passing_retry_attempt(
+    tmp_path: Path,
+) -> None:
+    manifest = load_controller_manifest(
+        Path(__file__).resolve().parents[2]
+        / "configs/autodl/four_gpu_recovery.template.json"
+    )
+    audit = manifest.by_id["bace_policy_provenance_audit"]
+    initializer = manifest.by_id["bace_clean_initializer"]
+    audit_state = _state(audit, "PASS")
+    audit_state["instances"]["main"].update(
+        {
+            "attempt": 1,
+            "expected_output": str(tmp_path / "audit" / "attempt-1"),
+        }
+    )
+    context = _dependency_output_context(
+        tmp_path,
+        initializer,
+        {
+            audit.task_id: audit_state,
+            initializer.task_id: _state(initializer, "READY"),
+        },
+    )
+    assert context["dep_bace_policy_provenance_audit_output"].endswith(
+        "/audit/attempt-1"
+    )
+    assert "{dep_bace_policy_provenance_audit_output}" in (
+        initializer.input_manifest or ""
+    )
+
+
 def test_stale_uuid_lock_metadata_is_audited_but_not_deleted(tmp_path: Path) -> None:
     gpu = _gpu(0)
     lock_path = tmp_path / "gpu-GPU-uuid-0.lock"
@@ -478,9 +742,70 @@ def test_stale_uuid_lock_metadata_is_audited_but_not_deleted(tmp_path: Path) -> 
     assert json.loads(lock_path.read_text(encoding="utf-8"))["state"] == "LOCKED"
 
 
+def test_live_uuid_lock_metadata_is_never_reused_when_advisory_fd_is_openable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gpu = _gpu(0)
+    owner_pid = 4242
+    lock_path = tmp_path / "gpu-GPU-uuid-0.lock"
+    lock_path.write_text(
+        json.dumps({"state": "LOCKED", "pid": owner_pid}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "read_process_identity",
+        lambda pid: (
+            {"pid": pid, "start_ticks": 1, "command_sha256": "a" * 64}
+            if pid == owner_pid
+            else None
+        ),
+    )
+    rows = audit_gpu_locks(tmp_path, [gpu], probe_advisory_lock=True)
+    assert rows[0]["advisory_lock_available"] is True
+    assert rows[0]["audit"] == "INDETERMINATE"
+    assert allocation_safe_gpu_uuids(rows) == frozenset()
+
+
+@pytest.mark.parametrize("owner_pid", [None, "4242", True, 0, -1])
+def test_locked_uuid_metadata_requires_one_explicit_positive_integer_pid(
+    tmp_path: Path,
+    owner_pid: Any,
+) -> None:
+    gpu = _gpu(0)
+    lock_path = tmp_path / "gpu-GPU-uuid-0.lock"
+    lock_path.write_text(
+        json.dumps({"state": "LOCKED", "pid": owner_pid}) + "\n",
+        encoding="utf-8",
+    )
+    rows = audit_gpu_locks(tmp_path, [gpu], probe_advisory_lock=True)
+    assert rows[0]["lock_owner_pid_valid"] is False
+    assert rows[0]["audit"] == "MALFORMED_LOCK_METADATA"
+    assert allocation_safe_gpu_uuids(rows) == frozenset()
+
+
+def test_advisory_uuid_lock_never_fails_open_on_nonlocked_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gpu = _gpu(0)
+    lock_path = tmp_path / "gpu-GPU-uuid-0.lock"
+    lock_path.write_text(
+        json.dumps({"state": "RELEASED", "pid": None}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(controller_module, "gpu_lock_available", lambda *_: False)
+    rows = audit_gpu_locks(tmp_path, [gpu], probe_advisory_lock=True)
+    assert rows[0]["audit"] == "INDETERMINATE"
+    assert allocation_safe_gpu_uuids(rows) == frozenset()
+
+
 def test_launch_delegates_to_exp_run_with_frozen_python_and_four_gpu_limit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(controller_module.os, "cpu_count", lambda: 112)
     project = tmp_path / "project"
     data = tmp_path / "data"
     project.mkdir()
@@ -495,6 +820,8 @@ def test_launch_delegates_to_exp_run_with_frozen_python_and_four_gpu_limit(
     task = TaskSpec(
         **{
             **task.__dict__,
+            "runner_dataset": "bace-gnn-clean-audit",
+            "runner_stage": "BACE_POLICY_PROVENANCE_AUDIT",
             "config_files": (str(config),),
             "input_manifest": str(input_manifest),
             "required_absolute_output_files": (
@@ -506,7 +833,16 @@ def test_launch_delegates_to_exp_run_with_frozen_python_and_four_gpu_limit(
     root = layout.control_root / "four_gpu_recovery" / "test"
     task_root = root / "tasks" / task.task_id
     task_root.mkdir(parents=True)
-    (task_root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    frozen_task = _task_manifest_payload(task, "0" * 64)
+    (task_root / "manifest.json").write_text(
+        json.dumps(frozen_task) + "\n",
+        encoding="utf-8",
+    )
+    assert frozen_task["controller_safety_environment"] == {
+        "OMP_NUM_THREADS": "27",
+        "MKL_NUM_THREADS": "27",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
     captured: dict[str, Any] = {}
 
     def fake_runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -552,10 +888,15 @@ def test_launch_delegates_to_exp_run_with_frozen_python_and_four_gpu_limit(
     assert command[0] == str(interpreter)
     assert command[1].endswith("scripts/autodl/exp_run.py")
     assert command[command.index("--gpu-hard-limit") + 1] == "4"
+    assert command[command.index("--dataset") + 1] == "bace-gnn-clean-audit"
+    assert command[command.index("--stage") + 1] == "BACE_POLICY_PROVENANCE_AUDIT"
     assert command[command.index("--required-absolute-output-file") + 1].endswith(
         "/outputs/autodl/audits/audit.csv"
     )
     assert "PYTHONDONTWRITEBYTECODE=1" in command
+    assert "OMP_NUM_THREADS=27" in command
+    assert "MKL_NUM_THREADS=27" in command
+    assert "TOKENIZERS_PARALLELISM=false" in command
     payload_start = command.index("--") + 1
     assert command[payload_start] == str(interpreter)
     assert state["instances"]["main"]["state"] == "STARTING"
@@ -592,7 +933,10 @@ def test_launch_expands_task_output_before_command_and_numeric_shard_index(
     root = layout.control_root / "four_gpu_recovery" / "controller"
     task_root = root / "tasks" / task.task_id
     task_root.mkdir(parents=True)
-    (task_root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (task_root / "manifest.json").write_text(
+        json.dumps(_task_manifest_payload(task, "0" * 64)) + "\n",
+        encoding="utf-8",
+    )
     captured: dict[str, Any] = {}
 
     def fake_runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -720,6 +1064,24 @@ def test_existing_exp_run_is_strictly_adopted_and_not_relaunched(
         + "\n",
         encoding="utf-8",
     )
+    # A reused generic stage slot may still contain terminal fields from an
+    # older run. Adoption authority is the exact run-specific state/spec above,
+    # never this mutable compatibility projection.
+    generic_stage = layout.control_root / "mutagenicity" / "stages" / "AUX"
+    generic_stage.mkdir(parents=True)
+    (generic_stage / "state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "old-failed-run",
+                "state": "FAILED",
+                "exit_code": 1,
+                "completed_at": "2020-01-01T00:00:00Z",
+                "failures": ["stale old stage projection"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     root = layout.control_root / "four_gpu_recovery" / "controller"
     state = _state(task, "NOT_STARTED")
     states = {task.task_id: state}
@@ -802,7 +1164,10 @@ def test_committed_integration_template_is_valid_and_keeps_taste_blocked() -> No
     assert manifest.by_id["bace_b6_ppo_smoke"].stage == "B6_PPO_SMOKE_V2"
     assert manifest.by_id["bace_b6_ppo_smoke"].depends_on == (
         "bace_gnn_ppo_adapter_canary",
+        "bace_clean_initializer",
     )
+    assert manifest.by_id["bace_b6_ppo_smoke"].adopt_existing_run_id is None
+    assert manifest.by_id["bace_b7_ppo_full"].adopt_existing_run_id is None
     assert manifest.by_id["bace_gnn_ppo_adapter_canary"].depends_on == (
         "bace_clean_initializer",
     )
@@ -813,6 +1178,25 @@ def test_committed_integration_template_is_valid_and_keeps_taste_blocked() -> No
     )
     assert manifest.by_id["bace_b13_verification_shards"].shards is not None
     assert manifest.by_id["bace_b13_verification_shards"].shards.count == 4
+
+
+def test_live_candidate_accepts_exact_adoptions_but_keeps_b6_b7_fresh() -> None:
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_controller_manifest(
+        root / "configs/autodl/four_gpu_recovery.live_candidate.json"
+    )
+
+    assert len(manifest.tasks) == 22
+    assert manifest.runtime["launch_grace_seconds"] == 180
+    assert manifest.runtime["max_transient_retries"] == 1
+    assert manifest.by_id["mut_recovery"].adopt_existing_run_id is not None
+    assert manifest.by_id["aids_recovery"].adopt_existing_run_id is not None
+    assert (
+        manifest.by_id["bace_gnn_ppo_adapter_canary"].adopt_existing_run_id
+        is not None
+    )
+    assert manifest.by_id["bace_b6_ppo_smoke"].adopt_existing_run_id is None
+    assert manifest.by_id["bace_b7_ppo_full"].adopt_existing_run_id is None
     assert "{shard_id}" in manifest.by_id["bace_b13_verification_shards"].runner_stage
     assert manifest.by_id["bace_b13_final_eval"].shards is None
     assert manifest.by_id["bace_b11_cross_parent_verified"].depends_on == (
@@ -856,13 +1240,17 @@ def test_template_matches_commit_b_wrapper_environment_contract() -> None:
     canary = manifest.by_id["bace_gnn_ppo_adapter_canary"]
     b6 = manifest.by_id["bace_b6_ppo_smoke"]
     b7 = manifest.by_id["bace_b7_ppo_full"]
+    assert audit.runner_dataset == "bace-gnn-clean-audit"
+    assert initializer.runner_dataset == "bace-gnn-clean-init"
+    assert audit.runner_dataset != "bace"
+    assert initializer.runner_dataset != "bace"
     assert "BACE_POLICY_INITIALIZER" not in audit.environment
     assert audit.external_bace_stage == "B5_ORACLE_SMOKE"
     assert "BACE_POLICY_PROVENANCE_MANIFEST" not in audit.environment
     assert "BACE_POLICY_INITIALIZER" not in initializer.environment
     assert "BACE_POLICY_PROVENANCE_MANIFEST" not in initializer.environment
     assert initializer.environment["BACE_POLICY_AUDIT_SELECTION"].endswith(
-        "/initializer_selection.json"
+        "{dep_bace_policy_provenance_audit_output}/initializer_selection.json"
     )
     assert audit.required_absolute_output_files == (
         audit.environment["BACE_POLICY_AUDIT_CSV"],
@@ -876,8 +1264,14 @@ def test_template_matches_commit_b_wrapper_environment_contract() -> None:
         "{dep_bace_b6_ppo_smoke_output}/ppo_smoke_manifest.json"
     )
     assert b7.environment["BACE_B6_V2_MANIFEST"] == b7.input_manifest
-    assert "b6-v2/attempt-0" not in json.dumps(
+    assert "attempt-0" not in json.dumps(
         {
+            "initializer_input": initializer.input_manifest,
+            "initializer_environment": initializer.environment,
+            "canary_input": canary.input_manifest,
+            "canary_environment": canary.environment,
+            "b6_input": b6.input_manifest,
+            "b6_environment": b6.environment,
             "input_manifest": b7.input_manifest,
             "environment": b7.environment,
         },
@@ -888,6 +1282,15 @@ def test_template_matches_commit_b_wrapper_environment_contract() -> None:
         task.environment["PYTHONDONTWRITEBYTECODE"] == "1"
         for task in manifest.tasks
     )
+    assert "canary_connected_deletion_preflight.json" in canary.required_output_files
+    for required in (
+        "resume_provenance.json",
+        "stable_ppo_resume_manifest.json",
+        "stable_ppo_training_state.pt",
+        "checkpoint-50/stable_ppo_resume_manifest.json",
+        "checkpoint-300/stable_ppo_training_state.pt",
+    ):
+        assert required in b7.required_output_files
 
 
 def test_template_injects_exact_commit_d_output_and_marker_contracts() -> None:

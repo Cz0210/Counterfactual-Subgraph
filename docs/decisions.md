@@ -6871,3 +6871,48 @@ policy bytes, unchanged reference bytes, and reloadable checkpoints.  Formal
 `B6_PPO_SMOKE_V2` ignores the preflight and retains its existing requirement
 that at least one of B6's own PPO-generated candidates receives a real GNN
 deletion score.
+
+---
+
+## 2026-08-22: Fail closed at the A/B/C release boundary and make B7 resumable
+
+The four-GPU controller allocates only UUIDs whose advisory-lock audit is
+positively `AVAILABLE` or whose stale metadata is proven to have neither a
+live owner PID nor a compute process. Non-LOCKED JSON metadata cannot override
+a held advisory lock. STARTING has a bounded launch grace, and RUNNING is
+healthy only while its exact PID generation remains alive; controller-written
+heartbeats do not substitute for worker evidence. A lost worker or recognized
+transient I/O failure receives at most one independent transient retry, while
+OOM retains its separate one-time lower-batch retry. Every retry writes a new
+attempt-qualified output. Once one shard becomes terminal, already-running
+siblings drain, no new sibling launches, and the aggregate becomes terminal
+only after all active siblings exit.
+
+Controller-owned `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and
+`TOKENIZERS_PARALLELISM=false` limits are computed from the four-worker CPU
+budget, frozen in launch evidence, and cannot be overridden by task input.
+They apply to newly launched jobs only: exact adoption continues to compare
+the historical environment byte-for-byte and never claims defaults that were
+not present. Custom BACE policy audit/initializer workers use non-primary
+dataset namespaces so the primary B0--B14 parser cannot reject their auxiliary
+stage names. Dependency inputs resolve the exact passing retry output instead
+of a hard-coded attempt zero. The dashboard preserves the raw Taste license
+BLOCKED state and additionally reports `workload_state`, which excludes that
+immutable license gate from executable-science completion.
+
+B7 now rejects B6 based on the complete physical predecessor bundle rather
+than manifest labels alone. It requires the same execution commit as B7,
+recomputes final and periodic LoRA identities from bytes, rebuilds reward
+summary from the candidate JSONL, and binds GNN/checkpoint, initializer,
+reference, RF, calibration, and test provenance. Consequently a live B6 from
+an earlier pre-release commit remains diagnostic evidence and cannot release a
+final-commit B7; the final controller must launch a fresh B6 and B7 from one
+immutable project root/commit.
+
+Formal B7 periodic checkpoints now atomically publish policy, value head,
+optimizer, KL/validation control, observer/candidate history, and Python/Torch
+RNG state under an exact resume contract. A same-batch transient retry may
+adopt only the latest complete, hash-valid, incomplete periodic checkpoint
+into a fresh output root. OOM retry changes batch size and therefore restarts
+from the clean initializer. The final B7 gate binds all six periodic resume
+states plus the final state before writing PASS.

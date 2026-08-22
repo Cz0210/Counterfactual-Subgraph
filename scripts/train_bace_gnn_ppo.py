@@ -28,6 +28,7 @@ from scripts.train_ppo import (  # noqa: E402
     collect_runtime_environment_debug,
     ensure_score_head_for_experimental_ppo,
     import_training_dependencies,
+    resolve_decoded_chem_generation_config,
 )
 from scripts.train_ppo_stable import (  # noqa: E402
     build_parser as build_stable_parser,
@@ -47,12 +48,17 @@ from src.train.bace_gnn_ppo import (  # noqa: E402
     model_parameter_hash,
     run_canary_connected_deletion_preflight,
     validate_adapter_checkpoint_reload,
+    validate_b6_v2_predecessor,
 )
 from src.train.bace_policy_init import (  # noqa: E402
     atomic_text,
     sha256_file,
     validate_frozen_train_contract,
     validate_policy_provenance_manifest,
+)
+from src.train.stable_ppo_resume import (  # noqa: E402
+    adopt_stable_ppo_checkpoint_prefix,
+    read_stable_ppo_resume_manifest,
 )
 from src.utils.io import read_jsonl  # noqa: E402
 from src.utils.logging_utils import RunContext, configure_run_logger  # noqa: E402
@@ -78,6 +84,7 @@ def build_parser():
     parser.add_argument("--b6-parent-count", type=int, default=16)
     parser.add_argument("--oracle-batch-size", type=int, default=256)
     parser.add_argument("--gnn-device", default="cuda")
+    parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
     return parser
 
 
@@ -93,42 +100,17 @@ def _validate_b6_predecessor(
     manifest_path: Path,
     *,
     checkpoint_id: str,
+    gnn_checkpoint: Path,
     policy_initializer_hash: str,
     git_commit: str,
 ) -> dict[str, Any]:
-    path = manifest_path.expanduser().resolve(strict=True)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    required = {
-        "stage": "B6_PPO_SMOKE_V2",
-        "status": "PASS",
-        "oracle_backend": "gnn",
-        "dataset": "bace",
-        "classifier_type": "gnn",
-        "source_label": 1,
-        "num_classes": 2,
-        "rf_oracle_used": False,
-        "calibration_loaded": False,
-        "calibration_dataset_loaded": False,
-        "frozen_temperature_calibration_loaded": True,
-        "test_loaded": False,
-        "checkpoint_id": checkpoint_id,
-        "policy_initializer_hash": policy_initializer_hash,
-        "git_commit": git_commit,
-    }
-    failures = [
-        f"{key}={payload.get(key)!r}"
-        for key, expected in required.items()
-        if payload.get(key) != expected
-    ]
-    if failures:
-        raise ValueError("B7 rejected B6-v2 predecessor: " + ", ".join(failures))
-    policy_checkpoint_hash = str(payload.get("policy_checkpoint_hash") or "")
-    if len(policy_checkpoint_hash) != 64 or any(
-        character not in "0123456789abcdef"
-        for character in policy_checkpoint_hash.lower()
-    ):
-        raise ValueError("B7 rejected malformed B6-v2 policy checkpoint identity")
-    return {"path": str(path), "sha256": sha256_file(path), "manifest": payload}
+    return validate_b6_v2_predecessor(
+        manifest_path,
+        checkpoint_id=checkpoint_id,
+        gnn_checkpoint=gnn_checkpoint,
+        policy_initializer_hash=policy_initializer_hash,
+        git_commit=git_commit,
+    )
 
 
 def _configure_stage(args: Any) -> None:
@@ -154,6 +136,8 @@ def _configure_stage(args: Any) -> None:
     args.reward_clip_max = 5.0
     args.normalize_reward = False
     args.normalize_advantage = False
+    if args.resume_from_checkpoint is not None and args.stage != "B7_PPO_FULL":
+        raise ValueError("Only formal B7 supports stable PPO checkpoint resume")
     if args.stage == "BACE_GNN_PPO_ADAPTER_CANARY":
         args.max_steps = 1
         args.max_prompt_examples = 8
@@ -206,6 +190,113 @@ def _gnn_checkpoint_contract(checkpoint: Path) -> dict[str, Any]:
     return card
 
 
+def _b7_resume_contract_base(
+    *,
+    args: Any,
+    stable_config: Any,
+    card: dict[str, Any],
+    git_commit: str,
+    train_csv: Path,
+    policy_initializer_hash: str,
+    actual_batch_size: int,
+    b6_predecessor: dict[str, Any],
+) -> dict[str, Any]:
+    generation = resolve_decoded_chem_generation_config(args)
+    return {
+        "schema_version": "bace_b7_stable_ppo_resume_contract_v1",
+        "stage": "B7_PPO_FULL",
+        "dataset": "bace",
+        "git_commit": git_commit,
+        "checkpoint_id": str(card["checkpoint_id"]),
+        "policy_initializer_hash": policy_initializer_hash,
+        "b6_v2_manifest_sha256": str(b6_predecessor["sha256"]),
+        "train_csv": str(train_csv),
+        "train_csv_sha256": sha256_file(train_csv),
+        "max_steps": int(args.max_steps),
+        "save_steps": int(args.save_steps),
+        "seed": int(args.seed),
+        "actual_batch_size": int(actual_batch_size),
+        "max_prompt_examples": int(args.max_prompt_examples),
+        "oracle_batch_size": int(args.oracle_batch_size),
+        "stable_config": asdict(stable_config),
+        "generation_config": asdict(generation),
+    }
+
+
+def _resolve_b7_resume_contract(
+    *,
+    base: dict[str, Any],
+    resume_from_checkpoint: Path | None,
+    policy_parameter_hash_before: str,
+    reference_policy_hash: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if resume_from_checkpoint is None:
+        return (
+            {
+                **base,
+                "policy_parameter_hash_before": policy_parameter_hash_before,
+                "reference_policy_hash": reference_policy_hash,
+            },
+            None,
+        )
+    manifest = read_stable_ppo_resume_manifest(resume_from_checkpoint)
+    stored = manifest.get("resume_contract")
+    if not isinstance(stored, dict):
+        raise ValueError("B7 resume checkpoint has no frozen resume contract")
+    mismatches = [
+        key for key, value in base.items() if stored.get(key) != value
+    ]
+    if stored.get("reference_policy_hash") != reference_policy_hash:
+        mismatches.append("reference_policy_hash")
+    original_hash = stored.get("policy_parameter_hash_before")
+    if not isinstance(original_hash, str) or len(original_hash) != 64:
+        mismatches.append("policy_parameter_hash_before")
+    if mismatches:
+        raise ValueError(
+            "B7 resume contract differs from the frozen run: "
+            + ", ".join(sorted(set(mismatches)))
+        )
+    return dict(stored), manifest
+
+
+def _validate_b7_resume_artifacts(
+    *,
+    output: Path,
+    resume_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind every periodic and final resumable state into the B7 manifest."""
+
+    roots = [("final", int(resume_contract["max_steps"]), output)] + [
+        (f"checkpoint-{step}", step, output / f"checkpoint-{step}")
+        for step in B7_CHECKPOINT_STEPS
+    ]
+    artifacts: dict[str, Any] = {}
+    for label, expected_step, root in roots:
+        manifest = read_stable_ppo_resume_manifest(root)
+        if int(manifest["completed_steps"]) != expected_step:
+            raise ValueError(f"B7 {label} resumable step identity changed")
+        if manifest.get("resume_contract") != resume_contract:
+            raise ValueError(f"B7 {label} resumable contract changed")
+        artifacts[label] = {
+            "checkpoint_dir": str(root.resolve(strict=True)),
+            "completed_steps": expected_step,
+            "resume_manifest": str(root / "stable_ppo_resume_manifest.json"),
+            "resume_manifest_sha256": sha256_file(
+                root / "stable_ppo_resume_manifest.json"
+            ),
+            "training_state": str(root / "stable_ppo_training_state.pt"),
+            "training_state_sha256": sha256_file(
+                root / "stable_ppo_training_state.pt"
+            ),
+            "candidate_pool_sha256": sha256_file(root / "candidate_pool.jsonl"),
+        }
+    return {
+        "schema_version": "bace_b7_resume_artifacts_v1",
+        "resume_contract": resume_contract,
+        "artifacts": artifacts,
+    }
+
+
 def run(args: Any) -> int:
     _configure_stage(args)
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -240,6 +331,7 @@ def run(args: Any) -> int:
         b6_predecessor = _validate_b6_predecessor(
             args.b6_v2_manifest,
             checkpoint_id=str(card["checkpoint_id"]),
+            gnn_checkpoint=checkpoint,
             policy_initializer_hash=str(policy_provenance["policy_initializer_hash"]),
             git_commit=git_commit,
         )
@@ -261,6 +353,26 @@ def run(args: Any) -> int:
         args.stage,
     )
     stable_config = resolve_stable_config(args)
+    resume_checkpoint: Path | None = None
+    if args.resume_from_checkpoint is not None:
+        resume_checkpoint = args.resume_from_checkpoint.expanduser()
+        if resume_checkpoint.is_symlink():
+            raise ValueError("B7 resume checkpoint may not be a symlink")
+        resume_checkpoint = resume_checkpoint.resolve(strict=True)
+        runtime_root_value = os.environ.get("AUTODL_RUNTIME_ROOT")
+        if not runtime_root_value:
+            raise ValueError("B7 resume requires AUTODL_RUNTIME_ROOT")
+        allowed_resume_root = (
+            Path(runtime_root_value).expanduser().resolve(strict=True) / "outputs"
+        )
+        try:
+            resume_checkpoint.relative_to(allowed_resume_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"B7 resume checkpoint must be under {allowed_resume_root}"
+            ) from exc
+        validate_adapter_checkpoint_reload(resume_checkpoint)
+    policy_load_adapter = resume_checkpoint or initializer
     atomic_json(
         output / "run_manifest.json",
         {
@@ -271,12 +383,16 @@ def run(args: Any) -> int:
             "shared_algorithm_reimplemented": False,
             "model_path": str(model_path),
             "policy_initializer": str(initializer),
+            "policy_load_adapter": str(policy_load_adapter),
             "policy_initializer_hash": policy_provenance["policy_initializer_hash"],
             "gnn_checkpoint": str(checkpoint),
             "checkpoint_id": card["checkpoint_id"],
             "dataset_path": str(train_csv),
             "train_contract": train_contract,
             "b6_predecessor": b6_predecessor,
+            "resume_from_checkpoint": (
+                str(resume_checkpoint) if resume_checkpoint is not None else None
+            ),
             "stable_config": asdict(stable_config),
             "args": {
                 key: value
@@ -320,7 +436,7 @@ def run(args: Any) -> int:
     policy_model = build_policy_model(
         deps,
         model_path=model_path,
-        adapter_path=initializer,
+        adapter_path=policy_load_adapter,
         trust_remote_code=args.trust_remote_code,
         local_files_only=True,
         is_trainable=True,
@@ -350,8 +466,55 @@ def run(args: Any) -> int:
         reference_model=reference_model,
         value_model=value_model,
     )
-    policy_hash_before = model_parameter_hash(policy_model, trainable_only=True)
+    policy_hash_at_run_start = model_parameter_hash(policy_model, trainable_only=True)
     reference_hash_before = model_parameter_hash(reference_model, adapter_only=True)
+    policy_hash_before = policy_hash_at_run_start
+    resume_contract: dict[str, Any] | None = None
+    resume_manifest: dict[str, Any] | None = None
+    adopted_checkpoint_prefix: list[dict[str, Any]] = []
+    if args.stage == "B7_PPO_FULL":
+        resume_base = _b7_resume_contract_base(
+            args=args,
+            stable_config=stable_config,
+            card=card,
+            git_commit=git_commit,
+            train_csv=train_csv,
+            policy_initializer_hash=str(policy_provenance["policy_initializer_hash"]),
+            actual_batch_size=actual_batch_size,
+            b6_predecessor=b6_predecessor,
+        )
+        resume_contract, resume_manifest = _resolve_b7_resume_contract(
+            base=resume_base,
+            resume_from_checkpoint=resume_checkpoint,
+            policy_parameter_hash_before=policy_hash_at_run_start,
+            reference_policy_hash=reference_hash_before,
+        )
+        policy_hash_before = str(resume_contract["policy_parameter_hash_before"])
+        if resume_checkpoint is not None:
+            completed = int(resume_manifest["completed_steps"])
+            if completed not in B7_CHECKPOINT_STEPS or completed >= int(args.max_steps):
+                raise ValueError("B7 resume source must be one incomplete periodic checkpoint")
+            adopted_checkpoint_prefix = adopt_stable_ppo_checkpoint_prefix(
+                resume_checkpoint=resume_checkpoint,
+                output_dir=output,
+                checkpoint_steps=B7_CHECKPOINT_STEPS,
+            )
+        atomic_json(
+            output / "resume_provenance.json",
+            {
+                "schema_version": "bace_b7_resume_provenance_v1",
+                "resumed": resume_checkpoint is not None,
+                "resume_from_checkpoint": (
+                    str(resume_checkpoint) if resume_checkpoint is not None else None
+                ),
+                "resume_source_manifest": resume_manifest,
+                "resume_contract": resume_contract,
+                "policy_parameter_hash_at_run_start": policy_hash_at_run_start,
+                "policy_parameter_hash_before_full_run": policy_hash_before,
+                "adopted_checkpoint_prefix": adopted_checkpoint_prefix,
+                "fresh_output_root": str(output),
+            },
+        )
     reward_adapter = BatchedGNNPPORewardAdapter.from_checkpoint(
         checkpoint,
         device=rollout_device if args.gnn_device == "cuda" else args.gnn_device,
@@ -390,6 +553,8 @@ def run(args: Any) -> int:
         output_dir=output,
         logger=logger,
         run_observer=observer,
+        resume_from_checkpoint=resume_checkpoint,
+        resume_contract=resume_contract,
     )
     policy_hash_after = model_parameter_hash(policy_model, trainable_only=True)
     reference_hash_after = model_parameter_hash(reference_model, adapter_only=True)
@@ -420,6 +585,14 @@ def run(args: Any) -> int:
         hard_kl=0.8,
     )
     atomic_json(output / "ppo_gate.json", gate)
+    b7_resume_artifacts: dict[str, Any] | None = None
+    if args.stage == "B7_PPO_FULL":
+        if resume_contract is None:
+            raise ValueError("B7 completed without a frozen resume contract")
+        b7_resume_artifacts = _validate_b7_resume_artifacts(
+            output=output,
+            resume_contract=resume_contract,
+        )
     manifest_name = {
         "BACE_GNN_PPO_ADAPTER_CANARY": "canary_manifest.json",
         "B6_PPO_SMOKE_V2": "ppo_smoke_manifest.json",
@@ -433,6 +606,24 @@ def run(args: Any) -> int:
         "policy_initializer": str(initializer),
         "policy_initializer_hash": str(policy_provenance["policy_initializer_hash"]),
         "reference_policy_hash": reference_hash_before,
+        "policy_parameter_hash_at_run_start": policy_hash_at_run_start,
+        "resumed": resume_checkpoint is not None,
+        "resume_from_checkpoint": (
+            str(resume_checkpoint) if resume_checkpoint is not None else None
+        ),
+        "resume_contract": resume_contract,
+        "adopted_checkpoint_prefix": adopted_checkpoint_prefix,
+        "resume_provenance": (
+            str(output / "resume_provenance.json")
+            if args.stage == "B7_PPO_FULL"
+            else None
+        ),
+        "resume_provenance_sha256": (
+            sha256_file(output / "resume_provenance.json")
+            if args.stage == "B7_PPO_FULL"
+            else None
+        ),
+        "stable_resume_artifacts": b7_resume_artifacts,
         "policy_checkpoint_hash": checkpoint_reload["policy_checkpoint_hash"],
         "policy_checkpoint_hash_schema": checkpoint_reload[
             "policy_checkpoint_hash_schema"
@@ -459,13 +650,17 @@ def run(args: Any) -> int:
             "adapter_weights"
         ],
         "candidate_pool": str(output / "candidate_pool.jsonl"),
+        "candidate_pool_sha256": sha256_file(output / "candidate_pool.jsonl"),
         "reward_manifest": str(output / "reward_manifest.json"),
+        "reward_manifest_sha256": sha256_file(output / "reward_manifest.json"),
         "oracle_provenance": str(output / "oracle_provenance.json"),
         "canary_connected_deletion_preflight": (
             str(output / "canary_connected_deletion_preflight.json")
             if canary_preflight is not None
             else None
         ),
+        "oracle_provenance_sha256": sha256_file(output / "oracle_provenance.json"),
+        "ppo_gate_sha256": sha256_file(output / "ppo_gate.json"),
         "output_root": str(output),
         "stable_loop": "scripts.train_ppo_stable.run_stable_decoded_chem_ppo_loop",
         "shared_algorithm_reimplemented": False,
