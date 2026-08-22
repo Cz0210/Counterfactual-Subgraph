@@ -43,6 +43,58 @@ remains blocked until the ongoing AutoDL evidence produces the required roots.
 
 Accepted
 
+## [2026-08-23] Bound AIDS ComRecGC DBSCAN memory without changing labels
+
+### Background
+
+The serialized AIDS generation payload contains 100,262 candidates and is
+4,913,145,399 bytes.  Repair-v3 loaded the frozen 1,283-parent contract and
+then died in `run_common_recourse.py` when the AutoDL cgroup reached its
+515,396,075,520-byte limit.  The legacy implementation retained every
+theta-eligible pair/vector as Python objects and sklearn DBSCAN retained every
+epsilon neighborhood simultaneously.  A second exclusive run reached the
+same limit, proving that serialization rather than task colocation was the
+remaining blocker.
+
+### Decision
+
+Keep sklearn 1.7.2's Euclidean radius query and the original float32/float64
+recourse vectors, but query it in bounded deterministic blocks.  Determine
+core status from an exact first pass, union only epsilon-adjacent core points
+in a resumable second pass, then assign every border point to the earliest
+numbered adjacent core component in a third pass.  Components are numbered by
+their minimum core sample index.  This is exactly the ordered
+`dbscan_inner` result, including ambiguous borders, without retaining the
+radius graph.
+
+Materialize candidate-major/parent-minor pair/vector chunks as atomic `.npy`
+files and consolidate them with memory maps.  Preserve the legacy NumPy
+centroid and medoid reduction on one cluster at a time and invoke the pinned
+official greedy routine unchanged.  Every phase has a hash-bound checkpoint;
+the last incomplete block is idempotently replayed after interruption.  A
+hard RSS budget is checked before every worst-case radius query and cluster
+copy.  Version, array dtype/shape/hash, epsilon, `min_samples`, block contract,
+labels, and all checkpoints are fail-closed.
+
+The external-memory engine remains unreleased for a full AIDS cell until its
+pair materializer is connected to `run_common_recourse.py`, the end-to-end
+legacy/external fixture (pairs, labels, selected rows, and hashes) passes in
+the AutoDL environment, and a fresh repair-v4 controller is built.  Repair-v2
+and repair-v3 roots remain immutable.
+
+### Consequences
+
+- Neighbor storage is bounded by one query block rather than all points.
+- Scientific output is independent of resource block size.
+- A resume cannot change the vector file, sklearn version, clustering
+  contract, chunk identity, or pair order.
+- Any cluster too large for the declared exact NumPy reduction budget fails
+  closed instead of switching to an approximate or differently rounded mean.
+
+### Status
+
+Accepted (algorithm core; full-route release still gated)
+
 ## [2026-08-23] Serialize the AIDS ComRecGC retry on CPU under a cgroup RAM gate
 
 ### Background
