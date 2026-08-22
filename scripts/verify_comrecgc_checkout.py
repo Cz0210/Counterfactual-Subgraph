@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.baselines.comrecgc.contracts import UPSTREAM_COMMIT  # noqa: E402
 from src.baselines.comrecgc.upstream import (  # noqa: E402
     imported_upstream,
+    read_upstream_commit,
     validate_upstream_checkout,
 )
 
@@ -27,17 +27,6 @@ REQUIRED_FILES = ("comrecgc.py", "common_recourse.py", "data.py", "gnn.py")
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return result.stdout.strip()
 
 
 def verify_checkout(
@@ -53,7 +42,7 @@ def verify_checkout(
             f"actual={expected_commit}, expected={UPSTREAM_COMMIT}."
         )
     validated = validate_upstream_checkout(source)
-    commit = _git(validated, "rev-parse", "HEAD")
+    commit = read_upstream_commit(validated)
     identities = {
         name: _sha(validated / name)
         for name in REQUIRED_FILES

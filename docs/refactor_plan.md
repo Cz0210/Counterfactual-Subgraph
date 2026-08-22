@@ -1,5 +1,13 @@
 # Refactor Plan
 
+## 2026-08-22: Reuse scoped Git trust in the standalone COMRECGC gate
+
+- [x] Expose the shared process-private COMRECGC commit reader used by checkout
+  validation.
+- [x] Remove the standalone verifier's duplicate raw `git rev-parse` call.
+- [x] Add a migrated-owner regression proving the verifier supplies an exact
+  temporary `safe.directory` without changing global Git configuration.
+
 ## 2026-08-22: BACE Ours historical B13 standardization compatibility
 
 - [x] Audit the immutable B12 selection, B13 top-level, merge, and four shard
