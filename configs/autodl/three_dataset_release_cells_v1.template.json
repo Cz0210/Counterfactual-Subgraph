@@ -1,0 +1,104 @@
+{
+  "schema_version": "three_dataset_release_cell_catalog_v1",
+  "matrix_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1",
+  "adoption_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/paper_matrix/four_methods_four_datasets_v1/adoptions/user_approved_frozen_v4_20260822T182359Z/adoption_manifest.json",
+  "cells": [
+    {
+      "dataset": "AIDS",
+      "method": "Ours",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/adoptions/user_approved_frozen_v4_20260822T182359Z/cells/aids/ours/standardized",
+      "owner_kind": "user_approved_frozen_v4"
+    },
+    {
+      "dataset": "AIDS",
+      "method": "GCFExplainer",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/adoptions/user_approved_frozen_v4_20260822T182359Z/cells/aids/gcfexplainer/standardized",
+      "owner_kind": "user_approved_frozen_v4"
+    },
+    {
+      "dataset": "AIDS",
+      "method": "GlobalGCE",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/adoptions/user_approved_frozen_v4_20260822T182359Z/cells/aids/globalgce/standardized",
+      "owner_kind": "user_approved_frozen_v4"
+    },
+    {
+      "dataset": "AIDS",
+      "method": "ComRecGC",
+      "root_kind": "placeholder",
+      "root_layout": "nested_standardized",
+      "placeholder": "FREEZE_EXACT_AIDS_COMRECGC_ROOT_AND_OWNER_MANIFEST_AFTER_ROUTE_SELECTION",
+      "candidate_root_hint": "{matrix_root}/repairs/four_methods_four_datasets_aids_comrecgc_repair_v4/cells/aids/comrecgc/standardized/attempt-0",
+      "owner_task_id": "aids_comrecgc_standardized_external_memory",
+      "owner_manifest_hint": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_aids_comrecgc_repair_v4.json"
+    },
+    {
+      "dataset": "Mutagenicity",
+      "method": "Ours",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/adoptions/user_approved_frozen_v4_20260822T182359Z/cells/mutagenicity/ours/standardized",
+      "owner_kind": "user_approved_frozen_v4"
+    },
+    {
+      "dataset": "Mutagenicity",
+      "method": "GCFExplainer",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/adoptions/user_approved_frozen_v4_20260822T182359Z/cells/mutagenicity/gcfexplainer/standardized",
+      "owner_kind": "user_approved_frozen_v4"
+    },
+    {
+      "dataset": "Mutagenicity",
+      "method": "GlobalGCE",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/adoptions/user_approved_frozen_v4_20260822T182359Z/cells/mutagenicity/globalgce/standardized",
+      "owner_kind": "user_approved_frozen_v4"
+    },
+    {
+      "dataset": "Mutagenicity",
+      "method": "ComRecGC",
+      "root_kind": "placeholder",
+      "root_layout": "nested_standardized",
+      "placeholder": "FREEZE_EXACT_MUT_COMRECGC_ROOT_AND_OWNER_MANIFEST_AFTER_AIDS_DEPENDENCY_SELECTION",
+      "candidate_root_hint": "{matrix_root}/repairs/four_methods_four_datasets_mut_traceoff_parity_v1/cells/mutagenicity/comrecgc/standardized/attempt-0",
+      "owner_task_id": "mut_standardize_from_parity_common",
+      "owner_manifest_hint": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_mut_traceoff_parity_v1.json"
+    },
+    {
+      "dataset": "BACE",
+      "method": "Ours",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/repairs/four_methods_four_datasets_repair_v1/cells/bace/ours/standardized/attempt-0",
+      "owner_task_id": "bace_ours_standardized",
+      "owner_manifest_hint": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_repair_v1.json"
+    },
+    {
+      "dataset": "BACE",
+      "method": "GCFExplainer",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/cells/bace/gcfexplainer/standardized/attempt-0",
+      "owner_task_id": "bace_gcfexplainer_standardized",
+      "owner_manifest_hint": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_continuation_v1.json"
+    },
+    {
+      "dataset": "BACE",
+      "method": "GlobalGCE",
+      "root_kind": "placeholder",
+      "placeholder": "FREEZE_STANDARDIZED_ROOT_AFTER_BACE_GLOBALGCE_FINAL_AND_CPU_STANDARDIZATION_ARE_CLOSED",
+      "upstream_scientific_final_hint": "{matrix_root}/runs/bace_globalgce_frozen_gine_v5_cc941fc/bace/globalgce/final/attempt-0",
+      "upstream_scientific_final_role": "scientific_final_not_a_standardized_cell",
+      "owner_task_id": "bace_globalgce_standardized",
+      "required_owner_task_id": "bace_globalgce_standardized",
+      "owner_manifest_requirement": "fresh external standardization manifest containing bace_globalgce_standardized and its exact output template"
+    },
+    {
+      "dataset": "BACE",
+      "method": "ComRecGC",
+      "root_kind": "fixed",
+      "standardized_root": "{matrix_root}/repairs/four_methods_four_datasets_repair_v1/cells/bace/comrecgc/standardized/attempt-0",
+      "owner_task_id": "bace_comrecgc_standardized",
+      "owner_manifest_hint": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_repair_v1.json"
+    }
+  ]
+}

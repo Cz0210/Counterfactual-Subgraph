@@ -1,5 +1,48 @@
 # Decisions Log
 
+## [2026-08-23] Gate the three-dataset release with an external-owner supervisor
+
+### Background
+
+The twelve AIDS/Mutagenicity/BACE cells are produced by several already
+running persistent controllers. Starting another aggregate controller would
+compete for their locks, while rendering from a historical handoff or a
+candidate path could promote a stale or raw result. In particular, the BACE
+GlobalGCE v5 native final is not yet the standardized Figure 3/Figure 4/Table 2
+closure. AIDS and Mutagenicity ComRecGC may also select fresh repair routes.
+
+### Decision
+
+Add an independent CPU-only release supervisor that never mutates a scientific
+controller or cell root. A builder freezes each standardized root together
+with the SHA of its external owner manifest, owner task ID, and exact output
+binding. Unsettled routes remain explicit placeholders and cannot be inferred
+from hints. BACE GlobalGCE is activated only through the existing fresh CPU
+`bace_globalgce_standardized` task, never from its raw final directory.
+
+At fewer than twelve passing cells, the supervisor writes only PID/control/
+heartbeat state and no numeric registry, figure, or table. At exactly twelve,
+it applies the existing canonical registry and three-dataset audits, binds all
+closure file identities including `PASS`, publishes a sixteen-row matrix with
+four TasteMolNet license blocks, and invokes the existing staging-only
+exporter. Fresh directories use atomic no-replace publication; process-loss
+transactions are restartable and never duplicate a still-live exporter.
+
+### Consequences
+
+- Six user-approved v4 cells remain render-only and are not scientifically
+  recomputed.
+- TasteMolNet remains `BLOCKED_LICENSE_REVIEW`; 12/16 is explicitly partial.
+- Result and paper-staging trees are byte-identical under runtime, and
+  `paper/` remains unchanged.
+- The code and template can be integrated now, but deployment remains blocked
+  until the three placeholder owner routes are immutable and a runnable spec
+  is reviewed.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Queue BACE GCF equivalence in an immutable UUID-lock sidecar
 
 ### Background

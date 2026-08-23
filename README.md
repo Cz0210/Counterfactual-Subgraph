@@ -117,6 +117,13 @@ closures prove 16/16 eligible cells; incomplete campaigns receive a
 non-numeric staging audit only. See
 `docs/AUTODL_FOUR_BY_FOUR_MAIN_RESULTS_EXPORT.md`.
 
+The partial three-dataset release has a separate persistent CPU-only
+supervisor. It hash-binds all twelve standardized cell roots to their external
+owner manifest/task/output contracts, remains non-numeric while fewer than
+twelve cells pass, and publishes only runtime staging artifacts; it never
+modifies a scientific controller or `paper/`. See
+`docs/AUTODL_THREE_DATASET_RELEASE_SUPERVISOR.md`.
+
 Failed four-by-four terminal closures can be retried without reopening the
 main controller or any PASS/FAILED root by the bounded, source-audited repair
 manifest builder at

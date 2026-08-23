@@ -1,5 +1,27 @@
 # Refactor Plan
 
+## 2026-08-23: Persistent three-dataset release supervisor
+
+- [x] Catalog the nine settled standardized roots and keep AIDS ComRecGC,
+  Mutagenicity ComRecGC, and BACE GlobalGCE as explicit fail-closed
+  placeholders until their exact routes are frozen.
+- [x] Require every non-v4 cell to bind an immutable external owner manifest,
+  task ID, and exact output path/template; bind PASS and closure hashes at
+  publication time.
+- [x] Keep the GlobalGCE native v5 final root outside the matrix and require
+  the existing CPU `bace_globalgce_standardized` task to create a fresh paper
+  closure.
+- [x] Add a CPU-only, flock/PID-bound persistent monitor with a 60-second
+  heartbeat, restart reconciliation, no GPU lock, and no writes to active
+  controllers or scientific roots.
+- [x] Publish neither registry nor numeric output below 12/16; at 12/16,
+  atomically publish the canonical sixteen-row matrix and use the existing
+  three-dataset staging exporter under fresh/no-clobber destinations.
+- [x] Add exporter process-loss recovery, paired static Slurm parity wrappers,
+  focused drift/restart/heartbeat/no-output tests, and an AutoDL runbook.
+- [ ] Build the runnable spec only after all three placeholder routes have
+  immutable owner manifests; review its SHA before deploying the sidecar.
+
 ## 2026-08-23: BACE equivalence UUID-lock sidecar
 
 - [x] Prove active controller manifests cannot accept new task bytes after
