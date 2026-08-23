@@ -70,6 +70,25 @@
   deploying or interrupting existing AutoDL diagnostic/legacy jobs.
 - [ ] Publish either PASS gate only after the real AutoDL evidence completes;
   until then optimized full/shared routes remain blocked.
+## 2026-08-23: Exact all-core DBSCAN anchor shortcut
+
+- [x] Add a deterministic, hash-bound finite-anchor witness before the
+  quadratic dense-radius route.
+- [x] Prove all rows core from distinct anchor sample-index lower bounds,
+  including sklearn self counting, duplicate-vector identity, and inclusive
+  epsilon semantics.
+- [x] Prove one component from a connected anchor epsilon graph plus an anchor
+  attachment for every non-anchor row; emit exact labels zero in source order.
+- [x] Publish lower-bound/anchor proof artifacts and explicitly mark exact
+  full neighbor counts unavailable instead of fabricating them.
+- [x] Resume the linear witness by hash-bound blocks and reject tampering,
+  scientific-input drift, sklearn drift, or RSS overflow.
+- [x] Fall back only below an explicit exact-complexity limit; otherwise stop
+  with `EXACT_DBSCAN_COMPLEXITY_BLOCKED` and no approximate labels.
+- [x] Cover positive sklearn label/core parity, epsilon-boundary and duplicate
+  semantics, negative fallback/block cases, resume/hash closure, and RSS.
+- [ ] Wire the opt-in contract through a fresh AutoDL continuation only after
+  independent real promoted-vector proof; do not mutate the running v4 root.
 
 ## 2026-08-23: AIDS ComRecGC exact external-memory repair-v4
 

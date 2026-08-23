@@ -31,6 +31,228 @@ def _contract(*, block: int = 7, max_rss_bytes: int | None = None):
     )
 
 
+def _shortcut_contract(
+    *,
+    block: int = 3,
+    anchors: int = 4,
+    fallback: int = 100,
+    max_rss_bytes: int | None = None,
+) -> external.ExternalDBSCANContract:
+    return external.ExternalDBSCANContract(
+        eps=1.0,
+        min_samples=3,
+        query_block_size=2,
+        checkpoint_interval_blocks=1,
+        max_rss_bytes=max_rss_bytes or external._rss_bytes() + 512 * 1024**2,
+        expected_sklearn_version=sklearn.__version__,
+        shortcut_mode=external.ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        shortcut_anchor_count=anchors,
+        shortcut_query_block_size=block,
+        exact_fallback_max_samples=fallback,
+    )
+
+
+def _all_core_values(num_samples: int = 12) -> np.ndarray:
+    values = np.zeros((num_samples, 64), dtype=np.float32)
+    # With four anchors and N=12 the deterministic anchor indices are
+    # [0, 3, 7, 11].  Keep them duplicate-by-value but distinct-by-index.
+    values[1, 0] = 1.0  # exactly eps from every anchor: sklearn uses <= eps
+    values[2, 0] = 0.25
+    values[4, 0] = -0.5
+    values[5, 0] = 0.75
+    values[6, 0] = -1.0
+    values[8, 0] = 0.1
+    values[9, 0] = -0.1
+    values[10, 0] = 0.5
+    return values
+
+
+def test_anchor_shortcut_is_elementwise_sklearn_exact_with_boundary_and_duplicates(
+    tmp_path: Path,
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    expected = DBSCAN(eps=1.0, min_samples=3).fit(values)
+    contract = _shortcut_contract()
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "shortcut",
+        contract=contract,
+    )
+
+    labels = np.load(result.labels_path, allow_pickle=False)
+    core = np.load(result.core_mask_path, allow_pickle=False)
+    assert np.array_equal(labels, expected.labels_)
+    assert np.array_equal(np.flatnonzero(core), expected.core_sample_indices_)
+    assert labels.tolist() == [0] * len(values)
+    assert core.tolist() == [True] * len(values)
+    assert result.neighbor_counts_path is None
+    assert result.shortcut_proof_path is not None
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    proof = json.loads(result.shortcut_proof_path.read_text(encoding="utf-8"))
+    lower = np.load(proof["anchor_neighbor_lower_bounds_path"], allow_pickle=False)
+    assert manifest["clustering_path"] == external.ALL_CORE_ONE_COMPONENT_SHORTCUT
+    assert manifest["neighbor_counts_available"] is False
+    assert manifest["neighbor_counts_path"] is None
+    assert manifest["neighbor_counts_sha256"] is None
+    assert manifest["approximation_used"] is False
+    assert proof["exact_neighbor_counts_materialized"] is False
+    assert proof["all_points_core_proven"] is True
+    assert proof["single_epsilon_component_proven"] is True
+    assert lower.tolist() == [3, 4, 4, 3, 4, 4, 4, 3, 4, 4, 4, 3]
+    reopened = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "shortcut",
+        contract=contract,
+        resume=True,
+    )
+    assert reopened.manifest_sha256 == result.manifest_sha256
+    assert reopened.neighbor_counts_path is None
+
+
+def test_inconclusive_anchor_witness_falls_back_only_below_explicit_limit(
+    tmp_path: Path,
+) -> None:
+    values = np.zeros((9, 64), dtype=np.float32)
+    values[:, 0] = np.asarray([0.0, 0.01, 0.02, 10.0, 10.01, 10.02, 20.0, 20.01, 20.02])
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = external.ExternalDBSCANContract(
+        **{**_shortcut_contract(anchors=3, fallback=9).__dict__, "eps": 0.05}
+    )
+    expected = DBSCAN(eps=contract.eps, min_samples=contract.min_samples).fit(values)
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=tmp_path / "fallback", contract=contract
+    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    failure = json.loads(
+        (tmp_path / "fallback/shortcut_failure.json").read_text(encoding="utf-8")
+    )
+    assert np.array_equal(np.load(result.labels_path), expected.labels_)
+    assert np.array_equal(
+        np.flatnonzero(np.load(result.core_mask_path)), expected.core_sample_indices_
+    )
+    assert result.neighbor_counts_path is not None
+    assert manifest["clustering_path"] == "three_pass_exact_radius_graph_v1"
+    assert failure["status"] == "INCONCLUSIVE"
+    assert failure["fallback_allowed"] is True
+    assert failure["approximation_used"] is False
+
+
+def test_large_inconclusive_anchor_witness_is_explicit_complexity_block(
+    tmp_path: Path,
+) -> None:
+    values = np.zeros((9, 64), dtype=np.float32)
+    values[:, 0] = np.arange(9, dtype=np.float32) * 10.0
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = external.ExternalDBSCANContract(
+        **{**_shortcut_contract(anchors=3, fallback=8).__dict__, "eps": 0.05}
+    )
+    root = tmp_path / "blocked"
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="EXACT_DBSCAN_COMPLEXITY_BLOCKED",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    failure = json.loads((root / "shortcut_failure.json").read_text())
+    assert failure["fallback_allowed"] is False
+    assert failure["approximation_used"] is False
+    assert not (root / "labels.npy").exists()
+
+
+def test_anchor_shortcut_resume_is_label_hash_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = np.zeros((16, 64), dtype=np.float32)
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract(block=3, anchors=4)
+    reference = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "reference",
+        contract=contract,
+    )
+    reference_manifest = json.loads(reference.manifest_path.read_text())
+    original_fit = external._fit_anchor_neighbors
+    calls = {"count": 0}
+
+    class InterruptingAnchorModel:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def radius_neighbors(self, *args, **kwargs):
+            calls["count"] += 1
+            # anchor graph, first committed sample block, then interruption
+            if calls["count"] == 3:
+                raise RuntimeError("anchor witness interruption")
+            return self.wrapped.radius_neighbors(*args, **kwargs)
+
+    def interrupted_fit(*args, **kwargs):
+        model, version = original_fit(*args, **kwargs)
+        return InterruptingAnchorModel(model), version
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", interrupted_fit)
+    root = tmp_path / "resumed"
+    with pytest.raises(RuntimeError, match="anchor witness interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    state = json.loads((root / "checkpoint.json").read_text())
+    assert state["phase"] == "shortcut_anchor_scan"
+    assert state["next_offset"] == 3
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", original_fit)
+    resumed = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract, resume=True
+    )
+    resumed_manifest = json.loads(resumed.manifest_path.read_text())
+    assert resumed_manifest["labels_sha256"] == reference_manifest["labels_sha256"]
+    assert resumed_manifest["core_mask_sha256"] == reference_manifest["core_mask_sha256"]
+    assert np.array_equal(np.load(resumed.labels_path), np.load(reference.labels_path))
+
+
+def test_anchor_shortcut_terminal_rejects_tampered_lower_bound_witness(
+    tmp_path: Path,
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract()
+    root = tmp_path / "shortcut"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    proof = json.loads(result.shortcut_proof_path.read_text())
+    lower_path = Path(proof["anchor_neighbor_lower_bounds_path"])
+    with lower_path.open("r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        value = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([value[0] ^ 1]))
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="proof artifact mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
+def test_anchor_shortcut_rss_gate_precedes_full_sample_scan(tmp_path: Path) -> None:
+    values = _all_core_values(20)
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract(
+        block=20,
+        max_rss_bytes=external._rss_bytes() + 1024,
+    )
+    with pytest.raises(external.ExternalMemoryDBSCANError, match="RSS"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=tmp_path / "shortcut",
+            contract=contract,
+        )
+
+
 @pytest.mark.parametrize("seed", range(8))
 def test_external_labels_are_elementwise_sklearn_exact(tmp_path: Path, seed: int) -> None:
     random = np.random.default_rng(seed)

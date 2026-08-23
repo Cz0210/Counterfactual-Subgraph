@@ -210,6 +210,57 @@ controller state is not rewritten or relabelled.
 ### Status
 
 Accepted
+## [2026-08-23] Shortcut dense DBSCAN only with a complete anchor proof
+
+### Background
+
+The exact three-pass external DBSCAN bounds memory but not work.  For the
+91,916,686-row, 64-feature AIDS recourse array, a dense epsilon graph would
+still require quadratic brute-force distance work even with query blocks of
+eight.  A constant-label shortcut is scientifically acceptable only when a
+small witness proves the result; observing a dense diagnostic sample is not
+such a proof.
+
+### Decision
+
+Add an opt-in `all_core_one_component_anchor_v1` route.  Select distinct
+sample-index anchors deterministically by
+`floor(i * (N - 1) / (A - 1))`, bind that exact index-list hash, the complete
+promoted vector-file SHA-256, dtype/shape, frozen sklearn version, epsilon,
+`min_samples`, and every shortcut parameter into the scientific identity.
+The shortcut is allowed only when sklearn's full-data `algorithm=auto` route
+resolves to the same brute Euclidean kernel used for the anchor scan.
+
+For every input row, count distinct anchor sample indices at distance
+`<= float(eps)`, excluding the row's own sample index only when it is itself
+an anchor.  Duplicate vectors remain distinct sample indices.  A lower bound
+of at least `min_samples - 1` proves the row is core because sklearn also
+counts its own index.  Independently require the anchor epsilon graph to be
+connected and every non-anchor row to touch an anchor.  These conditions prove
+that every row is core and the entire ordered input is one component, so
+sklearn's exact labels are elementwise zero and its core set is every row.
+
+Save the anchor indices, canonical undirected anchor edges, and per-row anchor
+lower bounds as checksum-closed proof artifacts.  Do not create or claim an
+exact `neighbor_counts.npy`; the manifest records that it is unavailable and
+why.  A failed proof may enter the original exact three-pass route only when
+`N` is at or below an explicit fallback limit.  Above that limit it emits
+`EXACT_DBSCAN_COMPLEXITY_BLOCKED`, with an immutable inconclusive witness, and
+never approximates labels.
+
+### Consequences
+
+- A successful witness changes quadratic dense-radius work to `O(N * A)` and
+  keeps memory bounded by one sample block and the finite anchor set.
+- Boundary, self, duplicate, label-order, resume, input-hash, and RSS behavior
+  remain fail-closed and are compared directly with sklearn fixtures.
+- Exploratory anchor diagnostics are not adopted as formal evidence; a fresh
+  run must recompute the proof against the promoted pair-store vectors.
+- Existing AutoDL worktrees, checkpoints, and output roots remain untouched.
+
+### Status
+
+Accepted (core implemented; fresh AutoDL release remains separately gated)
 
 ## [2026-08-23] Bound AIDS ComRecGC DBSCAN memory without changing labels
 
