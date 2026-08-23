@@ -15,11 +15,20 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from .external_memory_dbscan import ExternalMemoryDBSCANError, _check_rss, _rss_bytes
+from .external_memory_dbscan import (
+    ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    ExternalMemoryDBSCANError,
+    _check_rss,
+    _rss_bytes,
+    _validate_shortcut_proof_closure,
+)
 
 
 PAIR_STORE_SCHEMA = "comrecgc_external_pair_store_v1"
+PAIR_STORE_ADOPTION_SCHEMA = "comrecgc_read_only_pair_store_adoption_v1"
 SUMMARY_SCHEMA = "comrecgc_external_cluster_summary_v1"
+ONE_CLUSTER_SUMMARY_SCHEMA = "comrecgc_exact_one_cluster_summary_v1"
 
 
 def _utc_now() -> str:
@@ -146,6 +155,28 @@ class PairStoreResult:
     pairs_sha256: str
     vectors_sha256: str
     manifest_sha256: str
+
+
+@dataclass(frozen=True)
+class ExactOneClusterSummaryResult:
+    """Terminal products of the proven all-core/one-component summary path."""
+
+    official_result: tuple[list[int], list[float], list[int]]
+    selected: list[dict[str, Any]]
+    manifest_path: Path
+    manifest_sha256: str
+    retained_mask_path: Path
+    retained_positions_path: Path | None
+    retained_vectors_path: Path | None
+
+
+@dataclass(frozen=True)
+class AdoptedPairStoreResult:
+    """Read-only source pair store plus its fresh adoption evidence."""
+
+    pair_store: PairStoreResult
+    adoption_manifest_path: Path
+    adoption_manifest_sha256: str
 
 
 class ExternalPairStore:
@@ -520,6 +551,1484 @@ def _validate_pair_store_manifest(path: Path, manifest: Mapping[str, Any]) -> No
         raise ExternalMemoryDBSCANError("pair-store terminal array schema mismatch")
 
 
+def _file_stat_identity(path: Path) -> dict[str, int]:
+    value = path.stat()
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _find_writable_process_references(
+    paths: Sequence[Path], *, proc_root: Path
+) -> list[dict[str, Any]]:
+    """Return writable FDs/maps referring to exact source inodes."""
+
+    root = proc_root.expanduser().resolve(strict=True)
+    targets = {
+        (int(path.stat().st_dev), int(path.stat().st_ino)): str(path)
+        for path in paths
+    }
+    writers: list[dict[str, Any]] = []
+    for process in root.iterdir():
+        if not process.name.isdigit() or not process.is_dir():
+            continue
+        pid = int(process.name)
+        fd_root = process / "fd"
+        try:
+            descriptors = list(fd_root.iterdir())
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            descriptors = []
+        for descriptor in descriptors:
+            try:
+                value = descriptor.stat()
+                target = targets.get((int(value.st_dev), int(value.st_ino)))
+                if target is None:
+                    continue
+                flags_text = (process / "fdinfo" / descriptor.name).read_text(
+                    encoding="utf-8"
+                )
+                flags_line = next(
+                    line for line in flags_text.splitlines() if line.startswith("flags:")
+                )
+                flags = int(flags_line.split(":", 1)[1].strip(), 8)
+                if (flags & os.O_ACCMODE) in {os.O_WRONLY, os.O_RDWR}:
+                    writers.append(
+                        {
+                            "pid": pid,
+                            "kind": "fd",
+                            "fd": int(descriptor.name),
+                            "path": target,
+                            "flags_octal": oct(flags),
+                        }
+                    )
+            except (
+                FileNotFoundError,
+                PermissionError,
+                ProcessLookupError,
+                StopIteration,
+                ValueError,
+            ):
+                continue
+        maps_path = process / "maps"
+        try:
+            mappings = maps_path.read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        for line in mappings:
+            parts = line.split(maxsplit=5)
+            if len(parts) < 5 or "w" not in parts[1] or int(parts[4]) == 0:
+                continue
+            try:
+                major_hex, minor_hex = parts[3].split(":", 1)
+                device = os.makedev(int(major_hex, 16), int(minor_hex, 16))
+                target = targets.get((int(device), int(parts[4])))
+            except (ValueError, OSError):
+                continue
+            if target is not None:
+                writers.append(
+                    {
+                        "pid": pid,
+                        "kind": "mapping",
+                        "path": target,
+                        "permissions": parts[1],
+                    }
+                )
+    return sorted(
+        writers,
+        key=lambda row: (
+            int(row["pid"]),
+            str(row["kind"]),
+            int(row.get("fd", -1)),
+        ),
+    )
+
+
+def validate_adopted_pair_store_read_only(
+    manifest_path: str | Path,
+    *,
+    expected_scientific_identity: Mapping[str, Any] | None = None,
+    proc_root: str | Path = "/proc",
+) -> AdoptedPairStoreResult:
+    """Revalidate a physical-reference adoption without trusting its claims.
+
+    Every invocation reopens and hashes the source pair-store closure, checks
+    the stat identity frozen by the adoption manifest, and brackets that work
+    with writable-FD/mapping scans.  This intentionally costs one full source
+    read at terminal reconciliation: downstream stages must never consume a
+    stale, replaced, or concurrently-written 25 GiB source merely because a
+    small adoption JSON still exists.
+    """
+
+    adoption_logical = Path(manifest_path).expanduser()
+    if adoption_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("pair-store adoption manifest is a symlink")
+    adoption_path = adoption_logical.resolve(strict=True)
+    if not adoption_path.is_file():
+        raise ExternalMemoryDBSCANError("pair-store adoption manifest is not regular")
+    adoption = _load_object(adoption_path)
+    expected_identity = (
+        None
+        if expected_scientific_identity is None
+        else dict(expected_scientific_identity)
+    )
+    if (
+        adoption.get("schema_version") != PAIR_STORE_ADOPTION_SCHEMA
+        or adoption.get("run_complete") is not True
+        or adoption.get("adoption_mode") != "physical_read_only_reference"
+        or adoption.get("source_open_mode_required") != "read_only"
+        or adoption.get("source_mutated") is not False
+        or adoption.get("copied") is not False
+        or adoption.get("hardlinked") is not False
+    ):
+        raise ExternalMemoryDBSCANError("pair-store adoption contract mismatch")
+    identity = adoption.get("scientific_identity")
+    if not isinstance(identity, Mapping):
+        raise ExternalMemoryDBSCANError("pair-store adoption identity missing")
+    identity = dict(identity)
+    identity_sha = _stable_hash(identity)
+    if (
+        adoption.get("scientific_identity_sha256") != identity_sha
+        or (expected_identity is not None and identity != expected_identity)
+    ):
+        raise ExternalMemoryDBSCANError("pair-store adoption identity mismatch")
+
+    source_logical = Path(
+        str(adoption.get("source_manifest_path") or "")
+    ).expanduser()
+    if source_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("adopted source manifest is a symlink")
+    source_path = source_logical.resolve(strict=True)
+    if not source_path.is_file():
+        raise ExternalMemoryDBSCANError("adopted source manifest is not regular")
+    source_manifest = _load_object(source_path)
+    if (
+        source_manifest.get("schema_version") != PAIR_STORE_SCHEMA
+        or source_manifest.get("run_complete") is not True
+        or source_manifest.get("scientific_identity") != identity
+        or source_manifest.get("scientific_identity_sha256") != identity_sha
+    ):
+        raise ExternalMemoryDBSCANError("adopted source scientific identity mismatch")
+    pairs_logical = Path(str(source_manifest.get("pairs_path") or ""))
+    vectors_logical = Path(str(source_manifest.get("vectors_path") or ""))
+    if pairs_logical.is_symlink() or vectors_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("adopted pair-store array is a symlink")
+    pairs_path = pairs_logical.resolve(strict=True)
+    vectors_path = vectors_logical.resolve(strict=True)
+    sources = [source_path, pairs_path, vectors_path]
+    if any(path.is_symlink() or not path.is_file() for path in sources):
+        raise ExternalMemoryDBSCANError("adopted pair-store source is not regular")
+    source_files = adoption.get("source_files")
+    if not isinstance(source_files, Mapping) or set(source_files) != {
+        str(path) for path in sources
+    }:
+        raise ExternalMemoryDBSCANError("pair-store adoption source-file set mismatch")
+    recorded_stats: dict[str, dict[str, int]] = {}
+    for path in sources:
+        entry = source_files.get(str(path))
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("stat"), Mapping):
+            raise ExternalMemoryDBSCANError("pair-store adoption stat identity missing")
+        recorded_stats[str(path)] = {
+            str(key): int(value) for key, value in entry["stat"].items()
+        }
+    before = {str(path): _file_stat_identity(path) for path in sources}
+    if before != recorded_stats:
+        raise ExternalMemoryDBSCANError("pair-store adopted source stat drift")
+
+    proc = Path(proc_root).expanduser().resolve(strict=True)
+    writer_claim = adoption.get("source_writer_scan")
+    if (
+        not isinstance(writer_claim, Mapping)
+        or writer_claim.get("proc_root") != str(proc)
+        or int(writer_claim.get("writable_reference_count", -1)) != 0
+        or writer_claim.get("writers") != []
+    ):
+        raise ExternalMemoryDBSCANError("pair-store adoption writer-scan claim mismatch")
+    writers_before = _find_writable_process_references(sources, proc_root=proc)
+    if writers_before:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_HAS_LIVE_WRITER:"
+            + json.dumps(writers_before, sort_keys=True)
+        )
+    _validate_pair_store_manifest(source_path, source_manifest)
+    actual_hashes = {
+        str(source_path): _sha256_file(source_path),
+        str(pairs_path): str(source_manifest["pairs_sha256"]),
+        str(vectors_path): str(source_manifest["vectors_sha256"]),
+    }
+    if adoption.get("source_manifest_sha256") != actual_hashes[str(source_path)]:
+        raise ExternalMemoryDBSCANError("pair-store source manifest checksum mismatch")
+    for path in sources:
+        entry = source_files[str(path)]
+        if entry.get("sha256") != actual_hashes[str(path)]:
+            raise ExternalMemoryDBSCANError("pair-store adopted source checksum mismatch")
+    writers_after = _find_writable_process_references(sources, proc_root=proc)
+    if writers_after:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_HAS_LIVE_WRITER:"
+            + json.dumps(writers_after, sort_keys=True)
+        )
+    after = {str(path): _file_stat_identity(path) for path in sources}
+    if after != before:
+        raise ExternalMemoryDBSCANError("pair-store source drift during validation")
+    return AdoptedPairStoreResult(
+        pair_store=_pair_store_result(source_path, source_manifest),
+        adoption_manifest_path=adoption_path,
+        adoption_manifest_sha256=_sha256_file(adoption_path),
+    )
+
+
+def adopt_external_pair_store_read_only(
+    *,
+    source_manifest_path: str | Path,
+    adoption_root: str | Path,
+    expected_scientific_identity: Mapping[str, Any],
+    proc_root: str | Path = "/proc",
+    resume: bool = False,
+) -> AdoptedPairStoreResult:
+    """Adopt a completed pair store by physical read-only reference.
+
+    No source file is copied, linked, chmodded, or opened writable.  The fresh
+    adoption manifest binds source content/stat identity and a live Linux
+    writable-FD/mapping scan.  The caller must continue to open the returned
+    arrays with ``mmap_mode='r'``.
+    """
+
+    source_logical = Path(source_manifest_path).expanduser()
+    if source_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("pair-store source manifest is a symlink")
+    source_path = source_logical.resolve(strict=True)
+    root = Path(adoption_root).expanduser().resolve(strict=False)
+    manifest_path = root / "run_manifest.json"
+    expected_identity = dict(expected_scientific_identity)
+    expected_identity_sha = _stable_hash(expected_identity)
+    if not source_path.is_file():
+        raise ExternalMemoryDBSCANError("pair-store source manifest is not regular")
+    source_manifest = _load_object(source_path)
+    if (
+        source_manifest.get("schema_version") != PAIR_STORE_SCHEMA
+        or source_manifest.get("run_complete") is not True
+    ):
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_NOT_TERMINALLY_PROMOTED"
+        )
+    if (
+        source_manifest.get("scientific_identity") != expected_identity
+        or source_manifest.get("scientific_identity_sha256")
+        != expected_identity_sha
+    ):
+        raise ExternalMemoryDBSCANError("adopted pair-store identity mismatch")
+    pairs_logical = Path(str(source_manifest.get("pairs_path") or ""))
+    vectors_logical = Path(str(source_manifest.get("vectors_path") or ""))
+    if pairs_logical.is_symlink() or vectors_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("pair-store source array is a symlink")
+    pairs_path = pairs_logical.resolve(strict=True)
+    vectors_path = vectors_logical.resolve(strict=True)
+    sources = [source_path, pairs_path, vectors_path]
+    if any(path.is_symlink() or not path.is_file() for path in sources):
+        raise ExternalMemoryDBSCANError("adopted pair-store source is not regular")
+    before = {str(path): _file_stat_identity(path) for path in sources}
+    _validate_pair_store_manifest(source_path, source_manifest)
+    writers = _find_writable_process_references(
+        sources, proc_root=Path(proc_root)
+    )
+    if writers:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_HAS_LIVE_WRITER:" + json.dumps(writers, sort_keys=True)
+        )
+    after = {str(path): _file_stat_identity(path) for path in sources}
+    if before != after:
+        raise ExternalMemoryDBSCANError("pair-store source stat drift during adoption")
+    source_manifest_sha = _sha256_file(source_path)
+    final_after = {str(path): _file_stat_identity(path) for path in sources}
+    if after != final_after:
+        raise ExternalMemoryDBSCANError("pair-store source drift after writer scan")
+    after = final_after
+    payload = {
+        "schema_version": PAIR_STORE_ADOPTION_SCHEMA,
+        "run_complete": True,
+        "source_manifest_path": str(source_path),
+        "source_manifest_sha256": source_manifest_sha,
+        "scientific_identity": expected_identity,
+        "scientific_identity_sha256": expected_identity_sha,
+        "source_files": {
+            str(path): {
+                "stat": after[str(path)],
+                "sha256": (
+                    source_manifest_sha
+                    if path == source_path
+                    else str(
+                        source_manifest[
+                            "pairs_sha256" if path == pairs_path else "vectors_sha256"
+                        ]
+                    )
+                ),
+            }
+            for path in sources
+        },
+        "source_writer_scan": {
+            "proc_root": str(Path(proc_root).expanduser().resolve(strict=True)),
+            "writable_reference_count": 0,
+            "writers": [],
+        },
+        "adoption_mode": "physical_read_only_reference",
+        "source_open_mode_required": "read_only",
+        "source_mutated": False,
+        "copied": False,
+        "hardlinked": False,
+        "adopted_at": _utc_now(),
+    }
+    if manifest_path.exists():
+        if not resume:
+            raise FileExistsError(f"pair-store adoption already exists: {root}")
+        existing = _load_object(manifest_path)
+        frozen = dict(existing)
+        frozen.pop("adopted_at", None)
+        current = dict(payload)
+        current.pop("adopted_at", None)
+        if frozen != current:
+            raise ExternalMemoryDBSCANError("pair-store adoption resume mismatch")
+        payload = existing
+    else:
+        if root.exists() and any(root.iterdir()):
+            raise FileExistsError(f"pair-store adoption root is non-empty: {root}")
+        root.mkdir(parents=True, exist_ok=True)
+        _atomic_json(manifest_path, payload)
+    return validate_adopted_pair_store_read_only(
+        manifest_path,
+        expected_scientific_identity=expected_identity,
+        proc_root=proc_root,
+    )
+
+
+def _validate_exact_one_cluster_source(
+    *,
+    dbscan_manifest_path: Path,
+    dbscan_manifest_sha256: str,
+    recourse_vectors: np.ndarray,
+) -> dict[str, Any]:
+    """Close the all-core proof before any specialized summary is attempted."""
+
+    manifest_path = dbscan_manifest_path.expanduser().resolve(strict=True)
+    if _sha256_file(manifest_path) != str(dbscan_manifest_sha256):
+        raise ExternalMemoryDBSCANError("one-cluster DBSCAN manifest checksum mismatch")
+    manifest = _load_object(manifest_path)
+    if (
+        manifest.get("run_complete") is not True
+        or manifest.get("clustering_path")
+        not in {
+            ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        }
+        or manifest.get("shortcut_proof_path") is None
+        or manifest.get("shortcut_proof_sha256") is None
+        or int(manifest.get("cluster_count", -1)) != 1
+        or int(manifest.get("noise_count", -1)) != 0
+        or int(manifest.get("core_count", -1)) != len(recourse_vectors)
+        or int(manifest.get("num_samples", -1)) != len(recourse_vectors)
+        or manifest.get("neighbor_counts_available") is not False
+        or manifest.get("approximation_used") is not False
+    ):
+        raise ExternalMemoryDBSCANError(
+            "one-cluster summary requires a complete exact anchor proof"
+        )
+    _validate_shortcut_proof_closure(manifest=manifest, root=manifest_path.parent)
+    proof_path = Path(str(manifest["shortcut_proof_path"])).resolve(strict=True)
+    if (
+        proof_path.parent != manifest_path.parent
+        or _sha256_file(proof_path) != manifest["shortcut_proof_sha256"]
+    ):
+        raise ExternalMemoryDBSCANError("one-cluster shortcut proof checksum mismatch")
+    proof = _load_object(proof_path)
+    if (
+        proof.get("status") != "PASS"
+        or proof.get("all_points_core_proven") is not True
+        or proof.get("single_epsilon_component_proven") is not True
+        or proof.get("labels_are_exact_sklearn_order") is not True
+        or proof.get("label_value") != 0
+        or proof.get("core_mask_value") is not True
+        or proof.get("approximation_used") is not False
+    ):
+        raise ExternalMemoryDBSCANError("one-cluster shortcut proof is incomplete")
+    identity = manifest.get("scientific_identity")
+    if not isinstance(identity, dict):
+        raise ExternalMemoryDBSCANError("DBSCAN scientific identity is missing")
+    if manifest.get("scientific_identity_sha256") != _stable_hash(identity):
+        raise ExternalMemoryDBSCANError("DBSCAN scientific identity hash mismatch")
+    if (
+        identity.get("vectors_shape")
+        != [int(recourse_vectors.shape[0]), int(recourse_vectors.shape[1])]
+        or identity.get("vectors_dtype") != str(recourse_vectors.dtype)
+    ):
+        raise ExternalMemoryDBSCANError("one-cluster vector schema drifted")
+    return manifest
+
+
+def _open_or_create_memmap(
+    path: Path,
+    *,
+    shape: tuple[int, ...],
+    dtype: np.dtype[Any],
+    resume: bool,
+) -> np.memmap:
+    if path.exists():
+        if path.is_symlink() or not resume:
+            raise ExternalMemoryDBSCANError(f"unexpected summary partial: {path}")
+        values = np.load(path, mmap_mode="r+", allow_pickle=False)
+        if values.shape != shape or values.dtype != dtype:
+            raise ExternalMemoryDBSCANError(
+                f"summary partial schema mismatch: {path.name}"
+            )
+        return values
+    return np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=shape)
+
+
+def _fsync_memmap(values: np.memmap) -> None:
+    values.flush()
+    filename = getattr(values, "filename", None)
+    if filename is None:
+        raise ExternalMemoryDBSCANError("summary memmap lost its backing file")
+    with Path(filename).open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _summary_checkpoint(
+    path: Path,
+    *,
+    identity: Mapping[str, Any],
+    phase: str,
+    next_offset: int,
+    retained_count: int,
+    peak_rss_bytes: int,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": ONE_CLUSTER_SUMMARY_SCHEMA,
+        "scientific_identity": dict(identity),
+        "scientific_identity_sha256": _stable_hash(identity),
+        "phase": str(phase),
+        "next_offset": int(next_offset),
+        "retained_count": int(retained_count),
+        "peak_rss_bytes": int(peak_rss_bytes),
+        "updated_at": _utc_now(),
+        **dict(extra or {}),
+    }
+    _atomic_json(path, payload)
+    return payload
+
+
+def _promote_summary_array(
+    *,
+    partial: Path,
+    final: Path,
+    shape: tuple[int, ...],
+    dtype: np.dtype[Any],
+    expected_sha256: str,
+    label: str,
+) -> Path:
+    _reconcile_promoted_pair_array(
+        partial=partial,
+        final=final,
+        shape=shape,
+        dtype=dtype,
+        expected_sha256=expected_sha256,
+        label=label,
+    )
+    return final
+
+
+def _validate_one_cluster_summary_manifest(
+    *, manifest_path: Path, manifest: Mapping[str, Any], identity: Mapping[str, Any]
+) -> ExactOneClusterSummaryResult:
+    root = manifest_path.parent.resolve(strict=True)
+    if (
+        manifest.get("schema_version") != ONE_CLUSTER_SUMMARY_SCHEMA
+        or manifest.get("run_complete") is not True
+        or manifest.get("scientific_identity") != dict(identity)
+        or manifest.get("scientific_identity_sha256") != _stable_hash(identity)
+        or manifest.get("exact_one_cluster_semantics_replayed") is not True
+        or manifest.get("approximation_used") is not False
+    ):
+        raise ExternalMemoryDBSCANError("completed one-cluster summary mismatch")
+    pairs_storage = str(identity.get("pairs_storage") or "physical_npy")
+    if pairs_storage == "physical_npy":
+        pair_source = Path(str(identity.get("pairs_path") or "")).resolve(strict=True)
+        if _sha256_file(pair_source) != identity.get("pairs_sha256"):
+            raise ExternalMemoryDBSCANError(
+                "completed one-cluster physical pair source changed"
+            )
+    elif pairs_storage == "implicit_cartesian_v1":
+        authority = Path(
+            str(identity.get("pair_authority_manifest_path") or "")
+        ).resolve(strict=True)
+        if _sha256_file(authority) != identity.get("pair_authority_manifest_sha256"):
+            raise ExternalMemoryDBSCANError(
+                "completed one-cluster implicit pair authority changed"
+            )
+    else:
+        raise ExternalMemoryDBSCANError(
+            "completed one-cluster pair storage contract is invalid"
+        )
+    artifact_paths: dict[str, Path | None] = {}
+    for name in (
+        "retained_mask",
+        "retained_positions",
+        "retained_vectors",
+        "torch_centroid",
+        "numpy_centroid",
+        "retained_centroid",
+    ):
+        path_value = manifest.get(f"{name}_path")
+        sha_value = manifest.get(f"{name}_sha256")
+        if path_value is None:
+            if sha_value is not None or name in {
+                "retained_mask",
+                "torch_centroid",
+                "numpy_centroid",
+            }:
+                raise ExternalMemoryDBSCANError(
+                    f"completed one-cluster {name} closure mismatch"
+                )
+            artifact_paths[name] = None
+            continue
+        path = Path(str(path_value)).resolve(strict=True)
+        if path.parent != root or _sha256_file(path) != sha_value:
+            raise ExternalMemoryDBSCANError(
+                f"completed one-cluster {name} checksum mismatch"
+            )
+        artifact_paths[name] = path
+    vector_shape = manifest.get("scientific_identity", {}).get("vectors_shape")
+    vector_dtype = manifest.get("scientific_identity", {}).get("vectors_dtype")
+    if (
+        not isinstance(vector_shape, list)
+        or len(vector_shape) != 2
+        or int(vector_shape[0]) <= 0
+        or int(vector_shape[1]) <= 0
+    ):
+        raise ExternalMemoryDBSCANError("completed one-cluster vector schema is invalid")
+    n_samples, n_features = map(int, vector_shape)
+    retained_count = int(manifest.get("retained_count", -1))
+    mask = np.load(artifact_paths["retained_mask"], mmap_mode="r", allow_pickle=False)
+    if mask.shape != (n_samples,) or mask.dtype != np.dtype(np.bool_):
+        raise ExternalMemoryDBSCANError("completed one-cluster mask schema mismatch")
+    if int(np.count_nonzero(mask)) != retained_count:
+        raise ExternalMemoryDBSCANError("completed one-cluster retained count mismatch")
+    for name in ("torch_centroid", "numpy_centroid"):
+        center = np.load(artifact_paths[name], allow_pickle=False)
+        if center.shape != (n_features,) or str(center.dtype) != vector_dtype:
+            raise ExternalMemoryDBSCANError(
+                f"completed one-cluster {name} schema mismatch"
+            )
+    if retained_count:
+        positions = np.load(
+            artifact_paths["retained_positions"], mmap_mode="r", allow_pickle=False
+        )
+        vectors = np.load(
+            artifact_paths["retained_vectors"], mmap_mode="r", allow_pickle=False
+        )
+        retained_center = np.load(
+            artifact_paths["retained_centroid"], allow_pickle=False
+        )
+        if (
+            positions.shape != (retained_count,)
+            or positions.dtype != np.dtype(np.int64)
+            or vectors.shape != (retained_count, n_features)
+            or str(vectors.dtype) != vector_dtype
+            or retained_center.shape != (n_features,)
+            or str(retained_center.dtype) != vector_dtype
+        ):
+            raise ExternalMemoryDBSCANError(
+                "completed one-cluster retained artifact schema mismatch"
+            )
+    official = manifest.get("official_result")
+    selected = manifest.get("selected")
+    if (
+        not isinstance(official, list)
+        or len(official) != 3
+        or not all(isinstance(part, list) for part in official)
+        or not isinstance(selected, list)
+    ):
+        raise ExternalMemoryDBSCANError("completed one-cluster result schema mismatch")
+    return ExactOneClusterSummaryResult(
+        official_result=(list(official[0]), list(official[1]), list(official[2])),
+        selected=[dict(row) for row in selected],
+        manifest_path=manifest_path,
+        manifest_sha256=_sha256_file(manifest_path),
+        retained_mask_path=artifact_paths["retained_mask"],  # type: ignore[arg-type]
+        retained_positions_path=artifact_paths["retained_positions"],
+        retained_vectors_path=artifact_paths["retained_vectors"],
+    )
+
+
+def validate_proven_one_cluster_summary(
+    manifest_path: str | Path,
+) -> ExactOneClusterSummaryResult:
+    """Validate a terminal summary and every hash-bound scientific artifact."""
+
+    path = Path(manifest_path).expanduser().resolve(strict=True)
+    manifest = _load_object(path)
+    identity = manifest.get("scientific_identity")
+    if not isinstance(identity, Mapping):
+        raise ExternalMemoryDBSCANError(
+            "completed one-cluster scientific identity is absent"
+        )
+    return _validate_one_cluster_summary_manifest(
+        manifest_path=path, manifest=manifest, identity=identity
+    )
+
+
+def _validate_scan_offset(offset: int, *, total: int, block_size: int, phase: str) -> None:
+    if (
+        int(offset) < 0
+        or int(offset) > int(total)
+        or (int(offset) != int(total) and int(offset) % int(block_size) != 0)
+    ):
+        raise ExternalMemoryDBSCANError(
+            f"{phase} checkpoint offset is not a committed block boundary"
+        )
+
+
+def _scan_torch_first_counterfactuals(
+    *,
+    recourse_vectors: np.ndarray,
+    pair_indices: np.ndarray,
+    center: np.ndarray,
+    radius: float,
+    stop_offset: int,
+    block_size: int,
+    torch_module: Any,
+) -> dict[int, int]:
+    """Replay the exact upstream first-parent update through one prefix."""
+
+    tensor = torch_module.from_numpy(recourse_vectors)
+    center_tensor = torch_module.from_numpy(center)
+    first_cf_by_parent: dict[int, int] = {}
+    for offset in range(0, int(stop_offset), int(block_size)):
+        stop = min(int(stop_offset), offset + int(block_size))
+        distances = torch_module.norm(tensor[offset:stop] - center_tensor, dim=-1)
+        retained = (distances < float(radius)).detach().cpu().numpy()
+        if bool(np.any(retained)):
+            block_pairs = pair_indices[offset:stop][retained]
+            parents, first = np.unique(block_pairs[:, 0], return_index=True)
+            for parent, local_index in zip(parents.tolist(), first.tolist()):
+                first_cf_by_parent.setdefault(
+                    int(parent), int(block_pairs[int(local_index), 1])
+                )
+    return first_cf_by_parent
+
+
+def _numpy_trace_membership(
+    values: np.ndarray, *, center: np.ndarray, radius: float
+) -> np.ndarray:
+    distances = np.linalg.norm(values - center, axis=1)
+    return distances.astype(np.float64, copy=False) < float(radius)
+
+
+def _validate_trace_mask_prefix(
+    *,
+    mask: np.ndarray,
+    recourse_vectors: np.ndarray,
+    center: np.ndarray,
+    radius: float,
+    stop_offset: int,
+    block_size: int,
+) -> int:
+    count = 0
+    for offset in range(0, int(stop_offset), int(block_size)):
+        stop = min(int(stop_offset), offset + int(block_size))
+        expected = _numpy_trace_membership(
+            recourse_vectors[offset:stop], center=center, radius=radius
+        )
+        if not np.array_equal(mask[offset:stop], expected):
+            raise ExternalMemoryDBSCANError(
+                "trace-mask committed prefix content mismatch"
+            )
+        count += int(np.count_nonzero(expected))
+    return count
+
+
+def _validate_retained_materialization_prefix(
+    *,
+    mask: np.ndarray,
+    recourse_vectors: np.ndarray,
+    positions: np.ndarray,
+    retained_vectors: np.ndarray,
+    stop_offset: int,
+    expected_cursor: int,
+    block_size: int,
+) -> None:
+    cursor = 0
+    for offset in range(0, int(stop_offset), int(block_size)):
+        stop = min(int(stop_offset), offset + int(block_size))
+        local = np.flatnonzero(mask[offset:stop])
+        count = int(len(local))
+        expected_positions = local.astype(np.int64, copy=False) + offset
+        if (
+            not np.array_equal(
+                positions[cursor : cursor + count], expected_positions
+            )
+            or not np.array_equal(
+                retained_vectors[cursor : cursor + count],
+                recourse_vectors[offset:stop][local],
+            )
+        ):
+            raise ExternalMemoryDBSCANError(
+                "retained-materialization committed prefix mismatch"
+            )
+        cursor += count
+    if cursor != int(expected_cursor):
+        raise ExternalMemoryDBSCANError(
+            "retained-materialization checkpoint cursor mismatch"
+        )
+
+
+def summarize_proven_one_cluster_external(
+    *,
+    work_dir: str | Path,
+    dbscan_manifest_path: str | Path,
+    dbscan_manifest_sha256: str,
+    recourse_vectors: np.ndarray,
+    pair_indices: Any,
+    pairs_sha256: str,
+    pair_authority_manifest_path: str | Path | None = None,
+    pair_authority_manifest_sha256: str | None = None,
+    radius: float,
+    theta: float,
+    recourse_size: int,
+    official_greedy: Callable[..., Any],
+    torch_module: Any,
+    max_rss_bytes: int,
+    block_size: int = 65_536,
+    resume: bool = False,
+) -> ExactOneClusterSummaryResult:
+    """Exactly replay the pinned one-cluster coverage/trace without Python O(N).
+
+    The entrypoint is legal only after a hash-closed DBSCAN certificate proves
+    that every row is core and sklearn's sole label is zero.  Torch and NumPy
+    centroids remain separate because the two pinned legacy consumers use
+    different reduction implementations.  Per-row norms are blockwise (there
+    is no cross-row reduction), and retained vectors are materialized on disk
+    in original pair order before the legacy NumPy medoid reduction.
+    """
+
+    root = Path(work_dir).expanduser().resolve(strict=False)
+    state_path = root / "checkpoint.json"
+    manifest_path = root / "run_manifest.json"
+    if (
+        recourse_vectors.ndim != 2
+        or pair_indices.ndim != 2
+        or pair_indices.shape != (len(recourse_vectors), 2)
+        or pair_indices.dtype != np.dtype(np.int64)
+        or recourse_vectors.dtype not in (np.dtype(np.float32), np.dtype(np.float64))
+        or len(recourse_vectors) <= 0
+    ):
+        raise ExternalMemoryDBSCANError("one-cluster arrays are not exactly aligned")
+    if not np.isfinite(float(radius)) or float(radius) <= 0:
+        raise ExternalMemoryDBSCANError("one-cluster radius must be positive")
+    if not np.isfinite(float(theta)) or float(theta) < 0:
+        raise ExternalMemoryDBSCANError("one-cluster theta must be nonnegative")
+    if int(recourse_size) < 0 or int(block_size) <= 0 or int(max_rss_bytes) <= 0:
+        raise ExternalMemoryDBSCANError("invalid one-cluster execution bound")
+    dbscan_path = Path(dbscan_manifest_path).expanduser().resolve(strict=True)
+    dbscan_manifest = _validate_exact_one_cluster_source(
+        dbscan_manifest_path=dbscan_path,
+        dbscan_manifest_sha256=dbscan_manifest_sha256,
+        recourse_vectors=recourse_vectors,
+    )
+    pair_filename = str(getattr(pair_indices, "filename", "") or "")
+    pair_path: Path | None = None
+    pair_authority_path: Path | None = None
+    if pair_filename:
+        pair_path = Path(pair_filename).resolve(strict=True)
+        if _sha256_file(pair_path) != str(pairs_sha256):
+            raise ExternalMemoryDBSCANError("one-cluster pair checksum mismatch")
+        pairs_storage = "physical_npy"
+    else:
+        if (
+            getattr(pair_indices, "logical_npy_sha256", None) != str(pairs_sha256)
+            or pair_authority_manifest_path is None
+            or pair_authority_manifest_sha256 is None
+        ):
+            raise ExternalMemoryDBSCANError(
+                "one-cluster implicit pair authority is incomplete"
+            )
+        pair_authority_path = Path(pair_authority_manifest_path).expanduser().resolve(
+            strict=True
+        )
+        if _sha256_file(pair_authority_path) != str(pair_authority_manifest_sha256):
+            raise ExternalMemoryDBSCANError(
+                "one-cluster implicit pair authority checksum mismatch"
+            )
+        pairs_storage = "implicit_cartesian_v1"
+    vector_path = Path(
+        str(getattr(recourse_vectors, "filename", "") or "")
+    ).resolve(strict=True)
+    dbscan_identity = dbscan_manifest["scientific_identity"]
+    if (
+        Path(str(dbscan_identity.get("vectors_path") or "")).resolve(strict=True)
+        != vector_path
+        or _sha256_file(vector_path) != dbscan_identity.get("vectors_sha256")
+    ):
+        raise ExternalMemoryDBSCANError("one-cluster vector checksum mismatch")
+    identity = {
+        "schema_version": ONE_CLUSTER_SUMMARY_SCHEMA,
+        "dbscan_manifest_path": str(dbscan_path),
+        "dbscan_manifest_sha256": str(dbscan_manifest_sha256),
+        "shortcut_proof_path": dbscan_manifest["shortcut_proof_path"],
+        "shortcut_proof_sha256": dbscan_manifest["shortcut_proof_sha256"],
+        "vectors_path": str(vector_path),
+        "vectors_sha256": dbscan_identity["vectors_sha256"],
+        "vectors_shape": [int(value) for value in recourse_vectors.shape],
+        "vectors_dtype": str(recourse_vectors.dtype),
+        "pairs_storage": pairs_storage,
+        "pairs_path": None if pair_path is None else str(pair_path),
+        "pairs_sha256": str(pairs_sha256),
+        "pair_authority_manifest_path": (
+            None if pair_authority_path is None else str(pair_authority_path)
+        ),
+        "pair_authority_manifest_sha256": (
+            None
+            if pair_authority_path is None
+            else str(pair_authority_manifest_sha256)
+        ),
+        "radius": float(radius),
+        "theta": float(theta),
+        "recourse_size": int(recourse_size),
+        "block_size": int(block_size),
+        "torch_version": str(torch_module.__version__),
+        "numpy_version": str(np.__version__),
+        "pair_order": "candidate_major_parent_minor",
+        "coverage_comparison": "torch.norm(row-torch.mean(all_rows)) < radius",
+        "trace_comparison": "numpy.linalg.norm(row-numpy.mean(all_rows)) < radius",
+    }
+    identity_hash = _stable_hash(identity)
+    if manifest_path.exists():
+        manifest = _load_object(manifest_path)
+        return _validate_one_cluster_summary_manifest(
+            manifest_path=manifest_path, manifest=manifest, identity=identity
+        )
+    if root.exists() and any(root.iterdir()) and not resume:
+        raise FileExistsError(f"one-cluster summary root is non-empty: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    if state_path.exists():
+        state = _load_object(state_path)
+        if (
+            state.get("schema_version") != ONE_CLUSTER_SUMMARY_SCHEMA
+            or state.get("scientific_identity") != identity
+            or state.get("scientific_identity_sha256") != identity_hash
+        ):
+            raise ExternalMemoryDBSCANError("one-cluster checkpoint identity mismatch")
+    else:
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="torch_coverage",
+            next_offset=0,
+            retained_count=0,
+            peak_rss_bytes=_rss_bytes(),
+        )
+    peak = max(int(state.get("peak_rss_bytes", 0)), _rss_bytes())
+    n_samples, n_features = map(int, recourse_vectors.shape)
+    row_bytes = n_features * int(recourse_vectors.dtype.itemsize)
+    reservation = int(block_size) * (row_bytes * 2 + 32) + 128 * 1024**2
+    _check_rss(
+        int(max_rss_bytes), phase="one_cluster.block", reserved_bytes=reservation
+    )
+
+    torch_center_path = root / "torch_centroid.npy"
+    checkpointed_torch_center_sha = state.get("torch_centroid_sha256")
+    if torch_center_path.exists() and checkpointed_torch_center_sha:
+        if _sha256_file(torch_center_path) != checkpointed_torch_center_sha:
+            raise ExternalMemoryDBSCANError(
+                "torch centroid checkpoint checksum mismatch"
+            )
+        torch_center = np.load(torch_center_path, allow_pickle=False)
+        if torch_center.shape != (n_features,) or torch_center.dtype != recourse_vectors.dtype:
+            raise ExternalMemoryDBSCANError("torch centroid checkpoint schema mismatch")
+    else:
+        tensor = torch_module.from_numpy(recourse_vectors)
+        torch_center_tensor = torch_module.mean(tensor, dim=0)
+        torch_center = torch_center_tensor.detach().cpu().numpy().copy()
+        _atomic_npy(torch_center_path, torch_center)
+        del torch_center_tensor, tensor
+    torch_center_sha = _sha256_file(torch_center_path)
+    torch_center_norm = float(
+        torch_module.norm(torch_module.from_numpy(torch_center)).item()
+    )
+
+    phase = str(state.get("phase"))
+    if phase == "torch_coverage":
+        first_cf_by_parent = {
+            int(parent): int(candidate)
+            for parent, candidate in (state.get("first_cf_by_parent") or [])
+        }
+        start = int(state.get("next_offset", 0))
+        _validate_scan_offset(
+            start,
+            total=n_samples,
+            block_size=int(block_size),
+            phase="torch coverage",
+        )
+        replayed_first = _scan_torch_first_counterfactuals(
+            recourse_vectors=recourse_vectors,
+            pair_indices=pair_indices,
+            center=torch_center,
+            radius=float(radius),
+            stop_offset=start,
+            block_size=int(block_size),
+            torch_module=torch_module,
+        )
+        if replayed_first != first_cf_by_parent:
+            raise ExternalMemoryDBSCANError(
+                "torch-coverage checkpoint prefix state mismatch"
+            )
+        tensor = torch_module.from_numpy(recourse_vectors)
+        center_tensor = torch_module.from_numpy(torch_center)
+        for offset in range(start, n_samples, int(block_size)):
+            stop = min(n_samples, offset + int(block_size))
+            distances = torch_module.norm(
+                tensor[offset:stop] - center_tensor, dim=-1
+            )
+            retained = distances < float(radius)
+            retained_numpy = retained.detach().cpu().numpy()
+            if bool(np.any(retained_numpy)):
+                block_pairs = pair_indices[offset:stop][retained_numpy]
+                parents, first = np.unique(block_pairs[:, 0], return_index=True)
+                for parent, local_index in zip(parents.tolist(), first.tolist()):
+                    first_cf_by_parent.setdefault(
+                        int(parent), int(block_pairs[int(local_index), 1])
+                    )
+            del distances, retained, retained_numpy
+            peak = max(peak, _check_rss(int(max_rss_bytes), phase="one_cluster.torch"))
+            state = _summary_checkpoint(
+                state_path,
+                identity=identity,
+                phase="torch_coverage",
+                next_offset=stop,
+                retained_count=0,
+                peak_rss_bytes=peak,
+                extra={
+                    "torch_centroid_sha256": torch_center_sha,
+                    "torch_centroid_norm": torch_center_norm,
+                    "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                },
+            )
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="trace_mask",
+            next_offset=0,
+            retained_count=0,
+            peak_rss_bytes=peak,
+            extra={
+                "torch_centroid_sha256": torch_center_sha,
+                "torch_centroid_norm": torch_center_norm,
+                "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+            },
+        )
+        del center_tensor, tensor
+        phase = "trace_mask"
+
+    if state.get("torch_centroid_sha256") != torch_center_sha:
+        raise ExternalMemoryDBSCANError("torch centroid checkpoint checksum mismatch")
+    first_cf_by_parent = {
+        int(parent): int(candidate)
+        for parent, candidate in (state.get("first_cf_by_parent") or [])
+    }
+    official_result: tuple[list[int], list[float], list[int]]
+    if torch_center_norm < float(theta) and int(recourse_size) > 0:
+        official_result = (
+            [len(first_cf_by_parent)],
+            [torch_center_norm],
+            [len(set(first_cf_by_parent.values()))],
+        )
+    else:
+        official_result = ([], [], [])
+
+    numpy_center_path = root / "numpy_centroid.npy"
+    checkpointed_numpy_center_sha = state.get("numpy_centroid_sha256")
+    if numpy_center_path.exists() and checkpointed_numpy_center_sha:
+        if _sha256_file(numpy_center_path) != checkpointed_numpy_center_sha:
+            raise ExternalMemoryDBSCANError(
+                "NumPy centroid checkpoint checksum mismatch"
+            )
+        numpy_center = np.load(numpy_center_path, allow_pickle=False)
+        if numpy_center.shape != (n_features,) or numpy_center.dtype != recourse_vectors.dtype:
+            raise ExternalMemoryDBSCANError("NumPy centroid checkpoint schema mismatch")
+    else:
+        # The all-zero label mask selects every row in original order.  The
+        # direct contiguous memmap view has the same dtype/shape/strides as the
+        # legacy advanced-index copy and therefore the same NumPy reduction.
+        numpy_center = np.mean(recourse_vectors, axis=0)
+        _atomic_npy(numpy_center_path, numpy_center)
+    numpy_center_sha = _sha256_file(numpy_center_path)
+    numpy_center_norm = float(np.linalg.norm(numpy_center))
+
+    mask_partial = root / "retained_mask.partial.npy"
+    mask_final = root / "retained_mask.npy"
+    phase = str(state.get("phase"))
+    if phase == "trace_mask":
+        mask = _open_or_create_memmap(
+            mask_partial,
+            shape=(n_samples,),
+            dtype=np.dtype(np.bool_),
+            resume=bool(resume),
+        )
+        retained_count = int(state.get("retained_count", 0))
+        start = int(state.get("next_offset", 0))
+        _validate_scan_offset(
+            start,
+            total=n_samples,
+            block_size=int(block_size),
+            phase="trace mask",
+        )
+        replayed_count = _validate_trace_mask_prefix(
+            mask=mask,
+            recourse_vectors=recourse_vectors,
+            center=numpy_center,
+            radius=float(radius),
+            stop_offset=start,
+            block_size=int(block_size),
+        )
+        if replayed_count != retained_count:
+            raise ExternalMemoryDBSCANError(
+                "trace-mask checkpoint retained count mismatch"
+            )
+        for offset in range(start, n_samples, int(block_size)):
+            stop = min(n_samples, offset + int(block_size))
+            # The legacy trace executes ``float(np_scalar) < float(radius)``;
+            # the helper preserves that comparison instead of NumPy 2's
+            # value-based Python-scalar promotion.
+            retained = _numpy_trace_membership(
+                recourse_vectors[offset:stop],
+                center=numpy_center,
+                radius=float(radius),
+            )
+            mask[offset:stop] = retained
+            retained_count += int(np.count_nonzero(retained))
+            _fsync_memmap(mask)
+            peak = max(peak, _check_rss(int(max_rss_bytes), phase="one_cluster.trace"))
+            state = _summary_checkpoint(
+                state_path,
+                identity=identity,
+                phase="trace_mask",
+                next_offset=stop,
+                retained_count=retained_count,
+                peak_rss_bytes=peak,
+                extra={
+                    "torch_centroid_sha256": torch_center_sha,
+                    "torch_centroid_norm": torch_center_norm,
+                    "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                    "numpy_centroid_sha256": numpy_center_sha,
+                    "numpy_centroid_norm": numpy_center_norm,
+                },
+            )
+        _fsync_memmap(mask)
+        mask_sha = _sha256_file(mask_partial)
+        del mask
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="trace_mask_ready",
+            next_offset=n_samples,
+            retained_count=retained_count,
+            peak_rss_bytes=peak,
+            extra={
+                "torch_centroid_sha256": torch_center_sha,
+                "torch_centroid_norm": torch_center_norm,
+                "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                "numpy_centroid_sha256": numpy_center_sha,
+                "numpy_centroid_norm": numpy_center_norm,
+                "retained_mask_sha256": mask_sha,
+            },
+        )
+        phase = "trace_mask_ready"
+    if phase == "trace_mask_ready":
+        _promote_summary_array(
+            partial=mask_partial,
+            final=mask_final,
+            shape=(n_samples,),
+            dtype=np.dtype(np.bool_),
+            expected_sha256=str(state.get("retained_mask_sha256") or ""),
+            label="retained mask",
+        )
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="retained_materialize",
+            next_offset=0,
+            retained_count=int(state["retained_count"]),
+            peak_rss_bytes=peak,
+            extra={
+                **{
+                    key: state[key]
+                    for key in (
+                        "torch_centroid_sha256",
+                        "torch_centroid_norm",
+                        "first_cf_by_parent",
+                        "numpy_centroid_sha256",
+                        "numpy_centroid_norm",
+                        "retained_mask_sha256",
+                    )
+                },
+                "retained_cursor": 0,
+            },
+        )
+        phase = "retained_materialize"
+
+    if state.get("numpy_centroid_sha256") != numpy_center_sha:
+        raise ExternalMemoryDBSCANError("NumPy centroid checkpoint checksum mismatch")
+    mask = np.load(mask_final, mmap_mode="r", allow_pickle=False)
+    retained_count = int(state.get("retained_count", 0))
+    positions_partial = root / "retained_positions.partial.npy"
+    positions_final = root / "retained_positions.npy"
+    vectors_partial = root / "retained_vectors.partial.npy"
+    vectors_final = root / "retained_vectors.npy"
+    phase = str(state.get("phase"))
+    if phase == "retained_materialize":
+        if retained_count == 0:
+            state = _summary_checkpoint(
+                state_path,
+                identity=identity,
+                phase="retained_ready",
+                next_offset=n_samples,
+                retained_count=0,
+                peak_rss_bytes=peak,
+                extra={
+                    **{
+                        key: state[key]
+                        for key in (
+                            "torch_centroid_sha256",
+                            "torch_centroid_norm",
+                            "first_cf_by_parent",
+                            "numpy_centroid_sha256",
+                            "numpy_centroid_norm",
+                            "retained_mask_sha256",
+                        )
+                    },
+                    "retained_cursor": 0,
+                    "retained_positions_sha256": None,
+                    "retained_vectors_sha256": None,
+                },
+            )
+        else:
+            positions = _open_or_create_memmap(
+                positions_partial,
+                shape=(retained_count,),
+                dtype=np.dtype(np.int64),
+                resume=bool(resume),
+            )
+            retained_vectors = _open_or_create_memmap(
+                vectors_partial,
+                shape=(retained_count, n_features),
+                dtype=recourse_vectors.dtype,
+                resume=bool(resume),
+            )
+            start = int(state.get("next_offset", 0))
+            cursor = int(state.get("retained_cursor", 0))
+            _validate_scan_offset(
+                start,
+                total=n_samples,
+                block_size=int(block_size),
+                phase="retained materialization",
+            )
+            _validate_retained_materialization_prefix(
+                mask=mask,
+                recourse_vectors=recourse_vectors,
+                positions=positions,
+                retained_vectors=retained_vectors,
+                stop_offset=start,
+                expected_cursor=cursor,
+                block_size=int(block_size),
+            )
+            for offset in range(start, n_samples, int(block_size)):
+                stop = min(n_samples, offset + int(block_size))
+                local = np.flatnonzero(mask[offset:stop])
+                count = int(len(local))
+                if count:
+                    positions[cursor : cursor + count] = local.astype(
+                        np.int64, copy=False
+                    ) + offset
+                    retained_vectors[cursor : cursor + count] = recourse_vectors[
+                        offset:stop
+                    ][local]
+                    cursor += count
+                _fsync_memmap(positions)
+                _fsync_memmap(retained_vectors)
+                peak = max(
+                    peak,
+                    _check_rss(int(max_rss_bytes), phase="one_cluster.materialize"),
+                )
+                state = _summary_checkpoint(
+                    state_path,
+                    identity=identity,
+                    phase="retained_materialize",
+                    next_offset=stop,
+                    retained_count=retained_count,
+                    peak_rss_bytes=peak,
+                    extra={
+                        **{
+                            key: state[key]
+                            for key in (
+                                "torch_centroid_sha256",
+                                "torch_centroid_norm",
+                                "first_cf_by_parent",
+                                "numpy_centroid_sha256",
+                                "numpy_centroid_norm",
+                                "retained_mask_sha256",
+                            )
+                        },
+                        "retained_cursor": cursor,
+                    },
+                )
+            if cursor != retained_count:
+                raise ExternalMemoryDBSCANError("retained materialization count drift")
+            _fsync_memmap(positions)
+            _fsync_memmap(retained_vectors)
+            positions_sha = _sha256_file(positions_partial)
+            vectors_sha = _sha256_file(vectors_partial)
+            del positions, retained_vectors
+            state = _summary_checkpoint(
+                state_path,
+                identity=identity,
+                phase="retained_ready",
+                next_offset=n_samples,
+                retained_count=retained_count,
+                peak_rss_bytes=peak,
+                extra={
+                    **{
+                        key: state[key]
+                        for key in (
+                            "torch_centroid_sha256",
+                            "torch_centroid_norm",
+                            "first_cf_by_parent",
+                            "numpy_centroid_sha256",
+                            "numpy_centroid_norm",
+                            "retained_mask_sha256",
+                        )
+                    },
+                    "retained_cursor": cursor,
+                    "retained_positions_sha256": positions_sha,
+                    "retained_vectors_sha256": vectors_sha,
+                },
+            )
+        phase = "retained_ready"
+    if phase == "retained_ready":
+        if retained_count:
+            _promote_summary_array(
+                partial=positions_partial,
+                final=positions_final,
+                shape=(retained_count,),
+                dtype=np.dtype(np.int64),
+                expected_sha256=str(state.get("retained_positions_sha256") or ""),
+                label="retained positions",
+            )
+            _promote_summary_array(
+                partial=vectors_partial,
+                final=vectors_final,
+                shape=(retained_count, n_features),
+                dtype=recourse_vectors.dtype,
+                expected_sha256=str(state.get("retained_vectors_sha256") or ""),
+                label="retained vectors",
+            )
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="finalize",
+            next_offset=n_samples,
+            retained_count=retained_count,
+            peak_rss_bytes=peak,
+            extra={key: value for key, value in state.items() if key not in {
+                "schema_version", "scientific_identity", "scientific_identity_sha256",
+                "phase", "next_offset", "retained_count", "peak_rss_bytes", "updated_at"
+            }},
+        )
+        phase = "finalize"
+    if phase != "finalize":
+        raise ExternalMemoryDBSCANError(f"unknown one-cluster phase: {phase}")
+
+    # A checkpoint is only a progress hint.  Recompute every scientific prefix
+    # before publishing PASS so a skipped/tampered offset can never turn an
+    # unwritten zero-filled suffix into a valid result.
+    if (
+        (
+            pair_path is not None
+            and _sha256_file(pair_path) != str(pairs_sha256)
+        )
+        or (
+            pair_authority_path is not None
+            and _sha256_file(pair_authority_path)
+            != str(pair_authority_manifest_sha256)
+        )
+        or _sha256_file(vector_path) != dbscan_identity.get("vectors_sha256")
+        or _sha256_file(dbscan_path) != str(dbscan_manifest_sha256)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "one-cluster source changed during summary replay"
+        )
+    _validate_exact_one_cluster_source(
+        dbscan_manifest_path=dbscan_path,
+        dbscan_manifest_sha256=dbscan_manifest_sha256,
+        recourse_vectors=recourse_vectors,
+    )
+    replayed_first = _scan_torch_first_counterfactuals(
+        recourse_vectors=recourse_vectors,
+        pair_indices=pair_indices,
+        center=torch_center,
+        radius=float(radius),
+        stop_offset=n_samples,
+        block_size=int(block_size),
+        torch_module=torch_module,
+    )
+    if replayed_first != first_cf_by_parent:
+        raise ExternalMemoryDBSCANError(
+            "terminal torch-coverage replay mismatch"
+        )
+    replayed_retained_count = _validate_trace_mask_prefix(
+        mask=mask,
+        recourse_vectors=recourse_vectors,
+        center=numpy_center,
+        radius=float(radius),
+        stop_offset=n_samples,
+        block_size=int(block_size),
+    )
+    if replayed_retained_count != retained_count:
+        raise ExternalMemoryDBSCANError("terminal trace-mask coverage mismatch")
+    if retained_count:
+        terminal_positions = np.load(
+            positions_final, mmap_mode="r", allow_pickle=False
+        )
+        terminal_vectors = np.load(
+            vectors_final, mmap_mode="r", allow_pickle=False
+        )
+        _validate_retained_materialization_prefix(
+            mask=mask,
+            recourse_vectors=recourse_vectors,
+            positions=terminal_positions,
+            retained_vectors=terminal_vectors,
+            stop_offset=n_samples,
+            expected_cursor=retained_count,
+            block_size=int(block_size),
+        )
+        del terminal_positions, terminal_vectors
+
+    selected: list[dict[str, Any]] = []
+    if retained_count:
+        retained_positions = np.load(positions_final, mmap_mode="r", allow_pickle=False)
+        retained_vectors = np.load(vectors_final, mmap_mode="r", allow_pickle=False)
+        retained_center = np.mean(retained_vectors, axis=0)
+        retained_center_path = root / "retained_centroid.npy"
+        _atomic_npy(retained_center_path, retained_center)
+        covered_parents: set[int] = set()
+        member_counterfactuals: set[int] = set()
+        winner = -1
+        winner_distance = float("inf")
+        for offset in range(0, retained_count, int(block_size)):
+            stop = min(retained_count, offset + int(block_size))
+            distances = np.linalg.norm(
+                retained_vectors[offset:stop] - retained_center, axis=1
+            )
+            local_winner = int(np.argmin(distances))
+            local_distance = float(distances[local_winner])
+            if local_distance < winner_distance:
+                winner_distance = local_distance
+                winner = offset + local_winner
+            source_rows = retained_positions[offset:stop]
+            pairs = pair_indices[source_rows]
+            covered_parents.update(map(int, np.unique(pairs[:, 0]).tolist()))
+            member_counterfactuals.update(map(int, np.unique(pairs[:, 1]).tolist()))
+        if winner < 0:
+            raise ExternalMemoryDBSCANError("retained medoid winner is missing")
+        filtered = numpy_center_norm < float(theta) and bool(covered_parents)
+        if filtered and int(recourse_size) > 0:
+            selection = official_greedy(
+                counterfactual_covering={0: set(covered_parents)},
+                graphs_covered_by={parent: {0} for parent in covered_parents},
+                k=1,
+            )
+            if selection != {1: (0, len(covered_parents))}:
+                raise ExternalMemoryDBSCANError(
+                    "official one-cluster greedy result changed"
+                )
+            source_position = int(retained_positions[winner])
+            source_index, counterfactual_index = pair_indices[source_position]
+            selected = [
+                {
+                    "rank": 1,
+                    "cluster_label": 0,
+                    "cluster_center_norm": numpy_center_norm,
+                    "cluster_radius": float(radius),
+                    "cluster_size": n_samples,
+                    "representative_source_index": int(source_index),
+                    "representative_counterfactual_index": int(counterfactual_index),
+                    "representative_distance_to_center": winner_distance,
+                    "covered_parent_indices_native": sorted(covered_parents),
+                    "native_cumulative_covered_count": len(covered_parents),
+                    "native_cumulative_cost": numpy_center_norm,
+                    "member_counterfactual_indices": sorted(member_counterfactuals),
+                }
+            ]
+    retained_center_path = root / "retained_centroid.npy"
+    artifacts = {
+        "retained_mask_path": str(mask_final),
+        "retained_mask_sha256": _sha256_file(mask_final),
+        "retained_positions_path": str(positions_final) if retained_count else None,
+        "retained_positions_sha256": (
+            _sha256_file(positions_final) if retained_count else None
+        ),
+        "retained_vectors_path": str(vectors_final) if retained_count else None,
+        "retained_vectors_sha256": (
+            _sha256_file(vectors_final) if retained_count else None
+        ),
+        "torch_centroid_path": str(torch_center_path),
+        "torch_centroid_sha256": torch_center_sha,
+        "numpy_centroid_path": str(numpy_center_path),
+        "numpy_centroid_sha256": numpy_center_sha,
+        "retained_centroid_path": (
+            str(retained_center_path) if retained_count else None
+        ),
+        "retained_centroid_sha256": (
+            _sha256_file(retained_center_path) if retained_count else None
+        ),
+    }
+    manifest = {
+        "schema_version": ONE_CLUSTER_SUMMARY_SCHEMA,
+        "run_complete": True,
+        "scientific_identity": identity,
+        "scientific_identity_sha256": identity_hash,
+        "exact_one_cluster_semantics_replayed": True,
+        "official_coverage_function_invoked": False,
+        "official_coverage_semantics_derived_for_single_label_zero": True,
+        "official_greedy_invoked_for_trace": bool(selected),
+        "legacy_torch_reduction_order_preserved": True,
+        "legacy_numpy_reduction_order_preserved": True,
+        "strict_radius_comparison_preserved": True,
+        "candidate_major_parent_minor_order_preserved": True,
+        "medoid_first_argmin_tie_order_preserved": True,
+        "approximation_used": False,
+        "num_samples": n_samples,
+        "retained_count": retained_count,
+        "torch_centroid_norm": torch_center_norm,
+        "numpy_centroid_norm": numpy_center_norm,
+        "official_result": [list(part) for part in official_result],
+        "selected": selected,
+        "peak_rss_bytes_observed": max(peak, _rss_bytes()),
+        "max_rss_bytes": int(max_rss_bytes),
+        **artifacts,
+        "completed_at": _utc_now(),
+    }
+    if int(manifest["peak_rss_bytes_observed"]) > int(max_rss_bytes):
+        raise ExternalMemoryDBSCANError("one-cluster summary peak RSS exceeded budget")
+    _atomic_json(manifest_path, manifest)
+    return _validate_one_cluster_summary_manifest(
+        manifest_path=manifest_path, manifest=manifest, identity=identity
+    )
+
+
 def invoke_official_coverage_summary_external(
     *,
     labels: np.ndarray,
@@ -707,10 +2216,18 @@ def trace_external_cluster_order(
 
 
 __all__ = [
+    "AdoptedPairStoreResult",
+    "ExactOneClusterSummaryResult",
     "ExternalPairStore",
+    "ONE_CLUSTER_SUMMARY_SCHEMA",
+    "PAIR_STORE_ADOPTION_SCHEMA",
     "PAIR_STORE_SCHEMA",
     "PairStoreResult",
     "SUMMARY_SCHEMA",
     "invoke_official_coverage_summary_external",
+    "adopt_external_pair_store_read_only",
+    "summarize_proven_one_cluster_external",
     "trace_external_cluster_order",
+    "validate_adopted_pair_store_read_only",
+    "validate_proven_one_cluster_summary",
 ]

@@ -111,6 +111,47 @@
   external-schema-v2 checkpoints/terminals and the real failed fixed-64
   witness remain immutable.
 
+## 2026-08-23: Fresh exact-Cartesian adoption of AIDS pair chunks
+
+- [x] Reconstruct and compare the complete pair scientific identity before
+  adoption; bind the exact source manifest and array hashes plus physical stat
+  identity.
+- [x] Reject every live writable FD/mapping through Linux procfs and recheck
+  source stats around full checksum validation.
+- [x] Prove the complete 71,642-by-1,283 Cartesian row formula elementwise;
+  represent pair indices implicitly without a second 1.47 GiB array.
+- [x] Reconstruct exactly one contiguous vector `.npy` on local XFS from raw
+  chunk bytes; derive its target header/hash without chunkwise reductions.
+- [x] Enforce `posix_fallocate`, target-size plus 3 GiB admission, post-reserve
+  floor, reconstructible-cache semantics, and exclusive scratch locking.
+- [x] Close the fresh adoption manifest through normal and resumed terminal
+  validation and add identity/writer/stat-drift and end-to-end fixtures.
+- [x] Keep the paired Slurm CLI in sync without submitting an HPC job.
+- [x] Integrate independently reviewed adaptive core
+  `645c6e51b7abcdc5dd4a9e0a1226d71d020880da`.
+- [ ] Obtain independent release review of the chunk/cache wiring and build a
+  fresh v5 controller manifest; old v4 remains read-only until every gate passes.
+
+## 2026-08-23: Exact disk-backed one-cluster summary replay
+
+- [x] Admit the specialized route only from a hash-closed exact all-core,
+  one-component DBSCAN proof; retain the general multi-cluster implementation.
+- [x] Preserve separate frozen Torch and NumPy centroid/reduction semantics and
+  strict per-row radius comparisons with block-size-independent fixtures.
+- [x] Reproduce upstream first-parent counterfactual coverage and the official
+  one-cluster greedy result without a 91.9-million-element Python loop.
+- [x] Persist retained mask, source positions, and vectors in source order;
+  preserve NumPy retained-centroid and first-argmin medoid behavior exactly.
+- [x] Add resumable two-phase promotion, input/result hashes, centroid tamper
+  rejection, RSS admission, empty-coverage parity, and terminal continuation
+  closure.
+- [x] Wire the adaptive shortcut and summary bounds through the common-recourse
+  CLI and paired Slurm parity wrapper while leaving the default route disabled.
+- [x] Implement both terminal pair-store adoption and the specialized
+  exact-Cartesian chunk/cache route through fresh manifests.
+- [ ] Run a fresh real-data adaptive proof and summary sidecar; never continue
+  into the old v4 attempt or publish PASS from exploratory evidence.
+
 ## 2026-08-23: Deterministic adaptive AIDS DBSCAN witness
 
 - [x] Retain the fixed evenly-spaced 64-anchor route as a fail-closed negative;

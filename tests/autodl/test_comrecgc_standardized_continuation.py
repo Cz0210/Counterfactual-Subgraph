@@ -223,6 +223,7 @@ def test_commands_use_native_comrecgc_and_frozen_rf_contract(tmp_path: Path) -> 
 def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
     tmp_path: Path,
 ) -> None:
+    pair_source = _file(tmp_path / "old-pair-store/run_manifest.json", "{}\n")
     inputs = replace(
         _inputs(tmp_path, dataset="aids"),
         device="cpu",
@@ -230,6 +231,15 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
         external_max_rss_gb=96.0,
         external_query_block_size=8,
         external_checkpoint_interval_blocks=1,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_shortcut_seed_count=3,
+        external_shortcut_failure_cap=4096,
+        external_shortcut_query_block_size=65536,
+        external_exact_fallback_max_samples=0,
+        external_summary_block_size=65536,
+        external_pair_store_source_manifest=pair_source,
         expected_sklearn_version="1.7.2",
         common_recourse_resume=True,
     )
@@ -243,8 +253,76 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
     assert command[command.index("--device") + 1] == "cpu"
     assert command[command.index("--external-max-rss-gb") + 1] == "96"
     assert command[command.index("--external-query-block-size") + 1] == "8"
+    assert command[command.index("--external-dbscan-shortcut-mode") + 1] == (
+        "all_core_one_component_adaptive_anchor_v1"
+    )
+    assert command[command.index("--external-shortcut-seed-count") + 1] == "3"
+    assert command[command.index("--external-shortcut-failure-cap") + 1] == "4096"
+    assert command[command.index("--external-exact-fallback-max-samples") + 1] == "0"
+    assert command[command.index("--external-summary-block-size") + 1] == "65536"
+    assert command[
+        command.index("--external-pair-store-source-manifest") + 1
+    ] == str(pair_source)
     assert command[command.index("--expected-sklearn-version") + 1] == "1.7.2"
     assert "--resume" in command
+
+
+def test_pair_store_adoption_route_fails_before_output_on_contract_drift(
+    tmp_path: Path,
+) -> None:
+    source_manifest = _file(tmp_path / "pair-store/run_manifest.json", "{}\n")
+    inputs = replace(
+        _inputs(tmp_path, dataset="aids"),
+        external_pair_store_source_manifest=source_manifest,
+        common_recourse_engine="external_memory_exact_v1",
+        external_dbscan_shortcut_mode="disabled",
+        device="cpu",
+    )
+    with pytest.raises(ValueError, match="PAIR_STORE_ADOPTION_ROUTE_CONTRACT"):
+        continuation.run_continuation(inputs)
+    assert not inputs.output_root.exists()
+
+
+def test_chunk_source_route_freezes_cache_and_owner_arguments(
+    tmp_path: Path, _fake_procfs: Path
+) -> None:
+    checkpoint = _file(tmp_path / "old/pair_store/checkpoint.json", "{}\n")
+    owner = tmp_path / "old"
+    cache = tmp_path / "local-cache"
+    lock = tmp_path / "local-cache.lock"
+    inputs = replace(
+        _inputs(tmp_path, dataset="aids"),
+        device="cpu",
+        common_recourse_engine="external_memory_exact_v1",
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_exact_fallback_max_samples=0,
+        external_pair_store_source_checkpoint=checkpoint,
+        external_pair_store_source_owner_root=owner,
+        external_vector_cache_root=cache,
+        external_vector_cache_lock=lock,
+        external_vector_cache_min_free_gb=3.0,
+        external_vector_cache_proc_root=_fake_procfs,
+        common_recourse_resume=True,
+    )
+    command = continuation.build_stage_commands(
+        inputs,
+        project_commit="d" * 40,
+        candidate_count=100262,
+        teacher_sha256="e" * 64,
+    )[0][1]
+    expected = {
+        "--external-pair-store-source-checkpoint": str(checkpoint),
+        "--external-pair-store-source-owner-root": str(owner),
+        "--external-vector-cache-root": str(cache),
+        "--external-vector-cache-lock": str(lock),
+        "--external-vector-cache-min-free-gb": "3",
+        "--external-vector-cache-proc-root": str(_fake_procfs),
+    }
+    for flag, value in expected.items():
+        assert command[command.index(flag) + 1] == value
+    assert "--external-pair-store-source-manifest" not in command
 
 
 def _external_common_terminal(root: Path) -> Path:
@@ -252,10 +330,15 @@ def _external_common_terminal(root: Path) -> Path:
     pairs = _file(pair_root / "pairs.npy", "pairs")
     vectors = _file(pair_root / "vectors.npy", "vectors")
     pair_manifest = pair_root / "run_manifest.json"
+    pair_identity = {"dataset": "aids", "fixture": "terminal-closure"}
+    pair_identity_sha = continuation.stable_json_sha256(pair_identity)
     _json(
         pair_manifest,
         {
+            "schema_version": continuation.PAIR_STORE_SCHEMA,
             "run_complete": True,
+            "scientific_identity": pair_identity,
+            "scientific_identity_sha256": pair_identity_sha,
             "pairs_path": str(pairs),
             "pairs_sha256": continuation.sha256_file(pairs),
             "vectors_path": str(vectors),
@@ -275,6 +358,10 @@ def _external_common_terminal(root: Path) -> Path:
             "external_memory_artifacts": {
                 "pair_store_manifest": str(pair_manifest),
                 "pair_store_manifest_sha256": continuation.sha256_file(pair_manifest),
+                "pair_store_scientific_identity_sha256": pair_identity_sha,
+                "pair_store_adopted_read_only": False,
+                "pair_store_adoption_manifest": None,
+                "pair_store_adoption_manifest_sha256": None,
                 "dbscan_manifest": None,
             },
         },

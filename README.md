@@ -76,6 +76,9 @@ See:
 - `docs/AUTODL_AM_LEGACY_STANDARDIZATION.md` (strict frozen-result adoption and
   deterministic matched-protocol re-export plus fail-closed
   AIDS/Mutagenicity legacy inventory)
+- `docs/AUTODL_AIDS_COMRECGC_EXACT_SHORTCUT.md` (release-gated fresh adoption
+  of an immutable pair source, exact adaptive DBSCAN proof, and bounded
+  one-cluster replay; never a continuation inside the old repair-v4 root)
 
 ---
 

@@ -44,6 +44,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--external-checkpoint-interval-blocks", type=int, default=1
     )
+    parser.add_argument(
+        "--external-dbscan-shortcut-mode",
+        choices=("disabled", "all_core_one_component_adaptive_anchor_v1"),
+        default="disabled",
+    )
+    parser.add_argument("--external-shortcut-seed-count", type=int, default=3)
+    parser.add_argument("--external-shortcut-failure-cap", type=int, default=4096)
+    parser.add_argument(
+        "--external-shortcut-query-block-size", type=int, default=65536
+    )
+    parser.add_argument(
+        "--external-exact-fallback-max-samples", type=int, default=100000
+    )
+    parser.add_argument("--external-summary-block-size", type=int, default=65536)
+    parser.add_argument(
+        "--external-pair-store-source-manifest",
+        help=(
+            "Completed external pair-store manifest to adopt by validated "
+            "physical read-only reference into this fresh output root."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-store-source-checkpoint",
+        help=(
+            "Immutable chunk-phase checkpoint whose hash-closed chunks form a "
+            "complete Cartesian pair source. Mutually exclusive with the "
+            "terminal source manifest."
+        ),
+    )
+    parser.add_argument(
+        "--external-pair-store-source-owner-root",
+        help="Old read-only run root whose owner process must be absent.",
+    )
+    parser.add_argument(
+        "--external-vector-cache-root",
+        help="Local-XFS root for the reconstructible contiguous vector cache.",
+    )
+    parser.add_argument(
+        "--external-vector-cache-lock",
+        help="Exclusive lock used while constructing the local vector cache.",
+    )
+    parser.add_argument(
+        "--external-vector-cache-min-free-gb", type=float, default=3.0
+    )
+    parser.add_argument("--external-vector-cache-proc-root", default="/proc")
     parser.add_argument("--expected-sklearn-version", default="1.7.2")
     return parser
 
@@ -71,6 +116,29 @@ def main() -> int:
         external_max_rss_bytes=int(float(args.external_max_rss_gb) * 1024**3),
         external_query_block_size=args.external_query_block_size,
         external_checkpoint_interval_blocks=args.external_checkpoint_interval_blocks,
+        external_dbscan_shortcut_mode=args.external_dbscan_shortcut_mode,
+        external_shortcut_seed_count=args.external_shortcut_seed_count,
+        external_shortcut_failure_cap=args.external_shortcut_failure_cap,
+        external_shortcut_query_block_size=args.external_shortcut_query_block_size,
+        external_exact_fallback_max_samples=(
+            args.external_exact_fallback_max_samples
+        ),
+        external_summary_block_size=args.external_summary_block_size,
+        external_pair_store_source_manifest=(
+            args.external_pair_store_source_manifest
+        ),
+        external_pair_store_source_checkpoint=(
+            args.external_pair_store_source_checkpoint
+        ),
+        external_pair_store_source_owner_root=(
+            args.external_pair_store_source_owner_root
+        ),
+        external_vector_cache_root=args.external_vector_cache_root,
+        external_vector_cache_lock=args.external_vector_cache_lock,
+        external_vector_cache_min_free_bytes=int(
+            float(args.external_vector_cache_min_free_gb) * 1024**3
+        ),
+        external_vector_cache_proc_root=args.external_vector_cache_proc_root,
         expected_sklearn_version=args.expected_sklearn_version,
     )
     print(json.dumps(manifest, sort_keys=True))

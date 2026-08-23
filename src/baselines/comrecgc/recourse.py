@@ -24,13 +24,20 @@ from .contracts import (
 )
 from .model_adapter import AIDSGreedEmbeddingAdapter
 from .external_memory_dbscan import (
+    ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalDBSCANContract,
     fit_external_memory_dbscan,
 )
 from .external_memory_recourse import (
     ExternalPairStore,
+    adopt_external_pair_store_read_only,
     invoke_official_coverage_summary_external,
+    summarize_proven_one_cluster_external,
     trace_external_cluster_order,
+)
+from .external_pair_chunk_cache import (
+    DEFAULT_LOCAL_FREE_FLOOR_BYTES,
+    materialize_cartesian_chunk_vector_cache,
 )
 from .project_dataset import (
     load_aids_generation_bundle,
@@ -240,6 +247,19 @@ def run_common_recourse(
     external_max_rss_bytes: int = 96 * 1024**3,
     external_query_block_size: int = 8,
     external_checkpoint_interval_blocks: int = 1,
+    external_dbscan_shortcut_mode: str = "disabled",
+    external_shortcut_seed_count: int = 3,
+    external_shortcut_failure_cap: int = 4_096,
+    external_shortcut_query_block_size: int = 65_536,
+    external_exact_fallback_max_samples: int = 100_000,
+    external_summary_block_size: int = 65_536,
+    external_pair_store_source_manifest: str | Path | None = None,
+    external_pair_store_source_checkpoint: str | Path | None = None,
+    external_pair_store_source_owner_root: str | Path | None = None,
+    external_vector_cache_root: str | Path | None = None,
+    external_vector_cache_lock: str | Path | None = None,
+    external_vector_cache_min_free_bytes: int = DEFAULT_LOCAL_FREE_FLOOR_BYTES,
+    external_vector_cache_proc_root: str | Path = "/proc",
     expected_sklearn_version: str = "1.7.2",
 ) -> dict[str, Any]:
     parameters.validate(mode)
@@ -251,7 +271,47 @@ def run_common_recourse(
         raise ValueError(
             "external_memory_exact_v1 is released only for CPU-backed AIDS"
         )
+    chunk_source_requested = external_pair_store_source_checkpoint is not None
+    if (
+        external_pair_store_source_manifest is not None or chunk_source_requested
+    ) and engine != "external_memory_exact_v1":
+        raise ValueError(
+            "external pair-store adoption requires external_memory_exact_v1"
+        )
+    if external_pair_store_source_manifest is not None and chunk_source_requested:
+        raise ValueError("terminal and chunk pair-store sources are mutually exclusive")
+    chunk_source_values = (
+        external_pair_store_source_checkpoint,
+        external_pair_store_source_owner_root,
+        external_vector_cache_root,
+        external_vector_cache_lock,
+    )
+    if any(value is not None for value in chunk_source_values) and not all(
+        value is not None for value in chunk_source_values
+    ):
+        raise ValueError(
+            "chunk-source checkpoint, owner root, local cache root, and lock are required together"
+        )
     root = require_empty_output(output_dir, resume=resume)
+    if external_pair_store_source_manifest is not None or chunk_source_requested:
+        if (
+            str(external_dbscan_shortcut_mode)
+            != ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+        ):
+            raise ValueError(
+                "read-only pair-store adoption requires the exact adaptive shortcut"
+            )
+        source_pair_artifact = Path(
+            external_pair_store_source_manifest
+            if external_pair_store_source_manifest is not None
+            else external_pair_store_source_checkpoint  # type: ignore[arg-type]
+        ).expanduser().resolve(strict=True)
+        try:
+            source_pair_artifact.relative_to(root)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("pair-store source must be outside the fresh output root")
     generation_root = Path(generation_dir).expanduser().resolve()
     generation_manifest = json_load(generation_root / "run_manifest.json")
     if generation_manifest.get("run_complete") is not True:
@@ -312,24 +372,36 @@ def run_common_recourse(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("COMRECGC common-recourse requires scikit-learn.") from exc
     with imported_upstream(upstream_root) as modules:
-        if dataset == "aids":
-            embedding_model = AIDSGreedEmbeddingAdapter(
-                distance_checkpoint,
-                atom_vocabulary=[str(value) for value in bundle.atom_vocabulary],
-                device=device,
-            ).eval()
-        else:
-            embedding_model = modules["distance"].load_neurosed(
-                bundle.graphs,
-                neurosed_model_path=str(Path(distance_checkpoint).expanduser().resolve()),
-                device=device,
-            ).to(device).eval()
-        original_batch = Batch.from_data_list(bundle.graphs).to(device)
-        with torch.no_grad():
-            original_embeddings = embedding_model.embed_model(original_batch).detach().cpu()
-        embedding_model.embed_targets(bundle.graphs)
-        original_counts = modules["util"].graph_element_counts(bundle.graphs).cpu()
+        pair_source_requested = (
+            external_pair_store_source_manifest is not None
+            or chunk_source_requested
+        )
+        embedding_model = None
+        original_embeddings = None
+        original_counts = None
+        if not pair_source_requested:
+            if dataset == "aids":
+                embedding_model = AIDSGreedEmbeddingAdapter(
+                    distance_checkpoint,
+                    atom_vocabulary=[str(value) for value in bundle.atom_vocabulary],
+                    device=device,
+                ).eval()
+            else:
+                embedding_model = modules["distance"].load_neurosed(
+                    bundle.graphs,
+                    neurosed_model_path=str(Path(distance_checkpoint).expanduser().resolve()),
+                    device=device,
+                ).to(device).eval()
+            original_batch = Batch.from_data_list(bundle.graphs).to(device)
+            with torch.no_grad():
+                original_embeddings = embedding_model.embed_model(original_batch).detach().cpu()
+            embedding_model.embed_targets(bundle.graphs)
+            original_counts = modules["util"].graph_element_counts(bundle.graphs).cpu()
         external_artifacts: dict[str, Any] | None = None
+        official_audit: dict[str, Any] = {
+            "official_coverage_summary_invoked": True,
+            "official_coverage_semantics_derived_for_single_label_zero": False,
+        }
         if engine == "external_memory_exact_v1":
             chunk_size = max(1, int(batch_size))
             dataset_audit = bundle.audit()
@@ -362,20 +434,13 @@ def run_common_recourse(
                 "vector_expression": "(candidate_embedding-parent_embedding)/(candidate_count+parent_count)",
                 "device": "cpu",
             }
-            pair_store = ExternalPairStore(
-                root=root / "external_memory/pair_store",
-                scientific_identity=pair_identity,
-                max_rss_bytes=int(external_max_rss_bytes),
-                resume=resume,
-            )
-            if pair_store.complete:
-                pair_result = pair_store.finalize()
-            else:
-                for chunk_index, start in enumerate(
-                    range(0, len(candidate_graphs), chunk_size)
-                ):
-                    stop = min(len(candidate_graphs), start + chunk_size)
-                    chunk_identity = {
+            expected_chunk_identities = []
+            for chunk_index, start in enumerate(
+                range(0, len(candidate_graphs), chunk_size)
+            ):
+                stop = min(len(candidate_graphs), start + chunk_size)
+                expected_chunk_identities.append(
+                    {
                         "chunk_index": chunk_index,
                         "candidate_start": start,
                         "candidate_stop": stop,
@@ -386,66 +451,140 @@ def run_common_recourse(
                             generation_indices[start:stop]
                         ),
                     }
-                    if chunk_index < pair_store.next_chunk_index:
-                        pair_store.verify_completed_chunk(
+                )
+            pair_adoption = None
+            chunk_cache = None
+            pair_authority_manifest_path = None
+            pair_authority_manifest_sha256 = None
+            if chunk_source_requested:
+                chunk_cache = materialize_cartesian_chunk_vector_cache(
+                    source_checkpoint_path=external_pair_store_source_checkpoint,  # type: ignore[arg-type]
+                    source_owner_root=external_pair_store_source_owner_root,  # type: ignore[arg-type]
+                    persistent_root=root / "external_memory/chunk_vector_cache",
+                    local_cache_root=external_vector_cache_root,  # type: ignore[arg-type]
+                    scratch_lock_path=external_vector_cache_lock,  # type: ignore[arg-type]
+                    expected_scientific_identity=pair_identity,
+                    expected_chunk_identities=expected_chunk_identities,
+                    parent_count=len(bundle.graphs),
+                    candidate_count=len(candidate_graphs),
+                    min_local_free_bytes=int(external_vector_cache_min_free_bytes),
+                    proc_root=external_vector_cache_proc_root,
+                    resume=resume,
+                )
+                pair_indices_external = chunk_cache.pairs
+                recourse_array_external = np.load(
+                    chunk_cache.vectors_path, mmap_mode="r", allow_pickle=False
+                )
+                pair_row_count = chunk_cache.row_count
+                pair_indices_sha256 = chunk_cache.pairs.logical_npy_sha256
+                recourse_vectors_sha256 = chunk_cache.vectors_sha256
+                recourse_vectors_path = chunk_cache.vectors_path
+                pair_manifest_path = chunk_cache.manifest_path
+                pair_manifest_sha256 = chunk_cache.manifest_sha256
+                pair_authority_manifest_path = chunk_cache.manifest_path
+                pair_authority_manifest_sha256 = chunk_cache.manifest_sha256
+            elif external_pair_store_source_manifest is not None:
+                pair_adoption = adopt_external_pair_store_read_only(
+                    source_manifest_path=external_pair_store_source_manifest,
+                    adoption_root=root / "external_memory/pair_store_adoption",
+                    expected_scientific_identity=pair_identity,
+                    resume=resume,
+                )
+                pair_result = pair_adoption.pair_store
+                pair_indices_external = np.load(
+                    pair_result.pairs_path, mmap_mode="r", allow_pickle=False
+                )
+                recourse_array_external = np.load(
+                    pair_result.vectors_path, mmap_mode="r", allow_pickle=False
+                )
+                pair_row_count = pair_result.row_count
+                pair_indices_sha256 = pair_result.pairs_sha256
+                recourse_vectors_sha256 = pair_result.vectors_sha256
+                recourse_vectors_path = pair_result.vectors_path
+                pair_manifest_path = pair_result.manifest_path
+                pair_manifest_sha256 = pair_result.manifest_sha256
+            else:
+                pair_store = ExternalPairStore(
+                    root=root / "external_memory/pair_store",
+                    scientific_identity=pair_identity,
+                    max_rss_bytes=int(external_max_rss_bytes),
+                    resume=resume,
+                )
+                if pair_store.complete:
+                    pair_result = pair_store.finalize()
+                else:
+                    if embedding_model is None or original_embeddings is None or original_counts is None:
+                        raise RuntimeError("pair materialization model state is unavailable")
+                    for chunk_identity in expected_chunk_identities:
+                        chunk_index = int(chunk_identity["chunk_index"])
+                        start = int(chunk_identity["candidate_start"])
+                        stop = int(chunk_identity["candidate_stop"])
+                        if chunk_index < pair_store.next_chunk_index:
+                            pair_store.verify_completed_chunk(
+                                chunk_index=chunk_index,
+                                chunk_identity=chunk_identity,
+                            )
+                            continue
+                        if chunk_index != pair_store.next_chunk_index:
+                            raise RuntimeError("External pair-store checkpoint has a gap.")
+                        chunk = candidate_graphs[start:stop]
+                        with torch.no_grad():
+                            raw_distances = embedding_model.predict_outer_with_queries(
+                                chunk, batch_size=batch_size
+                            ).cpu()
+                            chunk_embeddings = embedding_model.embed_model(
+                                Batch.from_data_list(chunk).to(device)
+                            ).detach().cpu()
+                        chunk_counts = modules["util"].graph_element_counts(chunk).cpu()
+                        scale = chunk_counts[:, None] + original_counts[None, :]
+                        normalized = raw_distances / scale
+                        valid_pairs = torch.nonzero(
+                            normalized <= float(parameters.theta), as_tuple=False
+                        )
+                        pair_rows: list[tuple[int, int]] = []
+                        vector_rows: list[np.ndarray] = []
+                        for local_cf, original_index in valid_pairs.tolist():
+                            global_cf = start + int(local_cf)
+                            pair_rows.append((int(original_index), global_cf))
+                            vector = (
+                                (
+                                    chunk_embeddings[int(local_cf)]
+                                    - original_embeddings[int(original_index)]
+                                )
+                                / scale[int(local_cf), int(original_index)]
+                            )
+                            vector_rows.append(vector.numpy())
+                        pairs_chunk = np.asarray(pair_rows, dtype=np.int64).reshape(-1, 2)
+                        if vector_rows:
+                            vectors_chunk = np.asarray(vector_rows)
+                        else:
+                            vectors_chunk = np.empty(
+                                (0, int(original_embeddings.shape[1])),
+                                dtype=original_embeddings.numpy().dtype,
+                            )
+                        pair_store.append(
                             chunk_index=chunk_index,
+                            pairs=pairs_chunk,
+                            vectors=vectors_chunk,
                             chunk_identity=chunk_identity,
                         )
-                        continue
-                    if chunk_index != pair_store.next_chunk_index:
-                        raise RuntimeError("External pair-store checkpoint has a gap.")
-                    chunk = candidate_graphs[start:stop]
-                    with torch.no_grad():
-                        raw_distances = embedding_model.predict_outer_with_queries(
-                            chunk, batch_size=batch_size
-                        ).cpu()
-                        chunk_embeddings = embedding_model.embed_model(
-                            Batch.from_data_list(chunk).to(device)
-                        ).detach().cpu()
-                    chunk_counts = modules["util"].graph_element_counts(chunk).cpu()
-                    scale = chunk_counts[:, None] + original_counts[None, :]
-                    normalized = raw_distances / scale
-                    valid_pairs = torch.nonzero(
-                        normalized <= float(parameters.theta), as_tuple=False
-                    )
-                    pair_rows: list[tuple[int, int]] = []
-                    vector_rows: list[np.ndarray] = []
-                    for local_cf, original_index in valid_pairs.tolist():
-                        global_cf = start + int(local_cf)
-                        pair_rows.append((int(original_index), global_cf))
-                        vector = (
-                            (
-                                chunk_embeddings[int(local_cf)]
-                                - original_embeddings[int(original_index)]
-                            )
-                            / scale[int(local_cf), int(original_index)]
-                        )
-                        vector_rows.append(vector.numpy())
-                    pairs_chunk = np.asarray(pair_rows, dtype=np.int64).reshape(-1, 2)
-                    if vector_rows:
-                        vectors_chunk = np.asarray(vector_rows)
-                    else:
-                        vectors_chunk = np.empty(
-                            (0, int(original_embeddings.shape[1])),
-                            dtype=original_embeddings.numpy().dtype,
-                        )
-                    pair_store.append(
-                        chunk_index=chunk_index,
-                        pairs=pairs_chunk,
-                        vectors=vectors_chunk,
-                        chunk_identity=chunk_identity,
-                    )
-                pair_result = pair_store.finalize()
+                    pair_result = pair_store.finalize()
+                pair_indices_external = np.load(
+                    pair_result.pairs_path, mmap_mode="r", allow_pickle=False
+                )
+                recourse_array_external = np.load(
+                    pair_result.vectors_path, mmap_mode="r", allow_pickle=False
+                )
+                pair_row_count = pair_result.row_count
+                pair_indices_sha256 = pair_result.pairs_sha256
+                recourse_vectors_sha256 = pair_result.vectors_sha256
+                recourse_vectors_path = pair_result.vectors_path
+                pair_manifest_path = pair_result.manifest_path
+                pair_manifest_sha256 = pair_result.manifest_sha256
             distance_pair_count = len(candidate_graphs) * len(bundle.graphs)
-            pair_indices_external = np.load(
-                pair_result.pairs_path, mmap_mode="r", allow_pickle=False
-            )
-            recourse_array_external = np.load(
-                pair_result.vectors_path, mmap_mode="r+", allow_pickle=False
-            )
-            if pair_result.row_count:
+            if pair_row_count:
                 dbscan_result = fit_external_memory_dbscan(
-                    vectors_path=pair_result.vectors_path,
+                    vectors_path=recourse_vectors_path,
                     work_dir=root / "external_memory/dbscan",
                     contract=ExternalDBSCANContract(
                         eps=float(parameters.delta),
@@ -456,40 +595,102 @@ def run_common_recourse(
                         ),
                         max_rss_bytes=int(external_max_rss_bytes),
                         expected_sklearn_version=expected_sklearn_version,
+                        shortcut_mode=str(external_dbscan_shortcut_mode),
+                        shortcut_seed_count=int(external_shortcut_seed_count),
+                        shortcut_failure_cap=int(external_shortcut_failure_cap),
+                        shortcut_query_block_size=int(
+                            external_shortcut_query_block_size
+                        ),
+                        exact_fallback_max_samples=int(
+                            external_exact_fallback_max_samples
+                        ),
                     ),
-                    expected_vectors_sha256=pair_result.vectors_sha256,
+                    expected_vectors_sha256=recourse_vectors_sha256,
                     resume=resume,
                 )
                 cluster_labels = np.load(
                     dbscan_result.labels_path, mmap_mode="r", allow_pickle=False
                 )
-                official_result, official_audit = (
-                    invoke_official_coverage_summary_external(
+                one_cluster_summary_manifest = None
+                one_cluster_summary_manifest_sha256 = None
+                if dbscan_result.shortcut_proof_path is not None:
+                    exact_summary = summarize_proven_one_cluster_external(
+                        work_dir=root / "external_memory/one_cluster_summary",
+                        dbscan_manifest_path=dbscan_result.manifest_path,
+                        dbscan_manifest_sha256=dbscan_result.manifest_sha256,
+                        recourse_vectors=recourse_array_external,
+                        pair_indices=pair_indices_external,
+                        pairs_sha256=pair_indices_sha256,
+                        pair_authority_manifest_path=pair_authority_manifest_path,
+                        pair_authority_manifest_sha256=(
+                            pair_authority_manifest_sha256
+                        ),
+                        radius=float(parameters.delta),
+                        theta=float(parameters.theta),
+                        recourse_size=int(parameters.recourse_size),
+                        official_greedy=modules[
+                            "common_recourse"
+                        ].greedy_counterfactual_summary_from_covering_sets,
+                        torch_module=torch,
+                        max_rss_bytes=int(external_max_rss_bytes),
+                        block_size=int(external_summary_block_size),
+                        resume=resume,
+                    )
+                    official_result = exact_summary.official_result
+                    selected = exact_summary.selected
+                    summary_manifest = json_load(exact_summary.manifest_path)
+                    official_audit = {
+                        "schema_version": summary_manifest["schema_version"],
+                        "official_coverage_summary_invoked": False,
+                        "official_coverage_semantics_derived_for_single_label_zero": True,
+                        "legacy_torch_reduction_order_preserved": True,
+                        "peak_rss_bytes_observed": summary_manifest[
+                            "peak_rss_bytes_observed"
+                        ],
+                    }
+                    trace_audit = {
+                        "schema_version": summary_manifest["schema_version"],
+                        "selected_count": len(selected),
+                        "legacy_numpy_reduction_order_preserved": True,
+                        "official_greedy_invoked": summary_manifest[
+                            "official_greedy_invoked_for_trace"
+                        ],
+                        "peak_rss_bytes_observed": summary_manifest[
+                            "peak_rss_bytes_observed"
+                        ],
+                    }
+                    one_cluster_summary_manifest = str(exact_summary.manifest_path)
+                    one_cluster_summary_manifest_sha256 = (
+                        exact_summary.manifest_sha256
+                    )
+                else:
+                    official_result, official_audit = (
+                        invoke_official_coverage_summary_external(
+                            labels=cluster_labels,
+                            recourse_vectors=recourse_array_external,
+                            pair_indices=pair_indices_external,
+                            radius=float(parameters.delta),
+                            theta=float(parameters.theta),
+                            recourse_size=int(parameters.recourse_size),
+                            official_coverage_summary=modules[
+                                "common_recourse"
+                            ].coverage_summary,
+                            torch_module=torch,
+                            max_rss_bytes=int(external_max_rss_bytes),
+                        )
+                    )
+                    selected, trace_audit = trace_external_cluster_order(
                         labels=cluster_labels,
                         recourse_vectors=recourse_array_external,
                         pair_indices=pair_indices_external,
                         radius=float(parameters.delta),
                         theta=float(parameters.theta),
                         recourse_size=int(parameters.recourse_size),
-                        official_coverage_summary=modules[
+                        official_greedy=modules[
                             "common_recourse"
-                        ].coverage_summary,
-                        torch_module=torch,
+                        ].greedy_counterfactual_summary_from_covering_sets,
                         max_rss_bytes=int(external_max_rss_bytes),
                     )
-                )
-                selected, trace_audit = trace_external_cluster_order(
-                    labels=cluster_labels,
-                    recourse_vectors=recourse_array_external,
-                    pair_indices=pair_indices_external,
-                    radius=float(parameters.delta),
-                    theta=float(parameters.theta),
-                    recourse_size=int(parameters.recourse_size),
-                    official_greedy=modules[
-                        "common_recourse"
-                    ].greedy_counterfactual_summary_from_covering_sets,
-                    max_rss_bytes=int(external_max_rss_bytes),
-                )
                 dbscan_manifest = str(dbscan_result.manifest_path)
                 dbscan_manifest_sha256 = dbscan_result.manifest_sha256
             else:
@@ -506,20 +707,59 @@ def run_common_recourse(
                 }
                 dbscan_manifest = None
                 dbscan_manifest_sha256 = None
+                one_cluster_summary_manifest = None
+                one_cluster_summary_manifest_sha256 = None
             external_artifacts = {
                 "engine": engine,
-                "pair_store_manifest": str(pair_result.manifest_path),
-                "pair_store_manifest_sha256": pair_result.manifest_sha256,
-                "pair_indices_sha256": pair_result.pairs_sha256,
-                "recourse_vectors_sha256": pair_result.vectors_sha256,
+                "pair_store_manifest": str(pair_manifest_path),
+                "pair_store_manifest_sha256": pair_manifest_sha256,
+                "pair_store_scientific_identity_sha256": stable_json_sha256(
+                    pair_identity
+                ),
+                "pair_store_adopted_read_only": pair_adoption is not None,
+                "pair_chunks_adopted_read_only": chunk_cache is not None,
+                "pair_indices_materialized": chunk_cache is None,
+                "pair_indices_formula": (
+                    None
+                    if chunk_cache is None
+                    else "parent=row%parent_count;candidate=row//parent_count"
+                ),
+                "chunk_vector_cache_manifest": (
+                    None if chunk_cache is None else str(chunk_cache.manifest_path)
+                ),
+                "chunk_vector_cache_manifest_sha256": (
+                    None if chunk_cache is None else chunk_cache.manifest_sha256
+                ),
+                "local_vector_cache_is_scientific_authority": False,
+                "pair_store_adoption_manifest": (
+                    None
+                    if pair_adoption is None
+                    else str(pair_adoption.adoption_manifest_path)
+                ),
+                "pair_store_adoption_manifest_sha256": (
+                    None
+                    if pair_adoption is None
+                    else pair_adoption.adoption_manifest_sha256
+                ),
+                "pair_indices_sha256": pair_indices_sha256,
+                "recourse_vectors_sha256": recourse_vectors_sha256,
                 "dbscan_manifest": dbscan_manifest,
                 "dbscan_manifest_sha256": dbscan_manifest_sha256,
+                "one_cluster_summary_manifest": one_cluster_summary_manifest,
+                "one_cluster_summary_manifest_sha256": (
+                    one_cluster_summary_manifest_sha256
+                ),
                 "official_coverage_audit": official_audit,
                 "trace_audit": trace_audit,
                 "max_rss_bytes": int(external_max_rss_bytes),
                 "resume_enabled": bool(resume),
+                "dbscan_shortcut_mode": str(external_dbscan_shortcut_mode),
+                "adaptive_shortcut_requested": (
+                    str(external_dbscan_shortcut_mode)
+                    == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+                ),
             }
-            theta_eligible_pair_count = pair_result.row_count
+            theta_eligible_pair_count = pair_row_count
         else:
             pair_indices: list[tuple[int, int]] = []
             recourse_vectors: list[np.ndarray] = []
@@ -659,7 +899,14 @@ def run_common_recourse(
             "SCIENTIFIC_OUTPUT_EMPTY" if not output_rows else "FULL_EXECUTION_PASS"
         ),
         "native_cost": None if not output_rows else output_rows[-1]["native_cost"],
-        "official_coverage_summary_invoked": True,
+        "official_coverage_summary_invoked": bool(
+            official_audit.get("official_coverage_summary_invoked")
+        ),
+        "official_coverage_semantics_derived_for_single_label_zero": bool(
+            official_audit.get(
+                "official_coverage_semantics_derived_for_single_label_zero"
+            )
+        ),
         "official_coverage_summary_result": [list(value) for value in official_result],
         "official_greedy_order_preserved": True,
         "embedding_centers_exported_as_graphs": False,
@@ -691,13 +938,26 @@ def run_common_recourse(
         ),
     }
     if external_artifacts is not None:
-        closure_files["external_memory/pair_store/run_manifest.json"] = str(
-            external_artifacts["pair_store_manifest_sha256"]
-        )
+        if external_artifacts.get("pair_chunks_adopted_read_only") is True:
+            closure_files[
+                "external_memory/chunk_vector_cache/run_manifest.json"
+            ] = str(external_artifacts["chunk_vector_cache_manifest_sha256"])
+        elif external_artifacts.get("pair_store_adopted_read_only") is True:
+            closure_files[
+                "external_memory/pair_store_adoption/run_manifest.json"
+            ] = str(external_artifacts["pair_store_adoption_manifest_sha256"])
+        else:
+            closure_files["external_memory/pair_store/run_manifest.json"] = str(
+                external_artifacts["pair_store_manifest_sha256"]
+            )
         if external_artifacts.get("dbscan_manifest") is not None:
             closure_files["external_memory/dbscan/run_manifest.json"] = str(
                 external_artifacts["dbscan_manifest_sha256"]
             )
+        if external_artifacts.get("one_cluster_summary_manifest") is not None:
+            closure_files[
+                "external_memory/one_cluster_summary/run_manifest.json"
+            ] = str(external_artifacts["one_cluster_summary_manifest_sha256"])
     write_json(
         root / "_RUN_COMPLETE.json",
         {

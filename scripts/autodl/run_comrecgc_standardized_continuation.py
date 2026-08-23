@@ -36,6 +36,19 @@ from src.baselines.comrecgc.contracts import (  # noqa: E402
     stable_json_sha256,
     write_json,
 )
+from src.baselines.comrecgc.external_memory_dbscan import (  # noqa: E402
+    ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    _validate_shortcut_proof_closure,
+)
+from src.baselines.comrecgc.external_memory_recourse import (  # noqa: E402
+    PAIR_STORE_SCHEMA,
+    validate_adopted_pair_store_read_only,
+    validate_proven_one_cluster_summary,
+)
+from src.baselines.comrecgc.external_pair_chunk_cache import (  # noqa: E402
+    validate_cartesian_chunk_vector_cache,
+)
 
 
 DATASET_CONTRACTS: dict[str, dict[str, int]] = {
@@ -77,6 +90,19 @@ class ContinuationInputs:
     external_max_rss_gb: float = 96.0
     external_query_block_size: int = 8
     external_checkpoint_interval_blocks: int = 1
+    external_dbscan_shortcut_mode: str = "disabled"
+    external_shortcut_seed_count: int = 3
+    external_shortcut_failure_cap: int = 4_096
+    external_shortcut_query_block_size: int = 65_536
+    external_exact_fallback_max_samples: int = 100_000
+    external_summary_block_size: int = 65_536
+    external_pair_store_source_manifest: Path | None = None
+    external_pair_store_source_checkpoint: Path | None = None
+    external_pair_store_source_owner_root: Path | None = None
+    external_vector_cache_root: Path | None = None
+    external_vector_cache_lock: Path | None = None
+    external_vector_cache_min_free_gb: float = 3.0
+    external_vector_cache_proc_root: Path = Path("/proc")
     expected_sklearn_version: str = "1.7.2"
     common_recourse_resume: bool = False
 
@@ -545,10 +571,46 @@ def build_stage_commands(
                 str(int(inputs.external_query_block_size)),
                 "--external-checkpoint-interval-blocks",
                 str(int(inputs.external_checkpoint_interval_blocks)),
+                "--external-dbscan-shortcut-mode",
+                inputs.external_dbscan_shortcut_mode,
+                "--external-shortcut-seed-count",
+                str(int(inputs.external_shortcut_seed_count)),
+                "--external-shortcut-failure-cap",
+                str(int(inputs.external_shortcut_failure_cap)),
+                "--external-shortcut-query-block-size",
+                str(int(inputs.external_shortcut_query_block_size)),
+                "--external-exact-fallback-max-samples",
+                str(int(inputs.external_exact_fallback_max_samples)),
+                "--external-summary-block-size",
+                str(int(inputs.external_summary_block_size)),
                 "--expected-sklearn-version",
                 inputs.expected_sklearn_version,
             ]
         )
+        if inputs.external_pair_store_source_manifest is not None:
+            common_argv.extend(
+                [
+                    "--external-pair-store-source-manifest",
+                    str(inputs.external_pair_store_source_manifest),
+                ]
+            )
+        if inputs.external_pair_store_source_checkpoint is not None:
+            common_argv.extend(
+                [
+                    "--external-pair-store-source-checkpoint",
+                    str(inputs.external_pair_store_source_checkpoint),
+                    "--external-pair-store-source-owner-root",
+                    str(inputs.external_pair_store_source_owner_root),
+                    "--external-vector-cache-root",
+                    str(inputs.external_vector_cache_root),
+                    "--external-vector-cache-lock",
+                    str(inputs.external_vector_cache_lock),
+                    "--external-vector-cache-min-free-gb",
+                    format(float(inputs.external_vector_cache_min_free_gb), ".17g"),
+                    "--external-vector-cache-proc-root",
+                    str(inputs.external_vector_cache_proc_root),
+                ]
+            )
     if inputs.common_recourse_resume:
         common_argv.append("--resume")
     chemistry_argv = [
@@ -758,6 +820,14 @@ def _resume_contract(
     }
     if inputs.source_csv is not None:
         scientific_files["source_csv"] = inputs.source_csv
+    if inputs.external_pair_store_source_manifest is not None:
+        scientific_files["external_pair_store_source_manifest"] = (
+            inputs.external_pair_store_source_manifest
+        )
+    if inputs.external_pair_store_source_checkpoint is not None:
+        scientific_files["external_pair_store_source_checkpoint"] = (
+            inputs.external_pair_store_source_checkpoint
+        )
     scientific_input_files = {
         key: {
             "path": str(path.resolve(strict=True)),
@@ -784,6 +854,51 @@ def _resume_contract(
         "external_query_block_size": int(inputs.external_query_block_size),
         "external_checkpoint_interval_blocks": int(
             inputs.external_checkpoint_interval_blocks
+        ),
+        "external_dbscan_shortcut_mode": inputs.external_dbscan_shortcut_mode,
+        "external_shortcut_seed_count": int(inputs.external_shortcut_seed_count),
+        "external_shortcut_failure_cap": int(inputs.external_shortcut_failure_cap),
+        "external_shortcut_query_block_size": int(
+            inputs.external_shortcut_query_block_size
+        ),
+        "external_exact_fallback_max_samples": int(
+            inputs.external_exact_fallback_max_samples
+        ),
+        "external_summary_block_size": int(inputs.external_summary_block_size),
+        "external_pair_store_source_manifest": (
+            None
+            if inputs.external_pair_store_source_manifest is None
+            else str(inputs.external_pair_store_source_manifest.resolve(strict=True))
+        ),
+        "external_pair_store_source_checkpoint": (
+            None
+            if inputs.external_pair_store_source_checkpoint is None
+            else str(
+                inputs.external_pair_store_source_checkpoint.resolve(strict=True)
+            )
+        ),
+        "external_pair_store_source_owner_root": (
+            None
+            if inputs.external_pair_store_source_owner_root is None
+            else str(inputs.external_pair_store_source_owner_root.resolve(strict=True))
+        ),
+        "external_vector_cache_root": (
+            None
+            if inputs.external_vector_cache_root is None
+            else str(inputs.external_vector_cache_root.resolve(strict=False))
+        ),
+        "external_vector_cache_lock": (
+            None
+            if inputs.external_vector_cache_lock is None
+            else str(inputs.external_vector_cache_lock.resolve(strict=False))
+        ),
+        "external_vector_cache_min_free_gb": float(
+            inputs.external_vector_cache_min_free_gb
+        ),
+        "external_vector_cache_proc_root": (
+            None
+            if inputs.external_pair_store_source_checkpoint is None
+            else str(inputs.external_vector_cache_proc_root.resolve(strict=True))
         ),
         "expected_sklearn_version": inputs.expected_sklearn_version,
         "stages": [
@@ -871,7 +986,6 @@ def _validate_common_recourse_completion(
         "selected_common_recourses.json",
         "selected_common_recourses.csv",
         "representative_counterfactuals.pt",
-        "external_memory/pair_store/run_manifest.json",
     }
     if not required.issubset(closure):
         raise ValueError("RESUME_COMMON_TERMINAL_CLOSURE_INCOMPLETE")
@@ -894,30 +1008,103 @@ def _validate_common_recourse_completion(
         or not isinstance(external, Mapping)
     ):
         raise ValueError("RESUME_COMMON_RUN_MANIFEST_MISMATCH")
-    pair_manifest_path = _require_file(
-        root / "external_memory/pair_store/run_manifest.json"
+    adopted_pair_store = external.get("pair_store_adopted_read_only") is True
+    adopted_pair_chunks = external.get("pair_chunks_adopted_read_only") is True
+    if adopted_pair_store and adopted_pair_chunks:
+        raise ValueError("RESUME_COMMON_MULTIPLE_PAIR_ADOPTION_ROUTES")
+    pair_closure_relative = (
+        "external_memory/chunk_vector_cache/run_manifest.json"
+        if adopted_pair_chunks
+        else (
+            "external_memory/pair_store_adoption/run_manifest.json"
+            if adopted_pair_store
+            else "external_memory/pair_store/run_manifest.json"
+        )
     )
+    if pair_closure_relative not in closure:
+        raise ValueError("RESUME_COMMON_PAIR_CLOSURE_MISSING")
+    if adopted_pair_chunks:
+        chunk_manifest_path = _require_file(root / pair_closure_relative)
+        if (
+            str(external.get("chunk_vector_cache_manifest"))
+            != str(chunk_manifest_path)
+            or str(external.get("chunk_vector_cache_manifest_sha256"))
+            != sha256_file(chunk_manifest_path)
+            or external.get("pair_indices_materialized") is not False
+            or external.get("local_vector_cache_is_scientific_authority") is not False
+        ):
+            raise ValueError("RESUME_COMMON_CHUNK_ADOPTION_BINDING_MISMATCH")
+        try:
+            chunk_result = validate_cartesian_chunk_vector_cache(
+                chunk_manifest_path,
+                require_cache=True,
+            )
+        except Exception as exc:
+            raise ValueError("RESUME_COMMON_CHUNK_ADOPTION_CLOSURE_MISMATCH") from exc
+        pair_manifest_path = chunk_result.manifest_path
+        pair_identity = _load_object(pair_manifest_path).get("scientific_identity")
+        if (
+            not isinstance(pair_identity, Mapping)
+            or pair_identity.get("source_pair_scientific_identity_sha256")
+            != external.get("pair_store_scientific_identity_sha256")
+            or chunk_result.pairs.logical_npy_sha256
+            != external.get("pair_indices_sha256")
+            or chunk_result.vectors_sha256
+            != external.get("recourse_vectors_sha256")
+        ):
+            raise ValueError("RESUME_COMMON_CHUNK_ADOPTION_SCIENTIFIC_MISMATCH")
+    elif adopted_pair_store:
+        adoption_manifest_path = _require_file(root / pair_closure_relative)
+        if (
+            str(external.get("pair_store_adoption_manifest"))
+            != str(adoption_manifest_path)
+            or str(external.get("pair_store_adoption_manifest_sha256"))
+            != sha256_file(adoption_manifest_path)
+        ):
+            raise ValueError("RESUME_COMMON_PAIR_ADOPTION_BINDING_MISMATCH")
+        try:
+            adopted = validate_adopted_pair_store_read_only(adoption_manifest_path)
+        except Exception as exc:
+            raise ValueError("RESUME_COMMON_PAIR_ADOPTION_CLOSURE_MISMATCH") from exc
+        pair_manifest_path = adopted.pair_store.manifest_path
+    else:
+        if (
+            external.get("pair_store_adoption_manifest") is not None
+            or external.get("pair_store_adoption_manifest_sha256") is not None
+        ):
+            raise ValueError("RESUME_COMMON_UNEXPECTED_PAIR_ADOPTION")
+        pair_manifest_path = _require_file(root / pair_closure_relative)
     if (
         str(external.get("pair_store_manifest")) != str(pair_manifest_path)
         or str(external.get("pair_store_manifest_sha256"))
         != sha256_file(pair_manifest_path)
     ):
         raise ValueError("RESUME_COMMON_PAIR_MANIFEST_BINDING_MISMATCH")
-    pair_manifest = _load_object(pair_manifest_path)
-    if pair_manifest.get("run_complete") is not True:
-        raise ValueError("RESUME_COMMON_PAIR_MANIFEST_INCOMPLETE")
-    for path_field, hash_field in (
-        ("pairs_path", "pairs_sha256"),
-        ("vectors_path", "vectors_sha256"),
-    ):
-        artifact = _require_file(Path(str(pair_manifest.get(path_field) or "")))
+    if not adopted_pair_chunks:
+        pair_manifest = _load_object(pair_manifest_path)
+        pair_identity = pair_manifest.get("scientific_identity")
+        pair_identity_sha = pair_manifest.get("scientific_identity_sha256")
         if (
-            artifact.parent != pair_manifest_path.parent
-            or sha256_file(artifact) != pair_manifest.get(hash_field)
+            pair_manifest.get("schema_version") != PAIR_STORE_SCHEMA
+            or pair_manifest.get("run_complete") is not True
+            or not isinstance(pair_identity, Mapping)
+            or pair_identity_sha != stable_json_sha256(pair_identity)
+            or external.get("pair_store_scientific_identity_sha256")
+            != pair_identity_sha
         ):
-            raise ValueError(
-                f"RESUME_COMMON_PAIR_ARTIFACT_MISMATCH:{path_field}"
-            )
+            raise ValueError("RESUME_COMMON_PAIR_MANIFEST_INCOMPLETE")
+        for path_field, hash_field in (
+            ("pairs_path", "pairs_sha256"),
+            ("vectors_path", "vectors_sha256"),
+        ):
+            artifact = _require_file(Path(str(pair_manifest.get(path_field) or "")))
+            if (
+                artifact.parent != pair_manifest_path.parent
+                or sha256_file(artifact) != pair_manifest.get(hash_field)
+            ):
+                raise ValueError(
+                    f"RESUME_COMMON_PAIR_ARTIFACT_MISMATCH:{path_field}"
+                )
     dbscan_manifest_raw = external.get("dbscan_manifest")
     if dbscan_manifest_raw is None:
         if int(manifest.get("theta_eligible_pair_count", -1)) != 0:
@@ -935,11 +1122,28 @@ def _validate_common_recourse_completion(
     dbscan_manifest = _load_object(dbscan_manifest_path)
     if dbscan_manifest.get("run_complete") is not True:
         raise ValueError("RESUME_COMMON_DBSCAN_MANIFEST_INCOMPLETE")
-    for path_field, hash_field in (
-        ("neighbor_counts_path", "neighbor_counts_sha256"),
+    shortcut = dbscan_manifest.get("clustering_path") in {
+        ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    }
+    required_dbscan_artifacts = [
         ("core_mask_path", "core_mask_sha256"),
         ("labels_path", "labels_sha256"),
-    ):
+    ]
+    if shortcut:
+        if dbscan_manifest.get("neighbor_counts_available") is not False:
+            raise ValueError("RESUME_COMMON_DBSCAN_SHORTCUT_COUNT_CONTRACT_MISMATCH")
+        try:
+            _validate_shortcut_proof_closure(
+                manifest=dbscan_manifest, root=dbscan_manifest_path.parent
+            )
+        except Exception as exc:
+            raise ValueError("RESUME_COMMON_DBSCAN_SHORTCUT_CLOSURE_MISMATCH") from exc
+    else:
+        required_dbscan_artifacts.insert(
+            0, ("neighbor_counts_path", "neighbor_counts_sha256")
+        )
+    for path_field, hash_field in required_dbscan_artifacts:
         artifact = _require_file(Path(str(dbscan_manifest.get(path_field) or "")))
         if (
             artifact.parent != dbscan_manifest_path.parent
@@ -948,6 +1152,43 @@ def _validate_common_recourse_completion(
             raise ValueError(
                 f"RESUME_COMMON_DBSCAN_ARTIFACT_MISMATCH:{path_field}"
             )
+    summary_manifest_raw = external.get("one_cluster_summary_manifest")
+    summary_manifest_sha256 = external.get("one_cluster_summary_manifest_sha256")
+    if shortcut:
+        if "external_memory/one_cluster_summary/run_manifest.json" not in closure:
+            raise ValueError("RESUME_COMMON_ONE_CLUSTER_CLOSURE_MISSING")
+        summary_manifest_path = _require_file(
+            root / "external_memory/one_cluster_summary/run_manifest.json"
+        )
+        if (
+            str(summary_manifest_raw) != str(summary_manifest_path)
+            or str(summary_manifest_sha256) != sha256_file(summary_manifest_path)
+        ):
+            raise ValueError("RESUME_COMMON_ONE_CLUSTER_MANIFEST_BINDING_MISMATCH")
+        try:
+            exact_summary = validate_proven_one_cluster_summary(
+                summary_manifest_path
+            )
+        except Exception as exc:
+            raise ValueError("RESUME_COMMON_ONE_CLUSTER_CLOSURE_MISMATCH") from exc
+        summary_manifest = _load_object(summary_manifest_path)
+        identity = summary_manifest.get("scientific_identity")
+        if (
+            not isinstance(identity, Mapping)
+            or identity.get("dbscan_manifest_sha256")
+            != external.get("dbscan_manifest_sha256")
+            or identity.get("pairs_sha256") != external.get("pair_indices_sha256")
+            or [list(value) for value in exact_summary.official_result]
+            != manifest.get("official_coverage_summary_result")
+            or manifest.get("official_coverage_summary_invoked") is not False
+            or manifest.get(
+                "official_coverage_semantics_derived_for_single_label_zero"
+            )
+            is not True
+        ):
+            raise ValueError("RESUME_COMMON_ONE_CLUSTER_SCIENTIFIC_MISMATCH")
+    elif summary_manifest_raw is not None or summary_manifest_sha256 is not None:
+        raise ValueError("RESUME_COMMON_UNEXPECTED_ONE_CLUSTER_MANIFEST")
 
 
 def _archive_previous_failure(output_root: Path) -> None:
@@ -968,6 +1209,32 @@ def _archive_previous_failure(output_root: Path) -> None:
 
 
 def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
+    chunk_source_values = (
+        inputs.external_pair_store_source_checkpoint,
+        inputs.external_pair_store_source_owner_root,
+        inputs.external_vector_cache_root,
+        inputs.external_vector_cache_lock,
+    )
+    if any(value is not None for value in chunk_source_values) and not all(
+        value is not None for value in chunk_source_values
+    ):
+        raise ValueError("CHUNK_PAIR_STORE_ROUTE_ARGUMENTS_INCOMPLETE")
+    if (
+        inputs.external_pair_store_source_manifest is not None
+        and inputs.external_pair_store_source_checkpoint is not None
+    ):
+        raise ValueError("PAIR_STORE_ADOPTION_SOURCES_ARE_MUTUALLY_EXCLUSIVE")
+    if (
+        inputs.external_pair_store_source_manifest is not None
+        or inputs.external_pair_store_source_checkpoint is not None
+    ) and (
+        inputs.dataset != "aids"
+        or inputs.device != "cpu"
+        or inputs.common_recourse_engine != "external_memory_exact_v1"
+        or inputs.external_dbscan_shortcut_mode
+        != ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+    ):
+        raise ValueError("PAIR_STORE_ADOPTION_ROUTE_CONTRACT_MISMATCH")
     resuming = inputs.output_root.exists()
     if resuming:
         if (
@@ -1184,6 +1451,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--external-checkpoint-interval-blocks", type=int, default=1
     )
+    parser.add_argument(
+        "--external-dbscan-shortcut-mode",
+        choices=("disabled", "all_core_one_component_adaptive_anchor_v1"),
+        default="disabled",
+    )
+    parser.add_argument("--external-shortcut-seed-count", type=int, default=3)
+    parser.add_argument("--external-shortcut-failure-cap", type=int, default=4096)
+    parser.add_argument(
+        "--external-shortcut-query-block-size", type=int, default=65536
+    )
+    parser.add_argument(
+        "--external-exact-fallback-max-samples", type=int, default=100000
+    )
+    parser.add_argument("--external-summary-block-size", type=int, default=65536)
+    parser.add_argument(
+        "--external-pair-store-source-manifest",
+        type=_absolute,
+        help="Completed pair-store manifest adopted read-only into this fresh run.",
+    )
+    parser.add_argument("--external-pair-store-source-checkpoint", type=_absolute)
+    parser.add_argument("--external-pair-store-source-owner-root", type=_absolute)
+    parser.add_argument("--external-vector-cache-root", type=_absolute)
+    parser.add_argument("--external-vector-cache-lock", type=_absolute)
+    parser.add_argument(
+        "--external-vector-cache-min-free-gb", type=float, default=3.0
+    )
+    parser.add_argument(
+        "--external-vector-cache-proc-root", type=_absolute, default=Path("/proc")
+    )
     parser.add_argument("--expected-sklearn-version", default="1.7.2")
     parser.add_argument("--common-recourse-resume", action="store_true")
     return parser
@@ -1215,6 +1511,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         external_max_rss_gb=args.external_max_rss_gb,
         external_query_block_size=args.external_query_block_size,
         external_checkpoint_interval_blocks=args.external_checkpoint_interval_blocks,
+        external_dbscan_shortcut_mode=args.external_dbscan_shortcut_mode,
+        external_shortcut_seed_count=args.external_shortcut_seed_count,
+        external_shortcut_failure_cap=args.external_shortcut_failure_cap,
+        external_shortcut_query_block_size=args.external_shortcut_query_block_size,
+        external_exact_fallback_max_samples=(
+            args.external_exact_fallback_max_samples
+        ),
+        external_summary_block_size=args.external_summary_block_size,
+        external_pair_store_source_manifest=(
+            _require_file(args.external_pair_store_source_manifest)
+            if args.external_pair_store_source_manifest
+            else None
+        ),
+        external_pair_store_source_checkpoint=(
+            _require_file(args.external_pair_store_source_checkpoint)
+            if args.external_pair_store_source_checkpoint
+            else None
+        ),
+        external_pair_store_source_owner_root=(
+            _require_directory(args.external_pair_store_source_owner_root)
+            if args.external_pair_store_source_owner_root
+            else None
+        ),
+        external_vector_cache_root=args.external_vector_cache_root,
+        external_vector_cache_lock=args.external_vector_cache_lock,
+        external_vector_cache_min_free_gb=args.external_vector_cache_min_free_gb,
+        external_vector_cache_proc_root=_require_directory(
+            args.external_vector_cache_proc_root
+        ),
         expected_sklearn_version=args.expected_sklearn_version,
         common_recourse_resume=args.common_recourse_resume,
     )

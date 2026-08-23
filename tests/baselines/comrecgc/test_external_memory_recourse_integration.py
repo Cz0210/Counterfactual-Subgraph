@@ -10,6 +10,8 @@ import pytest
 
 from src.baselines.comrecgc.contracts import RecourseParameters, sha256_file, stable_json_sha256
 from src.baselines.comrecgc import recourse
+from src.baselines.comrecgc import external_memory_recourse as external_recourse
+from src.baselines.comrecgc import external_pair_chunk_cache as chunk_cache
 from src.baselines.comrecgc.external_memory_dbscan import _rss_bytes
 from scripts.autodl import run_comrecgc_standardized_continuation as continuation
 
@@ -70,26 +72,47 @@ def _greedy(counterfactual_covering, graphs_covered_by, k):
     return selected
 
 
-def _official_coverage_summary(*, db_2, rec, idxs, **_kwargs):
+def _official_coverage_summary(
+    *, db_2, rec, idxs, radius, threshold_theta, recourse_size
+):
     labels = np.asarray(db_2.labels_)
+    covered = set()
+    first_counterfactuals = set()
+    points = rec[labels == 0]
+    positions = np.flatnonzero(labels == 0)
+    centroid = torch.mean(points, dim=0)
+    distances = torch.norm(points - centroid, dim=-1)
+    for local, distance in enumerate(distances):
+        if distance < radius:
+            parent, candidate = idxs[int(positions[local])]
+            if int(parent) not in covered:
+                covered.add(int(parent))
+                first_counterfactuals.add(int(candidate))
+    if torch.norm(centroid).item() >= threshold_theta or recourse_size <= 0:
+        return ([], [], [])
     return (
-        [int(np.count_nonzero(labels >= 0))],
-        [float(rec.sum().item())],
-        [len(idxs)],
+        [len(covered)],
+        [torch.norm(centroid).item()],
+        [len(first_counterfactuals)],
     )
 
 
 def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    zero = [0.0] * 64
+    parent_one = [0.02, *([0.0] * 63)]
+    candidate_zero = [0.01, *([0.0] * 63)]
+    candidate_one = [0.015, *([0.0] * 63)]
+    candidate_far = [1.0] * 64
     parents = [
-        FixtureGraph([0.0, 0.0], [], 1.0),
-        FixtureGraph([0.02, 0.0], [], 2.0),
+        FixtureGraph(zero, [], 1.0),
+        FixtureGraph(parent_one, [], 2.0),
     ]
     candidates = [
-        FixtureGraph([0.01, 0.0], [0.02, 0.02], 3.0),
-        FixtureGraph([0.015, 0.0], [0.02, 0.02], 4.0),
-        FixtureGraph([1.0, 1.0], [1.0, 1.0], 5.0),
+        FixtureGraph(candidate_zero, [0.02, 0.02], 3.0),
+        FixtureGraph(candidate_one, [0.02, 0.02], 4.0),
+        FixtureGraph(candidate_far, [1.0, 1.0], 5.0),
     ]
     payload = {
         "counterfactual_candidates": [
@@ -193,6 +216,14 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         engine="external_memory_exact_v1",
         external_max_rss_bytes=_rss_bytes() + 512 * 1024**2,
         external_query_block_size=2,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_shortcut_seed_count=3,
+        external_shortcut_failure_cap=16,
+        external_shortcut_query_block_size=2,
+        external_exact_fallback_max_samples=0,
+        external_summary_block_size=2,
         expected_sklearn_version=sklearn.__version__,
     )
 
@@ -225,6 +256,9 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
     ]
     assert external_manifest["common_recourse_engine"] == "external_memory_exact_v1"
     assert external_manifest["external_memory_artifacts"]["pair_indices_sha256"]
+    assert external_manifest["external_memory_artifacts"][
+        "one_cluster_summary_manifest_sha256"
+    ]
     terminal_path = external_root / "_RUN_COMPLETE.json"
     terminal = json.loads(terminal_path.read_text())
     continuation._validate_common_recourse_completion(
@@ -255,3 +289,193 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
     reconciled = json.loads(checkpoint.read_text())
     assert reconciled["status"] == "PASS"
     assert reconciled["reconciled_after_child_completion"] is True
+
+    source_manifest = external_root / "external_memory/pair_store/run_manifest.json"
+    source_pair = json.loads(source_manifest.read_text(encoding="utf-8"))
+    source_paths = [
+        source_manifest,
+        Path(source_pair["pairs_path"]),
+        Path(source_pair["vectors_path"]),
+    ]
+    source_stats_before = {
+        str(path): external_recourse._file_stat_identity(path) for path in source_paths
+    }
+    fake_proc = tmp_path / "proc"
+    fake_proc.mkdir()
+    real_adopt = external_recourse.adopt_external_pair_store_read_only
+    real_validate = external_recourse.validate_adopted_pair_store_read_only
+    monkeypatch.setattr(
+        recourse,
+        "adopt_external_pair_store_read_only",
+        lambda **kwargs: real_adopt(**kwargs, proc_root=fake_proc),
+    )
+    monkeypatch.setattr(
+        continuation,
+        "validate_adopted_pair_store_read_only",
+        lambda path: real_validate(path, proc_root=fake_proc),
+    )
+    monkeypatch.setattr(
+        recourse,
+        "AIDSGreedEmbeddingAdapter",
+        lambda *_args, **_kwargs: pytest.fail(
+            "read-only pair-store adoption must not rerun pair inference"
+        ),
+    )
+    adopted_root = tmp_path / "external-adopted"
+    adopted_manifest = recourse.run_common_recourse(
+        **common,
+        output_dir=adopted_root,
+        engine="external_memory_exact_v1",
+        external_max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        external_query_block_size=2,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_shortcut_seed_count=3,
+        external_shortcut_failure_cap=16,
+        external_shortcut_query_block_size=2,
+        external_exact_fallback_max_samples=0,
+        external_summary_block_size=2,
+        external_pair_store_source_manifest=source_manifest,
+        expected_sklearn_version=sklearn.__version__,
+    )
+    assert not (adopted_root / "external_memory/pair_store").exists()
+    adoption_path = (
+        adopted_root / "external_memory/pair_store_adoption/run_manifest.json"
+    )
+    assert adoption_path.is_file()
+    assert adopted_manifest["external_memory_artifacts"][
+        "pair_store_adopted_read_only"
+    ] is True
+    assert adopted_manifest["external_memory_artifacts"]["pair_store_manifest"] == str(
+        source_manifest
+    )
+    assert json.loads(
+        (adopted_root / "selected_common_recourses.json").read_text()
+    ) == external_rows
+    assert {
+        str(path): external_recourse._file_stat_identity(path) for path in source_paths
+    } == source_stats_before
+    adopted_terminal_path = adopted_root / "_RUN_COMPLETE.json"
+    adopted_terminal = json.loads(adopted_terminal_path.read_text())
+    assert (
+        "external_memory/pair_store_adoption/run_manifest.json"
+        in adopted_terminal["artifact_sha256"]
+    )
+    assert "external_memory/pair_store/run_manifest.json" not in adopted_terminal[
+        "artifact_sha256"
+    ]
+    continuation._validate_common_recourse_completion(
+        marker=adopted_terminal_path,
+        terminal=adopted_terminal,
+    )
+
+    # A specialized source with every candidate-parent pair eligible proves
+    # the chunk snapshot -> implicit Cartesian pair route end to end.
+    payload_two = {
+        "counterfactual_candidates": payload["counterfactual_candidates"][:2],
+        "graph_map": {
+            key: value
+            for key, value in payload["graph_map"].items()
+            if key in {"hash-0", "hash-1"}
+        },
+    }
+    monkeypatch.setattr(recourse, "_torch_load", lambda _path: payload_two)
+    monkeypatch.setattr(
+        recourse,
+        "AIDSGreedEmbeddingAdapter",
+        lambda *_args, **_kwargs: FixtureEmbedding(),
+    )
+    chunk_source_root = tmp_path / "chunk-source"
+    source_result = recourse.run_common_recourse(
+        **common,
+        output_dir=chunk_source_root,
+        engine="external_memory_exact_v1",
+        external_max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        external_query_block_size=2,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_shortcut_seed_count=3,
+        external_shortcut_failure_cap=16,
+        external_shortcut_query_block_size=2,
+        external_exact_fallback_max_samples=0,
+        external_summary_block_size=2,
+        expected_sklearn_version=sklearn.__version__,
+    )
+    source_pair_root = chunk_source_root / "external_memory/pair_store"
+    source_pair_manifest = json.loads(
+        (source_pair_root / "run_manifest.json").read_text(encoding="utf-8")
+    )
+    snapshot = {
+        "schema_version": source_pair_manifest["schema_version"],
+        "phase": "chunks",
+        "scientific_identity": source_pair_manifest["scientific_identity"],
+        "scientific_identity_sha256": source_pair_manifest[
+            "scientific_identity_sha256"
+        ],
+        "next_chunk_index": source_pair_manifest["chunk_count"],
+        "row_count": source_pair_manifest["row_count"],
+        "chunks": source_pair_manifest["chunks"],
+    }
+    snapshot_path = tmp_path / "source-snapshot/chunk_checkpoint.snapshot.json"
+    snapshot_path.parent.mkdir()
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    def portable_preallocate(path: Path, *, size: int) -> None:
+        with path.open("r+b") as handle:
+            handle.truncate(size)
+
+    monkeypatch.setattr(chunk_cache, "_preallocate_file", portable_preallocate)
+    monkeypatch.setattr(chunk_cache, "_statvfs_free_bytes", lambda _path: 10**12)
+    monkeypatch.setattr(
+        recourse,
+        "AIDSGreedEmbeddingAdapter",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Cartesian chunk adoption must not rerun pair inference"
+        ),
+    )
+    chunk_adopted_root = tmp_path / "chunk-adopted"
+    chunk_adopted = recourse.run_common_recourse(
+        **common,
+        output_dir=chunk_adopted_root,
+        engine="external_memory_exact_v1",
+        external_max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        external_query_block_size=2,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_shortcut_seed_count=3,
+        external_shortcut_failure_cap=16,
+        external_shortcut_query_block_size=2,
+        external_exact_fallback_max_samples=0,
+        external_summary_block_size=2,
+        external_pair_store_source_checkpoint=snapshot_path,
+        external_pair_store_source_owner_root=chunk_source_root,
+        external_vector_cache_root=tmp_path / "local-vector-cache",
+        external_vector_cache_lock=tmp_path / "local-vector-cache.lock",
+        external_vector_cache_min_free_bytes=128,
+        external_vector_cache_proc_root=fake_proc,
+        expected_sklearn_version=sklearn.__version__,
+    )
+    assert chunk_adopted["external_memory_artifacts"][
+        "pair_chunks_adopted_read_only"
+    ] is True
+    assert chunk_adopted["external_memory_artifacts"][
+        "pair_indices_materialized"
+    ] is False
+    assert not (
+        chunk_adopted_root / "external_memory/chunk_vector_cache/pair_indices.npy"
+    ).exists()
+    assert json.loads(
+        (chunk_adopted_root / "selected_common_recourses.json").read_text()
+    ) == json.loads(
+        (chunk_source_root / "selected_common_recourses.json").read_text()
+    )
+    assert chunk_adopted["official_coverage_summary_result"] == source_result[
+        "official_coverage_summary_result"
+    ]
+    chunk_terminal_path = chunk_adopted_root / "_RUN_COMPLETE.json"
+    continuation._validate_common_recourse_completion(
+        marker=chunk_terminal_path,
+        terminal=json.loads(chunk_terminal_path.read_text()),
+    )

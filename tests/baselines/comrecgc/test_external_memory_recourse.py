@@ -11,8 +11,11 @@ from src.baselines.comrecgc import external_memory_recourse as external_recourse
 from src.baselines.comrecgc.external_memory_dbscan import _rss_bytes
 from src.baselines.comrecgc.external_memory_recourse import (
     ExternalPairStore,
+    adopt_external_pair_store_read_only,
     invoke_official_coverage_summary_external,
+    summarize_proven_one_cluster_external,
     trace_external_cluster_order,
+    validate_adopted_pair_store_read_only,
 )
 from src.baselines.comrecgc.recourse import trace_official_cluster_order
 
@@ -32,6 +35,93 @@ def _greedy(counterfactual_covering, graphs_covered_by, k):
                     counterfactual_covering[other].discard(parent)
         selected[rank] = (cluster, len(covered))
     return selected
+
+
+def _official_one_cluster_coverage(
+    *, labels, vectors, pairs, radius, theta, recourse_size
+):
+    import torch
+
+    common_recourse = {}
+    centroid_norms = {}
+    graph_coverage_map = {}
+    rec = torch.tensor(vectors)
+    for cluster_label in range(max(labels) + 1):
+        covered_graphs = set()
+        covered_hashes = set()
+        cluster_mask = labels == cluster_label
+        cluster_points = rec[cluster_mask]
+        cluster_indices = [
+            index for index, is_in_cluster in enumerate(cluster_mask) if is_in_cluster
+        ]
+        centroid = torch.mean(cluster_points, dim=0)
+        distances = torch.norm(cluster_points - centroid, dim=-1)
+        for index, distance in enumerate(distances):
+            if distance < radius:
+                original_index, counterfactual_index = pairs[cluster_indices[index]]
+                if int(original_index) not in covered_graphs:
+                    covered_graphs.add(int(original_index))
+                    covered_hashes.add(int(counterfactual_index))
+        common_recourse[cluster_label] = covered_graphs
+        centroid_norms[cluster_label] = torch.norm(centroid).item()
+        graph_coverage_map[cluster_label] = covered_hashes
+    filtered = {}
+    covered_by = {}
+    for label, parents in common_recourse.items():
+        if centroid_norms[label] < theta:
+            filtered[label] = parents
+            for parent in parents:
+                covered_by.setdefault(parent, set()).add(label)
+    selected = _greedy(
+        counterfactual_covering=filtered,
+        graphs_covered_by=covered_by,
+        k=min(recourse_size, len(filtered)),
+    )
+    covering, costs, sizes = [], [], []
+    cumulative_cost = 0.0
+    covered_hashes = set()
+    for rank in selected:
+        label, cumulative_covered = selected[rank]
+        covering.append(cumulative_covered)
+        covered_hashes.update(graph_coverage_map[label])
+        cumulative_cost += centroid_norms[label]
+        costs.append(cumulative_cost)
+        sizes.append(len(covered_hashes))
+    return covering, costs, sizes
+
+
+def _one_cluster_fixture(
+    tmp_path: Path, values: np.ndarray, pairs: np.ndarray, *, eps: float
+):
+    from src.baselines.comrecgc import external_memory_dbscan as external_dbscan
+    import sklearn
+
+    vectors_path = tmp_path / "vectors.npy"
+    pairs_path = tmp_path / "pairs.npy"
+    with vectors_path.open("wb") as handle:
+        np.save(handle, values, allow_pickle=False)
+    with pairs_path.open("wb") as handle:
+        np.save(handle, pairs, allow_pickle=False)
+    vectors = np.load(vectors_path, mmap_mode="r", allow_pickle=False)
+    pair_values = np.load(pairs_path, mmap_mode="r", allow_pickle=False)
+    result = external_dbscan.fit_external_memory_dbscan(
+        vectors_path=vectors_path,
+        work_dir=tmp_path / "dbscan",
+        contract=external_dbscan.ExternalDBSCANContract(
+            eps=eps,
+            min_samples=2,
+            query_block_size=2,
+            checkpoint_interval_blocks=1,
+            max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+            expected_sklearn_version=sklearn.__version__,
+            shortcut_mode=external_dbscan.ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            shortcut_anchor_count=len(values),
+            shortcut_query_block_size=2,
+            exact_fallback_max_samples=0,
+        ),
+    )
+    assert result.shortcut_proof_path is not None
+    return vectors, pair_values, result
 
 
 def test_pair_store_resume_preserves_global_pair_order_and_hash(tmp_path: Path) -> None:
@@ -189,6 +279,167 @@ def test_pair_store_resume_rejects_dataset_content_fingerprint_drift(
         )
 
 
+def _completed_pair_store(tmp_path: Path):
+    identity = {
+        "dataset": "aids",
+        "dataset_fingerprint": "fixture-dataset-sha",
+        "dataset_audit_sha256": "a" * 64,
+        "pair_order": "candidate_major_parent_minor",
+    }
+    store = ExternalPairStore(
+        root=tmp_path / "source-pair-store",
+        scientific_identity=identity,
+        max_rss_bytes=_rss_bytes() + 128 * 1024**2,
+    )
+    store.append(
+        chunk_index=0,
+        pairs=np.asarray([[0, 0], [1, 0]], dtype=np.int64),
+        vectors=np.asarray([[0.0, 0.1], [0.2, 0.3]], dtype=np.float32),
+        chunk_identity={"candidate_start": 0, "candidate_stop": 1},
+    )
+    return identity, store.finalize()
+
+
+def test_pair_store_physical_adoption_is_hash_bound_read_only_and_resumable(
+    tmp_path: Path,
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    before = {
+        path: external_recourse._file_stat_identity(path)
+        for path in (source.manifest_path, source.pairs_path, source.vectors_path)
+    }
+    adopted = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        adoption_root=tmp_path / "fresh" / "pair_store_adoption",
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    assert adopted.pair_store.manifest_path == source.manifest_path
+    assert adopted.pair_store.pairs_path == source.pairs_path
+    assert adopted.pair_store.vectors_path == source.vectors_path
+    assert sorted(path.name for path in adopted.adoption_manifest_path.parent.iterdir()) == [
+        "run_manifest.json"
+    ]
+    after = {
+        path: external_recourse._file_stat_identity(path)
+        for path in (source.manifest_path, source.pairs_path, source.vectors_path)
+    }
+    assert after == before
+    resumed = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        adoption_root=adopted.adoption_manifest_path.parent,
+        expected_scientific_identity=identity,
+        proc_root=proc,
+        resume=True,
+    )
+    assert resumed.adoption_manifest_sha256 == adopted.adoption_manifest_sha256
+    validated = validate_adopted_pair_store_read_only(
+        adopted.adoption_manifest_path,
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    assert validated.pair_store.pairs_sha256 == source.pairs_sha256
+
+
+def test_pair_store_adoption_rejects_identity_writer_and_stat_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    with pytest.raises(Exception, match="identity mismatch"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=source.manifest_path,
+            adoption_root=tmp_path / "wrong-identity",
+            expected_scientific_identity={**identity, "dataset_fingerprint": "drift"},
+            proc_root=proc,
+        )
+    monkeypatch.setattr(
+        external_recourse,
+        "_find_writable_process_references",
+        lambda *_args, **_kwargs: [
+            {"pid": 7, "kind": "fd", "fd": 3, "path": str(source.vectors_path)}
+        ],
+    )
+    with pytest.raises(Exception, match="LIVE_WRITER"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=source.manifest_path,
+            adoption_root=tmp_path / "writer",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+    monkeypatch.setattr(
+        external_recourse,
+        "_find_writable_process_references",
+        lambda *_args, **_kwargs: [],
+    )
+    adopted = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        adoption_root=tmp_path / "stat-drift",
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    payload = json.loads(adopted.adoption_manifest_path.read_text(encoding="utf-8"))
+    payload["source_files"][str(source.vectors_path)]["stat"]["size"] += 1
+    adopted.adoption_manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(Exception, match="stat drift"):
+        validate_adopted_pair_store_read_only(
+            adopted.adoption_manifest_path,
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+
+
+def test_pair_store_adoption_rejects_closed_chunks_without_terminal_promotion(
+    tmp_path: Path,
+) -> None:
+    identity = {
+        "dataset": "aids",
+        "dataset_fingerprint": "fixture-dataset-sha",
+    }
+    store = ExternalPairStore(
+        root=tmp_path / "chunks-only",
+        scientific_identity=identity,
+        max_rss_bytes=_rss_bytes() + 128 * 1024**2,
+    )
+    store.append(
+        chunk_index=0,
+        pairs=np.asarray([[0, 0], [1, 0]], dtype=np.int64),
+        vectors=np.asarray([[0.0], [0.1]], dtype=np.float32),
+        chunk_identity={"candidate_start": 0, "candidate_stop": 1},
+    )
+    checkpoint = tmp_path / "chunks-only/checkpoint.json"
+    assert checkpoint.is_file()
+    assert not (tmp_path / "chunks-only/run_manifest.json").exists()
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    with pytest.raises(Exception, match="NOT_TERMINALLY_PROMOTED"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=checkpoint,
+            adoption_root=tmp_path / "fresh",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+    assert not (tmp_path / "fresh").exists()
+
+
+def test_pair_store_adoption_rejects_manifest_symlink(tmp_path: Path) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    alias = tmp_path / "pair-store-alias.json"
+    alias.symlink_to(source.manifest_path)
+    with pytest.raises(Exception, match="source manifest is a symlink"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=alias,
+            adoption_root=tmp_path / "fresh",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+
+
 def test_official_coverage_receives_zero_copy_vector_view(tmp_path: Path) -> None:
     import torch
 
@@ -241,6 +492,272 @@ def test_cluster_summary_rss_gate_covers_largest_cluster_copy() -> None:
             recourse_size=100,
             official_greedy=_greedy,
             max_rss_bytes=_rss_bytes() + 1024,
+        )
+
+
+def test_proven_one_cluster_stream_is_elementwise_legacy_exact(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    values = np.asarray(
+        [[-0.030], [-0.015], [0.000], [0.015], [0.030]], dtype=np.float32
+    )
+    pairs = np.asarray(
+        [[0, 10], [0, 11], [1, 11], [2, 12], [3, 13]], dtype=np.int64
+    )
+    radius = 0.020
+    theta = 0.100
+    vectors, pair_values, dbscan = _one_cluster_fixture(
+        tmp_path, values, pairs, eps=radius
+    )
+    expected_official = _official_one_cluster_coverage(
+        labels=np.zeros(len(values), dtype=np.intp),
+        vectors=values,
+        pairs=pairs,
+        radius=radius,
+        theta=theta,
+        recourse_size=100,
+    )
+    expected_selected = trace_official_cluster_order(
+        labels=np.zeros(len(values), dtype=np.intp),
+        recourse_vectors=values,
+        pair_indices=[tuple(map(int, row)) for row in pairs],
+        radius=radius,
+        theta=theta,
+        recourse_size=100,
+        official_greedy=_greedy,
+    )
+    actual = summarize_proven_one_cluster_external(
+        work_dir=tmp_path / "summary",
+        dbscan_manifest_path=dbscan.manifest_path,
+        dbscan_manifest_sha256=dbscan.manifest_sha256,
+        recourse_vectors=vectors,
+        pair_indices=pair_values,
+        pairs_sha256=external_recourse._sha256_file(tmp_path / "pairs.npy"),
+        radius=radius,
+        theta=theta,
+        recourse_size=100,
+        official_greedy=_greedy,
+        torch_module=torch,
+        max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        block_size=2,
+    )
+    assert actual.official_result == expected_official
+    assert actual.selected == expected_selected
+    manifest = json.loads(actual.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["exact_one_cluster_semantics_replayed"] is True
+    assert manifest["approximation_used"] is False
+    assert manifest["retained_count"] == 3
+    assert np.array_equal(
+        np.load(actual.retained_positions_path, allow_pickle=False),
+        np.asarray([1, 2, 3], dtype=np.int64),
+    )
+
+
+def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    values = np.asarray([[-0.020], [0.000], [0.020]], dtype=np.float32)
+    pairs = np.asarray([[0, 10], [1, 11], [2, 12]], dtype=np.int64)
+    vectors, pair_values, dbscan = _one_cluster_fixture(
+        tmp_path, values, pairs, eps=0.020
+    )
+    expected = trace_official_cluster_order(
+        labels=np.zeros(3, dtype=np.intp),
+        recourse_vectors=values,
+        pair_indices=[tuple(map(int, row)) for row in pairs],
+        radius=0.020,
+        theta=0.100,
+        recourse_size=100,
+        official_greedy=_greedy,
+    )
+    actual = summarize_proven_one_cluster_external(
+        work_dir=tmp_path / "summary",
+        dbscan_manifest_path=dbscan.manifest_path,
+        dbscan_manifest_sha256=dbscan.manifest_sha256,
+        recourse_vectors=vectors,
+        pair_indices=pair_values,
+        pairs_sha256=external_recourse._sha256_file(tmp_path / "pairs.npy"),
+        radius=0.020,
+        theta=0.100,
+        recourse_size=100,
+        official_greedy=_greedy,
+        torch_module=torch,
+        max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        block_size=2,
+    )
+    assert float(np.float32(0.020)) < 0.020
+    assert actual.selected == expected
+    assert np.load(actual.retained_positions_path, allow_pickle=False).tolist() == [
+        0,
+        1,
+        2,
+    ]
+
+
+def test_proven_one_cluster_preserves_official_empty_coverage_corner(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    angles = np.arange(64, dtype=np.float64) * (2.0 * np.pi / 64.0)
+    values = np.zeros((64, 64), dtype=np.float32)
+    values[:, :2] = np.column_stack((np.cos(angles), np.sin(angles))).astype(
+        np.float32
+    )
+    pairs = np.column_stack(
+        (np.arange(64, dtype=np.int64), np.arange(64, dtype=np.int64))
+    )
+    radius = 0.11
+    vectors, pair_values, dbscan = _one_cluster_fixture(
+        tmp_path, values, pairs, eps=radius
+    )
+    expected = _official_one_cluster_coverage(
+        labels=np.zeros(64, dtype=np.intp),
+        vectors=values,
+        pairs=pairs,
+        radius=radius,
+        theta=0.1,
+        recourse_size=100,
+    )
+    actual = summarize_proven_one_cluster_external(
+        work_dir=tmp_path / "summary",
+        dbscan_manifest_path=dbscan.manifest_path,
+        dbscan_manifest_sha256=dbscan.manifest_sha256,
+        recourse_vectors=vectors,
+        pair_indices=pair_values,
+        pairs_sha256=external_recourse._sha256_file(tmp_path / "pairs.npy"),
+        radius=radius,
+        theta=0.1,
+        recourse_size=100,
+        official_greedy=_greedy,
+        torch_module=torch,
+        max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        block_size=7,
+    )
+    assert actual.official_result == expected
+    assert actual.official_result[0] == [0]
+    assert actual.official_result[2] == [0]
+    assert actual.selected == []
+    assert actual.retained_positions_path is None
+    assert actual.retained_vectors_path is None
+
+
+def test_proven_one_cluster_resume_is_exact_and_tamper_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import torch
+
+    values = np.asarray(
+        [[-0.030], [-0.015], [0.000], [0.015], [0.030]], dtype=np.float32
+    )
+    pairs = np.asarray(
+        [[0, 10], [0, 11], [1, 11], [2, 12], [3, 13]], dtype=np.int64
+    )
+    vectors, pair_values, dbscan = _one_cluster_fixture(
+        tmp_path, values, pairs, eps=0.020
+    )
+    kwargs = {
+        "dbscan_manifest_path": dbscan.manifest_path,
+        "dbscan_manifest_sha256": dbscan.manifest_sha256,
+        "recourse_vectors": vectors,
+        "pair_indices": pair_values,
+        "pairs_sha256": external_recourse._sha256_file(tmp_path / "pairs.npy"),
+        "radius": 0.020,
+        "theta": 0.100,
+        "recourse_size": 100,
+        "official_greedy": _greedy,
+        "torch_module": torch,
+        "max_rss_bytes": _rss_bytes() + 512 * 1024**2,
+        "block_size": 2,
+    }
+    original_checkpoint = external_recourse._summary_checkpoint
+    interrupted = {"done": False}
+
+    def interrupt(path, **checkpoint):
+        result = original_checkpoint(path, **checkpoint)
+        if (
+            not interrupted["done"]
+            and checkpoint["phase"] == "trace_mask"
+            and checkpoint["next_offset"] == 2
+        ):
+            interrupted["done"] = True
+            raise RuntimeError("summary interruption")
+        return result
+
+    monkeypatch.setattr(external_recourse, "_summary_checkpoint", interrupt)
+    with pytest.raises(RuntimeError, match="summary interruption"):
+        summarize_proven_one_cluster_external(
+            work_dir=tmp_path / "resumed", **kwargs
+        )
+    monkeypatch.setattr(
+        external_recourse, "_summary_checkpoint", original_checkpoint
+    )
+    checkpoint_path = tmp_path / "resumed/checkpoint.json"
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    tampered = json.loads(checkpoint_bytes)
+    assert tampered["phase"] == "trace_mask"
+    tampered["next_offset"] = len(values)
+    checkpoint_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(Exception, match="trace-mask committed prefix"):
+        summarize_proven_one_cluster_external(
+            work_dir=tmp_path / "resumed", resume=True, **kwargs
+        )
+    checkpoint_path.write_bytes(checkpoint_bytes)
+    resumed = summarize_proven_one_cluster_external(
+        work_dir=tmp_path / "resumed", resume=True, **kwargs
+    )
+    reference = summarize_proven_one_cluster_external(
+        work_dir=tmp_path / "reference", **kwargs
+    )
+    assert resumed.official_result == reference.official_result
+    assert resumed.selected == reference.selected
+    assert external_recourse._sha256_file(resumed.retained_mask_path) == (
+        external_recourse._sha256_file(reference.retained_mask_path)
+    )
+    assert external_recourse._sha256_file(resumed.retained_vectors_path) == (
+        external_recourse._sha256_file(reference.retained_vectors_path)
+    )
+
+    manifest = json.loads(resumed.manifest_path.read_text(encoding="utf-8"))
+    centroid_path = Path(manifest["numpy_centroid_path"])
+    centroid = np.load(centroid_path, allow_pickle=False)
+    with centroid_path.open("wb") as handle:
+        np.save(handle, centroid + np.float32(0.1), allow_pickle=False)
+    with pytest.raises(Exception, match="centroid checksum"):
+        summarize_proven_one_cluster_external(
+            work_dir=tmp_path / "resumed", resume=True, **kwargs
+        )
+
+
+def test_proven_one_cluster_rejects_nonproof_and_low_rss(tmp_path: Path) -> None:
+    import torch
+
+    values = np.zeros((4, 1), dtype=np.float32)
+    pairs = np.column_stack(
+        (np.arange(4, dtype=np.int64), np.arange(4, dtype=np.int64))
+    )
+    vectors, pair_values, dbscan = _one_cluster_fixture(
+        tmp_path, values, pairs, eps=0.020
+    )
+    with pytest.raises(Exception, match="RSS"):
+        summarize_proven_one_cluster_external(
+            work_dir=tmp_path / "summary",
+            dbscan_manifest_path=dbscan.manifest_path,
+            dbscan_manifest_sha256=dbscan.manifest_sha256,
+            recourse_vectors=vectors,
+            pair_indices=pair_values,
+            pairs_sha256=external_recourse._sha256_file(tmp_path / "pairs.npy"),
+            radius=0.020,
+            theta=0.100,
+            recourse_size=100,
+            official_greedy=_greedy,
+            torch_module=torch,
+            max_rss_bytes=_rss_bytes() + 1024,
+            block_size=2,
         )
 
 

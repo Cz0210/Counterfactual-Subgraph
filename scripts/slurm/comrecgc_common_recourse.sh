@@ -7,8 +7,8 @@
 #SBATCH --gres=gpu:a800:1
 #SBATCH --mem=96G
 #SBATCH --time=48:00:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=logs/%j.out
+#SBATCH --error=logs/%j.err
 
 set -eo pipefail
 set +u
@@ -20,6 +20,9 @@ cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONHASHSEED=0
 mkdir -p logs
+echo "[ENV] python=$(command -v python)"
+python --version
+python -c 'import torch; print(f"[ENV] cuda_available={torch.cuda.is_available()}")'
 
 DATASET="${DATASET:-}"
 MODE="${MODE:-smoke}"
@@ -27,6 +30,19 @@ RESUME="${RESUME:-false}"
 ENGINE="${ENGINE:-legacy_in_memory}"
 EXTERNAL_MAX_RSS_GB="${EXTERNAL_MAX_RSS_GB:-96}"
 EXTERNAL_QUERY_BLOCK_SIZE="${EXTERNAL_QUERY_BLOCK_SIZE:-8}"
+EXTERNAL_DBSCAN_SHORTCUT_MODE="${EXTERNAL_DBSCAN_SHORTCUT_MODE:-disabled}"
+EXTERNAL_SHORTCUT_SEED_COUNT="${EXTERNAL_SHORTCUT_SEED_COUNT:-3}"
+EXTERNAL_SHORTCUT_FAILURE_CAP="${EXTERNAL_SHORTCUT_FAILURE_CAP:-4096}"
+EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE="${EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE:-65536}"
+EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES="${EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES:-100000}"
+EXTERNAL_SUMMARY_BLOCK_SIZE="${EXTERNAL_SUMMARY_BLOCK_SIZE:-65536}"
+EXTERNAL_PAIR_STORE_SOURCE_MANIFEST="${EXTERNAL_PAIR_STORE_SOURCE_MANIFEST:-}"
+EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT="${EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT:-}"
+EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT="${EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT:-}"
+EXTERNAL_VECTOR_CACHE_ROOT="${EXTERNAL_VECTOR_CACHE_ROOT:-}"
+EXTERNAL_VECTOR_CACHE_LOCK="${EXTERNAL_VECTOR_CACHE_LOCK:-}"
+EXTERNAL_VECTOR_CACHE_MIN_FREE_GB="${EXTERNAL_VECTOR_CACHE_MIN_FREE_GB:-3}"
+EXTERNAL_VECTOR_CACHE_PROC_ROOT="${EXTERNAL_VECTOR_CACHE_PROC_ROOT:-/proc}"
 EXPECTED_SKLEARN_VERSION="${EXPECTED_SKLEARN_VERSION:-1.7.2}"
 [[ "$DATASET" == "aids" || "$DATASET" == "mutagenicity" ]] || exit 2
 [[ "$MODE" == "smoke" || "$MODE" == "full" ]] || exit 2
@@ -60,13 +76,30 @@ RESUME_ARGS=(); [[ "$RESUME" == "true" ]] && RESUME_ARGS=(--resume)
 ENGINE_ARGS=(--engine "$ENGINE")
 if [[ "$ENGINE" == "external_memory_exact_v1" ]]; then
   [[ "$DATASET" == "aids" ]] || { echo "[COMRECGC_CONFIG_ERROR] external engine is AIDS-only" >&2; exit 2; }
-  ENGINE_ARGS+=(--external-max-rss-gb "$EXTERNAL_MAX_RSS_GB" --external-query-block-size "$EXTERNAL_QUERY_BLOCK_SIZE" --expected-sklearn-version "$EXPECTED_SKLEARN_VERSION")
+  DEVICE="${DEVICE:-cpu}"
+  [[ "$DEVICE" == "cpu" ]] || { echo "[COMRECGC_CONFIG_ERROR] AIDS external engine is CPU-only" >&2; exit 2; }
+  ENGINE_ARGS+=(--external-max-rss-gb "$EXTERNAL_MAX_RSS_GB" --external-query-block-size "$EXTERNAL_QUERY_BLOCK_SIZE" --external-dbscan-shortcut-mode "$EXTERNAL_DBSCAN_SHORTCUT_MODE" --external-shortcut-seed-count "$EXTERNAL_SHORTCUT_SEED_COUNT" --external-shortcut-failure-cap "$EXTERNAL_SHORTCUT_FAILURE_CAP" --external-shortcut-query-block-size "$EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE" --external-exact-fallback-max-samples "$EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES" --external-summary-block-size "$EXTERNAL_SUMMARY_BLOCK_SIZE" --expected-sklearn-version "$EXPECTED_SKLEARN_VERSION")
+  if [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" ]]; then
+    ENGINE_ARGS+=(--external-pair-store-source-manifest "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST")
+  fi
+  CHUNK_SOURCE_COUNT=0
+  [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
+  [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
+  [[ -n "$EXTERNAL_VECTOR_CACHE_ROOT" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
+  [[ -n "$EXTERNAL_VECTOR_CACHE_LOCK" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
+  [[ "$CHUNK_SOURCE_COUNT" -eq 0 || "$CHUNK_SOURCE_COUNT" -eq 4 ]] || { echo "[COMRECGC_CONFIG_ERROR] chunk source/cache arguments are all-or-none" >&2; exit 2; }
+  [[ -z "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" || "$CHUNK_SOURCE_COUNT" -eq 0 ]] || { echo "[COMRECGC_CONFIG_ERROR] terminal and chunk sources are mutually exclusive" >&2; exit 2; }
+  if [[ "$CHUNK_SOURCE_COUNT" -eq 4 ]]; then
+    ENGINE_ARGS+=(--external-pair-store-source-checkpoint "$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT" --external-pair-store-source-owner-root "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" --external-vector-cache-root "$EXTERNAL_VECTOR_CACHE_ROOT" --external-vector-cache-lock "$EXTERNAL_VECTOR_CACHE_LOCK" --external-vector-cache-min-free-gb "$EXTERNAL_VECTOR_CACHE_MIN_FREE_GB" --external-vector-cache-proc-root "$EXTERNAL_VECTOR_CACHE_PROC_ROOT")
+  fi
+else
+  DEVICE="${DEVICE:-cuda:0}"
 fi
 python scripts/baselines/comrecgc/run_common_recourse.py \
   --config configs/hpc.yaml --set inference.fallback_to_heuristic=false \
   --dataset "$DATASET" --mode "$MODE" --upstream-root "$COMRECGC_ROOT" \
   --dataset-dir "$DATASET_DIR" "${SOURCE_ARGS[@]}" --generation-dir "$GENERATION_DIR" \
   --distance-checkpoint "$DISTANCE_CHECKPOINT" --output-dir "$OUTPUT_DIR" \
-  --parent-limit "$PARENT_LIMIT" --device "${DEVICE:-cuda:0}" "${ENGINE_ARGS[@]}" "${RESUME_ARGS[@]}"
+  --parent-limit "$PARENT_LIMIT" --device "$DEVICE" "${ENGINE_ARGS[@]}" "${RESUME_ARGS[@]}"
 test -s "$OUTPUT_DIR/_RUN_COMPLETE.json"
 echo "[COMRECGC_COMMON_RECOURSE_SUCCESS]"

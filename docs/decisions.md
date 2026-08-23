@@ -321,6 +321,108 @@ neighbor counts remain explicitly unavailable rather than synthesized.
 
 Accepted (core closure only; fresh AutoDL release remains separately gated)
 
+## [2026-08-23] Adopt an exact Cartesian AIDS pair source into a fresh route
+
+### Background
+
+The running repair-v4 source has closed 560 chunks before completing its slow
+network-filesystem consolidation.  Those chunks contain 71,642 candidates by
+1,283 parents: exactly 91,916,686 rows.  The adaptive shortcut and streaming
+summary belong to a newer commit and must never resume inside that old attempt.
+
+### Decision
+
+Allow a specialized chunk source only for the CPU AIDS external engine and
+exact adaptive shortcut.  Reconstruct the complete pair scientific identity
+from the frozen dataset/source audit, generation payload, candidate and parent
+order, distance checkpoint, parameters, and batch contract.  Rehash every
+checkpoint/chunk file, freeze physical stat identities, reject writable
+references, and prove each pair row elementwise as
+`[row % parent_count, row // parent_count]` with no gaps or overlaps.
+
+Copy only raw vector-array bytes, in source chunk order, into one physically
+allocated contiguous local-XFS `.npy` cache.  Derive and recheck the target
+header/file SHA from persistent chunks.  Keep pair indices implicit using the
+proven Cartesian formula, so the route does not allocate a second pair array.
+Never compute chunk-local centroids, distance reductions, medoids, or coverage:
+the exact DBSCAN proof and summary consume the reconstructed contiguous vector
+layout and therefore preserve pinned floating reduction order.
+
+The persistent chunks plus fresh audit are scientific authority; the local
+vector file is reconstructible operational cache.  Require free space for its
+exact size plus a 3 GiB floor, `posix_fallocate`, and a route-wide scratch flock.
+Both normal completion and same-root resume revalidate hashes/stats, source
+identity, zero writers/owners, cache content, proof, and summary.  A preliminary
+audit may record a live old owner but cannot authorize adoption.  The old
+controller/root remain immutable, and stopping it requires a separately
+authorized graceful stage-boundary action after code, smoke, audit, and review.
+
+### Consequences
+
+- Fresh DBSCAN/summary work consumes one contiguous local vector memmap while
+  the old persistent chunks remain read-only authority.
+- A changed checkpoint/chunk/stat/hash, live writer/owner, Cartesian mismatch,
+  local-space shortfall, or procfs audit failure stops before DBSCAN.
+- Chunkwise floating reductions and active partial consolidation arrays remain
+  forbidden; only raw-byte contiguous reconstruction is allowed.
+- This mechanism does not authorize a launch: the adaptive proof and route
+  still require independent review and a fresh controller manifest.
+
+### Status
+
+Accepted (route implementation in review; source audit and fresh launch pending)
+
+## [2026-08-23] Replay a proven one-cluster summary with ordered disk-backed blocks
+
+### Background
+
+The exact adaptive DBSCAN certificate can prove that every one of the
+91,916,686 AIDS recourse rows is core and has sklearn label zero.  Calling the
+pinned upstream summary unchanged after that proof is still infeasible: it
+creates a 91.9-million-element Python index list, iterates one Torch scalar at
+a time, and the lineage trace makes repeated 23.5 GiB advanced-index copies.
+Those operations add no clustering information once the sole label is proven.
+
+### Decision
+
+Add a specialized path that is legal only after the complete DBSCAN manifest
+and anchor-proof artifact closure validates.  Reproduce the upstream Torch
+centroid independently from the lineage trace's NumPy centroid.  For an
+all-true label-zero selection, compute each centroid from the direct contiguous
+read-only memmap view; frozen NumPy 2.2.6 and Torch 2.7.1 fixtures establish
+bit equality with the legacy all-row advanced-index copy.  Compute strict
+`distance < radius` membership in source-ordered blocks because every row norm
+is independent, while preserving the first counterfactual observed for each
+parent in the upstream coverage result.
+
+For the lineage trace, persist the retained mask, original global positions,
+and retained vectors in original order.  Compute the retained centroid from
+that disk-backed contiguous array with the unchanged NumPy reduction, then
+scan medoid distances in order and update the winner only on strict
+improvement so the first-`argmin` tie rule is unchanged.  Preserve the native
+parent/counterfactual sets, official one-cluster greedy call, cumulative cost,
+and selected-row schema.  Every phase is resumable and every promoted array,
+centroid, input manifest, and result is checksum closed.  Record honestly that
+the general upstream coverage function was analytically replayed rather than
+called; no approximation is allowed.
+
+### Consequences
+
+- The route removes Python work proportional to 91.9 million objects and
+  bounds resident scratch by one block; retained vectors may use disk but keep
+  exact row and reduction order.
+- Torch and NumPy radius masks are not interchanged, since their boundary
+  arithmetic belongs to different frozen legacy consumers.
+- The general multi-cluster route remains unchanged.  A missing/tampered
+  all-core proof or summary closure fails before final PASS.
+- The source pair store is opened read-only.  Production adoption and launch
+  must use a fresh output/controller and never write the old v4 attempt.
+
+### Status
+
+Accepted (implementation and fixtures complete; fresh source-adoption release
+remains separately gated)
+
 ## [2026-08-23] Expand an exact DBSCAN witness by all deterministic failures
 
 ### Background

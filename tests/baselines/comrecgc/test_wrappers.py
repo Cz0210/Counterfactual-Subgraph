@@ -106,6 +106,12 @@ def test_common_recourse_wrapper_exposes_external_engine_without_changing_defaul
     assert 'ENGINE="${ENGINE:-legacy_in_memory}"' in text
     assert "external_memory_exact_v1" in text
     assert "--external-max-rss-gb" in text
+    assert "--external-dbscan-shortcut-mode" in text
+    assert "--external-shortcut-failure-cap" in text
+    assert "--external-summary-block-size" in text
+    assert "--external-pair-store-source-manifest" in text
+    assert 'DEVICE="${DEVICE:-cpu}"' in text
+    assert "AIDS external engine is CPU-only" in text
     assert "--expected-sklearn-version" in text
 
 
