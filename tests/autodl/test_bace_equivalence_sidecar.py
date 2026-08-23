@@ -86,7 +86,15 @@ def _scientific_inputs(tmp_path: Path) -> dict[str, Path]:
     return values
 
 
-def test_audit_protected_running_run_requires_matching_uuid_lock(tmp_path: Path) -> None:
+def test_audit_protected_running_run_requires_matching_uuid_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Production is intentionally Linux-procfs-only.  Keep this fixture about
+    # lock/run identity even when the developer test host is macOS.
+    monkeypatch.setattr(
+        "src.utils.autodl_bace_equivalence_sidecar.read_process_identity",
+        lambda pid: {"pid": pid, "start_ticks": 12345},
+    )
     runtime = tmp_path / "runtime"
     run = _protected(runtime, "live-run", state="RUNNING", gpu_index=2)
     evidence = audit_protected_run(runtime_root=runtime, run=run)
