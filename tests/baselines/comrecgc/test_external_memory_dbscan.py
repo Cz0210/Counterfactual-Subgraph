@@ -845,6 +845,41 @@ def test_anchor_shortcut_validates_full_lower_array_before_pass(
     assert not (root / "labels.npy").exists()
 
 
+def test_source_mutation_during_shortcut_scan_is_rejected_before_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _all_core_values()
+    vectors_path = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract()
+    original_lower_block = external._anchor_lower_block
+    mutated = {"done": False}
+
+    def mutate_source_after_first_query(*args, **kwargs):
+        result = original_lower_block(*args, **kwargs)
+        if not mutated["done"]:
+            mutated["done"] = True
+            source = np.load(vectors_path, mmap_mode="r+")
+            source[5, 1] = np.float32(0.001)
+            source.flush()
+            del source
+        return result
+
+    monkeypatch.setattr(external, "_anchor_lower_block", mutate_source_after_first_query)
+    root = tmp_path / "source-mutation"
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="vector source .* identity changed before shortcut PASS",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors_path,
+            work_dir=root,
+            contract=contract,
+        )
+    assert not (root / "run_manifest.json").exists()
+    assert not (root / "shortcut_proof.json").exists()
+    assert not (root / "labels.npy").exists()
+
+
 def test_anchor_shortcut_terminal_rejects_tampered_lower_bound_witness(
     tmp_path: Path,
 ) -> None:

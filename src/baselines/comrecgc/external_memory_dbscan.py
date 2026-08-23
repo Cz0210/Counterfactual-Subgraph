@@ -29,6 +29,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import stat
 import sys
 import tempfile
 from typing import Any, Mapping, Sequence
@@ -144,6 +145,66 @@ def _sha256_file(path: str | Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _source_stat_identity(path: Path) -> dict[str, int]:
+    value = path.stat()
+    if not stat.S_ISREG(value.st_mode):
+        raise ExternalMemoryDBSCANError(
+            f"DBSCAN vector source is not a regular file: {path}"
+        )
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _hash_source_with_stable_stat(path: Path) -> tuple[str, dict[str, int]]:
+    before = _source_stat_identity(path)
+    digest = _sha256_file(path)
+    after = _source_stat_identity(path)
+    if before != after:
+        raise ExternalMemoryDBSCANError(
+            "DBSCAN vector source changed during identity hashing"
+        )
+    return digest, before
+
+
+def _verify_source_identity(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_stat: Mapping[str, Any],
+    phase: str,
+) -> None:
+    before = _source_stat_identity(path)
+    if before != dict(expected_stat):
+        raise ExternalMemoryDBSCANError(
+            f"DBSCAN vector source stat identity changed before {phase}"
+        )
+    digest = _sha256_file(path)
+    after = _source_stat_identity(path)
+    if (
+        after != before
+        or after != dict(expected_stat)
+        or digest != str(expected_sha256)
+    ):
+        raise ExternalMemoryDBSCANError(
+            f"DBSCAN vector source content identity changed before {phase}"
+        )
+
+
+def _assert_source_stat_identity(
+    path: Path, *, expected_stat: Mapping[str, Any], phase: str
+) -> None:
+    if _source_stat_identity(path) != dict(expected_stat):
+        raise ExternalMemoryDBSCANError(
+            f"DBSCAN vector source stat identity changed before {phase}"
+        )
 
 
 def _stable_hash(value: Mapping[str, Any]) -> str:
@@ -1488,6 +1549,8 @@ def _validate_adaptive_selection_manifest(
         or manifest.get("selection_identity_sha256") != _stable_hash(selection)
         or selection.get("vectors_path") != identity.get("vectors_path")
         or selection.get("vectors_sha256") != identity.get("vectors_sha256")
+        or selection.get("vectors_stat_identity")
+        != identity.get("vectors_stat_identity")
         or selection.get("vectors_dtype") != identity.get("vectors_dtype")
         or selection.get("vectors_shape") != identity.get("vectors_shape")
         or selection.get("selection_contract") != identity.get("shortcut_contract")
@@ -2213,6 +2276,7 @@ def _resolve_adaptive_anchor_selection(
         "schema_version": ADAPTIVE_SELECTION_SCHEMA_VERSION,
         "vectors_path": identity["vectors_path"],
         "vectors_sha256": identity["vectors_sha256"],
+        "vectors_stat_identity": identity["vectors_stat_identity"],
         "vectors_dtype": identity["vectors_dtype"],
         "vectors_shape": identity["vectors_shape"],
         "selection_contract": identity["shortcut_contract"],
@@ -2342,6 +2406,8 @@ def _validate_shortcut_proof_closure(
         != manifest.get("scientific_identity_sha256")
         or proof.get("vectors_path") != scientific_identity.get("vectors_path")
         or proof.get("vectors_sha256") != scientific_identity.get("vectors_sha256")
+        or proof.get("vectors_stat_identity")
+        != scientific_identity.get("vectors_stat_identity")
         or proof.get("vectors_dtype") != scientific_identity.get("vectors_dtype")
         or proof.get("vectors_shape") != vectors_shape
         or proof.get("sklearn_version")
@@ -3014,6 +3080,13 @@ def _fit_all_core_one_component_shortcut(
         raise ExternalMemoryDBSCANError(
             "shortcut final lower-bound checkpoint/full-scan mismatch"
         )
+    vector_source = Path(str(identity["vectors_path"])).resolve(strict=True)
+    _verify_source_identity(
+        vector_source,
+        expected_sha256=str(identity["vectors_sha256"]),
+        expected_stat=identity["vectors_stat_identity"],
+        phase="shortcut PASS",
+    )
     required_progress_phases = (
         ["adaptive_seed_scan", "adaptive_failure_scan", "shortcut_anchor_scan"]
         if contract.shortcut_mode == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
@@ -3061,6 +3134,7 @@ def _fit_all_core_one_component_shortcut(
         "scientific_identity_sha256": _stable_hash(identity),
         "vectors_path": str(Path(identity["vectors_path"])),
         "vectors_sha256": identity["vectors_sha256"],
+        "vectors_stat_identity": identity["vectors_stat_identity"],
         "vectors_dtype": identity["vectors_dtype"],
         "vectors_shape": identity["vectors_shape"],
         "sklearn_version": sklearn_version,
@@ -3168,6 +3242,11 @@ def _fit_all_core_one_component_shortcut(
     }
     if manifest["peak_rss_bytes_observed"] > int(contract.max_rss_bytes):
         raise ExternalMemoryDBSCANError("recorded peak RSS exceeded the frozen budget")
+    _assert_source_stat_identity(
+        vector_source,
+        expected_stat=identity["vectors_stat_identity"],
+        phase="shortcut manifest publication",
+    )
     _atomic_json(final_manifest_path, manifest)
     complete_extra = shortcut_progress_extra()
     complete_extra.update(
@@ -3233,7 +3312,18 @@ def fit_external_memory_dbscan(
             raise ExternalMemoryDBSCANError("terminal DBSCAN vector path mismatch")
         if scientific_identity.get("contract") != asdict(contract):
             raise ExternalMemoryDBSCANError("terminal DBSCAN contract mismatch")
-        actual_source_sha = _sha256_file(source)
+        expected_source_stat = scientific_identity.get("vectors_stat_identity")
+        if not isinstance(expected_source_stat, Mapping):
+            raise ExternalMemoryDBSCANError(
+                "terminal DBSCAN vector stat identity is absent"
+            )
+        _verify_source_identity(
+            source,
+            expected_sha256=str(scientific_identity.get("vectors_sha256") or ""),
+            expected_stat=expected_source_stat,
+            phase="terminal reopen",
+        )
+        actual_source_sha = str(scientific_identity["vectors_sha256"])
         if (
             scientific_identity.get("vectors_sha256") != actual_source_sha
             or (
@@ -3274,6 +3364,11 @@ def fit_external_memory_dbscan(
                     raise ExternalMemoryDBSCANError(
                         f"terminal DBSCAN artifact closure mismatch: {field}"
                     )
+        _assert_source_stat_identity(
+            source,
+            expected_stat=expected_source_stat,
+            phase="terminal result return",
+        )
         return ExternalDBSCANResult(
             labels_path=labels_path,
             core_mask_path=core_path,
@@ -3292,7 +3387,15 @@ def fit_external_memory_dbscan(
     root.mkdir(parents=True, exist_ok=True)
     checkpoint_existed_at_entry = state_path.exists()
 
+    actual_vectors_sha, vectors_stat_identity = _hash_source_with_stable_stat(source)
+    if expected_vectors_sha256 and actual_vectors_sha != expected_vectors_sha256:
+        raise ExternalMemoryDBSCANError("recourse vector SHA256 mismatch")
     vectors = _open_npy_memmap(source, mode="r")
+    _assert_source_stat_identity(
+        source,
+        expected_stat=vectors_stat_identity,
+        phase="vector mmap validation",
+    )
     if vectors.ndim != 2 or vectors.shape[0] <= 0 or vectors.shape[1] <= 0:
         raise ExternalMemoryDBSCANError("vectors must be a nonempty 2-D ndarray")
     if vectors.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
@@ -3300,9 +3403,6 @@ def fit_external_memory_dbscan(
             f"vectors must preserve float32/float64 semantics, got {vectors.dtype}"
         )
     n_samples, n_features = (int(vectors.shape[0]), int(vectors.shape[1]))
-    actual_vectors_sha = _sha256_file(source)
-    if expected_vectors_sha256 and actual_vectors_sha != expected_vectors_sha256:
-        raise ExternalMemoryDBSCANError("recourse vector SHA256 mismatch")
     neighbors, sklearn_version, fit_method = _fit_neighbors(
         vectors, eps=float(contract.eps)
     )
@@ -3358,6 +3458,7 @@ def fit_external_memory_dbscan(
         "schema_version": SCHEMA_VERSION,
         "vectors_path": str(source),
         "vectors_sha256": actual_vectors_sha,
+        "vectors_stat_identity": vectors_stat_identity,
         "vectors_dtype": str(vectors.dtype),
         "vectors_shape": [n_samples, n_features],
         "contract": asdict(contract),
@@ -3800,6 +3901,12 @@ def fit_external_memory_dbscan(
 
     labels = _open_npy_memmap(labels_final, mode="r")
     cluster_labels = np.unique(labels[labels >= 0])
+    _verify_source_identity(
+        source,
+        expected_sha256=actual_vectors_sha,
+        expected_stat=vectors_stat_identity,
+        phase="exact DBSCAN PASS",
+    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "run_complete": True,
@@ -3830,6 +3937,11 @@ def fit_external_memory_dbscan(
     }
     if manifest["peak_rss_bytes_observed"] > int(contract.max_rss_bytes):
         raise ExternalMemoryDBSCANError("recorded peak RSS exceeded the frozen budget")
+    _assert_source_stat_identity(
+        source,
+        expected_stat=vectors_stat_identity,
+        phase="exact DBSCAN manifest publication",
+    )
     _atomic_json(final_manifest_path, manifest)
     return ExternalDBSCANResult(
         labels_path=labels_final,

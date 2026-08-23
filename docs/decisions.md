@@ -243,6 +243,15 @@ failure cap is asserted again on every replay-valid ledger and immediately
 before selection publication, so coordinated state re-signing cannot turn a
 cap-exceeded terminal prefix into a complete first pass.
 
+The vector source identity now includes device, inode, mode, byte size, mtime,
+and ctime captured around the initial full SHA-256.  Opening the mmap must
+preserve that snapshot.  Both shortcut and ordinary exact routes perform a
+second complete SHA-256 with matching before/after stat identity immediately
+before PASS, followed by a final stat check at manifest publication.  Terminal
+reopen repeats the same content/stat closure.  A long uninterrupted scan can
+therefore no longer publish evidence for bytes that changed after the entry
+hash.
+
 Before labels are materialized, the finalizer verifies that lower-ledger
 coverage is contiguous and exact over every source row, rehashes every lower
 slice, recomputes the global and non-anchor minima, and enforces the core and

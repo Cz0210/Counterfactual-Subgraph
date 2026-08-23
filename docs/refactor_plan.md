@@ -81,6 +81,9 @@
   reject offset, aggregate, ledger, partial-array, or state tampering.
 - [x] Reassert the adaptive failure cap after replay and before selection so a
   coordinated, reauthenticated complete-ledger mutation still fails closed.
+- [x] Bind a stable source-file stat snapshot around the entry SHA, repeat the
+  complete vector SHA before PASS, and reject any mmap/final-publication stat
+  drift in shortcut, fallback, and terminal-reopen paths.
 - [x] Persist first-pass completion before adaptive-selection publication and
   cover the selection-rename/checkpoint crash window with a resume fixture.
 - [x] Before PASS, validate contiguous exact lower coverage for every row,
