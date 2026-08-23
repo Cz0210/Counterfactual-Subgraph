@@ -8676,3 +8676,16 @@ does not submit any HPC job.
 ### Status
 
 Accepted
+## 2026-08-23: GlobalGCE gSpan may use exact stable-top-k anti-monotone pruning
+
+- The running BACE GlobalGCE v5 route showed millions of frequent subgraphs in
+  its first gSpan root while the official consumer only uses the stable top 20.
+- We added an opt-in route that retains the exact stable top-k and prunes a DFS
+  branch only when projected-support anti-monotonicity proves that neither the
+  branch nor an equal-support later descendant can enter that top-k.
+- The legacy all-pattern SQLite spill remains the default.  The optimized route
+  has a distinct fingerprint/schema, atomic pre-root snapshots, whole-root
+  replay after interruption, and a selected-payload hash audit.
+- This decision does not authorize stopping or modifying the active v5 writer.
+  A fresh route requires exact monolithic parity, crash-resume validation, an
+  immutable execution commit, and a fresh output root.

@@ -110,13 +110,17 @@ def resumable_gspan_root_chunks(
     top_k: int | None = None,
     flush_every: int | None = None,
     max_in_memory_candidates: int | None = None,
+    exact_top_k_pruning: bool = False,
 ) -> Iterator[None]:
     """Spill deterministic gSpan root reports and retain only official top-k.
 
     The official implementation builds every frequent graph in memory and then
-    performs a stable support-descending sort before slicing ``topk``.  We store
-    the same traversal order in SQLite and apply the equivalent SQL ordering,
-    allowing an interrupted root to be replayed without retaining the universe.
+    performs a stable support-descending sort before slicing ``topk``.  The
+    default route stores the same traversal order in SQLite and applies the
+    equivalent SQL ordering.  The opt-in exact-top-k route retains only the
+    stable top-k and prunes a DFS branch only after its support upper bound can
+    no longer enter that top-k.  Both routes restart an interrupted gSpan root
+    from its beginning; neither adopts a partial traversal.
     """
 
     root = Path(checkpoint_root).expanduser().resolve()
@@ -124,6 +128,7 @@ def resumable_gspan_root_chunks(
     gspan_class = gspan_module.gSpan
     original_run = gspan_class.run
     original_report = gspan_class._report
+    original_subgraph_mining = gspan_class._subgraph_mining
     globals_ = original_run.__globals__
     projected_class = globals_["Projected"]
     pdfs_class = globals_["PDFS"]
@@ -140,6 +145,8 @@ def resumable_gspan_root_chunks(
     )
     if configured_flush <= 0 or configured_max <= 0:
         raise ValueError("GlobalGCE spill limits must be positive.")
+    if exact_top_k_pruning and (top_k is None or int(top_k) <= 0):
+        raise ValueError("Exact GlobalGCE top-k pruning requires a positive top_k.")
     commit_every = min(configured_flush, configured_max)
     min_free_bytes = int(
         float(os.environ.get("GLOBALGCE_STORAGE_MIN_FREE_GIB", "50")) * 1024**3
@@ -147,6 +154,17 @@ def resumable_gspan_root_chunks(
     min_free_ratio = float(os.environ.get("GLOBALGCE_STORAGE_MIN_FREE_RATIO", "0.02"))
     min_free_inodes = int(os.environ.get("GLOBALGCE_STORAGE_MIN_FREE_INODES", "100000"))
     active: dict[int, dict[str, Any]] = {}
+
+    def _stable_key(row: tuple[int, int, int]) -> tuple[int, int, int]:
+        support, root_index, local_index = row
+        return (-int(support), int(root_index), int(local_index))
+
+    def _load_retained_top_k(connection: sqlite3.Connection) -> list[tuple[int, int, int]]:
+        rows = connection.execute(
+            "SELECT support, root_index, local_index FROM patterns "
+            "ORDER BY support DESC, root_index ASC, local_index ASC"
+        ).fetchall()
+        return [(int(row[0]), int(row[1]), int(row[2])) for row in rows]
 
     def peak_rss_mib() -> float:
         value = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
@@ -175,21 +193,42 @@ def resumable_gspan_root_chunks(
         context = active.get(id(self))
         if context is None:
             raise RuntimeError("GlobalGCE spill report invoked outside an active root.")
-        graph = self._DFScode.to_graph(
-            gid=next(self._counter), is_undirected=self._is_undirected
-        )
-        graph = self._from_Graph_to_nx_Graph(graph)
+        if context.pop("suppress_next_report", False):
+            return
         local_index = int(context["local_index"])
-        context["connection"].execute(
-            "INSERT INTO patterns(root_index, local_index, support, payload) "
-            "VALUES (?, ?, ?, ?)",
-            (
-                int(context["root_index"]),
-                local_index,
-                int(self._support),
-                sqlite3.Binary(pickle.dumps(graph, protocol=pickle.HIGHEST_PROTOCOL)),
-            ),
-        )
+        report_gid = next(self._counter)
+        row = (int(self._support), int(context["root_index"]), local_index)
+        retain = True
+        retained = context.get("retained_top_k")
+        if retained is not None:
+            limit = int(context["top_k"])
+            retain = len(retained) < limit or _stable_key(row) < _stable_key(retained[-1])
+        if retain:
+            graph = self._DFScode.to_graph(
+                gid=report_gid, is_undirected=self._is_undirected
+            )
+            graph = self._from_Graph_to_nx_Graph(graph)
+            context["connection"].execute(
+                "INSERT INTO patterns(root_index, local_index, support, payload) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    int(context["root_index"]),
+                    local_index,
+                    int(self._support),
+                    sqlite3.Binary(
+                        pickle.dumps(graph, protocol=pickle.HIGHEST_PROTOCOL)
+                    ),
+                ),
+            )
+            if retained is not None:
+                retained.append(row)
+                retained.sort(key=_stable_key)
+                if len(retained) > int(context["top_k"]):
+                    discarded = retained.pop()
+                    context["connection"].execute(
+                        "DELETE FROM patterns WHERE root_index=? AND local_index=?",
+                        (int(discarded[1]), int(discarded[2])),
+                    )
         context["local_index"] = local_index + 1
         context["uncommitted"] = int(context["uncommitted"]) + 1
         context["state"]["frequent_subgraph_count"] = int(
@@ -207,6 +246,37 @@ def resumable_gspan_root_chunks(
                     "GLOBALGCE_STORAGE_GUARD_STOP: scratch free-space or inode "
                     "reserve was reached after a committed SQLite checkpoint."
                 )
+
+    def exact_subgraph_mining(self: Any, projected: Any) -> Any:
+        """Apply only the anti-monotone pruning that preserves stable top-k."""
+
+        context = active.get(id(self))
+        if context is None or context.get("retained_top_k") is None:
+            return original_subgraph_mining(self, projected)
+        self._support = self._get_support(projected)
+        if self._support < self._min_support:
+            return None
+        if not self._is_min():
+            return None
+        if self._DFScode.get_num_vertices() < self._min_num_vertices:
+            return original_subgraph_mining(self, projected)
+        optimized_report(self, projected)
+        retained = context["retained_top_k"]
+        if len(retained) == int(context["top_k"]):
+            cutoff_support = int(retained[-1][0])
+            # gSpan projected support is anti-monotone under every extension.
+            # Equal-support descendants are later in the stable traversal and
+            # therefore cannot displace the already retained kth row either.
+            if cutoff_support >= int(self._support):
+                context["pruned_branch_count"] = int(
+                    context.get("pruned_branch_count") or 0
+                ) + 1
+                return self
+        context["suppress_next_report"] = True
+        try:
+            return original_subgraph_mining(self, projected)
+        finally:
+            context.pop("suppress_next_report", None)
 
     def resumable_run(self: Any) -> tuple[list[Any], list[int]]:
         self._read_graphs()
@@ -227,7 +297,11 @@ def resumable_gspan_root_chunks(
             "is_undirected": self._is_undirected,
             "root_order": [repr(value) for value in top_roots],
             "top_k": int(top_k) if top_k is not None else None,
-            "spill_schema": "sqlite_stable_support_topk_v2",
+            "spill_schema": (
+                "sqlite_exact_stable_topk_antimonotone_v1"
+                if exact_top_k_pruning
+                else "sqlite_stable_support_topk_v2"
+            ),
         }
         fingerprint = _graph_input_fingerprint(self._nx_graph_list, settings)
         support_root = root / f"support_{int(self._min_support)}_{fingerprint[:16]}"
@@ -250,6 +324,19 @@ def resumable_gspan_root_chunks(
             "support INTEGER NOT NULL, payload BLOB NOT NULL, "
             "PRIMARY KEY(root_index, local_index))"
         )
+        if exact_top_k_pruning:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS root_snapshot("
+                "snapshot_for_root INTEGER NOT NULL, root_index INTEGER NOT NULL, "
+                "local_index INTEGER NOT NULL, support INTEGER NOT NULL, "
+                "payload BLOB NOT NULL, "
+                "PRIMARY KEY(snapshot_for_root, root_index, local_index))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS root_stats("
+                "root_index INTEGER PRIMARY KEY, reported_pattern_count INTEGER NOT NULL, "
+                "pruned_branch_count INTEGER NOT NULL)"
+            )
         existing = connection.execute(
             "SELECT value FROM metadata WHERE key='input_fingerprint'"
         ).fetchone()
@@ -262,7 +349,11 @@ def resumable_gspan_root_chunks(
         )
         connection.commit()
         state = {
-            "schema_version": "globalgce_gspan_sqlite_chunks_v2",
+            "schema_version": (
+                "globalgce_gspan_exact_stable_topk_v1"
+                if exact_top_k_pruning
+                else "globalgce_gspan_sqlite_chunks_v2"
+            ),
             "stage": "mining",
             "input_fingerprint": fingerprint,
             "root_count": len(top_roots),
@@ -272,6 +363,7 @@ def resumable_gspan_root_chunks(
             "sqlite_path": str(database_path),
             "flush_every": configured_flush,
             "max_in_memory_candidates": configured_max,
+            "exact_top_k_pruning": bool(exact_top_k_pruning),
             "peak_rss_mib": peak_rss_mib(),
             **storage_snapshot(support_root),
         }
@@ -284,9 +376,43 @@ def resumable_gspan_root_chunks(
                         (root_index,),
                     ).fetchone()
                     if completed is None or int(completed[0]) != 1:
-                        connection.execute(
-                            "DELETE FROM patterns WHERE root_index=?", (root_index,)
-                        )
+                        if exact_top_k_pruning:
+                            active_root = connection.execute(
+                                "SELECT value FROM metadata WHERE key='active_root_index'"
+                            ).fetchone()
+                            if completed is not None:
+                                if active_root is None or int(active_root[0]) != root_index:
+                                    raise RuntimeError(
+                                        "GlobalGCE exact top-k resume snapshot identity mismatch."
+                                    )
+                                connection.execute("DELETE FROM patterns")
+                                connection.execute(
+                                    "INSERT INTO patterns(root_index, local_index, support, payload) "
+                                    "SELECT root_index, local_index, support, payload "
+                                    "FROM root_snapshot WHERE snapshot_for_root=?",
+                                    (root_index,),
+                                )
+                            else:
+                                if active_root is not None:
+                                    raise RuntimeError(
+                                        "GlobalGCE exact top-k database has a stale active root."
+                                    )
+                                connection.execute("DELETE FROM root_snapshot")
+                                connection.execute(
+                                    "INSERT INTO root_snapshot("
+                                    "snapshot_for_root, root_index, local_index, support, payload) "
+                                    "SELECT ?, root_index, local_index, support, payload FROM patterns",
+                                    (root_index,),
+                                )
+                                connection.execute(
+                                    "INSERT INTO metadata(key, value) "
+                                    "VALUES('active_root_index', ?) ",
+                                    (str(root_index),),
+                                )
+                        else:
+                            connection.execute(
+                                "DELETE FROM patterns WHERE root_index=?", (root_index,)
+                            )
                         connection.execute(
                             "INSERT OR REPLACE INTO roots(root_index, root_label, complete, pattern_count) "
                             "VALUES (?, ?, 0, 0)",
@@ -301,6 +427,13 @@ def resumable_gspan_root_chunks(
                             "state": state,
                             "support_root": support_root,
                             "checkpoint_path": support_root / "checkpoint.json",
+                            "retained_top_k": (
+                                _load_retained_top_k(connection)
+                                if exact_top_k_pruning
+                                else None
+                            ),
+                            "top_k": int(top_k) if exact_top_k_pruning else None,
+                            "pruned_branch_count": 0,
                         }
                         active[id(self)] = context
                         self.fs_collection = []
@@ -314,10 +447,35 @@ def resumable_gspan_root_chunks(
                             active.pop(id(self), None)
                         connection.commit()
                         pattern_count = int(context["local_index"])
-                        connection.execute(
-                            "UPDATE roots SET complete=1, pattern_count=? WHERE root_index=?",
-                            (pattern_count, root_index),
-                        )
+                        if exact_top_k_pruning:
+                            connection.execute(
+                                "INSERT OR REPLACE INTO root_stats("
+                                "root_index, reported_pattern_count, pruned_branch_count) "
+                                "VALUES (?, ?, ?)",
+                                (
+                                    root_index,
+                                    pattern_count,
+                                    int(context["pruned_branch_count"]),
+                                ),
+                            )
+                            connection.execute(
+                                "UPDATE roots SET complete=1, pattern_count=? "
+                                "WHERE root_index=?",
+                                (pattern_count, root_index),
+                            )
+                            connection.execute(
+                                "DELETE FROM root_snapshot WHERE snapshot_for_root=?",
+                                (root_index,),
+                            )
+                            connection.execute(
+                                "DELETE FROM metadata WHERE key='active_root_index'"
+                            )
+                        else:
+                            connection.execute(
+                                "UPDATE roots SET complete=1, pattern_count=? "
+                                "WHERE root_index=?",
+                                (pattern_count, root_index),
+                            )
                         connection.commit()
                     state.update(
                         {
@@ -333,10 +491,32 @@ def resumable_gspan_root_chunks(
                             "sqlite_bytes": database_path.stat().st_size,
                         }
                     )
+                    if exact_top_k_pruning:
+                        state.update(
+                            {
+                                "reported_pattern_count": int(
+                                    connection.execute(
+                                        "SELECT COALESCE(SUM(reported_pattern_count), 0) "
+                                        "FROM root_stats"
+                                    ).fetchone()[0]
+                                ),
+                                "pruned_branch_count": int(
+                                    connection.execute(
+                                        "SELECT COALESCE(SUM(pruned_branch_count), 0) "
+                                        "FROM root_stats"
+                                    ).fetchone()[0]
+                                ),
+                                "retained_pattern_count": int(
+                                    connection.execute(
+                                        "SELECT COUNT(*) FROM patterns"
+                                    ).fetchone()[0]
+                                ),
+                            }
+                        )
                     _atomic_json(support_root / "checkpoint.json", state)
             limit = int(top_k) if top_k is not None else -1
             query = (
-                "SELECT support, payload FROM patterns "
+                "SELECT support, root_index, local_index, payload FROM patterns "
                 "ORDER BY support DESC, root_index ASC, local_index ASC"
             )
             parameters: tuple[int, ...] = ()
@@ -345,8 +525,55 @@ def resumable_gspan_root_chunks(
                 parameters = (limit,)
             selected = connection.execute(query, parameters).fetchall()
             self.freq_collection = [int(row[0]) for row in selected]
-            self.fs_collection = [pickle.loads(row[1]) for row in selected]
+            self.fs_collection = [pickle.loads(row[3]) for row in selected]
             self._frequent_subgraphs = []
+            if exact_top_k_pruning:
+                selected_rows = [
+                    {
+                        "rank": rank,
+                        "support": int(row[0]),
+                        "root_index": int(row[1]),
+                        "local_index": int(row[2]),
+                        "payload_sha256": hashlib.sha256(bytes(row[3])).hexdigest(),
+                    }
+                    for rank, row in enumerate(selected, start=1)
+                ]
+                audit_payload = {
+                    "schema_version": "globalgce_exact_stable_topk_audit_v1",
+                    "run_complete": True,
+                    "input_fingerprint": fingerprint,
+                    "top_k": int(top_k),
+                    "selected_count": len(selected_rows),
+                    "selected_rows": selected_rows,
+                    "selected_identity_sha256": hashlib.sha256(
+                        json.dumps(
+                            selected_rows,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    "ordering": "support_desc_root_index_asc_local_index_asc",
+                    "pruning_proof": (
+                        "projected_support_is_antimonotone_and_equal_support_"
+                        "descendants_are_later_in_stable_dfs_order"
+                    ),
+                    "reported_pattern_count": int(
+                        connection.execute(
+                            "SELECT COALESCE(SUM(reported_pattern_count), 0) "
+                            "FROM root_stats"
+                        ).fetchone()[0]
+                    ),
+                    "pruned_branch_count": int(
+                        connection.execute(
+                            "SELECT COALESCE(SUM(pruned_branch_count), 0) "
+                            "FROM root_stats"
+                        ).fetchone()[0]
+                    ),
+                    "retained_pattern_count": int(
+                        connection.execute("SELECT COUNT(*) FROM patterns").fetchone()[0]
+                    ),
+                }
+                _atomic_json(support_root / "exact_top_k_audit.json", audit_payload)
             state.update(
                 {
                     "stage": "complete",
@@ -363,11 +590,14 @@ def resumable_gspan_root_chunks(
 
     gspan_class._report = optimized_report
     gspan_class.run = resumable_run
+    if exact_top_k_pruning:
+        gspan_class._subgraph_mining = exact_subgraph_mining
     try:
         yield
     finally:
         gspan_class.run = original_run
         gspan_class._report = original_report
+        gspan_class._subgraph_mining = original_subgraph_mining
 
 
 def _atomic_torch_save(torch_module: Any, payload: Any, path: Path) -> None:
@@ -400,6 +630,7 @@ def train_globalgce_resumable(
     resume: bool,
     gspan_flush_every: int = 256,
     gspan_max_in_memory_candidates: int = 256,
+    gspan_exact_top_k_pruning: bool = False,
 ) -> Any:
     """Run the official loop with atomic epoch checkpoints and exact RNG state."""
 
@@ -413,6 +644,7 @@ def train_globalgce_resumable(
         top_k=int(model.fsg.topk),
         flush_every=int(gspan_flush_every),
         max_in_memory_candidates=int(gspan_max_in_memory_candidates),
+        exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
     ):
         fss, expanded_train, expanded_val, expanded_test = model.get_fs_expanded_data(
             train_loader

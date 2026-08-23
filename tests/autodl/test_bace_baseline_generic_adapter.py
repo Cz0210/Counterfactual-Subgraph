@@ -171,6 +171,22 @@ def test_generated_globalgce_entrypoint_commands_parse_exactly(tmp_path: Path) -
     }
 
 
+def test_globalgce_exact_topk_flag_is_frozen_into_train_task(tmp_path: Path) -> None:
+    fragment = build_bace_baseline_generic_controller_fragment(
+        method="GlobalGCE",
+        globalgce_exact_top_k_pruning=True,
+        **_paths(tmp_path),
+    )
+    task = next(
+        row
+        for row in fragment["tasks"]
+        if row["id"] == "bace_globalgce_train_candidates"
+    )
+    assert "--gspan-exact-top-k-pruning" in task["command"]
+    parsed = build_route_parser().parse_args(task["command"][2:])
+    assert parsed.gspan_exact_top_k_pruning is True
+
+
 def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     destination = tmp_path / "fragments/globalgce.json"

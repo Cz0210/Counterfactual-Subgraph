@@ -71,6 +71,11 @@ def _fragment_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--neurosed-manifest")
     parser.add_argument("--globalgce-source-manifest")
     parser.add_argument("--globalgce-native-train-csv")
+    parser.add_argument(
+        "--globalgce-exact-top-k-pruning",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     parser.add_argument("--omp-threads", type=int, default=4)
 
 
@@ -91,6 +96,9 @@ def _fragment_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "neurosed_manifest": args.neurosed_manifest,
         "globalgce_source_manifest": args.globalgce_source_manifest,
         "globalgce_native_train_csv": args.globalgce_native_train_csv,
+        "globalgce_exact_top_k_pruning": bool(
+            args.globalgce_exact_top_k_pruning
+        ),
         "omp_threads": args.omp_threads,
     }
 
@@ -155,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
     globalgce_train.add_argument("--gspan-flush-every", type=int, default=256)
     globalgce_train.add_argument(
         "--gspan-max-in-memory-candidates", type=int, default=256
+    )
+    globalgce_train.add_argument(
+        "--gspan-exact-top-k-pruning",
+        action=argparse.BooleanOptionalAction,
+        default=False,
     )
     globalgce_train.add_argument(
         "--resume", action=argparse.BooleanOptionalAction, default=True
@@ -328,6 +341,9 @@ def main(argv: list[str] | None = None) -> int:
                 gspan_flush_every=int(args.gspan_flush_every),
                 gspan_max_in_memory_candidates=int(
                     args.gspan_max_in_memory_candidates
+                ),
+                gspan_exact_top_k_pruning=bool(
+                    args.gspan_exact_top_k_pruning
                 ),
             ),
         )

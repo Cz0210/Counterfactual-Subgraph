@@ -478,6 +478,9 @@ def build_bace_frozen_gine_rule_pool(
             "gspan_max_in_memory_candidates": int(
                 resolved.gspan_max_in_memory_candidates
             ),
+            "gspan_exact_top_k_pruning": bool(
+                resolved.gspan_exact_top_k_pruning
+            ),
         },
     }
     fingerprint = stable_sha256(fingerprint_payload)
@@ -535,6 +538,11 @@ def build_bace_frozen_gine_rule_pool(
         memory_log_every_chunks=int(resolved.memory_log_every_chunks),
         gspan_flush_every=int(resolved.gspan_flush_every),
         gspan_max_in_memory_candidates=int(resolved.gspan_max_in_memory_candidates),
+        **(
+            {"gspan_exact_top_k_pruning": True}
+            if resolved.gspan_exact_top_k_pruning
+            else {}
+        ),
         start_parent_offset=0,
         on_training_ready=record_training,
         on_chunk=None,

@@ -36,6 +36,7 @@ def build_bace_baseline_controller_fragment(
     neurosed_manifest: str | Path | None = None,
     globalgce_source_manifest: str | Path | None = None,
     globalgce_native_train_csv: str | Path | None = None,
+    globalgce_exact_top_k_pruning: bool = False,
     omp_threads: int = 4,
 ) -> dict[str, Any]:
     """Return tasks ready to splice into a dependency-aware controller manifest.
@@ -264,6 +265,9 @@ def build_bace_baseline_controller_fragment(
             dependencies=[bridge_id],
             inputs=[source_manifest, native_train_csv, official, checkpoint],
         )
+        if globalgce_exact_top_k_pruning:
+            tasks[-1]["argv"].append("--gspan-exact-top-k-pruning")
+            tasks[-1]["env"]["GLOBALGCE_EXACT_TOP_K_PRUNING"] = "1"
         tasks[-1]["resume_argv"] = list(tasks[-1]["argv"])
         tasks[-1]["retry_policy"] = "resume_same_root_from_verified_checkpoint"
     elif spec.method_id == "gcfexplainer":

@@ -1284,3 +1284,16 @@ Mutagenicity roadmaps.
   to fresh runtime result/staging roots with `PAPER_FROZEN_PARTIAL` provenance.
 - [ ] Run the exporter only after the persistent controllers establish real
   12/16 PASS; never use its staging outputs as the final four-dataset result.
+## 2026-08-23: BACE GlobalGCE exact top-k mining follow-up
+
+- [x] Add an opt-in, stable top-k gSpan spill schema with anti-monotone branch
+  pruning and bounded retained storage.
+- [x] Preserve the legacy route as the default and bind the optimization into
+  CLI/config fingerprints.
+- [x] Add stable-tie, bounded-storage, and interrupted-root replay fixtures.
+- [ ] Run a pinned official-gSpan monolithic-versus-pruned smoke on AutoDL and
+  freeze its input/output hashes.
+- [ ] Obtain an independent release review before creating any fresh full v6
+  controller.
+- [ ] Keep v5 running until it completes naturally or a reviewed replacement
+  is projected to finish at least 30% earlier without losing a safe prefix.

@@ -203,6 +203,7 @@ class NativeGeneratorProtocol(Protocol):
         memory_log_every_chunks: int,
         gspan_flush_every: int,
         gspan_max_in_memory_candidates: int,
+        gspan_exact_top_k_pruning: bool,
         start_parent_offset: int,
         on_training_ready: Callable[[dict[str, Any]], None] | None,
         on_chunk: (
@@ -238,6 +239,7 @@ class PoolBuildConfig:
     memory_log_every_chunks: int = 1
     gspan_flush_every: int = 256
     gspan_max_in_memory_candidates: int = 256
+    gspan_exact_top_k_pruning: bool = False
 
 
 @dataclass(slots=True)
@@ -2021,6 +2023,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         memory_log_every_chunks: int = 1,
         gspan_flush_every: int = 256,
         gspan_max_in_memory_candidates: int = 256,
+        gspan_exact_top_k_pruning: bool = False,
         start_parent_offset: int = 0,
         on_training_ready: Callable[[dict[str, Any]], None] | None = None,
         on_chunk: (
@@ -2398,6 +2401,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 resume=bool(resume),
                 gspan_flush_every=int(gspan_flush_every),
                 gspan_max_in_memory_candidates=int(gspan_max_in_memory_candidates),
+                gspan_exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
             training_state_payload = {
@@ -2406,6 +2410,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "top_k_native": int(top_k_native),
                     "learning_rate": float(learning_rate),
                     "dropout": float(dropout),
+                    "gspan_exact_top_k_pruning": bool(
+                        gspan_exact_top_k_pruning
+                    ),
                     "selected_parent_count": len(parents),
                     "source_train_idx": list(source_train_idx),
                     "source_val_idx": list(source_val_idx),
@@ -3066,6 +3073,9 @@ def build_mutagenicity_train_pool(
         "gspan_max_in_memory_candidates": int(
             resolved.gspan_max_in_memory_candidates
         ),
+        "gspan_exact_top_k_pruning": bool(
+            resolved.gspan_exact_top_k_pruning
+        ),
         "native_generator": (
             generator.config_identity()
             if callable(getattr(generator, "config_identity", None))
@@ -3367,6 +3377,11 @@ def build_mutagenicity_train_pool(
             gspan_flush_every=int(resolved.gspan_flush_every),
             gspan_max_in_memory_candidates=int(
                 resolved.gspan_max_in_memory_candidates
+            ),
+            **(
+                {"gspan_exact_top_k_pruning": True}
+                if resolved.gspan_exact_top_k_pruning
+                else {}
             ),
             start_parent_offset=start_parent_offset,
             on_training_ready=_training_ready,
