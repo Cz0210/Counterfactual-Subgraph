@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import sys
+import uuid
 
 import pytest
 
-from scripts.autodl import run_four_gpu_recovery_controller as controller
 from scripts.autodl.run_four_gpu_recovery_controller import load_controller_manifest
 from src.utils.autodl_bace_equivalence_sidecar import (
     BaceEquivalenceSidecarError,
@@ -105,21 +104,20 @@ def test_audit_protected_running_run_requires_matching_uuid_lock(tmp_path: Path)
 
 def test_builds_gcf_only_immutable_queue_and_never_duplicates_comrec(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Pytest names its private temporary directory with ``test_*``.  Production
-    # paths are fixed AutoDL train-only paths; suppress only that fixture-name
-    # false positive while retaining every other manifest check.
-    monkeypatch.setattr(controller, "TEST_PATH", re.compile(r"$^"))
-    runtime = tmp_path / "runtime"
+    # The production controller intentionally rejects any path segment named
+    # ``test``.  Keep the fixture below pytest's parent but outside its
+    # function-named ``test_*`` directory so the real leakage guard runs.
+    safe_root = tmp_path.parent / f"bace_sidecar_fixture_{uuid.uuid4().hex}"
+    runtime = safe_root / "runtime"
     runs = [
         _protected(runtime, f"protected-{index}", gpu_index=index)
         for index in range(4)
     ]
-    inputs = _scientific_inputs(tmp_path)
-    manifest = tmp_path / "manifest.json"
-    audit = tmp_path / "build-audit.json"
-    output = tmp_path / "outputs"
+    inputs = _scientific_inputs(safe_root)
+    manifest = safe_root / "manifest.json"
+    audit = safe_root / "build-audit.json"
+    output = safe_root / "outputs"
     result = build_sidecar_manifest(
         controller_id="bace_equivalence_sidecar_test",
         project_root=PROJECT_ROOT,
