@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-08-23: BACE equivalence UUID-lock sidecar
+
+- [x] Prove active controller manifests cannot accept new task bytes after
+  their manifest SHA and instance topology are frozen.
+- [x] Audit the four protected live exp-runs and exclusive UUID locks without
+  signalling or writing their output roots.
+- [x] Add a fresh GCF-only queue for quick M=50, quick M=100, and formal M=500
+  with strict dependencies and attempt-qualified output roots.
+- [x] Keep the existing ComRecGC M=500 legacy-to-optimized pair outside the
+  sidecar so it is observed but never duplicated.
+- [ ] Build, validate, and persist the sidecar manifest from an immutable
+  AutoDL execution worktree, then launch it while all GPUs remain protected.
+- [ ] Publish GCF PASS markers only from the real replay gates; M=500 alone
+  remains insufficient to release optimized full.
+
 ## 2026-08-23: BACE GlobalGCE frozen train-view repair
 
 - [x] Distinguish the 959-row processed train input from the frozen 869-ID

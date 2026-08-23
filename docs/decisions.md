@@ -1,5 +1,46 @@
 # Decisions Log
 
+## [2026-08-23] Queue BACE GCF equivalence in an immutable UUID-lock sidecar
+
+### Background
+
+The active four-by-four and repair controller manifests are frozen by exact
+SHA and task topology after first launch, so appending GCF replay tasks would
+invalidate their persistent identity.  Four protected jobs already hold real
+exclusive GPU UUID locks: legacy GCF full, GlobalGCE v5 full, the existing
+ComRecGC M=500 legacy/optimized pair, and legacy ComRecGC full.  None may be
+stopped or duplicated merely to make a card available.
+
+### Decision
+
+Build a fresh, GCF-only sidecar controller with three strictly dependent tasks:
+quick M=50, quick M=100, then formal M=500.  Every task uses the fixed
+duplicate-preserving GINE batch implementation, a fresh attempt-qualified
+output, an exclusive global UUID lock, and a PASS-last equivalence gate.  The
+sidecar audits all four protected run/worker/UUID-lock identities before its
+manifest is frozen and records that it sent no signal.
+
+Do not enqueue ComRecGC again.  Its already-running M=500 exp-run is itself the
+approved sequential legacy-to-optimized pair and will publish its independent
+audit if it succeeds.  The sidecar records that launch-spec identity only as
+protected read-only evidence.  Quick GCF PASS cannot authorize a full run, and
+M=500 alone cannot replace the separately required M=1000 and performance
+gates.
+
+### Consequences
+
+- Existing controller manifests and all old full roots remain immutable.
+- A sidecar task starts only after a physical GPU is stably idle and its global
+  exclusive UUID lock is available.
+- A failed quick replay blocks later GCF replay tasks without stopping any old
+  full process or generating a false aggregate PASS.
+- The running ComRecGC M=500 pair remains the sole M=500 pair; no duplicate
+  scientific workload is introduced.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Bind BACE GlobalGCE native training to the frozen 869-ID view
 
 ### Background

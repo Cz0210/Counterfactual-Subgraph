@@ -138,6 +138,11 @@ for the former; measured same-GPU >=20% co-location speedup with result/health/
 VRAM parity is mandatory for the latter. See
 `docs/AUTODL_ACCELERATION_RELEASE_GATES.md`.
 
+Fresh BACE GCF quick50/quick100/formal-M500 replays can be queued behind the
+four protected AutoDL UUID locks through a separate immutable sidecar; it does
+not append to active controller manifests or duplicate the already-running
+ComRecGC M=500 pair. See `docs/AUTODL_BACE_EQUIVALENCE_SIDECAR.md`.
+
 The future TasteMolNet baseline routes share one explicit three-class GINE,
 untargeted Sweet-to-non-Sweet strict-flip contract while remaining terminally
 license-blocked in the current controller. See
