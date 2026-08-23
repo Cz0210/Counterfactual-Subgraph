@@ -21,6 +21,7 @@ from src.eval.four_by_four_main_results import (
     export_main_results,
 )
 from src.eval.four_by_four_registry import SCHEMA_VERSION, sha256_file
+from src.eval.three_dataset_main_results import export_three_dataset_results
 
 
 def _hash(value: str) -> str:
@@ -200,6 +201,48 @@ def _fake_renderer(root: Path, figure3: object, figure4: object) -> None:
     (root / "paper_figure4_four_datasets.pdf").write_bytes(b"panel4\n")
 
 
+def _three_dataset_matrix(tmp_path: Path) -> Path:
+    rows: list[dict[str, object]] = []
+    for dataset in DATASET_ORDER:
+        for method in METHOD_ORDER:
+            _, row = _cell(tmp_path, dataset, method)
+            if dataset == "TasteMolNet":
+                row["status"] = "BLOCKED_LICENSE"
+                row["rerun_reason"] = "BLOCKED_LICENSE_REVIEW"
+                row["standardized_output_root"] = ""
+            rows.append(row)
+    path = tmp_path / "matrix-three" / "matrix_status.json"
+    path.parent.mkdir(parents=True)
+    _write_json(
+        path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "audit_complete": True,
+            "matrix_complete_cells": 12,
+            "matrix_total_cells": 16,
+            "all_cells_complete": False,
+            "no_numeric_imputation": True,
+            "cells": rows,
+        },
+    )
+    return path
+
+
+def _fake_three_renderer(root: Path, figure3: object, figure4: object) -> None:
+    del figure3, figure4
+    for dataset in ("aids", "mutagenicity", "bace"):
+        combined = root / dataset / "combined"
+        for name in (
+            "figure3_coverage_vs_k.png",
+            "figure3_coverage_vs_k.pdf",
+            "figure4_coverage_vs_threshold.png",
+            "figure4_coverage_vs_threshold.pdf",
+        ):
+            (combined / name).write_bytes(b"verified-three-dataset-render\n")
+    (root / "paper_figure3_three_datasets.pdf").write_bytes(b"panel3\n")
+    (root / "paper_figure4_three_datasets.pdf").write_bytes(b"panel4\n")
+
+
 def test_complete_export_preserves_raw_thresholds_and_taste_destinations(tmp_path: Path) -> None:
     project = tmp_path / "project"
     (project / "paper").mkdir(parents=True)
@@ -229,6 +272,120 @@ def test_complete_export_preserves_raw_thresholds_and_taste_destinations(tmp_pat
     audit = json.loads((output / "final_export_audit.json").read_text(encoding="utf-8"))
     assert audit["zero_fill_used"] is False
     assert audit["paper_directory_written"] is False
+
+
+def test_three_dataset_staging_requires_exact_12_and_preserves_taste_block(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project-three"
+    (project / "paper").mkdir(parents=True)
+    sentinel = project / "paper" / "user-owned.tex"
+    sentinel.write_text("unchanged\n", encoding="utf-8")
+    matrix = _three_dataset_matrix(tmp_path)
+    output = tmp_path / "three_datasets_complete_v1"
+    staging = tmp_path / "paper_staging" / "three_datasets_complete_v1"
+    result = export_three_dataset_results(
+        matrix_status=matrix,
+        output_root=output,
+        paper_staging_root=staging,
+        project_root=project,
+        renderer=_fake_three_renderer,
+    )
+    assert result.complete is True
+    assert result.matrix_complete_cells == 12
+    assert (output / "PASS").read_text(encoding="utf-8") == "PASS\n"
+    assert (output / "paper_figure3_three_datasets.pdf").is_file()
+    assert (output / "paper_figure4_three_datasets.pdf").is_file()
+    assert (output / "paper_table2_three_datasets.tex").is_file()
+    assert not (output / "tastemolnet").exists()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged\n"
+    for relative in (
+        "paper_figure3_three_datasets.pdf",
+        "paper_figure4_three_datasets.pdf",
+        "paper_table2_three_datasets.tex",
+        "three_dataset_export_manifest.json",
+        "three_dataset_export_audit.json",
+        "PASS",
+    ):
+        assert sha256_file(output / relative) == sha256_file(staging / relative)
+    manifest = json.loads(
+        (output / "three_dataset_export_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["matrix_complete_cells"] == 12
+    assert manifest["matrix_total_cells"] == 16
+    assert manifest["final_four_dataset_export"] is False
+    assert manifest["paper_status"] == "PAPER_FROZEN_PARTIAL"
+    assert {row["status"] for row in manifest["taste_cells"]} == {
+        "BLOCKED_LICENSE"
+    }
+
+
+@pytest.mark.parametrize("failure", ("eleven_pass", "taste_not_license"))
+def test_three_dataset_staging_fails_closed_before_writing_numeric_outputs(
+    tmp_path: Path, failure: str
+) -> None:
+    project = tmp_path / "project-blocked"
+    (project / "paper").mkdir(parents=True)
+    matrix = _three_dataset_matrix(tmp_path)
+    payload = json.loads(matrix.read_text(encoding="utf-8"))
+    if failure == "eleven_pass":
+        target = next(
+            row
+            for row in payload["cells"]
+            if row["dataset"] == "BACE" and row["method"] == "ComRecGC"
+        )
+        target["status"] = "INCOMPLETE"
+        payload["matrix_complete_cells"] = 11
+    else:
+        target = next(
+            row
+            for row in payload["cells"]
+            if row["dataset"] == "TasteMolNet" and row["method"] == "Ours"
+        )
+        target["status"] = "MISSING"
+        target["rerun_reason"] = ""
+    _write_json(matrix, payload)
+    output = tmp_path / f"blocked-{failure}"
+    with pytest.raises(MainResultsError):
+        export_three_dataset_results(
+            matrix_status=matrix,
+            output_root=output,
+            project_root=project,
+            renderer=lambda *_: pytest.fail("renderer must not be called"),
+        )
+    assert not output.exists()
+
+
+def test_three_dataset_staging_rejects_paper_tree_and_tampered_cell(tmp_path: Path) -> None:
+    project = tmp_path / "project-tamper"
+    (project / "paper").mkdir(parents=True)
+    matrix = _three_dataset_matrix(tmp_path)
+    with pytest.raises(MainResultsError, match="may not write into paper"):
+        export_three_dataset_results(
+            matrix_status=matrix,
+            output_root=project / "paper" / "three",
+            project_root=project,
+            renderer=_fake_three_renderer,
+        )
+    payload = json.loads(matrix.read_text(encoding="utf-8"))
+    root = Path(
+        next(
+            row["standardized_output_root"]
+            for row in payload["cells"]
+            if row["dataset"] == "AIDS" and row["method"] == "Ours"
+        )
+    )
+    with (root / "figure4_coverage_vs_threshold.csv").open("a", encoding="utf-8") as handle:
+        handle.write("Ours,0.06,0.99\n")
+    output = tmp_path / "tampered-three"
+    with pytest.raises(MainResultsError):
+        export_three_dataset_results(
+            matrix_status=matrix,
+            output_root=output,
+            project_root=project,
+            renderer=lambda *_: pytest.fail("renderer must not be called"),
+        )
+    assert not output.exists()
 
 
 def test_incomplete_matrix_writes_only_partial_audit_and_never_zero_fills(tmp_path: Path) -> None:

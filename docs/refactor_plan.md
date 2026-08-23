@@ -1233,3 +1233,17 @@ Mutagenicity roadmaps.
 - [x] Cover the JSON result and marker with a focused CLI regression test.
 - [ ] Launch only in a fresh controller/output root; retain the original
   marker-missing attempt as immutable evidence.
+
+# 2026-08-23 — Three-dataset staging-only main results
+
+- [x] Require one canonical 16-cell registry with exactly 12 paper-pass
+  AIDS/Mutagenicity/BACE cells and four explicit TasteMolNet licence blocks.
+- [x] Reuse the strict standardized-cell closure and within-dataset
+  oracle/split/distance/threshold identity gates.
+- [x] Render three dataset-specific Figure 3/Figure 4/Table 2 artifacts and
+  three-dataset panels without recomputation, interpolation, smoothing, or
+  numeric imputation.
+- [x] Reject destinations under the user-owned `paper/` tree and publish only
+  to fresh runtime result/staging roots with `PAPER_FROZEN_PARTIAL` provenance.
+- [ ] Run the exporter only after the persistent controllers establish real
+  12/16 PASS; never use its staging outputs as the final four-dataset result.

@@ -35,6 +35,27 @@ filter as an opt-in input, leaving Mutagenicity behavior unchanged.
 
 Accepted
 
+## 2026-08-23 — Stage three-dataset results without weakening the final matrix
+
+### Decision
+
+Add a separate staging-only exporter for AIDS, Mutagenicity, and BACE.  It
+accepts only the canonical 16-cell registry with exactly twelve paper-pass
+non-TasteMolNet cells and four explicit `BLOCKED_LICENSE_REVIEW` TasteMolNet
+cells.  It reuses the same per-cell artifact/hash/oracle/split/threshold audit
+as the final exporter, copies reported CSV values verbatim, and renders only
+raw empirical points.  It writes `paper_figure{3,4}_three_datasets.pdf` and
+`paper_table2_three_datasets.tex` under runtime staging roots, never under
+`paper/`, and explicitly records `PAPER_FROZEN_PARTIAL`.
+
+The existing four-dataset exporter remains unchanged and still requires
+16/16.  Missing cells are never zero-filled, interpolated, or promoted from a
+TasteMolNet smoke run.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Separate optimization code from scientific release authority
 
 ### Background
