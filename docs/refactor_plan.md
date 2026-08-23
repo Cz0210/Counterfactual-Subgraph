@@ -70,6 +70,25 @@
   deploying or interrupting existing AutoDL diagnostic/legacy jobs.
 - [ ] Publish either PASS gate only after the real AutoDL evidence completes;
   until then optimized full/shared routes remain blocked.
+## 2026-08-23: Deterministic adaptive AIDS DBSCAN witness
+
+- [x] Retain the fixed evenly-spaced 64-anchor route as a fail-closed negative;
+  the full 91,916,686-row diagnostic found 43 unproved rows.
+- [x] Select three seeds by a complete global minimum squared-L2 scan with
+  deterministic sample-index tie breaking and resumable bounded blocks.
+- [x] Run a complete first seed-radius pass, freeze every insufficient row
+  index and its hash, and block rather than truncate when the failure cap is
+  exceeded.
+- [x] Define the final anchors as the sorted unique union of the seeds and all
+  first-pass failures; freeze exact anchor row/index hashes.
+- [x] Run the ordinary complete anchor lower-bound proof as a second pass and
+  retain its exact self, duplicate-index, inclusive-epsilon, and connectivity
+  gates.
+- [x] Add adaptive sklearn parity, resume, failure-cap, proof tamper, RSS, and
+  fixed-64 negative fixtures.
+- [ ] Release only through a fresh promoted-vector AutoDL proof and separate
+  downstream closure; never reuse the exploratory witness or old v4 root.
+
 ## 2026-08-23: Exact all-core DBSCAN anchor shortcut
 
 - [x] Add a deterministic, hash-bound finite-anchor witness before the

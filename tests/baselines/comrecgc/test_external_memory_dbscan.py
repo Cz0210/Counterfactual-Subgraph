@@ -67,6 +67,266 @@ def _all_core_values(num_samples: int = 12) -> np.ndarray:
     return values
 
 
+def _adaptive_values() -> np.ndarray:
+    values = np.zeros((9, 64), dtype=np.float32)
+    # The global minimum-norm seeds are indices 0, 1, 2.  The bridge at 0.55
+    # sees only seed 1 and is therefore a first-pass failure; together with
+    # the exact remote failures it connects and covers the final anchor graph.
+    values[:, 0] = np.asarray(
+        [0.0, 0.1, -0.1, 0.55, 1.0, 1.0, 1.0, 0.55, 1.0],
+        dtype=np.float32,
+    )
+    return values
+
+
+def _adaptive_contract(
+    *,
+    block: int = 3,
+    failure_cap: int = 10,
+    max_rss_bytes: int | None = None,
+) -> external.ExternalDBSCANContract:
+    return external.ExternalDBSCANContract(
+        eps=0.5,
+        min_samples=3,
+        query_block_size=2,
+        checkpoint_interval_blocks=1,
+        max_rss_bytes=max_rss_bytes or external._rss_bytes() + 512 * 1024**2,
+        expected_sklearn_version=sklearn.__version__,
+        shortcut_mode=external.ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        shortcut_seed_count=3,
+        shortcut_failure_cap=failure_cap,
+        shortcut_query_block_size=block,
+        exact_fallback_max_samples=0,
+    )
+
+
+def test_adaptive_two_pass_witness_is_elementwise_sklearn_exact(
+    tmp_path: Path,
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract()
+    expected = DBSCAN(eps=contract.eps, min_samples=contract.min_samples).fit(values)
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "adaptive",
+        contract=contract,
+    )
+    manifest = json.loads(result.manifest_path.read_text())
+    proof = json.loads(result.shortcut_proof_path.read_text())
+    selection = json.loads(
+        (tmp_path / "adaptive/adaptive_anchor_selection.json").read_text()
+    )["selection_identity"]
+    assert np.array_equal(np.load(result.labels_path), expected.labels_)
+    assert np.array_equal(
+        np.flatnonzero(np.load(result.core_mask_path)), expected.core_sample_indices_
+    )
+    assert manifest["clustering_path"] == (
+        external.ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+    )
+    assert manifest["neighbor_counts_available"] is False
+    assert selection["seed_indices"] == [0, 1, 2]
+    assert np.load(selection["failure_indices_path"]).tolist() == [3, 4, 5, 6, 7, 8]
+    assert np.load(selection["anchor_indices_path"]).tolist() == list(range(9))
+    assert selection["first_pass_complete"] is True
+    assert selection["approximation_used"] is False
+    assert proof["second_pass_complete"] is True
+    assert proof["adaptive_selection_identity_sha256"]
+    reopened = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "adaptive",
+        contract=contract,
+        resume=True,
+    )
+    assert reopened.manifest_sha256 == result.manifest_sha256
+
+
+def test_adaptive_failure_scan_resume_preserves_selection_and_label_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract(block=3)
+    reference = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "reference",
+        contract=contract,
+    )
+    reference_manifest = json.loads(reference.manifest_path.read_text())
+    reference_selection = json.loads(
+        (tmp_path / "reference/adaptive_anchor_selection.json").read_text()
+    )
+    original_fit = external._fit_anchor_neighbors
+    calls = {"count": 0}
+
+    class InterruptingSeedModel:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def radius_neighbors(self, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise RuntimeError("adaptive failure-scan interruption")
+            return self.wrapped.radius_neighbors(*args, **kwargs)
+
+    def interrupted_fit(*args, **kwargs):
+        model, version = original_fit(*args, **kwargs)
+        return InterruptingSeedModel(model), version
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", interrupted_fit)
+    root = tmp_path / "resumed"
+    with pytest.raises(RuntimeError, match="adaptive failure-scan interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint = json.loads((root / "checkpoint.json").read_text())
+    assert checkpoint["phase"] == "adaptive_failure_scan"
+    assert checkpoint["next_offset"] == 3
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", original_fit)
+    resumed = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract, resume=True
+    )
+    resumed_manifest = json.loads(resumed.manifest_path.read_text())
+    resumed_selection = json.loads((root / "adaptive_anchor_selection.json").read_text())
+    assert resumed_manifest["labels_sha256"] == reference_manifest["labels_sha256"]
+    for field in (
+        "seed_indices_sha256",
+        "failure_index_list_sha256",
+        "selected_anchor_indices_sha256",
+        "anchor_rows_sha256",
+    ):
+        assert resumed_selection["selection_identity"][field] == (
+            reference_selection["selection_identity"][field]
+        )
+
+
+def test_adaptive_selection_is_independent_of_resource_block_size(
+    tmp_path: Path,
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    results: list[dict] = []
+    for block in (2, 5):
+        result = external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=tmp_path / f"adaptive-{block}",
+            contract=_adaptive_contract(block=block),
+        )
+        selection = json.loads(
+            (tmp_path / f"adaptive-{block}/adaptive_anchor_selection.json").read_text()
+        )["selection_identity"]
+        results.append(
+            {
+                "labels_sha256": json.loads(result.manifest_path.read_text())[
+                    "labels_sha256"
+                ],
+                "seed_indices_sha256": selection["seed_indices_sha256"],
+                "failure_index_list_sha256": selection[
+                    "failure_index_list_sha256"
+                ],
+                "selected_anchor_indices_sha256": selection[
+                    "selected_anchor_indices_sha256"
+                ],
+                "anchor_rows_sha256": selection["anchor_rows_sha256"],
+            }
+        )
+    assert results[0] == results[1]
+
+
+def test_adaptive_failure_cap_exceeded_is_terminal_and_never_falls_back(
+    tmp_path: Path,
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    root = tmp_path / "blocked"
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="adaptive_failure_cap_exceeded",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=_adaptive_contract(failure_cap=2),
+        )
+    checkpoint = json.loads((root / "checkpoint.json").read_text())
+    failure = json.loads((root / "shortcut_failure.json").read_text())
+    assert checkpoint["phase"] == "shortcut_blocked"
+    assert failure["reason"] == "adaptive_failure_cap_exceeded"
+    assert failure["details"]["first_pass_complete"] is False
+    assert not (root / "neighbor_counts.npy").exists()
+
+
+def test_adaptive_terminal_rejects_tampered_first_pass_failure_set(
+    tmp_path: Path,
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract()
+    root = tmp_path / "adaptive"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    proof = json.loads(result.shortcut_proof_path.read_text())
+    selection = json.loads(
+        Path(proof["adaptive_selection_manifest_path"]).read_text()
+    )["selection_identity"]
+    failure_path = Path(selection["failure_indices_path"])
+    with failure_path.open("r+b") as handle:
+        handle.seek(-1, os.SEEK_END)
+        value = handle.read(1)
+        handle.seek(-1, os.SEEK_END)
+        handle.write(bytes([value[0] ^ 1]))
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="adaptive selection artifact mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
+def test_adaptive_seed_scan_rss_gate_precedes_full_scan(tmp_path: Path) -> None:
+    vectors = _save(tmp_path / "vectors.npy", _adaptive_values())
+    with pytest.raises(external.ExternalMemoryDBSCANError, match="RSS"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=tmp_path / "adaptive",
+            contract=_adaptive_contract(
+                max_rss_bytes=external._rss_bytes() + 1024
+            ),
+        )
+
+
+def test_fixed_evenly_spaced_64_retains_fail_closed_negative(tmp_path: Path) -> None:
+    values = np.zeros((100, 64), dtype=np.float32)
+    fixed = set(external._deterministic_anchor_indices(100, 64).tolist())
+    uncovered = next(index for index in range(100) if index not in fixed)
+    values[uncovered, 0] = 10.0
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = external.ExternalDBSCANContract(
+        eps=0.5,
+        min_samples=3,
+        query_block_size=2,
+        checkpoint_interval_blocks=1,
+        max_rss_bytes=external._rss_bytes() + 512 * 1024**2,
+        expected_sklearn_version=sklearn.__version__,
+        shortcut_mode=external.ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        shortcut_anchor_count=64,
+        shortcut_query_block_size=11,
+        exact_fallback_max_samples=99,
+    )
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="EXACT_DBSCAN_COMPLEXITY_BLOCKED",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=tmp_path / "fixed64-blocked",
+            contract=contract,
+        )
+
+
 def test_anchor_shortcut_is_elementwise_sklearn_exact_with_boundary_and_duplicates(
     tmp_path: Path,
 ) -> None:

@@ -37,7 +37,11 @@ import numpy as np
 SCHEMA_VERSION = "comrecgc_external_memory_dbscan_v2"
 SHORTCUT_DISABLED = "disabled"
 ALL_CORE_ONE_COMPONENT_SHORTCUT = "all_core_one_component_anchor_v1"
+ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT = (
+    "all_core_one_component_adaptive_anchor_v1"
+)
 SHORTCUT_PROOF_SCHEMA_VERSION = "comrecgc_dbscan_anchor_proof_v1"
+ADAPTIVE_SELECTION_SCHEMA_VERSION = "comrecgc_adaptive_anchor_selection_v1"
 
 
 class ExternalMemoryDBSCANError(RuntimeError):
@@ -54,6 +58,8 @@ class ExternalDBSCANContract:
     expected_sklearn_version: str
     shortcut_mode: str = SHORTCUT_DISABLED
     shortcut_anchor_count: int = 64
+    shortcut_seed_count: int = 3
+    shortcut_failure_cap: int = 4_096
     shortcut_query_block_size: int = 65_536
     exact_fallback_max_samples: int = 100_000
 
@@ -77,6 +83,7 @@ class ExternalDBSCANContract:
         if self.shortcut_mode not in {
             SHORTCUT_DISABLED,
             ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
         }:
             raise ExternalMemoryDBSCANError(
                 f"unsupported exact DBSCAN shortcut: {self.shortcut_mode}"
@@ -86,6 +93,18 @@ class ExternalDBSCANContract:
         if int(self.shortcut_anchor_count) > 65_535:
             raise ExternalMemoryDBSCANError(
                 "shortcut_anchor_count exceeds the auditable finite-anchor limit"
+            )
+        if int(self.shortcut_seed_count) <= 0:
+            raise ExternalMemoryDBSCANError("shortcut_seed_count must be positive")
+        if int(self.shortcut_seed_count) > 65_535:
+            raise ExternalMemoryDBSCANError(
+                "shortcut_seed_count exceeds the auditable finite-anchor limit"
+            )
+        if int(self.shortcut_failure_cap) <= 0:
+            raise ExternalMemoryDBSCANError("shortcut_failure_cap must be positive")
+        if int(self.shortcut_failure_cap) > 65_535:
+            raise ExternalMemoryDBSCANError(
+                "shortcut_failure_cap exceeds the auditable finite-anchor limit"
             )
         if int(self.shortcut_query_block_size) <= 0:
             raise ExternalMemoryDBSCANError(
@@ -347,6 +366,14 @@ def _deterministic_anchor_indices(num_samples: int, requested: int) -> np.ndarra
     return indices
 
 
+def _sample_indices_sha256(values: Sequence[int] | np.ndarray) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [int(value) for value in values], separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _atomic_npy(path: Path, value: np.ndarray) -> None:
     """Write one ndarray through a same-directory fsync + atomic rename."""
 
@@ -419,6 +446,29 @@ def _bounded_shortcut_block_size(
     if safe < 1:
         raise ExternalMemoryDBSCANError(
             f"RSS budget cannot hold one anchor-witness row during {phase}"
+        )
+    return max(1, min(int(requested), int(safe)))
+
+
+def _bounded_norm_block_size(
+    *,
+    requested: int,
+    num_features: int,
+    source_itemsize: int,
+    max_rss_bytes: int,
+) -> int:
+    current = _check_rss(max_rss_bytes, phase="adaptive_seed_scan")
+    available = int(max_rss_bytes) - current - 64 * 1024**2
+    per_row = max(
+        1,
+        2 * int(num_features) * np.dtype(np.float64).itemsize
+        + int(num_features) * int(source_itemsize)
+        + 4096,
+    )
+    safe = available // per_row
+    if safe < 1:
+        raise ExternalMemoryDBSCANError(
+            "RSS budget cannot hold one adaptive seed-selection row"
         )
     return max(1, min(int(requested), int(safe)))
 
@@ -569,13 +619,521 @@ def _ensure_exact_npy(path: Path, expected: np.ndarray, *, label: str) -> str:
     return _sha256_file(path)
 
 
+def _validate_adaptive_selection_manifest(
+    *,
+    path: Path,
+    expected_sha256: str,
+    root: Path,
+    identity: Mapping[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    resolved = path.resolve(strict=True)
+    if resolved.parent != root or _sha256_file(resolved) != str(expected_sha256):
+        raise ExternalMemoryDBSCANError(
+            "adaptive anchor-selection manifest closure mismatch"
+        )
+    manifest = _load_object(resolved)
+    selection = manifest.get("selection_identity")
+    if (
+        manifest.get("schema_version") != ADAPTIVE_SELECTION_SCHEMA_VERSION
+        or manifest.get("run_complete") is not True
+        or not isinstance(selection, Mapping)
+        or manifest.get("selection_identity_sha256") != _stable_hash(selection)
+        or selection.get("vectors_path") != identity.get("vectors_path")
+        or selection.get("vectors_sha256") != identity.get("vectors_sha256")
+        or selection.get("vectors_dtype") != identity.get("vectors_dtype")
+        or selection.get("vectors_shape") != identity.get("vectors_shape")
+        or selection.get("selection_contract") != identity.get("shortcut_contract")
+        or selection.get("seed_selection_algorithm")
+        != "global_k_minimum_squared_l2_float64_tie_sample_index_v1"
+        or selection.get("failure_selection_rule")
+        != "all_first_pass_insufficient_seed_lower_bound_indices_v1"
+        or selection.get("anchor_selection_rule")
+        != "sorted_unique_union_of_seed_and_all_failure_indices_v1"
+    ):
+        raise ExternalMemoryDBSCANError(
+            "adaptive anchor-selection scientific identity mismatch"
+        )
+    seed_indices = [int(value) for value in selection.get("seed_indices") or []]
+    seed_norm_hex = [str(value) for value in selection.get("seed_squared_norm_hex") or []]
+    seed_count = int(identity["shortcut_contract"]["seed_count"])
+    if (
+        len(seed_indices) != seed_count
+        or len(seed_norm_hex) != seed_count
+        or len(set(seed_indices)) != seed_count
+        or _sample_indices_sha256(seed_indices)
+        != selection.get("seed_indices_sha256")
+    ):
+        raise ExternalMemoryDBSCANError("adaptive seed identity mismatch")
+    seed_order = sorted(
+        zip((float.fromhex(value) for value in seed_norm_hex), seed_indices),
+        key=lambda row: (row[0], row[1]),
+    )
+    if [index for _norm, index in seed_order] != seed_indices:
+        raise ExternalMemoryDBSCANError("adaptive seeds are not canonically ordered")
+
+    failure_path = Path(str(selection.get("failure_indices_path") or "")).resolve(
+        strict=True
+    )
+    anchor_indices_path = Path(
+        str(selection.get("anchor_indices_path") or "")
+    ).resolve(strict=True)
+    anchor_rows_path = Path(str(selection.get("anchor_rows_path") or "")).resolve(
+        strict=True
+    )
+    for artifact, hash_field in (
+        (failure_path, "failure_indices_sha256"),
+        (anchor_indices_path, "anchor_indices_sha256"),
+        (anchor_rows_path, "anchor_rows_sha256"),
+    ):
+        if artifact.parent != root or _sha256_file(artifact) != selection.get(
+            hash_field
+        ):
+            raise ExternalMemoryDBSCANError(
+                f"adaptive selection artifact mismatch: {hash_field}"
+            )
+    failures = np.load(failure_path, allow_pickle=False)
+    anchors = np.load(anchor_indices_path, allow_pickle=False)
+    anchor_rows = np.load(anchor_rows_path, allow_pickle=False)
+    n_samples, n_features = (int(value) for value in identity["vectors_shape"])
+    if (
+        failures.dtype != np.dtype(np.intp)
+        or failures.ndim != 1
+        or len(failures) != int(selection.get("failure_count", -1))
+        or len(failures) > int(identity["shortcut_contract"]["failure_cap"])
+        or not np.array_equal(failures, np.unique(failures))
+        or np.any(failures < 0)
+        or np.any(failures >= n_samples)
+        or _sample_indices_sha256(failures)
+        != selection.get("failure_index_list_sha256")
+        or anchors.dtype != np.dtype(np.intp)
+        or anchors.ndim != 1
+        or not np.array_equal(anchors, np.unique(anchors))
+        or np.any(anchors < 0)
+        or np.any(anchors >= n_samples)
+        or _sample_indices_sha256(anchors)
+        != selection.get("selected_anchor_indices_sha256")
+        or not np.array_equal(
+            anchors,
+            np.asarray(sorted(set(seed_indices).union(failures.tolist())), dtype=np.intp),
+        )
+        or anchor_rows.shape != (len(anchors), n_features)
+        or str(anchor_rows.dtype) != str(identity["vectors_dtype"])
+    ):
+        raise ExternalMemoryDBSCANError("adaptive selection array schema mismatch")
+    source = _open_npy_memmap(
+        Path(str(identity["vectors_path"])).resolve(strict=True), mode="r"
+    )
+    if not np.array_equal(anchor_rows, np.asarray(source[anchors])):
+        raise ExternalMemoryDBSCANError(
+            "adaptive anchor rows do not match the promoted source vectors"
+        )
+    actual_seed_rows = np.asarray(source[np.asarray(seed_indices, dtype=np.intp)])
+    actual_seed_rows64 = np.asarray(actual_seed_rows, dtype=np.float64)
+    actual_seed_norm_hex = [
+        float(value).hex()
+        for value in np.einsum(
+            "ij,ij->i", actual_seed_rows64, actual_seed_rows64, dtype=np.float64
+        ).tolist()
+    ]
+    if actual_seed_norm_hex != seed_norm_hex:
+        raise ExternalMemoryDBSCANError(
+            "adaptive seed norms do not match the promoted source vectors"
+        )
+    del source, actual_seed_rows, actual_seed_rows64
+    return np.asarray(anchors, dtype=np.intp), dict(manifest)
+
+
+def _resolve_adaptive_anchor_selection(
+    *,
+    vectors: np.ndarray,
+    root: Path,
+    state_path: Path,
+    identity: Mapping[str, Any],
+    contract: ExternalDBSCANContract,
+    sklearn_version: str,
+    peak_rss_bytes: int,
+) -> tuple[np.ndarray, dict[str, Any], int]:
+    """Select deterministic seeds, collect every failure, then freeze anchors."""
+
+    selection_path = root / "adaptive_anchor_selection.json"
+    state = _load_object(state_path)
+    phase = str(state.get("phase"))
+    if phase == "shortcut_blocked":
+        failure_path = Path(str(state.get("shortcut_failure_path") or ""))
+        if (
+            failure_path.parent != root
+            or not failure_path.is_file()
+            or _sha256_file(failure_path)
+            != state.get("shortcut_failure_sha256")
+        ):
+            raise ExternalMemoryDBSCANError(
+                "blocked adaptive-selection failure artifact mismatch"
+            )
+        failure = _load_object(failure_path)
+        raise ExternalMemoryDBSCANError(
+            "EXACT_DBSCAN_COMPLEXITY_BLOCKED:"
+            f"reason={failure.get('reason')}"
+        )
+    if selection_path.exists():
+        expected_sha = str(
+            state.get("adaptive_selection_manifest_sha256")
+            or _sha256_file(selection_path)
+        )
+        anchors, manifest = _validate_adaptive_selection_manifest(
+            path=selection_path,
+            expected_sha256=expected_sha,
+            root=root,
+            identity=identity,
+        )
+        if phase in {"adaptive_seed_scan", "adaptive_failure_scan"}:
+            _checkpoint(
+                state_path,
+                identity=identity,
+                phase="shortcut_anchor_scan",
+                next_offset=0,
+                peak_rss_bytes=max(int(peak_rss_bytes), _rss_bytes()),
+                extra={
+                    "adaptive_selection_manifest_path": str(selection_path),
+                    "adaptive_selection_manifest_sha256": _sha256_file(
+                        selection_path
+                    ),
+                    "selected_anchor_indices_sha256": manifest[
+                        "selection_identity"
+                    ]["selected_anchor_indices_sha256"],
+                },
+            )
+        return anchors, manifest, max(int(peak_rss_bytes), _rss_bytes())
+    if phase not in {"adaptive_seed_scan", "adaptive_failure_scan"}:
+        raise ExternalMemoryDBSCANError(
+            "adaptive selection manifest is missing after selection phase"
+        )
+
+    n_samples, n_features = (int(vectors.shape[0]), int(vectors.shape[1]))
+    seed_count = int(contract.shortcut_seed_count)
+    if seed_count > n_samples:
+        raise ExternalMemoryDBSCANError(
+            "adaptive seed count exceeds the number of samples"
+        )
+    peak = max(int(peak_rss_bytes), _rss_bytes())
+    if phase == "adaptive_seed_scan":
+        start = int(state.get("next_offset", 0))
+        candidates_raw = state.get("adaptive_seed_candidates") or []
+        candidates: list[tuple[float, int]] = []
+        for row in candidates_raw:
+            if not isinstance(row, Mapping):
+                raise ExternalMemoryDBSCANError("adaptive seed checkpoint is invalid")
+            candidates.append(
+                (float.fromhex(str(row["squared_norm_hex"])), int(row["index"]))
+            )
+        block = _bounded_norm_block_size(
+            requested=int(contract.shortcut_query_block_size),
+            num_features=n_features,
+            source_itemsize=int(vectors.dtype.itemsize),
+            max_rss_bytes=int(contract.max_rss_bytes),
+        )
+        blocks_since_checkpoint = 0
+        for offset in range(start, n_samples, block):
+            stop = min(n_samples, offset + block)
+            rows = np.asarray(vectors[offset:stop], dtype=np.float64)
+            norms = np.einsum("ij,ij->i", rows, rows, dtype=np.float64)
+            if not np.isfinite(norms).all():
+                raise ExternalMemoryDBSCANError(
+                    "adaptive seed norm scan found NaN/Inf"
+                )
+            indices = np.arange(offset, stop, dtype=np.intp)
+            order = np.lexsort((indices, norms))[:seed_count]
+            combined = candidates + [
+                (float(norms[position]), int(indices[position]))
+                for position in order.tolist()
+            ]
+            candidates = sorted(combined, key=lambda row: (row[0], row[1]))[
+                :seed_count
+            ]
+            del rows, norms, indices, order
+            peak = max(
+                peak,
+                _check_rss(
+                    int(contract.max_rss_bytes), phase="adaptive_seed_scan"
+                ),
+            )
+            blocks_since_checkpoint += 1
+            if (
+                blocks_since_checkpoint >= int(contract.checkpoint_interval_blocks)
+                or stop == n_samples
+            ):
+                _checkpoint(
+                    state_path,
+                    identity=identity,
+                    phase="adaptive_seed_scan",
+                    next_offset=stop,
+                    peak_rss_bytes=peak,
+                    extra={
+                        "effective_shortcut_query_block_size": int(block),
+                        "adaptive_seed_candidates": [
+                            {
+                                "index": int(index),
+                                "squared_norm_hex": float(norm).hex(),
+                            }
+                            for norm, index in candidates
+                        ],
+                    },
+                )
+                blocks_since_checkpoint = 0
+        if len(candidates) != seed_count:
+            raise ExternalMemoryDBSCANError("adaptive seed scan is incomplete")
+        seed_indices = [index for _norm, index in candidates]
+        seed_norm_hex = [float(norm).hex() for norm, _index in candidates]
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="adaptive_failure_scan",
+            next_offset=0,
+            peak_rss_bytes=peak,
+            extra={
+                "seed_indices": seed_indices,
+                "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+                "seed_squared_norm_hex": seed_norm_hex,
+                "adaptive_failure_indices": [],
+                "adaptive_failure_indices_sha256": _sample_indices_sha256([]),
+            },
+        )
+        state = _load_object(state_path)
+        phase = "adaptive_failure_scan"
+
+    seed_indices = [int(value) for value in state.get("seed_indices") or []]
+    seed_norm_hex = [str(value) for value in state.get("seed_squared_norm_hex") or []]
+    if (
+        len(seed_indices) != seed_count
+        or len(seed_norm_hex) != seed_count
+        or _sample_indices_sha256(seed_indices) != state.get("seed_indices_sha256")
+    ):
+        raise ExternalMemoryDBSCANError("adaptive seed checkpoint identity mismatch")
+    failures = [int(value) for value in state.get("adaptive_failure_indices") or []]
+    if (
+        failures != sorted(set(failures))
+        or _sample_indices_sha256(failures)
+        != state.get("adaptive_failure_indices_sha256")
+    ):
+        raise ExternalMemoryDBSCANError("adaptive failure checkpoint identity mismatch")
+    seed_array = np.asarray(seed_indices, dtype=np.intp)
+    seed_vectors = np.asarray(vectors[seed_array])
+    seed_model, seed_sklearn_version = _fit_anchor_neighbors(
+        seed_vectors, eps=float(contract.eps)
+    )
+    if seed_sklearn_version != sklearn_version:
+        raise ExternalMemoryDBSCANError("adaptive seed/full sklearn versions differ")
+    seed_local_by_global = {
+        int(global_index): local_index
+        for local_index, global_index in enumerate(seed_indices)
+    }
+    start = int(state.get("next_offset", 0))
+    block = _bounded_shortcut_block_size(
+        requested=int(contract.shortcut_query_block_size),
+        anchor_count=seed_count,
+        max_rss_bytes=int(contract.max_rss_bytes),
+        phase="adaptive_failure_scan",
+    )
+    blocks_since_checkpoint = 0
+    for offset in range(start, n_samples, block):
+        stop = min(n_samples, offset + block)
+        _check_rss(
+            int(contract.max_rss_bytes),
+            phase="adaptive_failure_scan.query",
+            reserved_bytes=_shortcut_query_reservation_bytes(
+                stop - offset, seed_count
+            ),
+        )
+        neighborhoods = seed_model.radius_neighbors(
+            vectors[offset:stop], return_distance=False
+        )
+        for local_row, raw in enumerate(neighborhoods):
+            global_index = offset + local_row
+            values = np.asarray(raw, dtype=np.intp)
+            if len(values) != len(np.unique(values)):
+                raise ExternalMemoryDBSCANError(
+                    "adaptive failure scan returned duplicate seed indices"
+                )
+            own_seed = seed_local_by_global.get(global_index)
+            if own_seed is not None and own_seed not in values:
+                raise ExternalMemoryDBSCANError(
+                    "adaptive failure scan omitted explicit seed self sample"
+                )
+            lower = len(values) - int(own_seed is not None)
+            if lower < int(contract.min_samples) - 1 or (
+                own_seed is None and lower < 1
+            ):
+                failures.append(global_index)
+        del neighborhoods
+        if len(failures) > int(contract.shortcut_failure_cap):
+            observed = np.asarray(failures, dtype=np.intp)
+            observed_path = root / "adaptive_failure_cap_exceeded_indices.npy"
+            observed_sha = _ensure_exact_npy(
+                observed_path,
+                observed,
+                label="adaptive cap-exceeded failure indices",
+            )
+            failure = _shortcut_failure(
+                root=root,
+                identity=identity,
+                reason="adaptive_failure_cap_exceeded",
+                num_samples=n_samples,
+                fallback_limit=int(contract.exact_fallback_max_samples),
+                details={
+                    "failure_cap": int(contract.shortcut_failure_cap),
+                    "observed_failure_count": int(len(failures)),
+                    "observed_failure_indices_path": str(observed_path),
+                    "observed_failure_indices_sha256": observed_sha,
+                    "first_pass_complete": False,
+                },
+            )
+            _checkpoint(
+                state_path,
+                identity=identity,
+                phase="shortcut_blocked",
+                next_offset=stop,
+                peak_rss_bytes=max(peak, _rss_bytes()),
+                extra={
+                    "shortcut_failure_path": failure["path"],
+                    "shortcut_failure_sha256": failure["sha256"],
+                    "shortcut_approximation_used": False,
+                },
+            )
+            raise ExternalMemoryDBSCANError(
+                "EXACT_DBSCAN_COMPLEXITY_BLOCKED:"
+                "reason=adaptive_failure_cap_exceeded:"
+                f"count={len(failures)}:cap={contract.shortcut_failure_cap}"
+            )
+        peak = max(
+            peak,
+            _check_rss(
+                int(contract.max_rss_bytes), phase="adaptive_failure_scan"
+            ),
+        )
+        blocks_since_checkpoint += 1
+        if (
+            blocks_since_checkpoint >= int(contract.checkpoint_interval_blocks)
+            or stop == n_samples
+        ):
+            _checkpoint(
+                state_path,
+                identity=identity,
+                phase="adaptive_failure_scan",
+                next_offset=stop,
+                peak_rss_bytes=peak,
+                extra={
+                    "seed_indices": seed_indices,
+                    "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+                    "seed_squared_norm_hex": seed_norm_hex,
+                    "adaptive_failure_indices": failures,
+                    "adaptive_failure_indices_sha256": _sample_indices_sha256(
+                        failures
+                    ),
+                    "effective_shortcut_query_block_size": int(block),
+                },
+            )
+            blocks_since_checkpoint = 0
+
+    failure_array = np.asarray(failures, dtype=np.intp)
+    if not np.array_equal(failure_array, np.unique(failure_array)):
+        raise ExternalMemoryDBSCANError(
+            "adaptive first-pass failure indices are not canonical"
+        )
+    anchor_indices = np.asarray(
+        sorted(set(seed_indices).union(failures)), dtype=np.intp
+    )
+    if len(anchor_indices) > 65_535:
+        raise ExternalMemoryDBSCANError(
+            "EXACT_DBSCAN_COMPLEXITY_BLOCKED:adaptive anchor set exceeds limit"
+        )
+    failure_path = root / "adaptive_first_pass_failure_indices.npy"
+    anchor_indices_path = root / "shortcut_anchor_indices.npy"
+    anchor_rows_path = root / "adaptive_selected_anchor_rows.npy"
+    failure_sha = _ensure_exact_npy(
+        failure_path, failure_array, label="adaptive first-pass failure indices"
+    )
+    anchor_indices_sha = _ensure_exact_npy(
+        anchor_indices_path, anchor_indices, label="adaptive anchor indices"
+    )
+    anchor_rows = np.asarray(vectors[anchor_indices])
+    anchor_rows_sha = _ensure_exact_npy(
+        anchor_rows_path, anchor_rows, label="adaptive anchor rows"
+    )
+    selection_identity = {
+        "schema_version": ADAPTIVE_SELECTION_SCHEMA_VERSION,
+        "vectors_path": identity["vectors_path"],
+        "vectors_sha256": identity["vectors_sha256"],
+        "vectors_dtype": identity["vectors_dtype"],
+        "vectors_shape": identity["vectors_shape"],
+        "selection_contract": identity["shortcut_contract"],
+        "sklearn_version": sklearn_version,
+        "seed_selection_algorithm": (
+            "global_k_minimum_squared_l2_float64_tie_sample_index_v1"
+        ),
+        "seed_indices": seed_indices,
+        "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+        "seed_squared_norm_hex": seed_norm_hex,
+        "failure_selection_rule": (
+            "all_first_pass_insufficient_seed_lower_bound_indices_v1"
+        ),
+        "first_pass_complete": True,
+        "failure_count": int(len(failure_array)),
+        "failure_indices_path": str(failure_path),
+        "failure_indices_sha256": failure_sha,
+        "failure_index_list_sha256": _sample_indices_sha256(failure_array),
+        "anchor_selection_rule": (
+            "sorted_unique_union_of_seed_and_all_failure_indices_v1"
+        ),
+        "anchor_count": int(len(anchor_indices)),
+        "anchor_indices_path": str(anchor_indices_path),
+        "anchor_indices_sha256": anchor_indices_sha,
+        "selected_anchor_indices_sha256": _sample_indices_sha256(anchor_indices),
+        "anchor_rows_path": str(anchor_rows_path),
+        "anchor_rows_sha256": anchor_rows_sha,
+        "approximation_used": False,
+    }
+    selection_manifest = {
+        "schema_version": ADAPTIVE_SELECTION_SCHEMA_VERSION,
+        "run_complete": True,
+        "selection_identity": selection_identity,
+        "selection_identity_sha256": _stable_hash(selection_identity),
+        "completed_at": _utc_now(),
+    }
+    _atomic_json(selection_path, selection_manifest)
+    selection_sha = _sha256_file(selection_path)
+    _checkpoint(
+        state_path,
+        identity=identity,
+        phase="shortcut_anchor_scan",
+        next_offset=0,
+        peak_rss_bytes=max(peak, _rss_bytes()),
+        extra={
+            "adaptive_selection_manifest_path": str(selection_path),
+            "adaptive_selection_manifest_sha256": selection_sha,
+            "selected_anchor_indices_sha256": selection_identity[
+                "selected_anchor_indices_sha256"
+            ],
+        },
+    )
+    validated_anchors, validated_manifest = _validate_adaptive_selection_manifest(
+        path=selection_path,
+        expected_sha256=selection_sha,
+        root=root,
+        identity=identity,
+    )
+    return validated_anchors, validated_manifest, max(peak, _rss_bytes())
+
+
 def _validate_shortcut_proof_closure(
     *, manifest: Mapping[str, Any], root: Path
 ) -> tuple[Path, Path, Path, Path, Path]:
     """Validate a terminal shortcut without inventing exact neighbor counts."""
 
     if (
-        manifest.get("clustering_path") != ALL_CORE_ONE_COMPONENT_SHORTCUT
+        manifest.get("clustering_path")
+        not in {
+            ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        }
         or manifest.get("neighbor_counts_available") is not False
         or manifest.get("neighbor_counts_path") is not None
         or manifest.get("neighbor_counts_sha256") is not None
@@ -645,8 +1203,6 @@ def _validate_shortcut_proof_closure(
             n_samples > anchor_count
             and int(proof.get("minimum_non_anchor_anchor_neighbors", -1)) < 1
         )
-        or proof.get("selected_anchor_indices_sha256")
-        != shortcut_contract.get("selected_anchor_indices_sha256")
     ):
         raise ExternalMemoryDBSCANError("terminal shortcut witness schema mismatch")
     if int(np.min(lower)) != recorded_minimum:
@@ -654,8 +1210,48 @@ def _validate_shortcut_proof_closure(
     expected_indices_sha = hashlib.sha256(
         json.dumps(anchor_indices.tolist(), separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    if expected_indices_sha != shortcut_contract.get("selected_anchor_indices_sha256"):
-        raise ExternalMemoryDBSCANError("terminal shortcut anchor identity mismatch")
+    if manifest.get("clustering_path") == ALL_CORE_ONE_COMPONENT_SHORTCUT:
+        if (
+            proof.get("selected_anchor_indices_sha256")
+            != shortcut_contract.get("selected_anchor_indices_sha256")
+            or expected_indices_sha
+            != shortcut_contract.get("selected_anchor_indices_sha256")
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal shortcut anchor identity mismatch"
+            )
+    else:
+        selection_path = Path(
+            str(proof.get("adaptive_selection_manifest_path") or "")
+        )
+        selected, selection_manifest = _validate_adaptive_selection_manifest(
+            path=selection_path,
+            expected_sha256=str(
+                proof.get("adaptive_selection_manifest_sha256") or ""
+            ),
+            root=root,
+            identity=scientific_identity,
+        )
+        selection_identity = selection_manifest["selection_identity"]
+        if (
+            not np.array_equal(selected, anchor_indices)
+            or expected_indices_sha
+            != selection_identity.get("selected_anchor_indices_sha256")
+            or proof.get("selected_anchor_indices_sha256")
+            != selection_identity.get("selected_anchor_indices_sha256")
+            or proof.get("adaptive_selection_identity_sha256")
+            != selection_manifest.get("selection_identity_sha256")
+            or proof.get("first_pass_failure_indices_sha256")
+            != selection_identity.get("failure_indices_sha256")
+            or proof.get("first_pass_failure_index_list_sha256")
+            != selection_identity.get("failure_index_list_sha256")
+            or proof.get("selected_anchor_rows_sha256")
+            != selection_identity.get("anchor_rows_sha256")
+            or proof.get("second_pass_complete") is not True
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal adaptive selection/proof mismatch"
+            )
     adjacency = [{index} for index in range(anchor_count)]
     for source, target in anchor_edges.tolist():
         source_index, target_index = int(source), int(target)
@@ -705,6 +1301,8 @@ def _fit_all_core_one_component_shortcut(
     full_fit_method: str,
     sklearn_version: str,
     peak_rss_bytes: int,
+    anchor_indices_override: np.ndarray | None = None,
+    adaptive_selection_manifest: Mapping[str, Any] | None = None,
 ) -> ExternalDBSCANResult | None:
     """Prove the only safe shortcut or return ``None`` for exact fallback.
 
@@ -783,9 +1381,33 @@ def _fit_all_core_one_component_shortcut(
             {"sample_count": n_samples, "min_samples": int(contract.min_samples)},
         )
         return None
-    anchor_indices = _deterministic_anchor_indices(
-        n_samples, int(contract.shortcut_anchor_count)
-    )
+    if anchor_indices_override is None:
+        anchor_indices = _deterministic_anchor_indices(
+            n_samples, int(contract.shortcut_anchor_count)
+        )
+        anchor_selection_rule = "floor(i*(N-1)/(A-1)); endpoints included"
+        selected_anchor_indices_sha = identity["shortcut_contract"][
+            "selected_anchor_indices_sha256"
+        ]
+    else:
+        anchor_indices = np.asarray(anchor_indices_override, dtype=np.intp)
+        if adaptive_selection_manifest is None:
+            raise ExternalMemoryDBSCANError(
+                "adaptive anchors require their selection manifest"
+            )
+        selection_identity = adaptive_selection_manifest.get("selection_identity")
+        if not isinstance(selection_identity, Mapping):
+            raise ExternalMemoryDBSCANError(
+                "adaptive anchor selection identity is absent"
+            )
+        anchor_selection_rule = str(selection_identity["anchor_selection_rule"])
+        selected_anchor_indices_sha = str(
+            selection_identity["selected_anchor_indices_sha256"]
+        )
+        if _sample_indices_sha256(anchor_indices) != selected_anchor_indices_sha:
+            raise ExternalMemoryDBSCANError(
+                "adaptive selected-anchor hash mismatch"
+            )
     if len(anchor_indices) < int(contract.min_samples):
         inconclusive(
             "insufficient_distinct_anchors",
@@ -1022,7 +1644,7 @@ def _fit_all_core_one_component_shortcut(
     proof = {
         "schema_version": SHORTCUT_PROOF_SCHEMA_VERSION,
         "status": "PASS",
-        "shortcut": ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        "shortcut": contract.shortcut_mode,
         "scientific_identity_sha256": _stable_hash(identity),
         "vectors_path": str(Path(identity["vectors_path"])),
         "vectors_sha256": identity["vectors_sha256"],
@@ -1035,10 +1657,8 @@ def _fit_all_core_one_component_shortcut(
         "min_samples": int(contract.min_samples),
         "self_count_semantics": "each sample index counts itself exactly once",
         "duplicate_semantics": "duplicate vectors remain distinct sample indices",
-        "anchor_selection": "floor(i*(N-1)/(A-1)); endpoints included",
-        "selected_anchor_indices_sha256": identity["shortcut_contract"][
-            "selected_anchor_indices_sha256"
-        ],
+        "anchor_selection": anchor_selection_rule,
+        "selected_anchor_indices_sha256": selected_anchor_indices_sha,
         "anchor_indices_path": str(anchor_indices_path),
         "anchor_indices_sha256": anchor_indices_sha,
         "anchor_count": int(len(anchor_indices)),
@@ -1071,6 +1691,30 @@ def _fit_all_core_one_component_shortcut(
         "core_mask_sha256": core_sha,
         "completed_at": _utc_now(),
     }
+    if adaptive_selection_manifest is not None:
+        proof.update(
+            {
+                "adaptive_selection_manifest_path": str(
+                    root / "adaptive_anchor_selection.json"
+                ),
+                "adaptive_selection_manifest_sha256": _sha256_file(
+                    root / "adaptive_anchor_selection.json"
+                ),
+                "adaptive_selection_identity_sha256": adaptive_selection_manifest[
+                    "selection_identity_sha256"
+                ],
+                "first_pass_failure_indices_sha256": adaptive_selection_manifest[
+                    "selection_identity"
+                ]["failure_indices_sha256"],
+                "first_pass_failure_index_list_sha256": adaptive_selection_manifest[
+                    "selection_identity"
+                ]["failure_index_list_sha256"],
+                "selected_anchor_rows_sha256": adaptive_selection_manifest[
+                    "selection_identity"
+                ]["anchor_rows_sha256"],
+                "second_pass_complete": True,
+            }
+        )
     _atomic_json(proof_path, proof)
     proof_sha = _sha256_file(proof_path)
     manifest = {
@@ -1096,7 +1740,7 @@ def _fit_all_core_one_component_shortcut(
         "labels_sha256": labels_sha,
         "shortcut_proof_path": str(proof_path),
         "shortcut_proof_sha256": proof_sha,
-        "clustering_path": ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        "clustering_path": contract.shortcut_mode,
         "peak_rss_bytes_observed": max(peak, _rss_bytes()),
         "max_rss_bytes": int(contract.max_rss_bytes),
         "all_neighborhoods_materialized_simultaneously": False,
@@ -1175,7 +1819,10 @@ def fit_external_memory_dbscan(
         ):
             raise ExternalMemoryDBSCANError("terminal DBSCAN identity hash mismatch")
         shortcut_path: Path | None = None
-        if manifest.get("clustering_path") == ALL_CORE_ONE_COMPONENT_SHORTCUT:
+        if manifest.get("clustering_path") in {
+            ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        }:
             labels_path, core_path, shortcut_path, _anchors, _lower = (
                 _validate_shortcut_proof_closure(manifest=manifest, root=root)
             )
@@ -1235,6 +1882,49 @@ def fit_external_memory_dbscan(
             "SKLEARN_VERSION_MISMATCH:"
             f"actual={sklearn_version}:expected={contract.expected_sklearn_version}"
         )
+    if contract.shortcut_mode == ALL_CORE_ONE_COMPONENT_SHORTCUT:
+        shortcut_identity = {
+            "mode": contract.shortcut_mode,
+            "anchor_count": int(contract.shortcut_anchor_count),
+            "query_block_size": int(contract.shortcut_query_block_size),
+            "exact_fallback_max_samples": int(
+                contract.exact_fallback_max_samples
+            ),
+            "anchor_selection": "floor(i*(N-1)/(A-1)); endpoints included",
+            "selected_anchor_indices_sha256": _sample_indices_sha256(
+                _deterministic_anchor_indices(
+                    n_samples, int(contract.shortcut_anchor_count)
+                )
+            ),
+        }
+    elif contract.shortcut_mode == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT:
+        shortcut_identity = {
+            "mode": contract.shortcut_mode,
+            "seed_count": int(contract.shortcut_seed_count),
+            "failure_cap": int(contract.shortcut_failure_cap),
+            "query_block_size": int(contract.shortcut_query_block_size),
+            "exact_fallback_max_samples": int(
+                contract.exact_fallback_max_samples
+            ),
+            "seed_selection_algorithm": (
+                "global_k_minimum_squared_l2_float64_tie_sample_index_v1"
+            ),
+            "failure_selection_rule": (
+                "all_first_pass_insufficient_seed_lower_bound_indices_v1"
+            ),
+            "anchor_selection_rule": (
+                "sorted_unique_union_of_seed_and_all_failure_indices_v1"
+            ),
+            "selected_anchor_indices_sha256": None,
+        }
+    else:
+        shortcut_identity = {
+            "mode": SHORTCUT_DISABLED,
+            "query_block_size": int(contract.shortcut_query_block_size),
+            "exact_fallback_max_samples": int(
+                contract.exact_fallback_max_samples
+            ),
+        }
     identity = {
         "schema_version": SCHEMA_VERSION,
         "vectors_path": str(source),
@@ -1247,23 +1937,7 @@ def fit_external_memory_dbscan(
         "nearest_neighbors_metric": "euclidean",
         "nearest_neighbors_algorithm": "auto",
         "border_assignment": "minimum_cluster_label_of_adjacent_core_component",
-        "shortcut_contract": {
-            "mode": contract.shortcut_mode,
-            "anchor_count": int(contract.shortcut_anchor_count),
-            "query_block_size": int(contract.shortcut_query_block_size),
-            "exact_fallback_max_samples": int(
-                contract.exact_fallback_max_samples
-            ),
-            "anchor_selection": "floor(i*(N-1)/(A-1)); endpoints included",
-            "selected_anchor_indices_sha256": hashlib.sha256(
-                json.dumps(
-                    _deterministic_anchor_indices(
-                        n_samples, int(contract.shortcut_anchor_count)
-                    ).tolist(),
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-        },
+        "shortcut_contract": shortcut_identity,
     }
     state: dict[str, Any]
     if state_path.exists():
@@ -1278,11 +1952,10 @@ def fit_external_memory_dbscan(
             raise ExternalMemoryDBSCANError("checkpoint scientific identity mismatch")
     else:
         state = {
-            "phase": (
-                "shortcut_anchor_scan"
-                if contract.shortcut_mode == ALL_CORE_ONE_COMPONENT_SHORTCUT
-                else "neighbor_counts"
-            ),
+            "phase": {
+                ALL_CORE_ONE_COMPONENT_SHORTCUT: "shortcut_anchor_scan",
+                ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT: "adaptive_seed_scan",
+            }.get(contract.shortcut_mode, "neighbor_counts"),
             "next_offset": 0,
             "peak_rss_bytes": _rss_bytes(),
         }
@@ -1295,7 +1968,24 @@ def fit_external_memory_dbscan(
         )
 
     peak = max(int(state.get("peak_rss_bytes", 0)), _rss_bytes())
-    if contract.shortcut_mode == ALL_CORE_ONE_COMPONENT_SHORTCUT:
+    if contract.shortcut_mode in {
+        ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    }:
+        adaptive_anchors: np.ndarray | None = None
+        adaptive_manifest: Mapping[str, Any] | None = None
+        if contract.shortcut_mode == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT:
+            adaptive_anchors, adaptive_manifest, peak = (
+                _resolve_adaptive_anchor_selection(
+                    vectors=vectors,
+                    root=root,
+                    state_path=state_path,
+                    identity=identity,
+                    contract=contract,
+                    sklearn_version=sklearn_version,
+                    peak_rss_bytes=peak,
+                )
+            )
         shortcut_result = _fit_all_core_one_component_shortcut(
             vectors=vectors,
             root=root,
@@ -1306,6 +1996,8 @@ def fit_external_memory_dbscan(
             full_fit_method=fit_method,
             sklearn_version=sklearn_version,
             peak_rss_bytes=peak,
+            anchor_indices_override=adaptive_anchors,
+            adaptive_selection_manifest=adaptive_manifest,
         )
         if shortcut_result is not None:
             return shortcut_result
@@ -1700,6 +2392,8 @@ def fit_external_memory_dbscan(
 
 
 __all__ = [
+    "ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT",
+    "ADAPTIVE_SELECTION_SCHEMA_VERSION",
     "ALL_CORE_ONE_COMPONENT_SHORTCUT",
     "ExternalDBSCANContract",
     "ExternalDBSCANResult",

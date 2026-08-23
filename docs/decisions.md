@@ -210,6 +210,56 @@ controller state is not rewritten or relabelled.
 ### Status
 
 Accepted
+## [2026-08-23] Expand an exact DBSCAN witness by all deterministic failures
+
+### Background
+
+The full read-only evenly-spaced-64 diagnostic completed all 91,916,686 rows.
+Its anchor graph was connected and all anchors saw all 64 anchors including
+self, but 43 input rows still had insufficient anchor coverage and the minimum
+excluding-self lower bound was zero.  The fixed witness therefore correctly
+fails closed and cannot release the AIDS result.  An exploratory expansion
+showed that a small exceptional set exists, but its ad hoc representatives are
+not reusable scientific evidence.
+
+### Decision
+
+Add a separate opt-in
+`all_core_one_component_adaptive_anchor_v1` selection.  First scan every
+promoted vector row and select the globally smallest three squared L2 norms,
+computed in float64 and ordered by `(norm, sample_index)`.  This algorithm,
+seed count, complete vector SHA/dtype/shape, exact seed indices, hexadecimal
+norms, and index-list hash are frozen.
+
+Run a complete sklearn-brute seed-radius pass.  Record every sample index whose
+distinct-seed lower bound cannot yet prove core status or anchor attachment.
+The list is source ordered, unique, persisted exactly, and closed both by its
+`.npy` SHA and a portable index-list SHA.  Exceeding the declared failure cap
+is terminal and never truncates, samples, approximates, or falls back.
+
+For a cap-compliant list, define the final anchors without a heuristic:
+`sorted(unique(seed_indices union all_failure_indices))`.  Freeze the exact
+anchor-index array and exact source anchor rows.  Then rerun the full input
+scan against this final set and apply the unchanged all-core/single-component
+proof.  The final proof binds the adaptive selection-manifest hash, seed and
+failure identities, anchor-row hash, connected anchor graph, and complete
+second-pass lower-bound array.
+
+### Consequences
+
+- The exploratory representatives and fixed-64 negative cannot be promoted to
+  formal evidence.
+- Selection and proof are reproducible from the promoted vector file alone;
+  every tie and union ordering is specified.
+- A large or poorly connected exceptional set stops with an explicit
+  complexity block instead of changing DBSCAN semantics.
+- Existing controllers and output roots remain immutable; AutoDL wiring and a
+  fresh full proof are separate release steps.
+
+### Status
+
+Accepted (core only; fresh full proof still required)
+
 ## [2026-08-23] Shortcut dense DBSCAN only with a complete anchor proof
 
 ### Background
