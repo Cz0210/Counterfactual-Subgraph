@@ -4,6 +4,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+from scripts.baselines.globalgce.build_bace_train_pool import (
+    build_parser as build_legacy_rf_parser,
+)
 from scripts.autodl.run_bace_baseline_gnn_route import (
     build_parser as build_route_parser,
     main as route_main,
@@ -183,8 +188,43 @@ def test_globalgce_exact_topk_flag_is_frozen_into_train_task(tmp_path: Path) -> 
         if row["id"] == "bace_globalgce_train_candidates"
     )
     assert "--gspan-exact-top-k-pruning" in task["command"]
+    assert "--gnn-checkpoint" in task["command"]
+    assert "--teacher-path" not in task["command"]
+    assert str(task["command"][1]).endswith(
+        "scripts/autodl/run_bace_baseline_gnn_route.py"
+    )
     parsed = build_route_parser().parse_args(task["command"][2:])
     assert parsed.gspan_exact_top_k_pruning is True
+    assert parsed.gnn_checkpoint == str(_paths(tmp_path)["gnn_checkpoint"])
+
+
+def test_exact_topk_is_not_exposed_by_legacy_rf_cli_or_slurm() -> None:
+    with pytest.raises(SystemExit):
+        build_legacy_rf_parser().parse_args(
+            [
+                "--train-csv", "train.csv",
+                "--native-train-csv", "native.csv",
+                "--teacher-path", "teacher.pkl",
+                "--official-root", "official",
+                "--output-dir", "output",
+                "--gspan-exact-top-k-pruning",
+            ]
+        )
+    project_root = Path(__file__).resolve().parents[2]
+    legacy_slurm = (
+        project_root / "scripts/slurm/build_bace_train_pool.sh"
+    ).read_text(encoding="utf-8")
+    exact_docs = (
+        project_root / "docs/AUTODL_BACE_GLOBALGCE_EXACT_TOPK.md"
+    ).read_text(encoding="utf-8")
+    generic_slurm = (
+        project_root / "scripts/slurm/run_bace_baseline_gnn_route.sh"
+    ).read_text(encoding="utf-8")
+    assert "GSPAN_EXACT_TOP_K_PRUNING" not in legacy_slurm
+    assert "build_bace_train_pool.py \\\n" not in exact_docs
+    assert "globalgce-train-rules" in exact_docs
+    assert "--gnn-checkpoint" in exact_docs
+    assert "globalgce-train-rules" in generic_slurm
 
 
 def test_generic_fragment_cli_writes_fresh_composer_input(tmp_path: Path) -> None:

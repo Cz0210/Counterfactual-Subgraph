@@ -8689,3 +8689,25 @@ Accepted
 - This decision does not authorize stopping or modifying the active v5 writer.
   A fresh route requires exact monolithic parity, crash-resume validation, an
   immutable execution commit, and a fresh output root.
+
+## 2026-08-23: Close traversal-order and terminal-proof boundaries for exact gSpan
+
+- The exact-route fingerprint is versioned again and binds graph-list order,
+  node insertion order, and the exact NetworkX edge traversal order.  Sorting
+  graph content is invalid because the pinned official stable top-k can change
+  under equal-support traversal ties even when the unordered graph set is the
+  same.
+- A terminal exact audit may be published only after an atomic checkpoint says
+  `stage=complete`.  The audit is the PASS-last proof and binds that checkpoint
+  hash plus the selected SQLite payload identities.  Checkpoint or audit write
+  failure leaves a resumable non-terminal state.
+- Frozen-GINE BACE training persists the exact proof identity in its training
+  summary, summary, run manifest, and completion gate.  All four publications
+  are reopened, hash-checked, and the exact audit is recomputed before the
+  outer `PASS`; deleted or modified proof bytes fail closed.
+- The exact BACE CLI is only the GINE route
+  `run_bace_baseline_gnn_route.py globalgce-train-rules`.  The historical
+  RF-backed pool builder cannot enable exact mining and remains ineligible for
+  the BACE paper cell.
+- These changes do not authorize mutation or termination of the active v5
+  output.  Any diagnostic or replacement begins from a fresh immutable root.

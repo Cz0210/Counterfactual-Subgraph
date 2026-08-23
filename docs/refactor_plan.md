@@ -1297,3 +1297,12 @@ Mutagenicity roadmaps.
   controller.
 - [ ] Keep v5 running until it completes naturally or a reviewed replacement
   is projected to finish at least 30% earlier without losing a safe prefix.
+- [x] Bind graph-list, node-insertion, and edge-traversal order in the exact
+  resume fingerprint; reject cross-order adoption with a pinned-official
+  counterexample.
+- [x] Publish a complete checkpoint before the terminal exact audit and cover
+  both writes with recoverable failure injection.
+- [x] Remove exact mining from the historical RF BACE CLI/Slurm surface and
+  expose it only through the frozen-GINE generic route.
+- [x] Hash-bind and revalidate the exact proof through training summary,
+  summary, run manifest, completion gate, and final PASS.

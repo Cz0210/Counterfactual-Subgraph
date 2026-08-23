@@ -30,7 +30,6 @@ DRY_RUN=${DRY_RUN:-0}
 VALIDATE_ONLY=${VALIDATE_ONLY:-0}
 MIN_FREQ=${MIN_FREQ:-}
 MIN_FREQ_MANIFEST=${MIN_FREQ_MANIFEST:-$ARTIFACT_ROOT/outputs/hpc/optimization/bace_globalgce_v4_retry2/globalgce_bace_min_freq_manifest.json}
-GSPAN_EXACT_TOP_K_PRUNING=${GSPAN_EXACT_TOP_K_PRUNING:-0}
 
 for path in "$TRAIN_CSV" "$NATIVE_TRAIN_CSV" "$TEACHER_PATH"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
@@ -64,13 +63,6 @@ else
   test -s "$MIN_FREQ_MANIFEST" || { echo "missing min-freq manifest: $MIN_FREQ_MANIFEST" >&2; exit 2; }
   args+=(--min-freq-manifest "$MIN_FREQ_MANIFEST")
 fi
-if [[ "$GSPAN_EXACT_TOP_K_PRUNING" == 1 ]]; then
-  args+=(--gspan-exact-top-k-pruning)
-elif [[ "$GSPAN_EXACT_TOP_K_PRUNING" != 0 ]]; then
-  echo "GSPAN_EXACT_TOP_K_PRUNING must be 0 or 1" >&2
-  exit 2
-fi
-
 echo "hostname=$(hostname)"
 echo "python=$(which python)"
 python --version

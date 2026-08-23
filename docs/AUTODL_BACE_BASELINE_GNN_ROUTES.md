@@ -140,8 +140,14 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-train-rules \
   --official-root "$GLOBALGCE_OFFICIAL" \
   --output-dir "$OUTPUT_ROOT/train-candidates" \
   --expected-parent-count 360 --epochs 100 --top-k-native 20 \
-  --device cuda:0 --resume
+  --device cuda:0 --resume --gspan-exact-top-k-pruning
 ```
+
+The exact route is not exposed by the historical RF-backed
+`build_bace_train_pool.py` CLI.  Its paired wrapper is
+`scripts/slurm/run_bace_baseline_gnn_route.sh`, and the terminal training
+summary, run manifest, and completion gate all revalidate and hash-bind the
+exact audit before publishing `PASS`.
 
 The native CSV is the complete 959-row processed train split.  Before creating
 the training root, the adapter verifies the prepared graph bundle and selects

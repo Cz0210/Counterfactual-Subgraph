@@ -26,7 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, Sequence
 
-from .globalgce_resumable import train_globalgce_resumable
+from .globalgce_resumable import (
+    train_globalgce_resumable,
+    validate_exact_top_k_proof_identity,
+)
 
 try:
     from rdkit import Chem
@@ -2125,6 +2128,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             if can_resume_trained_model
             else {}
         )
+        exact_top_k_proof: dict[str, Any] = {}
         if can_resume_trained_model:
             expected_state = {
                 "seed": int(seed),
@@ -2132,6 +2136,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "top_k_native": int(top_k_native),
                 "learning_rate": float(learning_rate),
                 "dropout": float(dropout),
+                "gspan_exact_top_k_pruning": bool(
+                    gspan_exact_top_k_pruning
+                ),
                 "selected_parent_count": len(parents),
             }
             if use_frozen_gine:
@@ -2160,6 +2167,12 @@ class OfficialGlobalGCEMutagenicityGenerator:
                         f"mismatch for {path.name}: actual={actual_hash}, "
                         f"expected={training_state.get(hash_key)!r}."
                     )
+            if gspan_exact_top_k_pruning:
+                exact_top_k_proof.update(
+                    validate_exact_top_k_proof_identity(
+                        training_state.get("gspan_exact_top_k_proof") or {}
+                    )
+                )
         if use_frozen_gine:
             from src.baselines.globalgce_frozen_gine_bridge import (
                 FrozenGINEDifferentiableBridge,
@@ -2384,6 +2397,12 @@ class OfficialGlobalGCEMutagenicityGenerator:
             )
             gnn_summary = dict(training_state.get("gnn_training") or {})
         else:
+            def _record_exact_top_k_proof(proof: dict[str, Any]) -> None:
+                exact_top_k_proof.clear()
+                exact_top_k_proof.update(
+                    validate_exact_top_k_proof_identity(proof)
+                )
+
             augmented_test_loader = train_globalgce_resumable(
                 epochs=int(epochs),
                 pred_model=gnn_model,
@@ -2402,8 +2421,17 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 gspan_flush_every=int(gspan_flush_every),
                 gspan_max_in_memory_candidates=int(gspan_max_in_memory_candidates),
                 gspan_exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
+                on_exact_top_k_proof=(
+                    _record_exact_top_k_proof
+                    if gspan_exact_top_k_pruning
+                    else None
+                ),
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
+            if gspan_exact_top_k_pruning and not exact_top_k_proof:
+                raise RuntimeError(
+                    "GlobalGCE exact-top-k training did not bind its audit proof."
+                )
             training_state_payload = {
                     "seed": int(seed),
                     "epochs": int(epochs),
@@ -2425,6 +2453,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "trained_once": True,
                     "rule_selection_performed_once": True,
                 }
+            if gspan_exact_top_k_pruning:
+                training_state_payload["gspan_exact_top_k_proof"] = dict(
+                    exact_top_k_proof
+                )
             if use_frozen_gine:
                 training_state_payload["prediction_backend"] = (
                     "frozen_gine_differentiable_bridge"
@@ -2497,6 +2529,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "generation_requires_gradients": False,
             "trained_model_resumed": can_resume_trained_model,
             "training_checkpoint_policy": "gspan_root_chunks_plus_epoch_atomic_v1",
+            "gspan_exact_top_k_pruning": bool(gspan_exact_top_k_pruning),
             "unused_pandas_report_materialization": False,
             **codec_summary,
             "saved_results_candidates_used": False,
@@ -2504,6 +2537,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "calibration_loaded": False,
             "test_loaded": False,
         }
+        if gspan_exact_top_k_pruning:
+            training_summary["gspan_exact_top_k_proof"] = (
+                validate_exact_top_k_proof_identity(exact_top_k_proof)
+            )
         if use_frozen_gine:
             from src.baselines.globalgce_bace_native_rules import (
                 GlobalGCENativeRule,

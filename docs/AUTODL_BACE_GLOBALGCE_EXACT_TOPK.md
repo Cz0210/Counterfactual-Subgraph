@@ -22,8 +22,11 @@ route therefore:
 4. prunes only after reporting the current code and proving the stable cutoff;
 5. keeps an atomic pre-root top-k snapshot, so a crash restarts the whole root
    without adopting a partial traversal;
-6. emits `exact_top_k_audit.json` with the input fingerprint, selected payload
-   hashes, stable ordering, report count, and pruned-branch count.
+6. fingerprints graph-list, node-insertion, and edge-traversal order rather
+   than sorting away native traversal semantics;
+7. atomically closes `checkpoint.json` with `stage=complete` before publishing
+   terminal-PASS `exact_top_k_audit.json`, which binds the checkpoint and
+   selected payload hashes.
 
 The legacy SQLite-all-patterns route remains the default.  A new route must
 pass monolithic-versus-pruned candidate/support/payload parity and crash-resume
@@ -41,15 +44,18 @@ tests before using `--gspan-exact-top-k-pruning`.
 - A storage-guard stop in the legacy route is recoverable evidence, not a
   license to lower `min_freq` or `top_k`.
 
-Direct BACE CLI opt-in:
+Direct BACE frozen-GINE CLI opt-in (the historical RF pool builder deliberately
+does not expose this flag):
 
 ```bash
-python scripts/baselines/globalgce/build_bace_train_pool.py \
+python scripts/autodl/run_bace_baseline_gnn_route.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
-  --train-csv /absolute/train_source.csv \
+  globalgce-train-rules \
+  --method GlobalGCE \
+  --gnn-checkpoint /absolute/calibrated_bace_gine \
+  --source-manifest /absolute/source_graph_manifest.jsonl \
   --native-train-csv /absolute/train.csv \
-  --teacher-path /absolute/frozen_teacher.pkl \
   --official-root /absolute/pinned_globalgce \
   --output-dir /absolute/fresh_output \
   --expected-parent-count 360 --seed 13 --epochs 100 \
@@ -57,5 +63,8 @@ python scripts/baselines/globalgce/build_bace_train_pool.py \
   --gspan-exact-top-k-pruning
 ```
 
-For the paired Slurm entrypoint set `GSPAN_EXACT_TOP_K_PRUNING=1` when invoking
-`scripts/slurm/build_bace_train_pool.sh`.  The default remains `0`.
+The paired Slurm entrypoint is
+`scripts/slurm/run_bace_baseline_gnn_route.sh`; pass the same
+`globalgce-train-rules ... --gspan-exact-top-k-pruning` arguments after the
+script name.  Every terminal manifest must assert `oracle_backend=gnn`,
+`classifier_family=gine`, and `rf_oracle_used=false`.

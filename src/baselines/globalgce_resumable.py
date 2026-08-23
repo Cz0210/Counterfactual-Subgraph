@@ -17,7 +17,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 
 def _atomic_bytes(path: Path, payload: bytes) -> None:
@@ -49,28 +49,238 @@ def _atomic_pickle(path: Path, payload: Any) -> None:
     _atomic_bytes(path, pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
 
 
-def _graph_input_fingerprint(graphs: list[Any], settings: dict[str, Any]) -> str:
-    rows = []
-    for graph in graphs:
-        nodes = sorted(
-            (str(node), str(attributes.get("label")))
-            for node, attributes in graph.nodes(data=True)
-        )
-        edges = sorted(
-            (
-                min(str(left), str(right)),
-                max(str(left), str(right)),
-                str(attributes.get("label")),
+def _typed_fingerprint_value(value: Any) -> Any:
+    """Encode values without collapsing types that affect native traversal."""
+
+    if value is None:
+        return {"type": "none"}
+    if isinstance(value, bool):
+        return {"type": "bool", "value": value}
+    if isinstance(value, int):
+        return {"type": "int", "value": str(value)}
+    if isinstance(value, float):
+        return {"type": "float", "value": value.hex()}
+    if isinstance(value, str):
+        return {"type": "str", "value": value}
+    if isinstance(value, bytes):
+        return {"type": "bytes", "value": value.hex()}
+    if isinstance(value, tuple):
+        return {
+            "type": "tuple",
+            "value": [_typed_fingerprint_value(item) for item in value],
+        }
+    if isinstance(value, list):
+        return {
+            "type": "list",
+            "value": [_typed_fingerprint_value(item) for item in value],
+        }
+    if isinstance(value, Mapping):
+        encoded_items = [
+            (_typed_fingerprint_value(key), _typed_fingerprint_value(item))
+            for key, item in value.items()
+        ]
+        encoded_items.sort(
+            key=lambda row: json.dumps(
+                row[0], sort_keys=True, separators=(",", ":")
             )
-            for left, right, attributes in graph.edges(data=True)
         )
-        rows.append({"nodes": nodes, "edges": edges})
+        return {"type": "mapping", "value": encoded_items}
+    return {
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "repr": repr(value),
+    }
+
+
+def _graph_input_fingerprint(graphs: list[Any], settings: dict[str, Any]) -> str:
+    """Bind every ordering axis consumed by pinned NetworkX/gSpan traversal."""
+
+    rows = []
+    for graph_index, graph in enumerate(graphs):
+        nodes = [
+            {
+                "node_insertion_index": node_index,
+                "node": _typed_fingerprint_value(node),
+                "label": _typed_fingerprint_value(attributes.get("label")),
+            }
+            for node_index, (node, attributes) in enumerate(graph.nodes(data=True))
+        ]
+        edges = [
+            {
+                "edge_traversal_index": edge_index,
+                "left": _typed_fingerprint_value(left),
+                "right": _typed_fingerprint_value(right),
+                "label": _typed_fingerprint_value(attributes.get("label")),
+            }
+            for edge_index, (left, right, attributes) in enumerate(
+                graph.edges(data=True)
+            )
+        ]
+        rows.append(
+            {
+                "graph_list_index": graph_index,
+                "nodes_in_insertion_order": nodes,
+                "edges_in_native_traversal_order": edges,
+            }
+        )
     encoded = json.dumps(
-        {"settings": settings, "graphs": rows},
+        {
+            "fingerprint_schema": "globalgce_native_traversal_order_v2",
+            "settings": _typed_fingerprint_value(settings),
+            "graphs_in_input_list_order": rows,
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _file_identity(path: Path) -> dict[str, Any]:
+    resolved = path.expanduser().resolve(strict=True)
+    return {
+        "path": str(resolved),
+        "bytes": resolved.stat().st_size,
+        "sha256": _sha256_file(resolved),
+    }
+
+
+def _selected_rows_from_database(
+    connection: sqlite3.Connection, *, top_k: int
+) -> list[dict[str, Any]]:
+    selected = connection.execute(
+        "SELECT support, root_index, local_index, payload FROM patterns "
+        "ORDER BY support DESC, root_index ASC, local_index ASC LIMIT ?",
+        (int(top_k),),
+    ).fetchall()
+    return [
+        {
+            "rank": rank,
+            "support": int(row[0]),
+            "root_index": int(row[1]),
+            "local_index": int(row[2]),
+            "payload_sha256": hashlib.sha256(bytes(row[3])).hexdigest(),
+        }
+        for rank, row in enumerate(selected, start=1)
+    ]
+
+
+def validate_exact_top_k_audit(audit_path: str | Path) -> dict[str, Any]:
+    """Recompute the terminal exact-top-k proof from checkpoint and SQLite."""
+
+    audit_file = Path(audit_path).expanduser().resolve(strict=True)
+    if audit_file.name != "exact_top_k_audit.json":
+        raise ValueError("GlobalGCE exact-top-k proof path has an invalid filename.")
+    checkpoint_path = audit_file.parent / "checkpoint.json"
+    database_path = audit_file.parent / "frequent_patterns.sqlite3"
+    if not checkpoint_path.is_file() or not database_path.is_file():
+        raise FileNotFoundError(
+            "GlobalGCE exact-top-k proof requires checkpoint.json and SQLite."
+        )
+    audit = json.loads(audit_file.read_text(encoding="utf-8"))
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    if not isinstance(audit, dict) or not isinstance(checkpoint, dict):
+        raise ValueError("GlobalGCE exact-top-k proof files must be JSON objects.")
+    if (
+        audit.get("schema_version")
+        != "globalgce_exact_stable_topk_audit_v2"
+        or audit.get("status") != "PASS"
+        or audit.get("run_complete") is not True
+    ):
+        raise ValueError("GlobalGCE exact-top-k audit is not a v2 terminal PASS.")
+    if (
+        checkpoint.get("schema_version")
+        != "globalgce_gspan_exact_stable_topk_v2"
+        or checkpoint.get("stage") != "complete"
+        or checkpoint.get("exact_top_k_pruning") is not True
+    ):
+        raise ValueError("GlobalGCE exact-top-k checkpoint is not complete.")
+    checkpoint_identity = _file_identity(checkpoint_path)
+    if audit.get("checkpoint_sha256") != checkpoint_identity["sha256"]:
+        raise ValueError("GlobalGCE exact-top-k checkpoint hash binding failed.")
+    if audit.get("input_fingerprint") != checkpoint.get("input_fingerprint"):
+        raise ValueError("GlobalGCE exact-top-k fingerprint closure failed.")
+    if Path(str(checkpoint.get("sqlite_path") or "")).resolve() != database_path:
+        raise ValueError("GlobalGCE exact-top-k SQLite path closure failed.")
+    top_k = int(audit.get("top_k") or 0)
+    if top_k <= 0:
+        raise ValueError("GlobalGCE exact-top-k audit has an invalid top_k.")
+    with sqlite3.connect(database_path, timeout=120) as connection:
+        stored_fingerprint = connection.execute(
+            "SELECT value FROM metadata WHERE key='input_fingerprint'"
+        ).fetchone()
+        active_root = connection.execute(
+            "SELECT value FROM metadata WHERE key='active_root_index'"
+        ).fetchone()
+        root_count, complete_count = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(complete), 0) FROM roots"
+        ).fetchone()
+        retained_count = int(
+            connection.execute("SELECT COUNT(*) FROM patterns").fetchone()[0]
+        )
+        reported_count, pruned_count = connection.execute(
+            "SELECT COALESCE(SUM(reported_pattern_count), 0), "
+            "COALESCE(SUM(pruned_branch_count), 0) FROM root_stats"
+        ).fetchone()
+        selected_rows = _selected_rows_from_database(connection, top_k=top_k)
+    if stored_fingerprint is None or str(stored_fingerprint[0]) != str(
+        checkpoint["input_fingerprint"]
+    ):
+        raise ValueError("GlobalGCE exact-top-k SQLite fingerprint mismatch.")
+    if active_root is not None:
+        raise ValueError("GlobalGCE exact-top-k proof retains an active root.")
+    if (
+        int(root_count) != int(checkpoint.get("root_count", -1))
+        or int(complete_count) != int(root_count)
+        or int(checkpoint.get("completed_root_count", -1)) != int(root_count)
+    ):
+        raise ValueError("GlobalGCE exact-top-k root completion closure failed.")
+    selected_identity = hashlib.sha256(
+        json.dumps(selected_rows, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    if (
+        audit.get("selected_rows") != selected_rows
+        or int(audit.get("selected_count", -1)) != len(selected_rows)
+        or audit.get("selected_identity_sha256") != selected_identity
+        or int(audit.get("retained_pattern_count", -1)) != retained_count
+        or int(audit.get("reported_pattern_count", -1)) != int(reported_count)
+        or int(audit.get("pruned_branch_count", -1)) != int(pruned_count)
+    ):
+        raise ValueError("GlobalGCE exact-top-k selected-payload closure failed.")
+    return {
+        "schema_version": "globalgce_exact_top_k_proof_identity_v1",
+        "status": "PASS",
+        "input_fingerprint": str(checkpoint["input_fingerprint"]),
+        "top_k": top_k,
+        "selected_identity_sha256": selected_identity,
+        "audit": _file_identity(audit_file),
+        "checkpoint": checkpoint_identity,
+        "sqlite_path": str(database_path),
+    }
+
+
+def validate_exact_top_k_proof_identity(
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless a persisted proof identity still matches its bytes."""
+
+    if not isinstance(identity, Mapping):
+        raise ValueError("GlobalGCE exact-top-k proof identity is missing.")
+    audit = identity.get("audit")
+    if not isinstance(audit, Mapping) or not audit.get("path"):
+        raise ValueError("GlobalGCE exact-top-k proof has no audit path.")
+    observed = validate_exact_top_k_audit(str(audit["path"]))
+    if dict(identity) != observed:
+        raise ValueError("GlobalGCE exact-top-k proof identity/hash mismatch.")
+    return observed
 
 
 class _Heartbeat:
@@ -111,7 +321,7 @@ def resumable_gspan_root_chunks(
     flush_every: int | None = None,
     max_in_memory_candidates: int | None = None,
     exact_top_k_pruning: bool = False,
-) -> Iterator[None]:
+) -> Iterator[dict[str, Any]]:
     """Spill deterministic gSpan root reports and retain only official top-k.
 
     The official implementation builds every frequent graph in memory and then
@@ -154,6 +364,10 @@ def resumable_gspan_root_chunks(
     min_free_ratio = float(os.environ.get("GLOBALGCE_STORAGE_MIN_FREE_RATIO", "0.02"))
     min_free_inodes = int(os.environ.get("GLOBALGCE_STORAGE_MIN_FREE_INODES", "100000"))
     active: dict[int, dict[str, Any]] = {}
+    session: dict[str, Any] = {
+        "exact_top_k_pruning": bool(exact_top_k_pruning),
+        "completed_exact_top_k_proofs": [],
+    }
 
     def _stable_key(row: tuple[int, int, int]) -> tuple[int, int, int]:
         support, root_index, local_index = row
@@ -298,7 +512,7 @@ def resumable_gspan_root_chunks(
             "root_order": [repr(value) for value in top_roots],
             "top_k": int(top_k) if top_k is not None else None,
             "spill_schema": (
-                "sqlite_exact_stable_topk_antimonotone_v1"
+                "sqlite_exact_stable_topk_antimonotone_v2"
                 if exact_top_k_pruning
                 else "sqlite_stable_support_topk_v2"
             ),
@@ -350,7 +564,7 @@ def resumable_gspan_root_chunks(
         connection.commit()
         state = {
             "schema_version": (
-                "globalgce_gspan_exact_stable_topk_v1"
+                "globalgce_gspan_exact_stable_topk_v2"
                 if exact_top_k_pruning
                 else "globalgce_gspan_sqlite_chunks_v2"
             ),
@@ -528,20 +742,28 @@ def resumable_gspan_root_chunks(
             self.fs_collection = [pickle.loads(row[3]) for row in selected]
             self._frequent_subgraphs = []
             if exact_top_k_pruning:
-                selected_rows = [
+                selected_rows = _selected_rows_from_database(
+                    connection, top_k=int(top_k)
+                )
+                state.update(
                     {
-                        "rank": rank,
-                        "support": int(row[0]),
-                        "root_index": int(row[1]),
-                        "local_index": int(row[2]),
-                        "payload_sha256": hashlib.sha256(bytes(row[3])).hexdigest(),
+                        "stage": "complete",
+                        "current_root_index": None,
+                        "selected_top_k_count": len(selected),
+                        "peak_rss_mib": peak_rss_mib(),
                     }
-                    for rank, row in enumerate(selected, start=1)
-                ]
+                )
+                # The complete checkpoint closes first.  The exact audit is the
+                # terminal PASS publication and therefore can never claim a
+                # run whose latest checkpoint still says ``mining``.
+                checkpoint_path = support_root / "checkpoint.json"
+                _atomic_json(checkpoint_path, state)
                 audit_payload = {
-                    "schema_version": "globalgce_exact_stable_topk_audit_v1",
+                    "schema_version": "globalgce_exact_stable_topk_audit_v2",
+                    "status": "PASS",
                     "run_complete": True,
                     "input_fingerprint": fingerprint,
+                    "checkpoint_sha256": _sha256_file(checkpoint_path),
                     "top_k": int(top_k),
                     "selected_count": len(selected_rows),
                     "selected_rows": selected_rows,
@@ -573,16 +795,21 @@ def resumable_gspan_root_chunks(
                         connection.execute("SELECT COUNT(*) FROM patterns").fetchone()[0]
                     ),
                 }
-                _atomic_json(support_root / "exact_top_k_audit.json", audit_payload)
-            state.update(
-                {
-                    "stage": "complete",
-                    "current_root_index": None,
-                    "selected_top_k_count": len(selected),
-                    "peak_rss_mib": peak_rss_mib(),
-                }
-            )
-            _atomic_json(support_root / "checkpoint.json", state)
+                audit_path = support_root / "exact_top_k_audit.json"
+                _atomic_json(audit_path, audit_payload)
+                session["completed_exact_top_k_proofs"].append(
+                    validate_exact_top_k_audit(audit_path)
+                )
+            else:
+                state.update(
+                    {
+                        "stage": "complete",
+                        "current_root_index": None,
+                        "selected_top_k_count": len(selected),
+                        "peak_rss_mib": peak_rss_mib(),
+                    }
+                )
+                _atomic_json(support_root / "checkpoint.json", state)
             return self.fs_collection, self.freq_collection
         finally:
             active.pop(id(self), None)
@@ -593,7 +820,7 @@ def resumable_gspan_root_chunks(
     if exact_top_k_pruning:
         gspan_class._subgraph_mining = exact_subgraph_mining
     try:
-        yield
+        yield session
     finally:
         gspan_class.run = original_run
         gspan_class._report = original_report
@@ -631,6 +858,7 @@ def train_globalgce_resumable(
     gspan_flush_every: int = 256,
     gspan_max_in_memory_candidates: int = 256,
     gspan_exact_top_k_pruning: bool = False,
+    on_exact_top_k_proof: Callable[[dict[str, Any]], None] | None = None,
 ) -> Any:
     """Run the official loop with atomic epoch checkpoints and exact RNG state."""
 
@@ -645,10 +873,19 @@ def train_globalgce_resumable(
         flush_every=int(gspan_flush_every),
         max_in_memory_candidates=int(gspan_max_in_memory_candidates),
         exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
-    ):
+    ) as gspan_session:
         fss, expanded_train, expanded_val, expanded_test = model.get_fs_expanded_data(
             train_loader
         )
+    if gspan_exact_top_k_pruning:
+        proofs = list(gspan_session["completed_exact_top_k_proofs"])
+        if not proofs:
+            raise RuntimeError(
+                "GlobalGCE exact-top-k training produced no terminal audit proof."
+            )
+        proof = validate_exact_top_k_proof_identity(proofs[-1])
+        if on_exact_top_k_proof is not None:
+            on_exact_top_k_proof(proof)
     optimizer = torch_module.optim.Adam(
         model.parameters(), lr=float(learning_rate), weight_decay=1e-5
     )

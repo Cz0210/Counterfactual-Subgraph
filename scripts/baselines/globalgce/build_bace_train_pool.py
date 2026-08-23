@@ -46,14 +46,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory-log-every-chunks", type=int, default=1)
     parser.add_argument("--gspan-flush-every", type=int, default=256)
     parser.add_argument("--gspan-max-in-memory-candidates", type=int, default=256)
-    parser.add_argument(
-        "--gspan-exact-top-k-pruning",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Opt in to the audited stable-top-k anti-monotone gSpan pruning route."
-        ),
-    )
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--min-freq", type=int, default=None)
     parser.add_argument("--min-freq-manifest", default=None)
@@ -112,9 +104,6 @@ def main(argv: list[str] | None = None) -> int:
             gspan_flush_every=int(args.gspan_flush_every),
             gspan_max_in_memory_candidates=int(
                 args.gspan_max_in_memory_candidates
-            ),
-            gspan_exact_top_k_pruning=bool(
-                args.gspan_exact_top_k_pruning
             ),
         ),
     )

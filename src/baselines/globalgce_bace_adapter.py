@@ -36,6 +36,9 @@ from src.eval.bace_frozen_gnn_contracts import (
     stable_sha256,
     utc_now,
 )
+from src.baselines.globalgce_resumable import (
+    validate_exact_top_k_proof_identity,
+)
 
 
 DATASET_NAME = "BACE"
@@ -110,6 +113,66 @@ def _read_source_manifest(path_like: str | Path) -> list[dict[str, Any]]:
             seen.add(parent_id)
             rows.append(row)
     return rows
+
+
+def validate_bace_globalgce_terminal_artifacts(
+    output_dir: str | Path, *, require_exact_top_k: bool
+) -> dict[str, Any]:
+    """Re-open the train publications and gate the final PASS marker."""
+
+    root = Path(output_dir).expanduser().resolve(strict=True)
+    training_path = root / "training_summary.json"
+    summary_path = root / "summary.json"
+    manifest_path = root / "run_manifest.json"
+    complete_path = root / "_RUN_COMPLETE.json"
+    training = _json_object(
+        training_path, description="BACE GlobalGCE training summary"
+    )
+    summary = _json_object(summary_path, description="BACE GlobalGCE summary")
+    manifest = _json_object(
+        manifest_path, description="BACE GlobalGCE run manifest"
+    )
+    complete = _json_object(
+        complete_path, description="BACE GlobalGCE completion gate"
+    )
+    training_identity = file_identity(training_path)
+    summary_identity = file_identity(summary_path)
+    manifest_identity = file_identity(manifest_path)
+    if (
+        complete.get("training_summary") != training_identity
+        or complete.get("summary") != summary_identity
+        or complete.get("run_manifest") != manifest_identity
+        or manifest.get("training_summary") != training_identity
+        or manifest.get("summary") != summary_identity
+        or manifest.get("status") != "PASS"
+        or manifest.get("run_complete") is not True
+        or complete.get("status") != "PASS"
+        or complete.get("run_complete") is not True
+        or manifest.get("oracle_backend") != "gnn"
+        or manifest.get("classifier_family") != "gine"
+        or manifest.get("rf_oracle_used") is not False
+        or summary.get("oracle_backend") != "gnn"
+        or summary.get("classifier_family") != "gine"
+        or summary.get("rf_oracle_used") is not False
+    ):
+        raise RuntimeError("BACE GlobalGCE terminal artifact/hash closure failed")
+    exact_proof: dict[str, Any] | None = None
+    if require_exact_top_k:
+        exact_proof = validate_exact_top_k_proof_identity(
+            training.get("gspan_exact_top_k_proof") or {}
+        )
+        for payload in (summary, manifest, complete):
+            if validate_exact_top_k_proof_identity(
+                payload.get("gspan_exact_top_k_proof") or {}
+            ) != exact_proof:
+                raise RuntimeError("BACE GlobalGCE exact proof binding changed")
+    return {
+        "status": "PASS",
+        "training_summary": training_identity,
+        "summary": summary_identity,
+        "run_manifest": manifest_identity,
+        "gspan_exact_top_k_proof": exact_proof,
+    }
 
 
 def audit_bace_globalgce_train_contract(
@@ -351,6 +414,11 @@ def build_bace_train_pool(
     generator: NativeGeneratorProtocol,
     config: PoolBuildConfig | None = None,
 ) -> dict[str, Any]:
+    if config is not None and config.gspan_exact_top_k_pruning:
+        raise ValueError(
+            "BACE exact-top-k mining is forbidden on the historical RF route; "
+            "use build_bace_frozen_gine_rule_pool instead."
+        )
     return build_mutagenicity_train_pool(
         train_csv=train_csv,
         teacher_path=teacher_path,
@@ -519,6 +587,20 @@ def build_bace_frozen_gine_rule_pool(
     training_holder: dict[str, Any] = {}
 
     def record_training(summary: dict[str, Any]) -> None:
+        if (
+            summary.get("oracle_backend") != "gnn"
+            or summary.get("classifier_family") != "gine"
+            or summary.get("rf_oracle_used") is not False
+        ):
+            raise RuntimeError(
+                "BACE GlobalGCE training summary is not frozen-GINE clean"
+            )
+        if resolved.gspan_exact_top_k_pruning:
+            summary["gspan_exact_top_k_proof"] = (
+                validate_exact_top_k_proof_identity(
+                    summary.get("gspan_exact_top_k_proof") or {}
+                )
+            )
         training_holder.clear()
         training_holder.update(summary)
         atomic_json(root / "training_summary.json", training_holder)
@@ -549,6 +631,18 @@ def build_bace_frozen_gine_rule_pool(
         rules_only=True,
     )
     training_holder.update(result.training_summary)
+    if (
+        training_holder.get("oracle_backend") != "gnn"
+        or training_holder.get("classifier_family") != "gine"
+        or training_holder.get("rf_oracle_used") is not False
+    ):
+        raise RuntimeError("BACE GlobalGCE result is not frozen-GINE clean")
+    exact_top_k_proof: dict[str, Any] | None = None
+    if resolved.gspan_exact_top_k_pruning:
+        exact_top_k_proof = validate_exact_top_k_proof_identity(
+            training_holder.get("gspan_exact_top_k_proof") or {}
+        )
+        training_holder["gspan_exact_top_k_proof"] = exact_top_k_proof
     catalog_path = root / "native" / "native_rule_catalog.jsonl"
     rows: list[dict[str, Any]] = []
     with catalog_path.open(encoding="utf-8") as handle:
@@ -604,6 +698,16 @@ def build_bace_frozen_gine_rule_pool(
         }
     )
     atomic_json(root / "training_summary.json", training_holder)
+    training_summary_identity = file_identity(root / "training_summary.json")
+    persisted_training = _json_object(
+        root / "training_summary.json", description="BACE GlobalGCE training summary"
+    )
+    if resolved.gspan_exact_top_k_pruning:
+        persisted_proof = validate_exact_top_k_proof_identity(
+            persisted_training.get("gspan_exact_top_k_proof") or {}
+        )
+        if persisted_proof != exact_top_k_proof:
+            raise RuntimeError("BACE GlobalGCE training proof binding changed")
     summary = {
         "status": "PASS",
         "run_complete": True,
@@ -614,8 +718,15 @@ def build_bace_frozen_gine_rule_pool(
         "oracle_checkpoint_hash": card["checkpoint_id"],
         "calibration_loaded": False,
         "test_loaded": False,
+        "oracle_backend": "gnn",
+        "classifier_family": "gine",
+        "rf_oracle_used": False,
+        "training_summary": training_summary_identity,
     }
+    if exact_top_k_proof is not None:
+        summary["gspan_exact_top_k_proof"] = exact_top_k_proof
     atomic_json(root / "summary.json", summary)
+    summary_identity = file_identity(root / "summary.json")
     manifest = {
         **fingerprint_payload,
         "dataset": "bace",
@@ -635,14 +746,32 @@ def build_bace_frozen_gine_rule_pool(
         "selector_fitted_on_calibration": False,
         "calibration_loaded": False,
         "test_loaded": False,
+        "training_summary": training_summary_identity,
+        "summary": summary_identity,
         "completed_at": utc_now(),
     }
+    if exact_top_k_proof is not None:
+        manifest["gspan_exact_top_k_proof"] = exact_top_k_proof
     assert_gine_clean_manifest(
         manifest, checkpoint_id=str(card["checkpoint_id"]), require_train_only=True
     )
     atomic_json(manifest_path, manifest)
     atomic_json(root / "oracle_provenance.json", provenance)
-    atomic_json(root / "_RUN_COMPLETE.json", summary)
+    run_manifest_identity = file_identity(manifest_path)
+    complete = {
+        **summary,
+        "summary": summary_identity,
+        "run_manifest": run_manifest_identity,
+    }
+    atomic_json(root / "_RUN_COMPLETE.json", complete)
+
+    # Re-open every upper-layer publication and revalidate the terminal exact
+    # proof immediately before PASS.  Missing or modified proof bytes, or a
+    # summary/manifest hash mismatch, therefore fail closed without PASS.
+    validate_bace_globalgce_terminal_artifacts(
+        root,
+        require_exact_top_k=bool(resolved.gspan_exact_top_k_pruning),
+    )
     atomic_marker(root / "PASS", "[BACE_GLOBALGCE_FROZEN_GINE_RULE_POOL_PASS]")
     return manifest
 
@@ -657,4 +786,5 @@ __all__ = [
     "audit_bace_train_pool",
     "build_bace_frozen_gine_rule_pool",
     "build_bace_train_pool",
+    "validate_bace_globalgce_terminal_artifacts",
 ]
