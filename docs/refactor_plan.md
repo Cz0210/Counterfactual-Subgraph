@@ -70,6 +70,27 @@
   deploying or interrupting existing AutoDL diagnostic/legacy jobs.
 - [ ] Publish either PASS gate only after the real AutoDL evidence completes;
   until then optimized full/shared routes remain blocked.
+## 2026-08-23: Close shortcut checkpoint-prefix false positives
+
+- [x] Authenticate each atomic checkpoint payload and bind `next_offset` to a
+  contiguous, scientific-identity-bound forward hash-chain ledger.
+- [x] Record block-local float64 top-k evidence for adaptive seed selection,
+  the complete per-block adaptive failure set, and canonical uint32 lower
+  values/minima for the final anchor scan.
+- [x] Replay every committed prefix from source/model bytes before resume and
+  reject offset, aggregate, ledger, partial-array, or state tampering.
+- [x] Persist first-pass completion before adaptive-selection publication and
+  cover the selection-rename/checkpoint crash window with a resume fixture.
+- [x] Before PASS, validate contiguous exact lower coverage for every row,
+  global/non-anchor minima, core/attachment thresholds, and constant
+  labels/core outputs; repeat this closure on terminal reopen.
+- [x] Add the original 12-by-64 reviewer reproducer, adaptive seed/failure
+  coordinated offset tampering, committed-lower tampering, pre-PASS full-array
+  corruption, and publish-crash recovery tests.
+- [ ] Wire or run only from a later fresh AutoDL execution commit; all
+  external-schema-v2 checkpoints/terminals and the real failed fixed-64
+  witness remain immutable.
+
 ## 2026-08-23: Deterministic adaptive AIDS DBSCAN witness
 
 - [x] Retain the fixed evenly-spaced 64-anchor route as a fail-closed negative;

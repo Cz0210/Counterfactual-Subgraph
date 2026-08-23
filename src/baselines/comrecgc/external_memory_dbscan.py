@@ -13,9 +13,11 @@ and reconstructs the exact DBSCAN labelling from its graph definition:
   component.
 
 Those rules are equivalent to sklearn's ordered ``dbscan_inner`` traversal.
-The three passes are checkpointed independently.  Partial arrays live only in
-the caller-owned fresh work directory and are fsynced before an atomic state
-update, so replaying the last incomplete block is idempotent.
+The passes are checkpointed independently.  Shortcut checkpoints bind every
+committed prefix through a forward hash-chain ledger and replay that prefix
+from the source/model on resume.  Partial arrays live only in the caller-owned
+fresh work directory and are fsynced before an atomic state update, so
+replaying the last incomplete block is idempotent.
 """
 
 from __future__ import annotations
@@ -34,14 +36,15 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SCHEMA_VERSION = "comrecgc_external_memory_dbscan_v2"
+SCHEMA_VERSION = "comrecgc_external_memory_dbscan_v3"
 SHORTCUT_DISABLED = "disabled"
 ALL_CORE_ONE_COMPONENT_SHORTCUT = "all_core_one_component_anchor_v1"
 ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT = (
     "all_core_one_component_adaptive_anchor_v1"
 )
-SHORTCUT_PROOF_SCHEMA_VERSION = "comrecgc_dbscan_anchor_proof_v1"
-ADAPTIVE_SELECTION_SCHEMA_VERSION = "comrecgc_adaptive_anchor_selection_v1"
+SHORTCUT_PROOF_SCHEMA_VERSION = "comrecgc_dbscan_anchor_proof_v2"
+ADAPTIVE_SELECTION_SCHEMA_VERSION = "comrecgc_adaptive_anchor_selection_v2"
+PROGRESS_LEDGER_SCHEMA_VERSION = "comrecgc_shortcut_progress_ledger_v1"
 
 
 class ExternalMemoryDBSCANError(RuntimeError):
@@ -266,7 +269,20 @@ def _checkpoint(
     }
     if extra:
         payload.update(dict(extra))
+    payload["checkpoint_payload_sha256"] = _stable_hash(payload)
     _atomic_json(state_path, payload)
+
+
+def _load_checkpoint(path: Path) -> dict[str, Any]:
+    """Load one checkpoint and reject any mutation of its atomic payload."""
+
+    payload = _load_object(path)
+    expected = payload.get("checkpoint_payload_sha256")
+    unsigned = dict(payload)
+    unsigned.pop("checkpoint_payload_sha256", None)
+    if not isinstance(expected, str) or expected != _stable_hash(unsigned):
+        raise ExternalMemoryDBSCANError("checkpoint authentication mismatch")
+    return payload
 
 
 def _query_reservation_bytes(num_samples: int, rows: int) -> int:
@@ -619,12 +635,836 @@ def _ensure_exact_npy(path: Path, expected: np.ndarray, *, label: str) -> str:
     return _sha256_file(path)
 
 
+def _progress_genesis(*, phase: str, identity_sha256: str) -> str:
+    return _stable_hash(
+        {
+            "schema_version": PROGRESS_LEDGER_SCHEMA_VERSION,
+            "phase": str(phase),
+            "identity_sha256": str(identity_sha256),
+            "entry": "GENESIS",
+        }
+    )
+
+
+def _new_progress_ledger(
+    *, phase: str, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    identity_sha = _stable_hash(identity)
+    return {
+        "schema_version": PROGRESS_LEDGER_SCHEMA_VERSION,
+        "phase": str(phase),
+        "identity_sha256": identity_sha,
+        "entries": [],
+        "committed_offset": 0,
+        "head_sha256": _progress_genesis(
+            phase=str(phase), identity_sha256=identity_sha
+        ),
+        "complete": False,
+        "result": None,
+    }
+
+
+def _progress_ledger_sha256(ledger: Mapping[str, Any]) -> str:
+    return _stable_hash(ledger)
+
+
+def _progress_ledgers_sha256(
+    ledgers: Mapping[str, Mapping[str, Any]], *, identity: Mapping[str, Any]
+) -> str:
+    return _stable_hash(
+        {
+            "schema_version": PROGRESS_LEDGER_SCHEMA_VERSION,
+            "identity_sha256": _stable_hash(identity),
+            "progress_ledgers": dict(ledgers),
+        }
+    )
+
+
+def _progress_checkpoint_extra(
+    ledgers: Mapping[str, Mapping[str, Any]], *, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "progress_ledgers": dict(ledgers),
+        "progress_ledgers_sha256": _progress_ledgers_sha256(
+            ledgers, identity=identity
+        ),
+    }
+
+
+def _append_progress_entry(
+    ledger: dict[str, Any],
+    *,
+    start: int,
+    stop: int,
+    payload: Mapping[str, Any],
+) -> None:
+    if ledger.get("complete") is True:
+        raise ExternalMemoryDBSCANError("cannot append to a complete progress ledger")
+    if int(start) != int(ledger.get("committed_offset", -1)) or int(stop) <= int(
+        start
+    ):
+        raise ExternalMemoryDBSCANError("progress ledger block is noncontiguous")
+    entry_core = {
+        "schema_version": PROGRESS_LEDGER_SCHEMA_VERSION,
+        "phase": str(ledger.get("phase")),
+        "identity_sha256": str(ledger.get("identity_sha256")),
+        "start": int(start),
+        "stop": int(stop),
+        "previous_chain_sha256": str(ledger.get("head_sha256")),
+        "payload": dict(payload),
+    }
+    entry = dict(entry_core)
+    entry["entry_sha256"] = _stable_hash(entry_core)
+    entries = ledger.get("entries")
+    if not isinstance(entries, list):
+        raise ExternalMemoryDBSCANError("progress ledger entries are invalid")
+    entries.append(entry)
+    ledger["committed_offset"] = int(stop)
+    ledger["head_sha256"] = entry["entry_sha256"]
+
+
+def _complete_progress_ledger(
+    ledger: dict[str, Any], *, num_samples: int, result: Mapping[str, Any]
+) -> None:
+    if int(ledger.get("committed_offset", -1)) != int(num_samples):
+        raise ExternalMemoryDBSCANError("cannot complete a partial progress ledger")
+    ledger["complete"] = True
+    ledger["result"] = dict(result)
+
+
+def _validate_progress_ledger_structure(
+    ledger: Mapping[str, Any],
+    *,
+    phase: str,
+    identity: Mapping[str, Any],
+    num_samples: int,
+) -> None:
+    required_keys = {
+        "schema_version",
+        "phase",
+        "identity_sha256",
+        "entries",
+        "committed_offset",
+        "head_sha256",
+        "complete",
+        "result",
+    }
+    identity_sha = _stable_hash(identity)
+    if (
+        set(ledger) != required_keys
+        or ledger.get("schema_version") != PROGRESS_LEDGER_SCHEMA_VERSION
+        or ledger.get("phase") != phase
+        or ledger.get("identity_sha256") != identity_sha
+        or not isinstance(ledger.get("entries"), list)
+        or ledger.get("complete") not in {True, False}
+    ):
+        raise ExternalMemoryDBSCANError(
+            f"{phase} progress ledger schema/identity mismatch"
+        )
+    expected_start = 0
+    previous = _progress_genesis(phase=phase, identity_sha256=identity_sha)
+    for entry in ledger["entries"]:
+        if not isinstance(entry, Mapping):
+            raise ExternalMemoryDBSCANError(
+                f"{phase} progress ledger entry is invalid"
+            )
+        entry_core = dict(entry)
+        entry_sha = entry_core.pop("entry_sha256", None)
+        if (
+            set(entry_core)
+            != {
+                "schema_version",
+                "phase",
+                "identity_sha256",
+                "start",
+                "stop",
+                "previous_chain_sha256",
+                "payload",
+            }
+            or entry_core.get("schema_version") != PROGRESS_LEDGER_SCHEMA_VERSION
+            or entry_core.get("phase") != phase
+            or entry_core.get("identity_sha256") != identity_sha
+            or not isinstance(entry_core.get("payload"), Mapping)
+            or int(entry_core.get("start", -1)) != expected_start
+            or int(entry_core.get("stop", -1)) <= expected_start
+            or int(entry_core.get("stop", -1)) > int(num_samples)
+            or entry_core.get("previous_chain_sha256") != previous
+            or entry_sha != _stable_hash(entry_core)
+        ):
+            raise ExternalMemoryDBSCANError(
+                f"{phase} progress ledger chain mismatch"
+            )
+        expected_start = int(entry_core["stop"])
+        previous = str(entry_sha)
+    if (
+        int(ledger.get("committed_offset", -1)) != expected_start
+        or ledger.get("head_sha256") != previous
+        or (ledger.get("complete") is True and expected_start != int(num_samples))
+        or (ledger.get("complete") is True and not isinstance(ledger.get("result"), Mapping))
+        or (ledger.get("complete") is False and ledger.get("result") is not None)
+    ):
+        raise ExternalMemoryDBSCANError(
+            f"{phase} progress ledger closure mismatch"
+        )
+
+
+def _load_progress_ledgers(
+    state: Mapping[str, Any],
+    *,
+    identity: Mapping[str, Any],
+    num_samples: int,
+) -> dict[str, dict[str, Any]]:
+    raw = state.get("progress_ledgers")
+    if not isinstance(raw, Mapping):
+        raise ExternalMemoryDBSCANError("shortcut progress ledgers are missing")
+    ledgers = json.loads(json.dumps(dict(raw)))
+    if state.get("progress_ledgers_sha256") != _progress_ledgers_sha256(
+        ledgers, identity=identity
+    ):
+        raise ExternalMemoryDBSCANError("shortcut progress-ledger hash mismatch")
+    for phase, ledger in ledgers.items():
+        if not isinstance(phase, str) or not isinstance(ledger, Mapping):
+            raise ExternalMemoryDBSCANError("shortcut progress ledger is invalid")
+        _validate_progress_ledger_structure(
+            ledger,
+            phase=phase,
+            identity=identity,
+            num_samples=num_samples,
+        )
+    return ledgers
+
+
+def _require_progress_ledger(
+    ledgers: dict[str, dict[str, Any]],
+    *,
+    phase: str,
+    identity: Mapping[str, Any],
+    create: bool = False,
+) -> dict[str, Any]:
+    ledger = ledgers.get(phase)
+    if ledger is None and create:
+        ledger = _new_progress_ledger(phase=phase, identity=identity)
+        ledgers[phase] = ledger
+    if not isinstance(ledger, dict):
+        raise ExternalMemoryDBSCANError(f"{phase} progress ledger is missing")
+    return ledger
+
+
+def _seed_candidate_rows(
+    candidates: Sequence[tuple[float, int]],
+) -> list[dict[str, Any]]:
+    return [
+        {"index": int(index), "squared_norm_hex": float(norm).hex()}
+        for norm, index in candidates
+    ]
+
+
+def _parse_seed_candidate_rows(
+    rows: Any, *, label: str
+) -> list[tuple[float, int]]:
+    if not isinstance(rows, list):
+        raise ExternalMemoryDBSCANError(f"{label} is invalid")
+    parsed: list[tuple[float, int]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != {
+            "index",
+            "squared_norm_hex",
+        }:
+            raise ExternalMemoryDBSCANError(f"{label} is invalid")
+        try:
+            parsed.append(
+                (float.fromhex(str(row["squared_norm_hex"])), int(row["index"]))
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ExternalMemoryDBSCANError(f"{label} is invalid") from exc
+    if any(not np.isfinite(norm) for norm, _index in parsed):
+        raise ExternalMemoryDBSCANError(f"{label} contains NaN/Inf")
+    if parsed != sorted(parsed, key=lambda row: (row[0], row[1])):
+        raise ExternalMemoryDBSCANError(f"{label} is not canonically ordered")
+    return parsed
+
+
+def _adaptive_seed_block_candidates(
+    vectors: np.ndarray, *, start: int, stop: int, seed_count: int
+) -> list[tuple[float, int]]:
+    rows = np.asarray(vectors[start:stop], dtype=np.float64)
+    norms = np.einsum("ij,ij->i", rows, rows, dtype=np.float64)
+    if not np.isfinite(norms).all():
+        raise ExternalMemoryDBSCANError("adaptive seed norm scan found NaN/Inf")
+    indices = np.arange(start, stop, dtype=np.intp)
+    order = np.lexsort((indices, norms))[: int(seed_count)]
+    result = [
+        (float(norms[position]), int(indices[position]))
+        for position in order.tolist()
+    ]
+    del rows, norms, indices, order
+    return result
+
+
+def _fold_seed_ledger(
+    ledger: Mapping[str, Any], *, seed_count: int
+) -> list[tuple[float, int]]:
+    candidates: list[tuple[float, int]] = []
+    for entry in ledger["entries"]:
+        payload = entry["payload"]
+        local = _parse_seed_candidate_rows(
+            payload.get("local_seed_candidates"),
+            label="adaptive seed progress payload",
+        )
+        if int(payload.get("row_count", -1)) != int(entry["stop"]) - int(
+            entry["start"]
+        ) or (
+            len(local)
+            != min(int(seed_count), int(entry["stop"]) - int(entry["start"]))
+            or len({index for _norm, index in local}) != len(local)
+            or any(
+                index < int(entry["start"]) or index >= int(entry["stop"])
+                for _norm, index in local
+            )
+        ):
+            raise ExternalMemoryDBSCANError(
+                "adaptive seed progress row count mismatch"
+            )
+        candidates = sorted(candidates + local, key=lambda row: (row[0], row[1]))[
+            : int(seed_count)
+        ]
+    return candidates
+
+
+def _adaptive_failure_block(
+    *,
+    model: Any,
+    vectors: np.ndarray,
+    start: int,
+    stop: int,
+    seed_local_by_global: Mapping[int, int],
+    min_samples: int,
+) -> list[int]:
+    neighborhoods = model.radius_neighbors(
+        vectors[start:stop], return_distance=False
+    )
+    failures: list[int] = []
+    for local_row, raw in enumerate(neighborhoods):
+        global_index = int(start) + local_row
+        values = np.asarray(raw, dtype=np.intp)
+        if len(values) != len(np.unique(values)):
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure scan returned duplicate seed indices"
+            )
+        own_seed = seed_local_by_global.get(global_index)
+        if own_seed is not None and own_seed not in values:
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure scan omitted explicit seed self sample"
+            )
+        lower = len(values) - int(own_seed is not None)
+        if lower < int(min_samples) - 1 or (own_seed is None and lower < 1):
+            failures.append(global_index)
+    del neighborhoods
+    return failures
+
+
+def _fold_failure_ledger(ledger: Mapping[str, Any]) -> list[int]:
+    failures: list[int] = []
+    for entry in ledger["entries"]:
+        payload = entry["payload"]
+        block_failures = payload.get("failure_indices")
+        if not isinstance(block_failures, list):
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure progress payload is invalid"
+            )
+        parsed = [int(value) for value in block_failures]
+        if (
+            parsed != sorted(set(parsed))
+            or any(
+                value < int(entry["start"]) or value >= int(entry["stop"])
+                for value in parsed
+            )
+            or _sample_indices_sha256(parsed)
+            != payload.get("failure_indices_sha256")
+            or int(payload.get("row_count", -1))
+            != int(entry["stop"]) - int(entry["start"])
+        ):
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure progress payload mismatch"
+            )
+        failures.extend(parsed)
+    if failures != sorted(set(failures)):
+        raise ExternalMemoryDBSCANError(
+            "adaptive failure progress ledger is noncanonical"
+        )
+    return failures
+
+
+def _uint32_values_sha256(values: np.ndarray) -> str:
+    canonical = np.ascontiguousarray(np.asarray(values, dtype="<u4"))
+    return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+
+
+def _anchor_lower_block(
+    *,
+    model: Any,
+    vectors: np.ndarray,
+    start: int,
+    stop: int,
+    anchor_local_by_global: Mapping[int, int],
+    min_samples: int,
+) -> tuple[np.ndarray, dict[str, Any] | None]:
+    neighborhoods = model.radius_neighbors(
+        vectors[start:stop], return_distance=False
+    )
+    block_lower = np.empty(int(stop) - int(start), dtype=np.uint32)
+    first_failure: dict[str, Any] | None = None
+    for local_row, raw in enumerate(neighborhoods):
+        global_index = int(start) + local_row
+        values = np.asarray(raw, dtype=np.intp)
+        if len(values) != len(np.unique(values)):
+            raise ExternalMemoryDBSCANError(
+                "anchor scan returned duplicate sample indices"
+            )
+        own_anchor = anchor_local_by_global.get(global_index)
+        if own_anchor is not None and own_anchor not in values:
+            raise ExternalMemoryDBSCANError(
+                "anchor scan omitted explicit query self sample"
+            )
+        count_excluding_self = len(values) - int(own_anchor is not None)
+        block_lower[local_row] = count_excluding_self
+        if (
+            count_excluding_self < int(min_samples) - 1
+            or (own_anchor is None and count_excluding_self < 1)
+        ) and first_failure is None:
+            first_failure = {
+                "sample_index": int(global_index),
+                "distinct_anchor_neighbors_excluding_self": int(
+                    count_excluding_self
+                ),
+                "required_for_core": int(min_samples) - 1,
+                "required_for_anchor_attachment_if_non_anchor": 1,
+                "sample_is_anchor": own_anchor is not None,
+            }
+    del neighborhoods
+    return block_lower, first_failure
+
+
+def _lower_block_payload(
+    values: np.ndarray,
+    *,
+    start: int,
+    anchor_local_by_global: Mapping[int, int],
+) -> dict[str, Any]:
+    minimum = int(np.min(values))
+    anchor_positions = sorted(
+        global_index - int(start)
+        for global_index in anchor_local_by_global
+        if int(start) <= global_index < int(start) + len(values)
+    )
+    non_anchor_minima: list[int] = []
+    cursor = 0
+    for position in anchor_positions:
+        if cursor < position:
+            non_anchor_minima.append(int(np.min(values[cursor:position])))
+        cursor = position + 1
+    if cursor < len(values):
+        non_anchor_minima.append(int(np.min(values[cursor:])))
+    return {
+        "row_count": int(len(values)),
+        "lower_bounds_uint32_le_sha256": _uint32_values_sha256(values),
+        "minimum_distinct_anchor_neighbors_excluding_self": minimum,
+        "minimum_non_anchor_anchor_neighbors": (
+            min(non_anchor_minima) if non_anchor_minima else None
+        ),
+    }
+
+
+def _assert_active_progress_offset(
+    state: Mapping[str, Any], ledger: Mapping[str, Any], *, phase: str
+) -> None:
+    if (
+        state.get("phase") != phase
+        or int(state.get("next_offset", -1))
+        != int(ledger.get("committed_offset", -2))
+    ):
+        raise ExternalMemoryDBSCANError(
+            f"{phase} checkpoint offset/progress-ledger mismatch"
+        )
+
+
+def _replay_seed_progress(
+    *,
+    vectors: np.ndarray,
+    ledger: Mapping[str, Any],
+    seed_count: int,
+    max_rss_bytes: int,
+) -> tuple[list[tuple[float, int]], int]:
+    peak = _rss_bytes()
+    candidates: list[tuple[float, int]] = []
+    for entry in ledger["entries"]:
+        start, stop = int(entry["start"]), int(entry["stop"])
+        reservation = (stop - start) * (
+            2 * int(vectors.shape[1]) * np.dtype(np.float64).itemsize
+            + int(vectors.shape[1]) * int(vectors.dtype.itemsize)
+            + 4096
+        )
+        _check_rss(
+            int(max_rss_bytes),
+            phase="adaptive_seed_scan.resume_replay",
+            reserved_bytes=reservation,
+        )
+        local = _adaptive_seed_block_candidates(
+            vectors, start=start, stop=stop, seed_count=int(seed_count)
+        )
+        expected_payload = {
+            "row_count": stop - start,
+            "local_seed_candidates": _seed_candidate_rows(local),
+        }
+        if entry.get("payload") != expected_payload:
+            raise ExternalMemoryDBSCANError(
+                "adaptive seed resume replay mismatch"
+            )
+        candidates = sorted(candidates + local, key=lambda row: (row[0], row[1]))[
+            : int(seed_count)
+        ]
+        peak = max(
+            peak,
+            _check_rss(
+                int(max_rss_bytes), phase="adaptive_seed_scan.resume_replay"
+            ),
+        )
+    if ledger.get("complete") is True:
+        expected_result = {
+            "seed_candidates": _seed_candidate_rows(candidates),
+            "seed_indices_sha256": _sample_indices_sha256(
+                [index for _norm, index in candidates]
+            ),
+        }
+        if ledger.get("result") != expected_result:
+            raise ExternalMemoryDBSCANError(
+                "adaptive seed complete-ledger result mismatch"
+            )
+    return candidates, peak
+
+
+def _replay_failure_progress(
+    *,
+    vectors: np.ndarray,
+    model: Any,
+    seed_indices: Sequence[int],
+    ledger: Mapping[str, Any],
+    min_samples: int,
+    max_rss_bytes: int,
+) -> tuple[list[int], int]:
+    peak = _rss_bytes()
+    failures: list[int] = []
+    seed_hash = _sample_indices_sha256(seed_indices)
+    seed_local_by_global = {
+        int(global_index): local_index
+        for local_index, global_index in enumerate(seed_indices)
+    }
+    for entry in ledger["entries"]:
+        start, stop = int(entry["start"]), int(entry["stop"])
+        _check_rss(
+            int(max_rss_bytes),
+            phase="adaptive_failure_scan.resume_replay",
+            reserved_bytes=_shortcut_query_reservation_bytes(
+                stop - start, len(seed_indices)
+            ),
+        )
+        block_failures = _adaptive_failure_block(
+            model=model,
+            vectors=vectors,
+            start=start,
+            stop=stop,
+            seed_local_by_global=seed_local_by_global,
+            min_samples=int(min_samples),
+        )
+        expected_payload = {
+            "row_count": stop - start,
+            "seed_indices_sha256": seed_hash,
+            "failure_indices": block_failures,
+            "failure_indices_sha256": _sample_indices_sha256(block_failures),
+        }
+        if entry.get("payload") != expected_payload:
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure resume replay mismatch"
+            )
+        failures.extend(block_failures)
+        peak = max(
+            peak,
+            _check_rss(
+                int(max_rss_bytes), phase="adaptive_failure_scan.resume_replay"
+            ),
+        )
+    if failures != sorted(set(failures)):
+        raise ExternalMemoryDBSCANError(
+            "adaptive failure replay produced noncanonical indices"
+        )
+    if ledger.get("complete") is True:
+        expected_result = {
+            "first_pass_complete": True,
+            "failure_indices": failures,
+            "failure_indices_sha256": _sample_indices_sha256(failures),
+        }
+        if ledger.get("result") != expected_result:
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure complete-ledger result mismatch"
+            )
+    return failures, peak
+
+
+def _replay_lower_progress(
+    *,
+    vectors: np.ndarray,
+    lower: np.ndarray,
+    model: Any,
+    anchor_indices: np.ndarray,
+    ledger: Mapping[str, Any],
+    min_samples: int,
+    max_rss_bytes: int,
+) -> tuple[int | None, int | None, int]:
+    anchor_local_by_global = {
+        int(global_index): local_index
+        for local_index, global_index in enumerate(anchor_indices.tolist())
+    }
+    minimum: int | None = None
+    minimum_non_anchor: int | None = None
+    peak = _rss_bytes()
+    for entry in ledger["entries"]:
+        start, stop = int(entry["start"]), int(entry["stop"])
+        _check_rss(
+            int(max_rss_bytes),
+            phase="shortcut_anchor_scan.resume_replay",
+            reserved_bytes=_shortcut_query_reservation_bytes(
+                stop - start, len(anchor_indices)
+            ),
+        )
+        replayed, first_failure = _anchor_lower_block(
+            model=model,
+            vectors=vectors,
+            start=start,
+            stop=stop,
+            anchor_local_by_global=anchor_local_by_global,
+            min_samples=int(min_samples),
+        )
+        if first_failure is not None:
+            raise ExternalMemoryDBSCANError(
+                "shortcut lower-bound resume replay found a committed failure"
+            )
+        expected_payload = _lower_block_payload(
+            replayed,
+            start=start,
+            anchor_local_by_global=anchor_local_by_global,
+        )
+        if entry.get("payload") != expected_payload or not np.array_equal(
+            np.asarray(lower[start:stop]), replayed
+        ):
+            raise ExternalMemoryDBSCANError(
+                "shortcut lower-bound resume replay mismatch"
+            )
+        block_minimum = int(expected_payload[
+            "minimum_distinct_anchor_neighbors_excluding_self"
+        ])
+        minimum = block_minimum if minimum is None else min(minimum, block_minimum)
+        block_non_anchor = expected_payload[
+            "minimum_non_anchor_anchor_neighbors"
+        ]
+        if block_non_anchor is not None:
+            minimum_non_anchor = (
+                int(block_non_anchor)
+                if minimum_non_anchor is None
+                else min(minimum_non_anchor, int(block_non_anchor))
+            )
+        peak = max(
+            peak,
+            _check_rss(
+                int(max_rss_bytes), phase="shortcut_anchor_scan.resume_replay"
+            ),
+        )
+    return minimum, minimum_non_anchor, peak
+
+
+def _validate_complete_lower_witness(
+    *,
+    lower: np.ndarray,
+    anchor_indices: np.ndarray,
+    ledger: Mapping[str, Any],
+    num_samples: int,
+    min_samples: int,
+) -> tuple[int, int | None]:
+    """Validate every lower slot and the complete proof domain before PASS."""
+
+    if ledger.get("complete") is not True or int(
+        ledger.get("committed_offset", -1)
+    ) != int(num_samples):
+        raise ExternalMemoryDBSCANError(
+            "shortcut lower-bound progress ledger is incomplete"
+        )
+    anchor_local_by_global = {
+        int(global_index): local_index
+        for local_index, global_index in enumerate(anchor_indices.tolist())
+    }
+    minimum: int | None = None
+    minimum_non_anchor: int | None = None
+    for entry in ledger["entries"]:
+        start, stop = int(entry["start"]), int(entry["stop"])
+        values = np.asarray(lower[start:stop])
+        payload = _lower_block_payload(
+            values,
+            start=start,
+            anchor_local_by_global=anchor_local_by_global,
+        )
+        if entry.get("payload") != payload:
+            raise ExternalMemoryDBSCANError(
+                "shortcut final lower-bound ledger/array mismatch"
+            )
+        block_minimum = int(
+            payload["minimum_distinct_anchor_neighbors_excluding_self"]
+        )
+        minimum = block_minimum if minimum is None else min(minimum, block_minimum)
+        block_non_anchor = payload["minimum_non_anchor_anchor_neighbors"]
+        if block_non_anchor is not None:
+            minimum_non_anchor = (
+                int(block_non_anchor)
+                if minimum_non_anchor is None
+                else min(minimum_non_anchor, int(block_non_anchor))
+            )
+    if minimum is None or minimum < int(min_samples) - 1:
+        raise ExternalMemoryDBSCANError(
+            "shortcut final lower-bound core coverage failed"
+        )
+    if int(num_samples) > len(anchor_indices) and (
+        minimum_non_anchor is None or minimum_non_anchor < 1
+    ):
+        raise ExternalMemoryDBSCANError(
+            "shortcut final non-anchor attachment coverage failed"
+        )
+    expected_result = {
+        "full_scan_complete": True,
+        "minimum_distinct_anchor_neighbors_excluding_self": int(minimum),
+        "minimum_non_anchor_anchor_neighbors": minimum_non_anchor,
+        "all_rows_core_lower_bound_pass": True,
+        "all_non_anchors_attached": True,
+    }
+    if ledger.get("result") != expected_result:
+        raise ExternalMemoryDBSCANError(
+            "shortcut lower-bound complete-ledger result mismatch"
+        )
+    return int(minimum), minimum_non_anchor
+
+
+def _validate_constant_output(
+    path: Path,
+    *,
+    shape: tuple[int, ...],
+    dtype: Any,
+    expected: int | bool,
+    label: str,
+    block_size: int = 1_000_000,
+) -> None:
+    value = _open_npy_memmap(path, mode="r")
+    _validate_partial(value, shape=shape, dtype=dtype, label=label)
+    for start in range(0, int(shape[0]), int(block_size)):
+        if not np.all(value[start : min(shape[0], start + block_size)] == expected):
+            raise ExternalMemoryDBSCANError(f"{label} constant-value mismatch")
+    del value
+
+
+def _write_progress_ledger_artifact(
+    *,
+    path: Path,
+    ledgers: Mapping[str, Mapping[str, Any]],
+    identity: Mapping[str, Any],
+    required_phases: Sequence[str],
+    num_samples: int,
+) -> str:
+    for phase in required_phases:
+        ledger = ledgers.get(phase)
+        if not isinstance(ledger, Mapping):
+            raise ExternalMemoryDBSCANError(
+                f"required progress ledger is missing: {phase}"
+            )
+        _validate_progress_ledger_structure(
+            ledger,
+            phase=phase,
+            identity=identity,
+            num_samples=num_samples,
+        )
+        if ledger.get("complete") is not True:
+            raise ExternalMemoryDBSCANError(
+                f"required progress ledger is incomplete: {phase}"
+            )
+    payload = {
+        "schema_version": PROGRESS_LEDGER_SCHEMA_VERSION,
+        "scientific_identity_sha256": _stable_hash(identity),
+        "required_phases": list(required_phases),
+        "progress_ledgers": dict(ledgers),
+        "progress_ledgers_sha256": _progress_ledgers_sha256(
+            ledgers, identity=identity
+        ),
+        "all_required_prefixes_complete": True,
+        "created_at": _utc_now(),
+    }
+    _atomic_json(path, payload)
+    return _sha256_file(path)
+
+
+def _validate_progress_ledger_artifact(
+    *,
+    path: Path,
+    expected_sha256: str,
+    root: Path,
+    identity: Mapping[str, Any],
+    num_samples: int,
+    required_phases: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    resolved = path.resolve(strict=True)
+    if resolved.parent != root or _sha256_file(resolved) != str(expected_sha256):
+        raise ExternalMemoryDBSCANError(
+            "shortcut progress-ledger artifact closure mismatch"
+        )
+    payload = _load_object(resolved)
+    ledgers_raw = payload.get("progress_ledgers")
+    if (
+        payload.get("schema_version") != PROGRESS_LEDGER_SCHEMA_VERSION
+        or payload.get("scientific_identity_sha256") != _stable_hash(identity)
+        or payload.get("required_phases") != list(required_phases)
+        or payload.get("all_required_prefixes_complete") is not True
+        or not isinstance(ledgers_raw, Mapping)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "shortcut progress-ledger artifact identity mismatch"
+        )
+    ledgers = json.loads(json.dumps(dict(ledgers_raw)))
+    if payload.get("progress_ledgers_sha256") != _progress_ledgers_sha256(
+        ledgers, identity=identity
+    ):
+        raise ExternalMemoryDBSCANError(
+            "shortcut progress-ledger artifact hash mismatch"
+        )
+    for phase in required_phases:
+        ledger = ledgers.get(phase)
+        if not isinstance(ledger, Mapping):
+            raise ExternalMemoryDBSCANError(
+                f"shortcut progress-ledger phase is missing: {phase}"
+            )
+        _validate_progress_ledger_structure(
+            ledger,
+            phase=phase,
+            identity=identity,
+            num_samples=num_samples,
+        )
+        if ledger.get("complete") is not True:
+            raise ExternalMemoryDBSCANError(
+                f"shortcut progress-ledger phase is incomplete: {phase}"
+            )
+    return ledgers
+
+
 def _validate_adaptive_selection_manifest(
     *,
     path: Path,
     expected_sha256: str,
     root: Path,
     identity: Mapping[str, Any],
+    progress_ledgers: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     resolved = path.resolve(strict=True)
     if resolved.parent != root or _sha256_file(resolved) != str(expected_sha256):
@@ -649,6 +1489,12 @@ def _validate_adaptive_selection_manifest(
         != "all_first_pass_insufficient_seed_lower_bound_indices_v1"
         or selection.get("anchor_selection_rule")
         != "sorted_unique_union_of_seed_and_all_failure_indices_v1"
+        or not isinstance(
+            selection.get("adaptive_seed_progress_ledger_sha256"), str
+        )
+        or not isinstance(
+            selection.get("adaptive_failure_progress_ledger_sha256"), str
+        )
     ):
         raise ExternalMemoryDBSCANError(
             "adaptive anchor-selection scientific identity mismatch"
@@ -739,6 +1585,48 @@ def _validate_adaptive_selection_manifest(
         raise ExternalMemoryDBSCANError(
             "adaptive seed norms do not match the promoted source vectors"
         )
+    if progress_ledgers is not None:
+        seed_ledger = progress_ledgers.get("adaptive_seed_scan")
+        failure_ledger = progress_ledgers.get("adaptive_failure_scan")
+        if (
+            not isinstance(seed_ledger, Mapping)
+            or not isinstance(failure_ledger, Mapping)
+            or seed_ledger.get("complete") is not True
+            or failure_ledger.get("complete") is not True
+            or selection.get("adaptive_seed_progress_ledger_sha256")
+            != _progress_ledger_sha256(seed_ledger)
+            or selection.get("adaptive_failure_progress_ledger_sha256")
+            != _progress_ledger_sha256(failure_ledger)
+        ):
+            raise ExternalMemoryDBSCANError(
+                "adaptive selection/progress-ledger mismatch"
+            )
+        ledger_seed_candidates = _fold_seed_ledger(
+            seed_ledger, seed_count=seed_count
+        )
+        ledger_failures = _fold_failure_ledger(failure_ledger)
+        expected_seed_result = {
+            "seed_candidates": _seed_candidate_rows(ledger_seed_candidates),
+            "seed_indices_sha256": _sample_indices_sha256(
+                [index for _norm, index in ledger_seed_candidates]
+            ),
+        }
+        expected_failure_result = {
+            "first_pass_complete": True,
+            "failure_indices": ledger_failures,
+            "failure_indices_sha256": _sample_indices_sha256(ledger_failures),
+        }
+        if (
+            seed_ledger.get("result") != expected_seed_result
+            or failure_ledger.get("result") != expected_failure_result
+            or [index for _norm, index in ledger_seed_candidates] != seed_indices
+            or [float(norm).hex() for norm, _index in ledger_seed_candidates]
+            != seed_norm_hex
+            or ledger_failures != failures.tolist()
+        ):
+            raise ExternalMemoryDBSCANError(
+                "adaptive selection/progress-ledger result mismatch"
+            )
     del source, actual_seed_rows, actual_seed_rows64
     return np.asarray(anchors, dtype=np.intp), dict(manifest)
 
@@ -752,12 +1640,134 @@ def _resolve_adaptive_anchor_selection(
     contract: ExternalDBSCANContract,
     sklearn_version: str,
     peak_rss_bytes: int,
+    resume_replay_required: bool,
 ) -> tuple[np.ndarray, dict[str, Any], int]:
     """Select deterministic seeds, collect every failure, then freeze anchors."""
 
     selection_path = root / "adaptive_anchor_selection.json"
-    state = _load_object(state_path)
+    state = _load_checkpoint(state_path)
     phase = str(state.get("phase"))
+    n_samples, n_features = (int(vectors.shape[0]), int(vectors.shape[1]))
+    seed_count = int(contract.shortcut_seed_count)
+    if seed_count > n_samples:
+        raise ExternalMemoryDBSCANError(
+            "adaptive seed count exceeds the number of samples"
+        )
+    ledgers = _load_progress_ledgers(
+        state, identity=identity, num_samples=n_samples
+    )
+
+    seed_ledger = _require_progress_ledger(
+        ledgers, phase="adaptive_seed_scan", identity=identity
+    )
+    if phase == "adaptive_seed_scan":
+        _assert_active_progress_offset(
+            state, seed_ledger, phase="adaptive_seed_scan"
+        )
+    candidates = _fold_seed_ledger(seed_ledger, seed_count=seed_count)
+    peak = max(int(peak_rss_bytes), _rss_bytes())
+    if resume_replay_required and seed_ledger["entries"]:
+        replayed_candidates, replay_peak = _replay_seed_progress(
+            vectors=vectors,
+            ledger=seed_ledger,
+            seed_count=seed_count,
+            max_rss_bytes=int(contract.max_rss_bytes),
+        )
+        if replayed_candidates != candidates:
+            raise ExternalMemoryDBSCANError(
+                "adaptive seed ledger fold/replay mismatch"
+            )
+        peak = max(peak, replay_peak)
+    expected_seed_result = {
+        "seed_candidates": _seed_candidate_rows(candidates),
+        "seed_indices_sha256": _sample_indices_sha256(
+            [index for _norm, index in candidates]
+        ),
+    }
+    if seed_ledger.get("complete") is True and seed_ledger.get(
+        "result"
+    ) != expected_seed_result:
+        raise ExternalMemoryDBSCANError(
+            "adaptive seed complete-ledger identity mismatch"
+        )
+    if phase == "adaptive_seed_scan":
+        checkpoint_candidates = _parse_seed_candidate_rows(
+            state.get("adaptive_seed_candidates") or [],
+            label="adaptive seed checkpoint candidates",
+        )
+        if checkpoint_candidates != candidates:
+            raise ExternalMemoryDBSCANError(
+                "adaptive seed checkpoint/ledger mismatch"
+            )
+
+    failure_ledger = ledgers.get("adaptive_failure_scan")
+    seed_model: Any | None = None
+    failures: list[int] = []
+    if failure_ledger is not None:
+        if seed_ledger.get("complete") is not True:
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure scan started before seed completion"
+            )
+        _validate_progress_ledger_structure(
+            failure_ledger,
+            phase="adaptive_failure_scan",
+            identity=identity,
+            num_samples=n_samples,
+        )
+        if phase == "adaptive_failure_scan":
+            _assert_active_progress_offset(
+                state, failure_ledger, phase="adaptive_failure_scan"
+            )
+        seed_indices_for_replay = [index for _norm, index in candidates]
+        seed_vectors_for_replay = np.asarray(
+            vectors[np.asarray(seed_indices_for_replay, dtype=np.intp)]
+        )
+        seed_model, seed_sklearn_version = _fit_anchor_neighbors(
+            seed_vectors_for_replay, eps=float(contract.eps)
+        )
+        if seed_sklearn_version != sklearn_version:
+            raise ExternalMemoryDBSCANError(
+                "adaptive seed/full sklearn versions differ"
+            )
+        if resume_replay_required and failure_ledger["entries"]:
+            failures, replay_peak = _replay_failure_progress(
+                vectors=vectors,
+                model=seed_model,
+                seed_indices=seed_indices_for_replay,
+                ledger=failure_ledger,
+                min_samples=int(contract.min_samples),
+                max_rss_bytes=int(contract.max_rss_bytes),
+            )
+            peak = max(peak, replay_peak)
+        else:
+            failures = _fold_failure_ledger(failure_ledger)
+        expected_failure_result = {
+            "first_pass_complete": True,
+            "failure_indices": failures,
+            "failure_indices_sha256": _sample_indices_sha256(failures),
+        }
+        if failure_ledger.get("complete") is True and failure_ledger.get(
+            "result"
+        ) != expected_failure_result:
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure complete-ledger identity mismatch"
+            )
+        if phase == "adaptive_failure_scan" or (
+            phase == "shortcut_blocked"
+            and "adaptive_failure_indices" in state
+        ):
+            checkpoint_failures = [
+                int(value) for value in state.get("adaptive_failure_indices") or []
+            ]
+            if (
+                checkpoint_failures != failures
+                or _sample_indices_sha256(checkpoint_failures)
+                != state.get("adaptive_failure_indices_sha256")
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "adaptive failure checkpoint/ledger mismatch"
+                )
+
     if phase == "shortcut_blocked":
         failure_path = Path(str(state.get("shortcut_failure_path") or ""))
         if (
@@ -770,29 +1780,67 @@ def _resolve_adaptive_anchor_selection(
                 "blocked adaptive-selection failure artifact mismatch"
             )
         failure = _load_object(failure_path)
+        if failure.get("reason") == "adaptive_failure_cap_exceeded" and (
+            not isinstance(failure_ledger, Mapping)
+            or int(state.get("next_offset", -1))
+            != int(failure_ledger.get("committed_offset", -2))
+        ):
+            raise ExternalMemoryDBSCANError(
+                "blocked adaptive failure checkpoint/ledger offset mismatch"
+            )
         raise ExternalMemoryDBSCANError(
             "EXACT_DBSCAN_COMPLEXITY_BLOCKED:"
             f"reason={failure.get('reason')}"
         )
     if selection_path.exists():
-        expected_sha = str(
-            state.get("adaptive_selection_manifest_sha256")
-            or _sha256_file(selection_path)
-        )
+        expected_sha = str(state.get("adaptive_selection_manifest_sha256") or "")
+        if not expected_sha:
+            if not (
+                resume_replay_required
+                and phase == "adaptive_failure_scan"
+                and seed_ledger.get("complete") is True
+                and isinstance(failure_ledger, Mapping)
+                and failure_ledger.get("complete") is True
+                and int(failure_ledger.get("committed_offset", -1)) == n_samples
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "adaptive selection manifest is not checkpoint-bound"
+                )
+            # Crash window: the selection rename completed after the full
+            # first-pass ledger checkpoint but before the transition
+            # checkpoint.  The source-derived seed/failure prefixes were just
+            # replayed above, so validate the complete manifest semantically
+            # and bind its observed bytes in the next atomic checkpoint.
+            expected_sha = _sha256_file(selection_path)
         anchors, manifest = _validate_adaptive_selection_manifest(
             path=selection_path,
             expected_sha256=expected_sha,
             root=root,
             identity=identity,
+            progress_ledgers=ledgers,
         )
         if phase in {"adaptive_seed_scan", "adaptive_failure_scan"}:
-            _checkpoint(
-                state_path,
-                identity=identity,
+            if (
+                seed_ledger.get("complete") is not True
+                or not isinstance(failure_ledger, Mapping)
+                or failure_ledger.get("complete") is not True
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "adaptive selection exists before complete scan ledgers"
+                )
+            lower_ledger = _require_progress_ledger(
+                ledgers,
                 phase="shortcut_anchor_scan",
-                next_offset=0,
-                peak_rss_bytes=max(int(peak_rss_bytes), _rss_bytes()),
-                extra={
+                identity=identity,
+                create=True,
+            )
+            if lower_ledger["entries"]:
+                raise ExternalMemoryDBSCANError(
+                    "new shortcut lower ledger is unexpectedly nonempty"
+                )
+            extra = _progress_checkpoint_extra(ledgers, identity=identity)
+            extra.update(
+                {
                     "adaptive_selection_manifest_path": str(selection_path),
                     "adaptive_selection_manifest_sha256": _sha256_file(
                         selection_path
@@ -800,7 +1848,15 @@ def _resolve_adaptive_anchor_selection(
                     "selected_anchor_indices_sha256": manifest[
                         "selection_identity"
                     ]["selected_anchor_indices_sha256"],
-                },
+                }
+            )
+            _checkpoint(
+                state_path,
+                identity=identity,
+                phase="shortcut_anchor_scan",
+                next_offset=0,
+                peak_rss_bytes=max(int(peak_rss_bytes), _rss_bytes()),
+                extra=extra,
             )
         return anchors, manifest, max(int(peak_rss_bytes), _rss_bytes())
     if phase not in {"adaptive_seed_scan", "adaptive_failure_scan"}:
@@ -808,23 +1864,8 @@ def _resolve_adaptive_anchor_selection(
             "adaptive selection manifest is missing after selection phase"
         )
 
-    n_samples, n_features = (int(vectors.shape[0]), int(vectors.shape[1]))
-    seed_count = int(contract.shortcut_seed_count)
-    if seed_count > n_samples:
-        raise ExternalMemoryDBSCANError(
-            "adaptive seed count exceeds the number of samples"
-        )
-    peak = max(int(peak_rss_bytes), _rss_bytes())
     if phase == "adaptive_seed_scan":
-        start = int(state.get("next_offset", 0))
-        candidates_raw = state.get("adaptive_seed_candidates") or []
-        candidates: list[tuple[float, int]] = []
-        for row in candidates_raw:
-            if not isinstance(row, Mapping):
-                raise ExternalMemoryDBSCANError("adaptive seed checkpoint is invalid")
-            candidates.append(
-                (float.fromhex(str(row["squared_norm_hex"])), int(row["index"]))
-            )
+        start = int(seed_ledger["committed_offset"])
         block = _bounded_norm_block_size(
             requested=int(contract.shortcut_query_block_size),
             num_features=n_features,
@@ -834,22 +1875,25 @@ def _resolve_adaptive_anchor_selection(
         blocks_since_checkpoint = 0
         for offset in range(start, n_samples, block):
             stop = min(n_samples, offset + block)
-            rows = np.asarray(vectors[offset:stop], dtype=np.float64)
-            norms = np.einsum("ij,ij->i", rows, rows, dtype=np.float64)
-            if not np.isfinite(norms).all():
-                raise ExternalMemoryDBSCANError(
-                    "adaptive seed norm scan found NaN/Inf"
-                )
-            indices = np.arange(offset, stop, dtype=np.intp)
-            order = np.lexsort((indices, norms))[:seed_count]
-            combined = candidates + [
-                (float(norms[position]), int(indices[position]))
-                for position in order.tolist()
-            ]
-            candidates = sorted(combined, key=lambda row: (row[0], row[1]))[
+            local_candidates = _adaptive_seed_block_candidates(
+                vectors, start=offset, stop=stop, seed_count=seed_count
+            )
+            candidates = sorted(
+                candidates + local_candidates, key=lambda row: (row[0], row[1])
+            )[
                 :seed_count
             ]
-            del rows, norms, indices, order
+            _append_progress_entry(
+                seed_ledger,
+                start=offset,
+                stop=stop,
+                payload={
+                    "row_count": stop - offset,
+                    "local_seed_candidates": _seed_candidate_rows(
+                        local_candidates
+                    ),
+                },
+            )
             peak = max(
                 peak,
                 _check_rss(
@@ -861,72 +1905,113 @@ def _resolve_adaptive_anchor_selection(
                 blocks_since_checkpoint >= int(contract.checkpoint_interval_blocks)
                 or stop == n_samples
             ):
+                extra = _progress_checkpoint_extra(ledgers, identity=identity)
+                extra.update(
+                    {
+                        "effective_shortcut_query_block_size": int(block),
+                        "adaptive_seed_candidates": _seed_candidate_rows(
+                            candidates
+                        ),
+                    }
+                )
                 _checkpoint(
                     state_path,
                     identity=identity,
                     phase="adaptive_seed_scan",
                     next_offset=stop,
                     peak_rss_bytes=peak,
-                    extra={
-                        "effective_shortcut_query_block_size": int(block),
-                        "adaptive_seed_candidates": [
-                            {
-                                "index": int(index),
-                                "squared_norm_hex": float(norm).hex(),
-                            }
-                            for norm, index in candidates
-                        ],
-                    },
+                    extra=extra,
                 )
                 blocks_since_checkpoint = 0
         if len(candidates) != seed_count:
             raise ExternalMemoryDBSCANError("adaptive seed scan is incomplete")
         seed_indices = [index for _norm, index in candidates]
         seed_norm_hex = [float(norm).hex() for norm, _index in candidates]
+        _complete_progress_ledger(
+            seed_ledger,
+            num_samples=n_samples,
+            result={
+                "seed_candidates": _seed_candidate_rows(candidates),
+                "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+            },
+        )
+        failure_ledger = _require_progress_ledger(
+            ledgers,
+            phase="adaptive_failure_scan",
+            identity=identity,
+            create=True,
+        )
+        extra = _progress_checkpoint_extra(ledgers, identity=identity)
+        extra.update(
+            {
+                "seed_indices": seed_indices,
+                "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+                "seed_squared_norm_hex": seed_norm_hex,
+                "adaptive_failure_indices": [],
+                "adaptive_failure_indices_sha256": _sample_indices_sha256([]),
+            }
+        )
         _checkpoint(
             state_path,
             identity=identity,
             phase="adaptive_failure_scan",
             next_offset=0,
             peak_rss_bytes=peak,
-            extra={
-                "seed_indices": seed_indices,
-                "seed_indices_sha256": _sample_indices_sha256(seed_indices),
-                "seed_squared_norm_hex": seed_norm_hex,
-                "adaptive_failure_indices": [],
-                "adaptive_failure_indices_sha256": _sample_indices_sha256([]),
-            },
+            extra=extra,
         )
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
+        ledgers = _load_progress_ledgers(
+            state, identity=identity, num_samples=n_samples
+        )
+        seed_ledger = _require_progress_ledger(
+            ledgers, phase="adaptive_seed_scan", identity=identity
+        )
+        failure_ledger = _require_progress_ledger(
+            ledgers, phase="adaptive_failure_scan", identity=identity
+        )
         phase = "adaptive_failure_scan"
 
-    seed_indices = [int(value) for value in state.get("seed_indices") or []]
-    seed_norm_hex = [str(value) for value in state.get("seed_squared_norm_hex") or []]
+    candidates = _fold_seed_ledger(seed_ledger, seed_count=seed_count)
+    seed_indices = [index for _norm, index in candidates]
+    seed_norm_hex = [float(norm).hex() for norm, _index in candidates]
+    state_seed_indices = [int(value) for value in state.get("seed_indices") or []]
+    state_seed_norm_hex = [
+        str(value) for value in state.get("seed_squared_norm_hex") or []
+    ]
     if (
         len(seed_indices) != seed_count
         or len(seed_norm_hex) != seed_count
+        or state_seed_indices != seed_indices
+        or state_seed_norm_hex != seed_norm_hex
         or _sample_indices_sha256(seed_indices) != state.get("seed_indices_sha256")
     ):
         raise ExternalMemoryDBSCANError("adaptive seed checkpoint identity mismatch")
-    failures = [int(value) for value in state.get("adaptive_failure_indices") or []]
+    if failure_ledger is None:
+        raise ExternalMemoryDBSCANError("adaptive failure progress ledger is missing")
+    failures = _fold_failure_ledger(failure_ledger)
+    state_failures = [
+        int(value) for value in state.get("adaptive_failure_indices") or []
+    ]
     if (
         failures != sorted(set(failures))
+        or state_failures != failures
         or _sample_indices_sha256(failures)
         != state.get("adaptive_failure_indices_sha256")
     ):
         raise ExternalMemoryDBSCANError("adaptive failure checkpoint identity mismatch")
     seed_array = np.asarray(seed_indices, dtype=np.intp)
     seed_vectors = np.asarray(vectors[seed_array])
-    seed_model, seed_sklearn_version = _fit_anchor_neighbors(
-        seed_vectors, eps=float(contract.eps)
-    )
-    if seed_sklearn_version != sklearn_version:
-        raise ExternalMemoryDBSCANError("adaptive seed/full sklearn versions differ")
+    if seed_model is None:
+        seed_model, seed_sklearn_version = _fit_anchor_neighbors(
+            seed_vectors, eps=float(contract.eps)
+        )
+        if seed_sklearn_version != sklearn_version:
+            raise ExternalMemoryDBSCANError("adaptive seed/full sklearn versions differ")
     seed_local_by_global = {
         int(global_index): local_index
         for local_index, global_index in enumerate(seed_indices)
     }
-    start = int(state.get("next_offset", 0))
+    start = int(failure_ledger["committed_offset"])
     block = _bounded_shortcut_block_size(
         requested=int(contract.shortcut_query_block_size),
         anchor_count=seed_count,
@@ -943,27 +2028,26 @@ def _resolve_adaptive_anchor_selection(
                 stop - offset, seed_count
             ),
         )
-        neighborhoods = seed_model.radius_neighbors(
-            vectors[offset:stop], return_distance=False
+        block_failures = _adaptive_failure_block(
+            model=seed_model,
+            vectors=vectors,
+            start=offset,
+            stop=stop,
+            seed_local_by_global=seed_local_by_global,
+            min_samples=int(contract.min_samples),
         )
-        for local_row, raw in enumerate(neighborhoods):
-            global_index = offset + local_row
-            values = np.asarray(raw, dtype=np.intp)
-            if len(values) != len(np.unique(values)):
-                raise ExternalMemoryDBSCANError(
-                    "adaptive failure scan returned duplicate seed indices"
-                )
-            own_seed = seed_local_by_global.get(global_index)
-            if own_seed is not None and own_seed not in values:
-                raise ExternalMemoryDBSCANError(
-                    "adaptive failure scan omitted explicit seed self sample"
-                )
-            lower = len(values) - int(own_seed is not None)
-            if lower < int(contract.min_samples) - 1 or (
-                own_seed is None and lower < 1
-            ):
-                failures.append(global_index)
-        del neighborhoods
+        failures.extend(block_failures)
+        _append_progress_entry(
+            failure_ledger,
+            start=offset,
+            stop=stop,
+            payload={
+                "row_count": stop - offset,
+                "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+                "failure_indices": block_failures,
+                "failure_indices_sha256": _sample_indices_sha256(block_failures),
+            },
+        )
         if len(failures) > int(contract.shortcut_failure_cap):
             observed = np.asarray(failures, dtype=np.intp)
             observed_path = root / "adaptive_failure_cap_exceeded_indices.npy"
@@ -986,17 +2070,28 @@ def _resolve_adaptive_anchor_selection(
                     "first_pass_complete": False,
                 },
             )
+            extra = _progress_checkpoint_extra(ledgers, identity=identity)
+            extra.update(
+                {
+                    "seed_indices": seed_indices,
+                    "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+                    "seed_squared_norm_hex": seed_norm_hex,
+                    "adaptive_failure_indices": failures,
+                    "adaptive_failure_indices_sha256": _sample_indices_sha256(
+                        failures
+                    ),
+                    "shortcut_failure_path": failure["path"],
+                    "shortcut_failure_sha256": failure["sha256"],
+                    "shortcut_approximation_used": False,
+                }
+            )
             _checkpoint(
                 state_path,
                 identity=identity,
                 phase="shortcut_blocked",
                 next_offset=stop,
                 peak_rss_bytes=max(peak, _rss_bytes()),
-                extra={
-                    "shortcut_failure_path": failure["path"],
-                    "shortcut_failure_sha256": failure["sha256"],
-                    "shortcut_approximation_used": False,
-                },
+                extra=extra,
             )
             raise ExternalMemoryDBSCANError(
                 "EXACT_DBSCAN_COMPLEXITY_BLOCKED:"
@@ -1014,13 +2109,9 @@ def _resolve_adaptive_anchor_selection(
             blocks_since_checkpoint >= int(contract.checkpoint_interval_blocks)
             or stop == n_samples
         ):
-            _checkpoint(
-                state_path,
-                identity=identity,
-                phase="adaptive_failure_scan",
-                next_offset=stop,
-                peak_rss_bytes=peak,
-                extra={
+            extra = _progress_checkpoint_extra(ledgers, identity=identity)
+            extra.update(
+                {
                     "seed_indices": seed_indices,
                     "seed_indices_sha256": _sample_indices_sha256(seed_indices),
                     "seed_squared_norm_hex": seed_norm_hex,
@@ -1029,7 +2120,15 @@ def _resolve_adaptive_anchor_selection(
                         failures
                     ),
                     "effective_shortcut_query_block_size": int(block),
-                },
+                }
+            )
+            _checkpoint(
+                state_path,
+                identity=identity,
+                phase="adaptive_failure_scan",
+                next_offset=stop,
+                peak_rss_bytes=peak,
+                extra=extra,
             )
             blocks_since_checkpoint = 0
 
@@ -1038,6 +2137,39 @@ def _resolve_adaptive_anchor_selection(
         raise ExternalMemoryDBSCANError(
             "adaptive first-pass failure indices are not canonical"
         )
+    _complete_progress_ledger(
+        failure_ledger,
+        num_samples=n_samples,
+        result={
+            "first_pass_complete": True,
+            "failure_indices": failures,
+            "failure_indices_sha256": _sample_indices_sha256(failures),
+        },
+    )
+    # Persist the completed first-pass ledger before publishing any selection
+    # artifact.  A crash after the selection JSON rename must never leave that
+    # manifest referring to a completion state that existed only in memory.
+    completed_failure_extra = _progress_checkpoint_extra(
+        ledgers, identity=identity
+    )
+    completed_failure_extra.update(
+        {
+            "seed_indices": seed_indices,
+            "seed_indices_sha256": _sample_indices_sha256(seed_indices),
+            "seed_squared_norm_hex": seed_norm_hex,
+            "adaptive_failure_indices": failures,
+            "adaptive_failure_indices_sha256": _sample_indices_sha256(failures),
+            "effective_shortcut_query_block_size": int(block),
+        }
+    )
+    _checkpoint(
+        state_path,
+        identity=identity,
+        phase="adaptive_failure_scan",
+        next_offset=n_samples,
+        peak_rss_bytes=peak,
+        extra=completed_failure_extra,
+    )
     anchor_indices = np.asarray(
         sorted(set(seed_indices).union(failures)), dtype=np.intp
     )
@@ -1080,6 +2212,12 @@ def _resolve_adaptive_anchor_selection(
         "failure_indices_path": str(failure_path),
         "failure_indices_sha256": failure_sha,
         "failure_index_list_sha256": _sample_indices_sha256(failure_array),
+        "adaptive_seed_progress_ledger_sha256": _progress_ledger_sha256(
+            seed_ledger
+        ),
+        "adaptive_failure_progress_ledger_sha256": _progress_ledger_sha256(
+            failure_ledger
+        ),
         "anchor_selection_rule": (
             "sorted_unique_union_of_seed_and_all_failure_indices_v1"
         ),
@@ -1100,25 +2238,40 @@ def _resolve_adaptive_anchor_selection(
     }
     _atomic_json(selection_path, selection_manifest)
     selection_sha = _sha256_file(selection_path)
+    lower_ledger = _require_progress_ledger(
+        ledgers,
+        phase="shortcut_anchor_scan",
+        identity=identity,
+        create=True,
+    )
+    if lower_ledger["entries"]:
+        raise ExternalMemoryDBSCANError(
+            "new shortcut lower ledger is unexpectedly nonempty"
+        )
+    extra = _progress_checkpoint_extra(ledgers, identity=identity)
+    extra.update(
+        {
+            "adaptive_selection_manifest_path": str(selection_path),
+            "adaptive_selection_manifest_sha256": selection_sha,
+            "selected_anchor_indices_sha256": selection_identity[
+                "selected_anchor_indices_sha256"
+            ],
+        }
+    )
     _checkpoint(
         state_path,
         identity=identity,
         phase="shortcut_anchor_scan",
         next_offset=0,
         peak_rss_bytes=max(peak, _rss_bytes()),
-        extra={
-            "adaptive_selection_manifest_path": str(selection_path),
-            "adaptive_selection_manifest_sha256": selection_sha,
-            "selected_anchor_indices_sha256": selection_identity[
-                "selected_anchor_indices_sha256"
-            ],
-        },
+        extra=extra,
     )
     validated_anchors, validated_manifest = _validate_adaptive_selection_manifest(
         path=selection_path,
         expected_sha256=selection_sha,
         root=root,
         identity=identity,
+        progress_ledgers=ledgers,
     )
     return validated_anchors, validated_manifest, max(peak, _rss_bytes())
 
@@ -1164,8 +2317,34 @@ def _validate_shortcut_proof_closure(
         or proof.get("labels_are_exact_sklearn_order") is not True
         or proof.get("exact_neighbor_counts_materialized") is not False
         or proof.get("approximation_used") is not False
+        or proof.get("all_progress_prefixes_complete") is not True
     ):
         raise ExternalMemoryDBSCANError("terminal shortcut proof is incomplete")
+    required_progress_phases = (
+        ["adaptive_seed_scan", "adaptive_failure_scan", "shortcut_anchor_scan"]
+        if manifest.get("clustering_path")
+        == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+        else ["shortcut_anchor_scan"]
+    )
+    progress_path = Path(str(proof.get("progress_ledger_path") or ""))
+    if (
+        proof.get("progress_ledger_required_phases")
+        != required_progress_phases
+        or manifest.get("progress_ledger_path") != str(progress_path)
+        or manifest.get("progress_ledger_sha256")
+        != proof.get("progress_ledger_sha256")
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal shortcut progress-ledger binding mismatch"
+        )
+    progress_ledgers = _validate_progress_ledger_artifact(
+        path=progress_path,
+        expected_sha256=str(proof.get("progress_ledger_sha256") or ""),
+        root=root,
+        identity=scientific_identity,
+        num_samples=int(manifest.get("num_samples", -1)),
+        required_phases=required_progress_phases,
+    )
     artifacts: list[Path] = []
     for path_field, hash_field in (
         ("anchor_indices_path", "anchor_indices_sha256"),
@@ -1205,8 +2384,21 @@ def _validate_shortcut_proof_closure(
         )
     ):
         raise ExternalMemoryDBSCANError("terminal shortcut witness schema mismatch")
-    if int(np.min(lower)) != recorded_minimum:
-        raise ExternalMemoryDBSCANError("terminal shortcut lower-bound minimum mismatch")
+    validated_minimum, validated_non_anchor = _validate_complete_lower_witness(
+        lower=lower,
+        anchor_indices=anchor_indices,
+        ledger=progress_ledgers["shortcut_anchor_scan"],
+        num_samples=n_samples,
+        min_samples=min_samples,
+    )
+    if (
+        validated_minimum != recorded_minimum
+        or validated_non_anchor
+        != proof.get("minimum_non_anchor_anchor_neighbors")
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal shortcut lower-bound minimum mismatch"
+        )
     expected_indices_sha = hashlib.sha256(
         json.dumps(anchor_indices.tolist(), separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -1231,6 +2423,7 @@ def _validate_shortcut_proof_closure(
             ),
             root=root,
             identity=scientific_identity,
+            progress_ledgers=progress_ledgers,
         )
         selection_identity = selection_manifest["selection_identity"]
         if (
@@ -1280,6 +2473,20 @@ def _validate_shortcut_proof_closure(
             raise ExternalMemoryDBSCANError(
                 f"terminal shortcut artifact closure mismatch: {hash_field}"
             )
+    _validate_constant_output(
+        labels,
+        shape=(n_samples,),
+        dtype=np.intp,
+        expected=0,
+        label="terminal shortcut labels",
+    )
+    _validate_constant_output(
+        core,
+        shape=(n_samples,),
+        dtype=np.bool_,
+        expected=True,
+        label="terminal shortcut core mask",
+    )
     if (
         proof.get("labels_path") != str(labels)
         or proof.get("labels_sha256") != manifest.get("labels_sha256")
@@ -1303,6 +2510,7 @@ def _fit_all_core_one_component_shortcut(
     peak_rss_bytes: int,
     anchor_indices_override: np.ndarray | None = None,
     adaptive_selection_manifest: Mapping[str, Any] | None = None,
+    resume_replay_required: bool = False,
 ) -> ExternalDBSCANResult | None:
     """Prove the only safe shortcut or return ``None`` for exact fallback.
 
@@ -1320,8 +2528,31 @@ def _fit_all_core_one_component_shortcut(
 
     n_samples, n_features = (int(vectors.shape[0]), int(vectors.shape[1]))
     fallback_limit = int(contract.exact_fallback_max_samples)
-    state = _load_object(state_path)
+    state = _load_checkpoint(state_path)
     phase = str(state.get("phase"))
+    ledgers = _load_progress_ledgers(
+        state, identity=identity, num_samples=n_samples
+    )
+    adaptive_checkpoint_fields: dict[str, Any] = {}
+    if adaptive_selection_manifest is not None:
+        adaptive_identity = adaptive_selection_manifest.get("selection_identity")
+        if not isinstance(adaptive_identity, Mapping):
+            raise ExternalMemoryDBSCANError(
+                "adaptive anchor selection identity is absent"
+            )
+        adaptive_path = root / "adaptive_anchor_selection.json"
+        adaptive_checkpoint_fields = {
+            "adaptive_selection_manifest_path": str(adaptive_path),
+            "adaptive_selection_manifest_sha256": _sha256_file(adaptive_path),
+            "selected_anchor_indices_sha256": adaptive_identity[
+                "selected_anchor_indices_sha256"
+            ],
+        }
+
+    def shortcut_progress_extra() -> dict[str, Any]:
+        extra = _progress_checkpoint_extra(ledgers, identity=identity)
+        extra.update(adaptive_checkpoint_fields)
+        return extra
     failure_path = root / "shortcut_failure.json"
     if phase == "shortcut_blocked":
         if not failure_path.is_file() or _sha256_file(failure_path) != state.get(
@@ -1351,17 +2582,21 @@ def _fit_all_core_one_component_shortcut(
         next_phase = (
             "neighbor_counts" if n_samples <= fallback_limit else "shortcut_blocked"
         )
+        extra = shortcut_progress_extra()
+        extra.update(
+            {
+                "shortcut_failure_path": failure["path"],
+                "shortcut_failure_sha256": failure["sha256"],
+                "shortcut_approximation_used": False,
+            }
+        )
         _checkpoint(
             state_path,
             identity=identity,
             phase=next_phase,
             next_offset=0,
             peak_rss_bytes=peak_rss_bytes,
-            extra={
-                "shortcut_failure_path": failure["path"],
-                "shortcut_failure_sha256": failure["sha256"],
-                "shortcut_approximation_used": False,
-            },
+            extra=extra,
         )
         if next_phase == "shortcut_blocked":
             raise ExternalMemoryDBSCANError(
@@ -1467,6 +2702,46 @@ def _fit_all_core_one_component_shortcut(
 
     lower_partial = root / "shortcut_anchor_neighbor_lower_bounds.partial.npy"
     lower_final = root / "shortcut_anchor_neighbor_lower_bounds.npy"
+    lower_ledger = _require_progress_ledger(
+        ledgers, phase="shortcut_anchor_scan", identity=identity
+    )
+    if phase == "shortcut_anchor_scan":
+        _assert_active_progress_offset(
+            state, lower_ledger, phase="shortcut_anchor_scan"
+        )
+    if resume_replay_required and lower_ledger["entries"]:
+        replay_path = lower_final if lower_final.exists() else lower_partial
+        if not replay_path.exists():
+            raise ExternalMemoryDBSCANError(
+                "missing lower-bound array for resume replay"
+            )
+        replay_lower = _open_npy_memmap(replay_path, mode="r")
+        _validate_partial(
+            replay_lower,
+            shape=(n_samples,),
+            dtype=np.uint32,
+            label="anchor-neighbor lower bounds",
+        )
+        replay_minimum, replay_non_anchor, replay_peak = _replay_lower_progress(
+            vectors=vectors,
+            lower=replay_lower,
+            model=anchor_model,
+            anchor_indices=anchor_indices,
+            ledger=lower_ledger,
+            min_samples=int(contract.min_samples),
+            max_rss_bytes=int(contract.max_rss_bytes),
+        )
+        del replay_lower
+        if (
+            replay_minimum
+            != state.get("minimum_distinct_anchor_neighbors_excluding_self")
+            or replay_non_anchor
+            != state.get("minimum_non_anchor_anchor_neighbors")
+        ):
+            raise ExternalMemoryDBSCANError(
+                "shortcut lower-bound checkpoint minima/replay mismatch"
+            )
+        peak_rss_bytes = max(int(peak_rss_bytes), int(replay_peak))
     peak = max(int(peak_rss_bytes), _rss_bytes())
     if phase == "shortcut_anchor_scan":
         if lower_partial.exists():
@@ -1485,7 +2760,7 @@ def _fit_all_core_one_component_shortcut(
             lower = _new_memmap(
                 lower_partial, dtype=np.uint32, shape=(n_samples,)
             )
-        start = int(state.get("next_offset", 0))
+        start = int(lower_ledger["committed_offset"])
         block = _bounded_shortcut_block_size(
             requested=int(contract.shortcut_query_block_size),
             anchor_count=len(anchor_indices),
@@ -1496,13 +2771,32 @@ def _fit_all_core_one_component_shortcut(
             int(global_index): local_index
             for local_index, global_index in enumerate(anchor_indices.tolist())
         }
-        minimum_lower = int(
-            state.get("minimum_distinct_anchor_neighbors_excluding_self", len(anchor_indices))
+        committed_payloads = [entry["payload"] for entry in lower_ledger["entries"]]
+        minimum_lower = (
+            min(
+                int(payload["minimum_distinct_anchor_neighbors_excluding_self"])
+                for payload in committed_payloads
+            )
+            if committed_payloads
+            else int(len(anchor_indices))
         )
-        minimum_non_anchor = state.get("minimum_non_anchor_anchor_neighbors")
+        committed_non_anchor = [
+            int(payload["minimum_non_anchor_anchor_neighbors"])
+            for payload in committed_payloads
+            if payload.get("minimum_non_anchor_anchor_neighbors") is not None
+        ]
         minimum_non_anchor_value = (
-            None if minimum_non_anchor is None else int(minimum_non_anchor)
+            min(committed_non_anchor) if committed_non_anchor else None
         )
+        if lower_ledger["entries"] and (
+            minimum_lower
+            != state.get("minimum_distinct_anchor_neighbors_excluding_self")
+            or minimum_non_anchor_value
+            != state.get("minimum_non_anchor_anchor_neighbors")
+        ):
+            raise ExternalMemoryDBSCANError(
+                "shortcut lower-bound checkpoint/ledger minima mismatch"
+            )
         blocks_since_checkpoint = 0
         for offset in range(start, n_samples, block):
             stop = min(n_samples, offset + block)
@@ -1514,47 +2808,31 @@ def _fit_all_core_one_component_shortcut(
                 phase="shortcut_anchor_scan.query",
                 reserved_bytes=reserved,
             )
-            neighborhoods = anchor_model.radius_neighbors(
-                vectors[offset:stop], return_distance=False
+            block_lower, first_failure = _anchor_lower_block(
+                model=anchor_model,
+                vectors=vectors,
+                start=offset,
+                stop=stop,
+                anchor_local_by_global=anchor_local_by_global,
+                min_samples=int(contract.min_samples),
             )
-            block_lower = np.empty(stop - offset, dtype=np.uint32)
-            first_failure: dict[str, Any] | None = None
-            for local_row, raw in enumerate(neighborhoods):
-                global_index = offset + local_row
-                values = np.asarray(raw, dtype=np.intp)
-                if len(values) != len(np.unique(values)):
-                    raise ExternalMemoryDBSCANError(
-                        "anchor scan returned duplicate sample indices"
-                    )
-                own_anchor = anchor_local_by_global.get(global_index)
-                if own_anchor is not None and own_anchor not in values:
-                    raise ExternalMemoryDBSCANError(
-                        "anchor scan omitted explicit query self sample"
-                    )
-                count_excluding_self = len(values) - int(own_anchor is not None)
-                block_lower[local_row] = count_excluding_self
-                minimum_lower = min(minimum_lower, count_excluding_self)
-                if own_anchor is None:
-                    minimum_non_anchor_value = (
-                        count_excluding_self
-                        if minimum_non_anchor_value is None
-                        else min(minimum_non_anchor_value, count_excluding_self)
-                    )
-                if (
-                    count_excluding_self < int(contract.min_samples) - 1
-                    or (own_anchor is None and count_excluding_self < 1)
-                ) and first_failure is None:
-                    first_failure = {
-                        "sample_index": int(global_index),
-                        "distinct_anchor_neighbors_excluding_self": int(
-                            count_excluding_self
-                        ),
-                        "required_for_core": int(contract.min_samples) - 1,
-                        "required_for_anchor_attachment_if_non_anchor": 1,
-                        "sample_is_anchor": own_anchor is not None,
-                    }
             lower[offset:stop] = block_lower
-            del neighborhoods, block_lower
+            block_payload = _lower_block_payload(
+                block_lower,
+                start=offset,
+                anchor_local_by_global=anchor_local_by_global,
+            )
+            block_minimum = int(
+                block_payload["minimum_distinct_anchor_neighbors_excluding_self"]
+            )
+            minimum_lower = min(minimum_lower, block_minimum)
+            block_non_anchor = block_payload["minimum_non_anchor_anchor_neighbors"]
+            if block_non_anchor is not None:
+                minimum_non_anchor_value = (
+                    int(block_non_anchor)
+                    if minimum_non_anchor_value is None
+                    else min(minimum_non_anchor_value, int(block_non_anchor))
+                )
             peak = max(
                 peak,
                 _check_rss(
@@ -1566,19 +2844,22 @@ def _fit_all_core_one_component_shortcut(
                 inconclusive("per_sample_anchor_lower_bound_failed", first_failure)
                 del lower
                 return None
+            _append_progress_entry(
+                lower_ledger,
+                start=offset,
+                stop=stop,
+                payload=block_payload,
+            )
+            del block_lower
             blocks_since_checkpoint += 1
             if (
                 blocks_since_checkpoint >= int(contract.checkpoint_interval_blocks)
                 or stop == n_samples
             ):
                 _fsync_memmap(lower)
-                _checkpoint(
-                    state_path,
-                    identity=identity,
-                    phase="shortcut_anchor_scan",
-                    next_offset=stop,
-                    peak_rss_bytes=peak,
-                    extra={
+                extra = shortcut_progress_extra()
+                extra.update(
+                    {
                         "effective_shortcut_query_block_size": int(block),
                         "anchor_indices_sha256": anchor_indices_sha,
                         "anchor_edges_sha256": anchor_edges_sha,
@@ -1586,18 +2867,35 @@ def _fit_all_core_one_component_shortcut(
                             minimum_lower
                         ),
                         "minimum_non_anchor_anchor_neighbors": minimum_non_anchor_value,
-                    },
+                    }
+                )
+                _checkpoint(
+                    state_path,
+                    identity=identity,
+                    phase="shortcut_anchor_scan",
+                    next_offset=stop,
+                    peak_rss_bytes=peak,
+                    extra=extra,
                 )
                 blocks_since_checkpoint = 0
         _fsync_memmap(lower)
         lower_sha = _sha256_file(lower_partial)
-        _checkpoint(
-            state_path,
-            identity=identity,
-            phase="shortcut_finalize",
-            next_offset=n_samples,
-            peak_rss_bytes=peak,
-            extra={
+        _complete_progress_ledger(
+            lower_ledger,
+            num_samples=n_samples,
+            result={
+                "full_scan_complete": True,
+                "minimum_distinct_anchor_neighbors_excluding_self": int(
+                    minimum_lower
+                ),
+                "minimum_non_anchor_anchor_neighbors": minimum_non_anchor_value,
+                "all_rows_core_lower_bound_pass": True,
+                "all_non_anchors_attached": True,
+            },
+        )
+        extra = shortcut_progress_extra()
+        extra.update(
+            {
                 "effective_shortcut_query_block_size": int(block),
                 "anchor_indices_sha256": anchor_indices_sha,
                 "anchor_edges_sha256": anchor_edges_sha,
@@ -1608,11 +2906,25 @@ def _fit_all_core_one_component_shortcut(
                 "minimum_non_anchor_anchor_neighbors": minimum_non_anchor_value,
                 "anchor_edge_count": int(len(anchor_edges)),
                 "anchor_count": int(len(anchor_indices)),
-            },
+            }
+        )
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="shortcut_finalize",
+            next_offset=n_samples,
+            peak_rss_bytes=peak,
+            extra=extra,
         )
         del lower
         phase = "shortcut_finalize"
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
+        ledgers = _load_progress_ledgers(
+            state, identity=identity, num_samples=n_samples
+        )
+        lower_ledger = _require_progress_ledger(
+            ledgers, phase="shortcut_anchor_scan", identity=identity
+        )
 
     if phase != "shortcut_finalize":
         raise ExternalMemoryDBSCANError(f"unexpected shortcut phase: {phase}")
@@ -1629,6 +2941,38 @@ def _fit_all_core_one_component_shortcut(
     if anchor_edges_sha != state.get("anchor_edges_sha256"):
         raise ExternalMemoryDBSCANError("shortcut anchor-edge checkpoint mismatch")
 
+    lower_for_closure = _open_npy_memmap(lower_final, mode="r")
+    validated_minimum, validated_non_anchor = _validate_complete_lower_witness(
+        lower=lower_for_closure,
+        anchor_indices=anchor_indices,
+        ledger=lower_ledger,
+        num_samples=n_samples,
+        min_samples=int(contract.min_samples),
+    )
+    del lower_for_closure
+    if (
+        validated_minimum
+        != state.get("minimum_distinct_anchor_neighbors_excluding_self")
+        or validated_non_anchor
+        != state.get("minimum_non_anchor_anchor_neighbors")
+    ):
+        raise ExternalMemoryDBSCANError(
+            "shortcut final lower-bound checkpoint/full-scan mismatch"
+        )
+    required_progress_phases = (
+        ["adaptive_seed_scan", "adaptive_failure_scan", "shortcut_anchor_scan"]
+        if contract.shortcut_mode == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+        else ["shortcut_anchor_scan"]
+    )
+    progress_path = root / "shortcut_progress_ledger.json"
+    progress_sha = _write_progress_ledger_artifact(
+        path=progress_path,
+        ledgers=ledgers,
+        identity=identity,
+        required_phases=required_progress_phases,
+        num_samples=n_samples,
+    )
+
     labels_path = root / "labels.npy"
     core_path = root / "core_mask.npy"
     _constant_npy(
@@ -1636,6 +2980,20 @@ def _fit_all_core_one_component_shortcut(
     )
     _constant_npy(
         core_path, shape=(n_samples,), dtype=np.bool_, fill_value=True
+    )
+    _validate_constant_output(
+        labels_path,
+        shape=(n_samples,),
+        dtype=np.intp,
+        expected=0,
+        label="shortcut labels",
+    )
+    _validate_constant_output(
+        core_path,
+        shape=(n_samples,),
+        dtype=np.bool_,
+        expected=True,
+        label="shortcut core mask",
     )
     labels_sha = _sha256_file(labels_path)
     core_sha = _sha256_file(core_path)
@@ -1668,16 +3026,18 @@ def _fit_all_core_one_component_shortcut(
         "anchor_epsilon_graph_connected": True,
         "anchor_neighbor_lower_bounds_path": str(lower_final),
         "anchor_neighbor_lower_bounds_sha256": lower_sha,
+        "progress_ledger_path": str(progress_path),
+        "progress_ledger_sha256": progress_sha,
+        "progress_ledger_required_phases": required_progress_phases,
+        "all_progress_prefixes_complete": True,
         "anchor_neighbor_lower_bound_definition": (
             "distinct anchor sample indices within eps, excluding the query's "
             "own sample index when it is an anchor"
         ),
         "minimum_distinct_anchor_neighbors_excluding_self": int(
-            state["minimum_distinct_anchor_neighbors_excluding_self"]
+            validated_minimum
         ),
-        "minimum_non_anchor_anchor_neighbors": state.get(
-            "minimum_non_anchor_anchor_neighbors"
-        ),
+        "minimum_non_anchor_anchor_neighbors": validated_non_anchor,
         "all_points_core_proven": True,
         "single_epsilon_component_proven": True,
         "labels_are_exact_sklearn_order": True,
@@ -1740,6 +3100,8 @@ def _fit_all_core_one_component_shortcut(
         "labels_sha256": labels_sha,
         "shortcut_proof_path": str(proof_path),
         "shortcut_proof_sha256": proof_sha,
+        "progress_ledger_path": str(progress_path),
+        "progress_ledger_sha256": progress_sha,
         "clustering_path": contract.shortcut_mode,
         "peak_rss_bytes_observed": max(peak, _rss_bytes()),
         "max_rss_bytes": int(contract.max_rss_bytes),
@@ -1752,17 +3114,22 @@ def _fit_all_core_one_component_shortcut(
     if manifest["peak_rss_bytes_observed"] > int(contract.max_rss_bytes):
         raise ExternalMemoryDBSCANError("recorded peak RSS exceeded the frozen budget")
     _atomic_json(final_manifest_path, manifest)
+    complete_extra = shortcut_progress_extra()
+    complete_extra.update(
+        {
+            "shortcut_proof_sha256": proof_sha,
+            "progress_ledger_sha256": progress_sha,
+            "labels_sha256": labels_sha,
+            "core_mask_sha256": core_sha,
+        }
+    )
     _checkpoint(
         state_path,
         identity=identity,
         phase="complete",
         next_offset=n_samples,
         peak_rss_bytes=int(manifest["peak_rss_bytes_observed"]),
-        extra={
-            "shortcut_proof_sha256": proof_sha,
-            "labels_sha256": labels_sha,
-            "core_mask_sha256": core_sha,
-        },
+        extra=complete_extra,
     )
     return ExternalDBSCANResult(
         labels_path=labels_path,
@@ -1796,11 +3163,17 @@ def fit_external_memory_dbscan(
     final_manifest_path = root / "run_manifest.json"
     if final_manifest_path.exists():
         manifest = _load_object(final_manifest_path)
+        if manifest.get("schema_version") != SCHEMA_VERSION:
+            raise ExternalMemoryDBSCANError("terminal DBSCAN schema mismatch")
         if manifest.get("run_complete") is not True:
             raise ExternalMemoryDBSCANError("terminal DBSCAN manifest is incomplete")
         scientific_identity = manifest.get("scientific_identity")
         if not isinstance(scientific_identity, Mapping):
             raise ExternalMemoryDBSCANError("terminal DBSCAN identity is absent")
+        if scientific_identity.get("schema_version") != SCHEMA_VERSION:
+            raise ExternalMemoryDBSCANError(
+                "terminal DBSCAN scientific schema mismatch"
+            )
         if scientific_identity.get("vectors_path") != str(source):
             raise ExternalMemoryDBSCANError("terminal DBSCAN vector path mismatch")
         if scientific_identity.get("contract") != asdict(contract):
@@ -1862,6 +3235,7 @@ def fit_external_memory_dbscan(
     if root.exists() and any(root.iterdir()) and not resume:
         raise FileExistsError(f"external DBSCAN work directory is non-empty: {root}")
     root.mkdir(parents=True, exist_ok=True)
+    checkpoint_existed_at_entry = state_path.exists()
 
     vectors = _open_npy_memmap(source, mode="r")
     if vectors.ndim != 2 or vectors.shape[0] <= 0 or vectors.shape[1] <= 0:
@@ -1941,7 +3315,7 @@ def fit_external_memory_dbscan(
     }
     state: dict[str, Any]
     if state_path.exists():
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
         if not resume:
             raise ExternalMemoryDBSCANError("checkpoint exists but resume=false")
         if (
@@ -1951,27 +3325,51 @@ def fit_external_memory_dbscan(
         ):
             raise ExternalMemoryDBSCANError("checkpoint scientific identity mismatch")
     else:
+        initial_phase = {
+            ALL_CORE_ONE_COMPONENT_SHORTCUT: "shortcut_anchor_scan",
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT: "adaptive_seed_scan",
+        }.get(contract.shortcut_mode, "neighbor_counts")
         state = {
-            "phase": {
-                ALL_CORE_ONE_COMPONENT_SHORTCUT: "shortcut_anchor_scan",
-                ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT: "adaptive_seed_scan",
-            }.get(contract.shortcut_mode, "neighbor_counts"),
+            "phase": initial_phase,
             "next_offset": 0,
             "peak_rss_bytes": _rss_bytes(),
         }
+        initial_extra: dict[str, Any] = {}
+        if contract.shortcut_mode in {
+            ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        }:
+            initial_ledgers = {
+                initial_phase: _new_progress_ledger(
+                    phase=initial_phase, identity=identity
+                )
+            }
+            initial_extra = _progress_checkpoint_extra(
+                initial_ledgers, identity=identity
+            )
+            if initial_phase == "adaptive_seed_scan":
+                initial_extra["adaptive_seed_candidates"] = []
         _checkpoint(
             state_path,
             identity=identity,
             phase=str(state["phase"]),
             next_offset=0,
             peak_rss_bytes=int(state["peak_rss_bytes"]),
+            extra=initial_extra,
         )
 
     peak = max(int(state.get("peak_rss_bytes", 0)), _rss_bytes())
+    shortcut_active_phases = {
+        "adaptive_seed_scan",
+        "adaptive_failure_scan",
+        "shortcut_anchor_scan",
+        "shortcut_finalize",
+        "shortcut_blocked",
+    }
     if contract.shortcut_mode in {
         ALL_CORE_ONE_COMPONENT_SHORTCUT,
         ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
-    }:
+    } and str(state.get("phase")) in shortcut_active_phases:
         adaptive_anchors: np.ndarray | None = None
         adaptive_manifest: Mapping[str, Any] | None = None
         if contract.shortcut_mode == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT:
@@ -1984,6 +3382,7 @@ def fit_external_memory_dbscan(
                     contract=contract,
                     sklearn_version=sklearn_version,
                     peak_rss_bytes=peak,
+                    resume_replay_required=checkpoint_existed_at_entry,
                 )
             )
         shortcut_result = _fit_all_core_one_component_shortcut(
@@ -1998,10 +3397,11 @@ def fit_external_memory_dbscan(
             peak_rss_bytes=peak,
             anchor_indices_override=adaptive_anchors,
             adaptive_selection_manifest=adaptive_manifest,
+            resume_replay_required=checkpoint_existed_at_entry,
         )
         if shortcut_result is not None:
             return shortcut_result
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
         peak = max(peak, int(state.get("peak_rss_bytes", 0)), _rss_bytes())
     counts_partial = root / "neighbor_counts.partial.npy"
     counts_final = root / "neighbor_counts.npy"
@@ -2041,7 +3441,7 @@ def fit_external_memory_dbscan(
             },
         )
         phase = "core_union"
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
     if phase == "neighbor_counts":
         if counts_partial.exists():
             counts = _open_npy_memmap(counts_partial, mode="r+")
@@ -2144,7 +3544,7 @@ def fit_external_memory_dbscan(
             extra={"effective_query_block_size": block},
         )
         phase = "core_union"
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
 
     counts = _open_npy_memmap(counts_final, mode="r")
     core = np.load(core_path, mmap_mode="r", allow_pickle=False)
@@ -2222,7 +3622,7 @@ def fit_external_memory_dbscan(
             extra={"effective_query_block_size": block},
         )
         phase = "labels"
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
 
     parent = _open_npy_memmap(parent_partial, mode="r+")
     component_roots = np.unique(np.asarray(parent[core_indices], dtype=np.intp))
@@ -2248,7 +3648,7 @@ def fit_external_memory_dbscan(
             },
         )
         phase = "complete"
-        state = _load_object(state_path)
+        state = _load_checkpoint(state_path)
     if phase == "labels":
         if labels_partial.exists():
             labels = _open_npy_memmap(labels_partial, mode="r+")
@@ -2398,6 +3798,7 @@ __all__ = [
     "ExternalDBSCANContract",
     "ExternalDBSCANResult",
     "ExternalMemoryDBSCANError",
+    "PROGRESS_LEDGER_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "SHORTCUT_DISABLED",
     "SHORTCUT_PROOF_SCHEMA_VERSION",

@@ -210,6 +210,61 @@ controller state is not rewritten or relabelled.
 ### Status
 
 Accepted
+## [2026-08-23] Authenticate and replay every shortcut scan prefix before PASS
+
+### Background
+
+The first fixed/adaptive anchor implementation checkpointed a mutable
+`next_offset` and running minima, while the lower-bound array was preallocated
+with zeroes.  A reviewer reproducer interrupted a fixed 12-by-64 scan after
+rows 0--2, changed only `next_offset` from 3 to 12, and resumed.  That state
+could reach a false all-core PASS even though row 10 was outside epsilon and
+sklearn correctly labelled it noise.  Adaptive seed and failure scans had the
+same unauthenticated-prefix class of risk.
+
+### Decision
+
+External schema v3, adaptive-selection schema v2, and shortcut-proof schema
+v2 give every checkpoint a payload SHA and every committed adaptive
+seed, adaptive failure, and final anchor-lower block a scientific-identity-
+bound forward hash-chain entry.  Seed entries bind the block-local float64
+top-k rows, failure entries bind every insufficient source index, and lower
+entries bind canonical little-endian uint32 values plus block minima.  The
+checkpoint binds the complete ledger map and its committed offset.
+
+Any resume replays all committed entries at their original boundaries from
+the immutable vector source and frozen sklearn brute models.  It compares the
+recomputed seed rows, failure indices, lower values, and stored partial array
+before continuing; changing `next_offset`, a ledger entry, an aggregate, or a
+committed lower slot fails closed.  The completed failure ledger is persisted
+before publishing adaptive-selection artifacts so a rename/checkpoint crash
+window remains resumable and cannot create an unbound selection.
+
+Before labels are materialized, the finalizer verifies that lower-ledger
+coverage is contiguous and exact over every source row, rehashes every lower
+slice, recomputes the global and non-anchor minima, and enforces the core and
+attachment thresholds.  It freezes the completed ledgers as a separate
+checksum-bound proof artifact and verifies that labels are all zero and the
+core mask is all true.  Terminal reopen repeats artifact, complete-ledger,
+full-lower, selection, connectivity, and constant-output closure.  Exact full
+neighbor counts remain explicitly unavailable rather than synthesized.
+
+### Consequences
+
+- The reviewer 12-by-64 false-positive reproducer and independently
+  reauthenticated seed/failure offset tampering are rejected before PASS.
+- Existing external-schema-v2 checkpoints and terminals are deliberately
+  non-resumable under schema v3; a future formal run must use a fresh output
+  root.
+- Resume may spend one bounded linear replay pass validating its committed
+  prefix.  This is required release evidence, not optional diagnostic work.
+- The real evenly-spaced-64 failure remains immutable evidence.  The adaptive
+  route is still not wired to, deployed on, or run on AutoDL by this change.
+
+### Status
+
+Accepted (core closure only; fresh AutoDL release remains separately gated)
+
 ## [2026-08-23] Expand an exact DBSCAN witness by all deterministic failures
 
 ### Background

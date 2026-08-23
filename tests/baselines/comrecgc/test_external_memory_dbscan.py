@@ -20,6 +20,15 @@ def _save(path: Path, values: np.ndarray) -> Path:
     return path
 
 
+def _write_reauthenticated_checkpoint(path: Path, state: dict) -> None:
+    """Model coordinated state corruption beyond the outer payload checksum."""
+
+    unsigned = dict(state)
+    unsigned.pop("checkpoint_payload_sha256", None)
+    state["checkpoint_payload_sha256"] = external._stable_hash(unsigned)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
 def _contract(*, block: int = 7, max_rss_bytes: int | None = None):
     return external.ExternalDBSCANContract(
         eps=0.37,
@@ -199,6 +208,141 @@ def test_adaptive_failure_scan_resume_preserves_selection_and_label_hashes(
         assert resumed_selection["selection_identity"][field] == (
             reference_selection["selection_identity"][field]
         )
+
+
+def test_adaptive_seed_next_offset_tamper_cannot_skip_unscanned_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract(block=3)
+    original = external._adaptive_seed_block_candidates
+    calls = {"count": 0}
+
+    def interrupt_second_block(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise RuntimeError("adaptive seed interruption")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        external, "_adaptive_seed_block_candidates", interrupt_second_block
+    )
+    root = tmp_path / "adaptive-seed-tamper"
+    with pytest.raises(RuntimeError, match="adaptive seed interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint_path = root / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["phase"] == "adaptive_seed_scan"
+    assert checkpoint["next_offset"] == 3
+    checkpoint["next_offset"] = len(values)
+    _write_reauthenticated_checkpoint(checkpoint_path, checkpoint)
+
+    monkeypatch.setattr(external, "_adaptive_seed_block_candidates", original)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="offset/progress-ledger mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
+        )
+    assert not (root / "run_manifest.json").exists()
+
+
+def test_adaptive_failure_next_offset_tamper_cannot_skip_unscanned_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract(block=3)
+    original_fit = external._fit_anchor_neighbors
+    calls = {"count": 0}
+
+    class InterruptingSeedModel:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def radius_neighbors(self, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise RuntimeError("adaptive failure interruption")
+            return self.wrapped.radius_neighbors(*args, **kwargs)
+
+    def interrupted_fit(*args, **kwargs):
+        model, version = original_fit(*args, **kwargs)
+        return InterruptingSeedModel(model), version
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", interrupted_fit)
+    root = tmp_path / "adaptive-failure-tamper"
+    with pytest.raises(RuntimeError, match="adaptive failure interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint_path = root / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["phase"] == "adaptive_failure_scan"
+    assert checkpoint["next_offset"] == 3
+    checkpoint["next_offset"] = len(values)
+    _write_reauthenticated_checkpoint(checkpoint_path, checkpoint)
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", original_fit)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="offset/progress-ledger mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
+        )
+    assert not (root / "run_manifest.json").exists()
+
+
+def test_adaptive_selection_publish_crash_resumes_from_persisted_complete_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract(block=3)
+    original_atomic_json = external._atomic_json
+    crashed = {"done": False}
+
+    def crash_after_selection_publish(path, payload):
+        original_atomic_json(path, payload)
+        if path.name == "adaptive_anchor_selection.json" and not crashed["done"]:
+            crashed["done"] = True
+            raise RuntimeError("selection publish interruption")
+
+    monkeypatch.setattr(external, "_atomic_json", crash_after_selection_publish)
+    root = tmp_path / "selection-publish-resume"
+    with pytest.raises(RuntimeError, match="selection publish interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint = json.loads((root / "checkpoint.json").read_text())
+    assert checkpoint["phase"] == "adaptive_failure_scan"
+    assert checkpoint["next_offset"] == len(values)
+    assert checkpoint["progress_ledgers"]["adaptive_failure_scan"]["complete"]
+    assert (root / "adaptive_anchor_selection.json").is_file()
+
+    monkeypatch.setattr(external, "_atomic_json", original_atomic_json)
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=root,
+        contract=contract,
+        resume=True,
+    )
+    expected = DBSCAN(eps=contract.eps, min_samples=contract.min_samples).fit(values)
+    assert np.array_equal(np.load(result.labels_path), expected.labels_)
+    assert np.array_equal(
+        np.flatnonzero(np.load(result.core_mask_path)), expected.core_sample_indices_
+    )
 
 
 def test_adaptive_selection_is_independent_of_resource_block_size(
@@ -399,6 +543,52 @@ def test_inconclusive_anchor_witness_falls_back_only_below_explicit_limit(
     assert failure["approximation_used"] is False
 
 
+def test_shortcut_exact_fallback_resume_skips_retired_shortcut_ledgers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = np.zeros((9, 64), dtype=np.float32)
+    values[:, 0] = np.asarray(
+        [0.0, 0.01, 0.02, 10.0, 10.01, 10.02, 20.0, 20.01, 20.02]
+    )
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = external.ExternalDBSCANContract(
+        **{**_shortcut_contract(anchors=3, fallback=9).__dict__, "eps": 0.05}
+    )
+    original_checkpoint = external._checkpoint
+    interrupted = {"done": False}
+
+    def interrupt_after_core_union_checkpoint(*args, **kwargs):
+        original_checkpoint(*args, **kwargs)
+        if kwargs.get("phase") == "core_union" and not interrupted["done"]:
+            interrupted["done"] = True
+            raise RuntimeError("exact fallback interruption")
+
+    monkeypatch.setattr(
+        external, "_checkpoint", interrupt_after_core_union_checkpoint
+    )
+    root = tmp_path / "fallback-resume"
+    with pytest.raises(RuntimeError, match="exact fallback interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint = json.loads((root / "checkpoint.json").read_text())
+    assert checkpoint["phase"] == "core_union"
+    assert "progress_ledgers" not in checkpoint
+
+    monkeypatch.setattr(external, "_checkpoint", original_checkpoint)
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=root,
+        contract=contract,
+        resume=True,
+    )
+    expected = DBSCAN(eps=contract.eps, min_samples=contract.min_samples).fit(values)
+    assert np.array_equal(np.load(result.labels_path), expected.labels_)
+    assert np.array_equal(
+        np.flatnonzero(np.load(result.core_mask_path)), expected.core_sample_indices_
+    )
+
+
 def test_large_inconclusive_anchor_witness_is_explicit_complexity_block(
     tmp_path: Path,
 ) -> None:
@@ -470,6 +660,139 @@ def test_anchor_shortcut_resume_is_label_hash_exact(
     assert resumed_manifest["labels_sha256"] == reference_manifest["labels_sha256"]
     assert resumed_manifest["core_mask_sha256"] == reference_manifest["core_mask_sha256"]
     assert np.array_equal(np.load(resumed.labels_path), np.load(reference.labels_path))
+
+
+def test_reviewer_fixed_next_offset_tamper_reproducer_cannot_publish_false_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _all_core_values()
+    values[10] = 0.0
+    values[10, 0] = 10.0
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract(block=3, anchors=4, fallback=0)
+    original_fit = external._fit_anchor_neighbors
+    calls = {"count": 0}
+
+    class InterruptingAnchorModel:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def radius_neighbors(self, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 3:
+                raise RuntimeError("reviewer fixed interruption")
+            return self.wrapped.radius_neighbors(*args, **kwargs)
+
+    def interrupted_fit(*args, **kwargs):
+        model, version = original_fit(*args, **kwargs)
+        return InterruptingAnchorModel(model), version
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", interrupted_fit)
+    root = tmp_path / "reviewer-fixed-tamper"
+    with pytest.raises(RuntimeError, match="reviewer fixed interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint_path = root / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["next_offset"] == 3
+    checkpoint["next_offset"] = len(values)
+    checkpoint_path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True) + "\n")
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", original_fit)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="checkpoint authentication mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
+        )
+    assert not (root / "run_manifest.json").exists()
+    assert not (root / "labels.npy").exists()
+
+
+def test_anchor_shortcut_resume_replays_and_rejects_tampered_committed_lower(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = np.zeros((16, 64), dtype=np.float32)
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract(block=3, anchors=4)
+    original_fit = external._fit_anchor_neighbors
+    calls = {"count": 0}
+
+    class InterruptingAnchorModel:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def radius_neighbors(self, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 3:
+                raise RuntimeError("lower replay interruption")
+            return self.wrapped.radius_neighbors(*args, **kwargs)
+
+    def interrupted_fit(*args, **kwargs):
+        model, version = original_fit(*args, **kwargs)
+        return InterruptingAnchorModel(model), version
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", interrupted_fit)
+    root = tmp_path / "lower-replay-tamper"
+    with pytest.raises(RuntimeError, match="lower replay interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    lower_path = root / "shortcut_anchor_neighbor_lower_bounds.partial.npy"
+    lower = np.load(lower_path, mmap_mode="r+")
+    lower[0] = 0
+    lower.flush()
+    del lower
+
+    monkeypatch.setattr(external, "_fit_anchor_neighbors", original_fit)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="lower-bound resume replay mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
+        )
+    assert not (root / "run_manifest.json").exists()
+
+
+def test_anchor_shortcut_validates_full_lower_array_before_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract()
+    original_reconcile = external._reconcile_promoted_array
+
+    def corrupt_after_reconcile(*args, **kwargs):
+        path = original_reconcile(*args, **kwargs)
+        if kwargs.get("label") == "anchor-neighbor lower bounds":
+            lower = np.load(path, mmap_mode="r+")
+            lower[-1] = 0
+            lower.flush()
+            del lower
+        return path
+
+    monkeypatch.setattr(
+        external, "_reconcile_promoted_array", corrupt_after_reconcile
+    )
+    root = tmp_path / "final-lower-tamper"
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="final lower-bound ledger/array mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    assert not (root / "run_manifest.json").exists()
+    assert not (root / "labels.npy").exists()
 
 
 def test_anchor_shortcut_terminal_rejects_tampered_lower_bound_witness(
