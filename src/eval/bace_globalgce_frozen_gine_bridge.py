@@ -17,6 +17,7 @@ from src.baselines.bace_gnn_baseline_contracts import (
 from src.baselines.globalgce_bace_native_rules import build_parent_native_tensors
 from src.baselines.globalgce_frozen_gine_bridge import (
     BRIDGE_SCHEMA_VERSION,
+    EDGE_SCORE_RELAXATION,
     FrozenGINEDifferentiableBridge,
 )
 from src.data.molecular_graph_dataset import MolecularGraphData
@@ -31,7 +32,7 @@ from src.eval.bace_frozen_gnn_contracts import (
 from src.oracles.oracle_factory import build_oracle
 
 
-BRIDGE_SMOKE_VERSION = "bace_globalgce_frozen_gine_bridge_smoke_v1"
+BRIDGE_SMOKE_VERSION = "bace_globalgce_frozen_gine_bridge_smoke_v2"
 
 
 def _graph(featurizer: MolecularGraphFeaturizer, smiles: str) -> MolecularGraphData:
@@ -57,7 +58,13 @@ def run_frozen_gine_bridge_smoke(
     output_dir: str | Path,
     device: str = "cpu",
 ) -> dict[str, Any]:
-    """Prove frozen weights, nonzero transformation gradient, and hard parity."""
+    """Prove frozen weights, decoder-score gradients, and hard parity.
+
+    The second forward deliberately replaces native one-hot bond rows with
+    finite negative/positive affine scores whose ``argmax`` labels are
+    unchanged.  This matches the actual output domain of the pinned official
+    edge decoder and prevents an identity-only smoke from releasing training.
+    """
 
     torch = __import__("torch")
     checkpoint, card, schema = validate_bace_frozen_gine(gnn_checkpoint)
@@ -126,6 +133,68 @@ def run_frozen_gine_bridge_smoke(
         ),
     }
     transformation_gradient_nonzero = sum(gradients.values()) > 0.0
+
+    # Pinned official commit 157e65c accidentally passes nn.Sigmoid() as the
+    # final Linear's ``bias`` argument; its reconstructed edge attributes are
+    # unrestricted affine class scores.  Give every hard class a deterministic
+    # winning score while retaining negative non-winning values.
+    class_offsets = torch.linspace(
+        -1.25,
+        0.25,
+        int(edge_attr.shape[-1]),
+        dtype=edge_attr.dtype,
+        device=edge_attr.device,
+    )
+    production_edge_scores = (
+        class_offsets.view(1, 1, -1) + 2.5 * edge_attr.detach()
+    ).clone().requires_grad_(True)
+    score_feature = feature.detach().clone().requires_grad_(True)
+    score_adjacency = adjacency.detach().clone().requires_grad_(True)
+    score_result = bridge(
+        score_feature,
+        score_adjacency,
+        production_edge_scores,
+    )
+    score_probabilities = tuple(
+        float(value)
+        for value in score_result["y_pred"].detach().exp().cpu()[0].tolist()
+    )
+    score_parity_max_abs_error = max(
+        abs(left - right)
+        for left, right in zip(
+            ordinary_probabilities, score_probabilities, strict=True
+        )
+    )
+    score_hard_parity_pass = score_parity_max_abs_error <= 2e-6
+    score_loss = torch.nn.functional.nll_loss(
+        score_result["y_pred"],
+        torch.tensor(
+            [target], dtype=torch.long, device=score_result["y_pred"].device
+        ),
+    )
+    score_loss.backward()
+    score_gradients = {
+        "features": (
+            float(score_feature.grad.detach().abs().sum())
+            if score_feature.grad is not None
+            else 0.0
+        ),
+        "adjacency": (
+            float(score_adjacency.grad.detach().abs().sum())
+            if score_adjacency.grad is not None
+            else 0.0
+        ),
+        "edge_scores": (
+            float(production_edge_scores.grad.detach().abs().sum())
+            if production_edge_scores.grad is not None
+            else 0.0
+        ),
+    }
+    negative_edge_score_count = int(
+        (production_edge_scores.detach() < 0.0).sum().item()
+    )
+    production_edge_scores_exercised = negative_edge_score_count > 0
+    edge_score_gradient_nonzero = score_gradients["edge_scores"] > 0.0
     classifier_gradient_abs_sum = sum(
         float(parameter.grad.detach().abs().sum())
         for parameter in bridge.model.parameters()
@@ -137,13 +206,22 @@ def run_frozen_gine_bridge_smoke(
     )
     after_checkpoint_hash = sha256_file(checkpoint / "model.pt")
     checkpoint_unchanged = before_checkpoint_hash == after_checkpoint_hash
-    finite = math.isfinite(float(loss.detach().cpu())) and all(
-        math.isfinite(value) for value in gradients.values()
+    finite = (
+        math.isfinite(float(loss.detach().cpu()))
+        and math.isfinite(float(score_loss.detach().cpu()))
+        and all(math.isfinite(value) for value in gradients.values())
+        and all(math.isfinite(value) for value in score_gradients.values())
     )
     failures: list[str] = []
     for passed, name in (
         (parity_pass, "bridge_prediction_matches_ordinary_frozen_oracle"),
         (transformation_gradient_nonzero, "transformation_gradient_nonzero"),
+        (
+            production_edge_scores_exercised,
+            "production_negative_edge_scores_exercised",
+        ),
+        (score_hard_parity_pass, "negative_edge_scores_preserve_hard_forward"),
+        (edge_score_gradient_nonzero, "negative_edge_score_gradient_nonzero"),
         (classifier_gradient_abs_sum == 0.0, "classifier_gradient_zero"),
         (classifier_parameters_unchanged, "classifier_parameters_unchanged"),
         (checkpoint_unchanged, "checkpoint_hash_unchanged"),
@@ -177,6 +255,25 @@ def run_frozen_gine_bridge_smoke(
         "classifier_parameters_unchanged": classifier_parameters_unchanged,
         "transformation_gradient_nonzero": transformation_gradient_nonzero,
         "transformation_gradient_abs_sums": gradients,
+        "edge_score_contract": "pinned_official_unbounded_affine_class_scores",
+        "edge_score_relaxation": EDGE_SCORE_RELAXATION,
+        "production_negative_edge_scores_exercised": (
+            production_edge_scores_exercised
+        ),
+        "production_negative_edge_score_count": negative_edge_score_count,
+        "production_edge_score_min": float(
+            production_edge_scores.detach().min().cpu()
+        ),
+        "production_edge_score_max": float(
+            production_edge_scores.detach().max().cpu()
+        ),
+        "production_edge_score_gradient_abs_sums": score_gradients,
+        "negative_edge_score_gradient_nonzero": edge_score_gradient_nonzero,
+        "negative_edge_scores_preserve_hard_forward": score_hard_parity_pass,
+        "negative_edge_score_prediction_parity_max_abs_error": (
+            score_parity_max_abs_error
+        ),
+        "negative_edge_score_bridge_probabilities": list(score_probabilities),
         "bridge_prediction_matches_ordinary_frozen_oracle": parity_pass,
         "prediction_parity_max_abs_error": parity_max_abs_error,
         "checkpoint_hash_before": before_checkpoint_hash,

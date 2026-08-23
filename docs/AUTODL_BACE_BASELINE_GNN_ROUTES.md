@@ -37,6 +37,16 @@ re-scored by that same ordinary oracle. Official GTGNN, RF, a trainable
 classifier, surrogate GNN, full-graph substitution, and deletion substitution
 remain forbidden.
 
+The pinned official decoder's final edge `Linear` receives `nn.Sigmoid()` as
+its third positional `bias` argument rather than as a following module. Its
+edge output is therefore an unrestricted finite affine class-score vector,
+not a probability or nonnegative weight vector. At the frozen categorical
+GINE boundary the bridge applies a class-axis softmax to those scores. This is
+the differentiable categorical relaxation that preserves the official
+`argmax` hard edge class, including when scores are negative; clamping is not
+allowed. Node decoder values retain their separate nonnegative normalization
+because the pinned node decoder really does append its sigmoid.
+
 The machine-readable summary is available without starting science work:
 
 ```bash
@@ -123,7 +133,10 @@ GlobalGCE required preflight artifacts are `route_contract.json`,
 and terminal `READY`. The following bridge smoke publishes
 `bridge_gradient_audit.json`, `BRIDGE_PASS`, and `PASS` only when hard-forward
 parity, a nonzero transformation gradient, zero classifier gradients, an
-unchanged checkpoint hash, and finite outputs all hold.
+unchanged checkpoint hash, and finite outputs all hold. It exercises both a
+hard one-hot identity graph and production-shaped affine edge scores containing
+negative values; the latter must preserve the same hard `argmax` graph and
+produce a nonzero edge-score gradient.
 
 ```bash
 $PY scripts/autodl/run_bace_baseline_gnn_route.py globalgce-bridge-smoke \

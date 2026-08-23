@@ -5,6 +5,8 @@
 # requires the frozen calibrated GINE checkpoint, frozen train source manifest,
 # and complete processed train CSV; the adapter maps the exact frozen 869 IDs.
 # The historical RF build_bace_train_pool wrapper is not an exact-route CLI.
+# `globalgce-bridge-smoke` also exercises the pinned official decoder's
+# negative affine edge-score domain; an identity one-hot smoke is insufficient.
 # This wrapper never assumes a submodule is populated;
 # generic "$@" forwarding preserves exact AutoDL/Slurm CLI parity.
 #SBATCH --partition=A800

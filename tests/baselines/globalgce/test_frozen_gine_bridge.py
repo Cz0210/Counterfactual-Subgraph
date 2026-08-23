@@ -9,6 +9,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("rdkit")
 
 from src.baselines.globalgce_frozen_gine_bridge import (  # noqa: E402
+    EDGE_SCORE_RELAXATION,
     FrozenGINEDifferentiableBridge,
     GlobalGCEClassZeroTargetAdapter,
 )
@@ -121,6 +122,59 @@ def test_bridge_keeps_frozen_model_in_eval_when_official_loop_calls_train() -> N
     bridge.train(True)
     assert model.training is False
     assert all(module.training is False for module in model.modules())
+
+
+def test_bridge_accepts_official_negative_edge_scores_with_hard_parity() -> None:
+    model = _model()
+    bridge = FrozenGINEDifferentiableBridge(
+        model,
+        feature_schema=default_molecular_feature_schema(),
+        atom_symbols=("C", "O"),
+        bond_names=("no_edge", "single", "double", "triple"),
+        checkpoint_id="e" * 64,
+        temperature=1.0,
+    )
+    features, adjacency, one_hot_edges = _dense_ethanol()
+    offsets = torch.tensor([-1.25, -0.75, -0.25, 0.25]).view(1, 1, -1)
+    # Same hard classes as the native one-hot graph, but with the unrestricted
+    # finite affine score domain emitted by pinned official GlobalGCE.
+    edge_scores = (offsets + 2.5 * one_hot_edges.detach()).requires_grad_(True)
+    before = {name: value.detach().clone() for name, value in model.state_dict().items()}
+
+    result = bridge(features, adjacency, edge_scores)
+    expected = _ordinary_logits(model)
+    assert torch.allclose(result["logits"], expected, rtol=0.0, atol=2e-6)
+    assert result["bridge_audit"]["edge_score_relaxation"] == EDGE_SCORE_RELAXATION
+    graph_audit = result["bridge_audit"]["graphs"][0]
+    assert graph_audit["edge_score_negative_value_count"] > 0
+    assert graph_audit["edge_score_min"] < 0.0
+
+    torch.nn.functional.nll_loss(result["y_pred"], torch.tensor([0])).backward()
+    assert edge_scores.grad is not None
+    assert float(edge_scores.grad.detach().abs().sum()) > 0.0
+    assert all(parameter.grad is None for parameter in model.parameters())
+    assert all(parameter.requires_grad is False for parameter in model.parameters())
+    assert all(
+        torch.equal(before[name], value.detach())
+        for name, value in model.state_dict().items()
+    )
+    assert bridge.checkpoint_id == "e" * 64
+
+
+def test_bridge_rejects_nonfinite_official_edge_scores() -> None:
+    bridge = FrozenGINEDifferentiableBridge(
+        _model(),
+        feature_schema=default_molecular_feature_schema(),
+        atom_symbols=("C", "O"),
+        bond_names=("no_edge", "single", "double", "triple"),
+        checkpoint_id="f" * 64,
+        temperature=1.0,
+    )
+    features, adjacency, edges = _dense_ethanol()
+    with torch.no_grad():
+        edges[0, 0, 2] = float("nan")
+    with pytest.raises(ValueError, match="non-finite"):
+        bridge(features, adjacency, edges)
 
 
 def test_bridge_rejects_asymmetric_hard_adjacency() -> None:

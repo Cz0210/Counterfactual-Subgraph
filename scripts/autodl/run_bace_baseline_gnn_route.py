@@ -135,7 +135,13 @@ def build_parser() -> argparse.ArgumentParser:
     globalgce_forward.add_argument("--device", default="cpu")
     globalgce_forward.add_argument("--oracle-batch-size", type=int, default=256)
 
-    globalgce_bridge = sub.add_parser("globalgce-bridge-smoke")
+    globalgce_bridge = sub.add_parser(
+        "globalgce-bridge-smoke",
+        help=(
+            "Gate one-hot hard parity and pinned-official negative affine "
+            "edge-score softmax/gradient semantics."
+        ),
+    )
     _common(globalgce_bridge)
     globalgce_bridge.add_argument("--parent-smiles", required=True)
     globalgce_bridge.add_argument("--atom-symbol", action="append", required=True)

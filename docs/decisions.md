@@ -1,5 +1,49 @@
 # Decisions Log
 
+## [2026-08-23] Interpret pinned GlobalGCE edge decoder outputs as categorical scores
+
+### Background
+
+The first BACE GlobalGCE frozen-GINE full run completed exhaustive gSpan mining
+but failed as soon as official rule training called the differentiable bridge.
+The bridge rejected negative `edge_attributes` because it assumed they were
+nonnegative class weights. In pinned official commit
+`157e65c2850bc787f229a1ee8c60564906b933f2`, however, the apparent final
+`nn.Sigmoid()` is passed as the third positional argument of `nn.Linear`; it
+sets the truthy bias flag and is not appended to `decoder_edge_attr`. The
+decoder therefore emits unrestricted affine class scores, and the official
+hard graph codec decodes them with `argmax`.
+
+### Decision
+
+Keep the official decoder and its LHS-to-RHS semantics unchanged. At the
+categorical frozen-GINE boundary, map each finite edge score vector through a
+softmax over its class dimension before taking expected bond embeddings. This
+preserves the official hard `argmax` class for every unique maximum, admits
+negative scores, and provides gradients to the official transformation and
+decoder variables. Do not clamp scores or replace the frozen calibrated GINE
+with RF, GTGNN, or a surrogate. Continue to normalize node values separately,
+because the pinned node decoder does contain a real terminal sigmoid.
+
+The bridge smoke must include production-shaped negative edge scores in
+addition to the one-hot identity case, and must prove hard-oracle parity,
+nonzero edge-score gradients, no classifier gradients, unchanged frozen
+parameters/checkpoint, and finite outputs.
+
+### Consequences
+
+- The failed v5 training root remains immutable and cannot be relabelled PASS.
+- A corrected full attempt requires a fresh output root and immutable execution
+  commit.
+- Negative finite edge scores are valid bridge inputs; malformed rank/class
+  shape and NaN/Inf remain fail-closed errors.
+- Final hard transformations are still sanitized and reverified by the same
+  calibrated frozen GINE.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Gate the three-dataset release with an external-owner supervisor
 
 ### Background

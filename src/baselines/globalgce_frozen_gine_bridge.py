@@ -33,7 +33,8 @@ from src.data.molecular_graph_featurizer import (
 from src.oracles.gnn_oracle import load_gnn_checkpoint_bundle, sha256_file
 
 
-BRIDGE_SCHEMA_VERSION = "bace_globalgce_frozen_gine_st_bridge_v1"
+BRIDGE_SCHEMA_VERSION = "bace_globalgce_frozen_gine_st_bridge_v2"
+EDGE_SCORE_RELAXATION = "pinned_official_affine_scores_softmax_dim_minus_one_v1"
 
 
 class FrozenGINEBridgeError(ValueError):
@@ -68,6 +69,32 @@ def _normalize_distribution(value: Any, *, name: str) -> Any:
     if bool((denominator <= 0.0).any().item()):
         raise FrozenGINEBridgeError(f"{name} has an empty class distribution")
     return value / denominator
+
+
+def _categorical_score_distribution(value: Any, *, name: str) -> Any:
+    """Map pinned-official categorical scores to a differentiable simplex.
+
+    Pinned GlobalGCE commit ``157e65c`` does *not* apply a sigmoid to the
+    reconstructed edge attributes.  Its apparent ``nn.Sigmoid()`` is passed as
+    the third positional ``bias`` argument of the final ``nn.Linear`` instead
+    of being appended to ``nn.Sequential``.  The resulting finite affine
+    scores are therefore allowed to be negative and are hard-decoded with
+    ``argmax`` by the official graph codec.
+
+    Softmax is the order-preserving categorical relaxation of those scores:
+    it accepts the full official score domain, preserves the exact hard
+    ``argmax`` class, and carries gradients without clipping or changing the
+    frozen classifier.  This function is deliberately separate from
+    ``_normalize_distribution`` because node decoder values and native one-hot
+    rows remain non-negative weights under the pinned implementation.
+    """
+
+    torch = _torch()
+    if value.ndim != 2 or int(value.shape[-1]) < 2:
+        raise FrozenGINEBridgeError(f"{name} must be a rank-2 class tensor")
+    if not bool(torch.isfinite(value).all().item()):
+        raise FrozenGINEBridgeError(f"{name} contains non-finite values")
+    return torch.softmax(value, dim=-1)
 
 
 def _straight_through(hard: Any, soft: Any) -> Any:
@@ -411,7 +438,9 @@ class FrozenGINEDifferentiableBridge:
 
     def _mapped_edge_distribution(self, source: Any) -> tuple[Any, Any]:
         torch = _torch()
-        probabilities = _normalize_distribution(source, name="edge_attributes")
+        probabilities = _categorical_score_distribution(
+            source, name="edge_attributes"
+        )
         presence = 1.0 - probabilities[:, 0]
         bonds = probabilities[:, 1:]
         bonds = bonds / bonds.sum(dim=-1, keepdim=True).clamp_min(1e-12)
@@ -544,11 +573,27 @@ class FrozenGINEDifferentiableBridge:
         pooled = (node_hidden * node_gate.unsqueeze(-1)).sum(dim=0, keepdim=True)
         pooled = pooled / node_gate.sum().clamp_min(1.0)
         logits = self.model.classifier(pooled)
+        detached_edge_attributes = edge_attributes.detach()
+        edge_score_count = int(detached_edge_attributes.numel())
         return logits, {
             "active_node_count": len(active_native),
             "hard_edge_count": len(graph.hard_edges),
             "hard_graph_sanitized": graph.sanitized,
             "hard_graph_failure_reason": graph.failure_reason,
+            "edge_score_relaxation": EDGE_SCORE_RELAXATION,
+            "edge_score_negative_value_count": int(
+                (edge_attributes < 0.0).sum().detach().item()
+            ),
+            "edge_score_min": (
+                float(detached_edge_attributes.min().item())
+                if edge_score_count
+                else None
+            ),
+            "edge_score_max": (
+                float(detached_edge_attributes.max().item())
+                if edge_score_count
+                else None
+            ),
         }
 
     def __call__(self, features: Any, adjacency: Any, edge_attributes: Any) -> dict[str, Any]:
@@ -584,6 +629,9 @@ class FrozenGINEDifferentiableBridge:
             "checkpoint_id": self.checkpoint_id,
             "classifier_family": "gine",
             "rf_oracle_used": False,
+            "edge_score_contract": "pinned_official_unbounded_affine_class_scores",
+            "edge_score_relaxation": EDGE_SCORE_RELAXATION,
+            "hard_edge_decode": "argmax",
             "batch_size": len(audits),
             "hard_graph_sanitized_count": sum(
                 row["hard_graph_sanitized"] is True for row in audits
@@ -647,6 +695,7 @@ class GlobalGCEClassZeroTargetAdapter:
 
 __all__ = [
     "BRIDGE_SCHEMA_VERSION",
+    "EDGE_SCORE_RELAXATION",
     "FrozenGINEBridgeError",
     "FrozenGINEDifferentiableBridge",
     "GlobalGCEClassZeroTargetAdapter",

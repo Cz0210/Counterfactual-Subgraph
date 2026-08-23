@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-08-23: Accept pinned-official GlobalGCE affine edge scores
+
+- [x] Trace the negative edge values to the pinned official decoder, where the
+  apparent sigmoid is passed as `nn.Linear`'s positional bias flag and is not a
+  module in the decoder sequence.
+- [x] Treat decoder edge outputs as finite categorical scores and apply a
+  class-axis softmax only at the frozen-GINE expected-embedding boundary.
+- [x] Preserve the official hard `argmax` edge codec and reject non-finite or
+  malformed score tensors rather than clamping them.
+- [x] Extend the production smoke and focused tests with negative scores,
+  hard-oracle parity, nonzero transformation gradients, zero classifier
+  gradients, and unchanged checkpoint/parameter hashes.
+- [x] Keep the AutoDL CLI and paired Slurm wrapper in sync; any failed v5 root
+  remains immutable and a corrected run must use a fresh execution root.
+
 ## 2026-08-23: Persistent three-dataset release supervisor
 
 - [x] Catalog the nine settled standardized roots and keep AIDS ComRecGC,
