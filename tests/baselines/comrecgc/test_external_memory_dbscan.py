@@ -401,6 +401,56 @@ def test_adaptive_failure_cap_exceeded_is_terminal_and_never_falls_back(
     assert not (root / "neighbor_counts.npy").exists()
 
 
+def test_reauthenticated_complete_failure_ledger_cannot_bypass_cap(
+    tmp_path: Path,
+) -> None:
+    values = _adaptive_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _adaptive_contract(block=3, failure_cap=5)
+    root = tmp_path / "blocked-cap-tamper"
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="adaptive_failure_cap_exceeded",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    checkpoint_path = root / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    ledger = checkpoint["progress_ledgers"]["adaptive_failure_scan"]
+    failures = checkpoint["adaptive_failure_indices"]
+    assert ledger["committed_offset"] == len(values)
+    assert len(failures) > contract.shortcut_failure_cap
+
+    # Coordinate all self-authenticating state fields as an adversarial
+    # reproducer.  Resume replay still observes the real >cap set and must not
+    # allow selection merely because the ledger was marked complete.
+    checkpoint["phase"] = "adaptive_failure_scan"
+    ledger["complete"] = True
+    ledger["result"] = {
+        "first_pass_complete": True,
+        "failure_indices": failures,
+        "failure_indices_sha256": external._sample_indices_sha256(failures),
+    }
+    checkpoint["progress_ledgers_sha256"] = external._progress_ledgers_sha256(
+        checkpoint["progress_ledgers"], identity=checkpoint["identity"]
+    )
+    _write_reauthenticated_checkpoint(checkpoint_path, checkpoint)
+
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="exceeds the frozen cap",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
+        )
+    assert not (root / "adaptive_anchor_selection.json").exists()
+    assert not (root / "run_manifest.json").exists()
+
+
 def test_adaptive_terminal_rejects_tampered_first_pass_failure_set(
     tmp_path: Path,
 ) -> None:
@@ -818,6 +868,39 @@ def test_anchor_shortcut_terminal_rejects_tampered_lower_bound_witness(
     ):
         external.fit_external_memory_dbscan(
             vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
+def test_terminal_rejects_resigned_proof_threshold_drift(
+    tmp_path: Path,
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract()
+    root = tmp_path / "resigned-proof-drift"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    proof_path = result.shortcut_proof_path
+    assert proof_path is not None
+    proof = json.loads(proof_path.read_text())
+    proof["min_samples"] = 1
+    proof_path.write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n")
+    manifest = json.loads(result.manifest_path.read_text())
+    manifest["shortcut_proof_sha256"] = external._sha256_file(proof_path)
+    result.manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="terminal shortcut proof is incomplete",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
         )
 
 

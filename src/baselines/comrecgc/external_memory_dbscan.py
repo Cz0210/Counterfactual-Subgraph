@@ -1375,6 +1375,10 @@ def _write_progress_ledger_artifact(
     required_phases: Sequence[str],
     num_samples: int,
 ) -> str:
+    if set(ledgers) != set(required_phases):
+        raise ExternalMemoryDBSCANError(
+            "shortcut progress ledger phase set mismatch"
+        )
     for phase in required_phases:
         ledger = ledgers.get(phase)
         if not isinstance(ledger, Mapping):
@@ -1433,6 +1437,10 @@ def _validate_progress_ledger_artifact(
             "shortcut progress-ledger artifact identity mismatch"
         )
     ledgers = json.loads(json.dumps(dict(ledgers_raw)))
+    if set(ledgers) != set(required_phases):
+        raise ExternalMemoryDBSCANError(
+            "shortcut progress-ledger artifact phase set mismatch"
+        )
     if payload.get("progress_ledgers_sha256") != _progress_ledgers_sha256(
         ledgers, identity=identity
     ):
@@ -1741,6 +1749,13 @@ def _resolve_adaptive_anchor_selection(
             peak = max(peak, replay_peak)
         else:
             failures = _fold_failure_ledger(failure_ledger)
+        if (
+            len(failures) > int(contract.shortcut_failure_cap)
+            and phase != "shortcut_blocked"
+        ):
+            raise ExternalMemoryDBSCANError(
+                "adaptive failure progress ledger exceeds the frozen cap"
+            )
         expected_failure_result = {
             "first_pass_complete": True,
             "failure_indices": failures,
@@ -2133,6 +2148,10 @@ def _resolve_adaptive_anchor_selection(
             blocks_since_checkpoint = 0
 
     failure_array = np.asarray(failures, dtype=np.intp)
+    if len(failure_array) > int(contract.shortcut_failure_cap):
+        raise ExternalMemoryDBSCANError(
+            "adaptive failure set exceeds the frozen cap before selection"
+        )
     if not np.array_equal(failure_array, np.unique(failure_array)):
         raise ExternalMemoryDBSCANError(
             "adaptive first-pass failure indices are not canonical"
@@ -2305,16 +2324,45 @@ def _validate_shortcut_proof_closure(
     if not isinstance(scientific_identity, Mapping):
         raise ExternalMemoryDBSCANError("terminal shortcut identity is absent")
     shortcut_contract = scientific_identity.get("shortcut_contract")
-    if not isinstance(shortcut_contract, Mapping):
+    full_contract = scientific_identity.get("contract")
+    vectors_shape = scientific_identity.get("vectors_shape")
+    if (
+        not isinstance(shortcut_contract, Mapping)
+        or not isinstance(full_contract, Mapping)
+        or not isinstance(vectors_shape, list)
+        or len(vectors_shape) != 2
+    ):
         raise ExternalMemoryDBSCANError("terminal shortcut contract is absent")
+    identity_n_samples, identity_n_features = (int(value) for value in vectors_shape)
     if (
         proof.get("schema_version") != SHORTCUT_PROOF_SCHEMA_VERSION
         or proof.get("status") != "PASS"
+        or proof.get("shortcut") != manifest.get("clustering_path")
         or proof.get("scientific_identity_sha256")
         != manifest.get("scientific_identity_sha256")
+        or proof.get("vectors_path") != scientific_identity.get("vectors_path")
+        or proof.get("vectors_sha256") != scientific_identity.get("vectors_sha256")
+        or proof.get("vectors_dtype") != scientific_identity.get("vectors_dtype")
+        or proof.get("vectors_shape") != vectors_shape
+        or proof.get("sklearn_version")
+        != scientific_identity.get("sklearn_version")
+        or proof.get("eps") != full_contract.get("eps")
+        or proof.get("min_samples") != full_contract.get("min_samples")
+        or shortcut_contract.get("mode") != manifest.get("clustering_path")
+        or scientific_identity.get("nearest_neighbors_fit_method") != "brute"
+        or scientific_identity.get("nearest_neighbors_metric") != "euclidean"
+        or manifest.get("num_samples") != identity_n_samples
+        or manifest.get("num_features") != identity_n_features
+        or manifest.get("core_count") != identity_n_samples
+        or manifest.get("cluster_count") != 1
+        or manifest.get("noise_count") != 0
+        or manifest.get("approximation_used") is not False
+        or manifest.get("sklearn_dbscan_label_semantics_preserved") is not True
         or proof.get("all_points_core_proven") is not True
         or proof.get("single_epsilon_component_proven") is not True
         or proof.get("labels_are_exact_sklearn_order") is not True
+        or proof.get("label_value") != 0
+        or proof.get("core_mask_value") is not True
         or proof.get("exact_neighbor_counts_materialized") is not False
         or proof.get("approximation_used") is not False
         or proof.get("all_progress_prefixes_complete") is not True
@@ -2366,6 +2414,11 @@ def _validate_shortcut_proof_closure(
     recorded_minimum = int(
         proof.get("minimum_distinct_anchor_neighbors_excluding_self", -1)
     )
+    edge_rows = (
+        [tuple(int(value) for value in row) for row in anchor_edges.tolist()]
+        if anchor_edges.ndim == 2 and anchor_edges.shape[1:] == (2,)
+        else []
+    )
     if (
         anchor_indices.dtype != np.dtype(np.intp)
         or anchor_indices.shape != (anchor_count,)
@@ -2375,6 +2428,8 @@ def _validate_shortcut_proof_closure(
         or anchor_edges.dtype != np.dtype(np.intp)
         or anchor_edges.ndim != 2
         or anchor_edges.shape[1:] != (2,)
+        or len(anchor_edges) != int(proof.get("anchor_edge_count", -1))
+        or edge_rows != sorted(set(edge_rows))
         or lower.dtype != np.dtype(np.uint32)
         or lower.shape != (n_samples,)
         or recorded_minimum < min_samples - 1
@@ -2446,7 +2501,7 @@ def _validate_shortcut_proof_closure(
                 "terminal adaptive selection/proof mismatch"
             )
     adjacency = [{index} for index in range(anchor_count)]
-    for source, target in anchor_edges.tolist():
+    for source, target in edge_rows:
         source_index, target_index = int(source), int(target)
         if not (0 <= source_index < target_index < anchor_count):
             raise ExternalMemoryDBSCANError("terminal shortcut edge is noncanonical")

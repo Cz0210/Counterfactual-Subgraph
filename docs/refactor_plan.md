@@ -79,6 +79,8 @@
   values/minima for the final anchor scan.
 - [x] Replay every committed prefix from source/model bytes before resume and
   reject offset, aggregate, ledger, partial-array, or state tampering.
+- [x] Reassert the adaptive failure cap after replay and before selection so a
+  coordinated, reauthenticated complete-ledger mutation still fails closed.
 - [x] Persist first-pass completion before adaptive-selection publication and
   cover the selection-rename/checkpoint crash window with a resume fixture.
 - [x] Before PASS, validate contiguous exact lower coverage for every row,

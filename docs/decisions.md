@@ -238,7 +238,10 @@ recomputed seed rows, failure indices, lower values, and stored partial array
 before continuing; changing `next_offset`, a ledger entry, an aggregate, or a
 committed lower slot fails closed.  The completed failure ledger is persisted
 before publishing adaptive-selection artifacts so a rename/checkpoint crash
-window remains resumable and cannot create an unbound selection.
+window remains resumable and cannot create an unbound selection.  The frozen
+failure cap is asserted again on every replay-valid ledger and immediately
+before selection publication, so coordinated state re-signing cannot turn a
+cap-exceeded terminal prefix into a complete first pass.
 
 Before labels are materialized, the finalizer verifies that lower-ledger
 coverage is contiguous and exact over every source row, rehashes every lower
