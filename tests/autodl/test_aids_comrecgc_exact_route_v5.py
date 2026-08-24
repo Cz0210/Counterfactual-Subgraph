@@ -470,13 +470,22 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert benchmark["depends_on"] == [v5.SELECTOR_TASK_ID, v5.SNAPSHOT_TASK_ID]
     assert benchmark["expected_output"] != full_scan["expected_output"]
     assert "pair_semantics_benchmark" in benchmark["expected_output"]
-    assert "pair_semantics/" in full_scan["expected_output"]
+    assert "pair_semantics_receipt/" in full_scan["expected_output"]
+    assert full_scan["expected_output"].endswith("/attempt-{attempt}")
+    fixed_science = payload["aids_comrecgc_exact_route_v5_contract"][
+        "original_protocol"
+    ]["pair_semantics_science_root"]
+    assert "{attempt}" not in fixed_science
     assert "--max-chunks" in benchmark["command"]
     assert "--skip-source-array-hash-verification" in benchmark["command"]
     benchmark_output_index = benchmark["command"].index("--output-dir")
     full_output_index = full_scan["command"].index("--output-dir")
     assert benchmark["command"][benchmark_output_index + 1] == "{task_output}"
-    assert full_scan["command"][full_output_index + 1] == "{task_output}"
+    assert full_scan["command"][full_output_index + 1] == fixed_science
+    receipt_index = full_scan["command"].index("--receipt-output")
+    assert full_scan["command"][receipt_index + 1] == "{task_output}"
+    assert full_scan["retry_on_process_loss"] is True
+    assert payload["runtime"]["max_transient_retries"] == 1
     assert full_scan["depends_on"] == [v5.PAIR_SEMANTICS_BENCHMARK_TASK_ID]
     assert "--resume" not in full_scan["command"]
     assert close_view["depends_on"] == [v5.PAIR_SEMANTICS_TASK_ID]
@@ -484,6 +493,14 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
         "close_pair_contract.json",
         "PASS",
     ]
+    assert close_view["input_manifest"] == (
+        "{dep_"
+        + v5.PAIR_SEMANTICS_TASK_ID
+        + "_output}/pair_semantics_supervisor_receipt.json"
+    )
+    assert close_view["command"][
+        close_view["command"].index("--pair-semantics-contract") + 1
+    ] == fixed_science + "/close_pair_contract.json"
     compact_index = close_view["command"].index("--max-compact-gb")
     assert close_view["command"][compact_index + 1] == "8"
     assert environment["COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST"] == (
@@ -523,7 +540,7 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     ("mutation", "message"),
     [
         ("benchmark_limit", "benchmark contract"),
-        ("full_resume", "full close-pair scan contract"),
+        ("full_resume", "GREED supervisor command contract"),
         ("close_budget", "compact-copy bound"),
         ("close_cpu_env", "compact-copy bound"),
         ("science_input", "does not consume the exact snapshot"),
@@ -1612,9 +1629,15 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     )
     assert v5.REVIEWED_CORE_COMMIT == v5.INTEGRATED_REVIEWED_CORE_COMMIT
     assert v5.ROUTE_RELEASE_COMMIT == "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
-    assert v5.PAPER_PROTOCOL_RELEASE_COMMIT == (
-        "739512c16783cbc5f5fc3a9d5c4b7010b5aa05e5"
-    )
+    assert len(v5.PAPER_PROTOCOL_RELEASE_COMMIT) == 40
+    assert set(v5.PAPER_PROTOCOL_RELEASE_COMMIT) <= set("0123456789abcdef")
+    for relative in (
+        "src/utils/autodl_aids_greed_full_scan_supervisor.py",
+        "scripts/autodl/run_aids_greed_full_scan_supervisor.py",
+        "scripts/slurm/run_aids_greed_full_scan_supervisor.sh",
+        "scripts/baselines/comrecgc/build_close_pair_view.py",
+    ):
+        assert relative in v5.PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES
     assert v5.SNAPSHOT_RELEASE_COMMIT == (
         "8b99498a0c1beab11a6844ddf5f6f9d7c2c4458f"
     )
