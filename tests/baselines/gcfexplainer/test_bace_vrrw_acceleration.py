@@ -151,6 +151,22 @@ def test_frozen_gine_benchmark_cli_and_paired_slurm_are_synchronized() -> None:
         assert required in text
 
 
+def test_quick50_lockstep_wrapper_is_fail_closed_and_preserves_old_full() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    text = (
+        project_root / "scripts/autodl/run_bace_gcf_lockstep_quick50.sh"
+    ).read_text(encoding="utf-8")
+    assert "set -euo pipefail" in text
+    assert "run_one legacy legacy_a" in text
+    assert "run_one legacy legacy_b" in text
+    assert "legacy_a_vs_legacy_b.json" in text
+    assert "run_one ordered_v2 ordered_v2" in text
+    assert "--m 50" in text
+    assert "--profile equivalence_quick" in text
+    assert "kill" not in text
+    assert "139725" not in text
+
+
 def test_ordered_parallel_map_never_reorders_results() -> None:
     values = list(range(100))
     assert ordered_parallel_map(lambda value: value * value, values, workers=4) == [
