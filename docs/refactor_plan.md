@@ -1366,6 +1366,19 @@ Mutagenicity roadmaps.
   16 distinct cell terminal PASS tasks and one post-cell matrix audit.
 - [ ] Run the final exporter only after Taste licensing and every code gate
   release the full 16-cell matrix.
+
+# 2026-08-25 — AIDS production-subset exact equivalence gate
+
+- [x] Validate the terminal theta-close view plus physical pair/vector/distance
+  authority before selecting any production-derived audit row.
+- [x] Materialize deterministic first, random, dense, sparse, and theta-boundary
+  induced subsets with original logical order and SHA256 provenance.
+- [x] Compare sklearn with general external exact DBSCAN for partition, core,
+  noise, centroid, strict radius, coverage, and greedy semantics.
+- [x] Attempt the exact all-core certificate without allowing an inconclusive
+  proof to fall back silently, and record applicability explicitly.
+- [ ] Run this gate from the immutable AutoDL execution checkout after the
+  production close-view PASS; never promote its subset PASS to full DBSCAN PASS.
 # 2026-08-22 — Final matrix dependency closure
 
 - [x] Bind the post-cell registry audit to sixteen distinct successful attempt

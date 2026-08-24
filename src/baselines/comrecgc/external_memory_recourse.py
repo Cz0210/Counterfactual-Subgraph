@@ -2581,10 +2581,15 @@ def trace_external_cluster_order(
         points = recourse_vectors[positions]
         centroid = np.mean(points, axis=0)
         distances = np.linalg.norm(points - centroid, axis=1)
+        radius_in_distance_dtype = np.asarray(float(radius), dtype=distances.dtype)
         covered: set[int] = set()
         has_retained = False
         for local_index, distance in enumerate(distances):
-            if float(distance) < float(radius):
+            # Upstream compares a torch tensor with the Python scalar.  Torch
+            # casts that scalar to the tensor dtype before applying strict
+            # ``<``.  Keep the same boundary semantics here instead of first
+            # widening a float32 distance to Python float64.
+            if distance < radius_in_distance_dtype:
                 pair = pair_indices[int(positions[local_index])]
                 parent = int(pair[0])
                 covered.add(parent)
@@ -2627,7 +2632,9 @@ def trace_external_cluster_order(
         points = recourse_vectors[positions]
         centroid = np.mean(points, axis=0)
         distances = np.linalg.norm(points - centroid, axis=1)
-        retained_positions = np.flatnonzero(distances < float(radius))
+        retained_positions = np.flatnonzero(
+            distances < np.asarray(float(radius), dtype=distances.dtype)
+        )
         if retained_positions.size == 0:
             raise ExternalMemoryDBSCANError(
                 "selected cluster lost all strict-radius members"

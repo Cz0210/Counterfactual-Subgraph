@@ -9549,3 +9549,37 @@ immutable vector source.
 ### Status
 
 Accepted for implementation and focused review; not yet deployed.
+
+## [2026-08-25] Keep production-subset DBSCAN evidence distinct from full proof
+
+### Decision
+
+Add a CPU-only AutoDL audit that derives five deterministic, hash-closed AIDS
+inputs from the authority-bound theta-close view: first, seeded random, dense,
+sparse, and theta-boundary subsets. Preserve production logical-row order and
+bind the physical pair/vector/distance sources, bitmap, selection indices,
+seed, pivot, and canonical partition rule.
+
+For every subset, require exact agreement between sklearn DBSCAN and the
+general external-memory engine for core mask, noise, partition, centroid,
+strict centroid-radius membership, parent coverage, and stable-tie greedy
+selection. Attempt the all-core certificate with fallback disabled; an
+inconclusive certificate is recorded as not applicable, never as PASS.
+The NumPy production trace casts `delta` to the distance-array dtype before
+strict comparison, matching upstream Torch scalar promotion at exact float32
+boundaries instead of widening the distance to Python float64 first.
+
+### Consequences
+
+- Subset evidence can catch production schema, ordering, border, numerical,
+  coverage, and greedy regressions before full clustering.
+- `PASS` is terminal and last, but explicitly carries
+  `full_production_dbscan_equivalence_claimed=false`.
+- The synchronized Slurm wrapper always refuses execution because this audit
+  is AutoDL-only and the current campaign forbids HPC use.
+- No active execution root, pair store, controller, GPU lock, or old brute
+  process is modified by this implementation.
+
+### Status
+
+Accepted for code review; production execution remains a separate gate.
