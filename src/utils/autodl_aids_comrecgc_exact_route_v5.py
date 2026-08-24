@@ -26,6 +26,10 @@ from src.utils.aids_comrecgc_v5_snapshot import (
     EXPECTED_VECTOR_DIM as SNAPSHOT_EXPECTED_VECTOR_DIM,
     MIN_FREE_AFTER_BYTES as SNAPSHOT_MIN_FREE_AFTER_BYTES,
 )
+from src.utils.aids_comrecgc_v5_snapshot_adoption import (
+    SOURCE_CONTROLLER_ID as SNAPSHOT_OWNER_CONTROLLER_ID,
+    SOURCE_SNAPSHOT_TASK_ID as SNAPSHOT_OWNER_TASK_ID,
+)
 from src.utils import autodl_aids_comrecgc_repair_v3 as v3
 from src.utils.autodl_aids_comrecgc_repair_v4 import (
     CONTROLLER_ID as V4_CONTROLLER_ID,
@@ -38,11 +42,13 @@ from src.utils.autodl_four_by_four_repair import (
 )
 
 
-SPEC_SCHEMA = "aids_comrecgc_exact_route_v5_pair_order_v1_spec_v1"
-CONTROLLER_ID = "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1"
-TASK_ID = "aids_comrecgc_standardized_exact_route_v5_pair_order_v1"
-SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_pair_order_v1_selector_freeze"
-SNAPSHOT_TASK_ID = "aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1"
+SPEC_SCHEMA = "aids_comrecgc_exact_route_v5_snapshot_adopt_v1_spec_v1"
+CONTROLLER_ID = (
+    "four_methods_four_datasets_aids_comrecgc_exact_route_v5_snapshot_adopt_v1"
+)
+TASK_ID = "aids_comrecgc_standardized_exact_route_v5_snapshot_adopt_v1"
+SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_snapshot_adopt_v1_selector_freeze"
+SNAPSHOT_TASK_ID = "aids_comrecgc_pair_store_snapshot_adoption_v5_v1"
 SOURCE_NAMESPACE = "four_methods_four_datasets_continuation"
 REVIEWED_SOURCE_CORE_COMMIT = "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
 INTEGRATED_REVIEWED_CORE_COMMIT = "8c371b1c8ee1d8188555581c4f8e8b6060ae42eb"
@@ -69,6 +75,11 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
         "sha256": "751ebc29837fdd5985f03fb54aec23f255485fc74ad90a6798bf2b6e73a7c952",
     },
 }
+# Two-commit release pin.  This exact implementation commit contains the
+# snapshot-adoption authority closure, argv parser, supervisor preflight, tests,
+# paired Slurm wrapper, and documentation.  The builder-only child commit may
+# publish a controller only when this commit is a true execution ancestor.
+SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642
@@ -98,6 +109,24 @@ def _read_object(path: str | Path, *, label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RepairManifestError(f"{label} must be one JSON object")
     return payload
+
+
+def _flag_value_options(
+    command: tuple[str, ...], *, expected_prefix: tuple[str, ...]
+) -> dict[str, str]:
+    if command[: len(expected_prefix)] != expected_prefix:
+        raise RepairManifestError("snapshot adoption command entrypoint changed")
+    remainder = list(command[len(expected_prefix) :])
+    if len(remainder) % 2:
+        raise RepairManifestError("snapshot adoption command is not flag/value closed")
+    options: dict[str, str] = {}
+    for index in range(0, len(remainder), 2):
+        flag = remainder[index]
+        value = remainder[index + 1]
+        if not flag.startswith("--") or flag in options:
+            raise RepairManifestError("snapshot adoption command options changed")
+        options[flag] = value
+    return options
 
 
 def _absolute(value: Any, *, label: str, kind: str) -> Path:
@@ -319,6 +348,164 @@ def _terminal_source_evidence(
     }
 
 
+def _adopted_snapshot_evidence(
+    *,
+    spec: Mapping[str, Any],
+    proc_root: Path,
+    owner_namespace_root: Path,
+    expected_source_root: Path,
+    expected_source_manifest_sha256: str,
+) -> dict[str, Any]:
+    raw = spec.get("adopted_snapshot")
+    if not isinstance(raw, Mapping):
+        raise RepairManifestError("AIDS v5 adopted snapshot identity is missing")
+    specified_namespace = _absolute(
+        raw.get("owner_namespace_root"),
+        label="snapshot owner namespace root",
+        kind="dir",
+    )
+    if specified_namespace != owner_namespace_root:
+        raise RepairManifestError("snapshot owner namespace is not control authority")
+    owner_manifest = _absolute(
+        raw.get("owner_manifest"), label="snapshot owner manifest", kind="file"
+    )
+    owner_manifest_sha = str(raw.get("owner_manifest_sha256") or "")
+    if sha256_file(owner_manifest) != owner_manifest_sha:
+        raise RepairManifestError("snapshot owner manifest SHA256 mismatch")
+    owner = load_controller_manifest(owner_manifest)
+    if owner.controller_id != SNAPSHOT_OWNER_CONTROLLER_ID:
+        raise RepairManifestError("snapshot owner controller identity changed")
+    if SNAPSHOT_OWNER_TASK_ID not in owner.by_id:
+        raise RepairManifestError("snapshot owner task is missing")
+    owner_task = owner.by_id[SNAPSHOT_OWNER_TASK_ID]
+    gate_path = _absolute(
+        raw.get("owner_task_gate"), label="snapshot owner task gate", kind="file"
+    )
+    gate_sha = str(raw.get("owner_task_gate_sha256") or "")
+    expected_owner_manifest = (
+        owner_namespace_root
+        / "manifests"
+        / f"{SNAPSHOT_OWNER_CONTROLLER_ID}.json"
+    ).resolve(strict=False)
+    expected_gate = (
+        owner_namespace_root
+        / SNAPSHOT_OWNER_CONTROLLER_ID
+        / "tasks"
+        / SNAPSHOT_OWNER_TASK_ID
+        / "gate.json"
+    ).resolve(strict=False)
+    if owner_manifest != expected_owner_manifest or gate_path != expected_gate:
+        raise RepairManifestError("snapshot owner authority path changed")
+    if sha256_file(gate_path) != gate_sha:
+        raise RepairManifestError("snapshot owner task gate SHA256 mismatch")
+    gate = _read_object(gate_path, label="snapshot owner task gate")
+    snapshot_root = _absolute(
+        raw.get("snapshot_root"), label="adopted snapshot root", kind="dir"
+    )
+    expected_owner_output = owner_task.expected_output.replace("{attempt}", "0")
+    runs = gate.get("runs")
+    if (
+        Path(expected_owner_output).resolve(strict=False) != snapshot_root
+        or gate.get("status") != "PASS"
+        or gate.get("task_id") != SNAPSHOT_OWNER_TASK_ID
+        or not isinstance(runs, list)
+        or len(runs) != 1
+        or not isinstance(runs[0], Mapping)
+        or runs[0].get("state") != "PASS"
+        or runs[0].get("instance_id") != "main"
+        or int(runs[0].get("attempt", -1)) != 0
+        or Path(str(runs[0].get("expected_output") or "")).resolve(strict=False)
+        != snapshot_root
+    ):
+        raise RepairManifestError("snapshot owner task is not exact PASS attempt-0")
+    expected_hashes = {
+        "snapshot_manifest.json": str(raw.get("snapshot_manifest_sha256") or ""),
+        "dbscan_contract.json": str(raw.get("dbscan_contract_sha256") or ""),
+        "pair_store/run_manifest.json": str(
+            raw.get("pair_store_manifest_sha256") or ""
+        ),
+    }
+    for relative, expected_sha in expected_hashes.items():
+        artifact = _absolute(
+            snapshot_root / relative,
+            label=f"adopted snapshot {relative}",
+            kind="file",
+        )
+        if sha256_file(artifact) != expected_sha:
+            raise RepairManifestError(f"adopted snapshot hash changed: {relative}")
+    snapshot_manifest = _read_object(
+        snapshot_root / "snapshot_manifest.json", label="adopted snapshot manifest"
+    )
+    pair_manifest = _read_object(
+        snapshot_root / "pair_store/run_manifest.json",
+        label="adopted snapshot pair manifest",
+    )
+    snapshot_source = snapshot_manifest.get("source")
+    pairs_sha = str(raw.get("pairs_sha256") or "")
+    vectors_sha = str(raw.get("vectors_sha256") or "")
+    if (
+        snapshot_manifest.get("status") != "PASS"
+        or snapshot_manifest.get("pair_store_manifest_sha256")
+        != expected_hashes["pair_store/run_manifest.json"]
+        or snapshot_manifest.get("dbscan_contract_sha256")
+        != expected_hashes["dbscan_contract.json"]
+        or pair_manifest.get("pairs_sha256") != pairs_sha
+        or pair_manifest.get("vectors_sha256") != vectors_sha
+        or pair_manifest.get("source_manifest_sha256")
+        != expected_source_manifest_sha256
+        or not isinstance(snapshot_source, Mapping)
+        or snapshot_source.get("root") != str(expected_source_root)
+        or int(pair_manifest.get("row_count", -1)) != EXPECTED_PAIR_COUNT
+        or int(pair_manifest.get("vector_dim", -1)) != EXPECTED_VECTOR_DIM
+    ):
+        raise RepairManifestError("adopted snapshot scientific closure changed")
+    pass_path = _absolute(
+        snapshot_root / "PASS", label="adopted snapshot PASS", kind="file"
+    )
+    if pass_path.read_bytes() != b"PASS\n":
+        raise RepairManifestError("adopted snapshot PASS marker changed")
+    tree_files = [path for path in snapshot_root.rglob("*") if path.is_file()]
+    if any(path.is_symlink() for path in snapshot_root.rglob("*")):
+        raise RepairManifestError("adopted snapshot tree contains a symlink")
+    partials = [
+        str(path)
+        for path in snapshot_root.rglob("*")
+        if ".partial" in path.name
+    ]
+    writers = _find_writable_process_references(tree_files, proc_root=proc_root)
+    if partials or writers:
+        raise RepairManifestError("adopted snapshot is not immutable/read-only")
+    pairs_path = snapshot_root / "pair_store/pair_indices.npy"
+    vectors_path = snapshot_root / "pair_store/recourse_vectors.npy"
+    return {
+        "status": "PASS",
+        "owner_controller_id": owner.controller_id,
+        "owner_namespace_root": str(owner_namespace_root),
+        "owner_manifest": str(owner_manifest),
+        "owner_manifest_sha256": owner_manifest_sha,
+        "owner_task_id": SNAPSHOT_OWNER_TASK_ID,
+        "owner_task_gate": str(gate_path),
+        "owner_task_gate_sha256": gate_sha,
+        "owner_task_status": "PASS",
+        "owner_attempt": 0,
+        "snapshot_root": str(snapshot_root),
+        "source_root": str(expected_source_root),
+        "source_manifest_sha256": expected_source_manifest_sha256,
+        "snapshot_manifest_sha256": expected_hashes["snapshot_manifest.json"],
+        "dbscan_contract_sha256": expected_hashes["dbscan_contract.json"],
+        "pair_store_manifest_sha256": expected_hashes[
+            "pair_store/run_manifest.json"
+        ],
+        "pairs_sha256": pairs_sha,
+        "vectors_sha256": vectors_sha,
+        "pairs_stat": _file_stat_identity(pairs_path),
+        "vectors_stat": _file_stat_identity(vectors_path),
+        "writable_reference_count": 0,
+        "partial_count": 0,
+        "copy_or_hardlink_performed": False,
+    }
+
+
 def _base_environment(
     *, manifest_path: Path, expected_sha256: str
 ) -> tuple[dict[str, str], dict[str, Any]]:
@@ -375,8 +562,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         or spec.get("paper_frozen") is not True
         or spec.get("run_tastemolnet") != 0
         or spec.get("physical_snapshot_required") is not True
-        or int(spec.get("snapshot_min_free_after_bytes", -1))
-        != SNAPSHOT_MIN_FREE_AFTER_BYTES
+        or spec.get("snapshot_adoption_required") is not True
     ):
         raise RepairManifestError("invalid AIDS exact-route v5 spec identity")
     project_root = _absolute(spec.get("project_root"), label="project root", kind="dir")
@@ -386,6 +572,9 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     core_gate = _require_reviewed_core_equivalence(project_root)
     release_gate = _require_ancestor(project_root, ROUTE_RELEASE_COMMIT)
     snapshot_release_gate = _require_snapshot_release(project_root)
+    snapshot_adoption_release_gate = _require_ancestor(
+        project_root, SNAPSHOT_ADOPTION_RELEASE_COMMIT
+    )
     if (
         SNAPSHOT_EXPECTED_ROWS != EXPECTED_PAIR_COUNT
         or SNAPSHOT_EXPECTED_VECTOR_DIM != EXPECTED_VECTOR_DIM
@@ -489,6 +678,13 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         proc_root=proc_root,
         allowed_snapshot_writer_pid=old_pid,
     )
+    adopted_snapshot = _adopted_snapshot_evidence(
+        spec=spec,
+        proc_root=proc_root,
+        owner_namespace_root=(control_root / SOURCE_NAMESPACE).resolve(strict=True),
+        expected_source_root=terminal_root,
+        expected_source_manifest_sha256=str(terminal["source_manifest_sha256"]),
+    )
     generation_manifest = (
         Path(environment["SOURCE_GENERATION_ROOT"]) / "run_manifest.json"
     ).resolve(strict=True)
@@ -503,9 +699,10 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         != sha256_file(environment["DISTANCE_CHECKPOINT"])
     ):
         raise RepairManifestError("terminal pair store does not match frozen v4 inputs")
-    snapshot_output = fresh_root / "source_snapshot/attempt-{attempt}"
+    snapshot_output = fresh_root / "snapshot_adoption/attempt-{attempt}"
     snapshot_dependency_root = "{dep_" + SNAPSHOT_TASK_ID + "_output}"
-    snapshot_pair_root = snapshot_dependency_root + "/pair_store"
+    adopted_snapshot_root = str(adopted_snapshot["snapshot_root"])
+    snapshot_pair_root = adopted_snapshot_root + "/pair_store"
     environment.update(
         {
             "AUTODL_PYTHON": "{python}",
@@ -541,7 +738,38 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256": old_cmdline_sha256,
             "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT": str(old_output_root),
             "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT": str(old_project_root),
-            "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": snapshot_dependency_root,
+            "AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT": snapshot_dependency_root,
+            "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": adopted_snapshot_root,
+            "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST": str(
+                adopted_snapshot["owner_manifest"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT": str(
+                adopted_snapshot["owner_namespace_root"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256": str(
+                adopted_snapshot["owner_manifest_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE": str(
+                adopted_snapshot["owner_task_gate"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE_SHA256": str(
+                adopted_snapshot["owner_task_gate_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_MANIFEST_SHA256": str(
+                adopted_snapshot["snapshot_manifest_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_DBSCAN_SHA256": str(
+                adopted_snapshot["dbscan_contract_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_PAIR_MANIFEST_SHA256": str(
+                adopted_snapshot["pair_store_manifest_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_PAIRS_SHA256": str(
+                adopted_snapshot["pairs_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_VECTORS_SHA256": str(
+                adopted_snapshot["vectors_sha256"]
+            ),
             "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(terminal_root),
             "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
                 terminal["source_manifest_sha256"]
@@ -614,12 +842,11 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     snapshot_task = {
         "id": SNAPSHOT_TASK_ID,
         "dataset": "aids",
-        # The source contains held-out parent rows, so the generic leakage gate
-        # classifies this copy as the same post-freeze held-out boundary even
-        # though the runner action itself is a byte-for-byte snapshot.
+        # Adoption reopens held-out bytes only after selector freeze.  It does
+        # not copy, link, mutate, reorder, or recompute those bytes.
         "stage": "AM_COMRECGC_HELDOUT_EVAL",
         "runner_dataset": "paper-cell-aids-comrecgc-exact-route-v5",
-        "runner_stage": "AM_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT",
+        "runner_stage": "AM_COMRECGC_PAIR_STORE_SNAPSHOT_ADOPTION",
         "depends_on": [SELECTOR_TASK_ID],
         "resource": "cpu",
         "priority": 0,
@@ -628,60 +855,83 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "selector_parameters_frozen": True,
         "read_only_test": True,
         "command": [
-            "bash",
-            "{project_root}/scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh",
+            "{python}",
+            "{project_root}/scripts/autodl/adopt_aids_comrecgc_v5_snapshot.py",
+            "--config",
+            "configs/hpc.yaml",
+            "--output-dir",
+            "{task_output}",
+            "--proc-root",
+            str(proc_root),
+            "--owner-manifest",
+            str(adopted_snapshot["owner_manifest"]),
+            "--owner-manifest-sha256",
+            str(adopted_snapshot["owner_manifest_sha256"]),
+            "--owner-namespace-root",
+            str(adopted_snapshot["owner_namespace_root"]),
+            "--owner-task-gate",
+            str(adopted_snapshot["owner_task_gate"]),
+            "--owner-task-gate-sha256",
+            str(adopted_snapshot["owner_task_gate_sha256"]),
+            "--snapshot-root",
+            adopted_snapshot_root,
+            "--snapshot-manifest-sha256",
+            str(adopted_snapshot["snapshot_manifest_sha256"]),
+            "--dbscan-contract-sha256",
+            str(adopted_snapshot["dbscan_contract_sha256"]),
+            "--pair-store-manifest-sha256",
+            str(adopted_snapshot["pair_store_manifest_sha256"]),
+            "--pairs-sha256",
+            str(adopted_snapshot["pairs_sha256"]),
+            "--vectors-sha256",
+            str(adopted_snapshot["vectors_sha256"]),
+            "--source-root",
+            str(terminal_root),
+            "--source-manifest-sha256",
+            str(terminal["source_manifest_sha256"]),
+            "--allowed-pid",
+            str(old_pid),
+            "--allowed-start-ticks",
+            str(old_start_ticks),
+            "--allowed-cmdline-sha256",
+            old_cmdline_sha256,
+            "--allowed-output-root",
+            str(old_output_root),
+            "--allowed-project-root",
+            str(old_project_root),
+            "--expected-row-count",
+            str(EXPECTED_PAIR_COUNT),
+            "--expected-vector-dim",
+            str(EXPECTED_VECTOR_DIM),
+            "--expected-parent-count",
+            str(EXPECTED_PARENT_COUNT),
+            "--expected-candidate-count",
+            str(EXPECTED_CANDIDATE_COUNT),
         ],
-        "input_manifest": str(terminal["source_manifest"]),
-        "config_files": [str(base_manifest)],
+        "input_manifest": str(adopted_snapshot["owner_manifest"]),
+        "config_files": [
+            str(base_manifest),
+            str(adopted_snapshot["owner_task_gate"]),
+        ],
         "expected_output": str(snapshot_output),
         "required_output_files": [
-            "snapshot_manifest.json",
-            "dbscan_contract.json",
-            "pair_store/run_manifest.json",
+            "snapshot_adoption_manifest.json",
             "PASS",
         ],
-        "required_log_marker": "[AIDS_COMRECGC_V5_SNAPSHOT_SUPERVISOR_PASS]",
+        "required_log_marker": "[AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_PASS]",
         "environment": {
-            "AUTODL_PYTHON": "{python}",
-            "OUTPUT_ROOT": "{task_output}",
             "GPU_REQUIRED": "0",
             "CUDA_VISIBLE_DEVICES": "",
-            "AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE": "0",
-            "AIDS_COMRECGC_V5_SNAPSHOT_MAX_SAME_ROOT_RESUMES": "1",
-            "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(terminal_root),
-            "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
-                terminal["source_manifest_sha256"]
-            ),
-            "AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT": str(proc_root),
-            "AIDS_COMRECGC_V5_ALLOWED_OLD_PID": str(old_pid),
-            "AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS": str(old_start_ticks),
-            "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256": old_cmdline_sha256,
-            "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT": str(old_output_root),
-            "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT": str(old_project_root),
-            "AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES": str(
-                SNAPSHOT_MIN_FREE_AFTER_BYTES
-            ),
-            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS": str(EXPECTED_PAIR_COUNT),
-            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM": str(
-                EXPECTED_VECTOR_DIM
-            ),
-            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT": str(
-                EXPECTED_PARENT_COUNT
-            ),
-            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT": str(
-                EXPECTED_CANDIDATE_COUNT
-            ),
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "RUN_TASTEMOLNET": "0",
         },
         "semantic_failure_markers": [
-            "source full-hash closure mismatch",
-            "unexpected source writer",
-            "snapshot destination",
-            "Cartesian pair-count identity mismatch",
-            "insufficient persistent snapshot headroom",
+            "snapshot owner",
+            "snapshot full closure validation failed",
+            "snapshot adoption",
+            "live writer",
         ],
     }
     task = {
@@ -725,25 +975,29 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "reviewed_core_gate": core_gate,
         "route_release_gate": release_gate,
         "snapshot_release_gate": snapshot_release_gate,
+        "snapshot_adoption_release_gate": snapshot_adoption_release_gate,
         "base_v4": base_evidence,
         "terminal_pair_store": terminal,
-        "physical_snapshot": {
+        "snapshot_adoption": {
             "task_id": SNAPSHOT_TASK_ID,
             "expected_output": str(snapshot_output),
+            "adopted_snapshot": adopted_snapshot,
             "source_root": str(terminal_root),
             "source_manifest_sha256": str(terminal["source_manifest_sha256"]),
             "proc_root": str(proc_root),
-            "minimum_free_after_bytes": SNAPSHOT_MIN_FREE_AFTER_BYTES,
             "expected_rows": EXPECTED_PAIR_COUNT,
             "expected_vector_dim": EXPECTED_VECTOR_DIM,
             "expected_parent_count": EXPECTED_PARENT_COUNT,
             "expected_candidate_count": EXPECTED_CANDIDATE_COUNT,
-            "copy_mode": "sequential_physical_copy_fdatasync_link_noreplace_unlink",
-            "atomic_no_clobber_promotion": True,
+            "copy_mode": "read_only_existing_snapshot_adoption_no_copy",
+            "atomic_no_clobber_promotion": False,
             "source_hardlinks_forbidden": True,
+            "copy_or_hardlink_performed": False,
             "source_writer_policy": "only_exact_frozen_old_generation_or_natural_exit",
             "old_v4_signal_authorized": False,
             "dbscan_contract_required": True,
+            "full_closure_reopened_before_adoption_pass": True,
+            "full_closure_reopened_before_science": True,
         },
         "fresh_output_root": str(fresh_root),
         "gpu_required": False,
@@ -847,11 +1101,8 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or task.depends_on != (SELECTOR_TASK_ID, SNAPSHOT_TASK_ID)
     ):
         raise RepairManifestError("AIDS v5 selector-freeze dependency changed")
-    if snapshot_task.resource != "cpu" or snapshot_task.command != (
-        "bash",
-        "{project_root}/scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh",
-    ):
-        raise RepairManifestError("AIDS v5 physical snapshot launch contract changed")
+    if snapshot_task.resource != "cpu":
+        raise RepairManifestError("AIDS v5 snapshot adoption must be CPU-only")
     if snapshot_task.depends_on != (SELECTOR_TASK_ID,):
         raise RepairManifestError("AIDS v5 snapshot must follow selector freeze")
     if (
@@ -860,27 +1111,22 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or not snapshot_task.selector_parameters_frozen
         or snapshot_task.input_manifest
         != str(
-            payload["aids_comrecgc_exact_route_v5_contract"]["terminal_pair_store"][
-                "source_manifest"
-            ]
+            payload["aids_comrecgc_exact_route_v5_contract"]["snapshot_adoption"][
+                "adopted_snapshot"
+            ]["owner_manifest"]
         )
         or snapshot_task.expected_output
         != str(
-            payload["aids_comrecgc_exact_route_v5_contract"]["physical_snapshot"][
+            payload["aids_comrecgc_exact_route_v5_contract"]["snapshot_adoption"][
                 "expected_output"
             ]
         )
         or snapshot_task.required_output_files
-        != (
-            "snapshot_manifest.json",
-            "dbscan_contract.json",
-            "pair_store/run_manifest.json",
-            "PASS",
-        )
+        != ("snapshot_adoption_manifest.json", "PASS")
         or snapshot_task.required_log_marker
-        != "[AIDS_COMRECGC_V5_SNAPSHOT_SUPERVISOR_PASS]"
+        != "[AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_PASS]"
     ):
-        raise RepairManifestError("AIDS v5 snapshot artifact contract changed")
+        raise RepairManifestError("AIDS v5 snapshot adoption artifact contract changed")
     if task.resource != "cpu" or task.command != (
         "bash",
         "{project_root}/scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh",
@@ -931,50 +1177,126 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
     if any(task.environment.get(key) != value for key, value in required.items()):
         raise RepairManifestError("AIDS v5 production environment is incomplete")
-    snapshot_contract = contract.get("physical_snapshot")
+    snapshot_contract = contract.get("snapshot_adoption")
     if not isinstance(snapshot_contract, Mapping):
-        raise RepairManifestError("AIDS v5 physical snapshot contract is missing")
-    snapshot_required = {
-        "AUTODL_PYTHON": "{python}",
-        "OUTPUT_ROOT": "{task_output}",
-        "GPU_REQUIRED": "0",
-        "CUDA_VISIBLE_DEVICES": "",
-        "AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE": "0",
-        "AIDS_COMRECGC_V5_SNAPSHOT_MAX_SAME_ROOT_RESUMES": "1",
-        "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(
-            snapshot_contract.get("source_root")
+        raise RepairManifestError("AIDS v5 snapshot adoption contract is missing")
+    adopted = snapshot_contract.get("adopted_snapshot")
+    if not isinstance(adopted, Mapping) or adopted.get("status") != "PASS":
+        raise RepairManifestError("AIDS v5 adopted snapshot evidence is missing")
+    science_adoption_environment = {
+        "AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT": (
+            "{dep_" + SNAPSHOT_TASK_ID + "_output}"
         ),
-        "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
-            snapshot_contract.get("source_manifest_sha256")
+        "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": str(adopted.get("snapshot_root")),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST": str(
+            adopted.get("owner_manifest")
         ),
-        "AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT": str(
-            snapshot_contract.get("proc_root")
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT": str(
+            adopted.get("owner_namespace_root")
         ),
-        "AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES": str(
-            SNAPSHOT_MIN_FREE_AFTER_BYTES
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256": str(
+            adopted.get("owner_manifest_sha256")
         ),
-        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS": str(EXPECTED_PAIR_COUNT),
-        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM": str(EXPECTED_VECTOR_DIM),
-        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT": str(
-            EXPECTED_PARENT_COUNT
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE": str(
+            adopted.get("owner_task_gate")
         ),
-        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT": str(
-            EXPECTED_CANDIDATE_COUNT
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE_SHA256": str(
+            adopted.get("owner_task_gate_sha256")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_MANIFEST_SHA256": str(
+            adopted.get("snapshot_manifest_sha256")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_DBSCAN_SHA256": str(
+            adopted.get("dbscan_contract_sha256")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_PAIR_MANIFEST_SHA256": str(
+            adopted.get("pair_store_manifest_sha256")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_PAIRS_SHA256": str(
+            adopted.get("pairs_sha256")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_VECTORS_SHA256": str(
+            adopted.get("vectors_sha256")
         ),
     }
     if any(
-        snapshot_task.environment.get(key) != value
-        for key, value in snapshot_required.items()
+        task.environment.get(key) != value
+        for key, value in science_adoption_environment.items()
     ):
-        raise RepairManifestError("AIDS v5 snapshot production environment changed")
+        raise RepairManifestError("AIDS v5 science adoption identity drifted")
+    adoption_options = _flag_value_options(
+        snapshot_task.command,
+        expected_prefix=(
+            "{python}",
+            "{project_root}/scripts/autodl/adopt_aids_comrecgc_v5_snapshot.py",
+        ),
+    )
+    expected_adoption_options = {
+        "--config": "configs/hpc.yaml",
+        "--output-dir": "{task_output}",
+        "--proc-root": str(snapshot_contract.get("proc_root")),
+        "--owner-manifest": str(adopted.get("owner_manifest")),
+        "--owner-manifest-sha256": str(adopted.get("owner_manifest_sha256")),
+        "--owner-namespace-root": str(adopted.get("owner_namespace_root")),
+        "--owner-task-gate": str(adopted.get("owner_task_gate")),
+        "--owner-task-gate-sha256": str(adopted.get("owner_task_gate_sha256")),
+        "--snapshot-root": str(adopted.get("snapshot_root")),
+        "--snapshot-manifest-sha256": str(
+            adopted.get("snapshot_manifest_sha256")
+        ),
+        "--dbscan-contract-sha256": str(adopted.get("dbscan_contract_sha256")),
+        "--pair-store-manifest-sha256": str(
+            adopted.get("pair_store_manifest_sha256")
+        ),
+        "--pairs-sha256": str(adopted.get("pairs_sha256")),
+        "--vectors-sha256": str(adopted.get("vectors_sha256")),
+        "--source-root": str(snapshot_contract.get("source_root")),
+        "--source-manifest-sha256": str(
+            snapshot_contract.get("source_manifest_sha256")
+        ),
+        "--allowed-pid": str(
+            contract["allowed_old_read_only_process"].get("allowed_pid")
+        ),
+        "--allowed-start-ticks": str(
+            contract["allowed_old_read_only_process"].get("allowed_start_ticks")
+        ),
+        "--allowed-cmdline-sha256": str(
+            contract["allowed_old_read_only_process"].get(
+                "allowed_cmdline_sha256"
+            )
+        ),
+        "--allowed-output-root": str(
+            contract["allowed_old_read_only_process"].get("allowed_output_root")
+        ),
+        "--allowed-project-root": str(
+            contract["allowed_old_read_only_process"].get("allowed_project_root")
+        ),
+        "--expected-row-count": str(EXPECTED_PAIR_COUNT),
+        "--expected-vector-dim": str(EXPECTED_VECTOR_DIM),
+        "--expected-parent-count": str(EXPECTED_PARENT_COUNT),
+        "--expected-candidate-count": str(EXPECTED_CANDIDATE_COUNT),
+    }
+    if adoption_options != expected_adoption_options or any(
+        snapshot_task.environment.get(key) != value
+        for key, value in {
+            "GPU_REQUIRED": "0",
+            "CUDA_VISIBLE_DEVICES": "",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "RUN_TASTEMOLNET": "0",
+        }.items()
+    ):
+        raise RepairManifestError("AIDS v5 snapshot adoption command changed")
     dependency_root = "{dep_" + SNAPSHOT_TASK_ID + "_output}"
+    adopted_root = str(adopted.get("snapshot_root"))
     if (
         task.environment.get("COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT")
-        != dependency_root + "/pair_store"
+        != adopted_root + "/pair_store"
         or task.environment.get("COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT")
-        != dependency_root + "/pair_store"
-        or task.environment.get("AIDS_COMRECGC_V5_SNAPSHOT_ROOT") != dependency_root
-        or task.input_manifest != dependency_root + "/pair_store/run_manifest.json"
+        != adopted_root + "/pair_store"
+        or task.environment.get("AIDS_COMRECGC_V5_SNAPSHOT_ROOT") != adopted_root
+        or task.environment.get("AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT")
+        != dependency_root
+        or task.input_manifest != adopted_root + "/pair_store/run_manifest.json"
     ):
         raise RepairManifestError("AIDS v5 science does not consume the exact snapshot")
     if any(
@@ -1011,24 +1333,23 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in process_environment.items()
     ):
         raise RepairManifestError("AIDS v5 old-process environment drifted")
-    if any(
-        snapshot_task.environment.get(key) != value
-        for key, value in process_environment.items()
-    ):
-        raise RepairManifestError("AIDS v5 snapshot old-process identity drifted")
     if (
         contract.get("parameters") != EXPECTED_PARAMETERS
         or contract.get("gpu_required") is not False
         or contract.get("old_v4_mutated") is not False
         or contract.get("old_v4_signal_authorized") is not False
         or snapshot_contract.get("source_hardlinks_forbidden") is not True
-        or snapshot_contract.get("atomic_no_clobber_promotion") is not True
+        or snapshot_contract.get("atomic_no_clobber_promotion") is not False
         or snapshot_contract.get("copy_mode")
-        != "sequential_physical_copy_fdatasync_link_noreplace_unlink"
+        != "read_only_existing_snapshot_adoption_no_copy"
+        or snapshot_contract.get("copy_or_hardlink_performed") is not False
         or snapshot_contract.get("source_writer_policy")
         != "only_exact_frozen_old_generation_or_natural_exit"
         or snapshot_contract.get("old_v4_signal_authorized") is not False
         or snapshot_contract.get("dbscan_contract_required") is not True
+        or snapshot_contract.get("full_closure_reopened_before_adoption_pass")
+        is not True
+        or snapshot_contract.get("full_closure_reopened_before_science") is not True
         or int(snapshot_contract.get("expected_rows", -1)) != EXPECTED_PAIR_COUNT
         or int(snapshot_contract.get("expected_vector_dim", -1))
         != EXPECTED_VECTOR_DIM

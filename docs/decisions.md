@@ -1,5 +1,52 @@
 # Decisions Log
 
+## [2026-08-24] Adopt the completed AIDS physical snapshot into a fresh route
+
+### Background
+
+The corrected `pair_order_v1` controller completed and froze its 25 GB physical
+snapshot, then its science task failed before DBSCAN progress.  The failure was
+not scientific: a procfs guard searched the decoded command-line string and
+mistook a read-only `bash` diagnostic containing the literal entrypoint name
+for another common-recourse worker.  Recopying the already closed snapshot
+would waste persistent capacity and create a second unnecessary data authority.
+
+### Decision
+
+Publish a new controller/root, never resume the failed science attempt.  Its
+middle task adopts the existing snapshot by read-only reference.  Authority is
+bound first to the exact persistent `control_root/four_methods_four_datasets_continuation`
+namespace, then to the controller-manifest SHA and the task gate derived from
+that namespace.  The gate must contain one `main` PASS attempt zero with the
+exact output.  Snapshot/DBSCAN/pair
+manifest SHA values, and pair/vector SHA values.  Adoption performs the same
+full source/destination/stat/writer/partial closure as snapshot publication,
+writes only a small fresh adoption manifest, and publishes PASS last.  Science
+repeats that adoption validator before spawning its child.  It never copies,
+hardlinks, rewrites, or opens the old snapshot for writing.
+
+Procfs classification now parses raw NUL-delimited argv.  A worker is visible
+only when argv is a direct physical entrypoint or a CPython interpreter plus
+valid interpreter flags and the first script operand.  Relative operands are
+resolved against that process's `/proc/<pid>/cwd`.  Shell/grep/regex literals,
+`python -c`, `python -m`, and later arguments to another script are ignored;
+real absolute/relative/direct workers remain visible.  Once the first script
+operand has the exact entrypoint basename, missing, symlinked, or unreadable
+identity fails closed instead of disappearing from the process set.
+
+### Consequences
+
+- The earlier selector/snapshot PASS artifacts remain immutable evidence; its
+  failed science output is never reused.
+- The new science output and controller namespace are fresh, CPU-only, and
+  continue the 128 GiB cgroup / 96 GiB RSS / global high-memory handover gates.
+- Mut requires another fresh continuation bound to the new authoritative AIDS
+  controller manifest SHA and attempt-zero terminal output.
+
+### Status
+
+Accepted for code/review; deployment still requires an immutable pinned commit.
+
 ## [2026-08-24] Prefer a closed AIDS pair store and authenticate chunk-cache allocation
 
 ### Background
@@ -9254,3 +9301,38 @@ remains immutable and FAILED.
 - The first fresh v5 controller correctly failed closed before copying because
   its preflight assumed the opposite column order.  That controller/root remain
   immutable failure evidence; a corrected route must use a fresh namespace.
+
+## [2026-08-25] Recompute the AIDS logical close-pair view from frozen GREED
+
+### Decision
+
+Treat the 91,916,686-row pair/vector array as a physical store, not by itself
+as the logical DBSCAN input. Recompute every normalized scalar distance through
+the frozen AIDS GREED `torch.cdist` adapter and official element-count scale,
+then materialize only the inclusive `distance <= theta` predicate in a small,
+separately named bitmap. Recourse-vector norms remain a consistency audit and
+never become the filtering authority.
+
+Bind physical-snapshot wrappers to their hash-closed source chunk metadata,
+verify `(parent_index, candidate_index)` columns for every scanned row, and
+publish `PASS` last. A bounded benchmark remains resumable but non-terminal.
+When all rows are close, publish a separate exact-consumer-compatible
+`comrecgc_all_pairs_close_certificate_v1`; otherwise the bitmap is the sole
+logical close-view contract.
+
+The nominal official candidate cap comes from generation `--k` and
+`MAX_COUNTERFACTUAL_SIZE`. The current common-recourse `--cf_size` parameter is
+not claimed as an applied official slice. The project post-predicate slice is
+recorded explicitly as `PROJECT_EXTENSION` and whether it was binding.
+
+### Consequences
+
+- No 25 GB pair store is regenerated or copied by this audit.
+- Exact DBSCAN cannot consume the physical Cartesian row count unless the full
+  frozen-distance certificate proves every row is theta-close.
+- Benchmark output cannot be mistaken for a scientific PASS.
+
+### Status
+
+Accepted for implementation; production completion requires the immutable
+AutoDL execution and full scan.
