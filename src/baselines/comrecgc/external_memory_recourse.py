@@ -16,11 +16,13 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from .external_memory_dbscan import (
+    ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalMemoryDBSCANError,
     _check_rss,
     _rss_bytes,
+    _validate_component_recovery_closure,
     _validate_shortcut_proof_closure,
 )
 
@@ -1038,6 +1040,7 @@ def _validate_exact_one_cluster_source(
         not in {
             ALL_CORE_ONE_COMPONENT_SHORTCUT,
             ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+            ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
         }
         or manifest.get("shortcut_proof_path") is None
         or manifest.get("shortcut_proof_sha256") is None
@@ -1051,7 +1054,14 @@ def _validate_exact_one_cluster_source(
         raise ExternalMemoryDBSCANError(
             "one-cluster summary requires a complete exact anchor proof"
         )
-    _validate_shortcut_proof_closure(manifest=manifest, root=manifest_path.parent)
+    if manifest["clustering_path"] == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY:
+        _validate_component_recovery_closure(
+            manifest=manifest, root=manifest_path.parent
+        )
+    else:
+        _validate_shortcut_proof_closure(
+            manifest=manifest, root=manifest_path.parent
+        )
     proof_path = Path(str(manifest["shortcut_proof_path"])).resolve(strict=True)
     if (
         proof_path.parent != manifest_path.parent
@@ -1064,8 +1074,14 @@ def _validate_exact_one_cluster_source(
         or proof.get("all_points_core_proven") is not True
         or proof.get("single_epsilon_component_proven") is not True
         or proof.get("labels_are_exact_sklearn_order") is not True
-        or proof.get("label_value") != 0
-        or proof.get("core_mask_value") is not True
+        or (
+            manifest["clustering_path"] != ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
+            and proof.get("label_value") != 0
+        )
+        or (
+            manifest["clustering_path"] != ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
+            and proof.get("core_mask_value") is not True
+        )
         or proof.get("approximation_used") is not False
     ):
         raise ExternalMemoryDBSCANError("one-cluster shortcut proof is incomplete")

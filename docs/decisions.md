@@ -9489,3 +9489,63 @@ proof, and it never signals a scientific process.
 
 Accepted for the next immutable AutoDL controller release; not a deployment or
 permission to stop any existing worker.
+
+## [2026-08-25] Recover exact DBSCAN partitions from disconnected adaptive anchors
+
+### Background
+
+The AIDS adaptive certificate selected the complete union of three minimum-norm
+seeds and every first-pass seed-lower-bound failure.  Its 266-anchor epsilon
+graph had three exact components, so the former single-anchor-component check
+stopped before scanning whether a nonfailure core row connected those
+components.  This is an inconclusive single-cluster shortcut, not evidence that
+the full DBSCAN graph is disconnected.
+
+### Decision
+
+Retain the complete authenticated seed/failure ledgers and promote every
+failure row to its already-frozen anchor.  Recheck the entire anchor graph in
+float64 and require every failure anchor to have at least `min_samples`
+neighbors including self.  Every nonfailure row is independently core by the
+complete seed lower bound and touches at least one seed.  First stream all rows
+against every seed plus one deterministic nearest-to-seed boundary anchor per
+non-seed anchor component.  A nonfailure row within inclusive epsilon of
+anchors in two components is an exact core bridge witness; record both edges,
+their float64 distances, and the component union in source-row order.
+
+If those sufficient witnesses connect every component, publish the one-cluster
+partition without scanning the remaining anchors.  Otherwise perform one
+complete exact all-anchor component scan.  Because all failure rows are
+anchors and all other rows are seed-attached cores, the resulting component
+unions are the complete DBSCAN core partition: a component without a witnessed
+nonfailure edge is a genuine separate cluster.  Number clusters by their
+minimum global core row, matching sklearn's ordered all-core traversal.  This
+route has zero noise; fixtures containing noncore failures use the ordinary
+three-pass exact engine only below the frozen small-sample gate.  A large
+noncore case stops with `EXACT_DBSCAN_GENERAL_EXTERNAL_REQUIRED` and never
+silently starts the old quadratic brute route.
+
+Both bridge passes are resumable through source-identity-bound forward hash
+ledgers.  Every queried membership must agree elementwise between the frozen
+sklearn brute kernel and direct float64 recheck.  Publish separate all-core,
+connectivity, boundary, and canonical-partition certificates plus attachment,
+component-root, bridge-witness, labels, and core-mask hash closure.  Terminal
+reopen reconstructs labels and re-evaluates every retained bridge edge from the
+immutable vector source.
+
+### Consequences
+
+- A disconnected anchor subgraph no longer falsely terminates an otherwise
+  provable exact all-core result.
+- The targeted production path costs one full scan against five anchors in the
+  observed three-component case; the 266-anchor scan is reserved for a failed
+  targeted connection proof.
+- Exact multi-cluster outcomes remain reportable rather than being coerced to
+  one cluster or approximation.
+- Historical failed roots remain immutable.  Selection adoption, the reviewed
+  downstream boundary chain, controller DAG, and any AutoDL launch require a
+  separate fresh immutable release and independent review.
+
+### Status
+
+Accepted for implementation and focused review; not yet deployed.

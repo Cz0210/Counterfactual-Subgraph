@@ -124,6 +124,52 @@ def _one_cluster_fixture(
     return vectors, pair_values, result
 
 
+def _component_recovery_one_cluster_fixture(tmp_path: Path):
+    from src.baselines.comrecgc import external_memory_dbscan as external_dbscan
+    import sklearn
+
+    values = np.zeros((7, 64), dtype=np.float64)
+    values[:, 0] = [0.0, 0.0, 0.001, 0.019, 0.030, 0.031, 0.032]
+    pairs = np.asarray(
+        [[0, 10], [0, 11], [1, 12], [1, 13], [2, 14], [2, 15], [3, 16]],
+        dtype=np.int64,
+    )
+    vectors_path = tmp_path / "component_vectors.npy"
+    pairs_path = tmp_path / "component_pairs.npy"
+    with vectors_path.open("wb") as handle:
+        np.save(handle, values, allow_pickle=False)
+    with pairs_path.open("wb") as handle:
+        np.save(handle, pairs, allow_pickle=False)
+    result = external_dbscan.fit_external_memory_dbscan(
+        vectors_path=vectors_path,
+        work_dir=tmp_path / "component_dbscan",
+        contract=external_dbscan.ExternalDBSCANContract(
+            eps=0.02,
+            min_samples=3,
+            query_block_size=2,
+            checkpoint_interval_blocks=1,
+            max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+            expected_sklearn_version=sklearn.__version__,
+            shortcut_mode=(
+                external_dbscan.ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+            ),
+            shortcut_seed_count=3,
+            shortcut_failure_cap=100,
+            shortcut_query_block_size=2,
+            exact_fallback_max_samples=0,
+        ),
+    )
+    assert json.loads(result.manifest_path.read_text())["clustering_path"] == (
+        external_dbscan.ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
+    )
+    return (
+        np.load(vectors_path, mmap_mode="r", allow_pickle=False),
+        np.load(pairs_path, mmap_mode="r", allow_pickle=False),
+        result,
+        pairs_path,
+    )
+
+
 def test_pair_store_resume_preserves_global_pair_order_and_hash(tmp_path: Path) -> None:
     identity = {"dataset": "aids", "theta": 0.1, "seed": 0}
     budget = _rss_bytes() + 256 * 1024**2
@@ -671,6 +717,37 @@ def test_proven_one_cluster_stream_is_elementwise_legacy_exact(
     assert manifest["official_first_counterfactual_indices"] == [11, 12]
     assert manifest["official_radius_counterfactual_indices"] == [11, 12]
     assert manifest["centroid_norm"] == manifest["torch_centroid_norm"]
+
+
+def test_component_recovery_one_cluster_releases_streaming_summary(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    vectors, pairs, dbscan, pairs_path = _component_recovery_one_cluster_fixture(
+        tmp_path
+    )
+    summary = summarize_proven_one_cluster_external(
+        work_dir=tmp_path / "component_summary",
+        dbscan_manifest_path=dbscan.manifest_path,
+        dbscan_manifest_sha256=dbscan.manifest_sha256,
+        recourse_vectors=vectors,
+        pair_indices=pairs,
+        pairs_sha256=external_recourse._sha256_file(pairs_path),
+        radius=0.02,
+        theta=0.1,
+        recourse_size=100,
+        official_greedy=_greedy,
+        torch_module=torch,
+        max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        block_size=2,
+    )
+    manifest = json.loads(summary.manifest_path.read_text())
+    assert manifest["exact_one_cluster_semantics_replayed"] is True
+    assert manifest["scientific_identity"]["dbscan_manifest_sha256"] == (
+        dbscan.manifest_sha256
+    )
+    assert manifest["approximation_used"] is False
 
 
 def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(

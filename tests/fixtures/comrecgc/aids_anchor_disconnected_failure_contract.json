@@ -1,0 +1,22 @@
+{
+  "schema_version": "aids_comrecgc_anchor_disconnected_failure_fixture_v1",
+  "physical_input_rows": 91916686,
+  "vector_features": 64,
+  "source_dtype": "float32",
+  "eps": 0.02,
+  "min_samples": 3,
+  "anchor_count": 266,
+  "anchor_edge_count": 16860,
+  "initial_component_sizes": [149, 114, 3],
+  "anchor_rows_sha256": "ff32eec327569527862cf18d1d9dbe5ac374a63486e757cb1e5587494a976012",
+  "anchor_indices_sha256": "0f70593d7d632fd1040ea5c5fbf128552afbb917185dd673832cd9214db028c4",
+  "seed_global_indices": [17911194, 39777138, 38311244],
+  "boundary_anchor_global_indices": [8590599, 49369222],
+  "boundary_anchor_to_seed_distances_float64": [
+    0.0200069050372,
+    0.0200383080912
+  ],
+  "failure_reason": "anchor_epsilon_graph_disconnected",
+  "shortcut_failure_sha256_prefix": "74bc",
+  "fixture_note": "shortcut_failure hash is prefix-only evidence here; production adoption must bind the complete value"
+}
