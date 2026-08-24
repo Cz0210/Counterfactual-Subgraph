@@ -85,7 +85,7 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
 SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
-PAPER_PROTOCOL_RELEASE_COMMIT = "ae7aeac95d0777d259aa170746977dbba92d018e"
+PAPER_PROTOCOL_RELEASE_COMMIT = "d3ab30b504540467835dd00f7bb6b67e518f7e9d"
 PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
     "src/baselines/comrecgc/close_pair_scan.py": {
         "git_blob": "3aff0dc908d08a8da3f49d397f65084c80c7a37b",
