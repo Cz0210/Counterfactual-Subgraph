@@ -207,6 +207,7 @@ class NativeGeneratorProtocol(Protocol):
         gspan_flush_every: int,
         gspan_max_in_memory_candidates: int,
         gspan_exact_top_k_pruning: bool,
+        gspan_adoption_proof: str | Path | None,
         start_parent_offset: int,
         on_training_ready: Callable[[dict[str, Any]], None] | None,
         on_chunk: (
@@ -243,6 +244,7 @@ class PoolBuildConfig:
     gspan_flush_every: int = 256
     gspan_max_in_memory_candidates: int = 256
     gspan_exact_top_k_pruning: bool = False
+    gspan_adoption_proof: str | None = None
 
 
 @dataclass(slots=True)
@@ -2027,6 +2029,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         gspan_flush_every: int = 256,
         gspan_max_in_memory_candidates: int = 256,
         gspan_exact_top_k_pruning: bool = False,
+        gspan_adoption_proof: str | Path | None = None,
         start_parent_offset: int = 0,
         on_training_ready: Callable[[dict[str, Any]], None] | None = None,
         on_chunk: (
@@ -2042,6 +2045,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
             raise ValueError("memory_log_every_chunks must be positive.")
         if int(gspan_flush_every) <= 0 or int(gspan_max_in_memory_candidates) <= 0:
             raise ValueError("gSpan streaming limits must be positive.")
+        if gspan_adoption_proof is not None and gspan_exact_top_k_pruning:
+            raise ValueError(
+                "GlobalGCE adoption proof and fresh exact-top-k mining are mutually exclusive."
+            )
         if int(start_parent_offset) < 0 or int(start_parent_offset) > len(
             parents
         ):
@@ -2129,6 +2136,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
             else {}
         )
         exact_top_k_proof: dict[str, Any] = {}
+        gspan_adoption_identity: dict[str, Any] = {}
+        if gspan_adoption_proof is not None:
+            from src.baselines.globalgce_mining_adoption import (
+                validate_globalgce_gspan_adoption_proof,
+            )
+
+            gspan_adoption_identity.update(
+                validate_globalgce_gspan_adoption_proof(gspan_adoption_proof)
+            )
         if can_resume_trained_model:
             expected_state = {
                 "seed": int(seed),
@@ -2138,6 +2154,11 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "dropout": float(dropout),
                 "gspan_exact_top_k_pruning": bool(
                     gspan_exact_top_k_pruning
+                ),
+                "gspan_adoption_identity": (
+                    dict(gspan_adoption_identity)
+                    if gspan_adoption_proof is not None
+                    else None
                 ),
                 "selected_parent_count": len(parents),
             }
@@ -2172,6 +2193,12 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     validate_exact_top_k_proof_identity(
                         training_state.get("gspan_exact_top_k_proof") or {}
                     )
+                )
+            if gspan_adoption_proof is not None and training_state.get(
+                "gspan_adoption_identity"
+            ) != gspan_adoption_identity:
+                raise ValueError(
+                    "GlobalGCE trained-model resume adoption proof identity mismatch."
                 )
         if use_frozen_gine:
             from src.baselines.globalgce_frozen_gine_bridge import (
@@ -2403,6 +2430,14 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     validate_exact_top_k_proof_identity(proof)
                 )
 
+            def _record_gspan_adoption(proof: dict[str, Any]) -> None:
+                if gspan_adoption_identity and proof != gspan_adoption_identity:
+                    raise RuntimeError(
+                        "GlobalGCE adoption identity changed between preflight and consumption."
+                    )
+                gspan_adoption_identity.clear()
+                gspan_adoption_identity.update(proof)
+
             augmented_test_loader = train_globalgce_resumable(
                 epochs=int(epochs),
                 pred_model=gnn_model,
@@ -2421,9 +2456,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 gspan_flush_every=int(gspan_flush_every),
                 gspan_max_in_memory_candidates=int(gspan_max_in_memory_candidates),
                 gspan_exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
+                gspan_adoption_proof=gspan_adoption_proof,
                 on_exact_top_k_proof=(
                     _record_exact_top_k_proof
                     if gspan_exact_top_k_pruning
+                    else None
+                ),
+                on_gspan_adoption_proof=(
+                    _record_gspan_adoption
+                    if gspan_adoption_proof is not None
                     else None
                 ),
             )
@@ -2431,6 +2472,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
             if gspan_exact_top_k_pruning and not exact_top_k_proof:
                 raise RuntimeError(
                     "GlobalGCE exact-top-k training did not bind its audit proof."
+                )
+            if gspan_adoption_proof is not None and not gspan_adoption_identity:
+                raise RuntimeError(
+                    "GlobalGCE training did not bind the adopted mining proof."
                 )
             training_state_payload = {
                     "seed": int(seed),
@@ -2440,6 +2485,11 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "dropout": float(dropout),
                     "gspan_exact_top_k_pruning": bool(
                         gspan_exact_top_k_pruning
+                    ),
+                    "gspan_adoption_identity": (
+                        dict(gspan_adoption_identity)
+                        if gspan_adoption_proof is not None
+                        else None
                     ),
                     "selected_parent_count": len(parents),
                     "source_train_idx": list(source_train_idx),
@@ -2540,6 +2590,17 @@ class OfficialGlobalGCEMutagenicityGenerator:
         if gspan_exact_top_k_pruning:
             training_summary["gspan_exact_top_k_proof"] = (
                 validate_exact_top_k_proof_identity(exact_top_k_proof)
+            )
+        if gspan_adoption_proof is not None:
+            training_summary["gspan_adoption_identity"] = dict(
+                gspan_adoption_identity
+            )
+            training_summary["gspan_mining_route"] = (
+                "user_scoped_read_only_v5_exhaustive_adoption"
+            )
+        else:
+            training_summary["gspan_mining_route"] = (
+                "fresh_exact_top_k" if gspan_exact_top_k_pruning else "fresh_exhaustive"
             )
         if use_frozen_gine:
             from src.baselines.globalgce_bace_native_rules import (

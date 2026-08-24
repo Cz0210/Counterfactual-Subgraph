@@ -39,6 +39,9 @@ from src.eval.bace_frozen_gnn_contracts import (
 from src.baselines.globalgce_resumable import (
     validate_exact_top_k_proof_identity,
 )
+from src.baselines.globalgce_mining_adoption import (
+    validate_globalgce_gspan_adoption_proof,
+)
 
 
 DATASET_NAME = "BACE"
@@ -166,12 +169,24 @@ def validate_bace_globalgce_terminal_artifacts(
                 payload.get("gspan_exact_top_k_proof") or {}
             ) != exact_proof:
                 raise RuntimeError("BACE GlobalGCE exact proof binding changed")
+    adoption_proof: dict[str, Any] | None = None
+    if training.get("gspan_adoption_identity") is not None:
+        raw_adoption = training.get("gspan_adoption_identity") or {}
+        selected = raw_adoption.get("selected_top20") or {}
+        proof_path = Path(str(selected.get("path") or "")).parent / "adoption_proof.json"
+        adoption_proof = validate_globalgce_gspan_adoption_proof(proof_path)
+        if adoption_proof != raw_adoption:
+            raise RuntimeError("BACE GlobalGCE adoption proof binding changed")
+        for payload in (summary, manifest, complete):
+            if payload.get("gspan_adoption_identity") != adoption_proof:
+                raise RuntimeError("BACE GlobalGCE adoption identity was not propagated")
     return {
         "status": "PASS",
         "training_summary": training_identity,
         "summary": summary_identity,
         "run_manifest": manifest_identity,
         "gspan_exact_top_k_proof": exact_proof,
+        "gspan_adoption_identity": adoption_proof,
     }
 
 
@@ -471,6 +486,10 @@ def build_bace_frozen_gine_rule_pool(
     """
 
     resolved = config or PoolBuildConfig(expected_parent_count=EXPECTED_TRAIN_SOURCE_COUNT)
+    if resolved.gspan_adoption_proof and resolved.gspan_exact_top_k_pruning:
+        raise ValueError(
+            "BACE GlobalGCE adoption and fresh exact-top-k mining are mutually exclusive"
+        )
     if int(resolved.expected_parent_count) != EXPECTED_TRAIN_SOURCE_COUNT:
         raise ValueError("BACE GlobalGCE requires the frozen 360-parent train cohort")
     source_path = Path(source_manifest).expanduser().resolve(strict=True)
@@ -519,6 +538,11 @@ def build_bace_frozen_gine_rule_pool(
         frozen_gine_checkpoint=checkpoint,
         native_train_parent_ids=train_contract.native_train_parent_ids,
     )
+    adoption_identity = (
+        validate_globalgce_gspan_adoption_proof(resolved.gspan_adoption_proof)
+        if resolved.gspan_adoption_proof
+        else None
+    )
     root = Path(output_dir).expanduser().resolve(strict=False)
     fingerprint_payload = {
         "schema_version": "bace_globalgce_frozen_gine_rule_pool_v1",
@@ -549,6 +573,7 @@ def build_bace_frozen_gine_rule_pool(
             "gspan_exact_top_k_pruning": bool(
                 resolved.gspan_exact_top_k_pruning
             ),
+            "gspan_adoption_identity": adoption_identity,
         },
     }
     fingerprint = stable_sha256(fingerprint_payload)
@@ -601,6 +626,11 @@ def build_bace_frozen_gine_rule_pool(
                     summary.get("gspan_exact_top_k_proof") or {}
                 )
             )
+        if adoption_identity is not None:
+            if summary.get("gspan_adoption_identity") != adoption_identity:
+                raise RuntimeError(
+                    "BACE GlobalGCE training adoption identity changed"
+                )
         training_holder.clear()
         training_holder.update(summary)
         atomic_json(root / "training_summary.json", training_holder)
@@ -620,6 +650,7 @@ def build_bace_frozen_gine_rule_pool(
         memory_log_every_chunks=int(resolved.memory_log_every_chunks),
         gspan_flush_every=int(resolved.gspan_flush_every),
         gspan_max_in_memory_candidates=int(resolved.gspan_max_in_memory_candidates),
+        gspan_adoption_proof=resolved.gspan_adoption_proof,
         **(
             {"gspan_exact_top_k_pruning": True}
             if resolved.gspan_exact_top_k_pruning
@@ -643,6 +674,9 @@ def build_bace_frozen_gine_rule_pool(
             training_holder.get("gspan_exact_top_k_proof") or {}
         )
         training_holder["gspan_exact_top_k_proof"] = exact_top_k_proof
+    if adoption_identity is not None:
+        if training_holder.get("gspan_adoption_identity") != adoption_identity:
+            raise RuntimeError("BACE GlobalGCE result lost adoption identity")
     catalog_path = root / "native" / "native_rule_catalog.jsonl"
     rows: list[dict[str, Any]] = []
     with catalog_path.open(encoding="utf-8") as handle:
@@ -725,6 +759,8 @@ def build_bace_frozen_gine_rule_pool(
     }
     if exact_top_k_proof is not None:
         summary["gspan_exact_top_k_proof"] = exact_top_k_proof
+    if adoption_identity is not None:
+        summary["gspan_adoption_identity"] = adoption_identity
     atomic_json(root / "summary.json", summary)
     summary_identity = file_identity(root / "summary.json")
     manifest = {
@@ -752,6 +788,8 @@ def build_bace_frozen_gine_rule_pool(
     }
     if exact_top_k_proof is not None:
         manifest["gspan_exact_top_k_proof"] = exact_top_k_proof
+    if adoption_identity is not None:
+        manifest["gspan_adoption_identity"] = adoption_identity
     assert_gine_clean_manifest(
         manifest, checkpoint_id=str(card["checkpoint_id"]), require_train_only=True
     )
@@ -763,6 +801,8 @@ def build_bace_frozen_gine_rule_pool(
         "summary": summary_identity,
         "run_manifest": run_manifest_identity,
     }
+    if adoption_identity is not None:
+        complete["gspan_adoption_identity"] = adoption_identity
     atomic_json(root / "_RUN_COMPLETE.json", complete)
 
     # Re-open every upper-layer publication and revalidate the terminal exact

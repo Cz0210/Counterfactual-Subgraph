@@ -36,6 +36,7 @@ def build_bace_baseline_controller_fragment(
     neurosed_manifest: str | Path | None = None,
     globalgce_source_manifest: str | Path | None = None,
     globalgce_native_train_csv: str | Path | None = None,
+    globalgce_gspan_adoption_proof: str | Path | None = None,
     globalgce_exact_top_k_pruning: bool = False,
     omp_threads: int = 4,
 ) -> dict[str, Any]:
@@ -182,6 +183,14 @@ def build_bace_baseline_controller_fragment(
         native_train_csv = _absolute(
             globalgce_native_train_csv, field="globalgce_native_train_csv"
         )
+        adoption_proof = (
+            _absolute(
+                globalgce_gspan_adoption_proof,
+                field="globalgce_gspan_adoption_proof",
+            )
+            if globalgce_gspan_adoption_proof is not None
+            else None
+        )
         bridge_id = f"{prefix}_bridge_smoke"
         bridge_out = f"{root}/bridge_smoke"
         add(
@@ -265,6 +274,11 @@ def build_bace_baseline_controller_fragment(
             dependencies=[bridge_id],
             inputs=[source_manifest, native_train_csv, official, checkpoint],
         )
+        if adoption_proof is not None:
+            tasks[-1]["argv"].extend(
+                ["--gspan-adoption-proof", adoption_proof]
+            )
+            tasks[-1]["inputs"].append(adoption_proof)
         if globalgce_exact_top_k_pruning:
             tasks[-1]["argv"].append("--gspan-exact-top-k-pruning")
             tasks[-1]["env"]["GLOBALGCE_EXACT_TOP_K_PRUNING"] = "1"

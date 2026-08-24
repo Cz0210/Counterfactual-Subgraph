@@ -839,6 +839,67 @@ def _atomic_torch_save(torch_module: Any, payload: Any, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _get_fs_expanded_data_from_adoption(
+    *,
+    model: Any,
+    train_loader: Any,
+    proof_path: str | Path,
+) -> tuple[tuple[Any, Any, Any, Any], dict[str, Any]]:
+    """Run official expansion with an independently adopted exhaustive top-k.
+
+    Only one invocation of ``find_fs`` is replaced.  Pinned official
+    ``get_fs``/``run_fsg`` still fixes graph sizes, expands the train-only
+    dataset, tensorizes the graphs, and creates the native decoders.
+    """
+
+    from src.baselines.globalgce_mining_adoption import (
+        load_adopted_globalgce_top_k,
+        validate_globalgce_gspan_adoption_proof,
+    )
+
+    identity = validate_globalgce_gspan_adoption_proof(proof_path)
+    graphs, supports = load_adopted_globalgce_top_k(
+        proof_path,
+        validated_identity=identity,
+    )
+    expected_top_k = int(model.fsg.topk)
+    if len(graphs) != expected_top_k or len(supports) != expected_top_k:
+        raise ValueError(
+            "GlobalGCE adopted mining payload does not contain configured top-k"
+        )
+    normalized_supports = [int(value) for value in supports]
+    if normalized_supports != sorted(normalized_supports, reverse=True):
+        raise ValueError("GlobalGCE adopted top-k is not in stable support order")
+    if int(identity.get("top_k") or -1) != expected_top_k:
+        raise ValueError("GlobalGCE adoption top-k/config mismatch")
+
+    fsg = model.fsg
+    had_override = "find_fs" in vars(fsg)
+    previous_override = vars(fsg).get("find_fs")
+    call_count = 0
+
+    def adopted_find_fs(min_freq: int) -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count != 1:
+            raise RuntimeError("GlobalGCE adopted top-k was requested more than once")
+        if int(identity.get("min_freq") or -1) != int(min_freq):
+            raise ValueError("GlobalGCE adoption min_freq/config mismatch")
+        return list(graphs)
+
+    fsg.find_fs = adopted_find_fs
+    try:
+        expanded = model.get_fs_expanded_data(train_loader)
+    finally:
+        if had_override:
+            fsg.find_fs = previous_override
+        else:
+            delattr(fsg, "find_fs")
+    if call_count != 1:
+        raise RuntimeError("Official GlobalGCE did not consume adopted top-k exactly once")
+    return expanded, identity
+
+
 def train_globalgce_resumable(
     *,
     epochs: int,
@@ -858,7 +919,9 @@ def train_globalgce_resumable(
     gspan_flush_every: int = 256,
     gspan_max_in_memory_candidates: int = 256,
     gspan_exact_top_k_pruning: bool = False,
+    gspan_adoption_proof: str | Path | None = None,
     on_exact_top_k_proof: Callable[[dict[str, Any]], None] | None = None,
+    on_gspan_adoption_proof: Callable[[dict[str, Any]], None] | None = None,
 ) -> Any:
     """Run the official loop with atomic epoch checkpoints and exact RNG state."""
 
@@ -866,18 +929,34 @@ def train_globalgce_resumable(
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_root / "training_checkpoint.pt"
     heartbeat_path = checkpoint_root / "training_heartbeat.json"
-    with resumable_gspan_root_chunks(
-        gspan_module,
-        checkpoint_root=checkpoint_root / "gspan",
-        top_k=int(model.fsg.topk),
-        flush_every=int(gspan_flush_every),
-        max_in_memory_candidates=int(gspan_max_in_memory_candidates),
-        exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
-    ) as gspan_session:
-        fss, expanded_train, expanded_val, expanded_test = model.get_fs_expanded_data(
-            train_loader
+    if gspan_adoption_proof is not None and gspan_exact_top_k_pruning:
+        raise ValueError(
+            "GlobalGCE mining adoption and fresh exact-top-k mining are mutually exclusive"
         )
-    if gspan_exact_top_k_pruning:
+    if gspan_adoption_proof is not None:
+        (
+            (fss, expanded_train, expanded_val, expanded_test),
+            adoption_identity,
+        ) = _get_fs_expanded_data_from_adoption(
+            model=model,
+            train_loader=train_loader,
+            proof_path=gspan_adoption_proof,
+        )
+        if on_gspan_adoption_proof is not None:
+            on_gspan_adoption_proof(adoption_identity)
+    else:
+        with resumable_gspan_root_chunks(
+            gspan_module,
+            checkpoint_root=checkpoint_root / "gspan",
+            top_k=int(model.fsg.topk),
+            flush_every=int(gspan_flush_every),
+            max_in_memory_candidates=int(gspan_max_in_memory_candidates),
+            exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
+        ) as gspan_session:
+            fss, expanded_train, expanded_val, expanded_test = (
+                model.get_fs_expanded_data(train_loader)
+            )
+    if gspan_exact_top_k_pruning and gspan_adoption_proof is None:
         proofs = list(gspan_session["completed_exact_top_k_proofs"])
         if not proofs:
             raise RuntimeError(
