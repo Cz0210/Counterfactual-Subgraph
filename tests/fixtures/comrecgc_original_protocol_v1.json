@@ -1,0 +1,164 @@
+{
+  "as_of_utc": "2026-08-24T15:35:14Z",
+  "deployment_contract": {
+    "candidate_axis": 1,
+    "close_pair_filter_operator": "<=",
+    "dbscan_input": "theta_close_recourse_vectors_only",
+    "parent_axis": 0,
+    "physical_cartesian_store_is_not_logical_dbscan_input": true,
+    "recourse_vector": "(embedding(candidate) - embedding(parent)) / (element_count(candidate) + element_count(parent))"
+  },
+  "official_code_defaults": {
+    "candidate_cap": {
+      "candidate_count_after": null,
+      "candidate_count_before": null,
+      "candidate_count_must_come_from_run_payload": true,
+      "cf_size_applied": false,
+      "cf_size_declared": 100000,
+      "downstream_slice_applied": false,
+      "effective_source": "comrecgc.py --k -> MAX_COUNTERFACTUAL_SIZE",
+      "nominal_maximum": 100000,
+      "strict_payload_bound_requires_runtime_count_audit": true
+    },
+    "candidate_predicate": {
+      "operator": ">=",
+      "probability": 0.5
+    },
+    "common_recourse": {
+      "cf_size": 100000,
+      "cluster_size": 3,
+      "delta": 0.02,
+      "recourse_size": 100,
+      "theta": 0.1
+    },
+    "dbscan": {
+      "algorithm": "auto",
+      "eps": 0.02,
+      "metric": "euclidean",
+      "min_samples": 3,
+      "self_neighbor_counted": true
+    },
+    "generation": {
+      "candidate_capacity_k": 100000,
+      "heads": 5,
+      "sample_size": 10000,
+      "steps_M": 50000,
+      "teleport_tau": 0.1,
+      "theta": 0.1,
+      "theta_consumed_by_generation": false
+    },
+    "run_experiments_overrides": {
+      "aids": [],
+      "mutagenicity": [],
+      "nci1": [],
+      "proteins": [
+        "--theta",
+        "0.15"
+      ],
+      "teleport_overridden": false
+    }
+  },
+  "paper_config": {
+    "aids": {
+      "delta": 0.02,
+      "theta": 0.1
+    },
+    "candidate_limit_entering_clustering": 100000,
+    "candidate_predicate": {
+      "operator": ">",
+      "probability": 0.5
+    },
+    "dbscan": {
+      "algorithm": "DBSCAN",
+      "metric": null,
+      "min_samples": null,
+      "paper_specifies_metric": false,
+      "paper_specifies_min_samples": false,
+      "radius_delta": 0.02
+    },
+    "random_walk": {
+      "heads_k": 5,
+      "steps_M": 50000,
+      "teleport_tau": 0.05
+    },
+    "recourse_budget_R": 100
+  },
+  "paper_vs_official_code_differences": [
+    {
+      "field": "teleport_tau",
+      "official_code_default": 0.1,
+      "official_run_script_effective": 0.1,
+      "paper": 0.05
+    },
+    {
+      "field": "candidate_probability_boundary",
+      "official_code": ">= 0.5",
+      "paper_algorithm_5": "> 0.5"
+    },
+    {
+      "field": "candidate_cap",
+      "official_code": "generation-time --k registry bound; --cf_size is unused and no common_recourse.py slice exists",
+      "paper": "top 100000 frequently visited counterfactuals enter clustering"
+    },
+    {
+      "field": "generation_theta",
+      "official_code": "CLI option declared but not consumed by comrecgc.py",
+      "paper": "theta defines close counterfactuals and Appendix D.2 describes a 3 theta / 2 walk-distance constraint"
+    }
+  ],
+  "project_frozen_source_contract": {
+    "actual_aids_run_manifest_inspected": false,
+    "actual_run_values_must_not_be_inferred_from_defaults": true,
+    "integration_base": "25a6a227327306e874eb89b35b9b106f25751740",
+    "project_full_generation": {
+      "candidate_capacity": 100000,
+      "heads": 5,
+      "sample_size": 10000,
+      "seed": 0,
+      "steps": 50000,
+      "teleport": 0.1,
+      "theta": 0.1
+    },
+    "project_full_recourse": {
+      "cf_size": 100000,
+      "cluster_size": 3,
+      "delta": 0.02,
+      "recourse_size": 100,
+      "seed": 0,
+      "theta": 0.1
+    },
+    "project_post_predicate_cf_size_slice_is_extension": true,
+    "upstream_commit": "122f9341a360e9f06bb58a2f5823bb596021f6bf"
+  },
+  "schema_version": "comrecgc_original_protocol_audit_v1",
+  "sources": {
+    "official_implementation": {
+      "commit_date": "2025-05-23T03:01:37+02:00",
+      "key_file_sha256": {
+        "README.md": "8c1085c708597c8d3ef2b936b59224a1584c48e6b16a461b220af4fc915f88d2",
+        "common_recourse.py": "c5009ef5d73059dbea2d77e983a36a8140f1c2cca3b89664fec08f1ad7b4d6c5",
+        "comrecgc.py": "921b9bfc1cc0e3efff90bf24bf9c7b754ea99563a62bba6d7197ede37785f90d",
+        "data.py": "9674555b455a0d306e3272bb26c5b756ccd10f188ce2d3c97d7357752fd3e37f",
+        "distance.py": "d81182ccb31ef0fc5aef6a95a7debc6c17e3b495596e4ee3ff1642adf29745c3",
+        "gnn.py": "7f5cdd6eeb0d97566854f8078194527e09614b8e8d255ad189a0f7f777325fd8",
+        "run_experiments.sh": "3378ea8ccc494047fc2ee4bcc5f54e61ada27748b5a37838326a9e0a125771c0",
+        "util.py": "6489a02e7a0d6498a5f9e7b1a9a4ebc137e3d26541bd2a605bff9f54b1cf74ce"
+      },
+      "pinned_commit": "122f9341a360e9f06bb58a2f5823bb596021f6bf",
+      "remote_head_observed": "122f9341a360e9f06bb58a2f5823bb596021f6bf",
+      "remote_head_observed_at_utc": "2026-08-24T15:35:14Z",
+      "remote_head_matches_project_pin": true,
+      "url": "https://github.com/ssggreg/COMRECGC"
+    },
+    "paper": {
+      "pages": "17522-17541",
+      "pdf_sha256": "839ee4acd7f63334698d0a51a1ad2a9bc8368bd29f3aa58a2a684dd0f410ccc4",
+      "pdf_url": "https://raw.githubusercontent.com/mlresearch/v267/main/assets/fournier25a/fournier25a.pdf",
+      "pmlr_url": "https://proceedings.mlr.press/v267/fournier25a.html",
+      "title": "COMRECGC: Global Graph Counterfactual Explainer through Common Recourse",
+      "volume": 267,
+      "year": 2025
+    }
+  },
+  "status": "PASS_WITH_DOCUMENTED_PAPER_CODE_DIFFERENCES"
+}

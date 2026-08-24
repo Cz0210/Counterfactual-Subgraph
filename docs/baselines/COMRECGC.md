@@ -80,8 +80,16 @@ invalid and the AIDS graph was RF non-target. The single permitted smoke
 budget retry therefore uses the documented upper smoke bounds of 100 steps
 and 128 samples; full parameters and all scientific thresholds remain
 unchanged.
-Full values match the published implementation unless a future, documented
-resource Gate requires a protocol revision.
+Full values match the pinned implementation defaults, but they do not match
+every value stated in the paper. In particular, the paper reports
+`tau=0.05`, while the pinned CLI defaults to `0.1` and the official
+`run_experiments.sh` does not override it. The official `--cf_size` option is
+also declared but unused; the effective nominal bound originates from
+generation-time `--k`, while the project adapter's post-predicate `cf_size`
+slice is a project extension. See
+`docs/COMRECGC_ORIGINAL_PROTOCOL_AUDIT.md`. Completed generation parameters
+remain immutable and must be read from the actual run manifest rather than
+silently replaced by either source's defaults.
 
 ## Slurm and Automation
 
