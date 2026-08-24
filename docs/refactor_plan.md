@@ -18,8 +18,10 @@
   and create a new CID, route lock, output root, and Mut dependency identity.
 - [x] Add CLI/tamper/authority-path/process/parser/shell-preflight tests and a
   static paired Slurm wrapper.
-- [ ] Pin the implementation commit in a builder-only follow-up, obtain an
-  independent no-blocker review, and deploy only an immutable fresh worktree.
+- [x] Pin implementation commit
+  `daa9c89e21ec7cf2a812aea082619b2a3e731a65` in a builder-only follow-up.
+- [ ] Obtain an independent no-blocker review and deploy only an immutable
+  fresh worktree.
 
 ## 2026-08-24: Release-gate the fresh AIDS exact-Cartesian v5 route
 

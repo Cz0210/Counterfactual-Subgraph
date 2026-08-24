@@ -18,7 +18,9 @@ manifest/gate hashes, snapshot/DBSCAN/pair-manifest hashes, array hashes,
 source identity, and old-process identity.  Missing PASS or any drift fails
 before a common-recourse child exists.
 
-The process watchdog classifies real workers from NUL-delimited argv rather
+Implementation commit
+`daa9c89e21ec7cf2a812aea082619b2a3e731a65` is a mandatory builder ancestry
+gate.  The process watchdog classifies real workers from NUL-delimited argv rather
 than decoded substring search.  It supports direct/shebang execution, CPython
 flags and absolute or proc-cwd-relative script paths, while ignoring shell,
 grep, regex, `-c`, `-m`, and later diagnostic literals.  A real entrypoint with

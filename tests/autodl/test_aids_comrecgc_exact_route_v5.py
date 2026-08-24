@@ -743,6 +743,10 @@ def test_v5_real_head_builds_and_validates_release_gates(
     assert contract["snapshot_release_gate"]["release_commit"] == (
         v5.SNAPSHOT_RELEASE_COMMIT
     )
+    assert contract["snapshot_adoption_release_gate"]["required_commit"] == (
+        "daa9c89e21ec7cf2a812aea082619b2a3e731a65"
+    )
+    assert contract["snapshot_adoption_release_gate"]["is_ancestor"] == "true"
 
 
 def _process_gate(paths: dict[str, Path]) -> dict[str, Any]:

@@ -75,9 +75,11 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
         "sha256": "751ebc29837fdd5985f03fb54aec23f255485fc74ad90a6798bf2b6e73a7c952",
     },
 }
-# Two-commit release pin.  The implementation commit is filled with its exact
-# reviewed SHA by the final builder-only commit before deployment.
-SNAPSHOT_ADOPTION_RELEASE_COMMIT = "4733186c28d40f73c37d6ff06c7d429724237ed5"
+# Two-commit release pin.  This exact implementation commit contains the
+# snapshot-adoption authority closure, argv parser, supervisor preflight, tests,
+# paired Slurm wrapper, and documentation.  The builder-only child commit may
+# publish a controller only when this commit is a true execution ancestor.
+SNAPSHOT_ADOPTION_RELEASE_COMMIT = "daa9c89e21ec7cf2a812aea082619b2a3e731a65"
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642
