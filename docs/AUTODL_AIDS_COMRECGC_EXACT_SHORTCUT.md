@@ -151,18 +151,18 @@ COMRECGC_EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE=65536
 COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES=0
 COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE=65536
 COMRECGC_EXPECTED_SKLEARN_VERSION=1.7.2
-COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT={dep_aids_comrecgc_pair_store_physical_snapshot_v5_output}/pair_store
+COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT={dep_aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1_output}/pair_store
 COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL=1
-COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT={dep_aids_comrecgc_pair_store_physical_snapshot_v5_output}/pair_store
+COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT={dep_aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1_output}/pair_store
 COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB=3
 COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT=/proc
-COMRECGC_EXTERNAL_ROUTE_LOCK=/root/autodl-tmp/locks/aids-comrecgc-exact-v5.lock
+COMRECGC_EXTERNAL_ROUTE_LOCK=/root/autodl-tmp/locks/aids-comrecgc-exact-route-v5-pair-order-v1.lock
 AIDS_COMRECGC_V5_ALLOWED_OLD_PID=<frozen old PID>
 AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS=<frozen /proc starttime>
 AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256=<frozen raw cmdline SHA-256>
 AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT=<old common_recourse output>
 AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT=<old immutable worktree>
-AIDS_COMRECGC_V5_SNAPSHOT_ROOT={dep_aids_comrecgc_pair_store_physical_snapshot_v5_output}
+AIDS_COMRECGC_V5_SNAPSHOT_ROOT={dep_aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1_output}
 AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT=<old promoted pair_store>
 AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256=<frozen terminal manifest SHA-256>
 AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT=/proc
@@ -201,16 +201,20 @@ artifact is terminal corruption and is never deleted or reconstructed.
 The frozen identities are:
 
 ```text
-controller_id=four_methods_four_datasets_aids_comrecgc_exact_route_v5
-selector_task_id=aids_comrecgc_exact_route_v5_selector_freeze
-snapshot_task_id=aids_comrecgc_pair_store_physical_snapshot_v5
-terminal_task_id=aids_comrecgc_standardized_exact_route_v5
+controller_id=four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1
+selector_task_id=aids_comrecgc_exact_route_v5_pair_order_v1_selector_freeze
+snapshot_task_id=aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1
+terminal_task_id=aids_comrecgc_standardized_exact_route_v5_pair_order_v1
 snapshot_output=<fresh_output_root>/source_snapshot/attempt-0
 terminal_output=<fresh_output_root>/cells/aids/comrecgc/standardized/attempt-0
 ```
 
-Create an immutable execution worktree whose HEAD contains snapshot release
-`87050d3e02f7e3468227eec44e31e86aad048dad` plus its v5 builder integration,
+The earlier controller ID without `pair_order_v1` is immutable failure evidence:
+its source gate correctly stopped before copying because it assumed the pair
+columns were `(candidate,parent)`.  Never resume or overwrite that root.
+
+Create an immutable execution worktree whose HEAD contains corrected snapshot
+release `8b99498a0c1beab11a6844ddf5f6f9d7c2c4458f` plus its v5 builder integration,
 then fill a fresh copy of
 `configs/autodl/aids_comrecgc_exact_route_v5.template.json`, then publish and
 launch exactly once:
@@ -219,7 +223,7 @@ launch exactly once:
 PY=/root/miniconda3/envs/smiles_pip118/bin/python
 RUNTIME=/autodl-fs/data/counterfactual-subgraph-runtime
 CONTROL="$RUNTIME/control"
-CID=four_methods_four_datasets_aids_comrecgc_exact_route_v5
+CID=four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1
 SPEC="$CONTROL/four_methods_four_datasets_continuation/specs/$CID.json"
 MANIFEST="$CONTROL/four_methods_four_datasets_continuation/manifests/$CID.json"
 

@@ -867,6 +867,11 @@ def test_v5_manifest_publishes_only_at_exact_fresh_namespace_path(
 
 
 def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
+    assert v5.CONTROLLER_ID == (
+        "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1"
+    )
+    assert v5.SNAPSHOT_TASK_ID.endswith("_pair_order_v1")
+    assert v5.TASK_ID.endswith("_pair_order_v1")
     assert v5.REVIEWED_SOURCE_CORE_COMMIT == (
         "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
     )
@@ -876,7 +881,7 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     assert v5.REVIEWED_CORE_COMMIT == v5.INTEGRATED_REVIEWED_CORE_COMMIT
     assert v5.ROUTE_RELEASE_COMMIT == "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
     assert v5.SNAPSHOT_RELEASE_COMMIT == (
-        "87050d3e02f7e3468227eec44e31e86aad048dad"
+        "8b99498a0c1beab11a6844ddf5f6f9d7c2c4458f"
     )
     root = Path(__file__).resolve().parents[2]
     template = json.loads(

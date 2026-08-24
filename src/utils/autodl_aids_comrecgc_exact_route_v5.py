@@ -38,11 +38,11 @@ from src.utils.autodl_four_by_four_repair import (
 )
 
 
-SPEC_SCHEMA = "aids_comrecgc_exact_route_v5_spec_v1"
-CONTROLLER_ID = "four_methods_four_datasets_aids_comrecgc_exact_route_v5"
-TASK_ID = "aids_comrecgc_standardized_exact_route_v5"
-SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_selector_freeze"
-SNAPSHOT_TASK_ID = "aids_comrecgc_pair_store_physical_snapshot_v5"
+SPEC_SCHEMA = "aids_comrecgc_exact_route_v5_pair_order_v1_spec_v1"
+CONTROLLER_ID = "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1"
+TASK_ID = "aids_comrecgc_standardized_exact_route_v5_pair_order_v1"
+SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_pair_order_v1_selector_freeze"
+SNAPSHOT_TASK_ID = "aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1"
 SOURCE_NAMESPACE = "four_methods_four_datasets_continuation"
 REVIEWED_SOURCE_CORE_COMMIT = "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
 INTEGRATED_REVIEWED_CORE_COMMIT = "8c371b1c8ee1d8188555581c4f8e8b6060ae42eb"
@@ -62,11 +62,11 @@ REVIEWED_CORE_FILE_IDENTITIES = {
     },
 }
 ROUTE_RELEASE_COMMIT = "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
-SNAPSHOT_RELEASE_COMMIT = "87050d3e02f7e3468227eec44e31e86aad048dad"
+SNAPSHOT_RELEASE_COMMIT = "8b99498a0c1beab11a6844ddf5f6f9d7c2c4458f"
 SNAPSHOT_RELEASE_FILE_IDENTITIES = {
     "src/utils/aids_comrecgc_v5_snapshot.py": {
-        "git_blob": "695cded99653c72980982a18e04060884fa804ab",
-        "sha256": "8276cc7de0bc35709e0501f6c19404a597ca31b377437013754401de2859e81d",
+        "git_blob": "a323ce28fe85afbb676c47135fa1e5685338dc0e",
+        "sha256": "751ebc29837fdd5985f03fb54aec23f255485fc74ad90a6798bf2b6e73a7c952",
     },
 }
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
