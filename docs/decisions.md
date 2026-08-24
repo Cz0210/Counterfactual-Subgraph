@@ -8939,3 +8939,13 @@ Accepted
   equivalence when it changes an official raw embedding hash.
 - Existing 50k writers remain untouched.  Replays use immutable commits and
   fresh roots; optimized full remains ineligible until all exact gates pass.
+- A real repeated-cold audit established that frozen GINE CPU hidden/logits
+  are byte-exact while CUDA hidden/logits vary at low bits for the same full
+  ordered batch.  This rules out neighbour order, RNG, dedup and batch-shape
+  changes as the source of that audit failure; the current pure-PyTorch GINE
+  uses CUDA atomic `index_add_` in message aggregation and pooling.
+- The next diagnostic route is CPU-only (GINE and NeuroSED), with CUDA hidden
+  from the process.  It must pass legacy-A/legacy-B and legacy/patched lockstep
+  for Quick-50 before Quick-100 begins.  CPU evidence remains diagnostic and
+  cannot replace the protected 50k GPU route without a later ETA and semantics
+  decision.

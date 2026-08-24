@@ -1399,3 +1399,9 @@ Mutagenicity roadmaps.
   raw-byte nondeterminism.
 - [ ] Start Quick-100 only after Quick-50 exact parity; keep the old 50k PID and
   output root immutable until all formal release gates pass.
+- [x] Freeze repeated-cold evidence that CPU GINE is byte-exact and CUDA GINE
+  raw embeddings/logits are not, despite identical labels and allclose logits.
+- [x] Add a fail-closed CPU-only legacy-A/legacy-B/patched Quick-50/100 route
+  that obtains no GPU lock and records end-to-end phase profiles.
+- [ ] Use the CPU profiles to project 50k completion time before considering
+  any CPU formal replay; do not stop the old GPU full task.

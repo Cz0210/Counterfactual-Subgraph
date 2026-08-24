@@ -67,6 +67,30 @@ benchmark 显式兼容冻结 BACE GCF cohort 的 `canonical_smiles` 字段，并
 scorer identity 同时接受项目 `MolecularGraphData` 的 tuple-backed portable
 features 与 collated torch tensor；两者都按 dtype、shape 和 C-order bytes 绑定。
 
+## CUDA raw-byte 非确定性与 CPU lockstep
+
+GPU2 的 64-row repeated-cold 审计证明：同一进程、同一 checkpoint、同一完整
+有序 batch 的 GINE GPU hidden/logits 五次调用产生五组不同 SHA-256；预测标签
+完全一致、`allclose=true`、最大 logit 差 `3.5762786865234375e-07`。相同 CPU
+调用则 hidden/logits 均 5/5 byte-exact。输入顺序、重复 row、batch shape、RNG
+都未改变，因此该结果是 CUDA `index_add_` message aggregation/pooling 的 raw-byte
+非确定性证据，不是 ordered neighbour、dedup、cache 或 batch 语义 bug。由于官方
+VRRW 直接 hash raw embedding bytes，GPU exact replay 不能据此发布 PASS。
+
+CPU-only lockstep 使用：
+
+```bash
+CUDA_VISIBLE_DEVICES="" \
+BACE_GCF_CPU_LOCKSTEP_OUTPUT=<fresh root> \
+scripts/autodl/run_bace_gcf_cpu_lockstep.sh
+```
+
+该路线把 GINE 和 NeuroSED 都固定到 CPU，不获取 GPU lock。它按 Quick-50
+legacy-A、legacy-B、ordered-v2，再按相同顺序运行 Quick-100；任一逐调用 bit
+exact gate 失败会立即停止。官方 `importance.call` 对 CPU 错误调用
+`torch.cuda.set_device('cpu')`，项目 compatibility context 只将这一 housekeeping
+调用变为 no-op，并在退出时恢复；模型、图、RNG 与 transition 不变。
+
 ## 50k 前置硬门禁
 
 先在同一物理 GPU 上顺序执行 legacy/ordered-v2 的 500 和 1000 step fresh smoke：
