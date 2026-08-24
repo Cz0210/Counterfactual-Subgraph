@@ -17,6 +17,14 @@ from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
 from src.oracles.gnn_oracle import load_gnn_checkpoint_bundle, sha256_file
 
 
+def _record_smiles(record: dict) -> str:
+    for key in ("smiles", "canonical_smiles", "original_smiles"):
+        value = str(record.get(key, "")).strip()
+        if value:
+            return value
+    raise ValueError("BACE benchmark record has no molecular SMILES field.")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/hpc.yaml")
@@ -34,7 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _portable_rows(records: list[dict], featurizer: MolecularGraphFeaturizer) -> list[MolecularGraphData]:
     output: list[MolecularGraphData] = []
     for index, record in enumerate(records):
-        features = featurizer.featurize(str(record["smiles"]))
+        features = featurizer.featurize(_record_smiles(record))
         output.append(
             MolecularGraphData(
                 x=features.node_features,
