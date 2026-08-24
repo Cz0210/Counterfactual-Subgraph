@@ -3,6 +3,8 @@
   "controller_id": "four_methods_four_datasets_aids_comrecgc_exact_route_v5",
   "paper_frozen": true,
   "run_tastemolnet": 0,
+  "physical_snapshot_required": true,
+  "snapshot_min_free_after_bytes": 42949672960,
   "runtime_root": "/autodl-fs/data/counterfactual-subgraph-runtime",
   "control_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
   "project_root": "__IMMUTABLE_EXECUTION_WORKTREE__",

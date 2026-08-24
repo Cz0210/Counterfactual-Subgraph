@@ -1527,3 +1527,18 @@ Mutagenicity roadmaps.
   controller bound to the ComRecGC pair owner and physical GPU2 UUID.
 - [ ] Run that matrix only after GPU2 naturally releases; do not preempt any
   protected writer.
+## 2026-08-24 — AIDS v5 promoted-pair physical snapshot
+
+- [x] Add a CPU-only, no-hardlink physical snapshot primitive with full
+  pre/post source hashing, per-array fsync/atomic promotion, and a terminal
+  whole-closure validator.
+- [x] Make incomplete partials non-authoritative and prove same-root recovery
+  across array-promotion and terminal-manifest/PASS crash windows.
+- [x] Close the builder-to-task natural-exit window and discard only fixed-name
+  regular partials before recalculating remaining-byte disk headroom.
+- [x] Freeze the Cartesian row formula, array shape/dtype, and exact sklearn
+  DBSCAN semantics in a hash-bound `dbscan_contract.json`.
+- [ ] Wire the snapshot as a dependency of the fresh persistent v5 science
+  task and pin this reviewed snapshot implementation in its builder.
+- [ ] Run only from a fresh immutable AutoDL worktree/root after independent
+  review; retain repair-v4 as untouched read-only evidence.

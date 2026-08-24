@@ -53,6 +53,10 @@ def _fixture(
     monkeypatch.setattr(v5, "EXPECTED_CANDIDATE_COUNT", 3)
     monkeypatch.setattr(v5, "EXPECTED_PAIR_COUNT", 6)
     monkeypatch.setattr(v5, "EXPECTED_VECTOR_DIM", 4)
+    monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_PARENT_COUNT", 2)
+    monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_CANDIDATE_COUNT", 3)
+    monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_ROWS", 6)
+    monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_VECTOR_DIM", 4)
     if mock_git:
         monkeypatch.setattr(v5, "_git_head", lambda _root: "f" * 40)
         monkeypatch.setattr(
@@ -237,6 +241,8 @@ def _fixture(
             "controller_id": v5.CONTROLLER_ID,
             "paper_frozen": True,
             "run_tastemolnet": 0,
+            "physical_snapshot_required": True,
+            "snapshot_min_free_after_bytes": v5.SNAPSHOT_MIN_FREE_AFTER_BYTES,
             "runtime_root": str(runtime),
             "control_root": str(control),
             "project_root": str(project),
@@ -293,12 +299,24 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     ]
     environment = task["environment"]
     assert environment["COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL"] == "1"
-    assert environment["COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT"] == str(
-        paths["pair_root"]
+    snapshot_dependency = "{dep_" + v5.SNAPSHOT_TASK_ID + "_output}"
+    assert environment["COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT"] == (
+        snapshot_dependency + "/pair_store"
     )
-    assert environment["COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT"] == str(
-        paths["pair_root"]
+    assert environment["COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT"] == (
+        snapshot_dependency + "/pair_store"
     )
+    assert environment["AIDS_COMRECGC_V5_SNAPSHOT_ROOT"] == snapshot_dependency
+    snapshot_task = next(
+        task for task in payload["tasks"] if task["id"] == v5.SNAPSHOT_TASK_ID
+    )
+    assert snapshot_task["resource"] == "cpu"
+    assert snapshot_task["command"] == [
+        "bash",
+        "{project_root}/scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh",
+    ]
+    assert snapshot_task["environment"]["AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE"] == "0"
+    assert task["depends_on"] == [v5.SELECTOR_TASK_ID, v5.SNAPSHOT_TASK_ID]
     assert environment["COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES"] == "0"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_PID"] == "273939"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS"] == "687141119"
@@ -332,6 +350,9 @@ def test_v5_real_head_builds_and_validates_release_gates(
         v5.ROUTE_RELEASE_COMMIT
     )
     assert contract["route_release_gate"]["is_ancestor"] == "true"
+    assert contract["snapshot_release_gate"]["release_commit"] == (
+        v5.SNAPSHOT_RELEASE_COMMIT
+    )
 
 
 def _process_gate(paths: dict[str, Path]) -> dict[str, Any]:
@@ -790,6 +811,43 @@ def test_v5_rejects_cgroup_headroom_or_chunk_bypass(
         v5.validate_payload(payload)
 
 
+def test_v5_rejects_snapshot_bypass_or_production_test_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    payload, _summary = v5.build_payload(spec_path=paths["spec"])
+    tasks = {task["id"]: task for task in payload["tasks"]}
+    snapshot_task = tasks[v5.SNAPSHOT_TASK_ID]
+    science_task = tasks[v5.TASK_ID]
+
+    snapshot_task["environment"]["AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE"] = "1"
+    with pytest.raises(RepairManifestError, match="snapshot production environment"):
+        v5.validate_payload(payload)
+    snapshot_task["environment"]["AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE"] = "0"
+
+    snapshot_task["required_output_files"].remove("dbscan_contract.json")
+    with pytest.raises(RepairManifestError, match="snapshot artifact contract"):
+        v5.validate_payload(payload)
+    snapshot_task["required_output_files"].insert(1, "dbscan_contract.json")
+
+    science_task["environment"]["COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT"] = str(
+        paths["pair_root"]
+    )
+    with pytest.raises(RepairManifestError, match="exact snapshot"):
+        v5.validate_payload(payload)
+
+
+def test_v5_rejects_missing_snapshot_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    payload, _summary = v5.build_payload(spec_path=paths["spec"])
+    science_task = next(task for task in payload["tasks"] if task["id"] == v5.TASK_ID)
+    science_task["depends_on"] = [v5.SELECTOR_TASK_ID]
+    with pytest.raises(RepairManifestError, match="selector-freeze dependency"):
+        v5.validate_payload(payload)
+
+
 def test_v5_manifest_publishes_only_at_exact_fresh_namespace_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -817,6 +875,9 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     )
     assert v5.REVIEWED_CORE_COMMIT == v5.INTEGRATED_REVIEWED_CORE_COMMIT
     assert v5.ROUTE_RELEASE_COMMIT == "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
+    assert v5.SNAPSHOT_RELEASE_COMMIT == (
+        "87050d3e02f7e3468227eec44e31e86aad048dad"
+    )
     root = Path(__file__).resolve().parents[2]
     template = json.loads(
         (
@@ -857,6 +918,30 @@ def test_v5_real_head_accepts_integrated_reviewed_core_identity() -> None:
         "exact-git-blob-and-current-content-sha256"
     )
     assert set(evidence["files"]) == set(v5.REVIEWED_CORE_FILE_IDENTITIES)
+
+
+def test_v5_real_head_accepts_snapshot_release_identity() -> None:
+    root = Path(__file__).resolve().parents[2]
+    evidence = v5._require_snapshot_release(root)
+    assert evidence["release_commit"] == v5.SNAPSHOT_RELEASE_COMMIT
+    assert evidence["release_commit_is_ancestor"] is True
+    assert set(evidence["files"]) == set(v5.SNAPSHOT_RELEASE_FILE_IDENTITIES)
+
+
+def test_v5_snapshot_release_gate_rejects_working_content_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    original = v5.sha256_file
+
+    def changed(path: str | Path) -> str:
+        if Path(path).name == "aids_comrecgc_v5_snapshot.py":
+            return "0" * 64
+        return original(path)
+
+    monkeypatch.setattr(v5, "sha256_file", changed)
+    with pytest.raises(RepairManifestError, match="snapshot release content changed"):
+        v5._require_snapshot_release(root)
 
 
 def test_v5_reviewed_core_gate_rejects_integrated_blob_drift(
