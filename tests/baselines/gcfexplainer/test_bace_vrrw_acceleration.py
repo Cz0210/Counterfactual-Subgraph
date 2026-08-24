@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import random
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -11,17 +12,23 @@ from src.baselines.gcfexplainer_bace_adapter import validate_bace_vrrw_profile
 from src.baselines.gcfexplainer_acceleration import (
     BufferedVRRWLogging,
     GCFAccelerationConfig,
+    LockstepVRRWTrace,
     OrderedImportanceAcceleration,
     OrderedNeighbourAcceleration,
     build_acceleration_gate,
     compare_same_gpu_profiles,
+    compare_lockstep_traces,
     compare_vrrw_equivalence,
     canonical_graph_tensor_digest,
     ordered_parallel_map,
     validate_full_acceleration_gate,
 )
+from src.baselines.frozen_gine_batch_scorer import FrozenGINEBatchScorer
 from src.data.molecular_graph_featurizer import default_molecular_feature_schema
 from scripts.autodl.gate_bace_gcf_acceleration import parse_args as parse_gate_args
+from scripts.autodl.benchmark_bace_frozen_gine_batch import (
+    parse_args as parse_benchmark_args,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -108,6 +115,40 @@ def test_quick_replay_shell_is_diagnostic_only() -> None:
     assert "--profile equivalence_quick" in text
     assert '"eligible_for_full_acceleration_gate": False' in text
     assert "gate_bace_gcf_acceleration.py aggregate" not in text
+
+
+def test_frozen_gine_benchmark_cli_and_paired_slurm_are_synchronized() -> None:
+    args = parse_benchmark_args(
+        [
+            "--config",
+            "configs/hpc.yaml",
+            "--set",
+            "inference.fallback_to_heuristic=false",
+            "--dataset-dir",
+            "/dataset",
+            "--checkpoint-dir",
+            "/checkpoint",
+            "--output-dir",
+            "/fresh",
+        ]
+    )
+    assert args.rows == 64
+    project_root = Path(__file__).resolve().parents[3]
+    text = (
+        project_root / "scripts/slurm/benchmark_bace_frozen_gine_batch.sh"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "#SBATCH --partition=A800",
+        "#SBATCH --gres=gpu:a800:1",
+        "#SBATCH --output=logs/%j.out",
+        "#SBATCH --error=logs/%j.err",
+        "conda activate smiles_pip118",
+        "cd /share/home/u20526/czx/counterfactual-subgraph",
+        "export PYTHONPATH=$PWD",
+        "--config configs/hpc.yaml",
+        "--set inference.fallback_to_heuristic=false",
+    ):
+        assert required in text
 
 
 def test_ordered_parallel_map_never_reorders_results() -> None:
@@ -307,6 +348,164 @@ def test_importance_cache_reuses_only_an_exact_complete_ordered_batch() -> None:
     assert report["cache_entries"] == 2
     assert report["cache_scope"] == "exact_ordered_full_batch_v1"
     assert report["partial_row_reuse"] is False
+
+
+def test_frozen_gine_scorer_caches_only_complete_ordered_batches() -> None:
+    torch = pytest.importorskip("torch")
+
+    class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(()))
+            self.classifier = torch.nn.Identity()
+            self.calls = 0
+
+        def encode_graph(self, batch: object) -> object:
+            self.calls += 1
+            return batch.x
+
+    class Batch:
+        def __init__(self, rows: object) -> None:
+            self.x = torch.stack([row.x.reshape(-1) for row in rows])
+            self.edge_index = torch.empty((2, 0), dtype=torch.long)
+            self.edge_attr = torch.empty((0, 1))
+            self.batch = torch.arange(len(rows))
+
+        def to(self, _device: object) -> "Batch":
+            return self
+
+    def graph(value: float) -> object:
+        return SimpleNamespace(
+            x=torch.tensor([[value, value + 1]]),
+            edge_index=torch.empty((2, 0), dtype=torch.long),
+            edge_attr=torch.empty((0, 1)),
+            graph_sha256=str(value),
+        )
+
+    model = Model()
+    scorer = FrozenGINEBatchScorer(
+        model=model,
+        device="cpu",
+        temperature=1.0,
+        checkpoint_id="checkpoint",
+        collate_fn=Batch,
+        cache_capacity=4,
+        diagnostic_trace=True,
+    )
+    first, second = graph(1.0), graph(2.0)
+    baseline = scorer.score([first, second], context={"rows": [0, 1]})
+    exact = scorer.score([first, second], context={"rows": [0, 1]})
+    reversed_rows = scorer.score([second, first], context={"rows": [0, 1]})
+    assert model.calls == 2
+    assert torch.equal(baseline.project_logits, exact.project_logits)
+    assert reversed_rows.project_logits.tolist() == [[2.0, 3.0], [1.0, 2.0]]
+    report = scorer.report()
+    assert report["cache_hits"] == 2
+    assert report["cache_misses"] == 4
+    assert report["partial_row_reuse"] is False
+    assert report["deduplication"] is False
+    assert report["chunking"] is False
+
+
+def test_lockstep_comparator_reports_exact_first_field(tmp_path: Path) -> None:
+    left = {
+        "budget": 50,
+        "events": [
+            {"event": "move", "step": 5, "selected_index": 3},
+            {
+                "event": "importance",
+                "step": 6,
+                "importance": {"values": [[0.25, 1.0]]},
+            },
+        ],
+    }
+    right = json.loads(json.dumps(left))
+    right["events"][1]["importance"]["values"][0][0] = 0.25000003
+    left_path = tmp_path / "legacy.json"
+    right_path = tmp_path / "optimized.json"
+    _write_json(left_path, left)
+    _write_json(right_path, right)
+    result = compare_lockstep_traces(left_path, right_path)
+    assert result["status"] == "FAILED"
+    assert result["first_divergence"] == {
+        "event_index": 1,
+        "step": 6,
+        "event": "importance",
+        "field": "importance.values[0][0]",
+        "legacy": 0.25,
+        "optimized": 0.25000003,
+    }
+
+
+def test_lockstep_tracer_does_not_consume_rng_or_change_result() -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+
+    graph = SimpleNamespace(
+        num_nodes=2,
+        x=torch.tensor([[1, 0], [0, 1]]),
+        edge_index=torch.tensor([[0, 1], [1, 0]]),
+    )
+
+    def execute(*, traced: bool) -> tuple[object, object, object]:
+        importance = SimpleNamespace()
+
+        def importance_call(graphs: object, _wargs: object) -> object:
+            return (
+                np.asarray([[0.5, 1.0]] * len(graphs), dtype=np.float32),
+                np.asarray([[1.0, 2.0]] * len(graphs), dtype=np.float32),
+                torch.ones((len(graphs), 1)),
+            )
+
+        importance.call = importance_call
+        module = SimpleNamespace(
+            graph_map={"g": graph},
+            graph_index_map={"g": 0},
+            transitions={},
+            counterfactual_candidates=[{"importance_parts": [0.5, 1.0]}],
+        )
+
+        def restart(_graphs: object) -> str:
+            importance.call([graph], {"gnn_model": None})
+            return "g"
+
+        def move(*, graph_hash: str, importance_args: object, teleport_probability: float) -> object:
+            del importance_args, teleport_probability
+            random.uniform(0, 1)
+            importance.call([graph], {"gnn_model": None})
+            module.transitions[graph_hash] = (["g"], [("NOTHING", None, None)])
+            return "g", False
+
+        module.restart_randomwalk = restart
+        module.move_to_next_graph = move
+        random.seed(13)
+        np.random.seed(13)
+        torch.manual_seed(13)
+        if traced:
+            with LockstepVRRWTrace(
+                vrrw=module, importance=importance, torch=torch, np=np, budget=50
+            ) as trace:
+                result = module.restart_randomwalk([graph])
+                moved = module.move_to_next_graph(
+                    graph_hash=result,
+                    importance_args={},
+                    teleport_probability=0.1,
+                )
+            assert trace.payload()["event_count"] == 4
+        else:
+            result = module.restart_randomwalk([graph])
+            moved = module.move_to_next_graph(
+                graph_hash=result,
+                importance_args={},
+                teleport_probability=0.1,
+            )
+        return moved, random.getstate(), torch.get_rng_state().clone()
+
+    plain = execute(traced=False)
+    traced = execute(traced=True)
+    assert plain[0] == traced[0]
+    assert plain[1] == traced[1]
+    assert torch.equal(plain[2], traced[2])
 
 
 def _equivalence_root(

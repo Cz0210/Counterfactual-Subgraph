@@ -1385,3 +1385,17 @@ Mutagenicity roadmaps.
   expose it only through the frozen-GINE generic route.
 - [x] Hash-bind and revalidate the exact proof through training summary,
   summary, run manifest, completion gate, and final PASS.
+
+# 2026-08-24 — BACE GCF lockstep and frozen-GINE scoring
+
+- [x] Add Quick-50/100 per-call lockstep traces and an exact first-divergence
+  comparator without consuming RNG.
+- [x] Centralize duplicate-preserving full-batch frozen-GINE scoring with an
+  optional exact-complete-batch cache.
+- [x] Add repeated-cold CPU/GPU identity and throughput diagnostics plus the
+  paired Slurm entrypoint.
+- [ ] Run legacy twice and ordered-v2 once on a fresh AutoDL GPU root; classify
+  the first divergence as batch-input, GINE-output, or cross-process CUDA
+  raw-byte nondeterminism.
+- [ ] Start Quick-100 only after Quick-50 exact parity; keep the old 50k PID and
+  output root immutable until all formal release gates pass.
