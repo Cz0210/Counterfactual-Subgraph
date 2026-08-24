@@ -76,7 +76,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         allowed_cmdline_sha256=args.allowed_cmdline_sha256,
         allowed_output_root=args.allowed_output_root,
         allowed_project_root=args.allowed_project_root,
-        min_free_after_bytes=args.min_free_after_bytes,
         expected_row_count=args.expected_row_count,
         expected_vector_dim=args.expected_vector_dim,
         expected_parent_count=args.expected_parent_count,

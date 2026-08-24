@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -509,6 +511,69 @@ def test_checkpoint_identity_tamper_is_not_a_resume_hint(
     monkeypatch.setattr(snapshot, "_copy_one", original)
     with pytest.raises(snapshot.PairStoreSnapshotError, match="checkpoint identity"):
         _run(fixture, output, resume=True)
+
+
+def test_real_cli_create_and_validate_only_branches(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    output = tmp_path / "cli-snapshot"
+    root = Path(__file__).resolve().parents[2]
+    cli = root / "scripts/autodl/snapshot_aids_comrecgc_pair_store.py"
+    args = [
+        sys.executable,
+        str(cli),
+        "--config",
+        "configs/hpc.yaml",
+        "--source-root",
+        str(fixture["source"]),
+        "--expected-source-manifest-sha256",
+        str(fixture["manifest_sha"]),
+        "--output-dir",
+        str(output),
+        "--proc-root",
+        str(fixture["proc"]),
+        "--allowed-pid",
+        "77",
+        "--allowed-start-ticks",
+        "1234",
+        "--allowed-cmdline-sha256",
+        "a" * 64,
+        "--allowed-output-root",
+        str(fixture["old_output"]),
+        "--allowed-project-root",
+        str(fixture["project"]),
+        "--min-free-after-bytes",
+        "0",
+        "--expected-row-count",
+        str(fixture["rows"]),
+        "--expected-vector-dim",
+        str(fixture["dim"]),
+        "--expected-parent-count",
+        str(fixture["parents"]),
+        "--expected-candidate-count",
+        str(fixture["candidates"]),
+    ]
+
+    created = subprocess.run(
+        args,
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "[AIDS_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT_PASS]" in created.stdout
+    assert (output / "PASS").read_text(encoding="utf-8") == "PASS\n"
+
+    validated = subprocess.run(
+        [*args, "--validate-only"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (
+        "[AIDS_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT_VALIDATE_PASS]"
+        in validated.stdout
+    )
 
 
 def test_cli_and_slurm_keep_frozen_full_dimensions() -> None:
