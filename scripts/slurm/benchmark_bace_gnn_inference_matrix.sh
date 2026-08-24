@@ -15,6 +15,8 @@ cd /share/home/u20526/czx/counterfactual-subgraph
 export PYTHONPATH=$PWD
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 
 echo "python=$(command -v python)"
 python --version

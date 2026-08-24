@@ -64,10 +64,28 @@ python scripts/autodl/benchmark_bace_frozen_gine_batch.py \
 `1,8,32,128,512`，分别报告 ordered collation/device transfer、prepared-batch
 pure model 和 collation-to-logits end-to-end 的 CPU/GPU median/p95/rows/s。
 每个 batch 同时报告 argmax、hidden/logit max-absolute-difference、allclose 和
-repeated raw-byte digest；输出固定为 `bace_gnn_inference_benchmark.json`。
+repeated raw-byte digest；temperature-scaled logits 还逐 batch 报告 calibrated
+softmax probability 的 finite、normalized、allclose、最大绝对误差和 digest，
+顶层汇总最佳 end-to-end device/batch/rows-per-second。输出固定为
+`bace_gnn_inference_benchmark.json`。
 benchmark 完成 PASS 只表示所有 argmax/allclose 与 CPU repeat gate 通过，CUDA
 raw-byte repeat 另由 `exact_replay_status` fail closed，不能授权 VRRW 替换。
 配对 HPC 入口为 `scripts/slurm/benchmark_bace_gnn_inference_matrix.sh`。
+正式 benchmark 强制
+`OMP_NUM_THREADS=MKL_NUM_THREADS=OPENBLAS_NUM_THREADS=1` 和
+`TOKENIZERS_PARALLELISM=false`；CLI、paired Slurm、controller manifest、输入
+manifest 与 child environment 同时绑定这些值。
+
+AutoDL GPU2 benchmark 不跟踪 ComRecGC 的瞬时 science PID。持久入口
+`scripts/autodl/run_deferred_bace_gnn_inference_benchmark.py` 绑定 pair run ID、
+`launch_spec.json` SHA-256、pair worker PID/start-ticks、registry terminal state、
+GPU index/UUID 和 immutable execution commit。它每 60 秒发布 heartbeat；pair
+仍运行、UUID exclusive lock 未释放、GPU 仍有 compute PID 或资源不足时保持
+`WAITING_RESOURCE`。只有所有条件连续满足 60 秒，才同时取得 project slot 与
+UUID exclusive lock，建立一次 fresh benchmark run 并启动 child。预先存在的
+output root/run-state、provenance 不一致或 PID 复用在非 terminal registry 下均
+`BLOCKED`，不会续写。child 继承两个 lock FD，因此 controller 意外退出也不会
+在 benchmark 仍运行时提前释放 GPU 所有权。
 
 AutoDL 上的 `scripts/autodl/run_bace_gcf_lockstep_quick50.sh` 先运行该
 benchmark，再按 legacy-A、legacy-B、ordered-v2 顺序运行 fresh Quick-50；
