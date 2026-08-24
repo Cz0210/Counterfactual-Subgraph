@@ -20,7 +20,7 @@
 - [x] Add CLI/tamper/authority-path/process/parser/shell-preflight tests and a
   static paired Slurm wrapper.
 - [x] Pin implementation commit
-  `daa9c89e21ec7cf2a812aea082619b2a3e731a65` in a builder-only follow-up.
+  `98c5125b8b68df8a8797c0228e85d9c8f45e1aed` in a builder-only follow-up.
 - [ ] Obtain an independent no-blocker review and deploy only an immutable
   fresh worktree.
 

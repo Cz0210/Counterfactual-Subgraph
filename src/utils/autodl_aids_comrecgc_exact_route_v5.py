@@ -79,7 +79,7 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # snapshot-adoption authority closure, argv parser, supervisor preflight, tests,
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
-SNAPSHOT_ADOPTION_RELEASE_COMMIT = "daa9c89e21ec7cf2a812aea082619b2a3e731a65"
+SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642

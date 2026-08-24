@@ -830,7 +830,7 @@ def test_v5_real_head_builds_and_validates_release_gates(
         v5.SNAPSHOT_RELEASE_COMMIT
     )
     assert contract["snapshot_adoption_release_gate"]["required_commit"] == (
-        "daa9c89e21ec7cf2a812aea082619b2a3e731a65"
+        "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
     )
     assert contract["snapshot_adoption_release_gate"]["is_ancestor"] == "true"
 
