@@ -59,6 +59,16 @@ python scripts/autodl/benchmark_bace_frozen_gine_batch.py \
 ```
 
 `scripts/slurm/benchmark_bace_frozen_gine_batch.sh` 是同步的 HPC wrapper。
+正式推理吞吐矩阵另使用
+`scripts/autodl/benchmark_bace_gnn_inference_matrix.py`，固定覆盖 batch
+`1,8,32,128,512`，分别报告 ordered collation/device transfer、prepared-batch
+pure model 和 collation-to-logits end-to-end 的 CPU/GPU median/p95/rows/s。
+每个 batch 同时报告 argmax、hidden/logit max-absolute-difference、allclose 和
+repeated raw-byte digest；输出固定为 `bace_gnn_inference_benchmark.json`。
+benchmark 完成 PASS 只表示所有 argmax/allclose 与 CPU repeat gate 通过，CUDA
+raw-byte repeat 另由 `exact_replay_status` fail closed，不能授权 VRRW 替换。
+配对 HPC 入口为 `scripts/slurm/benchmark_bace_gnn_inference_matrix.sh`。
+
 AutoDL 上的 `scripts/autodl/run_bace_gcf_lockstep_quick50.sh` 先运行该
 benchmark，再按 legacy-A、legacy-B、ordered-v2 顺序运行 fresh Quick-50；
 legacy-A/B 不完全一致时会立即停止，不运行 ordered-v2。
