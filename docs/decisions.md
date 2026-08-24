@@ -1,5 +1,50 @@
 # Decisions Log
 
+## [2026-08-24] Adopt the completed AIDS physical snapshot into a fresh route
+
+### Background
+
+The corrected `pair_order_v1` controller completed and froze its 25 GB physical
+snapshot, then its science task failed before DBSCAN progress.  The failure was
+not scientific: a procfs guard searched the decoded command-line string and
+mistook a read-only `bash` diagnostic containing the literal entrypoint name
+for another common-recourse worker.  Recopying the already closed snapshot
+would waste persistent capacity and create a second unnecessary data authority.
+
+### Decision
+
+Publish a new controller/root, never resume the failed science attempt.  Its
+middle task adopts the existing snapshot by read-only reference.  Authority is
+bound to the exact old controller-manifest SHA, the path-derived authoritative
+task gate and its SHA, PASS attempt zero and exact output, snapshot/DBSCAN/pair
+manifest SHA values, and pair/vector SHA values.  Adoption performs the same
+full source/destination/stat/writer/partial closure as snapshot publication,
+writes only a small fresh adoption manifest, and publishes PASS last.  Science
+repeats that adoption validator before spawning its child.  It never copies,
+hardlinks, rewrites, or opens the old snapshot for writing.
+
+Procfs classification now parses raw NUL-delimited argv.  A worker is visible
+only when argv is a direct physical entrypoint or a CPython interpreter plus
+valid interpreter flags and the first script operand.  Relative operands are
+resolved against that process's `/proc/<pid>/cwd`.  Shell/grep/regex literals,
+`python -c`, `python -m`, and later arguments to another script are ignored;
+real absolute/relative/direct workers remain visible.  Once the first script
+operand has the exact entrypoint basename, missing, symlinked, or unreadable
+identity fails closed instead of disappearing from the process set.
+
+### Consequences
+
+- The earlier selector/snapshot PASS artifacts remain immutable evidence; its
+  failed science output is never reused.
+- The new science output and controller namespace are fresh, CPU-only, and
+  continue the 128 GiB cgroup / 96 GiB RSS / global high-memory handover gates.
+- Mut requires another fresh continuation bound to the new authoritative AIDS
+  controller manifest SHA and attempt-zero terminal output.
+
+### Status
+
+Accepted for code/review; deployment still requires an immutable pinned commit.
+
 ## [2026-08-24] Prefer a closed AIDS pair store and authenticate chunk-cache allocation
 
 ### Background

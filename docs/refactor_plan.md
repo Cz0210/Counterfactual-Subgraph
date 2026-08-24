@@ -1,5 +1,26 @@
 # Refactor Plan
 
+## 2026-08-24: Fresh AIDS snapshot-adoption continuation
+
+- [x] Replace decoded-command substring matching with raw NUL argv parsing,
+  CPython flag/first-script semantics, proc-cwd relative resolution, and exact
+  physical entrypoint identity.
+- [x] Ignore bash/grep/regex literals and `python -c/-m` while rejecting real
+  absolute, relative, flagged, direct, missing, or symlinked rogue workers.
+- [x] Bind the completed `pair_order_v1` snapshot to its exact owner manifest,
+  authoritative task-gate path/SHA, PASS attempt/output, all terminal manifest
+  hashes, and both large-array hashes.
+- [x] Add a PASS-last adoption task that fully reopens the immutable snapshot,
+  publishes no arrays, and performs no copy, hardlink, or source write.
+- [x] Make fresh science consume the original immutable snapshot path while
+  depending on and revalidating the fresh adoption gate before child spawn.
+- [x] Preserve CPU-only/cgroup/RSS/high-memory-lock/process-watchdog contracts
+  and create a new CID, route lock, output root, and Mut dependency identity.
+- [x] Add CLI/tamper/authority-path/process/parser/shell-preflight tests and a
+  static paired Slurm wrapper.
+- [ ] Pin the implementation commit in a builder-only follow-up, obtain an
+  independent no-blocker review, and deploy only an immutable fresh worktree.
+
 ## 2026-08-24: Release-gate the fresh AIDS exact-Cartesian v5 route
 
 - [x] Forward every adaptive DBSCAN, promoted-source, chunk-cache, headroom,

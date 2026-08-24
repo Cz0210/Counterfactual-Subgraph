@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 from typing import Any
 
@@ -22,6 +23,14 @@ from src.baselines.comrecgc.external_memory_recourse import (
     _stable_hash,
 )
 from src.utils import autodl_aids_comrecgc_exact_route_v5 as v5
+from src.utils.aids_comrecgc_v5_snapshot import (
+    create_promoted_pair_store_snapshot,
+)
+from src.utils.aids_comrecgc_v5_snapshot_adoption import (
+    SOURCE_CONTROLLER_ID as SNAPSHOT_OWNER_CONTROLLER_ID,
+    SOURCE_SNAPSHOT_TASK_ID as SNAPSHOT_OWNER_TASK_ID,
+)
+from src.utils import aids_comrecgc_v5_snapshot_adoption as adoption
 from src.utils import aids_comrecgc_v5_science_exec as science_exec
 from src.utils.autodl_aids_comrecgc_repair_v4 import (
     CONTROLLER_ID as V4_CONTROLLER_ID,
@@ -57,6 +66,10 @@ def _fixture(
     monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_CANDIDATE_COUNT", 3)
     monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_ROWS", 6)
     monkeypatch.setattr(v5, "SNAPSHOT_EXPECTED_VECTOR_DIM", 4)
+    monkeypatch.setattr(adoption, "EXPECTED_PARENT_COUNT", 2)
+    monkeypatch.setattr(adoption, "EXPECTED_CANDIDATE_COUNT", 3)
+    monkeypatch.setattr(adoption, "EXPECTED_ROWS", 6)
+    monkeypatch.setattr(adoption, "EXPECTED_VECTOR_DIM", 4)
     if mock_git:
         monkeypatch.setattr(v5, "_git_head", lambda _root: "f" * 40)
         monkeypatch.setattr(
@@ -133,7 +146,11 @@ def _fixture(
             "schema_version": 1,
             "controller_id": V4_CONTROLLER_ID,
             "paper_frozen": True,
-            "runtime": {"max_gpus": 4, "max_cpu_tasks": 1},
+            "runtime": {
+                "max_gpus": 4,
+                "max_cpu_tasks": 1,
+                "max_transient_retries": 0,
+            },
             "tasks": [
                 {
                     "id": "selector-freeze",
@@ -233,6 +250,87 @@ def _fixture(
         encoding="utf-8",
     )
     (old_proc / "cwd").symlink_to(old_project_root, target_is_directory=True)
+    snapshot_root = tmp_path / "approved-snapshot"
+    create_promoted_pair_store_snapshot(
+        source_root=pair_root,
+        expected_source_manifest_sha256=sha256_file(pair_manifest),
+        output_dir=snapshot_root,
+        proc_root=proc,
+        allowed_pid=old_pid,
+        allowed_start_ticks=old_start_ticks,
+        allowed_cmdline_sha256=hashlib.sha256(old_cmdline).hexdigest(),
+        allowed_output_root=old_output_root,
+        allowed_project_root=old_project_root,
+        min_free_after_bytes=0,
+        expected_row_count=6,
+        expected_vector_dim=4,
+        expected_parent_count=2,
+        expected_candidate_count=3,
+    )
+    owner_manifest = _json(
+        control
+        / v5.SOURCE_NAMESPACE
+        / "manifests"
+        / f"{SNAPSHOT_OWNER_CONTROLLER_ID}.json",
+        {
+            "schema_version": 1,
+            "controller_id": SNAPSHOT_OWNER_CONTROLLER_ID,
+            "paper_frozen": True,
+            "runtime": {
+                "max_gpus": 4,
+                "max_cpu_tasks": 1,
+                "max_transient_retries": 0,
+            },
+            "tasks": [
+                {
+                    "id": "owner-selector-freeze",
+                    "dataset": "aids",
+                    "stage": "AM_COMRECGC_THRESHOLD_FREEZE",
+                    "resource": "cpu",
+                    "manifest_only": True,
+                    "freezes_selector": True,
+                    "skip_reason": "fixture-only owner selector",
+                },
+                {
+                    "id": SNAPSHOT_OWNER_TASK_ID,
+                    "dataset": "aids",
+                    "stage": "AM_COMRECGC_HELDOUT_EVAL",
+                    "resource": "cpu",
+                    "depends_on": ["owner-selector-freeze"],
+                    "data_splits": ["test"],
+                    "selector_parameters_frozen": True,
+                    "read_only_test": True,
+                    "command": ["bash", "snapshot.sh"],
+                    "input_manifest": str(pair_manifest),
+                    "expected_output": str(snapshot_root),
+                    "required_output_files": ["snapshot_manifest.json", "PASS"],
+                    "required_log_marker": "PASS",
+                }
+            ],
+        },
+    )
+    owner_gate = _json(
+        control
+        / v5.SOURCE_NAMESPACE
+        / SNAPSHOT_OWNER_CONTROLLER_ID
+        / "tasks"
+        / SNAPSHOT_OWNER_TASK_ID
+        / "gate.json",
+        {
+            "schema_version": 1,
+            "task_id": SNAPSHOT_OWNER_TASK_ID,
+            "status": "PASS",
+            "reason": None,
+            "runs": [
+                {
+                    "attempt": 0,
+                    "expected_output": str(snapshot_root),
+                    "instance_id": "main",
+                    "state": "PASS",
+                }
+            ],
+        },
+    )
     fresh = runtime / "outputs/autodl/repairs/aids-v5"
     spec = _json(
         tmp_path / "aids-v5-spec.json",
@@ -242,7 +340,7 @@ def _fixture(
             "paper_frozen": True,
             "run_tastemolnet": 0,
             "physical_snapshot_required": True,
-            "snapshot_min_free_after_bytes": v5.SNAPSHOT_MIN_FREE_AFTER_BYTES,
+            "snapshot_adoption_required": True,
             "runtime_root": str(runtime),
             "control_root": str(control),
             "project_root": str(project),
@@ -258,6 +356,28 @@ def _fixture(
             "base_v4_manifest_sha256": sha256_file(base_manifest),
             "terminal_pair_store_root": str(pair_root),
             "terminal_pair_store_manifest_sha256": sha256_file(pair_manifest),
+            "adopted_snapshot": {
+                "owner_manifest": str(owner_manifest),
+                "owner_manifest_sha256": sha256_file(owner_manifest),
+                "owner_task_gate": str(owner_gate),
+                "owner_task_gate_sha256": sha256_file(owner_gate),
+                "snapshot_root": str(snapshot_root),
+                "snapshot_manifest_sha256": sha256_file(
+                    snapshot_root / "snapshot_manifest.json"
+                ),
+                "dbscan_contract_sha256": sha256_file(
+                    snapshot_root / "dbscan_contract.json"
+                ),
+                "pair_store_manifest_sha256": sha256_file(
+                    snapshot_root / "pair_store/run_manifest.json"
+                ),
+                "pairs_sha256": sha256_file(
+                    snapshot_root / "pair_store/pair_indices.npy"
+                ),
+                "vectors_sha256": sha256_file(
+                    snapshot_root / "pair_store/recourse_vectors.npy"
+                ),
+            },
             "allowed_old_read_only_process": {
                 "pid": old_pid,
                 "start_ticks": old_start_ticks,
@@ -281,6 +401,9 @@ def _fixture(
         "old_output_root": old_output_root,
         "old_project_root": old_project_root,
         "old_cmdline": old_cmdline,
+        "snapshot_root": snapshot_root,
+        "owner_manifest": owner_manifest,
+        "owner_gate": owner_gate,
     }
 
 
@@ -300,22 +423,30 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     environment = task["environment"]
     assert environment["COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL"] == "1"
     snapshot_dependency = "{dep_" + v5.SNAPSHOT_TASK_ID + "_output}"
+    adopted_root = str(paths["snapshot_root"])
     assert environment["COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT"] == (
-        snapshot_dependency + "/pair_store"
+        adopted_root + "/pair_store"
     )
     assert environment["COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT"] == (
-        snapshot_dependency + "/pair_store"
+        adopted_root + "/pair_store"
     )
-    assert environment["AIDS_COMRECGC_V5_SNAPSHOT_ROOT"] == snapshot_dependency
+    assert environment["AIDS_COMRECGC_V5_SNAPSHOT_ROOT"] == adopted_root
+    assert (
+        environment["AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT"]
+        == snapshot_dependency
+    )
     snapshot_task = next(
         task for task in payload["tasks"] if task["id"] == v5.SNAPSHOT_TASK_ID
     )
     assert snapshot_task["resource"] == "cpu"
-    assert snapshot_task["command"] == [
-        "bash",
-        "{project_root}/scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh",
+    assert snapshot_task["command"][:2] == [
+        "{python}",
+        "{project_root}/scripts/autodl/adopt_aids_comrecgc_v5_snapshot.py",
     ]
-    assert snapshot_task["environment"]["AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE"] == "0"
+    assert snapshot_task["required_output_files"] == [
+        "snapshot_adoption_manifest.json",
+        "PASS",
+    ]
     assert task["depends_on"] == [v5.SELECTOR_TASK_ID, v5.SNAPSHOT_TASK_ID]
     assert environment["COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES"] == "0"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_PID"] == "273939"
@@ -336,6 +467,265 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert headroom["free_bytes_at_build"] == 448 * 1024**3
     assert headroom["host_memfree_used"] is False
     assert summary["gpu_required"] is False
+
+
+def _adoption_kwargs(paths: dict[str, Path], output: Path) -> dict[str, Any]:
+    spec = json.loads(paths["spec"].read_text(encoding="utf-8"))
+    frozen = spec["adopted_snapshot"]
+    return {
+        "output_dir": output,
+        "proc_root": paths["proc"],
+        "owner_manifest": frozen["owner_manifest"],
+        "owner_manifest_sha256": frozen["owner_manifest_sha256"],
+        "owner_task_gate": frozen["owner_task_gate"],
+        "owner_task_gate_sha256": frozen["owner_task_gate_sha256"],
+        "snapshot_root": frozen["snapshot_root"],
+        "snapshot_manifest_sha256": frozen["snapshot_manifest_sha256"],
+        "dbscan_contract_sha256": frozen["dbscan_contract_sha256"],
+        "pair_store_manifest_sha256": frozen["pair_store_manifest_sha256"],
+        "pairs_sha256": frozen["pairs_sha256"],
+        "vectors_sha256": frozen["vectors_sha256"],
+        "source_root": paths["pair_root"],
+        "source_manifest_sha256": sha256_file(paths["pair_manifest"]),
+        "allowed_pid": 273939,
+        "allowed_start_ticks": 687141119,
+        "allowed_cmdline_sha256": hashlib.sha256(paths["old_cmdline"]).hexdigest(),
+        "allowed_output_root": paths["old_output_root"],
+        "allowed_project_root": paths["old_project_root"],
+        "expected_row_count": 6,
+        "expected_vector_dim": 4,
+        "expected_parent_count": 2,
+        "expected_candidate_count": 3,
+    }
+
+
+def test_snapshot_adoption_reopens_full_closure_without_copy_or_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "adoption"
+    terminal = adoption.create_snapshot_adoption(**_adoption_kwargs(paths, output))
+    assert terminal["status"] == "PASS"
+    assert terminal["copy_or_hardlink_performed"] is False
+    assert terminal["old_snapshot_mutated"] is False
+    assert sorted(path.name for path in output.iterdir()) == [
+        "PASS",
+        "snapshot_adoption_manifest.json",
+    ]
+    assert not list(output.rglob("*.npy"))
+    validated = adoption.validate_snapshot_adoption(
+        output_dir=output,
+        proc_root=paths["proc"],
+        identity=terminal["identity"],
+    )
+    assert validated == terminal
+
+
+def test_snapshot_adoption_rejects_identical_gate_from_non_authority_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    copied_gate = _file(tmp_path / "copied/gate.json", paths["owner_gate"].read_text())
+    kwargs = _adoption_kwargs(paths, tmp_path / "adoption-wrong-gate")
+    kwargs["owner_task_gate"] = copied_gate
+    kwargs["owner_task_gate_sha256"] = sha256_file(copied_gate)
+    with pytest.raises(adoption.SnapshotAdoptionError, match="authority path"):
+        adoption.create_snapshot_adoption(**kwargs)
+
+
+@pytest.mark.parametrize("tamper", ["owner_gate", "snapshot_manifest", "missing_pass"])
+def test_snapshot_adoption_revalidation_fails_closed_before_science(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "adoption-tamper"
+    terminal = adoption.create_snapshot_adoption(**_adoption_kwargs(paths, output))
+    if tamper == "owner_gate":
+        paths["owner_gate"].write_text('{"status":"FAILED"}\n', encoding="utf-8")
+    elif tamper == "snapshot_manifest":
+        manifest = paths["snapshot_root"] / "snapshot_manifest.json"
+        manifest.write_text(manifest.read_text() + "\n", encoding="utf-8")
+    else:
+        (output / "PASS").unlink()
+    with pytest.raises(adoption.SnapshotAdoptionError):
+        adoption.validate_snapshot_adoption(
+            output_dir=output,
+            proc_root=paths["proc"],
+            identity=terminal["identity"],
+        )
+
+
+def test_snapshot_adoption_real_cli_create_and_validate_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "adoption-cli"
+    kwargs = _adoption_kwargs(paths, output)
+    root = Path(__file__).resolve().parents[2]
+    cli = root / "scripts/autodl/adopt_aids_comrecgc_v5_snapshot.py"
+    args = [
+        sys.executable,
+        str(cli),
+        "--config",
+        "configs/hpc.yaml",
+    ]
+    option_names = {
+        "output_dir": "output-dir",
+        "proc_root": "proc-root",
+        "owner_manifest": "owner-manifest",
+        "owner_manifest_sha256": "owner-manifest-sha256",
+        "owner_task_gate": "owner-task-gate",
+        "owner_task_gate_sha256": "owner-task-gate-sha256",
+        "snapshot_root": "snapshot-root",
+        "snapshot_manifest_sha256": "snapshot-manifest-sha256",
+        "dbscan_contract_sha256": "dbscan-contract-sha256",
+        "pair_store_manifest_sha256": "pair-store-manifest-sha256",
+        "pairs_sha256": "pairs-sha256",
+        "vectors_sha256": "vectors-sha256",
+        "source_root": "source-root",
+        "source_manifest_sha256": "source-manifest-sha256",
+        "allowed_pid": "allowed-pid",
+        "allowed_start_ticks": "allowed-start-ticks",
+        "allowed_cmdline_sha256": "allowed-cmdline-sha256",
+        "allowed_output_root": "allowed-output-root",
+        "allowed_project_root": "allowed-project-root",
+        "expected_row_count": "expected-row-count",
+        "expected_vector_dim": "expected-vector-dim",
+        "expected_parent_count": "expected-parent-count",
+        "expected_candidate_count": "expected-candidate-count",
+    }
+    for key, option in option_names.items():
+        args.extend([f"--{option}", str(kwargs[key])])
+    created = subprocess.run(args, cwd=root, check=True, capture_output=True, text=True)
+    assert "[AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_PASS]" in created.stdout
+    validated = subprocess.run(
+        [*args, "--validate-only"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "[AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_VALIDATE_PASS]" in validated.stdout
+
+
+def test_science_supervisor_runs_adoption_validator_before_any_science_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    adoption_root = tmp_path / "adoption-preflight"
+    terminal = adoption.create_snapshot_adoption(
+        **_adoption_kwargs(paths, adoption_root)
+    )
+    trace = tmp_path / "python-trace.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/bin/bash\n"
+        f"printf '%s\\n' \"$*\" > {trace!s}\n"
+        "exit 75\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    identity = terminal["identity"]
+    old = identity["allowed_old_generation"]
+    root = Path(__file__).resolve().parents[2]
+    supervisor = root / "scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh"
+    environment = {
+        **os.environ,
+        "AUTODL_PYTHON": str(fake_python),
+        "OUTPUT_ROOT": str(tmp_path / "fresh-science"),
+        "DATASET": "aids",
+        "DEVICE": "cpu",
+        "GPU_REQUIRED": "0",
+        "COMMON_RECOURSE_ENGINE": "external_memory_exact_v1",
+        "COMRECGC_COMMON_RECOURSE_RESUME": "1",
+        "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES": "1",
+        "COMRECGC_EXTERNAL_MAX_RSS_GB": "96",
+        "COMRECGC_EXTERNAL_QUERY_BLOCK_SIZE": "8",
+        "COMRECGC_EXTERNAL_CHECKPOINT_INTERVAL_BLOCKS": "1",
+        "COMRECGC_EXTERNAL_DBSCAN_SHORTCUT_MODE": (
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        "COMRECGC_EXTERNAL_SHORTCUT_SEED_COUNT": "3",
+        "COMRECGC_EXTERNAL_SHORTCUT_FAILURE_CAP": "4096",
+        "COMRECGC_EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE": "65536",
+        "COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES": "0",
+        "COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE": "65536",
+        "COMRECGC_EXPECTED_SKLEARN_VERSION": "1.7.2",
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB": "3",
+        "COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL": "1",
+        "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT": str(
+            paths["snapshot_root"] / "pair_store"
+        ),
+        "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT": str(
+            paths["snapshot_root"] / "pair_store"
+        ),
+        "COMRECGC_EXTERNAL_ROUTE_LOCK": "/root/autodl-tmp/aids-v5-test.lock",
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT": str(paths["proc"]),
+        "COMRECGC_CGROUP_MEMORY_ROOT": str(paths["cgroup"]),
+        "AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES": str(128 * 1024**3),
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_PID": str(old["pid"]),
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS": str(old["start_ticks"]),
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256": str(
+            old["cmdline_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT": str(old["output_root"]),
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT": str(old["project_root"]),
+        "COMRECGC_HIGHMEM_LOCK_PATH": str(
+            paths["runtime"] / "locks/comrecgc_common_recourse_highmem.lock"
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": str(paths["snapshot_root"]),
+        "AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT": str(adoption_root),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST": str(
+            identity["owner_manifest"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256": str(
+            identity["owner_manifest_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE": str(
+            identity["owner_task_gate"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE_SHA256": str(
+            identity["owner_task_gate_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_MANIFEST_SHA256": str(
+            identity["snapshot_manifest_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_DBSCAN_SHA256": str(
+            identity["dbscan_contract_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_PAIR_MANIFEST_SHA256": str(
+            identity["pair_store_manifest_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_PAIRS_SHA256": str(identity["pairs_sha256"]),
+        "AIDS_COMRECGC_V5_SNAPSHOT_VECTORS_SHA256": str(
+            identity["vectors_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(paths["pair_root"]),
+        "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
+            identity["source_manifest_sha256"]
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT": str(paths["proc"]),
+        "AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES": "42949672960",
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS": "91916686",
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM": "64",
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT": "1283",
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT": "71642",
+    }
+    completed = subprocess.run(
+        ["bash", str(supervisor)],
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 75
+    assert "snapshot adoption closure validation failed" in completed.stderr
+    traced = trace.read_text(encoding="utf-8")
+    assert "adopt_aids_comrecgc_v5_snapshot.py" in traced
+    assert "--validate-only" in traced
+    assert str(adoption_root) in traced
+    assert not (tmp_path / "fresh-science/common_recourse").exists()
 
 
 def test_v5_real_head_builds_and_validates_release_gates(
@@ -425,6 +815,157 @@ def test_v5_process_gate_rejects_any_second_common_recourse_process(
     )
     (second / "cwd").symlink_to(paths["old_project_root"], target_is_directory=True)
     with pytest.raises(RuntimeError, match="UNEXPECTED_COMMON_RECOURSE_PROCESS_SET"):
+        _process_gate(paths)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "/bin/bash",
+            "-c",
+            "grep -R run_common_recourse.py /proc/*/cmdline",
+        ],
+        [
+            "/usr/bin/grep",
+            "run_common_recourse.py",
+            "/tmp/diagnostic.txt",
+        ],
+        [
+            "/bin/bash",
+            "-c",
+            "python regex='.*run_common_recourse.py.*' monitor-only",
+        ],
+        [
+            str(Path(os.sys.executable).resolve()),
+            "/tmp/not_run_common_recourse.py.txt",
+            "--output-dir",
+            "/tmp/not-science",
+        ],
+        [
+            str(Path(os.sys.executable).resolve()),
+            "-c",
+            "print('run_common_recourse.py monitor literal')",
+        ],
+        [
+            str(Path(os.sys.executable).resolve()),
+            "-m",
+            "monitor",
+            "run_common_recourse.py",
+        ],
+    ],
+)
+def test_v5_process_gate_ignores_literal_diagnostic_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    diagnostic = paths["proc"] / "274001"
+    diagnostic.mkdir()
+    (diagnostic / "cmdline").write_bytes(
+        b"\0".join(token.encode() for token in argv) + b"\0"
+    )
+    (diagnostic / "stat").write_text(
+        "274001 (diagnostic) "
+        + " ".join(["S", *(
+            "0" for _ in range(18)
+        ), "687141122"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (diagnostic / "cwd").symlink_to(
+        paths["old_project_root"], target_is_directory=True
+    )
+    result = _process_gate(paths)
+    assert result["active_common_recourse_count"] == 1
+    assert result["allowed_old_process_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        "python",
+        "python-u",
+        "python-O",
+        "python-X",
+        "python-combined",
+        "direct",
+        "python-relative",
+        "direct-relative",
+    ],
+)
+def test_v5_process_gate_detects_real_entrypoint_even_when_output_is_rogue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch: str
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    rogue_project = tmp_path / "rogue-project"
+    rogue_script = rogue_project / "scripts/baselines/comrecgc/run_common_recourse.py"
+    rogue_script.parent.mkdir(parents=True)
+    rogue_script.write_text("# real rogue entrypoint fixture\n", encoding="utf-8")
+    rogue = paths["proc"] / "274002"
+    rogue.mkdir()
+    relative_script = "scripts/baselines/comrecgc/run_common_recourse.py"
+    if launch == "direct":
+        argv = [str(rogue_script)]
+    elif launch == "direct-relative":
+        argv = [relative_script]
+    else:
+        argv = [str(Path(os.sys.executable).resolve())]
+        if launch == "python-u":
+            argv.append("-u")
+        elif launch == "python-O":
+            argv.append("-O")
+        elif launch == "python-X":
+            argv.extend(["-X", "dev"])
+        elif launch == "python-combined":
+            argv.extend(["-u", "-bb", "-i", "-R", "--"])
+        argv.append(relative_script if launch == "python-relative" else str(rogue_script))
+    argv.extend(["--output-dir", str(tmp_path / "rogue-output")])
+    (rogue / "cmdline").write_bytes(
+        b"\0".join(token.encode() for token in argv) + b"\0"
+    )
+    (rogue / "stat").write_text(
+        "274002 (python) "
+        + " ".join(["S", *("0" for _ in range(18)), "687141123"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (rogue / "cwd").symlink_to(rogue_project, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="UNEXPECTED_COMMON_RECOURSE_PROCESS_SET"):
+        _process_gate(paths)
+
+
+@pytest.mark.parametrize("entrypoint_state", ["missing", "symlink"])
+def test_v5_process_gate_fails_closed_for_unreadable_real_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint_state: str,
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    rogue_project = tmp_path / "rogue-unreadable-project"
+    script = rogue_project / "scripts/baselines/comrecgc/run_common_recourse.py"
+    script.parent.mkdir(parents=True)
+    if entrypoint_state == "symlink":
+        target = tmp_path / "physical.py"
+        target.write_text("# physical target\n", encoding="utf-8")
+        script.symlink_to(target)
+    rogue = paths["proc"] / "274003"
+    rogue.mkdir()
+    (rogue / "cmdline").write_bytes(
+        str(Path(os.sys.executable).resolve()).encode()
+        + b"\0scripts/baselines/comrecgc/run_common_recourse.py\0"
+    )
+    (rogue / "stat").write_text(
+        "274003 (python) "
+        + " ".join(["S", *("0" for _ in range(18)), "687141124"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (rogue / "cwd").symlink_to(rogue_project, target_is_directory=True)
+    with pytest.raises(
+        RuntimeError, match="COMMON_RECOURSE_ENTRYPOINT_IDENTITY_UNREADABLE"
+    ):
         _process_gate(paths)
 
 
@@ -820,15 +1361,17 @@ def test_v5_rejects_snapshot_bypass_or_production_test_mode(
     snapshot_task = tasks[v5.SNAPSHOT_TASK_ID]
     science_task = tasks[v5.TASK_ID]
 
-    snapshot_task["environment"]["AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE"] = "1"
-    with pytest.raises(RepairManifestError, match="snapshot production environment"):
+    snapshot_task["environment"]["GPU_REQUIRED"] = "1"
+    with pytest.raises(RepairManifestError, match="snapshot adoption command"):
         v5.validate_payload(payload)
-    snapshot_task["environment"]["AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE"] = "0"
+    snapshot_task["environment"]["GPU_REQUIRED"] = "0"
 
-    snapshot_task["required_output_files"].remove("dbscan_contract.json")
-    with pytest.raises(RepairManifestError, match="snapshot artifact contract"):
+    snapshot_task["required_output_files"].remove("snapshot_adoption_manifest.json")
+    with pytest.raises(RepairManifestError, match="snapshot adoption artifact"):
         v5.validate_payload(payload)
-    snapshot_task["required_output_files"].insert(1, "dbscan_contract.json")
+    snapshot_task["required_output_files"].insert(
+        0, "snapshot_adoption_manifest.json"
+    )
 
     science_task["environment"]["COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT"] = str(
         paths["pair_root"]
@@ -868,10 +1411,10 @@ def test_v5_manifest_publishes_only_at_exact_fresh_namespace_path(
 
 def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     assert v5.CONTROLLER_ID == (
-        "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1"
+        "four_methods_four_datasets_aids_comrecgc_exact_route_v5_snapshot_adopt_v1"
     )
-    assert v5.SNAPSHOT_TASK_ID.endswith("_pair_order_v1")
-    assert v5.TASK_ID.endswith("_pair_order_v1")
+    assert v5.SNAPSHOT_TASK_ID.endswith("_snapshot_adoption_v5_v1")
+    assert v5.TASK_ID.endswith("_snapshot_adopt_v1")
     assert v5.REVIEWED_SOURCE_CORE_COMMIT == (
         "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
     )
@@ -893,6 +1436,10 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
         "792679fed417737f85462d940243153e5081d8b80c7dab663591131c5bbd51b8"
     )
     assert template["python"] == "/root/miniconda3/envs/smiles_pip118/bin/python3.10"
+    assert template["snapshot_adoption_required"] is True
+    assert template["adopted_snapshot"]["owner_manifest_sha256"] == (
+        "6c6bea5157d86f2323681bc00310c1b89a2929ee635065965296885aed6524e6"
+    )
     wrapper = (
         root / "scripts/slurm/build_aids_comrecgc_exact_route_v5_manifest.sh"
     ).read_text(encoding="utf-8")
@@ -910,6 +1457,17 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
         "exit 78",
     ):
         assert token in wrapper
+    adoption_slurm = (
+        root / "scripts/slurm/adopt_aids_comrecgc_v5_snapshot.sh"
+    ).read_text(encoding="utf-8")
+    for token in (
+        "#SBATCH --partition=A800",
+        "#SBATCH --gres=gpu:a800:1",
+        "export PYTHONPATH=$PWD",
+        "--config configs/hpc.yaml",
+        "exit 78",
+    ):
+        assert token in adoption_slurm
 
 
 def test_v5_real_head_accepts_integrated_reviewed_core_identity() -> None:

@@ -11,6 +11,113 @@ import re
 from typing import Any, Sequence
 
 
+_PYTHON_INTERPRETER_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?$")
+_PYTHON_ENTRYPOINT_FLAGS = frozenset(
+    {
+        "-B",
+        "-E",
+        "-I",
+        "-O",
+        "-OO",
+        "-P",
+        "-R",
+        "-S",
+        "-b",
+        "-bb",
+        "-d",
+        "-i",
+        "-q",
+        "-s",
+        "-u",
+        "-v",
+        "-x",
+    }
+)
+
+
+def _decode_cmdline(raw: bytes) -> list[str]:
+    """Decode one procfs NUL argv without treating argument text as a command."""
+
+    if not raw:
+        return []
+    return [
+        token.decode("utf-8", errors="surrogateescape")
+        for token in raw.rstrip(b"\0").split(b"\0")
+    ]
+
+
+def _common_recourse_script_index(tokens: Sequence[str]) -> int | None:
+    """Return the script argv index for a plausible direct/Python launch."""
+
+    if not tokens:
+        return None
+    executable = Path(tokens[0]).expanduser()
+    if executable.name == "run_common_recourse.py":
+        return 0
+    if _PYTHON_INTERPRETER_RE.fullmatch(executable.name) is None:
+        return None
+    script_index = 1
+    while script_index < len(tokens):
+        token = tokens[script_index]
+        if token in _PYTHON_ENTRYPOINT_FLAGS:
+            script_index += 1
+            continue
+        if token in {"-W", "-X", "--check-hash-based-pycs"}:
+            script_index += 2
+            continue
+        if (
+            (token.startswith("-W") and token != "-W")
+            or (token.startswith("-X") and token != "-X")
+            or token.startswith("--check-hash-based-pycs=")
+        ):
+            script_index += 1
+            continue
+        if token == "--":
+            script_index += 1
+        break
+    if script_index >= len(tokens):
+        return None
+    # -c/-m and all unrecognized interpreter flags are not physical script
+    # entrypoints.  They must not turn a later diagnostic literal into one.
+    if tokens[script_index].startswith("-"):
+        return None
+    return script_index
+
+
+def _common_recourse_entrypoint(
+    tokens: Sequence[str], *, process_cwd: Path
+) -> str | None:
+    """Return the physical entrypoint only for a real Python script argv.
+
+    A shell, grep, monitoring command, or ``bash -c`` payload may contain the
+    literal script name in an arbitrary argument.  Such text is evidence about
+    that diagnostic command, not an executing common-recourse worker.  The
+    production worker contract is deliberately narrower: argv[0] is either the
+    exact executable script or a Python interpreter followed by only inert
+    interpreter flags and the exact physical ``run_common_recourse.py``
+    entrypoint.  Actual workers with a different output/cwd/generation remain
+    visible here and are rejected later as rogue processes.
+    """
+
+    script_index = _common_recourse_script_index(tokens)
+    if script_index is None:
+        return None
+    logical = Path(tokens[script_index]).expanduser()
+    if logical.name != "run_common_recourse.py":
+        return None
+    if not logical.is_absolute():
+        logical = process_cwd / logical
+    try:
+        if logical.is_symlink():
+            raise ValueError("script entrypoint is a symlink")
+        resolved = logical.resolve(strict=True)
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        raise ValueError("script entrypoint is unavailable") from exc
+    if not resolved.is_file() or resolved.name != "run_common_recourse.py":
+        raise ValueError("script entrypoint is not a regular physical file")
+    return str(resolved)
+
+
 def _proc_stat(stat_path: Path) -> tuple[str, int, int]:
     raw = stat_path.read_text(encoding="utf-8")
     closing = raw.rfind(")")
@@ -109,18 +216,24 @@ def verify_process_set(
             raw = (entry / "cmdline").read_bytes()
         except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
             continue
-        command = raw.replace(b"\0", b" ").decode("utf-8", errors="replace")
-        if "run_common_recourse.py" not in command:
+        tokens = _decode_cmdline(raw)
+        if _common_recourse_script_index(tokens) is None:
             continue
+        command = raw.replace(b"\0", b" ").decode("utf-8", errors="replace")
         try:
             _state, parent_pid, ticks = _proc_stat(entry / "stat")
-            cwd = str((entry / "cwd").resolve(strict=True))
+            cwd_path = (entry / "cwd").resolve(strict=True)
+            cwd = str(cwd_path)
         except (FileNotFoundError, PermissionError, ProcessLookupError, OSError, ValueError):
             raise RuntimeError(f"COMMON_RECOURSE_PROCESS_IDENTITY_UNREADABLE:{pid}")
-        tokens = [
-            token.decode("utf-8", errors="surrogateescape")
-            for token in raw.rstrip(b"\0").split(b"\0")
-        ]
+        try:
+            entrypoint = _common_recourse_entrypoint(tokens, process_cwd=cwd_path)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"COMMON_RECOURSE_ENTRYPOINT_IDENTITY_UNREADABLE:{pid}"
+            ) from exc
+        if entrypoint is None:
+            continue
         active.append(
             {
                 "pid": pid,
@@ -129,6 +242,7 @@ def verify_process_set(
                 "cmdline_sha256": hashlib.sha256(raw).hexdigest(),
                 "command": command,
                 "command_tokens": tokens,
+                "entrypoint": entrypoint,
                 "cwd": cwd,
             }
         )
@@ -169,10 +283,7 @@ def verify_process_set(
                     f"ALLOWED_OLD_PROCESS_IDENTITY_UNREADABLE:{allowed_pid}"
                 ) from exc
         if old_ticks is not None:
-            old_tokens = [
-                token.decode("utf-8", errors="surrogateescape")
-                for token in old_raw.rstrip(b"\0").split(b"\0")
-            ]
+            old_tokens = _decode_cmdline(old_raw)
             active.append(
                 {
                     "pid": int(allowed_pid),
@@ -195,7 +306,7 @@ def verify_process_set(
             is_route = bool(
                 route_enabled
                 and route_output in row["command_tokens"]
-                and route_script in row["command_tokens"]
+                and row.get("entrypoint") == route_script
                 and row["cwd"] == route_project
                 and _is_descendant_of_generation(
                     proc_root=proc,

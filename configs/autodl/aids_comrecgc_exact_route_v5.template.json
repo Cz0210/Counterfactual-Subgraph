@@ -1,10 +1,10 @@
 {
-  "schema_version": "aids_comrecgc_exact_route_v5_pair_order_v1_spec_v1",
-  "controller_id": "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1",
+  "schema_version": "aids_comrecgc_exact_route_v5_snapshot_adopt_v1_spec_v1",
+  "controller_id": "four_methods_four_datasets_aids_comrecgc_exact_route_v5_snapshot_adopt_v1",
   "paper_frozen": true,
   "run_tastemolnet": 0,
   "physical_snapshot_required": true,
-  "snapshot_min_free_after_bytes": 42949672960,
+  "snapshot_adoption_required": true,
   "runtime_root": "/autodl-fs/data/counterfactual-subgraph-runtime",
   "control_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control",
   "project_root": "__IMMUTABLE_EXECUTION_WORKTREE__",
@@ -15,11 +15,23 @@
   "min_cgroup_free_bytes": 137438953472,
   "flock_bin": "/usr/bin/flock",
   "local_scratch_root": "/root/autodl-tmp",
-  "route_lock_path": "/root/autodl-tmp/locks/aids-comrecgc-exact-route-v5-pair-order-v1.lock",
+  "route_lock_path": "/root/autodl-tmp/locks/aids-comrecgc-exact-route-v5-snapshot-adopt-v1.lock",
   "base_v4_manifest": "__AIDS_V4_MANIFEST__",
   "base_v4_manifest_sha256": "__AIDS_V4_MANIFEST_SHA256__",
   "terminal_pair_store_root": "__OLD_V4_TERMINAL_PAIR_STORE_ROOT__",
   "terminal_pair_store_manifest_sha256": "__PAIR_STORE_MANIFEST_SHA256__",
+  "adopted_snapshot": {
+    "owner_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1.json",
+    "owner_manifest_sha256": "6c6bea5157d86f2323681bc00310c1b89a2929ee635065965296885aed6524e6",
+    "owner_task_gate": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1/tasks/aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1/gate.json",
+    "owner_task_gate_sha256": "828b0b2c1c26bd9b54e7941c9084d989e5b6969823f925525e183b82897c4a30",
+    "snapshot_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs/four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1/source_snapshot/attempt-0",
+    "snapshot_manifest_sha256": "a40580f29f0ac7018b9455b7e58d2a22fb4b5feaa77ce0c9cbe0519118d5a5c6",
+    "dbscan_contract_sha256": "15d80ab3b349edc5aceb6893e27f328535f9c45bf663a22e166679831ad90e8d",
+    "pair_store_manifest_sha256": "41f859199fce117a2354d95f7520ff1721cf01e6a269b940b4f62f38ccb2261b",
+    "pairs_sha256": "c83eba699f2b269bc92ab6b1be434c77a16d4f4113085150de6704b9f1a1df57",
+    "vectors_sha256": "68072364166c20364b8d079a08fd67f5008447db54f51b338f3f541eb54b39e5"
+  },
   "allowed_old_read_only_process": {
     "pid": 273939,
     "start_ticks": 687141119,
@@ -27,5 +39,5 @@
     "output_root": "__OLD_V4_COMMON_RECOURSE_OUTPUT_ROOT__",
     "project_root": "/root/autodl-tmp/worktrees/run-aids-comrecgc-repair-v4-fd2281d"
   },
-  "fresh_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs/four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1"
+  "fresh_output_root": "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs/four_methods_four_datasets_aids_comrecgc_exact_route_v5_snapshot_adopt_v1"
 }
