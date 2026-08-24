@@ -32,6 +32,19 @@ evidence into every later checkpoint.  Replaying `posix_fallocate` after a
 pre-checkpoint crash is safe.  A missing cache after terminal publication
 requires a fresh root rather than rewriting the terminal checkpoint.
 
+For the actual v5 release, terminal promotion is already complete.  Freeze a
+stronger `require_promoted_final=1` gate, omit all chunk/cache fallback
+variables, and set the source owner to the exact pair-store root.  The old
+DBSCAN process may retain a read-only mmap concurrently; a full pair-tree
+writable-FD/mapping/partial scan still blocks any mutable producer.  If the
+terminal disappears or becomes invalid, v5 stops instead of switching routes.
+
+For the retained generic chunk route, distinguish an unauthenticated allocation
+artifact from authenticated data.  Only `phase=allocate_cache`, under the
+allocation flock plus an independently held route flock, may discard and
+atomically rebuild a zero-byte, truncated, or wrong-schema local NPY partial.
+`allocation_complete` and later phases always fail closed on the same damage.
+
 Freeze the production AutoDL wrapper to the reviewed adaptive shortcut,
 `eps=0.02`, `min_samples=3`, sklearn self-neighbour semantics, dense fallback
 zero, CPU-only execution, one route-wide scratch flock, and one bounded

@@ -258,6 +258,7 @@ def run_common_recourse(
     external_pair_store_source_owner_root: str | Path | None = None,
     external_vector_cache_root: str | Path | None = None,
     external_vector_cache_lock: str | Path | None = None,
+    external_vector_cache_route_lock: str | Path | None = None,
     external_vector_cache_min_free_bytes: int = DEFAULT_LOCAL_FREE_FLOOR_BYTES,
     external_vector_cache_proc_root: str | Path = "/proc",
     expected_sklearn_version: str = "1.7.2",
@@ -284,6 +285,7 @@ def run_common_recourse(
         external_pair_store_source_checkpoint,
         external_vector_cache_root,
         external_vector_cache_lock,
+        external_vector_cache_route_lock,
     )
     if any(value is not None for value in chunk_source_values) and not all(
         value is not None for value in chunk_source_values
@@ -469,6 +471,7 @@ def run_common_recourse(
                     persistent_root=root / "external_memory/chunk_vector_cache",
                     local_cache_root=external_vector_cache_root,  # type: ignore[arg-type]
                     scratch_lock_path=external_vector_cache_lock,  # type: ignore[arg-type]
+                    route_lock_path=external_vector_cache_route_lock,
                     expected_scientific_identity=pair_identity,
                     expected_chunk_identities=expected_chunk_identities,
                     parent_count=len(bundle.graphs),

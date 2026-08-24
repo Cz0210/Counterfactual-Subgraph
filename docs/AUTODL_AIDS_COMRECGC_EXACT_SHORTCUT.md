@@ -22,6 +22,13 @@ exactly one source:
 3. an empty, symlinked, malformed, hash-drifting, or scientifically mismatched
    terminal is an error, never permission to fall back to chunks.
 
+The production v5 manifest additionally freezes
+`COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL=1`.  Because the terminal
+already exists, v5 accepts no chunk checkpoint/cache environment at all and
+sets the owner root to the pair-store directory itself.  This permits the old
+DBSCAN stage to keep a read-only mmap concurrently: read-only FDs/mappings are
+not writers, while any partial or writable pair-tree inode still blocks.
+
 Terminal adoption recursively rejects every partial file or symlink below the
 pair store, every writable FD/mapping to any sibling inode, and every live
 process whose command names the old owner root.  It then hashes the promoted
@@ -118,10 +125,8 @@ COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES=0
 COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE=65536
 COMRECGC_EXPECTED_SKLEARN_VERSION=1.7.2
 COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT=<old-attempt>/common_recourse/external_memory/pair_store
-COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT=<old-attempt>/common_recourse
-COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT=<auto-root>/checkpoint.json
-COMRECGC_EXTERNAL_VECTOR_CACHE_ROOT=/root/autodl-tmp/<fresh-v5-id>/vector-cache
-COMRECGC_EXTERNAL_VECTOR_CACHE_LOCK=/root/autodl-tmp/<fresh-v5-id>/allocation.lock
+COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL=1
+COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT=<auto-root>
 COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB=3
 COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT=/proc
 COMRECGC_EXTERNAL_ROUTE_LOCK=/root/autodl-tmp/locks/aids-comrecgc-exact-v5.lock
@@ -132,11 +137,21 @@ MKL_NUM_THREADS=1
 
 `COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_MANIFEST` must be absent: only the wrapper
 may select the physical terminal after checking the automatic root.  The task
-is CPU-only and owns no GPU UUID/slot.  Build the immutable controller/spec only
-after the execution commit, source paths, headroom gate, and independent review
+also forbids the chunk checkpoint/vector-cache variables.  It is CPU-only and
+owns no GPU UUID/slot.  Build the immutable controller/spec only after the
+execution commit, source paths, terminal source audit, and independent review
 are frozen.  Start/restart it through the ordinary persistent controller using
 the same manifest SHA; never construct a second attempt merely to recover a
 live same-root supervisor.
+
+The generic chunk-rebuild CLI (not used by production v5) also requires
+`--external-vector-cache-route-lock`.  A zero-byte, truncated-header, or
+wrong-schema cache partial is recoverable only while the authenticated
+checkpoint is still `allocate_cache` and both the allocation lock and this
+independent outer route lock are held.  The replacement is written through a
+separate `.rebuild.partial.npy`, fsynced, schema-validated, and atomically
+promoted.  Once `allocation_complete` has been checkpointed, either malformed
+artifact is terminal corruption and is never deleted or reconstructed.
 
 ## Chunk-fallback scientific CLI
 

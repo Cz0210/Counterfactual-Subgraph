@@ -6,11 +6,17 @@
   procfs, and resume control through the production AutoDL continuation wrapper.
 - [x] Prefer a physically promoted final pair store; reject an invalid final
   instead of silently falling back to chunks.
+- [x] Freeze production v5 to terminal-only adoption with the exact pair-store
+  owner root, allowing the old DBSCAN's read-only mmap but retaining full-tree
+  partial/writable-inode rejection; terminal disappearance cannot select chunks.
 - [x] Reject terminal partial/symlink artifacts, writable sibling inodes, live
   old-owner processes, scientific/hash/stat drift, and source path escape.
 - [x] Authenticate `posix_fallocate` completion and NPY header/size/headroom,
   replay allocation safely across the pre-checkpoint crash window, and bind the
   evidence through copy, promotion, and terminal validation.
+- [x] Rebuild a malformed pre-allocation NPY only at authenticated
+  `allocate_cache` while both allocation and outer route flocks are held;
+  reject the same damage after `allocation_complete` without deleting it.
 - [x] Require a fresh root if a terminal chunk-cache manifest loses its local
   reconstructible artifact; never rewrite a published closure.
 - [x] Freeze the v5 supervisor to CPU-only adaptive exact DBSCAN with

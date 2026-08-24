@@ -477,6 +477,7 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         external_pair_store_source_owner_root=chunk_source_root,
         external_vector_cache_root=tmp_path / "local-vector-cache",
         external_vector_cache_lock=tmp_path / "local-vector-cache.lock",
+        external_vector_cache_route_lock=tmp_path / "local-route.lock",
         external_vector_cache_min_free_bytes=128,
         external_vector_cache_proc_root=fake_proc,
         expected_sklearn_version=sklearn.__version__,

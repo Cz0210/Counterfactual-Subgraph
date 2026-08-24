@@ -128,6 +128,44 @@ def _allocated_bytes(path: Path) -> int:
     return int(getattr(value, "st_blocks", 0)) * 512
 
 
+def _require_external_route_lock(path: str | Path | None) -> dict[str, Any]:
+    """Prove an outer supervisor still owns a second exclusive lock."""
+
+    if path is None:
+        raise ExternalMemoryDBSCANError(
+            "VECTOR_CACHE_MALFORMED_PARTIAL_ROUTE_LOCK_REQUIRED"
+        )
+    logical = Path(path).expanduser()
+    if logical.is_symlink():
+        raise ExternalMemoryDBSCANError("VECTOR_CACHE_ROUTE_LOCK_IS_SYMLINK")
+    if not logical.exists():
+        raise ExternalMemoryDBSCANError(
+            "VECTOR_CACHE_MALFORMED_PARTIAL_ROUTE_LOCK_MISSING"
+        )
+    resolved = logical.resolve(strict=True)
+    value = resolved.stat()
+    if not stat_module.S_ISREG(value.st_mode):
+        raise ExternalMemoryDBSCANError("VECTOR_CACHE_ROUTE_LOCK_NOT_REGULAR")
+    descriptor = os.open(resolved, os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {
+                "path": str(resolved),
+                "device": int(value.st_dev),
+                "inode": int(value.st_ino),
+                "outer_exclusive_lock_observed": True,
+            }
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            raise ExternalMemoryDBSCANError(
+                "VECTOR_CACHE_MALFORMED_PARTIAL_ROUTE_LOCK_NOT_HELD"
+            )
+    finally:
+        os.close(descriptor)
+
+
 def _prefix_sha256(path: Path, *, size: int) -> str:
     with path.open("rb") as handle:
         return hashlib.sha256(handle.read(int(size))).hexdigest()
@@ -637,6 +675,7 @@ def materialize_cartesian_chunk_vector_cache(
     persistent_root: str | Path,
     local_cache_root: str | Path,
     scratch_lock_path: str | Path,
+    route_lock_path: str | Path | None = None,
     expected_scientific_identity: Mapping[str, Any],
     expected_chunk_identities: Sequence[Mapping[str, Any]],
     parent_count: int,
@@ -652,6 +691,7 @@ def materialize_cartesian_chunk_vector_cache(
     state_path = root / "checkpoint.json"
     manifest_path = root / "run_manifest.json"
     cache_partial = local / "recourse_vectors.partial.npy"
+    cache_rebuild = local / "recourse_vectors.rebuild.partial.npy"
     cache_final = local / "recourse_vectors.npy"
     if root.exists() and any(root.iterdir()) and not resume:
         raise FileExistsError(f"chunk-cache persistent root is non-empty: {root}")
@@ -758,18 +798,67 @@ def materialize_cartesian_chunk_vector_cache(
                 raise ExternalMemoryDBSCANError(
                     "VECTOR_CACHE_ALLOCATION_CHECKPOINT_INVALID"
                 )
-            free_before = _statvfs_free_bytes(local)
-            if cache_partial.exists():
-                partial = _regular_no_symlink(
-                    cache_partial, label="local vector allocation partial"
-                )
-                values = np.load(partial, mmap_mode="r+", allow_pickle=False)
-                if values.shape != shape or values.dtype != dtype:
+            recovery_events: list[dict[str, Any]] = []
+
+            def discard_uncommitted(path: Path, *, reason: str) -> None:
+                route_lock = _require_external_route_lock(route_lock_path)
+                if path.is_symlink():
                     raise ExternalMemoryDBSCANError(
-                        "VECTOR_CACHE_PARTIAL_SCHEMA_MISMATCH"
+                        "VECTOR_CACHE_UNCOMMITTED_PARTIAL_IS_SYMLINK"
                     )
-                del values
-                allocated_before = min(_allocated_bytes(partial), expected_size)
+                before = _file_stat_identity(path) if path.exists() else None
+                if path.exists():
+                    if not path.is_file():
+                        raise ExternalMemoryDBSCANError(
+                            "VECTOR_CACHE_UNCOMMITTED_PARTIAL_NOT_REGULAR"
+                        )
+                    path.unlink()
+                    _fsync_directory(local)
+                recovery_events.append(
+                    {
+                        "path": str(path),
+                        "reason": reason,
+                        "stat_before_discard": before,
+                        "route_lock": route_lock,
+                        "allocation_lock": dict(lock),
+                    }
+                )
+
+            if cache_rebuild.exists() or cache_rebuild.is_symlink():
+                discard_uncommitted(
+                    cache_rebuild,
+                    reason="interrupted_atomic_npy_rebuild",
+                )
+            free_before = _statvfs_free_bytes(local)
+            if cache_partial.exists() or cache_partial.is_symlink():
+                if cache_partial.is_symlink():
+                    raise ExternalMemoryDBSCANError(
+                        "VECTOR_CACHE_UNCOMMITTED_PARTIAL_IS_SYMLINK"
+                    )
+                partial_valid = False
+                partial_reason = "unparseable_npy"
+                if cache_partial.is_file() and cache_partial.stat().st_size > 0:
+                    try:
+                        values = np.load(
+                            cache_partial, mmap_mode="r+", allow_pickle=False
+                        )
+                    except (EOFError, OSError, ValueError):
+                        pass
+                    else:
+                        if values.shape == shape and values.dtype == dtype:
+                            partial_valid = True
+                        else:
+                            partial_reason = "wrong_npy_schema"
+                        del values
+                else:
+                    partial_reason = "empty_or_nonregular_npy"
+                if partial_valid:
+                    allocated_before = min(
+                        _allocated_bytes(cache_partial), expected_size
+                    )
+                else:
+                    discard_uncommitted(cache_partial, reason=partial_reason)
+                    allocated_before = 0
             else:
                 allocated_before = 0
             remaining = max(expected_size - allocated_before, 0)
@@ -781,10 +870,20 @@ def materialize_cartesian_chunk_vector_cache(
                 )
             if not cache_partial.exists():
                 values = np.lib.format.open_memmap(
-                    cache_partial, mode="w+", dtype=dtype, shape=shape
+                    cache_rebuild, mode="w+", dtype=dtype, shape=shape
                 )
                 values.flush()
                 del values
+                with cache_rebuild.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                rebuilt = np.load(cache_rebuild, mmap_mode="r", allow_pickle=False)
+                if rebuilt.shape != shape or rebuilt.dtype != dtype:
+                    raise ExternalMemoryDBSCANError(
+                        "VECTOR_CACHE_ATOMIC_REBUILD_SCHEMA_MISMATCH"
+                    )
+                del rebuilt
+                os.replace(cache_rebuild, cache_partial)
+                _fsync_directory(local)
             _preallocate_file(cache_partial, size=expected_size)
             with cache_partial.open("rb") as handle:
                 os.fsync(handle.fileno())
@@ -799,6 +898,12 @@ def materialize_cartesian_chunk_vector_cache(
                 "allocated_bytes_after": allocated_after,
                 "local_free_bytes_before": free_before,
                 "local_free_bytes_after_reservation": free_after_reservation,
+                "uncommitted_partial_recovery": {
+                    "performed": bool(recovery_events),
+                    "events": recovery_events,
+                    "requires_allocate_cache_phase": True,
+                    "two_exclusive_locks_required": True,
+                },
             }
             _validate_allocation_evidence(
                 path=cache_partial,
@@ -820,6 +925,10 @@ def materialize_cartesian_chunk_vector_cache(
                 },
             )
             phase = "allocation_complete"
+        elif cache_rebuild.exists() or cache_rebuild.is_symlink():
+            raise ExternalMemoryDBSCANError(
+                "VECTOR_CACHE_REBUILD_ARTIFACT_AFTER_ALLOCATION"
+            )
         if phase == "allocation_complete":
             if (
                 int(state.get("next_chunk_index", -1)) != 0
