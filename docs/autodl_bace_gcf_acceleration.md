@@ -119,6 +119,14 @@ exact gate 失败会立即停止。官方 `importance.call` 对 CPU 错误调用
 `torch.cuda.set_device('cpu')`，项目 compatibility context 只将这一 housekeeping
 调用变为 no-op，并在退出时恢复；模型、图、RNG 与 transition 不变。
 
+Quick-50/100 的四个 exact gate 全部 PASS 后，正式 CPU M=500 诊断可使用
+`scripts/autodl/run_bace_gcf_cpu_m500.sh`。它先验证 Quick terminal manifest 的
+SHA-256、PASS 文件和四个 evidence hash，之后才创建 fresh root，顺序执行
+`legacy_m500` 与 `patched_m500`。该路线固定 `profile=smoke`、`parent_limit=64`、
+`M=500`、seed 13、CPU GINE/NeuroSED；不运行 M=1000、不获取 GPU lock，也不
+授权替换旧 50k。canonical transition/candidate/RNG equivalence 通过后才最后写
+`PASS`。
+
 ## 50k 前置硬门禁
 
 先在同一物理 GPU 上顺序执行 legacy/ordered-v2 的 500 和 1000 step fresh smoke：

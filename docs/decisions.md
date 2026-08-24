@@ -8949,6 +8949,11 @@ Accepted
   for Quick-50 before Quick-100 begins.  CPU evidence remains diagnostic and
   cannot replace the protected 50k GPU route without a later ETA and semantics
   decision.
+- M=500 may begin on CPU only after the Quick-50/100 terminal manifest and its
+  four exact evidence hashes validate.  It runs one legacy and one patched
+  fresh root with the formal 500-step smoke profile, writes PASS last, never
+  consumes a GPU slot, and remains diagnostic evidence rather than authority
+  to stop the protected 50k task.
 - Frozen-GINE throughput evidence uses the fixed batch matrix 1/8/32/128/512
   and separates collation/device transfer, prepared-batch model time, and full
   collation-to-logits time.  Argmax/allclose completion and raw-byte identity

@@ -303,6 +303,29 @@ def test_cpu_lockstep_runs_quick100_only_after_quick50_exact_gates() -> None:
     assert "139725" not in text
 
 
+def test_cpu_m500_requires_hashed_quick_terminal_and_is_gpu_free() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    text = (
+        project_root / "scripts/autodl/run_bace_gcf_cpu_m500.sh"
+    ).read_text(encoding="utf-8")
+    assert "set -euo pipefail" in text
+    assert "BACE_GCF_CPU_QUICK_MANIFEST_SHA256" in text
+    assert "expected_names" in text
+    assert "run_one legacy legacy_m500" in text
+    assert "run_one ordered_v2 patched_m500" in text
+    assert "--profile smoke" in text
+    assert "--m 500" in text
+    assert "--budget 500" in text
+    assert "--device1 cpu" in text
+    assert "--device2 cpu" in text
+    assert 'export CUDA_VISIBLE_DEVICES=""' in text
+    assert "M=1000" not in text
+    assert "kill" not in text
+    assert text.rindex('root / "diagnostic_manifest.json"') < text.rindex(
+        'root / "PASS"'
+    )
+
+
 def test_ordered_parallel_map_never_reorders_results() -> None:
     values = list(range(100))
     assert ordered_parallel_map(lambda value: value * value, values, workers=4) == [

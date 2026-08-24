@@ -1403,6 +1403,8 @@ Mutagenicity roadmaps.
   raw embeddings/logits are not, despite identical labels and allclose logits.
 - [x] Add a fail-closed CPU-only legacy-A/legacy-B/patched Quick-50/100 route
   that obtains no GPU lock and records end-to-end phase profiles.
+- [x] Add a fresh CPU-only M500 route that is unreachable until the hashed
+  Quick-50/100 terminal proof and all four exact evidence files validate.
 - [ ] Use the CPU profiles to project 50k completion time before considering
   any CPU formal replay; do not stop the old GPU full task.
 - [x] Add the fixed 1/8/32/128/512 CPU/GPU frozen-GINE matrix with separate
