@@ -141,8 +141,11 @@ def _validate_cartesian_pair_order(
         stop = min(row_count, offset + block_rows)
         positions = np.arange(offset, stop, dtype=np.int64)
         block = pairs[offset:stop]
-        if not np.array_equal(block[:, 0], positions // parent_count) or not np.array_equal(
-            block[:, 1], positions % parent_count
+        # The production pair store is candidate-major in row order, while
+        # each row stores ``(parent_index, candidate_index)``.  Column order is
+        # therefore intentionally the reverse of the two row-order terms.
+        if not np.array_equal(block[:, 0], positions % parent_count) or not np.array_equal(
+            block[:, 1], positions // parent_count
         ):
             raise PairStoreSnapshotError(
                 f"candidate-major/parent-minor pair order changed at rows {offset}:{stop}"
@@ -152,7 +155,8 @@ def _validate_cartesian_pair_order(
         "row_count": row_count,
         "parent_count": parent_count,
         "candidate_count": candidate_count,
-        "formula": "candidate_index=row//parent_count;parent_index=row%parent_count",
+        "columns": ["parent_index", "candidate_index"],
+        "formula": "parent_index=row%parent_count;candidate_index=row//parent_count",
         "all_rows_checked": True,
         "pair_indices_are_row_provenance_not_adjacency": True,
     }
@@ -408,6 +412,10 @@ def _dbscan_contract(*, manifest: Mapping[str, Any], manifest_sha256: str) -> di
         "vector_dim": int(manifest["vector_dim"]),
         "row_semantics": "candidate_by_parent_recourse_embedding_vector",
         "row_order": "candidate_major_parent_minor",
+        "pair_indices_columns": ["parent_index", "candidate_index"],
+        "row_formula": (
+            "parent_index=row%parent_count;candidate_index=row//parent_count"
+        ),
         "pair_indices_role": "row_provenance_only_not_adjacency_or_distance_edges",
         "precomputed_pairwise_distance_edges": False,
         "metric": "euclidean",

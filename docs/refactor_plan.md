@@ -1542,3 +1542,6 @@ Mutagenicity roadmaps.
   task and pin this reviewed snapshot implementation in its builder.
 - [ ] Run only from a fresh immutable AutoDL worktree/root after independent
   review; retain repair-v4 as untouched read-only evidence.
+- [x] Freeze the AIDS promoted pair-store column contract as
+  `(parent_index, candidate_index)` under candidate-major/parent-minor row
+  order, with a full bounded row-formula gate before physical snapshot copy.

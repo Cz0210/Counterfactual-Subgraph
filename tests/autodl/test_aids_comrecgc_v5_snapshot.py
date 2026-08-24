@@ -30,7 +30,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     candidates = 3
     rows = parents * candidates
     pairs = np.asarray(
-        [(candidate, parent) for candidate in range(candidates) for parent in range(parents)],
+        [(parent, candidate) for candidate in range(candidates) for parent in range(parents)],
         dtype=np.int64,
     )
     vectors = np.arange(rows * 2, dtype=np.float32).reshape(rows, 2) / 100.0
@@ -158,6 +158,10 @@ def test_physical_snapshot_is_exact_distinct_and_dbscan_bound(
     assert contract["metric"] == "euclidean"
     assert contract["sklearn_version"] == "1.7.2"
     assert contract["pair_indices_role"] == "row_provenance_only_not_adjacency_or_distance_edges"
+    assert contract["pair_indices_columns"] == ["parent_index", "candidate_index"]
+    assert contract["row_formula"] == (
+        "parent_index=row%parent_count;candidate_index=row//parent_count"
+    )
     assert result["source_post"]["allowed_writer_generation"]["allowed_old_process_count"] == 0
 
 
@@ -427,6 +431,51 @@ def test_pair_formula_mismatch_is_rejected_before_copy(
 
     with pytest.raises(snapshot.PairStoreSnapshotError, match="pair order changed"):
         _run(fixture, tmp_path / "snapshot")
+
+
+def test_production_parent_count_pair_column_semantics_at_boundaries(
+    tmp_path: Path,
+) -> None:
+    parent_count = 1_283
+    candidate_count = 3
+    row_count = parent_count * candidate_count
+    positions = np.arange(row_count, dtype=np.int64)
+    pairs = np.column_stack(
+        (positions % parent_count, positions // parent_count)
+    ).astype(np.int64, copy=False)
+    path = tmp_path / "pair_indices.npy"
+    np.save(path, pairs, allow_pickle=False)
+
+    evidence = snapshot._validate_cartesian_pair_order(
+        path,
+        row_count=row_count,
+        parent_count=parent_count,
+        candidate_count=candidate_count,
+        block_rows=1_283,
+    )
+
+    assert pairs[[0, 1, 1_282, 1_283, row_count - 1]].tolist() == [
+        [0, 0],
+        [1, 0],
+        [1_282, 0],
+        [0, 1],
+        [1_282, 2],
+    ]
+    assert evidence["columns"] == ["parent_index", "candidate_index"]
+    assert evidence["formula"] == (
+        "parent_index=row%parent_count;candidate_index=row//parent_count"
+    )
+
+    pairs[1_283] = pairs[1_283][::-1]
+    np.save(path, pairs, allow_pickle=False)
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="pair order changed"):
+        snapshot._validate_cartesian_pair_order(
+            path,
+            row_count=row_count,
+            parent_count=parent_count,
+            candidate_count=candidate_count,
+            block_rows=1_283,
+        )
 
 
 def test_headroom_is_fail_closed(
