@@ -23,6 +23,7 @@ from src.baselines.comrecgc.external_memory_recourse import (
     _stable_hash,
 )
 from src.utils import autodl_aids_comrecgc_exact_route_v5 as v5
+from src.utils import autodl_mut_traceoff_parity_v1 as mut
 from src.utils.aids_comrecgc_v5_snapshot import (
     create_promoted_pair_store_snapshot,
 )
@@ -144,6 +145,7 @@ def _fixture(
         "THETA_STAR": "0.05",
         "COST_CAP": "0.0535",
         "COMRECGC_HIGHMEM_LOCK_PATH": str(highmem_lock),
+        "COMRECGC_PROC_ROOT": str(proc),
         "OUTPUT_ROOT": "{task_output}",
         **{key: str(value) for key, value in directories.items()},
         **{key: str(value) for key, value in files.items()},
@@ -411,6 +413,7 @@ def _fixture(
         "old_project_root": old_project_root,
         "old_cmdline": old_cmdline,
         "snapshot_root": snapshot_root,
+        "flock": flock,
         "owner_manifest": owner_manifest,
         "owner_gate": owner_gate,
         "owner_namespace_root": control / v5.SOURCE_NAMESPACE,
@@ -518,6 +521,12 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert environment["COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES"] == "0"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_PID"] == "273939"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS"] == "687141119"
+    assert environment["COMRECGC_MIN_CGROUP_FREE_BYTES"] == str(
+        v5.MINIMUM_CGROUP_FREE_BYTES
+    )
+    assert environment["AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES"] == str(
+        v5.MINIMUM_CGROUP_FREE_BYTES
+    )
     assert environment["COMRECGC_HIGHMEM_LOCK_PATH"].endswith(
         "/locks/comrecgc_common_recourse_highmem.lock"
     )
@@ -537,6 +546,140 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert headroom["free_bytes_at_build"] == 448 * 1024**3
     assert headroom["host_memfree_used"] is False
     assert summary["gpu_required"] is False
+
+
+@pytest.mark.parametrize("replacement", [None, "1"])
+def test_v5_and_mut_reject_missing_or_tampered_generic_headroom_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str | None,
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    payload, _summary = v5.build_payload(spec_path=paths["spec"])
+    task = next(task for task in payload["tasks"] if task["id"] == v5.TASK_ID)
+    if replacement is None:
+        task["environment"].pop("COMRECGC_MIN_CGROUP_FREE_BYTES")
+    else:
+        task["environment"]["COMRECGC_MIN_CGROUP_FREE_BYTES"] = replacement
+    with pytest.raises(RepairManifestError, match="production environment"):
+        v5.validate_payload(payload)
+
+    manifest = _json(
+        paths["control"] / v5.SOURCE_NAMESPACE / "manifests/mutated-v5.json",
+        payload,
+    )
+    controller_root = paths["control"] / v5.SOURCE_NAMESPACE / v5.CONTROLLER_ID
+    controller_root.mkdir()
+    with pytest.raises(RepairManifestError, match="high-memory|headroom"):
+        mut._aids_manifest(
+            source_manifest=manifest.resolve(),
+            source_controller_root=controller_root.resolve(),
+            control_root=paths["control"].resolve(),
+            expected_controller_id=v5.CONTROLLER_ID,
+            expected_task_id=v5.TASK_ID,
+            expected_wrapper="run_aids_comrecgc_exact_route_v5_supervisor.sh",
+            expected_manifest_sha256=sha256_file(manifest),
+            expected_highmem_lock=(
+                paths["runtime"] / "locks/comrecgc_common_recourse_highmem.lock"
+            ).resolve(),
+            expected_flock_bin=paths["flock"].resolve(),
+            expected_cgroup_root=paths["cgroup"].resolve(),
+            expected_min_free_bytes=v5.MINIMUM_CGROUP_FREE_BYTES,
+            expected_proc_root=paths["proc"].resolve(),
+        )
+
+
+def test_real_v5_manifest_releases_mut_unique_attempt_one_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    manifest = (
+        paths["control"]
+        / v5.SOURCE_NAMESPACE
+        / "manifests"
+        / f"{v5.CONTROLLER_ID}.json"
+    )
+    v5.build_manifest(spec_path=paths["spec"], output_path=manifest)
+    manifest_sha = sha256_file(manifest)
+    controller_root = paths["control"] / v5.SOURCE_NAMESPACE / v5.CONTROLLER_ID
+    task_root = controller_root / "tasks" / v5.TASK_ID
+    task_root.mkdir(parents=True)
+    mut._aids_manifest(
+        source_manifest=manifest.resolve(),
+        source_controller_root=controller_root.resolve(),
+        control_root=paths["control"].resolve(),
+        expected_controller_id=v5.CONTROLLER_ID,
+        expected_task_id=v5.TASK_ID,
+        expected_wrapper="run_aids_comrecgc_exact_route_v5_supervisor.sh",
+        expected_manifest_sha256=manifest_sha,
+        expected_highmem_lock=(
+            paths["runtime"] / "locks/comrecgc_common_recourse_highmem.lock"
+        ).resolve(),
+        expected_flock_bin=paths["flock"].resolve(),
+        expected_cgroup_root=paths["cgroup"].resolve(),
+        expected_min_free_bytes=v5.MINIMUM_CGROUP_FREE_BYTES,
+        expected_proc_root=paths["proc"].resolve(),
+    )
+
+    output = paths["fresh"] / "cells/aids/comrecgc/standardized/attempt-1"
+    for relative in (
+        "standardized/_FINALIZED.json",
+        "standardized/run_manifest.json",
+        "run_manifest.json",
+        "final_gate.json",
+        "_RUN_COMPLETE.json",
+        "PASS",
+    ):
+        _file(output / relative)
+    run = {
+        "instance_id": "main",
+        "state": "PASS",
+        "run_id": "v5-attempt-1",
+        "attempt": 1,
+        "expected_output": str(output),
+    }
+    state = _json(
+        task_root / "state.json",
+        {
+            "task_id": v5.TASK_ID,
+            "state": "PASS",
+            "instances": {
+                "main": {
+                    key: value
+                    for key, value in run.items()
+                    if key != "instance_id"
+                }
+            },
+        },
+    )
+    gate = _json(
+        task_root / "gate.json",
+        {"task_id": v5.TASK_ID, "status": "PASS", "runs": [run]},
+    )
+    _json(
+        task_root / "manifest.json",
+        {"controller_manifest_sha256": manifest_sha},
+    )
+    _json(
+        controller_root / "controller_manifest.json",
+        {
+            "controller_id": v5.CONTROLLER_ID,
+            "source_manifest": str(manifest.resolve()),
+            "source_manifest_sha256": manifest_sha,
+        },
+    )
+    authority = mut.resolve_aids_passing_output(
+        source_manifest=manifest,
+        source_controller_root=controller_root,
+        task_gate=gate,
+        task_id=v5.TASK_ID,
+        expected_manifest_sha256=manifest_sha,
+        expected_task_gate_sha256=sha256_file(gate),
+        proc_root=paths["proc"],
+    )
+    assert authority["attempt"] == 1
+    assert authority["passing_output"] == str(output.resolve())
+    assert authority["task_state_sha256"] == sha256_file(state)
 
 
 @pytest.mark.parametrize(

@@ -908,6 +908,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT": str(proc_root),
             "COMRECGC_EXTERNAL_ROUTE_LOCK": str(route_lock),
             "COMRECGC_CGROUP_MEMORY_ROOT": str(cgroup_root),
+            "COMRECGC_MIN_CGROUP_FREE_BYTES": str(minimum_free),
             "AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES": str(minimum_free),
             "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES": "1",
             "AIDS_COMRECGC_V5_ALLOWED_OLD_PID": str(old_pid),
@@ -1800,6 +1801,9 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             highmem_contract.get("global_highmem_lock_path")
         ),
         "COMRECGC_CGROUP_MEMORY_ROOT": str(cgroup_contract.get("root")),
+        "COMRECGC_MIN_CGROUP_FREE_BYTES": str(
+            highmem_contract.get("per_attempt_cgroup_headroom_gate_bytes")
+        ),
         "AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES": str(
             highmem_contract.get("per_attempt_cgroup_headroom_gate_bytes")
         ),
