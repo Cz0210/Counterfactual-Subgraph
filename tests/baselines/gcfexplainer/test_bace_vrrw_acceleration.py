@@ -27,6 +27,7 @@ from src.baselines.frozen_gine_batch_scorer import FrozenGINEBatchScorer
 from src.data.molecular_graph_featurizer import default_molecular_feature_schema
 from scripts.autodl.gate_bace_gcf_acceleration import parse_args as parse_gate_args
 from scripts.autodl.benchmark_bace_frozen_gine_batch import (
+    _record_smiles,
     parse_args as parse_benchmark_args,
 )
 
@@ -149,6 +150,14 @@ def test_frozen_gine_benchmark_cli_and_paired_slurm_are_synchronized() -> None:
         "--set inference.fallback_to_heuristic=false",
     ):
         assert required in text
+
+
+def test_frozen_gine_benchmark_accepts_frozen_bace_record_schema() -> None:
+    assert _record_smiles({"canonical_smiles": "CCO"}) == "CCO"
+    assert _record_smiles({"original_smiles": "CCN"}) == "CCN"
+    assert _record_smiles({"smiles": "CCC", "canonical_smiles": "CC"}) == "CCC"
+    with pytest.raises(ValueError, match="no molecular SMILES"):
+        _record_smiles({"molecule_id": "missing"})
 
 
 def test_quick50_lockstep_wrapper_is_fail_closed_and_preserves_old_full() -> None:

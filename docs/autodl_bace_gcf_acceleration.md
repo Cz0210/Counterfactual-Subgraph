@@ -62,6 +62,8 @@ python scripts/autodl/benchmark_bace_frozen_gine_batch.py \
 AutoDL 上的 `scripts/autodl/run_bace_gcf_lockstep_quick50.sh` 先运行该
 benchmark，再按 legacy-A、legacy-B、ordered-v2 顺序运行 fresh Quick-50；
 legacy-A/B 不完全一致时会立即停止，不运行 ordered-v2。
+benchmark 显式兼容冻结 BACE GCF cohort 的 `canonical_smiles` 字段，并保留
+通用数据记录的 `smiles` / `original_smiles` 确定性回退顺序。
 
 ## 50k 前置硬门禁
 
