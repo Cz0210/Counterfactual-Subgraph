@@ -228,6 +228,7 @@ class TaskSpec:
     gpu_shared_workload_class: str | None = None
     gpu_colocation_gate: str | None = None
     gpu_colocation_gate_sha256: str | None = None
+    retry_on_process_loss: bool = False
 
     @property
     def instance_ids(self) -> tuple[str, ...]:
@@ -625,6 +626,9 @@ def _parse_task(raw: Any) -> TaskSpec:
         raise ControllerError(
             f"{task_id} manifest_only task may not declare raw data_splits"
         )
+    retry_on_process_loss = raw.get("retry_on_process_loss", False)
+    if not isinstance(retry_on_process_loss, bool):
+        raise ControllerError(f"{task_id}.retry_on_process_loss must be boolean")
     return TaskSpec(
         task_id=task_id,
         dataset=dataset,
@@ -688,6 +692,7 @@ def _parse_task(raw: Any) -> TaskSpec:
         freezes_selector=bool(raw.get("freezes_selector", False)),
         selector_parameters_frozen=bool(raw.get("selector_parameters_frozen", False)),
         read_only_test=bool(raw.get("read_only_test", False)),
+        retry_on_process_loss=retry_on_process_loss,
     )
 
 
@@ -1076,6 +1081,7 @@ def _task_manifest_payload(task: TaskSpec, manifest_sha256: str) -> dict[str, An
         "effective_launch_environment": dict(sorted(effective_environment.items())),
         "config_files": list(task.config_files),
         "semantic_failure_markers": list(task.semantic_failure_markers),
+        "retry_on_process_loss": task.retry_on_process_loss,
         "data_splits": list(task.data_splits),
         "manifest_only": task.manifest_only,
         "publish_bace_stage": task.publish_bace_stage,
@@ -1678,6 +1684,20 @@ def classify_failure(
     return "EXECUTION"
 
 
+def classify_task_failure(log_text: str, task: TaskSpec) -> str:
+    """Apply the explicit signal-loss opt-in without overriding semantics."""
+
+    failure_class = classify_failure(
+        log_text, semantic_markers=task.semantic_failure_markers
+    )
+    if failure_class == "EXECUTION" and task.retry_on_process_loss and re.search(
+        r"\[AUTODL_RUN_EXIT\]\s+exit_code=(?:-9|-15|137|143)(?:\s|$)",
+        log_text,
+    ):
+        return "TRANSIENT_PROCESS_LOSS"
+    return failure_class
+
+
 def oom_retry_allowed(
     failure_class: str, oom_retry_count: int, policy: OOMRetry
 ) -> bool:
@@ -1763,10 +1783,13 @@ def _fail_or_retry_process_loss(
 ) -> None:
     transient_retry_count = int(instance.get("transient_retry_count", 0))
     failure_class = "TRANSIENT_PROCESS_LOSS"
-    if not bool(instance.get("adopted")) and transient_retry_allowed(
-        failure_class,
-        transient_retry_count,
-        max_transient_retries=max_transient_retries,
+    if (
+        not bool(instance.get("adopted"))
+        and transient_retry_allowed(
+            failure_class,
+            transient_retry_count,
+            max_transient_retries=max_transient_retries,
+        )
     ):
         _reset_instance_for_retry(
             instance,
@@ -2490,10 +2513,7 @@ def _reconcile_instance(
         instance["failure_class"] = "CONTROLLER"
         instance["failure_reason"] = f"unknown exp_run state: {observed}"
         return
-    failure_class = classify_failure(
-        _run_log_text(layout, instance),
-        semantic_markers=task.semantic_failure_markers,
-    )
+    failure_class = classify_task_failure(_run_log_text(layout, instance), task)
     attempt = int(instance.get("attempt", 0))
     oom_retry_count = int(instance.get("oom_retry_count", 0))
     transient_retry_count = int(instance.get("transient_retry_count", 0))
@@ -2509,8 +2529,8 @@ def _reconcile_instance(
         transient_retry_count,
         max_transient_retries=max_transient_retries,
     ):
-        retry_kind = "TRANSIENT_IO"
-        retry_reason = "one bounded transient I/O retry authorized"
+        retry_kind = failure_class
+        retry_reason = "one bounded transient process/I/O retry authorized"
     if retry_kind is not None:
         _reset_instance_for_retry(
             instance,

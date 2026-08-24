@@ -27,6 +27,7 @@ from scripts.autodl.run_four_gpu_recovery_controller import (
     audit_gpu_locks,
     bind_adopted_runs,
     classify_failure,
+    classify_task_failure,
     controller_safety_environment,
     dependency_order,
     load_controller_manifest,
@@ -434,6 +435,17 @@ def test_transient_io_has_exactly_one_fresh_attempt_retry() -> None:
         "TRANSIENT_PROCESS_LOSS", 0, max_transient_retries=1
     )
     assert not transient_retry_allowed("EXECUTION", 0, max_transient_retries=1)
+
+
+def test_signal_exit_retry_is_task_opt_in_and_semantic_first() -> None:
+    base = _task("signal-loss")
+    opted_in = TaskSpec(**{**base.__dict__, "retry_on_process_loss": True})
+    signal_log = "[AUTODL_RUN_EXIT] exit_code=143 timestamp=now\n"
+    assert classify_task_failure(signal_log, base) == "EXECUTION"
+    assert classify_task_failure(signal_log, opted_in) == "TRANSIENT_PROCESS_LOSS"
+    assert classify_task_failure(
+        "semantic gate failed\n" + signal_log, opted_in
+    ) == "SEMANTIC"
 
 
 def test_workload_state_can_pass_while_raw_taste_gate_remains_blocked() -> None:

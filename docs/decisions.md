@@ -1,5 +1,51 @@
 # Decisions Log
 
+## [2026-08-25] Separate GREED scan science state from controller receipts
+
+### Background
+
+The complete AIDS GREED theta-close scan traverses 91,916,686 pairs. Generic
+controller outputs are immutable and attempt-qualified, so a worker, host, or
+controller loss could not safely resume the scan's existing checkpoint without
+either violating no-clobber launch semantics or discarding hours of verified
+work.
+
+### Decision
+
+Keep one campaign-owned `pair_semantics_science` root with no attempt token and
+make the full task's `expected_output` a fresh
+`pair_semantics_receipt/attempt-{attempt}` root. A dedicated CPU supervisor owns
+an inode-bound flock adjacent to the science root. Attempt zero launches the
+reviewed child without `--resume`; one transient child retry or a later
+controller attempt may resume only after checkpoint identity, committed prefix,
+PID generations, root/lock inodes, PASS absence, source hashes, and writable
+FD/mapping absence are revalidated. Resume authorization is two-phase so a
+pre-spawn supervisor crash does not consume the single allowance. Semantic and
+provenance markers are terminal and remain semantic-first even when the process
+also exits by signal.
+
+At completion, rehash the terminal science manifests and large arrays, freeze a
+terminal supervisor manifest, and write its PASS last. Fresh receipts bind that
+immutable manifest rather than mutable state/events. The close-view task uses
+the dependency receipt JSON as `input_manifest`, validates the receipt through
+the fixed science-root inode and exact terminal file hashes, then reads the
+fixed-root contract and distance array. Enable one generic transient retry only
+for fresh receipt publication; the science root itself never gains an attempt
+suffix.
+
+### Consequences
+
+- Host/process loss can produce receipt attempt 1 without recomputing an
+  authenticated scan prefix.
+- Receipt, terminal-manifest, lock-inode, science-inode, artifact, symlink,
+  partial/final coexistence, or live-writer drift fails closed.
+- The controller and Slurm entrypoints remain thin; the Slurm wrapper is parity
+  evidence only and explicitly refuses HPC execution.
+
+### Status
+
+Accepted for immutable release pinning; deployment remains separately gated.
+
 ## [2026-08-24] Adopt the completed AIDS physical snapshot into a fresh route
 
 ### Background

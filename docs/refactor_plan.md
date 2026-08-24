@@ -1,5 +1,17 @@
 # Refactor Plan
 
+## 2026-08-25 release blocker: restart-safe GREED full scan
+
+- [x] Separate the long-lived pair-semantics science root from fresh controller
+  receipt roots.
+- [x] Add a PID/lock/checkpoint/hash-authenticated supervisor with one bounded
+  same-root transient resume and semantic-failure exclusion.
+- [x] Make controller signal-loss classification opt-in and semantic-first.
+- [x] Bind the close-view dependency to the receipt while reading only the
+  fixed-root science artifacts after deep receipt validation.
+- [x] Add the paired non-runnable Slurm parity wrapper and focused restart,
+  writer, signal, and receipt-tamper tests.
+
 ## 2026-08-24: Fresh AIDS snapshot-adoption continuation
 
 - [x] Replace decoded-command substring matching with raw NUL argv parsing,

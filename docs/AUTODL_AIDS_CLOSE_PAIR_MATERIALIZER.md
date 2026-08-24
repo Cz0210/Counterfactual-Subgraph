@@ -41,6 +41,23 @@ chunk limit. A scientific completion writes the exact bytes `PASS\n` only
 after the full distance scan, formula audit, source closure, bitmap/distance
 hashes, and (when applicable) `all_pairs_close_certificate.json` are durable.
 
+The production full scan is launched only through
+`run_aids_greed_full_scan_supervisor.py`. The controller's attempt-qualified
+output is a small `pair_semantics_supervisor_receipt.json`; the arrays and
+checkpoint stay in one campaign-owned `pair_semantics_science` root without an
+attempt suffix. Attempt zero is always fresh and omits `--resume`. A child
+transient failure or a later controller attempt may add `--resume` only after
+the checkpoint identity and committed prefix are rehashed, both prior PID
+generations are absent, the fixed-root flock inode is unchanged, no writable
+FD/mapping targets the science tree, and scientific `PASS` is absent. Semantic
+or provenance failures are terminal.
+
+Completion freezes a supervisor terminal manifest and writes its PASS last.
+Each fresh receipt binds that immutable manifest, the fixed science-root inode,
+the lock inode, and the terminal science hashes. The theta-close view consumes
+the receipt as its `input_manifest`, reopens the full receipt-to-science hash
+closure, and only then reads the fixed-root distance array and contract.
+
 The direct entrypoint is:
 
 ```bash

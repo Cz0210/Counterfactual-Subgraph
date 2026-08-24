@@ -814,9 +814,16 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     pair_semantics_benchmark_output = (
         fresh_root / "pair_semantics_benchmark/attempt-{attempt}"
     )
-    pair_semantics_output = fresh_root / "pair_semantics/attempt-{attempt}"
+    pair_semantics_science_root = fresh_root / "pair_semantics_science"
+    pair_semantics_output = (
+        fresh_root / "pair_semantics_receipt/attempt-{attempt}"
+    )
     pair_semantics_dependency_root = (
         "{dep_" + PAIR_SEMANTICS_TASK_ID + "_output}"
+    )
+    pair_semantics_receipt = (
+        pair_semantics_dependency_root
+        + "/pair_semantics_supervisor_receipt.json"
     )
     close_pair_view_output = fresh_root / "close_pair_view/attempt-{attempt}"
     close_pair_view_dependency_root = (
@@ -1151,20 +1158,38 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "selector_parameters_frozen": True,
         "read_only_test": True,
         "command": [
+            "{python}",
+            "{project_root}/scripts/autodl/run_aids_greed_full_scan_supervisor.py",
+            "--config",
+            "configs/hpc.yaml",
+            "--project-root",
+            "{project_root}",
+            "--execution-commit",
+            execution_commit,
+            "--campaign-root",
+            str(fresh_root),
+            "--science-root",
+            str(pair_semantics_science_root),
+            "--receipt-output",
+            "{task_output}",
+            "--proc-root",
+            str(proc_root),
+            "--max-same-root-resumes",
+            "1",
+            "--",
             *pair_semantics_common_command,
             "--output-dir",
-            "{task_output}",
+            str(pair_semantics_science_root),
         ],
         "input_manifest": snapshot_pair_root + "/run_manifest.json",
         "config_files": [str(base_manifest)],
         "expected_output": str(pair_semantics_output),
         "required_output_files": [
-            "pair_semantics_audit.json",
-            "close_pair_contract.json",
-            "distance_scan/run_manifest.json",
+            "pair_semantics_supervisor_receipt.json",
             "PASS",
         ],
-        "required_log_marker": "[AIDS_CLOSE_PAIR_FILTER_PASS]",
+        "required_log_marker": "[AIDS_GREED_FULL_SCAN_SUPERVISOR_PASS]",
+        "retry_on_process_loss": True,
         "environment": dict(pair_semantics_environment),
         "semantic_failure_markers": [
             "pair-store provenance contract failed",
@@ -1172,6 +1197,8 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "read-only source stat identity changed",
             "direct pair-store SHA256 differs",
             "non-finite values",
+            "[AIDS_GREED_FULL_SCAN_SEMANTIC_FAILURE]",
+            "semantic/provenance failure forbids resume",
         ],
     }
     close_pair_view_task = {
@@ -1193,22 +1220,30 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "--config",
             "configs/hpc.yaml",
             "--pair-semantics-contract",
-            pair_semantics_dependency_root + "/close_pair_contract.json",
+            str(pair_semantics_science_root / "close_pair_contract.json"),
+            "--pair-semantics-receipt",
+            pair_semantics_receipt,
+            "--expected-pair-semantics-science-root",
+            str(pair_semantics_science_root),
+            "--expected-execution-commit",
+            execution_commit,
             "--physical-vectors",
             snapshot_pair_root + "/recourse_vectors.npy",
             "--normalized-distances",
             (
-                pair_semantics_dependency_root
-                + "/distance_scan/normalized_distances.greed.float32.npy"
+                str(
+                    pair_semantics_science_root
+                    / "distance_scan/normalized_distances.greed.float32.npy"
+                )
             ),
             "--all-pairs-close-certificate",
-            pair_semantics_dependency_root + "/all_pairs_close_certificate.json",
+            str(pair_semantics_science_root / "all_pairs_close_certificate.json"),
             "--output-dir",
             "{task_output}",
             "--max-compact-gb",
             "8",
         ],
-        "input_manifest": pair_semantics_dependency_root + "/close_pair_contract.json",
+        "input_manifest": pair_semantics_receipt,
         "config_files": [str(base_manifest)],
         "expected_output": str(close_pair_view_output),
         "required_output_files": ["close_pair_contract.json", "PASS"],
@@ -1322,12 +1357,19 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             ),
             "pair_semantics_task_id": PAIR_SEMANTICS_TASK_ID,
             "pair_semantics_expected_output": str(pair_semantics_output),
+            "pair_semantics_receipt_name": (
+                "pair_semantics_supervisor_receipt.json"
+            ),
+            "pair_semantics_science_root": str(pair_semantics_science_root),
             "close_pair_view_task_id": CLOSE_PAIR_VIEW_TASK_ID,
             "close_pair_view_expected_output": str(close_pair_view_output),
             "benchmark_chunks": 2,
             "benchmark_is_scientific_pass": False,
             "full_scan_resumes_benchmark_root": False,
             "full_scan_recomputes_benchmark_chunks": True,
+            "full_scan_fixed_science_root_across_controller_attempts": True,
+            "full_scan_receipt_root_is_attempt_qualified": True,
+            "full_scan_same_root_resume_limit": 1,
             "partial_close_compact_copy_limit_gb": 8,
             "full_25gb_copy_forbidden": True,
             "physical_pair_store_regenerated": False,
@@ -1390,7 +1432,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "worker_launcher": "auto",
             "max_cpu_tasks": 1,
             "launch_grace_seconds": 180,
-            "max_transient_retries": 0,
+            "max_transient_retries": 1,
             "keep_alive_when_blocked": True,
         },
         "resource_gates": {
@@ -1435,6 +1477,10 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     }:
         raise RepairManifestError(
             "AIDS v5 paper protocol must contain exactly six serialized tasks"
+        )
+    if int(manifest.runtime.get("max_transient_retries", -1)) != 1:
+        raise RepairManifestError(
+            "AIDS v5 controller must permit one fresh receipt transient retry"
         )
     task = manifest.by_id[TASK_ID]
     selector = manifest.by_id[SELECTOR_TASK_ID]
@@ -1490,6 +1536,13 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             "pair_semantics_expected_output"
         ]
     )
+    protocol_contract = payload["aids_comrecgc_exact_route_v5_contract"]
+    expected_science_root = str(
+        protocol_contract["original_protocol"]["pair_semantics_science_root"]
+    )
+    expected_campaign_root = str(protocol_contract["fresh_output_root"])
+    expected_execution_commit = str(protocol_contract["execution_commit"])
+    expected_proc_root = str(protocol_contract["snapshot_adoption"]["proc_root"])
     expected_pair_environment = {
         "GPU_REQUIRED": "0",
         "CUDA_VISIBLE_DEVICES": "",
@@ -1527,16 +1580,12 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or pair_semantics_task.expected_output != expected_pair_output
         or pair_semantics_task.required_output_files
         != (
-            "pair_semantics_audit.json",
-            "close_pair_contract.json",
-            "distance_scan/run_manifest.json",
+            "pair_semantics_supervisor_receipt.json",
             "PASS",
         )
         or pair_semantics_task.required_log_marker
-        != "[AIDS_CLOSE_PAIR_FILTER_PASS]"
-        or pair_semantics_task.command[-2:]
-        != ("--output-dir", "{task_output}")
-        or pair_semantics_task.command[:-2] != benchmark_task.command[:-5]
+        != "[AIDS_GREED_FULL_SCAN_SUPERVISOR_PASS]"
+        or not pair_semantics_task.retry_on_process_loss
         or pair_semantics_task.input_manifest != benchmark_task.input_manifest
         or not pair_semantics_task.input_manifest.endswith(
             "/pair_store/run_manifest.json"
@@ -1544,6 +1593,32 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or pair_semantics_task.environment != expected_pair_environment
     ):
         raise RepairManifestError("AIDS full close-pair scan contract changed")
+    expected_supervisor_command = (
+        "{python}",
+        "{project_root}/scripts/autodl/run_aids_greed_full_scan_supervisor.py",
+        "--config",
+        "configs/hpc.yaml",
+        "--project-root",
+        "{project_root}",
+        "--execution-commit",
+        expected_execution_commit,
+        "--campaign-root",
+        expected_campaign_root,
+        "--science-root",
+        expected_science_root,
+        "--receipt-output",
+        "{task_output}",
+        "--proc-root",
+        expected_proc_root,
+        "--max-same-root-resumes",
+        "1",
+        "--",
+        *benchmark_task.command[:-5],
+        "--output-dir",
+        expected_science_root,
+    )
+    if pair_semantics_task.command != expected_supervisor_command:
+        raise RepairManifestError("AIDS GREED supervisor command contract changed")
     expected_close_output = str(
         payload["aids_comrecgc_exact_route_v5_contract"]["original_protocol"][
             "close_pair_view_expected_output"
@@ -1564,20 +1639,26 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact_index = close_pair_view_task.command.index("--max-compact-gb")
     pair_dependency = "{dep_" + PAIR_SEMANTICS_TASK_ID + "_output}"
     snapshot_pair_root = str(Path(pair_semantics_task.input_manifest).parent)
+    receipt_manifest = pair_dependency + "/pair_semantics_supervisor_receipt.json"
     expected_close_command = (
         "{python}",
         "{project_root}/scripts/baselines/comrecgc/build_close_pair_view.py",
         "--config",
         "configs/hpc.yaml",
         "--pair-semantics-contract",
-        pair_dependency + "/close_pair_contract.json",
+        expected_science_root + "/close_pair_contract.json",
+        "--pair-semantics-receipt",
+        receipt_manifest,
+        "--expected-pair-semantics-science-root",
+        expected_science_root,
+        "--expected-execution-commit",
+        expected_execution_commit,
         "--physical-vectors",
         snapshot_pair_root + "/recourse_vectors.npy",
         "--normalized-distances",
-        pair_dependency
-        + "/distance_scan/normalized_distances.greed.float32.npy",
+        expected_science_root + "/distance_scan/normalized_distances.greed.float32.npy",
         "--all-pairs-close-certificate",
-        pair_dependency + "/all_pairs_close_certificate.json",
+        expected_science_root + "/all_pairs_close_certificate.json",
         "--output-dir",
         "{task_output}",
         "--max-compact-gb",
@@ -1587,7 +1668,7 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         close_pair_view_task.command != expected_close_command
         or close_pair_view_task.command[compact_index + 1] != "8"
         or close_pair_view_task.input_manifest
-        != pair_dependency + "/close_pair_contract.json"
+        != receipt_manifest
         or close_pair_view_task.environment != expected_pair_environment
     ):
         raise RepairManifestError("AIDS theta-close compact-copy bound changed")

@@ -23,6 +23,10 @@ from src.baselines.comrecgc.close_pair_view import (  # noqa: E402
     ThetaClosePairContract,
     materialize_theta_close_pair_view,
 )
+from src.baselines.comrecgc.contracts import sha256_file  # noqa: E402
+from src.utils.autodl_aids_greed_full_scan_supervisor import (  # noqa: E402
+    validate_receipt,
+)
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -65,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--set", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--pair-semantics-contract", required=True)
+    parser.add_argument("--pair-semantics-receipt")
+    parser.add_argument("--expected-pair-semantics-science-root")
+    parser.add_argument("--expected-execution-commit")
     parser.add_argument("--physical-vectors", required=True)
     parser.add_argument("--normalized-distances", required=True)
     parser.add_argument("--all-pairs-close-certificate")
@@ -86,6 +93,37 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     source_path = Path(args.pair_semantics_contract).expanduser().resolve(strict=True)
+    receipt_args = (
+        args.pair_semantics_receipt,
+        args.expected_pair_semantics_science_root,
+        args.expected_execution_commit,
+    )
+    if any(receipt_args) and not all(receipt_args):
+        raise ValueError(
+            "receipt validation requires receipt, fixed science root, and execution commit"
+        )
+    if all(receipt_args):
+        receipt = validate_receipt(
+            receipt_path=args.pair_semantics_receipt,
+            expected_science_root=args.expected_pair_semantics_science_root,
+            expected_execution_commit=args.expected_execution_commit,
+        )
+        if receipt["close_pair_contract"] != str(source_path):
+            raise ValueError(
+                "receipt does not authorize the requested pair-semantics contract"
+            )
+        expected_distance = receipt["terminal_files"][
+            "distance_scan/normalized_distances.greed.float32.npy"
+        ]
+        distance_path = Path(args.normalized_distances).expanduser().resolve(strict=True)
+        if (
+            expected_distance["path"] != str(distance_path)
+            or expected_distance["sha256"]
+            != sha256_file(distance_path)
+        ):
+            raise ValueError(
+                "receipt does not authorize the requested normalized-distance array"
+            )
     source = _load_object(source_path)
     pair_orientation = str(_required(source, "pair_orientation", "pair_axis"))
     if pair_orientation not in {PAIR_ORIENTATION, "col0=parent;col1=candidate"}:

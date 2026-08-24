@@ -1,5 +1,11 @@
 # Scripts
 
+`autodl/run_aids_greed_full_scan_supervisor.py` is the production CPU
+supervisor for the long AIDS GREED pair-semantics scan. It publishes only a
+fresh attempt-qualified receipt while keeping authenticated resumable science
+state in the controller campaign root. Its paired Slurm script is syntax/CLI
+parity evidence and intentionally exits without launching science on HPC.
+
 This directory is reserved for thin command-line entrypoints only.
 
 Some scripts are still bootstrap placeholders, but the repository now also

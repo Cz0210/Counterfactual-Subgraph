@@ -46,6 +46,11 @@ is stale.
 - Frozen GREED full close-pair scan, logical input count, exact certificates,
   cluster/noise count, centroid/radius/greedy result, and final standardized
   output: pending the fresh paper-protocol controller.
+- The release manifest now gives the long GREED scan a fixed campaign science
+  root and attempt-qualified receipt roots. One authenticated same-root child
+  resume and one generic fresh-receipt process-loss retry are bounded; semantic
+  failures never retry. The close-view task accepts only the dependency receipt
+  and revalidates its fixed-root artifact hashes before reading science bytes.
 
 ## Mutagenicity COMRECGC
 
