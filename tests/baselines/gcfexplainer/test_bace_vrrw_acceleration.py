@@ -31,6 +31,12 @@ from scripts.autodl.benchmark_bace_frozen_gine_batch import (
     _record_smiles,
     parse_args as parse_benchmark_args,
 )
+from scripts.autodl.benchmark_bace_gnn_inference_matrix import (
+    DEFAULT_BATCH_SIZES,
+    _parse_batch_sizes,
+    _timing_summary,
+    parse_args as parse_matrix_benchmark_args,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -159,6 +165,55 @@ def test_frozen_gine_benchmark_accepts_frozen_bace_record_schema() -> None:
     assert _record_smiles({"smiles": "CCC", "canonical_smiles": "CC"}) == "CCC"
     with pytest.raises(ValueError, match="no molecular SMILES"):
         _record_smiles({"molecule_id": "missing"})
+
+
+def test_bace_gnn_inference_matrix_cli_and_paired_slurm_are_synchronized() -> None:
+    args = parse_matrix_benchmark_args(
+        [
+            "--config",
+            "configs/hpc.yaml",
+            "--set",
+            "inference.fallback_to_heuristic=false",
+            "--dataset-dir",
+            "/dataset",
+            "--checkpoint-dir",
+            "/checkpoint",
+            "--output-dir",
+            "/fresh",
+        ]
+    )
+    assert args.batch_sizes == DEFAULT_BATCH_SIZES == (1, 8, 32, 128, 512)
+    assert _parse_batch_sizes("1,8,32,128,512") == DEFAULT_BATCH_SIZES
+    with pytest.raises(Exception, match="strictly increasing"):
+        _parse_batch_sizes("8,1")
+    with pytest.raises(Exception, match="duplicates"):
+        _parse_batch_sizes("1,1")
+    summary = _timing_summary([1.0, 3.0, 2.0], batch_size=8)
+    assert summary["median_seconds"] == 2.0
+    assert summary["median_rows_per_second"] == 4.0
+
+    project_root = Path(__file__).resolve().parents[3]
+    cli = (
+        project_root / "scripts/autodl/benchmark_bace_gnn_inference_matrix.py"
+    ).read_text(encoding="utf-8")
+    assert "bace_gnn_inference_benchmark.json" in cli
+    assert '"authorizes_vrrw_replacement": False' in cli
+    slurm = (
+        project_root / "scripts/slurm/benchmark_bace_gnn_inference_matrix.sh"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "#SBATCH --partition=A800",
+        "#SBATCH --gres=gpu:a800:1",
+        "#SBATCH --output=logs/%j.out",
+        "#SBATCH --error=logs/%j.err",
+        "conda activate smiles_pip118",
+        "cd /share/home/u20526/czx/counterfactual-subgraph",
+        "export PYTHONPATH=$PWD",
+        "--config configs/hpc.yaml",
+        "--set inference.fallback_to_heuristic=false",
+        "1,8,32,128,512",
+    ):
+        assert required in slurm
 
 
 def test_quick50_lockstep_wrapper_is_fail_closed_and_preserves_old_full() -> None:

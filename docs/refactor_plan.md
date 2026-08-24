@@ -1511,3 +1511,7 @@ Mutagenicity roadmaps.
   that obtains no GPU lock and records end-to-end phase profiles.
 - [ ] Use the CPU profiles to project 50k completion time before considering
   any CPU formal replay; do not stop the old GPU full task.
+- [x] Add the fixed 1/8/32/128/512 CPU/GPU frozen-GINE matrix with separate
+  batching, pure-model, end-to-end, argmax/max-difference, and raw-byte fields.
+- [ ] Run the matrix in a fresh GPU root only after a controller-owned GPU is
+  naturally available; do not preempt Quick50, ComRecGC, or any full writer.

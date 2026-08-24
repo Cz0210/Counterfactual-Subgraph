@@ -9188,3 +9188,7 @@ Accepted
   for Quick-50 before Quick-100 begins.  CPU evidence remains diagnostic and
   cannot replace the protected 50k GPU route without a later ETA and semantics
   decision.
+- Frozen-GINE throughput evidence uses the fixed batch matrix 1/8/32/128/512
+  and separates collation/device transfer, prepared-batch model time, and full
+  collation-to-logits time.  Argmax/allclose completion and raw-byte identity
+  are distinct gates: a performance PASS cannot waive CUDA byte instability.
