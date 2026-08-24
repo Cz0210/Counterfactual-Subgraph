@@ -36,7 +36,7 @@ from .external_memory_recourse import (
 )
 
 
-CHUNK_CACHE_SCHEMA = "comrecgc_cartesian_chunk_vector_cache_v1"
+CHUNK_CACHE_SCHEMA = "comrecgc_cartesian_chunk_vector_cache_v2"
 DEFAULT_LOCAL_FREE_FLOOR_BYTES = 3 * 1024**3
 
 
@@ -121,6 +121,78 @@ def _preallocate_file(path: Path, *, size: int) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _allocated_bytes(path: Path) -> int:
+    value = path.stat()
+    return int(getattr(value, "st_blocks", 0)) * 512
+
+
+def _prefix_sha256(path: Path, *, size: int) -> str:
+    with path.open("rb") as handle:
+        return hashlib.sha256(handle.read(int(size))).hexdigest()
+
+
+def _allocation_contract(
+    *,
+    path: Path,
+    shape: tuple[int, int],
+    dtype: np.dtype[Any],
+    header: bytes,
+    expected_size: int,
+    min_local_free_bytes: int,
+) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "shape": list(shape),
+        "dtype": str(dtype),
+        "header_size_bytes": len(header),
+        "header_sha256": hashlib.sha256(header).hexdigest(),
+        "file_size_bytes": int(expected_size),
+        "minimum_free_floor_bytes": int(min_local_free_bytes),
+        "allocation_method": "posix_fallocate",
+    }
+
+
+def _validate_allocation_evidence(
+    *,
+    path: Path,
+    local_root: Path,
+    evidence: Mapping[str, Any],
+    expected_contract: Mapping[str, Any],
+    min_local_free_bytes: int,
+) -> dict[str, Any]:
+    if (
+        evidence.get("allocation_contract") != dict(expected_contract)
+        or evidence.get("allocation_contract_sha256")
+        != _stable_hash(expected_contract)
+        or evidence.get("allocation_complete") is not True
+        or evidence.get("physical_allocation_verified") is not True
+    ):
+        raise ExternalMemoryDBSCANError(
+            "VECTOR_CACHE_ALLOCATION_EVIDENCE_MISMATCH"
+        )
+    resolved = _regular_no_symlink(path, label="local vector allocation")
+    expected_size = int(expected_contract["file_size_bytes"])
+    if resolved.stat().st_size != expected_size:
+        raise ExternalMemoryDBSCANError("VECTOR_CACHE_ALLOCATION_SIZE_MISMATCH")
+    header_size = int(expected_contract["header_size_bytes"])
+    if _prefix_sha256(resolved, size=header_size) != expected_contract["header_sha256"]:
+        raise ExternalMemoryDBSCANError("VECTOR_CACHE_ALLOCATION_HEADER_MISMATCH")
+    allocated = _allocated_bytes(resolved)
+    if allocated < expected_size:
+        raise ExternalMemoryDBSCANError(
+            "VECTOR_CACHE_ALLOCATION_IS_SPARSE:"
+            f"allocated={allocated}:expected={expected_size}"
+        )
+    free = _statvfs_free_bytes(local_root)
+    if free < int(min_local_free_bytes):
+        raise ExternalMemoryDBSCANError("VECTOR_CACHE_LOCAL_FLOOR_VIOLATED")
+    return {
+        **dict(evidence),
+        "physical_allocated_bytes_revalidated": allocated,
+        "local_free_bytes_revalidated": free,
+    }
 
 
 def _regular_no_symlink(value: str | Path, *, label: str) -> Path:
@@ -355,6 +427,22 @@ def _validate_chunk_source(
         resolved_rows.append((row, expected_chunk, pair_path, vector_path))
     if len({str(path) for path in files}) != len(files):
         raise ExternalMemoryDBSCANError("CHUNK_SOURCE_DUPLICATE_ARTIFACT_PATH")
+    guarded_tree_files: list[Path] = []
+    inert_partials: list[str] = []
+    for entry in chunk_root.parent.rglob("*"):
+        if entry.is_symlink():
+            raise ExternalMemoryDBSCANError(
+                f"CHUNK_SOURCE_TREE_HAS_SYMLINK:{entry}"
+            )
+        if entry.is_file():
+            resolved = entry.resolve(strict=True)
+            guarded_tree_files.append(resolved)
+            if ".partial." in resolved.name or resolved.name.endswith(".partial"):
+                inert_partials.append(str(resolved))
+    guarded_tree_files = sorted(set(guarded_tree_files), key=str)
+    guarded_before = {
+        str(path): _file_stat_identity(path) for path in guarded_tree_files
+    }
     before = {str(path): _file_stat_identity(path) for path in files}
     if before[str(source)] != source_stat_before or _sha256_file(source) != source_sha_before:
         raise ExternalMemoryDBSCANError("CHUNK_SOURCE_CHECKPOINT_DRIFT")
@@ -416,11 +504,14 @@ def _validate_chunk_source(
         raise ExternalMemoryDBSCANError("CHUNK_SOURCE_VECTOR_SCHEMA_DISAGREEMENT")
 
     checkpoint_sha = source_sha_before
-    writers = _find_writable_process_references(files, proc_root=proc_root)
+    writers = _find_writable_process_references(
+        sorted(set([*files, *guarded_tree_files]), key=str),
+        proc_root=proc_root,
+    )
     active = _scan_active_owner_processes(
         source_owner_root,
         proc_root=proc_root,
-        exclude_pids={os.getpid()},
+        exclude_pids={os.getpid(), os.getppid()},
     )
     if writers:
         raise ExternalMemoryDBSCANError(
@@ -431,7 +522,14 @@ def _validate_chunk_source(
             "CHUNK_SOURCE_OWNER_PROCESS_ACTIVE:" + json.dumps(active, sort_keys=True)
         )
     after = {str(path): _file_stat_identity(path) for path in files}
-    if before != after or checkpoint_sha != _sha256_file(source):
+    guarded_after = {
+        str(path): _file_stat_identity(path) for path in guarded_tree_files
+    }
+    if (
+        before != after
+        or guarded_before != guarded_after
+        or checkpoint_sha != _sha256_file(source)
+    ):
         raise ExternalMemoryDBSCANError("CHUNK_SOURCE_STAT_DRIFT")
     file_hashes: dict[str, str] = {str(source): checkpoint_sha}
     for row in frozen_rows:
@@ -462,6 +560,9 @@ def _validate_chunk_source(
         "writable_reference_count": 0,
         "active_owner_process_count": len(active),
         "active_owner_processes": active,
+        "guarded_source_tree_file_count": len(guarded_tree_files),
+        "inert_partial_artifact_paths": sorted(inert_partials),
+        "partial_artifacts_used_as_authority": False,
     }
 
 
@@ -612,25 +713,9 @@ def materialize_cartesian_chunk_vector_cache(
                     require_cache=True,
                     proc_root=proc_root,
                 )
-            if not resume:
-                raise ExternalMemoryDBSCANError(
-                    "VECTOR_CACHE_LOCAL_ARTIFACT_MISSING_RESUME_REQUIRED"
-                )
-            # The local file is explicitly reconstructible and not scientific
-            # authority.  Re-enter copy_chunks at zero under the same terminal
-            # identity; the immutable chunk closure is revalidated above and
-            # again before the existing manifest is trusted.
-            state = _write_checkpoint(
-                state_path,
-                {
-                    "schema_version": CHUNK_CACHE_SCHEMA,
-                    "phase": "copy_chunks",
-                    "scientific_identity": identity,
-                    "scientific_identity_sha256": identity_sha,
-                    "next_chunk_index": 0,
-                    "next_row_offset": 0,
-                    "terminal_manifest_sha256": terminal.manifest_sha256,
-                },
+            raise ExternalMemoryDBSCANError(
+                "VECTOR_CACHE_LOCAL_ARTIFACT_MISSING_FRESH_REBUILD_REQUIRED:"
+                f"terminal_manifest={terminal.manifest_path}"
             )
         elif state_path.exists():
             state = _load_checkpoint(state_path)
@@ -645,15 +730,139 @@ def materialize_cartesian_chunk_vector_cache(
                 state_path,
                 {
                     "schema_version": CHUNK_CACHE_SCHEMA,
-                    "phase": "copy_chunks",
+                    "phase": "allocate_cache",
                     "scientific_identity": identity,
                     "scientific_identity_sha256": identity_sha,
                     "next_chunk_index": 0,
                     "next_row_offset": 0,
                 },
             )
+        allocation_contract = _allocation_contract(
+            path=cache_partial,
+            shape=shape,
+            dtype=dtype,
+            header=header,
+            expected_size=expected_size,
+            min_local_free_bytes=int(min_local_free_bytes),
+        )
         phase = str(state.get("phase"))
+        if phase == "allocate_cache":
+            if (
+                int(state.get("next_chunk_index", -1)) != 0
+                or int(state.get("next_row_offset", -1)) != 0
+                or cache_final.exists()
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "VECTOR_CACHE_ALLOCATION_CHECKPOINT_INVALID"
+                )
+            free_before = _statvfs_free_bytes(local)
+            if cache_partial.exists():
+                partial = _regular_no_symlink(
+                    cache_partial, label="local vector allocation partial"
+                )
+                values = np.load(partial, mmap_mode="r+", allow_pickle=False)
+                if values.shape != shape or values.dtype != dtype:
+                    raise ExternalMemoryDBSCANError(
+                        "VECTOR_CACHE_PARTIAL_SCHEMA_MISMATCH"
+                    )
+                del values
+                allocated_before = min(_allocated_bytes(partial), expected_size)
+            else:
+                allocated_before = 0
+            remaining = max(expected_size - allocated_before, 0)
+            if free_before < remaining + int(min_local_free_bytes):
+                raise ExternalMemoryDBSCANError(
+                    "VECTOR_CACHE_LOCAL_HEADROOM_BLOCKED:"
+                    f"free={free_before}:remaining={remaining}:"
+                    f"floor={int(min_local_free_bytes)}"
+                )
+            if not cache_partial.exists():
+                values = np.lib.format.open_memmap(
+                    cache_partial, mode="w+", dtype=dtype, shape=shape
+                )
+                values.flush()
+                del values
+            _preallocate_file(cache_partial, size=expected_size)
+            with cache_partial.open("rb") as handle:
+                os.fsync(handle.fileno())
+            allocated_after = _allocated_bytes(cache_partial)
+            free_after_reservation = _statvfs_free_bytes(local)
+            allocation_evidence = {
+                "allocation_complete": True,
+                "allocation_contract": allocation_contract,
+                "allocation_contract_sha256": _stable_hash(allocation_contract),
+                "physical_allocation_verified": allocated_after >= expected_size,
+                "allocated_bytes_before": allocated_before,
+                "allocated_bytes_after": allocated_after,
+                "local_free_bytes_before": free_before,
+                "local_free_bytes_after_reservation": free_after_reservation,
+            }
+            _validate_allocation_evidence(
+                path=cache_partial,
+                local_root=local,
+                evidence=allocation_evidence,
+                expected_contract=allocation_contract,
+                min_local_free_bytes=int(min_local_free_bytes),
+            )
+            state = _write_checkpoint(
+                state_path,
+                {
+                    "schema_version": CHUNK_CACHE_SCHEMA,
+                    "phase": "allocation_complete",
+                    "scientific_identity": identity,
+                    "scientific_identity_sha256": identity_sha,
+                    "next_chunk_index": 0,
+                    "next_row_offset": 0,
+                    "allocation_evidence": allocation_evidence,
+                },
+            )
+            phase = "allocation_complete"
+        if phase == "allocation_complete":
+            if (
+                int(state.get("next_chunk_index", -1)) != 0
+                or int(state.get("next_row_offset", -1)) != 0
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "VECTOR_CACHE_ALLOCATION_CHECKPOINT_INVALID"
+                )
+            allocation_evidence = state.get("allocation_evidence")
+            if not isinstance(allocation_evidence, Mapping):
+                raise ExternalMemoryDBSCANError(
+                    "VECTOR_CACHE_ALLOCATION_EVIDENCE_MISSING"
+                )
+            _validate_allocation_evidence(
+                path=cache_partial,
+                local_root=local,
+                evidence=allocation_evidence,
+                expected_contract=allocation_contract,
+                min_local_free_bytes=int(min_local_free_bytes),
+            )
+            state = _write_checkpoint(
+                state_path,
+                {
+                    "schema_version": CHUNK_CACHE_SCHEMA,
+                    "phase": "copy_chunks",
+                    "scientific_identity": identity,
+                    "scientific_identity_sha256": identity_sha,
+                    "next_chunk_index": 0,
+                    "next_row_offset": 0,
+                    "allocation_evidence": dict(allocation_evidence),
+                },
+            )
+            phase = "copy_chunks"
         if phase == "copy_chunks":
+            allocation_evidence = state.get("allocation_evidence")
+            if not isinstance(allocation_evidence, Mapping):
+                raise ExternalMemoryDBSCANError(
+                    "VECTOR_CACHE_ALLOCATION_EVIDENCE_MISSING"
+                )
+            _validate_allocation_evidence(
+                path=cache_partial,
+                local_root=local,
+                evidence=allocation_evidence,
+                expected_contract=allocation_contract,
+                min_local_free_bytes=int(min_local_free_bytes),
+            )
             start_chunk = int(state.get("next_chunk_index", 0))
             if start_chunk < 0 or start_chunk > len(source["chunks"]):
                 raise ExternalMemoryDBSCANError("VECTOR_CACHE_CHECKPOINT_OFFSET_INVALID")
@@ -662,24 +871,7 @@ def materialize_cartesian_chunk_vector_cache(
                 if cache.shape != shape or cache.dtype != dtype:
                     raise ExternalMemoryDBSCANError("VECTOR_CACHE_PARTIAL_SCHEMA_MISMATCH")
             else:
-                if start_chunk != 0:
-                    raise ExternalMemoryDBSCANError("VECTOR_CACHE_PARTIAL_MISSING")
-                free_before = _statvfs_free_bytes(local)
-                if free_before < expected_size + int(min_local_free_bytes):
-                    raise ExternalMemoryDBSCANError(
-                        "VECTOR_CACHE_LOCAL_HEADROOM_BLOCKED:"
-                        f"free={free_before}:required={expected_size + int(min_local_free_bytes)}"
-                    )
-                cache = np.lib.format.open_memmap(
-                    cache_partial, mode="w+", dtype=dtype, shape=shape
-                )
-                cache.flush()
-                _preallocate_file(cache_partial, size=expected_size)
-                free_after_reservation = _statvfs_free_bytes(local)
-                if free_after_reservation < int(min_local_free_bytes):
-                    raise ExternalMemoryDBSCANError(
-                        "VECTOR_CACHE_LOCAL_FLOOR_VIOLATED_AFTER_RESERVATION"
-                    )
+                raise ExternalMemoryDBSCANError("VECTOR_CACHE_PARTIAL_MISSING")
             replayed_offset = _validate_cache_prefix(
                 cache=cache,
                 chunks=source["chunks"],
@@ -706,6 +898,7 @@ def materialize_cartesian_chunk_vector_cache(
                         "scientific_identity_sha256": identity_sha,
                         "next_chunk_index": index + 1,
                         "next_row_offset": cursor,
+                        "allocation_evidence": dict(allocation_evidence),
                     },
                 )
             if cursor != shape[0]:
@@ -731,12 +924,18 @@ def materialize_cartesian_chunk_vector_cache(
                     "next_chunk_index": len(source["chunks"]),
                     "next_row_offset": shape[0],
                     "vectors_sha256": cache_sha,
+                    "allocation_evidence": dict(allocation_evidence),
                 },
             )
             phase = "cache_ready"
         if phase != "cache_ready":
             raise ExternalMemoryDBSCANError(f"unknown vector-cache phase: {phase}")
         expected_sha = str(state.get("vectors_sha256") or "")
+        allocation_evidence = state.get("allocation_evidence")
+        if not isinstance(allocation_evidence, Mapping):
+            raise ExternalMemoryDBSCANError(
+                "VECTOR_CACHE_ALLOCATION_EVIDENCE_MISSING"
+            )
         candidates = [path for path in (cache_partial, cache_final) if path.exists()]
         if len(candidates) != 1:
             raise ExternalMemoryDBSCANError("VECTOR_CACHE_PROMOTION_STATE_AMBIGUOUS")
@@ -789,6 +988,10 @@ def materialize_cartesian_chunk_vector_cache(
             "vectors_cache_is_scientific_authority": False,
             "persistent_chunks_are_scientific_authority": True,
             "local_scratch_lock": lock,
+            "allocation_complete_authenticated": True,
+            "allocation_evidence": dict(allocation_evidence),
+            "allocation_checkpoint_path": str(state_path),
+            "allocation_checkpoint_sha256": _sha256_file(state_path),
             "proc_root": str(Path(proc_root).resolve(strict=True)),
             "local_free_bytes_after": free_after,
             "min_local_free_bytes": int(min_local_free_bytes),
@@ -826,12 +1029,34 @@ def validate_cartesian_chunk_vector_cache(
         or manifest.get("vectors_reconstructible_from_persistent_chunks") is not True
         or manifest.get("vectors_cache_is_scientific_authority") is not False
         or manifest.get("persistent_chunks_are_scientific_authority") is not True
+        or manifest.get("allocation_complete_authenticated") is not True
+        or not isinstance(manifest.get("allocation_evidence"), Mapping)
         or manifest.get("approximation_used") is not False
     ):
         raise ExternalMemoryDBSCANError("VECTOR_CACHE_TERMINAL_CONTRACT_MISMATCH")
     effective_proc_root = Path(
         manifest.get("proc_root") if proc_root is None else proc_root
     ).resolve(strict=True)
+    allocation_checkpoint = _regular_no_symlink(
+        manifest.get("allocation_checkpoint_path", ""),
+        label="allocation checkpoint",
+    )
+    if allocation_checkpoint.parent != path.parent:
+        raise ExternalMemoryDBSCANError(
+            "VECTOR_CACHE_ALLOCATION_CHECKPOINT_PATH_MISMATCH"
+        )
+    allocation_state = _load_checkpoint(allocation_checkpoint)
+    if (
+        _sha256_file(allocation_checkpoint)
+        != manifest.get("allocation_checkpoint_sha256")
+        or allocation_state.get("phase") != "cache_ready"
+        or allocation_state.get("allocation_evidence")
+        != manifest.get("allocation_evidence")
+        or allocation_state.get("scientific_identity") != identity
+    ):
+        raise ExternalMemoryDBSCANError(
+            "VECTOR_CACHE_ALLOCATION_CHECKPOINT_CLOSURE_MISMATCH"
+        )
     source_checkpoint = _regular_no_symlink(
         source.get("source_checkpoint_path", ""), label="chunk checkpoint"
     )
@@ -868,7 +1093,7 @@ def validate_cartesian_chunk_vector_cache(
     active = _scan_active_owner_processes(
         owner_root,
         proc_root=effective_proc_root,
-        exclude_pids={os.getpid()},
+        exclude_pids={os.getpid(), os.getppid()},
     )
     if active:
         raise ExternalMemoryDBSCANError("VECTOR_CACHE_SOURCE_OWNER_PROCESS_ACTIVE")

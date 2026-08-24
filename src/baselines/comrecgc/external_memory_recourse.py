@@ -648,6 +648,89 @@ def _find_writable_process_references(
     )
 
 
+def _active_process_commands_referencing(
+    target_root: Path, *, proc_root: Path, exclude_pids: set[int]
+) -> list[dict[str, Any]]:
+    target = str(target_root.resolve(strict=True))
+    found: list[dict[str, Any]] = []
+    for process in proc_root.resolve(strict=True).iterdir():
+        if not process.name.isdigit() or int(process.name) in exclude_pids:
+            continue
+        try:
+            raw = (process / "cmdline").read_bytes()
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+        command = raw.replace(b"\0", b" ").decode("utf-8", errors="replace")
+        if target in command:
+            found.append({"pid": int(process.name), "command": command})
+    return sorted(found, key=lambda row: int(row["pid"]))
+
+
+def _pair_store_source_root_guard(
+    *,
+    pair_store_root: Path,
+    source_owner_root: Path,
+    proc_root: Path,
+    reject_partial_files: bool,
+) -> dict[str, Any]:
+    """Close sibling partials, writable inodes, and old owner processes."""
+
+    pair_root = pair_store_root.resolve(strict=True)
+    owner_root = source_owner_root.resolve(strict=True)
+    try:
+        pair_root.relative_to(owner_root)
+    except ValueError as exc:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_OUTSIDE_OWNER_ROOT"
+        ) from exc
+    files: list[Path] = []
+    partials: list[str] = []
+    for entry in pair_root.rglob("*"):
+        if entry.is_symlink():
+            raise ExternalMemoryDBSCANError(
+                f"PAIR_STORE_SOURCE_TREE_HAS_SYMLINK:{entry}"
+            )
+        if entry.is_file():
+            resolved = entry.resolve(strict=True)
+            files.append(resolved)
+            if ".partial." in resolved.name or resolved.name.endswith(".partial"):
+                partials.append(str(resolved))
+    if reject_partial_files and partials:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_HAS_PARTIAL_ARTIFACTS:"
+            + json.dumps(sorted(partials))
+        )
+    writers = _find_writable_process_references(files, proc_root=proc_root)
+    if writers:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_TREE_HAS_LIVE_WRITER:"
+            + json.dumps(writers, sort_keys=True)
+        )
+    active = _active_process_commands_referencing(
+        owner_root,
+        proc_root=proc_root,
+        # The fresh continuation parent carries the read-only owner path in
+        # its own argv and must not be confused with the old scientific
+        # producer.  The old repair is a separate controller process, never
+        # our parent.
+        exclude_pids={os.getpid(), os.getppid()},
+    )
+    if active:
+        raise ExternalMemoryDBSCANError(
+            "PAIR_STORE_SOURCE_OWNER_PROCESS_ACTIVE:"
+            + json.dumps(active, sort_keys=True)
+        )
+    return {
+        "source_owner_root": str(owner_root),
+        "pair_store_root": str(pair_root),
+        "guarded_regular_file_count": len(files),
+        "partial_artifact_paths": sorted(partials),
+        "partial_artifacts_rejected": bool(reject_partial_files),
+        "writable_reference_count": 0,
+        "active_owner_process_count": 0,
+    }
+
+
 def validate_adopted_pair_store_read_only(
     manifest_path: str | Path,
     *,
@@ -754,6 +837,19 @@ def validate_adopted_pair_store_read_only(
             "PAIR_STORE_SOURCE_HAS_LIVE_WRITER:"
             + json.dumps(writers_before, sort_keys=True)
         )
+    source_guard_claim = adoption.get("source_root_guard")
+    if not isinstance(source_guard_claim, Mapping):
+        raise ExternalMemoryDBSCANError("pair-store source-root guard missing")
+    source_guard = _pair_store_source_root_guard(
+        pair_store_root=source_path.parent,
+        source_owner_root=Path(
+            str(source_guard_claim.get("source_owner_root") or "")
+        ),
+        proc_root=proc,
+        reject_partial_files=True,
+    )
+    if source_guard != source_guard_claim:
+        raise ExternalMemoryDBSCANError("pair-store source-root guard drift")
     _validate_pair_store_manifest(source_path, source_manifest)
     actual_hashes = {
         str(source_path): _sha256_file(source_path),
@@ -785,6 +881,7 @@ def validate_adopted_pair_store_read_only(
 def adopt_external_pair_store_read_only(
     *,
     source_manifest_path: str | Path,
+    source_owner_root: str | Path | None = None,
     adoption_root: str | Path,
     expected_scientific_identity: Mapping[str, Any],
     proc_root: str | Path = "/proc",
@@ -833,6 +930,17 @@ def adopt_external_pair_store_read_only(
         raise ExternalMemoryDBSCANError("adopted pair-store source is not regular")
     before = {str(path): _file_stat_identity(path) for path in sources}
     _validate_pair_store_manifest(source_path, source_manifest)
+    owner_root = (
+        source_path.parent
+        if source_owner_root is None
+        else Path(source_owner_root).expanduser().resolve(strict=True)
+    )
+    source_guard = _pair_store_source_root_guard(
+        pair_store_root=source_path.parent,
+        source_owner_root=owner_root,
+        proc_root=Path(proc_root),
+        reject_partial_files=True,
+    )
     writers = _find_writable_process_references(
         sources, proc_root=Path(proc_root)
     )
@@ -875,6 +983,7 @@ def adopt_external_pair_store_read_only(
             "writable_reference_count": 0,
             "writers": [],
         },
+        "source_root_guard": source_guard,
         "adoption_mode": "physical_read_only_reference",
         "source_open_mode_required": "read_only",
         "source_mutated": False,

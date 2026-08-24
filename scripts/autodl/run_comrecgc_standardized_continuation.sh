@@ -64,8 +64,52 @@ if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
     --external-max-rss-gb "${COMRECGC_EXTERNAL_MAX_RSS_GB:-96}"
     --external-query-block-size "${COMRECGC_EXTERNAL_QUERY_BLOCK_SIZE:-8}"
     --external-checkpoint-interval-blocks "${COMRECGC_EXTERNAL_CHECKPOINT_INTERVAL_BLOCKS:-1}"
+    --external-dbscan-shortcut-mode "${COMRECGC_EXTERNAL_DBSCAN_SHORTCUT_MODE:-disabled}"
+    --external-shortcut-seed-count "${COMRECGC_EXTERNAL_SHORTCUT_SEED_COUNT:-3}"
+    --external-shortcut-failure-cap "${COMRECGC_EXTERNAL_SHORTCUT_FAILURE_CAP:-4096}"
+    --external-shortcut-query-block-size "${COMRECGC_EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE:-65536}"
+    --external-exact-fallback-max-samples "${COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES:-100000}"
+    --external-summary-block-size "${COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE:-65536}"
     --expected-sklearn-version "${COMRECGC_EXPECTED_SKLEARN_VERSION:-1.7.2}"
   )
+
+  terminal_source="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_MANIFEST:-}"
+  chunk_checkpoint="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT:-}"
+  source_owner="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT:-}"
+  vector_cache_root="${COMRECGC_EXTERNAL_VECTOR_CACHE_ROOT:-}"
+  vector_cache_lock="${COMRECGC_EXTERNAL_VECTOR_CACHE_LOCK:-}"
+  auto_pair_root="${COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT:-}"
+  if [[ -n "$auto_pair_root" ]]; then
+    [[ "$auto_pair_root" == /* && -d "$auto_pair_root" && ! -L "$auto_pair_root" ]] || { echo "invalid automatic pair-store root: $auto_pair_root" >&2; exit 64; }
+    if [[ -e "$auto_pair_root/run_manifest.json" || -L "$auto_pair_root/run_manifest.json" ]]; then
+      [[ -f "$auto_pair_root/run_manifest.json" && -s "$auto_pair_root/run_manifest.json" && ! -L "$auto_pair_root/run_manifest.json" ]] || { echo "invalid promoted pair-store manifest: $auto_pair_root/run_manifest.json" >&2; exit 64; }
+      terminal_source="$auto_pair_root/run_manifest.json"
+      chunk_checkpoint=""
+      vector_cache_root=""
+      vector_cache_lock=""
+      echo "[COMRECGC_PAIR_SOURCE_SELECTED] mode=promoted_final manifest=$terminal_source"
+    else
+      echo "[COMRECGC_PAIR_SOURCE_SELECTED] mode=closed_chunks checkpoint=$chunk_checkpoint"
+    fi
+  fi
+  if [[ -n "$terminal_source" ]]; then
+    [[ -n "$source_owner" ]] || { echo "terminal pair source requires owner root" >&2; exit 64; }
+    [[ -z "$chunk_checkpoint$vector_cache_root$vector_cache_lock" ]] || { echo "terminal and chunk pair sources are mutually exclusive" >&2; exit 64; }
+    args+=(
+      --external-pair-store-source-manifest "$terminal_source"
+      --external-pair-store-source-owner-root "$source_owner"
+    )
+  elif [[ -n "$chunk_checkpoint$vector_cache_root$vector_cache_lock$source_owner" ]]; then
+    [[ -n "$chunk_checkpoint" && -n "$source_owner" && -n "$vector_cache_root" && -n "$vector_cache_lock" ]] || { echo "chunk-source/cache environment is incomplete" >&2; exit 64; }
+    args+=(
+      --external-pair-store-source-checkpoint "$chunk_checkpoint"
+      --external-pair-store-source-owner-root "$source_owner"
+      --external-vector-cache-root "$vector_cache_root"
+      --external-vector-cache-lock "$vector_cache_lock"
+      --external-vector-cache-min-free-gb "${COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB:-3}"
+      --external-vector-cache-proc-root "${COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT:-/proc}"
+    )
+  fi
   if [[ "${COMRECGC_COMMON_RECOURSE_RESUME:-0}" == "1" ]]; then
     args+=(--common-recourse-resume)
   fi

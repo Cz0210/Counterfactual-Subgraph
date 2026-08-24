@@ -190,6 +190,14 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
 
     monkeypatch.setattr(recourse, "imported_upstream", imported_modules)
     parameters = RecourseParameters.for_mode("full")
+    assert (
+        parameters.theta,
+        parameters.delta,
+        parameters.recourse_size,
+        parameters.cf_size,
+        parameters.cluster_size,
+        parameters.seed,
+    ) == (0.1, 0.02, 100, 100_000, 3, 0)
     common = dict(
         upstream_root=tmp_path,
         dataset="aids",
@@ -243,6 +251,18 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         DBSCAN(eps=parameters.delta, min_samples=parameters.cluster_size).fit_predict(
             expected_vectors
         ),
+    )
+    dbscan_manifest = json.loads(
+        Path(external_manifest["external_memory_artifacts"]["dbscan_manifest"])
+        .read_text(encoding="utf-8")
+    )
+    proof = json.loads(
+        Path(dbscan_manifest["shortcut_proof_path"]).read_text(encoding="utf-8")
+    )
+    assert proof["eps"] == 0.02
+    assert proof["min_samples"] == 3
+    assert proof["self_count_semantics"] == (
+        "each sample index counts itself exactly once"
     )
     legacy_rows = json.loads((legacy_root / "selected_common_recourses.json").read_text())
     external_rows = json.loads(
@@ -337,6 +357,7 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         external_exact_fallback_max_samples=0,
         external_summary_block_size=2,
         external_pair_store_source_manifest=source_manifest,
+        external_pair_store_source_owner_root=external_root,
         expected_sklearn_version=sklearn.__version__,
     )
     assert not (adopted_root / "external_memory/pair_store").exists()
@@ -426,6 +447,9 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
             handle.truncate(size)
 
     monkeypatch.setattr(chunk_cache, "_preallocate_file", portable_preallocate)
+    monkeypatch.setattr(
+        chunk_cache, "_allocated_bytes", lambda path: path.stat().st_size
+    )
     monkeypatch.setattr(chunk_cache, "_statvfs_free_bytes", lambda _path: 10**12)
     monkeypatch.setattr(
         recourse,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -110,9 +112,174 @@ def test_common_recourse_wrapper_exposes_external_engine_without_changing_defaul
     assert "--external-shortcut-failure-cap" in text
     assert "--external-summary-block-size" in text
     assert "--external-pair-store-source-manifest" in text
+    assert "--external-pair-store-source-owner-root" in text
+    assert 'EXTERNAL_PAIR_STORE_AUTO_ROOT="${EXTERNAL_PAIR_STORE_AUTO_ROOT:-}"' in text
+    assert "[COMRECGC_PAIR_SOURCE_SELECTED] mode=promoted_final" in text
     assert 'DEVICE="${DEVICE:-cpu}"' in text
     assert "AIDS external engine is CPU-only" in text
     assert "--expected-sklearn-version" in text
+
+
+def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
+    tmp_path: Path,
+) -> None:
+    wrapper = ROOT / "scripts/autodl/run_comrecgc_standardized_continuation.sh"
+    capture = tmp_path / "argv.txt"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    pair_root = tmp_path / "old/common_recourse/external_memory/pair_store"
+    pair_root.mkdir(parents=True)
+    (pair_root / "run_manifest.json").write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "fresh-output"
+    values = {
+        "DATASET": "aids",
+        "SOURCE_GENERATION_ROOT": str(tmp_path / "generation"),
+        "COMRECGC_UPSTREAM_ROOT": str(tmp_path / "upstream"),
+        "DATASET_DIR": str(tmp_path / "dataset"),
+        "SOURCE_CSV": str(tmp_path / "source.csv"),
+        "DISTANCE_CHECKPOINT": str(tmp_path / "distance.pt"),
+        "DATASET_CSV": str(tmp_path / "dataset.csv"),
+        "TEACHER_PATH": str(tmp_path / "teacher.pkl"),
+        "MOLCLR_ROOT": str(tmp_path / "molclr"),
+        "MOLCLR_CHECKPOINT": str(tmp_path / "molclr.pt"),
+        "THRESHOLDS_PATH": str(tmp_path / "thresholds.json"),
+        "OUTPUT_ROOT": str(output),
+        "AUTODL_PYTHON": str(fake_python),
+        "CAPTURE": str(capture),
+        "DEVICE": "cpu",
+        "COMMON_RECOURSE_ENGINE": "external_memory_exact_v1",
+        "COMRECGC_EXTERNAL_DBSCAN_SHORTCUT_MODE": (
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        "COMRECGC_EXTERNAL_SHORTCUT_SEED_COUNT": "3",
+        "COMRECGC_EXTERNAL_SHORTCUT_FAILURE_CAP": "4096",
+        "COMRECGC_EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE": "65536",
+        "COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES": "0",
+        "COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE": "65536",
+        "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT": str(pair_root),
+        "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT": str(
+            pair_root.parents[2]
+        ),
+        # A closed-chunk fallback is configured, but the promoted terminal
+        # must be selected without forwarding cache allocation arguments.
+        "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT": str(
+            pair_root / "checkpoint.json"
+        ),
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_ROOT": str(tmp_path / "cache"),
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_LOCK": str(tmp_path / "cache.lock"),
+    }
+    completed = subprocess.run(
+        ["bash", str(wrapper)],
+        env={**os.environ, **values},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    argv = capture.read_text(encoding="utf-8").splitlines()
+    assert "[COMRECGC_PAIR_SOURCE_SELECTED] mode=promoted_final" in completed.stdout
+    assert argv[argv.index("--external-pair-store-source-manifest") + 1] == str(
+        pair_root / "run_manifest.json"
+    )
+    assert argv[argv.index("--external-pair-store-source-owner-root") + 1] == str(
+        pair_root.parents[2]
+    )
+    assert argv[argv.index("--external-dbscan-shortcut-mode") + 1] == (
+        "all_core_one_component_adaptive_anchor_v1"
+    )
+    assert argv[argv.index("--external-exact-fallback-max-samples") + 1] == "0"
+    assert "--external-pair-store-source-checkpoint" not in argv
+    assert "--external-vector-cache-root" not in argv
+    assert "--external-vector-cache-lock" not in argv
+
+    (pair_root / "run_manifest.json").unlink()
+    fallback_capture = tmp_path / "fallback-argv.txt"
+    fallback_values = {
+        **values,
+        "CAPTURE": str(fallback_capture),
+        "OUTPUT_ROOT": str(tmp_path / "fresh-output-fallback"),
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB": "3",
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT": str(tmp_path / "proc"),
+    }
+    fallback = subprocess.run(
+        ["bash", str(wrapper)],
+        env={**os.environ, **fallback_values},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fallback_argv = fallback_capture.read_text(encoding="utf-8").splitlines()
+    assert "[COMRECGC_PAIR_SOURCE_SELECTED] mode=closed_chunks" in fallback.stdout
+    assert fallback_argv[
+        fallback_argv.index("--external-pair-store-source-checkpoint") + 1
+    ] == str(pair_root / "checkpoint.json")
+    assert fallback_argv[
+        fallback_argv.index("--external-vector-cache-root") + 1
+    ] == str(tmp_path / "cache")
+    assert fallback_argv[
+        fallback_argv.index("--external-vector-cache-lock") + 1
+    ] == str(tmp_path / "cache.lock")
+    assert fallback_argv[
+        fallback_argv.index("--external-vector-cache-min-free-gb") + 1
+    ] == "3"
+    assert fallback_argv[
+        fallback_argv.index("--external-vector-cache-proc-root") + 1
+    ] == str(tmp_path / "proc")
+
+    (pair_root / "run_manifest.json").touch()
+    invalid = subprocess.run(
+        ["bash", str(wrapper)],
+        env={
+            **os.environ,
+            **fallback_values,
+            "OUTPUT_ROOT": str(tmp_path / "fresh-output-invalid-final"),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid.returncode == 64
+    assert "invalid promoted pair-store manifest" in invalid.stderr
+
+
+def test_aids_exact_v5_supervisor_freezes_cpu_exact_and_storage_contracts() -> None:
+    text = (
+        ROOT / "scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh"
+    ).read_text(encoding="utf-8")
+    required = {
+        '"${DATASET:-}" == "aids"',
+        '"${DEVICE:-}" == "cpu"',
+        '"${GPU_REQUIRED:-}" == "0"',
+        '"${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1"',
+        '"${COMRECGC_EXTERNAL_MAX_RSS_GB:-}" == "96"',
+        '"${COMRECGC_EXTERNAL_QUERY_BLOCK_SIZE:-}" == "8"',
+        '"${COMRECGC_EXTERNAL_CHECKPOINT_INTERVAL_BLOCKS:-}" == "1"',
+        '"${COMRECGC_EXTERNAL_SHORTCUT_SEED_COUNT:-}" == "3"',
+        '"${COMRECGC_EXTERNAL_SHORTCUT_FAILURE_CAP:-}" == "4096"',
+        '"${COMRECGC_EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE:-}" == "65536"',
+        '"${COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES:-}" == "0"',
+        '"${COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE:-}" == "65536"',
+        '"${COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB:-}" == "3"',
+        "all_core_one_component_adaptive_anchor_v1",
+        "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT",
+        "COMRECGC_EXTERNAL_ROUTE_LOCK",
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT",
+        "route/cache/highmem locks must be distinct",
+        "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES",
+        "production test hooks are forbidden",
+    }
+    assert all(value in text for value in required)
+    assert text.count("resume_count=$((resume_count + 1))") == 1
+    assert "AIDS_COMRECGC_EXACT_ROUTE_V5_SUPERVISOR_PASS" in text
+    paired = (
+        ROOT / "scripts/slurm/run_aids_comrecgc_exact_route_v5_supervisor.sh"
+    ).read_text(encoding="utf-8")
+    assert "do not submit" in paired
+    assert "exit 78" in paired
+    assert "bash scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh" in paired
 
 
 def test_unified_eval_supports_explicit_resume_and_smoke_audit_input() -> None:

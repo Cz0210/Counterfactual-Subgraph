@@ -24,6 +24,9 @@ def _portable_preallocate(path: Path, *, size: int) -> None:
 
 def _source_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     monkeypatch.setattr(chunk_cache, "_preallocate_file", _portable_preallocate)
+    monkeypatch.setattr(
+        chunk_cache, "_allocated_bytes", lambda path: path.stat().st_size
+    )
     monkeypatch.setattr(chunk_cache, "_statvfs_free_bytes", lambda _path: 10**12)
     identity = {"dataset": "aids", "seed": 0, "theta": 0.1}
     chunk_identities = [
@@ -107,11 +110,13 @@ def test_cartesian_chunk_cache_matches_materialized_arrays_and_survives_cache_lo
             require_cache=True,
             proc_root=kwargs["proc_root"],
         )
-    rebuilt = chunk_cache.materialize_cartesian_chunk_vector_cache(
-        **kwargs, resume=True
-    )
-    assert np.array_equal(np.load(rebuilt.vectors_path), expected_vectors)
-    assert rebuilt.manifest_sha256 == result.manifest_sha256
+    with pytest.raises(
+        ExternalMemoryDBSCANError,
+        match="LOCAL_ARTIFACT_MISSING_FRESH_REBUILD_REQUIRED",
+    ):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(
+            **kwargs, resume=True
+        )
 
 
 def test_cartesian_chunk_cache_rejects_pair_order_even_with_resigned_chunk(
@@ -164,6 +169,23 @@ def test_cartesian_chunk_cache_rejects_active_source_owner(
     assert audit["eligible_for_adoption"] is False
 
 
+def test_cartesian_chunk_cache_allows_fresh_consumer_parent_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    proc_root = Path(kwargs["proc_root"])
+    process = proc_root / "12346"
+    process.mkdir()
+    (process / "cmdline").write_bytes(
+        b"python\0run_comrecgc_standardized_continuation.py\0"
+        + str(kwargs["source_owner_root"]).encode("utf-8")
+    )
+    monkeypatch.setattr(chunk_cache.os, "getppid", lambda: 12346)
+
+    result = chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+    assert result.manifest_path.is_file()
+
+
 def test_cartesian_chunk_cache_headroom_is_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,18 +195,90 @@ def test_cartesian_chunk_cache_headroom_is_fail_closed(
         chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
 
 
+def test_cartesian_chunk_cache_rejects_sparse_nominal_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(chunk_cache, "_allocated_bytes", lambda _path: 0)
+    with pytest.raises(ExternalMemoryDBSCANError, match="ALLOCATION_EVIDENCE_MISMATCH"):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+
+
+def test_cartesian_chunk_cache_replays_fallocate_after_precheckpoint_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    real_preallocate = chunk_cache._preallocate_file
+    calls = 0
+
+    def allocate_then_crash(path: Path, *, size: int) -> None:
+        nonlocal calls
+        calls += 1
+        real_preallocate(path, size=size)
+        if calls == 1:
+            raise RuntimeError("allocation-before-checkpoint")
+
+    monkeypatch.setattr(chunk_cache, "_preallocate_file", allocate_then_crash)
+    with pytest.raises(RuntimeError, match="allocation-before-checkpoint"):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+    state = chunk_cache._load_checkpoint(
+        Path(kwargs["persistent_root"]) / "checkpoint.json"
+    )
+    assert state["phase"] == "allocate_cache"
+
+    result = chunk_cache.materialize_cartesian_chunk_vector_cache(
+        **kwargs, resume=True
+    )
+    assert calls == 2
+    terminal = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert terminal["allocation_complete_authenticated"] is True
+    allocation_state = chunk_cache._load_checkpoint(
+        Path(terminal["allocation_checkpoint_path"])
+    )
+    assert allocation_state["phase"] == "cache_ready"
+    assert allocation_state["allocation_evidence"]["allocation_complete"] is True
+
+
+def test_cartesian_chunk_cache_rejects_resigned_allocation_evidence_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    original = chunk_cache._write_checkpoint
+
+    def stop_after_allocation(path: Path, payload: object) -> dict[str, object]:
+        result = original(path, payload)
+        if result.get("phase") == "allocation_complete":
+            raise RuntimeError("allocation checkpoint stop")
+        return result
+
+    monkeypatch.setattr(chunk_cache, "_write_checkpoint", stop_after_allocation)
+    with pytest.raises(RuntimeError, match="allocation checkpoint stop"):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+    state_path = Path(kwargs["persistent_root"]) / "checkpoint.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["allocation_evidence"]["physical_allocation_verified"] = False
+    state["checkpoint_payload_sha256"] = chunk_cache._payload_sha256(state)
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    monkeypatch.setattr(chunk_cache, "_write_checkpoint", original)
+    with pytest.raises(
+        ExternalMemoryDBSCANError, match="ALLOCATION_EVIDENCE_MISMATCH"
+    ):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(
+            **kwargs, resume=True
+        )
+
+
 def test_cartesian_chunk_cache_rejects_resigned_cursor_jump(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     kwargs = _source_fixture(tmp_path, monkeypatch)
     original = chunk_cache._write_checkpoint
-    writes = 0
-
     def interrupt_after_first_chunk(path: Path, payload: object) -> dict[str, object]:
-        nonlocal writes
         result = original(path, payload)
-        writes += 1
-        if writes == 2:
+        if (
+            result.get("phase") == "copy_chunks"
+            and result.get("next_chunk_index") == 1
+        ):
             raise RuntimeError("injected crash")
         return result
 
@@ -199,7 +293,10 @@ def test_cartesian_chunk_cache_rejects_resigned_cursor_jump(
     state["checkpoint_payload_sha256"] = chunk_cache._payload_sha256(state)
     state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
     monkeypatch.setattr(chunk_cache, "_write_checkpoint", original)
-    with pytest.raises(ExternalMemoryDBSCANError, match="COMMITTED_PREFIX_MISMATCH"):
+    with pytest.raises(
+        ExternalMemoryDBSCANError,
+        match="COMMITTED_PREFIX_MISMATCH|CHECKPOINT_CURSOR_MISMATCH",
+    ):
         chunk_cache.materialize_cartesian_chunk_vector_cache(
             **kwargs, resume=True
         )

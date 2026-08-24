@@ -440,6 +440,100 @@ def test_pair_store_adoption_rejects_manifest_symlink(tmp_path: Path) -> None:
         )
 
 
+def test_promoted_pair_store_adoption_rejects_any_partial_artifact(
+    tmp_path: Path,
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    partial = source.manifest_path.parent / "recourse_vectors.partial.npy"
+    partial.write_bytes(b"unfinished-consolidation")
+
+    with pytest.raises(Exception, match="PAIR_STORE_SOURCE_HAS_PARTIAL_ARTIFACTS"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=source.manifest_path,
+            source_owner_root=source.manifest_path.parent,
+            adoption_root=tmp_path / "fresh",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+    assert not (tmp_path / "fresh").exists()
+
+
+def test_promoted_pair_store_adoption_rejects_writable_sibling_inode(
+    tmp_path: Path,
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    sibling = source.manifest_path.parent / "consolidation.audit.json"
+    sibling.write_text("{}\n", encoding="utf-8")
+    proc = tmp_path / "proc"
+    fd = proc / "701/fd/9"
+    fd.parent.mkdir(parents=True)
+    fd.symlink_to(sibling)
+    fdinfo = proc / "701/fdinfo/9"
+    fdinfo.parent.mkdir(parents=True)
+    fdinfo.write_text("flags:\t02\n", encoding="utf-8")
+
+    with pytest.raises(Exception, match="PAIR_STORE_SOURCE_TREE_HAS_LIVE_WRITER"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=source.manifest_path,
+            source_owner_root=source.manifest_path.parent,
+            adoption_root=tmp_path / "fresh",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+    assert not (tmp_path / "fresh").exists()
+
+
+def test_promoted_pair_store_adoption_rejects_live_owner_process(
+    tmp_path: Path,
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    process = proc / "702"
+    process.mkdir(parents=True)
+    process.joinpath("cmdline").write_bytes(
+        b"python\0run_common_recourse.py\0--output-dir\0"
+        + os.fsencode(source.manifest_path.parent)
+        + b"\0"
+    )
+
+    with pytest.raises(Exception, match="PAIR_STORE_SOURCE_OWNER_PROCESS_ACTIVE"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=source.manifest_path,
+            source_owner_root=source.manifest_path.parent,
+            adoption_root=tmp_path / "fresh",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+    assert not (tmp_path / "fresh").exists()
+
+
+def test_promoted_pair_store_adoption_allows_fresh_consumer_parent_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    process = proc / "703"
+    process.mkdir(parents=True)
+    process.joinpath("cmdline").write_bytes(
+        b"python\0run_comrecgc_standardized_continuation.py\0"
+        b"--external-pair-store-source-owner-root\0"
+        + os.fsencode(source.manifest_path.parent)
+        + b"\0"
+    )
+    monkeypatch.setattr(external_recourse.os, "getppid", lambda: 703)
+
+    adopted = adopt_external_pair_store_read_only(
+        source_manifest_path=source.manifest_path,
+        source_owner_root=source.manifest_path.parent,
+        adoption_root=tmp_path / "fresh",
+        expected_scientific_identity=identity,
+        proc_root=proc,
+    )
+    assert adopted.adoption_manifest_path.is_file()
+
+
 def test_official_coverage_receives_zero_copy_vector_view(tmp_path: Path) -> None:
     import torch
 

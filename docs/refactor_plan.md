@@ -1,5 +1,30 @@
 # Refactor Plan
 
+## 2026-08-24: Release-gate the fresh AIDS exact-Cartesian v5 route
+
+- [x] Forward every adaptive DBSCAN, promoted-source, chunk-cache, headroom,
+  procfs, and resume control through the production AutoDL continuation wrapper.
+- [x] Prefer a physically promoted final pair store; reject an invalid final
+  instead of silently falling back to chunks.
+- [x] Reject terminal partial/symlink artifacts, writable sibling inodes, live
+  old-owner processes, scientific/hash/stat drift, and source path escape.
+- [x] Authenticate `posix_fallocate` completion and NPY header/size/headroom,
+  replay allocation safely across the pre-checkpoint crash window, and bind the
+  evidence through copy, promotion, and terminal validation.
+- [x] Require a fresh root if a terminal chunk-cache manifest loses its local
+  reconstructible artifact; never rewrite a published closure.
+- [x] Freeze the v5 supervisor to CPU-only adaptive exact DBSCAN with
+  `eps=0.02`, `min_samples=3`, self-neighbour semantics, dense fallback zero,
+  route-wide scratch locking, and one process-loss-only same-root retry.
+- [x] Keep the paired Slurm wrapper static/non-runnable and document the exact
+  fresh AutoDL task/environment recipe.
+- [x] Cover promoted-final priority, real shell forwarding, invalid-final,
+  partial/writer/owner, allocation crash/tamper, Cartesian order, sklearn label,
+  official greedy/medoid/selected-row, and terminal resume closures.
+- [ ] Obtain independent review of the final route commit, then run a fresh
+  source audit and production-shaped subset smoke before building/deploying a
+  fresh v5 controller.  Never signal or write repair-v4 during this step.
+
 ## 2026-08-23: Accept pinned-official GlobalGCE affine edge scores
 
 - [x] Trace the negative edge values to the pinned official decoder, where the

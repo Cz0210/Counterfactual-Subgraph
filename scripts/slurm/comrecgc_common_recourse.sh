@@ -39,6 +39,7 @@ EXTERNAL_SUMMARY_BLOCK_SIZE="${EXTERNAL_SUMMARY_BLOCK_SIZE:-65536}"
 EXTERNAL_PAIR_STORE_SOURCE_MANIFEST="${EXTERNAL_PAIR_STORE_SOURCE_MANIFEST:-}"
 EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT="${EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT:-}"
 EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT="${EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT:-}"
+EXTERNAL_PAIR_STORE_AUTO_ROOT="${EXTERNAL_PAIR_STORE_AUTO_ROOT:-}"
 EXTERNAL_VECTOR_CACHE_ROOT="${EXTERNAL_VECTOR_CACHE_ROOT:-}"
 EXTERNAL_VECTOR_CACHE_LOCK="${EXTERNAL_VECTOR_CACHE_LOCK:-}"
 EXTERNAL_VECTOR_CACHE_MIN_FREE_GB="${EXTERNAL_VECTOR_CACHE_MIN_FREE_GB:-3}"
@@ -79,17 +80,32 @@ if [[ "$ENGINE" == "external_memory_exact_v1" ]]; then
   DEVICE="${DEVICE:-cpu}"
   [[ "$DEVICE" == "cpu" ]] || { echo "[COMRECGC_CONFIG_ERROR] AIDS external engine is CPU-only" >&2; exit 2; }
   ENGINE_ARGS+=(--external-max-rss-gb "$EXTERNAL_MAX_RSS_GB" --external-query-block-size "$EXTERNAL_QUERY_BLOCK_SIZE" --external-dbscan-shortcut-mode "$EXTERNAL_DBSCAN_SHORTCUT_MODE" --external-shortcut-seed-count "$EXTERNAL_SHORTCUT_SEED_COUNT" --external-shortcut-failure-cap "$EXTERNAL_SHORTCUT_FAILURE_CAP" --external-shortcut-query-block-size "$EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE" --external-exact-fallback-max-samples "$EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES" --external-summary-block-size "$EXTERNAL_SUMMARY_BLOCK_SIZE" --expected-sklearn-version "$EXPECTED_SKLEARN_VERSION")
-  if [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" ]]; then
-    ENGINE_ARGS+=(--external-pair-store-source-manifest "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST")
+  if [[ -n "$EXTERNAL_PAIR_STORE_AUTO_ROOT" ]]; then
+    [[ "$EXTERNAL_PAIR_STORE_AUTO_ROOT" == /* && -d "$EXTERNAL_PAIR_STORE_AUTO_ROOT" && ! -L "$EXTERNAL_PAIR_STORE_AUTO_ROOT" ]] || { echo "[COMRECGC_CONFIG_ERROR] invalid automatic pair-store root" >&2; exit 2; }
+    if [[ -e "$EXTERNAL_PAIR_STORE_AUTO_ROOT/run_manifest.json" || -L "$EXTERNAL_PAIR_STORE_AUTO_ROOT/run_manifest.json" ]]; then
+      [[ -f "$EXTERNAL_PAIR_STORE_AUTO_ROOT/run_manifest.json" && -s "$EXTERNAL_PAIR_STORE_AUTO_ROOT/run_manifest.json" && ! -L "$EXTERNAL_PAIR_STORE_AUTO_ROOT/run_manifest.json" ]] || { echo "[COMRECGC_CONFIG_ERROR] invalid promoted pair-store manifest" >&2; exit 2; }
+      EXTERNAL_PAIR_STORE_SOURCE_MANIFEST="$EXTERNAL_PAIR_STORE_AUTO_ROOT/run_manifest.json"
+      EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT=""
+      EXTERNAL_VECTOR_CACHE_ROOT=""
+      EXTERNAL_VECTOR_CACHE_LOCK=""
+      echo "[COMRECGC_PAIR_SOURCE_SELECTED] mode=promoted_final manifest=$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST"
+    else
+      echo "[COMRECGC_PAIR_SOURCE_SELECTED] mode=closed_chunks checkpoint=$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT"
+    fi
   fi
   CHUNK_SOURCE_COUNT=0
   [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
   [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
   [[ -n "$EXTERNAL_VECTOR_CACHE_ROOT" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
   [[ -n "$EXTERNAL_VECTOR_CACHE_LOCK" ]] && CHUNK_SOURCE_COUNT=$((CHUNK_SOURCE_COUNT + 1))
-  [[ "$CHUNK_SOURCE_COUNT" -eq 0 || "$CHUNK_SOURCE_COUNT" -eq 4 ]] || { echo "[COMRECGC_CONFIG_ERROR] chunk source/cache arguments are all-or-none" >&2; exit 2; }
-  [[ -z "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" || "$CHUNK_SOURCE_COUNT" -eq 0 ]] || { echo "[COMRECGC_CONFIG_ERROR] terminal and chunk sources are mutually exclusive" >&2; exit 2; }
-  if [[ "$CHUNK_SOURCE_COUNT" -eq 4 ]]; then
+  if [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" ]]; then
+    [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" ]] || { echo "[COMRECGC_CONFIG_ERROR] terminal source requires owner root" >&2; exit 2; }
+    [[ "$CHUNK_SOURCE_COUNT" -eq 1 ]] || { echo "[COMRECGC_CONFIG_ERROR] terminal and chunk sources are mutually exclusive" >&2; exit 2; }
+    ENGINE_ARGS+=(--external-pair-store-source-manifest "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" --external-pair-store-source-owner-root "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT")
+  else
+    [[ "$CHUNK_SOURCE_COUNT" -eq 0 || "$CHUNK_SOURCE_COUNT" -eq 4 ]] || { echo "[COMRECGC_CONFIG_ERROR] chunk source/cache arguments are all-or-none" >&2; exit 2; }
+  fi
+  if [[ -z "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" && "$CHUNK_SOURCE_COUNT" -eq 4 ]]; then
     ENGINE_ARGS+=(--external-pair-store-source-checkpoint "$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT" --external-pair-store-source-owner-root "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" --external-vector-cache-root "$EXTERNAL_VECTOR_CACHE_ROOT" --external-vector-cache-lock "$EXTERNAL_VECTOR_CACHE_LOCK" --external-vector-cache-min-free-gb "$EXTERNAL_VECTOR_CACHE_MIN_FREE_GB" --external-vector-cache-proc-root "$EXTERNAL_VECTOR_CACHE_PROC_ROOT")
   fi
 else
