@@ -1,5 +1,16 @@
 # Decisions Log
 
+## [2026-08-24] Monitor unviable AutoDL work without taking task ownership
+
+The root-cause acceleration continuation adds a read-only persistent monitor
+whose spec freezes external PIDs, procfs start ticks, commands, output roots,
+progress probes, and GPU indices.  It classifies progress as progressing, slow,
+unviable, stalled, exited, or observation-failed and records rolling throughput
+and ETA every 60 seconds.  These states are diagnostic only: the monitor owns
+no scientific process, takes no GPU lock, never emits a cell PASS, and never
+signals a task.  Existing component controllers remain the only launch owners.
+
+
 ## [2026-08-24] Prefer a closed AIDS pair store and authenticate chunk-cache allocation
 
 ### Background

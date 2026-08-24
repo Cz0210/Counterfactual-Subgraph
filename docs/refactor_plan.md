@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-08-24: Root-cause acceleration progress health
+
+- [x] Add procfs-start-tick-bound, read-only external task monitoring.
+- [x] Separate RUNNING_PROGRESSING/SLOW/UNVIABLE/STALLED from PID liveness.
+- [x] Persist heartbeat, state, queue, ownership, runs and status JSONL without
+  acquiring a GPU lock or signalling scientific workers.
+- [ ] Freeze live PID/progress probes after the component controllers launch,
+  deploy from an immutable worktree, and keep a 60-second persistent heartbeat.
+
+
 ## 2026-08-24: Release-gate the fresh AIDS exact-Cartesian v5 route
 
 - [x] Forward every adaptive DBSCAN, promoted-source, chunk-cache, headroom,
