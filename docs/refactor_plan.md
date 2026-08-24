@@ -25,6 +25,24 @@
   source audit and production-shaped subset smoke before building/deploying a
   fresh v5 controller.  Never signal or write repair-v4 during this step.
 
+## 2026-08-24: BACE GlobalGCE v6 mining adoption and fresh fallback
+
+- [x] Add a deep exhaustive-v2 adoption proof for failed-v5 completed mining,
+  using SQLite `mode=ro&immutable=1` only.
+- [x] Bind failed task/root, train-only data, frozen GINE, official commit,
+  config, traversal order, 19 roots, 5,441,858 patterns, stable top-20,
+  source byte/stat identity, sidecars, and no-writer closure.
+- [x] Consume adopted graphs through one temporary official `find_fs` override;
+  retain official expansion, tensorization, decoder, and LHS→RHS semantics.
+- [x] Select adoption only on complete proof; otherwise run fresh exact-top-k-v2
+  without consuming any v5 pattern payload.
+- [x] Keep decision/bridge CPU-only and CUDA-hidden and formal training on one
+  exclusive GPU.
+- [x] Add tamper/fallback/consumer/controller tests, CLI entrypoints, paired
+  Slurm wrappers, documentation, and terminal proof propagation.
+- [ ] Deploy only from a fresh immutable v6 execution checkout/root; never
+  resume or relabel v5.
+
 ## 2026-08-23: Accept pinned-official GlobalGCE affine edge scores
 
 - [x] Trace the negative edge values to the pinned official decoder, where the

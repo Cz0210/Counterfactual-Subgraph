@@ -7,6 +7,9 @@
 # The historical RF build_bace_train_pool wrapper is not an exact-route CLI.
 # `globalgce-bridge-smoke` also exercises the pinned official decoder's
 # negative affine edge-score domain; an identity one-hot smoke is insufficient.
+# V6 may pass either a deep --gspan-adoption-proof or the controller-owned
+# --gspan-mining-decision; the latter resolves to adoption or fresh exact-v2
+# mining and rejects any attempt to combine both routes.
 # This wrapper never assumes a submodule is populated;
 # generic "$@" forwarding preserves exact AutoDL/Slurm CLI parity.
 #SBATCH --partition=A800

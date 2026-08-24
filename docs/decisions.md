@@ -54,6 +54,47 @@ non-runnable; no HPC experiment is launched.
 
 Accepted (code/tests only; remote launch remains separately gated)
 
+## [2026-08-24] Adopt failed-v5 GlobalGCE mining only through an exhaustive-v2 proof
+
+### Background
+
+BACE GlobalGCE v5 completed all 19 legacy gSpan roots and persisted 5,441,858
+patterns before rule training failed on the now-corrected negative affine edge
+score bridge. Re-mining is expensive, but the failed controller and parent run
+cannot be promoted to PASS merely because a large SQLite file is present.
+During diagnosis, one ordinary `mode=ro` SQLite open touched existing WAL/SHM
+sidecar metadata. The main database and checkpoint hashes, sizes, and mtimes
+did not change. Source SQLite is henceforth opened only with
+`mode=ro&immutable=1`; WAL must be absent or empty, while SHM is allowed only
+when its full pre/post stat and hash remain unchanged and no process holds a
+writable file descriptor.
+
+### Decision
+
+Permit v6 to reuse v5 mining only through
+`globalgce_gspan_exhaustive_v2_adoption_v1`. The proof binds the exact failed
+task/output root, incomplete parent run, pinned official commit, frozen BACE
+GINE, train-only source/native data, config, 19 roots, 5,441,858 patterns,
+traversal-order-v2 fingerprint, stable official top-20 payload/semantic hashes,
+checkpoint/SQLite bytes and stats, stable sidecars, and no-writer closure.
+
+The CPU-only CUDA-hidden mining decision chooses `adopt_v5_exhaustive` only on
+complete proof. Any unclosed identity chooses explicit
+`fresh_exact_top_k_v2` and consumes no v5 pattern bytes. The negative-score
+bridge smoke is CPU-only; only formal rule training requests an exclusive GPU
+under a fresh v6 controller/root. V5 remains immutable and FAILED.
+
+### Consequences
+
+- Adoption failure cannot silently mix v5 and fresh mining.
+- V5 failure never becomes scientific PASS.
+- V6 terminal artifacts bind and revalidate the adopted proof when used.
+- Provenance hashing and bridge smoke do not hold a GPU.
+
+### Status
+
+Accepted
+
 ## [2026-08-23] Interpret pinned GlobalGCE edge decoder outputs as categorical scores
 
 ### Background

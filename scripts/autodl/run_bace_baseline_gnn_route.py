@@ -71,6 +71,7 @@ def _fragment_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--neurosed-manifest")
     parser.add_argument("--globalgce-source-manifest")
     parser.add_argument("--globalgce-native-train-csv")
+    parser.add_argument("--globalgce-gspan-adoption-proof")
     parser.add_argument(
         "--globalgce-exact-top-k-pruning",
         action=argparse.BooleanOptionalAction,
@@ -96,6 +97,7 @@ def _fragment_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "neurosed_manifest": args.neurosed_manifest,
         "globalgce_source_manifest": args.globalgce_source_manifest,
         "globalgce_native_train_csv": args.globalgce_native_train_csv,
+        "globalgce_gspan_adoption_proof": args.globalgce_gspan_adoption_proof,
         "globalgce_exact_top_k_pruning": bool(
             args.globalgce_exact_top_k_pruning
         ),
@@ -170,6 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
     globalgce_train.add_argument(
         "--gspan-max-in-memory-candidates", type=int, default=256
     )
+    globalgce_train.add_argument("--gspan-adoption-proof")
+    globalgce_train.add_argument("--gspan-mining-decision")
     globalgce_train.add_argument(
         "--gspan-exact-top-k-pruning",
         action=argparse.BooleanOptionalAction,
@@ -327,6 +331,39 @@ def main(argv: list[str] | None = None) -> int:
             explicit_min_freq=args.min_freq,
             calibration_manifest=args.min_freq_manifest,
         )
+        adoption_proof = args.gspan_adoption_proof
+        exact_top_k_pruning = bool(args.gspan_exact_top_k_pruning)
+        if args.gspan_mining_decision:
+            if adoption_proof is not None or exact_top_k_pruning:
+                raise ValueError(
+                    "A mining decision cannot be combined with direct mining flags"
+                )
+            decision_path = Path(args.gspan_mining_decision).expanduser().resolve(
+                strict=True
+            )
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(decision, dict)
+                or decision.get("schema_version")
+                != "bace_globalgce_v6_mining_decision_v1"
+                or decision.get("status") != "PASS"
+            ):
+                raise ValueError("GlobalGCE v6 mining decision is not a PASS")
+            if decision.get("route") == "adopt_v5_exhaustive":
+                adoption_path = Path(
+                    str(decision.get("adoption_proof") or "")
+                ).resolve(strict=True)
+                try:
+                    adoption_path.relative_to(decision_path.parent)
+                except ValueError as exc:
+                    raise ValueError(
+                        "GlobalGCE adoption proof escapes the decision root"
+                    ) from exc
+                adoption_proof = str(adoption_path)
+            elif decision.get("route") == "fresh_exact_top_k_v2":
+                exact_top_k_pruning = True
+            else:
+                raise ValueError("GlobalGCE v6 mining decision route is invalid")
         result = build_bace_frozen_gine_rule_pool(
             source_manifest=args.source_manifest,
             native_train_csv=args.native_train_csv,
@@ -349,8 +386,9 @@ def main(argv: list[str] | None = None) -> int:
                     args.gspan_max_in_memory_candidates
                 ),
                 gspan_exact_top_k_pruning=bool(
-                    args.gspan_exact_top_k_pruning
+                    exact_top_k_pruning
                 ),
+                gspan_adoption_proof=adoption_proof,
             ),
         )
     elif args.stage == "gcf-export":

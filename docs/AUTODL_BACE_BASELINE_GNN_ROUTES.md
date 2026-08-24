@@ -319,3 +319,41 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py freeze \
 
 The final required files are `final_metrics.json`, `prefix_metrics.csv`,
 `FINAL_PASS.json`, `run_manifest.json`, and terminal `PASS`.
+
+## GlobalGCE v6 mining adoption
+
+`scripts/autodl/run_bace_globalgce_v6.py build-manifest` creates a fresh v6
+controller. Its CPU-only, CUDA-hidden mining decision first tries a deep
+`globalgce_gspan_exhaustive_v2_adoption_v1` proof for the 19-root failed-v5
+database. Complete dataset/GINE/config/train-only/traversal/checkpoint/SQLite/
+top-20/no-writer closure selects `adopt_v5_exhaustive`. Any missing closure
+selects `fresh_exact_top_k_v2` and training consumes no v5 pattern payload.
+
+The production negative affine edge-score bridge smoke also runs on CPU. Only
+formal rule training requests an exclusive GPU. Later calibration, selector,
+held-out test, and freeze stages retain the generic dependency graph. The v5
+task and run remain FAILED/incomplete and no v5 file is modified.
+
+Source SQLite queries use only `mode=ro&immutable=1`. WAL must be absent or
+empty. SHM may be non-empty only when its pre/post stat and SHA remain stable
+and no writable FD exists.
+
+The direct proof CLI is:
+
+```bash
+$PY scripts/baselines/globalgce/adopt_bace_v5_gspan_mining.py \
+  --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
+  --source-run-manifest "$V5_RUN_MANIFEST" \
+  --source-task-state "$V5_TASK_STATE" \
+  --source-checkpoint "$V5_GSPAN_CHECKPOINT" \
+  --source-sqlite "$V5_GSPAN_SQLITE" \
+  --official-root "$GLOBALGCE_OFFICIAL" \
+  --native-train-csv "$BACE_NATIVE_TRAIN_CSV" \
+  --source-manifest "$BACE_SOURCE_MANIFEST" \
+  --gine-checkpoint "$BACE_GINE" \
+  --output-dir "$FRESH_ADOPTION_ROOT" \
+  --expected-official-commit 157e65c2850bc787f229a1ee8c60564906b933f2 \
+  --expected-pattern-count 5441858 --expected-root-count 19 \
+  --min-freq 7 --top-k 20 --seed 13
+```
