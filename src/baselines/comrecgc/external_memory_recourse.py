@@ -676,7 +676,10 @@ def _pair_store_source_root_guard(
     """Close sibling partials, writable inodes, and old owner processes."""
 
     pair_root = pair_store_root.resolve(strict=True)
-    owner_root = source_owner_root.resolve(strict=True)
+    owner_logical = source_owner_root.expanduser()
+    if owner_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("PAIR_STORE_SOURCE_OWNER_ROOT_IS_SYMLINK")
+    owner_root = owner_logical.resolve(strict=True)
     try:
         pair_root.relative_to(owner_root)
     except ValueError as exc:
@@ -930,11 +933,14 @@ def adopt_external_pair_store_read_only(
         raise ExternalMemoryDBSCANError("adopted pair-store source is not regular")
     before = {str(path): _file_stat_identity(path) for path in sources}
     _validate_pair_store_manifest(source_path, source_manifest)
-    owner_root = (
+    owner_logical = (
         source_path.parent
         if source_owner_root is None
-        else Path(source_owner_root).expanduser().resolve(strict=True)
+        else Path(source_owner_root).expanduser()
     )
+    if owner_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("PAIR_STORE_SOURCE_OWNER_ROOT_IS_SYMLINK")
+    owner_root = owner_logical.resolve(strict=True)
     source_guard = _pair_store_source_root_guard(
         pair_store_root=source_path.parent,
         source_owner_root=owner_root,

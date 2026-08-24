@@ -440,6 +440,22 @@ def test_pair_store_adoption_rejects_manifest_symlink(tmp_path: Path) -> None:
         )
 
 
+def test_pair_store_adoption_rejects_owner_root_symlink(tmp_path: Path) -> None:
+    identity, source = _completed_pair_store(tmp_path)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    owner_alias = tmp_path / "owner-alias"
+    owner_alias.symlink_to(source.manifest_path.parent, target_is_directory=True)
+    with pytest.raises(Exception, match="OWNER_ROOT_IS_SYMLINK"):
+        adopt_external_pair_store_read_only(
+            source_manifest_path=source.manifest_path,
+            source_owner_root=owner_alias,
+            adoption_root=tmp_path / "fresh",
+            expected_scientific_identity=identity,
+            proc_root=proc,
+        )
+
+
 def test_promoted_pair_store_adoption_rejects_any_partial_artifact(
     tmp_path: Path,
 ) -> None:
