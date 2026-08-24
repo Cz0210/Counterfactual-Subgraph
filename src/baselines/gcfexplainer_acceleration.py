@@ -472,6 +472,272 @@ def _random_state_hashes(torch: Any, np: Any) -> dict[str, str | None]:
     }
 
 
+def _numeric_snapshot(value: Any, *, include_values: bool = False) -> dict[str, Any]:
+    """Capture exact numeric bytes without performing arithmetic."""
+
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()
+    if getattr(value, "is_sparse", False):
+        value = value.to_dense()
+    if hasattr(value, "contiguous"):
+        value = value.contiguous()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    import numpy as np
+
+    array = np.ascontiguousarray(value)
+    identity = hashlib.sha256()
+    identity.update(str(array.dtype).encode("ascii"))
+    identity.update(json.dumps(list(array.shape)).encode("ascii"))
+    identity.update(array.tobytes(order="C"))
+    result: dict[str, Any] = {
+        "dtype": str(array.dtype),
+        "shape": list(array.shape),
+        "sha256": identity.hexdigest(),
+    }
+    if array.ndim > 0:
+        if array.shape[0] == 0:
+            result["row_sha256"] = []
+        else:
+            rows = array.reshape(array.shape[0], -1)
+            result["row_sha256"] = [
+                hashlib.sha256(row.tobytes(order="C")).hexdigest() for row in rows
+            ]
+    if include_values:
+        result["values"] = array.tolist()
+    return result
+
+
+class LockstepVRRWTrace(AbstractContextManager["LockstepVRRWTrace"]):
+    """Record the first-divergence inputs and decisions of a bounded VRRW.
+
+    The wrappers only read tensors and RNG states.  They never draw randomness,
+    mutate a graph, reorder a neighbour or alter a return value.  This is
+    intentionally restricted to the 50/100-step diagnostic profiles.
+    """
+
+    def __init__(
+        self,
+        *,
+        vrrw: Any,
+        importance: Any,
+        torch: Any,
+        np: Any,
+        budget: int,
+    ) -> None:
+        if int(budget) not in QUICK_EQUIVALENCE_BUDGETS:
+            raise ValueError("Lockstep tracing is restricted to Quick-50/100.")
+        self.vrrw = vrrw
+        self.importance = importance
+        self.torch = torch
+        self.np = np
+        self.budget = int(budget)
+        self.events: list[dict[str, Any]] = []
+        self.step = 0
+        self.importance_call = 0
+        self._in_restart = False
+        self._originals: list[tuple[Any, str, Callable[..., Any]]] = []
+
+    def _rng(self) -> dict[str, str | None]:
+        return _random_state_hashes(self.torch, self.np)
+
+    def _canonical_for_hash(self, graph_hash: Any) -> str | None:
+        graph = self.vrrw.graph_map.get(graph_hash)
+        return canonical_graph_tensor_digest(graph) if graph is not None else None
+
+    def __enter__(self) -> "LockstepVRRWTrace":
+        original_importance = self.importance.call
+        original_move = self.vrrw.move_to_next_graph
+        original_restart = self.vrrw.restart_randomwalk
+        self._originals = [
+            (self.importance, "call", original_importance),
+            (self.vrrw, "move_to_next_graph", original_move),
+            (self.vrrw, "restart_randomwalk", original_restart),
+        ]
+
+        def traced_importance(graphs: Sequence[Any], wargs: Mapping[str, Any]) -> Any:
+            rng_before = self._rng()
+            result = original_importance(graphs, wargs)
+            rng_after = self._rng()
+            importance_rows, embeddings, coverage = result
+            model = wargs.get("gnn_model")
+            adapter_trace = getattr(model, "last_score_trace", None)
+            self.events.append(
+                {
+                    "event": "importance",
+                    "step": self.step,
+                    "phase": "restart" if self._in_restart else "transition",
+                    "call_index": self.importance_call,
+                    "ordered_input_graphs": [
+                        canonical_graph_tensor_digest(graph) for graph in graphs
+                    ],
+                    "importance": _numeric_snapshot(
+                        importance_rows, include_values=True
+                    ),
+                    "embeddings": _numeric_snapshot(embeddings),
+                    "coverage": _numeric_snapshot(coverage),
+                    "frozen_gine": dict(adapter_trace) if adapter_trace else None,
+                    "rng_before": rng_before,
+                    "rng_after": rng_after,
+                }
+            )
+            self.importance_call += 1
+            return result
+
+        def traced_restart(input_graphs: Sequence[Any]) -> Any:
+            rng_before = self._rng()
+            self._in_restart = True
+            try:
+                result = original_restart(input_graphs)
+            finally:
+                self._in_restart = False
+            self.events.append(
+                {
+                    "event": "restart",
+                    "step": self.step,
+                    "selected_graph": self._canonical_for_hash(result),
+                    "rng_before": rng_before,
+                    "rng_after": self._rng(),
+                }
+            )
+            return result
+
+        def traced_move(*args: Any, **kwargs: Any) -> Any:
+            self.step += 1
+            graph_hash = kwargs.get("graph_hash", args[0] if args else None)
+            current_graph = self._canonical_for_hash(graph_hash)
+            transition_known_before = graph_hash in self.vrrw.transitions
+            rng_before = self._rng()
+            result = original_move(*args, **kwargs)
+            rng_after = self._rng()
+            next_hash, teleported = result
+            transition = self.vrrw.transitions.get(graph_hash)
+            selected_index: int | None = None
+            selected_action: list[Any] | None = None
+            if transition is not None and next_hash is not None:
+                hashes, actions = transition[0], transition[1]
+                try:
+                    selected_index = list(hashes).index(next_hash)
+                    selected_action = list(actions[selected_index])
+                except (ValueError, IndexError):
+                    pass
+            self.events.append(
+                {
+                    "event": "move",
+                    "step": self.step,
+                    "current_graph": current_graph,
+                    "transition_known_before": transition_known_before,
+                    "selected_index": selected_index,
+                    "selected_action": selected_action,
+                    "selected_graph": self._canonical_for_hash(next_hash),
+                    "teleported": bool(teleported),
+                    "candidate_count": len(self.vrrw.counterfactual_candidates),
+                    "rng_before": rng_before,
+                    "rng_after": rng_after,
+                }
+            )
+            return result
+
+        self.importance.call = traced_importance
+        self.vrrw.restart_randomwalk = traced_restart
+        self.vrrw.move_to_next_graph = traced_move
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        for owner, name, original in reversed(self._originals):
+            setattr(owner, name, original)
+        self._originals.clear()
+
+    def payload(self) -> dict[str, Any]:
+        payload = {
+            "schema_version": 1,
+            "diagnostic_only": True,
+            "budget": self.budget,
+            "event_count": len(self.events),
+            "events": self.events,
+        }
+        payload["trace_sha256"] = _stable_json_sha256(payload)
+        return payload
+
+
+def _first_value_difference(
+    legacy: Any, optimized: Any, path: str = ""
+) -> tuple[str, Any, Any] | None:
+    if type(legacy) is not type(optimized):
+        return path, legacy, optimized
+    if isinstance(legacy, Mapping):
+        if list(legacy) != list(optimized):
+            return f"{path}.keys", list(legacy), list(optimized)
+        for key in legacy:
+            found = _first_value_difference(
+                legacy[key], optimized[key], f"{path}.{key}" if path else str(key)
+            )
+            if found is not None:
+                return found
+        return None
+    if isinstance(legacy, list):
+        if len(legacy) != len(optimized):
+            return f"{path}.length", len(legacy), len(optimized)
+        for index, (left, right) in enumerate(zip(legacy, optimized, strict=True)):
+            found = _first_value_difference(left, right, f"{path}[{index}]")
+            if found is not None:
+                return found
+        return None
+    return None if legacy == optimized else (path, legacy, optimized)
+
+
+def compare_lockstep_traces(legacy_path: Path, optimized_path: Path) -> dict[str, Any]:
+    """Report the exact first event/field divergence between two quick runs."""
+
+    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    optimized = json.loads(optimized_path.read_text(encoding="utf-8"))
+    first: dict[str, Any] | None = None
+    if legacy.get("budget") != optimized.get("budget"):
+        first = {
+            "event_index": None,
+            "step": None,
+            "event": None,
+            "field": "budget",
+            "legacy": legacy.get("budget"),
+            "optimized": optimized.get("budget"),
+        }
+    else:
+        left_events = list(legacy.get("events", []))
+        right_events = list(optimized.get("events", []))
+        for index, (left, right) in enumerate(
+            zip(left_events, right_events, strict=False)
+        ):
+            difference = _first_value_difference(left, right)
+            if difference is not None:
+                field, left_value, right_value = difference
+                first = {
+                    "event_index": index,
+                    "step": left.get("step"),
+                    "event": left.get("event"),
+                    "field": field,
+                    "legacy": left_value,
+                    "optimized": right_value,
+                }
+                break
+        if first is None and len(left_events) != len(right_events):
+            first = {
+                "event_index": min(len(left_events), len(right_events)),
+                "step": None,
+                "event": None,
+                "field": "events.length",
+                "legacy": len(left_events),
+                "optimized": len(right_events),
+            }
+    return {
+        "schema_version": 1,
+        "status": "PASS" if first is None else "FAILED",
+        "equivalence": "LOCKSTEP_EXACT" if first is None else "FIRST_DIVERGENCE_FOUND",
+        "legacy_path": str(legacy_path.resolve()),
+        "optimized_path": str(optimized_path.resolve()),
+        "first_divergence": first,
+    }
+
+
 def build_vrrw_equivalence_trace(
     *, payload: Mapping[str, Any], torch: Any, np: Any, budget: int
 ) -> dict[str, Any]:
@@ -598,6 +864,15 @@ def compare_vrrw_equivalence(
     )
     mismatches = [key for key in compared if legacy[1].get(key) != optimized[1].get(key)]
     failures.extend(f"canonical_mismatch:{key}" for key in mismatches)
+    legacy_lockstep = legacy_root / "lockstep_trace.json"
+    optimized_lockstep = optimized_root / "lockstep_trace.json"
+    lockstep_comparison: dict[str, Any] | None = None
+    if legacy_lockstep.is_file() and optimized_lockstep.is_file():
+        lockstep_comparison = compare_lockstep_traces(
+            legacy_lockstep, optimized_lockstep
+        )
+        if lockstep_comparison["status"] != "PASS":
+            failures.append("lockstep_first_divergence")
     return {
         "schema_version": 1,
         "status": "PASS" if not failures else "FAILED",
@@ -616,6 +891,7 @@ def compare_vrrw_equivalence(
             optimized[0]
         ),
         "compared_fields": list(compared),
+        "lockstep_comparison": lockstep_comparison,
         "failures": failures,
     }
 
@@ -763,11 +1039,13 @@ __all__ = [
     "OrderedLRU",
     "OrderedImportanceAcceleration",
     "OrderedNeighbourAcceleration",
+    "LockstepVRRWTrace",
     "VRRWPhaseProfiler",
     "build_acceleration_gate",
     "build_vrrw_equivalence_trace",
     "canonical_graph_tensor_digest",
     "compare_vrrw_equivalence",
+    "compare_lockstep_traces",
     "compare_same_gpu_profiles",
     "ordered_parallel_map",
     "scientific_replay_contract_sha256",

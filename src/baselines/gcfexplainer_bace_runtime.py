@@ -34,6 +34,7 @@ from src.baselines.gcfexplainer_acceleration import (
     BufferedVRRWLogging,
     GCFAccelerationConfig,
     LEGACY_ACCELERATION_MODE,
+    LockstepVRRWTrace,
     ORDERED_ACCELERATION_MODE,
     OrderedImportanceAcceleration,
     OrderedNeighbourAcceleration,
@@ -127,6 +128,7 @@ def _load_bace_native_gnn(
     source_records: Sequence[Mapping[str, Any]],
     device: str,
     acceleration: GCFAccelerationConfig | None = None,
+    diagnostic_trace_enabled: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     if checkpoint_kind == "frozen_project_gine_bundle":
         model = BACEFrozenGINENativeGraphAdapter(
@@ -135,6 +137,7 @@ def _load_bace_native_gnn(
             graph_schema=schema,
             device=device,
             acceleration=acceleration,
+            diagnostic_trace_enabled=diagnostic_trace_enabled,
         ).eval()
         return model, model.provenance()
     model = _load_official_gnn(
@@ -544,6 +547,7 @@ def run_bace_official_vrrw(
         source_records=selected,
         device=target_device1,
         acceleration=acceleration,
+        diagnostic_trace_enabled=str(profile) == "equivalence_quick",
     )
     internal_predictions = _predict_graphs(model, graphs, target_device1)
     write_jsonl(
@@ -590,6 +594,7 @@ def run_bace_official_vrrw(
         progress_every=acceleration.progress_every,
     )
     importance_acceleration: OrderedImportanceAcceleration | None = None
+    lockstep_trace: LockstepVRRWTrace | None = None
     random_walk_started: float | None = None
     random_walk_finished: float | None = None
     try:
@@ -629,6 +634,16 @@ def run_bace_official_vrrw(
                     )
                 )
             stack.enter_context(profiler)
+            if str(profile) == "equivalence_quick":
+                lockstep_trace = stack.enter_context(
+                    LockstepVRRWTrace(
+                        vrrw=vrrw,
+                        importance=importance,
+                        torch=torch,
+                        np=np,
+                        budget=int(m),
+                    )
+                )
             stack.enter_context(_official_vrrw_alpha_endpoint_patch(vrrw))
             random_walk_started = time.perf_counter()
             vrrw.counterfactual_summary_with_randomwalk(
@@ -655,6 +670,8 @@ def run_bace_official_vrrw(
         budget=int(m),
     )
     write_json(root / "equivalence_trace.json", equivalence_trace)
+    if lockstep_trace is not None:
+        write_json(root / "lockstep_trace.json", lockstep_trace.payload())
     graph_map = dict(payload.get("graph_map", {}))
     candidates = list(payload.get("counterfactual_candidates", []))
     gpu_total_bytes = 0
@@ -734,6 +751,14 @@ def run_bace_official_vrrw(
         "counterfactuals_sha256": sha256_file(result_path),
         "equivalence_trace_path": str(root / "equivalence_trace.json"),
         "equivalence_trace_sha256": sha256_file(root / "equivalence_trace.json"),
+        "lockstep_trace_path": (
+            str(root / "lockstep_trace.json") if lockstep_trace is not None else None
+        ),
+        "lockstep_trace_sha256": (
+            sha256_file(root / "lockstep_trace.json")
+            if lockstep_trace is not None
+            else None
+        ),
         "performance_profile_path": str(root / "performance_profile.json"),
         "performance_profile_sha256": sha256_file(root / "performance_profile.json"),
         "official_algorithms_reused": [

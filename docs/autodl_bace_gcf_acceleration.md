@@ -37,6 +37,29 @@ scripts/autodl/run_bace_gcf_quick_replay.sh
 `diagnostic_only=true` 和 `eligible_for_full_acceleration_gate=false`。即使
 50/100 均 PASS，也不能替代下面正式的 500/1000 gate。
 
+Quick profile 还会写入 `lockstep_trace.json`。它逐次记录 restart、
+importance 和 move 的 RNG 状态、canonical 输入顺序、GINE collated batch
+tensor、hidden/logit row digest、coverage 以及最终动作。gate 在两侧均有该文件
+时报告 `lockstep_comparison.first_divergence`，包含第一个 event、step 和字段；
+不再只用最终 coverage 猜测原因。trace 只允许 M=50/100，且包装器不调用 RNG、
+不修改返回值。
+
+Frozen-GINE 评分统一走 `FrozenGINEBatchScorer`。默认 cache capacity 为 0；
+显式启用时只缓存完整且顺序完全相同的 batch。partial hit、行级 dedup 和
+chunking 仍然禁止。CPU/GPU 数值与 repeated-cold raw-byte identity 可用以下
+有界诊断生成 JSON（该结果不授权替换 VRRW）：
+
+```bash
+python scripts/autodl/benchmark_bace_frozen_gine_batch.py \
+  --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
+  --dataset-dir <frozen BACE dataset> \
+  --checkpoint-dir <frozen calibrated GINE> \
+  --output-dir <fresh root>
+```
+
+`scripts/slurm/benchmark_bace_frozen_gine_batch.sh` 是同步的 HPC wrapper。
+
 ## 50k 前置硬门禁
 
 先在同一物理 GPU 上顺序执行 legacy/ordered-v2 的 500 和 1000 step fresh smoke：
@@ -94,9 +117,8 @@ full `ordered_v2` 必须显式传入该 gate；否则 fail closed。未通过 ga
 
 - `performance_profile.json`：random-walk wall time、phase time/calls、steps/s、RSS、peak GPU memory、adapter cache counters；
 - `equivalence_trace.json`：去除进程随机 Python hash 后的 canonical transition/candidate/RNG digest；
+- `lockstep_trace.json`（仅 Quick-50/100）：第一处分歧所需的逐调用精确证据；
 - 原有 `counterfactuals.pt`、`run_manifest.json`、`_RUN_COMPLETE.json`。
 
-AutoDL-only 指令与仓库默认 Slurm 同步规则在本轮冲突，因此没有新增 HPC wrapper；没有连接、提交或修改任何 HPC 作业。
-
-现有 paired Slurm full wrapper 已静态同步新增 CLI，并显式固定为 legacy
-模式；本轮未提交、连接或运行 HPC 作业。
+本轮未提交、连接或修改任何 HPC 作业；新增 benchmark CLI 的 paired Slurm
+仅是静态可审查入口。现有 full wrapper 仍显式固定为 legacy 模式。

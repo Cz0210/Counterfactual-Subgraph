@@ -9036,3 +9036,19 @@ Accepted
   called a structural counterfactual difference.
 - The diagnostic is evidence only and is permanently paper-ineligible.  It
   cannot release an optimized 50k run or weaken the formal M500 gate.
+
+## 2026-08-24 — Diagnose GCF raw-byte identity before optimized replacement
+
+- Quick-50/100 records a read-only lockstep trace at every restart, importance
+  call and move.  It binds RNG state, canonical ordered neighbours, exact
+  frozen-GINE batch tensors and row outputs, coverage and selected transition,
+  so a failed replay identifies the first field rather than only a final
+  candidate digest.
+- Frozen-GINE inference uses one shared ordered-batch scorer.  Its optional
+  cache is whole-batch-only; a miss scores the original duplicate-preserving
+  batch.  Partial-row reuse, deduplication and chunking remain forbidden.
+- CPU/GPU and repeated-cold byte identities are diagnostic evidence, not an
+  equivalence waiver.  Allclose output cannot be promoted to exact VRRW
+  equivalence when it changes an official raw embedding hash.
+- Existing 50k writers remain untouched.  Replays use immutable commits and
+  fresh roots; optimized full remains ineligible until all exact gates pass.

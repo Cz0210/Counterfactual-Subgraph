@@ -33,6 +33,7 @@ from src.baselines.gcfexplainer_mutagenicity_adapter import (
 )
 from src.data.molecular_graph_dataset import MolecularGraphData, collate_molecular_graphs
 from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
+from src.baselines.frozen_gine_batch_scorer import FrozenGINEBatchScorer
 from src.oracles.gnn_oracle import load_gnn_checkpoint_bundle, sha256_file
 from src.baselines.comrecgc.bace_preprocessing import (
     NativeGraphPreprocessRequest,
@@ -104,6 +105,8 @@ class BACEFrozenGINENativeGraphAdapter:
         preprocess_max_inflight: int = 64,
         source_cache_capacity: int = 0,
         candidate_cache_capacity: int = 0,
+        gine_batch_cache_capacity: int = 0,
+        diagnostic_trace_enabled: bool = False,
     ) -> None:
         torch = _require_torch()
         root = Path(checkpoint_dir).expanduser().resolve()
@@ -145,12 +148,22 @@ class BACEFrozenGINENativeGraphAdapter:
         self.preprocess_max_inflight = int(preprocess_max_inflight)
         self.source_cache_capacity = int(source_cache_capacity)
         self.candidate_cache_capacity = int(candidate_cache_capacity)
+        self.gine_batch_cache_capacity = int(gine_batch_cache_capacity)
         if self.preprocess_workers < 0:
             raise ValueError("preprocess_workers cannot be negative.")
         if self.preprocess_max_inflight <= 0:
             raise ValueError("preprocess_max_inflight must be positive.")
-        if self.source_cache_capacity < 0 or self.candidate_cache_capacity < 0:
+        if (
+            self.source_cache_capacity < 0
+            or self.candidate_cache_capacity < 0
+            or self.gine_batch_cache_capacity < 0
+        ):
             raise ValueError("BACE preprocessing cache capacities cannot be negative.")
+        if (
+            self.acceleration.mode == LEGACY_ACCELERATION_MODE
+            and self.gine_batch_cache_capacity != 0
+        ):
+            raise ValueError("Legacy BACE scoring forbids the GINE batch cache.")
         if self.preprocess_engine == LEGACY_PREPROCESS_ENGINE and any(
             (
                 self.preprocess_workers,
@@ -207,6 +220,17 @@ class BACEFrozenGINENativeGraphAdapter:
         # runtime's current CUDA index.
         self._parameter = next(self.model.parameters())
         self._torch = torch
+        self._gine_scorer = FrozenGINEBatchScorer(
+            model=self.model,
+            device=self.device,
+            temperature=self.temperature,
+            checkpoint_id=self.checkpoint_id,
+            collate_fn=lambda rows: collate_molecular_graphs(
+                rows, edge_feature_dim=self.edge_feature_dim
+            ),
+            cache_capacity=self.gine_batch_cache_capacity,
+            diagnostic_trace=diagnostic_trace_enabled,
+        )
 
     def eval(self) -> "BACEFrozenGINENativeGraphAdapter":
         self.model.eval()
@@ -216,7 +240,30 @@ class BACEFrozenGINENativeGraphAdapter:
         self.device = device
         self.model.to(device)
         self._parameter = next(self.model.parameters())
+        self._gine_scorer.device = device
         return self
+
+    @property
+    def last_score_trace(self) -> Mapping[str, Any] | None:
+        """Exact last GINE input/output trace for bounded equivalence runs."""
+
+        return self._gine_scorer.last_trace
+
+    def _score_valid_graphs(
+        self,
+        graphs: Sequence[MolecularGraphData],
+        *,
+        valid_positions: Sequence[int],
+        input_row_count: int,
+    ) -> tuple[Any, Any]:
+        score = self._gine_scorer.score(
+            graphs,
+            context={
+                "valid_positions": [int(value) for value in valid_positions],
+                "input_row_count": int(input_row_count),
+            },
+        )
+        return score.graph_hidden, score.project_logits
 
     @staticmethod
     def _plain_rows(value: Any, *, cast: Any) -> tuple[tuple[Any, ...], ...]:
@@ -559,11 +606,11 @@ class BACEFrozenGINENativeGraphAdapter:
         project_logits[:, 0] = -20.0
         project_logits[:, 1] = 20.0
         if valid_graphs:
-            batch = collate_molecular_graphs(
-                valid_graphs, edge_feature_dim=self.edge_feature_dim
-            ).to(self.device)
-            valid_hidden = self.model.encode_graph(batch)
-            valid_logits = self.model.classifier(valid_hidden) / self.temperature
+            valid_hidden, valid_logits = self._score_valid_graphs(
+                valid_graphs,
+                valid_positions=valid_positions,
+                input_row_count=len(graphs),
+            )
             positions = torch.tensor(
                 valid_positions, dtype=torch.long, device=valid_logits.device
             )
@@ -638,11 +685,11 @@ class BACEFrozenGINENativeGraphAdapter:
         valid_hidden = None
         valid_logits = None
         if valid_graphs:
-            batch = collate_molecular_graphs(
-                valid_graphs, edge_feature_dim=self.edge_feature_dim
-            ).to(self.device)
-            valid_hidden = self.model.encode_graph(batch)
-            valid_logits = self.model.classifier(valid_hidden) / self.temperature
+            valid_hidden, valid_logits = self._score_valid_graphs(
+                valid_graphs,
+                valid_positions=valid_positions,
+                input_row_count=len(graphs),
+            )
         self.phase_seconds["gine"] += time.perf_counter() - inference_started
 
         assemble_started = time.perf_counter()
@@ -695,6 +742,7 @@ class BACEFrozenGINENativeGraphAdapter:
                 "batch_semantics": "legacy_full_valid_row_batch_v1",
                 "in_call_smiles_deduplication": False,
                 "gine_chunking": False,
+                "frozen_gine_batch_scorer": self._gine_scorer.report(),
                 "phase_seconds": dict(sorted(self.phase_seconds.items())),
             },
             "preprocess_engine": self.preprocess_engine,
