@@ -59,6 +59,9 @@ python scripts/autodl/benchmark_bace_frozen_gine_batch.py \
 ```
 
 `scripts/slurm/benchmark_bace_frozen_gine_batch.sh` 是同步的 HPC wrapper。
+AutoDL 上的 `scripts/autodl/run_bace_gcf_lockstep_quick50.sh` 先运行该
+benchmark，再按 legacy-A、legacy-B、ordered-v2 顺序运行 fresh Quick-50；
+legacy-A/B 不完全一致时会立即停止，不运行 ordered-v2。
 
 ## 50k 前置硬门禁
 
