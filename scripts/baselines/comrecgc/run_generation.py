@@ -103,6 +103,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--parent-limit", type=int)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--gnn-device",
+        help=(
+            "Optional frozen-classifier device.  When omitted, --device is "
+            "used.  A separate CPU GINE device permits byte-deterministic "
+            "graph identities while keeping NeuroSED on CUDA."
+        ),
+    )
+    parser.add_argument(
+        "--distance-device",
+        help=(
+            "Optional NeuroSED device.  When omitted, --device is used."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument(
         "--bace-preprocess-engine",
@@ -225,6 +239,8 @@ def main() -> int:
             parent_limit=int(args.parent_limit),
             parameters=parameters,
             device=args.device,
+            gnn_device=args.gnn_device,
+            distance_device=args.distance_device,
             batch_size=args.batch_size,
             bace_preprocess_engine=args.bace_preprocess_engine,
             bace_preprocess_workers=args.bace_preprocess_workers,

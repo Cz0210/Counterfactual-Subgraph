@@ -28,6 +28,9 @@ python scripts/baselines/comrecgc/run_generation_equivalence_pair.py \
   --distance-checkpoint "${DISTANCE_CHECKPOINT:?}" \
   --output-dir "${OUTPUT_DIR:?}" \
   --steps "${STEPS:?500 or 1000}" \
+  --device "${DEVICE:-cuda:0}" \
+  --gnn-device "${GNN_DEVICE:-cpu}" \
+  --distance-device "${DISTANCE_DEVICE:-cuda:0}" \
   --workers "${WORKERS:-4}" \
   --max-inflight "${MAX_INFLIGHT:-64}" \
   --source-cache-capacity "${SOURCE_CACHE_CAPACITY:-1024}" \

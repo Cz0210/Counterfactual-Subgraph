@@ -1266,6 +1266,8 @@ def run_project_generation(
     parent_limit: int,
     parameters: GenerationParameters,
     device: str = "cuda:0",
+    gnn_device: str | None = None,
+    distance_device: str | None = None,
     batch_size: int = 128,
     bace_preprocess_engine: str = LEGACY_PREPROCESS_ENGINE,
     bace_preprocess_workers: int = 0,
@@ -1293,6 +1295,8 @@ def run_project_generation(
     diagnostic_equivalence_steps: int | None = None,
     equivalence_gate_role: str | None = None,
 ) -> dict[str, Any]:
+    resolved_gnn_device = str(gnn_device or device)
+    resolved_distance_device = str(distance_device or device)
     diagnostic_steps = (
         int(diagnostic_equivalence_steps)
         if diagnostic_equivalence_steps is not None
@@ -1404,8 +1408,17 @@ def run_project_generation(
         )
     root = require_empty_output(output_dir, resume=resume)
     torch, _Batch = _torch_stack()
-    if not torch.cuda.is_available() and str(device).startswith("cuda"):
-        raise RuntimeError("A CUDA device was requested but is not available.")
+    requested_devices = {
+        "gnn": resolved_gnn_device,
+        "distance": resolved_distance_device,
+    }
+    if not torch.cuda.is_available() and any(
+        value.startswith("cuda") for value in requested_devices.values()
+    ):
+        raise RuntimeError(
+            "A CUDA device was requested but is not available: "
+            f"{requested_devices}."
+        )
     if mode == "full" and os.environ.get("PYTHONHASHSEED") != "0":
         raise RuntimeError(
             "Exact COMRECGC checkpoints require PYTHONHASHSEED=0 before Python starts."
@@ -1484,12 +1497,12 @@ def run_project_generation(
                 model, model_provenance = load_aids_gnn(
                     gnn_checkpoint,
                     num_features=bundle.node_feature_dim,
-                    device=device,
+                    device=resolved_gnn_device,
                 )
                 embedding_model = AIDSGreedEmbeddingAdapter(
                     distance_checkpoint,
                     atom_vocabulary=[str(value) for value in bundle.atom_vocabulary],
-                    device=device,
+                    device=resolved_distance_device,
                 ).eval()
                 distance_provenance = embedding_model.provenance()
             elif dataset == "bace" and Path(gnn_checkpoint).expanduser().resolve().is_dir():
@@ -1511,7 +1524,7 @@ def run_project_generation(
                     gnn_checkpoint,
                     source_records=source_records,
                     graph_schema=bace_schema,
-                    device=device,
+                    device=resolved_gnn_device,
                     preprocess_engine=bace_preprocess_engine,
                     preprocess_workers=bace_preprocess_workers,
                     preprocess_max_inflight=bace_preprocess_max_inflight,
@@ -1522,8 +1535,8 @@ def run_project_generation(
                 embedding_model = modules["distance"].load_neurosed(
                     bundle.graphs,
                     neurosed_model_path=str(Path(distance_checkpoint).expanduser().resolve()),
-                    device=device,
-                ).to(device).eval()
+                    device=resolved_distance_device,
+                ).to(resolved_distance_device).eval()
                 distance_provenance = {
                     "checkpoint_path": str(Path(distance_checkpoint).expanduser().resolve()),
                     "checkpoint_sha256": sha256_file(distance_checkpoint),
@@ -1538,20 +1551,22 @@ def run_project_generation(
                     gnn_checkpoint,
                     num_features=bundle.node_feature_dim,
                     official_gnn_class=modules["gnn"].GNN,
-                    device=device,
+                    device=resolved_gnn_device,
                 )
                 embedding_model = modules["distance"].load_neurosed(
                     bundle.graphs,
                     neurosed_model_path=str(Path(distance_checkpoint).expanduser().resolve()),
-                    device=device,
-                ).to(device).eval()
+                    device=resolved_distance_device,
+                ).to(resolved_distance_device).eval()
                 distance_provenance = {
                     "checkpoint_path": str(Path(distance_checkpoint).expanduser().resolve()),
                     "checkpoint_sha256": sha256_file(distance_checkpoint),
                     "distance_model": f"{dataset}_neurosed",
                     "checkpoint_retrained": False,
                 }
-            predictions = _predict_internal(model, bundle.graphs, device=device)
+            predictions = _predict_internal(
+                model, bundle.graphs, device=resolved_gnn_device
+            )
             internal_counts = {str(key): int(value) for key, value in Counter(predictions).items()}
             config = {
                 "schema_version": 1,
@@ -1585,6 +1600,15 @@ def run_project_generation(
                     and model_provenance.get("rf_oracle_used") is False
                 ),
                 "distance_model": distance_provenance,
+                "device_contract": {
+                    "default_device": str(device),
+                    "gnn_device": resolved_gnn_device,
+                    "distance_device": resolved_distance_device,
+                    "split_scoring_enabled": (
+                        resolved_gnn_device != resolved_distance_device
+                    ),
+                    "graph_identity_model": "frozen_gine_graph_embedding",
+                },
                 "internal_prediction_counts": internal_counts,
                 "bace_preprocessing": (
                     {
@@ -1799,8 +1823,8 @@ def run_project_generation(
                     official,
                     model=model,
                     embedding_model=embedding_model,
-                    gnn_device=device,
-                    embedding_device=device,
+                    gnn_device=resolved_gnn_device,
+                    embedding_device=resolved_distance_device,
                     batch_size=batch_size,
                     trace_recorder=trace_recorder,
                     compatibility_audit=compatibility_audit,
@@ -1929,8 +1953,8 @@ def run_project_generation(
                         importance_args={
                             "gnn_model": model,
                             "neurosed_model": embedding_model,
-                            "gnn_device": device,
-                            "neurosed_device": device,
+                            "gnn_device": resolved_gnn_device,
+                            "neurosed_device": resolved_distance_device,
                         },
                         teleport_probability=parameters.teleport,
                         max_steps=parameters.steps,

@@ -59,6 +59,10 @@ def _command(
         str(args.parent_limit),
         "--device",
         args.device,
+        "--gnn-device",
+        args.gnn_device,
+        "--distance-device",
+        args.distance_device,
         "--batch-size",
         str(args.batch_size),
         "--trace-output-dir",
@@ -167,6 +171,16 @@ def main() -> int:
     parser.add_argument("--steps", type=int, choices=(500, 1000), required=True)
     parser.add_argument("--parent-limit", type=int, default=360)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--gnn-device",
+        default="cpu",
+        help="Deterministic frozen-GINE device shared by both A/B roles.",
+    )
+    parser.add_argument(
+        "--distance-device",
+        default="cuda:0",
+        help="NeuroSED device shared by both A/B roles.",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--max-inflight", type=int, default=64)

@@ -1487,6 +1487,10 @@ Mutagenicity roadmaps.
   baseline GNN identity instability from preprocessing/order changes.
 - [ ] Re-run fresh M500 only after the first divergence is fixed; keep the old
   formal 50k task running until the full equivalence and ETA gates pass.
+- [x] Split frozen-GINE and NeuroSED devices without changing the legacy
+  single-device default; bind both devices into command/config provenance.
+- [ ] Run both M500 roles with CPU GINE and CUDA NeuroSED after a bounded
+  repeated-cold proof confirms CPU byte identity and CUDA semantic parity.
 
 # 2026-08-24 — BACE GCF lockstep and frozen-GINE scoring
 

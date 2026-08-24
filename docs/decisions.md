@@ -9158,3 +9158,19 @@ Accepted
   equivalence when it changes an official raw embedding hash.
 - Existing 50k writers remain untouched.  Replays use immutable commits and
   fresh roots; optimized full remains ineligible until all exact gates pass.
+
+## 2026-08-24: Separate deterministic GINE identity from NeuroSED execution
+
+- COMRECGC's official graph key hashes the raw frozen-GINE graph embedding.
+  Repeated identical CUDA batches can differ in low bits because graph pooling
+  uses nondeterministic CUDA scatter reductions; those bytes must not be
+  mistaken for an RDKit/order/RNG change.
+- The project route now accepts separate classifier and distance devices.  A
+  replay may keep the frozen GINE on CPU for byte-stable graph identity while
+  keeping NeuroSED on CUDA.  Both A/B roles must use the same split contract,
+  and the devices are part of the scientific command/config identity.
+- The historical single `--device` behavior remains the default.  Existing
+  roots and running 50k processes are never migrated or resumed with the new
+  contract; all deterministic replays use fresh roots.
+- This is not an equivalence waiver: formal M500 still requires exact graph
+  order, trace, lineage, payload, checkpoint, and serialization parity.

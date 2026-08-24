@@ -43,6 +43,9 @@ BACE_SOURCE_CACHE_CAPACITY=${BACE_SOURCE_CACHE_CAPACITY:-0}
 BACE_CANDIDATE_CACHE_CAPACITY=${BACE_CANDIDATE_CACHE_CAPACITY:-0}
 BACE_ACCELERATION_GATE=${BACE_ACCELERATION_GATE:-}
 BACE_ACCELERATION_GATE_SHA256=${BACE_ACCELERATION_GATE_SHA256:-}
+DEVICE=${DEVICE:-cuda:0}
+GNN_DEVICE=${GNN_DEVICE:-$DEVICE}
+DISTANCE_DEVICE=${DISTANCE_DEVICE:-$DEVICE}
 
 for path in "$DATASET_DIR/dataset_summary.json" "$GNN_CHECKPOINT" "$DISTANCE_CHECKPOINT"; do
   test -s "$path" || { echo "missing input: $path" >&2; exit 2; }
@@ -66,7 +69,9 @@ args=(
   --distance-checkpoint "$DISTANCE_CHECKPOINT"
   --output-dir "$OUTPUT_DIR"
   --parent-limit 360
-  --device cuda:0
+  --device "$DEVICE"
+  --gnn-device "$GNN_DEVICE"
+  --distance-device "$DISTANCE_DEVICE"
   --batch-size 128
   --bace-preprocess-engine "$BACE_PREPROCESS_ENGINE"
   --bace-preprocess-workers "$BACE_PREPROCESS_WORKERS"

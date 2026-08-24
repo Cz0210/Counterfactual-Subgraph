@@ -38,6 +38,25 @@ def test_canonical_command_parameter_change_changes_identity() -> None:
     assert scientific_command_sha256(original) != scientific_command_sha256(changed)
 
 
+def test_split_gnn_and_distance_devices_are_explicit_command_identity() -> None:
+    combined = canonical_scientific_argv(_args("--device", "cuda:0"))
+    split = canonical_scientific_argv(
+        _args(
+            "--device",
+            "cuda:0",
+            "--gnn-device",
+            "cpu",
+            "--distance-device",
+            "cuda:0",
+        )
+    )
+
+    assert combined != split
+    assert any('gnn-device="cpu"' in item for item in split)
+    assert any('distance-device="cuda:0"' in item for item in split)
+    assert scientific_command_sha256(combined) != scientific_command_sha256(split)
+
+
 def test_preprocess_engine_and_worker_settings_are_checkpoint_identity() -> None:
     legacy = canonical_scientific_argv(_args())
     optimized = canonical_scientific_argv(
