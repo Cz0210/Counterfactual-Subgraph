@@ -21,6 +21,7 @@
   "terminal_pair_store_root": "__OLD_V4_TERMINAL_PAIR_STORE_ROOT__",
   "terminal_pair_store_manifest_sha256": "__PAIR_STORE_MANIFEST_SHA256__",
   "adopted_snapshot": {
+    "owner_namespace_root": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation",
     "owner_manifest": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/manifests/four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1.json",
     "owner_manifest_sha256": "6c6bea5157d86f2323681bc00310c1b89a2929ee635065965296885aed6524e6",
     "owner_task_gate": "/autodl-fs/data/counterfactual-subgraph-runtime/control/four_methods_four_datasets_continuation/four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1/tasks/aids_comrecgc_pair_store_physical_snapshot_v5_pair_order_v1/gate.json",

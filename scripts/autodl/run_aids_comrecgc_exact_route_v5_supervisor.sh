@@ -31,6 +31,7 @@ SCIENCE_EXEC_MODULE="src.utils.aids_comrecgc_v5_science_exec"
 : "${AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT:?snapshot adoption gate is required}"
 : "${AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST:?snapshot owner manifest is required}"
 : "${AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256:?snapshot owner manifest hash is required}"
+: "${AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT:?snapshot owner namespace is required}"
 : "${AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE:?snapshot owner task gate is required}"
 : "${AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE_SHA256:?snapshot owner task gate hash is required}"
 : "${AIDS_COMRECGC_V5_SNAPSHOT_MANIFEST_SHA256:?snapshot manifest hash is required}"
@@ -76,6 +77,7 @@ for path in \
   "$AIDS_COMRECGC_V5_SNAPSHOT_ROOT" \
   "$AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT" \
   "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST" \
+  "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT" \
   "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE" \
   "$COMRECGC_HIGHMEM_LOCK_PATH"; do
   [[ "$path" == /* ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] absolute path required: $path" >&2; exit 64; }
@@ -120,6 +122,7 @@ if ! PYTHONPATH="$PROJECT_ROOT" "$PYTHON" "$ADOPTION_CLI" \
     --proc-root "$AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT" \
     --owner-manifest "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST" \
     --owner-manifest-sha256 "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256" \
+    --owner-namespace-root "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT" \
     --owner-task-gate "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE" \
     --owner-task-gate-sha256 "$AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE_SHA256" \
     --snapshot-root "$AIDS_COMRECGC_V5_SNAPSHOT_ROOT" \

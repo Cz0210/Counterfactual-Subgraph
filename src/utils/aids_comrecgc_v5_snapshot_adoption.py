@@ -20,7 +20,7 @@ from src.utils.aids_comrecgc_v5_snapshot import (
 )
 
 
-ADOPTION_SCHEMA = "comrecgc_promoted_pair_store_snapshot_adoption_v1"
+ADOPTION_SCHEMA = "comrecgc_promoted_pair_store_snapshot_adoption_v2"
 SOURCE_CONTROLLER_ID = (
     "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1"
 )
@@ -142,6 +142,7 @@ def _publish_pass(path: Path) -> None:
 
 def _validate_owner(
     *,
+    owner_namespace_root: Path,
     owner_manifest_path: Path,
     owner_manifest_sha256: str,
     owner_task_gate_path: Path,
@@ -155,12 +156,11 @@ def _validate_owner(
         raise SnapshotAdoptionError("snapshot owner controller identity changed")
     if SOURCE_SNAPSHOT_TASK_ID not in owner.by_id:
         raise SnapshotAdoptionError("snapshot owner task is absent")
-    namespace_root = owner_manifest_path.parent.parent
     expected_manifest = (
-        namespace_root / "manifests" / f"{SOURCE_CONTROLLER_ID}.json"
+        owner_namespace_root / "manifests" / f"{SOURCE_CONTROLLER_ID}.json"
     ).resolve(strict=False)
     expected_gate = (
-        namespace_root
+        owner_namespace_root
         / SOURCE_CONTROLLER_ID
         / "tasks"
         / SOURCE_SNAPSHOT_TASK_ID
@@ -183,6 +183,7 @@ def _validate_owner(
         or len(runs) != 1
         or not isinstance(runs[0], Mapping)
         or runs[0].get("state") != "PASS"
+        or runs[0].get("instance_id") != "main"
         or int(runs[0].get("attempt", -1)) != 0
         or Path(str(runs[0].get("expected_output") or "")).resolve(strict=False)
         != snapshot_root
@@ -190,6 +191,7 @@ def _validate_owner(
         raise SnapshotAdoptionError("snapshot owner task is not exact PASS attempt-0")
     return {
         "controller_id": owner.controller_id,
+        "namespace_root": str(owner_namespace_root),
         "manifest": str(owner_manifest_path),
         "manifest_sha256": owner_manifest_sha256,
         "task_id": SOURCE_SNAPSHOT_TASK_ID,
@@ -203,6 +205,7 @@ def _validate_owner(
 
 def _identity(
     *,
+    owner_namespace_root: Path,
     owner_manifest_path: Path,
     owner_manifest_sha256: str,
     owner_task_gate_path: Path,
@@ -229,6 +232,7 @@ def _identity(
         "schema_version": ADOPTION_SCHEMA,
         "owner_controller_id": SOURCE_CONTROLLER_ID,
         "owner_task_id": SOURCE_SNAPSHOT_TASK_ID,
+        "owner_namespace_root": str(owner_namespace_root),
         "owner_manifest": str(owner_manifest_path),
         "owner_manifest_sha256": owner_manifest_sha256,
         "owner_task_gate": str(owner_task_gate_path),
@@ -335,6 +339,9 @@ def validate_snapshot_adoption(
     ):
         raise SnapshotAdoptionError("snapshot adoption terminal identity changed")
     owner = _validate_owner(
+        owner_namespace_root=_physical_dir(
+            identity["owner_namespace_root"], label="snapshot owner namespace root"
+        ),
         owner_manifest_path=_physical_file(
             identity["owner_manifest"], label="snapshot owner manifest"
         ),
@@ -361,6 +368,7 @@ def create_snapshot_adoption(
     proc_root: str | Path,
     owner_manifest: str | Path,
     owner_manifest_sha256: str,
+    owner_namespace_root: str | Path,
     owner_task_gate: str | Path,
     owner_task_gate_sha256: str,
     snapshot_root: str | Path,
@@ -417,12 +425,16 @@ def create_snapshot_adoption(
         _fsync_directory(output.parent)
     proc = _physical_dir(proc_root, label="proc root")
     owner_manifest_path = _physical_file(owner_manifest, label="snapshot owner manifest")
+    owner_namespace = _physical_dir(
+        owner_namespace_root, label="snapshot owner namespace root"
+    )
     owner_gate_path = _physical_file(owner_task_gate, label="snapshot owner task gate")
     snapshot = _physical_dir(snapshot_root, label="snapshot root")
     source = _physical_dir(source_root, label="snapshot source root")
     old_output = _physical_dir(allowed_output_root, label="old output root")
     old_project = _physical_dir(allowed_project_root, label="old project root")
     identity = _identity(
+        owner_namespace_root=owner_namespace,
         owner_manifest_path=owner_manifest_path,
         owner_manifest_sha256=owner_manifest_sha256,
         owner_task_gate_path=owner_gate_path,
@@ -446,6 +458,7 @@ def create_snapshot_adoption(
         expected_candidate_count=expected_candidate_count,
     )
     owner = _validate_owner(
+        owner_namespace_root=owner_namespace,
         owner_manifest_path=owner_manifest_path,
         owner_manifest_sha256=owner_manifest_sha256,
         owner_task_gate_path=owner_gate_path,

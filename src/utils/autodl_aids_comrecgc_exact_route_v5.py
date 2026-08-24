@@ -352,12 +352,20 @@ def _adopted_snapshot_evidence(
     *,
     spec: Mapping[str, Any],
     proc_root: Path,
+    owner_namespace_root: Path,
     expected_source_root: Path,
     expected_source_manifest_sha256: str,
 ) -> dict[str, Any]:
     raw = spec.get("adopted_snapshot")
     if not isinstance(raw, Mapping):
         raise RepairManifestError("AIDS v5 adopted snapshot identity is missing")
+    specified_namespace = _absolute(
+        raw.get("owner_namespace_root"),
+        label="snapshot owner namespace root",
+        kind="dir",
+    )
+    if specified_namespace != owner_namespace_root:
+        raise RepairManifestError("snapshot owner namespace is not control authority")
     owner_manifest = _absolute(
         raw.get("owner_manifest"), label="snapshot owner manifest", kind="file"
     )
@@ -374,12 +382,13 @@ def _adopted_snapshot_evidence(
         raw.get("owner_task_gate"), label="snapshot owner task gate", kind="file"
     )
     gate_sha = str(raw.get("owner_task_gate_sha256") or "")
-    namespace_root = owner_manifest.parent.parent
     expected_owner_manifest = (
-        namespace_root / "manifests" / f"{SNAPSHOT_OWNER_CONTROLLER_ID}.json"
+        owner_namespace_root
+        / "manifests"
+        / f"{SNAPSHOT_OWNER_CONTROLLER_ID}.json"
     ).resolve(strict=False)
     expected_gate = (
-        namespace_root
+        owner_namespace_root
         / SNAPSHOT_OWNER_CONTROLLER_ID
         / "tasks"
         / SNAPSHOT_OWNER_TASK_ID
@@ -403,6 +412,7 @@ def _adopted_snapshot_evidence(
         or len(runs) != 1
         or not isinstance(runs[0], Mapping)
         or runs[0].get("state") != "PASS"
+        or runs[0].get("instance_id") != "main"
         or int(runs[0].get("attempt", -1)) != 0
         or Path(str(runs[0].get("expected_output") or "")).resolve(strict=False)
         != snapshot_root
@@ -470,6 +480,7 @@ def _adopted_snapshot_evidence(
     return {
         "status": "PASS",
         "owner_controller_id": owner.controller_id,
+        "owner_namespace_root": str(owner_namespace_root),
         "owner_manifest": str(owner_manifest),
         "owner_manifest_sha256": owner_manifest_sha,
         "owner_task_id": SNAPSHOT_OWNER_TASK_ID,
@@ -670,6 +681,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     adopted_snapshot = _adopted_snapshot_evidence(
         spec=spec,
         proc_root=proc_root,
+        owner_namespace_root=(control_root / SOURCE_NAMESPACE).resolve(strict=True),
         expected_source_root=terminal_root,
         expected_source_manifest_sha256=str(terminal["source_manifest_sha256"]),
     )
@@ -730,6 +742,9 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": adopted_snapshot_root,
             "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST": str(
                 adopted_snapshot["owner_manifest"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT": str(
+                adopted_snapshot["owner_namespace_root"]
             ),
             "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256": str(
                 adopted_snapshot["owner_manifest_sha256"]
@@ -852,6 +867,8 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             str(adopted_snapshot["owner_manifest"]),
             "--owner-manifest-sha256",
             str(adopted_snapshot["owner_manifest_sha256"]),
+            "--owner-namespace-root",
+            str(adopted_snapshot["owner_namespace_root"]),
             "--owner-task-gate",
             str(adopted_snapshot["owner_task_gate"]),
             "--owner-task-gate-sha256",
@@ -1174,6 +1191,9 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST": str(
             adopted.get("owner_manifest")
         ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT": str(
+            adopted.get("owner_namespace_root")
+        ),
         "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256": str(
             adopted.get("owner_manifest_sha256")
         ),
@@ -1217,6 +1237,7 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "--proc-root": str(snapshot_contract.get("proc_root")),
         "--owner-manifest": str(adopted.get("owner_manifest")),
         "--owner-manifest-sha256": str(adopted.get("owner_manifest_sha256")),
+        "--owner-namespace-root": str(adopted.get("owner_namespace_root")),
         "--owner-task-gate": str(adopted.get("owner_task_gate")),
         "--owner-task-gate-sha256": str(adopted.get("owner_task_gate_sha256")),
         "--snapshot-root": str(adopted.get("snapshot_root")),

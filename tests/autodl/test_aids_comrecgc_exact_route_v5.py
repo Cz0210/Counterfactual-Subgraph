@@ -357,6 +357,7 @@ def _fixture(
             "terminal_pair_store_root": str(pair_root),
             "terminal_pair_store_manifest_sha256": sha256_file(pair_manifest),
             "adopted_snapshot": {
+                "owner_namespace_root": str(control / v5.SOURCE_NAMESPACE),
                 "owner_manifest": str(owner_manifest),
                 "owner_manifest_sha256": sha256_file(owner_manifest),
                 "owner_task_gate": str(owner_gate),
@@ -404,6 +405,7 @@ def _fixture(
         "snapshot_root": snapshot_root,
         "owner_manifest": owner_manifest,
         "owner_gate": owner_gate,
+        "owner_namespace_root": control / v5.SOURCE_NAMESPACE,
     }
 
 
@@ -475,6 +477,7 @@ def _adoption_kwargs(paths: dict[str, Path], output: Path) -> dict[str, Any]:
     return {
         "output_dir": output,
         "proc_root": paths["proc"],
+        "owner_namespace_root": frozen["owner_namespace_root"],
         "owner_manifest": frozen["owner_manifest"],
         "owner_manifest_sha256": frozen["owner_manifest_sha256"],
         "owner_task_gate": frozen["owner_task_gate"],
@@ -533,6 +536,85 @@ def test_snapshot_adoption_rejects_identical_gate_from_non_authority_path(
         adoption.create_snapshot_adoption(**kwargs)
 
 
+def test_builder_rejects_copied_owner_manifest_and_gate_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    forged_namespace = tmp_path / "forged-control/namespace"
+    copied_manifest = _file(
+        forged_namespace
+        / "manifests"
+        / f"{SNAPSHOT_OWNER_CONTROLLER_ID}.json",
+        paths["owner_manifest"].read_text(encoding="utf-8"),
+    )
+    copied_gate = _file(
+        forged_namespace
+        / SNAPSHOT_OWNER_CONTROLLER_ID
+        / "tasks"
+        / SNAPSHOT_OWNER_TASK_ID
+        / "gate.json",
+        paths["owner_gate"].read_text(encoding="utf-8"),
+    )
+    spec = json.loads(paths["spec"].read_text(encoding="utf-8"))
+    spec["adopted_snapshot"].update(
+        {
+            "owner_namespace_root": str(forged_namespace),
+            "owner_manifest": str(copied_manifest),
+            "owner_manifest_sha256": sha256_file(copied_manifest),
+            "owner_task_gate": str(copied_gate),
+            "owner_task_gate_sha256": sha256_file(copied_gate),
+        }
+    )
+    paths["spec"].write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(v5.RepairManifestError, match="control authority"):
+        v5.build_payload(spec_path=paths["spec"])
+
+
+def test_snapshot_adoption_rejects_copied_tree_outside_bound_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    forged_namespace = tmp_path / "forged-control/namespace"
+    copied_manifest = _file(
+        forged_namespace
+        / "manifests"
+        / f"{SNAPSHOT_OWNER_CONTROLLER_ID}.json",
+        paths["owner_manifest"].read_text(encoding="utf-8"),
+    )
+    copied_gate = _file(
+        forged_namespace
+        / SNAPSHOT_OWNER_CONTROLLER_ID
+        / "tasks"
+        / SNAPSHOT_OWNER_TASK_ID
+        / "gate.json",
+        paths["owner_gate"].read_text(encoding="utf-8"),
+    )
+    kwargs = _adoption_kwargs(paths, tmp_path / "adoption-forged-tree")
+    kwargs.update(
+        {
+            "owner_manifest": copied_manifest,
+            "owner_manifest_sha256": sha256_file(copied_manifest),
+            "owner_task_gate": copied_gate,
+            "owner_task_gate_sha256": sha256_file(copied_gate),
+        }
+    )
+    with pytest.raises(adoption.SnapshotAdoptionError, match="authority path"):
+        adoption.create_snapshot_adoption(**kwargs)
+
+
+def test_snapshot_adoption_requires_main_owner_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    gate = json.loads(paths["owner_gate"].read_text(encoding="utf-8"))
+    gate["runs"][0]["instance_id"] = "not-main"
+    paths["owner_gate"].write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8")
+    kwargs = _adoption_kwargs(paths, tmp_path / "adoption-non-main")
+    kwargs["owner_task_gate_sha256"] = sha256_file(paths["owner_gate"])
+    with pytest.raises(adoption.SnapshotAdoptionError, match="exact PASS attempt-0"):
+        adoption.create_snapshot_adoption(**kwargs)
+
+
 @pytest.mark.parametrize("tamper", ["owner_gate", "snapshot_manifest", "missing_pass"])
 def test_snapshot_adoption_revalidation_fails_closed_before_science(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
@@ -572,6 +654,7 @@ def test_snapshot_adoption_real_cli_create_and_validate_only(
     option_names = {
         "output_dir": "output-dir",
         "proc_root": "proc-root",
+        "owner_namespace_root": "owner-namespace-root",
         "owner_manifest": "owner-manifest",
         "owner_manifest_sha256": "owner-manifest-sha256",
         "owner_task_gate": "owner-task-gate",
@@ -675,6 +758,9 @@ def test_science_supervisor_runs_adoption_validator_before_any_science_spawn(
         ),
         "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": str(paths["snapshot_root"]),
         "AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT": str(adoption_root),
+        "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT": str(
+            identity["owner_namespace_root"]
+        ),
         "AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST": str(
             identity["owner_manifest"]
         ),

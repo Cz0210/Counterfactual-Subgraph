@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--proc-root", type=_absolute, required=True)
     parser.add_argument("--owner-manifest", type=_absolute, required=True)
     parser.add_argument("--owner-manifest-sha256", required=True)
+    parser.add_argument("--owner-namespace-root", type=_absolute, required=True)
     parser.add_argument("--owner-task-gate", type=_absolute, required=True)
     parser.add_argument("--owner-task-gate-sha256", required=True)
     parser.add_argument("--snapshot-root", type=_absolute, required=True)
@@ -72,6 +73,7 @@ def _common(args: argparse.Namespace) -> dict[str, object]:
         "proc_root": args.proc_root,
         "owner_manifest": args.owner_manifest,
         "owner_manifest_sha256": args.owner_manifest_sha256,
+        "owner_namespace_root": args.owner_namespace_root,
         "owner_task_gate": args.owner_task_gate,
         "owner_task_gate_sha256": args.owner_task_gate_sha256,
         "snapshot_root": args.snapshot_root,
@@ -119,6 +121,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected = {
             "owner_manifest": str(Path(args.owner_manifest).resolve(strict=True)),
             "owner_manifest_sha256": args.owner_manifest_sha256,
+            "owner_namespace_root": str(
+                Path(args.owner_namespace_root).resolve(strict=True)
+            ),
             "owner_task_gate": str(Path(args.owner_task_gate).resolve(strict=True)),
             "owner_task_gate_sha256": args.owner_task_gate_sha256,
             "snapshot_root": str(Path(args.snapshot_root).resolve(strict=True)),

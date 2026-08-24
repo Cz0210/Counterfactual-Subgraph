@@ -8,8 +8,9 @@
 - [x] Ignore bash/grep/regex literals and `python -c/-m` while rejecting real
   absolute, relative, flagged, direct, missing, or symlinked rogue workers.
 - [x] Bind the completed `pair_order_v1` snapshot to its exact owner manifest,
-  authoritative task-gate path/SHA, PASS attempt/output, all terminal manifest
-  hashes, and both large-array hashes.
+  exact persistent namespace root, namespace-derived task-gate path/SHA,
+  unique `main` PASS attempt/output, all terminal manifest hashes, and both
+  large-array hashes; copied manifest/gate trees are not authority.
 - [x] Add a PASS-last adoption task that fully reopens the immutable snapshot,
   publishes no arrays, and performs no copy, hardlink, or source write.
 - [x] Make fresh science consume the original immutable snapshot path while

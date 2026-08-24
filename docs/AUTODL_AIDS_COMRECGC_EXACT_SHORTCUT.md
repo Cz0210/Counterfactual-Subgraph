@@ -7,7 +7,8 @@ snapshot and then failed in its separate science task.  It is immutable.  The
 current release uses a new controller ID,
 `four_methods_four_datasets_aids_comrecgc_exact_route_v5_snapshot_adopt_v1`,
 with three tasks: selector freeze, read-only snapshot adoption, and fresh
-science.  The adoption task pins the old owner manifest/task gate/PASS/output
+science.  The adoption task pins the exact persistent controller namespace,
+then derives and pins the old owner manifest/task gate/unique-main PASS/output
 and every snapshot/array hash, reopens the full closure, writes only
 `snapshot_adoption_manifest.json` plus PASS, and never copies the 25 GB arrays.
 
@@ -195,6 +196,7 @@ AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT=<old common_recourse output>
 AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT=<old immutable worktree>
 AIDS_COMRECGC_V5_SNAPSHOT_ROOT=<frozen_pair_order_v1_snapshot_root>
 AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT={dep_aids_comrecgc_pair_store_snapshot_adoption_v5_v1_output}
+AIDS_COMRECGC_V5_SNAPSHOT_OWNER_NAMESPACE_ROOT=<exact_control_root>/four_methods_four_datasets_continuation
 AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST=<frozen_pair_order_v1_controller_manifest>
 AIDS_COMRECGC_V5_SNAPSHOT_OWNER_MANIFEST_SHA256=<frozen SHA-256>
 AIDS_COMRECGC_V5_SNAPSHOT_OWNER_TASK_GATE=<authoritative snapshot task gate>

@@ -15,8 +15,10 @@ would waste persistent capacity and create a second unnecessary data authority.
 
 Publish a new controller/root, never resume the failed science attempt.  Its
 middle task adopts the existing snapshot by read-only reference.  Authority is
-bound to the exact old controller-manifest SHA, the path-derived authoritative
-task gate and its SHA, PASS attempt zero and exact output, snapshot/DBSCAN/pair
+bound first to the exact persistent `control_root/four_methods_four_datasets_continuation`
+namespace, then to the controller-manifest SHA and the task gate derived from
+that namespace.  The gate must contain one `main` PASS attempt zero with the
+exact output.  Snapshot/DBSCAN/pair
 manifest SHA values, and pair/vector SHA values.  Adoption performs the same
 full source/destination/stat/writer/partial closure as snapshot publication,
 writes only a small fresh adoption manifest, and publishes PASS last.  Science
