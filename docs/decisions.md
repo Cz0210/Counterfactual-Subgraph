@@ -9168,3 +9168,13 @@ Accepted
 - The old v4 root stays read-only and receives no signal.  Any source drift,
   unexpected writer, symlink, partial, insufficient persistent-disk floor, or
   terminal artifact drift fails closed.
+## 2026-08-24 — AIDS physical snapshot freezes pair-index column semantics
+
+- The promoted AIDS pair store is candidate-major by row, but each
+  `pair_indices.npy` row is stored as `(parent_index, candidate_index)`.
+- The exact production identity is therefore
+  `parent_index = row % 1283` and `candidate_index = row // 1283` for all
+  91,916,686 rows.  Snapshot publication checks every row in bounded blocks.
+- The first fresh v5 controller correctly failed closed before copying because
+  its preflight assumed the opposite column order.  That controller/root remain
+  immutable failure evidence; a corrected route must use a fresh namespace.
