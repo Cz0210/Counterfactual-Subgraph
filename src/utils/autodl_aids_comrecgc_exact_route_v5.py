@@ -85,7 +85,7 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
 SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
-PAPER_PROTOCOL_RELEASE_COMMIT = "d3ab30b504540467835dd00f7bb6b67e518f7e9d"
+PAPER_PROTOCOL_RELEASE_COMMIT = "41756562d105f65b2510cdea344f36a6b1cfbae7"
 PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
     "src/baselines/comrecgc/close_pair_scan.py": {
         "git_blob": "3aff0dc908d08a8da3f49d397f65084c80c7a37b",
@@ -136,12 +136,12 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
         "sha256": "709f6a6b0ab3385d53b2af9715d743c68867fd140b276684a465233dfa2c45b5",
     },
     "scripts/autodl/run_four_gpu_recovery_controller.py": {
-        "git_blob": "8cb6b2b9936e739d7a292a82f3f4eaad40b6c2e4",
-        "sha256": "f23c4e633bf2f2275c729cd56bdc7823096798fc064070f94275c713a9723851",
+        "git_blob": "38a6a8688398e8681c6b6e31bcc1400ac547828f",
+        "sha256": "21b0600e59417838085b7f5465eafb3a2337cbae026fadac2f91d76fed8ea957",
     },
     "src/utils/autodl_aids_greed_full_scan_supervisor.py": {
-        "git_blob": "4c5259bf6ed8cbe9431ea24cab3779fe9254eb60",
-        "sha256": "844cc737b77c9d3121c365b88a1339c19081b09bced2ec28eb8df7ea4b2d8d72",
+        "git_blob": "e3b22d219decf781390e74829b28962fe9796196",
+        "sha256": "6a3777c52cc83fd724b289f80a31941080fcccbc3300ef9f900972fd1e5ecc18",
     },
     "scripts/autodl/run_aids_greed_full_scan_supervisor.py": {
         "git_blob": "6c067bce8da6d380d205e065099289ee97f9f888",
@@ -152,12 +152,32 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
         "sha256": "c936cf8a536330285b6afcfebb88647f6bcef2f577b50c4ff9dbd926a66b93d5",
     },
     "tests/autodl/test_aids_greed_full_scan_supervisor.py": {
-        "git_blob": "d2fc71666120c517a04d35982e015de601710e09",
-        "sha256": "473db58ca346103b18a0a380793fa51b43d56d8b4186435a9372c18f8955ce28",
+        "git_blob": "208ef7656364c9b5666a2b77b6b11e5df87b1069",
+        "sha256": "9c70f5302cfede6e57f8374bd16755c76c175ed2d07a0794598c29047a2d1fa9",
     },
     "tests/autodl/test_four_gpu_recovery_controller.py": {
-        "git_blob": "f4033ee3ac715200b2d6503fc4a20cda7b4c7e45",
-        "sha256": "889ba3daf4434125bd502cdf1577fc6e23b95386b09f1a23bc02dfb1cc388141",
+        "git_blob": "f00443fb3595e083de4ca7e7305136a14be0a411",
+        "sha256": "0ef2ae0f77e495d5c4a221b7aa14fdec8a0a434bbfe1339c2bf8c0ef4df58365",
+    },
+    "scripts/autodl/manage_mut_traceoff_parity_v1.py": {
+        "git_blob": "877e0419610e8261d13707272583a098cc2172a4",
+        "sha256": "20606b28ca892500d04e4f1f27caff9b1878ee94f0eeb38754fd49a317720893",
+    },
+    "scripts/slurm/manage_mut_traceoff_parity_v1.sh": {
+        "git_blob": "e8adbc1dbccc89e868b99e56d824eb68830fe9cc",
+        "sha256": "e2339bcecfd17932daefa4b4d34183643a38f1f85be00bdd8743788f3bc8a6ca",
+    },
+    "src/utils/autodl_mut_traceoff_parity_v1.py": {
+        "git_blob": "ba853462c39854005ee6f2feff9ae47eaaab4dc3",
+        "sha256": "78f777fb52467afc5ae165cade720998e9f24e7dcf7fc5ce06674c4c0d28509e",
+    },
+    "tests/autodl/test_mut_traceoff_parity_v1.py": {
+        "git_blob": "8c0e7dcc3144b6f221527640c5cca7fc42f9902a",
+        "sha256": "1b68ac8a6b2032e51679a2b3f0b531116632ffad3fdce99ec6f82c81199b33a3",
+    },
+    "tests/autodl/test_aids_comrecgc_exact_route_v5.py": {
+        "git_blob": "0d87ef246c7f835b80dc6d1ba5c03f0a10badb9b",
+        "sha256": "755b7d26b015cc6572121d198ca3298ef90ed4914ca76956e975c6b3d22121ec",
     },
     "docs/AUTODL_AIDS_CLOSE_PAIR_MATERIALIZER.md": {
         "git_blob": "96f55dca50c8c5eb115c8252233aeb1c2304f84c",
