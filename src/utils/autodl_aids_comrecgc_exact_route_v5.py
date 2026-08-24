@@ -85,7 +85,7 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
 SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
-PAPER_PROTOCOL_RELEASE_COMMIT = "739512c16783cbc5f5fc3a9d5c4b7010b5aa05e5"
+PAPER_PROTOCOL_RELEASE_COMMIT = "881c6628d4e4ce492ad8b93d3f5529bb411359fc"
 PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
     "src/baselines/comrecgc/close_pair_scan.py": {
         "git_blob": "3aff0dc908d08a8da3f49d397f65084c80c7a37b",
@@ -104,8 +104,8 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
         "sha256": "5d5a4619a055e30a94b720b836f16f5fafb0167463587e727780fef23d654b6f",
     },
     "scripts/baselines/comrecgc/build_close_pair_view.py": {
-        "git_blob": "078859ccc4db12da9c47969476aec2d027a427ed",
-        "sha256": "7b61a8b1505f07bf4c5f725e49cec081dce1e3a8521f85a58ccb777416baf969",
+        "git_blob": "41bb56d95a8cfd5656f07a7f016e02ba66180273",
+        "sha256": "b09cd3cb8e648018855559119a2d44549ab0161b812a2d47129a87d2179bd514",
     },
     "src/baselines/comrecgc/external_memory_dbscan.py": {
         "git_blob": "54fd31c1dfab46ff7b01b2871d48f52b664a7102",
@@ -134,6 +134,34 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
     "scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh": {
         "git_blob": "926664bc03ef4ec5b3b47d47839dffd8930d4dfa",
         "sha256": "709f6a6b0ab3385d53b2af9715d743c68867fd140b276684a465233dfa2c45b5",
+    },
+    "scripts/autodl/run_four_gpu_recovery_controller.py": {
+        "git_blob": "8cb6b2b9936e739d7a292a82f3f4eaad40b6c2e4",
+        "sha256": "f23c4e633bf2f2275c729cd56bdc7823096798fc064070f94275c713a9723851",
+    },
+    "src/utils/autodl_aids_greed_full_scan_supervisor.py": {
+        "git_blob": "4c5259bf6ed8cbe9431ea24cab3779fe9254eb60",
+        "sha256": "844cc737b77c9d3121c365b88a1339c19081b09bced2ec28eb8df7ea4b2d8d72",
+    },
+    "scripts/autodl/run_aids_greed_full_scan_supervisor.py": {
+        "git_blob": "172e1199056b8d226d8a80b220505cade9db759a",
+        "sha256": "3e6790ea235fece3f0a39660d6be092f3bc99bfd50dddf2186bba60bf2889e42",
+    },
+    "scripts/slurm/run_aids_greed_full_scan_supervisor.sh": {
+        "git_blob": "9b421848240dafc098b0134f7230cdd58cdafbee",
+        "sha256": "c936cf8a536330285b6afcfebb88647f6bcef2f577b50c4ff9dbd926a66b93d5",
+    },
+    "tests/autodl/test_aids_greed_full_scan_supervisor.py": {
+        "git_blob": "d2fc71666120c517a04d35982e015de601710e09",
+        "sha256": "473db58ca346103b18a0a380793fa51b43d56d8b4186435a9372c18f8955ce28",
+    },
+    "tests/autodl/test_four_gpu_recovery_controller.py": {
+        "git_blob": "f4033ee3ac715200b2d6503fc4a20cda7b4c7e45",
+        "sha256": "889ba3daf4434125bd502cdf1577fc6e23b95386b09f1a23bc02dfb1cc388141",
+    },
+    "docs/AUTODL_AIDS_CLOSE_PAIR_MATERIALIZER.md": {
+        "git_blob": "96f55dca50c8c5eb115c8252233aeb1c2304f84c",
+        "sha256": "19fe25e6289f319f0764973c4e0623aa43fb119a7e6cfa91a3ed3fbff84f3b85",
     },
 }
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
