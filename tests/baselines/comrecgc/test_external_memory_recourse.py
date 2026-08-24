@@ -750,7 +750,7 @@ def test_component_recovery_one_cluster_releases_streaming_summary(
     assert manifest["approximation_used"] is False
 
 
-def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(
+def test_proven_one_cluster_trace_casts_radius_to_float32_boundary(
     tmp_path: Path,
 ) -> None:
     import torch
@@ -760,7 +760,7 @@ def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(
     vectors, pair_values, dbscan = _one_cluster_fixture(
         tmp_path, values, pairs, eps=0.020
     )
-    expected = trace_official_cluster_order(
+    historical_widened = trace_official_cluster_order(
         labels=np.zeros(3, dtype=np.intp),
         recourse_vectors=values,
         pair_indices=[tuple(map(int, row)) for row in pairs],
@@ -785,11 +785,14 @@ def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(
         block_size=2,
     )
     assert float(np.float32(0.020)) < 0.020
-    assert actual.selected == expected
+    assert actual.selected != historical_widened
+    assert actual.selected[0]["covered_parent_indices_native"] == [1]
+    assert actual.selected[0]["member_counterfactual_indices"] == [11]
     assert actual.retained_positions_path is None
     assert actual.retained_vectors_path is None
     manifest = json.loads(actual.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["retained_count"] == 3
+    assert manifest["retained_count"] == 1
+    assert manifest["count_exactly_at_delta"] == 2
     assert manifest["float64_radius_membership_disagreement_count"] == 2
 
 

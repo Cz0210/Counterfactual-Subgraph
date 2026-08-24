@@ -1379,6 +1379,17 @@ Mutagenicity roadmaps.
   proof to fall back silently, and record applicability explicitly.
 - [ ] Run this gate from the immutable AutoDL execution checkout after the
   production close-view PASS; never promote its subset PASS to full DBSCAN PASS.
+
+# 2026-08-25 — One-cluster strict-radius post-hoc gate
+
+- [x] Cast the NumPy trace radius to the distance dtype before strict `<`,
+  matching official Torch scalar promotion without tolerance.
+- [x] Add a terminal-manifest-bound A/B replay for widened NumPy, corrected
+  NumPy, and official Torch masks, coverage sets, medoids, and selected trace.
+- [x] Publish PASS last only when the live widened mask and corrected mask are
+  identical; otherwise publish a corrected downstream-only replay artifact.
+- [ ] Run the audit after c766 one-cluster summary completion and before AIDS
+  standardization; never restart pair generation, close filtering, or DBSCAN.
 # 2026-08-22 — Final matrix dependency closure
 
 - [x] Bind the post-cell registry audit to sixteen distinct successful attempt

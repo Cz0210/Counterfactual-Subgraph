@@ -1408,7 +1408,8 @@ def _numpy_trace_membership(
     values: np.ndarray, *, center: np.ndarray, radius: float
 ) -> np.ndarray:
     distances = np.linalg.norm(values - center, axis=1)
-    return distances.astype(np.float64, copy=False) < float(radius)
+    radius_in_distance_dtype = np.asarray(float(radius), dtype=distances.dtype)
+    return distances < radius_in_distance_dtype
 
 
 def _validate_trace_mask_prefix(
@@ -1920,9 +1921,9 @@ def summarize_proven_one_cluster_external(
             )
         for offset in range(start, n_samples, int(block_size)):
             stop = min(n_samples, offset + int(block_size))
-            # The legacy trace executes ``float(np_scalar) < float(radius)``;
-            # the helper preserves that comparison instead of NumPy 2's
-            # value-based Python-scalar promotion.
+            # Match upstream Torch: cast the Python scalar to the distance
+            # tensor/array dtype, then apply strict ``<``.  Widening a float32
+            # distance first can incorrectly retain an exact-delta row.
             retained = _numpy_trace_membership(
                 recourse_vectors[offset:stop],
                 center=numpy_center,

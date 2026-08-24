@@ -9583,3 +9583,32 @@ boundaries instead of widening the distance to Python float64 first.
 ### Status
 
 Accepted for code review; production execution remains a separate gate.
+
+## [2026-08-25] Gate c766 one-cluster adoption on exact radius-mask replay
+
+### Decision
+
+Future one-cluster lineage traces cast the Python `delta` scalar to the NumPy
+distance dtype before applying strict `<`, matching upstream Torch behavior at
+an exact float32 boundary. Add a read-only post-hoc gate for the already
+running immutable c766 route rather than changing or restarting it.
+
+The gate binds the terminal summary, source vectors and pairs, saved centroids,
+and terminal block size. It simultaneously replays the historical widened
+NumPy mask, corrected dtype-cast NumPy mask, and official Torch mask, then
+compares mask digests, differing rows, parent/candidate sets, retained
+centroids, medoids, and selected trace. It also proves that the historical and
+Torch replays reproduce their respective terminal artifacts.
+
+### Consequences
+
+- Zero historical-versus-corrected mask differences permits adoption of the
+  live terminal without a DBSCAN rerun.
+- Any difference blocks final standardization. The audit emits the corrected
+  downstream trace for a fresh downstream-only replay bound to the existing
+  DBSCAN manifest; generation, theta filtering, and DBSCAN remain immutable.
+- The audit is CPU-only, fresh-root, PASS-last, and forbidden on HPC.
+
+### Status
+
+Accepted for implementation; live execution remains untouched.
