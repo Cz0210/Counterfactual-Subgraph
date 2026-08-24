@@ -224,6 +224,7 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
     tmp_path: Path,
 ) -> None:
     pair_source = _file(tmp_path / "old-pair-store/run_manifest.json", "{}\n")
+    close_view = _file(tmp_path / "close-view/close_pair_contract.json", "{}\n")
     inputs = replace(
         _inputs(tmp_path, dataset="aids"),
         device="cpu",
@@ -241,6 +242,7 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
         external_summary_block_size=65536,
         external_pair_store_source_manifest=pair_source,
         external_pair_store_source_owner_root=pair_source.parent,
+        external_close_pair_view_manifest=close_view,
         expected_sklearn_version="1.7.2",
         common_recourse_resume=True,
     )
@@ -267,6 +269,9 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
     assert command[
         command.index("--external-pair-store-source-owner-root") + 1
     ] == str(pair_source.parent)
+    assert command[
+        command.index("--external-close-pair-view-manifest") + 1
+    ] == str(close_view)
     assert command[command.index("--expected-sklearn-version") + 1] == "1.7.2"
     assert "--resume" in command
 
@@ -296,6 +301,7 @@ def test_chunk_source_route_freezes_cache_and_owner_arguments(
     cache = tmp_path / "local-cache"
     lock = tmp_path / "local-cache.lock"
     route_lock = tmp_path / "local-route.lock"
+    close_view = _file(tmp_path / "close-view/close_pair_contract.json", "{}\n")
     inputs = replace(
         _inputs(tmp_path, dataset="aids"),
         device="cpu",
@@ -306,6 +312,7 @@ def test_chunk_source_route_freezes_cache_and_owner_arguments(
         external_exact_fallback_max_samples=0,
         external_pair_store_source_checkpoint=checkpoint,
         external_pair_store_source_owner_root=owner,
+        external_close_pair_view_manifest=close_view,
         external_vector_cache_root=cache,
         external_vector_cache_lock=lock,
         external_vector_cache_route_lock=route_lock,
@@ -322,6 +329,7 @@ def test_chunk_source_route_freezes_cache_and_owner_arguments(
     expected = {
         "--external-pair-store-source-checkpoint": str(checkpoint),
         "--external-pair-store-source-owner-root": str(owner),
+        "--external-close-pair-view-manifest": str(close_view),
         "--external-vector-cache-root": str(cache),
         "--external-vector-cache-lock": str(lock),
         "--external-vector-cache-route-lock": str(route_lock),

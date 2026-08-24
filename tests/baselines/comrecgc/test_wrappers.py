@@ -134,6 +134,9 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
     pair_root = tmp_path / "old/common_recourse/external_memory/pair_store"
     pair_root.mkdir(parents=True)
     (pair_root / "run_manifest.json").write_text("{}\n", encoding="utf-8")
+    close_view = tmp_path / "close-view/close_pair_contract.json"
+    close_view.parent.mkdir(parents=True)
+    close_view.write_text("{}\n", encoding="utf-8")
     output = tmp_path / "fresh-output"
     values = {
         "DATASET": "aids",
@@ -164,6 +167,7 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
         "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT": str(
             pair_root.parents[2]
         ),
+        "COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST": str(close_view),
         # A closed-chunk fallback is configured, but the promoted terminal
         # must be selected without forwarding cache allocation arguments.
         "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT": str(
@@ -189,6 +193,9 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
     )
     assert argv[argv.index("--external-pair-store-source-owner-root") + 1] == str(
         pair_root.parents[2]
+    )
+    assert argv[argv.index("--external-close-pair-view-manifest") + 1] == str(
+        close_view
     )
     assert argv[argv.index("--external-dbscan-shortcut-mode") + 1] == (
         "all_core_one_component_adaptive_anchor_v1"
@@ -220,6 +227,9 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
     assert fallback_argv[
         fallback_argv.index("--external-pair-store-source-checkpoint") + 1
     ] == str(pair_root / "checkpoint.json")
+    assert fallback_argv[
+        fallback_argv.index("--external-close-pair-view-manifest") + 1
+    ] == str(close_view)
     assert fallback_argv[
         fallback_argv.index("--external-vector-cache-root") + 1
     ] == str(tmp_path / "cache")

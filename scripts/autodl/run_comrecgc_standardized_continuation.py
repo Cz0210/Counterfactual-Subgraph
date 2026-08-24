@@ -49,6 +49,9 @@ from src.baselines.comrecgc.external_memory_recourse import (  # noqa: E402
 from src.baselines.comrecgc.external_pair_chunk_cache import (  # noqa: E402
     validate_cartesian_chunk_vector_cache,
 )
+from src.baselines.comrecgc.close_pair_view import (  # noqa: E402
+    validate_theta_close_pair_view,
+)
 
 
 DATASET_CONTRACTS: dict[str, dict[str, int]] = {
@@ -99,6 +102,7 @@ class ContinuationInputs:
     external_pair_store_source_manifest: Path | None = None
     external_pair_store_source_checkpoint: Path | None = None
     external_pair_store_source_owner_root: Path | None = None
+    external_close_pair_view_manifest: Path | None = None
     external_vector_cache_root: Path | None = None
     external_vector_cache_lock: Path | None = None
     external_vector_cache_route_lock: Path | None = None
@@ -597,6 +601,13 @@ def build_stage_commands(
                     str(inputs.external_pair_store_source_owner_root),
                 ]
             )
+            if inputs.external_close_pair_view_manifest is not None:
+                common_argv.extend(
+                    [
+                        "--external-close-pair-view-manifest",
+                        str(inputs.external_close_pair_view_manifest),
+                    ]
+                )
         if inputs.external_pair_store_source_checkpoint is not None:
             common_argv.extend(
                 [
@@ -604,6 +615,8 @@ def build_stage_commands(
                     str(inputs.external_pair_store_source_checkpoint),
                     "--external-pair-store-source-owner-root",
                     str(inputs.external_pair_store_source_owner_root),
+                    "--external-close-pair-view-manifest",
+                    str(inputs.external_close_pair_view_manifest),
                     "--external-vector-cache-root",
                     str(inputs.external_vector_cache_root),
                     "--external-vector-cache-lock",
@@ -833,6 +846,10 @@ def _resume_contract(
         scientific_files["external_pair_store_source_checkpoint"] = (
             inputs.external_pair_store_source_checkpoint
         )
+    if inputs.external_close_pair_view_manifest is not None:
+        scientific_files["external_close_pair_view_manifest"] = (
+            inputs.external_close_pair_view_manifest
+        )
     scientific_input_files = {
         key: {
             "path": str(path.resolve(strict=True)),
@@ -886,6 +903,11 @@ def _resume_contract(
             None
             if inputs.external_pair_store_source_owner_root is None
             else str(inputs.external_pair_store_source_owner_root.resolve(strict=True))
+        ),
+        "external_close_pair_view_manifest": (
+            None
+            if inputs.external_close_pair_view_manifest is None
+            else str(inputs.external_close_pair_view_manifest.resolve(strict=True))
         ),
         "external_vector_cache_root": (
             None
@@ -1033,6 +1055,9 @@ def _validate_common_recourse_completion(
     )
     if pair_closure_relative not in closure:
         raise ValueError("RESUME_COMMON_PAIR_CLOSURE_MISSING")
+    physical_vectors_path: Path
+    physical_vectors_sha256: str
+    physical_pairs_sha256: str
     if adopted_pair_chunks:
         chunk_manifest_path = _require_file(root / pair_closure_relative)
         if (
@@ -1057,12 +1082,11 @@ def _validate_common_recourse_completion(
             not isinstance(pair_identity, Mapping)
             or pair_identity.get("source_pair_scientific_identity_sha256")
             != external.get("pair_store_scientific_identity_sha256")
-            or chunk_result.pairs.logical_npy_sha256
-            != external.get("pair_indices_sha256")
-            or chunk_result.vectors_sha256
-            != external.get("recourse_vectors_sha256")
         ):
             raise ValueError("RESUME_COMMON_CHUNK_ADOPTION_SCIENTIFIC_MISMATCH")
+        physical_vectors_path = chunk_result.vectors_path
+        physical_vectors_sha256 = chunk_result.vectors_sha256
+        physical_pairs_sha256 = chunk_result.pairs.logical_npy_sha256
     elif adopted_pair_store:
         adoption_manifest_path = _require_file(root / pair_closure_relative)
         if (
@@ -1077,6 +1101,9 @@ def _validate_common_recourse_completion(
         except Exception as exc:
             raise ValueError("RESUME_COMMON_PAIR_ADOPTION_CLOSURE_MISMATCH") from exc
         pair_manifest_path = adopted.pair_store.manifest_path
+        physical_vectors_path = adopted.pair_store.vectors_path
+        physical_vectors_sha256 = adopted.pair_store.vectors_sha256
+        physical_pairs_sha256 = adopted.pair_store.pairs_sha256
     else:
         if (
             external.get("pair_store_adoption_manifest") is not None
@@ -1115,6 +1142,48 @@ def _validate_common_recourse_completion(
                 raise ValueError(
                     f"RESUME_COMMON_PAIR_ARTIFACT_MISMATCH:{path_field}"
                 )
+        physical_vectors_path = Path(str(pair_manifest["vectors_path"]))
+        physical_vectors_sha256 = str(pair_manifest["vectors_sha256"])
+        physical_pairs_sha256 = str(pair_manifest["pairs_sha256"])
+    close_manifest_raw = external.get("close_pair_view_manifest")
+    close_manifest_sha = external.get("close_pair_view_manifest_sha256")
+    if close_manifest_raw is None:
+        if close_manifest_sha is not None:
+            raise ValueError("RESUME_COMMON_CLOSE_VIEW_BINDING_MISMATCH")
+        if (
+            (adopted_pair_store or adopted_pair_chunks)
+            and external.get("physical_pair_count") is not None
+            and int(external["physical_pair_count"])
+            == int(manifest.get("distance_pair_count", -2))
+        ):
+            raise ValueError("UNPROVEN_CARTESIAN_DBSCAN_INPUT")
+    else:
+        close_manifest_path = _require_file(Path(str(close_manifest_raw)))
+        if sha256_file(close_manifest_path) != str(close_manifest_sha):
+            raise ValueError("RESUME_COMMON_CLOSE_VIEW_BINDING_MISMATCH")
+        try:
+            close_view = validate_theta_close_pair_view(
+                close_manifest_path,
+                expected_physical_vectors_path=physical_vectors_path,
+                expected_physical_vectors_sha256=physical_vectors_sha256,
+                require_dbscan_eligible=True,
+                require_pair_semantics_authority=True,
+            )
+        except Exception as exc:
+            raise ValueError("RESUME_COMMON_CLOSE_VIEW_CLOSURE_MISMATCH") from exc
+        if (
+            close_view.logical_close_rows
+            != int(external.get("logical_close_pair_count", -1))
+            or close_view.logical_close_rows
+            != int(external.get("dbscan_input_count", -1))
+            or close_view.pairs_sha256 != external.get("pair_indices_sha256")
+            or close_view.vectors_sha256 != external.get("recourse_vectors_sha256")
+            or (
+                close_view.all_pairs_close
+                and close_view.pairs_sha256 != physical_pairs_sha256
+            )
+        ):
+            raise ValueError("RESUME_COMMON_CLOSE_VIEW_SCIENTIFIC_MISMATCH")
     dbscan_manifest_raw = external.get("dbscan_manifest")
     if dbscan_manifest_raw is None:
         if int(manifest.get("theta_eligible_pair_count", -1)) != 0:
@@ -1230,6 +1299,11 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
     ):
         raise ValueError("CHUNK_PAIR_STORE_ROUTE_ARGUMENTS_INCOMPLETE")
     if (
+        inputs.external_pair_store_source_checkpoint is not None
+        and inputs.external_close_pair_view_manifest is None
+    ):
+        raise ValueError("UNPROVEN_CARTESIAN_DBSCAN_INPUT")
+    if (
         inputs.external_pair_store_source_manifest is not None
         and inputs.external_pair_store_source_checkpoint is not None
     ):
@@ -1238,6 +1312,8 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
         inputs.external_pair_store_source_manifest is not None
         or inputs.external_pair_store_source_checkpoint is not None
     )
+    if inputs.external_close_pair_view_manifest is not None and not source_requested:
+        raise ValueError("CLOSE_PAIR_VIEW_WITHOUT_PHYSICAL_SOURCE")
     if source_requested and inputs.external_pair_store_source_owner_root is None:
         raise ValueError("PAIR_STORE_ADOPTION_OWNER_ROOT_MISSING")
     if not source_requested and inputs.external_pair_store_source_owner_root is not None:
@@ -1490,6 +1566,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--external-pair-store-source-checkpoint", type=_absolute)
     parser.add_argument("--external-pair-store-source-owner-root", type=_absolute)
+    parser.add_argument("--external-close-pair-view-manifest", type=_absolute)
     parser.add_argument("--external-vector-cache-root", type=_absolute)
     parser.add_argument("--external-vector-cache-lock", type=_absolute)
     parser.add_argument("--external-vector-cache-route-lock", type=_absolute)
@@ -1551,6 +1628,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         external_pair_store_source_owner_root=(
             _require_directory(args.external_pair_store_source_owner_root)
             if args.external_pair_store_source_owner_root
+            else None
+        ),
+        external_close_pair_view_manifest=(
+            _require_file(args.external_close_pair_view_manifest)
+            if args.external_close_pair_view_manifest
             else None
         ),
         external_vector_cache_root=args.external_vector_cache_root,

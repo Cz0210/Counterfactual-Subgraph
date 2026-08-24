@@ -39,6 +39,7 @@ EXTERNAL_SUMMARY_BLOCK_SIZE="${EXTERNAL_SUMMARY_BLOCK_SIZE:-65536}"
 EXTERNAL_PAIR_STORE_SOURCE_MANIFEST="${EXTERNAL_PAIR_STORE_SOURCE_MANIFEST:-}"
 EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT="${EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT:-}"
 EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT="${EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT:-}"
+EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST="${EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST:-}"
 EXTERNAL_PAIR_STORE_AUTO_ROOT="${EXTERNAL_PAIR_STORE_AUTO_ROOT:-}"
 COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL="${COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL:-0}"
 EXTERNAL_VECTOR_CACHE_ROOT="${EXTERNAL_VECTOR_CACHE_ROOT:-}"
@@ -109,11 +110,16 @@ if [[ "$ENGINE" == "external_memory_exact_v1" ]]; then
     [[ -n "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" ]] || { echo "[COMRECGC_CONFIG_ERROR] terminal source requires owner root" >&2; exit 2; }
     [[ "$CHUNK_SOURCE_COUNT" -eq 1 ]] || { echo "[COMRECGC_CONFIG_ERROR] terminal and chunk sources are mutually exclusive" >&2; exit 2; }
     ENGINE_ARGS+=(--external-pair-store-source-manifest "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" --external-pair-store-source-owner-root "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT")
+    if [[ -n "$EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST" ]]; then
+      [[ -s "$EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST" ]] || { echo "[COMRECGC_CONFIG_ERROR] invalid close-pair view manifest" >&2; exit 2; }
+      ENGINE_ARGS+=(--external-close-pair-view-manifest "$EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST")
+    fi
   else
     [[ "$CHUNK_SOURCE_COUNT" -eq 0 || "$CHUNK_SOURCE_COUNT" -eq 5 ]] || { echo "[COMRECGC_CONFIG_ERROR] chunk source/cache arguments are all-or-none" >&2; exit 2; }
   fi
   if [[ -z "$EXTERNAL_PAIR_STORE_SOURCE_MANIFEST" && "$CHUNK_SOURCE_COUNT" -eq 5 ]]; then
-    ENGINE_ARGS+=(--external-pair-store-source-checkpoint "$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT" --external-pair-store-source-owner-root "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" --external-vector-cache-root "$EXTERNAL_VECTOR_CACHE_ROOT" --external-vector-cache-lock "$EXTERNAL_VECTOR_CACHE_LOCK" --external-vector-cache-route-lock "$EXTERNAL_VECTOR_CACHE_ROUTE_LOCK" --external-vector-cache-min-free-gb "$EXTERNAL_VECTOR_CACHE_MIN_FREE_GB" --external-vector-cache-proc-root "$EXTERNAL_VECTOR_CACHE_PROC_ROOT")
+    [[ -s "$EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST" ]] || { echo "[COMRECGC_CONFIG_ERROR] Cartesian snapshot requires a validated theta-close view manifest" >&2; exit 2; }
+    ENGINE_ARGS+=(--external-pair-store-source-checkpoint "$EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT" --external-pair-store-source-owner-root "$EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" --external-close-pair-view-manifest "$EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST" --external-vector-cache-root "$EXTERNAL_VECTOR_CACHE_ROOT" --external-vector-cache-lock "$EXTERNAL_VECTOR_CACHE_LOCK" --external-vector-cache-route-lock "$EXTERNAL_VECTOR_CACHE_ROUTE_LOCK" --external-vector-cache-min-free-gb "$EXTERNAL_VECTOR_CACHE_MIN_FREE_GB" --external-vector-cache-proc-root "$EXTERNAL_VECTOR_CACHE_PROC_ROOT")
   fi
 else
   DEVICE="${DEVICE:-cuda:0}"

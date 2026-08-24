@@ -555,6 +555,29 @@ def test_anchor_shortcut_is_elementwise_sklearn_exact_with_boundary_and_duplicat
     assert proof["all_points_core_proven"] is True
     assert proof["single_epsilon_component_proven"] is True
     assert lower.tolist() == [3, 4, 4, 3, 4, 4, 4, 3, 4, 4, 4, 3]
+    for name in (
+        "all_core_certificate",
+        "connectivity_certificate",
+        "boundary_certificate",
+        "cluster_partition",
+    ):
+        path = Path(manifest[f"{name}_path"])
+        assert path.name == f"{name}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["status"] == "PASS"
+        assert payload["approximation_used"] is False
+    boundary = json.loads(Path(manifest["boundary_certificate_path"]).read_text())
+    assert boundary["comparison"] == "distance <= eps"
+    assert boundary["recheck_dtype"] == "float64"
+    assert boundary["float64_revalidated_row_count"] == len(values)
+    all_core = json.loads(Path(manifest["all_core_certificate_path"]).read_text())
+    assert all_core["min_samples"] == 3
+    assert all_core["self_neighbor_counted_exactly_once"] is True
+    connectivity = json.loads(
+        Path(manifest["connectivity_certificate_path"]).read_text()
+    )
+    assert connectivity["attached_or_anchor_row_count"] == len(values)
+    assert connectivity["every_close_row_attached_to_anchor_component"] is True
     reopened = external.fit_external_memory_dbscan(
         vectors_path=vectors,
         work_dir=tmp_path / "shortcut",
@@ -900,6 +923,30 @@ def test_anchor_shortcut_terminal_rejects_tampered_lower_bound_witness(
     with pytest.raises(
         external.ExternalMemoryDBSCANError,
         match="proof artifact mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
+def test_anchor_shortcut_terminal_rejects_tampered_split_certificate(
+    tmp_path: Path,
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract()
+    root = tmp_path / "shortcut"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    manifest = json.loads(result.manifest_path.read_text())
+    boundary_path = Path(manifest["boundary_certificate_path"])
+    boundary = json.loads(boundary_path.read_text())
+    boundary["uncertain_edges_accepted"] = 1
+    boundary_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="split certificate closure mismatch",
     ):
         external.fit_external_memory_dbscan(
             vectors_path=vectors, work_dir=root, contract=contract, resume=True

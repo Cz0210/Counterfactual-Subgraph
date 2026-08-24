@@ -78,6 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Old read-only run root whose owner process must be absent.",
     )
     parser.add_argument(
+        "--external-close-pair-view-manifest",
+        help=(
+            "Hash-closed logical theta-close view required when adopting a "
+            "physical Cartesian chunk snapshot."
+        ),
+    )
+    parser.add_argument(
         "--external-vector-cache-root",
         help="Local-XFS root for the reconstructible contiguous vector cache.",
     )
@@ -140,6 +147,7 @@ def main() -> int:
         external_pair_store_source_owner_root=(
             args.external_pair_store_source_owner_root
         ),
+        external_close_pair_view_manifest=args.external_close_pair_view_manifest,
         external_vector_cache_root=args.external_vector_cache_root,
         external_vector_cache_lock=args.external_vector_cache_lock,
         external_vector_cache_route_lock=args.external_vector_cache_route_lock,

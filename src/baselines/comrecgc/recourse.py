@@ -26,6 +26,7 @@ from .model_adapter import AIDSGreedEmbeddingAdapter
 from .external_memory_dbscan import (
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalDBSCANContract,
+    ExternalMemoryDBSCANError,
     fit_external_memory_dbscan,
 )
 from .external_memory_recourse import (
@@ -38,6 +39,12 @@ from .external_memory_recourse import (
 from .external_pair_chunk_cache import (
     DEFAULT_LOCAL_FREE_FLOOR_BYTES,
     materialize_cartesian_chunk_vector_cache,
+)
+from .close_pair_view import (
+    NORMALIZED_DISTANCE_CONTRACT,
+    SCALE_CONTRACT,
+    ThetaClosePairContract,
+    validate_theta_close_pair_view,
 )
 from .project_dataset import (
     load_aids_generation_bundle,
@@ -182,8 +189,11 @@ def trace_official_cluster_order(
         ordered.append(
             {
                 "rank": int(rank),
+                "selected_rank": int(rank),
                 "cluster_label": cluster_label,
+                "cluster_id": cluster_label,
                 "cluster_center_norm": centroid_norms[cluster_label],
+                "centroid_norm": centroid_norms[cluster_label],
                 "cluster_radius": float(radius),
                 "cluster_size": int(np.sum(labels == cluster_label)),
                 "representative_source_index": source_index,
@@ -191,8 +201,10 @@ def trace_official_cluster_order(
                 "representative_distance_to_center": medoid_distance,
                 "covered_parent_indices_native": sorted(filtered[cluster_label]),
                 "native_cumulative_covered_count": len(covered),
+                "cumulative_covered_count": len(covered),
                 "native_cumulative_cost": cumulative_cost,
                 "member_counterfactual_indices": sorted(cluster_cf_indices[cluster_label]),
+                "representative_candidate_ids": [int(counterfactual_index)],
             }
         )
     return ordered
@@ -256,6 +268,7 @@ def run_common_recourse(
     external_pair_store_source_manifest: str | Path | None = None,
     external_pair_store_source_checkpoint: str | Path | None = None,
     external_pair_store_source_owner_root: str | Path | None = None,
+    external_close_pair_view_manifest: str | Path | None = None,
     external_vector_cache_root: str | Path | None = None,
     external_vector_cache_lock: str | Path | None = None,
     external_vector_cache_route_lock: str | Path | None = None,
@@ -273,6 +286,19 @@ def run_common_recourse(
             "external_memory_exact_v1 is released only for CPU-backed AIDS"
         )
     chunk_source_requested = external_pair_store_source_checkpoint is not None
+    if chunk_source_requested and external_close_pair_view_manifest is None:
+        raise ValueError(
+            "UNPROVEN_CARTESIAN_DBSCAN_INPUT: the physical candidate-by-parent "
+            "snapshot is not bound to a validated theta-close logical view"
+        )
+    if (
+        not chunk_source_requested
+        and external_pair_store_source_manifest is None
+        and external_close_pair_view_manifest is not None
+    ):
+        raise ValueError(
+            "a theta-close view manifest requires an adopted physical pair source"
+        )
     if (
         external_pair_store_source_manifest is not None or chunk_source_requested
     ) and engine != "external_memory_exact_v1":
@@ -462,6 +488,8 @@ def run_common_recourse(
                 )
             pair_adoption = None
             chunk_cache = None
+            close_pair_view = None
+            physical_pair_row_count = None
             pair_authority_manifest_path = None
             pair_authority_manifest_sha256 = None
             if chunk_source_requested:
@@ -481,17 +509,55 @@ def run_common_recourse(
                     resume=resume,
                 )
                 pair_indices_external = chunk_cache.pairs
-                recourse_array_external = np.load(
-                    chunk_cache.vectors_path, mmap_mode="r", allow_pickle=False
+                physical_pair_row_count = int(chunk_cache.row_count)
+                close_pair_view = validate_theta_close_pair_view(
+                    external_close_pair_view_manifest,  # type: ignore[arg-type]
+                    expected_contract=ThetaClosePairContract(
+                        theta=float(parameters.theta),
+                        parent_count=len(bundle.graphs),
+                        candidate_count=len(candidate_graphs),
+                        distance_checkpoint_sha256=sha256_file(distance_checkpoint),
+                        embedding_checkpoint_sha256=sha256_file(distance_checkpoint),
+                        scale_contract=SCALE_CONTRACT,
+                        normalized_distance_contract=NORMALIZED_DISTANCE_CONTRACT,
+                    ),
+                    expected_physical_vectors_path=chunk_cache.vectors_path,
+                    expected_physical_vectors_sha256=chunk_cache.vectors_sha256,
+                    require_pair_semantics_authority=True,
                 )
-                pair_row_count = chunk_cache.row_count
-                pair_indices_sha256 = chunk_cache.pairs.logical_npy_sha256
-                recourse_vectors_sha256 = chunk_cache.vectors_sha256
-                recourse_vectors_path = chunk_cache.vectors_path
+                if not close_pair_view.eligible_for_dbscan:
+                    raise ExternalMemoryDBSCANError(
+                        close_pair_view.blocking_reason
+                        or "CLOSE_VIEW_NOT_DBSCAN_ELIGIBLE"
+                    )
+                if (
+                    close_pair_view.all_pairs_close
+                    and close_pair_view.pairs_sha256
+                    != chunk_cache.pairs.logical_npy_sha256
+                ):
+                    raise ExternalMemoryDBSCANError(
+                        "CLOSE_VIEW_PHYSICAL_PAIR_IDENTITY_MISMATCH"
+                    )
+                pair_indices_external = (
+                    chunk_cache.pairs
+                    if close_pair_view.pairs_path is None
+                    else np.load(
+                        close_pair_view.pairs_path,
+                        mmap_mode="r",
+                        allow_pickle=False,
+                    )
+                )
+                recourse_array_external = np.load(
+                    close_pair_view.vectors_path, mmap_mode="r", allow_pickle=False
+                )
+                pair_row_count = close_pair_view.logical_close_rows
+                pair_indices_sha256 = close_pair_view.pairs_sha256
+                recourse_vectors_sha256 = close_pair_view.vectors_sha256
+                recourse_vectors_path = close_pair_view.vectors_path
                 pair_manifest_path = chunk_cache.manifest_path
                 pair_manifest_sha256 = chunk_cache.manifest_sha256
-                pair_authority_manifest_path = chunk_cache.manifest_path
-                pair_authority_manifest_sha256 = chunk_cache.manifest_sha256
+                pair_authority_manifest_path = close_pair_view.manifest_path
+                pair_authority_manifest_sha256 = close_pair_view.manifest_sha256
             elif external_pair_store_source_manifest is not None:
                 pair_adoption = adopt_external_pair_store_read_only(
                     source_manifest_path=external_pair_store_source_manifest,
@@ -501,18 +567,91 @@ def run_common_recourse(
                     resume=resume,
                 )
                 pair_result = pair_adoption.pair_store
-                pair_indices_external = np.load(
-                    pair_result.pairs_path, mmap_mode="r", allow_pickle=False
+                physical_pair_row_count = int(pair_result.row_count)
+                terminal_is_cartesian = physical_pair_row_count == (
+                    len(candidate_graphs) * len(bundle.graphs)
                 )
-                recourse_array_external = np.load(
-                    pair_result.vectors_path, mmap_mode="r", allow_pickle=False
-                )
-                pair_row_count = pair_result.row_count
-                pair_indices_sha256 = pair_result.pairs_sha256
-                recourse_vectors_sha256 = pair_result.vectors_sha256
-                recourse_vectors_path = pair_result.vectors_path
-                pair_manifest_path = pair_result.manifest_path
-                pair_manifest_sha256 = pair_result.manifest_sha256
+                if terminal_is_cartesian and external_close_pair_view_manifest is None:
+                    raise ExternalMemoryDBSCANError(
+                        "UNPROVEN_CARTESIAN_DBSCAN_INPUT: terminal physical pair "
+                        "store requires a validated theta-close logical view"
+                    )
+                if external_close_pair_view_manifest is not None:
+                    close_pair_view = validate_theta_close_pair_view(
+                        external_close_pair_view_manifest,
+                        expected_contract=ThetaClosePairContract(
+                            theta=float(parameters.theta),
+                            parent_count=len(bundle.graphs),
+                            candidate_count=len(candidate_graphs),
+                            distance_checkpoint_sha256=sha256_file(
+                                distance_checkpoint
+                            ),
+                            embedding_checkpoint_sha256=sha256_file(
+                                distance_checkpoint
+                            ),
+                            scale_contract=SCALE_CONTRACT,
+                            normalized_distance_contract=(
+                                NORMALIZED_DISTANCE_CONTRACT
+                            ),
+                        ),
+                        expected_physical_vectors_path=pair_result.vectors_path,
+                        expected_physical_vectors_sha256=pair_result.vectors_sha256,
+                        require_pair_semantics_authority=True,
+                    )
+                    if not close_pair_view.eligible_for_dbscan:
+                        raise ExternalMemoryDBSCANError(
+                            close_pair_view.blocking_reason
+                            or "CLOSE_VIEW_NOT_DBSCAN_ELIGIBLE"
+                        )
+                    if (
+                        close_pair_view.all_pairs_close
+                        and close_pair_view.pairs_sha256
+                        != pair_result.pairs_sha256
+                    ):
+                        raise ExternalMemoryDBSCANError(
+                            "CLOSE_VIEW_PHYSICAL_PAIR_IDENTITY_MISMATCH"
+                        )
+                    pair_indices_external = (
+                        np.load(
+                            pair_result.pairs_path,
+                            mmap_mode="r",
+                            allow_pickle=False,
+                        )
+                        if close_pair_view.pairs_path is None
+                        else np.load(
+                            close_pair_view.pairs_path,
+                            mmap_mode="r",
+                            allow_pickle=False,
+                        )
+                    )
+                    recourse_array_external = np.load(
+                        close_pair_view.vectors_path,
+                        mmap_mode="r",
+                        allow_pickle=False,
+                    )
+                    pair_row_count = close_pair_view.logical_close_rows
+                    pair_indices_sha256 = close_pair_view.pairs_sha256
+                    recourse_vectors_sha256 = close_pair_view.vectors_sha256
+                    recourse_vectors_path = close_pair_view.vectors_path
+                    pair_manifest_path = pair_result.manifest_path
+                    pair_manifest_sha256 = pair_result.manifest_sha256
+                    pair_authority_manifest_path = close_pair_view.manifest_path
+                    pair_authority_manifest_sha256 = (
+                        close_pair_view.manifest_sha256
+                    )
+                else:
+                    pair_indices_external = np.load(
+                        pair_result.pairs_path, mmap_mode="r", allow_pickle=False
+                    )
+                    recourse_array_external = np.load(
+                        pair_result.vectors_path, mmap_mode="r", allow_pickle=False
+                    )
+                    pair_row_count = pair_result.row_count
+                    pair_indices_sha256 = pair_result.pairs_sha256
+                    recourse_vectors_sha256 = pair_result.vectors_sha256
+                    recourse_vectors_path = pair_result.vectors_path
+                    pair_manifest_path = pair_result.manifest_path
+                    pair_manifest_sha256 = pair_result.manifest_sha256
             else:
                 pair_store = ExternalPairStore(
                     root=root / "external_memory/pair_store",
@@ -728,10 +867,34 @@ def run_common_recourse(
                 ),
                 "pair_store_adopted_read_only": pair_adoption is not None,
                 "pair_chunks_adopted_read_only": chunk_cache is not None,
-                "pair_indices_materialized": chunk_cache is None,
+                "physical_pair_count": physical_pair_row_count,
+                "logical_close_pair_count": pair_row_count,
+                "dbscan_input_count": pair_row_count,
+                "dbscan_input": "theta_close_recourse_only",
+                "close_pair_view_manifest": (
+                    None
+                    if close_pair_view is None
+                    else str(close_pair_view.manifest_path)
+                ),
+                "close_pair_view_manifest_sha256": (
+                    None
+                    if close_pair_view is None
+                    else close_pair_view.manifest_sha256
+                ),
+                "pair_indices_materialized": (
+                    chunk_cache is None
+                    or (
+                        close_pair_view is not None
+                        and close_pair_view.pairs_path is not None
+                    )
+                ),
                 "pair_indices_formula": (
                     None
                     if chunk_cache is None
+                    or (
+                        close_pair_view is not None
+                        and close_pair_view.pairs_path is not None
+                    )
                     else "parent=row%parent_count;candidate=row//parent_count"
                 ),
                 "chunk_vector_cache_manifest": (
