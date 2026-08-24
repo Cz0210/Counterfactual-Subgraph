@@ -85,7 +85,7 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
 SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
-PAPER_PROTOCOL_RELEASE_COMMIT = "41756562d105f65b2510cdea344f36a6b1cfbae7"
+PAPER_PROTOCOL_RELEASE_COMMIT = "9dc64a479e4487f2d03c238137bf107209e5d17a"
 PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
     "src/baselines/comrecgc/close_pair_scan.py": {
         "git_blob": "3aff0dc908d08a8da3f49d397f65084c80c7a37b",
@@ -176,8 +176,8 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
         "sha256": "1b68ac8a6b2032e51679a2b3f0b531116632ffad3fdce99ec6f82c81199b33a3",
     },
     "tests/autodl/test_aids_comrecgc_exact_route_v5.py": {
-        "git_blob": "0d87ef246c7f835b80dc6d1ba5c03f0a10badb9b",
-        "sha256": "755b7d26b015cc6572121d198ca3298ef90ed4914ca76956e975c6b3d22121ec",
+        "git_blob": "6e33246c2a6ebef8fdd92635d7cacb940247bb3b",
+        "sha256": "f898b6d4974afcd957810d5e22e21febfb655763a5dd7eab3211440665729542",
     },
     "docs/AUTODL_AIDS_CLOSE_PAIR_MATERIALIZER.md": {
         "git_blob": "96f55dca50c8c5eb115c8252233aeb1c2304f84c",
