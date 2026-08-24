@@ -139,6 +139,9 @@ def test_physical_snapshot_is_exact_distinct_and_dbscan_bound(
     result = _run(fixture, output)
 
     assert result["status"] == "PASS"
+    assert result["source_hardlink_used"] is False
+    assert result["source_destination_inode_relation"] == "distinct"
+    assert result["promotion_mode"] == "fresh_partial_fsync_link_noreplace_unlink"
     assert (output / "PASS").read_text() == "PASS\n"
     copied_pairs = output / "pair_store/pair_indices.npy"
     copied_vectors = output / "pair_store/recourse_vectors.npy"

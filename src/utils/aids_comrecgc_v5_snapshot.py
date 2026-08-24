@@ -569,6 +569,10 @@ def validate_promoted_pair_store_snapshot(
     if (
         terminal.get("source_mutated") is not False
         or terminal.get("hardlinked") is not False
+        or terminal.get("source_hardlink_used") is not False
+        or terminal.get("promotion_mode")
+        != "fresh_partial_fsync_link_noreplace_unlink"
+        or terminal.get("source_destination_inode_relation") != "distinct"
         or terminal.get("destination_writable_reference_count") != 0
         or terminal.get("destination_partial_artifacts") != []
         or terminal.get("expected_row_count") != expected_row_count
@@ -873,6 +877,9 @@ def create_promoted_pair_store_snapshot(
             "status": "PASS",
             "source_mutated": False,
             "hardlinked": False,
+            "source_hardlink_used": False,
+            "promotion_mode": "fresh_partial_fsync_link_noreplace_unlink",
+            "source_destination_inode_relation": "distinct",
             "source": before,
             "source_post": after,
             "copy_records": copies,
