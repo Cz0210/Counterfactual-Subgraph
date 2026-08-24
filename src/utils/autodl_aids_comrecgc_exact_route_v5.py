@@ -1441,8 +1441,26 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         },
         "mut_dependency": {
             "controller_id": CONTROLLER_ID,
+            "controller_manifest": str(
+                control_root
+                / SOURCE_NAMESPACE
+                / "manifests"
+                / f"{CONTROLLER_ID}.json"
+            ),
+            "controller_root": str(
+                control_root / SOURCE_NAMESPACE / CONTROLLER_ID
+            ),
             "task_id": TASK_ID,
-            "expected_output": str(fresh_root / "cells/aids/comrecgc/standardized/attempt-0"),
+            "task_gate": str(
+                control_root
+                / SOURCE_NAMESPACE
+                / CONTROLLER_ID
+                / "tasks"
+                / TASK_ID
+                / "gate.json"
+            ),
+            "passing_output_resolution": "unique_PASS_run.expected_output",
+            "attempt_is_controller_authoritative": True,
             "terminal_marker": "PASS",
         },
     }
@@ -1484,7 +1502,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "controller_id": CONTROLLER_ID,
         "task_id": TASK_ID,
         "fresh_output_root": str(fresh_root),
-        "expected_output_attempt0": contract["mut_dependency"]["expected_output"],
+        "mut_dependency_task_gate": contract["mut_dependency"]["task_gate"],
         "gpu_required": False,
         "task_count": validation["task_count"],
     }

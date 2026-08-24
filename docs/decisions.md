@@ -9403,3 +9403,37 @@ AutoDL execution and full scan.
 - These changes authorize no live deployment or process signal. Production
 equivalence remains gated on the complete GREED scan and closed production
 subsets.
+
+## [2026-08-25] Separate restartable GREED science from fresh controller receipts
+
+### Decision
+
+Keep the production full GREED scan in one fixed campaign science root while
+each generic controller attempt owns a fresh receipt root. The supervisor
+recoverably promotes and inode-freezes the empty science root before the first
+child, holds and revalidates one descriptor-backed flock, resets inherited
+SIGTERM handling before Linux PDEATHSIG arming, and permits only one
+checkpoint-authenticated same-root resume. Semantic or provenance evidence is
+terminal and always takes precedence over process-loss recovery.
+
+Terminal adoption reopens the float32 distance and uint8 bitmap arrays in
+bounded mmap blocks, proves shape/dtype/nonnegative finite domain and the exact
+`distance <= theta` predicate, and reconciles physical/finite/close counts with
+both science manifests. Resume metadata is frozen in the terminal supervisor
+manifest; the fresh receipt copies only that frozen authority and publishes
+`PASS` last.
+
+Downstream Mut no longer assumes controller attempt zero. Its v5 dependency is
+the exact controller manifest plus task gate; the builder resolves one unique
+PASS state/run, validates the recorded attempt output against the manifest
+template, and hash-binds the gate, state, output, and terminal evidence.
+
+### Consequences
+
+- A dead worker or host may consume generic attempt one without changing the
+  science inode; a forged replacement root, lock, bitmap, count, or receipt is
+  rejected.
+- Existing global dead-worker recovery remains available, but a semantic marker
+  in the persisted run log prevents that retry.
+- No deployment, process signal, or mutation of historical AutoDL roots is
+  authorized by this change.

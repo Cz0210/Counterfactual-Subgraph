@@ -141,6 +141,12 @@ SOURCE_PARAMETERS = {
 
 AIDS_CONTROLLER_ID = "four_methods_four_datasets_aids_comrecgc_repair_v3"
 AIDS_TASK_ID = "aids_comrecgc_standardized_cpu_highmem"
+AIDS_EXACT_ROUTE_V5_CONTROLLER_ID = (
+    "four_methods_four_datasets_aids_comrecgc_exact_route_v5_snapshot_adopt_v1"
+)
+AIDS_EXACT_ROUTE_V5_TASK_ID = (
+    "aids_comrecgc_standardized_exact_route_v5_snapshot_adopt_v1"
+)
 REPAIR_V2_CONTROLLER_ID = "four_methods_four_datasets_am_repair_v2"
 REPAIR_V2_MUT_TASK_ID = "mutagenicity_comrecgc_standardized"
 REPAIR_V2_COMMON_REQUIRED = (
@@ -1264,8 +1270,11 @@ def _aids_manifest(
     if expected_controller_id == AIDS_CONTROLLER_ID:
         raise RepairManifestError("Known OOM-failed AIDS repair-v3 cannot release Mut")
     if (
-        not expected_controller_id.startswith(
-            "four_methods_four_datasets_aids_comrecgc_repair_"
+        not (
+            expected_controller_id.startswith(
+                "four_methods_four_datasets_aids_comrecgc_repair_"
+            )
+            or expected_controller_id == AIDS_EXACT_ROUTE_V5_CONTROLLER_ID
         )
         or not expected_task_id.startswith("aids_comrecgc_")
         or Path(expected_wrapper).name != expected_wrapper
@@ -1321,6 +1330,115 @@ def _aids_manifest(
     ) != int(expected_min_free_bytes):
         raise RepairManifestError("AIDS/Mut shared cgroup headroom differs")
     return manifest
+
+
+def resolve_aids_passing_output(
+    *,
+    source_manifest: str | Path,
+    source_controller_root: str | Path,
+    task_gate: str | Path,
+    task_id: str,
+    expected_manifest_sha256: str,
+    expected_task_gate_sha256: str | None = None,
+    proc_root: str | Path = "/proc",
+) -> dict[str, Any]:
+    """Resolve and hash-bind the controller-authoritative unique PASS attempt."""
+
+    manifest_path = _absolute(
+        source_manifest, label="AIDS dependency manifest", kind="file"
+    )
+    controller_root = _absolute(
+        source_controller_root, label="AIDS dependency controller root", kind="dir"
+    )
+    manifest = load_controller_manifest(manifest_path)
+    if manifest.sha256 != expected_manifest_sha256 or task_id not in manifest.by_id:
+        raise RepairManifestError("AIDS PASS authority manifest/task differs")
+    expected_gate = controller_root / "tasks" / task_id / "gate.json"
+    gate_path = _absolute(task_gate, label="AIDS dependency task gate", kind="file")
+    if gate_path != expected_gate.resolve(strict=True):
+        raise RepairManifestError("AIDS dependency task gate path is not exact")
+    gate_sha = sha256_file(gate_path)
+    if expected_task_gate_sha256 is not None and gate_sha != expected_task_gate_sha256:
+        raise RepairManifestError("AIDS dependency task gate SHA256 changed")
+    state_path = _absolute(
+        controller_root / "tasks" / task_id / "state.json",
+        label="AIDS dependency task state",
+        kind="file",
+    )
+    gate = _read_object(gate_path)
+    state = _read_object(state_path)
+    instances = _mapping(state.get("instances"), label="AIDS task instances")
+    passing_instances = [
+        value
+        for value in instances.values()
+        if isinstance(value, Mapping) and value.get("state") == "PASS"
+    ]
+    runs = gate.get("runs")
+    passing_runs = [
+        value
+        for value in (runs if isinstance(runs, list) else [])
+        if isinstance(value, Mapping) and value.get("state") == "PASS"
+    ]
+    if (
+        gate.get("task_id") != task_id
+        or gate.get("status") != "PASS"
+        or state.get("task_id") != task_id
+        or state.get("state") != "PASS"
+        or len(instances) != 1
+        or len(passing_instances) != 1
+        or len(passing_runs) != 1
+    ):
+        raise RepairManifestError(
+            "AIDS task gate/state do not expose one unique PASS run"
+        )
+    instance = passing_instances[0]
+    run = passing_runs[0]
+    exact_fields = ("run_id", "attempt", "expected_output")
+    if any(instance.get(key) != run.get(key) for key in exact_fields):
+        raise RepairManifestError("AIDS task gate PASS run differs from task state")
+    attempt = instance.get("attempt")
+    recorded_output = instance.get("expected_output")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise RepairManifestError("AIDS PASS attempt is malformed")
+    if not isinstance(recorded_output, str) or not recorded_output:
+        raise RepairManifestError("AIDS PASS output is absent")
+    template = str(manifest.by_id[task_id].expected_output or "")
+    expanded = template.replace("{attempt}", str(attempt))
+    if "{" in expanded or "}" in expanded:
+        raise RepairManifestError("AIDS PASS output template is not independently resolvable")
+    output = _absolute(recorded_output, label="AIDS passing output", kind="dir")
+    if Path(expanded).expanduser().resolve(strict=True) != output:
+        raise RepairManifestError("AIDS PASS output differs from manifest attempt template")
+    terminal = verify_controller_terminal(
+        source_manifest=manifest_path,
+        source_controller_root=controller_root,
+        task_id=task_id,
+        expected_output_root=output,
+        required_files=(
+            "standardized/_FINALIZED.json",
+            "standardized/run_manifest.json",
+            "run_manifest.json",
+            "final_gate.json",
+            "_RUN_COMPLETE.json",
+            "PASS",
+        ),
+        proc_root=proc_root,
+    )
+    return {
+        "status": "PASS",
+        "controller_id": manifest.controller_id,
+        "controller_manifest": str(manifest_path),
+        "controller_manifest_sha256": manifest.sha256,
+        "task_id": task_id,
+        "task_gate": str(gate_path),
+        "task_gate_sha256": gate_sha,
+        "task_state": str(state_path),
+        "task_state_sha256": sha256_file(state_path),
+        "run_id": instance.get("run_id"),
+        "attempt": attempt,
+        "passing_output": str(output),
+        "terminal": terminal,
+    }
 
 
 def _repair_v2_manifest(
@@ -1411,6 +1529,8 @@ def wait_for_aids_pass(
     source_controller_root: str | Path,
     control_root: str | Path,
     expected_output_root: str | Path,
+    task_gate: str | Path | None = None,
+    expected_task_gate_sha256: str | None = None,
     expected_controller_id: str,
     expected_task_id: str,
     expected_wrapper: str,
@@ -1425,7 +1545,14 @@ def wait_for_aids_pass(
     )
     control = _absolute(control_root, label="control root", kind="dir")
     expected = _absolute(
-        expected_output_root, label="AIDS dependency expected output", kind="fresh"
+        expected_output_root,
+        label="AIDS dependency expected output",
+        kind="dir" if task_gate is not None else "fresh",
+    )
+    gate_path = (
+        _absolute(task_gate, label="AIDS dependency task gate", kind="file")
+        if task_gate is not None
+        else None
     )
     manifest = _aids_manifest(
         source_manifest=manifest_path,
@@ -1462,21 +1589,36 @@ def wait_for_aids_pass(
             },
         )
         if task_state == "PASS":
-            terminal = verify_controller_terminal(
-                source_manifest=manifest_path,
-                source_controller_root=controller_root,
-                task_id=expected_task_id,
-                expected_output_root=expected,
-                required_files=(
-                    "standardized/_FINALIZED.json",
-                    "standardized/run_manifest.json",
-                    "run_manifest.json",
-                    "final_gate.json",
-                    "_RUN_COMPLETE.json",
-                    "PASS",
-                ),
-                proc_root=proc_root,
-            )
+            if gate_path is not None and expected_task_gate_sha256 is not None:
+                authority = resolve_aids_passing_output(
+                    source_manifest=manifest_path,
+                    source_controller_root=controller_root,
+                    task_gate=gate_path,
+                    task_id=expected_task_id,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                    expected_task_gate_sha256=expected_task_gate_sha256,
+                    proc_root=proc_root,
+                )
+                if authority["passing_output"] != str(expected):
+                    raise RepairManifestError(
+                        "AIDS passing output differs from the builder-frozen authority"
+                    )
+            else:
+                authority = verify_controller_terminal(
+                    source_manifest=manifest_path,
+                    source_controller_root=controller_root,
+                    task_id=expected_task_id,
+                    expected_output_root=expected,
+                    required_files=(
+                        "standardized/_FINALIZED.json",
+                        "standardized/run_manifest.json",
+                        "run_manifest.json",
+                        "final_gate.json",
+                        "_RUN_COMPLETE.json",
+                        "PASS",
+                    ),
+                    proc_root=proc_root,
+                )
             payload = {
                 "schema_version": "mut_wait_aids_comrecgc_pass_v1",
                 "status": "PASS",
@@ -1484,7 +1626,14 @@ def wait_for_aids_pass(
                 "aids_manifest_sha256": manifest.sha256,
                 "aids_task_id": expected_task_id,
                 "aids_output_root": str(expected.resolve(strict=True)),
-                "aids_terminal": terminal,
+                "aids_task_gate": None if gate_path is None else str(gate_path),
+                "aids_task_gate_sha256": expected_task_gate_sha256,
+                "aids_pass_authority": authority,
+                "aids_terminal": (
+                    authority.get("terminal")
+                    if gate_path is not None
+                    else authority
+                ),
                 "wait_completed_at": _utc_now(),
             }
             _atomic_json(output / "aids_dependency.json", payload)
@@ -1909,9 +2058,6 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     aids_root = _absolute(
         aids.get("root"), label="AIDS dependency root", kind="dir"
     )
-    aids_output = _absolute(
-        aids.get("expected_output"), label="AIDS dependency expected output", kind="fresh"
-    )
     aids_controller = _aids_manifest(
         source_manifest=aids_manifest,
         source_controller_root=aids_root,
@@ -1926,6 +2072,33 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         expected_min_free_bytes=aids_min_free_bytes,
         expected_proc_root=proc_root,
     )
+    aids_pass_authority: dict[str, Any] | None = None
+    if aids_controller_id == AIDS_EXACT_ROUTE_V5_CONTROLLER_ID:
+        if aids_task_id != AIDS_EXACT_ROUTE_V5_TASK_ID or aids.get("expected_output") is not None:
+            raise RepairManifestError(
+                "AIDS v5 dependency must resolve output solely from its task gate"
+            )
+        aids_gate = _absolute(
+            aids.get("task_gate"), label="AIDS v5 dependency task gate", kind="file"
+        )
+        aids_pass_authority = resolve_aids_passing_output(
+            source_manifest=aids_manifest,
+            source_controller_root=aids_root,
+            task_gate=aids_gate,
+            task_id=aids_task_id,
+            expected_manifest_sha256=aids_manifest_sha256,
+            proc_root=proc_root,
+        )
+        aids_output = Path(aids_pass_authority["passing_output"])
+        aids_gate_sha256 = str(aids_pass_authority["task_gate_sha256"])
+    else:
+        aids_output = _absolute(
+            aids.get("expected_output"),
+            label="AIDS dependency expected output",
+            kind="fresh",
+        )
+        aids_gate = aids_root / "tasks" / aids_task_id / "gate.json"
+        aids_gate_sha256 = sha256_file(aids_gate) if aids_gate.is_file() else ""
 
     science = _mapping(spec.get("standardization"), label="standardization")
     directories = ("molclr_root",)
@@ -1996,6 +2169,43 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             instrumentation_source_inventory_value["inventory_sha256"]
         ),
     }
+    aids_wait_command = [
+        "{python}",
+        "{project_root}/scripts/autodl/manage_mut_traceoff_parity_v1.py",
+        "--config",
+        "configs/hpc.yaml",
+        "wait-aids",
+        "--expected-controller-id",
+        aids_controller_id,
+        "--expected-task-id",
+        aids_task_id,
+        "--expected-wrapper",
+        aids_wrapper,
+        "--expected-manifest-sha256",
+        aids_manifest_sha256,
+        "--source-manifest",
+        str(aids_manifest),
+        "--source-controller-root",
+        str(aids_root),
+        "--control-root",
+        str(control_root),
+        "--expected-output-root",
+        str(aids_output),
+        "--proc-root",
+        str(proc_root),
+        "--poll-seconds",
+        "60",
+        "--output-dir",
+        "{task_output}",
+    ]
+    if aids_pass_authority is not None:
+        action_index = aids_wait_command.index("wait-aids") + 1
+        aids_wait_command[action_index:action_index] = [
+            "--task-gate",
+            str(aids_gate),
+            "--expected-task-gate-sha256",
+            aids_gate_sha256,
+        ]
     tasks: list[dict[str, Any]] = [
         _source_gate_task(
             source_root=source_root,
@@ -2023,36 +2233,12 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "priority": 3,
             "data_splits": [],
             "manifest_only": True,
-            "command": [
-                "{python}",
-                "{project_root}/scripts/autodl/manage_mut_traceoff_parity_v1.py",
-                "--config",
-                "configs/hpc.yaml",
-                "wait-aids",
-                "--expected-controller-id",
-                aids_controller_id,
-                "--expected-task-id",
-                aids_task_id,
-                "--expected-wrapper",
-                aids_wrapper,
-                "--expected-manifest-sha256",
-                aids_manifest_sha256,
-                "--source-manifest",
-                str(aids_manifest),
-                "--source-controller-root",
-                str(aids_root),
-                "--control-root",
-                str(control_root),
-                "--expected-output-root",
-                str(aids_output),
-                "--proc-root",
-                str(proc_root),
-                "--poll-seconds",
-                "60",
-                "--output-dir",
-                "{task_output}",
-            ],
-            "input_manifest": str(aids_manifest),
+            "command": aids_wait_command,
+            "input_manifest": (
+                str(aids_gate)
+                if aids_pass_authority is not None
+                else str(aids_manifest)
+            ),
             "config_files": [str(aids_root / "controller_manifest.json")],
             "expected_output": str(
                 fresh_root / "dependencies/aids-comrecgc/attempt-{attempt}"
@@ -2378,6 +2564,13 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "aids_terminal_contract": aids_terminal_contract,
             "aids_expected_manifest_sha256": aids_manifest_sha256,
             "aids_manifest_sha256": aids_controller.sha256,
+            "aids_pass_authority": aids_pass_authority,
+            "aids_task_gate": (
+                str(aids_gate) if aids_pass_authority is not None else None
+            ),
+            "aids_task_gate_sha256": (
+                aids_gate_sha256 if aids_pass_authority is not None else None
+            ),
             "aids_min_cgroup_free_bytes": aids_min_free_bytes,
             "mut_min_cgroup_free_bytes": min_free_bytes,
             "fresh_output_root": str(fresh_root),

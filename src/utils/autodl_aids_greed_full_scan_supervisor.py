@@ -30,6 +30,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -63,6 +64,7 @@ STATE_NAME = "state.json"
 EVENTS_NAME = "events.jsonl"
 TERMINAL_NAME = "terminal_supervisor_manifest.json"
 TERMINAL_PASS_NAME = "TERMINAL_PASS"
+INIT_NAME = "science_root_initialization.json"
 LOCK_NAME = ".aids_greed_full_scan.lock"
 
 EXPECTED_PARENT_COUNT = 1_283
@@ -180,6 +182,77 @@ def _directory_identity(path: Path) -> dict[str, int]:
     if not stat.S_ISDIR(value["mode"]):
         raise AIDSGreedFullScanSupervisorError(f"not a directory: {path}")
     return {"device": value["device"], "inode": value["inode"]}
+
+
+def _reserve_science_root(*, control_root: Path, science_root: Path) -> dict[str, Any]:
+    """Recoverably create and inode-freeze the empty scientific work root."""
+
+    init_path = control_root / INIT_NAME
+    if init_path.exists():
+        pending = _read_object(init_path, label="science-root initialization")
+        identity = pending.get("science_root_identity")
+        temporary_raw = pending.get("temporary_root")
+        if (
+            pending.get("schema_version") != SUPERVISOR_SCHEMA
+            or pending.get("status") not in {"INIT_PENDING", "INIT_FROZEN"}
+            or pending.get("science_root") != str(science_root)
+            or not isinstance(identity, Mapping)
+            or not isinstance(temporary_raw, str)
+        ):
+            raise AIDSGreedFullScanSupervisorError(
+                "science-root initialization authority differs"
+            )
+        temporary = Path(temporary_raw)
+        if science_root.exists() or science_root.is_symlink():
+            if science_root.is_symlink() or _directory_identity(science_root) != identity:
+                raise AIDSGreedFullScanSupervisorError(
+                    "pending science-root initialization inode differs"
+                )
+            if temporary.exists() or temporary.is_symlink():
+                raise AIDSGreedFullScanSupervisorError(
+                    "pending science-root initialization has two live roots"
+                )
+        else:
+            if (
+                temporary.is_symlink()
+                or not temporary.is_dir()
+                or _directory_identity(temporary) != identity
+                or any(temporary.iterdir())
+            ):
+                raise AIDSGreedFullScanSupervisorError(
+                    "pending temporary science-root reservation differs"
+                )
+            os.replace(temporary, science_root)
+        frozen = {
+            **pending,
+            "status": "INIT_FROZEN",
+            "science_root_identity": dict(identity),
+            "frozen_at": pending.get("frozen_at") or _utc_now(),
+        }
+        _atomic_json(init_path, frozen)
+        return frozen
+    if science_root.exists() or science_root.is_symlink():
+        raise AIDSGreedFullScanSupervisorError(
+            "preexisting science root lacks authenticated initialization"
+        )
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{science_root.name}.init-", dir=science_root.parent)
+    )
+    os.chmod(temporary, 0o755)
+    identity = _directory_identity(temporary)
+    pending = {
+        "schema_version": SUPERVISOR_SCHEMA,
+        "status": "INIT_PENDING",
+        "science_root": str(science_root),
+        "temporary_root": str(temporary),
+        "science_root_identity": identity,
+        "reserved_at": _utc_now(),
+    }
+    _atomic_json(init_path, pending)
+    os.replace(temporary, science_root)
+    frozen = {**pending, "status": "INIT_FROZEN", "frozen_at": _utc_now()}
+    _atomic_json(init_path, frozen)
+    return frozen
 
 
 def _absolute(path: str | Path, *, label: str, must_exist: bool) -> Path:
@@ -410,7 +483,9 @@ def build_contract(
         "execution_commit": execution_commit,
         "campaign_root": str(campaign_root),
         "science_root": str(science_root),
-        "science_root_identity_at_contract_creation": None,
+        "science_root_identity_at_contract_creation": _directory_identity(
+            science_root
+        ),
         "lock_path": str(lock_path),
         "lock_identity": dict(lock_identity),
         "child_argv_without_resume": list(child_argv),
@@ -695,6 +770,12 @@ def validate_terminal_science(
     bitmap_path = science_root / "distance_scan/close_pair_bitmap.greed.uint8.npy"
     distance_sha256 = sha256_file(distance_path.resolve(strict=True))
     bitmap_sha256 = sha256_file(bitmap_path.resolve(strict=True))
+    array_audit = _validate_terminal_arrays(
+        distance_path=distance_path,
+        bitmap_path=bitmap_path,
+        expected_count=EXPECTED_PAIR_COUNT,
+        theta=EXPECTED_THETA,
+    )
     if (
         close.get("schema_version") != AIDS_PAIR_SEMANTICS_SCHEMA
         or close.get("status") != "PASS"
@@ -713,8 +794,18 @@ def validate_terminal_science(
         or scan.get("status") != "PASS"
         or scan.get("run_complete") is not True
         or int(scan.get("physical_pair_count", -1)) != EXPECTED_PAIR_COUNT
+        or float(scan.get("theta", float("nan"))) != EXPECTED_THETA
+        or scan.get("filter_operator") != "<="
+        or int(scan.get("dbscan_input_count_contract", -1))
+        != array_audit["logical_close_pair_count"]
         or int(scan.get("logical_close_pair_count", -1))
         != int(close.get("logical_close_rows", -2))
+        or int(scan.get("logical_close_pair_count", -1))
+        != array_audit["logical_close_pair_count"]
+        or int(scan.get("distance_statistics", {}).get("finite_count", -1))
+        != array_audit["finite_count"]
+        or int(scan.get("distance_statistics", {}).get("nonfinite_count", -1))
+        != 0
         or scan.get("normalized_distances_path")
         != str(distance_path.resolve(strict=True))
         or scan.get("normalized_distances_sha256") != distance_sha256
@@ -725,6 +816,9 @@ def validate_terminal_science(
         or scan.get("close_bitmap_sha256") != bitmap_sha256
         or close.get("close_bitmap") != str(bitmap_path.resolve(strict=True))
         or close.get("close_bitmap_hash") != bitmap_sha256
+        or float(close.get("theta", float("nan"))) != EXPECTED_THETA
+        or close.get("filter_operator") != "<="
+        or close.get("distance_statistics") != scan.get("distance_statistics")
     ):
         raise AIDSGreedFullScanSupervisorError(
             "terminal science manifest closure differs"
@@ -749,7 +843,67 @@ def validate_terminal_science(
         "close_pair_contract_sha256": sha256_file(close_path),
         "pair_semantics_audit_sha256": sha256_file(audit_path),
         "distance_scan_manifest_sha256": sha256_file(scan_path),
+        "terminal_array_audit": array_audit,
         "terminal_files": terminal_files,
+    }
+
+
+def _validate_terminal_arrays(
+    *,
+    distance_path: Path,
+    bitmap_path: Path,
+    expected_count: int,
+    theta: float,
+    block_size: int = 1_000_000,
+) -> dict[str, Any]:
+    """Stream the final arrays and re-prove the stored theta predicate."""
+
+    distances = np.load(distance_path, mmap_mode="r", allow_pickle=False)
+    bitmap = np.load(bitmap_path, mmap_mode="r", allow_pickle=False)
+    if (
+        distances.shape != (int(expected_count),)
+        or distances.dtype != DISTANCE_DTYPE
+        or bitmap.shape != (int(expected_count),)
+        or bitmap.dtype != CLOSE_BITMAP_DTYPE
+    ):
+        raise AIDSGreedFullScanSupervisorError(
+            "terminal GREED arrays have the wrong production schema"
+        )
+    finite_count = 0
+    close_count = 0
+    for start in range(0, int(expected_count), int(block_size)):
+        stop = min(int(expected_count), start + int(block_size))
+        distance_block = np.asarray(distances[start:stop])
+        bitmap_block = np.asarray(bitmap[start:stop])
+        finite = np.isfinite(distance_block)
+        if not bool(np.all(finite)):
+            raise AIDSGreedFullScanSupervisorError(
+                "terminal normalized distances contain non-finite values"
+            )
+        if bool(np.any(distance_block < np.float32(0.0))):
+            raise AIDSGreedFullScanSupervisorError(
+                "terminal normalized distances contain negative values"
+            )
+        if not bool(np.all((bitmap_block == 0) | (bitmap_block == 1))):
+            raise AIDSGreedFullScanSupervisorError(
+                "terminal close bitmap contains values outside {0,1}"
+            )
+        expected_bitmap = np.less_equal(distance_block, np.float32(theta))
+        if not np.array_equal(bitmap_block.astype(np.bool_), expected_bitmap):
+            raise AIDSGreedFullScanSupervisorError(
+                "terminal close bitmap differs from distance <= theta"
+            )
+        finite_count += int(np.count_nonzero(finite))
+        close_count += int(np.count_nonzero(bitmap_block))
+    return {
+        "status": "PASS",
+        "physical_pair_count": int(expected_count),
+        "finite_count": finite_count,
+        "nonfinite_count": int(expected_count) - finite_count,
+        "logical_close_pair_count": close_count,
+        "theta": float(theta),
+        "predicate": "normalized_distance_float32 <= theta_float32",
+        "streaming_block_size": int(block_size),
     }
 
 
@@ -860,7 +1014,8 @@ def validate_receipt(
         contract.get("schema_version") != SUPERVISOR_SCHEMA
         or contract.get("status") != "FROZEN"
         or contract.get("science_root") != str(science)
-        or contract.get("science_root_identity_at_contract_creation") is not None
+        or contract.get("science_root_identity_at_contract_creation")
+        != _directory_identity(science)
     ):
         raise AIDSGreedFullScanSupervisorError("receipt science contract differs")
     if (
@@ -897,6 +1052,10 @@ def validate_receipt(
         != terminal_manifest.get("terminal_owner_identity")
         or receipt.get("lock_path") != terminal_manifest.get("lock_path")
         or receipt.get("lock_identity") != terminal_manifest.get("lock_identity")
+        or receipt.get("same_root_resume_count")
+        != terminal_manifest.get("same_root_resume_count")
+        or receipt.get("same_root_resume_reasons")
+        != terminal_manifest.get("same_root_resume_reasons")
     ):
         raise AIDSGreedFullScanSupervisorError(
             "receipt terminal-supervisor closure differs"
@@ -907,6 +1066,7 @@ def validate_receipt(
     lock_stat = os.lstat(lock_path)
     if (
         not stat.S_ISREG(lock_stat.st_mode)
+        or int(lock_stat.st_nlink) != 1
         or receipt.get("lock_identity")
         != {"device": int(lock_stat.st_dev), "inode": int(lock_stat.st_ino)}
     ):
@@ -916,6 +1076,7 @@ def validate_receipt(
         "close_pair_contract_sha256",
         "pair_semantics_audit_sha256",
         "distance_scan_manifest_sha256",
+        "terminal_array_audit",
         "terminal_files",
     ):
         if receipt.get(key) != terminal.get(key):
@@ -957,8 +1118,6 @@ def _publish_receipt(
     terminal_manifest_path: Path,
     terminal_manifest: Mapping[str, Any],
     terminal: Mapping[str, Any],
-    resume_count: int,
-    resume_reasons: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     if receipt_output.exists() or receipt_output.is_symlink():
         raise AIDSGreedFullScanSupervisorError(
@@ -990,9 +1149,14 @@ def _publish_receipt(
         "distance_scan_manifest_sha256": terminal[
             "distance_scan_manifest_sha256"
         ],
+        "terminal_array_audit": terminal["terminal_array_audit"],
         "terminal_files": terminal["terminal_files"],
-        "same_root_resume_count": int(resume_count),
-        "same_root_resume_reasons": list(resume_reasons),
+        "same_root_resume_count": int(
+            terminal_manifest["same_root_resume_count"]
+        ),
+        "same_root_resume_reasons": list(
+            terminal_manifest["same_root_resume_reasons"]
+        ),
         "controller_expected_output_is_receipt_only": True,
         "large_science_artifacts_copied": False,
         "published_at": _utc_now(),
@@ -1014,6 +1178,37 @@ class _HeldFlock:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.descriptor: int | None = None
+        self.identity: dict[str, int] | None = None
+
+    def assert_path_identity(self) -> dict[str, int]:
+        """Prove the named lock still denotes the descriptor we hold."""
+
+        if self.descriptor is None or self.identity is None:
+            raise AIDSGreedFullScanSupervisorError("GREED full-scan flock is not held")
+        descriptor_stat = os.fstat(self.descriptor)
+        try:
+            path_stat = os.lstat(self.path)
+        except FileNotFoundError as exc:
+            raise AIDSGreedFullScanSupervisorError(
+                "held GREED full-scan lock was unlinked"
+            ) from exc
+        actual = {
+            "device": int(descriptor_stat.st_dev),
+            "inode": int(descriptor_stat.st_ino),
+        }
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or not stat.S_ISREG(path_stat.st_mode)
+            or int(descriptor_stat.st_nlink) != 1
+            or int(path_stat.st_nlink) != 1
+            or actual != self.identity
+            or actual
+            != {"device": int(path_stat.st_dev), "inode": int(path_stat.st_ino)}
+        ):
+            raise AIDSGreedFullScanSupervisorError(
+                "held GREED full-scan lock path/inode differs"
+            )
+        return dict(actual)
 
     def __enter__(self) -> "_HeldFlock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1023,7 +1218,7 @@ class _HeldFlock:
             0o600,
         )
         value = os.fstat(descriptor)
-        if not stat.S_ISREG(value.st_mode):
+        if not stat.S_ISREG(value.st_mode) or int(value.st_nlink) != 1:
             os.close(descriptor)
             raise AIDSGreedFullScanSupervisorError(
                 "GREED full-scan lock is not a regular file"
@@ -1036,6 +1231,11 @@ class _HeldFlock:
                 "another GREED full-scan supervisor owns the campaign flock"
             ) from exc
         self.descriptor = descriptor
+        self.identity = {
+            "device": int(value.st_dev),
+            "inode": int(value.st_ino),
+        }
+        self.assert_path_identity()
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -1043,6 +1243,7 @@ class _HeldFlock:
         fcntl.flock(self.descriptor, fcntl.LOCK_UN)
         os.close(self.descriptor)
         self.descriptor = None
+        self.identity = None
 
 
 def _pdeathsig(expected_parent_pid: int) -> None:
@@ -1050,6 +1251,10 @@ def _pdeathsig(expected_parent_pid: int) -> None:
 
     if not sys.platform.startswith("linux"):
         return
+    # ``fork`` inherits the supervisor's forwarding handlers.  Reset SIGTERM
+    # before arming PDEATHSIG so a parent death in this pre-exec window cannot
+    # run the inherited Python handler and continue into ``exec``.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, int(signal.SIGTERM), 0, 0, 0) != 0:
         os._exit(126)
@@ -1194,17 +1399,35 @@ def run_supervisor(
         child_argv, project_root=project, science_root=science
     )
     lock_path = science.parent / f".{science.name}{LOCK_NAME}"
-    with _HeldFlock(lock_path):
-        lock_identity = _file_identity(lock_path)
-        lock_identity = {
-            "device": lock_identity["device"],
-            "inode": lock_identity["inode"],
-        }
-        science_exists = science.exists()
-        if science_exists and (science.is_symlink() or not science.is_dir()):
+    with _HeldFlock(lock_path) as held_lock:
+        lock_identity = held_lock.assert_path_identity()
+        control = campaign / CONTROL_DIRECTORY
+        if control.exists() and (control.is_symlink() or not control.is_dir()):
             raise AIDSGreedFullScanSupervisorError(
-                "existing science root is not a physical directory"
+                "campaign supervisor control path is not a physical directory"
             )
+        control.mkdir(mode=0o700, exist_ok=True)
+        contract_path = control / CONTRACT_NAME
+        state_path = control / STATE_NAME
+        events_path = control / EVENTS_NAME
+        contract_only_initialization = contract_path.exists() and not state_path.exists()
+        if state_path.exists() and not contract_path.exists():
+            raise AIDSGreedFullScanSupervisorError(
+                "science-root state exists without its frozen contract"
+            )
+        fresh_control = not state_path.exists()
+        initialization = _reserve_science_root(
+            control_root=control, science_root=science
+        )
+        if initialization.get("status") != "INIT_FROZEN":
+            raise AIDSGreedFullScanSupervisorError(
+                "science-root initialization did not freeze"
+            )
+        if science.is_symlink() or not science.is_dir():
+            raise AIDSGreedFullScanSupervisorError(
+                "authenticated science root is not a physical directory"
+            )
+        science_exists = True
         writers = find_live_science_writers(
             science_root=science,
             proc_root=proc,
@@ -1215,21 +1438,6 @@ def run_supervisor(
                 "fixed science root has a live writer: "
                 + ",".join(str(item["pid"]) for item in writers)
             )
-        control = campaign / CONTROL_DIRECTORY
-        fresh_control = not control.exists()
-        if fresh_control:
-            if science_exists:
-                raise AIDSGreedFullScanSupervisorError(
-                    "preexisting science root lacks authenticated campaign control"
-                )
-            control.mkdir(mode=0o700)
-        elif control.is_symlink() or not control.is_dir():
-            raise AIDSGreedFullScanSupervisorError(
-                "campaign supervisor control path is not a physical directory"
-            )
-        contract_path = control / CONTRACT_NAME
-        state_path = control / STATE_NAME
-        events_path = control / EVENTS_NAME
         candidate_contract = build_contract(
             project_root=project,
             execution_commit=execution_commit,
@@ -1245,12 +1453,25 @@ def run_supervisor(
         )
         replay_pending_attempt: int | None = None
         if fresh_control:
-            _atomic_json(contract_path, candidate_contract)
+            if contract_only_initialization:
+                existing_contract = _read_object(
+                    contract_path, label="pre-state science supervisor contract"
+                )
+                if (
+                    _contract_identity(existing_contract)
+                    != _contract_identity(candidate_contract)
+                    or any(science.iterdir())
+                ):
+                    raise AIDSGreedFullScanSupervisorError(
+                        "contract-only science-root initialization differs"
+                    )
+            else:
+                _atomic_json(contract_path, candidate_contract)
             state: dict[str, Any] = {
                 "schema_version": SUPERVISOR_SCHEMA,
                 "status": "INITIALIZED",
                 "science_root": str(science),
-                "science_root_identity": None,
+                "science_root_identity": _directory_identity(science),
                 "lock_identity": lock_identity,
                 "resume_count": 0,
                 "resume_reasons": [],
@@ -1264,7 +1485,7 @@ def run_supervisor(
                 {
                     "event": "FRESH_SCIENCE_ROOT_RESERVED",
                     "science_root": str(science),
-                    "science_root_absent": True,
+                    "science_root_created_empty": True,
                     "timestamp": _utc_now(),
                 },
             )
@@ -1294,6 +1515,7 @@ def run_supervisor(
                     "existing science-root/lock identity differs"
                 )
             if (science / "PASS").is_file():
+                held_lock.assert_path_identity()
                 terminal = validate_terminal_science(
                     science_root=science, contract=contract
                 )
@@ -1313,14 +1535,13 @@ def run_supervisor(
                         lock_identity=lock_identity,
                     )
                 )
+                held_lock.assert_path_identity()
                 receipt_payload = _publish_receipt(
                     receipt_output=receipt,
                     contract_path=contract_path,
                     terminal_manifest_path=terminal_manifest_path,
                     terminal_manifest=terminal_manifest,
                     terminal=terminal,
-                    resume_count=int(state.get("resume_count", 0)),
-                    resume_reasons=list(state.get("resume_reasons") or []),
                 )
                 print(
                     "[AIDS_GREED_FULL_SCAN_SUPERVISOR_PASS] "
@@ -1329,12 +1550,12 @@ def run_supervisor(
                 )
                 return receipt_payload
             fresh_pre_spawn = (
-                not science_exists
-                and recorded_science_identity is None
+                recorded_science_identity == _directory_identity(science)
                 and not isinstance(state.get("child_identity"), Mapping)
                 and state.get("status")
                 in {"INITIALIZED", "STARTING_CHILD", "CHILD_SPAWN_PENDING"}
                 and all(path.stat().st_size == 0 for path in control.glob("child-attempt-*.log"))
+                and not any(science.iterdir())
             )
             if fresh_pre_spawn:
                 resume = False
@@ -1374,7 +1595,7 @@ def run_supervisor(
                 isinstance(pending, Mapping)
                 and pending.get("state") == "PENDING_RESUME"
             )
-            if resume is False and not science_exists:
+            if fresh_pre_spawn:
                 pass
             elif pending_resume:
                 validate_resume_checkpoint(science_root=science, contract=contract)
@@ -1413,6 +1634,7 @@ def run_supervisor(
                 resume = True
 
         contract = _read_object(contract_path, label="science supervisor contract")
+        held_lock.assert_path_identity()
         owner_identity = read_process_identity(os.getpid(), proc_root=proc)
         if owner_identity is None:
             raise AIDSGreedFullScanSupervisorError(
@@ -1467,6 +1689,7 @@ def run_supervisor(
                 events_path=events_path,
                 resume=resume,
             )
+            held_lock.assert_path_identity()
             if not science.is_dir() or science.is_symlink():
                 raise AIDSGreedFullScanSupervisorError(
                     "scientific child did not create a physical science root"
@@ -1479,6 +1702,7 @@ def run_supervisor(
                     "science-root inode changed during child execution"
                 )
             if returncode == 0:
+                held_lock.assert_path_identity()
                 terminal = validate_terminal_science(
                     science_root=science, contract=contract
                 )
@@ -1517,8 +1741,6 @@ def run_supervisor(
                     terminal_manifest_path=terminal_manifest_path,
                     terminal_manifest=terminal_manifest,
                     terminal=terminal,
-                    resume_count=int(state["resume_count"]),
-                    resume_reasons=list(state.get("resume_reasons") or []),
                 )
                 print(
                     "[AIDS_GREED_FULL_SCAN_SUPERVISOR_PASS] "

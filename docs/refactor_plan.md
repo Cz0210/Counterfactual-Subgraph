@@ -1587,3 +1587,7 @@ Mutagenicity roadmaps.
   split exact DBSCAN certificates, and streaming one-cluster coverage output.
 - [ ] Run the production GREED distance scan and first/random/dense/sparse/
   top-distance closed-subset comparisons before releasing the fresh route.
+- [x] Make the full GREED scan survive controller/worker/host loss through one
+  inode-frozen science root plus fresh attempt receipts; validate terminal
+  arrays and bind later Mut consumption to the controller-authoritative unique
+  PASS task gate rather than standardized attempt zero.

@@ -71,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--source-controller-root", type=_absolute, required=True)
     wait.add_argument("--control-root", type=_absolute, required=True)
     wait.add_argument("--expected-output-root", type=_absolute, required=True)
+    wait.add_argument("--task-gate", type=_absolute)
+    wait.add_argument("--expected-task-gate-sha256")
     wait.add_argument("--proc-root", type=_absolute, default=Path("/proc"))
     wait.add_argument("--poll-seconds", type=int, default=60)
     wait.add_argument("--output-dir", type=_absolute, required=True)
@@ -150,6 +152,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_controller_root=args.source_controller_root,
             control_root=args.control_root,
             expected_output_root=args.expected_output_root,
+            task_gate=args.task_gate,
+            expected_task_gate_sha256=args.expected_task_gate_sha256,
             expected_controller_id=args.expected_controller_id,
             expected_task_id=args.expected_task_id,
             expected_wrapper=args.expected_wrapper,

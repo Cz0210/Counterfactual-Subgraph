@@ -470,6 +470,58 @@ def test_builder_has_attempt_gates_exact_dependencies_and_cpu_boundaries(
         temporary.cleanup()
 
 
+def test_builder_v5_dependency_consumes_gate_and_freezes_attempt_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary, spec_path = _builder_fixture(monkeypatch)
+    try:
+        spec = json.loads(spec_path.read_text())
+        aids = spec["aids_dependency"]
+        aids["controller_id"] = mut.AIDS_EXACT_ROUTE_V5_CONTROLLER_ID
+        aids["task_id"] = mut.AIDS_EXACT_ROUTE_V5_TASK_ID
+        aids["wrapper"] = "run_aids_comrecgc_exact_route_v5_supervisor.sh"
+        aids.pop("expected_output")
+        gate = Path(aids["root"]) / "tasks" / aids["task_id"] / "gate.json"
+        gate.parent.mkdir(parents=True)
+        _json(gate, {"status": "PASS"})
+        output = spec_path.parent / "aids-v5-output/attempt-1"
+        output.mkdir(parents=True)
+        aids["task_gate"] = str(gate)
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        gate_sha = sha256_file(gate)
+        authority = {
+            "status": "PASS",
+            "controller_id": mut.AIDS_EXACT_ROUTE_V5_CONTROLLER_ID,
+            "task_id": mut.AIDS_EXACT_ROUTE_V5_TASK_ID,
+            "task_gate": str(gate.resolve()),
+            "task_gate_sha256": gate_sha,
+            "attempt": 1,
+            "passing_output": str(output.resolve()),
+        }
+        monkeypatch.setattr(
+            mut,
+            "_aids_manifest",
+            lambda **_kwargs: SimpleNamespace(
+                controller_id=mut.AIDS_EXACT_ROUTE_V5_CONTROLLER_ID,
+                sha256=aids["expected_manifest_sha256"],
+            ),
+        )
+        monkeypatch.setattr(
+            mut, "resolve_aids_passing_output", lambda **_kwargs: authority
+        )
+        payload, _summary = mut.build_payload(spec_path=spec_path)
+        tasks = {task["id"]: task for task in payload["tasks"]}
+        wait = tasks[mut.AIDS_WAIT_TASK_ID]
+        assert wait["input_manifest"] == str(gate.resolve())
+        assert "--task-gate" in wait["command"]
+        assert gate_sha in wait["command"]
+        contract = payload["mut_traceoff_parity_contract"]
+        assert contract["aids_pass_authority"]["attempt"] == 1
+        assert contract["aids_task_gate_sha256"] == gate_sha
+    finally:
+        temporary.cleanup()
+
+
 def test_known_failed_aids_v3_and_manifest_replacement_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -510,6 +562,96 @@ def test_known_failed_aids_v3_and_manifest_replacement_are_rejected(
             expected_task_id=mut.AIDS_TASK_ID,
             expected_wrapper="run_comrecgc_standardized_continuation_cpu_highmem.sh",
             expected_manifest_sha256="a" * 64,
+        )
+
+
+def test_aids_v5_pass_authority_resolves_attempt_one_and_hash_binds_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = tmp_path / mut.SOURCE_NAMESPACE
+    manifests = namespace / "manifests"
+    manifests.mkdir(parents=True)
+    controller = namespace / mut.AIDS_EXACT_ROUTE_V5_CONTROLLER_ID
+    task_root = controller / "tasks" / mut.AIDS_EXACT_ROUTE_V5_TASK_ID
+    task_root.mkdir(parents=True)
+    output_template = tmp_path / "outputs/attempt-{attempt}"
+    output = tmp_path / "outputs/attempt-1"
+    output.mkdir(parents=True)
+    manifest_path = _json(manifests / "v5.json", {"fixture": True})
+    manifest_sha = sha256_file(manifest_path)
+    _json(
+        task_root / "state.json",
+        {
+            "task_id": mut.AIDS_EXACT_ROUTE_V5_TASK_ID,
+            "state": "PASS",
+            "instances": {
+                "main": {
+                    "state": "PASS",
+                    "run_id": "v5-run-attempt-1",
+                    "attempt": 1,
+                    "expected_output": str(output),
+                }
+            },
+        },
+    )
+    gate_path = _json(
+        task_root / "gate.json",
+        {
+            "task_id": mut.AIDS_EXACT_ROUTE_V5_TASK_ID,
+            "status": "PASS",
+            "runs": [
+                {
+                    "instance_id": "main",
+                    "state": "PASS",
+                    "run_id": "v5-run-attempt-1",
+                    "attempt": 1,
+                    "expected_output": str(output),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        mut,
+        "load_controller_manifest",
+        lambda _path: SimpleNamespace(
+            controller_id=mut.AIDS_EXACT_ROUTE_V5_CONTROLLER_ID,
+            sha256=manifest_sha,
+            by_id={
+                mut.AIDS_EXACT_ROUTE_V5_TASK_ID: SimpleNamespace(
+                    expected_output=str(output_template)
+                )
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        mut,
+        "verify_controller_terminal",
+        lambda **_kwargs: {"status": "PASS", "source_output_root": str(output)},
+    )
+    authority = mut.resolve_aids_passing_output(
+        source_manifest=manifest_path,
+        source_controller_root=controller,
+        task_gate=gate_path,
+        task_id=mut.AIDS_EXACT_ROUTE_V5_TASK_ID,
+        expected_manifest_sha256=manifest_sha,
+        expected_task_gate_sha256=sha256_file(gate_path),
+        proc_root=tmp_path,
+    )
+    assert authority["attempt"] == 1
+    assert authority["passing_output"] == str(output.resolve())
+    assert authority["task_gate_sha256"] == sha256_file(gate_path)
+    gate = json.loads(gate_path.read_text())
+    gate["runs"][0]["expected_output"] = str(tmp_path / "tampered")
+    gate_path.write_text(json.dumps(gate), encoding="utf-8")
+    with pytest.raises(RepairManifestError, match="SHA256 changed"):
+        mut.resolve_aids_passing_output(
+            source_manifest=manifest_path,
+            source_controller_root=controller,
+            task_gate=gate_path,
+            task_id=mut.AIDS_EXACT_ROUTE_V5_TASK_ID,
+            expected_manifest_sha256=manifest_sha,
+            expected_task_gate_sha256=authority["task_gate_sha256"],
+            proc_root=tmp_path,
         )
 
 

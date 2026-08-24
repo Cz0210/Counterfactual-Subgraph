@@ -17,6 +17,8 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "AutoDL-only continuation; do not submit this Slurm wrapper."
+# The built AutoDL manifest forwards wait-aids task-gate/SHA authority.  This
+# guard-only Slurm companion intentionally never reconstructs runtime flags.
 exit 2
 
 python scripts/autodl/manage_mut_traceoff_parity_v1.py \

@@ -1775,12 +1775,24 @@ def _reset_instance_for_retry(
 
 
 def _fail_or_retry_process_loss(
+    layout: Any,
     instance: dict[str, Any],
     task: TaskSpec,
     *,
     reason: str,
     max_transient_retries: int,
 ) -> None:
+    if classify_failure(
+        _run_log_text(layout, instance),
+        semantic_markers=task.semantic_failure_markers,
+    ) == "SEMANTIC":
+        instance["state"] = "FAILED"
+        instance["failure_class"] = "SEMANTIC"
+        instance["failure_reason"] = (
+            "semantic failure marker observed before process-loss recovery: "
+            + reason
+        )
+        return
     transient_retry_count = int(instance.get("transient_retry_count", 0))
     failure_class = "TRANSIENT_PROCESS_LOSS"
     if (
@@ -2408,6 +2420,7 @@ def _reconcile_instance(
             instance["failure_reason"] = "waiting within detached launch grace"
             return
         _fail_or_retry_process_loss(
+            layout,
             instance,
             task,
             reason="run state absent after bounded launch grace",
@@ -2428,6 +2441,7 @@ def _reconcile_instance(
                     expected_identity, pid
                 ):
                     _fail_or_retry_process_loss(
+                        layout,
                         instance,
                         task,
                         reason="worker PID generation/command changed",
@@ -2451,6 +2465,7 @@ def _reconcile_instance(
             instance["failure_reason"] = "waiting within detached launch grace"
             return
         _fail_or_retry_process_loss(
+            layout,
             instance,
             task,
             reason="STARTING worker has no live PID after bounded launch grace",
@@ -2461,6 +2476,7 @@ def _reconcile_instance(
         pid = run_state.get("pid")
         if not isinstance(pid, int) or isinstance(pid, bool):
             _fail_or_retry_process_loss(
+                layout,
                 instance,
                 task,
                 reason="RUNNING exp_run state has no worker PID",
@@ -2470,6 +2486,7 @@ def _reconcile_instance(
         identity = read_process_identity(pid)
         if identity is None:
             _fail_or_retry_process_loss(
+                layout,
                 instance,
                 task,
                 reason="RUNNING exp_run worker PID is absent",
@@ -2481,6 +2498,7 @@ def _reconcile_instance(
             expected_identity, pid
         ):
             _fail_or_retry_process_loss(
+                layout,
                 instance,
                 task,
                 reason="worker PID generation/command changed",

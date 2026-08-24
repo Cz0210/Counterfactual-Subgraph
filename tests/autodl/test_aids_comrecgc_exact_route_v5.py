@@ -525,7 +525,10 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     dependency = payload["aids_comrecgc_exact_route_v5_contract"]["mut_dependency"]
     assert dependency["controller_id"] == v5.CONTROLLER_ID
     assert dependency["task_id"] == v5.TASK_ID
-    assert dependency["expected_output"].endswith("/attempt-0")
+    assert dependency["task_gate"].endswith(f"/{v5.TASK_ID}/gate.json")
+    assert dependency["passing_output_resolution"] == "unique_PASS_run.expected_output"
+    assert dependency["attempt_is_controller_authoritative"] is True
+    assert "expected_output" not in dependency
     headroom = payload["aids_comrecgc_exact_route_v5_contract"][
         "highmem_exclusion"
     ]["cgroup_headroom_gate"]

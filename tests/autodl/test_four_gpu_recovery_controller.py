@@ -540,6 +540,39 @@ def test_dead_starting_and_running_workers_retry_once_then_fail_closed(
     assert running["failure_reason"] == "RUNNING exp_run worker PID is absent"
 
 
+def test_dead_worker_log_semantic_marker_preempts_global_process_loss_retry(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    data = tmp_path / "data"
+    project.mkdir()
+    data.mkdir()
+    (project / ".git").mkdir()
+    layout = build_runtime_layout(project_root=project, data_root=data).ensure()
+    log = tmp_path / "dead-worker.log"
+    log.write_text("semantic gate failed: provenance differs\n", encoding="utf-8")
+    task = _task("dead-semantic", dataset="mutagenicity")
+    instance = {
+        "state": "STARTING",
+        "run_id": "missing-semantic-run",
+        "started_at": "2020-01-01T00:00:00Z",
+        "attempt": 0,
+        "transient_retry_count": 0,
+        "log_path": str(log),
+    }
+    _reconcile_instance(
+        layout,
+        task,
+        instance,
+        launch_grace_seconds=60,
+        max_transient_retries=1,
+        now_epoch=1_700_000_000.0,
+    )
+    assert instance["state"] == "FAILED"
+    assert instance["failure_class"] == "SEMANTIC"
+    assert instance["attempt"] == 0
+
+
 def test_b7_transient_failure_records_latest_checkpoint_for_fresh_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
