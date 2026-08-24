@@ -8953,3 +8953,15 @@ Accepted
   and separates collation/device transfer, prepared-batch model time, and full
   collation-to-logits time.  Argmax/allclose completion and raw-byte identity
   are distinct gates: a performance PASS cannot waive CUDA byte instability.
+- The matrix additionally reports calibrated softmax probability finiteness,
+  normalization, allclose and maximum absolute difference for every batch,
+  plus the best end-to-end device/batch/throughput.  The process fails closed
+  unless OMP, MKL and OpenBLAS each use one thread and tokenizer parallelism is
+  disabled; those values are hash-bound in the launch input.
+- GPU2 release is owned by the persistent ComRecGC pair worker, not its
+  transient legacy or optimized science child.  The deferred matrix
+  controller therefore binds the pair run ID, launch-spec SHA, worker PID and
+  start ticks, terminal registry state and physical UUID.  It emits a
+  60-second heartbeat while resources are busy, creates exactly one fresh
+  benchmark run only after a stable free window, and blocks on any partial
+  target rather than resuming or overwriting it.

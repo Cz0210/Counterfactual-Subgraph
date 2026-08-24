@@ -1407,5 +1407,10 @@ Mutagenicity roadmaps.
   any CPU formal replay; do not stop the old GPU full task.
 - [x] Add the fixed 1/8/32/128/512 CPU/GPU frozen-GINE matrix with separate
   batching, pure-model, end-to-end, argmax/max-difference, and raw-byte fields.
+- [x] Add calibrated-probability and best end-to-end summaries, bind the exact
+  single-thread environment, and validate them in the PASS-last contract.
+- [x] Add a persistent fail-closed deferred benchmark controller bound to the
+  ComRecGC pair parent worker/registry/launch-spec and physical GPU UUID; wait
+  through transient child changes and resource contention without exiting.
 - [ ] Run the matrix in a fresh GPU root only after a controller-owned GPU is
   naturally available; do not preempt Quick50, ComRecGC, or any full writer.

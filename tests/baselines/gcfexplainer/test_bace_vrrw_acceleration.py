@@ -33,6 +33,9 @@ from scripts.autodl.benchmark_bace_frozen_gine_batch import (
 )
 from scripts.autodl.benchmark_bace_gnn_inference_matrix import (
     DEFAULT_BATCH_SIZES,
+    REQUIRED_THREAD_ENVIRONMENT,
+    _best_end_to_end_summary,
+    _calibrated_probability_correctness,
     _parse_batch_sizes,
     _timing_summary,
     parse_args as parse_matrix_benchmark_args,
@@ -192,6 +195,35 @@ def test_bace_gnn_inference_matrix_cli_and_paired_slurm_are_synchronized() -> No
     assert summary["median_seconds"] == 2.0
     assert summary["median_rows_per_second"] == 4.0
 
+    matrix = [
+        {
+            "batch_size": 1,
+            "timing": {
+                "end_to_end": {
+                    "cpu": {"median_rows_per_second": 2.0, "median_seconds": 0.5},
+                    "gpu": {"median_rows_per_second": 1.0, "median_seconds": 1.0},
+                }
+            },
+        },
+        {
+            "batch_size": 8,
+            "timing": {
+                "end_to_end": {
+                    "cpu": {"median_rows_per_second": 4.0, "median_seconds": 2.0},
+                    "gpu": {"median_rows_per_second": 16.0, "median_seconds": 0.5},
+                }
+            },
+        },
+    ]
+    best = _best_end_to_end_summary(matrix)
+    assert best["overall"] == {
+        "device": "gpu",
+        "batch_size": 8,
+        "median_rows_per_second": 16.0,
+        "median_seconds": 0.5,
+    }
+    assert best["per_device"]["cpu"]["batch_size"] == 8
+
     project_root = Path(__file__).resolve().parents[3]
     cli = (
         project_root / "scripts/autodl/benchmark_bace_gnn_inference_matrix.py"
@@ -212,8 +244,31 @@ def test_bace_gnn_inference_matrix_cli_and_paired_slurm_are_synchronized() -> No
         "--config configs/hpc.yaml",
         "--set inference.fallback_to_heuristic=false",
         "1,8,32,128,512",
+        "export OMP_NUM_THREADS=1",
+        "export MKL_NUM_THREADS=1",
+        "export OPENBLAS_NUM_THREADS=1",
+        "export TOKENIZERS_PARALLELISM=false",
     ):
         assert required in slurm
+
+
+def test_calibrated_probability_comparison_is_explicit_and_normalized() -> None:
+    torch = pytest.importorskip("torch")
+    left = torch.tensor([[0.1, 0.2], [4.0, -3.0]], dtype=torch.float64)
+    right = left + torch.tensor([[1e-10, -1e-10], [0.0, 0.0]])
+    result = _calibrated_probability_correctness(
+        torch, left, right, atol=1e-8, rtol=1e-7
+    )
+    assert result["calibrated_probability_finite"] is True
+    assert result["calibrated_probability_normalized"] is True
+    assert result["calibrated_probability_allclose"] is True
+    assert result["max_abs_probability_difference"] > 0.0
+    assert set(REQUIRED_THREAD_ENVIRONMENT) == {
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "TOKENIZERS_PARALLELISM",
+    }
 
 
 def test_quick50_lockstep_wrapper_is_fail_closed_and_preserves_old_full() -> None:

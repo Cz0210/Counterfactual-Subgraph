@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 import statistics
 import time
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from src.baselines.gcfexplainer_acceleration import write_fresh_json
 from src.baselines.gcfexplainer_bace_adapter import load_bace_gcf_dataset
@@ -27,6 +27,12 @@ from src.oracles.gnn_oracle import load_gnn_checkpoint_bundle, sha256_file
 
 
 DEFAULT_BATCH_SIZES = (1, 8, 32, 128, 512)
+REQUIRED_THREAD_ENVIRONMENT = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
 
 
 def _parse_batch_sizes(value: str) -> tuple[int, ...]:
@@ -174,6 +180,57 @@ def _forward(model: Any, batch: Any, temperature: float) -> tuple[Any, Any]:
     return hidden, model.classifier(hidden) / temperature
 
 
+def _calibrated_probability_correctness(
+    torch: Any,
+    left_logits: Any,
+    right_logits: Any,
+    *,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
+    """Compare softmax probabilities from temperature-scaled logits."""
+
+    left = torch.softmax(left_logits, dim=-1)
+    right = torch.softmax(right_logits, dim=-1)
+    left_sums = left.sum(dim=-1)
+    right_sums = right.sum(dim=-1)
+    normalization_atol = max(float(atol), 1e-7)
+    normalized = bool(
+        torch.allclose(
+            left_sums,
+            torch.ones_like(left_sums),
+            atol=normalization_atol,
+            rtol=0.0,
+        )
+        and torch.allclose(
+            right_sums,
+            torch.ones_like(right_sums),
+            atol=normalization_atol,
+            rtol=0.0,
+        )
+    )
+    return {
+        "calibrated_probability_finite": bool(
+            torch.isfinite(left).all() and torch.isfinite(right).all()
+        ),
+        "calibrated_probability_normalized": normalized,
+        "calibrated_probability_allclose": bool(
+            torch.allclose(left, right, atol=atol, rtol=rtol)
+        ),
+        "max_abs_probability_difference": float(
+            torch.max(torch.abs(left - right)).item()
+        ),
+        "left_max_probability_sum_error": float(
+            torch.max(torch.abs(left_sums - 1.0)).item()
+        ),
+        "right_max_probability_sum_error": float(
+            torch.max(torch.abs(right_sums - 1.0)).item()
+        ),
+        "left_probability_sha256": _tensor_sha256(left),
+        "right_probability_sha256": _tensor_sha256(right),
+    }
+
+
 def _correctness(
     torch: Any, cpu_result: Any, gpu_result: Any, *, atol: float, rtol: float
 ) -> dict[str, Any]:
@@ -185,7 +242,7 @@ def _correctness(
         and torch.isfinite(gpu_hidden).all()
         and torch.isfinite(gpu_logits).all()
     )
-    return {
+    result = {
         "finite": finite,
         "argmax_equal": bool(torch.equal(cpu_logits.argmax(-1), gpu_logits.argmax(-1))),
         "logits_allclose": bool(
@@ -203,6 +260,16 @@ def _correctness(
         "cross_device_graph_hidden_exact": bool(torch.equal(cpu_hidden, gpu_hidden)),
         "cross_device_project_logits_exact": bool(torch.equal(cpu_logits, gpu_logits)),
     }
+    result.update(
+        _calibrated_probability_correctness(
+            torch,
+            cpu_logits,
+            gpu_logits,
+            atol=atol,
+            rtol=rtol,
+        )
+    )
+    return result
 
 
 def _same_device_phase_correctness(
@@ -210,7 +277,7 @@ def _same_device_phase_correctness(
 ) -> dict[str, Any]:
     left_hidden, left_logits = (value.detach().cpu() for value in left)
     right_hidden, right_logits = (value.detach().cpu() for value in right)
-    return {
+    result = {
         "argmax_equal": bool(torch.equal(left_logits.argmax(-1), right_logits.argmax(-1))),
         "logits_allclose": bool(
             torch.allclose(left_logits, right_logits, atol=atol, rtol=rtol)
@@ -225,6 +292,62 @@ def _same_device_phase_correctness(
             torch.max(torch.abs(left_hidden - right_hidden)).item()
         ),
     }
+    result.update(
+        _calibrated_probability_correctness(
+            torch,
+            left_logits,
+            right_logits,
+            atol=atol,
+            rtol=rtol,
+        )
+    )
+    return result
+
+
+def _best_end_to_end_summary(matrix: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    per_device: dict[str, dict[str, Any]] = {}
+    candidates: list[dict[str, Any]] = []
+    for device in ("cpu", "gpu"):
+        rows = [
+            {
+                "device": device,
+                "batch_size": int(row["batch_size"]),
+                "median_rows_per_second": float(
+                    row["timing"]["end_to_end"][device][
+                        "median_rows_per_second"
+                    ]
+                ),
+                "median_seconds": float(
+                    row["timing"]["end_to_end"][device]["median_seconds"]
+                ),
+            }
+            for row in matrix
+        ]
+        best = max(rows, key=lambda item: item["median_rows_per_second"])
+        per_device[device] = best
+        candidates.append(best)
+    overall = max(candidates, key=lambda item: item["median_rows_per_second"])
+    return {
+        "per_device": per_device,
+        "overall": overall,
+        "gpu_over_cpu_best_throughput_ratio": (
+            per_device["gpu"]["median_rows_per_second"]
+            / per_device["cpu"]["median_rows_per_second"]
+        ),
+    }
+
+
+def _validate_thread_environment(environment: Mapping[str, str]) -> None:
+    mismatches = {
+        key: environment.get(key)
+        for key, expected in REQUIRED_THREAD_ENVIRONMENT.items()
+        if environment.get(key) != expected
+    }
+    if mismatches:
+        raise RuntimeError(
+            "formal benchmark thread environment mismatch: "
+            + json.dumps(mismatches, sort_keys=True)
+        )
 
 
 def _validate_checkpoint(metadata: dict[str, Any]) -> None:
@@ -247,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(
             "formal BACE benchmark requires batch sizes exactly 1,8,32,128,512"
         )
+    _validate_thread_environment(os.environ)
 
     root = args.output_dir.expanduser().resolve(strict=False)
     if root.exists() or root.is_symlink():
@@ -382,11 +506,17 @@ def main(argv: list[str] | None = None) -> int:
             and bool(check["argmax_equal"])
             and bool(check["logits_allclose"])
             and bool(check["hidden_allclose"])
+            and bool(check["calibrated_probability_finite"])
+            and bool(check["calibrated_probability_normalized"])
+            and bool(check["calibrated_probability_allclose"])
             for check in (pure_correctness, e2e_correctness)
         ) and all(
             bool(check["argmax_equal"])
             and bool(check["logits_allclose"])
             and bool(check["hidden_allclose"])
+            and bool(check["calibrated_probability_finite"])
+            and bool(check["calibrated_probability_normalized"])
+            and bool(check["calibrated_probability_allclose"])
             for check in (cpu_phase, gpu_phase)
         )
         assert cpu_pure_repeat is not None
@@ -454,8 +584,9 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
+    best_end_to_end = _best_end_to_end_summary(matrix)
     payload = {
-        "schema_version": "bace_gnn_inference_benchmark_v1",
+        "schema_version": "bace_gnn_inference_benchmark_v2",
         "status": "PASS" if all_correct and cpu_raw_exact else "FAILED",
         "benchmark_completed": True,
         "diagnostic_only": True,
@@ -489,21 +620,32 @@ def main(argv: list[str] | None = None) -> int:
         "repeats": args.repeats,
         "atol": args.atol,
         "rtol": args.rtol,
+        "temperature_scaling": {
+            "temperature": temperature,
+            "source": "frozen_calibrated_bace_gine_checkpoint",
+            "probability_transform": "softmax(project_logits / temperature)",
+        },
+        "thread_environment": {
+            key: os.environ[key] for key in REQUIRED_THREAD_ENVIRONMENT
+        },
         "all_argmax_and_allclose_checks_pass": all_correct,
+        "all_calibrated_probability_checks_pass": all_correct,
         "cpu_raw_byte_repeat_exact_all_batches": cpu_raw_exact,
         "gpu_raw_byte_repeat_exact_all_batches": gpu_raw_exact,
         "not_an_order_rng_or_batch_bug": bool(all_correct and not gpu_raw_exact),
+        "best_end_to_end": best_end_to_end,
         "matrix": matrix,
     }
     output = root / "bace_gnn_inference_benchmark.json"
     write_fresh_json(output, payload)
     completion = {
-        "schema_version": "bace_gnn_inference_benchmark_complete_v1",
+        "schema_version": "bace_gnn_inference_benchmark_complete_v2",
         "status": payload["status"],
         "result_path": str(output),
         "result_sha256": sha256_file(output),
         "benchmark_completed": True,
         "exact_replay_status": payload["exact_replay_status"],
+        "best_end_to_end": best_end_to_end,
     }
     write_fresh_json(root / "_BENCHMARK_COMPLETE.json", completion)
     if payload["status"] == "PASS":
