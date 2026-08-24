@@ -12,10 +12,12 @@ from src.baselines.comrecgc.aids_pair_semantics import (
     AIDSPairSemanticsError,
     _build_all_pairs_close_certificate,
     _formula_audit,
+    _post_scan_disposition,
     _resolve_pair_chunk_authority,
     _sample_rows,
     _select_candidates,
     _write_terminal_pass,
+    _validate_dataset_provenance,
 )
 from src.baselines.comrecgc.close_pair_scan import PairChunk, scan_theta_close_pairs
 from src.baselines.comrecgc.contracts import sha256_file, stable_json_sha256
@@ -47,6 +49,39 @@ def test_candidate_cap_is_effective_after_classifier_and_graph_resolution() -> N
     assert selected.graph_hashes == ["g0", "g2"]
     assert selected.generation_indices == [0, 3]
     assert selected.cap == 2
+
+
+def test_dataset_provenance_rejects_graph_or_audit_drift_with_same_ids() -> None:
+    audit = {
+        "dataset": "AIDS/HIV",
+        "dataset_fingerprint": "fingerprint-a",
+        "generation_parent_ids_sha256": "same-parent-ids",
+        "num_graphs": 1_283,
+    }
+    identity = {
+        "dataset": "aids",
+        "dataset_fingerprint": "fingerprint-a",
+        "dataset_audit": audit,
+        "dataset_audit_sha256": stable_json_sha256(audit),
+    }
+    _validate_dataset_provenance(
+        identity,
+        dataset_fingerprint="fingerprint-a",
+        dataset_audit=audit,
+    )
+
+    with pytest.raises(AIDSPairSemanticsError, match="dataset_fingerprint"):
+        _validate_dataset_provenance(
+            identity,
+            dataset_fingerprint="fingerprint-b",
+            dataset_audit={**audit, "dataset_fingerprint": "fingerprint-b"},
+        )
+    with pytest.raises(AIDSPairSemanticsError, match="dataset_audit"):
+        _validate_dataset_provenance(
+            identity,
+            dataset_fingerprint="fingerprint-a",
+            dataset_audit={**audit, "num_graphs": 1_282},
+        )
 
 
 def test_production_sample_contract_includes_random_chunk_ends_and_boundary() -> None:
@@ -438,3 +473,106 @@ def test_terminal_metadata_failure_never_writes_pass(
             final={"physical_store_rows": 6, "logical_close_rows": 6},
         )
     assert not (tmp_path / "PASS").exists()
+
+
+def _tiny_scan_fixture(tmp_path: Path, *, candidate_count: int) -> tuple[Path, list[PairChunk]]:
+    parent_count = 2
+    pairs = np.asarray(
+        [
+            [parent, candidate]
+            for candidate in range(candidate_count)
+            for parent in range(parent_count)
+        ],
+        dtype=np.int64,
+    )
+    pair_path = tmp_path / "pairs.npy"
+    np.save(pair_path, pairs, allow_pickle=False)
+    chunks = [
+        PairChunk(
+            candidate,
+            candidate,
+            candidate + 1,
+            parent_count,
+            (0, candidate),
+            (parent_count - 1, candidate),
+        )
+        for candidate in range(candidate_count)
+    ]
+    return pair_path, chunks
+
+
+def test_first_bounded_invocation_covering_all_is_still_benchmark(
+    tmp_path: Path,
+) -> None:
+    pair_path, chunks = _tiny_scan_fixture(tmp_path, candidate_count=1)
+    root = tmp_path / "scan"
+    scan = scan_theta_close_pairs(
+        output_dir=root,
+        pair_indices_path=pair_path,
+        pair_chunks=chunks,
+        parent_count=2,
+        candidate_count=1,
+        theta=0.1,
+        scientific_identity={"bounded": "first-covers-all"},
+        distance_provider=lambda _start, _stop: np.zeros((1, 2), dtype=np.float32),
+        max_chunks=1,
+    )
+
+    assert scan is not None
+    assert _post_scan_disposition(max_chunks=1, scan_complete=True) == "benchmark"
+    assert not (root / "PASS").exists()
+
+
+def test_bounded_resume_covering_final_chunks_still_requires_unbounded_resume(
+    tmp_path: Path,
+) -> None:
+    pair_path, chunks = _tiny_scan_fixture(tmp_path, candidate_count=3)
+    root = tmp_path / "scan"
+
+    first = scan_theta_close_pairs(
+        output_dir=root,
+        pair_indices_path=pair_path,
+        pair_chunks=chunks,
+        parent_count=2,
+        candidate_count=3,
+        theta=0.1,
+        scientific_identity={"bounded": "resume-covers-final"},
+        distance_provider=lambda start, stop: np.zeros(
+            (stop - start, 2), dtype=np.float32
+        ),
+        max_chunks=1,
+    )
+    assert first is None
+    final_bounded = scan_theta_close_pairs(
+        output_dir=root,
+        pair_indices_path=pair_path,
+        pair_chunks=chunks,
+        parent_count=2,
+        candidate_count=3,
+        theta=0.1,
+        scientific_identity={"bounded": "resume-covers-final"},
+        distance_provider=lambda start, stop: np.zeros(
+            (stop - start, 2), dtype=np.float32
+        ),
+        resume=True,
+        max_chunks=2,
+    )
+    assert final_bounded is not None
+    assert _post_scan_disposition(max_chunks=2, scan_complete=True) == "benchmark"
+    assert not (root / "PASS").exists()
+
+    terminal_resume = scan_theta_close_pairs(
+        output_dir=root,
+        pair_indices_path=pair_path,
+        pair_chunks=chunks,
+        parent_count=2,
+        candidate_count=3,
+        theta=0.1,
+        scientific_identity={"bounded": "resume-covers-final"},
+        distance_provider=lambda _start, _stop: pytest.fail(
+            "terminal unbounded resume must not recompute distances"
+        ),
+        resume=True,
+    )
+    assert terminal_resume is not None
+    assert _post_scan_disposition(max_chunks=None, scan_complete=True) == "scientific"

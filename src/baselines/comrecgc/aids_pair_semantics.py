@@ -73,6 +73,20 @@ class AIDSPairSemanticsError(RuntimeError):
     """Raised when production provenance or recomputed semantics fail closed."""
 
 
+def _post_scan_disposition(
+    *, max_chunks: int | None, scan_complete: bool
+) -> str:
+    """A chunk-bounded invocation is always a benchmark, even at EOF."""
+
+    if max_chunks is not None:
+        return "benchmark"
+    if not scan_complete:
+        raise AIDSPairSemanticsError(
+            "unbounded distance scan stopped before terminal completion"
+        )
+    return "scientific"
+
+
 def _resolve_pair_chunk_authority(
     manifest_path: Path, manifest: Mapping[str, Any]
 ) -> tuple[list[PairChunk], dict[str, Any]]:
@@ -156,6 +170,34 @@ def _resolve_pair_chunk_authority(
         "source_chunk_count": len(source_chunks),
         "source_chunks_sha256": source_chunks_hash,
     }
+
+
+def _validate_dataset_provenance(
+    scientific_identity: Mapping[str, Any],
+    *,
+    dataset_fingerprint: str,
+    dataset_audit: Mapping[str, Any],
+) -> None:
+    actual_audit = dict(dataset_audit)
+    expected_audit_hash = stable_json_sha256(actual_audit)
+    checks = {
+        "dataset": scientific_identity.get("dataset") == "aids",
+        "dataset_fingerprint": scientific_identity.get("dataset_fingerprint")
+        == str(dataset_fingerprint),
+        "dataset_audit": scientific_identity.get("dataset_audit")
+        == actual_audit,
+        "dataset_audit_sha256": scientific_identity.get(
+            "dataset_audit_sha256"
+        )
+        == expected_audit_hash,
+        "audit_internal_fingerprint": actual_audit.get("dataset_fingerprint")
+        == str(dataset_fingerprint),
+    }
+    failed = [key for key, passed in checks.items() if not passed]
+    if failed:
+        raise AIDSPairSemanticsError(
+            "pair-store dataset provenance failed: " + ", ".join(failed)
+        )
 
 
 def _json_load(path: str | Path) -> dict[str, Any]:
@@ -282,6 +324,8 @@ def _validate_pair_store(
     distance_checkpoint: Path,
     selection: CandidateSelection,
     parent_ids: Sequence[str],
+    dataset_fingerprint: str,
+    dataset_audit: Mapping[str, Any],
     theta: float,
 ) -> tuple[dict[str, Any], list[PairChunk]]:
     manifest = _json_load(manifest_path)
@@ -290,6 +334,11 @@ def _validate_pair_store(
         raise AIDSPairSemanticsError("pair-store manifest lacks scientific_identity")
     chunks, chunk_authority = _resolve_pair_chunk_authority(
         manifest_path, manifest
+    )
+    _validate_dataset_provenance(
+        scientific,
+        dataset_fingerprint=dataset_fingerprint,
+        dataset_audit=dataset_audit,
     )
     expected_parameters = asdict(RecourseParameters.for_mode("full"))
     failures: list[str] = []
@@ -663,6 +712,7 @@ def run_aids_pair_semantics_audit(
             raise AIDSPairSemanticsError(
                 f"production candidate count {len(selection.graphs)} != 71642"
             )
+        bundle_audit = bundle.audit()
         manifest, chunks = _validate_pair_store(
             manifest_path=pair_manifest_path,
             generation_manifest_path=generation_manifest_path,
@@ -670,6 +720,8 @@ def run_aids_pair_semantics_audit(
             distance_checkpoint=checkpoint_path,
             selection=selection,
             parent_ids=bundle.parent_ids,
+            dataset_fingerprint=bundle.dataset_fingerprint,
+            dataset_audit=bundle_audit,
             theta=theta,
         )
         pair_indices_path = Path(str(manifest["pairs_path"])).resolve(strict=True)
@@ -860,7 +912,10 @@ def run_aids_pair_semantics_audit(
                 boundary_sample_size=1_000,
                 progress_callback=report_scan_progress,
             )
-            if scan is None:
+            disposition = _post_scan_disposition(
+                max_chunks=max_chunks, scan_complete=scan is not None
+            )
+            if disposition == "benchmark":
                 checkpoint = _json_load(root / "distance_scan/checkpoint.json")
                 source_stats_after_benchmark = {
                     "pair_manifest": _file_stat(pair_manifest_path),
@@ -893,6 +948,7 @@ def run_aids_pair_semantics_audit(
                     ),
                     "eta_seconds": checkpoint.get("eta_seconds"),
                     "resume_command_required": True,
+                    "distance_scan_terminal": scan is not None,
                     "storage_preflight": storage_preflight,
                     "source_stats_before": source_stats_before,
                     "source_stats_after": source_stats_after_benchmark,
@@ -907,6 +963,8 @@ def run_aids_pair_semantics_audit(
                 _progress(progress_path, state="BENCHMARK_COMPLETE", **benchmark)
                 return benchmark
 
+            if scan is None:  # guarded by _post_scan_disposition
+                raise AssertionError("scientific disposition lacks terminal scan")
             scan_manifest = _json_load(scan.manifest_path)
             expected_normalization_keys = {
                 f"{chunk.candidate_start}:{chunk.candidate_stop}"
@@ -1087,6 +1145,8 @@ def run_aids_pair_semantics_audit(
                 all_pairs_close_certificate_sha256
             ),
             "theta": float(theta),
+            "parent_count": EXPECTED_PARENT_COUNT,
+            "candidate_count": EXPECTED_CANDIDATE_COUNT,
             "filter_operator": "<=",
             "distance_checkpoint_hash": sha256_file(checkpoint_path),
             "embedding_checkpoint_hash": sha256_file(checkpoint_path),
@@ -1095,7 +1155,8 @@ def run_aids_pair_semantics_audit(
             "scale_contract": (
                 "element_count(parent)+element_count(candidate)"
             ),
-            "pair_orientation": ["parent_index", "candidate_index"],
+            "pair_orientation": "col0_parent_col1_candidate",
+            "pair_axis": ["parent_index", "candidate_index"],
             "pair_order": "candidate_major_parent_minor",
             "dtype": "float32",
             "chunk_order": [chunk.chunk_index for chunk in chunks],
@@ -1104,6 +1165,14 @@ def run_aids_pair_semantics_audit(
             "close_bitmap_hash": scan.close_bitmap_sha256,
             "normalized_distances": str(scan.distance_path),
             "normalized_distances_hash": scan.distance_sha256,
+            "normalized_distances_sha256": scan.distance_sha256,
+            "physical_vectors_sha256": str(
+                source_hashes["recourse_vectors_direct_sha256"]
+            ),
+            "normalized_distance_contract": (
+                "GREED/NeuroSED.predict_outer(parent,candidate)/"
+                "(element_count(parent)+element_count(candidate))"
+            ),
             "distance_statistics": scan_manifest["distance_statistics"],
             "normalization_audit": normalization_audit,
             "normalization_audit_path": str(normalization_audit_path),
