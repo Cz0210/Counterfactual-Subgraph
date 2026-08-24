@@ -16,4 +16,3 @@ from src.utils.autodl_aids_greed_full_scan_supervisor import main  # noqa: E402
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
