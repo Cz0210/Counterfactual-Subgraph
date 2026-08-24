@@ -659,10 +659,18 @@ def test_proven_one_cluster_stream_is_elementwise_legacy_exact(
     assert manifest["exact_one_cluster_semantics_replayed"] is True
     assert manifest["approximation_used"] is False
     assert manifest["retained_count"] == 3
-    assert np.array_equal(
-        np.load(actual.retained_positions_path, allow_pickle=False),
-        np.asarray([1, 2, 3], dtype=np.int64),
+    assert actual.retained_positions_path is None
+    assert actual.retained_vectors_path is None
+    assert manifest["large_retained_arrays_materialized"] is False
+    assert manifest["retained_vector_bytes_materialized"] == 0
+    assert manifest["covered_parent_indices"] == [0, 1, 2]
+    assert manifest["coverage_pair_orientation"] == (
+        "col0_parent_col1_candidate"
     )
+    assert manifest["official_covered_parent_indices"] == [0, 1, 2]
+    assert manifest["official_first_counterfactual_indices"] == [11, 12]
+    assert manifest["official_radius_counterfactual_indices"] == [11, 12]
+    assert manifest["centroid_norm"] == manifest["torch_centroid_norm"]
 
 
 def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(
@@ -701,11 +709,11 @@ def test_proven_one_cluster_trace_preserves_python_float_radius_boundary(
     )
     assert float(np.float32(0.020)) < 0.020
     assert actual.selected == expected
-    assert np.load(actual.retained_positions_path, allow_pickle=False).tolist() == [
-        0,
-        1,
-        2,
-    ]
+    assert actual.retained_positions_path is None
+    assert actual.retained_vectors_path is None
+    manifest = json.loads(actual.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["retained_count"] == 3
+    assert manifest["float64_radius_membership_disagreement_count"] == 2
 
 
 def test_proven_one_cluster_preserves_official_empty_coverage_corner(
@@ -828,9 +836,8 @@ def test_proven_one_cluster_resume_is_exact_and_tamper_closed(
     assert external_recourse._sha256_file(resumed.retained_mask_path) == (
         external_recourse._sha256_file(reference.retained_mask_path)
     )
-    assert external_recourse._sha256_file(resumed.retained_vectors_path) == (
-        external_recourse._sha256_file(reference.retained_vectors_path)
-    )
+    assert resumed.retained_vectors_path is None
+    assert reference.retained_vectors_path is None
 
     manifest = json.loads(resumed.manifest_path.read_text(encoding="utf-8"))
     centroid_path = Path(manifest["numpy_centroid_path"])

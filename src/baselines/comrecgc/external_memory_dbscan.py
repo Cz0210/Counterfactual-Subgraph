@@ -46,6 +46,12 @@ ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT = (
 SHORTCUT_PROOF_SCHEMA_VERSION = "comrecgc_dbscan_anchor_proof_v2"
 ADAPTIVE_SELECTION_SCHEMA_VERSION = "comrecgc_adaptive_anchor_selection_v2"
 PROGRESS_LEDGER_SCHEMA_VERSION = "comrecgc_shortcut_progress_ledger_v1"
+ALL_CORE_CERTIFICATE_SCHEMA_VERSION = "comrecgc_dbscan_all_core_certificate_v1"
+CONNECTIVITY_CERTIFICATE_SCHEMA_VERSION = (
+    "comrecgc_dbscan_connectivity_certificate_v1"
+)
+BOUNDARY_CERTIFICATE_SCHEMA_VERSION = "comrecgc_dbscan_boundary_certificate_v1"
+CLUSTER_PARTITION_SCHEMA_VERSION = "comrecgc_dbscan_cluster_partition_v1"
 
 
 class ExternalMemoryDBSCANError(RuntimeError):
@@ -600,6 +606,285 @@ def _anchor_graph(
                 visited.add(target)
                 frontier.append(target)
     return edges, len(visited) == anchor_count, len(visited), rows
+
+
+def _write_shortcut_split_certificates(
+    *,
+    root: Path,
+    identity: Mapping[str, Any],
+    vectors: np.ndarray,
+    anchor_indices: np.ndarray,
+    anchor_indices_path: Path,
+    anchor_indices_sha256: str,
+    anchor_edges: np.ndarray,
+    anchor_edges_path: Path,
+    anchor_edges_sha256: str,
+    lower_path: Path,
+    lower_sha256: str,
+    labels_path: Path,
+    labels_sha256: str,
+    core_path: Path,
+    core_sha256: str,
+    contract: ExternalDBSCANContract,
+) -> dict[str, Any]:
+    """Float64-revalidate every shortcut witness and publish split proofs.
+
+    The sklearn radius scan remains the paper-compatible edge authority.  This
+    terminal pass recomputes every point-to-anchor comparison in float64 and
+    requires the resulting distinct-anchor count to equal the committed
+    sklearn lower-bound witness exactly.  Any precision disagreement therefore
+    fails closed instead of being hidden behind a tolerance.
+    """
+
+    n_samples, n_features = map(int, vectors.shape)
+    eps = float(contract.eps)
+    needed_other_neighbors = max(0, int(contract.min_samples) - 1)
+    anchors = np.asarray(vectors[anchor_indices], dtype=np.float64)
+    anchor_count = int(len(anchor_indices))
+    lower = _open_npy_memmap(lower_path, mode="r")
+    if lower.shape != (n_samples,) or lower.dtype != np.dtype(np.uint32):
+        raise ExternalMemoryDBSCANError("float64 boundary witness shape mismatch")
+    anchor_column_by_sample = {
+        int(sample): int(column)
+        for column, sample in enumerate(anchor_indices.tolist())
+    }
+    block_size = _bounded_shortcut_block_size(
+        requested=int(contract.shortcut_query_block_size),
+        anchor_count=anchor_count,
+        max_rss_bytes=int(contract.max_rss_bytes),
+        phase="shortcut_float64_boundary_revalidation",
+    )
+    anchor_squared = np.einsum("ij,ij->i", anchors, anchors)
+    exact_boundary_edge_count = 0
+    near_boundary_recompute_count = 0
+    non_anchor_attachment_count = 0
+    minimum_certifying_margin = float("inf")
+    maximum_certifying_distance = 0.0
+    witness_digest = hashlib.sha256()
+    comparison_guard = max(
+        64.0 * np.finfo(np.float64).eps * max(1.0, abs(eps)), 1.0e-15
+    )
+    for offset in range(0, n_samples, block_size):
+        stop = min(n_samples, offset + block_size)
+        block = np.asarray(vectors[offset:stop], dtype=np.float64)
+        block_squared = np.einsum("ij,ij->i", block, block)
+        squared = (
+            block_squared[:, None]
+            + anchor_squared[None, :]
+            - 2.0 * np.matmul(block, anchors.T)
+        )
+        np.maximum(squared, 0.0, out=squared)
+        distances = np.sqrt(squared, out=squared)
+        near = np.abs(distances - eps) <= comparison_guard
+        if bool(np.any(near)):
+            for row, column in np.argwhere(near).tolist():
+                distances[int(row), int(column)] = float(
+                    np.linalg.norm(block[int(row)] - anchors[int(column)])
+                )
+            near_boundary_recompute_count += int(np.count_nonzero(near))
+        within = distances <= eps
+        for sample, column in anchor_column_by_sample.items():
+            if offset <= sample < stop:
+                local = sample - offset
+                if not bool(within[local, column]) or distances[local, column] != 0.0:
+                    raise ExternalMemoryDBSCANError(
+                        "float64 boundary pass lost an anchor self-neighbor"
+                    )
+                within[local, column] = False
+        counts = np.sum(within, axis=1, dtype=np.uint32)
+        if not np.array_equal(counts, np.asarray(lower[offset:stop])):
+            raise ExternalMemoryDBSCANError(
+                "FLOAT_BOUNDARY_UNCERTAIN: sklearn/float64 anchor counts differ"
+            )
+        if bool(np.any(counts < needed_other_neighbors)):
+            raise ExternalMemoryDBSCANError(
+                "float64 boundary pass cannot certify min_samples including self"
+            )
+        non_anchor = np.ones(stop - offset, dtype=np.bool_)
+        for sample in anchor_column_by_sample:
+            if offset <= sample < stop:
+                non_anchor[sample - offset] = False
+        if bool(np.any(counts[non_anchor] < 1)):
+            raise ExternalMemoryDBSCANError(
+                "float64 boundary pass found an unattached non-anchor"
+            )
+        non_anchor_attachment_count += int(np.count_nonzero(non_anchor))
+        if needed_other_neighbors:
+            candidates = np.where(within, distances, np.inf)
+            kth = np.partition(
+                candidates, needed_other_neighbors - 1, axis=1
+            )[:, needed_other_neighbors - 1]
+            if not bool(np.isfinite(kth).all()) or bool(np.any(kth > eps)):
+                raise ExternalMemoryDBSCANError(
+                    "float64 certifying edge escaped inclusive epsilon"
+                )
+            minimum_certifying_margin = min(
+                minimum_certifying_margin, float(np.min(eps - kth))
+            )
+            maximum_certifying_distance = max(
+                maximum_certifying_distance, float(np.max(kth))
+            )
+            exact_boundary_edge_count += int(np.count_nonzero(kth == eps))
+            witness_digest.update(np.asarray(kth, dtype=np.float64).tobytes())
+        witness_digest.update(np.asarray(counts, dtype=np.uint32).tobytes())
+        _check_rss(
+            int(contract.max_rss_bytes),
+            phase="shortcut_float64_boundary_revalidation",
+        )
+    del lower
+
+    expected_edges = {
+        (int(source), int(target)) for source, target in anchor_edges.tolist()
+    }
+    observed_edge_count = 0
+    anchor_exact_boundary_edge_count = 0
+    for source in range(anchor_count):
+        distances = np.linalg.norm(anchors - anchors[source], axis=1)
+        if distances[source] != 0.0:
+            raise ExternalMemoryDBSCANError("float64 anchor graph lost self")
+        for target in np.flatnonzero(distances <= eps).tolist():
+            if source >= int(target):
+                continue
+            edge = (source, int(target))
+            if edge not in expected_edges:
+                raise ExternalMemoryDBSCANError(
+                    "FLOAT_BOUNDARY_UNCERTAIN: float64 added an anchor edge"
+                )
+            observed_edge_count += 1
+            anchor_exact_boundary_edge_count += int(distances[int(target)] == eps)
+    if observed_edge_count != len(expected_edges):
+        raise ExternalMemoryDBSCANError(
+            "FLOAT_BOUNDARY_UNCERTAIN: float64 removed an anchor edge"
+        )
+
+    scientific_identity_sha = _stable_hash(identity)
+    boundary_path = root / "boundary_certificate.json"
+    boundary = {
+        "schema_version": BOUNDARY_CERTIFICATE_SCHEMA_VERSION,
+        "status": "PASS",
+        "scientific_identity_sha256": scientific_identity_sha,
+        "input_rows": n_samples,
+        "input_features": n_features,
+        "source_dtype": str(vectors.dtype),
+        "recheck_dtype": "float64",
+        "metric": "euclidean",
+        "comparison": "distance <= eps",
+        "eps": eps,
+        "float64_revalidation_complete": True,
+        "float64_revalidated_row_count": n_samples,
+        "sklearn_anchor_count_witness_exactly_matched": True,
+        "near_boundary_recompute_guard": comparison_guard,
+        "near_boundary_direct_norm_recompute_count": near_boundary_recompute_count,
+        "minimum_margin_to_eps_among_certifying_edges": (
+            None
+            if needed_other_neighbors == 0
+            else minimum_certifying_margin
+        ),
+        "maximum_certifying_edge_distance": (
+            None if needed_other_neighbors == 0 else maximum_certifying_distance
+        ),
+        "count_certifying_edges_exactly_at_eps": exact_boundary_edge_count,
+        "count_anchor_edges_exactly_at_eps": anchor_exact_boundary_edge_count,
+        "certifying_witness_stream_sha256": witness_digest.hexdigest(),
+        "uncertain_edges_accepted": 0,
+        "approximation_used": False,
+    }
+    _atomic_json(boundary_path, boundary)
+    boundary_sha = _sha256_file(boundary_path)
+
+    all_core_path = root / "all_core_certificate.json"
+    all_core = {
+        "schema_version": ALL_CORE_CERTIFICATE_SCHEMA_VERSION,
+        "status": "PASS",
+        "scientific_identity_sha256": scientific_identity_sha,
+        "input_rows": n_samples,
+        "eps": eps,
+        "min_samples": int(contract.min_samples),
+        "metric": "euclidean",
+        "comparison": "distance <= eps",
+        "self_neighbor_counted_exactly_once": True,
+        "distinct_other_anchor_neighbors_required": needed_other_neighbors,
+        "all_points_core_proven": True,
+        "core_point_count": n_samples,
+        "anchor_neighbor_lower_bounds_path": str(lower_path),
+        "anchor_neighbor_lower_bounds_sha256": lower_sha256,
+        "minimum_distinct_anchor_neighbors_excluding_self": int(
+            np.min(np.load(lower_path, mmap_mode="r", allow_pickle=False))
+        ),
+        "boundary_certificate_path": str(boundary_path),
+        "boundary_certificate_sha256": boundary_sha,
+        "exact": True,
+        "approximation_used": False,
+    }
+    _atomic_json(all_core_path, all_core)
+    all_core_sha = _sha256_file(all_core_path)
+
+    connectivity_path = root / "connectivity_certificate.json"
+    connectivity = {
+        "schema_version": CONNECTIVITY_CERTIFICATE_SCHEMA_VERSION,
+        "status": "PASS",
+        "scientific_identity_sha256": scientific_identity_sha,
+        "input_rows": n_samples,
+        "eps": eps,
+        "metric": "euclidean",
+        "comparison": "distance <= eps",
+        "anchor_indices_path": str(anchor_indices_path),
+        "anchor_indices_sha256": anchor_indices_sha256,
+        "anchor_edges_path": str(anchor_edges_path),
+        "anchor_edges_sha256": anchor_edges_sha256,
+        "anchor_count": anchor_count,
+        "anchor_edge_count": len(expected_edges),
+        "anchor_graph_exact_connected": True,
+        "non_anchor_row_count": n_samples - anchor_count,
+        "non_anchor_rows_with_exact_anchor_attachment": (
+            non_anchor_attachment_count
+        ),
+        "every_close_row_attached_to_anchor_component": True,
+        "attached_or_anchor_row_count": n_samples,
+        "single_epsilon_component_proven": True,
+        "all_core_certificate_path": str(all_core_path),
+        "all_core_certificate_sha256": all_core_sha,
+        "boundary_certificate_path": str(boundary_path),
+        "boundary_certificate_sha256": boundary_sha,
+        "exact": True,
+        "approximation_used": False,
+    }
+    _atomic_json(connectivity_path, connectivity)
+    connectivity_sha = _sha256_file(connectivity_path)
+
+    partition_path = root / "cluster_partition.json"
+    partition = {
+        "schema_version": CLUSTER_PARTITION_SCHEMA_VERSION,
+        "status": "PASS",
+        "scientific_identity_sha256": scientific_identity_sha,
+        "input_rows": n_samples,
+        "cluster_count": 1,
+        "noise_count": 0,
+        "core_count": n_samples,
+        "canonical_cluster_labels": [0],
+        "partition": "one_cluster_zero_noise",
+        "labels_path": str(labels_path),
+        "labels_sha256": labels_sha256,
+        "core_mask_path": str(core_path),
+        "core_mask_sha256": core_sha256,
+        "all_core_certificate_sha256": all_core_sha,
+        "connectivity_certificate_sha256": connectivity_sha,
+        "boundary_certificate_sha256": boundary_sha,
+        "sklearn_partition_semantics_preserved": True,
+        "approximation_used": False,
+    }
+    _atomic_json(partition_path, partition)
+    partition_sha = _sha256_file(partition_path)
+    return {
+        "all_core_certificate_path": str(all_core_path),
+        "all_core_certificate_sha256": all_core_sha,
+        "connectivity_certificate_path": str(connectivity_path),
+        "connectivity_certificate_sha256": connectivity_sha,
+        "boundary_certificate_path": str(boundary_path),
+        "boundary_certificate_sha256": boundary_sha,
+        "cluster_partition_path": str(partition_path),
+        "cluster_partition_sha256": partition_sha,
+    }
 
 
 def _shortcut_failure(
@@ -2359,6 +2644,120 @@ def _resolve_adaptive_anchor_selection(
     return validated_anchors, validated_manifest, max(peak, _rss_bytes())
 
 
+def _validate_split_shortcut_certificates(
+    *,
+    manifest: Mapping[str, Any],
+    proof: Mapping[str, Any],
+    root: Path,
+    scientific_identity_sha256: str,
+    n_samples: int,
+    eps: float,
+    min_samples: int,
+    labels: Path,
+    core: Path,
+) -> None:
+    loaded: dict[str, dict[str, Any]] = {}
+    schemas = {
+        "all_core": ALL_CORE_CERTIFICATE_SCHEMA_VERSION,
+        "connectivity": CONNECTIVITY_CERTIFICATE_SCHEMA_VERSION,
+        "boundary": BOUNDARY_CERTIFICATE_SCHEMA_VERSION,
+        "cluster_partition": CLUSTER_PARTITION_SCHEMA_VERSION,
+    }
+    for name, schema in schemas.items():
+        path_field = f"{name}_certificate_path" if name != "cluster_partition" else "cluster_partition_path"
+        hash_field = f"{name}_certificate_sha256" if name != "cluster_partition" else "cluster_partition_sha256"
+        raw_path = proof.get(path_field)
+        path = Path(str(raw_path or "")).resolve(strict=True)
+        if (
+            path.parent != root
+            or manifest.get(path_field) != str(path)
+            or manifest.get(hash_field) != proof.get(hash_field)
+            or _sha256_file(path) != proof.get(hash_field)
+        ):
+            raise ExternalMemoryDBSCANError(
+                f"terminal split certificate closure mismatch: {name}"
+            )
+        payload = _load_object(path)
+        if (
+            payload.get("schema_version") != schema
+            or payload.get("status") != "PASS"
+            or payload.get("scientific_identity_sha256")
+            != scientific_identity_sha256
+            or int(payload.get("input_rows", -1)) != int(n_samples)
+            or payload.get("approximation_used") is not False
+        ):
+            raise ExternalMemoryDBSCANError(
+                f"terminal split certificate is incomplete: {name}"
+            )
+        loaded[name] = payload
+    boundary = loaded["boundary"]
+    all_core = loaded["all_core"]
+    connectivity = loaded["connectivity"]
+    partition = loaded["cluster_partition"]
+    if (
+        boundary.get("metric") != "euclidean"
+        or boundary.get("comparison") != "distance <= eps"
+        or boundary.get("eps") != eps
+        or boundary.get("recheck_dtype") != "float64"
+        or boundary.get("float64_revalidation_complete") is not True
+        or int(boundary.get("float64_revalidated_row_count", -1)) != n_samples
+        or boundary.get("sklearn_anchor_count_witness_exactly_matched") is not True
+        or int(boundary.get("uncertain_edges_accepted", -1)) != 0
+    ):
+        raise ExternalMemoryDBSCANError("terminal boundary certificate is incomplete")
+    if (
+        all_core.get("metric") != "euclidean"
+        or all_core.get("comparison") != "distance <= eps"
+        or all_core.get("eps") != eps
+        or int(all_core.get("min_samples", -1)) != min_samples
+        or all_core.get("self_neighbor_counted_exactly_once") is not True
+        or all_core.get("all_points_core_proven") is not True
+        or int(all_core.get("core_point_count", -1)) != n_samples
+        or all_core.get("exact") is not True
+        or all_core.get("boundary_certificate_sha256")
+        != proof.get("boundary_certificate_sha256")
+    ):
+        raise ExternalMemoryDBSCANError("terminal all-core certificate is incomplete")
+    if (
+        connectivity.get("metric") != "euclidean"
+        or connectivity.get("comparison") != "distance <= eps"
+        or connectivity.get("eps") != eps
+        or connectivity.get("anchor_graph_exact_connected") is not True
+        or connectivity.get("every_close_row_attached_to_anchor_component") is not True
+        or int(connectivity.get("attached_or_anchor_row_count", -1)) != n_samples
+        or connectivity.get("single_epsilon_component_proven") is not True
+        or connectivity.get("exact") is not True
+        or connectivity.get("all_core_certificate_sha256")
+        != proof.get("all_core_certificate_sha256")
+        or connectivity.get("boundary_certificate_sha256")
+        != proof.get("boundary_certificate_sha256")
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal connectivity certificate is incomplete"
+        )
+    if (
+        partition.get("cluster_count") != 1
+        or partition.get("noise_count") != 0
+        or partition.get("core_count") != n_samples
+        or partition.get("canonical_cluster_labels") != [0]
+        or partition.get("partition") != "one_cluster_zero_noise"
+        or partition.get("labels_path") != str(labels)
+        or partition.get("labels_sha256") != manifest.get("labels_sha256")
+        or partition.get("core_mask_path") != str(core)
+        or partition.get("core_mask_sha256") != manifest.get("core_mask_sha256")
+        or partition.get("all_core_certificate_sha256")
+        != proof.get("all_core_certificate_sha256")
+        or partition.get("connectivity_certificate_sha256")
+        != proof.get("connectivity_certificate_sha256")
+        or partition.get("boundary_certificate_sha256")
+        != proof.get("boundary_certificate_sha256")
+        or partition.get("sklearn_partition_semantics_preserved") is not True
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal cluster-partition certificate is incomplete"
+        )
+
+
 def _validate_shortcut_proof_closure(
     *, manifest: Mapping[str, Any], root: Path
 ) -> tuple[Path, Path, Path, Path, Path]:
@@ -2615,6 +3014,17 @@ def _validate_shortcut_proof_closure(
         or proof.get("core_mask_sha256") != manifest.get("core_mask_sha256")
     ):
         raise ExternalMemoryDBSCANError("terminal shortcut proof/output mismatch")
+    _validate_split_shortcut_certificates(
+        manifest=manifest,
+        proof=proof,
+        root=root,
+        scientific_identity_sha256=str(manifest["scientific_identity_sha256"]),
+        n_samples=n_samples,
+        eps=float(proof["eps"]),
+        min_samples=min_samples,
+        labels=labels,
+        core=core,
+    )
     return labels, core, proof_path, artifacts[0], artifacts[2]
 
 
@@ -3126,6 +3536,24 @@ def _fit_all_core_one_component_shortcut(
     labels_sha = _sha256_file(labels_path)
     core_sha = _sha256_file(core_path)
     lower_sha = _sha256_file(lower_final)
+    split_certificates = _write_shortcut_split_certificates(
+        root=root,
+        identity=identity,
+        vectors=vectors,
+        anchor_indices=anchor_indices,
+        anchor_indices_path=anchor_indices_path,
+        anchor_indices_sha256=anchor_indices_sha,
+        anchor_edges=anchor_edges,
+        anchor_edges_path=anchor_edges_path,
+        anchor_edges_sha256=anchor_edges_sha,
+        lower_path=lower_final,
+        lower_sha256=lower_sha,
+        labels_path=labels_path,
+        labels_sha256=labels_sha,
+        core_path=core_path,
+        core_sha256=core_sha,
+        contract=contract,
+    )
     proof_path = root / "shortcut_proof.json"
     proof = {
         "schema_version": SHORTCUT_PROOF_SCHEMA_VERSION,
@@ -3178,6 +3606,7 @@ def _fit_all_core_one_component_shortcut(
         "labels_sha256": labels_sha,
         "core_mask_path": str(core_path),
         "core_mask_sha256": core_sha,
+        **split_certificates,
         "completed_at": _utc_now(),
     }
     if adaptive_selection_manifest is not None:
@@ -3229,6 +3658,7 @@ def _fit_all_core_one_component_shortcut(
         "labels_sha256": labels_sha,
         "shortcut_proof_path": str(proof_path),
         "shortcut_proof_sha256": proof_sha,
+        **split_certificates,
         "progress_ledger_path": str(progress_path),
         "progress_ledger_sha256": progress_sha,
         "clustering_path": contract.shortcut_mode,

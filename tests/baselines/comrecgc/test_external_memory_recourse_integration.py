@@ -12,7 +12,20 @@ from src.baselines.comrecgc.contracts import RecourseParameters, sha256_file, st
 from src.baselines.comrecgc import recourse
 from src.baselines.comrecgc import external_memory_recourse as external_recourse
 from src.baselines.comrecgc import external_pair_chunk_cache as chunk_cache
-from src.baselines.comrecgc.external_memory_dbscan import _rss_bytes
+from src.baselines.comrecgc.external_memory_dbscan import (
+    ExternalMemoryDBSCANError,
+    _rss_bytes,
+)
+from src.baselines.comrecgc.close_pair_view import (
+    ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA,
+    FILTER_OPERATOR,
+    NORMALIZED_DISTANCE_CONTRACT,
+    PAIR_ORDER,
+    PAIR_ORIENTATION,
+    SCALE_CONTRACT,
+    ThetaClosePairContract,
+    materialize_theta_close_pair_view,
+)
 from scripts.autodl import run_comrecgc_standardized_continuation as continuation
 
 
@@ -342,6 +355,101 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         ),
     )
     adopted_root = tmp_path / "external-adopted"
+    cartesian_source_root = tmp_path / "cartesian-terminal-source"
+    cartesian_store = external_recourse.ExternalPairStore(
+        root=cartesian_source_root / "pair_store",
+        scientific_identity=source_pair["scientific_identity"],
+        max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+    )
+    cartesian_store.append(
+        chunk_index=0,
+        pairs=np.asarray(
+            [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]],
+            dtype=np.int64,
+        ),
+        vectors=np.zeros((6, 64), dtype=np.float32),
+        chunk_identity={"fixture": "full-cartesian"},
+    )
+    cartesian_pair_result = cartesian_store.finalize()
+    with pytest.raises(
+        ExternalMemoryDBSCANError, match="UNPROVEN_CARTESIAN_DBSCAN_INPUT"
+    ):
+        recourse.run_common_recourse(
+            **common,
+            output_dir=tmp_path / "external-adopted-unproven",
+            engine="external_memory_exact_v1",
+            external_max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+            external_dbscan_shortcut_mode=(
+                "all_core_one_component_adaptive_anchor_v1"
+            ),
+            external_pair_store_source_manifest=cartesian_pair_result.manifest_path,
+            external_pair_store_source_owner_root=cartesian_source_root,
+        )
+    terminal_distances = tmp_path / "terminal-normalized-distances.npy"
+    np.save(terminal_distances, np.full(6, 0.01, dtype=np.float32))
+    terminal_contract = ThetaClosePairContract(
+        theta=parameters.theta,
+        parent_count=2,
+        candidate_count=3,
+        distance_checkpoint_sha256=sha256_file(distance),
+        embedding_checkpoint_sha256=sha256_file(distance),
+        scale_contract=SCALE_CONTRACT,
+        normalized_distance_contract=NORMALIZED_DISTANCE_CONTRACT,
+    )
+    terminal_close_root = tmp_path / "terminal-close-view"
+    terminal_pair_semantics_path = tmp_path / "terminal-pair-semantics.json"
+    terminal_pair_semantics_path.write_text(
+        json.dumps({"fixture": "terminal-cartesian-pair-semantics"})
+    )
+    with pytest.raises(ExternalMemoryDBSCANError, match="ALL_PAIRS_CLOSE"):
+        materialize_theta_close_pair_view(
+            physical_vectors_path=cartesian_pair_result.vectors_path,
+            normalized_distances_path=terminal_distances,
+            output_dir=terminal_close_root,
+            contract=terminal_contract,
+            pair_semantics_contract_path=terminal_pair_semantics_path,
+            block_size=2,
+        )
+    terminal_identity = json.loads(
+        (terminal_close_root / "checkpoint.json").read_text()
+    )["scientific_identity"]
+    terminal_certificate = {
+        "schema_version": ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA,
+        "status": "PASS",
+        "all_pairs_close_proven": True,
+        "full_distance_scan_complete": True,
+        "official_sample_comparison_pass": True,
+        "normalization_audit_pass": True,
+        "physical_store_rows": 6,
+        "count_distance_le_theta": 6,
+        "count_distance_gt_theta": 0,
+        "count_distance_eq_theta": 0,
+        "theta": parameters.theta,
+        "filter_operator": FILTER_OPERATOR,
+        "pair_orientation": PAIR_ORIENTATION,
+        "pair_order": PAIR_ORDER,
+        "physical_vectors_sha256": terminal_identity["physical_vectors_sha256"],
+        "normalized_distances_sha256": terminal_identity[
+            "normalized_distances_sha256"
+        ],
+        "distance_checkpoint_sha256": sha256_file(distance),
+        "embedding_checkpoint_sha256": sha256_file(distance),
+        "scale_contract": SCALE_CONTRACT,
+        "normalized_distance_contract": NORMALIZED_DISTANCE_CONTRACT,
+        "approximation_used": False,
+    }
+    terminal_certificate_path = tmp_path / "terminal-all-close-certificate.json"
+    terminal_certificate_path.write_text(json.dumps(terminal_certificate))
+    terminal_close_view = materialize_theta_close_pair_view(
+        physical_vectors_path=cartesian_pair_result.vectors_path,
+        normalized_distances_path=terminal_distances,
+        output_dir=terminal_close_root,
+        contract=terminal_contract,
+        pair_semantics_contract_path=terminal_pair_semantics_path,
+        all_pairs_close_certificate_path=terminal_certificate_path,
+        block_size=2,
+        resume=True,
+    )
     adopted_manifest = recourse.run_common_recourse(
         **common,
         output_dir=adopted_root,
@@ -356,8 +464,9 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         external_shortcut_query_block_size=2,
         external_exact_fallback_max_samples=0,
         external_summary_block_size=2,
-        external_pair_store_source_manifest=source_manifest,
-        external_pair_store_source_owner_root=external_root,
+        external_pair_store_source_manifest=cartesian_pair_result.manifest_path,
+        external_pair_store_source_owner_root=cartesian_source_root,
+        external_close_pair_view_manifest=terminal_close_view.manifest_path,
         expected_sklearn_version=sklearn.__version__,
     )
     assert not (adopted_root / "external_memory/pair_store").exists()
@@ -369,11 +478,15 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         "pair_store_adopted_read_only"
     ] is True
     assert adopted_manifest["external_memory_artifacts"]["pair_store_manifest"] == str(
-        source_manifest
+        cartesian_pair_result.manifest_path
     )
-    assert json.loads(
+    adopted_rows = json.loads(
         (adopted_root / "selected_common_recourses.json").read_text()
-    ) == external_rows
+    )
+    assert len(adopted_rows) == 1
+    assert adopted_rows[0]["cluster_size"] == 6
+    assert adopted_rows[0]["covered_parent_indices_native"] == [0, 1]
+    assert adopted_rows[0]["member_counterfactual_indices"] == [0, 1, 2]
     assert {
         str(path): external_recourse._file_stat_identity(path) for path in source_paths
     } == source_stats_before
@@ -459,6 +572,87 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         ),
     )
     chunk_adopted_root = tmp_path / "chunk-adopted"
+    local_vector_cache = tmp_path / "local-vector-cache"
+    cache_result = chunk_cache.materialize_cartesian_chunk_vector_cache(
+        source_checkpoint_path=snapshot_path,
+        source_owner_root=chunk_source_root,
+        persistent_root=chunk_adopted_root / "external_memory/chunk_vector_cache",
+        local_cache_root=local_vector_cache,
+        scratch_lock_path=tmp_path / "local-vector-cache.lock",
+        route_lock_path=tmp_path / "local-route.lock",
+        expected_scientific_identity=snapshot["scientific_identity"],
+        expected_chunk_identities=[
+            row["scientific_identity"] for row in snapshot["chunks"]
+        ],
+        parent_count=2,
+        candidate_count=2,
+        min_local_free_bytes=128,
+        proc_root=fake_proc,
+    )
+    aligned_distances = tmp_path / "aligned-normalized-distances.npy"
+    np.save(aligned_distances, np.full(4, 0.01, dtype=np.float32))
+    close_contract = ThetaClosePairContract(
+        theta=parameters.theta,
+        parent_count=2,
+        candidate_count=2,
+        distance_checkpoint_sha256=sha256_file(distance),
+        embedding_checkpoint_sha256=sha256_file(distance),
+        scale_contract=SCALE_CONTRACT,
+        normalized_distance_contract=NORMALIZED_DISTANCE_CONTRACT,
+    )
+    close_root = tmp_path / "all-close-view"
+    chunk_pair_semantics_path = tmp_path / "chunk-pair-semantics.json"
+    chunk_pair_semantics_path.write_text(
+        json.dumps({"fixture": "chunk-cartesian-pair-semantics"})
+    )
+    with pytest.raises(ExternalMemoryDBSCANError, match="ALL_PAIRS_CLOSE"):
+        materialize_theta_close_pair_view(
+            physical_vectors_path=cache_result.vectors_path,
+            normalized_distances_path=aligned_distances,
+            output_dir=close_root,
+            contract=close_contract,
+            pair_semantics_contract_path=chunk_pair_semantics_path,
+            block_size=2,
+        )
+    close_checkpoint = json.loads((close_root / "checkpoint.json").read_text())
+    close_identity = close_checkpoint["scientific_identity"]
+    all_close_certificate = {
+        "schema_version": ALL_PAIRS_CLOSE_CERTIFICATE_SCHEMA,
+        "status": "PASS",
+        "all_pairs_close_proven": True,
+        "full_distance_scan_complete": True,
+        "official_sample_comparison_pass": True,
+        "normalization_audit_pass": True,
+        "physical_store_rows": 4,
+        "count_distance_le_theta": 4,
+        "count_distance_gt_theta": 0,
+        "count_distance_eq_theta": 0,
+        "theta": parameters.theta,
+        "filter_operator": FILTER_OPERATOR,
+        "pair_orientation": PAIR_ORIENTATION,
+        "pair_order": PAIR_ORDER,
+        "physical_vectors_sha256": close_identity["physical_vectors_sha256"],
+        "normalized_distances_sha256": close_identity[
+            "normalized_distances_sha256"
+        ],
+        "distance_checkpoint_sha256": sha256_file(distance),
+        "embedding_checkpoint_sha256": sha256_file(distance),
+        "scale_contract": SCALE_CONTRACT,
+        "normalized_distance_contract": NORMALIZED_DISTANCE_CONTRACT,
+        "approximation_used": False,
+    }
+    all_close_certificate_path = tmp_path / "all-close-certificate.json"
+    all_close_certificate_path.write_text(json.dumps(all_close_certificate))
+    close_view = materialize_theta_close_pair_view(
+        physical_vectors_path=cache_result.vectors_path,
+        normalized_distances_path=aligned_distances,
+        output_dir=close_root,
+        contract=close_contract,
+        pair_semantics_contract_path=chunk_pair_semantics_path,
+        all_pairs_close_certificate_path=all_close_certificate_path,
+        block_size=2,
+        resume=True,
+    )
     chunk_adopted = recourse.run_common_recourse(
         **common,
         output_dir=chunk_adopted_root,
@@ -475,12 +669,14 @@ def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
         external_summary_block_size=2,
         external_pair_store_source_checkpoint=snapshot_path,
         external_pair_store_source_owner_root=chunk_source_root,
-        external_vector_cache_root=tmp_path / "local-vector-cache",
+        external_close_pair_view_manifest=close_view.manifest_path,
+        external_vector_cache_root=local_vector_cache,
         external_vector_cache_lock=tmp_path / "local-vector-cache.lock",
         external_vector_cache_route_lock=tmp_path / "local-route.lock",
         external_vector_cache_min_free_bytes=128,
         external_vector_cache_proc_root=fake_proc,
         expected_sklearn_version=sklearn.__version__,
+        resume=True,
     )
     assert chunk_adopted["external_memory_artifacts"][
         "pair_chunks_adopted_read_only"

@@ -9336,3 +9336,24 @@ recorded explicitly as `PROJECT_EXTENSION` and whether it was binding.
 
 Accepted for implementation; production completion requires the immutable
 AutoDL execution and full scan.
+
+## 2026-08-25: Adopted Cartesian COMRECGC stores require a theta-close authority
+
+- Treat the 91,916,686-row AIDS artifact as a physical Cartesian store, not as
+  proof that every row is a logical DBSCAN sample. Adoption fails closed unless
+  a hash-closed `normalized_distance <= theta` view is supplied; a complete
+  `ALL_PAIRS_CLOSE` certificate permits zero-copy use of the physical mmap.
+- Default partial-close storage is a bitmap plus physical row indices. It is
+  not eligible for the current path-based DBSCAN engine unless a declared disk
+  budget permits compact selected rows; this prevents an implicit second
+  approximately 25 GiB vector copy.
+- The close view binds the pair-semantics authority and physical vector/pair
+  identities. Terminal snapshot and close-view inputs may coexist, while an
+  adopted Cartesian terminal without the view is rejected.
+- A successful all-core shortcut must publish separate all-core,
+  connectivity, boundary, and partition certificates. The one-cluster
+  downstream summary remains streaming and records official float32 and
+  stable float64 centroid/radius decisions without retained-vector copies.
+- These changes authorize no live deployment or process signal. Production
+equivalence remains gated on the complete GREED scan and closed production
+subsets.

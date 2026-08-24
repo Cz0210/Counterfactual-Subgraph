@@ -75,6 +75,7 @@ if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
 
   terminal_source="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_MANIFEST:-}"
   chunk_checkpoint="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_CHECKPOINT:-}"
+  close_pair_view_manifest="${COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST:-}"
   source_owner="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT:-}"
   vector_cache_root="${COMRECGC_EXTERNAL_VECTOR_CACHE_ROOT:-}"
   vector_cache_lock="${COMRECGC_EXTERNAL_VECTOR_CACHE_LOCK:-}"
@@ -105,11 +106,16 @@ if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
       --external-pair-store-source-manifest "$terminal_source"
       --external-pair-store-source-owner-root "$source_owner"
     )
-  elif [[ -n "$chunk_checkpoint$vector_cache_root$vector_cache_lock$vector_cache_route_lock$source_owner" ]]; then
-    [[ -n "$chunk_checkpoint" && -n "$source_owner" && -n "$vector_cache_root" && -n "$vector_cache_lock" && -n "$vector_cache_route_lock" ]] || { echo "chunk-source/cache environment is incomplete" >&2; exit 64; }
+    if [[ -n "$close_pair_view_manifest" ]]; then
+      [[ -f "$close_pair_view_manifest" ]] || { echo "invalid close-pair view manifest: $close_pair_view_manifest" >&2; exit 64; }
+      args+=(--external-close-pair-view-manifest "$close_pair_view_manifest")
+    fi
+  elif [[ -n "$chunk_checkpoint$close_pair_view_manifest$vector_cache_root$vector_cache_lock$vector_cache_route_lock$source_owner" ]]; then
+    [[ -n "$chunk_checkpoint" && -n "$close_pair_view_manifest" && -f "$close_pair_view_manifest" && -n "$source_owner" && -n "$vector_cache_root" && -n "$vector_cache_lock" && -n "$vector_cache_route_lock" ]] || { echo "chunk-source/cache/close-view environment is incomplete" >&2; exit 64; }
     args+=(
       --external-pair-store-source-checkpoint "$chunk_checkpoint"
       --external-pair-store-source-owner-root "$source_owner"
+      --external-close-pair-view-manifest "$close_pair_view_manifest"
       --external-vector-cache-root "$vector_cache_root"
       --external-vector-cache-lock "$vector_cache_lock"
       --external-vector-cache-route-lock "$vector_cache_route_lock"

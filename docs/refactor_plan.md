@@ -1569,3 +1569,9 @@ Mutagenicity roadmaps.
 - [x] Freeze the AIDS promoted pair-store column contract as
   `(parent_index, candidate_index)` under candidate-major/parent-minor row
   order, with a full bounded row-formula gate before physical snapshot copy.
+- [x] Fail closed when an adopted Cartesian pair store is not bound to a
+  validated theta-close logical view or complete `ALL_PAIRS_CLOSE` proof.
+- [x] Add zero-copy bitmap/index close views, an explicit compact-storage gate,
+  split exact DBSCAN certificates, and streaming one-cluster coverage output.
+- [ ] Run the production GREED distance scan and first/random/dense/sparse/
+  top-distance closed-subset comparisons before releasing the fresh route.

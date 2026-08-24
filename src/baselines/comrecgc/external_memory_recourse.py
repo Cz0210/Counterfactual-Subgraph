@@ -28,7 +28,7 @@ from .external_memory_dbscan import (
 PAIR_STORE_SCHEMA = "comrecgc_external_pair_store_v1"
 PAIR_STORE_ADOPTION_SCHEMA = "comrecgc_read_only_pair_store_adoption_v1"
 SUMMARY_SCHEMA = "comrecgc_external_cluster_summary_v1"
-ONE_CLUSTER_SUMMARY_SCHEMA = "comrecgc_exact_one_cluster_summary_v1"
+ONE_CLUSTER_SUMMARY_SCHEMA = "comrecgc_exact_one_cluster_summary_v2"
 
 
 def _utc_now() -> str:
@@ -1194,6 +1194,7 @@ def _validate_one_cluster_summary_manifest(
         "retained_positions",
         "retained_vectors",
         "torch_centroid",
+        "stable_float64_centroid",
         "numpy_centroid",
         "retained_centroid",
     ):
@@ -1203,6 +1204,7 @@ def _validate_one_cluster_summary_manifest(
             if sha_value is not None or name in {
                 "retained_mask",
                 "torch_centroid",
+                "stable_float64_centroid",
                 "numpy_centroid",
             }:
                 raise ExternalMemoryDBSCANError(
@@ -1238,22 +1240,30 @@ def _validate_one_cluster_summary_manifest(
             raise ExternalMemoryDBSCANError(
                 f"completed one-cluster {name} schema mismatch"
             )
+    stable_center = np.load(
+        artifact_paths["stable_float64_centroid"], allow_pickle=False
+    )
+    if stable_center.shape != (n_features,) or stable_center.dtype != np.dtype(
+        np.float64
+    ):
+        raise ExternalMemoryDBSCANError(
+            "completed one-cluster stable float64 centroid schema mismatch"
+        )
+    if (
+        artifact_paths["retained_positions"] is not None
+        or artifact_paths["retained_vectors"] is not None
+        or manifest.get("large_retained_arrays_materialized") is not False
+        or int(manifest.get("retained_vector_bytes_materialized", -1)) != 0
+    ):
+        raise ExternalMemoryDBSCANError(
+            "completed one-cluster summary unexpectedly materialized retained rows"
+        )
     if retained_count:
-        positions = np.load(
-            artifact_paths["retained_positions"], mmap_mode="r", allow_pickle=False
-        )
-        vectors = np.load(
-            artifact_paths["retained_vectors"], mmap_mode="r", allow_pickle=False
-        )
         retained_center = np.load(
             artifact_paths["retained_centroid"], allow_pickle=False
         )
         if (
-            positions.shape != (retained_count,)
-            or positions.dtype != np.dtype(np.int64)
-            or vectors.shape != (retained_count, n_features)
-            or str(vectors.dtype) != vector_dtype
-            or retained_center.shape != (n_features,)
+            retained_center.shape != (n_features,)
             or str(retained_center.dtype) != vector_dtype
         ):
             raise ExternalMemoryDBSCANError(
@@ -1261,11 +1271,29 @@ def _validate_one_cluster_summary_manifest(
             )
     official = manifest.get("official_result")
     selected = manifest.get("selected")
+    official_parents = manifest.get("official_covered_parent_indices")
+    official_first_candidates = manifest.get(
+        "official_first_counterfactual_indices"
+    )
+    official_radius_candidates = manifest.get(
+        "official_radius_counterfactual_indices"
+    )
     if (
         not isinstance(official, list)
         or len(official) != 3
         or not all(isinstance(part, list) for part in official)
         or not isinstance(selected, list)
+        or not isinstance(official_parents, list)
+        or not isinstance(official_first_candidates, list)
+        or not isinstance(official_radius_candidates, list)
+        or official_parents != sorted(set(map(int, official_parents)))
+        or official_first_candidates
+        != sorted(set(map(int, official_first_candidates)))
+        or official_radius_candidates
+        != sorted(set(map(int, official_radius_candidates)))
+        or not set(official_first_candidates).issubset(
+            set(official_radius_candidates)
+        )
     ):
         raise ExternalMemoryDBSCANError("completed one-cluster result schema mismatch")
     return ExactOneClusterSummaryResult(
@@ -1274,8 +1302,8 @@ def _validate_one_cluster_summary_manifest(
         manifest_path=manifest_path,
         manifest_sha256=_sha256_file(manifest_path),
         retained_mask_path=artifact_paths["retained_mask"],  # type: ignore[arg-type]
-        retained_positions_path=artifact_paths["retained_positions"],
-        retained_vectors_path=artifact_paths["retained_vectors"],
+        retained_positions_path=None,
+        retained_vectors_path=None,
     )
 
 
@@ -1307,33 +1335,57 @@ def _validate_scan_offset(offset: int, *, total: int, block_size: int, phase: st
         )
 
 
-def _scan_torch_first_counterfactuals(
+def _scan_torch_coverage_audit_prefix(
     *,
     recourse_vectors: np.ndarray,
-    pair_indices: np.ndarray,
+    pair_indices: Any,
     center: np.ndarray,
+    stable_float64_center: np.ndarray,
     radius: float,
     stop_offset: int,
     block_size: int,
     torch_module: Any,
-) -> dict[int, int]:
-    """Replay the exact upstream first-parent update through one prefix."""
+) -> tuple[dict[int, int], set[int], int, int, int]:
+    """Replay official strict-radius coverage plus a float64 boundary audit."""
 
     tensor = torch_module.from_numpy(recourse_vectors)
     center_tensor = torch_module.from_numpy(center)
     first_cf_by_parent: dict[int, int] = {}
+    all_counterfactuals: set[int] = set()
+    within = 0
+    exactly_at_radius = 0
+    float64_membership_disagreements = 0
     for offset in range(0, int(stop_offset), int(block_size)):
         stop = min(int(stop_offset), offset + int(block_size))
         distances = torch_module.norm(tensor[offset:stop] - center_tensor, dim=-1)
         retained = (distances < float(radius)).detach().cpu().numpy()
+        exactly = (distances == float(radius)).detach().cpu().numpy()
+        stable_distances = np.linalg.norm(
+            np.asarray(recourse_vectors[offset:stop], dtype=np.float64)
+            - stable_float64_center,
+            axis=1,
+        )
+        stable_retained = stable_distances < float(radius)
+        within += int(np.count_nonzero(retained))
+        exactly_at_radius += int(np.count_nonzero(exactly))
+        float64_membership_disagreements += int(
+            np.count_nonzero(retained != stable_retained)
+        )
         if bool(np.any(retained)):
             block_pairs = pair_indices[offset:stop][retained]
+            all_counterfactuals.update(map(int, block_pairs[:, 1].tolist()))
             parents, first = np.unique(block_pairs[:, 0], return_index=True)
             for parent, local_index in zip(parents.tolist(), first.tolist()):
                 first_cf_by_parent.setdefault(
                     int(parent), int(block_pairs[int(local_index), 1])
                 )
-    return first_cf_by_parent
+    return (
+        first_cf_by_parent,
+        all_counterfactuals,
+        within,
+        exactly_at_radius,
+        float64_membership_disagreements,
+    )
 
 
 def _numpy_trace_membership(
@@ -1366,39 +1418,80 @@ def _validate_trace_mask_prefix(
     return count
 
 
-def _validate_retained_materialization_prefix(
+def _array_hex(values: np.ndarray) -> list[str]:
+    return [float(value).hex() for value in np.asarray(values).tolist()]
+
+
+def _array_from_hex(values: Sequence[str], *, dtype: np.dtype[Any]) -> np.ndarray:
+    return np.asarray([float.fromhex(str(value)) for value in values], dtype=dtype)
+
+
+def _stream_masked_sum_prefix(
     *,
     mask: np.ndarray,
     recourse_vectors: np.ndarray,
-    positions: np.ndarray,
-    retained_vectors: np.ndarray,
     stop_offset: int,
-    expected_cursor: int,
     block_size: int,
-) -> None:
-    cursor = 0
+    dtype: np.dtype[Any],
+) -> tuple[np.ndarray, int]:
+    total = np.zeros(int(recourse_vectors.shape[1]), dtype=dtype)
+    count = 0
+    for offset in range(0, int(stop_offset), int(block_size)):
+        stop = min(int(stop_offset), offset + int(block_size))
+        selected = np.asarray(recourse_vectors[offset:stop][mask[offset:stop]])
+        if len(selected):
+            block_sum = np.sum(selected, axis=0, dtype=dtype)
+            total = np.add(total, block_sum, dtype=dtype)
+            count += int(len(selected))
+    return total, count
+
+
+def _stream_float64_centroid(
+    values: np.ndarray, *, block_size: int
+) -> np.ndarray:
+    total = np.zeros(int(values.shape[1]), dtype=np.float64)
+    for offset in range(0, len(values), int(block_size)):
+        stop = min(len(values), offset + int(block_size))
+        total += np.sum(
+            np.asarray(values[offset:stop], dtype=np.float64),
+            axis=0,
+            dtype=np.float64,
+        )
+    return total / np.float64(len(values))
+
+
+def _scan_retained_medoid_prefix(
+    *,
+    mask: np.ndarray,
+    recourse_vectors: np.ndarray,
+    pair_indices: Any,
+    center: np.ndarray,
+    stop_offset: int,
+    block_size: int,
+) -> tuple[int, float, set[int], set[int]]:
+    """Replay a first-argmin medoid and coverage sets without retained copies."""
+
+    winner_position = -1
+    winner_distance = float("inf")
+    parents: set[int] = set()
+    candidates: set[int] = set()
     for offset in range(0, int(stop_offset), int(block_size)):
         stop = min(int(stop_offset), offset + int(block_size))
         local = np.flatnonzero(mask[offset:stop])
-        count = int(len(local))
-        expected_positions = local.astype(np.int64, copy=False) + offset
-        if (
-            not np.array_equal(
-                positions[cursor : cursor + count], expected_positions
-            )
-            or not np.array_equal(
-                retained_vectors[cursor : cursor + count],
-                recourse_vectors[offset:stop][local],
-            )
-        ):
-            raise ExternalMemoryDBSCANError(
-                "retained-materialization committed prefix mismatch"
-            )
-        cursor += count
-    if cursor != int(expected_cursor):
-        raise ExternalMemoryDBSCANError(
-            "retained-materialization checkpoint cursor mismatch"
-        )
+        if not len(local):
+            continue
+        physical = local.astype(np.int64, copy=False) + offset
+        selected = np.asarray(recourse_vectors[offset:stop][local])
+        distances = np.linalg.norm(selected - center, axis=1)
+        local_winner = int(np.argmin(distances))
+        local_distance = float(distances[local_winner])
+        if local_distance < winner_distance:
+            winner_distance = local_distance
+            winner_position = int(physical[local_winner])
+        pairs = pair_indices[physical]
+        parents.update(map(int, np.unique(pairs[:, 0]).tolist()))
+        candidates.update(map(int, np.unique(pairs[:, 1]).tolist()))
+    return winner_position, winner_distance, parents, candidates
 
 
 def summarize_proven_one_cluster_external(
@@ -1426,8 +1519,9 @@ def summarize_proven_one_cluster_external(
     that every row is core and sklearn's sole label is zero.  Torch and NumPy
     centroids remain separate because the two pinned legacy consumers use
     different reduction implementations.  Per-row norms are blockwise (there
-    is no cross-row reduction), and retained vectors are materialized on disk
-    in original pair order before the legacy NumPy medoid reduction.
+    is no cross-row reduction).  Radius membership is stored as a one-byte
+    bitmap; retained rows are then reduced and searched in global row order.
+    No retained position/vector matrix is materialized.
     """
 
     root = Path(work_dir).expanduser().resolve(strict=False)
@@ -1519,6 +1613,9 @@ def summarize_proven_one_cluster_external(
         "pair_order": "candidate_major_parent_minor",
         "coverage_comparison": "torch.norm(row-torch.mean(all_rows)) < radius",
         "trace_comparison": "numpy.linalg.norm(row-numpy.mean(all_rows)) < radius",
+        "retained_summary_storage": "bitmap_plus_streaming_reductions_v1",
+        "retained_medoid": "first_argmin_in_global_pair_order",
+        "large_retained_arrays_materialized": False,
     }
     identity_hash = _stable_hash(identity)
     if manifest_path.exists():
@@ -1574,6 +1671,31 @@ def summarize_proven_one_cluster_external(
     torch_center_norm = float(
         torch_module.norm(torch_module.from_numpy(torch_center)).item()
     )
+    float64_center_path = root / "stable_float64_centroid.npy"
+    if float64_center_path.exists():
+        float64_center = np.load(float64_center_path, allow_pickle=False)
+        if float64_center.shape != (n_features,) or float64_center.dtype != np.dtype(
+            np.float64
+        ):
+            raise ExternalMemoryDBSCANError(
+                "stable float64 centroid checkpoint schema mismatch"
+            )
+    else:
+        float64_center = _stream_float64_centroid(
+            recourse_vectors, block_size=int(block_size)
+        )
+        _atomic_npy(float64_center_path, float64_center)
+    float64_center_sha = _sha256_file(float64_center_path)
+    float64_center_norm = float(np.linalg.norm(float64_center))
+    centroid_max_abs_difference = float(
+        np.max(np.abs(np.asarray(torch_center, dtype=np.float64) - float64_center))
+    )
+    centroid_norm_decision_disagreement = (
+        (torch_center_norm < float(theta))
+        != (float64_center_norm < float(theta))
+    )
+    # The pinned official decision is the fixed-order float32/Torch result.
+    # Float64 is an audit value, not a silent replacement for that decision.
 
     phase = str(state.get("phase"))
     if phase == "torch_coverage":
@@ -1581,6 +1703,9 @@ def summarize_proven_one_cluster_external(
             int(parent): int(candidate)
             for parent, candidate in (state.get("first_cf_by_parent") or [])
         }
+        official_counterfactuals = set(
+            map(int, state.get("official_counterfactuals") or [])
+        )
         start = int(state.get("next_offset", 0))
         _validate_scan_offset(
             start,
@@ -1588,19 +1713,36 @@ def summarize_proven_one_cluster_external(
             block_size=int(block_size),
             phase="torch coverage",
         )
-        replayed_first = _scan_torch_first_counterfactuals(
+        (
+            replayed_first,
+            replayed_counterfactuals,
+            replayed_within,
+            replayed_exact,
+            replayed_disagreements,
+        ) = _scan_torch_coverage_audit_prefix(
             recourse_vectors=recourse_vectors,
             pair_indices=pair_indices,
             center=torch_center,
+            stable_float64_center=float64_center,
             radius=float(radius),
             stop_offset=start,
             block_size=int(block_size),
             torch_module=torch_module,
         )
-        if replayed_first != first_cf_by_parent:
+        if (
+            replayed_first != first_cf_by_parent
+            or replayed_counterfactuals != official_counterfactuals
+            or replayed_within != int(state.get("official_within_radius_count", 0))
+            or replayed_exact != int(state.get("count_exactly_at_delta", 0))
+            or replayed_disagreements
+            != int(state.get("float64_radius_membership_disagreement_count", 0))
+        ):
             raise ExternalMemoryDBSCANError(
                 "torch-coverage checkpoint prefix state mismatch"
             )
+        official_within_radius_count = replayed_within
+        count_exactly_at_delta = replayed_exact
+        float64_radius_membership_disagreement_count = replayed_disagreements
         tensor = torch_module.from_numpy(recourse_vectors)
         center_tensor = torch_module.from_numpy(torch_center)
         for offset in range(start, n_samples, int(block_size)):
@@ -1610,14 +1752,36 @@ def summarize_proven_one_cluster_external(
             )
             retained = distances < float(radius)
             retained_numpy = retained.detach().cpu().numpy()
+            exactly_numpy = (distances == float(radius)).detach().cpu().numpy()
+            stable_distances = np.linalg.norm(
+                np.asarray(recourse_vectors[offset:stop], dtype=np.float64)
+                - float64_center,
+                axis=1,
+            )
+            stable_retained = stable_distances < float(radius)
+            official_within_radius_count += int(np.count_nonzero(retained_numpy))
+            count_exactly_at_delta += int(np.count_nonzero(exactly_numpy))
+            float64_radius_membership_disagreement_count += int(
+                np.count_nonzero(retained_numpy != stable_retained)
+            )
             if bool(np.any(retained_numpy)):
                 block_pairs = pair_indices[offset:stop][retained_numpy]
+                official_counterfactuals.update(
+                    map(int, block_pairs[:, 1].tolist())
+                )
                 parents, first = np.unique(block_pairs[:, 0], return_index=True)
                 for parent, local_index in zip(parents.tolist(), first.tolist()):
                     first_cf_by_parent.setdefault(
                         int(parent), int(block_pairs[int(local_index), 1])
                     )
-            del distances, retained, retained_numpy
+            del (
+                distances,
+                retained,
+                retained_numpy,
+                exactly_numpy,
+                stable_distances,
+                stable_retained,
+            )
             peak = max(peak, _check_rss(int(max_rss_bytes), phase="one_cluster.torch"))
             state = _summary_checkpoint(
                 state_path,
@@ -1629,7 +1793,16 @@ def summarize_proven_one_cluster_external(
                 extra={
                     "torch_centroid_sha256": torch_center_sha,
                     "torch_centroid_norm": torch_center_norm,
+                    "stable_float64_centroid_sha256": float64_center_sha,
+                    "stable_float64_centroid_norm": float64_center_norm,
+                    "centroid_max_abs_difference": centroid_max_abs_difference,
+                    "official_within_radius_count": official_within_radius_count,
+                    "count_exactly_at_delta": count_exactly_at_delta,
+                    "float64_radius_membership_disagreement_count": (
+                        float64_radius_membership_disagreement_count
+                    ),
                     "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                    "official_counterfactuals": sorted(official_counterfactuals),
                 },
             )
         state = _summary_checkpoint(
@@ -1642,7 +1815,16 @@ def summarize_proven_one_cluster_external(
             extra={
                 "torch_centroid_sha256": torch_center_sha,
                 "torch_centroid_norm": torch_center_norm,
+                "stable_float64_centroid_sha256": float64_center_sha,
+                "stable_float64_centroid_norm": float64_center_norm,
+                "centroid_max_abs_difference": centroid_max_abs_difference,
+                "official_within_radius_count": official_within_radius_count,
+                "count_exactly_at_delta": count_exactly_at_delta,
+                "float64_radius_membership_disagreement_count": (
+                    float64_radius_membership_disagreement_count
+                ),
                 "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                "official_counterfactuals": sorted(official_counterfactuals),
             },
         )
         del center_tensor, tensor
@@ -1650,10 +1832,17 @@ def summarize_proven_one_cluster_external(
 
     if state.get("torch_centroid_sha256") != torch_center_sha:
         raise ExternalMemoryDBSCANError("torch centroid checkpoint checksum mismatch")
+    if state.get("stable_float64_centroid_sha256") != float64_center_sha:
+        raise ExternalMemoryDBSCANError(
+            "stable float64 centroid checkpoint checksum mismatch"
+        )
     first_cf_by_parent = {
         int(parent): int(candidate)
         for parent, candidate in (state.get("first_cf_by_parent") or [])
     }
+    official_counterfactuals = set(
+        map(int, state.get("official_counterfactuals") or [])
+    )
     official_result: tuple[list[int], list[float], list[int]]
     if torch_center_norm < float(theta) and int(recourse_size) > 0:
         official_result = (
@@ -1737,7 +1926,18 @@ def summarize_proven_one_cluster_external(
                 extra={
                     "torch_centroid_sha256": torch_center_sha,
                     "torch_centroid_norm": torch_center_norm,
+                    "stable_float64_centroid_sha256": float64_center_sha,
+                    "stable_float64_centroid_norm": float64_center_norm,
+                    "centroid_max_abs_difference": centroid_max_abs_difference,
+                    "official_within_radius_count": int(
+                        state["official_within_radius_count"]
+                    ),
+                    "count_exactly_at_delta": int(state["count_exactly_at_delta"]),
+                    "float64_radius_membership_disagreement_count": int(
+                        state["float64_radius_membership_disagreement_count"]
+                    ),
                     "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                    "official_counterfactuals": sorted(official_counterfactuals),
                     "numpy_centroid_sha256": numpy_center_sha,
                     "numpy_centroid_norm": numpy_center_norm,
                 },
@@ -1755,7 +1955,18 @@ def summarize_proven_one_cluster_external(
             extra={
                 "torch_centroid_sha256": torch_center_sha,
                 "torch_centroid_norm": torch_center_norm,
+                "stable_float64_centroid_sha256": float64_center_sha,
+                "stable_float64_centroid_norm": float64_center_norm,
+                "centroid_max_abs_difference": centroid_max_abs_difference,
+                "official_within_radius_count": int(
+                    state["official_within_radius_count"]
+                ),
+                "count_exactly_at_delta": int(state["count_exactly_at_delta"]),
+                "float64_radius_membership_disagreement_count": int(
+                    state["float64_radius_membership_disagreement_count"]
+                ),
                 "first_cf_by_parent": sorted(first_cf_by_parent.items()),
+                "official_counterfactuals": sorted(official_counterfactuals),
                 "numpy_centroid_sha256": numpy_center_sha,
                 "numpy_centroid_norm": numpy_center_norm,
                 "retained_mask_sha256": mask_sha,
@@ -1774,182 +1985,225 @@ def summarize_proven_one_cluster_external(
         state = _summary_checkpoint(
             state_path,
             identity=identity,
-            phase="retained_materialize",
+            phase="retained_centroid",
             next_offset=0,
             retained_count=int(state["retained_count"]),
             peak_rss_bytes=peak,
-            extra={
-                **{
-                    key: state[key]
-                    for key in (
-                        "torch_centroid_sha256",
-                        "torch_centroid_norm",
-                        "first_cf_by_parent",
-                        "numpy_centroid_sha256",
-                        "numpy_centroid_norm",
-                        "retained_mask_sha256",
-                    )
-                },
-                "retained_cursor": 0,
-            },
+            extra={key: value for key, value in state.items() if key not in {
+                "schema_version", "scientific_identity", "scientific_identity_sha256",
+                "phase", "next_offset", "retained_count", "peak_rss_bytes", "updated_at"
+            }},
         )
-        phase = "retained_materialize"
+        phase = "retained_centroid"
 
     if state.get("numpy_centroid_sha256") != numpy_center_sha:
         raise ExternalMemoryDBSCANError("NumPy centroid checkpoint checksum mismatch")
     mask = np.load(mask_final, mmap_mode="r", allow_pickle=False)
     retained_count = int(state.get("retained_count", 0))
-    positions_partial = root / "retained_positions.partial.npy"
-    positions_final = root / "retained_positions.npy"
-    vectors_partial = root / "retained_vectors.partial.npy"
-    vectors_final = root / "retained_vectors.npy"
+    retained_center_path = root / "retained_centroid.npy"
     phase = str(state.get("phase"))
-    if phase == "retained_materialize":
-        if retained_count == 0:
+    if phase == "retained_centroid":
+        start = int(state.get("next_offset", 0))
+        _validate_scan_offset(
+            start,
+            total=n_samples,
+            block_size=int(block_size),
+            phase="retained centroid",
+        )
+        replay_sum, replay_count = _stream_masked_sum_prefix(
+            mask=mask,
+            recourse_vectors=recourse_vectors,
+            stop_offset=start,
+            block_size=int(block_size),
+            dtype=recourse_vectors.dtype,
+        )
+        checkpoint_sum = _array_from_hex(
+            state.get("retained_sum_hex") or _array_hex(
+                np.zeros(n_features, dtype=recourse_vectors.dtype)
+            ),
+            dtype=recourse_vectors.dtype,
+        )
+        if (
+            not np.array_equal(replay_sum, checkpoint_sum)
+            or replay_count != int(state.get("retained_sum_count", 0))
+        ):
+            raise ExternalMemoryDBSCANError(
+                "retained-centroid checkpoint prefix does not replay"
+            )
+        retained_sum = replay_sum
+        summed_count = replay_count
+        for offset in range(start, n_samples, int(block_size)):
+            stop = min(n_samples, offset + int(block_size))
+            selected = np.asarray(
+                recourse_vectors[offset:stop][mask[offset:stop]]
+            )
+            if len(selected):
+                retained_sum = np.add(
+                    retained_sum,
+                    np.sum(selected, axis=0, dtype=recourse_vectors.dtype),
+                    dtype=recourse_vectors.dtype,
+                )
+                summed_count += int(len(selected))
+            peak = max(
+                peak,
+                _check_rss(int(max_rss_bytes), phase="one_cluster.retained_centroid"),
+            )
             state = _summary_checkpoint(
                 state_path,
                 identity=identity,
-                phase="retained_ready",
-                next_offset=n_samples,
-                retained_count=0,
+                phase="retained_centroid",
+                next_offset=stop,
+                retained_count=retained_count,
                 peak_rss_bytes=peak,
                 extra={
-                    **{
-                        key: state[key]
-                        for key in (
-                            "torch_centroid_sha256",
-                            "torch_centroid_norm",
-                            "first_cf_by_parent",
-                            "numpy_centroid_sha256",
-                            "numpy_centroid_norm",
-                            "retained_mask_sha256",
-                        )
-                    },
-                    "retained_cursor": 0,
-                    "retained_positions_sha256": None,
-                    "retained_vectors_sha256": None,
+                    **{key: value for key, value in state.items() if key not in {
+                        "schema_version", "scientific_identity", "scientific_identity_sha256",
+                        "phase", "next_offset", "retained_count", "peak_rss_bytes", "updated_at",
+                        "retained_sum_hex", "retained_sum_count"
+                    }},
+                    "retained_sum_hex": _array_hex(retained_sum),
+                    "retained_sum_count": summed_count,
                 },
             )
-        else:
-            positions = _open_or_create_memmap(
-                positions_partial,
-                shape=(retained_count,),
-                dtype=np.dtype(np.int64),
-                resume=bool(resume),
-            )
-            retained_vectors = _open_or_create_memmap(
-                vectors_partial,
-                shape=(retained_count, n_features),
+        if summed_count != retained_count:
+            raise ExternalMemoryDBSCANError("retained-centroid count drift")
+        retained_center_sha: str | None = None
+        if retained_count:
+            retained_center = np.asarray(
+                retained_sum / np.asarray(retained_count, dtype=recourse_vectors.dtype),
                 dtype=recourse_vectors.dtype,
-                resume=bool(resume),
             )
-            start = int(state.get("next_offset", 0))
-            cursor = int(state.get("retained_cursor", 0))
-            _validate_scan_offset(
-                start,
-                total=n_samples,
-                block_size=int(block_size),
-                phase="retained materialization",
-            )
-            _validate_retained_materialization_prefix(
+            retained_center_sha = _atomic_npy(retained_center_path, retained_center)
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="retained_medoid",
+            next_offset=0,
+            retained_count=retained_count,
+            peak_rss_bytes=peak,
+            extra={
+                **{key: value for key, value in state.items() if key not in {
+                    "schema_version", "scientific_identity", "scientific_identity_sha256",
+                    "phase", "next_offset", "retained_count", "peak_rss_bytes", "updated_at"
+                }},
+                "retained_centroid_sha256": retained_center_sha,
+                "medoid_position": -1,
+                "medoid_distance_hex": float("inf").hex(),
+                "covered_parents": [],
+                "member_counterfactuals": [],
+            },
+        )
+        phase = "retained_medoid"
+    if phase == "retained_medoid":
+        start = int(state.get("next_offset", 0))
+        _validate_scan_offset(
+            start,
+            total=n_samples,
+            block_size=int(block_size),
+            phase="retained medoid",
+        )
+        if retained_count:
+            if (
+                not retained_center_path.is_file()
+                or _sha256_file(retained_center_path)
+                != state.get("retained_centroid_sha256")
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "retained streaming centroid checksum mismatch"
+                )
+            retained_center = np.load(retained_center_path, allow_pickle=False)
+            (
+                replay_winner,
+                replay_distance,
+                replay_parents,
+                replay_candidates,
+            ) = _scan_retained_medoid_prefix(
                 mask=mask,
                 recourse_vectors=recourse_vectors,
-                positions=positions,
-                retained_vectors=retained_vectors,
+                pair_indices=pair_indices,
+                center=retained_center,
                 stop_offset=start,
-                expected_cursor=cursor,
                 block_size=int(block_size),
             )
+            if (
+                replay_winner != int(state.get("medoid_position", -1))
+                or replay_distance.hex() != state.get("medoid_distance_hex")
+                or sorted(replay_parents) != state.get("covered_parents")
+                or sorted(replay_candidates) != state.get("member_counterfactuals")
+            ):
+                raise ExternalMemoryDBSCANError(
+                    "retained-medoid checkpoint prefix does not replay"
+                )
+            winner = replay_winner
+            winner_distance = replay_distance
+            covered_parents = replay_parents
+            member_counterfactuals = replay_candidates
             for offset in range(start, n_samples, int(block_size)):
                 stop = min(n_samples, offset + int(block_size))
                 local = np.flatnonzero(mask[offset:stop])
-                count = int(len(local))
-                if count:
-                    positions[cursor : cursor + count] = local.astype(
-                        np.int64, copy=False
-                    ) + offset
-                    retained_vectors[cursor : cursor + count] = recourse_vectors[
-                        offset:stop
-                    ][local]
-                    cursor += count
-                _fsync_memmap(positions)
-                _fsync_memmap(retained_vectors)
+                if len(local):
+                    physical = local.astype(np.int64, copy=False) + offset
+                    selected_vectors = np.asarray(
+                        recourse_vectors[offset:stop][local]
+                    )
+                    distances = np.linalg.norm(
+                        selected_vectors - retained_center, axis=1
+                    )
+                    local_winner = int(np.argmin(distances))
+                    local_distance = float(distances[local_winner])
+                    if local_distance < winner_distance:
+                        winner = int(physical[local_winner])
+                        winner_distance = local_distance
+                    pairs = pair_indices[physical]
+                    covered_parents.update(
+                        map(int, np.unique(pairs[:, 0]).tolist())
+                    )
+                    member_counterfactuals.update(
+                        map(int, np.unique(pairs[:, 1]).tolist())
+                    )
                 peak = max(
                     peak,
-                    _check_rss(int(max_rss_bytes), phase="one_cluster.materialize"),
+                    _check_rss(int(max_rss_bytes), phase="one_cluster.retained_medoid"),
                 )
                 state = _summary_checkpoint(
                     state_path,
                     identity=identity,
-                    phase="retained_materialize",
+                    phase="retained_medoid",
                     next_offset=stop,
                     retained_count=retained_count,
                     peak_rss_bytes=peak,
                     extra={
-                        **{
-                            key: state[key]
-                            for key in (
-                                "torch_centroid_sha256",
-                                "torch_centroid_norm",
-                                "first_cf_by_parent",
-                                "numpy_centroid_sha256",
-                                "numpy_centroid_norm",
-                                "retained_mask_sha256",
-                            )
-                        },
-                        "retained_cursor": cursor,
+                        **{key: value for key, value in state.items() if key not in {
+                            "schema_version", "scientific_identity", "scientific_identity_sha256",
+                            "phase", "next_offset", "retained_count", "peak_rss_bytes", "updated_at",
+                            "medoid_position", "medoid_distance_hex", "covered_parents",
+                            "member_counterfactuals"
+                        }},
+                        "medoid_position": winner,
+                        "medoid_distance_hex": winner_distance.hex(),
+                        "covered_parents": sorted(covered_parents),
+                        "member_counterfactuals": sorted(member_counterfactuals),
                     },
                 )
-            if cursor != retained_count:
-                raise ExternalMemoryDBSCANError("retained materialization count drift")
-            _fsync_memmap(positions)
-            _fsync_memmap(retained_vectors)
-            positions_sha = _sha256_file(positions_partial)
-            vectors_sha = _sha256_file(vectors_partial)
-            del positions, retained_vectors
-            state = _summary_checkpoint(
-                state_path,
-                identity=identity,
-                phase="retained_ready",
-                next_offset=n_samples,
-                retained_count=retained_count,
-                peak_rss_bytes=peak,
-                extra={
-                    **{
-                        key: state[key]
-                        for key in (
-                            "torch_centroid_sha256",
-                            "torch_centroid_norm",
-                            "first_cf_by_parent",
-                            "numpy_centroid_sha256",
-                            "numpy_centroid_norm",
-                            "retained_mask_sha256",
-                        )
-                    },
-                    "retained_cursor": cursor,
-                    "retained_positions_sha256": positions_sha,
-                    "retained_vectors_sha256": vectors_sha,
-                },
-            )
-        phase = "retained_ready"
-    if phase == "retained_ready":
-        if retained_count:
-            _promote_summary_array(
-                partial=positions_partial,
-                final=positions_final,
-                shape=(retained_count,),
-                dtype=np.dtype(np.int64),
-                expected_sha256=str(state.get("retained_positions_sha256") or ""),
-                label="retained positions",
-            )
-            _promote_summary_array(
-                partial=vectors_partial,
-                final=vectors_final,
-                shape=(retained_count, n_features),
-                dtype=recourse_vectors.dtype,
-                expected_sha256=str(state.get("retained_vectors_sha256") or ""),
-                label="retained vectors",
-            )
+        else:
+            winner = -1
+            winner_distance = float("inf")
+            covered_parents = set()
+            member_counterfactuals = set()
+        state = _summary_checkpoint(
+            state_path,
+            identity=identity,
+            phase="finalize",
+            next_offset=n_samples,
+            retained_count=retained_count,
+            peak_rss_bytes=peak,
+            extra={key: value for key, value in state.items() if key not in {
+                "schema_version", "scientific_identity", "scientific_identity_sha256",
+                "phase", "next_offset", "retained_count", "peak_rss_bytes", "updated_at"
+            }},
+        )
+        phase = "finalize"
+    if phase == "finalize":
         state = _summary_checkpoint(
             state_path,
             identity=identity,
@@ -1990,16 +2244,31 @@ def summarize_proven_one_cluster_external(
         dbscan_manifest_sha256=dbscan_manifest_sha256,
         recourse_vectors=recourse_vectors,
     )
-    replayed_first = _scan_torch_first_counterfactuals(
+    (
+        replayed_first,
+        replayed_counterfactuals,
+        replayed_official_within,
+        replayed_exact_delta,
+        replayed_radius_disagreements,
+    ) = _scan_torch_coverage_audit_prefix(
         recourse_vectors=recourse_vectors,
         pair_indices=pair_indices,
         center=torch_center,
+        stable_float64_center=float64_center,
         radius=float(radius),
         stop_offset=n_samples,
         block_size=int(block_size),
         torch_module=torch_module,
     )
-    if replayed_first != first_cf_by_parent:
+    if (
+        replayed_first != first_cf_by_parent
+        or replayed_counterfactuals != official_counterfactuals
+        or replayed_official_within
+        != int(state.get("official_within_radius_count", -1))
+        or replayed_exact_delta != int(state.get("count_exactly_at_delta", -1))
+        or replayed_radius_disagreements
+        != int(state.get("float64_radius_membership_disagreement_count", -1))
+    ):
         raise ExternalMemoryDBSCANError(
             "terminal torch-coverage replay mismatch"
         )
@@ -2013,51 +2282,62 @@ def summarize_proven_one_cluster_external(
     )
     if replayed_retained_count != retained_count:
         raise ExternalMemoryDBSCANError("terminal trace-mask coverage mismatch")
-    if retained_count:
-        terminal_positions = np.load(
-            positions_final, mmap_mode="r", allow_pickle=False
-        )
-        terminal_vectors = np.load(
-            vectors_final, mmap_mode="r", allow_pickle=False
-        )
-        _validate_retained_materialization_prefix(
-            mask=mask,
-            recourse_vectors=recourse_vectors,
-            positions=terminal_positions,
-            retained_vectors=terminal_vectors,
-            stop_offset=n_samples,
-            expected_cursor=retained_count,
-            block_size=int(block_size),
-        )
-        del terminal_positions, terminal_vectors
+    terminal_sum, terminal_sum_count = _stream_masked_sum_prefix(
+        mask=mask,
+        recourse_vectors=recourse_vectors,
+        stop_offset=n_samples,
+        block_size=int(block_size),
+        dtype=recourse_vectors.dtype,
+    )
+    if terminal_sum_count != retained_count:
+        raise ExternalMemoryDBSCANError("terminal retained-centroid count mismatch")
 
     selected: list[dict[str, Any]] = []
+    retained_center_path = root / "retained_centroid.npy"
+    covered_parents: set[int] = set()
+    member_counterfactuals: set[int] = set()
+    winner = -1
+    winner_distance = float("inf")
     if retained_count:
-        retained_positions = np.load(positions_final, mmap_mode="r", allow_pickle=False)
-        retained_vectors = np.load(vectors_final, mmap_mode="r", allow_pickle=False)
-        retained_center = np.mean(retained_vectors, axis=0)
-        retained_center_path = root / "retained_centroid.npy"
-        _atomic_npy(retained_center_path, retained_center)
-        covered_parents: set[int] = set()
-        member_counterfactuals: set[int] = set()
-        winner = -1
-        winner_distance = float("inf")
-        for offset in range(0, retained_count, int(block_size)):
-            stop = min(retained_count, offset + int(block_size))
-            distances = np.linalg.norm(
-                retained_vectors[offset:stop] - retained_center, axis=1
+        retained_center = np.asarray(
+            terminal_sum
+            / np.asarray(retained_count, dtype=recourse_vectors.dtype),
+            dtype=recourse_vectors.dtype,
+        )
+        if (
+            not retained_center_path.is_file()
+            or _sha256_file(retained_center_path)
+            != state.get("retained_centroid_sha256")
+            or not np.array_equal(
+                np.load(retained_center_path, allow_pickle=False), retained_center
             )
-            local_winner = int(np.argmin(distances))
-            local_distance = float(distances[local_winner])
-            if local_distance < winner_distance:
-                winner_distance = local_distance
-                winner = offset + local_winner
-            source_rows = retained_positions[offset:stop]
-            pairs = pair_indices[source_rows]
-            covered_parents.update(map(int, np.unique(pairs[:, 0]).tolist()))
-            member_counterfactuals.update(map(int, np.unique(pairs[:, 1]).tolist()))
-        if winner < 0:
-            raise ExternalMemoryDBSCANError("retained medoid winner is missing")
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal retained streaming centroid mismatch"
+            )
+        (
+            winner,
+            winner_distance,
+            covered_parents,
+            member_counterfactuals,
+        ) = _scan_retained_medoid_prefix(
+            mask=mask,
+            recourse_vectors=recourse_vectors,
+            pair_indices=pair_indices,
+            center=retained_center,
+            stop_offset=n_samples,
+            block_size=int(block_size),
+        )
+        if (
+            winner < 0
+            or winner != int(state.get("medoid_position", -1))
+            or winner_distance.hex() != state.get("medoid_distance_hex")
+            or sorted(covered_parents) != state.get("covered_parents")
+            or sorted(member_counterfactuals) != state.get("member_counterfactuals")
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal retained-medoid replay mismatch"
+            )
         filtered = numpy_center_norm < float(theta) and bool(covered_parents)
         if filtered and int(recourse_size) > 0:
             selection = official_greedy(
@@ -2069,13 +2349,15 @@ def summarize_proven_one_cluster_external(
                 raise ExternalMemoryDBSCANError(
                     "official one-cluster greedy result changed"
                 )
-            source_position = int(retained_positions[winner])
-            source_index, counterfactual_index = pair_indices[source_position]
+            source_index, counterfactual_index = pair_indices[int(winner)]
             selected = [
                 {
                     "rank": 1,
+                    "selected_rank": 1,
                     "cluster_label": 0,
+                    "cluster_id": 0,
                     "cluster_center_norm": numpy_center_norm,
+                    "centroid_norm": numpy_center_norm,
                     "cluster_radius": float(radius),
                     "cluster_size": n_samples,
                     "representative_source_index": int(source_index),
@@ -2083,24 +2365,25 @@ def summarize_proven_one_cluster_external(
                     "representative_distance_to_center": winner_distance,
                     "covered_parent_indices_native": sorted(covered_parents),
                     "native_cumulative_covered_count": len(covered_parents),
+                    "cumulative_covered_count": len(covered_parents),
                     "native_cumulative_cost": numpy_center_norm,
                     "member_counterfactual_indices": sorted(member_counterfactuals),
+                    "representative_candidate_ids": [
+                        int(counterfactual_index)
+                    ],
                 }
             ]
-    retained_center_path = root / "retained_centroid.npy"
     artifacts = {
         "retained_mask_path": str(mask_final),
         "retained_mask_sha256": _sha256_file(mask_final),
-        "retained_positions_path": str(positions_final) if retained_count else None,
-        "retained_positions_sha256": (
-            _sha256_file(positions_final) if retained_count else None
-        ),
-        "retained_vectors_path": str(vectors_final) if retained_count else None,
-        "retained_vectors_sha256": (
-            _sha256_file(vectors_final) if retained_count else None
-        ),
+        "retained_positions_path": None,
+        "retained_positions_sha256": None,
+        "retained_vectors_path": None,
+        "retained_vectors_sha256": None,
         "torch_centroid_path": str(torch_center_path),
         "torch_centroid_sha256": torch_center_sha,
+        "stable_float64_centroid_path": str(float64_center_path),
+        "stable_float64_centroid_sha256": float64_center_sha,
         "numpy_centroid_path": str(numpy_center_path),
         "numpy_centroid_sha256": numpy_center_sha,
         "retained_centroid_path": (
@@ -2121,14 +2404,58 @@ def summarize_proven_one_cluster_external(
         "official_greedy_invoked_for_trace": bool(selected),
         "legacy_torch_reduction_order_preserved": True,
         "legacy_numpy_reduction_order_preserved": True,
+        "retained_streaming_reduction_order": (
+            "fixed_global_row_order_with_fixed_block_size"
+        ),
         "strict_radius_comparison_preserved": True,
+        "radius_filter_operator": "<",
+        "centroid_norm_filter_operator": "<",
         "candidate_major_parent_minor_order_preserved": True,
         "medoid_first_argmin_tie_order_preserved": True,
+        "greedy_tie_break": "ascending_canonical_cluster_id",
         "approximation_used": False,
         "num_samples": n_samples,
+        "cluster_member_count": n_samples,
         "retained_count": retained_count,
+        "within_centroid_radius_count": replayed_official_within,
+        "outside_centroid_radius_count": n_samples - replayed_official_within,
+        "count_exactly_at_delta": replayed_exact_delta,
+        "float64_radius_membership_disagreement_count": (
+            replayed_radius_disagreements
+        ),
         "torch_centroid_norm": torch_center_norm,
+        "centroid_norm": torch_center_norm,
+        "stable_float64_centroid_norm": float64_center_norm,
+        "centroid_max_abs_difference": centroid_max_abs_difference,
+        "centroid_norm_decision_disagreement": centroid_norm_decision_disagreement,
         "numpy_centroid_norm": numpy_center_norm,
+        "centroid_norm_lt_theta": torch_center_norm < float(theta),
+        "count_exactly_at_theta": int(torch_center_norm == float(theta)),
+        "trace_numpy_centroid_norm_lt_theta": numpy_center_norm < float(theta),
+        "trace_numpy_count_exactly_at_theta": int(
+            numpy_center_norm == float(theta)
+        ),
+        "coverage_pair_orientation": "col0_parent_col1_candidate",
+        "official_covered_parent_indices": sorted(first_cf_by_parent),
+        "official_first_counterfactual_indices": sorted(
+            set(first_cf_by_parent.values())
+        ),
+        "official_radius_counterfactual_indices": sorted(
+            official_counterfactuals
+        ),
+        "official_parent_to_covering_clusters": {
+            str(parent): [0] for parent in sorted(first_cf_by_parent)
+        },
+        "covered_parent_indices": sorted(covered_parents),
+        "counterfactual_indices": sorted(member_counterfactuals),
+        "parent_to_covering_clusters": {
+            str(parent): [0] for parent in sorted(covered_parents)
+        },
+        "selected_common_recourse_count": len(selected),
+        "large_retained_arrays_materialized": False,
+        "retained_vector_bytes_materialized": 0,
+        "retained_position_bytes_materialized": 0,
+        "storage_bytes_avoided": retained_count * (row_bytes + 8),
         "official_result": [list(part) for part in official_result],
         "selected": selected,
         "peak_rss_bytes_observed": max(peak, _rss_bytes()),
@@ -2306,8 +2633,11 @@ def trace_external_cluster_order(
         ordered.append(
             {
                 "rank": int(rank),
+                "selected_rank": int(rank),
                 "cluster_label": cluster_label,
+                "cluster_id": cluster_label,
                 "cluster_center_norm": centroid_norms[cluster_label],
+                "centroid_norm": centroid_norms[cluster_label],
                 "cluster_radius": float(radius),
                 "cluster_size": cluster_sizes[cluster_label],
                 "representative_source_index": int(source_index),
@@ -2315,8 +2645,10 @@ def trace_external_cluster_order(
                 "representative_distance_to_center": medoid_distance,
                 "covered_parent_indices_native": sorted(filtered[cluster_label]),
                 "native_cumulative_covered_count": len(covered),
+                "cumulative_covered_count": len(covered),
                 "native_cumulative_cost": cumulative_cost,
                 "member_counterfactual_indices": member_counterfactuals,
+                "representative_candidate_ids": [int(counterfactual_index)],
             }
         )
     return ordered, {
