@@ -399,7 +399,10 @@ def _validate_chunk_source(
     if int(checkpoint.get("row_count", -1)) != expected_rows:
         raise ExternalMemoryDBSCANError("CHUNK_SOURCE_CARTESIAN_ROW_COUNT_MISMATCH")
 
-    owner_root = source_owner_root.resolve(strict=True)
+    owner_logical = source_owner_root.expanduser()
+    if owner_logical.is_symlink():
+        raise ExternalMemoryDBSCANError("CHUNK_SOURCE_OWNER_ROOT_IS_SYMLINK")
+    owner_root = owner_logical.resolve(strict=True)
     if not chunks or not isinstance(chunks[0], Mapping):
         raise ExternalMemoryDBSCANError("CHUNK_SOURCE_EMPTY")
     first_pair_path = _regular_no_symlink(
