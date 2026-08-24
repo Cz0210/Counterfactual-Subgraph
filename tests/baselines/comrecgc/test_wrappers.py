@@ -302,11 +302,24 @@ def test_aids_exact_v5_supervisor_freezes_cpu_exact_and_storage_contracts() -> N
         "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT",
         "verify_aids_comrecgc_v5_process_set.py",
         "common-recourse process set changed",
+        "mid-run common-recourse process set changed",
+        "mid-run cgroup headroom gate failed",
+        "--allowed-route-root-pid",
+        '"$OUTPUT_ROOT/common_recourse"',
+        "aids_comrecgc_v5_lock_handover",
+        "aids_comrecgc_v5_science_exec",
+        "science process group was not established",
+        "HIGHMEM_HANDOVER_QUEUED",
+        "global high-memory handover helper failed",
+        "kill -TERM -- \"-$science_pid\"",
+        "memory.limit_in_bytes",
+        "memory.usage_in_bytes",
         "production test hooks are forbidden",
     }
     assert all(value in text for value in required)
     assert text.count("resume_count=$((resume_count + 1))") == 1
     assert "AIDS_COMRECGC_EXACT_ROUTE_V5_SUPERVISOR_PASS" in text
+    assert "MemFree" not in text
     paired = (
         ROOT / "scripts/slurm/run_aids_comrecgc_exact_route_v5_supervisor.sh"
     ).read_text(encoding="utf-8")

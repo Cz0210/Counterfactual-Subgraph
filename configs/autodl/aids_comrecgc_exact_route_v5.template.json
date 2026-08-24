@@ -21,7 +21,7 @@
   "allowed_old_read_only_process": {
     "pid": 273939,
     "start_ticks": 687141119,
-    "cmdline_sha256": "ea8bf3a4f7a35a2b5e3f7b62eaecf4c919ac87b2a0ad59f3f7a9c5aa066eb022",
+    "cmdline_sha256": "792679fed417737f85462d940243153e5081d8b80c7dab663591131c5bbd51b8",
     "output_root": "__OLD_V4_COMMON_RECOURSE_OUTPUT_ROOT__",
     "project_root": "/root/autodl-tmp/worktrees/run-aids-comrecgc-repair-v4-fd2281d"
   },

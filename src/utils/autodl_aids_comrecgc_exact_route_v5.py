@@ -288,6 +288,17 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     environment, base_evidence = _base_environment(
         manifest_path=base_manifest, expected_sha256=base_sha
     )
+    highmem_lock_logical = Path(
+        str(environment.get("COMRECGC_HIGHMEM_LOCK_PATH") or "")
+    ).expanduser()
+    if not highmem_lock_logical.is_absolute() or highmem_lock_logical.is_symlink():
+        raise RepairManifestError("AIDS v5 global high-memory lock must be physical")
+    highmem_lock = highmem_lock_logical.resolve(strict=False)
+    expected_highmem_lock = (
+        runtime_root / "locks/comrecgc_common_recourse_highmem.lock"
+    ).resolve(strict=False)
+    if highmem_lock != expected_highmem_lock or highmem_lock.is_symlink():
+        raise RepairManifestError("AIDS v5 global high-memory lock identity changed")
     terminal_root = _absolute(
         spec.get("terminal_pair_store_root"), label="terminal pair-store root", kind="dir"
     )
@@ -477,14 +488,29 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "old_v4_signal_authorized": False,
         "allowed_old_read_only_process": process_gate,
         "highmem_exclusion": {
-            "v5_global_highmem_lock_acquired": False,
+            "global_highmem_lock_held_at_build": False,
             "reason": (
-                "the hash-bound old v4 read-only DBSCAN owns that lock until "
-                "a separately authorized graceful switch"
+                "a monitored waiter is queued before science and takes the "
+                "same physical lock when old v4 exits naturally"
             ),
+            "global_highmem_lock_path": str(highmem_lock),
+            "lock_handover_queued_before_science": True,
+            "lock_handover_helper_generation_monitored": True,
+            "lock_retained_until_supervisor_exit": True,
             "old_read_only_consumer_is_the_only_colocation_exception": True,
             "v5_route_lock_held": True,
             "per_attempt_cgroup_headroom_gate_bytes": minimum_free,
+            "cgroup_headroom_gate": {
+                "root": str(cgroup_root),
+                "limit_path": str(cgroup_root / "memory.limit_in_bytes"),
+                "usage_path": str(cgroup_root / "memory.usage_in_bytes"),
+                "limit_bytes_at_build": limit,
+                "usage_bytes_at_build": usage,
+                "free_bytes_at_build": limit - usage,
+                "semantics": "memory.limit_in_bytes-minus-memory.usage_in_bytes",
+                "host_memfree_used": False,
+                "revalidated_before_and_during_each_attempt": True,
+            },
             "v5_rss_budget_gib": 96,
             "process_set_revalidated_before_every_attempt": True,
             "mut_dependency_blocks_until_v5_pass": True,
@@ -556,6 +582,28 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "{project_root}/scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh",
     ):
         raise RepairManifestError("AIDS v5 task launch contract changed")
+    contract = payload.get("aids_comrecgc_exact_route_v5_contract")
+    if not isinstance(contract, Mapping):
+        raise RepairManifestError("AIDS v5 contract is missing")
+    highmem_contract = contract.get("highmem_exclusion")
+    if not isinstance(highmem_contract, Mapping):
+        raise RepairManifestError("AIDS v5 high-memory contract is missing")
+    cgroup_contract = highmem_contract.get("cgroup_headroom_gate")
+    if not isinstance(cgroup_contract, Mapping):
+        raise RepairManifestError("AIDS v5 cgroup contract is missing")
+    cgroup_contract_root = Path(str(cgroup_contract.get("root") or ""))
+    if (
+        str(cgroup_contract.get("limit_path"))
+        != str(cgroup_contract_root / "memory.limit_in_bytes")
+        or str(cgroup_contract.get("usage_path"))
+        != str(cgroup_contract_root / "memory.usage_in_bytes")
+        or int(cgroup_contract.get("free_bytes_at_build", -1))
+        != int(cgroup_contract.get("limit_bytes_at_build", -1))
+        - int(cgroup_contract.get("usage_bytes_at_build", -1))
+        or int(cgroup_contract.get("free_bytes_at_build", -1))
+        < MINIMUM_CGROUP_FREE_BYTES
+    ):
+        raise RepairManifestError("AIDS v5 cgroup evidence changed")
     required = {
         "DATASET": "aids",
         "DEVICE": "cpu",
@@ -568,6 +616,13 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             "all_core_one_component_adaptive_anchor_v1"
         ),
         "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES": "1",
+        "COMRECGC_HIGHMEM_LOCK_PATH": str(
+            highmem_contract.get("global_highmem_lock_path")
+        ),
+        "COMRECGC_CGROUP_MEMORY_ROOT": str(cgroup_contract.get("root")),
+        "AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES": str(
+            highmem_contract.get("per_attempt_cgroup_headroom_gate_bytes")
+        ),
         "RUN_TASTEMOLNET": "0",
     }
     if any(task.environment.get(key) != value for key, value in required.items()):
@@ -583,9 +638,6 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
     ):
         raise RepairManifestError("AIDS v5 production task contains a fallback bypass")
-    contract = payload.get("aids_comrecgc_exact_route_v5_contract")
-    if not isinstance(contract, Mapping):
-        raise RepairManifestError("AIDS v5 contract is missing")
     process_contract = contract.get("allowed_old_read_only_process")
     if not isinstance(process_contract, Mapping):
         raise RepairManifestError("AIDS v5 old-process contract is missing")
@@ -615,10 +667,27 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or contract.get("old_v4_mutated") is not False
         or contract.get("old_v4_signal_authorized") is not False
         or process_contract.get("status") != "PASS"
-        or not isinstance(contract.get("highmem_exclusion"), Mapping)
-        or contract["highmem_exclusion"].get(
+        or highmem_contract.get(
             "process_set_revalidated_before_every_attempt"
         )
+        is not True
+        or highmem_contract.get(
+            "lock_handover_queued_before_science"
+        )
+        is not True
+        or highmem_contract.get(
+            "lock_handover_helper_generation_monitored"
+        )
+        is not True
+        or highmem_contract.get(
+            "lock_retained_until_supervisor_exit"
+        )
+        is not True
+        or cgroup_contract.get("semantics")
+        != "memory.limit_in_bytes-minus-memory.usage_in_bytes"
+        or cgroup_contract.get("host_memfree_used")
+        is not False
+        or cgroup_contract.get("revalidated_before_and_during_each_attempt")
         is not True
     ):
         raise RepairManifestError("AIDS v5 scientific/safety contract changed")

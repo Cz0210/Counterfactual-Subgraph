@@ -40,6 +40,13 @@ after it exits naturally; PID reuse, identity drift, or any second
 `run_common_recourse.py` process fails closed.  This gate does not weaken the
 pair-tree partial/writable-inode scan.  The source manifest and both arrays are
 hashed and their stat/writer closure is repeated at terminal validation.
+While science is running, the same scan repeats every monitor interval and
+permits only the old generation (if still alive) plus at most one exact
+`OUTPUT_ROOT/common_recourse` child descended from the PID/start-tick-bound v5
+science generation, with the frozen script path and execution cwd.  Any rogue
+third process or ancestor reuse terminates only the fresh v5 process group.
+The cgroup-v1 `memory.limit_in_bytes - memory.usage_in_bytes` 128 GiB floor is
+rechecked on the same loop; host `MemFree` is not used as a substitute.
 
 ## Why chunks are sufficient here
 
@@ -206,7 +213,11 @@ sole allowed old read-only process generation, binds the exact repair-v4
 manifest/scientific inputs, verifies live cgroup headroom, and publishes only
 at the controller namespace path.  The supervisor repeats the process-set and
 128 GiB cgroup-free gates before every attempt while the v5 child keeps its
-independent 96 GiB RSS ceiling.  It records a
+independent 96 GiB RSS ceiling.  Before the first science child it also queues
+a generation-monitored helper on the exact global high-memory flock.  The old
+v4 process retains the lock while alive; on natural exit the helper acquires
+and holds it through v5 supervisor exit.  A failed/reused helper generation
+terminates only the fresh v5 process group and fails closed.  It records a
 `mut_dependency` object in the manifest.  A fresh Mut controller must bind the
 new manifest physical SHA256 plus the controller/task/output identities above;
 the old Mut wait controller is not edited or repointed.

@@ -49,6 +49,21 @@ least 128 GiB live cgroup headroom (which includes the old RSS), cap the new
 route at 96 GiB RSS, and hold a distinct v5 route flock.  Mut remains blocked
 on v5 PASS, so it cannot overlap this exception.
 
+Queue a monitored helper on the same physical global high-memory flock before
+starting the first v5 science child.  While old v4 is alive that helper waits;
+when v4 exits naturally it acquires and retains the lock until the v5
+supervisor generation exits.  The supervisor binds the helper's own Linux
+generation and monitors it while each science child runs in a fresh process
+group.  Helper failure terminates only that new process group and fails v5;
+cleanup verifies the helper generation before signalling it, so PID reuse
+cannot redirect a signal.
+
+Continue the process-set scan while the science group runs.  In that interval
+the only additional common-recourse command may be the exact script/output/cwd
+child of the PID/start-tick-bound v5 science root.  A non-descendant, a reused
+science-root PID, a second child, or command/output drift terminates only v5
+and fails the fresh controller.
+
 For the retained generic chunk route, distinguish an unauthenticated allocation
 artifact from authenticated data.  Only `phase=allocate_cache`, under the
 allocation flock plus an independently held route flock, may discard and

@@ -27,6 +27,12 @@
   `eps=0.02`, `min_samples=3`, self-neighbour semantics, dense fallback zero,
   route-wide scratch locking, a 128 GiB per-attempt cgroup-free gate, a 96 GiB
   child RSS ceiling, and one process-loss-only same-root retry.
+- [x] Queue and monitor a same-inode global high-memory flock handover before
+  science starts; retain it after old-v4 natural exit, and fail/terminate only
+  the new process group if the helper generation disappears or drifts.
+- [x] Re-scan common-recourse processes during science and permit only the
+  frozen old generation plus one exact descendant of the bound v5 science
+  generation; reject mid-run rogue tasks and root PID reuse.
 - [x] Keep the paired Slurm wrapper static/non-runnable and document the exact
   fresh AutoDL task/environment recipe.
 - [x] Add a fresh-only v5 manifest builder with physical terminal-array audit,

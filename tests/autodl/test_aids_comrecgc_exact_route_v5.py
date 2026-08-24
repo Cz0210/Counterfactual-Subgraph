@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import time
 from typing import Any
 
 import numpy as np
@@ -19,6 +22,7 @@ from src.baselines.comrecgc.external_memory_recourse import (
     _stable_hash,
 )
 from src.utils import autodl_aids_comrecgc_exact_route_v5 as v5
+from src.utils import aids_comrecgc_v5_science_exec as science_exec
 from src.utils.autodl_aids_comrecgc_repair_v4 import (
     CONTROLLER_ID as V4_CONTROLLER_ID,
     STANDARDIZATION_TASK_ID as V4_TASK_ID,
@@ -70,6 +74,9 @@ def _fixture(
     scratch.mkdir()
     flock = _file(tmp_path / "bin/flock", "#!/bin/bash\nexit 0\n")
     flock.chmod(0o755)
+    highmem_lock = _file(
+        runtime / "locks/comrecgc_common_recourse_highmem.lock", ""
+    )
     science = tmp_path / "science"
     directories = {
         key: science / key.lower()
@@ -107,6 +114,7 @@ def _fixture(
         "COMRECGC_COMMON_RECOURSE_RESUME": "1",
         "THETA_STAR": "0.05",
         "COST_CAP": "0.0535",
+        "COMRECGC_HIGHMEM_LOCK_PATH": str(highmem_lock),
         "OUTPUT_ROOT": "{task_output}",
         **{key: str(value) for key, value in directories.items()},
         **{key: str(value) for key, value in files.items()},
@@ -290,11 +298,21 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert environment["COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES"] == "0"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_PID"] == "273939"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS"] == "687141119"
+    assert environment["COMRECGC_HIGHMEM_LOCK_PATH"].endswith(
+        "/locks/comrecgc_common_recourse_highmem.lock"
+    )
     assert not any("SOURCE_CHECKPOINT" in key or "CACHE_ROOT" in key for key in environment)
     dependency = payload["aids_comrecgc_exact_route_v5_contract"]["mut_dependency"]
     assert dependency["controller_id"] == v5.CONTROLLER_ID
     assert dependency["task_id"] == v5.TASK_ID
     assert dependency["expected_output"].endswith("/attempt-0")
+    headroom = payload["aids_comrecgc_exact_route_v5_contract"][
+        "highmem_exclusion"
+    ]["cgroup_headroom_gate"]
+    assert headroom["limit_path"].endswith("/memory.limit_in_bytes")
+    assert headroom["usage_path"].endswith("/memory.usage_in_bytes")
+    assert headroom["free_bytes_at_build"] == 448 * 1024**3
+    assert headroom["host_memfree_used"] is False
     assert summary["gpu_required"] is False
 
 
@@ -344,7 +362,12 @@ def test_v5_process_gate_rejects_pid_reuse_or_identity_drift(
         other = tmp_path / "other-project"
         other.mkdir()
         (paths["old_proc"] / "cwd").symlink_to(other, target_is_directory=True)
-    with pytest.raises(RuntimeError, match="IDENTITY_MISMATCH"):
+    expected_error = (
+        "ALLOWED_OLD_PROCESS_PID_REUSED"
+        if mutation == "start_ticks"
+        else "UNEXPECTED_COMMON_RECOURSE_PROCESS_SET"
+    )
+    with pytest.raises(RuntimeError, match=expected_error):
         _process_gate(paths)
 
 
@@ -366,6 +389,341 @@ def test_v5_process_gate_rejects_any_second_common_recourse_process(
         _process_gate(paths)
 
 
+def test_v5_process_gate_rejects_old_pid_reused_by_non_common_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    (paths["old_proc"] / "cmdline").write_bytes(b"/usr/bin/sleep\0infinity\0")
+    (paths["old_proc"] / "stat").write_text(
+        "273939 (sleep) "
+        + " ".join(["S", *("0" for _ in range(18)), "687141120"])
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="ALLOWED_OLD_PROCESS_PID_REUSED"):
+        _process_gate(paths)
+
+
+def test_v5_process_gate_rejects_same_generation_non_common_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    (paths["old_proc"] / "cmdline").write_bytes(b"/usr/bin/sleep\0infinity\0")
+    with pytest.raises(RuntimeError, match="UNEXPECTED_COMMON_RECOURSE_PROCESS_SET"):
+        _process_gate(paths)
+
+
+def test_v5_midrun_process_gate_allows_exact_route_child_and_rejects_rogue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    route_project = tmp_path / "route-project"
+    route_script = route_project / "scripts/baselines/comrecgc/run_common_recourse.py"
+    route_script.parent.mkdir(parents=True)
+    route_script.write_text("# route fixture\n", encoding="utf-8")
+    route_output = tmp_path / "fresh/common_recourse"
+    route_output.mkdir(parents=True)
+    root_pid = 5000
+    root_ticks = 700001
+    route_root = paths["proc"] / str(root_pid)
+    route_root.mkdir()
+    (route_root / "stat").write_text(
+        f"{root_pid} (continuation) "
+        + " ".join(["S", "1", *("0" for _ in range(17)), str(root_ticks)])
+        + "\n",
+        encoding="utf-8",
+    )
+    child_pid = 5001
+    route_child = paths["proc"] / str(child_pid)
+    route_child.mkdir()
+    (route_child / "stat").write_text(
+        f"{child_pid} (python) "
+        + " ".join(["S", str(root_pid), *("0" for _ in range(17)), "700002"])
+        + "\n",
+        encoding="utf-8",
+    )
+    route_cmdline = (
+        str(Path(os.sys.executable).resolve()).encode()
+        + b"\0"
+        + str(route_script).encode()
+        + b"\0--output-dir\0"
+        + str(route_output).encode()
+        + b"\0"
+    )
+    (route_child / "cmdline").write_bytes(route_cmdline)
+    (route_child / "cwd").symlink_to(route_project, target_is_directory=True)
+
+    allowed = verify_process_set(
+        proc_root=paths["proc"],
+        allowed_pid=273939,
+        allowed_start_ticks=687141119,
+        allowed_cmdline_sha256=hashlib.sha256(paths["old_cmdline"]).hexdigest(),
+        allowed_output_root=paths["old_output_root"],
+        allowed_project_root=paths["old_project_root"],
+        allowed_route_root_pid=root_pid,
+        allowed_route_root_start_ticks=root_ticks,
+        allowed_route_output_root=route_output,
+        allowed_route_project_root=route_project,
+    )
+    assert allowed["active_common_recourse_count"] == 2
+    assert allowed["allowed_old_process_count"] == 1
+    assert allowed["allowed_route_process_count"] == 1
+
+    rogue_pid = 5002
+    rogue = paths["proc"] / str(rogue_pid)
+    rogue.mkdir()
+    (rogue / "stat").write_text(
+        f"{rogue_pid} (python) "
+        + " ".join(["S", "1", *("0" for _ in range(17)), "700003"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (rogue / "cmdline").write_bytes(route_cmdline)
+    (rogue / "cwd").symlink_to(route_project, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="UNEXPECTED_COMMON_RECOURSE_PROCESS_SET"):
+        verify_process_set(
+            proc_root=paths["proc"],
+            allowed_pid=273939,
+            allowed_start_ticks=687141119,
+            allowed_cmdline_sha256=hashlib.sha256(paths["old_cmdline"]).hexdigest(),
+            allowed_output_root=paths["old_output_root"],
+            allowed_project_root=paths["old_project_root"],
+            allowed_route_root_pid=root_pid,
+            allowed_route_root_start_ticks=root_ticks,
+            allowed_route_output_root=route_output,
+            allowed_route_project_root=route_project,
+        )
+
+
+def test_v5_midrun_process_gate_rejects_route_root_pid_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    route_project = tmp_path / "route-project"
+    route_script = route_project / "scripts/baselines/comrecgc/run_common_recourse.py"
+    route_script.parent.mkdir(parents=True)
+    route_script.write_text("# route fixture\n", encoding="utf-8")
+    route_output = tmp_path / "fresh/common_recourse"
+    route_output.mkdir(parents=True)
+    root_pid = 5010
+    route_root = paths["proc"] / str(root_pid)
+    route_root.mkdir()
+    (route_root / "stat").write_text(
+        f"{root_pid} (reused) "
+        + " ".join(["S", "1", *("0" for _ in range(17)), "900002"])
+        + "\n",
+        encoding="utf-8",
+    )
+    child_pid = 5011
+    child = paths["proc"] / str(child_pid)
+    child.mkdir()
+    (child / "stat").write_text(
+        f"{child_pid} (python) "
+        + " ".join(["S", str(root_pid), *("0" for _ in range(17)), "900003"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (child / "cmdline").write_bytes(
+        str(Path(os.sys.executable).resolve()).encode()
+        + b"\0"
+        + str(route_script).encode()
+        + b"\0--output-dir\0"
+        + str(route_output).encode()
+        + b"\0"
+    )
+    (child / "cwd").symlink_to(route_project, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="UNEXPECTED_COMMON_RECOURSE_PROCESS_SET"):
+        verify_process_set(
+            proc_root=paths["proc"],
+            allowed_pid=273939,
+            allowed_start_ticks=687141119,
+            allowed_cmdline_sha256=hashlib.sha256(paths["old_cmdline"]).hexdigest(),
+            allowed_output_root=paths["old_output_root"],
+            allowed_project_root=paths["old_project_root"],
+            allowed_route_root_pid=root_pid,
+            allowed_route_root_start_ticks=900001,
+            allowed_route_output_root=route_output,
+            allowed_route_project_root=route_project,
+        )
+
+
+def test_v5_highmem_handover_queues_acquires_retains_and_releases(
+    tmp_path: Path,
+) -> None:
+    proc = tmp_path / "proc"
+    supervisor_pid = 4242
+    supervisor = proc / str(supervisor_pid)
+    supervisor.mkdir(parents=True)
+    supervisor_start_ticks = 998877
+    (supervisor / "stat").write_text(
+        f"{supervisor_pid} (supervisor) "
+        + " ".join(["S", *("0" for _ in range(18)), str(supervisor_start_ticks)])
+        + "\n",
+        encoding="utf-8",
+    )
+    lock = tmp_path / "highmem.lock"
+    lock.touch()
+    state = tmp_path / "handover.json"
+    old_fd = lock.open("r+")
+    fcntl.flock(old_fd.fileno(), fcntl.LOCK_EX)
+    root = Path(__file__).resolve().parents[2]
+    helper = subprocess.Popen(
+        [
+            str(Path(os.sys.executable).resolve()),
+            "-m",
+            "src.utils.aids_comrecgc_v5_lock_handover",
+            "--lock-path",
+            str(lock),
+            "--state-path",
+            str(state),
+            "--supervisor-pid",
+            str(supervisor_pid),
+            "--proc-root",
+            str(proc),
+            "--poll-seconds",
+            "0.01",
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+    )
+
+    def wait_status(expected: str) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if state.is_file():
+                try:
+                    if json.loads(state.read_text())["status"] == expected:
+                        return
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            time.sleep(0.01)
+        raise AssertionError(f"handover did not reach {expected}")
+
+    third_fd = lock.open("r+")
+    try:
+        wait_status("QUEUED")
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(third_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(old_fd.fileno(), fcntl.LOCK_UN)
+        wait_status("ACQUIRED")
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(third_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (supervisor / "stat").unlink()
+        supervisor.rmdir()
+        assert helper.wait(timeout=5) == 0
+        fcntl.flock(third_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        if helper.poll() is None:
+            helper.terminate()
+            helper.wait(timeout=5)
+        fcntl.flock(third_fd.fileno(), fcntl.LOCK_UN)
+        third_fd.close()
+        old_fd.close()
+
+
+@pytest.mark.parametrize("replace_phase", ["QUEUED", "ACQUIRED"])
+def test_v5_highmem_handover_rejects_lock_path_replacement(
+    tmp_path: Path, replace_phase: str
+) -> None:
+    proc = tmp_path / "proc"
+    supervisor_pid = 4243
+    supervisor = proc / str(supervisor_pid)
+    supervisor.mkdir(parents=True)
+    (supervisor / "stat").write_text(
+        f"{supervisor_pid} (supervisor) "
+        + " ".join(["S", *("0" for _ in range(18)), "998878"])
+        + "\n",
+        encoding="utf-8",
+    )
+    lock = tmp_path / "highmem.lock"
+    lock.touch()
+    state = tmp_path / "handover.json"
+    old_fd = lock.open("r+")
+    fcntl.flock(old_fd.fileno(), fcntl.LOCK_EX)
+    root = Path(__file__).resolve().parents[2]
+    helper = subprocess.Popen(
+        [
+            str(Path(os.sys.executable).resolve()),
+            "-m",
+            "src.utils.aids_comrecgc_v5_lock_handover",
+            "--lock-path",
+            str(lock),
+            "--state-path",
+            str(state),
+            "--supervisor-pid",
+            str(supervisor_pid),
+            "--proc-root",
+            str(proc),
+            "--poll-seconds",
+            "0.01",
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if state.is_file() and json.loads(state.read_text())["status"] == "QUEUED":
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("handover did not queue")
+        if replace_phase == "ACQUIRED":
+            fcntl.flock(old_fd.fileno(), fcntl.LOCK_UN)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if json.loads(state.read_text())["status"] == "ACQUIRED":
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("handover did not acquire")
+        lock.unlink()
+        lock.touch()
+        assert helper.wait(timeout=5) == 75
+        failed = json.loads(state.read_text())
+        assert failed["status"] == "FAILED"
+        assert "HIGHMEM_LOCK_PATH_IDENTITY_CHANGED" in failed["error"]
+        replacement_fd = lock.open("r+")
+        try:
+            fcntl.flock(replacement_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            fcntl.flock(replacement_fd.fileno(), fcntl.LOCK_UN)
+            replacement_fd.close()
+    finally:
+        if helper.poll() is None:
+            helper.terminate()
+            helper.wait(timeout=5)
+        fcntl.flock(old_fd.fileno(), fcntl.LOCK_UN)
+        old_fd.close()
+
+
+def test_v5_science_exec_establishes_session_before_fixed_script_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = root / "scripts/autodl/run_comrecgc_standardized_continuation.sh"
+    calls: list[tuple[str, Any]] = []
+    monkeypatch.setattr(science_exec.os, "setsid", lambda: calls.append(("setsid", None)))
+
+    def fake_exec(path: str, argv: list[str]) -> None:
+        calls.append((path, argv))
+        raise RuntimeError("EXEC_CAPTURED")
+
+    monkeypatch.setattr(science_exec.os, "execv", fake_exec)
+    with pytest.raises(RuntimeError, match="EXEC_CAPTURED"):
+        science_exec.main(
+            ["--project-root", str(root), "--script", str(script)]
+        )
+    assert calls == [
+        ("setsid", None),
+        ("/bin/bash", ["bash", str(script.resolve(strict=True))]),
+    ]
+    with pytest.raises(RuntimeError, match="identity changed"):
+        science_exec.main(
+            ["--project-root", str(root), "--script", str(root / "README.md")]
+        )
+
+
 def test_v5_terminal_source_gate_rejects_partial_and_manifest_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -378,6 +736,18 @@ def test_v5_terminal_source_gate_rejects_partial_and_manifest_drift(
     pair_manifest["row_count"] += 1
     _json(paths["pair_manifest"], pair_manifest)
     with pytest.raises(RepairManifestError, match="manifest SHA256 mismatch"):
+        v5.build_payload(spec_path=paths["spec"])
+
+
+def test_v5_rejects_replaced_global_highmem_lock_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    lock = paths["runtime"] / "locks/comrecgc_common_recourse_highmem.lock"
+    lock.unlink()
+    replacement = _file(tmp_path / "replacement-highmem.lock", "")
+    lock.symlink_to(replacement)
+    with pytest.raises(RepairManifestError, match="must be physical"):
         v5.build_payload(spec_path=paths["spec"])
 
 
@@ -424,6 +794,14 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     assert v5.REVIEWED_CORE_COMMIT == "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
     assert v5.ROUTE_RELEASE_COMMIT == "e75b6e8160e07c869c558080259b4b05695f76d7"
     root = Path(__file__).resolve().parents[2]
+    template = json.loads(
+        (
+            root / "configs/autodl/aids_comrecgc_exact_route_v5.template.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert template["allowed_old_read_only_process"]["cmdline_sha256"] == (
+        "792679fed417737f85462d940243153e5081d8b80c7dab663591131c5bbd51b8"
+    )
     wrapper = (
         root / "scripts/slurm/build_aids_comrecgc_exact_route_v5_manifest.sh"
     ).read_text(encoding="utf-8")
