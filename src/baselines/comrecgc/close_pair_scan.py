@@ -286,7 +286,7 @@ def scan_theta_close_pairs(
     *,
     output_dir: str | Path,
     pair_indices_path: str | Path,
-    pair_chunks: Sequence[Mapping[str, Any]],
+    pair_chunks: Sequence[Mapping[str, Any] | PairChunk],
     parent_count: int,
     candidate_count: int,
     theta: float,
@@ -312,7 +312,10 @@ def scan_theta_close_pairs(
     if int(boundary_sample_size) <= 0:
         raise ValueError("boundary_sample_size must be positive")
     pair_path = Path(pair_indices_path).expanduser().resolve(strict=True)
-    chunks = [PairChunk.from_manifest(value) for value in pair_chunks]
+    chunks = [
+        value if isinstance(value, PairChunk) else PairChunk.from_manifest(value)
+        for value in pair_chunks
+    ]
     _validate_chunks(
         chunks, parent_count=int(parent_count), candidate_count=int(candidate_count)
     )
