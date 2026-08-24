@@ -64,6 +64,8 @@ benchmark，再按 legacy-A、legacy-B、ordered-v2 顺序运行 fresh Quick-50�
 legacy-A/B 不完全一致时会立即停止，不运行 ordered-v2。
 benchmark 显式兼容冻结 BACE GCF cohort 的 `canonical_smiles` 字段，并保留
 通用数据记录的 `smiles` / `original_smiles` 确定性回退顺序。
+scorer identity 同时接受项目 `MolecularGraphData` 的 tuple-backed portable
+features 与 collated torch tensor；两者都按 dtype、shape 和 C-order bytes 绑定。
 
 ## 50k 前置硬门禁
 

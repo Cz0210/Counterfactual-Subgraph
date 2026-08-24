@@ -391,7 +391,9 @@ def test_frozen_gine_scorer_caches_only_complete_ordered_batches() -> None:
 
     class Batch:
         def __init__(self, rows: object) -> None:
-            self.x = torch.stack([row.x.reshape(-1) for row in rows])
+            self.x = torch.stack(
+                [torch.as_tensor(row.x).reshape(-1) for row in rows]
+            )
             self.edge_index = torch.empty((2, 0), dtype=torch.long)
             self.edge_attr = torch.empty((0, 1))
             self.batch = torch.arange(len(rows))
@@ -401,9 +403,9 @@ def test_frozen_gine_scorer_caches_only_complete_ordered_batches() -> None:
 
     def graph(value: float) -> object:
         return SimpleNamespace(
-            x=torch.tensor([[value, value + 1]]),
-            edge_index=torch.empty((2, 0), dtype=torch.long),
-            edge_attr=torch.empty((0, 1)),
+            x=((value, value + 1),),
+            edge_index=((), ()),
+            edge_attr=(),
             graph_sha256=str(value),
         )
 

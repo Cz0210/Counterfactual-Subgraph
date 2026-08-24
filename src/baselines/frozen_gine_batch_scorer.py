@@ -15,11 +15,15 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 def _tensor_snapshot(value: Any, *, row_digests: bool = True) -> dict[str, Any]:
-    tensor = value.detach().cpu()
-    if getattr(tensor, "is_sparse", False):
-        tensor = tensor.to_dense()
-    tensor = tensor.contiguous()
-    array = tensor.numpy()
+    if hasattr(value, "detach"):
+        tensor = value.detach().cpu()
+        if getattr(tensor, "is_sparse", False):
+            tensor = tensor.to_dense()
+        array = tensor.contiguous().numpy()
+    else:
+        import numpy as np
+
+        array = np.ascontiguousarray(value)
     identity = hashlib.sha256()
     identity.update(str(array.dtype).encode("ascii"))
     identity.update(json.dumps(list(array.shape)).encode("ascii"))
