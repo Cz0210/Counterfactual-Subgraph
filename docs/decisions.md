@@ -9225,3 +9225,38 @@ Accepted
 - The first fresh v5 controller correctly failed closed before copying because
   its preflight assumed the opposite column order.  That controller/root remain
   immutable failure evidence; a corrected route must use a fresh namespace.
+
+## [2026-08-25] Recompute the AIDS logical close-pair view from frozen GREED
+
+### Decision
+
+Treat the 91,916,686-row pair/vector array as a physical store, not by itself
+as the logical DBSCAN input. Recompute every normalized scalar distance through
+the frozen AIDS GREED `torch.cdist` adapter and official element-count scale,
+then materialize only the inclusive `distance <= theta` predicate in a small,
+separately named bitmap. Recourse-vector norms remain a consistency audit and
+never become the filtering authority.
+
+Bind physical-snapshot wrappers to their hash-closed source chunk metadata,
+verify `(parent_index, candidate_index)` columns for every scanned row, and
+publish `PASS` last. A bounded benchmark remains resumable but non-terminal.
+When all rows are close, publish a separate exact-consumer-compatible
+`comrecgc_all_pairs_close_certificate_v1`; otherwise the bitmap is the sole
+logical close-view contract.
+
+The nominal official candidate cap comes from generation `--k` and
+`MAX_COUNTERFACTUAL_SIZE`. The current common-recourse `--cf_size` parameter is
+not claimed as an applied official slice. The project post-predicate slice is
+recorded explicitly as `PROJECT_EXTENSION` and whether it was binding.
+
+### Consequences
+
+- No 25 GB pair store is regenerated or copied by this audit.
+- Exact DBSCAN cannot consume the physical Cartesian row count unless the full
+  frozen-distance certificate proves every row is theta-close.
+- Benchmark output cannot be mistaken for a scientific PASS.
+
+### Status
+
+Accepted for implementation; production completion requires the immutable
+AutoDL execution and full scan.
