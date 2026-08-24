@@ -9139,3 +9139,26 @@ Accepted
   an explicit tree-equivalent integration gate, not a silent commit
   substitution, and drift in either integrated blobs or working content fails
   closed.
+
+## 2026-08-24: Snapshot the promoted AIDS pair store into fresh physical inodes
+
+- The protected repair-v4 DBSCAN process retains an `O_RDWR` mapping of its
+  already-promoted pair arrays.  Exact-route v5 must neither signal that
+  process nor consume its writable inode directly.
+- A dedicated CPU-only snapshot stage now brackets a sequential physical copy
+  with full source SHA-256/stat closure.  Each destination is copied through a
+  non-authoritative `.partial`, synchronized, atomically promoted, then
+  reopened and hash/schema checked.  Source and destination device/inode pairs
+  must differ, so source hardlinks are forbidden.
+- Same-root recovery may discard only an incomplete partial.  Already promoted
+  arrays are adopted only after their complete content, size, schema, and
+  distinct-inode proof pass.  Terminal publication is PASS-last and reuses the
+  same whole-closure validator after a manifest-to-PASS crash window.
+- The snapshot contract freezes all 91,916,686 candidate-major/parent-minor
+  rows and the 64-dimensional float32 vectors.  `pair_indices` is row
+  provenance, never a precomputed distance/adjacency graph.  The downstream
+  DBSCAN contract remains Euclidean `eps=0.02`, `min_samples=3`, includes the
+  sample itself, and follows frozen sklearn 1.7.2 border/label ordering.
+- The old v4 root stays read-only and receives no signal.  Any source drift,
+  unexpected writer, symlink, partial, insufficient persistent-disk floor, or
+  terminal artifact drift fails closed.
