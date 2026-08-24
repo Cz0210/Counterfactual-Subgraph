@@ -17,6 +17,7 @@ RUNNING_PROGRESSING = "RUNNING_PROGRESSING"
 RUNNING_SLOW = "RUNNING_SLOW"
 RUNNING_UNVIABLE = "RUNNING_UNVIABLE"
 RUNNING_STALLED = "RUNNING_STALLED"
+SUPERSEDED = "SUPERSEDED"
 PROCESS_EXITED = "PROCESS_EXITED"
 OBSERVATION_FAILED = "OBSERVATION_FAILED"
 HEALTH_STATES = frozenset(
@@ -25,10 +26,43 @@ HEALTH_STATES = frozenset(
         RUNNING_SLOW,
         RUNNING_UNVIABLE,
         RUNNING_STALLED,
+        SUPERSEDED,
         PROCESS_EXITED,
         OBSERVATION_FAILED,
     }
 )
+
+ROUTE_VIABLE = "VIABLE"
+ROUTE_SLOW = "SLOW"
+ROUTE_UNVIABLE = "UNVIABLE"
+ROUTE_STALLED = "STALLED"
+ROUTE_SUPERSEDED = "SUPERSEDED"
+ROUTE_UNKNOWN = "UNKNOWN"
+SUPERSESSION_RECEIPT_SCHEMA = "autodl_route_supersession_receipt_v1"
+SUPERSESSION_RECEIPT_STATE = "GRACEFUL_CHECKPOINT_AND_STOP_COMPLETE"
+
+
+def route_viability_for_progress_state(progress_state: str) -> str:
+    """Map an observed worker state to a non-terminal route assessment.
+
+    A controller is not allowed to infer scientific PASS from a completed
+    counter or a live PID.  In particular, a missing worker is *unknown*, not
+    successful, unless an independent finalizer says otherwise.
+    """
+
+    values = {
+        RUNNING_PROGRESSING: ROUTE_VIABLE,
+        RUNNING_SLOW: ROUTE_SLOW,
+        RUNNING_UNVIABLE: ROUTE_UNVIABLE,
+        RUNNING_STALLED: ROUTE_STALLED,
+        SUPERSEDED: ROUTE_SUPERSEDED,
+        PROCESS_EXITED: ROUTE_UNKNOWN,
+        OBSERVATION_FAILED: ROUTE_UNKNOWN,
+    }
+    try:
+        return values[progress_state]
+    except KeyError as exc:
+        raise ValueError(f"Unknown scientific progress state: {progress_state!r}") from exc
 
 
 def _timestamp(value: str | None = None) -> datetime:
@@ -121,6 +155,10 @@ def update_progress_health(
         state = RUNNING_PROGRESSING
     return {
         "health_state": state,
+        # ``health_state`` is retained for existing consumers.  The explicit
+        # name prevents a live monitor from being mistaken for a live worker.
+        "scientific_progress_state": state,
+        "route_viability": route_viability_for_progress_state(state),
         "completed": completed,
         "total": total,
         "fraction": completed / total,
@@ -131,7 +169,81 @@ def update_progress_health(
         "rolling_throughput_per_hour": rolling_rate * 3600.0,
         "eta_hours": eta_hours,
         "pid_alive": bool(pid_alive),
+        "scientific_worker_alive": bool(pid_alive),
         "automatic_signal_allowed": False,
+    }
+
+
+def mark_superseded(
+    previous: Mapping[str, Any] | None,
+    *,
+    total: int,
+    scientific_worker_alive: bool,
+    observed_at: str,
+    supersession: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record an operator-approved route replacement without signalling it.
+
+    This is deliberately not an action primitive.  The caller must provide an
+    immutable receipt for a completed graceful handover/stop.  A superseded
+    worker can be already gone (the common case) or still drain briefly; both
+    are observable and neither is treated as PASS.
+    """
+
+    if isinstance(total, bool) or int(total) <= 0:
+        raise ValueError("A superseded task requires a positive total.")
+    if supersession.get("schema_version") != SUPERSESSION_RECEIPT_SCHEMA:
+        raise ValueError("Supersession evidence has the wrong schema.")
+    if supersession.get("state") != SUPERSESSION_RECEIPT_STATE:
+        raise ValueError("Supersession evidence has the wrong terminal state.")
+    for field in (
+        "graceful_checkpoint_completed",
+        "graceful_stop_completed",
+        "old_worker_exited",
+    ):
+        if supersession.get(field) is not True:
+            raise ValueError(f"Supersession evidence does not prove {field}.")
+    if supersession.get("sigkill_used") is not False:
+        raise ValueError("Supersession evidence does not prove sigkill_used=false.")
+    receipt_sha = str(supersession.get("receipt_sha256") or "")
+    if len(receipt_sha) != 64 or any(value not in "0123456789abcdef" for value in receipt_sha):
+        raise ValueError("Supersession evidence lacks a valid receipt SHA256.")
+    replacement = supersession.get("replacement")
+    if not isinstance(replacement, Mapping) or replacement.get("task_gate_state") != "PASS":
+        raise ValueError("Supersession evidence does not bind a replacement PASS gate.")
+    if scientific_worker_alive:
+        raise ValueError("A live scientific worker cannot be marked SUPERSEDED.")
+    now = _timestamp(observed_at)
+    prior = dict(previous or {})
+    completed = int(prior.get("completed", 0))
+    if completed < 0 or completed > int(total):
+        raise ValueError("Prior progress for a superseded task is outside [0, total].")
+    last_progress = _timestamp(prior.get("last_progress_at", observed_at))
+    rolling_rate = prior.get("rolling_throughput_per_second")
+    if rolling_rate is not None:
+        rolling_rate = float(rolling_rate)
+        if not math.isfinite(rolling_rate) or rolling_rate < 0:
+            rolling_rate = None
+    return {
+        "health_state": SUPERSEDED,
+        "scientific_progress_state": SUPERSEDED,
+        "route_viability": ROUTE_SUPERSEDED,
+        "completed": completed,
+        "total": int(total),
+        "fraction": completed / int(total),
+        "observed_at": now.isoformat(timespec="seconds"),
+        "last_progress_at": last_progress.isoformat(timespec="seconds"),
+        "seconds_since_progress": max(0.0, (now - last_progress).total_seconds()),
+        "rolling_throughput_per_second": rolling_rate,
+        "rolling_throughput_per_hour": (
+            None if rolling_rate is None else rolling_rate * 3600.0
+        ),
+        "eta_hours": None,
+        # Kept as aliases for monitor-v1 consumers.
+        "pid_alive": bool(scientific_worker_alive),
+        "scientific_worker_alive": bool(scientific_worker_alive),
+        "automatic_signal_allowed": False,
+        "supersession": dict(supersession),
     }
 
 
@@ -144,5 +256,16 @@ __all__ = [
     "RUNNING_SLOW",
     "RUNNING_STALLED",
     "RUNNING_UNVIABLE",
+    "SUPERSEDED",
+    "SUPERSESSION_RECEIPT_SCHEMA",
+    "SUPERSESSION_RECEIPT_STATE",
+    "ROUTE_SLOW",
+    "ROUTE_STALLED",
+    "ROUTE_SUPERSEDED",
+    "ROUTE_UNKNOWN",
+    "ROUTE_UNVIABLE",
+    "ROUTE_VIABLE",
+    "mark_superseded",
+    "route_viability_for_progress_state",
     "update_progress_health",
 ]

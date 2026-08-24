@@ -9441,3 +9441,51 @@ template, and hash-binds the gate, state, output, and terminal evidence.
   in the persisted run log prevents that retry.
 - No deployment, process signal, or mutation of historical AutoDL roots is
   authorized by this change.
+
+## [2026-08-25] Separate AutoDL controller liveness from scientific route viability
+
+### Decision
+
+The read-only root-cause monitor retains its monitor-v1 `health_state` and
+`pid_alive` fields for compatibility, but now also publishes four unambiguous
+observations: `controller_process_alive`, `scientific_worker_alive`,
+`scientific_progress_state`, and `route_viability`.  A live controller is
+therefore not evidence that a scientific worker is alive, progressing, or on a
+viable route.
+
+`RUNNING_PROGRESSING`, `RUNNING_SLOW`, `RUNNING_UNVIABLE`, and
+`RUNNING_STALLED` map respectively to `VIABLE`, `SLOW`, `UNVIABLE`, and
+`STALLED` route viability.  A missing worker or failed probe maps to `UNKNOWN`,
+never PASS.  `SUPERSEDED` is emitted only when a new monitor spec pins the
+SHA256 of a physical no-symlink JSON handover receipt.  That receipt must prove
+graceful checkpoint and stop completion, old-worker exit, `sigkill_used=false`,
+and a replacement task gate in `PASS`.  It binds the old task ID, PID,
+start-ticks, and output root plus the replacement controller/task/output root,
+controller-manifest hash, task-gate hash, and final-manifest hash.  The monitor
+rechecks the physical replacement files and every receipt field, rejects
+zombie/terminal `/proc` states as live, and refuses `SUPERSEDED` while the
+frozen old worker generation is still alive.
+
+Receipt booleans use exact JSON boolean identity (`true`/`false`); numeric
+`1`/`0` are rejected. PID and start-ticks use positive JSON integers only, so
+booleans and integral floating-point values cannot impersonate process
+identity fields.
+
+The monitor does not probe a potentially retired progress file after this full
+proof, and it never signals a scientific process.
+
+### Consequences
+
+- The dashboard/status payload can report process ownership and scientific
+  health independently without changing existing consumers of `health_state`.
+- Graceful retirement remains an operator/controller action outside this
+  monitor; this code records the completed action but cannot initiate it.
+- Existing monitor specs remain valid because `supersession` is optional.
+- A missing/mutated receipt, symlink, non-JSON file, hash mismatch, incomplete
+  stop proof, non-PASS replacement gate, or still-live worker fails closed as
+  `OBSERVATION_FAILED`/`UNKNOWN`.
+
+### Status
+
+Accepted for the next immutable AutoDL controller release; not a deployment or
+permission to stop any existing worker.

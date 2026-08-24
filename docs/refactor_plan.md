@@ -1550,6 +1550,19 @@ Mutagenicity roadmaps.
 - [ ] Decide sharding only after M500 parity; keep the old formal 50k writer
   running until equivalence, benchmark, and ETA gates pass.
 
+## 2026-08-25: Root-cause controller health semantics
+
+- [x] Preserve the read-only monitor's existing state schema while adding
+  explicit controller liveness, worker liveness, scientific progress, and
+  route-viability fields.
+- [x] Add the SHA-pinned, physical-JSON receipt-gated `SUPERSEDED` terminal
+  observation. It field-binds the old PID generation/root, graceful
+  checkpoint/stop evidence, no-SIGKILL evidence, and replacement PASS
+  gate/controller/task/root/manifest hashes. Boolean and PID-generation fields
+  are type-strict JSON values; the monitor cannot send a process signal.
+- [ ] Roll the fields into a future immutable AutoDL execution release only
+  after the active AIDS full scan reaches its own terminal protocol gate.
+
 ## 2026-08-24 — BACE GCF lockstep and frozen-GINE scoring
 
 - [x] Add Quick-50/100 per-call lockstep traces and an exact first-divergence
