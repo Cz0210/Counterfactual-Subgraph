@@ -85,7 +85,7 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
 SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
-PAPER_PROTOCOL_RELEASE_COMMIT = "9dc64a479e4487f2d03c238137bf107209e5d17a"
+PAPER_PROTOCOL_RELEASE_COMMIT = "73923ce1cc822da3b592bebceb1ae90770d1f1cb"
 PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
     "src/baselines/comrecgc/close_pair_scan.py": {
         "git_blob": "3aff0dc908d08a8da3f49d397f65084c80c7a37b",
@@ -140,8 +140,8 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
         "sha256": "21b0600e59417838085b7f5465eafb3a2337cbae026fadac2f91d76fed8ea957",
     },
     "src/utils/autodl_aids_greed_full_scan_supervisor.py": {
-        "git_blob": "e3b22d219decf781390e74829b28962fe9796196",
-        "sha256": "6a3777c52cc83fd724b289f80a31941080fcccbc3300ef9f900972fd1e5ecc18",
+        "git_blob": "4a4c4a4072c3301174fdbfd975cc65ca8d171939",
+        "sha256": "b082adeda87d4b31450fcf2f54765d3ab7d3a9e28d696d752c7a4d7497bbdfbe",
     },
     "scripts/autodl/run_aids_greed_full_scan_supervisor.py": {
         "git_blob": "6c067bce8da6d380d205e065099289ee97f9f888",
@@ -152,8 +152,8 @@ PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
         "sha256": "c936cf8a536330285b6afcfebb88647f6bcef2f577b50c4ff9dbd926a66b93d5",
     },
     "tests/autodl/test_aids_greed_full_scan_supervisor.py": {
-        "git_blob": "208ef7656364c9b5666a2b77b6b11e5df87b1069",
-        "sha256": "9c70f5302cfede6e57f8374bd16755c76c175ed2d07a0794598c29047a2d1fa9",
+        "git_blob": "d68f14a62289b489d4c185aadc7a7d0b8fecffbd",
+        "sha256": "9182a53224cd86a374612340c5fcdd76eb1f7efa6c56452ed66b71e329b2a8b3",
     },
     "tests/autodl/test_four_gpu_recovery_controller.py": {
         "git_blob": "f00443fb3595e083de4ca7e7305136a14be0a411",
