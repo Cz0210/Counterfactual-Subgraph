@@ -323,15 +323,19 @@ def _copy_one(
     # A partial is never authority.  Same-root recovery restarts this one file
     # from byte zero, while already promoted/verified earlier files are kept.
     partial.unlink(missing_ok=True)
-    source_descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    destination_descriptor = os.open(
-        partial,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
+    source_descriptor = -1
+    destination_descriptor = -1
     digest = hashlib.sha256()
     copied = 0
     try:
+        source_descriptor = os.open(
+            source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        destination_descriptor = os.open(
+            partial,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
         while True:
             chunk = os.read(source_descriptor, COPY_BUFFER_BYTES)
             if not chunk:
@@ -348,11 +352,20 @@ def _copy_one(
         # equivalent used by the macOS development fixtures.
         getattr(os, "fdatasync", os.fsync)(destination_descriptor)
     finally:
-        os.close(source_descriptor)
-        os.close(destination_descriptor)
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
     if copied != expected_size or digest.hexdigest() != expected_sha256:
         raise PairStoreSnapshotError("copied snapshot bytes differ from source authority")
-    os.replace(partial, destination)
+    # Publish without clobbering a concurrently created destination.  The
+    # temporary and final names briefly reference the newly copied inode (never
+    # the source inode); unlinking the partial after the directory fsync leaves
+    # exactly one physical destination name.  A crash in this two-name window
+    # is reconciled below only when both names prove the same inode.
+    os.link(partial, destination, follow_symlinks=False)
+    _fsync_directory(destination.parent)
+    partial.unlink()
     _fsync_directory(destination.parent)
     return _validate_final_copy(
         source=source,
@@ -367,6 +380,17 @@ def _discard_restartable_partial(*, destination: Path) -> bool:
     if not partial.exists() and not partial.is_symlink():
         return False
     if destination.exists() or destination.is_symlink():
+        if (
+            not destination.is_symlink()
+            and destination.is_file()
+            and not partial.is_symlink()
+            and partial.is_file()
+            and (destination.stat().st_dev, destination.stat().st_ino)
+            == (partial.stat().st_dev, partial.stat().st_ino)
+        ):
+            partial.unlink()
+            _fsync_directory(destination.parent)
+            return True
         raise PairStoreSnapshotError("partial exists beside promoted destination")
     if partial.is_symlink() or not partial.is_file():
         raise PairStoreSnapshotError("snapshot partial must be a physical regular file")

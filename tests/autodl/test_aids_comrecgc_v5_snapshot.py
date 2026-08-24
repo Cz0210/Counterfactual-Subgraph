@@ -218,6 +218,27 @@ def test_resume_discards_large_regular_partial_before_headroom_gate(
     assert result["discarded_non_authoritative_partials"] == [str(partial)]
 
 
+def test_resume_reconciles_atomic_publish_link_unlink_crash_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    output = tmp_path / "snapshot"
+    pair_store = output / "pair_store"
+    pair_store.mkdir(parents=True)
+    partial = pair_store / ".pair_indices.npy.partial"
+    final = pair_store / "pair_indices.npy"
+    shutil.copyfile(fixture["pairs"], partial)
+    os.link(partial, final)
+    assert partial.stat().st_ino == final.stat().st_ino
+
+    result = _run(fixture, output, resume=True)
+
+    assert result["status"] == "PASS"
+    assert not partial.exists()
+    assert final.stat().st_ino != Path(fixture["pairs"]).stat().st_ino
+
+
 @pytest.mark.parametrize("kind", ["symlink", "directory"])
 def test_resume_rejects_nonregular_partial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
