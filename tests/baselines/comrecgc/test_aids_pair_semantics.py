@@ -17,7 +17,7 @@ from src.baselines.comrecgc.aids_pair_semantics import (
     _select_candidates,
     _write_terminal_pass,
 )
-from src.baselines.comrecgc.close_pair_scan import PairChunk
+from src.baselines.comrecgc.close_pair_scan import PairChunk, scan_theta_close_pairs
 from src.baselines.comrecgc.contracts import sha256_file, stable_json_sha256
 
 
@@ -221,6 +221,109 @@ def test_snapshot_wrapper_uses_hash_bound_source_chunks(tmp_path: Path) -> None:
     assert authority["source_chunks_sha256"] == wrapper["source_chunks_sha256"]
 
 
+def test_real_shape_snapshot_source_chunks_drive_bounded_two_chunk_scan(
+    tmp_path: Path,
+) -> None:
+    parent_count = 1_283
+    candidate_count = 71_642
+    physical_rows = parent_count * candidate_count
+    chunks: list[dict] = []
+    for chunk_index, candidate_start in enumerate(range(0, candidate_count, 128)):
+        candidate_stop = min(candidate_count, candidate_start + 128)
+        chunks.append(
+            {
+                "chunk_index": chunk_index,
+                "row_count": (candidate_stop - candidate_start) * parent_count,
+                "first_pair": [0, candidate_start],
+                "last_pair": [parent_count - 1, candidate_stop - 1],
+                "scientific_identity": {
+                    "candidate_start": candidate_start,
+                    "candidate_stop": candidate_stop,
+                },
+            }
+        )
+    assert len(chunks) == 560
+    identity = {
+        "candidate_count": candidate_count,
+        "parent_count": parent_count,
+    }
+    source = {
+        "run_complete": True,
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+        "row_count": physical_rows,
+        "pairs_sha256": "pairs",
+        "vectors_sha256": "vectors",
+        "candidate_major_parent_minor_order": True,
+        "scientific_identity": identity,
+    }
+    source_path = tmp_path / "source-560.json"
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+    wrapper = {
+        "run_complete": True,
+        "physical_snapshot": True,
+        "physical_snapshot_schema": (
+            "comrecgc_promoted_pair_store_physical_snapshot_v1"
+        ),
+        "chunk_count": 0,
+        "chunks": [],
+        "source_chunk_count": len(chunks),
+        "source_chunks_sha256": stable_json_sha256(chunks),
+        "source_manifest_path": str(source_path),
+        "source_manifest_sha256": sha256_file(source_path),
+        "row_count": physical_rows,
+        "pairs_sha256": "pairs",
+        "vectors_sha256": "vectors",
+        "candidate_major_parent_minor_order": True,
+        "scientific_identity": identity,
+    }
+    wrapper_path = tmp_path / "wrapper-560.json"
+    wrapper_path.write_text(json.dumps(wrapper), encoding="utf-8")
+    resolved_chunks, _authority = _resolve_pair_chunk_authority(
+        wrapper_path, wrapper
+    )
+
+    pair_path = tmp_path / "physical-pairs.npy"
+    pairs = np.lib.format.open_memmap(
+        pair_path,
+        mode="w+",
+        dtype=np.int64,
+        shape=(physical_rows, 2),
+    )
+    bounded_rows = 2 * 128 * parent_count
+    row_numbers = np.arange(bounded_rows, dtype=np.int64)
+    pairs[:bounded_rows, 0] = row_numbers % parent_count
+    pairs[:bounded_rows, 1] = row_numbers // parent_count
+    pairs.flush()
+    del pairs
+    calls: list[tuple[int, int]] = []
+
+    def provider(start: int, stop: int) -> np.ndarray:
+        calls.append((start, stop))
+        return np.zeros((stop - start, parent_count), dtype=np.float32)
+
+    result = scan_theta_close_pairs(
+        output_dir=tmp_path / "bounded-scan",
+        pair_indices_path=pair_path,
+        pair_chunks=resolved_chunks,
+        parent_count=parent_count,
+        candidate_count=candidate_count,
+        theta=0.1,
+        scientific_identity={"snapshot": "source-bound-560"},
+        distance_provider=provider,
+        max_chunks=2,
+    )
+
+    assert result is None
+    assert calls == [(0, 128), (128, 256)]
+    checkpoint = json.loads(
+        (tmp_path / "bounded-scan/checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint["next_chunk_index"] == 2
+    assert checkpoint["rows_processed"] == 328_448
+    assert checkpoint["logical_close_pair_count"] == 328_448
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [
@@ -297,7 +400,13 @@ def test_all_pairs_close_certificate_matches_exact_consumer_schema() -> None:
     assert certificate["full_distance_scan_complete"] is True
     assert certificate["official_sample_comparison_pass"] is True
     assert certificate["normalization_audit_pass"] is True
-    assert certificate["normalized_distance_contract"].startswith("torch.cdist")
+    assert certificate["scale_contract"] == (
+        "element_count(parent)+element_count(candidate)"
+    )
+    assert certificate["normalized_distance_contract"] == (
+        "GREED/NeuroSED.predict_outer(parent,candidate)/"
+        "(element_count(parent)+element_count(candidate))"
+    )
     assert certificate["approximation_used"] is False
 
 

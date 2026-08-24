@@ -558,15 +558,15 @@ def _build_all_pairs_close_certificate(
         "embedding_checkpoint_sha256": str(distance_checkpoint_sha256),
         "embedding_checkpoint_hash": str(distance_checkpoint_sha256),
         "scale_contract": (
-            "element_count(candidate)+element_count(parent)"
+            "element_count(parent)+element_count(candidate)"
         ),
         "distance_contract": (
             "AIDSGreedEmbeddingAdapter.predict_outer_with_queries -> "
             "torch.cdist(candidate_embeddings,parent_embeddings,p=2)"
         ),
         "normalized_distance_contract": (
-            "torch.cdist(candidate_embeddings,parent_embeddings,p=2) / "
-            "(element_count(candidate)+element_count(parent))"
+            "GREED/NeuroSED.predict_outer(parent,candidate)/"
+            "(element_count(parent)+element_count(candidate))"
         ),
         "distance_authority": "frozen_project_GREED_checkpoint",
         "official_backend_difference": "PROJECT_EXTENSION",
@@ -849,7 +849,7 @@ def run_aids_pair_semantics_audit(
             scan = scan_theta_close_pairs(
                 output_dir=root / "distance_scan",
                 pair_indices_path=pair_indices_path,
-                pair_chunks=list(manifest["chunks"]),
+                pair_chunks=chunks,
                 parent_count=len(bundle.graphs),
                 candidate_count=len(selection.graphs),
                 theta=theta,
