@@ -74,6 +74,14 @@ def _fixture(
         monkeypatch.setattr(v5, "_git_head", lambda _root: "f" * 40)
         monkeypatch.setattr(
             v5,
+            "_require_clean_worktree",
+            lambda _root: {
+                "status": "PASS",
+                "tracked_and_untracked_clean": True,
+            },
+        )
+        monkeypatch.setattr(
+            v5,
             "_require_ancestor",
             lambda _root, commit: {
                 "required_commit": commit,
@@ -543,7 +551,7 @@ def test_v5_rejects_paper_protocol_task_tampering(
         index = close_view["command"].index("--max-compact-gb")
         close_view["command"][index + 1] = "9"
     elif mutation == "close_cpu_env":
-        close_view["environment"]["OMP_NUM_THREADS"] = "2"
+        close_view["environment"]["OPENBLAS_NUM_THREADS"] = "2"
     else:
         science["input_manifest"] = str(
             paths["snapshot_root"] / "pair_store/run_manifest.json"
@@ -914,6 +922,16 @@ def test_v5_real_head_builds_and_validates_release_gates(
         "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
     )
     assert contract["snapshot_adoption_release_gate"]["is_ancestor"] == "true"
+    assert contract["clean_worktree_gate"] == {
+        "status": "PASS",
+        "tracked_and_untracked_clean": True,
+    }
+    assert contract["paper_protocol_release_gate"]["release_commit"] == (
+        v5.PAPER_PROTOCOL_RELEASE_COMMIT
+    )
+    assert contract["paper_protocol_release_gate"][
+        "release_commit_is_ancestor"
+    ] is True
 
 
 def _process_gate(paths: dict[str, Path]) -> dict[str, Any]:
@@ -1594,6 +1612,9 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     )
     assert v5.REVIEWED_CORE_COMMIT == v5.INTEGRATED_REVIEWED_CORE_COMMIT
     assert v5.ROUTE_RELEASE_COMMIT == "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
+    assert v5.PAPER_PROTOCOL_RELEASE_COMMIT == (
+        "739512c16783cbc5f5fc3a9d5c4b7010b5aa05e5"
+    )
     assert v5.SNAPSHOT_RELEASE_COMMIT == (
         "8b99498a0c1beab11a6844ddf5f6f9d7c2c4458f"
     )
@@ -1650,9 +1671,34 @@ def test_v5_real_head_accepts_integrated_reviewed_core_identity() -> None:
     )
     assert evidence["integrated_commit_is_ancestor"] is True
     assert evidence["equivalence_basis"] == (
-        "exact-git-blob-and-current-content-sha256"
+        "ancestor-git-blob-with-protocol-extension"
     )
+    assert evidence["current_extension_bound_by_protocol_release"] is True
     assert set(evidence["files"]) == set(v5.REVIEWED_CORE_FILE_IDENTITIES)
+
+
+def test_v5_real_head_accepts_paper_protocol_release_identity() -> None:
+    root = Path(__file__).resolve().parents[2]
+    evidence = v5._require_paper_protocol_release(root)
+    assert evidence["release_commit"] == v5.PAPER_PROTOCOL_RELEASE_COMMIT
+    assert evidence["release_commit_is_ancestor"] is True
+    assert set(evidence["files"]) == set(v5.PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES)
+
+
+def test_v5_paper_protocol_release_rejects_working_content_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    original = v5.sha256_file
+
+    def changed(path: str | Path) -> str:
+        if Path(path).name == "close_pair_view.py":
+            return "0" * 64
+        return original(path)
+
+    monkeypatch.setattr(v5, "sha256_file", changed)
+    with pytest.raises(RepairManifestError, match="paper-protocol release content"):
+        v5._require_paper_protocol_release(root)
 
 
 def test_v5_real_head_accepts_snapshot_release_identity() -> None:

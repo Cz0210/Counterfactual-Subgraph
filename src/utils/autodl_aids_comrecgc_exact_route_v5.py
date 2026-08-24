@@ -85,6 +85,57 @@ SNAPSHOT_RELEASE_FILE_IDENTITIES = {
 # paired Slurm wrapper, and documentation.  The builder-only child commit may
 # publish a controller only when this commit is a true execution ancestor.
 SNAPSHOT_ADOPTION_RELEASE_COMMIT = "98c5125b8b68df8a8797c0228e85d9c8f45e1aed"
+PAPER_PROTOCOL_RELEASE_COMMIT = "739512c16783cbc5f5fc3a9d5c4b7010b5aa05e5"
+PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES = {
+    "src/baselines/comrecgc/close_pair_scan.py": {
+        "git_blob": "3aff0dc908d08a8da3f49d397f65084c80c7a37b",
+        "sha256": "7fc151a16b9235fc698d448db5756e5c2455151955243443f1c28fe20582eb76",
+    },
+    "src/baselines/comrecgc/aids_pair_semantics.py": {
+        "git_blob": "c3dfd7c5a963a20bd11a31d58177f522592ae8a0",
+        "sha256": "478823410749e958f916490bf0f1aaa0633aeb2fbe62d4387b38ec70210a6636",
+    },
+    "scripts/autodl/run_aids_comrecgc_pair_semantics.py": {
+        "git_blob": "0803199a1a3c99ed7c2cd8952ef23a54ec5fbee3",
+        "sha256": "dd3fbce4b18cc1f95fdca42e5e3e2266208a2c1facab716b887409ef29f8ec2a",
+    },
+    "src/baselines/comrecgc/close_pair_view.py": {
+        "git_blob": "3f9a7f070c1ae4576178e9435943f7bdb6e3a1cf",
+        "sha256": "5d5a4619a055e30a94b720b836f16f5fafb0167463587e727780fef23d654b6f",
+    },
+    "scripts/baselines/comrecgc/build_close_pair_view.py": {
+        "git_blob": "078859ccc4db12da9c47969476aec2d027a427ed",
+        "sha256": "7b61a8b1505f07bf4c5f725e49cec081dce1e3a8521f85a58ccb777416baf969",
+    },
+    "src/baselines/comrecgc/external_memory_dbscan.py": {
+        "git_blob": "54fd31c1dfab46ff7b01b2871d48f52b664a7102",
+        "sha256": "6e37c4289d950f1529f9bb1709b60040d24eeda528116b3baf70fce54d5b52dc",
+    },
+    "src/baselines/comrecgc/external_memory_recourse.py": {
+        "git_blob": "71bc95019dce3b7fbed6c7ddc4a2a7ac5d080869",
+        "sha256": "df449ba53bf8796a531551d865ce4e4082d16d73eb23d5bada169652618ff266",
+    },
+    "src/baselines/comrecgc/recourse.py": {
+        "git_blob": "82d1f9e2e67e0d0cc87d4e9f4758db1afe8f8926",
+        "sha256": "3c4d99dfa4bdb3f0cbeebb9fcc127e7e762f3eabbe7ddbb04c7326fe7536c836",
+    },
+    "scripts/baselines/comrecgc/run_common_recourse.py": {
+        "git_blob": "a8b150f2d06a3d5f104114ba1f979613a3cccb95",
+        "sha256": "da38387c8c6b921d051bd91a5850099ae194ee0010c72be84f16723121dc5834",
+    },
+    "scripts/autodl/run_comrecgc_standardized_continuation.py": {
+        "git_blob": "a1efe5f2d0b1e3f837a69a1aaf35165767690a7c",
+        "sha256": "95836505629a60a4c0fba2d9cc5fad516bfbb1600a77366f42d04ba0647991a6",
+    },
+    "scripts/autodl/run_comrecgc_standardized_continuation.sh": {
+        "git_blob": "9dcc53c3eb7c3f6a10186ad6d6e2830d39d46b85",
+        "sha256": "0197dab47a94d52a42d98b3a82fbc34bfbdbb244c3c1d221e8d8636180a19e94",
+    },
+    "scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh": {
+        "git_blob": "926664bc03ef4ec5b3b47d47839dffd8930d4dfa",
+        "sha256": "709f6a6b0ab3385d53b2af9715d743c68867fd140b276684a465233dfa2c45b5",
+    },
+}
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642
@@ -223,10 +274,6 @@ def _require_reviewed_core_equivalence(project_root: Path) -> dict[str, Any]:
                 f"reviewed core file is not physical: {relative_path}"
             )
         current_sha256 = sha256_file(current_path)
-        if current_sha256 != expected["sha256"]:
-            raise RepairManifestError(
-                f"reviewed core working content changed: {relative_path}"
-            )
         files[relative_path] = {
             "reviewed_source_git_blob": expected["git_blob"],
             "integrated_git_blob": integrated_blob,
@@ -237,8 +284,62 @@ def _require_reviewed_core_equivalence(project_root: Path) -> dict[str, Any]:
         "integrated_equivalent_commit": INTEGRATED_REVIEWED_CORE_COMMIT,
         "execution_head": ancestry["execution_head"],
         "integrated_commit_is_ancestor": True,
-        "equivalence_basis": "exact-git-blob-and-current-content-sha256",
+        "equivalence_basis": "ancestor-git-blob-with-protocol-extension",
+        "current_extension_bound_by_protocol_release": True,
         "source_commit_object_required_at_build": False,
+        "files": files,
+    }
+
+
+def _require_clean_worktree(project_root: Path) -> dict[str, Any]:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise RepairManifestError("cannot verify execution worktree cleanliness")
+    if completed.stdout.strip():
+        raise RepairManifestError("execution worktree must be clean")
+    return {"status": "PASS", "tracked_and_untracked_clean": True}
+
+
+def _require_paper_protocol_release(project_root: Path) -> dict[str, Any]:
+    ancestry = _require_ancestor(project_root, PAPER_PROTOCOL_RELEASE_COMMIT)
+    files: dict[str, dict[str, str]] = {}
+    for relative_path, expected in PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES.items():
+        release_blob = _git_blob(
+            project_root,
+            commit=PAPER_PROTOCOL_RELEASE_COMMIT,
+            relative_path=relative_path,
+        )
+        current_path = project_root / relative_path
+        if (
+            release_blob != expected["git_blob"]
+            or current_path.is_symlink()
+            or not current_path.is_file()
+            or sha256_file(current_path) != expected["sha256"]
+        ):
+            raise RepairManifestError(
+                f"paper-protocol release content changed: {relative_path}"
+            )
+        files[relative_path] = {
+            "release_git_blob": release_blob,
+            "current_sha256": expected["sha256"],
+        }
+    return {
+        "release_commit": PAPER_PROTOCOL_RELEASE_COMMIT,
+        "execution_head": ancestry["execution_head"],
+        "release_commit_is_ancestor": True,
         "files": files,
     }
 
@@ -574,12 +675,14 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     execution_commit = str(spec.get("execution_commit") or "")
     if _git_head(project_root) != execution_commit:
         raise RepairManifestError("v5 spec is not bound to execution HEAD")
+    clean_worktree_gate = _require_clean_worktree(project_root)
     core_gate = _require_reviewed_core_equivalence(project_root)
     release_gate = _require_ancestor(project_root, ROUTE_RELEASE_COMMIT)
     snapshot_release_gate = _require_snapshot_release(project_root)
     snapshot_adoption_release_gate = _require_ancestor(
         project_root, SNAPSHOT_ADOPTION_RELEASE_COMMIT
     )
+    paper_protocol_release_gate = _require_paper_protocol_release(project_root)
     if (
         SNAPSHOT_EXPECTED_ROWS != EXPECTED_PAIR_COUNT
         or SNAPSHOT_EXPECTED_VECTOR_DIM != EXPECTED_VECTOR_DIM
@@ -1171,9 +1274,11 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "execution_project_root": str(project_root),
         "execution_commit": execution_commit,
         "reviewed_core_gate": core_gate,
+        "clean_worktree_gate": clean_worktree_gate,
         "route_release_gate": release_gate,
         "snapshot_release_gate": snapshot_release_gate,
         "snapshot_adoption_release_gate": snapshot_adoption_release_gate,
+        "paper_protocol_release_gate": paper_protocol_release_gate,
         "base_v4": base_evidence,
         "terminal_pair_store": terminal,
         "snapshot_adoption": {
@@ -1494,6 +1599,20 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     contract = payload.get("aids_comrecgc_exact_route_v5_contract")
     if not isinstance(contract, Mapping):
         raise RepairManifestError("AIDS v5 contract is missing")
+    clean_gate = contract.get("clean_worktree_gate")
+    protocol_release_gate = contract.get("paper_protocol_release_gate")
+    if (
+        not isinstance(clean_gate, Mapping)
+        or clean_gate.get("status") != "PASS"
+        or clean_gate.get("tracked_and_untracked_clean") is not True
+        or not isinstance(protocol_release_gate, Mapping)
+        or protocol_release_gate.get("release_commit")
+        != PAPER_PROTOCOL_RELEASE_COMMIT
+        or protocol_release_gate.get("release_commit_is_ancestor") is not True
+        or set(protocol_release_gate.get("files") or {})
+        != set(PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES)
+    ):
+        raise RepairManifestError("AIDS paper-protocol release gate changed")
     highmem_contract = contract.get("highmem_exclusion")
     if not isinstance(highmem_contract, Mapping):
         raise RepairManifestError("AIDS v5 high-memory contract is missing")
@@ -1795,6 +1914,8 @@ __all__ = [
     "INTEGRATED_REVIEWED_CORE_COMMIT",
     "PAIR_SEMANTICS_BENCHMARK_TASK_ID",
     "PAIR_SEMANTICS_TASK_ID",
+    "PAPER_PROTOCOL_RELEASE_COMMIT",
+    "PAPER_PROTOCOL_RELEASE_FILE_IDENTITIES",
     "REVIEWED_CORE_COMMIT",
     "REVIEWED_CORE_FILE_IDENTITIES",
     "REVIEWED_SOURCE_CORE_COMMIT",
