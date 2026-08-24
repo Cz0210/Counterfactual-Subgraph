@@ -892,6 +892,7 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
     assert template["allowed_old_read_only_process"]["cmdline_sha256"] == (
         "792679fed417737f85462d940243153e5081d8b80c7dab663591131c5bbd51b8"
     )
+    assert template["python"] == "/root/miniconda3/envs/smiles_pip118/bin/python3.10"
     wrapper = (
         root / "scripts/slurm/build_aids_comrecgc_exact_route_v5_manifest.sh"
     ).read_text(encoding="utf-8")
