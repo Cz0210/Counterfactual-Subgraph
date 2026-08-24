@@ -1,6 +1,6 @@
 # AutoDL Root-Cause Acceleration Continuation Handoff
 
-Snapshot basis: 2026-08-24 06:21 UTC. This document is a rolling, truthful
+Snapshot basis: 2026-08-24 07:23 UTC. This document is a rolling, truthful
 handoff for the active AutoDL continuation. A marker is recorded only after its
 own immutable terminal proof exists. Historical failures and frozen adoptions
 are never rewritten.
@@ -25,8 +25,9 @@ are never rewritten.
 | AIDS ComRecGC repair-v4 | controller PID `273356`, science PID `273939` | old brute DBSCAN running but unviable | CPU only; old root protected |
 | Mut ComRecGC trace-off parity | controller PID `273766` | waiting for exact AIDS terminal PASS | no GPU |
 | BACE GlobalGCE v6 | `bace_globalgce_frozen_gine_v6_9646874`, PID `450901`, science PID `451688` | formal training running | GPU1 exclusive |
-| BACE GCF CPU lockstep | `bace-gcf-cpu-lockstep-284cc78d-20260824T060014Z`, worker PID `456488`, science PID `456491` | Quick-50 legacy-A running | CPU only |
+| BACE GCF CPU lockstep | `bace-gcf-cpu-lockstep-284cc78d-20260824T060014Z`, worker PID `456488`, current science PID `466792` | Quick-50 PASS; Quick-100 legacy-A running | CPU only |
 | BACE ComRecGC deterministic M500 | `bace-comrecgc-deterministic-m500-17f8688-20260824T060331Z`, worker PID `456429`, pair PID `456435`, science PID `456442` | legacy half running | GPU2 exclusive |
+| Deferred frozen-GINE benchmark | `bace-gine-deferred-1983ad0d-20260824T070726Z`, PID `466744` | `WAITING_RESOURCE/PAIR_REGISTRY_RUNNING` | none until the complete M500 pair releases GPU2 |
 | Original four-method continuation | controller PID `138716`, GCF science PID `139725` | mixed historical state; GCF full is genuinely running | GPU0 exclusive |
 | Repair-v1 continuation | controller PID `144695`, ComRecGC science PID `169008` | mixed historical state; ComRecGC full is genuinely running | GPU3 exclusive |
 
@@ -84,10 +85,14 @@ Labels remained equal and the maximum probability/logit-level numerical drift
 was `3.576e-7`. The formal audit is
 `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/audits/bace_gcf_cuda_raw_byte_nondeterminism_20260824T054301Z/audit.json`.
 
-A CPU frozen-GINE lockstep route therefore runs legacy-A, legacy-B, and patched
-Quick-50 from fresh roots before it can release Quick-100 and M500. At this
-snapshot legacy-A was at 40/50. No GCF equivalence PASS has been claimed.
-The old full remains live at 13,826/50,000 and is not eligible for replacement.
+A CPU frozen-GINE lockstep route ran legacy-A, legacy-B, and patched Quick-50
+from fresh roots. Legacy-A versus legacy-B is `LOCKSTEP_EXACT`; legacy-A versus
+ordered-v2 is `CANONICAL_EXACT` with nested `LOCKSTEP_EXACT`, identical trace
+SHA256 `3c7bdc9272e3530ddf08ddef32f1f0fd0caa7e12f061d1a93004bbaa0c3b1198`,
+`first_divergence=null`, and no failures. Quick-50 is therefore a real
+diagnostic equivalence PASS and released CPU Quick-100; Quick-100 legacy-A was
+at 30/100 at this snapshot. M500 remains dependency-blocked. The old full
+continues and is not eligible for replacement on Quick-50 evidence alone.
 
 ## BACE ComRecGC
 
@@ -98,7 +103,7 @@ same CUDA raw-byte frozen-GINE identity problem, not a buffered-writer tail.
 
 The fresh pair keeps NeuroSED on CUDA but computes the official GINE graph key
 on CPU. Both roles use the same frozen device contract. The pair is currently
-in its legacy half at 25/500, about 92.9 steps/hour; optimized and the final
+in its legacy half at 100/500, about 90.2 steps/hour; optimized and the final
 audit are automatically sequenced after it. The formal equivalence audit also
 compares the complete device contract, trace, payload, lineage, checkpoint,
 and serialization identities. No M500 PASS has been claimed.
@@ -114,10 +119,15 @@ The diagnostic scorer preserves full duplicate-containing ordered batches,
 loads the frozen checkpoint once, uses stable sequence IDs, and keeps any cache
 key bound to graph/checkpoint/temperature/feature/device identity. CPU is the
 only observed byte-stable device for the official raw embedding key. The full
-CPU/GPU matrix for batch sizes 1, 8, 32, 128, and 512 is pending a naturally
-released GPU slot; it will publish `bace_gnn_inference_benchmark.json` from a
-fresh diagnostic root. A faster allclose CUDA result is not an exact-identity
-waiver.
+CPU/GPU matrix for batch sizes 1, 8, 32, 128, and 512 is queued behind the
+complete ComRecGC M500 pair. Persistent controller
+`bace-gine-deferred-1983ad0d-20260824T070726Z` binds the pair run ID, launch-spec
+SHA, worker start-ticks, UUID lock, thread environment, input semantic hash,
+and a fresh benchmark root. It remains `WAITING_RESOURCE`, rather than treating
+the transition from legacy to optimized as a free GPU. The benchmark reports
+pure-model, batching, end-to-end, argmax, calibrated-probability differences,
+normalization, and the best device/batch summary. A faster allclose CUDA result
+is not an exact-identity waiver.
 
 ## BACE GlobalGCE v6
 
@@ -131,9 +141,12 @@ The v5 mining adoption was correctly rejected because its old manifest did not
 prove the exact-v2 flag. V6 performed a fresh exact stable-top-k mining pass:
 19/19 roots, 1,601 reported patterns, 20 retained, 1,371 pruned branches, and a
 hash-bound selected identity. GPU1 now runs official rule/candidate training.
-Source expansion 353/353 is complete; epoch 0 had not yet published its first
-checkpoint at this snapshot, so only a tens-of-hours order-of-magnitude ETA is
-honest. The persistent 16-task manifest already includes calibration, frozen
+Source expansion 353/353 is complete. Epoch 0 published the first atomic
+checkpoint (`next_epoch=1`, SHA256
+`8ac602e3d3ae00e02da2315142e71c3f88bc7218a6ba8c62b3e743306aad4139`)
+after about 100.5 minutes, including the first full validation. Epochs 1--4
+and the next validation at epoch 5 are still needed for an honest cyclic ETA.
+The persistent 16-task manifest already includes calibration, frozen
 selection, held-out test shards, merges, standardization, and final freeze.
 No BACE GlobalGCE cell PASS has been claimed.
 
@@ -191,5 +204,6 @@ starting a second writer. Preserve every output/controller root.
 
 - `TASTE_LICENSE_BLOCKED`
 - `ROOT_CAUSE_ACCELERATION_CONTROLLER_RUNNING`
+- `GCF_QUICK50_EQUIVALENCE_PASS`
 
 All other requested completion/equivalence markers remain pending.
