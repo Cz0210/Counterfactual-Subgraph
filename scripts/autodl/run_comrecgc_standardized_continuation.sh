@@ -78,7 +78,11 @@ if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
   source_owner="${COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT:-}"
   vector_cache_root="${COMRECGC_EXTERNAL_VECTOR_CACHE_ROOT:-}"
   vector_cache_lock="${COMRECGC_EXTERNAL_VECTOR_CACHE_LOCK:-}"
+  vector_cache_route_lock="${COMRECGC_EXTERNAL_VECTOR_CACHE_ROUTE_LOCK:-}"
   auto_pair_root="${COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT:-}"
+  require_promoted_final="${COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL:-0}"
+  [[ "$require_promoted_final" == "0" || "$require_promoted_final" == "1" ]] || { echo "COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL must be 0 or 1" >&2; exit 64; }
+  [[ "$require_promoted_final" == "0" || -n "$auto_pair_root" ]] || { echo "promoted-final requirement needs automatic pair-store root" >&2; exit 64; }
   if [[ -n "$auto_pair_root" ]]; then
     [[ "$auto_pair_root" == /* && -d "$auto_pair_root" && ! -L "$auto_pair_root" ]] || { echo "invalid automatic pair-store root: $auto_pair_root" >&2; exit 64; }
     if [[ -e "$auto_pair_root/run_manifest.json" || -L "$auto_pair_root/run_manifest.json" ]]; then
@@ -87,25 +91,28 @@ if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
       chunk_checkpoint=""
       vector_cache_root=""
       vector_cache_lock=""
+      vector_cache_route_lock=""
       echo "[COMRECGC_PAIR_SOURCE_SELECTED] mode=promoted_final manifest=$terminal_source"
     else
+      [[ "$require_promoted_final" == "0" ]] || { echo "required promoted pair-store manifest is absent: $auto_pair_root/run_manifest.json" >&2; exit 75; }
       echo "[COMRECGC_PAIR_SOURCE_SELECTED] mode=closed_chunks checkpoint=$chunk_checkpoint"
     fi
   fi
   if [[ -n "$terminal_source" ]]; then
     [[ -n "$source_owner" ]] || { echo "terminal pair source requires owner root" >&2; exit 64; }
-    [[ -z "$chunk_checkpoint$vector_cache_root$vector_cache_lock" ]] || { echo "terminal and chunk pair sources are mutually exclusive" >&2; exit 64; }
+    [[ -z "$chunk_checkpoint$vector_cache_root$vector_cache_lock$vector_cache_route_lock" ]] || { echo "terminal and chunk pair sources are mutually exclusive" >&2; exit 64; }
     args+=(
       --external-pair-store-source-manifest "$terminal_source"
       --external-pair-store-source-owner-root "$source_owner"
     )
-  elif [[ -n "$chunk_checkpoint$vector_cache_root$vector_cache_lock$source_owner" ]]; then
-    [[ -n "$chunk_checkpoint" && -n "$source_owner" && -n "$vector_cache_root" && -n "$vector_cache_lock" ]] || { echo "chunk-source/cache environment is incomplete" >&2; exit 64; }
+  elif [[ -n "$chunk_checkpoint$vector_cache_root$vector_cache_lock$vector_cache_route_lock$source_owner" ]]; then
+    [[ -n "$chunk_checkpoint" && -n "$source_owner" && -n "$vector_cache_root" && -n "$vector_cache_lock" && -n "$vector_cache_route_lock" ]] || { echo "chunk-source/cache environment is incomplete" >&2; exit 64; }
     args+=(
       --external-pair-store-source-checkpoint "$chunk_checkpoint"
       --external-pair-store-source-owner-root "$source_owner"
       --external-vector-cache-root "$vector_cache_root"
       --external-vector-cache-lock "$vector_cache_lock"
+      --external-vector-cache-route-lock "$vector_cache_route_lock"
       --external-vector-cache-min-free-gb "${COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB:-3}"
       --external-vector-cache-proc-root "${COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT:-/proc}"
     )

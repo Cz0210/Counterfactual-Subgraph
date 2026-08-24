@@ -1,57 +1,49 @@
 # Refactor Plan
 
-## 2026-08-24: Root-cause acceleration progress health
-
-- [x] Add procfs-start-tick-bound, read-only external task monitoring.
-- [x] Separate RUNNING_PROGRESSING/SLOW/UNVIABLE/STALLED from PID liveness.
-- [x] Persist heartbeat, state, queue, ownership, runs and status JSONL without
-  acquiring a GPU lock or signalling scientific workers.
-- [ ] Freeze live PID/progress probes after the component controllers launch,
-  deploy from an immutable worktree, and keep a 60-second persistent heartbeat.
-
-
 ## 2026-08-24: Release-gate the fresh AIDS exact-Cartesian v5 route
 
 - [x] Forward every adaptive DBSCAN, promoted-source, chunk-cache, headroom,
   procfs, and resume control through the production AutoDL continuation wrapper.
 - [x] Prefer a physically promoted final pair store; reject an invalid final
   instead of silently falling back to chunks.
-- [x] Reject terminal partial/symlink artifacts, writable sibling inodes, live
-  old-owner processes, scientific/hash/stat drift, and source path escape.
+- [x] Freeze production v5 to terminal-only adoption with the exact pair-store
+  owner root, allowing the old DBSCAN's read-only mmap but retaining full-tree
+  partial/writable-inode rejection; terminal disappearance cannot select chunks.
+- [x] Freeze the sole old read-only DBSCAN generation by PID/start ticks/raw
+  command hash/exact output/cwd and re-scan procfs before every attempt; allow
+  natural exit but reject PID reuse, identity drift, or a second common task.
+- [x] Reject terminal partial/symlink artifacts, writable sibling inodes,
+  unbound common-recourse processes, scientific/hash/stat drift, and source
+  path escape.
 - [x] Authenticate `posix_fallocate` completion and NPY header/size/headroom,
   replay allocation safely across the pre-checkpoint crash window, and bind the
   evidence through copy, promotion, and terminal validation.
+- [x] Rebuild a malformed pre-allocation NPY only at authenticated
+  `allocate_cache` while both allocation and outer route flocks are held;
+  reject the same damage after `allocation_complete` without deleting it.
 - [x] Require a fresh root if a terminal chunk-cache manifest loses its local
   reconstructible artifact; never rewrite a published closure.
 - [x] Freeze the v5 supervisor to CPU-only adaptive exact DBSCAN with
   `eps=0.02`, `min_samples=3`, self-neighbour semantics, dense fallback zero,
-  route-wide scratch locking, and one process-loss-only same-root retry.
+  route-wide scratch locking, a 128 GiB per-attempt cgroup-free gate, a 96 GiB
+  child RSS ceiling, and one process-loss-only same-root retry.
+- [x] Queue and monitor a same-inode global high-memory flock handover before
+  science starts; retain it after old-v4 natural exit, and fail/terminate only
+  the new process group if the helper generation disappears or drifts.
+- [x] Re-scan common-recourse processes during science and permit only the
+  frozen old generation plus one exact descendant of the bound v5 science
+  generation; reject mid-run rogue tasks and root PID reuse.
 - [x] Keep the paired Slurm wrapper static/non-runnable and document the exact
   fresh AutoDL task/environment recipe.
+- [x] Add a fresh-only v5 manifest builder with physical terminal-array audit,
+  immutable repair-v4 input binding, selector-adoption dependency, exact Mut
+  dependency identity, and persistent controller launch/restart commands.
 - [x] Cover promoted-final priority, real shell forwarding, invalid-final,
   partial/writer/owner, allocation crash/tamper, Cartesian order, sklearn label,
   official greedy/medoid/selected-row, and terminal resume closures.
 - [ ] Obtain independent review of the final route commit, then run a fresh
   source audit and production-shaped subset smoke before building/deploying a
   fresh v5 controller.  Never signal or write repair-v4 during this step.
-
-## 2026-08-24: BACE GlobalGCE v6 mining adoption and fresh fallback
-
-- [x] Add a deep exhaustive-v2 adoption proof for failed-v5 completed mining,
-  using SQLite `mode=ro&immutable=1` only.
-- [x] Bind failed task/root, train-only data, frozen GINE, official commit,
-  config, traversal order, 19 roots, 5,441,858 patterns, stable top-20,
-  source byte/stat identity, sidecars, and no-writer closure.
-- [x] Consume adopted graphs through one temporary official `find_fs` override;
-  retain official expansion, tensorization, decoder, and LHS→RHS semantics.
-- [x] Select adoption only on complete proof; otherwise run fresh exact-top-k-v2
-  without consuming any v5 pattern payload.
-- [x] Keep decision/bridge CPU-only and CUDA-hidden and formal training on one
-  exclusive GPU.
-- [x] Add tamper/fallback/consumer/controller tests, CLI entrypoints, paired
-  Slurm wrappers, documentation, and terminal proof propagation.
-- [ ] Deploy only from a fresh immutable v6 execution checkout/root; never
-  resume or relabel v5.
 
 ## 2026-08-23: Accept pinned-official GlobalGCE affine edge scores
 
@@ -1479,44 +1471,59 @@ Mutagenicity roadmaps.
   expose it only through the frozen-GINE generic route.
 - [x] Hash-bind and revalidate the exact proof through training summary,
   summary, run manifest, completion gate, and final PASS.
-# 2026-08-24 COMRECGC deterministic divergence trace
+
+## 2026-08-24 — AIDS v5 reviewed-core integration identity
+
+- [x] Retain `645c6e51...` as the independent-review source identity.
+- [x] Require tree-equivalent integration commit `8c371b1c...` as an actual
+  execution ancestor.
+- [x] Validate frozen implementation/test Git blobs and current content
+  SHA-256 in the manifest builder, with positive real-HEAD and negative drift
+  tests.
+
+## 2026-08-24: Root-cause acceleration progress health
+
+- [x] Add procfs-start-tick-bound, read-only external task monitoring.
+- [x] Separate RUNNING_PROGRESSING/SLOW/UNVIABLE/STALLED from PID liveness.
+- [x] Persist heartbeat, state, queue, ownership, runs and status JSONL without
+  acquiring a GPU lock or signalling scientific workers.
+- [x] Deploy from an immutable worktree with a 60-second persistent heartbeat.
+
+## 2026-08-24: BACE GlobalGCE v6 mining adoption and fresh fallback
+
+- [x] Add a deep exhaustive-v2 adoption proof for failed-v5 completed mining,
+  using SQLite `mode=ro&immutable=1` only.
+- [x] Bind failed task/root, train-only data, frozen GINE, official commit,
+  traversal order, 19 roots, stable top-20, source identities, sidecars, and
+  no-writer closure.
+- [x] Select adoption only on complete proof; otherwise run fresh exact-top-k
+  v2 without consuming any v5 pattern payload.
+- [x] Keep decision/bridge CPU-only and formal training on one exclusive GPU.
+- [x] Deploy a fresh immutable v6 controller/root; never resume or relabel v5.
+- [ ] Complete training, calibration, held-out evaluation, standardization,
+  and final frozen-GINE closure.
+
+## 2026-08-24: COMRECGC deterministic divergence trace
 
 - [x] Add a safe JSON-only first-divergence report for selected transitions and
   candidate lineage.
-- [ ] Use fresh legacy-vs-legacy and legacy-vs-optimized prefixes to separate
-  baseline GNN identity instability from preprocessing/order changes.
-- [ ] Re-run fresh M500 only after the first divergence is fixed; keep the old
-  formal 50k task running until the full equivalence and ETA gates pass.
 - [x] Split frozen-GINE and NeuroSED devices without changing the legacy
   single-device default; bind both devices into command/config provenance.
-- [ ] Run both M500 roles with CPU GINE and CUDA NeuroSED after a bounded
-  repeated-cold proof confirms CPU byte identity and CUDA semantic parity.
+- [ ] Complete the fresh deterministic legacy/optimized M500 pair and require
+  exact trace, lineage, payload, checkpoint, and serialization parity.
+- [ ] Decide sharding only after M500 parity; keep the old formal 50k writer
+  running until equivalence, benchmark, and ETA gates pass.
 
-# 2026-08-24 — BACE GCF lockstep and frozen-GINE scoring
+## 2026-08-24 — BACE GCF lockstep and frozen-GINE scoring
 
 - [x] Add Quick-50/100 per-call lockstep traces and an exact first-divergence
   comparator without consuming RNG.
 - [x] Centralize duplicate-preserving full-batch frozen-GINE scoring with an
   optional exact-complete-batch cache.
-- [x] Add repeated-cold CPU/GPU identity and throughput diagnostics plus the
-  paired Slurm entrypoint.
-- [ ] Run legacy twice and ordered-v2 once on a fresh AutoDL GPU root; classify
-  the first divergence as batch-input, GINE-output, or cross-process CUDA
-  raw-byte nondeterminism.
-- [ ] Start Quick-100 only after Quick-50 exact parity; keep the old 50k PID and
-  output root immutable until all formal release gates pass.
-- [x] Freeze repeated-cold evidence that CPU GINE is byte-exact and CUDA GINE
-  raw embeddings/logits are not, despite identical labels and allclose logits.
-- [x] Add a fail-closed CPU-only legacy-A/legacy-B/patched Quick-50/100 route
-  that obtains no GPU lock and records end-to-end phase profiles.
-- [ ] Use the CPU profiles to project 50k completion time before considering
-  any CPU formal replay; do not stop the old GPU full task.
-- [x] Add the fixed 1/8/32/128/512 CPU/GPU frozen-GINE matrix with separate
-  batching, pure-model, end-to-end, argmax/max-difference, and raw-byte fields.
-- [x] Add calibrated-probability and best end-to-end summaries, bind the exact
-  single-thread environment, and validate them in the PASS-last contract.
-- [x] Add a persistent fail-closed deferred benchmark controller bound to the
-  ComRecGC pair parent worker/registry/launch-spec and physical GPU UUID; wait
-  through transient child changes and resource contention without exiting.
-- [ ] Run the matrix in a fresh GPU root only after a controller-owned GPU is
-  naturally available; do not preempt Quick50, ComRecGC, or any full writer.
+- [x] Prove repeated-cold CPU byte identity and diagnose CUDA raw-byte drift.
+- [x] Pass CPU-only legacy-A/legacy-B/patched Quick-50 lockstep exactly.
+- [ ] Complete Quick-100 and M500 before releasing any optimized full route.
+- [x] Add the 1/8/32/128/512 CPU/GPU benchmark and a persistent deferred
+  controller bound to the ComRecGC pair owner and physical GPU2 UUID.
+- [ ] Run that matrix only after GPU2 naturally releases; do not preempt any
+  protected writer.

@@ -295,6 +295,7 @@ def test_chunk_source_route_freezes_cache_and_owner_arguments(
     owner = tmp_path / "old"
     cache = tmp_path / "local-cache"
     lock = tmp_path / "local-cache.lock"
+    route_lock = tmp_path / "local-route.lock"
     inputs = replace(
         _inputs(tmp_path, dataset="aids"),
         device="cpu",
@@ -307,6 +308,7 @@ def test_chunk_source_route_freezes_cache_and_owner_arguments(
         external_pair_store_source_owner_root=owner,
         external_vector_cache_root=cache,
         external_vector_cache_lock=lock,
+        external_vector_cache_route_lock=route_lock,
         external_vector_cache_min_free_gb=3.0,
         external_vector_cache_proc_root=_fake_procfs,
         common_recourse_resume=True,
@@ -322,6 +324,7 @@ def test_chunk_source_route_freezes_cache_and_owner_arguments(
         "--external-pair-store-source-owner-root": str(owner),
         "--external-vector-cache-root": str(cache),
         "--external-vector-cache-lock": str(lock),
+        "--external-vector-cache-route-lock": str(route_lock),
         "--external-vector-cache-min-free-gb": "3",
         "--external-vector-cache-proc-root": str(_fake_procfs),
     }

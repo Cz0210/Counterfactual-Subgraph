@@ -101,6 +101,7 @@ class ContinuationInputs:
     external_pair_store_source_owner_root: Path | None = None
     external_vector_cache_root: Path | None = None
     external_vector_cache_lock: Path | None = None
+    external_vector_cache_route_lock: Path | None = None
     external_vector_cache_min_free_gb: float = 3.0
     external_vector_cache_proc_root: Path = Path("/proc")
     expected_sklearn_version: str = "1.7.2"
@@ -607,6 +608,8 @@ def build_stage_commands(
                     str(inputs.external_vector_cache_root),
                     "--external-vector-cache-lock",
                     str(inputs.external_vector_cache_lock),
+                    "--external-vector-cache-route-lock",
+                    str(inputs.external_vector_cache_route_lock),
                     "--external-vector-cache-min-free-gb",
                     format(float(inputs.external_vector_cache_min_free_gb), ".17g"),
                     "--external-vector-cache-proc-root",
@@ -893,6 +896,11 @@ def _resume_contract(
             None
             if inputs.external_vector_cache_lock is None
             else str(inputs.external_vector_cache_lock.resolve(strict=False))
+        ),
+        "external_vector_cache_route_lock": (
+            None
+            if inputs.external_vector_cache_route_lock is None
+            else str(inputs.external_vector_cache_route_lock.resolve(strict=False))
         ),
         "external_vector_cache_min_free_gb": float(
             inputs.external_vector_cache_min_free_gb
@@ -1215,6 +1223,7 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
         inputs.external_pair_store_source_checkpoint,
         inputs.external_vector_cache_root,
         inputs.external_vector_cache_lock,
+        inputs.external_vector_cache_route_lock,
     )
     if any(value is not None for value in chunk_source_values) and not all(
         value is not None for value in chunk_source_values
@@ -1483,6 +1492,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--external-pair-store-source-owner-root", type=_absolute)
     parser.add_argument("--external-vector-cache-root", type=_absolute)
     parser.add_argument("--external-vector-cache-lock", type=_absolute)
+    parser.add_argument("--external-vector-cache-route-lock", type=_absolute)
     parser.add_argument(
         "--external-vector-cache-min-free-gb", type=float, default=3.0
     )
@@ -1545,6 +1555,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         external_vector_cache_root=args.external_vector_cache_root,
         external_vector_cache_lock=args.external_vector_cache_lock,
+        external_vector_cache_route_lock=args.external_vector_cache_route_lock,
         external_vector_cache_min_free_gb=args.external_vector_cache_min_free_gb,
         external_vector_cache_proc_root=_require_directory(
             args.external_vector_cache_proc_root

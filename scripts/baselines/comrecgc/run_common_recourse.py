@@ -86,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exclusive lock used while constructing the local vector cache.",
     )
     parser.add_argument(
+        "--external-vector-cache-route-lock",
+        help=(
+            "Independent outer route lock required only to recover a malformed "
+            "pre-allocation cache artifact."
+        ),
+    )
+    parser.add_argument(
         "--external-vector-cache-min-free-gb", type=float, default=3.0
     )
     parser.add_argument("--external-vector-cache-proc-root", default="/proc")
@@ -135,6 +142,7 @@ def main() -> int:
         ),
         external_vector_cache_root=args.external_vector_cache_root,
         external_vector_cache_lock=args.external_vector_cache_lock,
+        external_vector_cache_route_lock=args.external_vector_cache_route_lock,
         external_vector_cache_min_free_bytes=int(
             float(args.external_vector_cache_min_free_gb) * 1024**3
         ),

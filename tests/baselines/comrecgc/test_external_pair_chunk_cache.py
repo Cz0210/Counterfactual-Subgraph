@@ -64,6 +64,7 @@ def _source_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "persistent_root": tmp_path / "fresh" / "adoption",
         "local_cache_root": tmp_path / "local" / "cache",
         "scratch_lock_path": tmp_path / "local" / "cache.lock",
+        "route_lock_path": tmp_path / "local" / "route.lock",
         "expected_scientific_identity": identity,
         "expected_chunk_identities": chunk_identities,
         "parent_count": parent_count,
@@ -237,6 +238,126 @@ def test_cartesian_chunk_cache_replays_fallocate_after_precheckpoint_crash(
     )
     assert allocation_state["phase"] == "cache_ready"
     assert allocation_state["allocation_evidence"]["allocation_complete"] is True
+
+
+@pytest.mark.parametrize("malformed", ("zero", "truncated", "wrong_schema"))
+def test_cartesian_chunk_cache_recovers_malformed_preallocation_partial_under_two_locks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformed: str,
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    real_open_memmap = chunk_cache.np.lib.format.open_memmap
+    injected = False
+
+    def malformed_partial_then_crash(
+        path: object, *args: object, **inner: object
+    ) -> np.memmap:
+        nonlocal injected
+        if Path(path).name == "recourse_vectors.rebuild.partial.npy" and not injected:
+            injected = True
+            partial = Path(path).parent / "recourse_vectors.partial.npy"
+            if malformed == "zero":
+                partial.touch()
+            elif malformed == "truncated":
+                partial.write_bytes(b"\x93NUMPY\x01\x00")
+            else:
+                wrong = real_open_memmap(
+                    partial, mode="w+", dtype=np.float64, shape=(1, 1)
+                )
+                wrong.flush()
+                del wrong
+            raise RuntimeError(f"injected-{malformed}-allocation-crash")
+        return real_open_memmap(path, *args, **inner)
+
+    monkeypatch.setattr(
+        chunk_cache.np.lib.format, "open_memmap", malformed_partial_then_crash
+    )
+    with pytest.raises(RuntimeError, match=f"injected-{malformed}"):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+    state = chunk_cache._load_checkpoint(
+        Path(kwargs["persistent_root"]) / "checkpoint.json"
+    )
+    assert state["phase"] == "allocate_cache"
+
+    monkeypatch.setattr(chunk_cache.np.lib.format, "open_memmap", real_open_memmap)
+    with chunk_cache.exclusive_scratch_lock(kwargs["route_lock_path"]):
+        result = chunk_cache.materialize_cartesian_chunk_vector_cache(
+            **kwargs, resume=True
+        )
+    terminal = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    allocation_state = chunk_cache._load_checkpoint(
+        Path(terminal["allocation_checkpoint_path"])
+    )
+    recovery = allocation_state["allocation_evidence"][
+        "uncommitted_partial_recovery"
+    ]
+    assert recovery["performed"] is True
+    assert recovery["two_exclusive_locks_required"] is True
+    assert recovery["events"][0]["route_lock"][
+        "outer_exclusive_lock_observed"
+    ] is True
+
+
+def test_cartesian_chunk_cache_does_not_rebuild_malformed_partial_after_allocation_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    original = chunk_cache._write_checkpoint
+
+    def stop_after_allocation(path: Path, payload: object) -> dict[str, object]:
+        result = original(path, payload)
+        if result.get("phase") == "allocation_complete":
+            raise RuntimeError("allocation checkpoint stop")
+        return result
+
+    monkeypatch.setattr(chunk_cache, "_write_checkpoint", stop_after_allocation)
+    with pytest.raises(RuntimeError, match="allocation checkpoint stop"):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+    partial = Path(kwargs["local_cache_root"]) / "recourse_vectors.partial.npy"
+    partial.write_bytes(b"\x93NUMPY\x01\x00")
+    bytes_before = partial.read_bytes()
+    monkeypatch.setattr(chunk_cache, "_write_checkpoint", original)
+    with chunk_cache.exclusive_scratch_lock(kwargs["route_lock_path"]):
+        with pytest.raises(
+            ExternalMemoryDBSCANError,
+            match="ALLOCATION_SIZE_MISMATCH|ALLOCATION_HEADER_MISMATCH",
+        ):
+            chunk_cache.materialize_cartesian_chunk_vector_cache(
+                **kwargs, resume=True
+            )
+    assert partial.read_bytes() == bytes_before
+
+
+def test_cartesian_chunk_cache_requires_outer_route_lock_for_malformed_partial_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _source_fixture(tmp_path, monkeypatch)
+    real_open_memmap = chunk_cache.np.lib.format.open_memmap
+
+    def zero_partial_then_crash(
+        path: object, *args: object, **inner: object
+    ) -> np.memmap:
+        if Path(path).name == "recourse_vectors.rebuild.partial.npy":
+            partial = Path(path).parent / "recourse_vectors.partial.npy"
+            partial.touch()
+            raise RuntimeError("injected-zero-allocation-crash")
+        return real_open_memmap(path, *args, **inner)
+
+    monkeypatch.setattr(
+        chunk_cache.np.lib.format, "open_memmap", zero_partial_then_crash
+    )
+    with pytest.raises(RuntimeError, match="injected-zero"):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(**kwargs)
+    monkeypatch.setattr(chunk_cache.np.lib.format, "open_memmap", real_open_memmap)
+    Path(kwargs["route_lock_path"]).touch()
+    with pytest.raises(
+        ExternalMemoryDBSCANError,
+        match="MALFORMED_PARTIAL_ROUTE_LOCK_NOT_HELD",
+    ):
+        chunk_cache.materialize_cartesian_chunk_vector_cache(
+            **kwargs, resume=True
+        )
 
 
 def test_cartesian_chunk_cache_rejects_resigned_allocation_evidence_tamper(

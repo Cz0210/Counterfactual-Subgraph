@@ -171,6 +171,9 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
         ),
         "COMRECGC_EXTERNAL_VECTOR_CACHE_ROOT": str(tmp_path / "cache"),
         "COMRECGC_EXTERNAL_VECTOR_CACHE_LOCK": str(tmp_path / "cache.lock"),
+        "COMRECGC_EXTERNAL_VECTOR_CACHE_ROUTE_LOCK": str(
+            tmp_path / "route.lock"
+        ),
     }
     completed = subprocess.run(
         ["bash", str(wrapper)],
@@ -194,6 +197,7 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
     assert "--external-pair-store-source-checkpoint" not in argv
     assert "--external-vector-cache-root" not in argv
     assert "--external-vector-cache-lock" not in argv
+    assert "--external-vector-cache-route-lock" not in argv
 
     (pair_root / "run_manifest.json").unlink()
     fallback_capture = tmp_path / "fallback-argv.txt"
@@ -223,6 +227,9 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
         fallback_argv.index("--external-vector-cache-lock") + 1
     ] == str(tmp_path / "cache.lock")
     assert fallback_argv[
+        fallback_argv.index("--external-vector-cache-route-lock") + 1
+    ] == str(tmp_path / "route.lock")
+    assert fallback_argv[
         fallback_argv.index("--external-vector-cache-min-free-gb") + 1
     ] == "3"
     assert fallback_argv[
@@ -243,6 +250,22 @@ def test_autodl_wrapper_forwards_exact_route_and_prefers_promoted_pair_store(
     )
     assert invalid.returncode == 64
     assert "invalid promoted pair-store manifest" in invalid.stderr
+
+    (pair_root / "run_manifest.json").unlink()
+    required_final = subprocess.run(
+        ["bash", str(wrapper)],
+        env={
+            **os.environ,
+            **fallback_values,
+            "OUTPUT_ROOT": str(tmp_path / "fresh-output-required-final"),
+            "COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert required_final.returncode == 75
+    assert "required promoted pair-store manifest is absent" in required_final.stderr
 
 
 def test_aids_exact_v5_supervisor_freezes_cpu_exact_and_storage_contracts() -> None:
@@ -265,15 +288,38 @@ def test_aids_exact_v5_supervisor_freezes_cpu_exact_and_storage_contracts() -> N
         '"${COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB:-}" == "3"',
         "all_core_one_component_adaptive_anchor_v1",
         "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT",
+        "COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL",
         "COMRECGC_EXTERNAL_ROUTE_LOCK",
         "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT",
-        "route/cache/highmem locks must be distinct",
+        "terminal owner must be the exact pair-store root",
+        "promoted-final route forbids chunk/cache fallback",
+        "route/highmem locks must be distinct",
         "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_PID",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT",
+        "verify_aids_comrecgc_v5_process_set.py",
+        "common-recourse process set changed",
+        "mid-run common-recourse process set changed",
+        "mid-run cgroup headroom gate failed",
+        "--allowed-route-root-pid",
+        '"$OUTPUT_ROOT/common_recourse"',
+        "aids_comrecgc_v5_lock_handover",
+        "aids_comrecgc_v5_science_exec",
+        "science process group was not established",
+        "HIGHMEM_HANDOVER_QUEUED",
+        "global high-memory handover helper failed",
+        "kill -TERM -- \"-$science_pid\"",
+        "memory.limit_in_bytes",
+        "memory.usage_in_bytes",
         "production test hooks are forbidden",
     }
     assert all(value in text for value in required)
     assert text.count("resume_count=$((resume_count + 1))") == 1
     assert "AIDS_COMRECGC_EXACT_ROUTE_V5_SUPERVISOR_PASS" in text
+    assert "MemFree" not in text
     paired = (
         ROOT / "scripts/slurm/run_aids_comrecgc_exact_route_v5_supervisor.sh"
     ).read_text(encoding="utf-8")

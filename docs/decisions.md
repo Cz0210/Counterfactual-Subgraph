@@ -1,16 +1,5 @@
 # Decisions Log
 
-## [2026-08-24] Monitor unviable AutoDL work without taking task ownership
-
-The root-cause acceleration continuation adds a read-only persistent monitor
-whose spec freezes external PIDs, procfs start ticks, commands, output roots,
-progress probes, and GPU indices.  It classifies progress as progressing, slow,
-unviable, stalled, exited, or observation-failed and records rolling throughput
-and ETA every 60 seconds.  These states are diagnostic only: the monitor owns
-no scientific process, takes no GPU lock, never emits a cell PASS, and never
-signals a task.  Existing component controllers remain the only launch owners.
-
-
 ## [2026-08-24] Prefer a closed AIDS pair store and authenticate chunk-cache allocation
 
 ### Background
@@ -43,6 +32,51 @@ evidence into every later checkpoint.  Replaying `posix_fallocate` after a
 pre-checkpoint crash is safe.  A missing cache after terminal publication
 requires a fresh root rather than rewriting the terminal checkpoint.
 
+For the actual v5 release, terminal promotion is already complete.  Freeze a
+stronger `require_promoted_final=1` gate, omit all chunk/cache fallback
+variables, and set the source owner to the exact pair-store root.  The old
+DBSCAN process may retain a read-only mmap concurrently; a full pair-tree
+writable-FD/mapping/partial scan still blocks any mutable producer.  If the
+terminal disappears or becomes invalid, v5 stops instead of switching routes.
+
+This coexistence is not a general high-memory-lock bypass.  Freeze the old
+consumer's PID, Linux start ticks, raw cmdline hash, exact output argument, and
+execution cwd in the v5 spec.  At build it must be the only common-recourse
+process.  Before every attempt, scan procfs again and allow either that exact
+generation or an empty set after its natural exit.  Reject PID reuse, command
+or cwd drift, and every second common-recourse process.  In parallel require at
+least 128 GiB live cgroup headroom (which includes the old RSS), cap the new
+route at 96 GiB RSS, and hold a distinct v5 route flock.  Mut remains blocked
+on v5 PASS, so it cannot overlap this exception.
+
+Queue a monitored helper on the same physical global high-memory flock before
+starting the first v5 science child.  While old v4 is alive that helper waits;
+when v4 exits naturally it acquires and retains the lock until the v5
+supervisor generation exits.  The supervisor binds the helper's own Linux
+generation and monitors it while each science child runs in a fresh process
+group.  Helper failure terminates only that new process group and fails v5;
+cleanup verifies the helper generation before signalling it, so PID reuse
+cannot redirect a signal.
+
+Continue the process-set scan while the science group runs.  In that interval
+the only additional common-recourse command may be the exact script/output/cwd
+child of the PID/start-tick-bound v5 science root.  A non-descendant, a reused
+science-root PID, a second child, or command/output drift terminates only v5
+and fails the fresh controller.
+
+For the retained generic chunk route, distinguish an unauthenticated allocation
+artifact from authenticated data.  Only `phase=allocate_cache`, under the
+allocation flock plus an independently held route flock, may discard and
+atomically rebuild a zero-byte, truncated, or wrong-schema local NPY partial.
+`allocation_complete` and later phases always fail closed on the same damage.
+
+Publish v5 through its dedicated two-task persistent manifest: a deterministic
+hash-only adoption gate for the already frozen calibration selector, followed
+by the terminal-only CPU science task.  The second task is the sole Mut
+dependency authority.  Mut must bind its exact controller manifest SHA, task
+ID, and attempt-0 output in a fresh controller; existing wait controllers are
+immutable.
+
 Freeze the production AutoDL wrapper to the reviewed adaptive shortcut,
 `eps=0.02`, `min_samples=3`, sklearn self-neighbour semantics, dense fallback
 zero, CPU-only execution, one route-wide scratch flock, and one bounded
@@ -60,51 +94,12 @@ non-runnable; no HPC experiment is launched.
 - Old repair-v4 processes and outputs remain untouched.  V5 needs a fresh
   execution worktree, output root, controller/spec/manifest, source audit,
   smoke, and independent release review.
+- The old process may exit naturally, but no signal or write is authorized by
+  this route and its PID can never be reused as evidence for a new generation.
 
 ### Status
 
 Accepted (code/tests only; remote launch remains separately gated)
-
-## [2026-08-24] Adopt failed-v5 GlobalGCE mining only through an exhaustive-v2 proof
-
-### Background
-
-BACE GlobalGCE v5 completed all 19 legacy gSpan roots and persisted 5,441,858
-patterns before rule training failed on the now-corrected negative affine edge
-score bridge. Re-mining is expensive, but the failed controller and parent run
-cannot be promoted to PASS merely because a large SQLite file is present.
-During diagnosis, one ordinary `mode=ro` SQLite open touched existing WAL/SHM
-sidecar metadata. The main database and checkpoint hashes, sizes, and mtimes
-did not change. Source SQLite is henceforth opened only with
-`mode=ro&immutable=1`; WAL must be absent or empty, while SHM is allowed only
-when its full pre/post stat and hash remain unchanged and no process holds a
-writable file descriptor.
-
-### Decision
-
-Permit v6 to reuse v5 mining only through
-`globalgce_gspan_exhaustive_v2_adoption_v1`. The proof binds the exact failed
-task/output root, incomplete parent run, pinned official commit, frozen BACE
-GINE, train-only source/native data, config, 19 roots, 5,441,858 patterns,
-traversal-order-v2 fingerprint, stable official top-20 payload/semantic hashes,
-checkpoint/SQLite bytes and stats, stable sidecars, and no-writer closure.
-
-The CPU-only CUDA-hidden mining decision chooses `adopt_v5_exhaustive` only on
-complete proof. Any unclosed identity chooses explicit
-`fresh_exact_top_k_v2` and consumes no v5 pattern bytes. The negative-score
-bridge smoke is CPU-only; only formal rule training requests an exclusive GPU
-under a fresh v6 controller/root. V5 remains immutable and FAILED.
-
-### Consequences
-
-- Adoption failure cannot silently mix v5 and fresh mining.
-- V5 failure never becomes scientific PASS.
-- V6 terminal artifacts bind and revalidate the adopted proof when used.
-- Provenance hashing and bridge smoke do not hold a GPU.
-
-### Status
-
-Accepted
 
 ## [2026-08-23] Interpret pinned GlobalGCE edge decoder outputs as categorical scores
 
@@ -9131,76 +9126,93 @@ Accepted
   the BACE paper cell.
 - These changes do not authorize mutation or termination of the active v5
   output.  Any diagnostic or replacement begins from a fresh immutable root.
-# 2026-08-24: diagnose COMRECGC generation divergence from JSON traces first
+
+## 2026-08-24: Bind AIDS v5 to the integrated equivalent of the reviewed DBSCAN core
+
+- The independently reviewed exact-shortcut source commit `645c6e51...` was
+  cherry-picked into the production lineage as `8c371b1c...`; the former is
+  not a Git ancestor of the v5 execution branch.
+- The v5 builder now requires `8c371b1c...` as the true ancestor and separately
+  freezes the exact Git blob identities and current SHA-256 values of
+  `external_memory_dbscan.py` and its focused test.
+- The manifest records both commit identities and per-file evidence.  This is
+  an explicit tree-equivalent integration gate, not a silent commit
+  substitution, and drift in either integrated blobs or working content fails
+  closed.
+
+## [2026-08-24] Monitor unviable AutoDL work without taking task ownership
+
+The root-cause acceleration continuation adds a read-only persistent monitor
+whose spec freezes external PIDs, procfs start ticks, commands, output roots,
+progress probes, and GPU indices. It classifies progress as progressing, slow,
+unviable, stalled, exited, or observation-failed and records rolling throughput
+and ETA every 60 seconds. These states are diagnostic only: the monitor owns
+no scientific process, takes no GPU lock, never emits a cell PASS, and never
+signals a task. Existing component controllers remain the only launch owners.
+
+## [2026-08-24] Adopt failed-v5 GlobalGCE mining only through an exhaustive-v2 proof
+
+The failed BACE GlobalGCE v5 controller cannot become PASS merely because its
+19 gSpan roots and SQLite payload exist. V6 may reuse those bytes only through
+the `globalgce_gspan_exhaustive_v2_adoption_v1` proof, which opens SQLite with
+`mode=ro&immutable=1` and binds the failed task/root, train-only cohort, frozen
+GINE, official commit, traversal order, 19 roots, stable top-20, source bytes
+and stats, sidecars, and no-writer closure. Any unclosed identity selects an
+explicit `fresh_exact_top_k_v2` route and consumes no v5 pattern bytes. V5
+remains immutable and FAILED.
+
+## 2026-08-24: Diagnose COMRECGC generation divergence from JSON traces first
 
 - A failed legacy/optimized payload-count gate must still publish the earliest
   actionable selected-transition and candidate-lineage difference.
 - The diagnostic reads only hash-bound JSON/JSONL trace artifacts; it does not
   unpickle a failed scientific payload.
 - Python hashes of raw GNN embedding bytes are reported separately from stable
-  canonical graph SHA256 differences.  Official-hash drift alone cannot be
+  canonical graph SHA-256 differences. Official-hash drift alone cannot be
   called a structural counterfactual difference.
-- The diagnostic is evidence only and is permanently paper-ineligible.  It
+- The diagnostic is evidence only and is permanently paper-ineligible. It
   cannot release an optimized 50k run or weaken the formal M500 gate.
 
 ## 2026-08-24 — Diagnose GCF raw-byte identity before optimized replacement
 
 - Quick-50/100 records a read-only lockstep trace at every restart, importance
-  call and move.  It binds RNG state, canonical ordered neighbours, exact
+  call and move. It binds RNG state, canonical ordered neighbours, exact
   frozen-GINE batch tensors and row outputs, coverage and selected transition,
   so a failed replay identifies the first field rather than only a final
   candidate digest.
-- Frozen-GINE inference uses one shared ordered-batch scorer.  Its optional
+- Frozen-GINE inference uses one shared ordered-batch scorer. Its optional
   cache is whole-batch-only; a miss scores the original duplicate-preserving
-  batch.  Partial-row reuse, deduplication and chunking remain forbidden.
+  batch. Partial-row reuse, deduplication and chunking remain forbidden.
 - CPU/GPU and repeated-cold byte identities are diagnostic evidence, not an
-  equivalence waiver.  Allclose output cannot be promoted to exact VRRW
+  equivalence waiver. Allclose output cannot be promoted to exact VRRW
   equivalence when it changes an official raw embedding hash.
-- Existing 50k writers remain untouched.  Replays use immutable commits and
+- Existing 50k writers remain untouched. Replays use immutable commits and
   fresh roots; optimized full remains ineligible until all exact gates pass.
+
 ## 2026-08-24: Separate deterministic GINE identity from NeuroSED execution
 
 - COMRECGC's official graph key hashes the raw frozen-GINE graph embedding.
   Repeated identical CUDA batches can differ in low bits because graph pooling
   uses nondeterministic CUDA scatter reductions; those bytes must not be
   mistaken for an RDKit/order/RNG change.
-- The project route now accepts separate classifier and distance devices.  A
-  replay may keep the frozen GINE on CPU for byte-stable graph identity while
-  keeping NeuroSED on CUDA.  Both A/B roles must use the same split contract,
-  and the devices are part of the scientific command/config identity.  The
-  formal equivalence audit re-reads and compares that complete device contract;
-  a role-specific device drift fails before payload parity can be accepted.
-- The historical single `--device` behavior remains the default.  Existing
-  roots and running 50k processes are never migrated or resumed with the new
-  contract; all deterministic replays use fresh roots.
-- This is not an equivalence waiver: formal M500 still requires exact graph
-  order, trace, lineage, payload, checkpoint, and serialization parity.
+- The route accepts separate classifier and distance devices. A replay may
+  keep the frozen GINE on CPU for byte-stable graph identity while keeping
+  NeuroSED on CUDA. Both A/B roles must use the same split contract, which is
+  part of the scientific command/config identity.
+- Existing roots and running 50k processes are never migrated. This is not an
+  equivalence waiver: formal M500 still requires exact graph order, trace,
+  lineage, payload, checkpoint, and serialization parity.
 
 ## 2026-08-24: Run GCF deterministic replay on CPU after CUDA raw-byte drift
 
-- A real repeated-cold audit established that frozen GINE CPU hidden/logits
-  are byte-exact while CUDA hidden/logits vary at low bits for the same full
-  ordered batch.  This rules out neighbour order, RNG, dedup and batch-shape
-  changes as the source of that audit failure; the current pure-PyTorch GINE
-  uses CUDA atomic `index_add_` in message aggregation and pooling.
-- The next diagnostic route is CPU-only (GINE and NeuroSED), with CUDA hidden
-  from the process.  It must pass legacy-A/legacy-B and legacy/patched lockstep
-  for Quick-50 before Quick-100 begins.  CPU evidence remains diagnostic and
-  cannot replace the protected 50k GPU route without a later ETA and semantics
-  decision.
-- Frozen-GINE throughput evidence uses the fixed batch matrix 1/8/32/128/512
-  and separates collation/device transfer, prepared-batch model time, and full
-  collation-to-logits time.  Argmax/allclose completion and raw-byte identity
-  are distinct gates: a performance PASS cannot waive CUDA byte instability.
-- The matrix additionally reports calibrated softmax probability finiteness,
-  normalization, allclose and maximum absolute difference for every batch,
-  plus the best end-to-end device/batch/throughput.  The process fails closed
-  unless OMP, MKL and OpenBLAS each use one thread and tokenizer parallelism is
-  disabled; those values are hash-bound in the launch input.
-- GPU2 release is owned by the persistent ComRecGC pair worker, not its
-  transient legacy or optimized science child.  The deferred matrix
-  controller therefore binds the pair run ID, launch-spec SHA, worker PID and
-  start ticks, terminal registry state and physical UUID.  It emits a
-  60-second heartbeat while resources are busy, creates exactly one fresh
-  benchmark run only after a stable free window, and blocks on any partial
-  target rather than resuming or overwriting it.
+- A repeated-cold audit established that frozen GINE CPU hidden/logits are
+  byte-exact while CUDA hidden/logits vary at low bits for the same full
+  ordered batch, despite identical labels and allclose logits.
+- The deterministic diagnostic route is CPU-only with CUDA hidden. It requires
+  legacy-A/legacy-B and legacy/patched lockstep at Quick-50 before Quick-100,
+  and then M500. CPU evidence cannot replace the protected 50k GPU route
+  without later ETA and semantics gates.
+- The fixed batch matrix 1/8/32/128/512 separates collation, prepared-batch
+  model time, end-to-end time, argmax/allclose, calibrated probability, and
+  raw-byte identity. It is launched by a persistent deferred controller only
+  after the controller-owned GPU2 pair worker releases its UUID lock.
