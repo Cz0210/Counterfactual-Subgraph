@@ -183,6 +183,91 @@ def test_resume_restarts_non_authoritative_partial(
     assert not partial.exists()
 
 
+def test_snapshot_start_accepts_already_naturally_exited_old_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch, exits_after=0)
+    result = _run(fixture, tmp_path / "snapshot")
+    assert result["status"] == "PASS"
+    assert result["source"]["allowed_writer_generation"]["allowed_old_process_count"] == 0
+
+
+def test_resume_discards_large_regular_partial_before_headroom_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    output = tmp_path / "snapshot"
+    pair_store = output / "pair_store"
+    pair_store.mkdir(parents=True)
+    partial = pair_store / ".recourse_vectors.npy.partial"
+    partial.write_bytes(b"x" * 4096)
+    remaining = Path(fixture["pairs"]).stat().st_size + Path(
+        fixture["vectors"]
+    ).stat().st_size
+    floor = 10_000
+
+    def free_space(_path: Path) -> shutil._ntuple_diskusage:
+        free = floor + remaining - 1 if partial.exists() else floor + remaining
+        return shutil._ntuple_diskusage(100_000, 0, free)
+
+    monkeypatch.setattr(snapshot.shutil, "disk_usage", free_space)
+    result = _run(fixture, output, resume=True, min_free_after_bytes=floor)
+    assert result["status"] == "PASS"
+    assert result["discarded_non_authoritative_partials"] == [str(partial)]
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_resume_rejects_nonregular_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    output = tmp_path / "snapshot"
+    pair_store = output / "pair_store"
+    pair_store.mkdir(parents=True)
+    partial = pair_store / ".pair_indices.npy.partial"
+    if kind == "symlink":
+        partial.symlink_to(fixture["pairs"])
+    else:
+        partial.mkdir()
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="physical regular"):
+        _run(fixture, output, resume=True)
+
+
+def test_logical_source_and_output_symlinks_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    source_link = tmp_path / "source-link"
+    source_link.symlink_to(fixture["source"], target_is_directory=True)
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="symlink"):
+        snapshot.create_promoted_pair_store_snapshot(
+            source_root=source_link,
+            expected_source_manifest_sha256=str(fixture["manifest_sha"]),
+            output_dir=tmp_path / "snapshot",
+            proc_root=fixture["proc"],
+            allowed_pid=77,
+            allowed_start_ticks=1234,
+            allowed_cmdline_sha256="a" * 64,
+            allowed_output_root=fixture["old_output"],
+            allowed_project_root=fixture["project"],
+            min_free_after_bytes=0,
+            expected_row_count=int(fixture["rows"]),
+            expected_vector_dim=int(fixture["dim"]),
+            expected_parent_count=int(fixture["parents"]),
+            expected_candidate_count=int(fixture["candidates"]),
+        )
+    real_output = tmp_path / "real-output"
+    real_output.mkdir()
+    output_link = tmp_path / "output-link"
+    output_link.symlink_to(real_output, target_is_directory=True)
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="symlink"):
+        _run(fixture, output_link, resume=True)
+
+
 def test_resume_after_first_array_promotion_only_charges_remaining_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -333,6 +418,75 @@ def test_headroom_is_fail_closed(
         _run(fixture, tmp_path / "snapshot", min_free_after_bytes=1)
 
 
+def test_only_exact_old_source_writer_is_permitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    source = Path(fixture["source"])
+
+    def writers(paths: list[Path], **_kwargs: object) -> list[dict[str, object]]:
+        if any(source in path.parents or path == source for path in paths):
+            return [{"pid": 77, "kind": "mapping", "path": str(paths[-1])}]
+        return []
+
+    monkeypatch.setattr(snapshot, "_find_writable_process_references", writers)
+    assert _run(fixture, tmp_path / "snapshot")["status"] == "PASS"
+
+
+def test_unexpected_source_or_destination_writer_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    monkeypatch.setattr(
+        snapshot,
+        "_find_writable_process_references",
+        lambda _paths, **_kwargs: [{"pid": 88, "kind": "fd", "path": "rogue"}],
+    )
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="unexpected source writer"):
+        _run(fixture, tmp_path / "source-writer")
+
+    calls = 0
+
+    def destination_writer(paths: list[Path], **_kwargs: object) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        # Source scans occur first and may recur; the destination scan is the
+        # only call whose file set includes snapshot_manifest.json.
+        if any(path.name == "snapshot_manifest.json" for path in paths):
+            return [{"pid": 88, "kind": "fd", "path": str(paths[0])}]
+        return []
+
+    monkeypatch.setattr(
+        snapshot, "_find_writable_process_references", destination_writer
+    )
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="live writer"):
+        _run(fixture, tmp_path / "destination-writer")
+
+
+def test_checkpoint_identity_tamper_is_not_a_resume_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path)
+    _install_process_gate(monkeypatch)
+    output = tmp_path / "snapshot"
+    original = snapshot._copy_one
+
+    def crash_first(**_kwargs: object) -> dict[str, object]:
+        raise OSError("injected before first copy")
+
+    monkeypatch.setattr(snapshot, "_copy_one", crash_first)
+    with pytest.raises(OSError):
+        _run(fixture, output)
+    checkpoint = json.loads((output / "snapshot_checkpoint.json").read_text())
+    checkpoint["identity"]["row_count"] += 1
+    _write_json(output / "snapshot_checkpoint.json", checkpoint)
+    monkeypatch.setattr(snapshot, "_copy_one", original)
+    with pytest.raises(snapshot.PairStoreSnapshotError, match="checkpoint identity"):
+        _run(fixture, output, resume=True)
+
+
 def test_cli_and_slurm_keep_frozen_full_dimensions() -> None:
     root = Path(__file__).resolve().parents[2]
     cli = (root / "scripts/autodl/snapshot_aids_comrecgc_pair_store.py").read_text()
@@ -344,3 +498,11 @@ def test_cli_and_slurm_keep_frozen_full_dimensions() -> None:
     assert "export PYTHONPATH=$PWD" in slurm
     assert "--config configs/hpc.yaml" in slurm
     assert "exit 78" in slurm
+    supervisor = (
+        root / "scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh"
+    ).read_text()
+    assert "AIDS_COMRECGC_V5_SNAPSHOT_MAX_SAME_ROOT_RESUMES" in supervisor
+    assert "status != 137 && status != 143" in supervisor
+    assert "--resume" in supervisor
+    assert "--validate-only" in supervisor
+    assert "test hooks are forbidden" in supervisor

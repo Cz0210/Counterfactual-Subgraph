@@ -362,6 +362,19 @@ def _copy_one(
     )
 
 
+def _discard_restartable_partial(*, destination: Path) -> bool:
+    partial = destination.with_name(f".{destination.name}.partial")
+    if not partial.exists() and not partial.is_symlink():
+        return False
+    if destination.exists() or destination.is_symlink():
+        raise PairStoreSnapshotError("partial exists beside promoted destination")
+    if partial.is_symlink() or not partial.is_file():
+        raise PairStoreSnapshotError("snapshot partial must be a physical regular file")
+    partial.unlink()
+    _fsync_directory(destination.parent)
+    return True
+
+
 def _dbscan_contract(*, manifest: Mapping[str, Any], manifest_sha256: str) -> dict[str, Any]:
     return {
         "schema_version": DBSCAN_CONTRACT_SCHEMA,
@@ -435,8 +448,12 @@ def validate_promoted_pair_store_snapshot(
 ) -> dict[str, Any]:
     """Reopen and prove the entire terminal snapshot closure."""
 
-    source = Path(source_root).expanduser().resolve(strict=True)
-    output = Path(output_dir).expanduser().resolve(strict=True)
+    source_logical = Path(source_root).expanduser()
+    output_logical = Path(output_dir).expanduser()
+    if source_logical.is_symlink() or output_logical.is_symlink():
+        raise PairStoreSnapshotError("snapshot source/output may not be a symlink")
+    source = source_logical.resolve(strict=True)
+    output = output_logical.resolve(strict=True)
     terminal_path = _physical_file(
         output / "snapshot_manifest.json", label="snapshot terminal manifest"
     )
@@ -564,11 +581,16 @@ def create_promoted_pair_store_snapshot(
         != int(expected_parent_count) * int(expected_candidate_count)
     ):
         raise PairStoreSnapshotError("invalid frozen Cartesian snapshot dimensions")
-    source = Path(source_root).expanduser().resolve(strict=True)
-    proc = Path(proc_root).expanduser().resolve(strict=True)
-    output = Path(output_dir).expanduser().resolve(strict=False)
-    if output.is_symlink():
+    source_logical = Path(source_root).expanduser()
+    proc_logical = Path(proc_root).expanduser()
+    output_logical = Path(output_dir).expanduser()
+    if source_logical.is_symlink() or proc_logical.is_symlink():
+        raise PairStoreSnapshotError("snapshot source/proc root may not be a symlink")
+    if output_logical.is_symlink():
         raise PairStoreSnapshotError("snapshot output may not be a symlink")
+    source = source_logical.resolve(strict=True)
+    proc = proc_logical.resolve(strict=True)
+    output = output_logical.resolve(strict=False)
     if output.exists() and not resume:
         raise FileExistsError(f"snapshot output must be fresh: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -635,7 +657,11 @@ def create_promoted_pair_store_snapshot(
             expected_vector_dim=expected_vector_dim,
             expected_parent_count=expected_parent_count,
             expected_candidate_count=expected_candidate_count,
-            require_old_alive=True,
+            # The builder requires the frozen generation to be live, but it
+            # may finish naturally before this queued CPU task starts.  A
+            # missing generation is safer (zero writers); verify_process_set
+            # still rejects PID reuse and every unexpected process.
+            require_old_alive=False,
         )
         source_pairs = Path(str(source_manifest["pairs_path"])).resolve(strict=True)
         source_vectors = Path(str(source_manifest["vectors_path"])).resolve(strict=True)
@@ -678,6 +704,12 @@ def create_promoted_pair_store_snapshot(
                     "promoted": [],
                 },
             )
+
+        discarded_partials: list[str] = []
+        for name in ("pair_indices.npy", "recourse_vectors.npy"):
+            destination = pair_store / name
+            if _discard_restartable_partial(destination=destination):
+                discarded_partials.append(str(destination.with_name(f".{name}.partial")))
 
         remaining = 0
         for source_path, name, expected_hash in (
@@ -825,6 +857,7 @@ def create_promoted_pair_store_snapshot(
             "free_bytes_before": free,
             "minimum_free_after_bytes": int(min_free_after_bytes),
             "remaining_bytes_at_headroom_gate": remaining,
+            "discarded_non_authoritative_partials": discarded_partials,
             "expected_row_count": int(expected_row_count),
             "expected_vector_dim": int(expected_vector_dim),
             "expected_parent_count": int(expected_parent_count),

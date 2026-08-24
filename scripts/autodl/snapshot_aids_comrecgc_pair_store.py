@@ -21,6 +21,7 @@ from src.utils.aids_comrecgc_v5_snapshot import (  # noqa: E402
     EXPECTED_VECTOR_DIM,
     MIN_FREE_AFTER_BYTES,
     create_promoted_pair_store_snapshot,
+    validate_promoted_pair_store_snapshot,
 )
 
 
@@ -28,7 +29,9 @@ def _absolute(value: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         raise argparse.ArgumentTypeError(f"absolute path required: {value}")
-    return path.resolve(strict=False)
+    # Preserve the logical spelling so the core can reject a symlink instead
+    # of silently resolving it before the physical-source/output gate.
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,12 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-candidate-count", type=int, default=EXPECTED_CANDIDATE_COUNT
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--validate-only", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = create_promoted_pair_store_snapshot(
+    common = dict(
         source_root=args.source_root,
         expected_source_manifest_sha256=args.expected_source_manifest_sha256,
         output_dir=args.output_dir,
@@ -77,10 +81,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_vector_dim=args.expected_vector_dim,
         expected_parent_count=args.expected_parent_count,
         expected_candidate_count=args.expected_candidate_count,
-        resume=args.resume,
     )
+    if args.validate_only:
+        result = validate_promoted_pair_store_snapshot(**common, require_pass=True)
+        marker = "[AIDS_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT_VALIDATE_PASS]"
+    else:
+        result = create_promoted_pair_store_snapshot(
+            **common,
+            min_free_after_bytes=args.min_free_after_bytes,
+            resume=args.resume,
+        )
+        marker = "[AIDS_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT_PASS]"
     print(json.dumps(result, indent=2, sort_keys=True))
-    print("[AIDS_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT_PASS]", flush=True)
+    print(marker, flush=True)
     return 0
 
 
