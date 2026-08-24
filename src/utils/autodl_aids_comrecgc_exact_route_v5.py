@@ -36,8 +36,24 @@ CONTROLLER_ID = "four_methods_four_datasets_aids_comrecgc_exact_route_v5"
 TASK_ID = "aids_comrecgc_standardized_exact_route_v5"
 SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_selector_freeze"
 SOURCE_NAMESPACE = "four_methods_four_datasets_continuation"
-REVIEWED_CORE_COMMIT = "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
-ROUTE_RELEASE_COMMIT = "e75b6e8160e07c869c558080259b4b05695f76d7"
+REVIEWED_SOURCE_CORE_COMMIT = "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
+INTEGRATED_REVIEWED_CORE_COMMIT = "8c371b1c8ee1d8188555581c4f8e8b6060ae42eb"
+# Kept as the public release-pin name for downstream audit consumers.  The
+# independently reviewed source commit was cherry-picked into the integration
+# lineage; therefore ancestry must use the integrated equivalent, not the
+# non-ancestor source SHA.
+REVIEWED_CORE_COMMIT = INTEGRATED_REVIEWED_CORE_COMMIT
+REVIEWED_CORE_FILE_IDENTITIES = {
+    "src/baselines/comrecgc/external_memory_dbscan.py": {
+        "git_blob": "57e9f7d6c5463a29f30fc08a9792ea2e65a30754",
+        "sha256": "383e391a1bb0bb9b4356f8b976b67e1098da2d3af6a90e15dc5a858b36ed0d5a",
+    },
+    "tests/baselines/comrecgc/test_external_memory_dbscan.py": {
+        "git_blob": "d71a532b035f181805ef803a695d30cd31d7d6cc",
+        "sha256": "d556a2eea865b180b0dff91bc4085f0a085e35e4786cedc0fcf3410b457d1f77",
+    },
+}
+ROUTE_RELEASE_COMMIT = "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642
@@ -113,6 +129,69 @@ def _require_ancestor(project_root: Path, commit: str) -> dict[str, str]:
             f"required AIDS exact-route commit is not an ancestor: {commit}"
         )
     return {"required_commit": commit, "execution_head": head, "is_ancestor": "true"}
+
+
+def _git_blob(project_root: Path, *, commit: str, relative_path: str) -> str:
+    try:
+        value = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "rev-parse",
+                f"{commit}:{relative_path}",
+            ],
+            text=True,
+            timeout=30,
+        ).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RepairManifestError(
+            f"cannot resolve reviewed core blob: {commit}:{relative_path}"
+        ) from exc
+    if len(value) != 40:
+        raise RepairManifestError(
+            f"reviewed core blob is not a full SHA: {relative_path}"
+        )
+    return value
+
+
+def _require_reviewed_core_equivalence(project_root: Path) -> dict[str, Any]:
+    ancestry = _require_ancestor(project_root, INTEGRATED_REVIEWED_CORE_COMMIT)
+    files: dict[str, dict[str, str]] = {}
+    for relative_path, expected in REVIEWED_CORE_FILE_IDENTITIES.items():
+        integrated_blob = _git_blob(
+            project_root,
+            commit=INTEGRATED_REVIEWED_CORE_COMMIT,
+            relative_path=relative_path,
+        )
+        if integrated_blob != expected["git_blob"]:
+            raise RepairManifestError(
+                f"integrated reviewed core blob changed: {relative_path}"
+            )
+        current_path = project_root / relative_path
+        if current_path.is_symlink() or not current_path.is_file():
+            raise RepairManifestError(
+                f"reviewed core file is not physical: {relative_path}"
+            )
+        current_sha256 = sha256_file(current_path)
+        if current_sha256 != expected["sha256"]:
+            raise RepairManifestError(
+                f"reviewed core working content changed: {relative_path}"
+            )
+        files[relative_path] = {
+            "reviewed_source_git_blob": expected["git_blob"],
+            "integrated_git_blob": integrated_blob,
+            "current_sha256": current_sha256,
+        }
+    return {
+        "reviewed_source_commit": REVIEWED_SOURCE_CORE_COMMIT,
+        "integrated_equivalent_commit": INTEGRATED_REVIEWED_CORE_COMMIT,
+        "execution_head": ancestry["execution_head"],
+        "integrated_commit_is_ancestor": True,
+        "equivalence_basis": "exact-git-blob-and-current-content-sha256",
+        "source_commit_object_required_at_build": False,
+        "files": files,
+    }
 
 
 def _terminal_source_evidence(
@@ -240,7 +319,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     execution_commit = str(spec.get("execution_commit") or "")
     if _git_head(project_root) != execution_commit:
         raise RepairManifestError("v5 spec is not bound to execution HEAD")
-    core_gate = _require_ancestor(project_root, REVIEWED_CORE_COMMIT)
+    core_gate = _require_reviewed_core_equivalence(project_root)
     release_gate = _require_ancestor(project_root, ROUTE_RELEASE_COMMIT)
     runtime_root = _absolute(spec.get("runtime_root"), label="runtime root", kind="dir")
     control_root = _absolute(spec.get("control_root"), label="control root", kind="dir")
@@ -732,7 +811,10 @@ def build_manifest(*, spec_path: str | Path, output_path: str | Path) -> dict[st
 __all__ = [
     "CONTROLLER_ID",
     "EXPECTED_PAIR_COUNT",
+    "INTEGRATED_REVIEWED_CORE_COMMIT",
     "REVIEWED_CORE_COMMIT",
+    "REVIEWED_CORE_FILE_IDENTITIES",
+    "REVIEWED_SOURCE_CORE_COMMIT",
     "ROUTE_RELEASE_COMMIT",
     "SELECTOR_TASK_ID",
     "SPEC_SCHEMA",

@@ -1471,3 +1471,12 @@ Mutagenicity roadmaps.
   expose it only through the frozen-GINE generic route.
 - [x] Hash-bind and revalidate the exact proof through training summary,
   summary, run manifest, completion gate, and final PASS.
+
+## 2026-08-24 — AIDS v5 reviewed-core integration identity
+
+- [x] Retain `645c6e51...` as the independent-review source identity.
+- [x] Require tree-equivalent integration commit `8c371b1c...` as an actual
+  execution ancestor.
+- [x] Validate frozen implementation/test Git blobs and current content
+  SHA-256 in the manifest builder, with positive real-HEAD and negative drift
+  tests.

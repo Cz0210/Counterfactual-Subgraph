@@ -6,8 +6,10 @@ without ever resuming or writing the old attempt.  A terminally promoted
 read-only reference.  Closed Cartesian chunks are a fallback only when that
 terminal manifest does not exist.  The route is specialized to 71,642
 candidates by 1,283 parents, exactly 91,916,686 rows in
-candidate-major/parent-minor order.  The reviewed adaptive exact-DBSCAN core is
-commit `645c6e51b7abcdc5dd4a9e0a1226d71d020880da`.
+candidate-major/parent-minor order.  The independently reviewed adaptive
+exact-DBSCAN source commit is
+`645c6e51b7abcdc5dd4a9e0a1226d71d020880da`; its exact two-file blob-equivalent
+integration commit is `8c371b1c8ee1d8188555581c4f8e8b6060ae42eb`.
 
 ## Pair-source priority and inactivity gate
 
@@ -81,8 +83,10 @@ a new fresh cache/adoption root; the old terminal closure is never rewritten.
 
 Do not stop repair-v4 or launch the fresh controller until all gates pass:
 
-1. execution HEAD has reviewed core `645c6e51...` as a true ancestor plus the
-   independently reviewed route commit;
+1. execution HEAD has integrated reviewed core `8c371b1c...` as a true
+   ancestor plus the independently reviewed route commit; the builder also
+   verifies the frozen Git blob IDs and current SHA-256 of the reviewed
+   implementation and focused test against review source `645c6e51...`;
 2. inspect the automatic pair source.  Prefer and fully revalidate an already
    promoted terminal; snapshot the `phase=chunks` checkpoint only when the
    terminal is truly absent;

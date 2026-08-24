@@ -43,23 +43,27 @@ def _file(path: Path, content: str = "x") -> Path:
 
 
 def _fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mock_git: bool = True,
 ) -> dict[str, Path]:
     monkeypatch.setattr(v5, "EXPECTED_PARENT_COUNT", 2)
     monkeypatch.setattr(controller, "TEST_PATH", re.compile(r"a^"))
     monkeypatch.setattr(v5, "EXPECTED_CANDIDATE_COUNT", 3)
     monkeypatch.setattr(v5, "EXPECTED_PAIR_COUNT", 6)
     monkeypatch.setattr(v5, "EXPECTED_VECTOR_DIM", 4)
-    monkeypatch.setattr(v5, "_git_head", lambda _root: "f" * 40)
-    monkeypatch.setattr(
-        v5,
-        "_require_ancestor",
-        lambda _root, commit: {
-            "required_commit": commit,
-            "execution_head": "f" * 40,
-            "is_ancestor": "true",
-        },
-    )
+    if mock_git:
+        monkeypatch.setattr(v5, "_git_head", lambda _root: "f" * 40)
+        monkeypatch.setattr(
+            v5,
+            "_require_ancestor",
+            lambda _root, commit: {
+                "required_commit": commit,
+                "execution_head": "f" * 40,
+                "is_ancestor": "true",
+            },
+        )
     runtime = tmp_path / "runtime"
     control = runtime / "control"
     (control / v5.SOURCE_NAMESPACE / "manifests").mkdir(parents=True)
@@ -236,7 +240,7 @@ def _fixture(
             "runtime_root": str(runtime),
             "control_root": str(control),
             "project_root": str(project),
-            "execution_commit": "f" * 40,
+            "execution_commit": "f" * 40 if mock_git else v5._git_head(project),
             "python": str(Path(os.sys.executable).resolve()),
             "proc_root": str(proc),
             "cgroup_memory_root": str(cgroup),
@@ -314,6 +318,20 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert headroom["free_bytes_at_build"] == 448 * 1024**3
     assert headroom["host_memfree_used"] is False
     assert summary["gpu_required"] is False
+
+
+def test_v5_real_head_builds_and_validates_release_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch, mock_git=False)
+    payload, _summary = v5.build_payload(spec_path=paths["spec"])
+    assert v5.validate_payload(payload)["status"] == "PASS"
+    contract = payload["aids_comrecgc_exact_route_v5_contract"]
+    assert contract["reviewed_core_gate"]["integrated_commit_is_ancestor"] is True
+    assert contract["route_release_gate"]["required_commit"] == (
+        v5.ROUTE_RELEASE_COMMIT
+    )
+    assert contract["route_release_gate"]["is_ancestor"] == "true"
 
 
 def _process_gate(paths: dict[str, Path]) -> dict[str, Any]:
@@ -791,8 +809,14 @@ def test_v5_manifest_publishes_only_at_exact_fresh_namespace_path(
 
 
 def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
-    assert v5.REVIEWED_CORE_COMMIT == "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
-    assert v5.ROUTE_RELEASE_COMMIT == "e75b6e8160e07c869c558080259b4b05695f76d7"
+    assert v5.REVIEWED_SOURCE_CORE_COMMIT == (
+        "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
+    )
+    assert v5.INTEGRATED_REVIEWED_CORE_COMMIT == (
+        "8c371b1c8ee1d8188555581c4f8e8b6060ae42eb"
+    )
+    assert v5.REVIEWED_CORE_COMMIT == v5.INTEGRATED_REVIEWED_CORE_COMMIT
+    assert v5.ROUTE_RELEASE_COMMIT == "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
     root = Path(__file__).resolve().parents[2]
     template = json.loads(
         (
@@ -819,6 +843,35 @@ def test_v5_release_pins_reviewed_core_and_has_static_paired_slurm() -> None:
         "exit 78",
     ):
         assert token in wrapper
+
+
+def test_v5_real_head_accepts_integrated_reviewed_core_identity() -> None:
+    root = Path(__file__).resolve().parents[2]
+    evidence = v5._require_reviewed_core_equivalence(root)
+    assert evidence["reviewed_source_commit"] == v5.REVIEWED_SOURCE_CORE_COMMIT
+    assert evidence["integrated_equivalent_commit"] == (
+        v5.INTEGRATED_REVIEWED_CORE_COMMIT
+    )
+    assert evidence["integrated_commit_is_ancestor"] is True
+    assert evidence["equivalence_basis"] == (
+        "exact-git-blob-and-current-content-sha256"
+    )
+    assert set(evidence["files"]) == set(v5.REVIEWED_CORE_FILE_IDENTITIES)
+
+
+def test_v5_reviewed_core_gate_rejects_integrated_blob_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    identities = {
+        path: dict(identity)
+        for path, identity in v5.REVIEWED_CORE_FILE_IDENTITIES.items()
+    }
+    first = next(iter(identities))
+    identities[first]["git_blob"] = "0" * 40
+    monkeypatch.setattr(v5, "REVIEWED_CORE_FILE_IDENTITIES", identities)
+    with pytest.raises(RepairManifestError, match="integrated reviewed core blob changed"):
+        v5._require_reviewed_core_equivalence(root)
     selector_wrapper = (
         root / "scripts/slurm/write_aids_comrecgc_v5_selector_gate.sh"
     ).read_text(encoding="utf-8")

@@ -9126,3 +9126,16 @@ Accepted
   the BACE paper cell.
 - These changes do not authorize mutation or termination of the active v5
   output.  Any diagnostic or replacement begins from a fresh immutable root.
+
+## 2026-08-24: Bind AIDS v5 to the integrated equivalent of the reviewed DBSCAN core
+
+- The independently reviewed exact-shortcut source commit `645c6e51...` was
+  cherry-picked into the production lineage as `8c371b1c...`; the former is
+  not a Git ancestor of the v5 execution branch.
+- The v5 builder now requires `8c371b1c...` as the true ancestor and separately
+  freezes the exact Git blob identities and current SHA-256 values of
+  `external_memory_dbscan.py` and its focused test.
+- The manifest records both commit identities and per-file evidence.  This is
+  an explicit tree-equivalent integration gate, not a silent commit
+  substitution, and drift in either integrated blobs or working content fails
+  closed.
