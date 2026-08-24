@@ -244,6 +244,10 @@ def audit_generation_equivalence(
             "distance_model"
         ):
             identity_mismatches.append("distance_model")
+        if legacy_manifest.get("device_contract") != optimized_manifest.get(
+            "device_contract"
+        ):
+            identity_mismatches.append("device_contract")
         legacy_payload = _torch_load(legacy_dir / "counterfactuals.pt")
         optimized_payload = _torch_load(optimized_dir / "counterfactuals.pt")
         payload = _payload_equivalence(legacy_payload, optimized_payload)

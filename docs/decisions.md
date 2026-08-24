@@ -9168,7 +9168,9 @@ Accepted
 - The project route now accepts separate classifier and distance devices.  A
   replay may keep the frozen GINE on CPU for byte-stable graph identity while
   keeping NeuroSED on CUDA.  Both A/B roles must use the same split contract,
-  and the devices are part of the scientific command/config identity.
+  and the devices are part of the scientific command/config identity.  The
+  formal equivalence audit re-reads and compares that complete device contract;
+  a role-specific device drift fails before payload parity can be accepted.
 - The historical single `--device` behavior remains the default.  Existing
   roots and running 50k processes are never migrated or resumed with the new
   contract; all deterministic replays use fresh roots.

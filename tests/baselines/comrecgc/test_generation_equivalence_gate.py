@@ -80,6 +80,10 @@ def _run_root(tmp_path: Path, *, role: str, frequency: int = 2) -> Path:
         "parent_limit": 360,
         "parameters": {"seed": 0, "steps": 500, "heads": 5},
         "distance_model": {"checkpoint_sha256": "distance"},
+        "device_contract": {
+            "algorithm_device": "cuda:0",
+            "graph_identity_device": "cpu",
+        },
         "dataset_audit": {"dataset_sha256": "dataset"},
         "internal_prediction_counts": {"0": 1, "1": 1},
         "bace_preprocessing": {"engine": engine},
@@ -152,3 +156,28 @@ def test_equivalence_gate_fails_closed_on_unbound_completion_marker(
         )
     assert not (tmp_path / "audit/PASS").exists()
     assert (tmp_path / "audit/FAIL.json").is_file()
+
+
+def test_equivalence_gate_fails_closed_on_device_contract_drift(
+    tmp_path: Path,
+) -> None:
+    legacy = _run_root(tmp_path, role="legacy")
+    optimized = _run_root(tmp_path, role="optimized")
+    optimized_manifest_path = optimized / "run_manifest.json"
+    optimized_manifest = json.loads(
+        optimized_manifest_path.read_text(encoding="utf-8")
+    )
+    optimized_manifest["device_contract"]["graph_identity_device"] = "cuda:0"
+    _write_json(optimized_manifest_path, optimized_manifest)
+
+    with pytest.raises(RuntimeError, match="equivalence gate failed"):
+        audit_generation_equivalence(
+            legacy_root=legacy,
+            optimized_root=optimized,
+            output_dir=tmp_path / "audit",
+            expected_steps=500,
+        )
+
+    failure = json.loads((tmp_path / "audit/FAIL.json").read_text(encoding="utf-8"))
+    assert "device_contract" in failure["identity_mismatches"]
+    assert not (tmp_path / "audit/PASS").exists()
