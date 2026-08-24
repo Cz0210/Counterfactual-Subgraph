@@ -240,6 +240,7 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
         external_exact_fallback_max_samples=0,
         external_summary_block_size=65536,
         external_pair_store_source_manifest=pair_source,
+        external_pair_store_source_owner_root=pair_source.parent,
         expected_sklearn_version="1.7.2",
         common_recourse_resume=True,
     )
@@ -263,6 +264,9 @@ def test_aids_external_engine_is_explicit_cpu_bounded_and_resumable(
     assert command[
         command.index("--external-pair-store-source-manifest") + 1
     ] == str(pair_source)
+    assert command[
+        command.index("--external-pair-store-source-owner-root") + 1
+    ] == str(pair_source.parent)
     assert command[command.index("--expected-sklearn-version") + 1] == "1.7.2"
     assert "--resume" in command
 
@@ -274,6 +278,7 @@ def test_pair_store_adoption_route_fails_before_output_on_contract_drift(
     inputs = replace(
         _inputs(tmp_path, dataset="aids"),
         external_pair_store_source_manifest=source_manifest,
+        external_pair_store_source_owner_root=source_manifest.parent,
         common_recourse_engine="external_memory_exact_v1",
         external_dbscan_shortcut_mode="disabled",
         device="cpu",

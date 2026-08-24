@@ -592,6 +592,8 @@ def build_stage_commands(
                 [
                     "--external-pair-store-source-manifest",
                     str(inputs.external_pair_store_source_manifest),
+                    "--external-pair-store-source-owner-root",
+                    str(inputs.external_pair_store_source_owner_root),
                 ]
             )
         if inputs.external_pair_store_source_checkpoint is not None:
@@ -1211,7 +1213,6 @@ def _archive_previous_failure(output_root: Path) -> None:
 def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
     chunk_source_values = (
         inputs.external_pair_store_source_checkpoint,
-        inputs.external_pair_store_source_owner_root,
         inputs.external_vector_cache_root,
         inputs.external_vector_cache_lock,
     )
@@ -1224,6 +1225,14 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
         and inputs.external_pair_store_source_checkpoint is not None
     ):
         raise ValueError("PAIR_STORE_ADOPTION_SOURCES_ARE_MUTUALLY_EXCLUSIVE")
+    source_requested = (
+        inputs.external_pair_store_source_manifest is not None
+        or inputs.external_pair_store_source_checkpoint is not None
+    )
+    if source_requested and inputs.external_pair_store_source_owner_root is None:
+        raise ValueError("PAIR_STORE_ADOPTION_OWNER_ROOT_MISSING")
+    if not source_requested and inputs.external_pair_store_source_owner_root is not None:
+        raise ValueError("PAIR_STORE_ADOPTION_OWNER_ROOT_WITHOUT_SOURCE")
     if (
         inputs.external_pair_store_source_manifest is not None
         or inputs.external_pair_store_source_checkpoint is not None

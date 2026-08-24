@@ -282,7 +282,6 @@ def run_common_recourse(
         raise ValueError("terminal and chunk pair-store sources are mutually exclusive")
     chunk_source_values = (
         external_pair_store_source_checkpoint,
-        external_pair_store_source_owner_root,
         external_vector_cache_root,
         external_vector_cache_lock,
     )
@@ -290,8 +289,15 @@ def run_common_recourse(
         value is not None for value in chunk_source_values
     ):
         raise ValueError(
-            "chunk-source checkpoint, owner root, local cache root, and lock are required together"
+            "chunk-source checkpoint, local cache root, and lock are required together"
         )
+    source_requested = (
+        external_pair_store_source_manifest is not None or chunk_source_requested
+    )
+    if source_requested and external_pair_store_source_owner_root is None:
+        raise ValueError("external pair-store source requires its old owner root")
+    if not source_requested and external_pair_store_source_owner_root is not None:
+        raise ValueError("pair-store owner root was provided without a source")
     root = require_empty_output(output_dir, resume=resume)
     if external_pair_store_source_manifest is not None or chunk_source_requested:
         if (
@@ -486,6 +492,7 @@ def run_common_recourse(
             elif external_pair_store_source_manifest is not None:
                 pair_adoption = adopt_external_pair_store_read_only(
                     source_manifest_path=external_pair_store_source_manifest,
+                    source_owner_root=external_pair_store_source_owner_root,
                     adoption_root=root / "external_memory/pair_store_adoption",
                     expected_scientific_identity=pair_identity,
                     resume=resume,

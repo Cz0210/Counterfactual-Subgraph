@@ -1,5 +1,59 @@
 # Decisions Log
 
+## [2026-08-24] Prefer a closed AIDS pair store and authenticate chunk-cache allocation
+
+### Background
+
+The first fresh exact-Cartesian route always described the 560 closed chunks as
+its source.  The old repair may, however, finish promotion before v5 is
+released, in which case reconstructing another 23.53 GiB vector cache is both
+unnecessary and riskier.  The production continuation wrapper also did not
+forward the adaptive shortcut/source/cache controls, and the chunk cache could
+not distinguish a crash after physical allocation from an unauthenticated
+sparse partial.  A nominal terminal manifest could coexist with a partial or a
+writable sibling inode.
+
+### Decision
+
+At runtime, inspect one frozen automatic pair-store root.  A physical nonempty
+terminal manifest has strict priority and is adopted by read-only reference;
+its invalidity never authorizes chunk fallback.  Before adoption, recursively
+reject symlinks and partial artifacts in the pair store, writable FD/mapping
+references to every sibling inode, and any live command that names the old
+owner root.  Revalidate the same guard, exact manifest/array hashes, and stat
+identities at terminal closure.
+
+Use closed chunks only when no terminal manifest exists.  Split local cache
+creation into authenticated `allocate_cache`, `allocation_complete`,
+`copy_chunks`, and `cache_ready` phases.  Compute remaining physical allocation
+from `st_blocks`, require exact remaining bytes plus the 3 GiB floor, run
+`posix_fallocate`, verify physical allocation/header/floor, and bind that
+evidence into every later checkpoint.  Replaying `posix_fallocate` after a
+pre-checkpoint crash is safe.  A missing cache after terminal publication
+requires a fresh root rather than rewriting the terminal checkpoint.
+
+Freeze the production AutoDL wrapper to the reviewed adaptive shortcut,
+`eps=0.02`, `min_samples=3`, sklearn self-neighbour semantics, dense fallback
+zero, CPU-only execution, one route-wide scratch flock, and one bounded
+process-loss-only same-root resume.  Keep the paired Slurm entrypoint static and
+non-runnable; no HPC experiment is launched.
+
+### Consequences
+
+- A promoted final source avoids the local 23.53 GiB cache entirely.
+- Active/ambiguous promotion and storage allocation fail before DBSCAN or
+  downstream selection; no partial becomes scientific authority.
+- Chunk fallback preserves candidate-major/parent-minor bytes and the exact
+  sklearn/official selector semantics already covered by the production-shaped
+  equivalence fixture.
+- Old repair-v4 processes and outputs remain untouched.  V5 needs a fresh
+  execution worktree, output root, controller/spec/manifest, source audit,
+  smoke, and independent release review.
+
+### Status
+
+Accepted (code/tests only; remote launch remains separately gated)
+
 ## [2026-08-23] Interpret pinned GlobalGCE edge decoder outputs as categorical scores
 
 ### Background
