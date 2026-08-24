@@ -9433,6 +9433,10 @@ template, and hash-binds the gate, state, output, and terminal evidence.
 - A dead worker or host may consume generic attempt one without changing the
   science inode; a forged replacement root, lock, bitmap, count, or receipt is
   rejected.
+- Terminal success revalidates the held flock descriptor against its named
+  inode after long science validation, after terminal freeze, and after receipt
+  publication. A post-publication mismatch revokes receipt `PASS` before the
+  task can return success.
 - Existing global dead-worker recovery remains available, but a semantic marker
   in the persisted run log prevents that retry.
 - No deployment, process signal, or mutation of historical AutoDL roots is

@@ -1174,6 +1174,23 @@ def _publish_receipt(
     return payload
 
 
+def _revoke_receipt_pass(receipt_output: Path) -> None:
+    """Make a just-published receipt non-authoritative after a lock race."""
+
+    pass_path = receipt_output / "PASS"
+    try:
+        value = os.lstat(pass_path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(value.st_mode) and pass_path.read_bytes() == b"PASS\n":
+        os.unlink(pass_path)
+        descriptor = os.open(receipt_output, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 class _HeldFlock:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -1519,6 +1536,7 @@ def run_supervisor(
                 terminal = validate_terminal_science(
                     science_root=science, contract=contract
                 )
+                held_lock.assert_path_identity()
                 terminal_manifest_path, terminal_manifest = (
                     _freeze_terminal_supervisor_manifest(
                         control_root=control,
@@ -1543,6 +1561,11 @@ def run_supervisor(
                     terminal_manifest=terminal_manifest,
                     terminal=terminal,
                 )
+                try:
+                    held_lock.assert_path_identity()
+                except AIDSGreedFullScanSupervisorError:
+                    _revoke_receipt_pass(receipt)
+                    raise
                 print(
                     "[AIDS_GREED_FULL_SCAN_SUPERVISOR_PASS] "
                     f"resumes={state.get('resume_count', 0)} adopted_terminal=1",
@@ -1706,6 +1729,7 @@ def run_supervisor(
                 terminal = validate_terminal_science(
                     science_root=science, contract=contract
                 )
+                held_lock.assert_path_identity()
                 state.update(
                     {
                         "status": "PASS",
@@ -1735,6 +1759,7 @@ def run_supervisor(
                         lock_identity=lock_identity,
                     )
                 )
+                held_lock.assert_path_identity()
                 receipt_payload = _publish_receipt(
                     receipt_output=receipt,
                     contract_path=contract_path,
@@ -1742,6 +1767,11 @@ def run_supervisor(
                     terminal_manifest=terminal_manifest,
                     terminal=terminal,
                 )
+                try:
+                    held_lock.assert_path_identity()
+                except AIDSGreedFullScanSupervisorError:
+                    _revoke_receipt_pass(receipt)
+                    raise
                 print(
                     "[AIDS_GREED_FULL_SCAN_SUPERVISOR_PASS] "
                     f"resumes={state['resume_count']} adopted_terminal=0",

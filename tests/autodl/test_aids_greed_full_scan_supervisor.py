@@ -371,6 +371,109 @@ def test_held_flock_rejects_unlink_recreate_race(tmp_path: Path) -> None:
             held.assert_path_identity()
 
 
+@pytest.mark.parametrize("adopted_terminal", [False, True])
+def test_terminal_validation_lock_replacement_never_publishes_receipt_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adopted_terminal: bool,
+) -> None:
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    science = campaign / "science"
+    child_results = [(143, "", True)] if adopted_terminal else [(0, "", False)]
+    _patch_small_run(
+        monkeypatch, science=science, child_results=child_results
+    )
+    common = {
+        "project_root": Path(__file__).resolve().parents[2],
+        "execution_commit": COMMIT,
+        "campaign_root": campaign,
+        "science_root": science,
+        "proc_root": proc,
+        "max_same_root_resumes": 1,
+        "semantic_failure_markers": (),
+        "child_argv": ("python", "reviewed-child"),
+    }
+    if adopted_terminal:
+        with pytest.raises(SystemExit, match="143"):
+            supervisor.run_supervisor(
+                **common, receipt_output=campaign / "receipt/attempt-0"
+            )
+        (science / "PASS").write_text("PASS\n", encoding="utf-8")
+    receipt = campaign / f"receipt/attempt-{int(adopted_terminal)}"
+    lock = science.parent / f".{science.name}{supervisor.LOCK_NAME}"
+
+    def replace_named_lock(**_kwargs: object) -> dict[str, object]:
+        lock.unlink()
+        lock.write_bytes(b"")
+        return _terminal(science)
+
+    monkeypatch.setattr(
+        supervisor, "validate_terminal_science", replace_named_lock
+    )
+    with pytest.raises(
+        supervisor.AIDSGreedFullScanSupervisorError, match="lock path/inode"
+    ):
+        supervisor.run_supervisor(**common, receipt_output=receipt)
+    assert not (receipt / "PASS").exists()
+    assert not (
+        campaign
+        / supervisor.CONTROL_DIRECTORY
+        / supervisor.TERMINAL_PASS_NAME
+    ).exists()
+
+
+def test_post_receipt_lock_replacement_revokes_receipt_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    science = campaign / "science"
+    _patch_small_run(
+        monkeypatch,
+        science=science,
+        child_results=[(0, "", False)],
+    )
+    receipt = campaign / "receipt/attempt-0"
+    lock = science.parent / f".{science.name}{supervisor.LOCK_NAME}"
+    original_publish = supervisor._publish_receipt
+
+    def publish_then_replace(**kwargs: object) -> dict[str, object]:
+        payload = original_publish(**kwargs)
+        lock.unlink()
+        lock.write_bytes(b"")
+        return payload
+
+    monkeypatch.setattr(supervisor, "_publish_receipt", publish_then_replace)
+    with pytest.raises(
+        supervisor.AIDSGreedFullScanSupervisorError, match="lock path/inode"
+    ):
+        supervisor.run_supervisor(
+            project_root=Path(__file__).resolve().parents[2],
+            execution_commit=COMMIT,
+            campaign_root=campaign,
+            science_root=science,
+            receipt_output=receipt,
+            proc_root=proc,
+            max_same_root_resumes=1,
+            semantic_failure_markers=(),
+            child_argv=("python", "reviewed-child"),
+        )
+    assert (receipt / supervisor.RECEIPT_NAME).is_file()
+    assert not (receipt / "PASS").exists()
+    with pytest.raises(
+        supervisor.AIDSGreedFullScanSupervisorError, match="receipt PASS is absent"
+    ):
+        supervisor.validate_receipt(
+            receipt_path=receipt / supervisor.RECEIPT_NAME,
+            expected_science_root=science,
+        )
+
+
 def test_live_writer_scan_matches_exact_science_argument(tmp_path: Path) -> None:
     proc = tmp_path / "proc"
     science = tmp_path / "campaign/science"
