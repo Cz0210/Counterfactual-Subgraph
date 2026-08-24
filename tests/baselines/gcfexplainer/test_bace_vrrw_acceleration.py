@@ -321,8 +321,10 @@ def test_cpu_m500_requires_hashed_quick_terminal_and_is_gpu_free() -> None:
     assert 'export CUDA_VISIBLE_DEVICES=""' in text
     assert "M=1000" not in text
     assert "kill" not in text
-    assert text.rindex('root / "diagnostic_manifest.json"') < text.rindex(
-        'root / "PASS"'
+    assert text.index(
+        'write_fresh_json(root / "diagnostic_manifest.json", payload)'
+    ) < text.index(
+        'write_fresh_json(\n    root / "PASS"'
     )
 
 
