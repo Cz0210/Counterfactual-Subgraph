@@ -9,6 +9,7 @@ PROJECT_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 PYTHON="${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}"
 INNER="$SCRIPT_DIR/run_comrecgc_standardized_continuation.sh"
 VERIFY_CLI="$PROJECT_ROOT/scripts/autodl/build_aids_comrecgc_repair_v4_manifest.py"
+PROCESS_GATE_CLI="$PROJECT_ROOT/scripts/autodl/verify_aids_comrecgc_v5_process_set.py"
 
 : "${OUTPUT_ROOT:?OUTPUT_ROOT is required}"
 : "${COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT:?automatic pair-store root is required}"
@@ -17,6 +18,11 @@ VERIFY_CLI="$PROJECT_ROOT/scripts/autodl/build_aids_comrecgc_repair_v4_manifest.
 : "${COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT:?procfs root is required}"
 : "${COMRECGC_CGROUP_MEMORY_ROOT:?cgroup-v1 memory root is required}"
 : "${AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES:?minimum cgroup headroom is required}"
+: "${AIDS_COMRECGC_V5_ALLOWED_OLD_PID:?allowed old read-only PID is required}"
+: "${AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS:?allowed old process start ticks are required}"
+: "${AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256:?allowed old process command hash is required}"
+: "${AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT:?allowed old output root is required}"
+: "${AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT:?allowed old project root is required}"
 
 [[ "${DATASET:-}" == "aids" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] DATASET must be aids" >&2; exit 64; }
 [[ "${DEVICE:-}" == "cpu" && "${GPU_REQUIRED:-}" == "0" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] CPU-only contract changed" >&2; exit 64; }
@@ -45,7 +51,9 @@ for path in \
   "$COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" \
   "$COMRECGC_EXTERNAL_ROUTE_LOCK" \
   "$COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT" \
-  "$COMRECGC_CGROUP_MEMORY_ROOT"; do
+  "$COMRECGC_CGROUP_MEMORY_ROOT" \
+  "$AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT" \
+  "$AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT"; do
   [[ "$path" == /* ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] absolute path required: $path" >&2; exit 64; }
 done
 [[ -d "$COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT" && ! -L "$COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] physical procfs root required" >&2; exit 64; }
@@ -53,6 +61,9 @@ done
 [[ "$COMRECGC_EXTERNAL_ROUTE_LOCK" == /root/autodl-tmp/* ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] scratch lock must stay on local AutoDL storage" >&2; exit 64; }
 [[ "$COMRECGC_EXTERNAL_ROUTE_LOCK" != "${COMRECGC_HIGHMEM_LOCK_PATH:-}" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] route/highmem locks must be distinct" >&2; exit 64; }
 [[ "$AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES" =~ ^[0-9]+$ && "$AIDS_COMRECGC_V5_MIN_CGROUP_FREE_BYTES" -ge 137438953472 ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] cgroup headroom must be at least 128 GiB" >&2; exit 64; }
+[[ "$AIDS_COMRECGC_V5_ALLOWED_OLD_PID" =~ ^[1-9][0-9]*$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid old PID" >&2; exit 64; }
+[[ "$AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS" =~ ^[1-9][0-9]*$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid old start ticks" >&2; exit 64; }
+[[ "$AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid old command SHA256" >&2; exit 64; }
 
 export DEVICE=cpu
 export GPU_REQUIRED=0
@@ -83,6 +94,17 @@ exec 8>"$COMRECGC_EXTERNAL_ROUTE_LOCK"
 resume_count=0
 while true; do
   check_cgroup_headroom || exit $?
+  if ! PYTHONPATH="$PROJECT_ROOT" "$PYTHON" "$PROCESS_GATE_CLI" \
+      --config configs/hpc.yaml \
+      --proc-root "$COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT" \
+      --allowed-pid "$AIDS_COMRECGC_V5_ALLOWED_OLD_PID" \
+      --allowed-start-ticks "$AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS" \
+      --allowed-cmdline-sha256 "$AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256" \
+      --allowed-output-root "$AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT" \
+      --allowed-project-root "$AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT"; then
+    echo "[AIDS_V5_SUPERVISOR_FAIL] common-recourse process set changed" >&2
+    exit 75
+  fi
   bash "$INNER"
   child_status=$?
   if (( child_status == 0 )); then

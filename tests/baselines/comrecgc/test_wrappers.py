@@ -295,6 +295,13 @@ def test_aids_exact_v5_supervisor_freezes_cpu_exact_and_storage_contracts() -> N
         "promoted-final route forbids chunk/cache fallback",
         "route/highmem locks must be distinct",
         "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_PID",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT",
+        "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT",
+        "verify_aids_comrecgc_v5_process_set.py",
+        "common-recourse process set changed",
         "production test hooks are forbidden",
     }
     assert all(value in text for value in required)

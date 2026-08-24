@@ -39,11 +39,28 @@ DBSCAN process may retain a read-only mmap concurrently; a full pair-tree
 writable-FD/mapping/partial scan still blocks any mutable producer.  If the
 terminal disappears or becomes invalid, v5 stops instead of switching routes.
 
+This coexistence is not a general high-memory-lock bypass.  Freeze the old
+consumer's PID, Linux start ticks, raw cmdline hash, exact output argument, and
+execution cwd in the v5 spec.  At build it must be the only common-recourse
+process.  Before every attempt, scan procfs again and allow either that exact
+generation or an empty set after its natural exit.  Reject PID reuse, command
+or cwd drift, and every second common-recourse process.  In parallel require at
+least 128 GiB live cgroup headroom (which includes the old RSS), cap the new
+route at 96 GiB RSS, and hold a distinct v5 route flock.  Mut remains blocked
+on v5 PASS, so it cannot overlap this exception.
+
 For the retained generic chunk route, distinguish an unauthenticated allocation
 artifact from authenticated data.  Only `phase=allocate_cache`, under the
 allocation flock plus an independently held route flock, may discard and
 atomically rebuild a zero-byte, truncated, or wrong-schema local NPY partial.
 `allocation_complete` and later phases always fail closed on the same damage.
+
+Publish v5 through its dedicated two-task persistent manifest: a deterministic
+hash-only adoption gate for the already frozen calibration selector, followed
+by the terminal-only CPU science task.  The second task is the sole Mut
+dependency authority.  Mut must bind its exact controller manifest SHA, task
+ID, and attempt-0 output in a fresh controller; existing wait controllers are
+immutable.
 
 Freeze the production AutoDL wrapper to the reviewed adaptive shortcut,
 `eps=0.02`, `min_samples=3`, sklearn self-neighbour semantics, dense fallback
@@ -62,6 +79,8 @@ non-runnable; no HPC experiment is launched.
 - Old repair-v4 processes and outputs remain untouched.  V5 needs a fresh
   execution worktree, output root, controller/spec/manifest, source audit,
   smoke, and independent release review.
+- The old process may exit naturally, but no signal or write is authorized by
+  this route and its PID can never be reused as evidence for a new generation.
 
 ### Status
 

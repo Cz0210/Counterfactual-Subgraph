@@ -9,8 +9,12 @@
 - [x] Freeze production v5 to terminal-only adoption with the exact pair-store
   owner root, allowing the old DBSCAN's read-only mmap but retaining full-tree
   partial/writable-inode rejection; terminal disappearance cannot select chunks.
-- [x] Reject terminal partial/symlink artifacts, writable sibling inodes, live
-  old-owner processes, scientific/hash/stat drift, and source path escape.
+- [x] Freeze the sole old read-only DBSCAN generation by PID/start ticks/raw
+  command hash/exact output/cwd and re-scan procfs before every attempt; allow
+  natural exit but reject PID reuse, identity drift, or a second common task.
+- [x] Reject terminal partial/symlink artifacts, writable sibling inodes,
+  unbound common-recourse processes, scientific/hash/stat drift, and source
+  path escape.
 - [x] Authenticate `posix_fallocate` completion and NPY header/size/headroom,
   replay allocation safely across the pre-checkpoint crash window, and bind the
   evidence through copy, promotion, and terminal validation.
@@ -21,9 +25,13 @@
   reconstructible artifact; never rewrite a published closure.
 - [x] Freeze the v5 supervisor to CPU-only adaptive exact DBSCAN with
   `eps=0.02`, `min_samples=3`, self-neighbour semantics, dense fallback zero,
-  route-wide scratch locking, and one process-loss-only same-root retry.
+  route-wide scratch locking, a 128 GiB per-attempt cgroup-free gate, a 96 GiB
+  child RSS ceiling, and one process-loss-only same-root retry.
 - [x] Keep the paired Slurm wrapper static/non-runnable and document the exact
   fresh AutoDL task/environment recipe.
+- [x] Add a fresh-only v5 manifest builder with physical terminal-array audit,
+  immutable repair-v4 input binding, selector-adoption dependency, exact Mut
+  dependency identity, and persistent controller launch/restart commands.
 - [x] Cover promoted-final priority, real shell forwarding, invalid-final,
   partial/writer/owner, allocation crash/tamper, Cartesian order, sklearn label,
   official greedy/medoid/selected-row, and terminal resume closures.
