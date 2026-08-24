@@ -1014,6 +1014,16 @@ def run_aids_pair_semantics_audit(
                 != manifest["vectors_sha256"]
             ):
                 raise AIDSPairSemanticsError("direct pair-store SHA256 differs")
+        chunk_metadata_final_sha256 = sha256_file(chunk_metadata_manifest_path)
+        if chunk_metadata_final_sha256 != manifest[
+            "resolved_chunk_metadata_authority"
+        ]["chunk_metadata_manifest_sha256"]:
+            raise AIDSPairSemanticsError(
+                "chunk-metadata authority changed before terminal closure"
+            )
+        source_hashes["chunk_metadata_manifest_final_sha256"] = (
+            chunk_metadata_final_sha256
+        )
         source_stats_after = {
             "pair_manifest": _file_stat(pair_manifest_path),
             "chunk_metadata_manifest": _file_stat(chunk_metadata_manifest_path),
