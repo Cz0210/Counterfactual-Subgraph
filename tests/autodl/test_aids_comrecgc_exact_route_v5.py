@@ -449,7 +449,47 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
         "snapshot_adoption_manifest.json",
         "PASS",
     ]
-    assert task["depends_on"] == [v5.SELECTOR_TASK_ID, v5.SNAPSHOT_TASK_ID]
+    assert task["depends_on"] == [
+        v5.SELECTOR_TASK_ID,
+        v5.SNAPSHOT_TASK_ID,
+        v5.PAIR_SEMANTICS_TASK_ID,
+        v5.CLOSE_PAIR_VIEW_TASK_ID,
+    ]
+    tasks = {entry["id"]: entry for entry in payload["tasks"]}
+    benchmark = tasks[v5.PAIR_SEMANTICS_BENCHMARK_TASK_ID]
+    full_scan = tasks[v5.PAIR_SEMANTICS_TASK_ID]
+    close_view = tasks[v5.CLOSE_PAIR_VIEW_TASK_ID]
+    assert benchmark["depends_on"] == [v5.SELECTOR_TASK_ID, v5.SNAPSHOT_TASK_ID]
+    assert benchmark["expected_output"] != full_scan["expected_output"]
+    assert "pair_semantics_benchmark" in benchmark["expected_output"]
+    assert "pair_semantics/" in full_scan["expected_output"]
+    assert "--max-chunks" in benchmark["command"]
+    assert "--skip-source-array-hash-verification" in benchmark["command"]
+    benchmark_output_index = benchmark["command"].index("--output-dir")
+    full_output_index = full_scan["command"].index("--output-dir")
+    assert benchmark["command"][benchmark_output_index + 1] == "{task_output}"
+    assert full_scan["command"][full_output_index + 1] == "{task_output}"
+    assert full_scan["depends_on"] == [v5.PAIR_SEMANTICS_BENCHMARK_TASK_ID]
+    assert "--resume" not in full_scan["command"]
+    assert close_view["depends_on"] == [v5.PAIR_SEMANTICS_TASK_ID]
+    assert close_view["required_output_files"] == [
+        "close_pair_contract.json",
+        "PASS",
+    ]
+    compact_index = close_view["command"].index("--max-compact-gb")
+    assert close_view["command"][compact_index + 1] == "8"
+    assert environment["COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST"] == (
+        "{dep_"
+        + v5.CLOSE_PAIR_VIEW_TASK_ID
+        + "_output}/close_pair_contract.json"
+    )
+    assert task["input_manifest"] == environment[
+        "COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST"
+    ]
+    assert any(
+        path.endswith("/pair_store/run_manifest.json")
+        for path in task["config_files"]
+    )
     assert environment["COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES"] == "0"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_PID"] == "273939"
     assert environment["AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS"] == "687141119"
@@ -469,6 +509,47 @@ def test_v5_payload_is_terminal_only_cpu_and_freezes_mut_dependency(
     assert headroom["free_bytes_at_build"] == 448 * 1024**3
     assert headroom["host_memfree_used"] is False
     assert summary["gpu_required"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("benchmark_limit", "benchmark contract"),
+        ("full_resume", "full close-pair scan contract"),
+        ("close_budget", "compact-copy bound"),
+        ("close_cpu_env", "compact-copy bound"),
+        ("science_input", "does not consume the exact snapshot"),
+    ],
+)
+def test_v5_rejects_paper_protocol_task_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    paths = _fixture(tmp_path, monkeypatch)
+    payload, _summary = v5.build_payload(spec_path=paths["spec"])
+    tasks = {entry["id"]: entry for entry in payload["tasks"]}
+    benchmark = tasks[v5.PAIR_SEMANTICS_BENCHMARK_TASK_ID]
+    full_scan = tasks[v5.PAIR_SEMANTICS_TASK_ID]
+    close_view = tasks[v5.CLOSE_PAIR_VIEW_TASK_ID]
+    science = tasks[v5.TASK_ID]
+    if mutation == "benchmark_limit":
+        index = benchmark["command"].index("--max-chunks")
+        benchmark["command"][index + 1] = "3"
+    elif mutation == "full_resume":
+        full_scan["command"].append("--resume")
+    elif mutation == "close_budget":
+        index = close_view["command"].index("--max-compact-gb")
+        close_view["command"][index + 1] = "9"
+    elif mutation == "close_cpu_env":
+        close_view["environment"]["OMP_NUM_THREADS"] = "2"
+    else:
+        science["input_manifest"] = str(
+            paths["snapshot_root"] / "pair_store/run_manifest.json"
+        )
+    with pytest.raises(RepairManifestError, match=message):
+        v5.validate_payload(payload)
 
 
 def _adoption_kwargs(paths: dict[str, Path], output: Path) -> dict[str, Any]:

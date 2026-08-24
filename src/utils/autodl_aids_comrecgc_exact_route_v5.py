@@ -49,6 +49,11 @@ CONTROLLER_ID = (
 TASK_ID = "aids_comrecgc_standardized_exact_route_v5_snapshot_adopt_v1"
 SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_snapshot_adopt_v1_selector_freeze"
 SNAPSHOT_TASK_ID = "aids_comrecgc_pair_store_snapshot_adoption_v5_v1"
+PAIR_SEMANTICS_BENCHMARK_TASK_ID = (
+    "aids_comrecgc_pair_semantics_greed_benchmark_v1"
+)
+PAIR_SEMANTICS_TASK_ID = "aids_comrecgc_pair_semantics_greed_full_v1"
+CLOSE_PAIR_VIEW_TASK_ID = "aids_comrecgc_theta_close_view_v1"
 SOURCE_NAMESPACE = "four_methods_four_datasets_continuation"
 REVIEWED_SOURCE_CORE_COMMIT = "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
 INTEGRATED_REVIEWED_CORE_COMMIT = "8c371b1c8ee1d8188555581c4f8e8b6060ae42eb"
@@ -703,6 +708,17 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     snapshot_dependency_root = "{dep_" + SNAPSHOT_TASK_ID + "_output}"
     adopted_snapshot_root = str(adopted_snapshot["snapshot_root"])
     snapshot_pair_root = adopted_snapshot_root + "/pair_store"
+    pair_semantics_benchmark_output = (
+        fresh_root / "pair_semantics_benchmark/attempt-{attempt}"
+    )
+    pair_semantics_output = fresh_root / "pair_semantics/attempt-{attempt}"
+    pair_semantics_dependency_root = (
+        "{dep_" + PAIR_SEMANTICS_TASK_ID + "_output}"
+    )
+    close_pair_view_output = fresh_root / "close_pair_view/attempt-{attempt}"
+    close_pair_view_dependency_root = (
+        "{dep_" + CLOSE_PAIR_VIEW_TASK_ID + "_output}"
+    )
     environment.update(
         {
             "AUTODL_PYTHON": "{python}",
@@ -727,6 +743,9 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL": "1",
             "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT": snapshot_pair_root,
             "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT": snapshot_pair_root,
+            "COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST": (
+                close_pair_view_dependency_root + "/close_pair_contract.json"
+            ),
             "COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB": "3",
             "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT": str(proc_root),
             "COMRECGC_EXTERNAL_ROUTE_LOCK": str(route_lock),
@@ -791,6 +810,8 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "COMRECGC_FLOCK_BIN": str(flock_bin),
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "TOKENIZERS_PARALLELISM": "false",
             "PYTHONDONTWRITEBYTECODE": "1",
             "RUN_TASTEMOLNET": "0",
         }
@@ -934,13 +955,181 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "live writer",
         ],
     }
+    pair_semantics_common_command = [
+        "{python}",
+        "{project_root}/scripts/autodl/run_aids_comrecgc_pair_semantics.py",
+        "--config",
+        "configs/hpc.yaml",
+        "--project-root",
+        "{project_root}",
+        "--upstream-root",
+        environment["COMRECGC_UPSTREAM_ROOT"],
+        "--dataset-dir",
+        environment["DATASET_DIR"],
+        "--source-csv",
+        environment["SOURCE_CSV"],
+        "--generation-dir",
+        environment["SOURCE_GENERATION_ROOT"],
+        "--distance-checkpoint",
+        environment["DISTANCE_CHECKPOINT"],
+        "--pair-store-manifest",
+        snapshot_pair_root + "/run_manifest.json",
+        "--expected-pair-store-manifest-sha256",
+        str(adopted_snapshot["pair_store_manifest_sha256"]),
+        "--parent-limit",
+        str(EXPECTED_PARENT_COUNT),
+        "--theta",
+        str(EXPECTED_PARAMETERS["theta"]),
+        "--device",
+        "cpu",
+        "--distance-batch-size",
+        "128",
+    ]
+    pair_semantics_environment = {
+        "GPU_REQUIRED": "0",
+        "CUDA_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "RUN_TASTEMOLNET": "0",
+    }
+    pair_semantics_benchmark_task = {
+        "id": PAIR_SEMANTICS_BENCHMARK_TASK_ID,
+        "dataset": "aids",
+        "stage": "AM_COMRECGC_HELDOUT_EVAL",
+        "runner_dataset": "paper-cell-aids-comrecgc-original-protocol-v1",
+        "runner_stage": "AM_COMRECGC_GREED_CLOSE_PAIR_BENCHMARK",
+        "depends_on": [SELECTOR_TASK_ID, SNAPSHOT_TASK_ID],
+        "resource": "cpu",
+        "priority": 2,
+        "manifest_only": False,
+        "data_splits": ["test"],
+        "selector_parameters_frozen": True,
+        "read_only_test": True,
+        "command": [
+            *pair_semantics_common_command,
+            "--output-dir",
+            "{task_output}",
+            "--max-chunks",
+            "2",
+            "--skip-source-array-hash-verification",
+        ],
+        "input_manifest": snapshot_pair_root + "/run_manifest.json",
+        "config_files": [str(base_manifest)],
+        # The benchmark and the full scan intentionally use distinct fresh
+        # roots.  The generic exp_run launcher rejects any nonempty output
+        # root, so cross-task resume would fail before the full scan starts.
+        # Recomputing 2/560 chunks is bounded and preserves no-clobber launch
+        # semantics for both tasks.
+        "expected_output": str(pair_semantics_benchmark_output),
+        "required_output_files": ["benchmark_result.json", "progress.json"],
+        "required_log_marker": "BENCHMARK_COMPLETE_NOT_SCIENTIFIC_PASS",
+        "environment": dict(pair_semantics_environment),
+        "semantic_failure_markers": [
+            "pair-store provenance contract failed",
+            "physical pair axes differ",
+            "dataset fingerprint differs",
+            "source binding failed",
+        ],
+    }
+    pair_semantics_task = {
+        "id": PAIR_SEMANTICS_TASK_ID,
+        "dataset": "aids",
+        "stage": "AM_COMRECGC_HELDOUT_EVAL",
+        "runner_dataset": "paper-cell-aids-comrecgc-original-protocol-v1",
+        "runner_stage": "AM_COMRECGC_GREED_CLOSE_PAIR_FULL",
+        "depends_on": [PAIR_SEMANTICS_BENCHMARK_TASK_ID],
+        "resource": "cpu",
+        "priority": 2,
+        "manifest_only": False,
+        "data_splits": ["test"],
+        "selector_parameters_frozen": True,
+        "read_only_test": True,
+        "command": [
+            *pair_semantics_common_command,
+            "--output-dir",
+            "{task_output}",
+        ],
+        "input_manifest": snapshot_pair_root + "/run_manifest.json",
+        "config_files": [str(base_manifest)],
+        "expected_output": str(pair_semantics_output),
+        "required_output_files": [
+            "pair_semantics_audit.json",
+            "close_pair_contract.json",
+            "distance_scan/run_manifest.json",
+            "PASS",
+        ],
+        "required_log_marker": "[AIDS_CLOSE_PAIR_FILTER_PASS]",
+        "environment": dict(pair_semantics_environment),
+        "semantic_failure_markers": [
+            "pair-store provenance contract failed",
+            "physical pair axes differ",
+            "read-only source stat identity changed",
+            "direct pair-store SHA256 differs",
+            "non-finite values",
+        ],
+    }
+    close_pair_view_task = {
+        "id": CLOSE_PAIR_VIEW_TASK_ID,
+        "dataset": "aids",
+        "stage": "AM_COMRECGC_HELDOUT_EVAL",
+        "runner_dataset": "paper-cell-aids-comrecgc-original-protocol-v1",
+        "runner_stage": "AM_COMRECGC_THETA_CLOSE_VIEW",
+        "depends_on": [PAIR_SEMANTICS_TASK_ID],
+        "resource": "cpu",
+        "priority": 2,
+        "manifest_only": False,
+        "data_splits": ["test"],
+        "selector_parameters_frozen": True,
+        "read_only_test": True,
+        "command": [
+            "{python}",
+            "{project_root}/scripts/baselines/comrecgc/build_close_pair_view.py",
+            "--config",
+            "configs/hpc.yaml",
+            "--pair-semantics-contract",
+            pair_semantics_dependency_root + "/close_pair_contract.json",
+            "--physical-vectors",
+            snapshot_pair_root + "/recourse_vectors.npy",
+            "--normalized-distances",
+            (
+                pair_semantics_dependency_root
+                + "/distance_scan/normalized_distances.greed.float32.npy"
+            ),
+            "--all-pairs-close-certificate",
+            pair_semantics_dependency_root + "/all_pairs_close_certificate.json",
+            "--output-dir",
+            "{task_output}",
+            "--max-compact-gb",
+            "8",
+        ],
+        "input_manifest": pair_semantics_dependency_root + "/close_pair_contract.json",
+        "config_files": [str(base_manifest)],
+        "expected_output": str(close_pair_view_output),
+        "required_output_files": ["close_pair_contract.json", "PASS"],
+        "required_log_marker": "[COMRECGC_CLOSE_PAIR_VIEW_PASS]",
+        "environment": dict(pair_semantics_environment),
+        "semantic_failure_markers": [
+            "CLOSE_PAIR_VIEW_BLOCKED_STORAGE",
+            "all-pairs-close certificate",
+            "physical vector source",
+            "logical theta-close manifest",
+        ],
+    }
     task = {
         "id": TASK_ID,
         "dataset": "aids",
         "stage": "AM_COMRECGC_HELDOUT_EVAL",
         "runner_dataset": "paper-cell-aids-comrecgc-exact-route-v5",
         "runner_stage": "AM_COMRECGC_HELDOUT_EVAL",
-        "depends_on": [SELECTOR_TASK_ID, SNAPSHOT_TASK_ID],
+        "depends_on": [
+            SELECTOR_TASK_ID,
+            SNAPSHOT_TASK_ID,
+            PAIR_SEMANTICS_TASK_ID,
+            CLOSE_PAIR_VIEW_TASK_ID,
+        ],
         "resource": "cpu",
         "priority": 1,
         "data_splits": ["test"],
@@ -951,8 +1140,15 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "bash",
             "{project_root}/scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh",
         ],
-        "input_manifest": snapshot_pair_root + "/run_manifest.json",
-        "config_files": [str(base_manifest), environment["THRESHOLDS_PATH"]],
+        # The logical theta-close view is the scientific DBSCAN input.  Keep
+        # the physical snapshot as a separately hashed config/source and let
+        # exp_run bind its primary input hash to the close-view manifest.
+        "input_manifest": close_pair_view_dependency_root + "/close_pair_contract.json",
+        "config_files": [
+            str(base_manifest),
+            environment["THRESHOLDS_PATH"],
+            snapshot_pair_root + "/run_manifest.json",
+        ],
         "expected_output": str(expected_output),
         "required_output_files": list(STANDARDIZED_REQUIRED_FILES),
         "required_log_marker": "[COMRECGC_STANDARDIZED_CONTINUATION_PASS] dataset=aids",
@@ -963,6 +1159,8 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "sklearn version mismatch",
             "rss budget exceeded",
             "exact_dbscan_complexity_blocked",
+            "UNPROVEN_CARTESIAN_DBSCAN_INPUT",
+            "logical theta-close manifest",
             "test leakage",
         ],
     }
@@ -998,6 +1196,37 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "dbscan_contract_required": True,
             "full_closure_reopened_before_adoption_pass": True,
             "full_closure_reopened_before_science": True,
+        },
+        "original_protocol": {
+            "official_comrecgc_commit": (
+                "122f9341a360e9f06bb58a2f5823bb596021f6bf"
+            ),
+            "physical_pair_count": EXPECTED_PAIR_COUNT,
+            "dbscan_input": "theta_close_recourse_vectors_only",
+            "theta": EXPECTED_PARAMETERS["theta"],
+            "filter_operator": "<=",
+            "delta": EXPECTED_PARAMETERS["delta"],
+            "min_samples": EXPECTED_PARAMETERS["cluster_size"],
+            "metric": "euclidean",
+            "self_neighbor_counted": True,
+            "pair_semantics_benchmark_task_id": (
+                PAIR_SEMANTICS_BENCHMARK_TASK_ID
+            ),
+            "pair_semantics_benchmark_expected_output": str(
+                pair_semantics_benchmark_output
+            ),
+            "pair_semantics_task_id": PAIR_SEMANTICS_TASK_ID,
+            "pair_semantics_expected_output": str(pair_semantics_output),
+            "close_pair_view_task_id": CLOSE_PAIR_VIEW_TASK_ID,
+            "close_pair_view_expected_output": str(close_pair_view_output),
+            "benchmark_chunks": 2,
+            "benchmark_is_scientific_pass": False,
+            "full_scan_resumes_benchmark_root": False,
+            "full_scan_recomputes_benchmark_chunks": True,
+            "partial_close_compact_copy_limit_gb": 8,
+            "full_25gb_copy_forbidden": True,
+            "physical_pair_store_regenerated": False,
+            "physical_pair_store_copied": False,
         },
         "fresh_output_root": str(fresh_root),
         "gpu_required": False,
@@ -1065,7 +1294,14 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "max_cpu_load_fraction": 0.95,
         },
         "aids_comrecgc_exact_route_v5_contract": contract,
-        "tasks": [selector_task, snapshot_task, task],
+        "tasks": [
+            selector_task,
+            snapshot_task,
+            pair_semantics_benchmark_task,
+            pair_semantics_task,
+            close_pair_view_task,
+            task,
+        ],
     }
     validation = validate_payload(payload)
     return payload, {
@@ -1087,18 +1323,30 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if manifest.controller_id != CONTROLLER_ID or set(manifest.by_id) != {
         SNAPSHOT_TASK_ID,
         SELECTOR_TASK_ID,
+        PAIR_SEMANTICS_BENCHMARK_TASK_ID,
+        PAIR_SEMANTICS_TASK_ID,
+        CLOSE_PAIR_VIEW_TASK_ID,
         TASK_ID,
     }:
         raise RepairManifestError(
-            "AIDS v5 must contain exactly snapshot, selector, and terminal science tasks"
+            "AIDS v5 paper protocol must contain exactly six serialized tasks"
         )
     task = manifest.by_id[TASK_ID]
     selector = manifest.by_id[SELECTOR_TASK_ID]
     snapshot_task = manifest.by_id[SNAPSHOT_TASK_ID]
+    benchmark_task = manifest.by_id[PAIR_SEMANTICS_BENCHMARK_TASK_ID]
+    pair_semantics_task = manifest.by_id[PAIR_SEMANTICS_TASK_ID]
+    close_pair_view_task = manifest.by_id[CLOSE_PAIR_VIEW_TASK_ID]
     if (
         selector.stage != "AM_COMRECGC_THRESHOLD_FREEZE"
         or not selector.freezes_selector
-        or task.depends_on != (SELECTOR_TASK_ID, SNAPSHOT_TASK_ID)
+        or task.depends_on
+        != (
+            SELECTOR_TASK_ID,
+            SNAPSHOT_TASK_ID,
+            PAIR_SEMANTICS_TASK_ID,
+            CLOSE_PAIR_VIEW_TASK_ID,
+        )
     ):
         raise RepairManifestError("AIDS v5 selector-freeze dependency changed")
     if snapshot_task.resource != "cpu":
@@ -1127,6 +1375,117 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         != "[AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_PASS]"
     ):
         raise RepairManifestError("AIDS v5 snapshot adoption artifact contract changed")
+    expected_benchmark_output = str(
+        payload["aids_comrecgc_exact_route_v5_contract"]["original_protocol"][
+            "pair_semantics_benchmark_expected_output"
+        ]
+    )
+    expected_pair_output = str(
+        payload["aids_comrecgc_exact_route_v5_contract"]["original_protocol"][
+            "pair_semantics_expected_output"
+        ]
+    )
+    expected_pair_environment = {
+        "GPU_REQUIRED": "0",
+        "CUDA_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "RUN_TASTEMOLNET": "0",
+    }
+    if (
+        benchmark_task.resource != "cpu"
+        or benchmark_task.depends_on != (SELECTOR_TASK_ID, SNAPSHOT_TASK_ID)
+        or benchmark_task.expected_output != expected_benchmark_output
+        or benchmark_task.expected_output == pair_semantics_task.expected_output
+        or benchmark_task.required_output_files
+        != ("benchmark_result.json", "progress.json")
+        or benchmark_task.required_log_marker
+        != "BENCHMARK_COMPLETE_NOT_SCIENTIFIC_PASS"
+        or benchmark_task.command[-5:]
+        != (
+            "--output-dir",
+            "{task_output}",
+            "--max-chunks",
+            "2",
+            "--skip-source-array-hash-verification",
+        )
+        or benchmark_task.environment != expected_pair_environment
+    ):
+        raise RepairManifestError("AIDS close-pair benchmark contract changed")
+    if (
+        pair_semantics_task.resource != "cpu"
+        or pair_semantics_task.depends_on
+        != (PAIR_SEMANTICS_BENCHMARK_TASK_ID,)
+        or pair_semantics_task.expected_output != expected_pair_output
+        or pair_semantics_task.required_output_files
+        != (
+            "pair_semantics_audit.json",
+            "close_pair_contract.json",
+            "distance_scan/run_manifest.json",
+            "PASS",
+        )
+        or pair_semantics_task.required_log_marker
+        != "[AIDS_CLOSE_PAIR_FILTER_PASS]"
+        or pair_semantics_task.command[-2:]
+        != ("--output-dir", "{task_output}")
+        or pair_semantics_task.command[:-2] != benchmark_task.command[:-5]
+        or pair_semantics_task.input_manifest != benchmark_task.input_manifest
+        or not pair_semantics_task.input_manifest.endswith(
+            "/pair_store/run_manifest.json"
+        )
+        or pair_semantics_task.environment != expected_pair_environment
+    ):
+        raise RepairManifestError("AIDS full close-pair scan contract changed")
+    expected_close_output = str(
+        payload["aids_comrecgc_exact_route_v5_contract"]["original_protocol"][
+            "close_pair_view_expected_output"
+        ]
+    )
+    if (
+        close_pair_view_task.resource != "cpu"
+        or close_pair_view_task.depends_on != (PAIR_SEMANTICS_TASK_ID,)
+        or close_pair_view_task.expected_output != expected_close_output
+        or close_pair_view_task.required_output_files
+        != ("close_pair_contract.json", "PASS")
+        or close_pair_view_task.required_log_marker
+        != "[COMRECGC_CLOSE_PAIR_VIEW_PASS]"
+        or "--all-pairs-close-certificate" not in close_pair_view_task.command
+        or "--max-compact-gb" not in close_pair_view_task.command
+    ):
+        raise RepairManifestError("AIDS theta-close view contract changed")
+    compact_index = close_pair_view_task.command.index("--max-compact-gb")
+    pair_dependency = "{dep_" + PAIR_SEMANTICS_TASK_ID + "_output}"
+    snapshot_pair_root = str(Path(pair_semantics_task.input_manifest).parent)
+    expected_close_command = (
+        "{python}",
+        "{project_root}/scripts/baselines/comrecgc/build_close_pair_view.py",
+        "--config",
+        "configs/hpc.yaml",
+        "--pair-semantics-contract",
+        pair_dependency + "/close_pair_contract.json",
+        "--physical-vectors",
+        snapshot_pair_root + "/recourse_vectors.npy",
+        "--normalized-distances",
+        pair_dependency
+        + "/distance_scan/normalized_distances.greed.float32.npy",
+        "--all-pairs-close-certificate",
+        pair_dependency + "/all_pairs_close_certificate.json",
+        "--output-dir",
+        "{task_output}",
+        "--max-compact-gb",
+        "8",
+    )
+    if (
+        close_pair_view_task.command != expected_close_command
+        or close_pair_view_task.command[compact_index + 1] != "8"
+        or close_pair_view_task.input_manifest
+        != pair_dependency + "/close_pair_contract.json"
+        or close_pair_view_task.environment != expected_pair_environment
+    ):
+        raise RepairManifestError("AIDS theta-close compact-copy bound changed")
     if task.resource != "cpu" or task.command != (
         "bash",
         "{project_root}/scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh",
@@ -1164,6 +1523,11 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "COMRECGC_EXTERNAL_EXACT_FALLBACK_MAX_SAMPLES": "0",
         "COMRECGC_EXTERNAL_DBSCAN_SHORTCUT_MODE": (
             "all_core_one_component_adaptive_anchor_v1"
+        ),
+        "COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST": (
+            "{dep_"
+            + CLOSE_PAIR_VIEW_TASK_ID
+            + "_output}/close_pair_contract.json"
         ),
         "AIDS_COMRECGC_V5_MAX_SAME_ROOT_RESUMES": "1",
         "COMRECGC_HIGHMEM_LOCK_PATH": str(
@@ -1296,7 +1660,15 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         or task.environment.get("AIDS_COMRECGC_V5_SNAPSHOT_ROOT") != adopted_root
         or task.environment.get("AIDS_COMRECGC_V5_SNAPSHOT_ADOPTION_ROOT")
         != dependency_root
-        or task.input_manifest != adopted_root + "/pair_store/run_manifest.json"
+        or task.input_manifest
+        != "{dep_"
+        + CLOSE_PAIR_VIEW_TASK_ID
+        + "_output}/close_pair_contract.json"
+        or adopted_root + "/pair_store/run_manifest.json" not in task.config_files
+        or task.environment.get("COMRECGC_EXTERNAL_CLOSE_PAIR_VIEW_MANIFEST")
+        != "{dep_"
+        + CLOSE_PAIR_VIEW_TASK_ID
+        + "_output}/close_pair_contract.json"
     ):
         raise RepairManifestError("AIDS v5 science does not consume the exact snapshot")
     if any(
@@ -1385,7 +1757,7 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "status": "PASS",
         "controller_id": CONTROLLER_ID,
         "task_id": TASK_ID,
-        "task_count": 3,
+        "task_count": 6,
         "gpu_required": False,
         "manifest_sha256": manifest.sha256,
     }
@@ -1418,8 +1790,11 @@ def build_manifest(*, spec_path: str | Path, output_path: str | Path) -> dict[st
 
 __all__ = [
     "CONTROLLER_ID",
+    "CLOSE_PAIR_VIEW_TASK_ID",
     "EXPECTED_PAIR_COUNT",
     "INTEGRATED_REVIEWED_CORE_COMMIT",
+    "PAIR_SEMANTICS_BENCHMARK_TASK_ID",
+    "PAIR_SEMANTICS_TASK_ID",
     "REVIEWED_CORE_COMMIT",
     "REVIEWED_CORE_FILE_IDENTITIES",
     "REVIEWED_SOURCE_CORE_COMMIT",
