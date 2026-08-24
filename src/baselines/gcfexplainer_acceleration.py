@@ -340,6 +340,40 @@ class BufferedVRRWLogging(AbstractContextManager["BufferedVRRWLogging"]):
             self._original = None
 
 
+class OfficialCPUCUDAHousekeeping(
+    AbstractContextManager["OfficialCPUCUDAHousekeeping"]
+):
+    """Neutralize the official inference-only ``set_device('cpu')`` call.
+
+    Official ``importance.call`` invokes ``torch.cuda.set_device`` even when
+    both models are explicitly on CPU.  PyTorch rejects a CPU device there.
+    This bounded compatibility patch changes only that housekeeping call; all
+    model, graph, RNG and transition code remains untouched.
+    """
+
+    def __init__(self, importance: Any) -> None:
+        self.importance = importance
+        self._original: Callable[..., Any] | None = None
+
+    def __enter__(self) -> "OfficialCPUCUDAHousekeeping":
+        cuda = self.importance.torch.cuda
+        original = cuda.set_device
+        self._original = original
+
+        def set_device(device: Any) -> Any:
+            if str(device).strip().lower() == "cpu":
+                return None
+            return original(device)
+
+        cuda.set_device = set_device
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self._original is not None:
+            self.importance.torch.cuda.set_device = self._original
+            self._original = None
+
+
 def _tensor_digest(value: Any) -> str:
     tensor = value.detach().cpu()
     if getattr(tensor, "is_sparse", False):
@@ -1040,6 +1074,7 @@ __all__ = [
     "OrderedImportanceAcceleration",
     "OrderedNeighbourAcceleration",
     "LockstepVRRWTrace",
+    "OfficialCPUCUDAHousekeeping",
     "VRRWPhaseProfiler",
     "build_acceleration_gate",
     "build_vrrw_equivalence_trace",

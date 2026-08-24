@@ -13,6 +13,7 @@ from src.baselines.gcfexplainer_acceleration import (
     BufferedVRRWLogging,
     GCFAccelerationConfig,
     LockstepVRRWTrace,
+    OfficialCPUCUDAHousekeeping,
     OrderedImportanceAcceleration,
     OrderedNeighbourAcceleration,
     build_acceleration_gate,
@@ -176,6 +177,22 @@ def test_quick50_lockstep_wrapper_is_fail_closed_and_preserves_old_full() -> Non
     assert "139725" not in text
 
 
+def test_cpu_lockstep_runs_quick100_only_after_quick50_exact_gates() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    text = (
+        project_root / "scripts/autodl/run_bace_gcf_cpu_lockstep.sh"
+    ).read_text(encoding="utf-8")
+    assert "set -euo pipefail" in text
+    assert 'export CUDA_VISIBLE_DEVICES=""' in text
+    assert "--device1 cpu" in text
+    assert "--device2 cpu" in text
+    assert text.index("run_budget 50") < text.index("run_budget 100")
+    assert "legacy_a_vs_legacy_b.json" in text
+    assert "legacy_a_vs_ordered_v2.json" in text
+    assert "kill" not in text
+    assert "139725" not in text
+
+
 def test_ordered_parallel_map_never_reorders_results() -> None:
     values = list(range(100))
     assert ordered_parallel_map(lambda value: value * value, values, workers=4) == [
@@ -191,6 +208,22 @@ def test_buffered_logging_keeps_iteration_sequence() -> None:
         assert calls == []
     assert list(module.tqdm(range(1))) == [0]
     assert calls == ["legacy"]
+
+
+def test_official_cpu_housekeeping_neutralizes_only_cpu_set_device() -> None:
+    calls: list[object] = []
+
+    def original(device: object) -> None:
+        calls.append(device)
+
+    cuda = SimpleNamespace(set_device=original)
+    importance = SimpleNamespace(torch=SimpleNamespace(cuda=cuda))
+    with OfficialCPUCUDAHousekeeping(importance):
+        importance.torch.cuda.set_device("cpu")
+        importance.torch.cuda.set_device("cuda:2")
+    assert calls == ["cuda:2"]
+    importance.torch.cuda.set_device("cpu")
+    assert calls == ["cuda:2", "cpu"]
 
 
 def test_ordered_adapter_preserves_duplicate_rows_and_legacy_batch_shape(

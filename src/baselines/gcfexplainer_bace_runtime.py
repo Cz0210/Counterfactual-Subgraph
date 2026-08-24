@@ -35,6 +35,7 @@ from src.baselines.gcfexplainer_acceleration import (
     GCFAccelerationConfig,
     LEGACY_ACCELERATION_MODE,
     LockstepVRRWTrace,
+    OfficialCPUCUDAHousekeeping,
     ORDERED_ACCELERATION_MODE,
     OrderedImportanceAcceleration,
     OrderedNeighbourAcceleration,
@@ -89,6 +90,9 @@ from src.baselines.gcfexplainer_mutagenicity_runtime import (
     _torch_save_compat,
     importlib_import_from_official,
 )
+
+
+BACE_GCF_CPU_HOUSEKEEPING_PATCH = "official_importance_set_device_cpu_noop_v1"
 
 
 def _reuse_complete(root: Path, *, resume: bool) -> dict[str, Any] | None:
@@ -441,6 +445,13 @@ def run_bace_official_vrrw(
         raise ValueError("BACE NeuroSED projection checkpoint hash mismatch.")
     if _neurosed_input_dim(neurosed) != schema.node_feature_dim:
         raise ValueError("BACE NeuroSED input dimension does not match BACE schema.")
+    cpu_only_route = (
+        str(device1).strip().lower() == "cpu"
+        and str(device2).strip().lower() == "cpu"
+    )
+    compatibility_patches = [VRRW_ALPHA_ENDPOINT_PATCH]
+    if cpu_only_route:
+        compatibility_patches.append(BACE_GCF_CPU_HOUSEKEEPING_PATCH)
     config = {
         "dataset": DATASET,
         "dataset_name": "bace",
@@ -478,7 +489,8 @@ def run_bace_official_vrrw(
         "dataset_fingerprint": dataset_summary.get("generation_source_cohort_hash"),
         "calibration_loaded": False,
         "test_loaded": False,
-        "official_compatibility_patches": [VRRW_ALPHA_ENDPOINT_PATCH],
+        "official_compatibility_patches": compatibility_patches,
+        "cpu_only_route": cpu_only_route,
         "acceleration": {
             **asdict(acceleration),
             "fingerprint": acceleration.fingerprint,
@@ -539,6 +551,8 @@ def run_bace_official_vrrw(
     dataset = GraphRecordDataset(graphs, schema.node_feature_dim)
     target_device1 = _device_name(torch, device1)
     target_device2 = _device_name(torch, device2)
+    if cpu_only_route and (target_device1 != "cpu" or target_device2 != "cpu"):
+        raise ValueError("BACE GCF CPU-only route resolved a non-CPU device.")
     model, model_provenance = _load_bace_native_gnn(
         modules=modules,
         checkpoint=checkpoint,
@@ -617,9 +631,19 @@ def run_bace_official_vrrw(
         print("dataset=bace", flush=True)
         print(f"alpha={float(alpha)}", flush=True)
         print("official_source_modified=false", flush=True)
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats(target_device1)
+        profile_cuda_device = next(
+            (
+                value
+                for value in (target_device1, target_device2)
+                if str(value).startswith("cuda")
+            ),
+            None,
+        )
+        if torch.cuda.is_available() and profile_cuda_device is not None:
+            torch.cuda.reset_peak_memory_stats(profile_cuda_device)
         with ExitStack() as stack:
+            if cpu_only_route:
+                stack.enter_context(OfficialCPUCUDAHousekeeping(importance))
             if acceleration.cpu_neighbor_workers > 1:
                 stack.enter_context(
                     OrderedNeighbourAcceleration(
@@ -677,8 +701,8 @@ def run_bace_official_vrrw(
     gpu_total_bytes = 0
     peak_allocated_bytes = 0
     peak_reserved_bytes = 0
-    if torch.cuda.is_available():
-        device_object = torch.device(target_device1)
+    if torch.cuda.is_available() and profile_cuda_device is not None:
+        device_object = torch.device(profile_cuda_device)
         device_index = (
             torch.cuda.current_device()
             if device_object.index is None
