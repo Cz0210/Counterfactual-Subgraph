@@ -16,8 +16,15 @@ from scripts.autodl.verify_aids_comrecgc_v5_process_set import verify_process_se
 from src.baselines.comrecgc.external_memory_recourse import (
     PAIR_STORE_SCHEMA,
     _file_stat_identity,
-    _pair_store_source_root_guard,
+    _find_writable_process_references,
     _validate_pair_store_manifest,
+)
+from src.utils.aids_comrecgc_v5_snapshot import (
+    EXPECTED_CANDIDATE_COUNT as SNAPSHOT_EXPECTED_CANDIDATE_COUNT,
+    EXPECTED_PARENT_COUNT as SNAPSHOT_EXPECTED_PARENT_COUNT,
+    EXPECTED_ROWS as SNAPSHOT_EXPECTED_ROWS,
+    EXPECTED_VECTOR_DIM as SNAPSHOT_EXPECTED_VECTOR_DIM,
+    MIN_FREE_AFTER_BYTES as SNAPSHOT_MIN_FREE_AFTER_BYTES,
 )
 from src.utils import autodl_aids_comrecgc_repair_v3 as v3
 from src.utils.autodl_aids_comrecgc_repair_v4 import (
@@ -35,6 +42,7 @@ SPEC_SCHEMA = "aids_comrecgc_exact_route_v5_spec_v1"
 CONTROLLER_ID = "four_methods_four_datasets_aids_comrecgc_exact_route_v5"
 TASK_ID = "aids_comrecgc_standardized_exact_route_v5"
 SELECTOR_TASK_ID = "aids_comrecgc_exact_route_v5_selector_freeze"
+SNAPSHOT_TASK_ID = "aids_comrecgc_pair_store_physical_snapshot_v5"
 SOURCE_NAMESPACE = "four_methods_four_datasets_continuation"
 REVIEWED_SOURCE_CORE_COMMIT = "645c6e51b7abcdc5dd4a9e0a1226d71d020880da"
 INTEGRATED_REVIEWED_CORE_COMMIT = "8c371b1c8ee1d8188555581c4f8e8b6060ae42eb"
@@ -54,6 +62,13 @@ REVIEWED_CORE_FILE_IDENTITIES = {
     },
 }
 ROUTE_RELEASE_COMMIT = "a6cdfd51d19af7f390d1cbc9d00827c97baee150"
+SNAPSHOT_RELEASE_COMMIT = "87050d3e02f7e3468227eec44e31e86aad048dad"
+SNAPSHOT_RELEASE_FILE_IDENTITIES = {
+    "src/utils/aids_comrecgc_v5_snapshot.py": {
+        "git_blob": "695cded99653c72980982a18e04060884fa804ab",
+        "sha256": "8276cc7de0bc35709e0501f6c19404a597ca31b377437013754401de2859e81d",
+    },
+}
 MINIMUM_CGROUP_FREE_BYTES = 128 * 1024**3
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642
@@ -194,8 +209,40 @@ def _require_reviewed_core_equivalence(project_root: Path) -> dict[str, Any]:
     }
 
 
+def _require_snapshot_release(project_root: Path) -> dict[str, Any]:
+    ancestry = _require_ancestor(project_root, SNAPSHOT_RELEASE_COMMIT)
+    files: dict[str, dict[str, str]] = {}
+    for relative_path, expected in SNAPSHOT_RELEASE_FILE_IDENTITIES.items():
+        release_blob = _git_blob(
+            project_root,
+            commit=SNAPSHOT_RELEASE_COMMIT,
+            relative_path=relative_path,
+        )
+        current_path = project_root / relative_path
+        if release_blob != expected["git_blob"] or sha256_file(current_path) != expected[
+            "sha256"
+        ]:
+            raise RepairManifestError(
+                f"physical snapshot release content changed: {relative_path}"
+            )
+        files[relative_path] = {
+            "release_git_blob": release_blob,
+            "current_sha256": expected["sha256"],
+        }
+    return {
+        "release_commit": SNAPSHOT_RELEASE_COMMIT,
+        "execution_head": ancestry["execution_head"],
+        "release_commit_is_ancestor": True,
+        "files": files,
+    }
+
+
 def _terminal_source_evidence(
-    *, root: Path, expected_sha256: str, proc_root: Path
+    *,
+    root: Path,
+    expected_sha256: str,
+    proc_root: Path,
+    allowed_snapshot_writer_pid: int,
 ) -> dict[str, Any]:
     if root.is_symlink() or not root.resolve(strict=True).is_dir():
         raise RepairManifestError("terminal pair-store root must be a physical directory")
@@ -230,15 +277,19 @@ def _terminal_source_evidence(
         or parameters != EXPECTED_PARAMETERS
     ):
         raise RepairManifestError("terminal pair-store scientific identity changed")
-    guard = _pair_store_source_root_guard(
-        pair_store_root=root,
-        source_owner_root=root,
-        proc_root=proc_root,
-        reject_partial_files=True,
-    )
+    for entry in root.iterdir():
+        if entry.is_symlink():
+            raise RepairManifestError(f"terminal pair store has a symlink: {entry}")
+        if entry.name.endswith(".partial") or ".partial." in entry.name:
+            raise RepairManifestError(f"PAIR_STORE_SOURCE_HAS_PARTIAL:{entry}")
     _validate_pair_store_manifest(manifest_path, manifest)
     pairs_path = Path(str(manifest["pairs_path"])).resolve(strict=True)
     vectors_path = Path(str(manifest["vectors_path"])).resolve(strict=True)
+    writers = _find_writable_process_references(
+        [manifest_path, pairs_path, vectors_path], proc_root=proc_root
+    )
+    if any(int(row.get("pid", -1)) != int(allowed_snapshot_writer_pid) for row in writers):
+        raise RepairManifestError("terminal pair store has an unexpected live writer")
     return {
         "status": "PASS",
         "source_root": str(root),
@@ -254,7 +305,17 @@ def _terminal_source_evidence(
         "parent_count": EXPECTED_PARENT_COUNT,
         "candidate_count": EXPECTED_CANDIDATE_COUNT,
         "vector_dim": EXPECTED_VECTOR_DIM,
-        "source_guard": guard,
+        "source_guard": {
+            "status": "PASS",
+            "mode": "fresh_physical_snapshot_source_with_exact_old_writer",
+            "source_owner_root": str(root),
+            "allowed_writer_pid": int(allowed_snapshot_writer_pid),
+            "writers": writers,
+            "unexpected_writer_count": 0,
+            "partial_count": 0,
+            "symlink_count": 0,
+            "source_direct_adoption_forbidden": True,
+        },
     }
 
 
@@ -313,6 +374,9 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         or spec.get("controller_id") != CONTROLLER_ID
         or spec.get("paper_frozen") is not True
         or spec.get("run_tastemolnet") != 0
+        or spec.get("physical_snapshot_required") is not True
+        or int(spec.get("snapshot_min_free_after_bytes", -1))
+        != SNAPSHOT_MIN_FREE_AFTER_BYTES
     ):
         raise RepairManifestError("invalid AIDS exact-route v5 spec identity")
     project_root = _absolute(spec.get("project_root"), label="project root", kind="dir")
@@ -321,6 +385,14 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         raise RepairManifestError("v5 spec is not bound to execution HEAD")
     core_gate = _require_reviewed_core_equivalence(project_root)
     release_gate = _require_ancestor(project_root, ROUTE_RELEASE_COMMIT)
+    snapshot_release_gate = _require_snapshot_release(project_root)
+    if (
+        SNAPSHOT_EXPECTED_ROWS != EXPECTED_PAIR_COUNT
+        or SNAPSHOT_EXPECTED_VECTOR_DIM != EXPECTED_VECTOR_DIM
+        or SNAPSHOT_EXPECTED_PARENT_COUNT != EXPECTED_PARENT_COUNT
+        or SNAPSHOT_EXPECTED_CANDIDATE_COUNT != EXPECTED_CANDIDATE_COUNT
+    ):
+        raise RepairManifestError("snapshot and exact-route dimensions diverged")
     runtime_root = _absolute(spec.get("runtime_root"), label="runtime root", kind="dir")
     control_root = _absolute(spec.get("control_root"), label="control root", kind="dir")
     proc_root = _absolute(spec.get("proc_root"), label="proc root", kind="dir")
@@ -378,14 +450,6 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     ).resolve(strict=False)
     if highmem_lock != expected_highmem_lock or highmem_lock.is_symlink():
         raise RepairManifestError("AIDS v5 global high-memory lock identity changed")
-    terminal_root = _absolute(
-        spec.get("terminal_pair_store_root"), label="terminal pair-store root", kind="dir"
-    )
-    terminal = _terminal_source_evidence(
-        root=terminal_root,
-        expected_sha256=str(spec.get("terminal_pair_store_manifest_sha256") or ""),
-        proc_root=proc_root,
-    )
     allowed_old_raw = spec.get("allowed_old_read_only_process")
     if not isinstance(allowed_old_raw, Mapping):
         raise RepairManifestError("allowed old read-only process identity is missing")
@@ -397,6 +461,9 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
     )
     old_project_root = _absolute(
         allowed_old_raw.get("project_root"), label="old v4 project root", kind="dir"
+    )
+    terminal_root = _absolute(
+        spec.get("terminal_pair_store_root"), label="terminal pair-store root", kind="dir"
     )
     try:
         terminal_root.relative_to(old_output_root)
@@ -416,6 +483,12 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         or int(process_gate.get("active_common_recourse_count", -1)) != 1
     ):
         raise RepairManifestError("old read-only process must be present at v5 build")
+    terminal = _terminal_source_evidence(
+        root=terminal_root,
+        expected_sha256=str(spec.get("terminal_pair_store_manifest_sha256") or ""),
+        proc_root=proc_root,
+        allowed_snapshot_writer_pid=old_pid,
+    )
     generation_manifest = (
         Path(environment["SOURCE_GENERATION_ROOT"]) / "run_manifest.json"
     ).resolve(strict=True)
@@ -430,6 +503,9 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         != sha256_file(environment["DISTANCE_CHECKPOINT"])
     ):
         raise RepairManifestError("terminal pair store does not match frozen v4 inputs")
+    snapshot_output = fresh_root / "source_snapshot/attempt-{attempt}"
+    snapshot_dependency_root = "{dep_" + SNAPSHOT_TASK_ID + "_output}"
+    snapshot_pair_root = snapshot_dependency_root + "/pair_store"
     environment.update(
         {
             "AUTODL_PYTHON": "{python}",
@@ -452,8 +528,8 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "COMRECGC_EXTERNAL_SUMMARY_BLOCK_SIZE": "65536",
             "COMRECGC_EXPECTED_SKLEARN_VERSION": "1.7.2",
             "COMRECGC_EXTERNAL_REQUIRE_PROMOTED_FINAL": "1",
-            "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT": str(terminal_root),
-            "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT": str(terminal_root),
+            "COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT": snapshot_pair_root,
+            "COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT": snapshot_pair_root,
             "COMRECGC_EXTERNAL_VECTOR_CACHE_MIN_FREE_GB": "3",
             "COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT": str(proc_root),
             "COMRECGC_EXTERNAL_ROUTE_LOCK": str(route_lock),
@@ -465,6 +541,25 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256": old_cmdline_sha256,
             "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT": str(old_output_root),
             "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT": str(old_project_root),
+            "AIDS_COMRECGC_V5_SNAPSHOT_ROOT": snapshot_dependency_root,
+            "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(terminal_root),
+            "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
+                terminal["source_manifest_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT": str(proc_root),
+            "AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES": str(
+                SNAPSHOT_MIN_FREE_AFTER_BYTES
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS": str(EXPECTED_PAIR_COUNT),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM": str(
+                EXPECTED_VECTOR_DIM
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT": str(
+                EXPECTED_PARENT_COUNT
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT": str(
+                EXPECTED_CANDIDATE_COUNT
+            ),
             "COMRECGC_FLOCK_BIN": str(flock_bin),
             "OMP_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
@@ -516,13 +611,86 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "RUN_TASTEMOLNET": "0",
         },
     }
+    snapshot_task = {
+        "id": SNAPSHOT_TASK_ID,
+        "dataset": "aids",
+        # The source contains held-out parent rows, so the generic leakage gate
+        # classifies this copy as the same post-freeze held-out boundary even
+        # though the runner action itself is a byte-for-byte snapshot.
+        "stage": "AM_COMRECGC_HELDOUT_EVAL",
+        "runner_dataset": "paper-cell-aids-comrecgc-exact-route-v5",
+        "runner_stage": "AM_COMRECGC_PAIR_STORE_PHYSICAL_SNAPSHOT",
+        "depends_on": [SELECTOR_TASK_ID],
+        "resource": "cpu",
+        "priority": 0,
+        "manifest_only": False,
+        "data_splits": ["test"],
+        "selector_parameters_frozen": True,
+        "read_only_test": True,
+        "command": [
+            "bash",
+            "{project_root}/scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh",
+        ],
+        "input_manifest": str(terminal["source_manifest"]),
+        "config_files": [str(base_manifest)],
+        "expected_output": str(snapshot_output),
+        "required_output_files": [
+            "snapshot_manifest.json",
+            "dbscan_contract.json",
+            "pair_store/run_manifest.json",
+            "PASS",
+        ],
+        "required_log_marker": "[AIDS_COMRECGC_V5_SNAPSHOT_SUPERVISOR_PASS]",
+        "environment": {
+            "AUTODL_PYTHON": "{python}",
+            "OUTPUT_ROOT": "{task_output}",
+            "GPU_REQUIRED": "0",
+            "CUDA_VISIBLE_DEVICES": "",
+            "AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE": "0",
+            "AIDS_COMRECGC_V5_SNAPSHOT_MAX_SAME_ROOT_RESUMES": "1",
+            "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(terminal_root),
+            "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
+                terminal["source_manifest_sha256"]
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT": str(proc_root),
+            "AIDS_COMRECGC_V5_ALLOWED_OLD_PID": str(old_pid),
+            "AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS": str(old_start_ticks),
+            "AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256": old_cmdline_sha256,
+            "AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT": str(old_output_root),
+            "AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT": str(old_project_root),
+            "AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES": str(
+                SNAPSHOT_MIN_FREE_AFTER_BYTES
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS": str(EXPECTED_PAIR_COUNT),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM": str(
+                EXPECTED_VECTOR_DIM
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT": str(
+                EXPECTED_PARENT_COUNT
+            ),
+            "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT": str(
+                EXPECTED_CANDIDATE_COUNT
+            ),
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "RUN_TASTEMOLNET": "0",
+        },
+        "semantic_failure_markers": [
+            "source full-hash closure mismatch",
+            "unexpected source writer",
+            "snapshot destination",
+            "Cartesian pair-count identity mismatch",
+            "insufficient persistent snapshot headroom",
+        ],
+    }
     task = {
         "id": TASK_ID,
         "dataset": "aids",
         "stage": "AM_COMRECGC_HELDOUT_EVAL",
         "runner_dataset": "paper-cell-aids-comrecgc-exact-route-v5",
         "runner_stage": "AM_COMRECGC_HELDOUT_EVAL",
-        "depends_on": [SELECTOR_TASK_ID],
+        "depends_on": [SELECTOR_TASK_ID, SNAPSHOT_TASK_ID],
         "resource": "cpu",
         "priority": 1,
         "data_splits": ["test"],
@@ -533,7 +701,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "bash",
             "{project_root}/scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh",
         ],
-        "input_manifest": str(terminal["source_manifest"]),
+        "input_manifest": snapshot_pair_root + "/run_manifest.json",
         "config_files": [str(base_manifest), environment["THRESHOLDS_PATH"]],
         "expected_output": str(expected_output),
         "required_output_files": list(STANDARDIZED_REQUIRED_FILES),
@@ -556,8 +724,27 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
         "execution_commit": execution_commit,
         "reviewed_core_gate": core_gate,
         "route_release_gate": release_gate,
+        "snapshot_release_gate": snapshot_release_gate,
         "base_v4": base_evidence,
         "terminal_pair_store": terminal,
+        "physical_snapshot": {
+            "task_id": SNAPSHOT_TASK_ID,
+            "expected_output": str(snapshot_output),
+            "source_root": str(terminal_root),
+            "source_manifest_sha256": str(terminal["source_manifest_sha256"]),
+            "proc_root": str(proc_root),
+            "minimum_free_after_bytes": SNAPSHOT_MIN_FREE_AFTER_BYTES,
+            "expected_rows": EXPECTED_PAIR_COUNT,
+            "expected_vector_dim": EXPECTED_VECTOR_DIM,
+            "expected_parent_count": EXPECTED_PARENT_COUNT,
+            "expected_candidate_count": EXPECTED_CANDIDATE_COUNT,
+            "copy_mode": "sequential_physical_copy_fdatasync_link_noreplace_unlink",
+            "atomic_no_clobber_promotion": True,
+            "source_hardlinks_forbidden": True,
+            "source_writer_policy": "only_exact_frozen_old_generation_or_natural_exit",
+            "old_v4_signal_authorized": False,
+            "dbscan_contract_required": True,
+        },
         "fresh_output_root": str(fresh_root),
         "gpu_required": False,
         "parameters": EXPECTED_PARAMETERS,
@@ -624,7 +811,7 @@ def build_payload(*, spec_path: str | Path) -> tuple[dict[str, Any], dict[str, A
             "max_cpu_load_fraction": 0.95,
         },
         "aids_comrecgc_exact_route_v5_contract": contract,
-        "tasks": [selector_task, task],
+        "tasks": [selector_task, snapshot_task, task],
     }
     validation = validate_payload(payload)
     return payload, {
@@ -644,18 +831,56 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         v3._atomic_json(path, payload)
         manifest = load_controller_manifest(path)
     if manifest.controller_id != CONTROLLER_ID or set(manifest.by_id) != {
+        SNAPSHOT_TASK_ID,
         SELECTOR_TASK_ID,
         TASK_ID,
     }:
-        raise RepairManifestError("AIDS v5 must contain exactly selector gate and terminal-only task")
+        raise RepairManifestError(
+            "AIDS v5 must contain exactly snapshot, selector, and terminal science tasks"
+        )
     task = manifest.by_id[TASK_ID]
     selector = manifest.by_id[SELECTOR_TASK_ID]
+    snapshot_task = manifest.by_id[SNAPSHOT_TASK_ID]
     if (
         selector.stage != "AM_COMRECGC_THRESHOLD_FREEZE"
         or not selector.freezes_selector
-        or task.depends_on != (SELECTOR_TASK_ID,)
+        or task.depends_on != (SELECTOR_TASK_ID, SNAPSHOT_TASK_ID)
     ):
         raise RepairManifestError("AIDS v5 selector-freeze dependency changed")
+    if snapshot_task.resource != "cpu" or snapshot_task.command != (
+        "bash",
+        "{project_root}/scripts/autodl/run_aids_comrecgc_v5_snapshot_supervisor.sh",
+    ):
+        raise RepairManifestError("AIDS v5 physical snapshot launch contract changed")
+    if snapshot_task.depends_on != (SELECTOR_TASK_ID,):
+        raise RepairManifestError("AIDS v5 snapshot must follow selector freeze")
+    if (
+        snapshot_task.data_splits != ("test",)
+        or not snapshot_task.read_only_test
+        or not snapshot_task.selector_parameters_frozen
+        or snapshot_task.input_manifest
+        != str(
+            payload["aids_comrecgc_exact_route_v5_contract"]["terminal_pair_store"][
+                "source_manifest"
+            ]
+        )
+        or snapshot_task.expected_output
+        != str(
+            payload["aids_comrecgc_exact_route_v5_contract"]["physical_snapshot"][
+                "expected_output"
+            ]
+        )
+        or snapshot_task.required_output_files
+        != (
+            "snapshot_manifest.json",
+            "dbscan_contract.json",
+            "pair_store/run_manifest.json",
+            "PASS",
+        )
+        or snapshot_task.required_log_marker
+        != "[AIDS_COMRECGC_V5_SNAPSHOT_SUPERVISOR_PASS]"
+    ):
+        raise RepairManifestError("AIDS v5 snapshot artifact contract changed")
     if task.resource != "cpu" or task.command != (
         "bash",
         "{project_root}/scripts/autodl/run_aids_comrecgc_exact_route_v5_supervisor.sh",
@@ -706,6 +931,52 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
     if any(task.environment.get(key) != value for key, value in required.items()):
         raise RepairManifestError("AIDS v5 production environment is incomplete")
+    snapshot_contract = contract.get("physical_snapshot")
+    if not isinstance(snapshot_contract, Mapping):
+        raise RepairManifestError("AIDS v5 physical snapshot contract is missing")
+    snapshot_required = {
+        "AUTODL_PYTHON": "{python}",
+        "OUTPUT_ROOT": "{task_output}",
+        "GPU_REQUIRED": "0",
+        "CUDA_VISIBLE_DEVICES": "",
+        "AIDS_COMRECGC_V5_SNAPSHOT_TEST_MODE": "0",
+        "AIDS_COMRECGC_V5_SNAPSHOT_MAX_SAME_ROOT_RESUMES": "1",
+        "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT": str(
+            snapshot_contract.get("source_root")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256": str(
+            snapshot_contract.get("source_manifest_sha256")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT": str(
+            snapshot_contract.get("proc_root")
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES": str(
+            SNAPSHOT_MIN_FREE_AFTER_BYTES
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS": str(EXPECTED_PAIR_COUNT),
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM": str(EXPECTED_VECTOR_DIM),
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT": str(
+            EXPECTED_PARENT_COUNT
+        ),
+        "AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT": str(
+            EXPECTED_CANDIDATE_COUNT
+        ),
+    }
+    if any(
+        snapshot_task.environment.get(key) != value
+        for key, value in snapshot_required.items()
+    ):
+        raise RepairManifestError("AIDS v5 snapshot production environment changed")
+    dependency_root = "{dep_" + SNAPSHOT_TASK_ID + "_output}"
+    if (
+        task.environment.get("COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT")
+        != dependency_root + "/pair_store"
+        or task.environment.get("COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT")
+        != dependency_root + "/pair_store"
+        or task.environment.get("AIDS_COMRECGC_V5_SNAPSHOT_ROOT") != dependency_root
+        or task.input_manifest != dependency_root + "/pair_store/run_manifest.json"
+    ):
+        raise RepairManifestError("AIDS v5 science does not consume the exact snapshot")
     if any(
         key in task.environment
         for key in (
@@ -740,11 +1011,27 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in process_environment.items()
     ):
         raise RepairManifestError("AIDS v5 old-process environment drifted")
+    if any(
+        snapshot_task.environment.get(key) != value
+        for key, value in process_environment.items()
+    ):
+        raise RepairManifestError("AIDS v5 snapshot old-process identity drifted")
     if (
         contract.get("parameters") != EXPECTED_PARAMETERS
         or contract.get("gpu_required") is not False
         or contract.get("old_v4_mutated") is not False
         or contract.get("old_v4_signal_authorized") is not False
+        or snapshot_contract.get("source_hardlinks_forbidden") is not True
+        or snapshot_contract.get("atomic_no_clobber_promotion") is not True
+        or snapshot_contract.get("copy_mode")
+        != "sequential_physical_copy_fdatasync_link_noreplace_unlink"
+        or snapshot_contract.get("source_writer_policy")
+        != "only_exact_frozen_old_generation_or_natural_exit"
+        or snapshot_contract.get("old_v4_signal_authorized") is not False
+        or snapshot_contract.get("dbscan_contract_required") is not True
+        or int(snapshot_contract.get("expected_rows", -1)) != EXPECTED_PAIR_COUNT
+        or int(snapshot_contract.get("expected_vector_dim", -1))
+        != EXPECTED_VECTOR_DIM
         or process_contract.get("status") != "PASS"
         or highmem_contract.get(
             "process_set_revalidated_before_every_attempt"
@@ -777,7 +1064,7 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "status": "PASS",
         "controller_id": CONTROLLER_ID,
         "task_id": TASK_ID,
-        "task_count": 2,
+        "task_count": 3,
         "gpu_required": False,
         "manifest_sha256": manifest.sha256,
     }
@@ -817,6 +1104,9 @@ __all__ = [
     "REVIEWED_SOURCE_CORE_COMMIT",
     "ROUTE_RELEASE_COMMIT",
     "SELECTOR_TASK_ID",
+    "SNAPSHOT_RELEASE_COMMIT",
+    "SNAPSHOT_RELEASE_FILE_IDENTITIES",
+    "SNAPSHOT_TASK_ID",
     "SPEC_SCHEMA",
     "TASK_ID",
     "build_manifest",

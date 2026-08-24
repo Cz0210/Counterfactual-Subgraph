@@ -9154,6 +9154,12 @@ Accepted
   arrays are adopted only after their complete content, size, schema, and
   distinct-inode proof pass.  Terminal publication is PASS-last and reuses the
   same whole-closure validator after a manifest-to-PASS crash window.
+- The old process is required when the builder freezes its generation, but a
+  queued snapshot accepts its verified natural exit before the first copy.
+  PID reuse and other common-recourse processes remain terminal errors.  A
+  fixed-name regular partial is removed and its directory fsynced before the
+  resume headroom calculation; symlink/non-regular partials and any partial
+  beside a promoted final remain corruption.
 - The snapshot contract freezes all 91,916,686 candidate-major/parent-minor
   rows and the 64-dimensional float32 vectors.  `pair_indices` is row
   provenance, never a precomputed distance/adjacency graph.  The downstream

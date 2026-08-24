@@ -10,6 +10,7 @@ PYTHON="${AUTODL_PYTHON:-/root/miniconda3/envs/smiles_pip118/bin/python}"
 INNER="$SCRIPT_DIR/run_comrecgc_standardized_continuation.sh"
 VERIFY_CLI="$PROJECT_ROOT/scripts/autodl/build_aids_comrecgc_repair_v4_manifest.py"
 PROCESS_GATE_CLI="$PROJECT_ROOT/scripts/autodl/verify_aids_comrecgc_v5_process_set.py"
+SNAPSHOT_CLI="$PROJECT_ROOT/scripts/autodl/snapshot_aids_comrecgc_pair_store.py"
 HANDOVER_MODULE="src.utils.aids_comrecgc_v5_lock_handover"
 SCIENCE_EXEC_MODULE="src.utils.aids_comrecgc_v5_science_exec"
 
@@ -26,6 +27,11 @@ SCIENCE_EXEC_MODULE="src.utils.aids_comrecgc_v5_science_exec"
 : "${AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT:?allowed old output root is required}"
 : "${AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT:?allowed old project root is required}"
 : "${COMRECGC_HIGHMEM_LOCK_PATH:?global high-memory lock is required}"
+: "${AIDS_COMRECGC_V5_SNAPSHOT_ROOT:?physical snapshot root is required}"
+: "${AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT:?snapshot source root is required}"
+: "${AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256:?snapshot source hash is required}"
+: "${AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT:?snapshot procfs root is required}"
+: "${AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES:?snapshot free floor is required}"
 
 [[ "${DATASET:-}" == "aids" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] DATASET must be aids" >&2; exit 64; }
 [[ "${DEVICE:-}" == "cpu" && "${GPU_REQUIRED:-}" == "0" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] CPU-only contract changed" >&2; exit 64; }
@@ -68,10 +74,43 @@ done
 [[ "$AIDS_COMRECGC_V5_ALLOWED_OLD_PID" =~ ^[1-9][0-9]*$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid old PID" >&2; exit 64; }
 [[ "$AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS" =~ ^[1-9][0-9]*$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid old start ticks" >&2; exit 64; }
 [[ "$AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid old command SHA256" >&2; exit 64; }
+[[ "$AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] invalid snapshot source SHA256" >&2; exit 64; }
+[[ "${AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS:-}" == "91916686" \
+   && "${AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM:-}" == "64" \
+   && "${AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT:-}" == "1283" \
+   && "${AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT:-}" == "71642" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] snapshot scientific dimensions changed" >&2; exit 64; }
+[[ "$AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT" == "$COMRECGC_EXTERNAL_VECTOR_CACHE_PROC_ROOT" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] snapshot procfs root changed" >&2; exit 64; }
+[[ "$COMRECGC_EXTERNAL_PAIR_STORE_AUTO_ROOT" == "$AIDS_COMRECGC_V5_SNAPSHOT_ROOT/pair_store" \
+   && "$COMRECGC_EXTERNAL_PAIR_STORE_SOURCE_OWNER_ROOT" == "$AIDS_COMRECGC_V5_SNAPSHOT_ROOT/pair_store" ]] || { echo "[AIDS_V5_SUPERVISOR_FAIL] science source is not the exact physical snapshot" >&2; exit 64; }
 
 export DEVICE=cpu
 export GPU_REQUIRED=0
 export CUDA_VISIBLE_DEVICES=""
+
+# The snapshot task publishes PASS-last, but the science process independently
+# reopens and hash-validates the full source/destination/DBSCAN closure.  This
+# is intentionally read-only and accepts only natural exit of the frozen old
+# generation, never PID reuse or an unexpected common-recourse process.
+if ! PYTHONPATH="$PROJECT_ROOT" "$PYTHON" "$SNAPSHOT_CLI" \
+    --config configs/hpc.yaml \
+    --source-root "$AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_ROOT" \
+    --expected-source-manifest-sha256 "$AIDS_COMRECGC_V5_SNAPSHOT_SOURCE_MANIFEST_SHA256" \
+    --output-dir "$AIDS_COMRECGC_V5_SNAPSHOT_ROOT" \
+    --proc-root "$AIDS_COMRECGC_V5_SNAPSHOT_PROC_ROOT" \
+    --allowed-pid "$AIDS_COMRECGC_V5_ALLOWED_OLD_PID" \
+    --allowed-start-ticks "$AIDS_COMRECGC_V5_ALLOWED_OLD_START_TICKS" \
+    --allowed-cmdline-sha256 "$AIDS_COMRECGC_V5_ALLOWED_OLD_CMDLINE_SHA256" \
+    --allowed-output-root "$AIDS_COMRECGC_V5_ALLOWED_OLD_OUTPUT_ROOT" \
+    --allowed-project-root "$AIDS_COMRECGC_V5_ALLOWED_OLD_PROJECT_ROOT" \
+    --min-free-after-bytes "$AIDS_COMRECGC_V5_SNAPSHOT_MIN_FREE_AFTER_BYTES" \
+    --expected-row-count "$AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_ROWS" \
+    --expected-vector-dim "$AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_VECTOR_DIM" \
+    --expected-parent-count "$AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_PARENT_COUNT" \
+    --expected-candidate-count "$AIDS_COMRECGC_V5_SNAPSHOT_EXPECTED_CANDIDATE_COUNT" \
+    --validate-only; then
+  echo "[AIDS_V5_SUPERVISOR_FAIL] physical snapshot closure validation failed" >&2
+  exit 75
+fi
 
 check_cgroup_headroom() {
   local quiet="${1:-0}"

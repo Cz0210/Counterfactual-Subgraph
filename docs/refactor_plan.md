@@ -1488,6 +1488,8 @@ Mutagenicity roadmaps.
   whole-closure validator.
 - [x] Make incomplete partials non-authoritative and prove same-root recovery
   across array-promotion and terminal-manifest/PASS crash windows.
+- [x] Close the builder-to-task natural-exit window and discard only fixed-name
+  regular partials before recalculating remaining-byte disk headroom.
 - [x] Freeze the Cartesian row formula, array shape/dtype, and exact sklearn
   DBSCAN semantics in a hash-bound `dbscan_contract.json`.
 - [ ] Wire the snapshot as a dependency of the fresh persistent v5 science
