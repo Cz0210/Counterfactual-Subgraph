@@ -9025,3 +9025,14 @@ Accepted
   the BACE paper cell.
 - These changes do not authorize mutation or termination of the active v5
   output.  Any diagnostic or replacement begins from a fresh immutable root.
+# 2026-08-24: diagnose COMRECGC generation divergence from JSON traces first
+
+- A failed legacy/optimized payload-count gate must still publish the earliest
+  actionable selected-transition and candidate-lineage difference.
+- The diagnostic reads only hash-bound JSON/JSONL trace artifacts; it does not
+  unpickle a failed scientific payload.
+- Python hashes of raw GNN embedding bytes are reported separately from stable
+  canonical graph SHA256 differences.  Official-hash drift alone cannot be
+  called a structural counterfactual difference.
+- The diagnostic is evidence only and is permanently paper-ineligible.  It
+  cannot release an optimized 50k run or weaken the formal M500 gate.

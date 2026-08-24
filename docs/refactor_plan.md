@@ -1426,3 +1426,11 @@ Mutagenicity roadmaps.
   expose it only through the frozen-GINE generic route.
 - [x] Hash-bind and revalidate the exact proof through training summary,
   summary, run manifest, completion gate, and final PASS.
+# 2026-08-24 COMRECGC deterministic divergence trace
+
+- [x] Add a safe JSON-only first-divergence report for selected transitions and
+  candidate lineage.
+- [ ] Use fresh legacy-vs-legacy and legacy-vs-optimized prefixes to separate
+  baseline GNN identity instability from preprocessing/order changes.
+- [ ] Re-run fresh M500 only after the first divergence is fixed; keep the old
+  formal 50k task running until the full equivalence and ETA gates pass.
