@@ -73,7 +73,7 @@ def _spec(
     python = Path(sys.executable).resolve(strict=True)
     authority_parent = tmp_path / "adoption-authority"
     authority_parent.mkdir()
-    cid = "aids_comrecgc_exact_recovery_v1_20260825T010203Z_deadbeef"
+    cid = "aids_comrecgc_multicomponent_exact_v2_20260825T010203Z_deadbeef"
     controller_root = tmp_path / cid
     controller_manifest_path = tmp_path / "controller-manifest.json"
     source_authority = _source_authority(tmp_path)
@@ -323,6 +323,7 @@ def _spec(
             ),
             "controller_max_launches": recovery.CONTROLLER_MAX_LAUNCHES,
             "controller_log_max_bytes": recovery.CONTROLLER_LOG_MAX_BYTES,
+            "old_brute_handover": recovery.handover_contract(),
             "safety_floor_bytes": recovery.DEFAULT_SAFETY_FLOOR_BYTES,
             "budget": budget,
             "max_rss_bytes": recovery.DEFAULT_MAX_RSS_BYTES,
@@ -464,6 +465,21 @@ def test_disk_preflight_enforces_separate_append_log_limit(
     ):
         recovery._disk_preflight(manifest)
     assert not (root / "PASS").exists()
+
+
+def test_status_reports_log_limit_overshoot_as_blocked(tmp_path: Path) -> None:
+    manifest_path, manifest = _built_manifest(tmp_path)
+    root = Path(manifest["controller_root"])
+    logs = root / "logs"
+    logs.mkdir(parents=True)
+    with (logs / "controller.fixture.log").open("wb") as stream:
+        stream.truncate(recovery.CONTROLLER_LOG_MAX_BYTES + 1)
+    status = recovery.controller_status(manifest_path)
+    assert status["controller_log_bytes"] == recovery.CONTROLLER_LOG_MAX_BYTES + 1
+    assert status["log_budget_exceeded"] is True
+    assert status["status"] == "OUTPUT_BUDGET_EXCEEDED"
+    assert status["scientific_progress_state"] == "BLOCKED"
+    assert status["route_viability"] == "BLOCKED"
 
 
 def test_state_growth_is_reserved_before_atomic_replace(
@@ -1186,12 +1202,20 @@ def test_status_uses_progress_freshness_not_historical_delta(
     }
     now = 10_000.0
     state["exact_progress_monitor"] = {
+        "schema_version": recovery.EXACT_PROGRESS_MONITOR_SCHEMA,
+        "controller_manifest_sha256": manifest_sha,
         "stage_id": recovery.EXACT_STAGE,
         "progress": monitored,
         "last_change_epoch": now - age,
+        "continuous_progress_since_epoch": None,
+        "continuous_start_progress": None,
+        "baseline_progress": 0,
         "observed_epoch": now - min(age, 1.0),
         "observed_at": "fixture",
     }
+    state["exact_progress_monitor"]["monitor_sha256"] = (
+        recovery.stable_json_sha256(state["exact_progress_monitor"])
+    )
     _write_json(root / "state.json", state)
     os.utime(checkpoint, (now - checkpoint_age, now - checkpoint_age))
     monkeypatch.setattr(recovery, "_pid_alive", lambda *args, **kwargs: True)
@@ -1700,6 +1724,29 @@ def test_prelaunch_history_has_a_hard_same_cid_launch_limit(
     assert sorted((root / "logs").glob("prelaunch.*.json")) == before
 
 
+def test_first_prelaunch_may_be_resume_after_root_claim_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(recovery, "_execution_tree_clean", lambda root: True)
+    monkeypatch.setattr(
+        recovery.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=100 * 1024**3),
+    )
+    manifest_path, manifest = _built_manifest(
+        tmp_path, pins_ready=True, deployment_authorized=True
+    )
+    launchable = recovery._load_launchable_manifest(manifest_path)
+    root = recovery._claim_controller_root(launchable, resume=False)
+    assert root == Path(manifest["controller_root"])
+    assert not list((root / "logs").glob("prelaunch.*.json"))
+
+    prepared = recovery.prepare_controller_launch(manifest_path, resume=True)
+    assert prepared["requested_mode"] == "resume"
+    assert prepared["launch_number"] == 1
+    assert len(list((root / "logs").glob("prelaunch.*.json"))) == 1
+
+
 def test_controller_lock_detects_concurrent_writer_and_replacement(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -1971,3 +2018,226 @@ def test_source_authority_rejects_failed_gate_relabelled_pass(tmp_path: Path) ->
     _write_json(spec_path, value)
     with pytest.raises(recovery.RecoveryControllerError, match="rerun/copy or bless"):
         recovery.build_controller_payload(spec_path)
+
+
+def test_resume_smoke_requires_a_second_controller_and_live_exact_reattachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "controller"
+    (root / "gates").mkdir(parents=True)
+    (root / "logs").mkdir()
+    (root / ".controller.lock").write_bytes(b"")
+    checkpoint_path = tmp_path / "exact/dbscan/checkpoint.json"
+    exact_stage = {
+        "stage_id": recovery.EXACT_STAGE,
+        "progress_checkpoint_path": str(checkpoint_path),
+    }
+    vector_sha = "a" * 64
+    manifest = {
+        "manifest_sha256": "b" * 64,
+        "controller_root": str(root),
+        "resources": {"proc_root": "/proc"},
+        "source_authority": {"source_vectors_sha256": vector_sha},
+        "stages": [exact_stage],
+    }
+    held = SimpleNamespace(identity=recovery._current_lock_identity(root))
+    state = {
+        "controller_process": None,
+        "worker": {
+            "stage_id": recovery.EXACT_STAGE,
+            "pid": 300,
+            "start_ticks": 33,
+            "argv_sha256": "c" * 64,
+        },
+        "resume_smoke": None,
+    }
+    current = {"pid": 200, "start_ticks": 22, "argv_sha256": "d" * 64}
+    assert recovery._record_resume_smoke_if_reattached(
+        manifest=manifest,
+        root=root,
+        state=state,
+        current_controller=current,
+        held=held,
+    ) is None
+    assert state["resume_smoke"] is None
+
+    state["controller_process"] = {
+        "pid": 100,
+        "start_ticks": 11,
+        "argv_sha256": "e" * 64,
+    }
+    monkeypatch.setattr(recovery, "_pid_alive", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        recovery,
+        "_validated_bound_worker_pid_for_signal",
+        lambda **kwargs: 300,
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_validated_exact_checkpoint_snapshot",
+        lambda stage: {
+            "path": str(checkpoint_path),
+            "sha256_at_observation": "f" * 64,
+            "checkpoint_payload_sha256": "0" * 64,
+            "identity_sha256": "1" * 64,
+            "progress_ledgers_sha256": "2" * 64,
+            "progress_rows": recovery.DEFAULT_BLOCK_SIZE,
+            "vectors_sha256": vector_sha,
+        },
+    )
+    receipt = recovery._record_resume_smoke_if_reattached(
+        manifest=manifest,
+        root=root,
+        state=state,
+        current_controller=current,
+        held=held,
+    )
+    assert receipt is not None
+    assert receipt["status"] == "PASS"
+    assert receipt["science_worker_reattached"] is True
+    assert receipt["signals_sent"] == []
+    assert receipt["previous_controller"]["pid"] == 100
+    assert receipt["resumed_controller"]["pid"] == 200
+
+
+def test_handover_checkpoint_reopens_authenticated_hash_chain(tmp_path: Path) -> None:
+    from src.baselines.comrecgc import external_memory_dbscan as dbscan
+
+    path = tmp_path / "checkpoint.json"
+    identity = {"vectors_sha256": "a" * 64}
+    ledger = dbscan._new_progress_ledger(
+        phase="shortcut_anchor_scan", identity=identity
+    )
+    dbscan._append_progress_entry(
+        ledger,
+        start=0,
+        stop=7,
+        payload={"fixture": True},
+    )
+    ledgers = {"shortcut_anchor_scan": ledger}
+    dbscan._checkpoint(
+        path,
+        identity=identity,
+        phase="shortcut_anchor_scan",
+        next_offset=7,
+        peak_rss_bytes=1,
+        extra=dbscan._progress_checkpoint_extra(ledgers, identity=identity),
+    )
+    snapshot = recovery._validated_exact_checkpoint_snapshot(
+        {"progress_checkpoint_path": str(path)}
+    )
+    assert snapshot["progress_rows"] == 7
+    assert snapshot["vectors_sha256"] == "a" * 64
+    assert snapshot["sha256_at_observation"] == recovery.sha256_file(path)
+    assert len(snapshot["checkpoint_payload_sha256"]) == 64
+
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["peak_rss_bytes"] = 2
+    _write_json(path, tampered)
+    with pytest.raises(
+        recovery.RecoveryControllerError,
+        match="checkpoint authentication changed",
+    ):
+        recovery._validated_exact_checkpoint_snapshot(
+            {"progress_checkpoint_path": str(path)}
+        )
+
+
+def test_aids_old_brute_graceful_stop_requires_typed_handover_and_sends_no_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 100_000.0
+    source = _source_authority(tmp_path)
+    vector_sha = str(source["source_vectors_sha256"])
+    exact_stage = {
+        "stage_id": recovery.EXACT_STAGE,
+        "progress_checkpoint_path": str(tmp_path / "checkpoint.json"),
+    }
+    manifest = {
+        "manifest_sha256": "f" * 64,
+        "project_root": str(Path(__file__).resolve().parents[2]),
+        "execution_commit": "a" * 40,
+        "release_pins": {"controller_commit": "b" * 40},
+        "release_ready": True,
+        "production_deployment_authorized": True,
+        "source_authority": source,
+        "stages": [exact_stage],
+    }
+    result = {
+        "status": "RUNNING",
+        "route_viability": "RUNNING_PROGRESSING",
+        "current_stage": recovery.EXACT_STAGE,
+        "scientific_worker_alive": True,
+        "stages": {recovery.ADOPTION_STAGE: "PASS"},
+    }
+    progress = 12_000_000
+    monitor = {
+        "schema_version": recovery.EXACT_PROGRESS_MONITOR_SCHEMA,
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "stage_id": recovery.EXACT_STAGE,
+        "progress": progress,
+        "baseline_progress": 0,
+        "continuous_start_progress": 0,
+        "continuous_progress_since_epoch": now - 601.0,
+        "last_change_epoch": now - 1.0,
+        "observed_epoch": now - 1.0,
+        "observed_at": "fixture",
+    }
+    monitor["monitor_sha256"] = recovery.stable_json_sha256(monitor)
+    state = {
+        "resume_smoke": {
+            "fixture": True,
+            "checkpoint_snapshot": {
+                "identity_sha256": "d" * 64,
+                "progress_rows": recovery.DEFAULT_BLOCK_SIZE,
+            },
+        },
+        "exact_progress_monitor": monitor,
+    }
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(recovery.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(recovery.time, "time", lambda: now)
+    monkeypatch.setattr(recovery, "_execution_tree_clean", lambda root: True)
+    monkeypatch.setattr(
+        recovery, "_release_commits_are_ancestors", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        recovery, "_validate_resume_smoke", lambda manifest, value: dict(value)
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_validated_exact_checkpoint_snapshot",
+        lambda stage: {
+            "path": stage["progress_checkpoint_path"],
+            "sha256_at_observation": "c" * 64,
+            "checkpoint_payload_sha256": "0" * 64,
+            "identity_sha256": "d" * 64,
+            "progress_ledgers_sha256": "e" * 64,
+            "progress_rows": progress,
+            "vectors_sha256": vector_sha,
+        },
+    )
+
+    handover = recovery._old_brute_handover_status(
+        manifest=manifest, result=result, state=state
+    )
+    assert handover["status"] == "ELIGIBLE"
+    assert handover["eligible_to_request_old_brute_stop"] is True
+    assert handover["conditions"]["continuous_progress_10m_pass"] is True
+    assert handover["conditions"]["eta_within_48h_pass"] is True
+    assert handover["conditions"]["relative_speedup_100x_pass"] is False
+    assert handover["conditions"]["eta_or_100x_pass"] is True
+    assert handover["external_old_route_speedup_evidence_required"] is False
+    assert handover["old_route_signal_authorized_here"] is False
+    assert handover["old_route_signal_sent"] is False
+    assert signals == []
+
+    blocked = dict(result)
+    blocked["status"] = "OUTPUT_BUDGET_EXCEEDED"
+    blocked["route_viability"] = "BLOCKED"
+    refused = recovery._old_brute_handover_status(
+        manifest=manifest, result=blocked, state=state
+    )
+    assert refused["eligible_to_request_old_brute_stop"] is False
+    assert refused["conditions"]["controller_status_allows_handover"] is False
+    assert signals == []

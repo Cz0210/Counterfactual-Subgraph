@@ -50,6 +50,7 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     SUBSET_MAX_ATTEMPTS,
     SUBSET_STAGE,
     derive_output_budget,
+    handover_contract,
     sha256_file,
     stable_json_sha256,
 )
@@ -425,7 +426,7 @@ def generate_production_spec(
     suffix = stable_json_sha256(
         {"adoption_receipt_sha256": sha256_file(receipt_path), "timestamp": when}
     )[:8]
-    cid = f"aids_comrecgc_exact_recovery_v1_{when}_{suffix}"
+    cid = f"aids_comrecgc_multicomponent_exact_v2_{when}_{suffix}"
     controller_root = parent / cid
     if controller_root.exists() or controller_root.is_symlink():
         raise RecoverySpecError("fresh controller CID/root already exists")
@@ -547,6 +548,7 @@ def generate_production_spec(
             ),
             "controller_max_launches": CONTROLLER_MAX_LAUNCHES,
             "controller_log_max_bytes": CONTROLLER_LOG_MAX_BYTES,
+            "old_brute_handover": handover_contract(),
             "safety_floor_bytes": DEFAULT_SAFETY_FLOOR_BYTES,
             "budget": budget,
             "max_rss_bytes": DEFAULT_MAX_RSS_BYTES,

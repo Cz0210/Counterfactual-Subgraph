@@ -49,6 +49,11 @@ FINAL_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_recovered_standardized_freeze_v1"
 COEXISTENCE_SCHEMA = "aids_comrecgc_exact_recovery_coexistence_probe_v2"
 RESOURCE_SCHEMA = "aids_comrecgc_exact_recovery_resource_budget_v1"
 PRELAUNCH_SCHEMA = "aids_comrecgc_exact_recovery_prelaunch_v1"
+RESUME_SMOKE_SCHEMA = "aids_comrecgc_exact_recovery_resume_smoke_v1"
+HANDOVER_SCHEMA = "aids_comrecgc_old_brute_handover_eligibility_v1"
+EXACT_PROGRESS_MONITOR_SCHEMA = (
+    "aids_comrecgc_exact_recovery_progress_monitor_v1"
+)
 EXACT_MONOTONIC_PROGRESS_FIELD = "component_recovery_monotonic_rows"
 CLOSURE_INVENTORY_SCHEMA = "aids_comrecgc_exact_recovery_stage_closure_inventory_v1"
 CLOSURE_REHASH_MAX_BYTES = 16 * 1024**2
@@ -61,6 +66,10 @@ STARTUP_BARRIER_RECORD_MAX_BYTES = EXEC_STARTUP_BARRIER_MAX_RECORD_BYTES
 STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER = 2
 CONTROLLER_MAX_LAUNCHES = 32
 CONTROLLER_LOG_MAX_BYTES = 256 * 1024**2
+HANDOVER_MIN_PROGRESS_SECONDS = 10 * 60
+HANDOVER_MAX_OBSERVATION_AGE_SECONDS = 2 * 60
+HANDOVER_MAX_ETA_SECONDS = 48 * 60 * 60
+HANDOVER_MIN_RELATIVE_SPEEDUP = 100.0
 OUTER_STARTUP_BARRIER_STAGE_COUNT = 4
 INNER_CONTINUATION_STAGE_COUNT = 5
 SUBSET_MAX_ATTEMPTS = 8
@@ -69,7 +78,7 @@ PARTIAL_STAGE_ARCHIVE_MAX_BYTES = 1024**3
 
 CONTROLLER_ID = "aids_comrecgc_exact_component_recovery_v1"
 CID_PATTERN = re.compile(
-    r"^aids_comrecgc_exact_recovery_v1_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$"
+    r"^aids_comrecgc_multicomponent_exact_v2_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$"
 )
 SCIENCE_RELEASE_COMMIT = "d8912ccb0901840ee1f0458ef66f630312024b0b"
 
@@ -129,6 +138,7 @@ EXPECTED_ROWS = 91_916_686
 EXPECTED_VECTOR_DIM = 64
 EXPECTED_PARENT_COUNT = 1_283
 EXPECTED_CANDIDATE_COUNT = 71_642
+HANDOVER_CONSERVATIVE_WORK_ROWS = 2 * EXPECTED_ROWS
 EXPECTED_SUBSET_NAMES = ("first", "random", "dense", "sparse", "theta_boundary")
 DEFAULT_SUBSET_SIZE = 2_000
 DEFAULT_BLOCK_SIZE = 65_536
@@ -790,6 +800,20 @@ def derive_output_budget(
     }
 
 
+def handover_contract() -> dict[str, Any]:
+    return {
+        "schema_version": HANDOVER_SCHEMA,
+        "minimum_continuous_progress_seconds": HANDOVER_MIN_PROGRESS_SECONDS,
+        "maximum_observation_age_seconds": (
+            HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+        ),
+        "maximum_new_route_eta_seconds": HANDOVER_MAX_ETA_SECONDS,
+        "minimum_relative_speedup": HANDOVER_MIN_RELATIVE_SPEEDUP,
+        "conservative_exact_work_rows": HANDOVER_CONSERVATIVE_WORK_ROWS,
+        "old_route_signal_authorized_here": False,
+    }
+
+
 def _validate_argv(
     value: Any,
     *,
@@ -1241,6 +1265,8 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
         raise RecoveryControllerError("resource retention contract changed")
     if int(resources.get("max_rss_bytes", 0)) != DEFAULT_MAX_RSS_BYTES:
         raise RecoveryControllerError("recovery RSS budget must remain 96GiB")
+    if resources.get("old_brute_handover") != handover_contract():
+        raise RecoveryControllerError("old-brute handover contract changed")
     if (
         resources.get("max_rss_scope")
         != "exact_dbscan_process_with_native_peak_certificate"
@@ -3275,6 +3301,271 @@ def _progress_value(stage: Mapping[str, Any]) -> int | None:
         return None
 
 
+def _validated_exact_checkpoint_snapshot(
+    stage: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Strictly reopen the hash-chained exact checkpoint for handover use."""
+
+    from src.baselines.comrecgc.external_memory_dbscan import (
+        SCHEMA_VERSION as DBSCAN_SCHEMA_VERSION,
+        _load_checkpoint,
+        _load_progress_ledgers,
+        _stable_hash,
+    )
+
+    path = _require_absolute(
+        stage.get("progress_checkpoint_path"),
+        label="exact handover checkpoint",
+        existing="file",
+    )
+    checkpoint_sha_before = sha256_file(path)
+    try:
+        checkpoint = _load_checkpoint(path)
+    except Exception as exc:
+        raise RecoveryControllerError(
+            "exact handover checkpoint authentication changed"
+        ) from exc
+    checkpoint_sha_after = sha256_file(path)
+    if checkpoint_sha_before != checkpoint_sha_after:
+        raise RecoveryControllerError(
+            "exact handover checkpoint changed during observation"
+        )
+    identity = checkpoint.get("identity")
+    if (
+        checkpoint.get("schema_version") != DBSCAN_SCHEMA_VERSION
+        or not isinstance(identity, Mapping)
+        or checkpoint.get("identity_sha256") != _stable_hash(identity)
+    ):
+        raise RecoveryControllerError("exact handover checkpoint identity changed")
+    try:
+        ledgers = _load_progress_ledgers(
+            checkpoint,
+            identity=identity,
+            num_samples=EXPECTED_ROWS,
+        )
+    except Exception as exc:
+        raise RecoveryControllerError(
+            "exact handover checkpoint ledger closure changed"
+        ) from exc
+    progress = 0
+    observed = False
+    for phase in (
+        "shortcut_anchor_scan",
+        "adaptive_component_expansion_scan",
+    ):
+        ledger = ledgers.get(phase)
+        if isinstance(ledger, Mapping):
+            committed = int(ledger.get("committed_offset", -1))
+            if committed < 0:
+                raise RecoveryControllerError(
+                    "exact handover checkpoint progress changed"
+                )
+            progress += committed
+            observed = True
+    if not observed:
+        raise RecoveryControllerError("exact handover checkpoint has no recovery ledger")
+    vectors_sha = identity.get("vectors_sha256")
+    if not _is_sha256(vectors_sha):
+        raise RecoveryControllerError("exact handover checkpoint vector SHA is absent")
+    return {
+        "path": str(path),
+        "sha256_at_observation": checkpoint_sha_after,
+        "checkpoint_payload_sha256": checkpoint["checkpoint_payload_sha256"],
+        "identity_sha256": checkpoint["identity_sha256"],
+        "progress_ledgers_sha256": checkpoint["progress_ledgers_sha256"],
+        "progress_rows": progress,
+        "vectors_sha256": vectors_sha,
+    }
+
+
+def _validate_resume_smoke(
+    manifest: Mapping[str, Any], value: Any
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RecoveryControllerError("exact resume smoke is absent")
+    projected = dict(value)
+    receipt_sha = projected.pop("receipt_sha256", None)
+    expected_keys = {
+        "schema_version",
+        "status",
+        "controller_manifest_sha256",
+        "previous_controller",
+        "resumed_controller",
+        "reattached_exact_worker",
+        "checkpoint_snapshot",
+        "controller_lock_identity",
+        "science_worker_reattached",
+        "signals_sent",
+        "recorded_at",
+        "receipt_sha256",
+    }
+    previous = value.get("previous_controller")
+    resumed = value.get("resumed_controller")
+    worker = value.get("reattached_exact_worker")
+    checkpoint = value.get("checkpoint_snapshot")
+    if (
+        set(value) != expected_keys
+        or value.get("schema_version") != RESUME_SMOKE_SCHEMA
+        or value.get("status") != "PASS"
+        or value.get("controller_manifest_sha256") != manifest["manifest_sha256"]
+        or not isinstance(previous, Mapping)
+        or not isinstance(resumed, Mapping)
+        or not isinstance(worker, Mapping)
+        or not isinstance(checkpoint, Mapping)
+        or int(previous.get("pid", 0)) <= 0
+        or int(previous.get("start_ticks", 0)) <= 0
+        or int(resumed.get("pid", 0)) <= 0
+        or int(resumed.get("start_ticks", 0)) <= 0
+        or (
+            int(previous["pid"]),
+            int(previous["start_ticks"]),
+        )
+        == (int(resumed["pid"]), int(resumed["start_ticks"]))
+        or int(worker.get("pid", 0)) <= 0
+        or int(worker.get("start_ticks", 0)) <= 0
+        or worker.get("stage_id") != EXACT_STAGE
+        or checkpoint.get("path")
+        != _stage(manifest, EXACT_STAGE)["progress_checkpoint_path"]
+        or int(checkpoint.get("progress_rows", 0)) <= 0
+        or not _is_sha256(checkpoint.get("sha256_at_observation"))
+        or not _is_sha256(checkpoint.get("checkpoint_payload_sha256"))
+        or not _is_sha256(checkpoint.get("identity_sha256"))
+        or not _is_sha256(checkpoint.get("progress_ledgers_sha256"))
+        or checkpoint.get("vectors_sha256")
+        != manifest["source_authority"]["source_vectors_sha256"]
+        or value.get("controller_lock_identity")
+        != _current_lock_identity(Path(manifest["controller_root"]))
+        or value.get("science_worker_reattached") is not True
+        or value.get("signals_sent") != []
+        or not isinstance(value.get("recorded_at"), str)
+        or not value.get("recorded_at")
+        or receipt_sha != stable_json_sha256(projected)
+    ):
+        raise RecoveryControllerError("exact resume smoke closure changed")
+    return dict(value)
+
+
+def _record_resume_smoke_if_reattached(
+    *,
+    manifest: Mapping[str, Any],
+    root: Path,
+    state: dict[str, Any],
+    current_controller: Mapping[str, Any],
+    held: HeldControllerLock,
+) -> dict[str, Any] | None:
+    existing = state.get("resume_smoke")
+    if existing is not None:
+        return _validate_resume_smoke(manifest, existing)
+    previous = state.get("controller_process")
+    worker = state.get("worker")
+    if not isinstance(previous, Mapping) or not isinstance(worker, Mapping):
+        return None
+    try:
+        previous_pid = int(previous["pid"])
+        previous_ticks = int(previous["start_ticks"])
+        current_pid = int(current_controller["pid"])
+        current_ticks = int(current_controller["start_ticks"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        previous_pid <= 0
+        or previous_ticks <= 0
+        or current_pid <= 0
+        or current_ticks <= 0
+        or (previous_pid, previous_ticks) == (current_pid, current_ticks)
+    ):
+        return None
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    if _pid_alive(previous_pid, previous_ticks, proc_root=proc_root):
+        raise RecoveryControllerError(
+            "previous controller generation is still alive during resume smoke"
+        )
+    exact_stage = _stage(manifest, EXACT_STAGE)
+    worker_pid = _validated_bound_worker_pid_for_signal(
+        root=root,
+        stage=exact_stage,
+        worker=worker,
+        proc_root=proc_root,
+    )
+    if worker_pid is None:
+        return None
+    checkpoint = _validated_exact_checkpoint_snapshot(exact_stage)
+    if int(checkpoint["progress_rows"]) <= 0:
+        return None
+    payload: dict[str, Any] = {
+        "schema_version": RESUME_SMOKE_SCHEMA,
+        "status": "PASS",
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "previous_controller": dict(previous),
+        "resumed_controller": dict(current_controller),
+        "reattached_exact_worker": {
+            "stage_id": EXACT_STAGE,
+            "pid": worker_pid,
+            "start_ticks": int(worker["start_ticks"]),
+            "argv_sha256": worker["argv_sha256"],
+        },
+        "checkpoint_snapshot": checkpoint,
+        "controller_lock_identity": held.identity,
+        "science_worker_reattached": True,
+        "signals_sent": [],
+        "recorded_at": _utc_now(),
+    }
+    payload["receipt_sha256"] = stable_json_sha256(payload)
+    state["resume_smoke"] = payload
+    return _validate_resume_smoke(manifest, payload)
+
+
+def _validate_exact_progress_monitor(
+    *, controller_manifest_sha256: str, value: Any
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RecoveryControllerError("exact progress monitor is absent")
+    expected_keys = {
+        "schema_version",
+        "controller_manifest_sha256",
+        "stage_id",
+        "progress",
+        "last_change_epoch",
+        "continuous_progress_since_epoch",
+        "continuous_start_progress",
+        "baseline_progress",
+        "observed_epoch",
+        "observed_at",
+        "monitor_sha256",
+    }
+    projected = dict(value)
+    monitor_sha = projected.pop("monitor_sha256", None)
+    continuous_since = value.get("continuous_progress_since_epoch")
+    continuous_start = value.get("continuous_start_progress")
+    if (
+        set(value) != expected_keys
+        or value.get("schema_version") != EXACT_PROGRESS_MONITOR_SCHEMA
+        or value.get("controller_manifest_sha256")
+        != controller_manifest_sha256
+        or value.get("stage_id") != EXACT_STAGE
+        or not isinstance(value.get("progress"), int)
+        or int(value.get("progress", -1)) < 0
+        or not isinstance(value.get("baseline_progress"), int)
+        or int(value.get("baseline_progress", -1)) < 0
+        or not isinstance(value.get("last_change_epoch"), (int, float))
+        or not isinstance(value.get("observed_epoch"), (int, float))
+        or (
+            continuous_since is not None
+            and not isinstance(continuous_since, (int, float))
+        )
+        or (
+            continuous_start is not None
+            and not isinstance(continuous_start, int)
+        )
+        or (continuous_since is None) != (continuous_start is None)
+        or not isinstance(value.get("observed_at"), str)
+        or not value.get("observed_at")
+        or monitor_sha != stable_json_sha256(projected)
+    ):
+        raise RecoveryControllerError("exact progress monitor closure changed")
+    return dict(value)
+
+
 def _stage_environment(manifest: Mapping[str, Any]) -> dict[str, str]:
     env = dict(os.environ)
     env.update(_frozen_stage_environment(manifest))
@@ -3292,6 +3583,7 @@ def _initial_state(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "controller_process": None,
         "worker": None,
         "startup_barrier": None,
+        "resume_smoke": None,
         "exact_coexistence_baseline": None,
         "exact_progress_monitor": None,
         "updated_at": _utc_now(),
@@ -3310,6 +3602,13 @@ def _load_state(root: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
         or set(value.get("stages", {})) != set(STAGE_ORDER)
     ):
         raise RecoveryControllerError("controller mutable state identity mismatch")
+    if value.get("resume_smoke") is not None:
+        _validate_resume_smoke(manifest, value["resume_smoke"])
+    if value.get("exact_progress_monitor") is not None:
+        _validate_exact_progress_monitor(
+            controller_manifest_sha256=manifest["manifest_sha256"],
+            value=value["exact_progress_monitor"],
+        )
     return value
 
 
@@ -3479,6 +3778,17 @@ def _update_exact_progress_monitor(
         return None
     now = time.time()
     existing = state.get("exact_progress_monitor")
+    if existing is not None:
+        existing = _validate_exact_progress_monitor(
+            controller_manifest_sha256=state["controller_manifest_sha256"],
+            value=existing,
+        )
+    baseline = state.get("exact_coexistence_baseline")
+    baseline_progress = (
+        int(baseline.get("start_progress", 0))
+        if isinstance(baseline, Mapping)
+        else 0
+    )
     if isinstance(existing, Mapping):
         previous = int(existing.get("progress", -1))
         if progress < previous:
@@ -3486,15 +3796,45 @@ def _update_exact_progress_monitor(
         changed_at = (
             now if progress > previous else float(existing.get("last_change_epoch", now))
         )
+        previous_observed = float(existing.get("observed_epoch", now))
+        observation_gap = max(0.0, now - previous_observed)
+        continuous_since = existing.get("continuous_progress_since_epoch")
+        continuous_start_progress = existing.get("continuous_start_progress")
+        if (
+            observation_gap > HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+            or not isinstance(continuous_since, (int, float))
+            or not isinstance(continuous_start_progress, int)
+        ):
+            if progress > baseline_progress:
+                continuous_since = now
+                continuous_start_progress = (
+                    previous
+                    if observation_gap <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+                    and previous >= baseline_progress
+                    else progress
+                )
+            else:
+                continuous_since = None
+                continuous_start_progress = None
     else:
         changed_at = now
+        continuous_since = now if progress > baseline_progress else None
+        continuous_start_progress = (
+            baseline_progress if progress > baseline_progress else None
+        )
     monitor = {
+        "schema_version": EXACT_PROGRESS_MONITOR_SCHEMA,
+        "controller_manifest_sha256": state["controller_manifest_sha256"],
         "stage_id": EXACT_STAGE,
         "progress": int(progress),
         "last_change_epoch": changed_at,
+        "continuous_progress_since_epoch": continuous_since,
+        "continuous_start_progress": continuous_start_progress,
+        "baseline_progress": baseline_progress,
         "observed_epoch": now,
         "observed_at": _utc_now(),
     }
+    monitor["monitor_sha256"] = stable_json_sha256(monitor)
     state["exact_progress_monitor"] = monitor
     return monitor
 
@@ -4212,10 +4552,6 @@ def _validated_prelaunch_history(
             raise RecoveryControllerError(
                 f"controller prelaunch receipt changed: {path}"
             )
-        if len(rows) == 0 and row.get("requested_mode") != "fresh":
-            raise RecoveryControllerError(
-                "first controller prelaunch receipt must be fresh"
-            )
         if len(rows) > 0 and row.get("requested_mode") != "resume":
             raise RecoveryControllerError(
                 "later controller prelaunch receipts must be resume"
@@ -4358,12 +4694,20 @@ def run_controller(
                 os.getpid(),
                 proc_root=Path(str(manifest["resources"].get("proc_root", "/proc"))),
             )
-            state["controller_process"] = {
+            current_controller = {
                 "pid": os.getpid(),
                 "start_ticks": controller_start_ticks,
                 "argv_sha256": stable_json_sha256(sys.argv),
                 "registered_at": _utc_now(),
             }
+            _record_resume_smoke_if_reattached(
+                manifest=manifest,
+                root=root,
+                state=state,
+                current_controller=current_controller,
+                held=held,
+            )
+            state["controller_process"] = current_controller
             _save_state(manifest, root, state, held.verify)
             for stage_id in STAGE_ORDER:
                 held.verify()
@@ -4476,6 +4820,262 @@ def run_controller(
             raise
 
 
+def _old_brute_handover_status(
+    *,
+    manifest: Mapping[str, Any],
+    result: Mapping[str, Any],
+    state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a read-only, fail-closed old-route handover certificate.
+
+    This controller never signals the legacy process.  A separate, reviewed
+    executor may consume ``eligible_to_request_old_brute_stop`` and must bind
+    the old worker independently before taking any graceful-stop action.
+    """
+
+    contract = handover_contract()
+    errors: dict[str, str] = {}
+    project_root = Path(str(manifest["project_root"]))
+    try:
+        release_ancestry_pass = _release_commits_are_ancestors(
+            project_root,
+            execution_commit=str(manifest["execution_commit"]),
+            pins=manifest["release_pins"],
+        )
+        execution_tree_clean = _execution_tree_clean(project_root)
+    except Exception as exc:
+        release_ancestry_pass = False
+        execution_tree_clean = False
+        errors["review_release"] = f"{type(exc).__name__}:{exc}"
+    review_release_pass = bool(
+        manifest.get("release_ready") is True
+        and manifest.get("production_deployment_authorized") is True
+        and release_ancestry_pass
+        and execution_tree_clean
+    )
+
+    adoption_gate_pass = result.get("stages", {}).get(ADOPTION_STAGE) == "PASS"
+    source = manifest.get("source_authority")
+    source_manifest_pass = False
+    pair_store_checksum_pass = False
+    if adoption_gate_pass and isinstance(source, Mapping):
+        try:
+            validated_source = _validate_source_authority(source)
+        except Exception as exc:
+            errors["source_manifest"] = f"{type(exc).__name__}:{exc}"
+        else:
+            source_manifest_pass = True
+            pair_store_checksum_pass = bool(
+                int(validated_source.get("physical_pair_count", -1))
+                == EXPECTED_ROWS
+                and validated_source.get("pair_store_regenerated") is False
+                and validated_source.get("source_pair_store_access")
+                == "read_only_zero_copy"
+                and _is_sha256(validated_source.get("pair_store_manifest_sha256"))
+                and _is_sha256(validated_source.get("physical_pairs_sha256"))
+                and _is_sha256(
+                    validated_source.get("normalized_distances_sha256")
+                )
+                and _is_sha256(validated_source.get("close_bitmap_sha256"))
+                and _is_sha256(validated_source.get("source_vectors_sha256"))
+            )
+
+    resume_smoke_pass = False
+    resume_smoke: dict[str, Any] | None = None
+    if isinstance(state, Mapping) and state.get("resume_smoke") is not None:
+        try:
+            resume_smoke = _validate_resume_smoke(
+                manifest, state.get("resume_smoke")
+            )
+        except Exception as exc:
+            errors["resume_smoke"] = f"{type(exc).__name__}:{exc}"
+        else:
+            resume_smoke_pass = True
+
+    checkpoint: dict[str, Any] | None = None
+    try:
+        checkpoint = _validated_exact_checkpoint_snapshot(
+            _stage(manifest, EXACT_STAGE)
+        )
+    except Exception as exc:
+        errors["first_durable_checkpoint"] = f"{type(exc).__name__}:{exc}"
+    first_durable_checkpoint_pass = bool(
+        checkpoint is not None
+        and int(checkpoint.get("progress_rows", 0)) > 0
+        and checkpoint.get("vectors_sha256")
+        == manifest["source_authority"]["source_vectors_sha256"]
+    )
+    if resume_smoke_pass and checkpoint is not None and resume_smoke is not None:
+        resume_checkpoint = resume_smoke["checkpoint_snapshot"]
+        if (
+            checkpoint.get("identity_sha256")
+            != resume_checkpoint.get("identity_sha256")
+            or int(checkpoint.get("progress_rows", -1))
+            < int(resume_checkpoint.get("progress_rows", 0))
+        ):
+            resume_smoke_pass = False
+            errors["resume_smoke_checkpoint"] = (
+                "current checkpoint no longer extends resume-smoke checkpoint"
+            )
+
+    monitor = (
+        state.get("exact_progress_monitor")
+        if isinstance(state, Mapping)
+        else None
+    )
+    now = time.time()
+    observation_age_seconds: float | None = None
+    last_change_age_seconds: float | None = None
+    continuous_progress_seconds: float | None = None
+    progress_rows: int | None = None
+    progress_delta_rows: int | None = None
+    throughput_rows_per_second: float | None = None
+    conservative_remaining_rows: int | None = None
+    conservative_eta_seconds: float | None = None
+    continuous_progress_pass = False
+    positive_throughput_pass = False
+    if isinstance(monitor, Mapping):
+        try:
+            monitor = _validate_exact_progress_monitor(
+                controller_manifest_sha256=manifest["manifest_sha256"],
+                value=monitor,
+            )
+            observed_epoch = float(monitor["observed_epoch"])
+            last_change_epoch = float(monitor["last_change_epoch"])
+            continuous_since = float(
+                monitor["continuous_progress_since_epoch"]
+            )
+            continuous_start_progress = int(
+                monitor["continuous_start_progress"]
+            )
+            progress_rows = int(monitor["progress"])
+            baseline_progress = int(monitor["baseline_progress"])
+            if (
+                progress_rows < baseline_progress
+                or continuous_start_progress < baseline_progress
+                or progress_rows < continuous_start_progress
+                or progress_rows > HANDOVER_CONSERVATIVE_WORK_ROWS
+                or continuous_since > last_change_epoch
+                or last_change_epoch > observed_epoch
+                or observed_epoch > now
+                or (
+                    checkpoint is not None
+                    and progress_rows > int(checkpoint["progress_rows"])
+                )
+            ):
+                raise ValueError("monitored progress ordering changed")
+            observation_age_seconds = max(0.0, now - observed_epoch)
+            last_change_age_seconds = max(0.0, now - last_change_epoch)
+            continuous_progress_seconds = max(0.0, now - continuous_since)
+            progress_delta_rows = progress_rows - continuous_start_progress
+            continuous_progress_pass = bool(
+                result.get("scientific_worker_alive") is True
+                and result.get("current_stage") == EXACT_STAGE
+                and observation_age_seconds
+                <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+                and last_change_age_seconds
+                <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+                and continuous_progress_seconds >= HANDOVER_MIN_PROGRESS_SECONDS
+                and progress_delta_rows > 0
+            )
+            if continuous_progress_seconds > 0 and progress_delta_rows > 0:
+                throughput_rows_per_second = (
+                    progress_delta_rows / continuous_progress_seconds
+                )
+                positive_throughput_pass = throughput_rows_per_second > 0.0
+                conservative_remaining_rows = max(
+                    0, HANDOVER_CONSERVATIVE_WORK_ROWS - progress_rows
+                )
+                conservative_eta_seconds = (
+                    conservative_remaining_rows / throughput_rows_per_second
+                )
+        except (KeyError, TypeError, ValueError, RecoveryControllerError) as exc:
+            errors["continuous_progress"] = f"{type(exc).__name__}:{exc}"
+
+    eta_within_48h_pass = bool(
+        positive_throughput_pass
+        and conservative_eta_seconds is not None
+        and conservative_eta_seconds <= HANDOVER_MAX_ETA_SECONDS
+    )
+    # The old-route denominator is deliberately not accepted from an
+    # untyped, caller-supplied status value.  The separate stop executor owns
+    # that live identity/throughput receipt if the ETA branch is unavailable.
+    relative_speedup_100x_pass = False
+    eta_or_100x_pass = eta_within_48h_pass or relative_speedup_100x_pass
+    controller_status_allows_handover = bool(
+        result.get("status") not in {
+            "BLOCKED",
+            "FILESYSTEM_RECONCILIATION_REQUIRED",
+            "OUTPUT_BUDGET_EXCEEDED",
+            "PRELAUNCH_HISTORY_INVALID",
+            "TERMINAL_RECONCILIATION_REQUIRED",
+        }
+        and result.get("route_viability") not in {
+            "BLOCKED",
+            "BLOCKED_RECOVERABLE",
+            "RUNNING_STALLED",
+        }
+    )
+    conditions = {
+        "review_release_pass": review_release_pass,
+        "source_manifest_pass": source_manifest_pass,
+        "pair_store_checksum_pass": pair_store_checksum_pass,
+        "resume_smoke_pass": resume_smoke_pass,
+        "first_durable_checkpoint_pass": first_durable_checkpoint_pass,
+        "continuous_progress_10m_pass": continuous_progress_pass,
+        "positive_throughput_pass": positive_throughput_pass,
+        "eta_within_48h_pass": eta_within_48h_pass,
+        "relative_speedup_100x_pass": relative_speedup_100x_pass,
+        "eta_or_100x_pass": eta_or_100x_pass,
+        "controller_status_allows_handover": controller_status_allows_handover,
+    }
+    eligible = all(
+        conditions[name]
+        for name in (
+            "review_release_pass",
+            "source_manifest_pass",
+            "pair_store_checksum_pass",
+            "resume_smoke_pass",
+            "first_durable_checkpoint_pass",
+            "continuous_progress_10m_pass",
+            "positive_throughput_pass",
+            "eta_or_100x_pass",
+            "controller_status_allows_handover",
+        )
+    )
+    return {
+        "schema_version": HANDOVER_SCHEMA,
+        "status": "ELIGIBLE" if eligible else "NOT_ELIGIBLE",
+        "conditions": conditions,
+        "minimum_continuous_progress_seconds": HANDOVER_MIN_PROGRESS_SECONDS,
+        "maximum_observation_age_seconds": (
+            HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+        ),
+        "maximum_new_route_eta_seconds": HANDOVER_MAX_ETA_SECONDS,
+        "minimum_relative_speedup": HANDOVER_MIN_RELATIVE_SPEEDUP,
+        "conservative_exact_work_rows": HANDOVER_CONSERVATIVE_WORK_ROWS,
+        "progress_rows": progress_rows,
+        "progress_delta_rows": progress_delta_rows,
+        "continuous_progress_seconds": continuous_progress_seconds,
+        "observation_age_seconds": observation_age_seconds,
+        "last_change_age_seconds": last_change_age_seconds,
+        "throughput_rows_per_second": throughput_rows_per_second,
+        "conservative_remaining_rows": conservative_remaining_rows,
+        "conservative_eta_seconds": conservative_eta_seconds,
+        "checkpoint_snapshot": checkpoint,
+        "resume_smoke_receipt": resume_smoke,
+        "external_old_route_speedup_evidence_required": (
+            not eta_within_48h_pass
+        ),
+        "external_old_route_speedup_evidence_accepted_here": False,
+        "eligible_to_request_old_brute_stop": eligible,
+        "old_route_signal_authorized_here": False,
+        "old_route_signal_sent": False,
+        "errors": errors,
+        "observed_at": _utc_now(),
+    }
+
+
 def controller_status(manifest_path: str | Path) -> dict[str, Any]:
     path = _require_absolute(manifest_path, label="controller manifest", existing="file")
     manifest = _read_json(path, label="controller manifest")
@@ -4507,6 +5107,11 @@ def controller_status(manifest_path: str | Path) -> dict[str, Any]:
         "controller_log_limit_bytes": CONTROLLER_LOG_MAX_BYTES,
     }
     if not root.is_dir():
+        result["old_brute_handover"] = _old_brute_handover_status(
+            manifest=manifest,
+            result=result,
+            state=None,
+        )
         return result
     logs_root = root / "logs"
     if logs_root.is_dir() and not logs_root.is_symlink():
@@ -4704,6 +5309,16 @@ def controller_status(manifest_path: str | Path) -> dict[str, Any]:
         result["status"] = "PRELAUNCH_HISTORY_INVALID"
         result["scientific_progress_state"] = "BLOCKED"
         result["route_viability"] = "BLOCKED"
+    if result["controller_log_bytes"] > result["controller_log_limit_bytes"]:
+        result["log_budget_exceeded"] = True
+        result["status"] = "OUTPUT_BUDGET_EXCEEDED"
+        result["scientific_progress_state"] = "BLOCKED"
+        result["route_viability"] = "BLOCKED"
+    result["old_brute_handover"] = _old_brute_handover_status(
+        manifest=manifest,
+        result=result,
+        state=state,
+    )
     return result
 
 

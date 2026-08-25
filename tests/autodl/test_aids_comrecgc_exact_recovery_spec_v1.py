@@ -194,6 +194,13 @@ def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
         adoption_validator=lambda *, output_dir: receipt,
         manifest_loader=lambda path: fake_controller,
     )
+    assert spec["cid"].startswith(
+        "aids_comrecgc_multicomponent_exact_v2_20260825T010203Z_"
+    )
+    assert Path(spec["controller_root"]).name == spec["cid"]
+    for stage in spec["stages"]:
+        if stage["stage_id"] != controller.ADOPTION_STAGE:
+            Path(stage["output_dir"]).relative_to(spec["controller_root"])
     spec_path = _json(tmp_path / "generated-spec.json", spec)
     built = controller.build_controller_manifest(
         spec_path=spec_path, output_path=controller_manifest

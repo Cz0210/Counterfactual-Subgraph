@@ -9915,6 +9915,21 @@ quiescent, at-most-1-GiB noncheckpointed partial may be archived for each of
 the four downstream stages. A second interruption or oversized partial stays
 in place and blocks the CID for manual diagnosis/new-CID recovery.
 
+Use `aids_comrecgc_multicomponent_exact_v2_<timestamp>_<hash8>` as the exact
+fresh production CID and controller-root basename; every fresh scientific
+output is a descendant of that root. Internal controller and receipt schema
+identifiers remain v1 because this is an execution-release namespace change,
+not an incompatible scientific schema rewrite.
+
+Do not let this release stop the old brute route. Expose a machine-readable,
+fail-closed handover certificate instead. It binds reviewed release ancestry,
+typed source/pair evidence, a real second-generation controller reattachment,
+an authenticated durable exact checkpoint, ten minutes of fresh continuous
+progress, positive throughput, and either a conservative ETA no greater than
+48 hours or a separately typed live-old-route speedup of at least 100x. This
+controller implements the ETA branch and explicitly leaves the old-throughput
+receipt and graceful signal to a separate reviewed executor.
+
 ### Consequences
 
 - Repeated shell/tmux preparation cannot grow unbounded tiny receipts, PID
@@ -9922,7 +9937,8 @@ in place and blocks the CID for manual diagnosis/new-CID recovery.
 - Log overflow is reported separately from total output overflow while still
   retaining the same fail-closed graceful-stop behavior.
 - Regression tests now exercise launch 33, log overflow, second interruption,
-  and the sparse-file 1-GiB boundary directly.
+  the sparse-file 1-GiB boundary, authenticated resume evidence, and the typed
+  no-signal handover gate directly.
 - This hardening performs no adoption, AutoDL launch, remote write, process
   signal, old-brute stop, matrix update, or HPC action.
 

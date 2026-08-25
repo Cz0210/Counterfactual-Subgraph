@@ -1667,9 +1667,16 @@ Mutagenicity roadmaps.
 - [x] Add explicit regressions proving log-limit overflow, launch 33, a second
   non-checkpointed interruption, and an oversized partial all retain evidence
   and fail closed without publishing PASS.
-- [ ] Pin a fresh independently reviewed adoption-v3 commit and the final
-  controller integration commit; keep production authorization false until
-  both reviews pass.
+- [x] Bind the fresh production controller root to the exact
+  `aids_comrecgc_multicomponent_exact_v2_<timestamp>_<hash8>` prefix and keep
+  every scientific output beneath it while retaining reviewed internal v1
+  controller/schema identifiers.
+- [x] Expose a read-only old-brute handover certificate that requires release,
+  source/pair, real controller-resume, durable-checkpoint, ten-minute progress,
+  throughput, and ETA evidence; keep all process signals outside this release.
+- [ ] After fresh review, create a strict pin-only child for adoption-v3 and
+  the final controller integration; keep the implementation parent's
+  production authorization false.
 - [ ] Build an immutable execution worktree, run production spec generation
   and dry CLI parsing, then launch one fresh AutoDL CPU controller.
 - [ ] Require subset, exact, downstream replay, standardized freeze, and final

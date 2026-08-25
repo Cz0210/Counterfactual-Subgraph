@@ -114,6 +114,19 @@ constrained, so one write may cross the limit before observation; the bound
 worker is then stopped with `SIGTERM`, the evidence is retained, and controller
 PASS remains impossible.
 
+Status also exposes a typed, read-only `old_brute_handover` object. It is
+eligible only when reviewed release pins/ancestry and a clean immutable tree,
+the typed adoption/source manifest and pair-store checksums, a real second
+controller generation reattached to the live exact worker, an authenticated
+hash-chained checkpoint, ten continuous minutes of fresh progress, positive
+throughput, and a conservative remaining-work ETA of at most 48 hours all
+pass. The conservative work denominator is two complete 91,916,686-row scans.
+The alternative 100x speedup branch requires a separate executor to bind and
+measure the live old worker; untyped caller data is never accepted here. This
+release reports `eligible_to_request_old_brute_stop` but always reports
+`old_route_signal_authorized_here=false` and `old_route_signal_sent=false`.
+It does not signal or stop the old brute route.
+
 ## Production commands
 
 These commands are intentionally non-runnable until the reviewed adoption and
@@ -127,8 +140,9 @@ PY=/root/miniconda3/envs/smiles_pip118/bin/python
 PROJECT=/root/autodl-tmp/worktrees/<immutable-recovery-execution>
 ADOPTION=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery_evidence/aids_c766_failed_selection_v1/<fresh-child>
 PARENT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs
-SPEC=/autodl-fs/data/counterfactual-subgraph-runtime/control/<fresh-cid>.spec.json
-MANIFEST=/autodl-fs/data/counterfactual-subgraph-runtime/control/<fresh-cid>.manifest.json
+TS=<fresh-UTC-timestamp>
+SPEC=/autodl-fs/data/counterfactual-subgraph-runtime/control/aids_comrecgc_multicomponent_exact_v2_$TS.spec.json
+MANIFEST=/autodl-fs/data/counterfactual-subgraph-runtime/control/aids_comrecgc_multicomponent_exact_v2_$TS.manifest.json
 
 "$PY" "$PROJECT/scripts/autodl/build_aids_comrecgc_exact_recovery_v1.py" \
   --config "$PROJECT/configs/hpc.yaml" generate-production \
@@ -136,6 +150,7 @@ MANIFEST=/autodl-fs/data/counterfactual-subgraph-runtime/control/<fresh-cid>.man
   --controller-parent "$PARENT" \
   --python "$PY" \
   --project-root "$PROJECT" \
+  --timestamp "$TS" \
   --controller-manifest "$MANIFEST" \
   --output "$SPEC"
 
@@ -160,6 +175,10 @@ Read-only status and same-CID restart are:
   "$MANIFEST" resume
 ```
 
+The generator prints the authoritative CID and controller root; both use
+`aids_comrecgc_multicomponent_exact_v2_<timestamp>_<hash8>`. The spec and
+manifest filenames are caller reservations and need not duplicate the hash8.
+
 The paired `scripts/slurm/` files exist for repository CLI parity but
 deliberately exit before doing work. This recovery must not be submitted to
 HPC.
@@ -171,7 +190,8 @@ HPC.
 - Adoption-v3 superseding commit
   `7370006da6175851def0f151ca6fb4dfb44f2ab7` passed fresh detached review and
   is an actual integration ancestor.
-- The adoption and combined controller integration pins remain intentionally
-  unset pending fresh review of the merge commit.
+- The implementation commit intentionally leaves release pins unset. Only a
+  fresh-reviewed strict pin-only child may populate them and authorize
+  production; its generated manifest/status is the execution authority.
 - No fresh recovery controller has been deployed by this implementation.
 - The c766 failed root and old brute route remain untouched.
