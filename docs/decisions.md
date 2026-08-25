@@ -9686,6 +9686,13 @@ is refused until all release pins and explicit deployment authorization are
 present. The superseding adoption API has not yet passed review, so its pin and
 adapter identity remain intentionally unset.
 
+The fresh failed-selection promotion also publishes its claim, three small
+arrays, rewritten selection, and terminal manifest through deterministic
+two-name hardlink windows. Same-CID resume may rewrite an authenticated
+temp-only prefix or collapse a final-plus-same-inode temp back to one link;
+unrelated temp inodes fail closed. A process exit during the first claim write
+therefore cannot strand the fresh exact root or create unbounded random temps.
+
 Each typed gate also contains the exact terminal-validation projection and a
 recursive closure inventory. Reopen rehashes bounded artifacts and verifies
 publish-time SHA plus exact physical stat identity for large arrays, so a

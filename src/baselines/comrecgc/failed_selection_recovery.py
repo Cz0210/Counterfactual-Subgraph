@@ -25,7 +25,6 @@ import os
 from pathlib import Path
 import resource
 import stat
-import tempfile
 from typing import Any, Iterator, Mapping
 
 import numpy as np
@@ -116,56 +115,173 @@ def _physical_file(path: Path, *, label: str) -> Path:
     return resolved
 
 
-def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+def _publication_temp(path: Path) -> Path:
+    return path.parent / f".{path.name}.publish.tmp"
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
     )
-    temporary = Path(temporary_name)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _private_regular_identity(path: Path, *, label: str) -> os.stat_result:
+    if path.is_symlink():
+        raise FailedSelectionRecoveryError(f"{label} may not be a symlink")
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise FailedSelectionRecoveryError(f"cannot inspect {label}") from exc
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_IMODE(value.st_mode) != 0o600
+        or int(value.st_uid) != os.getuid()
+    ):
+        raise FailedSelectionRecoveryError(f"{label} identity changed")
+    return value
+
+
+def _reconcile_immutable_publication(path: Path) -> None:
+    """Normalize only the fixed two-name crash window under the route lock."""
+
+    temporary = _publication_temp(path)
+    target_exists = path.exists() or path.is_symlink()
+    temporary_exists = temporary.exists() or temporary.is_symlink()
+    if not target_exists and not temporary_exists:
+        return
+    target = (
+        _private_regular_identity(path, label=f"promotion output {path.name}")
+        if target_exists
+        else None
+    )
+    staged = (
+        _private_regular_identity(
+            temporary, label=f"promotion temporary {temporary.name}"
+        )
+        if temporary_exists
+        else None
+    )
+    if target is None:
+        assert staged is not None
+        if int(staged.st_nlink) != 1:
+            raise FailedSelectionRecoveryError(
+                f"promotion temporary link count changed: {temporary}"
+            )
+        return
+    if staged is None:
+        if int(target.st_nlink) != 1:
+            raise FailedSelectionRecoveryError(
+                f"promotion output link count changed: {path}"
+            )
+        return
+    if (
+        (target.st_dev, target.st_ino) != (staged.st_dev, staged.st_ino)
+        or int(target.st_nlink) != 2
+        or int(staged.st_nlink) != 2
+    ):
+        raise FailedSelectionRecoveryError(
+            f"promotion publication names do not share one inode: {path}"
+        )
+    temporary.unlink()
+    _fsync_directory(path.parent)
+    current = _private_regular_identity(path, label=f"promotion output {path.name}")
+    if int(current.st_nlink) != 1:
+        raise FailedSelectionRecoveryError(
+            f"promotion output did not reconcile: {path}"
+        )
+
+
+def _open_fixed_publication_temp(path: Path) -> tuple[int, Path]:
+    temporary = _publication_temp(path)
+    _reconcile_immutable_publication(path)
+    if path.exists() or path.is_symlink():
+        raise FailedSelectionRecoveryError(
+            f"immutable promotion output already exists: {path}"
+        )
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_TRUNC
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+    except OSError as exc:
+        raise FailedSelectionRecoveryError(
+            f"cannot open promotion temporary: {temporary}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        named = _private_regular_identity(
+            temporary, label=f"promotion temporary {temporary.name}"
+        )
+        if (
+            (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or int(opened.st_nlink) != 1
+        ):
+            raise FailedSelectionRecoveryError(
+                f"promotion temporary changed while opening: {temporary}"
+            )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, temporary
+
+
+def _link_fixed_publication(path: Path, temporary: Path) -> None:
+    try:
+        os.link(temporary, path, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise FailedSelectionRecoveryError(
+            f"immutable promotion output already exists: {path}"
+        ) from exc
+    _fsync_directory(path.parent)
+    temporary.unlink()
+    _fsync_directory(path.parent)
+    _reconcile_immutable_publication(path)
+
+
+def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
+    descriptor, temporary = _open_fixed_publication_temp(path)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(dict(payload), handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError as exc:
-            raise FailedSelectionRecoveryError(
-                f"immutable promotion output already exists: {path}"
-            ) from exc
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        temporary.unlink(missing_ok=True)
+    except BaseException:
+        # A normal exception is retryable through the same authenticated fixed
+        # name.  A hard process exit leaves the same state for resume.
+        raise
+    _link_fixed_publication(path, temporary)
 
 
 def _write_new_npy(path: Path, values: np.ndarray) -> str:
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
+    descriptor, temporary = _open_fixed_publication_temp(path)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             np.save(handle, np.asarray(values), allow_pickle=False)
             handle.flush()
             os.fsync(handle.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError as exc:
-            raise FailedSelectionRecoveryError(
-                f"immutable promotion array already exists: {path}"
-            ) from exc
-    finally:
-        temporary.unlink(missing_ok=True)
+    except BaseException:
+        raise
+    _link_fixed_publication(path, temporary)
     return _sha256_file(path)
 
 
 def _ensure_exact_npy(
     path: Path, values: np.ndarray, *, expected_sha256: str, label: str
 ) -> str:
+    _reconcile_immutable_publication(path)
     if path.exists() or path.is_symlink():
         physical = _physical_file(path, label=label)
         _validate_hash(physical, expected_sha256, label=label)
@@ -181,6 +297,7 @@ def _ensure_exact_npy(
 
 
 def _ensure_exact_json(path: Path, payload: Mapping[str, Any], *, label: str) -> str:
+    _reconcile_immutable_publication(path)
     if path.exists() or path.is_symlink():
         physical = _physical_file(path, label=label)
         if _load_object(physical) != dict(payload):
@@ -483,6 +600,7 @@ def _promote_failed_adaptive_selection_for_component_recovery_locked(
             raise FailedSelectionRecoveryError("promotion root is not physical")
     else:
         root.mkdir(mode=0o755)
+    _reconcile_immutable_publication(claim_path)
     if claim_path.exists() or claim_path.is_symlink():
         claim = _load_object(_physical_file(claim_path, label="promotion claim"))
         claim_comparable = dict(claim)
@@ -494,7 +612,13 @@ def _promote_failed_adaptive_selection_for_component_recovery_locked(
         ):
             raise FailedSelectionRecoveryError("promotion claim identity changed")
     else:
-        if any(root.iterdir()):
+        allowed_claim_temporary = _publication_temp(claim_path).name
+        unexpected = {
+            entry.name
+            for entry in root.iterdir()
+            if entry.name != allowed_claim_temporary
+        }
+        if unexpected:
             raise FailedSelectionRecoveryError(
                 "partial promotion root lacks its immutable claim"
             )
@@ -502,6 +626,17 @@ def _promote_failed_adaptive_selection_for_component_recovery_locked(
         claim = {**claim_identity, "created_at": created_at}
         _write_new_json(claim_path, claim)
     claim_sha = _sha256_file(claim_path)
+    target_failure = root / "adaptive_first_pass_failure_indices.npy"
+    target_anchor_indices = root / "shortcut_anchor_indices.npy"
+    target_anchor_rows = root / "adaptive_selected_anchor_rows.npy"
+    for published in (
+        target_failure,
+        target_anchor_indices,
+        target_anchor_rows,
+        selection_path,
+        manifest_path,
+    ):
+        _reconcile_immutable_publication(published)
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = _load_object(
             _physical_file(manifest_path, label="promotion manifest")
@@ -578,9 +713,6 @@ def _promote_failed_adaptive_selection_for_component_recovery_locked(
             selection_manifest_sha256=str(selection_sha),
             seed_failure_scan_reexecuted=False,
         )
-    target_failure = root / "adaptive_first_pass_failure_indices.npy"
-    target_anchor_indices = root / "shortcut_anchor_indices.npy"
-    target_anchor_rows = root / "adaptive_selected_anchor_rows.npy"
     copied = {
         "failure_indices_sha256": _ensure_exact_npy(
             target_failure,

@@ -1641,7 +1641,8 @@ Mutagenicity roadmaps.
   discrete-decision disagreement checks.
 - [x] Add a public c766 failed-selection promotion API that rebinds only small
   authenticated arrays/ledgers into a fresh root and never replays the complete
-  seed/failure scan or copies the 25 GB source vectors.
+  seed/failure scan or copies the 25 GB source vectors; make every promotion
+  artifact's two-name publication crash-reconcilable under the route lock.
 - [x] Add a typed five-stage CPU-only recovery controller, code-generated
   production spec, CID-local no-clobber launch/status/restart commands, and a
   formula-derived disk/RSS/coexistence contract.

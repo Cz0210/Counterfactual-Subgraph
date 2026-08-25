@@ -13,6 +13,12 @@ evidence files are byte-checked into a fresh evidence archive; the active
 selection manifest and checkpoint are rebuilt with fresh paths. The 25 GB
 vectors and pair store are never copied or regenerated.
 
+The fresh promotion claim and copied small arrays use deterministic two-name
+hardlink publication. Resume rewrites only a validated temp-only prefix or
+removes the extra name when final and temp are the same inode; any unrelated
+temp inode blocks. This closes an interruption during the very first claim
+write without replaying the seed/failure scan.
+
 ## Exactness contract
 
 The recovery is valid only after all of the following reopen successfully:

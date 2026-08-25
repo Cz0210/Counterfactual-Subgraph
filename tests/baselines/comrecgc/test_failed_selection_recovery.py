@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -337,6 +338,121 @@ def test_preterminal_promotion_crash_resumes_without_full_fit(
         resume=True,
     )
     assert result.promotion_manifest_path.is_file()
+
+
+def test_claim_publication_temp_only_resumes_same_fresh_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vectors, _source_root, contract, source = _failed_source(tmp_path, monkeypatch)
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text('{"status":"RECOVERY_ONLY_READY"}\n', encoding="utf-8")
+    parent = tmp_path / "stage"
+    parent.mkdir()
+    fresh = parent / "dbscan"
+    fresh.mkdir()
+    claim = fresh / recovery.PROMOTION_CLAIM_NAME
+    temporary = recovery._publication_temp(claim)
+    temporary.write_bytes(b"interrupted publication")
+    temporary.chmod(0o600)
+
+    result = promote_failed_adaptive_selection_for_component_recovery(
+        vectors_path=vectors,
+        work_dir=fresh,
+        source=source,
+        contract=contract,
+        expected_vectors_sha256=external._sha256_file(vectors),
+        adoption_receipt_path=receipt,
+        adoption_receipt_sha256=external._sha256_file(receipt),
+        source_authority_sha256="a" * 64,
+        resume=True,
+    )
+
+    assert result.promotion_manifest_path.is_file()
+    assert claim.is_file()
+    assert claim.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_terminal_promotion_reconciles_same_inode_publication_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vectors, _source_root, contract, source = _failed_source(tmp_path, monkeypatch)
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text('{"status":"RECOVERY_ONLY_READY"}\n', encoding="utf-8")
+    parent = tmp_path / "stage"
+    parent.mkdir()
+    fresh = parent / "dbscan"
+    promote_failed_adaptive_selection_for_component_recovery(
+        vectors_path=vectors,
+        work_dir=fresh,
+        source=source,
+        contract=contract,
+        expected_vectors_sha256=external._sha256_file(vectors),
+        adoption_receipt_path=receipt,
+        adoption_receipt_sha256=external._sha256_file(receipt),
+        source_authority_sha256="a" * 64,
+    )
+    target = fresh / "adaptive_first_pass_failure_indices.npy"
+    temporary = recovery._publication_temp(target)
+    os.link(target, temporary, follow_symlinks=False)
+    assert target.stat().st_nlink == 2
+
+    reopened = promote_failed_adaptive_selection_for_component_recovery(
+        vectors_path=vectors,
+        work_dir=fresh,
+        source=source,
+        contract=contract,
+        expected_vectors_sha256=external._sha256_file(vectors),
+        adoption_receipt_path=receipt,
+        adoption_receipt_sha256=external._sha256_file(receipt),
+        source_authority_sha256="a" * 64,
+        resume=True,
+    )
+
+    assert reopened.promotion_manifest_path.is_file()
+    assert target.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_terminal_promotion_rejects_unrelated_publication_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vectors, _source_root, contract, source = _failed_source(tmp_path, monkeypatch)
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text('{"status":"RECOVERY_ONLY_READY"}\n', encoding="utf-8")
+    parent = tmp_path / "stage"
+    parent.mkdir()
+    fresh = parent / "dbscan"
+    promote_failed_adaptive_selection_for_component_recovery(
+        vectors_path=vectors,
+        work_dir=fresh,
+        source=source,
+        contract=contract,
+        expected_vectors_sha256=external._sha256_file(vectors),
+        adoption_receipt_path=receipt,
+        adoption_receipt_sha256=external._sha256_file(receipt),
+        source_authority_sha256="a" * 64,
+    )
+    target = fresh / "adaptive_first_pass_failure_indices.npy"
+    temporary = recovery._publication_temp(target)
+    temporary.write_bytes(b"unrelated")
+    temporary.chmod(0o600)
+
+    with pytest.raises(
+        FailedSelectionRecoveryError,
+        match="publication names do not share one inode",
+    ):
+        promote_failed_adaptive_selection_for_component_recovery(
+            vectors_path=vectors,
+            work_dir=fresh,
+            source=source,
+            contract=contract,
+            expected_vectors_sha256=external._sha256_file(vectors),
+            adoption_receipt_path=receipt,
+            adoption_receipt_sha256=external._sha256_file(receipt),
+            source_authority_sha256="a" * 64,
+            resume=True,
+        )
 
 
 def test_preterminal_promotion_resume_rejects_array_tamper(
