@@ -2058,15 +2058,15 @@ def _archive_noncheckpointed_partial_stage(
         raise ValueError("PARTIAL_STAGE_ARCHIVE_ROOT_IS_NOT_PHYSICAL")
     destination = archive_root / f"{stage}.{token}"
     authorization_path = archive_root / f"{stage}.{token}.archive.json"
-    prior_authorities = [
+    prior_stage_entries = [
         candidate
-        for candidate in archive_root.glob(f"{stage}.*.archive.json")
-        if candidate != authorization_path
+        for candidate in archive_root.glob(f"{stage}.*")
+        if candidate not in {destination, authorization_path}
     ]
-    if prior_authorities:
+    if prior_stage_entries:
         raise ValueError(
             f"PARTIAL_STAGE_RETRY_LIMIT_REACHED:{stage}:"
-            f"prior={sorted(str(value) for value in prior_authorities)}"
+            f"prior={sorted(str(value) for value in prior_stage_entries)}"
         )
     move_identity = {
         "schema_version": "comrecgc_partial_stage_archive_identity_v2",

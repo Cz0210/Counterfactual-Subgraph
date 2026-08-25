@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=_absolute, required=True)
     generate = commands.add_parser(
         "generate-production",
-        help="derive a release-unready production spec from typed adoption evidence",
+        help="derive the release-bound production spec from typed adoption evidence",
     )
     generate.add_argument("--adoption-output", type=_absolute, required=True)
     generate.add_argument("--controller-parent", type=_absolute, required=True)
@@ -73,8 +73,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "cid": payload["cid"],
             "controller_root": payload["controller_root"],
             "controller_manifest_path": payload["controller_manifest_path"],
-            "production_deployment_authorized": False,
-            "release_pins_intentionally_unset": True,
+            "production_deployment_authorized": payload[
+                "production_deployment_authorized"
+            ],
+            "release_pins_intentionally_unset": any(
+                value is None for value in payload["release_pins"].values()
+            ),
         }
         marker = "[AIDS_EXACT_RECOVERY_PRODUCTION_SPEC_GENERATED]"
     elif args.action == "validate":

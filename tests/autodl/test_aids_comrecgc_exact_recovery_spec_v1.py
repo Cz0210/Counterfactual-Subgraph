@@ -198,8 +198,25 @@ def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
     built = controller.build_controller_manifest(
         spec_path=spec_path, output_path=controller_manifest
     )
-    assert built["release_ready"] is False
-    assert built["production_deployment_authorized"] is False
+    expected_pins = {
+        "science_commit": controller.SCIENCE_RELEASE_COMMIT,
+        "adoption_commit": builder.ADOPTION_RELEASE_COMMIT,
+        "controller_commit": builder.CONTROLLER_RELEASE_COMMIT,
+        "exact_runner_commit": builder.EXACT_RUNNER_RELEASE_COMMIT,
+        "subset_runner_commit": builder.SUBSET_RUNNER_RELEASE_COMMIT,
+        "downstream_runner_commit": builder.DOWNSTREAM_RUNNER_RELEASE_COMMIT,
+        "standardization_runner_commit": (
+            builder.STANDARDIZATION_RUNNER_RELEASE_COMMIT
+        ),
+    }
+    assert built["release_pins"] == expected_pins
+    assert built["release_ready"] is all(
+        isinstance(value, str) and len(value) == 40
+        for value in expected_pins.values()
+    )
+    assert built["production_deployment_authorized"] is (
+        builder.PRODUCTION_DEPLOYMENT_AUTHORIZED
+    )
     stages = {row["stage_id"]: row for row in built["stages"]}
     assert stages[controller.EXACT_STAGE]["output_dir"].endswith(
         "/science/common_recourse/external_memory"

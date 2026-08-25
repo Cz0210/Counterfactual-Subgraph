@@ -24,6 +24,8 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     DEFAULT_SAFETY_FLOOR_BYTES,
     DEFAULT_SUBSET_SIZE,
     DEFAULT_THREAD_COUNT,
+    CONTROLLER_LOG_MAX_BYTES,
+    CONTROLLER_MAX_LAUNCHES,
     DEPENDENCIES,
     DOWNSTREAM_STAGE,
     EXACT_STAGE,
@@ -57,6 +59,18 @@ ADOPTION_MODULE = "src.baselines.comrecgc.failed_selection_adoption"
 ADOPTION_CALLABLE = "verify_aids_c766_failed_selection_recovery_evidence"
 ADOPTION_ENTRYPOINT = "scripts/autodl/adopt_aids_c766_failed_selection.py"
 STAGE_ENTRYPOINT = "scripts/autodl/run_aids_comrecgc_exact_recovery_stage.py"
+
+# These are the only production-release switches.  A reviewed implementation
+# commit leaves them unset/false.  Its strict pin-only child may change only
+# these literal values; callers cannot supply release SHAs or authorization on
+# the command line or in a hand-authored spec.
+ADOPTION_RELEASE_COMMIT: str | None = None
+CONTROLLER_RELEASE_COMMIT: str | None = None
+EXACT_RUNNER_RELEASE_COMMIT: str | None = None
+SUBSET_RUNNER_RELEASE_COMMIT: str | None = None
+DOWNSTREAM_RUNNER_RELEASE_COMMIT: str | None = None
+STANDARDIZATION_RUNNER_RELEASE_COMMIT: str | None = None
+PRODUCTION_DEPLOYMENT_AUTHORIZED = False
 
 
 class RecoverySpecError(RuntimeError):
@@ -475,8 +489,17 @@ def generate_production_spec(
         block_size=DEFAULT_BLOCK_SIZE,
         safety_floor_bytes=DEFAULT_SAFETY_FLOOR_BYTES,
     )
-    pins = {name: None for name in REQUIRED_RELEASE_PINS}
-    pins["science_commit"] = SCIENCE_RELEASE_COMMIT
+    pins = {
+        "science_commit": SCIENCE_RELEASE_COMMIT,
+        "adoption_commit": ADOPTION_RELEASE_COMMIT,
+        "controller_commit": CONTROLLER_RELEASE_COMMIT,
+        "exact_runner_commit": EXACT_RUNNER_RELEASE_COMMIT,
+        "subset_runner_commit": SUBSET_RUNNER_RELEASE_COMMIT,
+        "downstream_runner_commit": DOWNSTREAM_RUNNER_RELEASE_COMMIT,
+        "standardization_runner_commit": STANDARDIZATION_RUNNER_RELEASE_COMMIT,
+    }
+    if set(pins) != set(REQUIRED_RELEASE_PINS):
+        raise RecoverySpecError("production release pin schema changed")
     return {
         "schema_version": SPEC_SCHEMA,
         "controller_id": CONTROLLER_ID,
@@ -485,7 +508,7 @@ def generate_production_spec(
         "controller_root": str(controller_root),
         "controller_manifest_path": str(manifest_path),
         "adoption_authority_parent": str(adoption_root.parent),
-        "production_deployment_authorized": False,
+        "production_deployment_authorized": PRODUCTION_DEPLOYMENT_AUTHORIZED,
         "stages": stages,
         "adoption_contract": {
             "receipt_schema": receipt["schema_version"],
@@ -522,6 +545,8 @@ def generate_production_spec(
             "startup_barrier_publication_file_multiplier": (
                 STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
             ),
+            "controller_max_launches": CONTROLLER_MAX_LAUNCHES,
+            "controller_log_max_bytes": CONTROLLER_LOG_MAX_BYTES,
             "safety_floor_bytes": DEFAULT_SAFETY_FLOOR_BYTES,
             "budget": budget,
             "max_rss_bytes": DEFAULT_MAX_RSS_BYTES,

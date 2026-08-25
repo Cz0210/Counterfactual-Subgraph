@@ -105,9 +105,14 @@ The bound is a publication/recovery contract, not unlimited retry storage.
 One interrupted archive per non-common downstream stage is recoverable in the
 same CID only when that archive is at most 1 GiB; a second interruption of the
 same non-checkpointed stage, or an oversized partial, fails closed and requires
-manual diagnosis plus a fresh CID. Append-only worker logs are polled rather
-than filesystem-quota constrained, so an over-cap excursion may retain failed
-evidence but can never publish controller PASS.
+manual diagnosis plus a fresh CID. Same-CID controller launches are capped at
+32, and every immutable prelaunch receipt is reopened as one ordered CID-local
+history before another launch is prepared. Append-only worker/controller logs
+have a separate 256 MiB aggregate logical-byte limit inside the existing
+512 MiB log/manifest budget. They are polled rather than kernel-quota
+constrained, so one write may cross the limit before observation; the bound
+worker is then stopped with `SIGTERM`, the evidence is retained, and controller
+PASS remains impossible.
 
 ## Production commands
 

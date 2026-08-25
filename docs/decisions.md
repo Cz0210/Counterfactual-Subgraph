@@ -9892,3 +9892,41 @@ live original worker or live/unprovably-reused child continues to fail closed.
 
 Passed fresh independent superseding-commit review and merged into the
 release-disabled controller integration; no production receipt was created.
+
+## [2026-08-25] Bound AIDS recovery launches, logs, and interrupted retries
+
+### Decision
+
+Keep the formula-derived route budget as a publication/recovery contract while
+adding two independent same-CID limits. At most 32 controller prelaunch
+receipts may be published. Before preparing another launch, reopen the exact
+ordered CID-local history, its manifest/controller/root identities, sequential
+launch number, fixed thread count, and controller-lock inode binding. Include
+both names of every possible prelaunch publication in the output formula.
+
+Within the existing 512 MiB log/manifest allowance, cap aggregate append-only
+worker and controller logs at 256 MiB logical bytes. This remains a polled
+limit, not a kernel filesystem quota: a write can cross the boundary before the
+next observation, but the bound worker is gracefully terminated and no state,
+gate, terminal, or PASS publication may proceed over the limit.
+
+Retain the existing downstream retry policy unchanged: exactly one physical,
+quiescent, at-most-1-GiB noncheckpointed partial may be archived for each of
+the four downstream stages. A second interruption or oversized partial stays
+in place and blocks the CID for manual diagnosis/new-CID recovery.
+
+### Consequences
+
+- Repeated shell/tmux preparation cannot grow unbounded tiny receipts, PID
+  files, or logs under one CID.
+- Log overflow is reported separately from total output overflow while still
+  retaining the same fail-closed graceful-stop behavior.
+- Regression tests now exercise launch 33, log overflow, second interruption,
+  and the sparse-file 1-GiB boundary directly.
+- This hardening performs no adoption, AutoDL launch, remote write, process
+  signal, old-brute stop, matrix update, or HPC action.
+
+### Status
+
+Implemented for fresh detached release review; production pins remain a
+separate pin-only child.

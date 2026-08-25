@@ -321,6 +321,8 @@ def _spec(
             "startup_barrier_publication_file_multiplier": (
                 recovery.STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
             ),
+            "controller_max_launches": recovery.CONTROLLER_MAX_LAUNCHES,
+            "controller_log_max_bytes": recovery.CONTROLLER_LOG_MAX_BYTES,
             "safety_floor_bytes": recovery.DEFAULT_SAFETY_FLOOR_BYTES,
             "budget": budget,
             "max_rss_bytes": recovery.DEFAULT_MAX_RSS_BYTES,
@@ -393,6 +395,11 @@ def test_resource_budget_is_derived_and_below_old_100gib_floor(tmp_path: Path) -
     assert budget["fixed_bounds"][
         "startup_barrier_record_and_temp_upper_bound"
     ] == 2 * (4 + 5) * 32 * 64 * 1024
+    assert budget["fixed_bounds"][
+        "controller_prelaunch_record_and_temp_upper_bound"
+    ] == 2 * 32 * 64 * 1024
+    assert budget["controller_max_launches"] == 32
+    assert budget["controller_log_max_bytes"] == 256 * 1024**2
     assert budget["partial_stage_archive_max_bytes_each"] == 1024**3
     assert budget["max_output_bytes"] == sum(budget["arrays"].values()) + sum(
         budget["fixed_bounds"].values()
@@ -430,6 +437,33 @@ def test_disk_preflight_enforces_maximum_output_bytes(
     payload.write_bytes(b"12345678901")
     with pytest.raises(recovery.RecoveryControllerError, match="OUTPUT_BUDGET_EXCEEDED"):
         recovery._disk_preflight(manifest)
+
+
+def test_disk_preflight_enforces_separate_append_log_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "controller"
+    logs = root / "logs"
+    logs.mkdir(parents=True)
+    (logs / "exact.stdout.log").write_bytes(b"x" * 11)
+    manifest = {
+        "controller_root": str(root),
+        "resources": {
+            "controller_log_max_bytes": 10,
+            "budget": {"max_output_bytes": 100, "safety_floor_bytes": 0},
+        },
+    }
+    monkeypatch.setattr(
+        recovery.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=10_000),
+    )
+    with pytest.raises(
+        recovery.RecoveryControllerError,
+        match="RECOVERY_LOG_BUDGET_EXCEEDED.*manual_fresh_cid_required=true",
+    ):
+        recovery._disk_preflight(manifest)
+    assert not (root / "PASS").exists()
 
 
 def test_state_growth_is_reserved_before_atomic_replace(
@@ -1633,6 +1667,37 @@ def test_prelaunch_claim_is_cid_local_no_clobber_and_forces_resume(
     resumed = recovery.prepare_controller_launch(path, resume=True)
     assert resumed["requested_mode"] == "resume"
     assert resumed["launch_id"] != prepared["launch_id"]
+    assert prepared["launch_number"] == 1
+    assert resumed["launch_number"] == 2
+    assert resumed["maximum_launches"] == recovery.CONTROLLER_MAX_LAUNCHES
+
+
+def test_prelaunch_history_has_a_hard_same_cid_launch_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(recovery, "_execution_tree_clean", lambda root: True)
+    monkeypatch.setattr(
+        recovery.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=100 * 1024**3),
+    )
+    path, manifest = _built_manifest(
+        tmp_path, pins_ready=True, deployment_authorized=True
+    )
+    first = recovery.prepare_controller_launch(path, resume=False)
+    assert first["launch_number"] == 1
+    for expected in range(2, recovery.CONTROLLER_MAX_LAUNCHES + 1):
+        prepared = recovery.prepare_controller_launch(path, resume=True)
+        assert prepared["launch_number"] == expected
+    root = Path(manifest["controller_root"])
+    before = sorted((root / "logs").glob("prelaunch.*.json"))
+    assert len(before) == recovery.CONTROLLER_MAX_LAUNCHES
+    with pytest.raises(
+        recovery.RecoveryControllerError,
+        match="CONTROLLER_LAUNCH_BUDGET_EXHAUSTED.*manual_fresh_cid_required=true",
+    ):
+        recovery.prepare_controller_launch(path, resume=True)
+    assert sorted((root / "logs").glob("prelaunch.*.json")) == before
 
 
 def test_controller_lock_detects_concurrent_writer_and_replacement(tmp_path: Path) -> None:

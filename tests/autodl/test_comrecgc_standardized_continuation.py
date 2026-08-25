@@ -1115,6 +1115,78 @@ def test_partial_stage_archive_authority_replays_after_proc_audit_drift(
     assert scan_count >= 4
 
 
+@pytest.mark.parametrize("remove_first_authority", (False, True))
+def test_second_noncheckpointed_interruption_is_retained_and_blocks_same_cid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remove_first_authority: bool,
+) -> None:
+    root = tmp_path / "output"
+    marker = root / "chemistry/_RUN_COMPLETE.json"
+    argv = ["python", "chemistry.py"]
+    checkpoint = root / "stage_checkpoints/chemistry.json"
+
+    def write_interruption(payload: str) -> None:
+        _file(marker.parent / "partial.json", payload)
+        _json(
+            checkpoint,
+            {
+                "schema_version": 2,
+                "status": "FAILED",
+                "stage": "chemistry",
+                "runner_pid": 4242,
+                "process_group_id": 4242,
+                "process_group_contract": "dedicated_child_session_v1",
+                "argv_sha256": continuation.stable_json_sha256(argv),
+                "marker": str(marker),
+                "required_field": "run_complete",
+            },
+        )
+
+    monkeypatch.setattr(
+        continuation, "_process_group_member_pids", lambda *args, **kwargs: ()
+    )
+    monkeypatch.setattr(
+        continuation,
+        "_scan_live_source_writers",
+        lambda *_args, **_kwargs: {"all_writers_quiescent": True},
+    )
+    write_interruption("first\n")
+    first_archive = continuation._archive_noncheckpointed_partial_stage(
+        stage="chemistry",
+        argv=argv,
+        marker=marker,
+        required_field="run_complete",
+        checkpoint_path=checkpoint,
+        output_root=root,
+    )
+    assert (first_archive / "partial.json").read_text(encoding="utf-8") == "first\n"
+    first_authority = next(
+        (root / "partial_stage_history").glob("*.archive.json")
+    )
+    if remove_first_authority:
+        first_authority.unlink()
+
+    write_interruption("second\n")
+    with pytest.raises(
+        ValueError,
+        match="PARTIAL_STAGE_RETRY_LIMIT_REACHED:chemistry",
+    ):
+        continuation._archive_noncheckpointed_partial_stage(
+            stage="chemistry",
+            argv=argv,
+            marker=marker,
+            required_field="run_complete",
+            checkpoint_path=checkpoint,
+            output_root=root,
+        )
+    assert (marker.parent / "partial.json").read_text(encoding="utf-8") == "second\n"
+    assert first_archive.is_dir()
+    assert len(list((root / "partial_stage_history").glob("*.archive.json"))) == (
+        0 if remove_first_authority else 1
+    )
+
+
 def test_partial_stage_archive_enforces_the_budgeted_one_gibibyte_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

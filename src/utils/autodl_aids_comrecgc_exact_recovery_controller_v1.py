@@ -48,6 +48,7 @@ SUBSET_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_production_subset_stage_v1"
 FINAL_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_recovered_standardized_freeze_v1"
 COEXISTENCE_SCHEMA = "aids_comrecgc_exact_recovery_coexistence_probe_v2"
 RESOURCE_SCHEMA = "aids_comrecgc_exact_recovery_resource_budget_v1"
+PRELAUNCH_SCHEMA = "aids_comrecgc_exact_recovery_prelaunch_v1"
 EXACT_MONOTONIC_PROGRESS_FIELD = "component_recovery_monotonic_rows"
 CLOSURE_INVENTORY_SCHEMA = "aids_comrecgc_exact_recovery_stage_closure_inventory_v1"
 CLOSURE_REHASH_MAX_BYTES = 16 * 1024**2
@@ -58,6 +59,8 @@ STARTUP_BARRIER_BINDING_SCHEMA = (
 STARTUP_BARRIER_MAX_GENERATIONS = 32
 STARTUP_BARRIER_RECORD_MAX_BYTES = EXEC_STARTUP_BARRIER_MAX_RECORD_BYTES
 STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER = 2
+CONTROLLER_MAX_LAUNCHES = 32
+CONTROLLER_LOG_MAX_BYTES = 256 * 1024**2
 OUTER_STARTUP_BARRIER_STAGE_COUNT = 4
 INNER_CONTINUATION_STAGE_COUNT = 5
 SUBSET_MAX_ATTEMPTS = 8
@@ -728,6 +731,11 @@ def derive_output_budget(
         * STARTUP_BARRIER_RECORD_MAX_BYTES
         * STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
     )
+    controller_prelaunch_bound = (
+        CONTROLLER_MAX_LAUNCHES
+        * STARTUP_BARRIER_RECORD_MAX_BYTES
+        * STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
+    )
     fixed = {
         "standardized_exports_and_freeze": 1024**3,
         # One preserved interrupted attempt for each deterministic stage after
@@ -740,6 +748,9 @@ def derive_output_budget(
         "all_subset_attempts_dense_edge_upper_bound": subset_bound,
         "progress_ledger_upper_bound": checkpoint_bound,
         "startup_barrier_record_and_temp_upper_bound": startup_barrier_bound,
+        "controller_prelaunch_record_and_temp_upper_bound": (
+            controller_prelaunch_bound
+        ),
     }
     max_output = sum(arrays.values()) + sum(fixed.values())
     return {
@@ -757,6 +768,8 @@ def derive_output_budget(
         "startup_barrier_publication_file_multiplier": (
             STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
         ),
+        "controller_max_launches": CONTROLLER_MAX_LAUNCHES,
+        "controller_log_max_bytes": CONTROLLER_LOG_MAX_BYTES,
         "zero_copy_source_bytes_excluded": True,
         "source_pair_store_regenerated": False,
         "arrays": arrays,
@@ -771,7 +784,8 @@ def derive_output_budget(
             "sum(2*N*uint32 + N*int64 + 2*N*bool) + max(row_array) + "
             "8*5*S^2*uint64 + ceil(N/B)*16KiB + 1GiB final + "
             "4*1GiB interrupted-stage archives + 512MiB + "
-            "2*(4+5)*32*64KiB startup records"
+            "2*(4+5)*32*64KiB startup records + "
+            "2*32*64KiB controller prelaunch records"
         ),
     }
 
@@ -1219,6 +1233,10 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
         != STARTUP_BARRIER_RECORD_MAX_BYTES
         or int(resources.get("startup_barrier_publication_file_multiplier", -1))
         != STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
+        or int(resources.get("controller_max_launches", -1))
+        != CONTROLLER_MAX_LAUNCHES
+        or int(resources.get("controller_log_max_bytes", -1))
+        != CONTROLLER_LOG_MAX_BYTES
     ):
         raise RecoveryControllerError("resource retention contract changed")
     if int(resources.get("max_rss_bytes", 0)) != DEFAULT_MAX_RSS_BYTES:
@@ -2793,13 +2811,32 @@ def _disk_preflight(manifest: Mapping[str, Any]) -> dict[str, Any]:
     usage = shutil.disk_usage(probe_path)
     budget = manifest["resources"]["budget"]
     existing_bytes = 0
+    log_bytes = 0
     if root.exists():
         for path in root.rglob("*"):
             try:
+                if path.name.endswith(".log") and path.is_symlink():
+                    raise RecoveryControllerError(
+                        f"recovery log may not be a symlink: {path}"
+                    )
                 if path.is_file() and not path.is_symlink():
-                    existing_bytes += path.stat().st_size
+                    size = int(path.stat().st_size)
+                    existing_bytes += size
+                    if path.name.endswith(".log"):
+                        log_bytes += size
             except FileNotFoundError:
                 pass
+    log_limit = int(
+        manifest["resources"].get(
+            "controller_log_max_bytes", CONTROLLER_LOG_MAX_BYTES
+        )
+    )
+    if log_bytes > log_limit:
+        raise RecoveryControllerError(
+            "RECOVERY_LOG_BUDGET_EXCEEDED:"
+            f"existing={log_bytes}:maximum={log_limit}:"
+            "manual_fresh_cid_required=true"
+        )
     max_output_bytes = int(budget["max_output_bytes"])
     if existing_bytes > max_output_bytes:
         raise RecoveryControllerError(
@@ -2815,6 +2852,9 @@ def _disk_preflight(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "free_bytes": usage.free,
         "existing_output_bytes": existing_bytes,
+        "existing_log_bytes": log_bytes,
+        "maximum_log_bytes": log_limit,
+        "remaining_log_budget_bytes": log_limit - log_bytes,
         "remaining_output_budget_bytes": remaining,
         "required_free_bytes": required,
         "checked_at": _utc_now(),
@@ -4096,6 +4136,101 @@ def _load_launchable_manifest(manifest_path: str | Path) -> dict[str, Any]:
     return load_bound_controller_manifest(manifest_path)
 
 
+def _validated_prelaunch_history(
+    manifest: Mapping[str, Any], root: Path
+) -> list[dict[str, Any]]:
+    """Reopen the bounded CID-local controller-launch history.
+
+    Prelaunch receipts are durable evidence even when the shell/tmux handoff
+    never starts a controller.  Bounding and validating them prevents an
+    unlimited same-CID restart loop from escaping the formula-derived output
+    contract through tiny receipts, PID files, and append-only logs.
+    """
+
+    logs = root / "logs"
+    if logs.is_symlink() or not logs.is_dir():
+        raise RecoveryControllerError("controller logs authority changed")
+    expected_keys = {
+        "schema_version",
+        "status",
+        "controller_id",
+        "cid",
+        "controller_root",
+        "controller_manifest_path",
+        "controller_manifest_sha256",
+        "requested_mode",
+        "controller_invocation_requires_resume",
+        "launch_id",
+        "launch_number",
+        "maximum_launches",
+        "log_path",
+        "pid_path",
+        "tmux_session",
+        "thread_count",
+        "resource_preflight",
+        "writer_lock_identity",
+        "prepared_at",
+    }
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for path in sorted(logs.glob("prelaunch.*.json")):
+        row = _read_json(path, label="controller prelaunch receipt")
+        launch_id = row.get("launch_id")
+        if (
+            set(row) != expected_keys
+            or row.get("schema_version") != PRELAUNCH_SCHEMA
+            or row.get("status") != "READY"
+            or row.get("controller_id") != CONTROLLER_ID
+            or row.get("cid") != manifest["cid"]
+            or row.get("controller_root") != str(root)
+            or row.get("controller_manifest_path") != manifest["manifest_path"]
+            or row.get("controller_manifest_sha256")
+            != manifest["manifest_sha256"]
+            or row.get("requested_mode") not in {"fresh", "resume"}
+            or row.get("controller_invocation_requires_resume") is not True
+            or not isinstance(launch_id, str)
+            or not launch_id
+            or path.name != f"prelaunch.{launch_id}.json"
+            or launch_id in seen_ids
+            or isinstance(row.get("launch_number"), bool)
+            or not isinstance(row.get("launch_number"), int)
+            or row.get("maximum_launches") != CONTROLLER_MAX_LAUNCHES
+            or row.get("launch_number") != len(rows) + 1
+            or row.get("log_path")
+            != str(logs / f"controller.{launch_id}.log")
+            or row.get("pid_path")
+            != str(logs / f"controller.{launch_id}.pid")
+            or row.get("tmux_session")
+            != f"aids_exact_{manifest['cid'][-8:]}_{launch_id[:15]}"
+            or row.get("thread_count")
+            != int(manifest["resources"]["thread_count"])
+            or not isinstance(row.get("resource_preflight"), Mapping)
+            or row.get("writer_lock_identity") != _current_lock_identity(root)
+            or not isinstance(row.get("prepared_at"), str)
+            or not row.get("prepared_at")
+        ):
+            raise RecoveryControllerError(
+                f"controller prelaunch receipt changed: {path}"
+            )
+        if len(rows) == 0 and row.get("requested_mode") != "fresh":
+            raise RecoveryControllerError(
+                "first controller prelaunch receipt must be fresh"
+            )
+        if len(rows) > 0 and row.get("requested_mode") != "resume":
+            raise RecoveryControllerError(
+                "later controller prelaunch receipts must be resume"
+            )
+        seen_ids.add(launch_id)
+        rows.append(row)
+    if len(rows) > CONTROLLER_MAX_LAUNCHES:
+        raise RecoveryControllerError(
+            "CONTROLLER_LAUNCH_BUDGET_EXCEEDED:"
+            f"existing={len(rows)}:maximum={CONTROLLER_MAX_LAUNCHES}:"
+            "manual_fresh_cid_required=true"
+        )
+    return rows
+
+
 def prepare_controller_launch(
     manifest_path: str | Path, *, resume: bool
 ) -> dict[str, Any]:
@@ -4110,6 +4245,13 @@ def prepare_controller_launch(
     root = _claim_controller_root(manifest, resume=resume)
     with _controller_lock(root) as held:
         _reconcile_controller_owned_publications(manifest, root)
+        launches = _validated_prelaunch_history(manifest, root)
+        if len(launches) >= CONTROLLER_MAX_LAUNCHES:
+            raise RecoveryControllerError(
+                "CONTROLLER_LAUNCH_BUDGET_EXHAUSTED:"
+                f"existing={len(launches)}:maximum={CONTROLLER_MAX_LAUNCHES}:"
+                "manual_fresh_cid_required=true"
+            )
         resource = _disk_preflight(manifest)
         launch_id = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -4121,7 +4263,7 @@ def prepare_controller_launch(
         receipt_path = root / "logs" / f"prelaunch.{launch_id}.json"
         session = f"aids_exact_{manifest['cid'][-8:]}_{launch_id[:15]}"
         payload = {
-            "schema_version": "aids_comrecgc_exact_recovery_prelaunch_v1",
+            "schema_version": PRELAUNCH_SCHEMA,
             "status": "READY",
             "controller_id": CONTROLLER_ID,
             "cid": manifest["cid"],
@@ -4131,6 +4273,8 @@ def prepare_controller_launch(
             "requested_mode": "resume" if resume else "fresh",
             "controller_invocation_requires_resume": True,
             "launch_id": launch_id,
+            "launch_number": len(launches) + 1,
+            "maximum_launches": CONTROLLER_MAX_LAUNCHES,
             "log_path": str(log_path),
             "pid_path": str(pid_path),
             "tmux_session": session,
@@ -4146,6 +4290,11 @@ def prepare_controller_launch(
         held.verify()
         _write_new_bytes(receipt_path, encoded)
         held.verify()
+        reopened = _validated_prelaunch_history(manifest, root)
+        if len(reopened) != len(launches) + 1 or reopened[-1] != payload:
+            raise RecoveryControllerError(
+                "controller prelaunch history did not close after publication"
+            )
         _disk_preflight(manifest)
         return {**payload, "prelaunch_receipt_path": str(receipt_path)}
 
@@ -4352,9 +4501,34 @@ def controller_status(manifest_path: str | Path) -> dict[str, Any]:
         "scientific_worker_alive": False,
         "scientific_progress_state": "NOT_STARTED",
         "route_viability": "NOT_STARTED",
+        "controller_launch_count": 0,
+        "controller_launch_limit": CONTROLLER_MAX_LAUNCHES,
+        "controller_log_bytes": 0,
+        "controller_log_limit_bytes": CONTROLLER_LOG_MAX_BYTES,
     }
     if not root.is_dir():
         return result
+    logs_root = root / "logs"
+    if logs_root.is_dir() and not logs_root.is_symlink():
+        try:
+            result["controller_launch_count"] = len(
+                _validated_prelaunch_history(manifest, root)
+            )
+        except Exception as exc:
+            result["prelaunch_history_error"] = f"{type(exc).__name__}:{exc}"
+            result["route_viability"] = "RUNNING_STALLED"
+    elif (root / "owner_claim.json").exists():
+        result["prelaunch_history_error"] = "controller logs authority is absent"
+        result["route_viability"] = "RUNNING_STALLED"
+    if logs_root.is_dir() and not logs_root.is_symlink():
+        try:
+            result["controller_log_bytes"] = sum(
+                int(candidate.stat().st_size)
+                for candidate in logs_root.rglob("*.log")
+                if candidate.is_file() and not candidate.is_symlink()
+            )
+        except FileNotFoundError:
+            result["controller_log_observation_raced"] = True
     pending_publications = sorted(
         str(candidate)
         for pattern in ("*.publish.tmp", "*.replace.tmp")
@@ -4526,6 +4700,10 @@ def controller_status(manifest_path: str | Path) -> dict[str, Any]:
         result["status"] = "FILESYSTEM_RECONCILIATION_REQUIRED"
         result["scientific_progress_state"] = "BLOCKED_RECOVERABLE"
         result["route_viability"] = "BLOCKED_RECOVERABLE"
+    if "prelaunch_history_error" in result:
+        result["status"] = "PRELAUNCH_HISTORY_INVALID"
+        result["scientific_progress_state"] = "BLOCKED"
+        result["route_viability"] = "BLOCKED"
     return result
 
 

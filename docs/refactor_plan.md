@@ -1661,6 +1661,12 @@ Mutagenicity roadmaps.
   non-checkpointed downstream stage is same-CID recoverable; a second or
   oversized interruption blocks for manual diagnosis/fresh CID and may not
   publish PASS.
+- [x] Bound same-CID controller preparation to 32 launch receipts, reopen the
+  ordered receipt history before every new launch, and enforce a separate
+  256 MiB aggregate append-log limit inside the formula-derived output cap.
+- [x] Add explicit regressions proving log-limit overflow, launch 33, a second
+  non-checkpointed interruption, and an oversized partial all retain evidence
+  and fail closed without publishing PASS.
 - [ ] Pin a fresh independently reviewed adoption-v3 commit and the final
   controller integration commit; keep production authorization false until
   both reviews pass.
