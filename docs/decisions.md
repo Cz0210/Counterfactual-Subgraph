@@ -9669,7 +9669,7 @@ The subset gate deliberately precedes the full 266-anchor expansion and makes
 no full-production partition claim.
 
 The c766 terminal FAILED state is never converted into an ordinary task PASS.
-Its future adoption receipt must use the independently reviewed recovery-only
+Its adoption receipt uses the independently reviewed recovery-only
 schema and canonical scientific-state projection validator. The mutable state
 byte hash is audit evidence only; the validator must prove its fixed projection,
 mutable-field allowlist, double-read consistency, source-tree allowlist, and
@@ -9683,8 +9683,9 @@ parent with one direct child. It uses immutable typed gates, inode-bound
 `O_NOFOLLOW` locks, exclusive fresh-root claims, PASS-last terminal publication,
 PID-generation-aware restart, and a read-only status command. Production launch
 is refused until all release pins and explicit deployment authorization are
-present. The superseding adoption API has not yet passed review, so its pin and
-adapter identity remain intentionally unset.
+present. The superseding adoption API passed fresh detached review and is an
+actual integration ancestor; its release pin remains intentionally unset until
+the combined controller integration commit also passes review.
 
 The fresh failed-selection promotion also publishes its claim, three small
 arrays, rewritten selection, and terminal manifest through deterministic
@@ -9754,3 +9755,133 @@ pass before the long exact scan continues.
 
 Implemented for focused review. Release pins remain unset; not deployed or
 pushed.
+## [2026-08-25] Keep c766 failed selection separate from scientific PASS
+
+### Decision
+
+Permit a future AIDS recovery route to adopt only the completed adaptive
+seed/failure selection from the failed c766 route. The primitive is pinned to
+one physical AutoDL control root, namespace, controller ID, controller
+manifest, PASS close-view gate, and FAILED/SEMANTIC final gate. It derives both
+task outputs from their unique `main` run/attempt closure and accepts neither
+alternate authority paths nor copied controller trees.
+
+The v3 authority treats controller state as mutable transport rather than a
+byte-immutable file. It requires exact top-level, unique-main, launcher-
+identity, and worker-identity key sets and freezes every static value,
+including `created_at`, launch/GPU/log/retry/output fields, command, child,
+PID generations, and the length/SHA of the long failure reason. Only
+top-level `updated_at` and `instances.main.heartbeat_at` may vary, and both
+must remain nonempty UTC timestamp strings; their concrete values alone are
+replaced by projection sentinels. Both states are read before and after every
+full authority scan. The close/final gates remain byte-pinned, and the failed
+attempt is an exact 14-file
+relative-path/SHA allowlist: unknown, missing, symlink, and terminal-looking
+extras are rejected rather than adopted by TOFU.
+
+The receipt rehashes the referenced closure through `O_NOFOLLOW` descriptors,
+holds the control/namespace/controller/task/output and artifact-parent
+directory inodes throughout each scan, proves that the recorded worker
+generation exited without sending a signal, and rejects writable source
+descriptors. It adopts bytes read-only: the 25 GB vectors and pair store are
+neither regenerated nor copied. The output is a fresh direct child of the
+dedicated fixed parent
+`outputs/autodl/recovery_evidence/aids_c766_failed_selection_v1`; output and
+lock must be disjoint from every source root/file before either is created.
+At call entry the fixed output parent is opened with
+`O_DIRECTORY|O_NOFOLLOW`; sibling lock and output creation then use only its
+held dirfd/openat identity. The output-directory descriptor is held from
+`mkdir` through both authority scans and publication. Each failed-tree walk is
+repeated after all 14 tracked hashes, again at the end of each full authority
+scan, and immediately before terminal publication against the originally
+recorded failed-root inode.
+
+Publication writes a hidden preterminal receipt, completes the second full
+source reopen, records both scans' state-byte observations in the final
+receipt, and fsyncs a prepared recovery marker. The no-clobber hard-link is
+named `RECOVERY_EVIDENCE_READY`; while still holding the same output lock, the
+publisher must then run the complete typed terminal reopen over the controller
+manifest, both gates and states, procfs exit evidence, every tracked source
+artifact/directory, and the exact failed-tree inventory. The marker is not
+authoritative until that locked reopen returns. Failure revokes only the READY
+name whose device/inode equals the prepared marker's recorded inode; the
+prepared evidence remains diagnostic. No file named `PASS` is created.
+Terminal reopen uses the same typed v3 verifier; source drift revokes only the
+exact marker inode in the held receipt-bound output.
+Renamed/copied outputs, locks, or replacement marker inodes are never deleted.
+The receipt's top-level and every nested key set/container shape are exact;
+adding and re-signing a generic-looking `PASS: true` or any nested field cannot
+turn recovery evidence into a consumable dependency.
+
+The failed graph remains negative evidence: the receipt says
+`source_final_status=FAILED`,
+`failed_evidence_adopted_for_recovery_only=true`, and
+`ordinary_pass_dependency_eligible=false`. It freezes canonical initial
+component labels, seed component IDs, and the hash/minimum of exact
+self-inclusive anchor degrees. All three production seeds must occupy the same
+canonical size-three component, and every anchor must retain at least three
+epsilon neighbors including itself.
+
+### Consequences
+
+- No ordinary controller dependency may consume this receipt as a PASS, and no
+  DBSCAN partition has been proved by adoption. The controller integration is
+  a typed external-receipt dependency on
+  `aids_c766_failed_selection_recovery_evidence_v3`, never a generic task PASS.
+- The later recovery route may plan from the exact 266 selected rows without
+  silently rerunning or relabelling c766.
+- PID reuse, live original generations, symlinks, path escapes, alternate
+  gates, state-projection tampering, partial outputs, source drift,
+  namespace/output/lock replacement, unexpected failed-tree files, and
+  writable source handles all fail closed.
+- The paired Slurm file is static AutoDL-only CLI parity and exits before its
+  documentation command; this decision authorizes no HPC job or deployment.
+
+### Status
+
+Superseding v3 implementation and focused tests passed independent detached
+review and were merged as an actual integration ancestor. Production adoption
+and recovery execution remain separate explicit actions; this change performs
+neither deployment nor SSH.
+
+## [2026-08-25] Close c766 READY publication and process-exit receipts
+
+### Decision
+
+Supersede the initial v3 publisher with a locked post-READY validation barrier.
+Immediately after the READY hardlink and directory fsync, the same output-lock
+holder performs a complete `require_ready=True` reopen. This third full scan is
+the only successful return path. Controller manifest, close/final gates,
+projected states, procfs, all 28 fixture source artifacts, all 14 fixture source
+directory authorities, and the failed-tree allowlist are therefore checked
+after publication as well as before it. Any failure removes only a READY name
+that still resolves to the exact recorded prepared-marker device/inode.
+
+Validate all six `process_exit` receipt fields rather than treating the worker
+identity alone as stable. The expected worker PID/start-ticks/command hash and
+recorded child PID come from the frozen final task authority;
+`old_science_worker_exited` must be the JSON boolean `true`, and
+`signals_sent` must remain the empty list in both the receipt and current full
+scan. Worker observations are limited to absent, generation-proven PID reuse,
+or zombie. A positive recorded child PID is limited to absent or zombie because
+there is no frozen child generation with which to prove a live reuse.
+
+The two observation strings may change across scans only within those safe
+sets. Procfs can legitimately move from zombie to absent, from absent to a
+different worker generation, or between absent and zombie for an unowned child
+PID. These dynamic transitions do not weaken the stable identity fields and a
+live original worker or live/unprovably-reused child continues to fail closed.
+
+### Consequences
+
+- A drift injected after the second scan cannot survive as a successful READY.
+- Rebinding a tampered receipt to freshly computed marker bytes cannot change
+  any process identity, child PID, exit boolean, signal list, or observation
+  domain.
+- This commit remains implementation/test evidence only. It performs no
+  adoption, controller launch, deployment, SSH action, or process signal.
+
+### Status
+
+Passed fresh independent superseding-commit review and merged into the
+release-disabled controller integration; no production receipt was created.

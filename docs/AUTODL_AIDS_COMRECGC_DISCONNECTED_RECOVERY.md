@@ -163,7 +163,10 @@ HPC.
 
 - Science recovery commit `d8912ccb0901840ee1f0458ef66f630312024b0b` passed
   fresh detached review.
-- The adoption-v3 and controller integration pins are intentionally unset
-  pending fresh security/release review.
+- Adoption-v3 superseding commit
+  `7370006da6175851def0f151ca6fb4dfb44f2ab7` passed fresh detached review and
+  is an actual integration ancestor.
+- The adoption and combined controller integration pins remain intentionally
+  unset pending fresh review of the merge commit.
 - No fresh recovery controller has been deployed by this implementation.
 - The c766 failed root and old brute route remain untouched.
