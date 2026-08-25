@@ -9930,6 +9930,13 @@ progress, positive throughput, and either a conservative ETA no greater than
 controller implements the ETA branch and explicitly leaves the old-throughput
 receipt and graceful signal to a separate reviewed executor.
 
+Keep recovery liveness separate from handover eligibility. A promoted-only,
+fully authenticated checkpoint with no component ledger must allow the second
+controller to reattach, while yielding zero handover progress and no resume
+receipt. A new or observation-stale ten-minute window starts at the current
+progress rather than the pre-worker baseline, preventing unobserved earlier
+work from lowering the ETA.
+
 ### Consequences
 
 - Repeated shell/tmux preparation cannot grow unbounded tiny receipts, PID

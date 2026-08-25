@@ -121,6 +121,11 @@ controller generation reattached to the live exact worker, an authenticated
 hash-chained checkpoint, ten continuous minutes of fresh progress, positive
 throughput, and a conservative remaining-work ETA of at most 48 hours all
 pass. The conservative work denominator is two complete 91,916,686-row scans.
+An authenticated promoted checkpoint with no component ledger yet remains a
+safe same-CID reattachment point, but records zero qualifying progress and
+cannot pass resume-smoke or handover. Likewise, a missing/stale monitoring
+window starts at the current observed progress, so work completed before the
+ten-minute window cannot make its throughput or ETA look faster.
 The alternative 100x speedup branch requires a separate executor to bind and
 measure the live old worker; untyped caller data is never accepted here. This
 release reports `eligible_to_request_old_brute_stop` but always reports

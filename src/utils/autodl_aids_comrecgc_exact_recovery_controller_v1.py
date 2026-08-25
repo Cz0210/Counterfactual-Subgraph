@@ -3362,8 +3362,6 @@ def _validated_exact_checkpoint_snapshot(
                 )
             progress += committed
             observed = True
-    if not observed:
-        raise RecoveryControllerError("exact handover checkpoint has no recovery ledger")
     vectors_sha = identity.get("vectors_sha256")
     if not _is_sha256(vectors_sha):
         raise RecoveryControllerError("exact handover checkpoint vector SHA is absent")
@@ -3374,6 +3372,7 @@ def _validated_exact_checkpoint_snapshot(
         "identity_sha256": checkpoint["identity_sha256"],
         "progress_ledgers_sha256": checkpoint["progress_ledgers_sha256"],
         "progress_rows": progress,
+        "component_progress_ledger_observed": observed,
         "vectors_sha256": vectors_sha,
     }
 
@@ -3427,6 +3426,7 @@ def _validate_resume_smoke(
         or checkpoint.get("path")
         != _stage(manifest, EXACT_STAGE)["progress_checkpoint_path"]
         or int(checkpoint.get("progress_rows", 0)) <= 0
+        or checkpoint.get("component_progress_ledger_observed") is not True
         or not _is_sha256(checkpoint.get("sha256_at_observation"))
         or not _is_sha256(checkpoint.get("checkpoint_payload_sha256"))
         or not _is_sha256(checkpoint.get("identity_sha256"))
@@ -3807,12 +3807,10 @@ def _update_exact_progress_monitor(
         ):
             if progress > baseline_progress:
                 continuous_since = now
-                continuous_start_progress = (
-                    previous
-                    if observation_gap <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
-                    and previous >= baseline_progress
-                    else progress
-                )
+                # A missing or stale window begins at this observation.  Work
+                # completed before the authenticated fresh window may not be
+                # amortized over its ten-minute ETA denominator.
+                continuous_start_progress = progress
             else:
                 continuous_since = None
                 continuous_start_progress = None
@@ -3820,7 +3818,7 @@ def _update_exact_progress_monitor(
         changed_at = now
         continuous_since = now if progress > baseline_progress else None
         continuous_start_progress = (
-            baseline_progress if progress > baseline_progress else None
+            progress if progress > baseline_progress else None
         )
     monitor = {
         "schema_version": EXACT_PROGRESS_MONITOR_SCHEMA,

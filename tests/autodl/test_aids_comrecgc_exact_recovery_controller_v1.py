@@ -982,6 +982,51 @@ def test_exact_progress_is_monotonic_across_primary_to_expansion(
     )
 
 
+def test_late_first_progress_observation_excludes_pre_window_work_from_throughput(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    stage = {
+        "stage_id": recovery.EXACT_STAGE,
+        "progress_checkpoint_path": str(checkpoint),
+        "progress_field": recovery.EXACT_MONOTONIC_PROGRESS_FIELD,
+    }
+    pre_observation_progress = 10_000_000
+    state = recovery._initial_state({"manifest_sha256": "a" * 64})
+    state["exact_coexistence_baseline"] = {"start_progress": 0}
+    clock = [100.0]
+    monkeypatch.setattr(recovery.time, "time", lambda: clock[0])
+
+    def observe(progress: int) -> dict[str, object]:
+        _write_json(
+            checkpoint,
+            {
+                "progress_ledgers": {
+                    "shortcut_anchor_scan": {"committed_offset": progress}
+                }
+            },
+        )
+        return dict(
+            recovery._update_exact_progress_monitor(stage=stage, state=state)
+            or {}
+        )
+
+    first = observe(pre_observation_progress)
+    assert first["continuous_start_progress"] == pre_observation_progress
+    assert first["continuous_progress_since_epoch"] == 100.0
+
+    # Maintain a fresh <=120-second observation cadence for a full ten
+    # minutes. Only the 600 rows committed inside this observed window count.
+    latest = first
+    for step in range(1, 7):
+        clock[0] = 100.0 + step * 100.0
+        latest = observe(pre_observation_progress + step * 100)
+    assert latest["continuous_progress_since_epoch"] == 100.0
+    assert latest["continuous_start_progress"] == pre_observation_progress
+    assert int(latest["progress"]) - int(latest["continuous_start_progress"]) == 600
+    assert clock[0] - float(latest["continuous_progress_since_epoch"]) == 600.0
+
+
 def test_exact_coexistence_baseline_survives_worker_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2066,11 +2111,19 @@ def test_resume_smoke_requires_a_second_controller_and_live_exact_reattachment(
         "start_ticks": 11,
         "argv_sha256": "e" * 64,
     }
-    monkeypatch.setattr(recovery, "_pid_alive", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        recovery,
+        "_pid_alive",
+        lambda pid, ticks, **kwargs: (pid, ticks) == (300, 33),
+    )
     monkeypatch.setattr(
         recovery,
         "_validated_bound_worker_pid_for_signal",
-        lambda **kwargs: 300,
+        lambda **kwargs: (
+            300
+            if recovery._pid_alive(300, 33, proc_root=Path("/proc"))
+            else None
+        ),
     )
     monkeypatch.setattr(
         recovery,
@@ -2082,6 +2135,7 @@ def test_resume_smoke_requires_a_second_controller_and_live_exact_reattachment(
             "identity_sha256": "1" * 64,
             "progress_ledgers_sha256": "2" * 64,
             "progress_rows": recovery.DEFAULT_BLOCK_SIZE,
+            "component_progress_ledger_observed": True,
             "vectors_sha256": vector_sha,
         },
     )
@@ -2141,6 +2195,106 @@ def test_handover_checkpoint_reopens_authenticated_hash_chain(tmp_path: Path) ->
         recovery._validated_exact_checkpoint_snapshot(
             {"progress_checkpoint_path": str(path)}
         )
+
+
+def test_promoted_only_checkpoint_restart_reattaches_without_resume_pass_or_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.baselines.comrecgc import external_memory_dbscan as dbscan
+
+    root = tmp_path / "controller"
+    (root / "gates").mkdir(parents=True)
+    (root / "logs").mkdir()
+    (root / ".controller.lock").write_bytes(b"")
+    checkpoint_path = tmp_path / "exact/dbscan/checkpoint.json"
+    checkpoint_path.parent.mkdir(parents=True)
+    vector_sha = "a" * 64
+    identity = {"vectors_sha256": vector_sha}
+    ledgers = {}
+    for phase in ("adaptive_seed_scan", "adaptive_failure_scan"):
+        ledger = dbscan._new_progress_ledger(phase=phase, identity=identity)
+        dbscan._append_progress_entry(
+            ledger,
+            start=0,
+            stop=recovery.EXPECTED_ROWS,
+            payload={"promoted_read_only_prefix": True},
+        )
+        dbscan._complete_progress_ledger(
+            ledger,
+            num_samples=recovery.EXPECTED_ROWS,
+            result={"promoted": True},
+        )
+        ledgers[phase] = ledger
+    dbscan._checkpoint(
+        checkpoint_path,
+        identity=identity,
+        phase="adaptive_component_primary",
+        next_offset=0,
+        peak_rss_bytes=1,
+        extra=dbscan._progress_checkpoint_extra(ledgers, identity=identity),
+    )
+    stage = {
+        "stage_id": recovery.EXACT_STAGE,
+        "progress_checkpoint_path": str(checkpoint_path),
+    }
+    manifest = {
+        "manifest_sha256": "b" * 64,
+        "controller_root": str(root),
+        "resources": {"proc_root": "/proc"},
+        "source_authority": {"source_vectors_sha256": vector_sha},
+        "stages": [stage],
+    }
+    state = {
+        "status": "RUNNING",
+        "controller_process": {
+            "pid": 100,
+            "start_ticks": 11,
+            "argv_sha256": "c" * 64,
+        },
+        "worker": {
+            "stage_id": recovery.EXACT_STAGE,
+            "pid": 300,
+            "start_ticks": 33,
+            "argv_sha256": "d" * 64,
+        },
+        "resume_smoke": None,
+    }
+    current = {"pid": 200, "start_ticks": 22, "argv_sha256": "e" * 64}
+    held = SimpleNamespace(identity=recovery._current_lock_identity(root))
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        recovery,
+        "_pid_alive",
+        lambda pid, ticks, **kwargs: (pid, ticks) == (300, 33),
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_validated_bound_worker_pid_for_signal",
+        lambda **kwargs: (
+            300
+            if recovery._pid_alive(300, 33, proc_root=Path("/proc"))
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        recovery.os,
+        "killpg",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    snapshot = recovery._validated_exact_checkpoint_snapshot(stage)
+    assert snapshot["progress_rows"] == 0
+    assert snapshot["component_progress_ledger_observed"] is False
+    assert recovery._record_resume_smoke_if_reattached(
+        manifest=manifest,
+        root=root,
+        state=state,
+        current_controller=current,
+        held=held,
+    ) is None
+    assert state["status"] == "RUNNING"
+    assert state["resume_smoke"] is None
+    assert signals == []
 
 
 def test_aids_old_brute_graceful_stop_requires_typed_handover_and_sends_no_signal(
@@ -2214,6 +2368,7 @@ def test_aids_old_brute_graceful_stop_requires_typed_handover_and_sends_no_signa
             "identity_sha256": "d" * 64,
             "progress_ledgers_sha256": "e" * 64,
             "progress_rows": progress,
+            "component_progress_ledger_observed": True,
             "vectors_sha256": vector_sha,
         },
     )
