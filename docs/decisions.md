@@ -9656,3 +9656,94 @@ tampered partial or certificate, and terminal PASS binds the current
 ### Status
 
 Accepted for detached review; not deployed.
+
+## [2026-08-25] Isolate c766 recovery behind a typed five-stage controller
+
+### Decision
+
+Use a dedicated CPU-only controller for the disconnected AIDS exact-DBSCAN
+recovery. Its immutable stage order is failed-selection evidence adoption,
+production-derived five-subset equivalence, exact component recovery,
+streaming multi-component downstream/boundary replay, and standardized freeze.
+The subset gate deliberately precedes the full 266-anchor expansion and makes
+no full-production partition claim.
+
+The c766 terminal FAILED state is never converted into an ordinary task PASS.
+Its future adoption receipt must use the independently reviewed recovery-only
+schema and canonical scientific-state projection validator. The mutable state
+byte hash is audit evidence only; the validator must prove its fixed projection,
+mutable-field allowlist, double-read consistency, source-tree allowlist, and
+immutable gate/manifest/process closure. Only the exact-recovery DAG can consume
+the typed receipt. Matrix, Mutagenicity, and generic dependency readers reject
+it; only the final hash-closed controller terminal becomes ordinary-PASS
+eligible.
+
+The controller uses a fresh CID/root and an independent adoption-authority
+parent with one direct child. It uses immutable typed gates, inode-bound
+`O_NOFOLLOW` locks, exclusive fresh-root claims, PASS-last terminal publication,
+PID-generation-aware restart, and a read-only status command. Production launch
+is refused until all release pins and explicit deployment authorization are
+present. The superseding adoption API has not yet passed review, so its pin and
+adapter identity remain intentionally unset.
+
+Each typed gate also contains the exact terminal-validation projection and a
+recursive closure inventory. Reopen rehashes bounded artifacts and verifies
+publish-time SHA plus exact physical stat identity for large arrays, so a
+post-gate mutation cannot survive controller restart/status merely because the
+outer receipt is unchanged. Controller-level exact progress is the monotonic
+sum of the primary and expansion ledgers. Its host baseline is persisted before
+worker spawn and reused across worker generations; a fast terminal path binds
+the exact terminal, DBSCAN manifest, and recorded peak RSS instead of silently
+losing the coexistence gate.
+
+Root initialization is itself restartable: an empty parent-side preclaim,
+named by CID and controller-manifest SHA, is acquired with `O_EXCL`, fsync, and
+flock before any root directory is created. The final owner and controller
+terminal bind that inode, while same-CID resume may finish only the known
+root/gates/logs/owner prefix after an interruption. Output usage is a hard
+*publication* cap, not merely a free-space estimate: controller-owned state,
+gate, terminal, and PASS writes reserve their exact net growth before publish;
+science subprocesses are checked periodically and cannot publish a controller
+PASS after an over-cap excursion. The controller gracefully terminates a
+still-bound worker on breach. This is not a filesystem quota, so an individual
+science write may cross the cap before the next poll and its failed evidence is
+retained rather than destructively removed.
+
+The controller does not promise unlimited same-CID retries. Exactly one
+non-checkpointed partial per downstream stage may be archived, and that archive
+must be at most 1 GiB. A second interruption of the same stage or a larger
+partial is retained and blocks for manual diagnosis/new CID. Likewise,
+append-only logs are checked periodically rather than constrained by a kernel
+quota. These boundaries preserve fail-closed scientific publication: neither
+case can yield PASS over the formula-derived cap.
+
+The output-space gate is formula-derived from 91,916,686 rows: two uint32
+component arrays, int64 labels, core and radius masks, the largest atomic
+transient, bounded five-subset dense ledgers, block ledgers, standardized files,
+and logs, plus at most one retained 1 GiB interrupted archive for each of the
+four non-common downstream stages, all eight retained subset attempts, and the
+two-name startup-record crash window. This is about 8.97 GiB of new-output budget
+plus an 8 GiB safety floor; the adopted 25 GB pair/vector authority is read-only
+and zero-copy. The 96 GiB RSS ceiling applies only to the exact DBSCAN process
+and is closed by its native guard and terminal peak certificate; it is not
+claimed as a cgroup-enforced route-wide peak for the later subprocess tree.
+OMP, MKL, OpenBLAS, and NumExpr are frozen to 16 threads, CUDA is hidden, no GPU
+lock is acquired, and a first-checkpoint load/iowait/RSS coexistence probe must
+pass before the long exact scan continues.
+
+### Consequences
+
+- A production-specific subset mismatch blocks before the expensive component
+  scan.
+- One-cluster historical radius post-hoc evidence is not reused as if it were a
+  multi-component terminal; the d891 streaming summary performs the applicable
+  strict `<` float32/float64 fail-closed replay.
+- A controller crash may reattach to the same PID generation or validate a
+  completed terminal, but it cannot start a second writer in the same root.
+- No AutoDL process, failed c766 root, old brute route, GPU task, matrix cell, or
+  HPC job is changed by this implementation commit.
+
+### Status
+
+Implemented for focused review. Release pins remain unset; not deployed or
+pushed.

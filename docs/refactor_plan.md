@@ -1628,3 +1628,42 @@ Mutagenicity roadmaps.
   inode-frozen science root plus fresh attempt receipts; validate terminal
   arrays and bind later Mut consumption to the controller-authoritative unique
   PASS task gate rather than standardized attempt zero.
+
+## 2026-08-25 — AIDS disconnected-anchor exact recovery
+
+- [x] Prove the unique-seed-component recovery theorem and fail closed to a
+  general external exact route when frozen seed anchors span components.
+- [x] Add exact primary/full-anchor bridge scans, promoted-ledger replay,
+  float64 boundary rechecks, canonical component labels, and separate
+  core/connectivity/boundary/partition certificates.
+- [x] Add bounded multi-component centroid/radius/coverage/medoid/greedy
+  streaming with official-float32 decisions, float64 audit, and fail-closed
+  discrete-decision disagreement checks.
+- [x] Add a public c766 failed-selection promotion API that rebinds only small
+  authenticated arrays/ledgers into a fresh root and never replays the complete
+  seed/failure scan or copies the 25 GB source vectors.
+- [x] Add a typed five-stage CPU-only recovery controller, code-generated
+  production spec, CID-local no-clobber launch/status/restart commands, and a
+  formula-derived disk/RSS/coexistence contract.
+- [x] Place exact DBSCAN and component summary in the native standardized
+  continuation layout so one restartable final task can resume chemistry,
+  WNode evaluation, exports, and freeze.
+- [x] Put every controller worker and standardized-continuation child behind a
+  durable exec startup barrier: the target cannot execute until PID/process-
+  group identity is fsynced, and parent death before release yields EOF plus an
+  inode/flock quiescence proof instead of an unbound writer.
+- [x] Treat the formula-derived disk limit as a hard PASS-publication gate,
+  with exact reservation for controller writes and periodic graceful-stop
+  checks for science subprocesses; do not misstate it as a filesystem quota or
+  the exact-DBSCAN-only 96 GiB native RSS certificate as a route cgroup limit.
+- [x] Document the finite recovery boundary: one <=1 GiB archive per
+  non-checkpointed downstream stage is same-CID recoverable; a second or
+  oversized interruption blocks for manual diagnosis/fresh CID and may not
+  publish PASS.
+- [ ] Pin a fresh independently reviewed adoption-v3 commit and the final
+  controller integration commit; keep production authorization false until
+  both reviews pass.
+- [ ] Build an immutable execution worktree, run production spec generation
+  and dry CLI parsing, then launch one fresh AutoDL CPU controller.
+- [ ] Require subset, exact, downstream replay, standardized freeze, and final
+  controller gates before updating AIDS/Mut or stopping the old brute route.

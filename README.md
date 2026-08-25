@@ -80,6 +80,10 @@ See:
   of a promoted read-only pair store, with closed Cartesian chunks only as a
   storage-audited fallback, exact adaptive DBSCAN proof, and bounded
   one-cluster replay; never a continuation inside the old repair-v4 root)
+- `docs/AUTODL_AIDS_COMRECGC_DISCONNECTED_RECOVERY.md` (typed, CPU-only
+  recovery from the c766 disconnected-anchor evidence into an exact
+  multi-component partition and streaming downstream; release pins remain
+  mandatory and the failed source is never treated as an ordinary PASS)
 
 ---
 

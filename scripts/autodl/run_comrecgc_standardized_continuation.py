@@ -10,11 +10,14 @@ root.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
+import signal
 import stat as stat_module
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +60,14 @@ from src.baselines.comrecgc.external_pair_chunk_cache import (  # noqa: E402
 from src.baselines.comrecgc.close_pair_view import (  # noqa: E402
     validate_theta_close_pair_view,
 )
+from src.utils.autodl_exec_startup_barrier import (  # noqa: E402
+    ArmedExecStartupBarrier,
+    StartupBarrierRecord,
+    arm_exec_startup_barrier,
+    reconcile_interrupted_startup_barrier_publication,
+    validate_reopenable_unreleased_barrier,
+    validate_startup_barrier_record,
+)
 
 
 DATASET_CONTRACTS: dict[str, dict[str, int]] = {
@@ -75,6 +86,13 @@ _CRITICAL_SOURCE_MANIFESTS = (
     "frozen_payload_closure_audit.json",
     "adoption_manifest.json",
 )
+_STARTUP_BARRIER_BINDING_SCHEMA = "comrecgc_continuation_exec_startup_binding_v1"
+_STARTUP_BARRIER_MAX_GENERATIONS = 32
+_PARTIAL_STAGE_ARCHIVE_MAX_BYTES = 1024**3
+
+
+class _StageTerminationRequested(RuntimeError):
+    """Stop the outer continuation after forwarding an operator termination."""
 
 
 @dataclass(frozen=True)
@@ -744,6 +762,152 @@ def build_stage_commands(
     ]
 
 
+def _stage_startup_barrier_paths(
+    output_root: Path, *, stage: str, generation: int
+) -> tuple[Path, Path]:
+    if (
+        stage not in {"common_recourse", "chemistry", "unified_eval", "full_gate", "freeze"}
+        or not 0 <= generation < _STARTUP_BARRIER_MAX_GENERATIONS
+    ):
+        raise ValueError("CONTINUATION_STARTUP_BARRIER_GENERATION_INVALID")
+    checkpoint_root = output_root / "stage_checkpoints"
+    checkpoint_root.mkdir(mode=0o755, parents=True, exist_ok=True)
+    return (
+        checkpoint_root / f".{stage}.exec-startup.lock",
+        checkpoint_root / f".{stage}.exec-startup.{generation:02d}.json",
+    )
+
+
+def _validate_stage_startup_binding(
+    *,
+    output_root: Path,
+    stage: str,
+    argv: Sequence[str],
+    binding: Any,
+    allowed_phases: set[str],
+) -> StartupBarrierRecord | None:
+    if not isinstance(binding, Mapping):
+        raise ValueError(f"CONTINUATION_STARTUP_BARRIER_BINDING_MISSING:{stage}")
+    phase = binding.get("phase")
+    common = {
+        "schema_version",
+        "stage",
+        "generation",
+        "phase",
+        "record_path",
+        "lock_path",
+        "target_argv_sha256",
+    }
+    armed = common | {"record_sha256", "launcher_argv_sha256"}
+    expected_fields = common if phase == "PRE_ARM" else armed
+    if (
+        phase not in allowed_phases
+        or set(binding) != expected_fields
+        or binding.get("schema_version") != _STARTUP_BARRIER_BINDING_SCHEMA
+        or binding.get("stage") != stage
+        or isinstance(binding.get("generation"), bool)
+        or not isinstance(binding.get("generation"), int)
+        or binding.get("target_argv_sha256") != stable_json_sha256(list(argv))
+    ):
+        raise ValueError(f"CONTINUATION_STARTUP_BARRIER_BINDING_CHANGED:{stage}")
+    lock_path, record_path = _stage_startup_barrier_paths(
+        output_root, stage=stage, generation=int(binding["generation"])
+    )
+    if (
+        binding.get("lock_path") != str(lock_path)
+        or binding.get("record_path") != str(record_path)
+    ):
+        raise ValueError(f"CONTINUATION_STARTUP_BARRIER_PATH_CHANGED:{stage}")
+    if phase == "PRE_ARM":
+        try:
+            reconcile_interrupted_startup_barrier_publication(
+                lock_path=lock_path,
+                record_path=record_path,
+                timeout_seconds=30.0,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"CONTINUATION_STARTUP_BARRIER_PREARM_RECONCILIATION_FAILED:{stage}"
+            ) from exc
+    if phase == "PRE_ARM" and not record_path.exists():
+        return None
+    try:
+        record = validate_startup_barrier_record(
+            record_path,
+            expected_target_argv=list(argv),
+            validate_lock_path=True,
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"CONTINUATION_STARTUP_BARRIER_RECORD_INVALID:{stage}"
+        ) from exc
+    if (
+        record.lock_path != str(lock_path)
+        or (phase != "PRE_ARM" and binding.get("record_sha256") != sha256_file(record_path))
+        or (
+            phase != "PRE_ARM"
+            and binding.get("launcher_argv_sha256")
+            != stable_json_sha256(record.launcher_argv)
+        )
+    ):
+        raise ValueError(f"CONTINUATION_STARTUP_BARRIER_RECORD_CHANGED:{stage}")
+    return record
+
+
+def _next_stage_startup_generation(
+    *,
+    output_root: Path,
+    stage: str,
+    argv: Sequence[str],
+    checkpoint_path: Path | None,
+) -> int:
+    state_path = checkpoint_path or (output_root / "stage_state.json")
+    if not state_path.exists():
+        return 0
+    checkpoint = _load_object(_require_file(state_path))
+    if (
+        checkpoint.get("schema_version") != 2
+        or checkpoint.get("stage") != stage
+        or checkpoint.get("argv_sha256") != stable_json_sha256(list(argv))
+        or checkpoint.get("status") not in {"RUNNING", "FAILED"}
+    ):
+        raise ValueError(f"CONTINUATION_PREVIOUS_STAGE_STATE_INVALID:{stage}")
+    binding = checkpoint.get("startup_barrier")
+    if binding is None:
+        # Compatibility is limited to the already-safe private-session v1
+        # checkpoints. They still need a fully quiescent process group.
+        if checkpoint.get("process_group_contract") != "dedicated_child_session_v1":
+            raise ValueError(f"CONTINUATION_STARTUP_BARRIER_BINDING_MISSING:{stage}")
+        process_group_id = int(checkpoint.get("process_group_id") or -1)
+        _wait_for_process_group_quiescence(
+            process_group_id, proc_root=_PROC_ROOT, timeout_seconds=30.0
+        )
+        return 0
+    record = _validate_stage_startup_binding(
+        output_root=output_root,
+        stage=stage,
+        argv=argv,
+        binding=binding,
+        allowed_phases={"PRE_ARM", "ARMED", "BOUND", "QUIESCENT"},
+    )
+    phase = binding["phase"]
+    if phase == "BOUND":
+        process_group_id = int(checkpoint.get("process_group_id") or -1)
+        _wait_for_process_group_quiescence(
+            process_group_id, proc_root=_PROC_ROOT, timeout_seconds=30.0
+        )
+    elif record is not None:
+        validate_reopenable_unreleased_barrier(
+            record.record_path,
+            expected_target_argv=list(argv),
+            timeout_seconds=30.0,
+        )
+    generation = int(binding["generation"]) + 1
+    if generation >= _STARTUP_BARRIER_MAX_GENERATIONS:
+        raise ValueError(f"CONTINUATION_STARTUP_BARRIER_BUDGET_EXHAUSTED:{stage}")
+    return generation
+
+
 def _run_stage(
     *,
     stage: str,
@@ -755,10 +919,34 @@ def _run_stage(
     checkpoint_path: Path | None = None,
 ) -> None:
     argv_sha256 = stable_json_sha256(list(argv))
+    generation = _next_stage_startup_generation(
+        output_root=output_root,
+        stage=stage,
+        argv=argv,
+        checkpoint_path=checkpoint_path,
+    )
+    lock_path, record_path = _stage_startup_barrier_paths(
+        output_root, stage=stage, generation=generation
+    )
+    startup_binding: dict[str, Any] = {
+        "schema_version": _STARTUP_BARRIER_BINDING_SCHEMA,
+        "stage": stage,
+        "generation": generation,
+        "phase": "PRE_ARM",
+        "record_path": str(record_path),
+        "lock_path": str(lock_path),
+        "target_argv_sha256": argv_sha256,
+    }
     running = {
         "schema_version": 2,
         "status": "RUNNING",
         "stage": stage,
+        "runner_pid": os.getpid(),
+        "child_pid": None,
+        "child_start_ticks": None,
+        "process_group_id": None,
+        "process_group_contract": "durable_barrier_dedicated_child_session_v2",
+        "startup_barrier": startup_binding,
         "argv_sha256": argv_sha256,
         "marker": str(marker),
         "required_field": required_field,
@@ -767,13 +955,100 @@ def _run_stage(
     write_json(output_root / "stage_state.json", running)
     if checkpoint_path is not None:
         write_json(checkpoint_path, running)
+    process: subprocess.Popen[bytes] | None = None
+    barrier: ArmedExecStartupBarrier | None = None
+    science_released = False
+    pending_signals: list[int] = []
+    previous_handlers: dict[int, Any] = {}
+
+    def forward_signal(signum: int, _frame: Any) -> None:
+        pending_signals.append(signum)
+        # Before the durable BOUND checkpoint has been fsynced and the parent
+        # deliberately releases the startup barrier, the child is only the
+        # inert launcher.  Closing the capability pipe here makes a stop
+        # request fail closed even when it arrives between launch and bind.
+        if barrier is not None and not science_released:
+            barrier.abort()
+        if process is not None:
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+
+    def reject_pending_stop(*, phase: str) -> None:
+        if not pending_signals:
+            return
+        if barrier is not None and not science_released:
+            barrier.abort()
+        raise _StageTerminationRequested(
+            "STAGE_TERMINATED_BEFORE_SCIENCE_RELEASE:"
+            f"stage={stage}:phase={phase}:signals={pending_signals}"
+        )
+
     try:
-        subprocess.run(
-            list(argv),
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, forward_signal)
+        barrier = arm_exec_startup_barrier(
+            lock_path=lock_path,
+            record_path=record_path,
+            target_argv=list(argv),
+            python_executable=sys.executable,
+            record_policy="fresh",
+        )
+        reject_pending_stop(phase="AFTER_ARM")
+        startup_binding = {
+            **startup_binding,
+            "phase": "ARMED",
+            "record_sha256": sha256_file(record_path),
+            "launcher_argv_sha256": stable_json_sha256(barrier.launcher_argv),
+        }
+        running = {**running, "startup_barrier": startup_binding}
+        write_json(output_root / "stage_state.json", running)
+        if checkpoint_path is not None:
+            write_json(checkpoint_path, running)
+        reject_pending_stop(phase="BEFORE_LAUNCH")
+        process = barrier.launch(
             cwd=PROJECT_ROOT,
             env=dict(environment),
-            check=True,
+            start_new_session=True,
         )
+        reject_pending_stop(phase="AFTER_LAUNCH")
+        child_start_ticks = _read_proc_start_ticks(process.pid, proc_root=_PROC_ROOT)
+        observed_launcher = _proc_argv(process.pid, proc_root=_PROC_ROOT)
+        if (
+            child_start_ticks is None
+            or observed_launcher is None
+            or stable_json_sha256(observed_launcher)
+            != startup_binding["launcher_argv_sha256"]
+        ):
+            raise ValueError(f"STAGE_STARTUP_WRAPPER_IDENTITY_UNBOUND:{stage}")
+        startup_binding = {**startup_binding, "phase": "BOUND"}
+        running = {
+            **running,
+            "child_pid": process.pid,
+            "child_start_ticks": child_start_ticks,
+            "process_group_id": process.pid,
+            "child_started_at": _utc_now(),
+            "startup_barrier": startup_binding,
+        }
+        write_json(output_root / "stage_state.json", running)
+        if checkpoint_path is not None:
+            write_json(checkpoint_path, running)
+        reject_pending_stop(phase="BEFORE_RELEASE")
+        barrier.release()
+        science_released = True
+        for signum in pending_signals:
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+        return_code = process.wait()
+        _wait_for_process_group_quiescence(
+            process.pid, proc_root=_PROC_ROOT, timeout_seconds=None
+        )
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, list(argv))
         payload = _load_object(_require_file(marker))
         if payload.get(required_field) is not True:
             raise ValueError(
@@ -789,7 +1064,33 @@ def _run_stage(
                 ) from exc
             if expected_engine == "external_memory_exact_v1":
                 _validate_common_recourse_completion(marker=marker, terminal=payload)
+        if pending_signals:
+            # A child may checkpoint, finish its marker, and exit zero after a
+            # forwarded SIGTERM.  That completion is recoverable on the next
+            # explicit resume, but the current wrapper must not swallow the
+            # stop request and proceed to a later scientific stage.
+            raise _StageTerminationRequested(
+                "STAGE_TERMINATED_AFTER_CHILD_COMPLETION:"
+                f"stage={stage}:signals={pending_signals}"
+            )
     except Exception as exc:
+        if barrier is not None and not science_released:
+            barrier.abort()
+        if process is not None and process.poll() is None:
+            if science_released:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                # Retain wrapper ownership and the invocation lock until every
+                # non-zombie member is gone; never start a concurrent retry.
+                pass
+            _wait_for_process_group_quiescence(
+                process.pid, proc_root=_PROC_ROOT, timeout_seconds=None
+            )
         failed = {
             **running,
             "status": "FAILED",
@@ -801,6 +1102,9 @@ def _run_stage(
         if checkpoint_path is not None:
             write_json(checkpoint_path, failed)
         raise
+    finally:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
     passed = {
         **running,
         "status": "PASS",
@@ -987,12 +1291,8 @@ def _validate_completed_stage(
         write_json(
             checkpoint_path,
             {
-                "schema_version": 2,
+                **checkpoint,
                 "status": "PASS",
-                "stage": stage,
-                "argv_sha256": stable_json_sha256(list(argv)),
-                "marker": str(marker),
-                "required_field": required_field,
                 "marker_sha256": marker_sha256,
                 "reconciled_after_child_completion": True,
                 "completed_at": _utc_now(),
@@ -1000,6 +1300,41 @@ def _validate_completed_stage(
         )
         return True
     return False
+
+
+def _require_completed_stage_writer_quiescence(
+    *,
+    output_root: Path,
+    stage: str,
+    argv: Sequence[str],
+    checkpoint_path: Path,
+) -> None:
+    checkpoint = _load_object(_require_file(checkpoint_path))
+    if (
+        checkpoint.get("schema_version") != 2
+        or checkpoint.get("stage") != stage
+        or checkpoint.get("argv_sha256") != stable_json_sha256(list(argv))
+    ):
+        raise ValueError(f"COMPLETED_STAGE_CHECKPOINT_IDENTITY_CHANGED:{stage}")
+    contract = checkpoint.get("process_group_contract")
+    if contract == "durable_barrier_dedicated_child_session_v2":
+        binding = checkpoint.get("startup_barrier")
+        _validate_stage_startup_binding(
+            output_root=output_root,
+            stage=stage,
+            argv=argv,
+            binding=binding,
+            allowed_phases={"BOUND", "QUIESCENT"},
+        )
+    elif contract != "dedicated_child_session_v1":
+        raise ValueError(f"COMPLETED_STAGE_PROCESS_GROUP_CONTRACT_CHANGED:{stage}")
+    try:
+        process_group_id = int(checkpoint["process_group_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"COMPLETED_STAGE_PROCESS_GROUP_MISSING:{stage}") from exc
+    _wait_for_process_group_quiescence(
+        process_group_id, proc_root=_PROC_ROOT, timeout_seconds=30.0
+    )
 
 
 def _validate_common_recourse_completion(
@@ -1377,7 +1712,440 @@ def _archive_previous_failure(output_root: Path) -> None:
         os.close(directory_fd)
 
 
-def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _partial_directory_identity(path: Path) -> dict[str, int]:
+    if path.is_symlink():
+        raise ValueError(f"PARTIAL_STAGE_DIRECTORY_IS_SYMLINK:{path}")
+    value = path.stat()
+    if not stat_module.S_ISDIR(value.st_mode):
+        raise ValueError(f"PARTIAL_STAGE_PATH_IS_NOT_DIRECTORY:{path}")
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "uid": int(value.st_uid),
+        "gid": int(value.st_gid),
+        "nlink": int(value.st_nlink),
+    }
+
+
+def _partial_directory_usage(path: Path) -> dict[str, int]:
+    """Return a conservative logical-byte count for a physical partial tree."""
+
+    root = path.resolve(strict=True)
+    total = 0
+    regular_files = 0
+    directories = 0
+    for current_root, directory_names, file_names in os.walk(
+        root, topdown=True, followlinks=False
+    ):
+        current = Path(current_root)
+        directories += 1
+        for name in directory_names:
+            entry = current / name
+            value = entry.lstat()
+            if entry.is_symlink() or not stat_module.S_ISDIR(value.st_mode):
+                raise ValueError(f"PARTIAL_STAGE_TREE_ENTRY_NOT_PHYSICAL:{entry}")
+        for name in file_names:
+            entry = current / name
+            value = entry.lstat()
+            if entry.is_symlink() or not stat_module.S_ISREG(value.st_mode):
+                raise ValueError(f"PARTIAL_STAGE_TREE_ENTRY_NOT_REGULAR:{entry}")
+            total += int(value.st_size)
+            regular_files += 1
+            if total > _PARTIAL_STAGE_ARCHIVE_MAX_BYTES:
+                raise ValueError(
+                    "PARTIAL_STAGE_ARCHIVE_BYTE_LIMIT_EXCEEDED:"
+                    f"bytes={total}:limit={_PARTIAL_STAGE_ARCHIVE_MAX_BYTES}"
+                )
+    return {
+        "logical_bytes": total,
+        "regular_file_count": regular_files,
+        "directory_count": directories,
+        "limit_bytes": _PARTIAL_STAGE_ARCHIVE_MAX_BYTES,
+    }
+
+
+def _read_proc_start_ticks(
+    pid: int, *, proc_root: Path = _PROC_ROOT
+) -> int | None:
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        close = raw.rfind(")")
+        return int(raw[close + 2 :].split()[19])
+    except (FileNotFoundError, PermissionError, ValueError, IndexError):
+        return None
+
+
+def _proc_argv(pid: int, *, proc_root: Path = _PROC_ROOT) -> list[str] | None:
+    try:
+        stat_path = proc_root / str(pid) / "stat"
+        before = stat_path.stat()
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+        after = stat_path.stat()
+    except (FileNotFoundError, PermissionError):
+        return None
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise ValueError("STAGE_PROCESS_CHANGED_AROUND_CMDLINE_READ")
+    return [part.decode("utf-8", errors="strict") for part in raw.split(b"\0") if part]
+
+
+def _process_group_member_pids(
+    process_group_id: int, *, proc_root: Path = _PROC_ROOT
+) -> tuple[int, ...]:
+    proc = proc_root.expanduser()
+    if process_group_id <= 0 or not proc.is_dir():
+        raise ValueError("PARTIAL_STAGE_PROCESS_GROUP_AUDIT_UNAVAILABLE")
+    members: list[int] = []
+    for pid_dir in proc.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            raw = (pid_dir / "stat").read_text(encoding="utf-8")
+            close = raw.rfind(")")
+            fields = raw[close + 2 :].split()
+            process_state = fields[0]
+            observed_group = int(fields[2])
+        except FileNotFoundError:
+            continue
+        except (PermissionError, OSError, UnicodeError, ValueError, IndexError) as exc:
+            raise ValueError(
+                f"PARTIAL_STAGE_PROCESS_GROUP_AUDIT_UNAVAILABLE:pid={pid_dir.name}"
+            ) from exc
+        if observed_group == process_group_id and process_state not in {"Z", "X"}:
+            members.append(int(pid_dir.name))
+    return tuple(sorted(members))
+
+
+def _wait_for_process_group_quiescence(
+    process_group_id: int,
+    *,
+    proc_root: Path = _PROC_ROOT,
+    timeout_seconds: float | None = 30.0,
+    poll_seconds: float = 0.05,
+) -> None:
+    deadline: float | None = None
+    while True:
+        members = _process_group_member_pids(
+            process_group_id, proc_root=proc_root
+        )
+        if not members:
+            return
+        now = time.monotonic()
+        if deadline is None and timeout_seconds is not None:
+            deadline = now + timeout_seconds
+        if deadline is not None and now >= deadline:
+            raise ValueError(
+                "STAGE_CHILD_PROCESS_GROUP_NOT_QUIESCENT:"
+                f"pgid={process_group_id}:members={list(members)[:16]}"
+            )
+        time.sleep(poll_seconds)
+
+
+def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish an immutable JSON receipt without exposing a partial final file.
+
+    The deterministic temporary inode is protected by ``flock``.  A prior
+    writer killed during the write/link/fsync sequence can therefore be
+    reconciled in place, while a live concurrent writer cannot be mistaken for
+    a crash.  The final name is installed with hard-link no-replace semantics.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(payload, sort_keys=True, ensure_ascii=True, indent=2) + "\n"
+    ).encode("utf-8")
+    # One fixed private temp per final path prevents changing audit timestamps
+    # from accumulating a new orphan after every interrupted retry.
+    temporary = path.parent / f".{path.name}.partial"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | nofollow
+    created = False
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        created = True
+    except FileExistsError:
+        descriptor = os.open(temporary, os.O_RDWR | nofollow)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        before = os.fstat(descriptor)
+        current = os.lstat(temporary)
+        if (
+            not stat_module.S_ISREG(before.st_mode)
+            or (before.st_mode & 0o777) != 0o600
+            or before.st_uid != os.getuid()
+            or before.st_dev != current.st_dev
+            or before.st_ino != current.st_ino
+            or before.st_nlink not in {1, 2}
+        ):
+            raise ValueError(f"IMMUTABLE_JSON_TEMP_IDENTITY_CHANGED:{temporary}")
+        # A crash after link but before temporary cleanup leaves two names for
+        # the same fully-written inode.  Validate and finish that publication.
+        if before.st_nlink == 2:
+            final_stat = os.lstat(path)
+            if (
+                final_stat.st_dev != before.st_dev
+                or final_stat.st_ino != before.st_ino
+                or path.read_bytes() != encoded
+            ):
+                raise ValueError(f"IMMUTABLE_JSON_LINK_RECONCILIATION_FAILED:{path}")
+            temporary.unlink()
+            _fsync_directory(path.parent)
+            return
+        current_bytes = os.pread(descriptor, before.st_size, 0)
+        if created or current_bytes != encoded:
+            os.ftruncate(descriptor, 0)
+            written = 0
+            while written < len(encoded):
+                count = os.write(descriptor, encoded[written:])
+                if count <= 0:
+                    raise OSError("immutable JSON temporary write made no progress")
+                written += count
+            os.ftruncate(descriptor, len(encoded))
+        os.fsync(descriptor)
+        _fsync_directory(path.parent)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            final_stat = os.lstat(path)
+            if (
+                not stat_module.S_ISREG(final_stat.st_mode)
+                or path.read_bytes() != encoded
+            ):
+                raise ValueError(f"IMMUTABLE_JSON_FINAL_ALREADY_CHANGED:{path}")
+            temporary.unlink()
+            _fsync_directory(path.parent)
+            return
+        _fsync_directory(path.parent)
+        final_stat = os.lstat(path)
+        temporary_stat = os.fstat(descriptor)
+        if (
+            final_stat.st_dev != temporary_stat.st_dev
+            or final_stat.st_ino != temporary_stat.st_ino
+            or path.read_bytes() != encoded
+        ):
+            raise ValueError(f"IMMUTABLE_JSON_FINAL_IDENTITY_CHANGED:{path}")
+        temporary.unlink()
+        _fsync_directory(path.parent)
+    finally:
+        os.close(descriptor)
+
+
+def _archive_noncheckpointed_partial_stage(
+    *,
+    stage: str,
+    argv: Sequence[str],
+    marker: Path,
+    required_field: str,
+    checkpoint_path: Path,
+    output_root: Path,
+) -> Path:
+    """Preserve one interrupted deterministic child before a fresh retry.
+
+    The RUNNING/FAILED checkpoint was durably written before the child was
+    spawned.  A recovery-only archive authorization is published with
+    ``O_EXCL`` before the directory rename.  Therefore either side of a crash
+    around the rename can be audited without deleting or overwriting the
+    interrupted evidence.
+    """
+
+    if stage == "common_recourse":
+        raise ValueError("COMMON_RECOURSE_MUST_USE_NATIVE_RESUME")
+    partial = marker.parent
+    if marker.exists():
+        raise ValueError(f"PARTIAL_STAGE_ALREADY_HAS_TERMINAL:{stage}")
+    root = output_root.resolve(strict=True)
+    if partial.parent != root or partial.name != {
+        "chemistry": "chemistry",
+        "unified_eval": "unified_eval",
+        "full_gate": "full_gate",
+        "freeze": "standardized",
+    }.get(stage):
+        raise ValueError(f"PARTIAL_STAGE_PATH_CONTRACT_MISMATCH:{stage}:{partial}")
+    checkpoint = _load_object(_require_file(checkpoint_path))
+    if (
+        checkpoint.get("schema_version") != 2
+        or checkpoint.get("status") not in {"RUNNING", "FAILED"}
+        or checkpoint.get("stage") != stage
+        or checkpoint.get("argv_sha256") != stable_json_sha256(list(argv))
+        or checkpoint.get("marker") != str(marker)
+        or checkpoint.get("required_field") != required_field
+        or checkpoint.get("process_group_contract")
+        not in {
+            "dedicated_child_session_v1",
+            "durable_barrier_dedicated_child_session_v2",
+        }
+    ):
+        raise ValueError(f"PARTIAL_STAGE_CHECKPOINT_MISMATCH:{stage}")
+    process_group_id: int | None
+    if (
+        checkpoint.get("process_group_contract")
+        == "durable_barrier_dedicated_child_session_v2"
+    ):
+        binding = checkpoint.get("startup_barrier")
+        record = _validate_stage_startup_binding(
+            output_root=output_root,
+            stage=stage,
+            argv=argv,
+            binding=binding,
+            allowed_phases={"PRE_ARM", "ARMED", "BOUND", "QUIESCENT"},
+        )
+        if binding["phase"] in {"PRE_ARM", "ARMED"}:
+            if record is not None:
+                validate_reopenable_unreleased_barrier(
+                    record.record_path,
+                    expected_target_argv=list(argv),
+                    timeout_seconds=30.0,
+                )
+            process_group_id = None
+        else:
+            try:
+                process_group_id = int(checkpoint["process_group_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"PARTIAL_STAGE_PROCESS_GROUP_MISSING:{stage}"
+                ) from exc
+    else:
+        try:
+            process_group_id = int(checkpoint["process_group_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"PARTIAL_STAGE_PROCESS_GROUP_MISSING:{stage}") from exc
+    group_members_before = (
+        ()
+        if process_group_id is None
+        else _process_group_member_pids(process_group_id, proc_root=_PROC_ROOT)
+    )
+    if group_members_before:
+        raise ValueError(
+            f"PARTIAL_STAGE_PROCESS_GROUP_STILL_LIVE:{stage}:"
+            f"members={list(group_members_before)[:16]}"
+        )
+    writer_audit_before = _scan_live_source_writers(
+        partial.resolve(strict=True),
+        protected_snapshots=[],
+        proc_root=_PROC_ROOT,
+    )
+    source_identity = _partial_directory_identity(partial)
+    source_usage = _partial_directory_usage(partial)
+    token = stable_json_sha256(
+        {
+            "stage": stage,
+            "source": str(partial),
+            "source_identity": source_identity,
+            "argv_sha256": checkpoint["argv_sha256"],
+        }
+    )
+    archive_root = root / "partial_stage_history"
+    archive_root.mkdir(mode=0o755, exist_ok=True)
+    if archive_root.is_symlink() or not archive_root.is_dir():
+        raise ValueError("PARTIAL_STAGE_ARCHIVE_ROOT_IS_NOT_PHYSICAL")
+    destination = archive_root / f"{stage}.{token}"
+    authorization_path = archive_root / f"{stage}.{token}.archive.json"
+    prior_authorities = [
+        candidate
+        for candidate in archive_root.glob(f"{stage}.*.archive.json")
+        if candidate != authorization_path
+    ]
+    if prior_authorities:
+        raise ValueError(
+            f"PARTIAL_STAGE_RETRY_LIMIT_REACHED:{stage}:"
+            f"prior={sorted(str(value) for value in prior_authorities)}"
+        )
+    move_identity = {
+        "schema_version": "comrecgc_partial_stage_archive_identity_v2",
+        "status": "MOVE_AUTHORIZED",
+        "stage": stage,
+        "source": str(partial),
+        "destination": str(destination),
+        "source_identity": source_identity,
+        "source_usage": source_usage,
+        "argv_sha256": checkpoint["argv_sha256"],
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_sha256": sha256_file(checkpoint_path),
+        "process_group_id": process_group_id,
+        "marker": str(marker),
+        "marker_absent": True,
+    }
+    authorization = {
+        "schema_version": "comrecgc_partial_stage_archive_v2",
+        "status": "MOVE_AUTHORIZED",
+        "move_identity": move_identity,
+        "move_identity_sha256": stable_json_sha256(move_identity),
+        # This snapshot is audit evidence from the publication instant, not a
+        # replay identity.  /proc population and timestamps may legitimately
+        # differ after a crash before the authorized rename.
+        "publication_audit": {
+            "process_group_members_before": [],
+            "live_writer_audit_before": writer_audit_before,
+            "observed_at": _utc_now(),
+        },
+    }
+    if authorization_path.exists():
+        if authorization_path.is_symlink():
+            raise ValueError(f"PARTIAL_STAGE_ARCHIVE_AUTHORITY_CHANGED:{stage}")
+        existing_authorization = _load_object(authorization_path)
+        # Idempotent publication also reconciles the hardlink-after-publish
+        # crash window (final + deterministic temporary name, nlink == 2).
+        _write_new_json(authorization_path, existing_authorization)
+        if (
+            existing_authorization.get("schema_version")
+            != "comrecgc_partial_stage_archive_v2"
+            or existing_authorization.get("status") != "MOVE_AUTHORIZED"
+            or existing_authorization.get("move_identity") != move_identity
+            or existing_authorization.get("move_identity_sha256")
+            != stable_json_sha256(move_identity)
+            or not isinstance(existing_authorization.get("publication_audit"), Mapping)
+        ):
+            raise ValueError(f"PARTIAL_STAGE_ARCHIVE_AUTHORITY_CHANGED:{stage}")
+    else:
+        _write_new_json(authorization_path, authorization)
+    group_members_after = (
+        ()
+        if process_group_id is None
+        else _process_group_member_pids(process_group_id, proc_root=_PROC_ROOT)
+    )
+    if group_members_after:
+        raise ValueError(
+            f"PARTIAL_STAGE_PROCESS_GROUP_REAPPEARED:{stage}:"
+            f"members={list(group_members_after)[:16]}"
+        )
+    _scan_live_source_writers(
+        partial.resolve(strict=True),
+        protected_snapshots=[],
+        proc_root=_PROC_ROOT,
+    )
+    if _partial_directory_usage(partial) != source_usage:
+        raise ValueError(f"PARTIAL_STAGE_ARCHIVE_USAGE_CHANGED:{stage}")
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"PARTIAL_STAGE_ARCHIVE_DESTINATION_EXISTS:{stage}")
+    os.rename(partial, destination)
+    _fsync_directory(root)
+    _fsync_directory(archive_root)
+    if _partial_directory_identity(destination) != source_identity:
+        raise ValueError(f"PARTIAL_STAGE_ARCHIVE_IDENTITY_CHANGED:{stage}")
+    return destination
+
+
+def _validate_route_inputs(inputs: ContinuationInputs) -> None:
+    """Validate the physical-source route before bootstrap or continuation."""
+
     chunk_source_values = (
         inputs.external_pair_store_source_checkpoint,
         inputs.external_vector_cache_root,
@@ -1419,6 +2187,106 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
         != ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
     ):
         raise ValueError("PAIR_STORE_ADOPTION_ROUTE_CONTRACT_MISMATCH")
+
+
+def bootstrap_external_common_recovery_continuation(
+    inputs: ContinuationInputs,
+) -> dict[str, Any]:
+    """Create/reopen only the standardized continuation's immutable prelude.
+
+    The caller must hold its own invocation-wide recovery writer lock.  This
+    helper never starts common recourse or any downstream subprocess; it only
+    freezes the same adoption, checkout, command and resume contract that
+    :func:`run_continuation` will reopen after an independently proven exact
+    DBSCAN/summary has been placed in the native external-memory directories.
+    """
+
+    _validate_route_inputs(inputs)
+    if (
+        inputs.dataset != "aids"
+        or inputs.device != "cpu"
+        or inputs.common_recourse_engine != "external_memory_exact_v1"
+        or inputs.external_dbscan_shortcut_mode
+        != ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+        or inputs.external_pair_store_source_manifest is None
+        or inputs.external_pair_store_source_checkpoint is not None
+        or inputs.external_close_pair_view_manifest is None
+        or inputs.external_pair_store_source_owner_root is None
+        or inputs.common_recourse_resume is not True
+    ):
+        raise ValueError("EXTERNAL_COMMON_RECOVERY_BOOTSTRAP_CONTRACT_MISMATCH")
+    root = inputs.output_root
+    if root.is_symlink():
+        raise FileExistsError(f"Recovery OUTPUT_ROOT is a symlink: {root}")
+    if not root.exists():
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.mkdir(mode=0o755)
+    if not root.is_dir() or (root / "PASS").exists():
+        raise FileExistsError(f"Recovery OUTPUT_ROOT is not bootstrap-safe: {root}")
+    adoption_path = root / "generation_adoption_manifest.json"
+    checkout_path = root / "upstream_checkout_audit.json"
+    resume_contract_path = root / "continuation_resume_contract.json"
+    bootstrap_path = root / "exact_recovery_continuation_bootstrap.json"
+
+    if adoption_path.exists():
+        adoption = _load_object(_require_file(adoption_path))
+        _verify_adopted_generation_integrity(adoption)
+    else:
+        adoption = validate_adopted_generation(inputs)
+        write_json(adoption_path, adoption)
+    checkout = verify_checkout(
+        inputs.upstream_root,
+        expected_commit=UPSTREAM_COMMIT,
+        validate_imports=True,
+    )
+    if checkout_path.exists():
+        frozen_checkout = _load_object(_require_file(checkout_path))
+        if checkout.get("actual_commit") != frozen_checkout.get("actual_commit"):
+            raise ValueError("BOOTSTRAP_UPSTREAM_COMMIT_MISMATCH")
+        checkout = frozen_checkout
+    else:
+        write_json(checkout_path, checkout)
+    project_commit = _git_head()
+    teacher_sha256 = sha256_file(inputs.teacher_path)
+    commands = build_stage_commands(
+        inputs,
+        project_commit=project_commit,
+        candidate_count=int(adoption["counterfactual_candidate_count"]),
+        teacher_sha256=teacher_sha256,
+    )
+    contract = _resume_contract(
+        inputs=inputs,
+        adoption=adoption,
+        checkout=checkout,
+        project_commit=project_commit,
+        teacher_sha256=teacher_sha256,
+        commands=commands,
+    )
+    if resume_contract_path.exists():
+        if _load_object(_require_file(resume_contract_path)) != contract:
+            raise ValueError("BOOTSTRAP_SCIENTIFIC_CONTRACT_MISMATCH")
+    else:
+        write_json(resume_contract_path, contract)
+    result = {
+        "schema_version": "comrecgc_external_common_recovery_bootstrap_v1",
+        "status": "READY_FOR_EXTERNAL_COMMON_RECOVERY",
+        "output_root": str(root),
+        "generation_adoption_manifest_sha256": sha256_file(adoption_path),
+        "upstream_checkout_audit_sha256": sha256_file(checkout_path),
+        "continuation_resume_contract_sha256": sha256_file(resume_contract_path),
+        "common_recourse_started": False,
+        "downstream_started": False,
+    }
+    if bootstrap_path.exists():
+        if _load_object(_require_file(bootstrap_path)) != result:
+            raise ValueError("BOOTSTRAP_RECEIPT_MISMATCH")
+    else:
+        write_json(bootstrap_path, result)
+    return result
+
+
+def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
+    _validate_route_inputs(inputs)
     resuming = inputs.output_root.exists()
     if resuming:
         if (
@@ -1501,6 +2369,12 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
         for stage, argv, marker, field in commands:
             checkpoint_path = checkpoints / f"{stage}.json"
             if resuming and marker.exists():
+                _require_completed_stage_writer_quiescence(
+                    output_root=inputs.output_root,
+                    stage=stage,
+                    argv=argv,
+                    checkpoint_path=checkpoint_path,
+                )
                 _validate_completed_stage(
                     stage=stage,
                     argv=argv,
@@ -1510,8 +2384,13 @@ def run_continuation(inputs: ContinuationInputs) -> dict[str, Any]:
                 )
                 continue
             if resuming and marker.parent.exists() and stage != "common_recourse":
-                raise ValueError(
-                    f"RESUME_NONCHECKPOINTED_PARTIAL_STAGE:{stage}:{marker.parent}"
+                _archive_noncheckpointed_partial_stage(
+                    stage=stage,
+                    argv=argv,
+                    marker=marker,
+                    required_field=field,
+                    checkpoint_path=checkpoint_path,
+                    output_root=inputs.output_root,
                 )
             _run_stage(
                 stage=stage,

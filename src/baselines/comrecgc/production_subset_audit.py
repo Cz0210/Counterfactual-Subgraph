@@ -718,12 +718,18 @@ def run_production_subset_equivalence_audit(
                 expected_vectors_sha256=vectors_subset_sha,
             )
         except ExternalMemoryDBSCANError as exc:
-            if not str(exc).startswith("EXACT_DBSCAN_COMPLEXITY_BLOCKED:"):
+            failure_reason = str(exc)
+            if not failure_reason.startswith(
+                (
+                    "EXACT_DBSCAN_COMPLEXITY_BLOCKED:",
+                    "EXACT_DBSCAN_GENERAL_EXTERNAL_REQUIRED:",
+                )
+            ):
                 raise
             failure_path = certificate_root / "shortcut_failure.json"
             certificate = {
                 "applicable": False,
-                "reason": str(exc),
+                "reason": failure_reason,
                 "failure_path": str(failure_path),
                 "failure_sha256": sha256_file(failure_path),
             }

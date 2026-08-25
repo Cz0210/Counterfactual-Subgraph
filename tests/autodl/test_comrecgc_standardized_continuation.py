@@ -112,6 +112,49 @@ def _inputs(tmp_path: Path, dataset: str = "mutagenicity") -> continuation.Conti
     )
 
 
+def test_external_common_recovery_bootstrap_is_idempotent_and_starts_no_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = _inputs(tmp_path, dataset="aids")
+    pair_owner = tmp_path / "pair-owner"
+    pair_owner.mkdir()
+    pair_manifest = _file(pair_owner / "run_manifest.json", "{}\n")
+    close_manifest = _file(tmp_path / "close-view.json", "{}\n")
+    values = replace(
+        base,
+        device="cpu",
+        common_recourse_engine="external_memory_exact_v1",
+        external_dbscan_shortcut_mode="all_core_one_component_adaptive_anchor_v1",
+        external_pair_store_source_manifest=pair_manifest,
+        external_pair_store_source_owner_root=pair_owner,
+        external_close_pair_view_manifest=close_manifest,
+        common_recourse_resume=True,
+    )
+    monkeypatch.setattr(
+        continuation,
+        "verify_checkout",
+        lambda *args, **kwargs: {
+            "root": str(values.upstream_root),
+            "actual_commit": continuation.UPSTREAM_COMMIT,
+            "passed": True,
+        },
+    )
+    first = continuation.bootstrap_external_common_recovery_continuation(values)
+    second = continuation.bootstrap_external_common_recovery_continuation(values)
+    assert first == second
+    assert first["common_recourse_started"] is False
+    assert first["downstream_started"] is False
+    assert not (values.output_root / "common_recourse/_RUN_COMPLETE.json").exists()
+    assert not (values.output_root / "PASS").exists()
+    for name in (
+        "generation_adoption_manifest.json",
+        "upstream_checkout_audit.json",
+        "continuation_resume_contract.json",
+        "exact_recovery_continuation_bootstrap.json",
+    ):
+        assert (values.output_root / name).is_file()
+
+
 def test_adopts_recovered_generation_hashes_large_payload_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -427,7 +470,39 @@ def test_fresh_external_common_stage_requires_full_hash_closure_before_pass(
     output_root = tmp_path / "continuation"
     output_root.mkdir()
     checkpoint = output_root / "common-recourse-checkpoint.json"
-    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: None)
+    popen_calls: list[dict[str, object]] = []
+    observed_launcher: list[str] = []
+    held_read_fds: list[int] = []
+
+    class Process:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            del timeout
+            while held_read_fds:
+                continuation.os.close(held_read_fds.pop())
+            return 0
+
+    def fake_popen(args: object, **kwargs: object) -> object:
+        observed_launcher[:] = list(args)  # type: ignore[arg-type]
+        held_read_fds.append(continuation.os.dup(kwargs["pass_fds"][0]))
+        popen_calls.append(kwargs)
+        return Process()
+
+    monkeypatch.setattr(
+        continuation.subprocess, "Popen", fake_popen
+    )
+    monkeypatch.setattr(
+        continuation, "_read_proc_start_ticks", lambda *args, **kwargs: 99
+    )
+    monkeypatch.setattr(
+        continuation, "_proc_argv", lambda *args, **kwargs: observed_launcher
+    )
 
     with pytest.raises(ValueError, match="RESUME_COMMON_TERMINAL"):
         continuation._run_stage(
@@ -446,7 +521,283 @@ def test_fresh_external_common_stage_requires_full_hash_closure_before_pass(
         )
     stage = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert stage["status"] == "FAILED"
+    assert stage["child_pid"] == 4242
+    assert stage["process_group_id"] == 4242
+    assert (
+        stage["process_group_contract"]
+        == "durable_barrier_dedicated_child_session_v2"
+    )
+    assert stage["child_start_ticks"] == 99
+    assert stage["startup_barrier"]["phase"] == "BOUND"
+    assert len(popen_calls) == 1
+    assert popen_calls[0]["cwd"] == continuation.PROJECT_ROOT
+    assert popen_calls[0]["env"] == {}
+    assert popen_calls[0]["start_new_session"] is True
+    assert popen_calls[0]["close_fds"] is True
+    assert len(popen_calls[0]["pass_fds"]) == 2
     assert not (output_root / "PASS").exists()
+
+
+def test_forwarded_sigterm_never_allows_the_wrapper_to_continue_after_child_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "continuation"
+    output_root.mkdir()
+    marker = tmp_path / "chemistry" / "_RUN_COMPLETE.json"
+    _json(marker, {"run_complete": True})
+    checkpoint = output_root / "chemistry-checkpoint.json"
+    installed: dict[int, object] = {}
+    forwarded: list[tuple[int, int]] = []
+    observed_launcher: list[str] = []
+    held_read_fds: list[int] = []
+
+    def fake_signal(signum: int, handler: object) -> object:
+        previous = installed.get(signum, continuation.signal.SIG_DFL)
+        installed[signum] = handler
+        return previous
+
+    class Process:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            del timeout
+            while held_read_fds:
+                continuation.os.close(held_read_fds.pop())
+            handler = installed[continuation.signal.SIGTERM]
+            assert callable(handler)
+            handler(continuation.signal.SIGTERM, None)
+            return 0
+
+    monkeypatch.setattr(continuation.signal, "getsignal", lambda _signum: None)
+    monkeypatch.setattr(continuation.signal, "signal", fake_signal)
+    def fake_popen(args: object, **kwargs: object) -> Process:
+        observed_launcher[:] = list(args)  # type: ignore[arg-type]
+        held_read_fds.append(continuation.os.dup(kwargs["pass_fds"][0]))
+        return Process()
+
+    monkeypatch.setattr(continuation.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        continuation, "_read_proc_start_ticks", lambda *args, **kwargs: 99
+    )
+    monkeypatch.setattr(
+        continuation, "_proc_argv", lambda *args, **kwargs: observed_launcher
+    )
+    monkeypatch.setattr(
+        continuation.os,
+        "killpg",
+        lambda pid, signum: forwarded.append((pid, signum)),
+    )
+
+    with pytest.raises(
+        continuation._StageTerminationRequested,
+        match="STAGE_TERMINATED_AFTER_CHILD_COMPLETION",
+    ):
+        continuation._run_stage(
+            stage="chemistry",
+            argv=["python", "chemistry.py"],
+            marker=marker,
+            required_field="run_complete",
+            environment={},
+            output_root=output_root,
+            checkpoint_path=checkpoint,
+        )
+    failed = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert failed["status"] == "FAILED"
+    assert failed["error_class"] == "_StageTerminationRequested"
+    assert forwarded == [(4242, continuation.signal.SIGTERM)]
+    assert not (output_root / "PASS").exists()
+
+
+@pytest.mark.parametrize("signal_phase", ("during_arm", "during_launch"))
+def test_stop_before_durable_science_release_never_executes_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signal_phase: str,
+) -> None:
+    output_root = tmp_path / "continuation"
+    output_root.mkdir()
+    marker = tmp_path / "chemistry" / "_RUN_COMPLETE.json"
+    checkpoint = output_root / "chemistry-checkpoint.json"
+    installed: dict[int, object] = {}
+    observed = {"launch": 0, "release": 0, "abort": 0}
+
+    def fake_signal(signum: int, handler: object) -> object:
+        previous = installed.get(signum, continuation.signal.SIG_DFL)
+        installed[signum] = handler
+        return previous
+
+    def request_stop() -> None:
+        handler = installed[continuation.signal.SIGTERM]
+        assert callable(handler)
+        handler(continuation.signal.SIGTERM, None)
+
+    class Process:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    class FakeBarrier:
+        launcher_argv = ["python", "-S", "startup-wrapper"]
+
+        @staticmethod
+        def abort() -> None:
+            observed["abort"] += 1
+
+        @staticmethod
+        def release() -> None:
+            observed["release"] += 1
+
+        @staticmethod
+        def launch(**_kwargs: object) -> Process:
+            observed["launch"] += 1
+            if signal_phase == "during_launch":
+                request_stop()
+            return Process()
+
+    def fake_arm(**kwargs: object) -> FakeBarrier:
+        record_path = Path(str(kwargs["record_path"]))
+        _json(record_path, {"fake": "authenticated-record"})
+        if signal_phase == "during_arm":
+            request_stop()
+        return FakeBarrier()
+
+    monkeypatch.setattr(continuation.signal, "getsignal", lambda _signum: None)
+    monkeypatch.setattr(continuation.signal, "signal", fake_signal)
+    monkeypatch.setattr(continuation, "arm_exec_startup_barrier", fake_arm)
+
+    with pytest.raises(
+        continuation._StageTerminationRequested,
+        match="STAGE_TERMINATED_BEFORE_SCIENCE_RELEASE",
+    ):
+        continuation._run_stage(
+            stage="chemistry",
+            argv=["python", "chemistry.py"],
+            marker=marker,
+            required_field="run_complete",
+            environment={},
+            output_root=output_root,
+            checkpoint_path=checkpoint,
+        )
+    failed = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert failed["status"] == "FAILED"
+    assert failed["error_class"] == "_StageTerminationRequested"
+    assert observed["release"] == 0
+    assert observed["launch"] == (0 if signal_phase == "during_arm" else 1)
+    assert observed["abort"] >= 1
+    assert not marker.exists()
+
+
+def test_completed_marker_cannot_bypass_bound_process_group_quiescence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "continuation"
+    checkpoint = output_root / "stage_checkpoints/chemistry.json"
+    argv = ["python", "chemistry.py"]
+    lock_path, record_path = continuation._stage_startup_barrier_paths(
+        output_root, stage="chemistry", generation=0
+    )
+    barrier = continuation.arm_exec_startup_barrier(
+        lock_path=lock_path,
+        record_path=record_path,
+        target_argv=argv,
+        record_policy="fresh",
+    )
+    barrier.abort()
+    binding = {
+        "schema_version": continuation._STARTUP_BARRIER_BINDING_SCHEMA,
+        "stage": "chemistry",
+        "generation": 0,
+        "phase": "BOUND",
+        "record_path": str(record_path),
+        "lock_path": str(lock_path),
+        "target_argv_sha256": continuation.stable_json_sha256(argv),
+        "record_sha256": continuation.sha256_file(record_path),
+        "launcher_argv_sha256": continuation.stable_json_sha256(
+            continuation.validate_startup_barrier_record(record_path).launcher_argv
+        ),
+    }
+    _json(
+        checkpoint,
+        {
+            "schema_version": 2,
+            "status": "RUNNING",
+            "stage": "chemistry",
+            "argv_sha256": continuation.stable_json_sha256(argv),
+            "process_group_contract": "durable_barrier_dedicated_child_session_v2",
+            "process_group_id": 4242,
+            "startup_barrier": binding,
+        },
+    )
+    observed: list[int] = []
+
+    def reject_live_group(process_group_id: int, **_kwargs: object) -> None:
+        observed.append(process_group_id)
+        raise ValueError("STAGE_CHILD_PROCESS_GROUP_NOT_QUIESCENT")
+
+    monkeypatch.setattr(
+        continuation, "_wait_for_process_group_quiescence", reject_live_group
+    )
+    with pytest.raises(ValueError, match="NOT_QUIESCENT"):
+        continuation._require_completed_stage_writer_quiescence(
+            output_root=output_root,
+            stage="chemistry",
+            argv=argv,
+            checkpoint_path=checkpoint,
+        )
+    assert observed == [4242]
+
+
+@pytest.mark.parametrize("window", ("temp_only", "final_and_temp"))
+def test_continuation_prearm_reconciles_barrier_record_publication_crash(
+    tmp_path: Path, window: str
+) -> None:
+    output_root = tmp_path / "continuation"
+    output_root.mkdir()
+    argv = ["python", "chemistry.py"]
+    lock_path, record_path = continuation._stage_startup_barrier_paths(
+        output_root, stage="chemistry", generation=0
+    )
+    barrier = continuation.arm_exec_startup_barrier(
+        lock_path=lock_path,
+        record_path=record_path,
+        target_argv=argv,
+    )
+    barrier.abort()
+    temporary = Path(f"{record_path}.tmp.fixture")
+    if window == "temp_only":
+        record_path.rename(temporary)
+    else:
+        continuation.os.link(record_path, temporary, follow_symlinks=False)
+    binding = {
+        "schema_version": continuation._STARTUP_BARRIER_BINDING_SCHEMA,
+        "stage": "chemistry",
+        "generation": 0,
+        "phase": "PRE_ARM",
+        "record_path": str(record_path),
+        "lock_path": str(lock_path),
+        "target_argv_sha256": continuation.stable_json_sha256(argv),
+    }
+    record = continuation._validate_stage_startup_binding(
+        output_root=output_root,
+        stage="chemistry",
+        argv=argv,
+        binding=binding,
+        allowed_phases={"PRE_ARM"},
+    )
+    assert (record is not None) is (window == "final_and_temp")
+    assert not temporary.exists()
 
 
 def test_pass_marker_is_published_only_after_all_frozen_gates(
@@ -541,11 +892,16 @@ def test_exact_resume_adopts_only_hash_bound_completed_stage(
         _json(marker, {kwargs["required_field"]: True})
         _json(
             kwargs["checkpoint_path"],
-            {
-                "schema_version": 2,
-                "status": "PASS",
-                "stage": kwargs["stage"],
-                "argv_sha256": continuation.stable_json_sha256(
+                {
+                    "schema_version": 2,
+                    "status": "PASS",
+                    "stage": kwargs["stage"],
+                    "runner_pid": 4242,
+                    "child_pid": 4242,
+                    "child_start_ticks": 99,
+                    "process_group_id": 4242,
+                    "process_group_contract": "dedicated_child_session_v1",
+                    "argv_sha256": continuation.stable_json_sha256(
                     list(kwargs["argv"])
                 ),
                 "marker": str(marker),
@@ -555,16 +911,37 @@ def test_exact_resume_adopts_only_hash_bound_completed_stage(
         )
 
     first_observed: list[str] = []
+    common_stage_call: dict[str, object] = {}
 
     def interrupt_after_common(**kwargs) -> None:
         first_observed.append(kwargs["stage"])
         if kwargs["stage"] == "common_recourse":
+            common_stage_call.update(kwargs)
             checkpoint_pass(**kwargs)
             checkpoint = json.loads(kwargs["checkpoint_path"].read_text())
             checkpoint["status"] = "RUNNING"
             checkpoint.pop("marker_sha256")
             _json(kwargs["checkpoint_path"], checkpoint)
             return
+        marker = Path(kwargs["marker"])
+        _file(marker.parent / "partial-child-output.json", "interrupted\n")
+        _json(
+            kwargs["checkpoint_path"],
+            {
+                "schema_version": 2,
+                "status": "RUNNING",
+                "stage": kwargs["stage"],
+                "runner_pid": 4242,
+                "process_group_id": 4242,
+                "process_group_contract": "dedicated_child_session_v1",
+                "argv_sha256": continuation.stable_json_sha256(
+                    list(kwargs["argv"])
+                ),
+                "marker": str(marker),
+                "required_field": kwargs["required_field"],
+                "started_at": "before-sigterm",
+            },
+        )
         raise RuntimeError("diagnostic interruption")
 
     monkeypatch.setattr(continuation, "_run_stage", interrupt_after_common)
@@ -602,6 +979,228 @@ def test_exact_resume_adopts_only_hash_bound_completed_stage(
     )
     assert common_checkpoint["reconciled_after_child_completion"] is True
     assert list((inputs.output_root / "failure_history").glob("FAILED.*.json"))
+    archived = list(
+        (inputs.output_root / "partial_stage_history").glob("chemistry.*")
+    )
+    archived_payloads = [path for path in archived if path.is_dir()]
+    archived_authorities = [path for path in archived if path.suffix == ".json"]
+    assert len(archived_payloads) == 1
+    assert len(archived_authorities) == 1
+    assert (archived_payloads[0] / "partial-child-output.json").read_text() == (
+        "interrupted\n"
+    )
+    continuation._require_completed_stage_writer_quiescence(
+        output_root=inputs.output_root,
+        stage="common_recourse",
+        argv=common_stage_call["argv"],
+        checkpoint_path=common_stage_call["checkpoint_path"],
+    )
+    assert (
+        continuation._validate_completed_stage(
+            stage="common_recourse",
+            argv=common_stage_call["argv"],
+            marker=common_stage_call["marker"],
+            required_field=common_stage_call["required_field"],
+            checkpoint_path=common_stage_call["checkpoint_path"],
+        )
+        is False
+    )
+
+
+def test_partial_stage_archive_refuses_a_live_old_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "output"
+    marker = root / "chemistry/_RUN_COMPLETE.json"
+    _file(marker.parent / "partial.json")
+    argv = ["python", "chemistry.py"]
+    checkpoint = root / "stage_checkpoints/chemistry.json"
+    _json(
+        checkpoint,
+        {
+            "schema_version": 2,
+            "status": "RUNNING",
+            "stage": "chemistry",
+            "runner_pid": 4242,
+            "process_group_id": 4242,
+            "process_group_contract": "dedicated_child_session_v1",
+            "argv_sha256": continuation.stable_json_sha256(argv),
+            "marker": str(marker),
+            "required_field": "run_complete",
+        },
+    )
+    monkeypatch.setattr(
+        continuation,
+        "_process_group_member_pids",
+        lambda *args, **kwargs: (4243,),
+    )
+    with pytest.raises(ValueError, match="PROCESS_GROUP_STILL_LIVE"):
+        continuation._archive_noncheckpointed_partial_stage(
+            stage="chemistry",
+            argv=argv,
+            marker=marker,
+            required_field="run_complete",
+            checkpoint_path=checkpoint,
+            output_root=root,
+        )
+    assert (marker.parent / "partial.json").is_file()
+    assert not (root / "partial_stage_history").exists()
+
+
+def test_partial_stage_archive_authority_replays_after_proc_audit_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "output"
+    marker = root / "chemistry/_RUN_COMPLETE.json"
+    _file(marker.parent / "partial.json", "preserve-me\n")
+    argv = ["python", "chemistry.py"]
+    checkpoint = root / "stage_checkpoints/chemistry.json"
+    _json(
+        checkpoint,
+        {
+            "schema_version": 2,
+            "status": "FAILED",
+            "stage": "chemistry",
+            "runner_pid": 4242,
+            "process_group_id": 4242,
+            "process_group_contract": "dedicated_child_session_v1",
+            "argv_sha256": continuation.stable_json_sha256(argv),
+            "marker": str(marker),
+            "required_field": "run_complete",
+        },
+    )
+    monkeypatch.setattr(
+        continuation, "_process_group_member_pids", lambda *args, **kwargs: ()
+    )
+    scan_count = 0
+
+    def drifting_proc_audit(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal scan_count
+        scan_count += 1
+        return {"all_writers_quiescent": True, "scanned_process_count": scan_count}
+
+    monkeypatch.setattr(continuation, "_scan_live_source_writers", drifting_proc_audit)
+    real_rename = continuation.os.rename
+    monkeypatch.setattr(
+        continuation.os,
+        "rename",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("crash-after-authority-before-rename")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="crash-after-authority"):
+        continuation._archive_noncheckpointed_partial_stage(
+            stage="chemistry",
+            argv=argv,
+            marker=marker,
+            required_field="run_complete",
+            checkpoint_path=checkpoint,
+            output_root=root,
+        )
+    authority = next((root / "partial_stage_history").glob("*.archive.json"))
+    first = json.loads(authority.read_text(encoding="utf-8"))
+    assert first["publication_audit"]["live_writer_audit_before"][
+        "scanned_process_count"
+    ] == 1
+    monkeypatch.setattr(continuation.os, "rename", real_rename)
+    archived = continuation._archive_noncheckpointed_partial_stage(
+        stage="chemistry",
+        argv=argv,
+        marker=marker,
+        required_field="run_complete",
+        checkpoint_path=checkpoint,
+        output_root=root,
+    )
+    assert (archived / "partial.json").read_text(encoding="utf-8") == "preserve-me\n"
+    assert scan_count >= 4
+
+
+def test_partial_stage_archive_enforces_the_budgeted_one_gibibyte_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "output"
+    marker = root / "chemistry/_RUN_COMPLETE.json"
+    oversized = _file(marker.parent / "oversized.bin", "")
+    oversized.write_bytes(b"")
+    with oversized.open("r+b") as stream:
+        stream.truncate(continuation._PARTIAL_STAGE_ARCHIVE_MAX_BYTES + 1)
+    argv = ["python", "chemistry.py"]
+    checkpoint = root / "stage_checkpoints/chemistry.json"
+    _json(
+        checkpoint,
+        {
+            "schema_version": 2,
+            "status": "FAILED",
+            "stage": "chemistry",
+            "runner_pid": 4242,
+            "process_group_id": 4242,
+            "process_group_contract": "dedicated_child_session_v1",
+            "argv_sha256": continuation.stable_json_sha256(argv),
+            "marker": str(marker),
+            "required_field": "run_complete",
+        },
+    )
+    monkeypatch.setattr(
+        continuation, "_process_group_member_pids", lambda *args, **kwargs: ()
+    )
+    monkeypatch.setattr(
+        continuation,
+        "_scan_live_source_writers",
+        lambda *_args, **_kwargs: {"all_writers_quiescent": True},
+    )
+    with pytest.raises(ValueError, match="ARCHIVE_BYTE_LIMIT_EXCEEDED"):
+        continuation._archive_noncheckpointed_partial_stage(
+            stage="chemistry",
+            argv=argv,
+            marker=marker,
+            required_field="run_complete",
+            checkpoint_path=checkpoint,
+            output_root=root,
+        )
+    assert oversized.exists()
+    assert not list((root / "partial_stage_history").glob("*.archive.json"))
+
+
+def test_recovery_budget_and_continuation_archive_caps_are_identical() -> None:
+    from src.utils import (
+        autodl_aids_comrecgc_exact_recovery_controller_v1 as recovery_controller,
+    )
+
+    assert continuation._PARTIAL_STAGE_ARCHIVE_MAX_BYTES == (
+        recovery_controller.PARTIAL_STAGE_ARCHIVE_MAX_BYTES
+    )
+
+
+def test_immutable_json_publisher_recovers_a_partial_temporary_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    payload = {"schema_version": "fixture_v1", "status": "READY"}
+    real_write = continuation.os.write
+    crashed = False
+
+    def partial_write_then_crash(descriptor: int, data: bytes) -> int:
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            real_write(descriptor, data[: max(1, len(data) // 2)])
+            raise OSError("injected-mid-publication-crash")
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(continuation.os, "write", partial_write_then_crash)
+    with pytest.raises(OSError, match="injected-mid-publication-crash"):
+        continuation._write_new_json(receipt, payload)
+    assert not receipt.exists()
+    temporary = tmp_path / ".receipt.json.partial"
+    assert temporary.is_file()
+    monkeypatch.setattr(continuation.os, "write", real_write)
+    changed_audit_payload = {
+        **payload,
+        "publication_audit": {"scanned_process_count": 17},
+    }
+    continuation._write_new_json(receipt, changed_audit_payload)
+    assert json.loads(receipt.read_text(encoding="utf-8")) == changed_audit_payload
+    assert not temporary.exists()
 
 
 def test_exact_resume_fails_closed_on_same_path_input_content_drift(
