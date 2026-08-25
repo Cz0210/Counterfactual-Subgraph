@@ -18,6 +18,7 @@ from src.baselines.comrecgc.close_pair_view import (
     PAIR_ORDER,
     PAIR_ORIENTATION,
     SCALE_CONTRACT,
+    CartesianThetaClosePairs,
     ThetaClosePairContract,
     materialize_theta_close_pair_view,
     validate_theta_close_pair_view,
@@ -45,6 +46,24 @@ def _contract(*, parents: int, candidates: int, theta: float = 0.1) -> ThetaClos
         scale_contract=SCALE_CONTRACT,
         normalized_distance_contract=NORMALIZED_DISTANCE_CONTRACT,
     )
+
+
+def test_cartesian_pair_indexing_allocates_only_the_requested_rows() -> None:
+    pairs = CartesianThetaClosePairs(
+        physical_rows=None,
+        logical_count=91_916_686,
+        parent_count=1_283,
+    )
+    assert pairs[np.asarray([0, 1_283], dtype=np.int64)].tolist() == [
+        [0, 0],
+        [0, 1],
+    ]
+    assert pairs[1_282:1_285].tolist() == [
+        [1_282, 0],
+        [0, 1],
+        [1, 1],
+    ]
+    assert pairs[-1].tolist() == [1_282, 71_641]
 
 
 def test_comrecgc_official_close_pair_filter_and_pair_axis_contract(

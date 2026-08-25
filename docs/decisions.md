@@ -9612,3 +9612,47 @@ Torch replays reproduce their respective terminal artifacts.
 ### Status
 
 Accepted for implementation; live execution remains untouched.
+
+## [2026-08-25] Fail closed while recovering disconnected exact AIDS components
+
+### Decision
+
+Supersede the first disconnected-anchor recovery draft with an exact,
+hash-closed component theorem that is valid only when every frozen seed anchor
+belongs to one exact initial anchor component. Every nonfailure row must retain
+the completed seed-ledger lower bound, every failure row is an exact core
+anchor, and primary plus (when needed) all-anchor scans attach other anchor
+components through float64-revalidated `distance <= eps` witnesses. Split seed
+components route to the general external exact engine instead of publishing a
+component shortcut.
+
+For a genuine multi-component all-core result, stream every cluster in frozen
+global-row blocks. The fixed-block Torch-float32 reduction is explicitly a
+`PROJECT_EXTENSION`, not bit-identical to upstream's one-shot `torch.mean`;
+float64 centroids are retained as an audit and any radius or theta decision
+disagreement fails closed. Coverage and greedy selection use the authoritative
+Torch-style strict masks without copying the 91.9M-row principal component.
+
+Theta-close pair inputs are always reconstructed from a validated close-view
+authority when one is supplied. Progress arrays, query sets, label promotion,
+certificates, checkpoints, writer locks, and terminal manifests are reopened
+through content hashes and deterministic replay. Resume never overwrites a
+tampered partial or certificate, and terminal PASS binds the current
+`O_NOFOLLOW` writer-lock inode.
+
+### Consequences
+
+- Nonanchor-to-nonanchor bridges cannot be silently missed under the unique
+  seed-component gate; outside that gate the shortcut is inapplicable.
+- A true two- or three-component exact partition can complete centroid,
+  strict-radius coverage, medoid lineage, and stable greedy selection with
+  bounded memory.
+- Numerical differences that could change a paper decision block publication
+  for an explicit audit rather than being hidden by a tolerance.
+- This commit is implementation and focused-test evidence only. It does not
+  adopt c766 artifacts, launch an AutoDL controller, stop the old brute route,
+  or claim an AIDS matrix PASS.
+
+### Status
+
+Accepted for detached review; not deployed.

@@ -732,6 +732,11 @@ def _adaptive_primary_query_anchors(
             "adaptive seed is absent from selected anchors"
         ) from exc
     seed_components = {int(component_by_anchor[value]) for value in seed_locals}
+    if len(seed_components) != 1:
+        raise ExternalMemoryDBSCANError(
+            "adaptive component recovery requires every frozen seed anchor "
+            "to belong to one exact initial anchor component"
+        )
     selected = set(seed_locals)
     boundary_rows: list[dict[str, Any]] = []
     component_count = int(np.max(component_by_anchor)) + 1
@@ -1469,6 +1474,31 @@ def _ensure_exact_npy(path: Path, expected: np.ndarray, *, label: str) -> str:
             raise ExternalMemoryDBSCANError(f"{label} resume content mismatch")
     else:
         _atomic_npy(path, expected)
+    return _sha256_file(path)
+
+
+def _ensure_exact_json(
+    path: Path,
+    expected: Mapping[str, Any],
+    *,
+    label: str,
+    volatile_fields: Sequence[str] = (),
+) -> str:
+    """Publish deterministic JSON once; resumes verify rather than overwrite."""
+
+    if path.exists():
+        if path.is_symlink():
+            raise ExternalMemoryDBSCANError(f"{label} must not be a symlink")
+        actual = _load_object(path)
+        actual_comparable = dict(actual)
+        expected_comparable = dict(expected)
+        for field in volatile_fields:
+            actual_comparable.pop(str(field), None)
+            expected_comparable.pop(str(field), None)
+        if actual_comparable != expected_comparable:
+            raise ExternalMemoryDBSCANError(f"{label} resume content mismatch")
+    else:
+        _atomic_json(path, expected)
     return _sha256_file(path)
 
 
@@ -2243,8 +2273,12 @@ def _write_progress_ledger_artifact(
         "all_required_prefixes_complete": True,
         "created_at": _utc_now(),
     }
-    _atomic_json(path, payload)
-    return _sha256_file(path)
+    return _ensure_exact_json(
+        path,
+        payload,
+        label="shortcut progress ledger",
+        volatile_fields=("created_at",),
+    )
 
 
 def _validate_progress_ledger_artifact(
@@ -3693,6 +3727,14 @@ def _run_component_scan(
         phase=ledger_phase,
     )
     blocks_since_checkpoint = 0
+    promoted_array_bindings = {
+        key: state[key]
+        for key in (
+            "component_core_lower_bounds_sha256",
+            "component_attachments_sha256",
+        )
+        if state.get(key) is not None
+    }
     for offset in range(int(ledger["committed_offset"]), n_samples, block):
         stop = min(n_samples, offset + block)
         _check_rss(
@@ -3742,6 +3784,7 @@ def _run_component_scan(
             extra = _progress_checkpoint_extra(ledgers, identity=identity)
             extra.update(
                 {
+                    **promoted_array_bindings,
                     **_adaptive_selection_checkpoint_fields(root),
                     "component_recovery_query_anchor_indices_sha256": (
                         _sample_indices_sha256(query_globals)
@@ -3822,6 +3865,8 @@ def _write_component_recovery_outputs(
     anchor_boundary_count: int,
     primary_query_locals: np.ndarray,
     boundary_rows: Sequence[Mapping[str, Any]],
+    seed_indices: Sequence[int],
+    seed_initial_component: int,
     failures: np.ndarray,
     lower_path: Path,
     attachment_path: Path,
@@ -3850,19 +3895,28 @@ def _write_component_recovery_outputs(
         dtype=np.uint32,
         label="component recovery core lower bounds",
     )
-    if bool(np.any(lower < int(contract.min_samples) - 1)):
-        raise ExternalMemoryDBSCANError(
-            "component recovery final core lower bound failed"
-        )
-    if bool(np.any(attachment >= component_count)):
-        raise ExternalMemoryDBSCANError(
-            "component recovery final attachment escaped component set"
-        )
     minimum_by_root: dict[int, int] = {}
+    minimum_core_lower_bound: int | None = None
     scan_block = max(1, min(1_000_000, n_samples))
     for offset in range(0, n_samples, scan_block):
         stop = min(n_samples, offset + scan_block)
-        roots = final_roots[np.asarray(attachment[offset:stop], dtype=np.intp)]
+        block_lower = np.asarray(lower[offset:stop])
+        block_attachment = np.asarray(attachment[offset:stop])
+        block_minimum = int(np.min(block_lower))
+        minimum_core_lower_bound = (
+            block_minimum
+            if minimum_core_lower_bound is None
+            else min(minimum_core_lower_bound, block_minimum)
+        )
+        if block_minimum < int(contract.min_samples) - 1:
+            raise ExternalMemoryDBSCANError(
+                "component recovery final core lower bound failed"
+            )
+        if bool(np.any(block_attachment >= component_count)):
+            raise ExternalMemoryDBSCANError(
+                "component recovery final attachment escaped component set"
+            )
+        roots = final_roots[np.asarray(block_attachment, dtype=np.intp)]
         for component_root in np.unique(roots).tolist():
             local = int(np.flatnonzero(roots == int(component_root))[0]) + offset
             minimum_by_root[int(component_root)] = min(
@@ -3875,23 +3929,89 @@ def _write_component_recovery_outputs(
     }
     labels_path = root / "labels.npy"
     labels_temporary = root / "labels.partial.npy"
-    labels_temporary.unlink(missing_ok=True)
-    labels = _new_memmap(labels_temporary, dtype=np.intp, shape=(n_samples,))
+    if labels_path.exists() and labels_temporary.exists():
+        raise ExternalMemoryDBSCANError(
+            "component recovery labels have both partial and final artifacts"
+        )
+    labels_source = (
+        labels_path
+        if labels_path.exists()
+        else (labels_temporary if labels_temporary.exists() else None)
+    )
+    if labels_source is None:
+        labels = _new_memmap(
+            labels_temporary, dtype=np.intp, shape=(n_samples,)
+        )
+        for offset in range(0, n_samples, scan_block):
+            stop = min(n_samples, offset + scan_block)
+            roots = final_roots[
+                np.asarray(attachment[offset:stop], dtype=np.intp)
+            ]
+            labels[offset:stop] = np.fromiter(
+                (label_by_root[int(value)] for value in roots.tolist()),
+                dtype=np.intp,
+                count=stop - offset,
+            )
+        _fsync_memmap(labels)
+        del labels
+        labels_source = labels_temporary
+    if labels_source.is_symlink():
+        raise ExternalMemoryDBSCANError(
+            "component recovery labels artifact must not be a symlink"
+        )
+    labels_check = _open_npy_memmap(labels_source, mode="r")
+    _validate_partial(
+        labels_check,
+        shape=(n_samples,),
+        dtype=np.intp,
+        label="component recovery labels",
+    )
     for offset in range(0, n_samples, scan_block):
         stop = min(n_samples, offset + scan_block)
-        roots = final_roots[np.asarray(attachment[offset:stop], dtype=np.intp)]
-        labels[offset:stop] = np.fromiter(
+        roots = final_roots[
+            np.asarray(attachment[offset:stop], dtype=np.intp)
+        ]
+        expected_labels = np.fromiter(
             (label_by_root[int(value)] for value in roots.tolist()),
             dtype=np.intp,
             count=stop - offset,
         )
-    _fsync_memmap(labels)
-    del labels
-    labels_sha = _sha256_file(labels_temporary)
-    os.replace(labels_temporary, labels_path)
-    _fsync_directory(root)
+        if not np.array_equal(labels_check[offset:stop], expected_labels):
+            raise ExternalMemoryDBSCANError(
+                "component recovery labels resume content mismatch"
+            )
+    del labels_check
+    labels_sha = _sha256_file(labels_source)
+    if labels_source == labels_temporary:
+        os.replace(labels_temporary, labels_path)
+        _fsync_directory(root)
     core_path = root / "core_mask.npy"
-    _constant_npy(core_path, shape=(n_samples,), dtype=np.bool_, fill_value=True)
+    if core_path.exists():
+        if core_path.is_symlink():
+            raise ExternalMemoryDBSCANError(
+                "component recovery core mask must not be a symlink"
+            )
+        core_check = _open_npy_memmap(core_path, mode="r")
+        _validate_partial(
+            core_check,
+            shape=(n_samples,),
+            dtype=np.bool_,
+            label="component recovery core mask",
+        )
+        for offset in range(0, n_samples, scan_block):
+            stop = min(n_samples, offset + scan_block)
+            if not bool(np.all(core_check[offset:stop])):
+                raise ExternalMemoryDBSCANError(
+                    "component recovery core mask resume content mismatch"
+                )
+        del core_check
+    else:
+        _constant_npy(
+            core_path,
+            shape=(n_samples,),
+            dtype=np.bool_,
+            fill_value=True,
+        )
     core_sha = _sha256_file(core_path)
     lower_sha = _sha256_file(lower_path)
     attachment_sha = _sha256_file(attachment_path)
@@ -3912,7 +4032,7 @@ def _write_component_recovery_outputs(
         bridge_phases.append(COMPONENT_EXPANSION_LEDGER_PHASE)
     witnesses = _component_bridge_witnesses(ledgers, phases=bridge_phases)
     witness_path = root / "component_bridge_witnesses.json"
-    _atomic_json(
+    witness_sha = _ensure_exact_json(
         witness_path,
         {
             "schema_version": COMPONENT_RECOVERY_SCHEMA_VERSION,
@@ -3920,8 +4040,8 @@ def _write_component_recovery_outputs(
             "witness_count": len(witnesses),
             "approximation_used": False,
         },
+        label="component bridge witnesses",
     )
-    witness_sha = _sha256_file(witness_path)
     progress_path = root / "shortcut_progress_ledger.json"
     progress_sha = _write_progress_ledger_artifact(
         path=progress_path,
@@ -3977,8 +4097,9 @@ def _write_component_recovery_outputs(
         "uncertain_edges_accepted": 0,
         "approximation_used": False,
     }
-    _atomic_json(boundary_path, boundary)
-    boundary_sha = _sha256_file(boundary_path)
+    boundary_sha = _ensure_exact_json(
+        boundary_path, boundary, label="component boundary certificate"
+    )
     all_core_path = root / "all_core_certificate.json"
     all_core = {
         "schema_version": ALL_CORE_CERTIFICATE_SCHEMA_VERSION,
@@ -3994,6 +4115,13 @@ def _write_component_recovery_outputs(
         "all_points_core_proven": True,
         "core_point_count": n_samples,
         "nonfailure_core_authority": "complete_seed_failure_ledger",
+        "unique_seed_component_proven": True,
+        "seed_component_count": 1,
+        "seed_initial_component": int(seed_initial_component),
+        "seed_anchor_indices": [int(value) for value in seed_indices],
+        "seed_anchor_indices_sha256": _sample_indices_sha256(
+            np.asarray(seed_indices, dtype=np.intp)
+        ),
         "failure_core_authority": "exact_anchor_degree_including_self",
         "failure_count": int(len(failures)),
         "minimum_failure_anchor_degree_including_self": int(
@@ -4001,14 +4129,17 @@ def _write_component_recovery_outputs(
         ) if len(failures) else None,
         "core_lower_bounds_path": str(lower_path),
         "core_lower_bounds_sha256": lower_sha,
-        "minimum_distinct_certifying_neighbors_excluding_self": int(np.min(lower)),
+        "minimum_distinct_certifying_neighbors_excluding_self": int(
+            minimum_core_lower_bound
+        ),
         "boundary_certificate_path": str(boundary_path),
         "boundary_certificate_sha256": boundary_sha,
         "exact": True,
         "approximation_used": False,
     }
-    _atomic_json(all_core_path, all_core)
-    all_core_sha = _sha256_file(all_core_path)
+    all_core_sha = _ensure_exact_json(
+        all_core_path, all_core, label="component all-core certificate"
+    )
     connectivity_path = root / "connectivity_certificate.json"
     connectivity = {
         "schema_version": CONNECTIVITY_CERTIFICATE_SCHEMA_VERSION,
@@ -4024,6 +4155,15 @@ def _write_component_recovery_outputs(
         "final_exact_component_count": int(len(ordered_roots)),
         "anchor_graph_exact_connected": component_count == 1,
         "component_bridge_graph_exact": True,
+        "unique_seed_component_proven": True,
+        "seed_component_count": 1,
+        "seed_initial_component": int(seed_initial_component),
+        "seed_anchor_indices": [int(value) for value in seed_indices],
+        "seed_anchor_indices_sha256": _sample_indices_sha256(
+            np.asarray(seed_indices, dtype=np.intp)
+        ),
+        "nonfailure_to_seed_component_edge_proven": True,
+        "nonfailure_nonfailure_edges_cannot_merge_distinct_components": True,
         "single_epsilon_component_proven": len(ordered_roots) == 1,
         "exact_multicomponent_partition_proven": True,
         "primary_boundary_anchor_selection": [dict(value) for value in boundary_rows],
@@ -4045,8 +4185,11 @@ def _write_component_recovery_outputs(
         "exact": True,
         "approximation_used": False,
     }
-    _atomic_json(connectivity_path, connectivity)
-    connectivity_sha = _sha256_file(connectivity_path)
+    connectivity_sha = _ensure_exact_json(
+        connectivity_path,
+        connectivity,
+        label="component connectivity certificate",
+    )
     partition_path = root / "cluster_partition.json"
     partition = {
         "schema_version": CLUSTER_PARTITION_SCHEMA_VERSION,
@@ -4073,8 +4216,9 @@ def _write_component_recovery_outputs(
         "sklearn_partition_semantics_preserved": True,
         "approximation_used": False,
     }
-    _atomic_json(partition_path, partition)
-    partition_sha = _sha256_file(partition_path)
+    partition_sha = _ensure_exact_json(
+        partition_path, partition, label="component partition certificate"
+    )
     proof_path = root / "shortcut_proof.json"
     proof = {
         "schema_version": SHORTCUT_PROOF_SCHEMA_VERSION,
@@ -4104,6 +4248,13 @@ def _write_component_recovery_outputs(
         "anchor_count": int(len(anchor_indices)),
         "anchor_edge_count": int(len(anchor_edges)),
         "initial_anchor_component_count": component_count,
+        "unique_seed_component_proven": True,
+        "seed_component_count": 1,
+        "seed_initial_component": int(seed_initial_component),
+        "seed_anchor_indices": [int(value) for value in seed_indices],
+        "seed_anchor_indices_sha256": _sample_indices_sha256(
+            np.asarray(seed_indices, dtype=np.intp)
+        ),
         "all_points_core_proven": True,
         "single_epsilon_component_proven": len(ordered_roots) == 1,
         "exact_multicomponent_partition_proven": True,
@@ -4132,8 +4283,12 @@ def _write_component_recovery_outputs(
         "cluster_partition_sha256": partition_sha,
         "completed_at": _utc_now(),
     }
-    _atomic_json(proof_path, proof)
-    proof_sha = _sha256_file(proof_path)
+    proof_sha = _ensure_exact_json(
+        proof_path,
+        proof,
+        label="component exact proof",
+        volatile_fields=("completed_at",),
+    )
     _verify_source_identity(
         Path(str(identity["vectors_path"])),
         expected_sha256=str(identity["vectors_sha256"]),
@@ -4192,7 +4347,6 @@ def _write_component_recovery_outputs(
         raise ExternalMemoryDBSCANError(
             "recorded peak RSS exceeded the frozen budget"
         )
-    _atomic_json(final_manifest_path, manifest)
     _checkpoint(
         state_path,
         identity=identity,
@@ -4206,6 +4360,7 @@ def _write_component_recovery_outputs(
             "core_mask_sha256": core_sha,
         },
     )
+    _atomic_json(final_manifest_path, manifest)  # PASS is published last.
     del attachment, lower
     return ExternalDBSCANResult(
         labels_path=labels_path,
@@ -4263,6 +4418,79 @@ def _fit_adaptive_disconnected_component_recovery(
         anchor_indices=anchor_indices, anchor_rows=anchor_rows
     )
     component_count = len(components)
+    seed_locals = np.searchsorted(
+        anchor_indices, np.asarray(seed_indices, dtype=np.intp)
+    )
+    if (
+        bool(np.any(seed_locals >= len(anchor_indices)))
+        or not np.array_equal(anchor_indices[seed_locals], seed_indices)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "adaptive frozen seeds are absent from selected anchors"
+        )
+    seed_components = sorted(
+        {int(component_by_anchor[int(value)]) for value in seed_locals.tolist()}
+    )
+    if len(seed_components) != 1:
+        reason = "adaptive_seed_anchors_span_multiple_exact_components"
+        details = {
+            "seed_indices": [int(value) for value in seed_indices],
+            "seed_initial_components": seed_components,
+            "unique_seed_component_proven": False,
+            "old_quadratic_route_started": False,
+        }
+        if n_samples <= int(contract.exact_fallback_max_samples):
+            failure = _shortcut_failure(
+                root=root,
+                identity=identity,
+                reason=reason,
+                num_samples=n_samples,
+                fallback_limit=int(contract.exact_fallback_max_samples),
+                details={
+                    **details,
+                    "general_exact_route": "three_pass_exact_radius_graph_v1",
+                },
+            )
+            _checkpoint(
+                state_path,
+                identity=identity,
+                phase="neighbor_counts",
+                next_offset=0,
+                peak_rss_bytes=max(int(peak_rss_bytes), _rss_bytes()),
+                extra={
+                    "shortcut_failure_path": failure["path"],
+                    "shortcut_failure_sha256": failure["sha256"],
+                },
+            )
+            return None
+        failure = _shortcut_failure(
+            root=root,
+            identity=identity,
+            reason=f"{reason}_general_exact_required",
+            num_samples=n_samples,
+            fallback_limit=int(contract.exact_fallback_max_samples),
+            details={
+                **details,
+                "required_engine": "partitioned_external_memory_exact_dbscan",
+            },
+        )
+        _checkpoint(
+            state_path,
+            identity=identity,
+            phase="shortcut_blocked",
+            next_offset=0,
+            peak_rss_bytes=max(int(peak_rss_bytes), _rss_bytes()),
+            extra={
+                **_progress_checkpoint_extra(ledgers, identity=identity),
+                "shortcut_failure_path": failure["path"],
+                "shortcut_failure_sha256": failure["sha256"],
+            },
+        )
+        raise ExternalMemoryDBSCANError(
+            "EXACT_DBSCAN_GENERAL_EXTERNAL_REQUIRED:"
+            "reason=adaptive_seed_anchors_span_multiple_exact_components"
+        )
+    seed_initial_component = int(seed_components[0])
     anchor_degrees = np.asarray([len(value) for value in anchor_rows], dtype=np.uint32)
     if len(failures):
         failure_locals = np.searchsorted(anchor_indices, failures)
@@ -4579,6 +4807,8 @@ def _fit_adaptive_disconnected_component_recovery(
         anchor_boundary_count=anchor_boundary_count,
         primary_query_locals=primary_query_locals,
         boundary_rows=boundary_rows,
+        seed_indices=seed_indices,
+        seed_initial_component=seed_initial_component,
         failures=failures,
         lower_path=lower_final,
         attachment_path=attachment_final,
@@ -4615,6 +4845,22 @@ def _validate_component_recovery_closure(
         int(value) for value in scientific_identity["vectors_shape"]
     ]
     contract = scientific_identity["contract"]
+    checkpoint_path = root / "checkpoint.json"
+    checkpoint = _load_checkpoint(checkpoint_path)
+    if (
+        checkpoint.get("identity") != dict(scientific_identity)
+        or checkpoint.get("identity_sha256") != scientific_sha
+        or checkpoint.get("phase") != "complete"
+        or int(checkpoint.get("next_offset", -1)) != n_samples
+        or checkpoint.get("shortcut_proof_sha256")
+        != manifest.get("shortcut_proof_sha256")
+        or checkpoint.get("labels_sha256") != manifest.get("labels_sha256")
+        or checkpoint.get("core_mask_sha256")
+        != manifest.get("core_mask_sha256")
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal component-recovery checkpoint closure mismatch"
+        )
     proof_path = Path(str(manifest.get("shortcut_proof_path") or "")).resolve(
         strict=True
     )
@@ -4644,6 +4890,8 @@ def _validate_component_recovery_closure(
         or proof.get("eps") != contract.get("eps")
         or proof.get("min_samples") != contract.get("min_samples")
         or proof.get("all_points_core_proven") is not True
+        or proof.get("unique_seed_component_proven") is not True
+        or int(proof.get("seed_component_count", -1)) != 1
         or proof.get("exact_multicomponent_partition_proven") is not True
         or proof.get("labels_are_exact_sklearn_order") is not True
         or proof.get("exact_neighbor_counts_materialized") is not False
@@ -4694,6 +4942,20 @@ def _validate_component_recovery_closure(
     ):
         raise ExternalMemoryDBSCANError(
             "terminal component-recovery selection identity mismatch"
+        )
+    selection_identity = selection_manifest["selection_identity"]
+    frozen_seed_indices = [
+        int(value) for value in selection_identity.get("seed_indices", [])
+    ]
+    frozen_seed_sha256 = _sample_indices_sha256(
+        np.asarray(frozen_seed_indices, dtype=np.intp)
+    )
+    if (
+        proof.get("seed_anchor_indices") != frozen_seed_indices
+        or proof.get("seed_anchor_indices_sha256") != frozen_seed_sha256
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal component-recovery seed identity mismatch"
         )
     paths: dict[str, Path] = {}
     for field, hash_field in (
@@ -4763,11 +5025,20 @@ def _validate_component_recovery_closure(
         or boundary.get("anchor_graph_float64_exactly_matched") is not True
         or int(boundary.get("uncertain_edges_accepted", -1)) != 0
         or all_core.get("all_points_core_proven") is not True
+        or all_core.get("unique_seed_component_proven") is not True
+        or int(all_core.get("seed_component_count", -1)) != 1
         or int(all_core.get("core_point_count", -1)) != n_samples
         or all_core.get("self_neighbor_counted_exactly_once") is not True
         or all_core.get("boundary_certificate_sha256")
         != proof.get("boundary_certificate_sha256")
         or connectivity.get("component_bridge_graph_exact") is not True
+        or connectivity.get("unique_seed_component_proven") is not True
+        or int(connectivity.get("seed_component_count", -1)) != 1
+        or connectivity.get("nonfailure_to_seed_component_edge_proven") is not True
+        or connectivity.get(
+            "nonfailure_nonfailure_edges_cannot_merge_distinct_components"
+        )
+        is not True
         or connectivity.get("exact_multicomponent_partition_proven") is not True
         or connectivity.get("all_core_certificate_sha256")
         != proof.get("all_core_certificate_sha256")
@@ -4793,13 +5064,21 @@ def _validate_component_recovery_closure(
         dtype=np.uint32,
         label="recovery attachment",
     )
-    if (
-        not bool(np.all(core))
-        or bool(np.any(lower < int(contract["min_samples"]) - 1))
-    ):
-        raise ExternalMemoryDBSCANError(
-            "terminal component-recovery all-core artifact failed"
-        )
+    validation_block = max(1, min(1_000_000, n_samples))
+    for offset in range(0, n_samples, validation_block):
+        stop = min(n_samples, offset + validation_block)
+        if (
+            not bool(np.all(core[offset:stop]))
+            or bool(
+                np.any(
+                    lower[offset:stop]
+                    < int(contract["min_samples"]) - 1
+                )
+            )
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal component-recovery all-core artifact failed"
+            )
     component_path = Path(
         str(connectivity.get("anchor_initial_components_path") or "")
     ).resolve(strict=True)
@@ -4809,10 +5088,17 @@ def _validate_component_recovery_closure(
     witness_path = Path(
         str(connectivity.get("bridge_witnesses_path") or "")
     ).resolve(strict=True)
+    primary_query_path = Path(
+        str(connectivity.get("primary_query_anchor_indices_path") or "")
+    ).resolve(strict=True)
     for path, expected in (
         (component_path, connectivity.get("anchor_initial_components_sha256")),
         (roots_path, connectivity.get("final_component_roots_sha256")),
         (witness_path, connectivity.get("bridge_witnesses_sha256")),
+        (
+            primary_query_path,
+            connectivity.get("primary_query_anchor_indices_sha256"),
+        ),
     ):
         if path.parent != root or _sha256_file(path) != expected:
             raise ExternalMemoryDBSCANError(
@@ -4840,6 +5126,36 @@ def _validate_component_recovery_closure(
             raise ExternalMemoryDBSCANError(
                 "terminal anchor edge crosses initial components"
             )
+    seed_locals = np.searchsorted(
+        anchors, np.asarray(frozen_seed_indices, dtype=np.intp)
+    )
+    if (
+        not frozen_seed_indices
+        or bool(np.any(seed_locals >= len(anchors)))
+        or not np.array_equal(anchors[seed_locals], frozen_seed_indices)
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal component-recovery frozen seed anchors are absent"
+        )
+    seed_components = {
+        int(component_by_anchor[int(value)]) for value in seed_locals.tolist()
+    }
+    if len(seed_components) != 1:
+        raise ExternalMemoryDBSCANError(
+            "terminal component-recovery seeds span exact anchor components"
+        )
+    seed_component = next(iter(seed_components))
+    for certificate in (proof, all_core, connectivity):
+        if (
+            certificate.get("seed_anchor_indices") != frozen_seed_indices
+            or certificate.get("seed_anchor_indices_sha256")
+            != frozen_seed_sha256
+            or int(certificate.get("seed_initial_component", -1))
+            != seed_component
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal component-recovery unique seed certificate mismatch"
+            )
     witnesses_payload = _load_object(witness_path)
     witnesses = witnesses_payload.get("witnesses")
     if (
@@ -4854,6 +5170,71 @@ def _validate_component_recovery_closure(
     source = _open_npy_memmap(
         Path(str(scientific_identity["vectors_path"])), mode="r"
     )
+    primary_query = np.load(primary_query_path, allow_pickle=False)
+    recomputed_primary_locals, recomputed_boundary_rows = (
+        _adaptive_primary_query_anchors(
+            anchor_indices=anchors,
+            anchor_vectors64=np.asarray(source[anchors], dtype=np.float64),
+            component_by_anchor=component_by_anchor,
+            seed_indices=frozen_seed_indices,
+        )
+    )
+    recomputed_primary = np.asarray(
+        anchors[recomputed_primary_locals], dtype=np.intp
+    )
+    primary_query_content_sha = _sample_indices_sha256(recomputed_primary)
+    if (
+        primary_query.dtype != np.dtype(np.intp)
+        or primary_query.shape != recomputed_primary.shape
+        or not np.array_equal(primary_query, recomputed_primary)
+        or connectivity.get("primary_boundary_anchor_selection")
+        != recomputed_boundary_rows
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal component-recovery primary query selection mismatch"
+        )
+    primary_ledger = ledgers[COMPONENT_PRIMARY_LEDGER_PHASE]
+    if (
+        primary_ledger.get("result", {}).get("query_anchor_indices_sha256")
+        != primary_query_content_sha
+        or any(
+            entry.get("payload", {}).get("query_anchor_indices_sha256")
+            != primary_query_content_sha
+            for entry in primary_ledger["entries"]
+        )
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal component-recovery primary query ledger mismatch"
+        )
+    if COMPONENT_EXPANSION_LEDGER_PHASE in ledgers:
+        expansion_sha = _sample_indices_sha256(anchors)
+        expansion_ledger = ledgers[COMPONENT_EXPANSION_LEDGER_PHASE]
+        if (
+            expansion_ledger.get("result", {}).get(
+                "query_anchor_indices_sha256"
+            )
+            != expansion_sha
+            or any(
+                entry.get("payload", {}).get("query_anchor_indices_sha256")
+                != expansion_sha
+                for entry in expansion_ledger["entries"]
+            )
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal component-recovery expansion query ledger mismatch"
+            )
+    for entry in primary_ledger["entries"]:
+        start, stop = int(entry["start"]), int(entry["stop"])
+        payload = entry["payload"]
+        if (
+            payload.get("core_lower_bounds_uint32_le_sha256")
+            != _uint32_values_sha256(np.asarray(lower[start:stop]))
+            or payload.get("attachment_components_uint32_le_sha256")
+            != _uint32_values_sha256(np.asarray(attachment[start:stop]))
+        ):
+            raise ExternalMemoryDBSCANError(
+                "terminal component-recovery promoted array ledger mismatch"
+            )
     witness_parent = np.arange(len(final_roots), dtype=np.int32)
     selection = selection_manifest["selection_identity"]
     failures = np.load(Path(str(selection["failure_indices_path"])), allow_pickle=False)

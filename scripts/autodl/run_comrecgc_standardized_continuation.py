@@ -37,9 +37,14 @@ from src.baselines.comrecgc.contracts import (  # noqa: E402
     write_json,
 )
 from src.baselines.comrecgc.external_memory_dbscan import (  # noqa: E402
+    ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    _validate_component_recovery_closure,
     _validate_shortcut_proof_closure,
+)
+from src.baselines.comrecgc.external_component_summary import (  # noqa: E402
+    validate_proven_all_core_component_summary,
 )
 from src.baselines.comrecgc.external_memory_recourse import (  # noqa: E402
     PAIR_STORE_SCHEMA,
@@ -1145,6 +1150,7 @@ def _validate_common_recourse_completion(
         physical_vectors_path = Path(str(pair_manifest["vectors_path"]))
         physical_vectors_sha256 = str(pair_manifest["vectors_sha256"])
         physical_pairs_sha256 = str(pair_manifest["pairs_sha256"])
+    close_view = None
     close_manifest_raw = external.get("close_pair_view_manifest")
     close_manifest_sha = external.get("close_pair_view_manifest_sha256")
     if close_manifest_raw is None:
@@ -1205,6 +1211,10 @@ def _validate_common_recourse_completion(
         ALL_CORE_ONE_COMPONENT_SHORTCUT,
         ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     }
+    component_recovery = (
+        dbscan_manifest.get("clustering_path")
+        == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
+    )
     required_dbscan_artifacts = [
         ("core_mask_path", "core_mask_sha256"),
         ("labels_path", "labels_sha256"),
@@ -1218,6 +1228,19 @@ def _validate_common_recourse_completion(
             )
         except Exception as exc:
             raise ValueError("RESUME_COMMON_DBSCAN_SHORTCUT_CLOSURE_MISMATCH") from exc
+    elif component_recovery:
+        if dbscan_manifest.get("neighbor_counts_available") is not False:
+            raise ValueError(
+                "RESUME_COMMON_COMPONENT_RECOVERY_COUNT_CONTRACT_MISMATCH"
+            )
+        try:
+            _validate_component_recovery_closure(
+                manifest=dbscan_manifest, root=dbscan_manifest_path.parent
+            )
+        except Exception as exc:
+            raise ValueError(
+                "RESUME_COMMON_COMPONENT_RECOVERY_CLOSURE_MISMATCH"
+            ) from exc
     else:
         required_dbscan_artifacts.insert(
             0, ("neighbor_counts_path", "neighbor_counts_sha256")
@@ -1268,6 +1291,73 @@ def _validate_common_recourse_completion(
             raise ValueError("RESUME_COMMON_ONE_CLUSTER_SCIENTIFIC_MISMATCH")
     elif summary_manifest_raw is not None or summary_manifest_sha256 is not None:
         raise ValueError("RESUME_COMMON_UNEXPECTED_ONE_CLUSTER_MANIFEST")
+    component_summary_raw = external.get(
+        "all_core_component_summary_manifest"
+    )
+    component_summary_sha = external.get(
+        "all_core_component_summary_manifest_sha256"
+    )
+    if component_recovery:
+        relative = "external_memory/all_core_component_summary/run_manifest.json"
+        if relative not in closure:
+            raise ValueError("RESUME_COMMON_COMPONENT_SUMMARY_CLOSURE_MISSING")
+        component_summary_path = _require_file(root / relative)
+        if (
+            str(component_summary_raw) != str(component_summary_path)
+            or str(component_summary_sha) != sha256_file(component_summary_path)
+        ):
+            raise ValueError(
+                "RESUME_COMMON_COMPONENT_SUMMARY_MANIFEST_BINDING_MISMATCH"
+            )
+        try:
+            component_summary = validate_proven_all_core_component_summary(
+                component_summary_path,
+                pair_indices=None,
+                full_replay=True,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "RESUME_COMMON_COMPONENT_SUMMARY_CLOSURE_MISMATCH"
+            ) from exc
+        component_identity = _load_object(component_summary_path).get(
+            "scientific_identity"
+        )
+        selected_file = json.loads(
+            (root / "selected_common_recourses.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        selected_scientific_projection = []
+        if isinstance(selected_file, list):
+            for expected_row, published_row in zip(
+                component_summary.selected, selected_file, strict=False
+            ):
+                if not isinstance(published_row, Mapping):
+                    selected_scientific_projection.append(None)
+                    continue
+                selected_scientific_projection.append(
+                    {
+                        key: published_row.get(key)
+                        for key in expected_row
+                    }
+                )
+        if (
+            not isinstance(component_identity, Mapping)
+            or component_identity.get("dbscan_manifest_sha256")
+            != external.get("dbscan_manifest_sha256")
+            or component_identity.get("pairs_sha256")
+            != external.get("pair_indices_sha256")
+            or [list(value) for value in component_summary.official_result]
+            != manifest.get("official_coverage_summary_result")
+            or not isinstance(selected_file, list)
+            or len(component_summary.selected) != len(selected_file)
+            or component_summary.selected != selected_scientific_projection
+        ):
+            raise ValueError(
+                "RESUME_COMMON_COMPONENT_SUMMARY_SCIENTIFIC_MISMATCH"
+            )
+    elif component_summary_raw is not None or component_summary_sha is not None:
+        raise ValueError("RESUME_COMMON_UNEXPECTED_COMPONENT_SUMMARY_MANIFEST")
 
 
 def _archive_previous_failure(output_root: Path) -> None:

@@ -292,6 +292,7 @@ class ThetaClosePairView:
                 physical_rows=None,
                 logical_count=self.logical_close_rows,
                 parent_count=self.parent_count,
+                logical_npy_sha256=self.pairs_sha256,
             )
         if self.physical_row_indices_path is None:
             raise ExternalMemoryDBSCANError("indexed close view has no row index")
@@ -301,6 +302,7 @@ class ThetaClosePairView:
             ),
             logical_count=self.logical_close_rows,
             parent_count=self.parent_count,
+            logical_npy_sha256=self.pairs_sha256,
         )
 
 
@@ -336,10 +338,12 @@ class CartesianThetaClosePairs:
         physical_rows: np.ndarray | None,
         logical_count: int,
         parent_count: int,
+        logical_npy_sha256: str | None = None,
     ) -> None:
         self._physical_rows = physical_rows
         self._logical_count = int(logical_count)
         self._parent_count = int(parent_count)
+        self.logical_npy_sha256 = logical_npy_sha256
         self.shape = (self._logical_count, 2)
 
     def __len__(self) -> int:
@@ -349,15 +353,51 @@ class CartesianThetaClosePairs:
         if isinstance(key, tuple):
             row_key, column_key = key
             return self[row_key][..., column_key]
-        logical = np.arange(self._logical_count, dtype=np.int64)[key]
+        scalar = isinstance(key, (int, np.integer))
+        if scalar:
+            value = int(key)
+            if value < 0:
+                value += self._logical_count
+            if value < 0 or value >= self._logical_count:
+                raise IndexError("Cartesian pair row index is out of range")
+            logical = np.asarray([value], dtype=np.int64)
+            physical_key: Any = value
+        elif isinstance(key, slice):
+            start, stop, step = key.indices(self._logical_count)
+            logical = np.arange(start, stop, step, dtype=np.int64)
+            physical_key = key
+        else:
+            raw = np.asarray(key)
+            if raw.dtype == np.dtype(np.bool_):
+                if raw.ndim != 1 or raw.shape != (self._logical_count,):
+                    raise IndexError(
+                        "Cartesian pair boolean index has the wrong shape"
+                    )
+                logical = np.flatnonzero(raw).astype(np.int64, copy=False)
+                physical_key = raw
+            elif np.issubdtype(raw.dtype, np.integer):
+                logical = np.asarray(raw, dtype=np.int64)
+                logical = np.where(
+                    logical < 0, logical + self._logical_count, logical
+                )
+                if bool(
+                    np.any(logical < 0) or np.any(logical >= self._logical_count)
+                ):
+                    raise IndexError("Cartesian pair row index is out of range")
+                physical_key = logical
+            else:
+                raise IndexError("Cartesian pair indices must be integers or booleans")
         physical = (
             logical
             if self._physical_rows is None
-            else np.asarray(self._physical_rows[key], dtype=np.int64)
+            else np.atleast_1d(
+                np.asarray(self._physical_rows[physical_key], dtype=np.int64)
+            )
         )
-        return _expected_pairs(
+        result = _expected_pairs(
             np.asarray(physical, dtype=np.int64), parent_count=self._parent_count
         )
+        return result[0] if scalar else result
 
 
 def _mask(

@@ -200,6 +200,70 @@ def test_adaptive_disconnected_true_multicluster_partition_is_exact(
     assert partition["canonical_cluster_labels"] == [0, 1]
 
 
+def test_component_recovery_rejects_nonanchor_to_nonanchor_bridge_when_seeds_split(
+    tmp_path: Path,
+) -> None:
+    """A split seed set invalidates the component-attachment theorem.
+
+    Each outer row has three seed neighbours in exactly one seed component,
+    while the two outer rows connect those components only through each other.
+    A same-row anchor-component scan cannot see that edge, so the recovery
+    proof must fail closed instead of publishing sklearn's true one cluster.
+    """
+
+    values = np.zeros((8, 64), dtype=np.float64)
+    values[:, :2] = np.asarray(
+        [
+            [-0.60, -0.03],
+            [-0.60, 0.00],
+            [-0.60, 0.03],
+            [0.60, -0.03],
+            [0.60, 0.00],
+            [0.60, 0.03],
+            [-0.30, 0.90],
+            [0.30, 0.90],
+        ],
+        dtype=np.float64,
+    )
+    vectors = _save(tmp_path / "split-seed-vectors.npy", values)
+    contract = external.ExternalDBSCANContract(
+        eps=1.0,
+        min_samples=3,
+        query_block_size=2,
+        checkpoint_interval_blocks=1,
+        max_rss_bytes=external._rss_bytes() + 512 * 1024**2,
+        expected_sklearn_version=sklearn.__version__,
+        shortcut_mode=external.ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        shortcut_seed_count=6,
+        shortcut_failure_cap=100,
+        shortcut_query_block_size=2,
+        exact_fallback_max_samples=0,
+    )
+    expected = DBSCAN(eps=1.0, min_samples=3).fit(values)
+    assert set(expected.labels_.tolist()) == {0}
+    assert len(expected.core_sample_indices_) == len(values)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match=(
+            "EXACT_DBSCAN_GENERAL_EXTERNAL_REQUIRED:"
+            "reason=adaptive_seed_anchors_span_multiple_exact_components"
+        ),
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=tmp_path / "split-seed-recovery",
+            contract=contract,
+        )
+    failure = json.loads(
+        (tmp_path / "split-seed-recovery/shortcut_failure.json").read_text()
+    )
+    assert failure["reason"] == (
+        "adaptive_seed_anchors_span_multiple_exact_components_general_exact_required"
+    )
+    assert failure["details"]["unique_seed_component_proven"] is False
+    assert failure["details"]["old_quadratic_route_started"] is False
+
+
 def test_adaptive_noncore_failure_routes_small_noise_and_border_to_general_exact(
     tmp_path: Path,
 ) -> None:
@@ -306,6 +370,153 @@ def test_adaptive_component_recovery_resume_replays_committed_prefix(
     assert resumed_manifest["core_mask_sha256"] == reference_manifest["core_mask_sha256"]
 
 
+def test_adaptive_component_expansion_resume_preserves_promoted_array_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _component_values([0.0, 0.0, 0.001, 0.050, 0.051, 0.052])
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _component_recovery_contract(block=2)
+    reference = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "expansion-reference",
+        contract=contract,
+    )
+    original = external._recovery_scan_block
+    expansion_calls = {"count": 0}
+
+    def interrupt(*args, **kwargs):
+        if kwargs.get("verify_core_contract") is False:
+            expansion_calls["count"] += 1
+            if expansion_calls["count"] == 2:
+                raise RuntimeError("component expansion interruption")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(external, "_recovery_scan_block", interrupt)
+    root = tmp_path / "expansion-resumed"
+    with pytest.raises(RuntimeError, match="component expansion interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    state = json.loads((root / "checkpoint.json").read_text())
+    assert state["phase"] == external.COMPONENT_EXPANSION_PHASE
+    assert state["next_offset"] == 2
+    assert state["component_core_lower_bounds_sha256"]
+    assert state["component_attachments_sha256"]
+    monkeypatch.setattr(external, "_recovery_scan_block", original)
+    resumed = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract, resume=True
+    )
+    assert np.array_equal(
+        np.load(resumed.labels_path), np.load(reference.labels_path)
+    )
+    assert resumed.manifest_sha256 == reference.manifest_sha256 or (
+        json.loads(resumed.manifest_path.read_text())["labels_sha256"]
+        == json.loads(reference.manifest_path.read_text())["labels_sha256"]
+    )
+
+
+@pytest.mark.parametrize("tamper_partial", [False, True])
+def test_adaptive_component_recovery_labels_partial_is_replayed_before_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper_partial: bool,
+) -> None:
+    values = _component_values([0.0, 0.0, 0.001, 0.050, 0.051, 0.052])
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _component_recovery_contract(block=2)
+    root = tmp_path / f"labels-partial-{tamper_partial}"
+    original_replace = external.os.replace
+    interrupted = {"done": False}
+
+    def interrupt_labels_promotion(source, destination):
+        if (
+            not interrupted["done"]
+            and Path(source).name == "labels.partial.npy"
+            and Path(destination).name == "labels.npy"
+        ):
+            interrupted["done"] = True
+            raise RuntimeError("labels promotion interruption")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(external.os, "replace", interrupt_labels_promotion)
+    with pytest.raises(RuntimeError, match="labels promotion interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    monkeypatch.setattr(external.os, "replace", original_replace)
+    partial_path = root / "labels.partial.npy"
+    assert partial_path.is_file()
+    if tamper_partial:
+        partial = np.load(partial_path, mmap_mode="r+")
+        partial[0] = np.intp(99)
+        partial.flush()
+        del partial
+        with pytest.raises(
+            external.ExternalMemoryDBSCANError,
+            match="labels resume content mismatch",
+        ):
+            external.fit_external_memory_dbscan(
+                vectors_path=vectors,
+                work_dir=root,
+                contract=contract,
+                resume=True,
+            )
+        assert partial_path.is_file()
+        assert not (root / "labels.npy").exists()
+    else:
+        resumed = external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
+        )
+        expected = DBSCAN(
+            eps=contract.eps, min_samples=contract.min_samples
+        ).fit_predict(values)
+        assert np.array_equal(np.load(resumed.labels_path), expected)
+        assert not partial_path.exists()
+
+
+def test_adaptive_component_recovery_resume_never_overwrites_tampered_certificate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _component_values([0.0, 0.0, 0.001, 0.050, 0.051, 0.052])
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _component_recovery_contract(block=2)
+    root = tmp_path / "tampered-resume-certificate"
+    original = external._ensure_exact_json
+    interrupted = {"done": False}
+
+    def interrupt_after_boundary(path, expected, **kwargs):
+        result = original(path, expected, **kwargs)
+        if (
+            not interrupted["done"]
+            and kwargs.get("label") == "component boundary certificate"
+        ):
+            interrupted["done"] = True
+            raise RuntimeError("boundary certificate interruption")
+        return result
+
+    monkeypatch.setattr(external, "_ensure_exact_json", interrupt_after_boundary)
+    with pytest.raises(RuntimeError, match="boundary certificate interruption"):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract
+        )
+    monkeypatch.setattr(external, "_ensure_exact_json", original)
+    boundary_path = root / "boundary_certificate.json"
+    boundary = json.loads(boundary_path.read_text())
+    boundary["uncertain_edges_accepted"] = 1
+    boundary_path.write_text(json.dumps(boundary, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="boundary certificate resume content mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+    assert json.loads(boundary_path.read_text())["uncertain_edges_accepted"] == 1
+
+
 def test_adaptive_component_recovery_resume_rejects_tampered_core_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -374,6 +585,100 @@ def test_adaptive_component_recovery_terminal_rejects_tampered_bridge_receipt(
         )
 
 
+def test_adaptive_component_recovery_terminal_rejects_tampered_primary_query(
+    tmp_path: Path,
+) -> None:
+    values = _component_values(
+        [0.0, 0.0, 0.001, 0.019, 0.030, 0.031, 0.032]
+    )
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _component_recovery_contract()
+    root = tmp_path / "tampered-primary-query"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    manifest = json.loads(result.manifest_path.read_text())
+    connectivity = json.loads(
+        Path(manifest["connectivity_certificate_path"]).read_text()
+    )
+    query_path = Path(connectivity["primary_query_anchor_indices_path"])
+    query = np.load(query_path, allow_pickle=False)
+    with query_path.open("wb") as handle:
+        np.save(handle, query[::-1], allow_pickle=False)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="connectivity artifact mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
+def test_adaptive_component_recovery_terminal_rejects_coordinated_promoted_array_tamper(
+    tmp_path: Path,
+) -> None:
+    values = _component_values([0.0, 0.0, 0.001, 0.050, 0.051, 0.052])
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _component_recovery_contract(block=2)
+    root = tmp_path / "coordinated-promoted-array-tamper"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    manifest = json.loads(result.manifest_path.read_text())
+    proof_path = Path(manifest["shortcut_proof_path"])
+    proof = json.loads(proof_path.read_text())
+    lower_path = Path(proof["core_lower_bounds_path"])
+    lower = np.load(lower_path, mmap_mode="r+")
+    lower[0] = np.uint32(int(lower[0]) + 1)
+    lower.flush()
+    del lower
+    lower_sha = external._sha256_file(lower_path)
+
+    all_core_path = Path(proof["all_core_certificate_path"])
+    all_core = json.loads(all_core_path.read_text())
+    all_core["core_lower_bounds_sha256"] = lower_sha
+    external._atomic_json(all_core_path, all_core)
+    all_core_sha = external._sha256_file(all_core_path)
+
+    connectivity_path = Path(proof["connectivity_certificate_path"])
+    connectivity = json.loads(connectivity_path.read_text())
+    connectivity["all_core_certificate_sha256"] = all_core_sha
+    external._atomic_json(connectivity_path, connectivity)
+    connectivity_sha = external._sha256_file(connectivity_path)
+
+    partition_path = Path(proof["cluster_partition_path"])
+    partition = json.loads(partition_path.read_text())
+    partition["all_core_certificate_sha256"] = all_core_sha
+    partition["connectivity_certificate_sha256"] = connectivity_sha
+    external._atomic_json(partition_path, partition)
+    partition_sha = external._sha256_file(partition_path)
+
+    proof["core_lower_bounds_sha256"] = lower_sha
+    proof["all_core_certificate_sha256"] = all_core_sha
+    proof["connectivity_certificate_sha256"] = connectivity_sha
+    proof["cluster_partition_sha256"] = partition_sha
+    external._atomic_json(proof_path, proof)
+    proof_sha = external._sha256_file(proof_path)
+
+    manifest["shortcut_proof_sha256"] = proof_sha
+    manifest["all_core_certificate_sha256"] = all_core_sha
+    manifest["connectivity_certificate_sha256"] = connectivity_sha
+    manifest["cluster_partition_sha256"] = partition_sha
+    external._atomic_json(result.manifest_path, manifest)
+    state_path = root / "checkpoint.json"
+    checkpoint = json.loads(state_path.read_text())
+    checkpoint["shortcut_proof_sha256"] = proof_sha
+    _write_reauthenticated_checkpoint(state_path, checkpoint)
+
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="promoted array ledger mismatch",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
 def test_production_anchor_disconnect_fixture_selects_expected_boundaries() -> None:
     fixture = json.loads(
         Path("tests/fixtures/comrecgc/aids_anchor_disconnected_failure_contract.json")
@@ -405,6 +710,15 @@ def test_production_anchor_disconnect_fixture_selects_expected_boundaries() -> N
     assert reached in fixture["initial_component_sizes"]
     assert len(edges) == fixture["anchor_edge_count"]
     assert sorted(map(len, groups), reverse=True) == fixture["initial_component_sizes"]
+    seed_locals = np.searchsorted(
+        indices, np.asarray(fixture["seed_global_indices"], dtype=np.intp)
+    )
+    seed_components = {
+        int(components[int(value)]) for value in seed_locals.tolist()
+    }
+    assert seed_components == {int(components[seed_locals[0]])}
+    assert len(seed_components) == 1
+    assert len(groups[next(iter(seed_components))]) == 3
     assert len(query) == 5
     assert [row["anchor_global_index"] for row in boundary] == fixture[
         "boundary_anchor_global_indices"

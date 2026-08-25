@@ -24,10 +24,14 @@ from .contracts import (
 )
 from .model_adapter import AIDSGreedEmbeddingAdapter
 from .external_memory_dbscan import (
+    ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalDBSCANContract,
     ExternalMemoryDBSCANError,
     fit_external_memory_dbscan,
+)
+from .external_component_summary import (
+    summarize_proven_all_core_components_external,
 )
 from .external_memory_recourse import (
     ExternalPairStore,
@@ -762,7 +766,72 @@ def run_common_recourse(
                 )
                 one_cluster_summary_manifest = None
                 one_cluster_summary_manifest_sha256 = None
-                if dbscan_result.shortcut_proof_path is not None:
+                all_core_component_summary_manifest = None
+                all_core_component_summary_manifest_sha256 = None
+                completed_dbscan_manifest = json_load(dbscan_result.manifest_path)
+                if (
+                    completed_dbscan_manifest.get("clustering_path")
+                    == ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY
+                ):
+                    exact_summary = summarize_proven_all_core_components_external(
+                        work_dir=(
+                            root / "external_memory/all_core_component_summary"
+                        ),
+                        dbscan_manifest_path=dbscan_result.manifest_path,
+                        dbscan_manifest_sha256=dbscan_result.manifest_sha256,
+                        labels=cluster_labels,
+                        recourse_vectors=recourse_array_external,
+                        pair_indices=pair_indices_external,
+                        pairs_sha256=pair_indices_sha256,
+                        pair_authority_manifest_path=pair_authority_manifest_path,
+                        pair_authority_manifest_sha256=(
+                            pair_authority_manifest_sha256
+                        ),
+                        radius=float(parameters.delta),
+                        theta=float(parameters.theta),
+                        recourse_size=int(parameters.recourse_size),
+                        official_greedy=modules[
+                            "common_recourse"
+                        ].greedy_counterfactual_summary_from_covering_sets,
+                        torch_module=torch,
+                        max_rss_bytes=int(external_max_rss_bytes),
+                        block_size=int(external_summary_block_size),
+                        resume=resume,
+                    )
+                    official_result = exact_summary.official_result
+                    selected = exact_summary.selected
+                    summary_manifest = json_load(exact_summary.manifest_path)
+                    official_audit = {
+                        "schema_version": summary_manifest["schema_version"],
+                        "official_coverage_summary_invoked": False,
+                        "official_coverage_semantics_streamed_for_all_components": True,
+                        "cluster_count": summary_manifest["cluster_count"],
+                        "peak_rss_bytes_observed": summary_manifest[
+                            "peak_rss_bytes_observed"
+                        ],
+                    }
+                    trace_audit = {
+                        "schema_version": summary_manifest["schema_version"],
+                        "selected_count": len(selected),
+                        "official_mask_is_primary": True,
+                        "numpy_and_float64_are_audit_only": True,
+                        "official_greedy_invoked": summary_manifest[
+                            "official_greedy_invoked"
+                        ],
+                        "peak_rss_bytes_observed": summary_manifest[
+                            "peak_rss_bytes_observed"
+                        ],
+                    }
+                    all_core_component_summary_manifest = str(
+                        exact_summary.manifest_path
+                    )
+                    all_core_component_summary_manifest_sha256 = (
+                        exact_summary.manifest_sha256
+                    )
+                elif (
+                    dbscan_result.shortcut_proof_path is not None
+                    and dbscan_result.cluster_count == 1
+                ):
                     exact_summary = summarize_proven_one_cluster_external(
                         work_dir=root / "external_memory/one_cluster_summary",
                         dbscan_manifest_path=dbscan_result.manifest_path,
@@ -858,6 +927,8 @@ def run_common_recourse(
                 dbscan_manifest_sha256 = None
                 one_cluster_summary_manifest = None
                 one_cluster_summary_manifest_sha256 = None
+                all_core_component_summary_manifest = None
+                all_core_component_summary_manifest_sha256 = None
             external_artifacts = {
                 "engine": engine,
                 "pair_store_manifest": str(pair_manifest_path),
@@ -921,6 +992,12 @@ def run_common_recourse(
                 "one_cluster_summary_manifest": one_cluster_summary_manifest,
                 "one_cluster_summary_manifest_sha256": (
                     one_cluster_summary_manifest_sha256
+                ),
+                "all_core_component_summary_manifest": (
+                    all_core_component_summary_manifest
+                ),
+                "all_core_component_summary_manifest_sha256": (
+                    all_core_component_summary_manifest_sha256
                 ),
                 "official_coverage_audit": official_audit,
                 "trace_audit": trace_audit,
@@ -1131,6 +1208,17 @@ def run_common_recourse(
             closure_files[
                 "external_memory/one_cluster_summary/run_manifest.json"
             ] = str(external_artifacts["one_cluster_summary_manifest_sha256"])
+        if (
+            external_artifacts.get("all_core_component_summary_manifest")
+            is not None
+        ):
+            closure_files[
+                "external_memory/all_core_component_summary/run_manifest.json"
+            ] = str(
+                external_artifacts[
+                    "all_core_component_summary_manifest_sha256"
+                ]
+            )
     write_json(
         root / "_RUN_COMPLETE.json",
         {

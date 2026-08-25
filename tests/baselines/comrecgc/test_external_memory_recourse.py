@@ -128,7 +128,7 @@ def _component_recovery_one_cluster_fixture(tmp_path: Path):
     from src.baselines.comrecgc import external_memory_dbscan as external_dbscan
     import sklearn
 
-    values = np.zeros((7, 64), dtype=np.float64)
+    values = np.zeros((7, 64), dtype=np.float32)
     values[:, 0] = [0.0, 0.0, 0.001, 0.019, 0.030, 0.031, 0.032]
     pairs = np.asarray(
         [[0, 10], [0, 11], [1, 12], [1, 13], [2, 14], [2, 15], [3, 16]],

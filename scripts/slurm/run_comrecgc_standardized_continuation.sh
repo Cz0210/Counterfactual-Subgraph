@@ -10,8 +10,9 @@
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 
-# Static parity wrapper required by the repository workflow.  The current
-# campaign is AutoDL-only; this file is syntax-checked but is not submitted.
+# Static parity wrapper required by the repository workflow.  The continuation
+# now self-reopens the authority-bound component summary; no pair-view CLI was
+# added.  The current campaign is AutoDL-only, so this is checked, not submitted.
 set -euo pipefail
 source ~/.bashrc
 conda activate smiles_pip118

@@ -110,6 +110,208 @@ def _official_coverage_summary(
     )
 
 
+def _official_multi_coverage_summary(
+    *, db_2, rec, idxs, radius, threshold_theta, recourse_size
+):
+    labels = np.asarray(db_2.labels_)
+    common = {}
+    norms = {}
+    hashes = {}
+    for label in range(int(labels.max()) + 1):
+        positions = np.flatnonzero(labels == label)
+        points = rec[labels == label]
+        center = torch.mean(points, dim=0)
+        distances = torch.norm(points - center, dim=-1)
+        parents = set()
+        candidates = set()
+        for local, distance in enumerate(distances):
+            if distance < radius:
+                parent, candidate = idxs[int(positions[local])]
+                if int(parent) not in parents:
+                    parents.add(int(parent))
+                    candidates.add(int(candidate))
+        common[label] = parents
+        norms[label] = torch.norm(center).item()
+        hashes[label] = candidates
+    filtered = {
+        label: set(parents)
+        for label, parents in common.items()
+        if norms[label] < threshold_theta
+    }
+    covered_by = {}
+    for label, parents in filtered.items():
+        for parent in parents:
+            covered_by.setdefault(parent, set()).add(label)
+    selected = _greedy(
+        counterfactual_covering=filtered,
+        graphs_covered_by=covered_by,
+        k=min(recourse_size, len(filtered)),
+    )
+    covering, costs, sizes = [], [], []
+    cost = 0.0
+    candidates = set()
+    for rank in selected:
+        label, cumulative = selected[rank]
+        covering.append(cumulative)
+        cost += norms[label]
+        costs.append(cost)
+        candidates.update(hashes[label])
+        sizes.append(len(candidates))
+    return covering, costs, sizes
+
+
+@pytest.mark.parametrize(
+    "candidate_embeddings,expected_clusters",
+    [([0.0, 0.10], 2), ([0.0, 0.10, 0.18], 3)],
+)
+def test_full_runner_component_recovery_streams_multi_cluster_downstream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_embeddings: list[float],
+    expected_clusters: int,
+) -> None:
+    zero = [0.0] * 64
+    parents = [FixtureGraph(zero, [], float(index + 1)) for index in range(3)]
+    candidates = []
+    for index, value in enumerate(candidate_embeddings):
+        embedding = [value, *([0.0] * 63)]
+        candidates.append(
+            FixtureGraph(embedding, [0.02, 0.02, 0.02], float(index + 10))
+        )
+    payload = {
+        "counterfactual_candidates": [
+            {"importance_parts": [1.0], "graph_hash": f"hash-{index}"}
+            for index in range(len(candidates))
+        ],
+        "graph_map": {
+            f"hash-{index}": (graph, {})
+            for index, graph in enumerate(candidates)
+        },
+    }
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    counterfactuals = generation / "counterfactuals.pt"
+    counterfactuals.write_bytes(b"fixture-payload")
+    (generation / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "run_complete": True,
+                "dataset": "aids",
+                "mode": "full",
+                "parent_limit": 3,
+                "counterfactuals_path": str(counterfactuals),
+                "counterfactuals_sha256": sha256_file(counterfactuals),
+                "oracle_backend": "rf",
+                "classifier_family": "random_forest",
+                "rf_oracle_used": True,
+            }
+        )
+    )
+    distance = tmp_path / "distance.pt"
+    distance.write_bytes(b"distance")
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    source_csv = tmp_path / "source.csv"
+    source_csv.write_text("smiles\nC\n")
+    bundle = SimpleNamespace(
+        graphs=parents,
+        parent_ids=[f"AIDS_{index}" for index in range(3)],
+        atom_vocabulary=["C"],
+        dataset_fingerprint="multi-component-fixture",
+        audit=lambda: {
+            "dataset_fingerprint": "multi-component-fixture",
+            "generation_parent_ids_sha256": stable_json_sha256(
+                [f"AIDS_{index}" for index in range(3)]
+            ),
+            "source_files": [str(dataset_dir), str(source_csv)],
+        },
+    )
+    monkeypatch.setattr(recourse, "_torch_load", lambda _path: payload)
+    monkeypatch.setattr(recourse, "_torch_stack", lambda: (torch, FixtureBatch))
+    monkeypatch.setattr(recourse, "load_aids_generation_bundle", lambda **_kwargs: bundle)
+    monkeypatch.setattr(
+        recourse,
+        "AIDSGreedEmbeddingAdapter",
+        lambda *_args, **_kwargs: FixtureEmbedding(),
+    )
+    util = SimpleNamespace(
+        graph_element_counts=lambda graphs: torch.ones(
+            len(graphs), dtype=torch.float32
+        )
+    )
+
+    @contextmanager
+    def imported_modules(_root):
+        yield {
+            "util": util,
+            "common_recourse": SimpleNamespace(
+                coverage_summary=_official_multi_coverage_summary,
+                greedy_counterfactual_summary_from_covering_sets=_greedy,
+            ),
+        }
+
+    monkeypatch.setattr(recourse, "imported_upstream", imported_modules)
+    parameters = RecourseParameters.for_mode("full")
+    common = dict(
+        upstream_root=tmp_path,
+        dataset="aids",
+        dataset_dir=dataset_dir,
+        source_csv=source_csv,
+        generation_dir=generation,
+        distance_checkpoint=distance,
+        mode="full",
+        parent_limit=3,
+        parameters=parameters,
+        device="cpu",
+        batch_size=2,
+    )
+    legacy_root = tmp_path / "legacy"
+    external_root = tmp_path / "external"
+    legacy = recourse.run_common_recourse(
+        **common, output_dir=legacy_root, engine="legacy_in_memory"
+    )
+    external = recourse.run_common_recourse(
+        **common,
+        output_dir=external_root,
+        engine="external_memory_exact_v1",
+        external_max_rss_bytes=_rss_bytes() + 512 * 1024**2,
+        external_query_block_size=2,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+        external_shortcut_seed_count=3,
+        external_shortcut_failure_cap=100,
+        external_shortcut_query_block_size=2,
+        external_exact_fallback_max_samples=0,
+        external_summary_block_size=2,
+        expected_sklearn_version=sklearn.__version__,
+    )
+    dbscan_manifest = json.loads(
+        Path(external["external_memory_artifacts"]["dbscan_manifest"]).read_text()
+    )
+    component_summary = json.loads(
+        Path(
+            external["external_memory_artifacts"][
+                "all_core_component_summary_manifest"
+            ]
+        ).read_text()
+    )
+    assert dbscan_manifest["cluster_count"] == expected_clusters
+    assert component_summary["cluster_count"] == expected_clusters
+    assert component_summary["large_cluster_advanced_index_copy"] is False
+    assert external["official_coverage_summary_result"] == legacy[
+        "official_coverage_summary_result"
+    ]
+    assert json.loads(
+        (external_root / "selected_common_recourses.json").read_text()
+    ) == json.loads((legacy_root / "selected_common_recourses.json").read_text())
+    terminal_path = external_root / "_RUN_COMPLETE.json"
+    continuation._validate_common_recourse_completion(
+        marker=terminal_path,
+        terminal=json.loads(terminal_path.read_text()),
+    )
+
+
 def test_full_runner_external_engine_is_pair_label_selection_hash_exact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
