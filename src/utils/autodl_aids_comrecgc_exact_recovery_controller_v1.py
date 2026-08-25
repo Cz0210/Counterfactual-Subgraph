@@ -150,8 +150,8 @@ EXPECTED_ADOPTION_VALIDATOR_CALLABLE = (
     "verify_aids_c766_failed_selection_recovery_evidence"
 )
 EXPECTED_ADOPTION_TASK_STATE_PROJECTION_SHA256 = {
-    "close": "c9f1fb12a13c4a244d66c699659dc66369a9221e1f6ed14268a22adc3b7a0601",
-    "final": "b4fdcffe2a5db22b3ef2ef0d5c569d912dd685e3704201d785b95dc8e851dab7",
+    "close": "f2bcde0b4cf8b86082abb3bc9b7499c8a9459f1a1df92d8eada28996e332a780",
+    "final": "b455b618d29ac807eecead64b3aa8f47bfdee67344dab9cfb566337d148c12ab",
 }
 
 

@@ -1712,3 +1712,6 @@ Mutagenicity roadmaps.
 - [x] Merge into the independently reviewed recovery branch as an actual
   ancestor and bind its builder to the typed v3 external receipt without ordinary PASS,
   matrix, or Mut dependency consumption.
+- [x] Bind the controller to the reviewed v3 canonical task-state projection
+  hashes and add a cross-module profile equality test so a stale pre-v3 digest
+  cannot make production spec generation deterministically reject the receipt.

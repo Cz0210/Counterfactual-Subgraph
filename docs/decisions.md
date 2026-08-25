@@ -9678,6 +9678,13 @@ the typed receipt. Matrix, Mutagenicity, and generic dependency readers reject
 it; only the final hash-closed controller terminal becomes ordinary-PASS
 eligible.
 
+The controller freezes the reviewed v3 projection digests emitted by that same
+production authority profile (`f2bcde0b...` for close and `b455b618...` for
+final). A cross-module regression compares the controller values with
+`PRODUCTION_AUTHORITY` directly. This replaces the earlier pre-v3 projection
+digests, whose smaller schema omitted static state fields added by the hardened
+adoption contract and would make every real production spec fail closed.
+
 The controller uses a fresh CID/root and an independent adoption-authority
 parent with one direct child. It uses immutable typed gates, inode-bound
 `O_NOFOLLOW` locks, exclusive fresh-root claims, PASS-last terminal publication,

@@ -6,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 import sys
 
 from scripts.autodl import run_aids_comrecgc_exact_recovery_stage as stage_cli
+from src.baselines.comrecgc.failed_selection_adoption import PRODUCTION_AUTHORITY
 from src.utils import autodl_aids_comrecgc_exact_recovery_controller_v1 as controller
 from src.utils import autodl_aids_comrecgc_exact_recovery_spec_v1 as builder
 
@@ -27,6 +28,13 @@ def _artifact(path: Path, role: str) -> dict[str, object]:
         "path": str(path),
         "roles": [role],
         "sha256": controller.sha256_file(path),
+    }
+
+
+def test_controller_projection_contract_matches_reviewed_adoption_profile() -> None:
+    assert controller.EXPECTED_ADOPTION_TASK_STATE_PROJECTION_SHA256 == {
+        "close": PRODUCTION_AUTHORITY.close_state_authority.projection_sha256,
+        "final": PRODUCTION_AUTHORITY.final_state_authority.projection_sha256,
     }
 
 
