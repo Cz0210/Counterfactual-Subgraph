@@ -9533,10 +9533,16 @@ recorded failed-root inode.
 
 Publication writes a hidden preterminal receipt, completes the second full
 source reopen, records both scans' state-byte observations in the final
-receipt, and fsyncs a prepared recovery marker. The final no-clobber hard-link
-is named `RECOVERY_EVIDENCE_READY` and is the last correctness operation. No
-file named `PASS` is created. Terminal reopen uses the typed v3 verifier; source
-drift revokes only the exact marker inode in the held receipt-bound output.
+receipt, and fsyncs a prepared recovery marker. The no-clobber hard-link is
+named `RECOVERY_EVIDENCE_READY`; while still holding the same output lock, the
+publisher must then run the complete typed terminal reopen over the controller
+manifest, both gates and states, procfs exit evidence, every tracked source
+artifact/directory, and the exact failed-tree inventory. The marker is not
+authoritative until that locked reopen returns. Failure revokes only the READY
+name whose device/inode equals the prepared marker's recorded inode; the
+prepared evidence remains diagnostic. No file named `PASS` is created.
+Terminal reopen uses the same typed v3 verifier; source drift revokes only the
+exact marker inode in the held receipt-bound output.
 Renamed/copied outputs, locks, or replacement marker inodes are never deleted.
 The receipt's top-level and every nested key set/container shape are exact;
 adding and re-signing a generic-looking `PASS: true` or any nested field cannot
@@ -9571,3 +9577,44 @@ epsilon neighbors including itself.
 Superseding v3 implementation and hostile tests are ready for independent
 review/cherry-pick. Production adoption and recovery integration remain
 separate explicit actions; this change performs neither deployment nor SSH.
+
+## [2026-08-25] Close c766 READY publication and process-exit receipts
+
+### Decision
+
+Supersede the initial v3 publisher with a locked post-READY validation barrier.
+Immediately after the READY hardlink and directory fsync, the same output-lock
+holder performs a complete `require_ready=True` reopen. This third full scan is
+the only successful return path. Controller manifest, close/final gates,
+projected states, procfs, all 28 fixture source artifacts, all 14 fixture source
+directory authorities, and the failed-tree allowlist are therefore checked
+after publication as well as before it. Any failure removes only a READY name
+that still resolves to the exact recorded prepared-marker device/inode.
+
+Validate all six `process_exit` receipt fields rather than treating the worker
+identity alone as stable. The expected worker PID/start-ticks/command hash and
+recorded child PID come from the frozen final task authority;
+`old_science_worker_exited` must be the JSON boolean `true`, and
+`signals_sent` must remain the empty list in both the receipt and current full
+scan. Worker observations are limited to absent, generation-proven PID reuse,
+or zombie. A positive recorded child PID is limited to absent or zombie because
+there is no frozen child generation with which to prove a live reuse.
+
+The two observation strings may change across scans only within those safe
+sets. Procfs can legitimately move from zombie to absent, from absent to a
+different worker generation, or between absent and zombie for an unowned child
+PID. These dynamic transitions do not weaken the stable identity fields and a
+live original worker or live/unprovably-reused child continues to fail closed.
+
+### Consequences
+
+- A drift injected after the second scan cannot survive as a successful READY.
+- Rebinding a tampered receipt to freshly computed marker bytes cannot change
+  any process identity, child PID, exit boolean, signal list, or observation
+  domain.
+- This commit remains implementation/test evidence only. It performs no
+  adoption, controller launch, deployment, SSH action, or process signal.
+
+### Status
+
+Ready for a fresh independent superseding-commit review.

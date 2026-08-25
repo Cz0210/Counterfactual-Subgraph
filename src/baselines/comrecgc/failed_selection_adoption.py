@@ -62,6 +62,31 @@ READY_PREPARED_NAME = ".RECOVERY_EVIDENCE_READY.prepared"
 READY_PREFIX = b"AIDS_C766_FAILED_SELECTION_RECOVERY_EVIDENCE_READY_V3\n"
 MUTABLE_STATE_VALUE = "<MUTABLE>"
 
+_SAFE_WORKER_EXIT_OBSERVATIONS = frozenset(
+    {
+        "ORIGINAL_GENERATION_EXITED_PID_ABSENT",
+        "ORIGINAL_GENERATION_EXITED_PID_REUSED",
+        "ORIGINAL_GENERATION_EXITED_ZOMBIE",
+    }
+)
+_SAFE_RECORDED_CHILD_EXIT_OBSERVATIONS = frozenset(
+    {
+        "RECORDED_CHILD_PID_ABSENT",
+        "RECORDED_CHILD_ZOMBIE",
+    }
+)
+_NO_RECORDED_CHILD_OBSERVATION = "NO_RECORDED_CHILD_PID"
+_PROCESS_EXIT_KEYS = frozenset(
+    {
+        "expected_worker_identity",
+        "worker_observation",
+        "recorded_child_pid",
+        "child_observation",
+        "old_science_worker_exited",
+        "signals_sent",
+    }
+)
+
 TASK_STATE_TOP_KEYS = frozenset(
     {
         "created_at",
@@ -1579,6 +1604,88 @@ def _validate_worker_exited(
         "old_science_worker_exited": True,
         "signals_sent": [],
     }
+
+
+def _validate_process_exit_receipt(
+    *,
+    recorded: Any,
+    current: Any,
+    profile: FailedSelectionAuthority,
+) -> None:
+    """Validate all stable exit fields while allowing safe procfs churn.
+
+    PID absence, proven worker-PID reuse, and zombie state are all terminal
+    observations.  They may legitimately change between complete authority
+    scans (for example, zombie -> absent or absent -> reused).  Observation
+    strings therefore need not be byte-equal, but both the receipt and the
+    current scan must use only the safe enum appropriate to the exact frozen
+    worker identity and recorded child PID.  Every non-observation field is
+    required to agree exactly with the profile and current full scan.
+    """
+
+    if (
+        not isinstance(recorded, Mapping)
+        or not isinstance(current, Mapping)
+        or set(recorded) != set(_PROCESS_EXIT_KEYS)
+        or set(current) != set(_PROCESS_EXIT_KEYS)
+    ):
+        raise FailedSelectionAdoptionError(
+            "terminal worker-exit receipt schema changed"
+        )
+    expected_worker_identity = {
+        "pid": profile.final_state_authority.worker_pid,
+        "start_ticks": profile.final_state_authority.worker_start_ticks,
+        "command_sha256": (
+            profile.final_state_authority.worker_command_sha256
+        ),
+    }
+    expected_child_pid = profile.final_state_authority.child_pid
+    for label, process in (("recorded", recorded), ("current", current)):
+        if process.get("expected_worker_identity") != expected_worker_identity:
+            raise FailedSelectionAdoptionError(
+                f"{label} terminal worker identity changed"
+            )
+        if (
+            type(process.get("recorded_child_pid")) is not int
+            or process.get("recorded_child_pid") != expected_child_pid
+        ):
+            raise FailedSelectionAdoptionError(
+                f"{label} terminal child PID changed"
+            )
+        if process.get("old_science_worker_exited") is not True:
+            raise FailedSelectionAdoptionError(
+                f"{label} terminal worker-exit claim changed"
+            )
+        if process.get("signals_sent") != []:
+            raise FailedSelectionAdoptionError(
+                f"{label} terminal signal-free claim changed"
+            )
+        if process.get("worker_observation") not in (
+            _SAFE_WORKER_EXIT_OBSERVATIONS
+        ):
+            raise FailedSelectionAdoptionError(
+                f"{label} terminal worker observation is unsafe"
+            )
+        expected_child_observations = (
+            _SAFE_RECORDED_CHILD_EXIT_OBSERVATIONS
+            if expected_child_pid > 0
+            else frozenset({_NO_RECORDED_CHILD_OBSERVATION})
+        )
+        if process.get("child_observation") not in expected_child_observations:
+            raise FailedSelectionAdoptionError(
+                f"{label} terminal child observation is unsafe"
+            )
+
+    for key in (
+        "expected_worker_identity",
+        "recorded_child_pid",
+        "old_science_worker_exited",
+        "signals_sent",
+    ):
+        if recorded.get(key) != current.get(key):
+            raise FailedSelectionAdoptionError(
+                f"terminal worker-exit evidence changed: {key}"
+            )
 
 
 def _fd_flags(path: Path) -> int | None:
@@ -3137,7 +3244,10 @@ def _unlink_if_same_inode_at(
         current = output.stat_file(name)
     except FileNotFoundError:
         return
-    if current != dict(identity):
+    if (current["device"], current["inode"]) != (
+        int(identity["device"]),
+        int(identity["inode"]),
+    ):
         raise FailedSelectionAdoptionError(
             "cannot safely revoke a replaced recovery-evidence marker"
         )
@@ -3741,15 +3851,11 @@ def _validate_with_profile(
             raise FailedSelectionAdoptionError(f"terminal adoption evidence changed: {key}")
     recorded_process = receipt.get("process_exit")
     current_process = observed.get("process_exit")
-    if (
-        not isinstance(recorded_process, Mapping)
-        or not isinstance(current_process, Mapping)
-        or recorded_process.get("expected_worker_identity")
-        != current_process.get("expected_worker_identity")
-        or current_process.get("old_science_worker_exited") is not True
-        or current_process.get("signals_sent") != []
-    ):
-        raise FailedSelectionAdoptionError("terminal worker-exit evidence changed")
+    _validate_process_exit_receipt(
+        recorded=recorded_process,
+        current=current_process,
+        profile=profile,
+    )
     current_receipt_raw, current_receipt_identity = _read_file_at(output, receipt_name)
     if current_receipt_raw != receipt_raw or current_receipt_identity != receipt_identity:
         raise FailedSelectionAdoptionError("adoption receipt changed during reopen")
@@ -3924,7 +4030,7 @@ def _create_or_validate_with_profile(
                 output.fsync()
                 output.assert_inode()
                 lock.assert_inode()
-                _atomic_noclobber_at(
+                prepared_marker_identity = _atomic_noclobber_at(
                     output,
                     READY_PREPARED_NAME,
                     _ready_marker_bytes(final_encoded),
@@ -3963,10 +4069,44 @@ def _create_or_validate_with_profile(
                     raise FailedSelectionAdoptionError(
                         "recovery-evidence marker no-clobber collision"
                     ) from exc
-                # Durability is part of the terminal publication syscall
-                # sequence, not a post-marker scientific validation.
-                os.fsync(output.descriptor)
-                return final_receipt
+                # READY is authority only if the same lock holder can reopen
+                # the entire terminal receipt and every source authority after
+                # publication.  If anything drifted after the second scan,
+                # revoke only the exact READY inode just recorded above.
+                try:
+                    os.fsync(output.descriptor)
+                    ready_identity = output.stat_file(READY_NAME)
+                    if (
+                        ready_identity["device"],
+                        ready_identity["inode"],
+                    ) != (
+                        prepared_marker_identity["device"],
+                        prepared_marker_identity["inode"],
+                    ) or ready_identity["nlink"] != 2:
+                        raise FailedSelectionAdoptionError(
+                            "published recovery-evidence marker inode changed"
+                        )
+                    reopened_terminal = _validate_with_profile(
+                        output=output,
+                        profile=profile,
+                        proc_root=proc_root,
+                        receipt_name=RECEIPT_NAME,
+                        require_ready=True,
+                        held_lock=lock,
+                    )
+                    if reopened_terminal != final_receipt:
+                        raise FailedSelectionAdoptionError(
+                            "post-publication terminal receipt changed"
+                        )
+                    return reopened_terminal
+                except BaseException:
+                    lock.assert_fd()
+                    _unlink_if_same_inode_at(
+                        output,
+                        READY_NAME,
+                        prepared_marker_identity,
+                    )
+                    raise
 
 
 def create_or_validate_aids_c766_failed_selection_adoption(

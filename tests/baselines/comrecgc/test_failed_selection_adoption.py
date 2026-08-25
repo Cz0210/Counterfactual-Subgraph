@@ -781,6 +781,33 @@ def test_pid_reuse_is_exit_evidence_but_live_original_generation_blocks(
     assert not (live_child.output / READY_NAME).exists()
 
 
+def test_terminal_reopen_allows_only_safe_dynamic_proc_observation_changes(
+    tmp_path: Path,
+) -> None:
+    case = _build_fixture(tmp_path / "absent-to-reused")
+    receipt = _adopt(case)
+    assert receipt["process_exit"]["worker_observation"] == (
+        "ORIGINAL_GENERATION_EXITED_PID_ABSENT"
+    )
+    assert receipt["process_exit"]["child_observation"] == (
+        "RECORDED_CHILD_PID_ABSENT"
+    )
+    _proc_entry(case.proc, 12345, start_ticks=88)
+    _proc_entry(case.proc, 22345, start_ticks=999, state="Z")
+    assert _adopt(case) == receipt
+
+    churn = _build_fixture(tmp_path / "zombie-to-absent")
+    _proc_entry(churn.proc, 12345, start_ticks=77, state="Z")
+    _proc_entry(churn.proc, 22345, start_ticks=999, state="Z")
+    zombie_receipt = _adopt(churn)
+    assert zombie_receipt["process_exit"]["worker_observation"] == (
+        "ORIGINAL_GENERATION_EXITED_ZOMBIE"
+    )
+    shutil.rmtree(churn.proc / "12345")
+    shutil.rmtree(churn.proc / "22345")
+    assert _adopt(churn) == zombie_receipt
+
+
 def test_writable_source_fd_blocks_without_signalling(tmp_path: Path) -> None:
     case = _build_fixture(tmp_path)
     process = case.proc / "77"
@@ -1367,6 +1394,207 @@ def test_resigned_terminal_receipt_rejects_every_extra_nested_key(
     _rewrite_signed_terminal(case, receipt)
     with pytest.raises(FailedSelectionAdoptionError, match="schema changed"):
         _adopt(case)
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda process: process["expected_worker_identity"].update(
+            {"pid": 54321}
+        ),
+        lambda process: process.update({"recorded_child_pid": 54322}),
+        lambda process: process.update({"old_science_worker_exited": False}),
+        lambda process: process.update({"signals_sent": ["SIGTERM"]}),
+        lambda process: process.update(
+            {"worker_observation": "ORIGINAL_GENERATION_STILL_LIVE"}
+        ),
+        lambda process: process.update(
+            {"child_observation": "RECORDED_CHILD_PID_REUSED"}
+        ),
+        lambda process: process.update(
+            {"child_observation": "NO_RECORDED_CHILD_PID"}
+        ),
+    ],
+)
+def test_rebound_terminal_receipt_rejects_process_exit_tampering(
+    tmp_path: Path,
+    mutator,
+) -> None:
+    case = _build_fixture(tmp_path)
+    _adopt(case)
+    receipt = json.loads((case.output / RECEIPT_NAME).read_text())
+    mutator(receipt["process_exit"])
+    _rewrite_signed_terminal(case, receipt)
+    with pytest.raises(FailedSelectionAdoptionError):
+        _adopt(case)
+    assert not (case.output / READY_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "authority_kind",
+    [
+        "controller_manifest",
+        "close_gate",
+        "final_gate",
+        "close_state",
+        "final_state",
+        "proc_worker_generation",
+        "source_artifact",
+        "source_directory",
+        "failed_tree",
+    ],
+)
+def test_post_ready_full_reopen_revokes_ready_for_drift_after_second_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_kind: str,
+) -> None:
+    case = _build_fixture(tmp_path)
+    from src.baselines.comrecgc import failed_selection_adoption as adoption
+
+    original = adoption._validate_with_profile
+    calls = 0
+    ready_seen = False
+
+    def drift_after_second_scan() -> None:
+        if authority_kind == "controller_manifest":
+            case.source_manifest.write_text(case.source_manifest.read_text() + " ")
+        elif authority_kind == "close_gate":
+            case.close_gate.write_text(case.close_gate.read_text() + " ")
+        elif authority_kind == "final_gate":
+            case.final_gate.write_text(case.final_gate.read_text() + " ")
+        elif authority_kind in {"close_state", "final_state"}:
+            path = (
+                case.close_state
+                if authority_kind == "close_state"
+                else case.final_state
+            )
+            payload = json.loads(path.read_text())
+            payload["dataset"] = "hostile-drift"
+            _json(path, payload)
+        elif authority_kind == "proc_worker_generation":
+            _proc_entry(case.proc, 12345, start_ticks=77)
+        elif authority_kind == "source_artifact":
+            case.pair_contract.write_text(case.pair_contract.read_text() + " ")
+        elif authority_kind == "source_directory":
+            source = case.pair_contract.parent
+            displaced = source.parent / f"{source.name}-displaced"
+            source.rename(displaced)
+            shutil.copytree(displaced, source)
+        elif authority_kind == "failed_tree":
+            _json(
+                case.final_root
+                / "common_recourse/external_memory/dbscan/cluster_partition.json",
+                {"status": "PASS", "dbscan_partition_proven": True},
+            )
+        else:  # pragma: no cover - parameter list is closed above.
+            raise AssertionError(authority_kind)
+
+    def injecting_validation(**kwargs):
+        nonlocal calls, ready_seen
+        calls += 1
+        if kwargs["require_ready"]:
+            ready_seen = (case.output / READY_NAME).exists()
+            drift_after_second_scan()
+        return original(**kwargs)
+
+    monkeypatch.setattr(adoption, "_validate_with_profile", injecting_validation)
+    with pytest.raises(FailedSelectionAdoptionError):
+        _adopt(case)
+    assert calls == 2
+    assert ready_seen is True
+    assert not (case.output / READY_NAME).exists()
+    assert (case.output / READY_PREPARED_NAME).exists()
+
+
+def test_post_ready_full_reopen_rehashes_every_source_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.baselines.comrecgc import failed_selection_adoption as adoption
+
+    probe = _build_fixture(tmp_path / "probe")
+    probe_evidence = adoption._inspect_authority(
+        profile=probe.profile,
+        proc_root=probe.proc,
+    )
+    artifact_count = len(probe_evidence["source_artifacts"])
+    assert artifact_count > 0
+
+    for index in range(artifact_count):
+        case = _build_fixture(tmp_path / f"artifact-{index}")
+        evidence = adoption._inspect_authority(
+            profile=case.profile,
+            proc_root=case.proc,
+        )
+        target = Path(evidence["source_artifacts"][index]["path"])
+        original = adoption._validate_with_profile
+        mutated = False
+
+        def mutate_one_artifact(**kwargs):
+            nonlocal mutated
+            if kwargs["require_ready"] and not mutated:
+                assert (case.output / READY_NAME).exists()
+                target.write_bytes(target.read_bytes() + b"\npost-ready-drift")
+                mutated = True
+            return original(**kwargs)
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(
+                adoption,
+                "_validate_with_profile",
+                mutate_one_artifact,
+            )
+            with pytest.raises(FailedSelectionAdoptionError):
+                _adopt(case)
+        assert mutated is True, index
+        assert not (case.output / READY_NAME).exists(), index
+
+
+def test_post_ready_full_reopen_rebinds_every_source_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.baselines.comrecgc import failed_selection_adoption as adoption
+
+    probe = _build_fixture(tmp_path / "probe")
+    probe_evidence = adoption._inspect_authority(
+        profile=probe.profile,
+        proc_root=probe.proc,
+    )
+    directory_count = len(probe_evidence["source_directory_authority"])
+    assert directory_count > 0
+
+    for index in range(directory_count):
+        case = _build_fixture(tmp_path / f"directory-{index}")
+        evidence = adoption._inspect_authority(
+            profile=case.profile,
+            proc_root=case.proc,
+        )
+        source = Path(evidence["source_directory_authority"][index]["path"])
+        displaced = source.parent / f".{source.name}.post-ready-displaced"
+        original = adoption._validate_with_profile
+        mutated = False
+
+        def mutate_one_directory(**kwargs):
+            nonlocal mutated
+            if kwargs["require_ready"] and not mutated:
+                assert (case.output / READY_NAME).exists()
+                source.rename(displaced)
+                shutil.copytree(displaced, source)
+                mutated = True
+            return original(**kwargs)
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(
+                adoption,
+                "_validate_with_profile",
+                mutate_one_directory,
+            )
+            with pytest.raises(FailedSelectionAdoptionError):
+                _adopt(case)
+        assert mutated is True, index
+        assert not (case.output / READY_NAME).exists(), index
 
 
 def test_extra_failed_tree_file_injected_after_second_hash_walk_blocks_ready(

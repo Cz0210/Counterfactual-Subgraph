@@ -1638,6 +1638,14 @@ Mutagenicity roadmaps.
   partial-output, stale/replaced-lock, namespace/output rename-copy,
   preterminal crash, terminal drift/revocation, and replacement-inode tests
   plus an AutoDL CLI and static-refusal paired Slurm script.
+- [x] Require a third complete authority reopen after the READY hardlink while
+  the same output lock remains held; revoke only the exact recorded READY inode
+  on any controller/gate/state/proc/source-directory/source-artifact/failed-tree
+  drift. Exhaustively exercise every fixture source artifact and directory.
+- [x] Validate every `process_exit` receipt field against the frozen final-task
+  worker identity and child PID. Permit cross-scan procfs changes only among
+  the safe absent/proven-reuse/zombie worker observations and absent/zombie
+  child observations, with no signals and an exact exited boolean.
 - [ ] Cherry-pick into the independently reviewed recovery branch, then bind
   its builder to the typed v3 external receipt without allowing ordinary PASS,
   matrix, or Mut dependency consumption.
