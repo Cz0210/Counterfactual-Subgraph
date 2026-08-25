@@ -1604,3 +1604,40 @@ Mutagenicity roadmaps.
   inode-frozen science root plus fresh attempt receipts; validate terminal
   arrays and bind later Mut consumption to the controller-authoritative unique
   PASS task gate rather than standardized attempt zero.
+
+## 2026-08-25: c766 failed-selection recovery authority
+
+- [x] Add an independent read-only primitive pinned to the exact controller
+  namespace/CID, close PASS, FAILED/SEMANTIC final task, and fixed selection,
+  failure, pair, vector, and close-view hashes.
+- [x] Close the adaptive seed/failure ledgers and disconnected anchor graph;
+  freeze canonical component labels, the unique size-three seed component,
+  and self-inclusive anchor-degree hash/minimum without asserting a partition.
+- [x] Publish an O_EXCL receipt under an inode-bound physical lock/output,
+  perform the second complete authority scan before a recovery-only READY-last
+  marker, revoke only an exact receipt-bound READY inode on terminal drift,
+  and make typed terminal reopen idempotent without creating generic `PASS`.
+- [x] Freeze canonical non-heartbeat close/final state projections and record
+  every observed whole-state SHA; require exact top/main/PID-identity schemas,
+  freeze every static field, and allow only well-typed UTC `updated_at` and
+  `instances.main.heartbeat_at` values to drift. Hold control/namespace/
+  controller/task and source/output directory inodes across scans so
+  rename-plus-copy cannot become authority.
+- [x] Require the failed attempt's exact 14-file path/SHA inventory and reject
+  missing, extra, symlink, special, or terminal-looking injected artifacts.
+- [x] Restrict output to a direct fresh child of the dedicated fixed
+  `outputs/autodl/recovery_evidence/aids_c766_failed_selection_v1` parent and
+  reject ancestor/descendant overlap with every discovered source root/file
+  before creating the lock or output. Hold that parent at call entry and use
+  its dirfd/openat identity for the sibling lock and output creation.
+- [x] Require exact top-level and nested typed-receipt schemas, repeat the
+  descriptor-based 14-file inventory after tracked hashes and before READY,
+  and reject re-signed extra fields or files injected between full scans.
+- [x] Add focused tamper, symlink, gate/status/path, PID-reuse/live-worker,
+  writable-FD, state-projection churn/tamper, exact-inventory injection,
+  partial-output, stale/replaced-lock, namespace/output rename-copy,
+  preterminal crash, terminal drift/revocation, and replacement-inode tests
+  plus an AutoDL CLI and static-refusal paired Slurm script.
+- [ ] Cherry-pick into the independently reviewed recovery branch, then bind
+  its builder to the typed v3 external receipt without allowing ordinary PASS,
+  matrix, or Mut dependency consumption.
