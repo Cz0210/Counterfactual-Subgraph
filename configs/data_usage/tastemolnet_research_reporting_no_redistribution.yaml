@@ -1,0 +1,108 @@
+schema_version: tastemolnet_research_reporting_policy_v1
+policy_id: tastemolnet-research-reporting-no-redistribution-20260825
+effective_date: "2026-08-25"
+authorization_basis: forwarded_user_instruction_pending_root_activation
+authorization_state: PENDING_ROOT_ACTIVATION
+dataset: tastemolnet
+policy_version: 1
+authorization_source: PENDING_ROOT_ACTIVATION
+authorization_date: "2026-08-25"
+research_compute_allowed: false
+paper_result_reporting_allowed: false
+upstream_license_status: NOT_EXPLICITLY_STATED
+upstream_license_claimed_resolved: false
+raw_data_redistribution_allowed: false
+cleaned_dataset_redistribution_allowed: false
+full_smiles_label_table_release_allowed: false
+reconstructable_dataset_artifact_allowed: false
+preprocessing_code_release_allowed: true
+configuration_release_allowed: true
+aggregated_metrics_release_allowed: false
+figure_release_allowed: false
+trained_model_release_allowed: false
+required_citations:
+  - https://github.com/MujeebOnawole/Taste_Prediction_RGCN/tree/16af8ead8a17b6bd3941d9eb5879c5be75c14114
+fixed_upstream_commit: 16af8ead8a17b6bd3941d9eb5879c5be75c14114
+fixed_csv_sha256: b7308b3277fd07ed6af4b861c0d2ce2d843f92cc81a9e5e4efd65cf4040a291b
+
+dataset_identity:
+  id: tastemolnet
+  upstream_repository: https://github.com/MujeebOnawole/Taste_Prediction_RGCN
+  upstream_commit: 16af8ead8a17b6bd3941d9eb5879c5be75c14114
+  upstream_data_file: processed_data/taste_scaffold_split.csv
+  source_csv_sha256: b7308b3277fd07ed6af4b861c0d2ce2d843f92cc81a9e5e4efd65cf4040a291b
+  prepared_output_manifest_sha256: 36aaf17bf45e0a092a96a0379fab31d9e6bfcd719b87cb4ffa4e57a6642bb645
+  split_manifest_sha256: 841f3b911e5d353c1e00f010bafcc8a6f7b3433082dba8a8979fab1b558251af
+  upstream_terms_status: NOT_EXPLICITLY_STATED
+  prepared_rows: 13421
+  split_rows:
+    train: 9437
+    validation: 1328
+    calibration: 1328
+    test: 1328
+
+permissions:
+  research_execution: PENDING_ROOT_ACTIVATION
+  paper_reporting: PENDING_ROOT_ACTIVATION
+  dataset_redistribution: FORBIDDEN
+  raw_dataset_publication: FORBIDDEN
+  processed_dataset_publication: FORBIDDEN
+  molecule_level_publication: FORBIDDEN
+  aggregate_publication: ALLOWED_ONLY_AFTER_ACTIVATION_AND_PUBLIC_ARTIFACT_AUDIT
+  model_artifact_publication: INTERNAL_ONLY
+
+data_handling:
+  reuse_existing_prepared_data_only: true
+  reuse_existing_graph_cache_only: true
+  data_preparation_allowed: false
+  network_download_allowed: false
+  source_copy_allowed: false
+  public_artifact_audit_required: true
+
+execution:
+  phase: TASTEMOLNET_GINE_FULL_RESEARCH_V1
+  platform: autodl
+  hpc_execution_allowed: false
+  run_tastemolnet: 0
+  gpu_index: 2
+  gpu_lock_mode: exclusive
+  fresh_output_required: true
+  classifier:
+    oracle_backend: gnn
+    classifier_family: gine
+    rf_oracle_used: false
+    num_classes: 3
+    source_label: 1
+  split_access:
+    train_loaded: true
+    validation_loaded: true
+    calibration_loaded: false
+    test_loaded: false
+    test_metadata_hash_only: true
+
+publication:
+  allowed_categories:
+    - aggregate_metrics
+    - aggregate_tables
+    - aggregate_figures
+    - method_configuration
+    - provenance_hashes
+  forbidden_categories:
+    - source_csv
+    - prepared_split_rows
+    - graph_cache_payloads
+    - molecule_identifiers
+    - smiles_or_molecular_records
+    - per_example_predictions
+  marker: TASTEMOLNET_PUBLIC_ARTIFACT_NO_DATA_REDISTRIBUTION_AUDIT
+
+hash_contract:
+  policy_file_hash: sha256_raw_bytes
+  policy_semantic_hash: canonical_json_sha256_v1
+  runtime_must_bind:
+    - policy_file_sha256
+    - policy_canonical_sha256
+    - provenance_manifest_sha256
+    - prepared_output_manifest_sha256
+    - split_manifest_sha256
+    - graph_cache_manifest_sha256

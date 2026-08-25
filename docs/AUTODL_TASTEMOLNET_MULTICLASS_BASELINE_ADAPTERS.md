@@ -1,10 +1,12 @@
 # TasteMolNet multiclass baseline adapter foundation
 
-## Current execution boundary
+## Historical baseline-fragment boundary
 
-TasteMolNet remains `BLOCKED_LICENSE_REVIEW`. The foundation in this document
-does not train a classifier, run a baseline, score a molecule, read held-out
-test data, or allocate an AutoDL GPU.
+The original baseline fragment remains immutable and
+`BLOCKED_LICENSE_REVIEW`. It does not train a classifier, run a baseline,
+score a molecule, read held-out test data, or allocate an AutoDL GPU. Its old
+binary licence gate is now historical evidence only and can no longer emit a
+PASS or authorize work.
 
 The current controller fragment contains three terminal tasks:
 
@@ -81,23 +83,44 @@ unique true transition, no graph-hash collision, and
 `graph_content_identity=canonical_global_graph_hash`. Parent metadata remains
 provenance only.
 
-## Fresh release contract
+## Scoped research/reporting foundation
 
-The blocked fragment is immutable. The blocked-fragment builder intentionally
-rejects a license gate with `status=PASS`; it cannot relabel the old tasks.
+The blocked fragment is immutable. The blocked-fragment builder cannot relabel
+its tasks or consume a scoped-policy receipt.
 
-A future runnable fragment must be created at a fresh path and satisfy all of:
+A separate foundation now lives at:
 
-1. an exact-data `tastemolnet_license_audit_v1` gate with `status=PASS`,
-   `heavy_route_authorized=true`, `run_tastemolnet=true`, and an explicit reuse
-   basis;
-2. a frozen three-class GINE manifest with checkpoint, temperature, and feature
-   schema hashes, no RF provenance, and no test use for selection;
-3. one shared scaffold split and MolCLR checkpoint across the four methods;
-4. train-only candidate generation, calibration-only pool merge/selection, and
+```text
+configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml
+configs/autodl/tastemolnet_gine_research_v1.yaml
+src/baselines/tastemolnet_gine_research_tasks.py
+scripts/autodl/build_tastemolnet_gine_research_tasks.py
+```
+
+The checked-in policy is inactive, so its generated task is
+`enabled=false`, `command=null`, and `run_tastemolnet=0`. It cannot consume
+prepared/cache paths or a policy receipt. This records the future GPU-2
+exclusive, fresh-root, three-class GINE contract without activating it.
+
+A later runnable fragment must be created at a fresh path and satisfy all of:
+
+1. an independently reviewed active scoped policy and typed read-only
+   exact-data receipt, while upstream terms remain `NOT_EXPLICITLY_STATED` and
+   no `LICENSE_PASS` is produced;
+2. reuse of the checksum-bound existing prepared split and graph cache, with no
+   download, data preparation, cache rebuild, or source copy;
+3. a frozen three-class GINE manifest with checkpoint, temperature, and feature
+   schema hashes, no RF provenance, and no held-out-test use for selection;
+4. one shared scaffold split and MolCLR checkpoint across the four methods;
+5. train-only candidate generation, calibration-only pool merge/selection, and
    held-out test access only after an immutable selector freeze;
-5. method-native action manifests and destination-distribution export.
+6. method-native action manifests and destination-distribution export; and
+7. a sanitized, manifest-closed public artifact that passes
+   `scripts/audit_public_artifact_no_dataset_redistribution.py` before any
+   aggregate result is released.
 
-`src/baselines/tastemolnet_multiclass_tasks.py` serializes this exact release
-contract into every blocked fragment. Its hash makes later contract drift
-visible.
+`src/baselines/tastemolnet_multiclass_tasks.py` continues to serialize the
+historical blocked contract. The new typed GINE fragment is intentionally
+separate and requires a dedicated controller; it is ineligible for the generic
+four-GPU controller. See `docs/TASTEMOLNET_DATA_USAGE_POLICY.md` for the full
+private-use/publication boundary.

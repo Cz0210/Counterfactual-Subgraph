@@ -1668,6 +1668,31 @@ Mutagenicity roadmaps.
   and dry CLI parsing, then launch one fresh AutoDL CPU controller.
 - [ ] Require subset, exact, downstream replay, standardized freeze, and final
   controller gates before updating AIDS/Mut or stopping the old brute route.
+
+## 2026-08-25 — TasteMolNet scoped data-use foundation (inactive)
+
+- [x] Add the exact machine-readable research/reporting-without-redistribution
+  policy interface while retaining `NOT_EXPLICITLY_STATED` as the upstream
+  terms status and forbidding every `LICENSE_PASS` claim.
+- [x] Preserve the historical `LICENSE_REVIEW_REQUIRED` artifact and make the
+  legacy binary audit permanently non-authorizing.
+- [x] Add read-only checksum closure for the existing prepared split and graph
+  cache; forbid another download, preparation pass, cache rebuild, or source
+  copy.
+- [x] Add a manifest-closed public-artifact audit that rejects raw/cleaned or
+  reconstructable dataset content, molecule-level records, per-example
+  predictions, hidden archives, and protected hashes.
+- [x] Freeze a dedicated GPU-2-exclusive, fresh-root, true three-class GINE
+  task fragment with Sweet=1 strict untargeted flips, no RF, no test loading,
+  and no HPC eligibility.
+- [x] Keep the checked-in policy and fragment inactive: `RUN_TASTEMOLNET=0`,
+  `enabled=false`, and `command=null`.
+- [ ] In a separate root-authorized and independently reviewed commit, activate
+  only private research computation and aggregate paper reporting, pin exact
+  policy/receipt hashes, and connect the dedicated controller.
+- [ ] Deploy only from an immutable execution worktree and only to fresh AutoDL
+  controller/science roots; do not modify existing experiments.
+
 ## 2026-08-25: c766 failed-selection recovery authority
 
 - [x] Add an independent read-only primitive pinned to the exact controller

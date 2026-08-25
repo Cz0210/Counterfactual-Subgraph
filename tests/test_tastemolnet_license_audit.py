@@ -7,7 +7,6 @@ import pytest
 
 from scripts.audit_tastemolnet_license import (
     BLOCKED,
-    PASS,
     UPSTREAM_COMMIT,
     LicenseAuditError,
     audit_license,
@@ -84,7 +83,7 @@ def test_public_unlicensed_data_stays_blocked(tmp_path: Path) -> None:
     assert not (tmp_path / "audit" / "PASS").exists()
 
 
-def test_nonempty_user_approval_unlocks_exact_prepared_data(tmp_path: Path) -> None:
+def test_nonempty_user_terms_never_create_legacy_license_pass(tmp_path: Path) -> None:
     approval = tmp_path / "approval.txt"
     approval.write_text("Written permission covers research use of the exact CSV.\n")
     gate = audit_license(
@@ -92,15 +91,17 @@ def test_nonempty_user_approval_unlocks_exact_prepared_data(tmp_path: Path) -> N
         output_dir=tmp_path / "audit",
         approval_file=approval,
     )
-    assert gate["status"] == PASS
-    assert gate["passed"] is True
-    assert gate["heavy_route_authorized"] is True
-    assert gate["license_basis"] == "user_supplied_approval_or_terms"
+    assert gate["status"] == BLOCKED
+    assert gate["passed"] is False
+    assert gate["heavy_route_authorized"] is False
+    assert gate["license_basis"] is None
     assert gate["approval_file"] == str(approval.resolve())
     assert gate["approval_evidence"]["sha256"]
+    assert gate["legacy_license_pass_disabled"] is True
+    assert not (tmp_path / "audit" / "PASS").exists()
 
 
-def test_reviewed_prepared_license_requires_consistent_fields(tmp_path: Path) -> None:
+def test_reviewed_prepared_terms_still_do_not_activate_legacy_gate(tmp_path: Path) -> None:
     gate = audit_license(
         prepared_root=_prepared(
             tmp_path,
@@ -110,9 +111,11 @@ def test_reviewed_prepared_license_requires_consistent_fields(tmp_path: Path) ->
         ),
         output_dir=tmp_path / "audit",
     )
-    assert gate["status"] == PASS
-    assert gate["passed"] is True
-    assert gate["license_basis"] == "prepared_provenance_explicit_license"
+    assert gate["status"] == BLOCKED
+    assert gate["passed"] is False
+    assert gate["heavy_route_authorized"] is False
+    assert gate["license_basis"] is None
+    assert gate["legacy_license_pass_disabled"] is True
 
 
 def test_commit_drift_fails_closed(tmp_path: Path) -> None:

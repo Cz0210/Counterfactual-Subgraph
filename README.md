@@ -158,9 +158,14 @@ four protected AutoDL UUID locks through a separate immutable sidecar; it does
 not append to active controller manifests or duplicate the already-running
 ComRecGC M=500 pair. See `docs/AUTODL_BACE_EQUIVALENCE_SIDECAR.md`.
 
-The future TasteMolNet baseline routes share one explicit three-class GINE,
-untargeted Sweet-to-non-Sweet strict-flip contract while remaining terminally
-license-blocked in the current controller. See
+The future TasteMolNet baseline routes share one explicit three-class GINE and
+an untargeted Sweet-to-non-Sweet strict-flip contract. The historical baseline
+fragment remains terminally blocked, while a separate scoped
+research/reporting-without-redistribution policy and dedicated GINE controller
+template are checked in **inactive** (`RUN_TASTEMOLNET=0`) pending an
+independently reviewed activation. Upstream licence terms remain
+`NOT_EXPLICITLY_STATED`; no route may emit `LICENSE_PASS`. See
+`docs/TASTEMOLNET_DATA_USAGE_POLICY.md` and
 `docs/AUTODL_TASTEMOLNET_MULTICLASS_BASELINE_ADAPTERS.md`.
 
 ---

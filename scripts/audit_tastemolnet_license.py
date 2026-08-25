@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Freeze a fail-closed TasteMolNet data-license decision.
+"""Freeze the historical, non-authorizing TasteMolNet licence observation.
 
 This command never downloads data and never infers permission merely from a
-public repository or an open-access paper.  A PASS requires either explicit
-license evidence already bound by the prepared-data provenance or a
-user-supplied approval/terms file.  Otherwise it records the available
-evidence and emits ``BLOCKED_LICENSE_REVIEW``.
+public repository or an open-access paper.  It can no longer emit a PASS or
+authorize compute: scoped research/reporting authorization is represented by
+the separate machine-readable data-use policy, while the upstream licence
+observation remains ``NOT_EXPLICITLY_STATED``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 
 SCHEMA_VERSION = "tastemolnet_license_audit_v1"
 BLOCKED = "BLOCKED_LICENSE_REVIEW"
-PASS = "PASS"
+UPSTREAM_TERMS_STATUS = "NOT_EXPLICITLY_STATED"
 UPSTREAM_REPOSITORY = "https://github.com/MujeebOnawole/Taste_Prediction_RGCN"
 UPSTREAM_COMMIT = "16af8ead8a17b6bd3941d9eb5879c5be75c14114"
 UPSTREAM_DATA_FILE = "processed_data/taste_scaffold_split.csv"
@@ -146,12 +146,12 @@ def audit_license(
             ),
         }
 
-    passed_by = None
+    observed_terms_basis = None
     if approval_identity is not None:
-        passed_by = "user_supplied_approval_or_terms"
+        observed_terms_basis = "user_supplied_terms_observed_not_activated_here"
     elif reviewed:
-        passed_by = "prepared_provenance_explicit_license"
-    status = PASS if passed_by else BLOCKED
+        observed_terms_basis = "prepared_provenance_terms_observed_not_activated_here"
+    status = BLOCKED
     now = datetime.now(timezone.utc).isoformat()
     evidence = {
         "schema_version": SCHEMA_VERSION,
@@ -177,7 +177,9 @@ def audit_license(
         },
         "upstream_checkout": checkout_evidence,
         "approval_evidence": approval_identity,
-        "decision_basis": passed_by or "no_explicit_data_reuse_license_or_approval",
+        "decision_basis": observed_terms_basis or "no_explicit_data_reuse_license_or_approval",
+        "upstream_terms_status": UPSTREAM_TERMS_STATUS,
+        "legacy_license_pass_disabled": True,
         "legal_advice": False,
     }
     gate = {
@@ -185,22 +187,23 @@ def audit_license(
         "created_at": now,
         "dataset": "tastemolnet",
         "status": status,
-        "passed": status == PASS,
+        "passed": False,
         "license_id": license_id,
-        "license_basis": passed_by,
-        "reuse_basis": passed_by,
+        "license_basis": None,
+        "reuse_basis": None,
         "approval_file": (
             approval_identity.get("path") if approval_identity is not None else None
         ),
         "approval_evidence": approval_identity,
-        "heavy_route_authorized": status == PASS,
-        "run_tastemolnet": status == PASS,
-        "blocked_reason": None if status == PASS else BLOCKED,
+        "heavy_route_authorized": False,
+        "run_tastemolnet": False,
+        "blocked_reason": BLOCKED,
         "required_for_unblock": (
-            None
-            if status == PASS
-            else "Explicit terms covering this CSV/data compilation or a user-supplied approval file."
+            "This legacy licence observation never authorizes execution; use the "
+            "separate scoped data-use policy and a fresh route."
         ),
+        "upstream_terms_status": UPSTREAM_TERMS_STATUS,
+        "legacy_license_pass_disabled": True,
         "evidence_file": "taste_license_evidence.json",
     }
     markdown = "\n".join(
@@ -214,7 +217,7 @@ def audit_license(
             "- Public availability of a repository, paper, or CSV was not treated as a data license.",
             "- No TasteMolNet full GNN, PPO, generation, verification, selector, or final evaluation is authorized while blocked.",
             "",
-            "To unblock, provide `TASTEMOLNET_LICENSE_APPROVAL_FILE` pointing to explicit terms or written approval that covers research reuse of the exact data file.",
+            "This historical audit never emits a licence PASS. Scoped research/reporting authorization belongs to the separate data-use policy.",
             "",
         ]
     )
@@ -222,7 +225,7 @@ def audit_license(
     _atomic_json(output / "taste_license_evidence.json", evidence)
     _atomic_json(output / "taste_license_gate.json", gate)
     _atomic_text(output / "taste_license_audit.md", markdown)
-    _atomic_text(output / ("PASS" if status == PASS else BLOCKED), status + "\n")
+    _atomic_text(output / BLOCKED, status + "\n")
     return gate
 
 
@@ -255,12 +258,11 @@ def main(argv: list[str] | None = None) -> int:
         upstream_checkout=args.upstream_checkout,
     )
     print(json.dumps(gate, sort_keys=True), flush=True)
-    marker = "TASTE_LICENSE_PASS" if gate["status"] == PASS else "TASTE_LICENSE_BLOCKED"
-    print(f"[{marker}]", flush=True)
+    print("[TASTE_LICENSE_BLOCKED]", flush=True)
     if args.audit_completion_mode:
         print(f"[TASTE_LICENSE_AUDIT_COMPLETE] status={gate['status']}", flush=True)
         return 0
-    return 0 if gate["status"] == PASS else 65
+    return 65
 
 
 if __name__ == "__main__":

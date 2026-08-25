@@ -9892,3 +9892,55 @@ live original worker or live/unprovably-reused child continues to fail closed.
 
 Passed fresh independent superseding-commit review and merged into the
 release-disabled controller integration; no production receipt was created.
+
+## [2026-08-25] Separate TasteMolNet scoped use from upstream licence status
+
+### Decision
+
+Record `NOT_EXPLICITLY_STATED` as the immutable upstream-terms observation and
+never convert project authorization into a `LICENSE_PASS`. Replace the old
+binary licence-gate model for future work with a typed scoped policy that
+separately controls private research computation, aggregate paper reporting,
+and dataset redistribution. Raw or cleaned tables, reconstructable datasets,
+SMILES/label records, graph caches, per-example predictions, and trained-model
+artifacts remain forbidden for public release. Only sanitized aggregate
+metrics/tables/figures, configuration, and provenance hashes may be candidates
+for publication, and each candidate root requires an independent
+manifest-closed no-dataset-redistribution audit.
+
+Preserve the historical `LICENSE_REVIEW_REQUIRED` artifact unchanged. The
+legacy `audit_tastemolnet_license.py` remains a non-authorizing historical
+audit and may emit only `BLOCKED_LICENSE_REVIEW`; approval-shaped input cannot
+turn it into PASS.
+
+Freeze the future science contract as a genuine three-class GINE with
+Bitter=0, Sweet=1, Tasteless=2 and an untargeted strict flip
+`pred_before == 1 and pred_after != 1`. RF, binary projection, held-out-test
+selection, HPC, data re-preparation, cache rebuilding, and non-fresh roots are
+forbidden. The dedicated future route is exclusive to physical GPU 2.
+
+This implementation commit deliberately checks in only an inactive policy and
+controller fragment: `PENDING_ROOT_ACTIVATION`, `RUN_TASTEMOLNET=0`,
+`enabled=false`, and `command=null`. It cannot start training. A separate
+root-authorized activation must change the exact policy state, bind raw and
+canonical policy hashes plus the read-only prepared/cache receipt, pass fresh
+independent review, and use fresh AutoDL roots.
+
+### Consequences
+
+- Upstream terms remain unresolved as an observation; no success marker may be
+  interpreted as a licence determination.
+- Existing private data/cache bytes are validated in place and are never
+  copied into policy or public audit outputs.
+- The public-artifact audit is content/schema/provenance enforcement, not a
+  licence audit.
+- The original blocked three-baseline fragment stays blocked and immutable;
+  the scoped GINE foundation is a separate typed route.
+- Paired Slurm files are static CLI parity and exit before execution because
+  this campaign is AutoDL-only.
+
+### Status
+
+Inactive implementation and focused tests only. No activation, deployment,
+SSH access, GPU allocation, dataset read/rebuild, or experiment launch was
+performed.
