@@ -118,6 +118,10 @@ MAX_EVENTS_BYTES = 4 * 1024**2
 TERMINAL_EVENT_RESERVE_BYTES = 256 * 1024
 MAX_WORKER_LOG_BYTES = 32 * 1024**2
 MAX_STARTUP_GENERATIONS = 64
+LINUX_PROCESS_STATES = frozenset(
+    {"R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I"}
+)
+LINUX_EXITED_PROCESS_STATES = frozenset({"Z", "X", "x"})
 FROZEN_SCIENCE_ENV_KEYS = (
     "RUN_TASTEMOLNET",
     "TASTE_RESEARCH_COMPUTE_ALLOWED",
@@ -184,6 +188,18 @@ REQUIRED_OUTPUT_FILES = (
 
 class TasteGINEControllerError(RuntimeError):
     """Raised when persistent controller authority or worker state drifts."""
+
+
+class _ProcessGenerationExited(TasteGINEControllerError):
+    """The exact Linux PID generation reached an exited procfs state."""
+
+
+@dataclass(frozen=True, slots=True)
+class _LinuxProcessStatObservation:
+    pid: int
+    state: str
+    ppid: int
+    start_ticks: int
 
 
 def utc_now() -> str:
@@ -668,19 +684,55 @@ class TasteGINEControllerSpec:
         }
 
 
-def _linux_process_stat(pid: int) -> tuple[int, int] | None:
+def _read_linux_process_stat(
+    pid: int,
+) -> _LinuxProcessStatObservation | None:
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         raw = stat_path.read_text(encoding="utf-8")
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
+    except (FileNotFoundError, ProcessLookupError):
         return None
+    except PermissionError as exc:
+        raise TasteGINEControllerError("worker proc stat is unreadable") from exc
+    except OSError as exc:
+        raise TasteGINEControllerError(
+            "worker proc stat could not be verified"
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise TasteGINEControllerError("malformed worker proc stat") from exc
+    opening = raw.find("(")
     closing = raw.rfind(")")
-    if closing < 0:
+    fields = [] if closing < 0 else raw[closing + 2 :].split()
+    try:
+        observed_pid = int(raw[:opening].strip()) if opening > 0 else -1
+        state = fields[0]
+        ppid = int(fields[1])
+        start_ticks = int(fields[19])
+    except (IndexError, TypeError, ValueError) as exc:
+        raise TasteGINEControllerError("malformed worker proc stat") from exc
+    if (
+        opening <= 0
+        or closing <= opening
+        or observed_pid != pid
+        or len(fields) < 20
+        or state not in LINUX_PROCESS_STATES
+        or ppid < 0
+        or start_ticks <= 0
+    ):
         raise TasteGINEControllerError("malformed worker proc stat")
-    fields = raw[closing + 2 :].split()
-    if len(fields) < 20 or fields[0] == "Z":
+    return _LinuxProcessStatObservation(
+        pid=observed_pid,
+        state=state,
+        ppid=ppid,
+        start_ticks=start_ticks,
+    )
+
+
+def _linux_process_stat(pid: int) -> tuple[int, int] | None:
+    observed = _read_linux_process_stat(pid)
+    if observed is None or observed.state in LINUX_EXITED_PROCESS_STATES:
         return None
-    return int(fields[1]), int(fields[19])
+    return observed.ppid, observed.start_ticks
 
 
 def _linux_start_ticks(pid: int) -> int | None:
@@ -688,25 +740,106 @@ def _linux_start_ticks(pid: int) -> int | None:
     return None if observed is None else observed[1]
 
 
+def _exact_live_linux_generation(
+    pid: int, expected_start: Any
+) -> _LinuxProcessStatObservation | None:
+    if not _strict_int(expected_start) or expected_start <= 0:
+        raise TasteGINEControllerError(
+            "worker generation Linux start ticks are untyped"
+        )
+    observed = _read_linux_process_stat(pid)
+    if (
+        observed is None
+        or observed.start_ticks != expected_start
+        or observed.state in LINUX_EXITED_PROCESS_STATES
+    ):
+        return None
+    return observed
+
+
 def _process_snapshot(pid: int) -> dict[str, Any]:
     if sys.platform.startswith("linux"):
+        live_empty_cmdline = False
+        live_incomplete_identity = False
         for _ in range(20):
-            process_stat = _linux_process_stat(pid)
-            if process_stat is None:
-                raise TasteGINEControllerError(
-                    "worker disappeared before process snapshot"
-                )
-            ppid, ticks = process_stat
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-            cwd = os.path.realpath(f"/proc/{pid}/cwd")
-            exe = os.path.realpath(f"/proc/{pid}/exe")
-            exe_info = os.stat(f"/proc/{pid}/exe")
-            cmdline_after = Path(f"/proc/{pid}/cmdline").read_bytes()
-            cwd_after = os.path.realpath(f"/proc/{pid}/cwd")
-            exe_after = os.path.realpath(f"/proc/{pid}/exe")
-            exe_info_after = os.stat(f"/proc/{pid}/exe")
+            before = _read_linux_process_stat(pid)
             if (
-                _linux_process_stat(pid) == (ppid, ticks)
+                before is None
+                or before.state in LINUX_EXITED_PROCESS_STATES
+            ):
+                raise _ProcessGenerationExited(
+                    "worker exited before process snapshot"
+                )
+            ppid = before.ppid
+            ticks = before.start_ticks
+            try:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+            except PermissionError as exc:
+                raise TasteGINEControllerError(
+                    "live worker process cmdline is unreadable"
+                ) from exc
+            except OSError as exc:
+                after_error = _read_linux_process_stat(pid)
+                if (
+                    after_error is None
+                    or after_error.start_ticks != ticks
+                    or after_error.state in LINUX_EXITED_PROCESS_STATES
+                ):
+                    raise _ProcessGenerationExited(
+                        "worker exited while reading process cmdline"
+                    ) from exc
+                live_incomplete_identity = True
+                time.sleep(0.001)
+                continue
+            if not cmdline.rstrip(b"\0"):
+                after_empty = _read_linux_process_stat(pid)
+                if (
+                    after_empty is None
+                    or after_empty.start_ticks != ticks
+                    or after_empty.state in LINUX_EXITED_PROCESS_STATES
+                ):
+                    raise _ProcessGenerationExited(
+                        "worker exited while its cmdline was empty"
+                    )
+                live_empty_cmdline = True
+                time.sleep(0.001)
+                continue
+            try:
+                cwd = os.path.realpath(f"/proc/{pid}/cwd")
+                exe = os.path.realpath(f"/proc/{pid}/exe")
+                exe_info = os.stat(f"/proc/{pid}/exe")
+                cmdline_after = Path(f"/proc/{pid}/cmdline").read_bytes()
+                cwd_after = os.path.realpath(f"/proc/{pid}/cwd")
+                exe_after = os.path.realpath(f"/proc/{pid}/exe")
+                exe_info_after = os.stat(f"/proc/{pid}/exe")
+            except PermissionError as exc:
+                raise TasteGINEControllerError(
+                    "live worker process identity is unreadable"
+                ) from exc
+            except OSError as exc:
+                after_error = _read_linux_process_stat(pid)
+                if (
+                    after_error is None
+                    or after_error.start_ticks != ticks
+                    or after_error.state in LINUX_EXITED_PROCESS_STATES
+                ):
+                    raise _ProcessGenerationExited(
+                        "worker exited while reading process identity"
+                    ) from exc
+                live_incomplete_identity = True
+                time.sleep(0.001)
+                continue
+            after = _read_linux_process_stat(pid)
+            if (
+                after is None
+                or after.start_ticks != ticks
+                or after.state in LINUX_EXITED_PROCESS_STATES
+            ):
+                raise _ProcessGenerationExited(
+                    "worker exited during process snapshot"
+                )
+            if (
+                after.ppid == ppid
                 and cmdline_after == cmdline
                 and cwd_after == cwd
                 and exe_after == exe
@@ -729,6 +862,14 @@ def _process_snapshot(pid: int) -> dict[str, Any]:
                     "exe_identity": _file_identity(exe_info),
                 }
             time.sleep(0.001)
+        if live_empty_cmdline:
+            raise TasteGINEControllerError(
+                "live worker process cmdline remained empty"
+            )
+        if live_incomplete_identity:
+            raise TasteGINEControllerError(
+                "live worker process identity remained unavailable"
+            )
         raise TasteGINEControllerError(
             "worker process changed throughout the bounded snapshot window"
         )
@@ -745,6 +886,43 @@ def _process_snapshot(pid: int) -> dict[str, Any]:
         "exe": None,
         "exe_identity": None,
     }
+
+
+def _snapshot_live_linux_generation(
+    pid: int, expected_start: Any, *, label: str
+) -> dict[str, Any] | None:
+    """Snapshot only a live exact generation before argv phase validation."""
+
+    if _exact_live_linux_generation(pid, expected_start) is None:
+        return None
+    try:
+        snapshot = _process_snapshot(pid)
+    except (TasteGINEControllerError, OSError):
+        if _exact_live_linux_generation(pid, expected_start) is None:
+            return None
+        raise
+    if _exact_live_linux_generation(pid, expected_start) is None:
+        return None
+    if (
+        snapshot.get("pid") != pid
+        or snapshot.get("linux_start_ticks") != expected_start
+    ):
+        raise TasteGINEControllerError(
+            f"live {label} PID/start snapshot changed"
+        )
+    argv = snapshot.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or any(
+            not isinstance(value, str) or not value or "\0" in value
+            for value in argv
+        )
+    ):
+        raise TasteGINEControllerError(
+            f"live {label} process argv is empty or malformed"
+        )
+    return snapshot
 
 
 def _argv_flag_value(argv: Sequence[str], flag: str) -> str | None:
@@ -992,6 +1170,10 @@ def _observe_generation(
         return None
     if not sys.platform.startswith("linux"):
         return dict(generation) if _generation_alive(generation) else None
+    if not _strict_int(expected_start) or expected_start <= 0:
+        raise TasteGINEControllerError(
+            "registered worker Linux start ticks are untyped"
+        )
     if _linux_start_ticks(pid) != expected_start:
         return None
     registered = generation.get("registered")
@@ -1010,14 +1192,11 @@ def _observe_generation(
         raise TasteGINEControllerError(
             "registered worker PID/start/cwd/cmd/exe binding changed"
         )
-    try:
-        snapshot = _process_snapshot(pid)
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
+    snapshot = _snapshot_live_linux_generation(
+        pid, expected_start, label="worker"
+    )
+    if snapshot is None:
         return None
-    except TasteGINEControllerError:
-        if _linux_start_ticks(pid) is None:
-            return None
-        raise
     phase = _classify_process_phase(
         snapshot, spec=spec, barrier_record=barrier_record
     )
@@ -1438,6 +1617,10 @@ def _observe_trainer_generation(
         return None
     if not sys.platform.startswith("linux"):
         return dict(generation) if _generation_alive(generation) else None
+    if not _strict_int(expected_start) or expected_start <= 0:
+        raise TasteGINEControllerError(
+            "registered trainer Linux start ticks are untyped"
+        )
     if _linux_start_ticks(pid) != expected_start:
         return None
     authority_path = Path(str(generation.get("authority_path", "")))
@@ -1456,7 +1639,11 @@ def _observe_trainer_generation(
         for value in (barrier_record, registered, bindings_raw, ancestry_raw)
     ):
         raise TasteGINEControllerError("trainer child generation is untyped")
-    snapshot = _process_snapshot(pid)
+    snapshot = _snapshot_live_linux_generation(
+        pid, expected_start, label="trainer child"
+    )
+    if snapshot is None:
+        return None
     phase = _classify_trainer_phase(snapshot, barrier_record=barrier_record)
     order = {"trainer_startup_launcher": 0, "trainer_target": 1}
     previous_phase = str(generation.get("last_observed_phase"))

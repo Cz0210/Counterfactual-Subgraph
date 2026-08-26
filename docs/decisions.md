@@ -10210,3 +10210,47 @@ Local implementation and focused root-swap/dead-stale/live-stale/malformed
 negative tests only. No commit, push, SSH, deployment, AutoDL controller start,
 GPU allocation, TasteMolNet dataset read, or scientific experiment was
 performed.
+
+## [2026-08-26] Classify exact Linux process exit before Taste argv phases
+
+### Motivation
+
+A mandatory Linux code-only check exposed a short-process exit window: the
+registered PID/start generation could still have a `/proc/<pid>` entry while
+its command line had already been cleared. Treating that empty command line as
+a live argv/executable mismatch incorrectly converted a natural worker exit
+into controller identity drift.
+
+### Decision
+
+Parse Linux proc-stat PID, state, parent PID, and start ticks as one strict
+typed observation. Around every outer-worker and real-trainer process
+snapshot, require the declared start ticks and reject PID reuse. Treat only an
+absent entry or the exact generation's `Z`/`X` exit state as natural death
+before argv phase classification. Recheck the exact proc state after a
+snapshot and before classification, so an exit that clears `cmdline` cannot be
+misclassified as a live phase drift.
+
+Retry transient snapshot reads for a bounded interval while an exact
+generation remains nonterminal. If its command line or executable identity is
+still empty, malformed, unreadable, or unstable while proc-stat says it is
+live, fail closed. Permission errors, malformed proc-stat, phase regression,
+PID reuse, executable binding, and ancestry checks remain strict. Apply the
+same observation primitive to the `exp_run` worker and adopted trainer child.
+
+### Consequences
+
+- A naturally exiting short worker or trainer does not trigger a false
+  argv/executable identity-drift failure merely because it remains briefly
+  visible as a zombie.
+- A genuinely live process with empty or malformed argv is never treated as
+  successful or dead, and cannot authorize a concurrent retry.
+- Deterministic regression coverage includes live-to-zombie, PID-reuse, live
+  empty/malformed argv, and a real Linux launcher-to-target-to-zombie sequence
+  without sending the worker a signal.
+
+### Status
+
+Local superseding implementation and focused tests pending fresh independent
+review. No new commit, bundle, push, SSH, deployment, process signal, GPU
+allocation, TasteMolNet dataset read, or scientific experiment was performed.

@@ -684,7 +684,20 @@ def test_resume_detects_partial_terminal_name_before_any_writer_reconciliation(
 def test_generation_binding_allows_only_reviewed_launcher_to_target_exec(
     tmp_path: Path,
 ) -> None:
-    worker = _write_worker(tmp_path / "sleep.py", "import time\ntime.sleep(0.2)\n")
+    ready = tmp_path / "worker-ready"
+    stop = tmp_path / "worker-stop"
+    worker = _write_worker(
+        tmp_path / "sleep.py",
+        "from pathlib import Path\n"
+        "import time\n"
+        f"ready = Path({str(ready)!r})\n"
+        f"stop = Path({str(stop)!r})\n"
+        "ready.write_text('ready\\n', encoding='utf-8')\n"
+        "deadline = time.monotonic() + 5\n"
+        "while not stop.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.005)\n"
+        "raise SystemExit(0 if stop.exists() else 3)\n",
+    )
     spec = _spec(tmp_path, worker)
     lock = tmp_path / "barrier.lock"
     record_path = tmp_path / "barrier.json"
@@ -724,7 +737,130 @@ def test_generation_binding_allows_only_reviewed_launcher_to_target_exec(
     assert observed["last_observed"]["cwd"] == str(PROJECT_ROOT)
     assert observed["last_observed"]["argv"] == list(spec.worker_argv)
     assert observed["last_observed"]["exe"] == str(Path(sys.executable).resolve())
+    ready_deadline = time.monotonic() + 1
+    while not ready.is_file() and time.monotonic() < ready_deadline:
+        time.sleep(0.005)
+    assert ready.is_file()
+    stop.write_text("stop\n", encoding="utf-8")
+    exit_deadline = time.monotonic() + 2
+    exited = None
+    while time.monotonic() < exit_deadline:
+        exited = controller_module._read_linux_process_stat(process.pid)
+        if (
+            exited is None
+            or exited.state in controller_module.LINUX_EXITED_PROCESS_STATES
+        ):
+            break
+        time.sleep(0.005)
+    assert exited is None or (
+        exited.state in controller_module.LINUX_EXITED_PROCESS_STATES
+    )
+    assert (
+        controller_module._observe_generation(
+            observed,
+            spec=spec,
+            barrier_record=barrier.record.to_dict(),
+        )
+        is None
+    )
     assert process.wait(timeout=2) == 0
+
+
+def test_linux_exit_race_checks_proc_state_before_empty_argv_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid = 81001
+    start = 701
+    live = controller_module._LinuxProcessStatObservation(
+        pid=pid,
+        state="S",
+        ppid=1,
+        start_ticks=start,
+    )
+    zombie = controller_module._LinuxProcessStatObservation(
+        pid=pid,
+        state="Z",
+        ppid=1,
+        start_ticks=start,
+    )
+
+    worker = _write_worker(tmp_path / "unused.py", "raise SystemExit(0)\n")
+    spec = _spec(tmp_path, worker)
+    registered = {"pid": pid, "linux_start_ticks": start}
+    generation = {
+        "pid": pid,
+        "linux_start_ticks": start,
+        "registered": registered,
+        "registered_phase": "startup_launcher",
+        "last_observed_phase": "startup_launcher",
+        "phase_bindings": {"startup_launcher": registered},
+        "ancestry": {},
+    }
+    monkeypatch.setattr(controller_module.sys, "platform", "linux")
+    observations = iter((live, live, zombie))
+    monkeypatch.setattr(
+        controller_module,
+        "_read_linux_process_stat",
+        lambda observed_pid: next(observations),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_process_snapshot",
+        lambda observed_pid: {
+            "pid": observed_pid,
+            "linux_start_ticks": start,
+            "argv": [],
+        },
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_classify_process_phase",
+        lambda *args, **kwargs: pytest.fail(
+            "argv phase classification ran after exact-generation exit"
+        ),
+    )
+    assert (
+        controller_module._observe_generation(
+            generation,
+            spec=spec,
+            barrier_record={},
+        )
+        is None
+    )
+
+    reused = controller_module._LinuxProcessStatObservation(
+        pid=pid,
+        state="S",
+        ppid=1,
+        start_ticks=start + 1,
+    )
+    observations = iter((live, reused))
+    assert (
+        controller_module._snapshot_live_linux_generation(
+            pid, start, label="worker"
+        )
+        is None
+    )
+
+    for malformed_argv in ([], [""]):
+        observations = iter((live, live))
+        monkeypatch.setattr(
+            controller_module,
+            "_process_snapshot",
+            lambda observed_pid, argv=malformed_argv: {
+                "pid": observed_pid,
+                "linux_start_ticks": start,
+                "argv": argv,
+            },
+        )
+        with pytest.raises(
+            controller_module.TasteGINEControllerError,
+            match="live worker process argv is empty or malformed",
+        ):
+            controller_module._snapshot_live_linux_generation(
+                pid, start, label="worker"
+            )
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires /proc")

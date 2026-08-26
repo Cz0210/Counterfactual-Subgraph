@@ -1730,6 +1730,9 @@ Mutagenicity roadmaps.
   liveness filtering, ignore only conclusively dead declared PID/start
   generations, and reject live stale, malformed, unreadable, or concurrently
   live generations before retry.
+- [x] Classify exact Linux PID/start zombie/exit state before worker or trainer
+  argv-phase validation; boundedly retry transient teardown/exec snapshots but
+  fail closed when an exact live generation retains empty or malformed argv.
 - [ ] Complete independent review, immutable AutoDL deployment, and the first
   durable three-class GINE checkpoint on physical GPU 2.
 - [ ] Deploy only from an immutable execution worktree and only to fresh AutoDL
