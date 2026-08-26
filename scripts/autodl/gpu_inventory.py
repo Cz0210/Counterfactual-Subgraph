@@ -28,6 +28,15 @@ def parse_args() -> argparse.Namespace:
         "--max-gpus", type=int, default=int(os.environ.get("AUTODL_MAX_GPUS", "2"))
     )
     parser.add_argument(
+        "--gpu-hard-limit",
+        type=int,
+        default=int(os.environ.get("AUTODL_GPU_HARD_LIMIT", "2")),
+        help=(
+            "Explicit reviewed upper bound for --max-gpus. The default remains two; "
+            "four-GPU workflows must opt in with --gpu-hard-limit 4."
+        ),
+    )
+    parser.add_argument(
         "--min-free-memory-mb",
         type=int,
         default=int(os.environ.get("AUTODL_MIN_FREE_MEMORY_MB", "16000")),
@@ -54,7 +63,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        max_gpus = validate_max_gpus(args.max_gpus)
+        max_gpus = validate_max_gpus(args.max_gpus, hard_limit=args.gpu_hard_limit)
         project_root = resolve_project_root(args.project_root)
         data_root = select_data_root(project_root, explicit=args.data_root)
         layout = build_runtime_layout(project_root=project_root, data_root=data_root).ensure()
@@ -64,7 +73,11 @@ def main() -> int:
             min_free_memory_mb=args.min_free_memory_mb,
             max_utilization_percent=args.idle_util_threshold,
         )
-        selected = inventory.selected(max_gpus=max_gpus, lock_root=layout.locks_dir)
+        selected = inventory.selected(
+            max_gpus=max_gpus,
+            lock_root=layout.locks_dir,
+            hard_limit=args.gpu_hard_limit,
+        )
     except AutoDLRuntimeError as exc:
         print(f"AUTODL_GPU_INVENTORY_FAILED: {exc}", file=sys.stderr)
         return 2
@@ -77,6 +90,7 @@ def main() -> int:
         "samples": inventory.samples,
         "constraints": {
             "max_gpus": max_gpus,
+            "gpu_hard_limit": args.gpu_hard_limit,
             "min_free_memory_mb": args.min_free_memory_mb,
             "idle_util_threshold": args.idle_util_threshold,
         },

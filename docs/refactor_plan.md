@@ -1669,7 +1669,7 @@ Mutagenicity roadmaps.
 - [ ] Require subset, exact, downstream replay, standardized freeze, and final
   controller gates before updating AIDS/Mut or stopping the old brute route.
 
-## 2026-08-25 — TasteMolNet scoped data-use foundation (inactive)
+## 2026-08-25 — TasteMolNet scoped data-use and three-class GINE activation
 
 - [x] Add the exact machine-readable research/reporting-without-redistribution
   policy interface while retaining `NOT_EXPLICITLY_STATED` as the upstream
@@ -1685,11 +1685,53 @@ Mutagenicity roadmaps.
 - [x] Freeze a dedicated GPU-2-exclusive, fresh-root, true three-class GINE
   task fragment with Sweet=1 strict untargeted flips, no RF, no test loading,
   and no HPC eligibility.
-- [x] Keep the checked-in policy and fragment inactive: `RUN_TASTEMOLNET=0`,
-  `enabled=false`, and `command=null`.
-- [ ] In a separate root-authorized and independently reviewed commit, activate
-  only private research computation and aggregate paper reporting, pin exact
-  policy/receipt hashes, and connect the dedicated controller.
+- [x] Activate only private research computation and aggregate paper reporting:
+  `RUN_TASTEMOLNET=1`, while preserving `NOT_EXPLICITLY_STATED` and forbidding
+  all dataset redistribution.
+- [x] Require exact policy/receipt/prepared/cache closure at training start and
+  terminal, validation Macro OvR ROC-AUC selection with Macro-F1 tie-break,
+  validation-only temperature scaling, and held-out-test path/hash only.
+- [x] Add a separate exact-contract epoch state root with atomic model/
+  optimizer/best/RNG checkpoints, same-root resume, checkpoint cleanup audit,
+  terminal reopen, and staged immutable-output publication.
+- [x] Bind resume to the complete canonical config and config-file/override
+  hashes, clean commit/tree/source identity, Python/Torch/CUDA runtime, and
+  physical GPU-2 UUID; prove uninterrupted and crash/resume RNG/model parity.
+- [x] Hold a physical output-parent dirfd/lock/sentinel/claim for the long
+  route, reject output/state overlap with prepared/cache roots before loading,
+  and publish the deterministic contract staging root with atomic no-replace.
+- [x] Add the dedicated persistent Taste controller, durable startup barrier,
+  same-generation orphan adoption, one process-loss-only same-state retry,
+  bounded GPU-2 waiting/logs, terminal babysit, and typed terminal status.
+- [x] Keep terminal source/state/output/finalization authorities held through
+  stable full inventories and publish controller `PASS` last; reject same-byte
+  staging, state-root, named-lock, and output-parent replacement.
+- [x] Make PASS or any terminal-named artifact enter the shared strict
+  read-only validator before resumed-controller writer reconciliation.
+- [x] Bind the physical training-contract inode/content/file SHA and
+  recomputed canonical SHA through checkpoints, completion, and terminal
+  evidence.
+- [x] Add the controller-issued completion-only adoption receipt for the
+  finalization-published/completion-missing crash window while preserving the
+  ordinary `exp_run` fresh-output gate.
+- [x] Register the real trainer child behind a durable inner startup barrier
+  and retain exact PID/start/cwd/argv/cmd/exe/ancestry ownership across
+  `exp_run` parent loss without concurrent retry.
+- [x] Fail closed on deterministic CUDA/PyG parity drift and freeze the exact
+  GINE/seed-7/minimum-20-GiB route plus NumPy/RDKit/PyG/cuDNN/driver/runtime
+  manifest closure.
+- [x] Hold and verify manifest-bound train/validation cache path/SHA/inode
+  before and after deserialization, carry it across resume/terminal, and keep
+  calibration/test caches unopened.
+- [x] Deserialize both train and validation caches from duplicated streams of
+  the held authenticated descriptors; prove a hostile cache-root swap cannot
+  redirect `torch.load` and is rejected by the post-load named-inode closure.
+- [x] Strictly validate trainer authority/process/barrier structure before
+  liveness filtering, ignore only conclusively dead declared PID/start
+  generations, and reject live stale, malformed, unreadable, or concurrently
+  live generations before retry.
+- [ ] Complete independent review, immutable AutoDL deployment, and the first
+  durable three-class GINE checkpoint on physical GPU 2.
 - [ ] Deploy only from an immutable execution worktree and only to fresh AutoDL
   controller/science roots; do not modify existing experiments.
 

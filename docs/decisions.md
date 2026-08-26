@@ -9944,3 +9944,269 @@ independent review, and use fresh AutoDL roots.
 Inactive implementation and focused tests only. No activation, deployment,
 SSH access, GPU allocation, dataset read/rebuild, or experiment launch was
 performed.
+
+## [2026-08-25] Activate scoped TasteMolNet research without redistribution
+
+### Decision
+
+Apply the project owner's explicit instruction as a scoped execution policy:
+private TasteMolNet research computation and aggregate paper reporting are
+allowed, while upstream terms remain `NOT_EXPLICITLY_STATED` and every raw,
+cleaned, molecule-level, cache, or reconstructable dataset release remains
+forbidden. The historical `LICENSE_REVIEW_REQUIRED` file stays immutable and
+is no longer used as a computation blocker for this dedicated route.
+
+The full oracle is one task-specific three-class GINE on physical GPU 2. It
+requires a raw-SHA-pinned active policy, a typed read-only prepared/cache audit
+receipt, a fresh output, at least 20 GiB persistent free space, train and
+validation cache loading only, validation Macro OvR ROC-AUC checkpoint
+selection with Macro-F1 tie-break, validation-only temperature scaling, all
+three validation recalls positive, and no RF provenance. The held-out test is
+recorded only by path and SHA during training.
+
+The training bundle writes policy, cache, and oracle manifests with
+`paper_result_reporting_allowed=true`, `dataset_redistributed=false`, and
+`upstream_license_not_explicit=true`; all are included in the checkpoint SHA
+inventory and reopened before the terminal marker. Public reporting still
+requires the independent no-dataset-redistribution audit.
+
+Because the 200-epoch route is a multi-day job, training state is not held only
+in RAM. A separate, private, fresh state root freezes the exact data/policy/
+model/training contract and publishes one atomic checkpoint per completed
+epoch. The checkpoint includes current and best model states, optimizer,
+early-stop state, history, and Python/NumPy/Torch RNG states. An inode-bound
+single-writer lock rejects concurrent writers, interrupted checkpoint
+publication is reconciled from the fully fsynced state, and safe superseded
+checkpoint deletion is auditable. The immutable oracle output remains absent
+until a fully verified sibling staging bundle is renamed into place.
+
+### Consequences
+
+- `TASTE_RESEARCH_AND_PAPER_REPORTING_AUTHORIZED` and
+  `TASTE_NO_DATA_REDISTRIBUTION_GUARD_PASS` mean only that the scoped project
+  policy and no-redistribution boundary were validated.
+- No code may emit `TASTE_LICENSE_PASS` or reinterpret these markers as an
+  upstream licence conclusion.
+- The legacy blocked fragment remains historical evidence; the dedicated
+  policy-receipt-bound fragment is the only runnable Taste GINE route.
+- HPC remains forbidden; the paired Slurm entrypoint is validation-only and
+  exits before any training command.
+
+### Status
+
+Implementation and focused tests, including checkpoint/restart and terminal
+reopen, are local pending independent review and an immutable AutoDL
+deployment. No Taste GPU worker was started by this decision.
+
+## [2026-08-25] Give TasteMolNet a persistent fail-closed supervisor
+
+### Motivation
+
+Epoch checkpoints alone do not close controller death, worker-registration,
+output-parent replacement, or final-bundle publication windows. A direct
+foreground wrapper can be lost while the GPU worker continues, and a generic
+`PASS` marker cannot safely summarize mutable output and checkpoint trees.
+The original resume fingerprint also did not bind every merged config byte,
+override, clean source identity, or physical GPU UUID.
+
+### Decision
+
+Route the active Taste GINE fragment through a dedicated persistent AutoDL
+controller with one fresh CID/root. Freeze the clean commit/tree, reviewed
+worker program/wrapper paths and SHAs, Python, config-file SHAs, exact argv,
+allowlisted scientific environment, policy/receipt/private-data authority,
+physical GPU-2 contract, and exact output/state paths in its immutable spec.
+Use the durable exec-startup barrier before every worker generation, adopt only
+the recorded live PID/start-ticks generation after controller loss, and allow
+one genuine process-loss retry against the same inode-bound training root.
+Resource waiting remains bounded and does not consume that scientific retry.
+
+Bind the trainer resume contract to the complete canonical merged config,
+config files, dotlist and CLI overrides, clean source identity/hashes, runtime,
+and GPU UUID. Reject symlink components and output/state overlap with prepared
+or cache roots before any training input is loaded. Hold an output-parent
+dirfd, named lock, sentinel, and contract claim for the full route. Use one
+contract-derived finalization sibling, recover only the empty
+mkdir-before-claim window, receipt bounded cleanup of owned partial contents,
+and publish a verified complete inventory with Linux
+`renameat2(RENAME_NOREPLACE)` relative to the held parent descriptor.
+
+The controller's terminal publication holds the training-state root and named
+writer lock, output parent, and finalization authority while repeatedly
+reopening the complete bundle, policy/receipt, root identities, and SHA/stat
+inventories. It freezes terminal evidence and final state first, then writes
+controller `PASS` with no replace as the last publication. Terminal status
+uses the same typed reopen rather than trusting marker presence.
+
+Keep `NOT_EXPLICITLY_STATED` as the exact policy status everywhere and record
+scoped project permission separately as `authorization_status`.
+
+### Consequences
+
+- Empty controller/finalization/output-authority creation windows are
+  same-contract recoverable; nonempty unclaimed roots fail closed.
+- Same-byte staging, state-root, named-lock, controller-root, and output-parent
+  replacement cannot publish a valid controller terminal.
+- Claim/completion sidecars remain terminally hash-bound instead of becoming
+  unverified external authority, and private intermediates are bounded.
+- The worker explicitly calls `exp_run` with `--max-gpus 4` and
+  `--gpu-hard-limit 4`; the paired Slurm entrypoint remains a static HPC
+  refusal.
+
+### Status
+
+Local implementation, hostile crash/replacement tests, and documentation only.
+No commit, deployment, SSH action, controller launch, GPU allocation, or
+TasteMolNet experiment was performed by this decision.
+
+## [2026-08-25] Harden the TasteMolNet release controller against terminal and restart gaps
+
+### Decision
+
+Require the four-GPU inventory route to state both `--max-gpus 4` and the
+reviewed `--gpu-hard-limit 4`. Freeze one durable controller-wide resource
+deadline and keep the persistent controller responsible for exit 75 until that
+deadline, without spending the single scientific process-loss retry. A crash
+in `RELEASE_AUTHORIZED` before the startup token is sent re-arms the same
+attempt. Worker adoption now binds PID, Linux start ticks, cwd, argv, command
+bytes, executable path, and executable identity while permitting only the
+reviewed launcher-to-wrapper-to-`exp_run` exec phases.
+
+Reserve event-log capacity for terminal transitions and never let a diagnostic
+cap prevent durable PASS/FAILED state. A worker log that reaches its bound is
+inode-checked and bounded while the controller continues supervising the live
+generation; no signal is sent and ownership is not abandoned. Terminal status
+and controller reopen share one strict read-only state/terminal/PASS validator.
+PASS publication retains all controller, output, and state locks for a complete
+post-marker source rescan; failure removes the marker only when its name still
+resolves to the recorded device/inode.
+
+Resume cleanup preserves the first durable `CLEANUP_PREPARED` inventory across
+partial deletion crashes and deletes only through the already-held staging
+directory descriptor. The immutable training resume contract additionally
+binds NumPy, RDKit, PyG, cuDNN, CUDA-driver, and an allowlisted environment
+manifest.
+
+### Consequences
+
+- Resource scarcity cannot reset its deadline by restarting a wrapper or
+  consume a scientific retry.
+- A live science generation remains supervised when diagnostics reach their
+  bound or process identity becomes untrusted; the controller never signals it.
+- Status inspection cannot reconcile, publish, or otherwise mutate controller
+  state.
+- A path replacement cannot redirect cleanup or PASS revocation to a different
+  inode.
+
+### Status
+
+Local implementation and crash/negative tests only. No commit, push, SSH,
+deployment, AutoDL controller start, GPU allocation, or TasteMolNet experiment
+was performed.
+
+## [2026-08-26] Close TasteMolNet completion-adoption and exact-runtime release gaps
+
+### Decision
+
+Treat `state.phase=PASS` or the presence of any terminal-named controller
+artifact as an irreversible switch to the shared strict read-only validator.
+This switch occurs before a resumed controller creates/acquires a writer lock
+or reconciles publication temporaries; missing PASS/state/terminal peers and
+untyped terminal fields therefore fail without repair.
+
+Bind `training_contract.json` as a held physical inode, complete file SHA,
+recomputed canonical contract SHA, and exact content object. Carry that
+evidence through every epoch checkpoint, latest/heartbeat record, completion,
+terminal scan, and read authority. A self-declared hash can no longer validate
+changed contract content, and failed opens release all held descriptors and
+locks.
+
+Authorize the narrow finalization-published/completion-missing crash window
+with one immutable controller receipt. `exp_run` keeps its ordinary fresh
+output gate and accepts a pre-existing output only with that exact receipt,
+state root, and trainer argv. The trainer validates the same read-only closure
+and may write only the missing completion for the unchanged resume contract.
+Controller heartbeat replacement is allowed only when every stable receipt,
+CID/spec/root/deadline/attempt/launch field remains exact.
+
+Register the real trainer child behind a second durable exec barrier before
+release. Freeze its PID, Linux start ticks, parent PID/start, cwd, argv and
+cmdline hashes, executable path/inode, command hash, barrier record, and
+launcher-to-target phase bindings. If `exp_run` is lost, the persistent
+controller adopts that exact child and forbids a concurrent retry until it
+exits; identity drift remains supervised fail-closed without signalling the
+science process.
+
+Freeze the formal route to the verified GINE config, seed 7, and a persistent
+free-space threshold of at least 20 GiB. Require error-mode PyTorch
+deterministic algorithms, deterministic cuDNN, disabled benchmarking and TF32,
+and the fixed CUBLAS/Python hash environment. The production Taste route still
+requires exactly one masked CUDA device on physical GPU 2 and does not emulate
+CUDA on a non-GPU host. Resume binds NumPy, RDKit, PyG, cuDNN, driver, and the
+allowlisted environment manifest.
+
+Finally, freeze the private train/validation graph-cache manifest path/SHA and
+each cache path/SHA/inode. Hold descriptors across both cache loads, verify the
+manifest and both named inodes before and after deserialization, and carry the
+resulting cache contract into resume, output provenance, and controller
+terminal evidence. Calibration and test caches remain unopened.
+
+### Consequences
+
+- A published model bundle cannot bypass `exp_run` freshness or consume a
+  science retry merely because its completion write crashed.
+- Parent loss cannot create a second trainer while the registered child is
+  alive, including across controller restart.
+- Contract, cache, runtime, config, or deterministic-backend drift prevents
+  resume/PASS rather than being reduced to a warning.
+- No redistribution, held-out-test loading, HPC eligibility, or upstream
+  licence conclusion is introduced.
+
+### Status
+
+Local implementation plus real subprocess/crash and hostile negative tests
+only. No commit, push, SSH, deployment, AutoDL controller start, GPU
+allocation, TasteMolNet dataset read, or scientific experiment was performed.
+
+## [2026-08-26] Bind Taste cache deserialization and stale-child adoption to held authority
+
+### Decision
+
+Deserialize both Taste train and validation graph caches directly from
+duplicated binary streams backed by the already authenticated, held file
+descriptors. Path-based loading remains available to ordinary callers, but the
+full Taste route never reopens the cache pathname inside `torch.load`. Recheck
+the manifest and both held-file/named-file inode and content bindings around
+deserialization, so a graph-cache root swap either yields bytes from the held
+inode and then fails the named-path closure or fails closed without consuming
+replacement bytes.
+
+Split trainer-child discovery into generation-independent authority validation
+and current-worker binding. Before liveness classification, require the exact
+authority/process/barrier schemas, strict integer process identities, argv and
+command hashes, canonical run-state paths, owner-only authority file, physical
+executable identity shape, and parent/child/barrier structural relationships.
+Only an authority whose declared child PID/start pair is conclusively absent,
+reused, or zombie may be ignored as historical. An unreadable or malformed
+process observation, malformed authority, or still-live generation continues
+through the full current-parent/barrier/phase binding and therefore prevents a
+concurrent retry when mismatched. Reopen the same authority inode/hash after
+the liveness observation before either exclusion or adoption.
+
+### Consequences
+
+- Replacing the graph-cache directory cannot redirect train or validation
+  deserialization to a newly named inode.
+- A valid dead historical trainer authority no longer blocks adoption of the
+  one current live trainer merely because its parent belongs to an older
+  worker generation.
+- A live stale trainer, malformed stale record, unreadable `/proc` record, or
+  authority replacement remains a hard controller failure; no second science
+  worker is launched and no process is signalled.
+
+### Status
+
+Local implementation and focused root-swap/dead-stale/live-stale/malformed
+negative tests only. No commit, push, SSH, deployment, AutoDL controller start,
+GPU allocation, TasteMolNet dataset read, or scientific experiment was
+performed.

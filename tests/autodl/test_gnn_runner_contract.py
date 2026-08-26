@@ -11,27 +11,37 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AUTODL = PROJECT_ROOT / "scripts" / "autodl"
 
 
-def test_tastemolnet_full_script_has_two_independent_heavy_guards() -> None:
+def test_tastemolnet_full_script_has_scoped_compute_and_no_redistribution_guards() -> None:
     script = (AUTODL / "run_tastemolnet_gnn_full.sh").read_text(encoding="utf-8")
-    assert 'RUN_TASTEMOLNET" != "1"' in script
+    assert '[[ "$RUN_TASTEMOLNET" == "1" ]]' in script
+    assert '[[ "${TASTE_RESEARCH_COMPUTE_ALLOWED:-}" == "1" ]]' in script
+    assert '[[ "${TASTE_PAPER_RESULTS_ALLOWED:-}" == "1" ]]' in script
+    assert '[[ "${TASTE_DATA_REDISTRIBUTION_ALLOWED:-}" == "0" ]]' in script
+    assert "NOT_EXPLICITLY_STATED" in script
     assert "--heavy" in script
-    assert "[TASTEMOLNET_FOUNDATION_BLOCKED_LICENSE_REVIEW]" in script
-    assert "[TASTEMOLNET_FOUNDATION_READY_NOT_RUN]" not in script
+    assert "--training-state-dir" in script
+    assert "--resume-training" in script
+    assert "--max-gpus 4" in script
+    assert "--gpu-hard-limit 4" in script
+    assert "--foreground" in script
+    assert "paths_overlap" in script
+    assert "[TASTEMOLNET_FOUNDATION_BLOCKED_LICENSE_REVIEW]" not in script
+    inventory = (AUTODL / "gpu_inventory.py").read_text(encoding="utf-8")
+    assert '"--gpu-hard-limit"' in inventory
+    assert "validate_max_gpus(args.max_gpus, hard_limit=args.gpu_hard_limit)" in inventory
+    assert "hard_limit=args.gpu_hard_limit" in inventory
 
 
-def test_tastemolnet_full_license_marker_blocks_without_launch(
+def test_tastemolnet_full_requires_direct_scoped_compute_authority_without_launch(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
-    marker = tmp_path / "LICENSE_REVIEW_REQUIRED"
-    marker.write_text("review required\n", encoding="utf-8")
     environment = {
         **os.environ,
         "AUTODL_PYTHON": sys.executable,
         "AUTODL_DATA_ROOT": str(data_root),
         "AUTODL_RUNTIME_ROOT": str(data_root / "runtime"),
-        "TASTEMOLNET_LICENSE_MARKER": str(marker),
         "RUN_TASTEMOLNET": "0",
     }
     environment.pop("TASTEMOLNET_UPSTREAM_COMMIT", None)
@@ -43,11 +53,53 @@ def test_tastemolnet_full_license_marker_blocks_without_launch(
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 65
+    assert result.returncode == 64
     assert result.stdout == ""
-    assert result.stderr.strip() == (
-        "[TASTEMOLNET_FOUNDATION_BLOCKED_LICENSE_REVIEW]"
+    assert result.stderr.strip() == "RUN_TASTEMOLNET must be 1"
+
+
+def test_gpu_inventory_four_requires_explicit_hard_limit_real_cli(tmp_path: Path) -> None:
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(PROJECT_ROOT),
+        "AUTODL_DATA_ROOT": str(tmp_path / "data"),
+        "AUTODL_RUNTIME_ROOT": str(tmp_path / "runtime"),
+        "AUTODL_ARTIFACT_ROOT": str(tmp_path / "artifacts"),
+        "AUTODL_CONTROL_ROOT": str(tmp_path / "control"),
+    }
+    base = [
+        sys.executable,
+        str(AUTODL / "gpu_inventory.py"),
+        "--project-root",
+        str(PROJECT_ROOT),
+        "--data-root",
+        str(tmp_path / "data"),
+        "--max-gpus",
+        "4",
+        "--once",
+    ]
+    rejected = subprocess.run(
+        base,
+        cwd=PROJECT_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
     )
+    assert rejected.returncode == 2
+    assert "must be in [1, 2], got 4" in rejected.stderr
+
+    explicit = subprocess.run(
+        [*base, "--gpu-hard-limit", "4"],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    # This host may have no nvidia-smi, but the explicit four-GPU hard-limit
+    # gate must have been accepted before physical inventory is attempted.
+    assert "must be in [1, 2], got 4" not in explicit.stderr
 
 
 def test_bace_scripts_use_stage_order_and_task_specific_gnn() -> None:
@@ -108,6 +160,7 @@ def test_every_python_entrypoint_has_paired_slurm_status_wrapper() -> None:
         "bace_frozen_gnn_route",
         "run_four_gpu_recovery_controller",
         "status_four_gpu_recovery",
+        "run_tastemolnet_gine_controller",
     ):
         wrapper = PROJECT_ROOT / "scripts" / "slurm" / f"{name}.sh"
         assert wrapper.is_file(), name
@@ -162,3 +215,48 @@ def test_detached_worker_freezes_python_and_control_root_in_launch_spec() -> Non
     assert '"python_executable": str(Path(sys.executable).resolve(strict=True))' in text
     assert 'spec["control_root"]' in text
     assert '"control_root": str(layout.control_root)' in text
+
+
+def test_exp_run_rejects_preexisting_output_without_controller_receipt(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "ordinary-output"
+    output.mkdir()
+    (output / "existing.txt").write_text("published\n", encoding="utf-8")
+    data_root = tmp_path / "runtime-data"
+    data_root.mkdir()
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(PROJECT_ROOT),
+        "AUTODL_CONTROL_ROOT": str(data_root / "control"),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(AUTODL / "exp_run.py"),
+            "--project-root",
+            str(PROJECT_ROOT),
+            "--data-root",
+            str(data_root),
+            "launch",
+            "--dataset",
+            "ordinary-fixture",
+            "--stage",
+            "fresh-gate",
+            "--expected-output",
+            str(output),
+            "--foreground",
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(0)",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 2
+    assert "Expected output must be fresh/absent" in result.stderr

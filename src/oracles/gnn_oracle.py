@@ -39,6 +39,11 @@ REQUIRED_CHECKPOINT_FILES = (
     "git_state.json",
     "sha256sums.txt",
 )
+TASTE_REQUIRED_CHECKPOINT_FILES = (
+    "data_use_policy_binding.json",
+    "graph_cache_usage.json",
+    "oracle_manifest.json",
+)
 
 
 def _require_torch() -> Any:
@@ -133,6 +138,7 @@ def verify_checkpoint_bundle(
     checkpoint_dir: str | Path,
     *,
     verify_hashes: bool = True,
+    require_taste_closure: bool = True,
 ) -> dict[str, Any]:
     root = Path(checkpoint_dir).expanduser().resolve()
     if not root.is_dir():
@@ -164,6 +170,102 @@ def verify_checkpoint_bundle(
         raise ValueError("Frozen molecular classifier must declare oracle_backend=gnn.")
     if model_card.get("rf_oracle_used") is not False:
         raise ValueError("Frozen molecular classifier must declare rf_oracle_used=false.")
+    if (
+        require_taste_closure
+        and str(model_card.get("dataset", "")).strip().lower() == "tastemolnet"
+        and str(model_card.get("profile", "")).strip().lower() == "full"
+    ):
+        missing_taste = [
+            name for name in TASTE_REQUIRED_CHECKPOINT_FILES if not (root / name).is_file()
+        ]
+        if missing_taste:
+            raise ValueError(
+                "TasteMolNet GINE bundle is missing scoped policy/cache closure: "
+                f"{missing_taste}"
+            )
+        if verify_hashes:
+            unhashed_taste = sorted(set(TASTE_REQUIRED_CHECKPOINT_FILES) - set(expected))
+            if unhashed_taste:
+                raise ValueError(
+                    "TasteMolNet GINE SHA inventory omits scoped closure: "
+                    f"{unhashed_taste}"
+                )
+        binding = json.loads(
+            (root / "data_use_policy_binding.json").read_text(encoding="utf-8")
+        )
+        cache_usage = json.loads(
+            (root / "graph_cache_usage.json").read_text(encoding="utf-8")
+        )
+        oracle_manifest = json.loads(
+            (root / "oracle_manifest.json").read_text(encoding="utf-8")
+        )
+        if (
+            binding.get("schema_version") != "tastemolnet_training_policy_binding_v1"
+            or binding.get("dataset") != "tastemolnet"
+            or binding.get("status") != "NOT_EXPLICITLY_STATED"
+            or binding.get("authorization_status")
+            != "RESEARCH_REPORTING_ALLOWED_NO_REDISTRIBUTION"
+            or binding.get("paper_result_reporting_allowed") is not True
+            or binding.get("dataset_redistributed") is not False
+            or binding.get("data_redistribution_allowed") is not False
+            or binding.get("upstream_license_not_explicit") is not True
+            or binding.get("upstream_license_status") != "NOT_EXPLICITLY_STATED"
+            or binding.get("upstream_license_claimed_resolved") is not False
+            or binding.get("license_pass_claimed") is not False
+            or binding.get("hpc_execution_authorized") is not False
+        ):
+            raise ValueError("TasteMolNet scoped policy binding changed.")
+        binding_policy = binding.get("policy", {})
+        binding_receipt = binding.get("policy_receipt", {})
+        if (
+            not isinstance(binding_policy, Mapping)
+            or not isinstance(binding_receipt, Mapping)
+            or binding_policy.get("policy_file_sha256")
+            != model_card.get("data_use_policy_file_sha256")
+            or binding_policy.get("policy_canonical_sha256")
+            != model_card.get("data_use_policy_canonical_sha256")
+            or binding_receipt.get("sha256")
+            != model_card.get("data_use_policy_receipt_sha256")
+        ):
+            raise ValueError("TasteMolNet policy hashes conflict with model_card.json.")
+        if (
+            cache_usage.get("schema_version") != "tastemolnet_graph_cache_usage_v1"
+            or cache_usage.get("dataset") != "tastemolnet"
+            or cache_usage.get("mode") != "read_only_existing_cache"
+            or cache_usage.get("graph_cache_used") is not True
+            or cache_usage.get("loaded_splits") != ["train", "validation"]
+            or cache_usage.get("calibration_loaded") is not False
+            or cache_usage.get("test_loaded") is not False
+            or cache_usage.get("graph_cache_rebuilt") is not False
+            or cache_usage.get("data_reprepared") is not False
+            or cache_usage.get("graph_cache_manifest_sha256")
+            != model_card.get("graph_cache_manifest_sha256")
+        ):
+            raise ValueError("TasteMolNet read-only graph-cache closure changed.")
+        if (
+            oracle_manifest.get("schema_version")
+            != "tastemolnet_three_class_gine_oracle_manifest_v1"
+            or oracle_manifest.get("dataset") != "tastemolnet"
+            or oracle_manifest.get("status") != "PASS"
+            or oracle_manifest.get("checkpoint_id") != model_card.get("checkpoint_id")
+            or oracle_manifest.get("oracle_backend") != "gnn"
+            or oracle_manifest.get("classifier_family") != "gine"
+            or oracle_manifest.get("rf_oracle_used") is not False
+            or oracle_manifest.get("num_classes") != 3
+            or oracle_manifest.get("source_label") != 1
+            or oracle_manifest.get("test_loaded") is not False
+            or oracle_manifest.get("test_evaluated") is not False
+            or oracle_manifest.get("paper_result_reporting_allowed") is not True
+            or oracle_manifest.get("dataset_redistributed") is not False
+            or oracle_manifest.get("upstream_license_not_explicit") is not True
+            or oracle_manifest.get("health_gate", {}).get("status") != "PASS"
+        ):
+            raise ValueError("TasteMolNet three-class GINE oracle manifest changed.")
+        serialized_taste = json.dumps(
+            [binding, cache_usage, oracle_manifest, model_card], sort_keys=True
+        )
+        if "TASTE_LICENSE_PASS" in serialized_taste or "LICENSE_PASS" in serialized_taste:
+            raise ValueError("TasteMolNet bundle may not claim an upstream license PASS.")
     test_status = json.loads(
         (root / "test_evaluation_status.json").read_text(encoding="utf-8")
     )
@@ -217,6 +319,7 @@ def save_gnn_checkpoint_bundle(
     temperature_scaling: Mapping[str, Any] | None = None,
     environment: Mapping[str, Any] | None = None,
     git_state: Mapping[str, Any] | None = None,
+    defer_tastemolnet_closure: bool = False,
 ) -> dict[str, Any]:
     """Write the complete immutable classifier bundle expected by downstream jobs."""
 
@@ -293,7 +396,9 @@ def save_gnn_checkpoint_bundle(
     _atomic_json(root / "environment.json", dict(environment or {}))
     _atomic_json(root / "git_state.json", dict(git_state or {}))
     update_checkpoint_sha256sums(root)
-    audit = verify_checkpoint_bundle(root)
+    audit = verify_checkpoint_bundle(
+        root, require_taste_closure=not defer_tastemolnet_closure
+    )
     return {
         "checkpoint_dir": str(root),
         "checkpoint_id": checkpoint_id,
@@ -751,6 +856,7 @@ __all__ = [
     "CHECKPOINT_BUNDLE_VERSION",
     "GNNOracle",
     "REQUIRED_CHECKPOINT_FILES",
+    "TASTE_REQUIRED_CHECKPOINT_FILES",
     "classification_metrics",
     "expected_calibration_error",
     "fit_temperature_scaling",

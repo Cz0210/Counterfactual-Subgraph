@@ -12,4 +12,9 @@ export PYTHONPATH=$PWD
 echo "python=$(which python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-python scripts/autodl/gpu_inventory.py --config configs/hpc.yaml --once --format json
+python scripts/autodl/gpu_inventory.py \
+  --config configs/hpc.yaml \
+  --max-gpus "${AUTODL_MAX_GPUS:-2}" \
+  --gpu-hard-limit "${AUTODL_GPU_HARD_LIMIT:-2}" \
+  --once \
+  --format json

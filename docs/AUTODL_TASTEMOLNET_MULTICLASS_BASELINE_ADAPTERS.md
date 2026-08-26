@@ -97,12 +97,16 @@ src/baselines/tastemolnet_gine_research_tasks.py
 scripts/autodl/build_tastemolnet_gine_research_tasks.py
 ```
 
-The checked-in policy is inactive, so its generated task is
-`enabled=false`, `command=null`, and `run_tastemolnet=0`. It cannot consume
-prepared/cache paths or a policy receipt. This records the future GPU-2
-exclusive, fresh-root, three-class GINE contract without activating it.
+The checked-in scoped policy is active for private computation and aggregate
+reporting, so its GINE task is runnable only when it consumes the typed policy
+receipt and checksum-closed existing prepared/cache roots. It is GPU-2
+exclusive, fresh-root only, three-class, and still forbids data redistribution
+and every upstream licence-PASS claim.  Its long-running trainer uses a
+separate inode-bound epoch-checkpoint root and exact same-contract resume; the
+final oracle directory remains absent until a staged bundle has passed the
+full frozen-oracle audit.
 
-A later runnable fragment must be created at a fresh path and satisfy all of:
+A runnable fragment must be created at a fresh path and satisfy all of:
 
 1. an independently reviewed active scoped policy and typed read-only
    exact-data receipt, while upstream terms remain `NOT_EXPLICITLY_STATED` and
@@ -122,5 +126,15 @@ A later runnable fragment must be created at a fresh path and satisfy all of:
 `src/baselines/tastemolnet_multiclass_tasks.py` continues to serialize the
 historical blocked contract. The new typed GINE fragment is intentionally
 separate and requires a dedicated controller; it is ineligible for the generic
-four-GPU controller. See `docs/TASTEMOLNET_DATA_USAGE_POLICY.md` for the full
+four-GPU controller. Its command is
+`scripts/autodl/run_tastemolnet_gine_controller.sh`, which owns a fresh
+CID/controller root and runs the reviewed GINE worker only through a durable
+exec-startup barrier. Controller loss adopts the exact live PID generation;
+scientific process loss gets one same-state-root retry; transient GPU-2 waiting
+does not consume that retry. A controller `PASS` is valid only after typed
+reopen of the full oracle bundle, policy receipt, deterministic finalization
+claim/inventory, output-parent authority, training-state root/sentinel/lock,
+and file SHA/stat inventories. The status CLI performs that same typed reopen
+for terminal roots. The paired Slurm wrapper is a static AutoDL-only refusal.
+See `docs/TASTEMOLNET_DATA_USAGE_POLICY.md` for the full
 private-use/publication boundary.

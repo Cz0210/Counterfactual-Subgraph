@@ -1,14 +1,14 @@
 schema_version: tastemolnet_research_reporting_policy_v1
 policy_id: tastemolnet-research-reporting-no-redistribution-20260825
 effective_date: "2026-08-25"
-authorization_basis: forwarded_user_instruction_pending_root_activation
-authorization_state: PENDING_ROOT_ACTIVATION
+authorization_basis: explicit_user_instruction
+authorization_state: ACTIVE_SCOPED_AUTHORIZATION
 dataset: tastemolnet
 policy_version: 1
-authorization_source: PENDING_ROOT_ACTIVATION
+authorization_source: user_project_owner_instruction
 authorization_date: "2026-08-25"
-research_compute_allowed: false
-paper_result_reporting_allowed: false
+research_compute_allowed: true
+paper_result_reporting_allowed: true
 upstream_license_status: NOT_EXPLICITLY_STATED
 upstream_license_claimed_resolved: false
 raw_data_redistribution_allowed: false
@@ -17,10 +17,11 @@ full_smiles_label_table_release_allowed: false
 reconstructable_dataset_artifact_allowed: false
 preprocessing_code_release_allowed: true
 configuration_release_allowed: true
-aggregated_metrics_release_allowed: false
-figure_release_allowed: false
-trained_model_release_allowed: false
+aggregated_metrics_release_allowed: true
+figure_release_allowed: true
+trained_model_release_allowed: review_required
 required_citations:
+  - TasteMolNet paper
   - https://github.com/MujeebOnawole/Taste_Prediction_RGCN/tree/16af8ead8a17b6bd3941d9eb5879c5be75c14114
 fixed_upstream_commit: 16af8ead8a17b6bd3941d9eb5879c5be75c14114
 fixed_csv_sha256: b7308b3277fd07ed6af4b861c0d2ce2d843f92cc81a9e5e4efd65cf4040a291b
@@ -42,13 +43,13 @@ dataset_identity:
     test: 1328
 
 permissions:
-  research_execution: PENDING_ROOT_ACTIVATION
-  paper_reporting: PENDING_ROOT_ACTIVATION
+  research_execution: ALLOWED
+  paper_reporting: ALLOWED
   dataset_redistribution: FORBIDDEN
   raw_dataset_publication: FORBIDDEN
   processed_dataset_publication: FORBIDDEN
   molecule_level_publication: FORBIDDEN
-  aggregate_publication: ALLOWED_ONLY_AFTER_ACTIVATION_AND_PUBLIC_ARTIFACT_AUDIT
+  aggregate_publication: ALLOWED_AFTER_PUBLIC_ARTIFACT_AUDIT
   model_artifact_publication: INTERNAL_ONLY
 
 data_handling:
@@ -63,7 +64,7 @@ execution:
   phase: TASTEMOLNET_GINE_FULL_RESEARCH_V1
   platform: autodl
   hpc_execution_allowed: false
-  run_tastemolnet: 0
+  run_tastemolnet: 1
   gpu_index: 2
   gpu_lock_mode: exclusive
   fresh_output_required: true

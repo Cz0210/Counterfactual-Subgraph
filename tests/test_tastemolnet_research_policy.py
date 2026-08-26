@@ -23,7 +23,7 @@ def _active_policy(tmp_path: Path) -> Path:
     payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
     payload["authorization_basis"] = "explicit_user_instruction"
     payload["authorization_state"] = ACTIVE_STATE
-    payload["authorization_source"] = "EXPLICIT_USER_DIRECTION"
+    payload["authorization_source"] = "user_project_owner_instruction"
     payload["research_compute_allowed"] = True
     payload["paper_result_reporting_allowed"] = True
     payload["aggregated_metrics_release_allowed"] = True
@@ -39,11 +39,32 @@ def _active_policy(tmp_path: Path) -> Path:
     return path
 
 
-def test_checked_policy_is_precisely_disabled_pending_root_activation() -> None:
+def _pending_policy(tmp_path: Path) -> Path:
+    payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+    payload["authorization_basis"] = "forwarded_user_instruction_pending_root_activation"
+    payload["authorization_state"] = PENDING_STATE
+    payload["authorization_source"] = "PENDING_ROOT_ACTIVATION"
+    payload["research_compute_allowed"] = False
+    payload["paper_result_reporting_allowed"] = False
+    payload["aggregated_metrics_release_allowed"] = False
+    payload["figure_release_allowed"] = False
+    payload["trained_model_release_allowed"] = False
+    payload["permissions"]["research_execution"] = "PENDING_ROOT_ACTIVATION"
+    payload["permissions"]["paper_reporting"] = "PENDING_ROOT_ACTIVATION"
+    payload["permissions"]["aggregate_publication"] = (
+        "ALLOWED_ONLY_AFTER_ACTIVATION_AND_PUBLIC_ARTIFACT_AUDIT"
+    )
+    payload["execution"]["run_tastemolnet"] = 0
+    path = tmp_path / "pending-policy.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_checked_policy_is_active_scoped_without_license_conclusion() -> None:
     policy = load_tastemolnet_research_policy(POLICY)
-    assert policy.authorization_state == PENDING_STATE
-    assert policy.active is False
-    assert policy.payload["execution"]["run_tastemolnet"] == 0
+    assert policy.authorization_state == ACTIVE_STATE
+    assert policy.active is True
+    assert policy.payload["execution"]["run_tastemolnet"] == 1
     assert policy.payload["execution"]["gpu_index"] == 2
     assert policy.payload["execution"]["gpu_lock_mode"] == "exclusive"
     assert policy.payload["execution"]["hpc_execution_allowed"] is False
@@ -64,8 +85,8 @@ def test_checked_policy_is_precisely_disabled_pending_root_activation() -> None:
     )
     assert policy.payload["dataset_identity"]["upstream_terms_status"] == UPSTREAM_TERMS_STATUS
     assert policy.payload["permissions"]["dataset_redistribution"] == "FORBIDDEN"
-    assert policy.payload["research_compute_allowed"] is False
-    assert policy.payload["paper_result_reporting_allowed"] is False
+    assert policy.payload["research_compute_allowed"] is True
+    assert policy.payload["paper_result_reporting_allowed"] is True
     assert policy.payload["upstream_license_claimed_resolved"] is False
     assert policy.payload["raw_data_redistribution_allowed"] is False
     assert policy.payload["cleaned_dataset_redistribution_allowed"] is False
@@ -73,7 +94,15 @@ def test_checked_policy_is_precisely_disabled_pending_root_activation() -> None:
     assert policy.payload["reconstructable_dataset_artifact_allowed"] is False
     assert policy.payload["preprocessing_code_release_allowed"] is True
     assert policy.payload["configuration_release_allowed"] is True
-    assert policy.payload["trained_model_release_allowed"] is False
+    assert policy.payload["trained_model_release_allowed"] == "review_required"
+    policy.require_active()
+
+
+def test_synthetic_pending_policy_remains_non_runnable(tmp_path: Path) -> None:
+    policy = load_tastemolnet_research_policy(_pending_policy(tmp_path))
+    assert policy.authorization_state == PENDING_STATE
+    assert policy.active is False
+    assert policy.payload["execution"]["run_tastemolnet"] == 0
     with pytest.raises(TasteResearchPolicyError, match="NOT_ACTIVATED"):
         policy.require_active()
 

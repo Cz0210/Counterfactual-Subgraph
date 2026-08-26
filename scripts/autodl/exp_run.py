@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,10 +54,13 @@ from src.utils.autodl_gpu_colocation_gate import (
     GPUColocationGateError,
     validate_gpu_colocation_gate,
 )
+from src.utils.autodl_exec_startup_barrier import arm_exec_startup_barrier
 
 
 SCHEMA_VERSION = 1
 SCIENTIFIC_BLOCKED_EXIT_CODE = 78
+TRAINER_CHILD_AUTHORITY_SCHEMA = "autodl_exp_run_trainer_child_authority_v1"
+TRAINER_CHILD_AUTHORITY_NAME = "trainer_child_authority.json"
 _SAFE_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
 _SECRET = re.compile(
     r"(?i)(password|passwd|secret|token|authorization|api[_-]?key|"
@@ -116,6 +120,54 @@ def _assert_command_safe(command: Sequence[str]) -> None:
                 "Scientific command contains a credential-like option; use a "
                 "credential provider outside experiment manifests"
             )
+
+
+def _command_flag_value(command: Sequence[str], flag: str) -> str | None:
+    values = list(command)
+    matches = [index for index, value in enumerate(values) if value == flag]
+    if not matches:
+        return None
+    if len(matches) != 1 or matches[0] + 1 >= len(values):
+        raise AutoDLRuntimeError(f"Scientific command has malformed {flag}")
+    return values[matches[0] + 1]
+
+
+def _stable_argv_sha256(command: Sequence[str]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            list(command), sort_keys=False, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_published_output_adoption(
+    receipt_path: str | Path,
+    *,
+    expected_output: str | Path,
+    command: Sequence[str],
+) -> dict[str, Any]:
+    from src.utils.autodl_tastemolnet_gine_controller_v1 import (
+        TasteGINEControllerError,
+        validate_tastemolnet_published_output_adoption_readonly,
+    )
+
+    receipt = Path(receipt_path).expanduser().resolve(strict=True)
+    state_value = _command_flag_value(command, "--training-state-dir")
+    command_receipt = _command_flag_value(
+        command, "--resume-published-output-receipt"
+    )
+    if state_value is None or command_receipt != str(receipt):
+        raise AutoDLRuntimeError(
+            "Published-output adoption must bind the trainer state and exact receipt"
+        )
+    try:
+        return validate_tastemolnet_published_output_adoption_readonly(
+            receipt,
+            expected_output_dir=expected_output,
+            expected_training_state_root=state_value,
+        )
+    except TasteGINEControllerError as exc:
+        raise AutoDLRuntimeError(str(exc)) from exc
 
 
 def _registry_event(spec: Mapping[str, Any], *, state: str, exit_code: int | None, pid: int | None) -> dict[str, Any]:
@@ -421,6 +473,19 @@ def run_worker(spec_path: Path) -> int:
         f":{environment['PYTHONPATH']}" if environment.get("PYTHONPATH") else ""
     )
     environment["AUTODL_MPS_ENABLED"] = "0"
+    adoption_receipt = spec.get("resume_published_output_receipt")
+    if adoption_receipt is not None:
+        if sha256_file(Path(str(adoption_receipt))) != spec.get(
+            "resume_published_output_receipt_sha256"
+        ):
+            raise AutoDLRuntimeError(
+                "Published-output adoption receipt changed after launch registration"
+            )
+        _validate_published_output_adoption(
+            str(adoption_receipt),
+            expected_output=str(spec["expected_output"]),
+            command=[str(value) for value in spec["command"]],
+        )
     lock_context: Any = nullcontext()
     slot_context: Any = nullcontext()
     colocation_evidence: dict[str, Any] | None = None
@@ -533,20 +598,83 @@ def run_worker(spec_path: Path) -> int:
                     )
                     + "\n"
                 )
-                child = subprocess.Popen(
-                    list(spec["command"]),
-                    cwd=project_root,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
+                run_root = spec_path.parent.resolve(strict=True)
+                trainer_authority_path = run_root / TRAINER_CHILD_AUTHORITY_NAME
+                barrier = arm_exec_startup_barrier(
+                    lock_path=run_root / "trainer-startup.lock",
+                    record_path=run_root / "trainer-startup.json",
+                    target_argv=[str(value) for value in spec["command"]],
+                    python_executable=sys.executable,
                 )
-                child_pid = child.pid
-                if isinstance(lock_context, GPUSharedSlotLock):
-                    lock_context.update_child_pid(child_pid)
-                _write_stage_state(layout, spec, "RUNNING", run_id=spec["run_id"], pid=os.getpid(), child_pid=child_pid)
-                _write_run_state(layout, spec, "RUNNING", pid=os.getpid(), child_pid=child_pid)
+                released = False
+                try:
+                    child = barrier.launch(
+                        cwd=project_root,
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                    child_pid = child.pid
+                    from src.utils.autodl_tastemolnet_gine_controller_v1 import (
+                        _process_snapshot,
+                    )
+
+                    parent_snapshot = _process_snapshot(os.getpid())
+                    child_snapshot = _process_snapshot(child_pid)
+                    if (
+                        sys.platform.startswith("linux")
+                        and child_snapshot.get("ppid") != os.getpid()
+                    ):
+                        raise AutoDLRuntimeError(
+                            "Trainer startup ancestry changed before durable registration"
+                        )
+                    trainer_authority = {
+                        "schema_version": TRAINER_CHILD_AUTHORITY_SCHEMA,
+                        "status": "RELEASE_AUTHORIZED",
+                        "run_id": spec["run_id"],
+                        "dataset": spec["dataset"],
+                        "stage": spec["stage"],
+                        "controller_cid": environment.get(
+                            "TASTEMOLNET_GINE_CONTROLLER_CID"
+                        ),
+                        "controller_root": environment.get(
+                            "TASTEMOLNET_GINE_CONTROLLER_ROOT"
+                        ),
+                        "project_root": str(project_root),
+                        "authority_path": str(trainer_authority_path),
+                        "parent_exp_run": parent_snapshot,
+                        "child_registered": child_snapshot,
+                        "trainer_command": [str(value) for value in spec["command"]],
+                        "trainer_command_sha256": _stable_argv_sha256(
+                            [str(value) for value in spec["command"]]
+                        ),
+                        "barrier_record": barrier.record.to_dict(),
+                    }
+                    atomic_write_json(trainer_authority_path, trainer_authority)
+                    trainer_authority_sha256 = sha256_file(trainer_authority_path)
+                    common_child_state = {
+                        "run_id": spec["run_id"],
+                        "pid": os.getpid(),
+                        "child_pid": child_pid,
+                        "trainer_child_authority": str(trainer_authority_path),
+                        "trainer_child_authority_sha256": trainer_authority_sha256,
+                    }
+                    _write_stage_state(
+                        layout, spec, "RUNNING", **common_child_state
+                    )
+                    _write_run_state(
+                        layout, spec, "RUNNING", **common_child_state
+                    )
+                    if isinstance(lock_context, GPUSharedSlotLock):
+                        lock_context.update_child_pid(child_pid)
+                    barrier.release()
+                    released = True
+                except BaseException:
+                    if not released:
+                        barrier.abort()
+                    raise
                 exit_code = int(child.wait())
                 log.write(f"[AUTODL_RUN_EXIT] exit_code={exit_code} timestamp={utc_now()}\n")
                 log.flush()
@@ -687,8 +815,34 @@ def launch(args: argparse.Namespace) -> int:
             config_paths.append(gate_path)
     input_manifest = args.input_manifest.expanduser().resolve(strict=True) if args.input_manifest else None
     expected_output = args.expected_output.expanduser().resolve(strict=False) if args.expected_output else None
-    if expected_output is not None and expected_output.exists() and any(expected_output.iterdir() if expected_output.is_dir() else [expected_output]):
-        raise AutoDLRuntimeError(f"Expected output must be fresh/absent: {expected_output}")
+    adoption_receipt = (
+        None
+        if args.resume_published_output_receipt is None
+        else args.resume_published_output_receipt.expanduser().resolve(strict=True)
+    )
+    output_has_content = bool(
+        expected_output is not None
+        and expected_output.exists()
+        and any(
+            expected_output.iterdir()
+            if expected_output.is_dir()
+            else [expected_output]
+        )
+    )
+    if output_has_content:
+        if adoption_receipt is None:
+            raise AutoDLRuntimeError(
+                f"Expected output must be fresh/absent: {expected_output}"
+            )
+        _validate_published_output_adoption(
+            adoption_receipt,
+            expected_output=expected_output,
+            command=command,
+        )
+    elif adoption_receipt is not None:
+        raise AutoDLRuntimeError(
+            "Published-output adoption receipt is forbidden for a fresh output"
+        )
     required_output_any = [
         [part for part in value.split("|") if part]
         for value in args.required_output_any
@@ -761,6 +915,12 @@ def launch(args: argparse.Namespace) -> int:
         "input_manifest": str(input_manifest) if input_manifest else None,
         "input_hash": sha256_file(input_manifest) if input_manifest else None,
         "expected_output": str(expected_output) if expected_output else None,
+        "resume_published_output_receipt": (
+            None if adoption_receipt is None else str(adoption_receipt)
+        ),
+        "resume_published_output_receipt_sha256": (
+            None if adoption_receipt is None else sha256_file(adoption_receipt)
+        ),
         "required_output_files": list(args.required_output_file),
         "required_output_any": required_output_any,
         "required_absolute_output_files": [
@@ -886,6 +1046,11 @@ def parse_args() -> argparse.Namespace:
     launch_parser.add_argument("--config-file", type=Path, action="append", default=[])
     launch_parser.add_argument("--input-manifest", type=Path)
     launch_parser.add_argument("--expected-output", type=Path)
+    launch_parser.add_argument(
+        "--resume-published-output-receipt",
+        type=Path,
+        help="Controller-issued completion-only recovery for an already-published output",
+    )
     launch_parser.add_argument("--required-output-file", action="append", default=[])
     launch_parser.add_argument(
         "--required-output-any",

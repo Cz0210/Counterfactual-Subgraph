@@ -12,6 +12,9 @@ import tempfile
 from typing import Any, Sequence
 
 from src.utils.tastemolnet_research_policy import (
+    ACTIVE_AUDIT_MARKER,
+    NO_REDISTRIBUTION_MARKER,
+    PENDING_AUDIT_MARKER,
     PENDING_STATUS,
     TasteResearchPolicyError,
     load_tastemolnet_research_policy,
@@ -20,8 +23,8 @@ from src.utils.tastemolnet_research_policy import (
 
 
 RECEIPT_SCHEMA = "tastemolnet_research_reporting_policy_receipt_v1"
-ACTIVE_MARKER = "TASTEMOLNET_SCOPED_RESEARCH_AUTHORIZED"
-PENDING_MARKER = "TASTEMOLNET_POLICY_READY_EXECUTION_DISABLED"
+ACTIVE_MARKER = ACTIVE_AUDIT_MARKER
+PENDING_MARKER = PENDING_AUDIT_MARKER
 
 
 def _absolute(value: str) -> Path:
@@ -92,6 +95,7 @@ def audit_research_policy(
         "dataset": "tastemolnet",
         "status": policy.status,
         "authorization_state": policy.authorization_state,
+        "authorization_status": policy.authorization_status,
         "policy": policy.evidence(),
         "private_data_authority": authority.evidence(),
         "run_tastemolnet": 1 if policy.active else 0,
@@ -104,6 +108,9 @@ def audit_research_policy(
         "data_reprepared": False,
         "graph_cache_rebuilt": False,
         "terminal_marker": marker,
+        "no_redistribution_marker": (
+            NO_REDISTRIBUTION_MARKER if policy.active else None
+        ),
     }
     markdown = "\n".join(
         [
@@ -127,6 +134,11 @@ def audit_research_policy(
     )
     _write_new(output / "tastemolnet_policy_audit.md", markdown.encode("utf-8"))
     _write_new(output / marker, (marker + "\n").encode("utf-8"))
+    if policy.active:
+        _write_new(
+            output / NO_REDISTRIBUTION_MARKER,
+            (NO_REDISTRIBUTION_MARKER + "\n").encode("utf-8"),
+        )
     return receipt
 
 
@@ -162,7 +174,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 65
     print(json.dumps(receipt, sort_keys=True), flush=True)
     print(f"[{receipt['terminal_marker']}]", flush=True)
-    if receipt["status"] == PENDING_STATUS:
+    if receipt["no_redistribution_marker"]:
+        print(f"[{receipt['no_redistribution_marker']}]", flush=True)
+    if receipt["authorization_status"] == PENDING_STATUS:
         print("[TASTEMOLNET_EXECUTION_REMAINS_DISABLED]", flush=True)
     return 0
 

@@ -24,7 +24,7 @@ from src.oracles.gnn_oracle import (
     verify_checkpoint_bundle,
 )
 from src.oracles.oracle_factory import build_oracle
-from scripts.train_molecular_gnn import _classifier_health_gate
+from scripts.train_molecular_gnn import _classifier_health_gate, _selection_improves
 
 
 def _graph(name: str, label: int, *, atom_offset: int = 0) -> MolecularGraphData:
@@ -115,6 +115,66 @@ def test_full_classifier_health_gate_fails_single_class_predictions() -> None:
     assert gate["status"] == "FAIL"
     assert "validation_predictions_are_single_class" in gate["failures"]
     assert "source_class_recall_is_not_positive" in gate["failures"]
+
+
+def test_three_class_health_gate_requires_every_class_recall() -> None:
+    gate = _classifier_health_gate(
+        metrics={
+            "macro_ovr_roc_auc": 0.72,
+            "per_class": {
+                "0": {"recall": 0.5},
+                "1": {"recall": 0.25},
+                "2": {"recall": 0.0},
+            },
+        },
+        probabilities=np.asarray(
+            [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.2, 0.3, 0.5]],
+            dtype=np.float64,
+        ),
+        source_label=1,
+        profile="full",
+        training_config={
+            "health_gate": {
+                "enabled": True,
+                "apply_profile": "full",
+                "primary_metric": "macro_ovr_roc_auc",
+                "minimum_primary_metric": 0.0,
+                "require_multiple_predicted_classes": True,
+                "require_source_class_recall": True,
+                "require_all_class_recall": True,
+                "require_finite": True,
+            }
+        },
+    )
+    assert gate["status"] == "FAIL"
+    assert gate["failures"] == ["class_2_recall_is_not_positive"]
+
+
+def test_validation_selection_uses_macro_f1_only_for_primary_ties() -> None:
+    assert _selection_improves(
+        primary=0.8,
+        tiebreak=0.4,
+        best_primary=0.7,
+        best_tiebreak=0.9,
+    )
+    assert _selection_improves(
+        primary=0.8,
+        tiebreak=0.6,
+        best_primary=0.8,
+        best_tiebreak=0.5,
+    )
+    assert not _selection_improves(
+        primary=0.8,
+        tiebreak=0.4,
+        best_primary=0.8,
+        best_tiebreak=0.5,
+    )
+    assert not _selection_improves(
+        primary=0.79,
+        tiebreak=1.0,
+        best_primary=0.8,
+        best_tiebreak=0.5,
+    )
 
 
 @pytest.mark.parametrize("backbone", ["gine", "gin", "gcn", "gatv2"])
@@ -255,3 +315,33 @@ def test_checkpoint_model_card_contains_formal_gnn_provenance(tmp_path: Path) ->
     assert card["oracle_backend"] == "gnn"
     assert card["classifier_type"] == "gnn"
     assert card["rf_oracle_used"] is False
+
+
+def test_tastemolnet_full_bundle_requires_scoped_policy_and_cache_closure(
+    tmp_path: Path,
+) -> None:
+    model, schema = _model()
+    with pytest.raises(ValueError, match="missing scoped policy/cache closure"):
+        save_gnn_checkpoint_bundle(
+            model=model,
+            checkpoint_dir=tmp_path / "taste-full",
+            feature_schema=schema,
+            config={"gnn": model.config.to_dict()},
+            model_card={
+                "dataset": "tastemolnet",
+                "source_label": 1,
+                "profile": "full",
+            },
+            label_map={0: "Bitter", 1: "Sweet"},
+            split_manifest={
+                "files": {"test": {"path": "/frozen/test.csv", "sha256": "a" * 64}}
+            },
+            training_metrics={},
+            test_evaluation_status={
+                "status": "NOT_EVALUATED",
+                "test_loaded": False,
+                "reason": "held_out_until_frozen_final_evaluation",
+                "path": "/frozen/test.csv",
+                "sha256": "a" * 64,
+            },
+        )

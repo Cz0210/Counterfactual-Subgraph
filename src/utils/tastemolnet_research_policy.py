@@ -1,10 +1,10 @@
 """Typed TasteMolNet research/reporting and no-redistribution policy.
 
 The upstream repository has no explicit data-licence statement.  This module
-keeps that observation separate from a scoped user authorization.  The checked
-in policy is deliberately inactive; an independently reviewed activation must
-change both its authorization state and execution bit before any heavy worker
-can consume it.
+keeps that observation separate from the project owner's scoped authorization
+for private research computation and aggregate paper reporting.  It never
+converts that authorization into an upstream licence conclusion or a dataset
+redistribution permission.
 """
 
 from __future__ import annotations
@@ -28,6 +28,9 @@ UPSTREAM_REPOSITORY = "https://github.com/MujeebOnawole/Taste_Prediction_RGCN"
 UPSTREAM_COMMIT = "16af8ead8a17b6bd3941d9eb5879c5be75c14114"
 UPSTREAM_DATA_FILE = "processed_data/taste_scaffold_split.csv"
 SOURCE_CSV_SHA256 = "b7308b3277fd07ed6af4b861c0d2ce2d843f92cc81a9e5e4efd65cf4040a291b"
+ACTIVE_AUDIT_MARKER = "TASTE_RESEARCH_AND_PAPER_REPORTING_AUTHORIZED"
+NO_REDISTRIBUTION_MARKER = "TASTE_NO_DATA_REDISTRIBUTION_GUARD_PASS"
+PENDING_AUDIT_MARKER = "TASTEMOLNET_POLICY_READY_EXECUTION_DISABLED"
 
 _HEX_64 = frozenset("0123456789abcdef")
 
@@ -163,7 +166,9 @@ def _validate(payload: Mapping[str, Any]) -> None:
         "dataset": "tastemolnet",
         "policy_version": 1,
         "authorization_source": (
-            "EXPLICIT_USER_DIRECTION" if active else "PENDING_ROOT_ACTIVATION"
+            "user_project_owner_instruction"
+            if active
+            else "PENDING_ROOT_ACTIVATION"
         ),
         "authorization_date": "2026-08-25",
         "research_compute_allowed": active,
@@ -178,8 +183,9 @@ def _validate(payload: Mapping[str, Any]) -> None:
         "configuration_release_allowed": True,
         "aggregated_metrics_release_allowed": active,
         "figure_release_allowed": active,
-        "trained_model_release_allowed": False,
+        "trained_model_release_allowed": "review_required" if active else False,
         "required_citations": [
+            "TasteMolNet paper",
             "https://github.com/MujeebOnawole/Taste_Prediction_RGCN/tree/"
             + UPSTREAM_COMMIT
         ],
@@ -355,6 +361,12 @@ class TasteResearchPolicy:
 
     @property
     def status(self) -> str:
+        """The unresolved upstream-terms status; never an authorization claim."""
+
+        return UPSTREAM_TERMS_STATUS
+
+    @property
+    def authorization_status(self) -> str:
         return ACTIVE_STATUS if self.active else PENDING_STATUS
 
     def evidence(self) -> dict[str, Any]:
@@ -366,10 +378,14 @@ class TasteResearchPolicy:
             "policy_canonical_sha256": self.canonical_sha256,
             "authorization_state": self.authorization_state,
             "status": self.status,
+            "authorization_status": self.authorization_status,
             "upstream_terms_status": UPSTREAM_TERMS_STATUS,
             "research_execution_allowed": self.active,
             "paper_reporting_allowed": self.active,
             "dataset_redistribution_allowed": False,
+            "dataset_redistributed": False,
+            "upstream_license_not_explicit": True,
+            "paper_results_reporting_allowed_by_project_policy": self.active,
             "license_conclusion": "NOT_GRANTED_OR_INFERRED",
         }
 
@@ -611,6 +627,7 @@ def validate_tastemolnet_policy_receipt(
         "dataset",
         "status",
         "authorization_state",
+        "authorization_status",
         "policy",
         "private_data_authority",
         "run_tastemolnet",
@@ -623,12 +640,13 @@ def validate_tastemolnet_policy_receipt(
         "data_reprepared",
         "graph_cache_rebuilt",
         "terminal_marker",
+        "no_redistribution_marker",
     }
     _exact_keys(payload, expected_keys, field="policy_receipt")
     expected_marker = (
-        "TASTEMOLNET_SCOPED_RESEARCH_AUTHORIZED"
+        ACTIVE_AUDIT_MARKER
         if policy.active
-        else "TASTEMOLNET_POLICY_READY_EXECUTION_DISABLED"
+        else PENDING_AUDIT_MARKER
     )
     expected_run = 1 if policy.active else 0
     if (
@@ -638,6 +656,7 @@ def validate_tastemolnet_policy_receipt(
         or payload.get("dataset") != "tastemolnet"
         or payload.get("status") != policy.status
         or payload.get("authorization_state") != policy.authorization_state
+        or payload.get("authorization_status") != policy.authorization_status
         or payload.get("policy") != policy.evidence()
         or payload.get("private_data_authority") != authority.evidence()
         or payload.get("run_tastemolnet") != expected_run
@@ -651,6 +670,8 @@ def validate_tastemolnet_policy_receipt(
         or payload.get("data_reprepared") is not False
         or payload.get("graph_cache_rebuilt") is not False
         or payload.get("terminal_marker") != expected_marker
+        or payload.get("no_redistribution_marker")
+        != (NO_REDISTRIBUTION_MARKER if policy.active else None)
     ):
         raise TasteResearchPolicyError("typed Taste policy receipt changed")
     marker_path = source.parent / expected_marker
@@ -662,6 +683,13 @@ def validate_tastemolnet_policy_receipt(
         "tastemolnet_policy_audit.md",
         marker_source.name,
     }
+    if policy.active:
+        guard_source, guard_data = _read_physical(
+            source.parent / NO_REDISTRIBUTION_MARKER
+        )
+        if guard_data != (NO_REDISTRIBUTION_MARKER + "\n").encode("utf-8"):
+            raise TasteResearchPolicyError("Taste no-redistribution marker changed")
+        expected_inventory.add(guard_source.name)
     if _inventory_files(source.parent, excluded=set()) != expected_inventory:
         raise TasteResearchPolicyError("Taste policy audit output inventory changed")
     if require_active:
@@ -697,10 +725,13 @@ def load_tastemolnet_research_policy(
 
 __all__ = [
     "ACTIVE_STATE",
+    "ACTIVE_AUDIT_MARKER",
     "ACTIVE_STATUS",
     "PENDING_STATE",
+    "PENDING_AUDIT_MARKER",
     "PENDING_STATUS",
     "POLICY_SCHEMA",
+    "NO_REDISTRIBUTION_MARKER",
     "SOURCE_CSV_SHA256",
     "UPSTREAM_COMMIT",
     "UPSTREAM_TERMS_STATUS",

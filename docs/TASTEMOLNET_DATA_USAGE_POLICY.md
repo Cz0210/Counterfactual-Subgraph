@@ -14,20 +14,22 @@ Neither fact is a licence conclusion. The project must never emit
 `LICENSE_PASS`, claim that the upstream licence was resolved, or use an
 open-access paper licence as a substitute for data terms.
 
-The checked-in machine-readable policy is an **inactive activation template**:
+The checked-in machine-readable policy records the project owner's **active,
+scoped research authorization**:
 
 ```text
-authorization_state=PENDING_ROOT_ACTIVATION
-research_compute_allowed=false
-paper_result_reporting_allowed=false
-RUN_TASTEMOLNET=0
+authorization_state=ACTIVE_SCOPED_AUTHORIZATION
+research_compute_allowed=true
+paper_result_reporting_allowed=true
+RUN_TASTEMOLNET=1
+data_redistribution_allowed=false
 ```
 
-It therefore cannot start a worker. A separate, independently reviewed root
-activation must bind the explicit user direction, change the policy to its
-exact active state, pin its raw and canonical hashes, and create only fresh
-execution roots. This commit performs no activation, deployment, SSH action,
-data preparation, cache rebuild, or experiment run.
+This is project-level permission for private computation and aggregate paper
+reporting, not an upstream licence conclusion. Every execution must bind the
+policy's exact raw and canonical hashes, a fresh read-only authority receipt,
+and fresh execution roots. Activating the policy does not itself deploy, start,
+download, prepare, rebuild, or redistribute anything.
 
 The authoritative policy path is:
 
@@ -36,7 +38,7 @@ configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml
 ```
 
 The historical `LICENSE_REVIEW_REQUIRED` artifact remains immutable provenance.
-It is superseded only as an execution decision by a future scoped policy
+It is superseded only as an execution decision by the scoped policy
 receipt; it is never deleted, rewritten, or converted into a PASS marker.
 
 ## Fixed private-data authority
@@ -80,15 +82,48 @@ rf_oracle_used = false
 ```
 
 Both Sweet-to-Bitter and Sweet-to-Tasteless count as strict flips. A binary
-projection, an RF oracle, or a `1-label` target is invalid. Selection may use
-train and validation only. Calibration and held-out test loading remain
-disabled until later typed gates explicitly release them; the inactive full
-GINE fragment exposes only test metadata hashes.
+projection, an RF oracle, or a `1-label` target is invalid. Model fitting uses
+train; checkpoint selection and temperature calibration use validation only.
+The held-out test is not loaded during training; the full GINE fragment exposes
+only its path and SHA until the frozen-oracle evaluation gate.
 
-The future AutoDL route is dedicated, CPU-controller/GPU-worker scoped,
+The AutoDL route is dedicated, CPU-controller/GPU-worker scoped,
 exclusive to physical GPU 2, and requires fresh controller and science roots.
 HPC is forbidden for this campaign. Paired Slurm files exist only to satisfy
 repository CLI parity and intentionally exit before running the command.
+
+Full training also requires a private `--training-state-dir` outside the
+immutable classifier output and outside every prepared/cache root.  At the end
+of each epoch it atomically checkpoints the current model, AdamW state, best
+validation state, early-stop counter, metric history, and Python/NumPy/Torch
+CPU/CUDA RNG states.  The JSON checkpoint manifest is published only after the
+state file is fsynced, and only the current and previous epochs are retained;
+each safe deletion is recorded in `checkpoint_cleanup.json`.  A resumed worker
+must match the complete canonical configuration, every config-file SHA,
+dotlist/CLI overrides, clean Git commit/tree/source hashes, Python/Torch/CUDA
+runtime, physical GPU-2 UUID, and original input/policy contract exactly.  The
+output parent is held by an inode-bound directory descriptor, lock, sentinel,
+and contract claim for the full training/finalization lifetime.  The classifier
+bundle uses the single deterministic sibling
+`.<output>.finalizing-<contract-sha>`; an empty mkdir-before-claim crash may be
+reclaimed, a nonempty unclaimed root is rejected, partial owned contents are
+inventoried and cleanup-receipted, and a completed inventory is published with
+Linux `renameat2(RENAME_NOREPLACE)`.  Claim/completion sidecars remain
+hash-bound to the terminal training receipt.  Thus a process loss cannot turn
+a partial bundle into a scientific PASS or overwrite an existing output.
+
+One dedicated persistent Taste controller owns that worker.  Its immutable
+spec binds the clean project commit/tree, reviewed worker wrapper and SHA,
+Python, all three config SHAs, exact argv, frozen scientific environment,
+policy receipt, private prepared/cache authority, controller CID, and the
+output/state roots.  A durable exec-startup barrier closes the register/release
+window; controller restart adopts only the recorded live PID generation, and
+at most one genuine process-loss retry may reuse the same state root.  GPU-2
+waiting stays inside the same worker generation with a fixed deadline and
+bounded controller event/worker logs.  Terminal publication holds and
+revalidates the state root, named writer lock, output parent, finalization
+claim, complete bundle/policy audit, and file SHA/stat inventories through the
+final `PASS` no-replace write.
 
 ## Redistribution boundary
 
@@ -131,7 +166,7 @@ paths, molecule-level fields, and unsupported roles. Its success marker means
 only that the inspected public artifact contains no detected redistributable
 dataset material; it is not a licence marker.
 
-## Inactive audit and controller-template commands
+## Active policy audit and controller-fragment commands
 
 The policy/data authority audit is read-only with respect to the existing data
 and cache roots and writes only to a fresh audit root:
@@ -140,29 +175,51 @@ and cache roots and writes only to a fresh audit root:
 PYTHONPATH=$PWD python scripts/audit_tastemolnet_research_policy.py \
   --config configs/hpc.yaml \
   --policy configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml \
+  --expected-policy-sha256 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983 \
   --prepared-root /absolute/existing/prepared-root \
   --graph-cache-root /absolute/existing/graph-cache-root \
-  --output-dir /absolute/fresh/policy-audit-root
+  --output-dir /absolute/fresh/policy-audit-root \
+  --require-active
 ```
 
 With the checked-in policy this emits
-`TASTEMOLNET_POLICY_READY_EXECUTION_DISABLED`, never PASS. Supplying
-`--require-active` fails before creating the output root.
+`TASTE_RESEARCH_AND_PAPER_REPORTING_AUTHORIZED` and
+`TASTE_NO_DATA_REDISTRIBUTION_GUARD_PASS`. Neither marker is a licence PASS.
 
-The disabled GINE fragment can be generated without data paths or a policy
-receipt:
+The runnable GINE fragment requires the existing private authority and its
+fresh policy receipt:
 
 ```bash
 PYTHONPATH=$PWD python scripts/autodl/build_tastemolnet_gine_research_tasks.py \
   --config configs/hpc.yaml \
   --policy configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml \
+  --expected-policy-sha256 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983 \
+  --prepared-root /absolute/existing/prepared-root \
+  --graph-cache-root /absolute/existing/graph-cache-root \
+  --policy-receipt /absolute/fresh/policy-audit-root/tastemolnet_policy_receipt.json \
   --expected-output-root /absolute/fresh/future-science-root \
-  --output /absolute/fresh/tastemolnet-gine-disabled.json
+  --output /absolute/fresh/tastemolnet-gine-active.json \
+  --require-active
 ```
 
-The resulting task has `enabled=false`, `command=null`,
-`run_tastemolnet=0`, and no live data authority. A future activation must use
-`--require-active`, a validated policy receipt, exact existing prepared/cache
-roots, and the independently reviewed dedicated controller. The legacy binary
+The resulting task has `enabled=true`, `run_tastemolnet=1`, a validated policy
+receipt, exact existing prepared/cache roots, physical-GPU-2 exclusivity, and
+a fresh science root.  It launches the dedicated controller wrapper rather
+than the scientific worker directly:
+
+```bash
+bash scripts/autodl/run_tastemolnet_gine_controller.sh
+
+PYTHONPATH=$PWD python scripts/autodl/run_tastemolnet_gine_controller.py status \
+  --controller-root /absolute/existing/taste-controller-root
+```
+
+The wrapper requires the fragment-provided
+`TASTEMOLNET_GINE_CONTROLLER_CID`, `TASTEMOLNET_GINE_CONTROLLER_ROOT`,
+`TASTEMOLNET_GNN_FULL_OUTPUT`, and
+`TASTEMOLNET_GNN_TRAINING_STATE_ROOT`, sets the audited four-GPU scheduler
+ceiling explicitly, and resumes only that same physical controller root.  The
+paired `scripts/slurm/run_tastemolnet_gine_controller.sh` is deliberately a
+static HPC refusal and never starts Taste science. The legacy binary
 licence audit remains historical and can emit only
 `BLOCKED_LICENSE_REVIEW`; it cannot authorize this scoped route.

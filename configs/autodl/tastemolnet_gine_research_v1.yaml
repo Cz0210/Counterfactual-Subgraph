@@ -9,7 +9,7 @@ paths:
   cache_root: .cache/autodl
   model_root: null
 run:
-  notes: tastemolnet_gine_research_policy_ready_execution_disabled
+  notes: tastemolnet_gine_three_class_scoped_research_active_no_redistribution
 autodl:
   schema_version: tastemolnet_gine_research_autodl_v1
   dataset: tastemolnet
@@ -24,14 +24,20 @@ autodl:
   split_root_env: TASTEMOLNET_SPLIT_ROOT
   graph_cache_root_env: TASTEMOLNET_GRAPH_CACHE_ROOT
   policy_path: configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml
-  policy_file_sha256: null
+  policy_file_sha256: 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983
   prepared_output_manifest_sha256: 36aaf17bf45e0a092a96a0379fab31d9e6bfcd719b87cb4ffa4e57a6642bb645
   split_manifest_sha256: 841f3b911e5d353c1e00f010bafcc8a6f7b3433082dba8a8979fab1b558251af
   policy_receipt_env: TASTEMOLNET_POLICY_RECEIPT
   physical_gpu_index: 2
   gpu_lock_mode: exclusive
   max_gpus: 4
-  run_tastemolnet: false
+  gpu_hard_limit: 4
+  dedicated_persistent_controller_required: true
+  durable_exec_startup_barrier_required: true
+  same_state_root_process_loss_retries: 1
+  terminal_typed_reopen_required: true
+  atomic_directory_noreplace_required: true
+  run_tastemolnet: true
   heavy_training_authorization_env: RUN_TASTEMOLNET
   reuse_existing_prepared_only: true
   reuse_existing_graph_cache_only: true
@@ -51,19 +57,22 @@ training:
   early_stopping_patience: 20
   batch_size: 64
   primary_seed: 7
-  selection_metric: macro_f1
+  selection_metric: macro_ovr_roc_auc
+  selection_tiebreak_metric: macro_f1
   class_weighted_loss: true
   weighted_sampler: false
   gradient_clip_norm: 5.0
   health_gate:
     enabled: true
     apply_profile: full
-    primary_metric: macro_f1
+    primary_metric: macro_ovr_roc_auc
     minimum_primary_metric: 0.0
     require_multiple_predicted_classes: true
     require_source_class_recall: true
+    require_all_class_recall: true
     require_finite: true
 calibration:
   method: temperature_scaling
   split: validation
   max_iter: 100
+  fit_on_validation: true

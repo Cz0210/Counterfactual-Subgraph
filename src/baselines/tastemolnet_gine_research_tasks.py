@@ -1,13 +1,17 @@
 """Typed, fresh TasteMolNet GINE research task fragment.
 
-The checked-in policy is inactive, so the checked-in fragment is non-runnable.
-An independently reviewed policy activation plus a typed local-authority
-receipt are both required before this builder emits an executable task.
+The scoped project-owner policy permits private research computation and
+aggregate paper reporting while preserving the upstream licence uncertainty
+and a strict no-data-redistribution boundary.  A typed local-authority receipt
+is required before this builder emits an executable task.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from src.utils.tastemolnet_research_policy import (
@@ -33,6 +37,7 @@ REQUIRED_OUTPUT_FILES = (
     "sha256sums.txt",
     "data_use_policy_binding.json",
     "graph_cache_usage.json",
+    "oracle_manifest.json",
 )
 
 
@@ -44,6 +49,16 @@ def _absolute(value: str | Path | None, *, field: str, required: bool) -> Path |
     path = Path(value).expanduser()
     if not path.is_absolute():
         raise TasteResearchPolicyError(f"{field} must be absolute")
+    unresolved = Path(os.path.abspath(path))
+    current = Path(unresolved.anchor)
+    for part in unresolved.parts[1:]:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            raise TasteResearchPolicyError(f"{field} may not contain symlink components")
     return path.resolve(strict=False)
 
 
@@ -108,9 +123,17 @@ def build_tastemolnet_gine_research_fragment(
     if policy.active:
         task_command = [
             "bash",
-            "scripts/autodl/run_tastemolnet_gnn_full.sh",
+            "scripts/autodl/run_tastemolnet_gine_controller.sh",
         ]
-    expected = str(output_root / "attempt-{attempt}")
+    expected = str(output_root)
+    training_state_root = f"{expected}.training_state"
+    cid_suffix = hashlib.sha256(
+        f"{expected}\0{policy.file_sha256}".encode("utf-8")
+    ).hexdigest()[:8]
+    controller_cid = f"tastemolnet_gine_v1_20260825T000000Z_{cid_suffix}"
+    controller_root = str(
+        output_root.parent / f".{output_root.name}.controller-{controller_cid}"
+    )
     task = {
         "schema_version": TASK_SCHEMA,
         "id": TASK_ID,
@@ -133,13 +156,28 @@ def build_tastemolnet_gine_research_fragment(
                 str(receipt_path) if receipt_path is not None else ""
             ),
             "TASTEMOLNET_SPLIT_ROOT": str(prepared / "splits") if prepared else "",
+            "TASTEMOLNET_PREPARED_ROOT": str(prepared) if prepared else "",
             "TASTEMOLNET_GRAPH_CACHE_ROOT": str(cache) if cache else "",
+            "TASTEMOLNET_GNN_TRAINING_STATE_ROOT": (
+                training_state_root if policy.active else ""
+            ),
+            "TASTEMOLNET_GNN_FULL_OUTPUT": expected if policy.active else "",
+            "TASTEMOLNET_GINE_CONTROLLER_CID": (
+                controller_cid if policy.active else ""
+            ),
+            "TASTEMOLNET_GINE_CONTROLLER_ROOT": (
+                controller_root if policy.active else ""
+            ),
+            "TASTE_RESEARCH_COMPUTE_ALLOWED": "1" if policy.active else "0",
+            "TASTE_PAPER_RESULTS_ALLOWED": "1" if policy.active else "0",
+            "TASTE_DATA_REDISTRIBUTION_ALLOWED": "0",
+            "TASTE_UPSTREAM_LICENSE_STATUS": "NOT_EXPLICITLY_STATED",
             "PYTHONDONTWRITEBYTECODE": "1",
         },
         "command": task_command,
         "command_template": [
             "bash",
-            "scripts/autodl/run_tastemolnet_gnn_full.sh",
+            "scripts/autodl/run_tastemolnet_gine_controller.sh",
         ],
         "config_files": [
             "configs/hpc.yaml",
@@ -147,9 +185,15 @@ def build_tastemolnet_gine_research_fragment(
             "configs/autodl/tastemolnet_gine_research_v1.yaml",
         ],
         "expected_output": expected,
+        "persistent_training_state_root": training_state_root,
+        "persistent_controller_root": controller_root,
+        "controller_cid": controller_cid,
         "fresh_output_required": True,
+        "epoch_checkpoint_required": True,
+        "same_root_resume_supported": True,
+        "retry_policy": "resume_same_training_state_after_process_loss",
         "required_output_files": list(REQUIRED_OUTPUT_FILES),
-        "required_log_marker": "[TASTEMOLNET_GINE_RESEARCH_TRAIN_OK]",
+        "required_log_marker": "[TASTE_GINE_THREE_CLASS_PASS]",
         "data_splits_loaded": ["train", "validation"],
         "calibration_loaded": False,
         "test_loaded": False,
@@ -184,6 +228,7 @@ def build_tastemolnet_gine_research_fragment(
         "schema_version": FRAGMENT_SCHEMA,
         "dataset": "tastemolnet",
         "status": policy.status,
+        "authorization_status": policy.authorization_status,
         "policy": policy.evidence(),
         "policy_active": policy.active,
         "controller_contract": {
@@ -192,6 +237,10 @@ def build_tastemolnet_gine_research_fragment(
             "exact_physical_gpu_index": 2,
             "exclusive_gpu_lock_required": True,
             "fresh_controller_root_required": True,
+            "persistent_process_loss_supervision": True,
+            "durable_exec_startup_barrier_required": True,
+            "same_cid_worker_adoption_required": True,
+            "terminal_babysit_required": True,
             "fresh_science_output_required": True,
         },
         "tasks": [task],
@@ -224,6 +273,10 @@ def validate_tastemolnet_gine_research_fragment(
         or task.get("calibration_loaded") is not False
         or task.get("dataset_redistribution_allowed") is not False
         or task.get("hpc_execution_allowed") is not False
+        or task.get("epoch_checkpoint_required") is not True
+        or task.get("same_root_resume_supported") is not True
+        or task.get("retry_policy")
+        != "resume_same_training_state_after_process_loss"
     ):
         raise TasteResearchPolicyError("Taste GINE task contract changed")
     if active:
@@ -233,6 +286,18 @@ def validate_tastemolnet_gine_research_fragment(
             or task.get("command") != task.get("command_template")
             or not isinstance(task.get("policy_receipt"), dict)
             or not isinstance(task.get("data_contract", {}).get("authority"), dict)
+            or task.get("environment", {}).get(
+                "TASTEMOLNET_GNN_TRAINING_STATE_ROOT"
+            )
+            != task.get("persistent_training_state_root")
+            or task.get("environment", {}).get("TASTEMOLNET_GNN_FULL_OUTPUT")
+            != task.get("expected_output")
+            or task.get("environment", {}).get("TASTEMOLNET_GINE_CONTROLLER_ROOT")
+            != task.get("persistent_controller_root")
+            or task.get("environment", {}).get("TASTEMOLNET_GINE_CONTROLLER_CID")
+            != task.get("controller_cid")
+            or task.get("command")
+            != ["bash", "scripts/autodl/run_tastemolnet_gine_controller.sh"]
         ):
             raise TasteResearchPolicyError("active Taste GINE task is not authority-closed")
     else:

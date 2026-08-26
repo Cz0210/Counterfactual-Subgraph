@@ -8,7 +8,7 @@ import json
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 
 from src.data.molecular_graph_featurizer import (
     MolecularFeatureSchema,
@@ -698,18 +698,40 @@ def _checked_pointer_values(
 
 
 def load_molecular_graph_cache(
-    path: str | Path,
+    path: str | Path | BinaryIO,
     *,
     expected_num_classes: int | None = None,
     expected_source_sha256: str | None = None,
     expected_feature_schema: MolecularFeatureSchema | None = None,
 ) -> MolecularGraphDataset:
-    """Load and validate a plain-tensor graph cache without custom unpickling."""
+    """Load and validate a plain-tensor graph cache without custom unpickling.
+
+    ``path`` may be either an ordinary path or an already-open seekable binary
+    stream.  The latter is required by long-lived authority holders: callers
+    can deserialize the inode they opened and authenticated without reopening
+    a replaceable pathname between verification and ``torch.load``.
+    """
 
     torch = _require_torch()
-    source = Path(path).expanduser().resolve()
-    if not source.is_file():
-        raise FileNotFoundError(f"Molecular graph cache does not exist: {source}")
+    if isinstance(path, (str, Path)):
+        source: Any = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"Molecular graph cache does not exist: {source}")
+    else:
+        source = path
+        if not all(
+            callable(getattr(source, name, None))
+            for name in ("read", "seek", "tell")
+        ):
+            raise TypeError(
+                "Molecular graph cache input must be a path or seekable binary stream."
+            )
+        try:
+            source.seek(0)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "Molecular graph cache binary stream is not seekable."
+            ) from exc
     payload = torch.load(source, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("Molecular graph cache payload must be a dictionary.")

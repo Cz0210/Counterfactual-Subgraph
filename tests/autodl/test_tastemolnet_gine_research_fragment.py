@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -13,6 +14,7 @@ from scripts.audit_tastemolnet_research_policy import (
     audit_research_policy,
     main as policy_audit_main,
 )
+from scripts.train_molecular_gnn import _taste_runtime_authority
 from src.baselines.tastemolnet_gine_research_tasks import (
     PENDING_REASON,
     TASK_ID,
@@ -21,7 +23,10 @@ from src.baselines.tastemolnet_gine_research_tasks import (
 )
 from src.utils.env import load_and_merge_config_files
 from src.utils.tastemolnet_research_policy import (
+    ACTIVE_AUDIT_MARKER,
     ACTIVE_STATE,
+    NO_REDISTRIBUTION_MARKER,
+    PENDING_STATE,
     SOURCE_CSV_SHA256,
     UPSTREAM_COMMIT,
     TasteResearchPolicyError,
@@ -43,7 +48,7 @@ def _active_policy(tmp_path: Path, *, prepared: Path | None = None) -> Path:
     payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
     payload["authorization_basis"] = "explicit_user_instruction"
     payload["authorization_state"] = ACTIVE_STATE
-    payload["authorization_source"] = "EXPLICIT_USER_DIRECTION"
+    payload["authorization_source"] = "user_project_owner_instruction"
     payload["research_compute_allowed"] = True
     payload["paper_result_reporting_allowed"] = True
     payload["aggregated_metrics_release_allowed"] = True
@@ -62,6 +67,34 @@ def _active_policy(tmp_path: Path, *, prepared: Path | None = None) -> Path:
             prepared / "splits/split_manifest.json"
         )
     path = tmp_path / "active-policy.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _pending_policy(tmp_path: Path, *, prepared: Path | None = None) -> Path:
+    payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+    payload["authorization_basis"] = "forwarded_user_instruction_pending_root_activation"
+    payload["authorization_state"] = PENDING_STATE
+    payload["authorization_source"] = "PENDING_ROOT_ACTIVATION"
+    payload["research_compute_allowed"] = False
+    payload["paper_result_reporting_allowed"] = False
+    payload["aggregated_metrics_release_allowed"] = False
+    payload["figure_release_allowed"] = False
+    payload["trained_model_release_allowed"] = False
+    payload["permissions"]["research_execution"] = "PENDING_ROOT_ACTIVATION"
+    payload["permissions"]["paper_reporting"] = "PENDING_ROOT_ACTIVATION"
+    payload["permissions"]["aggregate_publication"] = (
+        "ALLOWED_ONLY_AFTER_ACTIVATION_AND_PUBLIC_ARTIFACT_AUDIT"
+    )
+    payload["execution"]["run_tastemolnet"] = 0
+    if prepared is not None:
+        payload["dataset_identity"]["prepared_output_manifest_sha256"] = _sha(
+            prepared / "output_manifest.json"
+        )
+        payload["dataset_identity"]["split_manifest_sha256"] = _sha(
+            prepared / "splits/split_manifest.json"
+        )
+    path = tmp_path / "pending-policy.yaml"
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return path
 
@@ -182,10 +215,10 @@ def _active_authorities(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return policy, prepared, cache, audit_root / "tastemolnet_policy_receipt.json"
 
 
-def test_checked_config_and_fragment_are_disabled_but_freeze_full_contract(tmp_path: Path) -> None:
+def test_checked_config_and_fragment_are_active_and_authority_closed(tmp_path: Path) -> None:
     config = load_and_merge_config_files([CONFIG])
     autodl = config["autodl"]
-    assert autodl["run_tastemolnet"] is False
+    assert autodl["run_tastemolnet"] is True
     assert autodl["physical_gpu_index"] == 2
     assert autodl["gpu_lock_mode"] == "exclusive"
     assert autodl["num_classes"] == 3
@@ -193,27 +226,42 @@ def test_checked_config_and_fragment_are_disabled_but_freeze_full_contract(tmp_p
     assert autodl["rf_oracle_used"] is False
     assert autodl["test_loaded"] is False
     assert autodl["hpc_execution_allowed"] is False
+    config_training = config["training"]
+    assert config_training["selection_metric"] == "macro_ovr_roc_auc"
+    assert config_training["selection_tiebreak_metric"] == "macro_f1"
+    assert config_training["health_gate"]["require_all_class_recall"] is True
+    assert config["calibration"]["fit_on_validation"] is True
     assert autodl["prepared_output_manifest_sha256"] == (
         "36aaf17bf45e0a092a96a0379fab31d9e6bfcd719b87cb4ffa4e57a6642bb645"
     )
     assert autodl["split_manifest_sha256"] == (
         "841f3b911e5d353c1e00f010bafcc8a6f7b3433082dba8a8979fab1b558251af"
     )
+    policy, prepared, cache, receipt = _active_authorities(tmp_path)
     fragment = build_tastemolnet_gine_research_fragment(
-        policy_path=POLICY,
+        policy_path=policy,
+        prepared_root=prepared,
+        graph_cache_root=cache,
+        policy_receipt=receipt,
         expected_output_root=tmp_path / "fresh-science-root",
     )
-    validate_tastemolnet_gine_research_fragment(fragment, require_active=False)
+    validate_tastemolnet_gine_research_fragment(fragment, require_active=True)
     task = fragment["tasks"][0]
     assert task["id"] == TASK_ID
-    assert task["enabled"] is False
-    assert task["blocked_reason"] == PENDING_REASON
-    assert task["run_tastemolnet"] == 0
-    assert task["command"] is None
+    assert task["enabled"] is True
+    assert task["blocked_reason"] is None
+    assert task["run_tastemolnet"] == 1
+    assert task["command"] == task["command_template"]
     assert task["physical_gpu_index"] == 2
     assert task["gpu_lock_mode"] == "exclusive"
     assert task["data_splits_loaded"] == ["train", "validation"]
     assert task["test_loaded"] is False
+    assert task["required_log_marker"] == "[TASTE_GINE_THREE_CLASS_PASS]"
+    assert "oracle_manifest.json" in task["required_output_files"]
+    assert task["environment"]["TASTE_DATA_REDISTRIBUTION_ALLOWED"] == "0"
+    assert task["environment"]["TASTE_UPSTREAM_LICENSE_STATUS"] == (
+        "NOT_EXPLICITLY_STATED"
+    )
     assert fragment["controller_contract"]["generic_four_gpu_controller_eligible"] is False
 
 
@@ -231,7 +279,16 @@ def test_active_fragment_requires_and_binds_policy_data_cache_and_receipt(tmp_pa
     task = fragment["tasks"][0]
     assert task["enabled"] is True
     assert task["run_tastemolnet"] == 1
-    assert task["command"] == ["bash", "scripts/autodl/run_tastemolnet_gnn_full.sh"]
+    assert task["command"] == [
+        "bash",
+        "scripts/autodl/run_tastemolnet_gine_controller.sh",
+    ]
+    assert task["environment"]["TASTEMOLNET_GNN_FULL_OUTPUT"] == task[
+        "expected_output"
+    ]
+    assert task["environment"]["TASTEMOLNET_GINE_CONTROLLER_ROOT"] == task[
+        "persistent_controller_root"
+    ]
     assert task["policy_receipt"] == {"path": str(receipt), "sha256": _sha(receipt)}
     authority = task["data_contract"]["authority"]
     assert authority["prepared_rows"] == 13421
@@ -239,21 +296,36 @@ def test_active_fragment_requires_and_binds_policy_data_cache_and_receipt(tmp_pa
     assert authority["graph_cache_rows"] == 13421
     assert authority["data_reprepared"] is False
     assert authority["graph_cache_rebuilt"] is False
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["terminal_marker"] == ACTIVE_AUDIT_MARKER
+    assert receipt_payload["no_redistribution_marker"] == NO_REDISTRIBUTION_MARKER
+    assert (receipt.parent / ACTIVE_AUDIT_MARKER).is_file()
+    assert (receipt.parent / NO_REDISTRIBUTION_MARKER).is_file()
+
+    runtime = _taste_runtime_authority(
+        SimpleNamespace(
+            taste_policy_file=str(policy),
+            taste_policy_sha256=_sha(policy),
+            taste_policy_receipt=str(receipt),
+            taste_prepared_root=str(prepared),
+            graph_cache_root=str(cache),
+        ),
+        dataset_id="tastemolnet",
+        profile="full",
+        split_paths={
+            split: prepared / "splits" / f"{split}.csv" for split in SPLIT_ROWS
+        },
+    )
+    assert runtime is not None
+    runtime_policy, runtime_authority, runtime_receipt = runtime
+    assert runtime_policy.active is True
+    assert runtime_authority.graph_cache_rows == 13421
+    assert runtime_receipt.sha256 == _sha(receipt)
 
 
 def test_pending_policy_audit_is_read_only_disabled_and_never_pass(tmp_path: Path) -> None:
     prepared, cache = _private_authority(tmp_path)
-    pending_payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
-    pending_payload["dataset_identity"]["prepared_output_manifest_sha256"] = _sha(
-        prepared / "output_manifest.json"
-    )
-    pending_payload["dataset_identity"]["split_manifest_sha256"] = _sha(
-        prepared / "splits/split_manifest.json"
-    )
-    pending_policy = tmp_path / "pending-policy.yaml"
-    pending_policy.write_text(
-        yaml.safe_dump(pending_payload, sort_keys=False), encoding="utf-8"
-    )
+    pending_policy = _pending_policy(tmp_path, prepared=prepared)
     output = tmp_path / "policy-audit"
     receipt = audit_research_policy(
         policy_path=pending_policy,
@@ -307,9 +379,10 @@ def test_active_policy_without_receipt_or_cache_fails_closed(tmp_path: Path) -> 
 
 
 def test_inactive_template_cannot_claim_live_authority(tmp_path: Path) -> None:
+    pending = _pending_policy(tmp_path)
     with pytest.raises(TasteResearchPolicyError, match="inactive template"):
         build_tastemolnet_gine_research_fragment(
-            policy_path=POLICY,
+            policy_path=pending,
             prepared_root=tmp_path / "prepared",
             expected_output_root=tmp_path / "out",
         )
@@ -366,27 +439,49 @@ def test_active_output_root_must_be_disjoint_from_private_authority(
         )
 
 
-def test_builder_cli_writes_only_fresh_disabled_template(tmp_path: Path, capsys) -> None:
+def test_fragment_rejects_output_with_symlinked_parent(tmp_path: Path) -> None:
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    with pytest.raises(TasteResearchPolicyError, match="symlink components"):
+        build_tastemolnet_gine_research_fragment(
+            policy_path=POLICY,
+            expected_output_root=alias / "future-output",
+        )
+
+
+def test_builder_cli_writes_only_fresh_active_fragment(tmp_path: Path, capsys) -> None:
+    policy, prepared, cache, receipt = _active_authorities(tmp_path)
     output = tmp_path / "fragment.json"
     root = tmp_path / "science"
     assert builder_main(
         [
             "--policy",
-            str(POLICY),
+            str(policy),
+            "--prepared-root",
+            str(prepared),
+            "--graph-cache-root",
+            str(cache),
+            "--policy-receipt",
+            str(receipt),
             "--expected-output-root",
             str(root),
             "--output",
             str(output),
+            "--require-active",
         ]
     ) == 0
     fragment = json.loads(output.read_text())
-    assert fragment["tasks"][0]["enabled"] is False
-    assert "[TASTEMOLNET_GINE_RESEARCH_FRAGMENT_DISABLED]" in capsys.readouterr().out
-    second = tmp_path / "active-required.json"
+    assert fragment["tasks"][0]["enabled"] is True
+    assert "[TASTEMOLNET_GINE_RESEARCH_FRAGMENT_ACTIVE]" in capsys.readouterr().out
+
+    pending = _pending_policy(tmp_path)
+    second = tmp_path / "pending-required.json"
     assert builder_main(
         [
             "--policy",
-            str(POLICY),
+            str(pending),
             "--expected-output-root",
             str(root),
             "--output",
@@ -400,7 +495,13 @@ def test_builder_cli_writes_only_fresh_disabled_template(tmp_path: Path, capsys)
     assert builder_main(
         [
             "--policy",
-            str(POLICY),
+            str(policy),
+            "--prepared-root",
+            str(prepared),
+            "--graph-cache-root",
+            str(cache),
+            "--policy-receipt",
+            str(receipt),
             "--expected-output-root",
             str(root),
             "--output",
@@ -408,3 +509,22 @@ def test_builder_cli_writes_only_fresh_disabled_template(tmp_path: Path, capsys)
         ]
     ) == 65
     assert not root.exists()
+
+
+def test_autodl_wrapper_uses_scoped_policy_gpu2_cache_and_no_license_pass() -> None:
+    wrapper = (
+        PROJECT_ROOT / "scripts/autodl/run_tastemolnet_gnn_full.sh"
+    ).read_text(encoding="utf-8")
+    assert "TASTEMOLNET_FOUNDATION_BLOCKED_LICENSE_REVIEW" not in wrapper
+    assert "TASTE_RESEARCH_COMPUTE_ALLOWED" in wrapper
+    assert "TASTE_PAPER_RESULTS_ALLOWED" in wrapper
+    assert "TASTE_DATA_REDISTRIBUTION_ALLOWED" in wrapper
+    assert "TASTE_UPSTREAM_LICENSE_STATUS" in wrapper
+    assert "WAITING_FOR_PHYSICAL_GPU2" in wrapper
+    assert "--graph-cache-root" in wrapper
+    assert "--taste-policy-file" in wrapper
+    assert "--taste-policy-sha256" in wrapper
+    assert "--taste-policy-receipt" in wrapper
+    assert "--taste-prepared-root" in wrapper
+    assert "[TASTE_GINE_THREE_CLASS_PASS]" in wrapper
+    assert "[TASTE_LICENSE_PASS]" not in wrapper

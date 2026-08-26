@@ -1,9 +1,11 @@
-"""Fail-closed multiclass adapters for future TasteMolNet baselines.
+"""Fail-closed multiclass adapters for scoped TasteMolNet research baselines.
 
 This module is deliberately free of training and I/O.  It freezes the common
 classifier and counterfactual semantics that GCFExplainer, GlobalGCE, and
-ComRecGC must obey after the exact TasteMolNet data license is approved.  The
-current AutoDL task fragment remains blocked and never calls these adapters.
+ComRecGC must obey under the project owner's research/reporting authorization.
+It does not claim an upstream data licence or permit dataset redistribution.
+The historical blocked AutoDL fragment remains immutable; a new typed route
+may call these adapters only after the scoped policy and frozen GINE pass.
 
 The adapters preserve each baseline's native action:
 
@@ -459,7 +461,7 @@ def multiclass_extension_manifest(method: str) -> dict[str, Any]:
             "method": "GCFExplainer",
             "action_kind": "full_counterfactual_graph",
             "candidate_condition": "pred_candidate != source_label",
-            "importance": "1 - p_source_or_max_non_source",
+            "importance": "1 - probabilities[source_label]",
         },
         "globalgce": {
             "method": "GlobalGCE",

@@ -35,7 +35,7 @@ def _active_policy(tmp_path: Path) -> Path:
     payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
     payload["authorization_basis"] = "explicit_user_instruction"
     payload["authorization_state"] = ACTIVE_STATE
-    payload["authorization_source"] = "EXPLICIT_USER_DIRECTION"
+    payload["authorization_source"] = "user_project_owner_instruction"
     payload["research_compute_allowed"] = True
     payload["paper_result_reporting_allowed"] = True
     payload["aggregated_metrics_release_allowed"] = True
@@ -47,6 +47,27 @@ def _active_policy(tmp_path: Path) -> Path:
     )
     payload["execution"]["run_tastemolnet"] = 1
     path = tmp_path / "active-policy.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _pending_policy(tmp_path: Path) -> Path:
+    payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+    payload["authorization_basis"] = "forwarded_user_instruction_pending_root_activation"
+    payload["authorization_state"] = "PENDING_ROOT_ACTIVATION"
+    payload["authorization_source"] = "PENDING_ROOT_ACTIVATION"
+    payload["research_compute_allowed"] = False
+    payload["paper_result_reporting_allowed"] = False
+    payload["aggregated_metrics_release_allowed"] = False
+    payload["figure_release_allowed"] = False
+    payload["trained_model_release_allowed"] = False
+    payload["permissions"]["research_execution"] = "PENDING_ROOT_ACTIVATION"
+    payload["permissions"]["paper_reporting"] = "PENDING_ROOT_ACTIVATION"
+    payload["permissions"]["aggregate_publication"] = (
+        "ALLOWED_ONLY_AFTER_ACTIVATION_AND_PUBLIC_ARTIFACT_AUDIT"
+    )
+    payload["execution"]["run_tastemolnet"] = 0
+    path = tmp_path / "pending-policy.yaml"
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return path
 
@@ -192,13 +213,13 @@ def test_valid_aggregate_only_tree_passes_without_license_claim(tmp_path: Path) 
 
 
 def test_pending_checked_policy_cannot_authorize_publication(tmp_path: Path) -> None:
-    public = tmp_path / "public"
-    public.mkdir()
+    policy = _pending_policy(tmp_path)
+    public = _public_root(tmp_path, policy)
     prepared, cache = _private_roots(tmp_path)
     with pytest.raises(TasteResearchPolicyError, match="NOT_ACTIVATED"):
         audit_tastemolnet_public_artifacts(
             public_root=public,
-            policy_path=POLICY,
+            policy_path=policy,
             prepared_root=prepared,
             graph_cache_root=cache,
         )

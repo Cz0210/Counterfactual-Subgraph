@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
 import platform
 import random
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -27,6 +31,7 @@ from src.data.molecular_graph_dataset import (  # noqa: E402
     MolecularGraphData,
     MolecularGraphDataset,
     build_molecular_data_loader,
+    load_molecular_graph_cache,
 )
 from src.data.molecular_graph_featurizer import (  # noqa: E402
     MolecularGraphFeaturizer,
@@ -37,13 +42,122 @@ from src.models.molecular_gnn import MolecularGNN, MolecularGNNConfig  # noqa: E
 from src.oracles.gnn_oracle import (  # noqa: E402
     GNNOracle,
     classification_metrics,
+    fit_temperature_scaling,
     save_gnn_checkpoint_bundle,
     sha256_file,
+    update_checkpoint_sha256sums,
+    verify_checkpoint_bundle,
+)
+from src.train.molecular_gnn_resume import (  # noqa: E402
+    FinalizationWorkspace,
+    MolecularGNNResumeError,
+    MolecularGNNResumeStore,
+    OutputParentAuthority,
+    assert_no_symlink_components,
+    canonical_sha256,
+    paths_overlap,
 )
 from src.utils.env import (  # noqa: E402
     apply_dotlist_overrides,
     load_and_merge_config_files,
 )
+from src.utils.tastemolnet_research_policy import (  # noqa: E402
+    TasteLocalDataAuthority,
+    TastePolicyReceipt,
+    TasteResearchPolicy,
+    TasteResearchPolicyError,
+    load_tastemolnet_research_policy,
+    validate_tastemolnet_local_authority,
+    validate_tastemolnet_policy_receipt,
+)
+
+
+def _physical_file_identity(info: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+        "mode": int(info.st_mode),
+        "uid": int(info.st_uid),
+        "nlink": int(info.st_nlink),
+        "size": int(info.st_size),
+        "mtime_ns": int(info.st_mtime_ns),
+        "ctime_ns": int(info.st_ctime_ns),
+    }
+
+
+def _open_frozen_input_file(
+    path: Path, *, expected_sha256: str, label: str
+) -> tuple[int, dict[str, Any], bytes]:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or _physical_file_identity(before) != _physical_file_identity(named)
+        ):
+            raise MolecularGNNResumeError(
+                f"{label} must be one named physical regular file"
+            )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        named_after = os.stat(path, follow_symlinks=False)
+        observed_sha256 = digest.hexdigest()
+        if (
+            _physical_file_identity(before) != _physical_file_identity(after)
+            or _physical_file_identity(after)
+            != _physical_file_identity(named_after)
+            or observed_sha256 != expected_sha256
+        ):
+            raise MolecularGNNResumeError(
+                f"{label} inode/content/hash differs from its frozen manifest"
+            )
+        return descriptor, {
+            "path": str(path),
+            "identity": _physical_file_identity(after),
+            "sha256": observed_sha256,
+        }, b"".join(chunks)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _verify_frozen_input_file(
+    path: Path,
+    descriptor: int,
+    evidence: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    before = os.fstat(descriptor)
+    named_before = os.stat(path, follow_symlinks=False)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    named_after = os.stat(path, follow_symlinks=False)
+    if (
+        evidence.get("path") != str(path)
+        or evidence.get("identity") != _physical_file_identity(before)
+        or _physical_file_identity(before) != _physical_file_identity(after)
+        or _physical_file_identity(after)
+        != _physical_file_identity(named_before)
+        or _physical_file_identity(after)
+        != _physical_file_identity(named_after)
+        or digest.hexdigest() != evidence.get("sha256")
+    ):
+        raise MolecularGNNResumeError(
+            f"{label} drifted across the graph-cache descriptor load window"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +191,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--train-limit", type=int)
     parser.add_argument("--validation-limit", type=int)
+    parser.add_argument(
+        "--graph-cache-root",
+        help=(
+            "Optional prebuilt molecular_graph_tensor_cache_v1 root. "
+            "TasteMolNet full training requires this read-only cache."
+        ),
+    )
+    parser.add_argument(
+        "--taste-policy-file",
+        help="Active scoped TasteMolNet research/no-redistribution policy.",
+    )
+    parser.add_argument("--taste-policy-sha256")
+    parser.add_argument(
+        "--taste-policy-receipt",
+        help="Typed receipt from audit_tastemolnet_research_policy.py.",
+    )
+    parser.add_argument(
+        "--taste-prepared-root",
+        help="Frozen private TasteMolNet prepared root; never copied to output.",
+    )
+    parser.add_argument(
+        "--training-state-dir",
+        help=(
+            "Separate persistent epoch-checkpoint root. TasteMolNet full training "
+            "requires this root so its immutable output remains fresh until terminal."
+        ),
+    )
+    parser.add_argument(
+        "--resume-training",
+        action="store_true",
+        help="Resume from the latest hash-bound epoch checkpoint in --training-state-dir.",
+    )
+    parser.add_argument(
+        "--resume-published-output-receipt",
+        help="Controller-issued completion-only adoption for a published Taste bundle.",
+    )
     return parser
 
 
@@ -130,15 +280,646 @@ def _resolve_split_paths(args: argparse.Namespace) -> dict[str, Path]:
     }
 
 
-def _set_seed(seed: int) -> None:
+def _load_fit_datasets(
+    *,
+    dataset_id: str,
+    profile: str,
+    split_paths: Mapping[str, Path],
+    graph_cache_root: str | None,
+    num_classes: int,
+    featurizer: MolecularGraphFeaturizer,
+    train_limit: int | None,
+    validation_limit: int | None,
+    stratified_limit: bool,
+    graph_cache_manifest_sha256: str | None = None,
+) -> tuple[MolecularGraphDataset, MolecularGraphDataset, dict[str, Any]]:
+    """Load only train/validation, preferring a frozen safe tensor cache."""
+
+    if dataset_id == "tastemolnet" and profile == "full" and not graph_cache_root:
+        raise ValueError("TasteMolNet full training requires --graph-cache-root.")
+    if not graph_cache_root:
+        train = MolecularGraphDataset.from_csv(
+            split_paths["train"],
+            num_classes=num_classes,
+            featurizer=featurizer,
+            expected_split="train",
+            limit=train_limit,
+            stratified_limit=stratified_limit,
+        )
+        validation = MolecularGraphDataset.from_csv(
+            split_paths["validation"],
+            num_classes=num_classes,
+            featurizer=featurizer,
+            expected_split="val",
+            limit=validation_limit,
+            stratified_limit=stratified_limit,
+        )
+        return train, validation, {
+            "schema_version": "molecular_graph_training_input_v1",
+            "mode": "csv_featurized",
+            "graph_cache_used": False,
+            "loaded_splits": ["train", "validation"],
+            "calibration_loaded": False,
+            "test_loaded": False,
+        }
+
+    if train_limit is not None or validation_limit is not None:
+        raise ValueError("A frozen full graph cache cannot be combined with row limits.")
+    unresolved_cache_root = Path(graph_cache_root).expanduser()
+    unresolved_cache_root = Path(os.path.abspath(unresolved_cache_root))
+    current = Path(unresolved_cache_root.anchor)
+    for part in unresolved_cache_root.parts[1:]:
+        current = current / part
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError("graph-cache path may not contain symlink components")
+    cache_root = unresolved_cache_root.resolve(strict=True)
+    if not stat.S_ISDIR(os.lstat(cache_root).st_mode):
+        raise ValueError("graph-cache root must be one physical directory")
+    cache_files = {
+        "train": cache_root / "train.pt",
+        "validation": cache_root / "validation.pt",
+    }
+    manifest_path = cache_root / "manifest.json"
+    if dataset_id == "tastemolnet" and profile == "full":
+        if not isinstance(graph_cache_manifest_sha256, str):
+            raise MolecularGNNResumeError(
+                "Taste graph-cache manifest SHA authority is absent"
+            )
+        manifest_fd, manifest_evidence, manifest_bytes = _open_frozen_input_file(
+            manifest_path,
+            expected_sha256=graph_cache_manifest_sha256,
+            label="Taste graph-cache manifest",
+        )
+        try:
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            os.close(manifest_fd)
+            raise MolecularGNNResumeError(
+                "Taste graph-cache manifest is not valid JSON"
+            ) from exc
+        raw_splits = manifest.get("splits") if isinstance(manifest, Mapping) else None
+        if (
+            not isinstance(raw_splits, Mapping)
+            or manifest.get("schema_version")
+            != "molecular_graph_cache_manifest_v1"
+        ):
+            os.close(manifest_fd)
+            raise MolecularGNNResumeError(
+                "Taste graph-cache manifest schema changed before load"
+            )
+    else:
+        manifest_fd = None
+        manifest_evidence = None
+        raw_splits = None
+    source_hashes = {
+        split: sha256_file(split_paths[split]) for split in cache_files
+    }
+    held_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+    try:
+        for split, path in cache_files.items():
+            if raw_splits is not None:
+                entry = raw_splits.get(split)
+                if (
+                    not isinstance(entry, Mapping)
+                    or entry.get("cache_file") != path.name
+                    or entry.get("source_csv_sha256") != source_hashes[split]
+                    or not isinstance(entry.get("cache_sha256"), str)
+                ):
+                    raise MolecularGNNResumeError(
+                        f"Taste graph-cache manifest binding changed for {split}"
+                    )
+                expected_cache_sha = str(entry["cache_sha256"])
+            else:
+                expected_cache_sha = sha256_file(path)
+            descriptor, evidence, _ = _open_frozen_input_file(
+                path,
+                expected_sha256=expected_cache_sha,
+                label=f"{split} graph cache",
+            )
+            held_cache[split] = (descriptor, evidence)
+        if manifest_fd is not None and manifest_evidence is not None:
+            _verify_frozen_input_file(
+                manifest_path,
+                manifest_fd,
+                manifest_evidence,
+                label="Taste graph-cache manifest before descriptor load",
+            )
+        with os.fdopen(os.dup(held_cache["train"][0]), "rb") as train_stream:
+            train = load_molecular_graph_cache(
+                train_stream,
+                expected_num_classes=num_classes,
+                expected_source_sha256=source_hashes["train"],
+                expected_feature_schema=featurizer.schema,
+            )
+        _verify_frozen_input_file(
+            cache_files["train"],
+            held_cache["train"][0],
+            held_cache["train"][1],
+            label="train graph cache",
+        )
+        with os.fdopen(os.dup(held_cache["validation"][0]), "rb") as validation_stream:
+            validation = load_molecular_graph_cache(
+                validation_stream,
+                expected_num_classes=num_classes,
+                expected_source_sha256=source_hashes["validation"],
+                expected_feature_schema=featurizer.schema,
+            )
+        for split, path in cache_files.items():
+            _verify_frozen_input_file(
+                path,
+                held_cache[split][0],
+                held_cache[split][1],
+                label=f"{split} graph cache after descriptor load",
+            )
+        if manifest_fd is not None and manifest_evidence is not None:
+            _verify_frozen_input_file(
+                manifest_path,
+                manifest_fd,
+                manifest_evidence,
+                label="Taste graph-cache manifest after descriptor load",
+            )
+    finally:
+        for descriptor, _ in held_cache.values():
+            os.close(descriptor)
+        if manifest_fd is not None:
+            os.close(manifest_fd)
+    cache_contract = {
+        "schema_version": "molecular_graph_training_cache_contract_v1",
+        "manifest": manifest_evidence,
+        "splits": {
+            split: {
+                **evidence,
+                "source_csv_sha256": source_hashes[split],
+            }
+            for split, (_, evidence) in held_cache.items()
+        },
+        "loaded_splits": ["train", "validation"],
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+    return train, validation, {
+        "schema_version": "molecular_graph_training_input_v1",
+        "mode": "frozen_safe_tensor_cache",
+        "graph_cache_used": True,
+        "graph_cache_root": str(cache_root),
+        "loaded_splits": ["train", "validation"],
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "cache_contract": cache_contract,
+        "cache_files": {
+            split: {
+                "path": str(path),
+                "sha256": held_cache[split][1]["sha256"],
+                "source_csv_sha256": source_hashes[split],
+            }
+            for split, path in cache_files.items()
+        },
+    }
+
+
+def _taste_runtime_authority(
+    args: argparse.Namespace,
+    *,
+    dataset_id: str,
+    profile: str,
+    split_paths: Mapping[str, Path],
+) -> tuple[TasteResearchPolicy, TasteLocalDataAuthority, TastePolicyReceipt] | None:
+    """Open the scoped Taste policy and frozen private inputs without loading rows."""
+
+    values = (
+        args.taste_policy_file,
+        args.taste_policy_sha256,
+        args.taste_policy_receipt,
+        args.taste_prepared_root,
+    )
+    if dataset_id != "tastemolnet" or profile != "full":
+        if any(value is not None for value in values):
+            raise ValueError(
+                "Taste policy authority flags are only valid for TasteMolNet full training."
+            )
+        return None
+    if not all(values) or not args.graph_cache_root:
+        raise ValueError(
+            "TasteMolNet full training requires policy file/SHA/receipt, prepared root, "
+            "and graph cache root."
+        )
+    policy = load_tastemolnet_research_policy(
+        args.taste_policy_file,
+        expected_file_sha256=args.taste_policy_sha256,
+    )
+    policy.require_active()
+    authority = validate_tastemolnet_local_authority(
+        policy,
+        prepared_root=args.taste_prepared_root,
+        graph_cache_root=args.graph_cache_root,
+    )
+    receipt = validate_tastemolnet_policy_receipt(
+        args.taste_policy_receipt,
+        policy=policy,
+        authority=authority,
+        require_active=True,
+    )
+    expected_split_root = authority.prepared_root / "splits"
+    for split, path in split_paths.items():
+        expected = (expected_split_root / f"{split}.csv").resolve(strict=True)
+        if path.resolve(strict=True) != expected:
+            raise TasteResearchPolicyError(
+                f"Taste {split} input escaped the frozen prepared authority"
+            )
+    return policy, authority, receipt
+
+
+def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish a fresh JSON artifact without replacing an existing authority."""
+
+    data = (json.dumps(dict(payload), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _training_resume_contract(
+    *,
+    args: argparse.Namespace,
+    dataset_id: str,
+    profile: str,
+    output_dir: Path,
+    split_paths: Mapping[str, Path],
+    taste_runtime: tuple[
+        TasteResearchPolicy, TasteLocalDataAuthority, TastePolicyReceipt
+    ]
+    | None,
+    model_config: MolecularGNNConfig,
+    feature_schema: Mapping[str, Any],
+    max_epochs: int,
+    patience: int,
+    batch_size: int,
+    learning_rate: float,
+    weight_decay: float,
+    seed: int,
+    num_workers: int,
+    class_weighted: bool,
+    weighted_sampler: bool,
+    selection_metric: str,
+    selection_tiebreak_metric: str | None,
+    clip_norm: float,
+    config: Mapping[str, Any],
+    git_state: Mapping[str, Any],
+    runtime_identity: Mapping[str, Any],
+    training_input: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the immutable identity for an epoch-resumable training campaign."""
+
+    contract: dict[str, Any] = {
+        "schema_version": "molecular_gnn_training_resume_contract_v1",
+        "dataset": dataset_id,
+        "profile": profile,
+        "output_dir": str(output_dir),
+        "source_identity": dict(git_state),
+        "configuration": {
+            "merged_canonical": copy.deepcopy(dict(config)),
+            "merged_canonical_sha256": canonical_sha256(config),
+            "config_files": [
+                {
+                    "path": str(path),
+                    "sha256": sha256_file(path),
+                }
+                for path in _resolved_config_paths(args)
+            ],
+            "dotlist_overrides": list(args.set),
+            "cli_overrides": _resume_relevant_cli(args),
+        },
+        "runtime_identity": dict(runtime_identity),
+        "training_input": copy.deepcopy(dict(training_input)),
+        "splits": {
+            name: {"path": str(path), "sha256": sha256_file(path)}
+            for name, path in sorted(split_paths.items())
+        },
+        "graph_cache_root": (
+            None
+            if not args.graph_cache_root
+            else str(Path(args.graph_cache_root).expanduser().resolve(strict=True))
+        ),
+        "model_config": model_config.to_dict(),
+        "feature_schema": dict(feature_schema),
+        "training": {
+            "max_epochs": int(max_epochs),
+            "early_stopping_patience": int(patience),
+            "batch_size": int(batch_size),
+            "learning_rate": float(learning_rate),
+            "weight_decay": float(weight_decay),
+            "seed": int(seed),
+            "num_workers": int(num_workers),
+            "class_weighted_loss": bool(class_weighted),
+            "weighted_sampler": bool(weighted_sampler),
+            "selection_metric": selection_metric,
+            "selection_tiebreak_metric": selection_tiebreak_metric,
+            "gradient_clip_norm": float(clip_norm),
+        },
+    }
+    if taste_runtime is not None:
+        policy, authority, receipt = taste_runtime
+        contract["tastemolnet_scoped_authority"] = {
+            "policy": policy.evidence(),
+            "private_data": authority.evidence(),
+            "policy_receipt": {
+                "path": str(receipt.path),
+                "sha256": receipt.sha256,
+            },
+        }
+    return contract
+
+
+def _resolved_config_paths(args: argparse.Namespace) -> list[Path]:
+    paths = [Path(path).expanduser().resolve(strict=True) for path in args.config]
+    if not paths:
+        paths = [(PROJECT_ROOT / "configs" / "gnn" / "gine.yaml").resolve(strict=True)]
+    return paths
+
+
+def _resume_relevant_cli(args: argparse.Namespace) -> dict[str, Any]:
+    """Freeze every scientific CLI value while excluding only resume intent."""
+
+    excluded = {
+        "resume_training",
+        "training_state_dir",
+        "resume_published_output_receipt",
+    }
+    return {
+        key: value
+        for key, value in sorted(vars(args).items())
+        if key not in excluded
+    }
+
+
+def _runtime_identity(*, torch: Any, device: str, taste_full: bool) -> dict[str, Any]:
+    def module_identity(name: str) -> dict[str, Any] | None:
+        try:
+            module = __import__(name)
+        except ImportError:
+            return None
+        raw_path = getattr(module, "__file__", None)
+        path = (
+            None
+            if raw_path is None
+            else Path(raw_path).expanduser().resolve(strict=True)
+        )
+        return {
+            "version": (
+                None
+                if getattr(module, "__version__", None) is None
+                else str(module.__version__)
+            ),
+            "module_path": None if path is None else str(path),
+            "module_sha256": None if path is None else sha256_file(path),
+        }
+
+    environment_keys = (
+        "CUDA_VISIBLE_DEVICES",
+        "AUTODL_PHYSICAL_GPU_INDEX",
+        "AUTODL_PHYSICAL_GPU_UUID",
+        "AUTODL_MAX_GPUS",
+        "AUTODL_PYTHON",
+        "RUN_TASTEMOLNET",
+        "TASTE_RESEARCH_COMPUTE_ALLOWED",
+        "TASTE_PAPER_RESULTS_ALLOWED",
+        "TASTE_DATA_REDISTRIBUTION_ALLOWED",
+        "TASTE_UPSTREAM_LICENSE_STATUS",
+        "TASTEMOLNET_POLICY_FILE",
+        "TASTEMOLNET_POLICY_SHA256",
+        "TASTEMOLNET_POLICY_RECEIPT",
+        "TASTEMOLNET_PREPARED_ROOT",
+        "TASTEMOLNET_SPLIT_ROOT",
+        "TASTEMOLNET_GRAPH_CACHE_ROOT",
+        "TASTEMOLNET_GNN_FULL_OUTPUT",
+        "TASTEMOLNET_GNN_TRAINING_STATE_ROOT",
+        "TASTEMOLNET_GINE_CONTROLLER_CID",
+        "TASTEMOLNET_GINE_CONTROLLER_ROOT",
+        "TASTEMOLNET_PUBLISHED_OUTPUT_ADOPTION_RECEIPT",
+        "TASTEMOLNET_RESOURCE_WAIT_DEADLINE_EPOCH",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "CUBLAS_WORKSPACE_CONFIG",
+        "PYTHONHASHSEED",
+        "PYTHONPATH",
+        "LD_LIBRARY_PATH",
+        "CUDA_HOME",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+    )
+    environment_manifest = {
+        key: os.environ.get(key) for key in environment_keys
+    }
+    physical_index = os.environ.get("AUTODL_PHYSICAL_GPU_INDEX")
+    physical_uuid = os.environ.get("AUTODL_PHYSICAL_GPU_UUID")
+    if taste_full:
+        if device != "cuda:0":
+            raise MolecularGNNResumeError(
+                "TasteMolNet full training requires logical cuda:0 behind the GPU2 mask"
+            )
+        if physical_index != "2" or not physical_uuid or not physical_uuid.startswith("GPU-"):
+            raise MolecularGNNResumeError(
+                "TasteMolNet full training requires physical GPU2 UUID runtime authority"
+            )
+        if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+            raise MolecularGNNResumeError(
+                "TasteMolNet full training requires exactly one masked CUDA device"
+            )
+    numpy_identity = module_identity("numpy")
+    rdkit_identity = module_identity("rdkit")
+    pyg_identity = module_identity("torch_geometric")
+    cudnn_version = (
+        None
+        if not hasattr(torch, "backends")
+        or not hasattr(torch.backends, "cudnn")
+        else torch.backends.cudnn.version()
+    )
+    driver_identity: dict[str, Any] | None = None
+    if torch.cuda.is_available():
+        nvidia_smi = shutil.which("nvidia-smi")
+        if nvidia_smi is not None:
+            observed = subprocess.run(
+                [
+                    nvidia_smi,
+                    "--query-gpu=driver_version",
+                    "--format=csv,noheader",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            versions = sorted(
+                {
+                    line.strip()
+                    for line in observed.stdout.splitlines()
+                    if line.strip()
+                }
+            )
+            if observed.returncode == 0 and len(versions) == 1:
+                nvidia_smi_path = Path(nvidia_smi).resolve(strict=True)
+                driver_identity = {
+                    "version": versions[0],
+                    "nvidia_smi_path": str(nvidia_smi_path),
+                    "nvidia_smi_sha256": sha256_file(nvidia_smi_path),
+                }
+    payload: dict[str, Any] = {
+        "python_executable": str(Path(sys.executable).resolve(strict=True)),
+        "python_version": sys.version,
+        "torch_version": str(torch.__version__),
+        "cuda_version": None if torch.version.cuda is None else str(torch.version.cuda),
+        "cuda_available": bool(torch.cuda.is_available()),
+        "logical_device": device,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "physical_gpu_index": physical_index,
+        "physical_gpu_uuid": physical_uuid,
+        "numpy": numpy_identity,
+        "rdkit": rdkit_identity,
+        "torch_geometric": pyg_identity,
+        "cudnn_version": None if cudnn_version is None else int(cudnn_version),
+        "cuda_driver": driver_identity,
+        "environment_manifest": environment_manifest,
+        "environment_manifest_sha256": canonical_sha256(environment_manifest),
+    }
+    if device.startswith("cuda") and torch.cuda.is_available():
+        properties = torch.cuda.get_device_properties(0)
+        payload["visible_device"] = {
+            "name": str(properties.name),
+            "total_memory": int(properties.total_memory),
+            "major": int(properties.major),
+            "minor": int(properties.minor),
+        }
+    if taste_full and (
+        numpy_identity is None
+        or not numpy_identity.get("version")
+        or rdkit_identity is None
+        or not rdkit_identity.get("version")
+        or pyg_identity is None
+        or not pyg_identity.get("version")
+        or cudnn_version is None
+        or driver_identity is None
+    ):
+        raise MolecularGNNResumeError(
+            "TasteMolNet resume runtime closure requires NumPy/RDKit/PyG/cuDNN/driver identities"
+        )
+    return payload
+
+
+def _bundle_output_identity(output_dir: Path) -> dict[str, Any]:
+    audit = verify_checkpoint_bundle(output_dir)
+    result = {
+        "model_sha256": sha256_file(output_dir / "model.pt"),
+        "model_card_sha256": sha256_file(output_dir / "model_card.json"),
+        "sha256s_sha256": sha256_file(output_dir / "sha256sums.txt"),
+        "checkpoint_id": audit["model_card"]["checkpoint_id"],
+        "training_resume_contract_sha256": audit["model_card"].get(
+            "training_resume_contract_sha256"
+        ),
+    }
+    contract_sha = result["training_resume_contract_sha256"]
+    if isinstance(contract_sha, str) and len(contract_sha) == 64:
+        prefix = f".{output_dir.name}.finalizing-{contract_sha}"
+        claim = output_dir.parent / f"{prefix}.claim.json"
+        ready = output_dir.parent / f"{prefix}.complete.json"
+        result["finalization_claim_sha256"] = sha256_file(claim)
+        result["finalization_completion_sha256"] = sha256_file(ready)
+    return result
+
+
+def _publish_staged_bundle(workspace: FinalizationWorkspace) -> Path:
+    """Publish a verified deterministic stage through atomic no-replace."""
+
+    verify_checkpoint_bundle(workspace.staging)
+    workspace.mark_ready()
+    workspace.publish()
+    verify_checkpoint_bundle(workspace.output_dir)
+    return workspace.output_dir
+
+
+def _set_seed(seed: int, *, exact_cuda: bool = False) -> None:
     torch = _require_torch()
+    if exact_cuda:
+        required_environment = {
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+            "PYTHONHASHSEED": "7",
+            "NVIDIA_TF32_OVERRIDE": "0",
+            "CUDNN_DETERMINISTIC": "1",
+        }
+        if seed != 7 or any(
+            os.environ.get(key) != value
+            for key, value in required_environment.items()
+        ):
+            raise MolecularGNNResumeError(
+                "Taste CUDA parity requires seed-7 and the frozen deterministic environment"
+            )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    if hasattr(torch, "use_deterministic_algorithms"):
-        torch.use_deterministic_algorithms(True, warn_only=True)
+    if not hasattr(torch, "use_deterministic_algorithms"):
+        raise MolecularGNNResumeError(
+            "PyTorch deterministic-algorithm enforcement is unavailable"
+        )
+    torch.use_deterministic_algorithms(True)
+    if hasattr(torch, "are_deterministic_algorithms_enabled") and not (
+        torch.are_deterministic_algorithms_enabled()
+    ):
+        raise MolecularGNNResumeError(
+            "PyTorch deterministic algorithms did not become mandatory"
+        )
+    if hasattr(torch, "set_deterministic_debug_mode"):
+        torch.set_deterministic_debug_mode("error")
+    if hasattr(torch, "backends") and hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        if hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = False
+    if (
+        hasattr(torch, "backends")
+        and hasattr(torch.backends, "cuda")
+        and hasattr(torch.backends.cuda, "matmul")
+        and hasattr(torch.backends.cuda.matmul, "allow_tf32")
+    ):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    if exact_cuda:
+        cudnn = getattr(getattr(torch, "backends", None), "cudnn", None)
+        cuda_backend = getattr(getattr(torch, "backends", None), "cuda", None)
+        matmul = getattr(cuda_backend, "matmul", None)
+        debug_mode = (
+            torch.get_deterministic_debug_mode()
+            if hasattr(torch, "get_deterministic_debug_mode")
+            else None
+        )
+        if (
+            cudnn is None
+            or getattr(cudnn, "deterministic", None) is not True
+            or getattr(cudnn, "benchmark", None) is not False
+            or getattr(cudnn, "allow_tf32", None) is not False
+            or matmul is None
+            or getattr(matmul, "allow_tf32", None) is not False
+            or (debug_mode is not None and debug_mode != 2)
+        ):
+            raise MolecularGNNResumeError(
+                "Taste CUDA parity could not enforce cuDNN/TF32 error-mode determinism"
+            )
 
 
 def _resolve_device(requested: str | None, config: Mapping[str, Any]) -> str:
@@ -242,6 +1023,24 @@ def _classifier_health_gate(
         recall = source_metrics.get("recall") if isinstance(source_metrics, Mapping) else None
         if recall is None or not math.isfinite(float(recall)) or float(recall) <= 0.0:
             failures.append("source_class_recall_is_not_positive")
+    if bool(raw_config.get("require_all_class_recall", False)):
+        per_class = metrics.get("per_class", {})
+        if not isinstance(per_class, Mapping):
+            failures.append("per_class_metrics_are_unavailable")
+        else:
+            for class_index in range(int(probabilities.shape[1])):
+                class_metrics = per_class.get(str(class_index), {})
+                recall = (
+                    class_metrics.get("recall")
+                    if isinstance(class_metrics, Mapping)
+                    else None
+                )
+                if (
+                    recall is None
+                    or not math.isfinite(float(recall))
+                    or float(recall) <= 0.0
+                ):
+                    failures.append(f"class_{class_index}_recall_is_not_positive")
     if bool(raw_config.get("require_finite", True)):
         if not np.isfinite(probabilities).all() or not all(
             math.isfinite(value) for value in _numeric_values(metrics)
@@ -258,6 +1057,25 @@ def _classifier_health_gate(
         "predicted_classes": sorted(int(value) for value in np.unique(predictions)),
         "failures": failures,
     }
+
+
+def _selection_improves(
+    *,
+    primary: float,
+    tiebreak: float | None,
+    best_primary: float,
+    best_tiebreak: float | None,
+    tolerance: float = 1e-12,
+) -> bool:
+    """Return whether one validation result wins the frozen lexicographic gate."""
+
+    if primary > best_primary + tolerance:
+        return True
+    if abs(primary - best_primary) > tolerance or tiebreak is None:
+        return False
+    if best_tiebreak is None:
+        return True
+    return tiebreak > best_tiebreak + tolerance
 
 
 def _reload_oracle_smoke(
@@ -398,10 +1216,25 @@ def _git_state() -> dict[str, Any]:
         )
         return result.stdout.strip()
 
+    tracked_sources = (
+        PROJECT_ROOT / "scripts" / "train_molecular_gnn.py",
+        PROJECT_ROOT / "src" / "train" / "molecular_gnn_resume.py",
+        PROJECT_ROOT / "src" / "models" / "molecular_gnn.py",
+        PROJECT_ROOT / "src" / "data" / "molecular_graph_dataset.py",
+        PROJECT_ROOT / "src" / "oracles" / "gnn_oracle.py",
+    )
     return {
         "commit": command("rev-parse", "HEAD"),
+        "tree": command("rev-parse", "HEAD^{tree}"),
         "branch": command("branch", "--show-current"),
         "status_short": command("status", "--short").splitlines(),
+        "tracked_source_files": [
+            {
+                "path": path.relative_to(PROJECT_ROOT).as_posix(),
+                "sha256": sha256_file(path),
+            }
+            for path in tracked_sources
+        ],
     }
 
 
@@ -447,17 +1280,138 @@ def main(argv: list[str] | None = None) -> int:
     source_label = spec.source_label if args.source_label is None else int(args.source_label)
     if num_classes != spec.num_classes or source_label != spec.source_label:
         raise ValueError("CLI class semantics conflict with the active dataset registry.")
+    if dataset_id == "tastemolnet" and args.profile == "full":
+        physical_cli_paths = {
+            "Taste data directory": args.data_dir,
+            "Taste output directory": args.output_dir,
+            "Taste training-state directory": args.training_state_dir,
+            "Taste prepared root": args.taste_prepared_root,
+            "Taste graph-cache root": args.graph_cache_root,
+            "Taste policy file": args.taste_policy_file,
+            "Taste policy receipt": args.taste_policy_receipt,
+        }
+        for label, value in physical_cli_paths.items():
+            if value is not None:
+                assert_no_symlink_components(value, label=label)
+        for value in args.config:
+            assert_no_symlink_components(value, label="Taste config file")
     split_paths = _resolve_split_paths(args)
-    output_dir = Path(args.output_dir).expanduser().resolve()
-    if output_dir.exists() and any(output_dir.iterdir()):
+    taste_runtime = _taste_runtime_authority(
+        args,
+        dataset_id=dataset_id,
+        profile=args.profile,
+        split_paths=split_paths,
+    )
+    output_dir = Path(os.path.abspath(Path(args.output_dir).expanduser()))
+    git_state = _git_state()
+    if taste_runtime is not None:
+        if git_state["status_short"]:
+            raise MolecularGNNResumeError(
+                "TasteMolNet full training requires a clean immutable Git worktree"
+            )
+        if len(str(git_state.get("commit", ""))) != 40 or len(
+            str(git_state.get("tree", ""))
+        ) != 40:
+            raise MolecularGNNResumeError(
+                "TasteMolNet full training requires commit/tree source identity"
+            )
+        _, authority, _ = taste_runtime
+        for private_root in (authority.prepared_root, authority.graph_cache_root):
+            if paths_overlap(output_dir, private_root):
+                raise ValueError(
+                    "immutable output must be disjoint from private Taste prepared/cache roots"
+                )
+    training_state_dir = (
+        None
+        if args.training_state_dir is None
+        else Path(os.path.abspath(Path(args.training_state_dir).expanduser()))
+    )
+    if args.resume_training and training_state_dir is None:
+        raise ValueError("--resume-training requires --training-state-dir")
+    if dataset_id == "tastemolnet" and args.profile == "full" and training_state_dir is None:
+        raise ValueError(
+            "TasteMolNet full training requires a separate --training-state-dir"
+        )
+    if training_state_dir is not None:
+        if (
+            training_state_dir == output_dir
+            or training_state_dir in output_dir.parents
+            or output_dir in training_state_dir.parents
+        ):
+            raise ValueError("training-state root and immutable output must be disjoint")
+        if taste_runtime is not None:
+            _, authority, _ = taste_runtime
+            for private_root in (authority.prepared_root, authority.graph_cache_root):
+                if (
+                    training_state_dir == private_root
+                    or training_state_dir in private_root.parents
+                    or private_root in training_state_dir.parents
+                ):
+                    raise ValueError(
+                        "training-state root must be disjoint from private Taste inputs"
+                    )
+    output_preexisting = output_dir.exists() and any(output_dir.iterdir())
+    if output_preexisting and not args.resume_training:
         raise FileExistsError(f"Molecular GNN output must be fresh: {output_dir}")
+    if output_dir.exists() and not output_preexisting and training_state_dir is not None:
+        raise FileExistsError(
+            "resumable molecular GNN output must remain absent until terminal publication"
+        )
+    if output_preexisting and args.resume_published_output_receipt:
+        if not args.resume_training:
+            raise MolecularGNNResumeError(
+                "Published-output adoption requires --resume-training"
+            )
+        from src.utils.autodl_tastemolnet_gine_controller_v1 import (
+            validate_tastemolnet_published_output_adoption_readonly,
+        )
+
+        validate_tastemolnet_published_output_adoption_readonly(
+            args.resume_published_output_receipt,
+            expected_output_dir=output_dir,
+            expected_training_state_root=training_state_dir,
+        )
+    elif taste_runtime is not None and output_preexisting:
+        raise MolecularGNNResumeError(
+            "Taste published output requires controller-issued completion-only adoption"
+        )
+    elif args.resume_published_output_receipt:
+        raise MolecularGNNResumeError(
+            "published-output adoption is forbidden without a published output"
+        )
 
     training_cfg = config.get("training", {})
     if not isinstance(training_cfg, Mapping):
         raise ValueError("training config must be a mapping.")
     seed = int(args.seed if args.seed is not None else training_cfg.get("primary_seed", 7))
-    _set_seed(seed)
+    if taste_runtime is not None:
+        resolved_configs = _resolved_config_paths(args)
+        verified_gine = (PROJECT_ROOT / "configs/gnn/gine.yaml").resolve(strict=True)
+        gnn_configs = [
+            path for path in resolved_configs if path.parent == verified_gine.parent
+        ]
+        try:
+            minimum_free_gb = int(os.environ.get("MIN_PERSISTENT_FREE_GB", "-1"))
+        except ValueError as exc:
+            raise MolecularGNNResumeError(
+                "Taste minimum persistent free-space threshold is malformed"
+            ) from exc
+        if (
+            args.backbone != "gine"
+            or seed != 7
+            or gnn_configs != [verified_gine]
+            or minimum_free_gb < 20
+        ):
+            raise MolecularGNNResumeError(
+                "Taste full training must use the verified GINE config, seed 7, and >=20 GiB gate"
+            )
+    _set_seed(seed, exact_cuda=taste_runtime is not None)
     device = _resolve_device(args.device, config)
+    runtime_identity = _runtime_identity(
+        torch=torch,
+        device=device,
+        taste_full=taste_runtime is not None,
+    )
     profile = args.profile
     smoke = profile == "smoke"
     max_epochs = int(
@@ -504,21 +1458,21 @@ def main(argv: list[str] | None = None) -> int:
 
     schema = default_molecular_feature_schema()
     featurizer = MolecularGraphFeaturizer(schema)
-    train_dataset = MolecularGraphDataset.from_csv(
-        split_paths["train"],
+    train_dataset, validation_dataset, training_input = _load_fit_datasets(
+        dataset_id=dataset_id,
+        profile=profile,
+        split_paths=split_paths,
+        graph_cache_root=args.graph_cache_root,
         num_classes=num_classes,
         featurizer=featurizer,
-        expected_split="train",
-        limit=train_limit,
+        train_limit=train_limit,
+        validation_limit=validation_limit,
         stratified_limit=smoke,
-    )
-    validation_dataset = MolecularGraphDataset.from_csv(
-        split_paths["validation"],
-        num_classes=num_classes,
-        featurizer=featurizer,
-        expected_split="val",
-        limit=validation_limit,
-        stratified_limit=smoke,
+        graph_cache_manifest_sha256=(
+            None
+            if taste_runtime is None
+            else taste_runtime[1].graph_cache_manifest_sha256
+        ),
     )
     # The held-out test split is never parsed or featurized by this training
     # entrypoint.  Only its path and streaming SHA-256 are frozen below.
@@ -550,6 +1504,10 @@ def main(argv: list[str] | None = None) -> int:
         gnn_values["backbone"] = args.backbone
     gnn_values["num_classes"] = num_classes
     model_config = MolecularGNNConfig.from_mapping(gnn_values)
+    if taste_runtime is not None and model_config.backbone != "gine":
+        raise MolecularGNNResumeError(
+            "verified Taste backbone and instantiated model config differ"
+        )
     model = MolecularGNN(
         model_config,
         node_cardinalities=schema.node_cardinalities,
@@ -569,13 +1527,124 @@ def main(argv: list[str] | None = None) -> int:
     )
     clip_norm = float(training_cfg.get("gradient_clip_norm", 5.0))
     selection_metric = str(training_cfg.get("selection_metric", "macro_f1"))
+    raw_tiebreak_metric = training_cfg.get("selection_tiebreak_metric")
+    selection_tiebreak_metric = (
+        None
+        if raw_tiebreak_metric is None or not str(raw_tiebreak_metric).strip()
+        else str(raw_tiebreak_metric)
+    )
+    resume_store: MolecularGNNResumeStore | None = None
+    output_authority: OutputParentAuthority | None = None
+    if training_state_dir is not None:
+        resume_contract = _training_resume_contract(
+            args=args,
+            dataset_id=dataset_id,
+            profile=profile,
+            output_dir=output_dir,
+            split_paths=split_paths,
+            taste_runtime=taste_runtime,
+            model_config=model_config,
+            feature_schema=schema.to_dict(),
+            max_epochs=max_epochs,
+            patience=patience,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            seed=seed,
+            num_workers=num_workers,
+            class_weighted=class_weighted,
+            weighted_sampler=weighted_sampler,
+            selection_metric=selection_metric,
+            selection_tiebreak_metric=selection_tiebreak_metric,
+            clip_norm=clip_norm,
+            config=config,
+            git_state=git_state,
+            runtime_identity=runtime_identity,
+            training_input=training_input,
+        )
+        resume_store = MolecularGNNResumeStore(
+            training_state_dir,
+            resume=args.resume_training,
+            contract=resume_contract,
+            torch_module=torch,
+        )
+        output_authority = OutputParentAuthority(
+            output_dir,
+            contract_sha256=resume_store.contract_sha256,
+            resume=args.resume_training,
+        )
+        output_authority.open()
+        resume_store.open()
+        completion = resume_store.completion()
+        if output_preexisting:
+            output_authority.verify()
+            terminal_workspace = FinalizationWorkspace(
+                output_dir,
+                contract_sha256=resume_store.contract_sha256,
+                resume=True,
+                parent_authority=output_authority,
+                training_state_root=training_state_dir,
+            )
+            terminal_workspace.verify_published()
+            identity = _bundle_output_identity(output_dir)
+            if identity.get("training_resume_contract_sha256") != (
+                resume_store.contract_sha256
+            ):
+                raise MolecularGNNResumeError(
+                    "existing terminal bundle belongs to another training contract"
+                )
+            if completion is None:
+                completion = resume_store.mark_complete(
+                    output_dir=output_dir, output_identity=identity
+                )
+            elif completion.get("output_identity") != identity:
+                raise MolecularGNNResumeError(
+                    "terminal bundle identity differs from training completion manifest"
+                )
+            resume_store.close()
+            output_authority.close()
+            terminal_workspace.close()
+            print(json.dumps({"training_completion": completion}, sort_keys=True), flush=True)
+            if dataset_id == "tastemolnet" and profile == "full":
+                print("[TASTE_GINE_THREE_CLASS_PASS]", flush=True)
+            print("[MOLECULAR_GNN_TRAIN_OK]", flush=True)
+            return 0
+        if completion is not None:
+            raise MolecularGNNResumeError(
+                "training completion manifest exists but immutable output is absent"
+            )
     history: list[dict[str, Any]] = []
     best_state: dict[str, Any] | None = None
     best_epoch = 0
     best_value = -math.inf
+    best_tiebreak_value: float | None = None
     epochs_without_improvement = 0
+    first_epoch = 1
+    if resume_store is not None:
+        snapshot = resume_store.load(model=model, optimizer=optimizer)
+        if snapshot is not None:
+            first_epoch = snapshot.next_epoch
+            history = snapshot.history
+            best_state = (
+                None if snapshot.best_state is None else dict(snapshot.best_state)
+            )
+            best_epoch = snapshot.best_epoch
+            best_value = snapshot.best_primary
+            best_tiebreak_value = snapshot.best_tiebreak
+            epochs_without_improvement = snapshot.epochs_without_improvement
+            if epochs_without_improvement >= patience:
+                # The previous process committed the exact early-stop boundary
+                # and then died during finalization.  Do not execute one extra
+                # epoch on resume; continue directly to the frozen bundle.
+                first_epoch = max_epochs + 1
+            for optimizer_state in optimizer.state.values():
+                for key, value in list(optimizer_state.items()):
+                    if isinstance(value, torch.Tensor):
+                        optimizer_state[key] = value.to(device)
 
-    for epoch in range(1, max_epochs + 1):
+    for epoch in range(first_epoch, max_epochs + 1):
+        if output_authority is not None:
+            output_authority.verify()
         model.train()
         total_loss = 0.0
         total_examples = 0
@@ -598,19 +1667,44 @@ def main(argv: list[str] | None = None) -> int:
             num_classes=num_classes,
         )
         metric_value = validation["metrics"].get(selection_metric)
-        if metric_value is None:
+        if metric_value is None or not math.isfinite(float(metric_value)):
             raise ValueError(
-                f"Selection metric {selection_metric!r} is unavailable on validation."
+                f"Selection metric {selection_metric!r} is unavailable or nonfinite "
+                "on validation."
             )
+        tiebreak_value: float | None = None
+        if selection_tiebreak_metric is not None:
+            observed_tiebreak = validation["metrics"].get(selection_tiebreak_metric)
+            if observed_tiebreak is None or not math.isfinite(
+                float(observed_tiebreak)
+            ):
+                raise ValueError(
+                    "Selection tie-break metric "
+                    f"{selection_tiebreak_metric!r} is unavailable or nonfinite "
+                    "on validation."
+                )
+            tiebreak_value = float(observed_tiebreak)
         epoch_row = {
             "epoch": epoch,
             "train_loss": total_loss / max(1, total_examples),
             "validation": validation["metrics"],
+            "selection": {
+                "primary_metric": selection_metric,
+                "primary_value": float(metric_value),
+                "tiebreak_metric": selection_tiebreak_metric,
+                "tiebreak_value": tiebreak_value,
+            },
         }
         history.append(epoch_row)
         print(json.dumps(epoch_row, sort_keys=True), flush=True)
-        if float(metric_value) > best_value + 1e-12:
+        if _selection_improves(
+            primary=float(metric_value),
+            tiebreak=tiebreak_value,
+            best_primary=best_value,
+            best_tiebreak=best_tiebreak_value,
+        ):
             best_value = float(metric_value)
+            best_tiebreak_value = tiebreak_value
             best_epoch = epoch
             best_state = {
                 key: value.detach().cpu().clone()
@@ -619,6 +1713,26 @@ def main(argv: list[str] | None = None) -> int:
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
+        if resume_store is not None:
+            assert output_authority is not None
+            output_authority.verify()
+            resume_store.save(
+                completed_epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                best_state=best_state,
+                best_epoch=best_epoch,
+                best_primary=best_value,
+                best_tiebreak=best_tiebreak_value,
+                epochs_without_improvement=epochs_without_improvement,
+                history=history,
+                metrics={
+                    "train_loss": epoch_row["train_loss"],
+                    "selection": epoch_row["selection"],
+                    "early_stop_counter": epochs_without_improvement,
+                },
+            )
+            output_authority.verify()
         if epochs_without_improvement >= patience:
             break
     if best_state is None:
@@ -640,6 +1754,22 @@ def main(argv: list[str] | None = None) -> int:
         profile=profile,
         training_config=training_cfg,
     )
+    calibration_cfg = config.get("calibration", {})
+    if not isinstance(calibration_cfg, Mapping):
+        raise ValueError("calibration config must be a mapping.")
+    fit_on_validation = bool(calibration_cfg.get("fit_on_validation", False))
+    if fit_on_validation:
+        if str(calibration_cfg.get("split", "validation")) != "validation":
+            raise ValueError(
+                "Frozen temperature scaling may use validation only."
+            )
+        temperature_scaling = fit_temperature_scaling(
+            final_validation["logits"],
+            final_validation["labels"],
+            max_iter=int(calibration_cfg.get("max_iter", 100)),
+        )
+    else:
+        temperature_scaling = None
     split_files = {
         name: {"path": str(path), "sha256": sha256_file(path)}
         for name, path in split_paths.items()
@@ -675,6 +1805,8 @@ def main(argv: list[str] | None = None) -> int:
         "best_epoch": best_epoch,
         "selection_metric": selection_metric,
         "best_validation_selection_value": best_value,
+        "selection_tiebreak_metric": selection_tiebreak_metric,
+        "best_validation_tiebreak_value": best_tiebreak_value,
         "epochs_completed": len(history),
         "history": history,
         "final_validation": final_validation["metrics"],
@@ -683,6 +1815,8 @@ def main(argv: list[str] | None = None) -> int:
         "class_weighted_loss": class_weighted,
         "weighted_sampler": weighted_sampler,
         "health_gate": health_gate,
+        "temperature_scaling": temperature_scaling,
+        "training_input": training_input,
     }
     resolved_config = copy.deepcopy(config)
     resolved_config["gnn"] = model_config.to_dict()
@@ -697,7 +1831,6 @@ def main(argv: list[str] | None = None) -> int:
         "class_weighted_loss": class_weighted,
         "weighted_sampler": weighted_sampler,
     }
-    git_state = _git_state()
     model_card = {
         "dataset": dataset_id,
         "backbone": model_config.backbone,
@@ -707,18 +1840,79 @@ def main(argv: list[str] | None = None) -> int:
         "training_commit": git_state["commit"],
         "best_epoch": best_epoch,
         "selection_metric": selection_metric,
+        "selection_tiebreak_metric": selection_tiebreak_metric,
         "selection_split": "validation",
         "temperature_calibration_split": "validation",
+        "temperature_calibration_fit_on_validation": fit_on_validation,
         "calibration_used_for_model_fit_or_selection": False,
         "test_used_for_model_fit_or_selection": False,
         "test_loaded_during_training": False,
         "test_evaluated_during_training": False,
         "profile": profile,
         "health_gate": health_gate,
+        "graph_cache_used": training_input["graph_cache_used"],
+        "training_input_mode": training_input["mode"],
     }
+    if resume_store is not None:
+        model_card.update(
+            {
+                "training_resume_schema": "molecular_gnn_epoch_resume_v1",
+                "training_resume_contract_sha256": resume_store.contract_sha256,
+                "training_state_separate_from_immutable_output": True,
+            }
+        )
+    if taste_runtime is not None:
+        taste_policy, taste_authority, taste_receipt = taste_runtime
+        model_card.update(
+            {
+                "data_use_policy_file_sha256": taste_policy.file_sha256,
+                "data_use_policy_canonical_sha256": taste_policy.canonical_sha256,
+                "data_use_policy_receipt_sha256": taste_receipt.sha256,
+                "paper_result_reporting_allowed": True,
+                "dataset_redistributed": False,
+                "upstream_license_not_explicit": True,
+                "upstream_license_status": "NOT_EXPLICITLY_STATED",
+                "license_pass_claimed": False,
+                "graph_cache_manifest_sha256": (
+                    taste_authority.graph_cache_manifest_sha256
+                ),
+            }
+        )
+    bundle_dir = output_dir
+    finalization_workspace: FinalizationWorkspace | None = None
+    if resume_store is not None:
+        assert output_authority is not None
+        output_authority.verify()
+        resume_store.verify_writer_authority()
+        finalization_workspace = FinalizationWorkspace(
+            output_dir,
+            contract_sha256=resume_store.contract_sha256,
+            resume=args.resume_training,
+            parent_authority=output_authority,
+            training_state_root=training_state_dir,
+        )
+        bundle_dir, already_complete = finalization_workspace.prepare()
+        resume_store.verify_writer_authority()
+        if already_complete:
+            verify_checkpoint_bundle(bundle_dir)
+            finalization_workspace.publish()
+            finalization_workspace.verify_published()
+            identity = _bundle_output_identity(output_dir)
+            completion = resume_store.mark_complete(
+                output_dir=output_dir, output_identity=identity
+            )
+            output_authority.verify()
+            resume_store.close()
+            output_authority.close()
+            finalization_workspace.close()
+            print(json.dumps({"training_completion": completion}, sort_keys=True), flush=True)
+            if dataset_id == "tastemolnet" and profile == "full":
+                print("[TASTE_GINE_THREE_CLASS_PASS]", flush=True)
+            print("[MOLECULAR_GNN_TRAIN_OK]", flush=True)
+            return 0
     bundle = save_gnn_checkpoint_bundle(
         model=model,
-        checkpoint_dir=output_dir,
+        checkpoint_dir=bundle_dir,
         feature_schema=schema,
         config=resolved_config,
         model_card=model_card,
@@ -731,25 +1925,171 @@ def main(argv: list[str] | None = None) -> int:
             final_validation["logits"],
             final_validation["probabilities"],
         ),
+        temperature_scaling=temperature_scaling,
         environment=_environment(device),
         git_state=git_state,
+        defer_tastemolnet_closure=taste_runtime is not None,
     )
+    if health_gate["status"] == "FAIL":
+        print(json.dumps(bundle, sort_keys=True), flush=True)
+        print(json.dumps({"health_gate": health_gate}, sort_keys=True), flush=True)
+        if dataset_id == "bace":
+            print("[BACE_GNN_HEALTH_GATE_FAILED]", flush=True)
+        if resume_store is not None:
+            resume_store.close()
+            assert output_authority is not None
+            output_authority.close()
+            if finalization_workspace is not None:
+                finalization_workspace.close()
+        return 3
+    if taste_runtime is not None:
+        start_policy, start_authority, start_receipt = taste_runtime
+        terminal_runtime = _taste_runtime_authority(
+            args,
+            dataset_id=dataset_id,
+            profile=profile,
+            split_paths=split_paths,
+        )
+        assert terminal_runtime is not None
+        terminal_policy, terminal_authority, terminal_receipt = terminal_runtime
+        if (
+            terminal_policy.file_sha256 != start_policy.file_sha256
+            or terminal_policy.canonical_sha256 != start_policy.canonical_sha256
+            or terminal_authority.evidence() != start_authority.evidence()
+            or terminal_receipt.sha256 != start_receipt.sha256
+            or terminal_receipt.payload != start_receipt.payload
+        ):
+            raise TasteResearchPolicyError(
+                "Taste policy/private-data authority changed during training"
+            )
+        policy_binding = {
+            "schema_version": "tastemolnet_training_policy_binding_v1",
+            "dataset": "tastemolnet",
+            "status": "NOT_EXPLICITLY_STATED",
+            "authorization_status": "RESEARCH_REPORTING_ALLOWED_NO_REDISTRIBUTION",
+            "policy": terminal_policy.evidence(),
+            "policy_receipt": {
+                "path": str(terminal_receipt.path),
+                "sha256": terminal_receipt.sha256,
+            },
+            "private_data_authority": terminal_authority.evidence(),
+            "paper_result_reporting_allowed": True,
+            "paper_results_reporting_allowed_by_project_policy": True,
+            "dataset_redistributed": False,
+            "data_redistribution_allowed": False,
+            "upstream_license_not_explicit": True,
+            "upstream_license_status": "NOT_EXPLICITLY_STATED",
+            "upstream_license_claimed_resolved": False,
+            "license_pass_claimed": False,
+            "public_artifact_audit_required": True,
+            "hpc_execution_authorized": False,
+        }
+        graph_cache_usage = {
+            "schema_version": "tastemolnet_graph_cache_usage_v1",
+            "dataset": "tastemolnet",
+            "mode": "read_only_existing_cache",
+            "graph_cache_used": training_input["graph_cache_used"],
+            "graph_cache_root": str(terminal_authority.graph_cache_root),
+            "graph_cache_manifest_sha256": (
+                terminal_authority.graph_cache_manifest_sha256
+            ),
+            "cache_files": training_input.get("cache_files", {}),
+            "cache_contract": training_input.get("cache_contract"),
+            "loaded_splits": ["train", "validation"],
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "test_metadata_hash_only": True,
+            "graph_cache_rebuilt": False,
+            "data_reprepared": False,
+        }
+        oracle_manifest = {
+            "schema_version": "tastemolnet_three_class_gine_oracle_manifest_v1",
+            "dataset": "tastemolnet",
+            "status": "PASS",
+            "checkpoint_id": bundle["checkpoint_id"],
+            "classifier_family": "gine",
+            "oracle_backend": "gnn",
+            "rf_oracle_used": False,
+            "num_classes": 3,
+            "label_map": {"0": "Bitter", "1": "Sweet", "2": "Tasteless"},
+            "source_label": 1,
+            "source_label_name": "Sweet",
+            "selection_split": "validation",
+            "selection_metric": selection_metric,
+            "selection_tiebreak_metric": selection_tiebreak_metric,
+            "temperature_calibration_split": "validation",
+            "temperature_scaling": temperature_scaling,
+            "health_gate": health_gate,
+            "test_loaded": False,
+            "test_evaluated": False,
+            "test_path_sha256_only": split_files["test"],
+            "paper_result_reporting_allowed": True,
+            "dataset_redistributed": False,
+            "upstream_license_not_explicit": True,
+            "public_artifact_audit_required": True,
+        }
+        _write_new_json(bundle_dir / "data_use_policy_binding.json", policy_binding)
+        _write_new_json(bundle_dir / "graph_cache_usage.json", graph_cache_usage)
+        _write_new_json(bundle_dir / "oracle_manifest.json", oracle_manifest)
+        update_checkpoint_sha256sums(bundle_dir)
+        bundle["audit"] = verify_checkpoint_bundle(bundle_dir)
+        final_runtime = _taste_runtime_authority(
+            args,
+            dataset_id=dataset_id,
+            profile=profile,
+            split_paths=split_paths,
+        )
+        assert final_runtime is not None
+        final_policy, final_authority, final_receipt = final_runtime
+        if (
+            final_policy.file_sha256 != terminal_policy.file_sha256
+            or final_policy.canonical_sha256 != terminal_policy.canonical_sha256
+            or final_authority.evidence() != terminal_authority.evidence()
+            or final_receipt.sha256 != terminal_receipt.sha256
+            or final_receipt.payload != terminal_receipt.payload
+        ):
+            raise TasteResearchPolicyError(
+                "Taste policy/private-data authority drifted before terminal marker"
+            )
+    if resume_store is not None:
+        assert finalization_workspace is not None
+        assert output_authority is not None
+        output_authority.verify()
+        _publish_staged_bundle(finalization_workspace)
+        finalization_workspace.verify_published()
+        bundle["checkpoint_dir"] = str(output_dir)
+        bundle["audit"] = verify_checkpoint_bundle(output_dir)
+        output_identity = _bundle_output_identity(output_dir)
+        if output_identity.get("training_resume_contract_sha256") != (
+            resume_store.contract_sha256
+        ):
+            raise MolecularGNNResumeError(
+                "published bundle lost its training resume contract"
+            )
+        resume_store.mark_complete(
+            output_dir=output_dir,
+            output_identity=output_identity,
+        )
+        output_authority.verify()
     if smoke:
         reload_smoke = _reload_oracle_smoke(
             output_dir, validation_dataset, device=device
         )
         print(json.dumps({"oracle_reload_smoke": reload_smoke}, sort_keys=True), flush=True)
     print(json.dumps(bundle, sort_keys=True), flush=True)
-    if health_gate["status"] == "FAIL":
-        print(json.dumps({"health_gate": health_gate}, sort_keys=True), flush=True)
-        if dataset_id == "bace":
-            print("[BACE_GNN_HEALTH_GATE_FAILED]", flush=True)
-        return 3
     if dataset_id == "bace" and profile == "smoke":
         print("[BACE_GNN_SMOKE_PASS]", flush=True)
     if dataset_id == "bace" and profile == "full":
         print("[BACE_GNN_TRAIN_PASS]", flush=True)
+    if dataset_id == "tastemolnet" and profile == "full":
+        print("[TASTE_GINE_THREE_CLASS_PASS]", flush=True)
     print("[MOLECULAR_GNN_TRAIN_OK]", flush=True)
+    if resume_store is not None:
+        resume_store.close()
+        assert output_authority is not None
+        output_authority.close()
+        assert finalization_workspace is not None
+        finalization_workspace.close()
     return 0
 
 
