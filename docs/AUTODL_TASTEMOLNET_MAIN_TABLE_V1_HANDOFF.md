@@ -50,6 +50,40 @@ split provenance, metrics, validation predictions, environment/Git evidence,
 and `sha256sums.txt`. It emits a first-batch progress event and verifies a real
 checkpoint reload before `[TASTE_GINE_THREE_CLASS_PASS]`.
 
+T3 does not refit that bundle. It adopts the temperature already fitted on T2
+validation logits only after recomputing NLL, ECE, Brier score, and argmax
+invariance from the hash-closed bundle-internal `validation_predictions.csv`
+and proving the complete source inventory unchanged. It opens no external
+split payload and runs CPU-only without claiming a GPU. Its fresh evidence
+root emits `[TASTE_GINE_CALIBRATION_PASS]` and a controller-facing `gate.json`;
+it is named `calibrated-<timestamp>-<pid>`, contains no model copy, and binds
+the single `checkpoint_id` that every downstream method must consume.
+The root must be the exact direct fresh child of
+`$AUTODL_ARTIFACT_ROOT/gnn_oracles/tastemolnet/gine/seed7`; neither a copied
+checkpoint subtree nor an arbitrary output location is accepted.
+
+T4 depends on that exact T3 gate, uses the selected `model.pt` once on physical
+GPU 1, and opens only the frozen graph-cache manifest plus `calibration.pt`.
+The cohort is the first sixteen calibration-order rows that are true Sweet,
+predicted Sweet, and have exactly four valid connected one/two-atom deletions.
+The smoke requires observed strict flips to both Bitter and Tasteless, then
+records aggregate three-class destinations and counterfactual drops only. It
+writes no CSV, SMILES, molecule identifiers, residual rows, or per-example
+predictions, and must record `test_payload_opened=false` before emitting
+`[TASTE_MULTICLASS_ORACLE_PASS]`.
+
+Both stages retain the artifact/output-parent/output descriptors across
+creation and preparation, then revalidate all source bytes/stat inventories,
+both exact tracked policy authorities, and the prepared output closure while
+the marker is absent. The PASS marker is the final commit. The T4 root uses the
+same exact artifact formula with a
+`t4-oracle-smoke-*` basename. Public held-stage and held-checkpoint APIs expose
+the exact T2 path plus checkpoint ID/full inventory/stat inventory/manifest
+hashes for T6; an equal-byte copied or symlink-aliased checkpoint is rejected.
+The supplemental policy contains a typed train-only/no-RF/no-calibration/no-test
+T6 authority whose sole training payload is the frozen prepared train CSV, but
+T6 runtime/controller implementation remains a separate reviewed successor.
+
 ## Runtime evidence locations
 
 The immutable deployment/launch step copies a runtime-populated version of

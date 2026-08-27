@@ -813,10 +813,21 @@ def validate_tastemolnet_policy_receipt(
     return TastePolicyReceipt(path=source, sha256=sha256_file(source), payload=payload)
 
 
-def load_tastemolnet_research_policy(
-    path: str | Path, *, expected_file_sha256: str | None = None
+def parse_tastemolnet_research_policy(
+    data: bytes,
+    *,
+    source: str | Path,
+    expected_file_sha256: str | None = None,
 ) -> TasteResearchPolicy:
-    source, data = _read_physical(path)
+    """Validate policy bytes already read through a caller-held authority.
+
+    Downstream stages use this entry point after opening the exact tracked
+    policy root-to-leaf with retained descriptors.  Keeping parsing separate
+    from pathname lookup prevents a second, path-based reopen from weakening
+    that stronger authority.
+    """
+
+    source_path = Path(source)
     file_sha256 = hashlib.sha256(data).hexdigest()
     if expected_file_sha256 is not None and file_sha256 != _hex(
         expected_file_sha256, field="expected_file_sha256"
@@ -832,10 +843,21 @@ def load_tastemolnet_research_policy(
         raise TasteResearchPolicyError("Taste policy must contain one mapping")
     _validate(payload)
     return TasteResearchPolicy(
-        path=source,
+        path=source_path,
         file_sha256=file_sha256,
         canonical_sha256=stable_json_sha256(payload),
         payload=payload,
+    )
+
+
+def load_tastemolnet_research_policy(
+    path: str | Path, *, expected_file_sha256: str | None = None
+) -> TasteResearchPolicy:
+    source, data = _read_physical(path)
+    return parse_tastemolnet_research_policy(
+        data,
+        source=source,
+        expected_file_sha256=expected_file_sha256,
     )
 
 
@@ -858,6 +880,7 @@ __all__ = [
     "TasteLocalDataAuthority",
     "TastePolicyReceipt",
     "load_tastemolnet_research_policy",
+    "parse_tastemolnet_research_policy",
     "validate_tastemolnet_local_authority",
     "validate_tastemolnet_policy_receipt",
     "sha256_file",

@@ -1742,6 +1742,39 @@ Mutagenicity roadmaps.
 - [x] Add a fresh policy-v2 main-controller namespace, typed old-block adoption,
   T0--T16 evidence skeleton, main-controller owner lock, event logs, GPU-2
   classifier-independent READY lane, and an explicit no-ablation contract.
+- [x] Add an exact supplemental downstream policy bound to policy v2: T3 may
+  only adopt the already validation-fitted temperature, T4 may open only the
+  authenticated graph-cache manifest and `calibration.pt` on GPU 1, and a
+  separately typed future T6 smoke uses only the frozen prepared train CSV,
+  is train-only with frozen-GINE reward, and has no
+  RF/validation/calibration/test access.
+- [x] Recompute T3 NLL/ECE/Brier/argmax evidence from the immutable bundle,
+  forbid refit/copy/mutation, retain `model.pt` as the selected asset, and
+  publish a fresh hash-closed controller-facing gate.
+- [x] Add the deterministic sixteen-parent multiclass T4 interface smoke with
+  bounded connected deletions, one loaded GINE oracle, batch/single parity,
+  Sweet-to-Bitter/Sweet-to-Tasteless destination aggregation, and fail-closed
+  invalid/full-parent controls.
+- [x] Keep T4 outputs aggregate-only: no CSV, SMILES, molecule IDs, or
+  per-example predictions; keep train/validation/test payloads unopened and
+  record `test_payload_opened=false`.
+- [x] Add thin AutoDL wrappers, an AutoDL-only non-runnable paired Slurm parity
+  entrypoint, exact-type hostile tests, cache-open guards, and output-hash
+  closure tests.
+- [x] Anchor checkpoint, cache, and stage-output child reads to retained
+  physical directory descriptors; reject permanent and temporary
+  swap-and-restore attempts during temperature/model/gate reads.
+- [x] Constrain T3/T4 output to exact direct fresh `calibrated-*` and
+  `t4-oracle-smoke-*` children of the AutoDL Taste/GINE/seed-7 artifact root;
+  retain root-to-leaf output descriptors, reclose checkpoint/cache/T3/policy
+  authorities while the output remains non-terminal, and publish PASS marker
+  last without any check-then-unlink cleanup.
+- [x] Expose retained stage, checkpoint, and supplemental-policy authorities so
+  T6 can bind the exact checkpoint path/ID/full/stat/manifest hashes across its
+  model/reward load; equal-byte copies and symlink aliases fail closed.
+- [ ] Add an explicit main-controller resume action that may run T3 only from
+  strict T2 PASS/T3 READY, then T4 only from T3 PASS/T4 READY; it must never
+  fall back to T2 or launch another classifier training run.
 
 ## 2026-08-25: c766 failed-selection recovery authority
 

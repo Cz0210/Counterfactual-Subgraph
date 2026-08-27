@@ -94,6 +94,81 @@ lane and is not silently used by the classifier.
 HPC is forbidden for this campaign. Paired Slurm files exist only to satisfy
 repository CLI parity and intentionally exit before running the command.
 
+### Downstream T3/T4/T6 supplemental authority
+
+The base T2 policy intentionally freezes classifier fitting to train and
+validation. A second exact, machine-readable policy narrows the later access
+rather than broadening the trainer:
+
+```text
+configs/data_usage/tastemolnet_downstream_research_no_redistribution_v1.json
+```
+
+It permits only the following typed stages (T6 authority does not itself
+implement or launch T6):
+
+- `T3_GINE_CALIBRATED`: verify and adopt the temperature already fitted by T2
+  on validation logits inside the immutable bundle. It reads the bundle's
+  hash-closed `validation_predictions.csv` as calibration evidence, but opens
+  no external validation CSV or graph payload; no optimizer/fitter is called,
+  and no checkpoint is copied or rewritten. T3 is CPU-only and claims no GPU
+  ownership. Its required fresh `calibrated-<timestamp>-<pid>` root is a
+  hash-closed adoption/reference bundle, not a second classifier copy; the
+  `checkpoint_id` in its gate is the one common calibrated oracle identity
+  consumed by all four methods.
+- `T4_ORACLE_SMOKE`: open the authenticated graph-cache `manifest.json` and
+  `calibration.pt` only, load the selected `model.pt` oracle once on physical
+  GPU 1, and run a deterministic bounded sixteen-parent three-class interface
+  smoke with exactly four real connected deletions per selected parent and
+  observed strict flips to both non-Sweet classes.
+- `T6_OURS_SMOKE`: use the frozen prepared train CSV only for a bounded real PPO smoke
+  whose reward is the same frozen three-class GINE. It requires at least five
+  optimizer steps, an immutable T5 clean-policy input, no RF oracle, and no
+  validation, calibration, or test payload access. A later implementation must
+  still pass the separately reviewed T5/T3/T4/T2 held authorities; this policy
+  entry alone is not an execution implementation.
+
+The supplemental policy still sets `research_compute_allowed=true`,
+`paper_result_reporting_allowed=true`, and
+`data_redistribution_allowed=false`. T4 never opens `train.pt`,
+`validation.pt`, `test.pt`, or a CSV. Its evidence root contains aggregate
+metrics and provenance hashes only—no SMILES, molecule identifiers, or
+per-example predictions. `last.pt` remains terminal checkpoint/reload evidence;
+downstream inference uses the selected `model.pt`.
+
+Both policy files, all T2 checkpoint children, the T3 evidence closure,
+`model.pt`, and the cache children are read relative to retained root-to-leaf
+physical descriptors. T3/T4 output may be created only as a direct fresh child
+of `$AUTODL_ARTIFACT_ROOT/gnn_oracles/tastemolnet/gine/seed7`, with the exact
+`calibrated-*` or `t4-oracle-smoke-*` basename. Output parent/root FDs remain
+held while all documents and their future-marker hash are prepared. The
+complete input/output closure is revalidated while the marker is still absent;
+the PASS marker is then created and fsynced as the final commit operation.
+
+Later consumers can retain `hold_taste_stage_output(...)`, bind its exact
+`checkpoint_dir`, checkpoint ID, full-byte inventory, stat inventory, and
+`sha256sums.txt` SHA through `hold_taste_checkpoint_bundle(...)`, and retain
+the exact T6 policy with `hold_tastemolnet_downstream_policy(...)`. This closes
+the path reopen window while a downstream model or reward adapter loads.
+
+The thin AutoDL entrypoints are:
+
+```bash
+RUN_TASTEMOLNET=1 \
+TASTEMOLNET_T2_BUNDLE=/absolute/immutable/t2-bundle \
+TASTEMOLNET_GRAPH_CACHE_ROOT=/absolute/immutable/graph-cache-root \
+scripts/autodl/run_tastemolnet_gnn_calibration_adoption.sh
+
+RUN_TASTEMOLNET=1 \
+TASTEMOLNET_T2_BUNDLE=/absolute/immutable/t2-bundle \
+TASTEMOLNET_T3_OUTPUT=/absolute/passed/t3-evidence \
+TASTEMOLNET_GRAPH_CACHE_ROOT=/absolute/immutable/graph-cache-root \
+scripts/autodl/run_tastemolnet_gnn_oracle_smoke.sh
+```
+
+Both commands require fresh outputs. The second waits for an idle physical GPU
+1 and binds its UUID before the visible `cuda:0` process is launched.
+
 Full training also requires a private `--training-state-dir` outside the
 immutable classifier output and outside every prepared/cache root.  At the end
 of each epoch it atomically checkpoints the current model, AdamW state, best

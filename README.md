@@ -179,6 +179,22 @@ route may emit `LICENSE_PASS`. See
 `docs/AUTODL_TASTEMOLNET_MAIN_TABLE_V1_HANDOFF.md` and
 `docs/AUTODL_TASTEMOLNET_MULTICLASS_BASELINE_ADAPTERS.md`.
 
+After a formal Taste GINE bundle closes, T3 adopts its existing
+validation-fitted temperature without refitting or copying the checkpoint.
+T4 then uses only the authenticated calibration graph cache for a bounded
+sixteen-parent multiclass oracle smoke on physical GPU 1, with exactly four
+real connected deletions per parent and both non-Sweet strict-flip destinations
+required. The T4 evidence is aggregate-only and never writes a split prediction
+CSV, SMILES, molecule IDs, or test payloads; the supplemental policy remains
+no-redistribution and AutoDL-only. T3/T4 outputs are exact direct fresh children
+under the Taste GINE seed-7 artifact root, are published through retained
+root-to-leaf descriptors, and reclose every input before creating the PASS
+marker as the final commit. The same supplemental policy now also types a
+future T6 Ours smoke as train-only,
+using only the frozen prepared train CSV with a frozen-GINE reward and no
+RF/no-validation/no-calibration/no-test; it does not by itself implement or
+launch T6.
+
 ---
 
 ## 3. Planned Repository Layout

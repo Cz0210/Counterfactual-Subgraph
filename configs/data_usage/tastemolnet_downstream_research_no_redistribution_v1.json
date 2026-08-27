@@ -1,0 +1,124 @@
+{
+  "authorization_basis": "explicit_project_owner_instruction",
+  "base_policy": {
+    "policy_canonical_sha256": "422e50a0d613c47dd451d9386c7dc4707a079087ebe62b3d72e6a6784dd1da3d",
+    "policy_file_sha256": "b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b",
+    "policy_id": "tastemolnet-research-reporting-no-redistribution-v2-20260825",
+    "policy_version": 2,
+    "schema_version": "tastemolnet_research_reporting_policy_v2"
+  },
+  "classifier_contract": {
+    "backbone": "gine",
+    "label_map": {
+      "0": "Bitter",
+      "1": "Sweet",
+      "2": "Tasteless"
+    },
+    "num_classes": 3,
+    "oracle_backend": "gnn",
+    "rf_oracle_used": false,
+    "source_label": 1,
+    "strict_flip": "pred_before == 1 and pred_after != 1"
+  },
+  "data_handling": {
+    "checkpoint_copy_allowed": false,
+    "checkpoint_mutation_allowed": false,
+    "data_preparation_allowed": false,
+    "graph_cache_rebuild_allowed": false,
+    "network_download_allowed": false,
+    "public_full_split_output_allowed": false,
+    "public_molecule_level_output_allowed": false,
+    "source_copy_allowed": false,
+    "temperature_refit_allowed": false
+  },
+  "dataset": "tastemolnet",
+  "effective_date": "2026-08-28",
+  "execution": {
+    "hpc_execution_allowed": false,
+    "platform": "autodl",
+    "stages": {
+      "T3_GINE_CALIBRATED": {
+        "allowed_input_files": [
+          "immutable_t2_bundle"
+        ],
+        "device": "cpu",
+        "fresh_output_required": true,
+        "gpu_uuid_binding_required": false,
+        "max_deletions_per_parent": 0,
+        "mode": "adopt_existing_validation_fit",
+        "num_classes": 3,
+        "physical_gpu_index": null,
+        "run": 1,
+        "source_count": 0,
+        "source_label": 1,
+        "split_payload_access": {
+          "calibration": false,
+          "test": false,
+          "train": false,
+          "validation": false
+        }
+      },
+      "T4_ORACLE_SMOKE": {
+        "allowed_input_files": [
+          "immutable_t2_bundle",
+          "graph_cache_manifest",
+          "calibration.pt"
+        ],
+        "device": "cuda:0",
+        "fresh_output_required": true,
+        "gpu_uuid_binding_required": true,
+        "max_deletions_per_parent": 4,
+        "minimum_deletions_per_parent": 4,
+        "mode": "calibration_cache_only_bounded_oracle_smoke",
+        "num_classes": 3,
+        "physical_gpu_index": 1,
+        "run": 1,
+        "source_count": 16,
+        "source_label": 1,
+        "split_payload_access": {
+          "calibration": true,
+          "test": false,
+          "train": false,
+          "validation": false
+        }
+      },
+      "T6_OURS_SMOKE": {
+        "allowed_input_files": [
+          "immutable_t2_bundle",
+          "immutable_t3_stage_output",
+          "immutable_t4_stage_output",
+          "immutable_t5_clean_policy",
+          "frozen_train_csv"
+        ],
+        "device": "cuda:0",
+        "fresh_output_required": true,
+        "frozen_gine_reward_required": true,
+        "gpu_uuid_binding_required": true,
+        "minimum_optimizer_steps": 5,
+        "mode": "train_only_frozen_gine_reward_ppo_smoke",
+        "num_classes": 3,
+        "physical_gpu_index": 1,
+        "rf_oracle_used": false,
+        "run": 1,
+        "source_label": 1,
+        "split_payload_access": {
+          "calibration": false,
+          "test": false,
+          "train": true,
+          "validation": false
+        }
+      }
+    }
+  },
+  "permissions": {
+    "aggregate_metrics_release_allowed": true,
+    "data_redistribution_allowed": false,
+    "paper_result_reporting_allowed": true,
+    "per_example_public_reporting_allowed": false,
+    "research_compute_allowed": true,
+    "trained_model_release_allowed": "review_required"
+  },
+  "policy_id": "tastemolnet-downstream-research-no-redistribution-v1-20260828",
+  "policy_version": 1,
+  "schema_version": "tastemolnet_downstream_research_policy_v1"
+}

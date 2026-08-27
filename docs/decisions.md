@@ -1,5 +1,74 @@
 # Decisions Log
 
+## [2026-08-28] Adopt the existing Taste GINE calibration and smoke only the calibration cache
+
+### Background
+
+The formal three-class TasteMolNet GINE already fits one positive scalar
+temperature on validation inside T2 and publishes the logits, calibration
+metrics, model/last-checkpoint closure, and reload evidence in one immutable
+bundle. Reusing the BACE B4 implementation would incorrectly require an
+uncalibrated checkpoint, refit the same validation logits, and copy the model
+bundle. Reusing BACE B5 would also read a CSV and publish molecule-level
+prediction/deletion rows.
+
+### Decision
+
+Add a separately hashed downstream policy that remains bound to active policy
+v2 and authorizes the two implemented AutoDL stages plus one typed future T6
+boundary. T3 verifies and adopts the existing
+validation fit in place: it recomputes raw/calibrated NLL, ECE, Brier score, and
+argmax invariance from the immutable bundle's validation predictions, never
+calls a fitter, never copies a checkpoint, and proves the source inventory is
+unchanged. T4 is frozen to physical GPU 1 and one loaded `model.pt` oracle. It
+opens only the graph-cache `manifest.json` and authenticated
+`calibration.pt`, chooses the first sixteen true/predicted Sweet parents with
+exactly four connected one/two-atom deletions, applies the shared three-class
+strict-flip semantics, and requires observed flips to both Bitter and
+Tasteless. T3 is CPU-only and claims no physical GPU ownership.
+
+T4 writes aggregate private evidence only: an opaque ordered-cohort digest,
+position-only deletion counts, aggregate flip destinations and probability
+drop statistics, policy/provenance/access documents, a controller-facing gate,
+and complete SHA closure under `[TASTE_MULTICLASS_ORACLE_PASS]`. It writes no
+CSV, SMILES, molecule identifiers, or per-example predictions. Train,
+validation, and test cache payloads remain unopened; test remains
+metadata-hash-only. The paired Slurm file is static CLI parity and exits before
+science because this campaign is AutoDL-only.
+Checkpoint, cache, and stage-output child reads are anchored with retained
+directory descriptors and `openat`; temporary root swap-and-restore attempts
+fail closed instead of redirecting temperature, model, or gate reads.
+The successor additionally retains every directory component, restricts T3/T4
+outputs to exact direct fresh children of the AutoDL Taste/GINE/seed-7 artifact
+root, and revalidates all source/policy/output authorities after publication.
+It exposes held stage and held T2-checkpoint APIs with exact checkpoint path,
+ID, full hash inventory, stat inventory, and manifest SHA evidence so a later
+consumer cannot substitute an equal-byte copy or symlink alias while loading.
+
+The supplemental policy explicitly authorizes `T6_OURS_SMOKE` only as a
+train-only, minimum-five-step PPO smoke that consumes only the frozen prepared
+train CSV, with frozen-GINE reward, immutable T3/T4/T5 predecessors, no RF, and
+no validation/calibration/test payload. This is authority for a later
+implementation, not a T6 implementation or launch.
+
+### Consequences
+
+- T3 means existing-fit adoption/verification, never a second calibration fit.
+- The selected inference asset remains the best `model.pt`; `last.pt` remains
+  terminal/reload evidence rather than replacing the selected model.
+- T4 is a bounded interface and multiclass-semantics smoke, not a method
+  efficacy result; its PASS nevertheless requires both authorized strict-flip
+  destinations to be exercised by real connected deletions.
+- The standalone T3/T4 gates can be consumed by the main controller only after
+  an explicit predecessor-gated controller action is released separately.
+- T6 must retain and revalidate the public stage/checkpoint/policy authorities
+  across its model/reward load and output publication; this change does not add
+  T6 runtime or controller integration.
+
+### Status
+
+Accepted for code/tests; remote deployment and science remain separately gated.
+
 ## [2026-08-25] Separate GREED scan science state from controller receipts
 
 ### Background
@@ -10348,3 +10417,43 @@ Local isolated successor implementation, deterministic hostile tests, and
 static validation only. The production diagnosis was read-only. No remote
 write, process signal, restart, controller/GPU-lock/matrix mutation, deployment,
 or new scientific computation was performed by this decision.
+
+## [2026-08-28] Publish Taste T3/T4 PASS only after retained closure
+
+### Motivation
+
+Taste T3 and T4 must write evidence before performing the final retained-input
+closure.  Publishing the PASS marker at that earlier point made error cleanup
+security-sensitive: a check-then-unlink sequence could delete a replacement
+inode, while preserving replacement terminal files could leave a stage that
+still reopened as PASS.
+
+### Decision
+
+Use a two-phase, marker-last publication.  The producer first writes all JSON
+evidence and `sha256sums.txt`; the inventory already commits the expected hash
+of the future marker, but the marker itself is absent and the public verifier
+must reject the prepared root.  While the root remains non-terminal, the
+producer reopens every checkpoint, cache, policy, execution-source, and T3
+predecessor authority.  Only after that closure succeeds does it create and
+fsync the exact PASS marker through the held output directory as the final
+commit operation.  The marker payload also binds the physical identities of
+every prepared JSON document and `sha256sums.txt`, so an equal-byte inode
+replacement cannot reopen as the producer's terminal stage.  There is no
+terminal cleanup path and no unlink of a possibly replaced file.
+
+The held T2 consumer API now exposes only two additional metadata payloads to
+T6: `split_manifest.json` and `test_evaluation_status.json`.  This lets T6 bind
+the frozen train path/hash and prove the test split remains unevaluated while
+continuing to reject every split CSV, validation predictions, training
+metrics, and terminal training checkpoint.
+
+### Consequences
+
+- A producer exception during preparation or retained closure leaves no PASS
+  marker and cannot leave a reusable T3/T4 terminal stage.
+- Publication never tries to unlink an attacker-replaced marker or hash
+  inventory.
+- T6 can load its GINE and train metadata through retained descriptors without
+  reopening validation, calibration, or test payloads.
+- This change does not release a controller, deploy code, or start science.
