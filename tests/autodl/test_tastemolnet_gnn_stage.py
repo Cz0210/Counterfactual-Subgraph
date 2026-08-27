@@ -309,6 +309,81 @@ def _minimal_t2_bundle(root: Path) -> dict[str, Any]:
     return card
 
 
+class _FakeT2AdoptionAuthority:
+    def __init__(self, root: Path, evidence: dict[str, Any]) -> None:
+        self.root = root
+        self._evidence = json.loads(json.dumps(evidence))
+
+    def revalidate(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._evidence))
+
+    def close(self) -> None:
+        return None
+
+
+def _t2_adoption_kwargs(
+    tmp_path: Path,
+    checkpoint: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    physical = stages._physical_directory(checkpoint, field="fixture T2 bundle")
+    try:
+        formal = stages._formal_bundle_inventory(physical)
+    finally:
+        physical.close()
+    root = (
+        tmp_path
+        / "runtime"
+        / "control"
+        / "tastemolnet-t2-gine-pass-adoption-v1"
+        / "tastemolnet-gine-v2-20260827T160838Z-274631"
+    )
+    gate_sha256 = "1" * 64
+    receipt_sha256 = "2" * 64
+    source_evidence_sha256 = "3" * 64
+    evidence = {
+        "schema_version": "tastemolnet_t2_gine_pass_downstream_binding_v1",
+        "stage": "T2_GINE_FULL",
+        "status": "PASS",
+        "state": stages.ADOPTION_MARKER,
+        "source_cid": "tastemolnet-gine-v2-20260827T160838Z-274631",
+        "source_run_id": "tastemolnet-t2-gine-full-20260827T161802Z-698faeec",
+        "adoption_root": str(root),
+        "adoption_root_inventory_sha256": "4" * 64,
+        "gate_path": str(root / "gate.json"),
+        "gate_sha256": gate_sha256,
+        "receipt_path": str(root / "manifest.json"),
+        "receipt_sha256": receipt_sha256,
+        "source_evidence_sha256": source_evidence_sha256,
+        "formal_bundle_root": str(checkpoint),
+        "formal_bundle_inventory": formal["inventory"],
+        "formal_bundle_inventory_sha256": formal["inventory_sha256"],
+        "formal_bundle_model_sha256": _sha(checkpoint / "model.pt"),
+        "formal_bundle_sha256s_sha256": _sha(checkpoint / "sha256sums.txt"),
+    }
+
+    def fake_hold(
+        adoption_root: str | Path,
+        *,
+        expected_gate_sha256: str,
+        expected_receipt_sha256: str,
+        expected_source_evidence_sha256: str,
+    ) -> _FakeT2AdoptionAuthority:
+        assert Path(adoption_root) == root
+        assert expected_gate_sha256 == gate_sha256
+        assert expected_receipt_sha256 == receipt_sha256
+        assert expected_source_evidence_sha256 == source_evidence_sha256
+        return _FakeT2AdoptionAuthority(root, evidence)
+
+    monkeypatch.setattr(stages, "hold_t2_gine_pass_adoption", fake_hold)
+    return {
+        "t2_adoption_root": root,
+        "t2_adoption_gate_sha256": gate_sha256,
+        "t2_adoption_receipt_sha256": receipt_sha256,
+        "t2_source_evidence_sha256": source_evidence_sha256,
+    }
+
+
 def test_t3_adopts_existing_fit_without_refit_copy_or_source_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,6 +400,7 @@ def test_t3_adopts_existing_fit_without_refit_copy_or_source_mutation(
     before = {path.name: _sha(path) for path in checkpoint.iterdir()}
     artifact_root, output = _stage_output(tmp_path, "calibrated-fixture")
     result = stages.run_t3_existing_fit_adoption(
+        **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
         checkpoint_dir=checkpoint,
         graph_cache_root=_graph_cache_exclusion(tmp_path),
         artifact_root=artifact_root,
@@ -355,6 +431,9 @@ def test_t3_adopts_existing_fit_without_refit_copy_or_source_mutation(
             "checkpoint_inventory_sha256",
             "checkpoint_stat_inventory_sha256",
             "checkpoint_sha256s_sha256",
+            "t2_adoption_gate_sha256",
+            "t2_adoption_receipt_sha256",
+            "t2_adoption_binding_sha256",
         }
         assert held.evidence["stage"] == stages.T3_STAGE
         assert held.evidence["checkpoint_id"] == result["checkpoint_id"]
@@ -395,7 +474,7 @@ def test_t3_adopts_existing_fit_without_refit_copy_or_source_mutation(
 
 
 def test_t3_rejects_old_checkpoint_descendant_output_exploit_before_mutation(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     checkpoint = tmp_path / "t2"
     _minimal_t2_bundle(checkpoint)
@@ -410,6 +489,7 @@ def test_t3_rejects_old_checkpoint_descendant_output_exploit_before_mutation(
     before = {path.name: _sha(path) for path in checkpoint.iterdir()}
     with pytest.raises(stages.TasteGNNStageError, match="overlaps protected"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=_graph_cache_exclusion(tmp_path),
             artifact_root=checkpoint,
@@ -422,7 +502,7 @@ def test_t3_rejects_old_checkpoint_descendant_output_exploit_before_mutation(
 
 
 def test_t3_rejects_graph_cache_descendant_output_before_mutation(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     checkpoint = tmp_path / "t2"
     _minimal_t2_bundle(checkpoint)
@@ -438,6 +518,7 @@ def test_t3_rejects_graph_cache_descendant_output_before_mutation(
     )
     with pytest.raises(stages.TasteGNNStageError, match="overlaps protected"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=cache_root,
             artifact_root=cache_root,
@@ -449,12 +530,13 @@ def test_t3_rejects_graph_cache_descendant_output_before_mutation(
 
 
 def test_held_checkpoint_rejects_copy_symlink_alias_and_late_mutation(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     checkpoint = tmp_path / "t2"
     _minimal_t2_bundle(checkpoint)
     artifact_root, output = _stage_output(tmp_path, "calibrated-checkpoint-hold")
     stages.run_t3_existing_fit_adoption(
+        **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
         checkpoint_dir=checkpoint,
         graph_cache_root=_graph_cache_exclusion(tmp_path),
         artifact_root=artifact_root,
@@ -486,7 +568,7 @@ def test_held_checkpoint_rejects_copy_symlink_alias_and_late_mutation(
 
 
 def test_t3_rejects_output_outside_exact_artifact_formula_before_creation(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     checkpoint = tmp_path / "t2"
     _minimal_t2_bundle(checkpoint)
@@ -495,6 +577,7 @@ def test_t3_rejects_output_outside_exact_artifact_formula_before_creation(
     invalid = tmp_path / "calibrated-outside"
     with pytest.raises(stages.TasteGNNStageError, match="direct child"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=_graph_cache_exclusion(tmp_path),
             artifact_root=artifact_root,
@@ -540,6 +623,7 @@ def test_output_creation_rejects_artifact_root_swap_and_restore(
     monkeypatch.setattr(stages.os, "mkdir", swapping_mkdir)
     with pytest.raises(stages.TasteGNNStageError, match="identity drifted"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=_graph_cache_exclusion(tmp_path),
             artifact_root=artifact_root,
@@ -587,6 +671,7 @@ def test_output_creation_rejects_output_parent_swap_and_restore(
     monkeypatch.setattr(stages.os, "mkdir", swapping_mkdir)
     with pytest.raises(stages.TasteGNNStageError, match="identity drifted"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=_graph_cache_exclusion(tmp_path),
             artifact_root=artifact_root,
@@ -614,6 +699,7 @@ def test_t3_publication_time_model_mutation_never_returns_pass(
     monkeypatch.setattr(stages, "_prepare_stage_output", injecting_prepare)
     with pytest.raises(stages.TasteGNNStageError, match="checkpoint bytes drifted"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=_graph_cache_exclusion(tmp_path),
             artifact_root=artifact_root,
@@ -646,6 +732,7 @@ def test_t3_marker_publish_window_model_mutation_never_returns_pass(
     monkeypatch.setattr(stages, "_publish_prepared_stage_marker", injecting_publish)
     with pytest.raises(stages.TasteGNNStageError, match="checkpoint bytes drifted"):
         stages.run_t3_existing_fit_adoption(
+            **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
             checkpoint_dir=checkpoint,
             graph_cache_root=_graph_cache_exclusion(tmp_path),
             artifact_root=artifact_root,
@@ -678,6 +765,7 @@ def test_t3_publication_time_policy_mutation_never_returns_pass(
             match="file authority changed|bytes changed",
         ):
             stages.run_t3_existing_fit_adoption(
+                **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
                 checkpoint_dir=checkpoint,
                 graph_cache_root=_graph_cache_exclusion(tmp_path),
                 artifact_root=artifact_root,
@@ -1053,12 +1141,13 @@ def test_terminal_marker_physically_binds_prepared_file_inodes(
 
 
 def test_held_stage_output_rejects_swap_restore_across_consumer_window(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     checkpoint = tmp_path / "t2"
     _minimal_t2_bundle(checkpoint)
     artifact_root, output = _stage_output(tmp_path, "calibrated-held")
     stages.run_t3_existing_fit_adoption(
+        **_t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch),
         checkpoint_dir=checkpoint,
         graph_cache_root=_graph_cache_exclusion(tmp_path),
         artifact_root=artifact_root,
@@ -1249,7 +1338,9 @@ def _fake_t4_route(
     checkpoint = tmp_path / "t2"
     card = _minimal_t2_bundle(checkpoint)
     artifact_root, t3 = _stage_output(tmp_path, "calibrated-for-t4")
+    t2_kwargs = _t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch)
     stages.run_t3_existing_fit_adoption(
+        **t2_kwargs,
         checkpoint_dir=checkpoint,
         graph_cache_root=_graph_cache_exclusion(tmp_path),
         artifact_root=artifact_root,
@@ -1297,6 +1388,7 @@ def _fake_t4_route(
         / "t4-oracle-smoke-hostile"
     )
     kwargs = {
+        **t2_kwargs,
         "checkpoint_dir": checkpoint,
         "t3_gate_path": t3 / "gate.json",
         "graph_cache_root": cache_root,
@@ -1316,7 +1408,9 @@ def test_t4_does_not_open_checkpoint_validation_csv_and_binds_exp_run_gpu(
     checkpoint = tmp_path / "t2"
     card = _minimal_t2_bundle(checkpoint)
     artifact_root, t3 = _stage_output(tmp_path, "calibrated-fixture")
+    t2_kwargs = _t2_adoption_kwargs(tmp_path, checkpoint, monkeypatch)
     stages.run_t3_existing_fit_adoption(
+        **t2_kwargs,
         checkpoint_dir=checkpoint,
         graph_cache_root=_graph_cache_exclusion(tmp_path),
         artifact_root=artifact_root,
@@ -1381,6 +1475,7 @@ def test_t4_does_not_open_checkpoint_validation_csv_and_binds_exp_run_gpu(
         / "t4-oracle-smoke-fixture"
     )
     result = stages.run_t4_calibration_cache_smoke(
+        **t2_kwargs,
         checkpoint_dir=checkpoint,
         t3_gate_path=t3 / "gate.json",
         graph_cache_root=cache_root,
@@ -1540,6 +1635,10 @@ def test_t4_rejects_unbound_direct_child_environment(
         monkeypatch.setenv(key, value)
     with pytest.raises(stages.TasteGNNStageError, match=message):
         stages.run_t4_calibration_cache_smoke(
+            t2_adoption_root="/never-opened-adoption",
+            t2_adoption_gate_sha256="1" * 64,
+            t2_adoption_receipt_sha256="2" * 64,
+            t2_source_evidence_sha256="3" * 64,
             checkpoint_dir="/never-opened",
             t3_gate_path="/never-opened/gate.json",
             graph_cache_root="/never-opened",
@@ -1688,6 +1787,23 @@ def test_cli_wrappers_preserve_gpu1_cache_only_and_no_hpc_execution() -> None:
     assert '--artifact-root "$AUTODL_ARTIFACT_ROOT"' in t3_wrapper
     assert '--graph-cache-root "$GRAPH_CACHE_ROOT"' in t3_wrapper
     assert "TASTEMOLNET_GRAPH_CACHE_ROOT" in t3_wrapper
+    receipt_envs = (
+        "TASTEMOLNET_T2_ADOPTION_ROOT",
+        "TASTEMOLNET_T2_ADOPTION_GATE_SHA256",
+        "TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256",
+        "TASTEMOLNET_T2_SOURCE_EVIDENCE_SHA256",
+    )
+    receipt_flags = (
+        "--t2-adoption-root",
+        "--t2-adoption-gate-sha256",
+        "--t2-adoption-receipt-sha256",
+        "--t2-source-evidence-sha256",
+    )
+    for wrapper in (t3_wrapper, t4_wrapper):
+        assert all(value in wrapper for value in receipt_envs)
+        assert all(value in wrapper for value in receipt_flags)
+        assert "--t2-controller-root" not in wrapper
+        assert "--t2-training-state-root" not in wrapper
     assert "--physical-gpu-index" not in t3_wrapper
     assert "--max-gpus 4" in t3_wrapper
     assert "--gpu-hard-limit 4" in t3_wrapper
@@ -1705,6 +1821,42 @@ def test_cli_wrappers_preserve_gpu1_cache_only_and_no_hpc_execution() -> None:
     assert "#SBATCH --partition=A800" in slurm
     assert "#SBATCH --gres=gpu:a800:1" in slurm
     assert "--config configs/hpc.yaml" in slurm
+    assert slurm.count("--set inference.fallback_to_heuristic=false") == 2
     assert "--artifact-root /absolute/artifact-root" in slurm
+    assert "--t2-adoption-gate-sha256" in slurm
+    assert "--t2-adoption-receipt-sha256" in slurm
+    assert "--t2-source-evidence-sha256" in slurm
     assert "exit 64" in slurm
     assert "HPC remains forbidden" in slurm
+
+
+@pytest.mark.parametrize("action", ("t3-adopt", "t4-oracle-smoke"))
+def test_slurm_fallback_override_is_real_cli_syntax(action: str) -> None:
+    parser = stage_cli.build_parser()
+    with pytest.raises(SystemExit) as stopped:
+        parser.parse_args(
+            [
+                "--config",
+                "configs/hpc.yaml",
+                "--set",
+                "inference.fallback_to_heuristic=false",
+                action,
+                "--help",
+            ]
+        )
+    assert stopped.value.code == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        ["inference.fallback_to_heuristic=true"],
+        ["training.device=cpu"],
+        ["inference.fallback_to_heuristic=false", "training.device=cpu"],
+    ),
+)
+def test_stage_cli_rejects_every_other_config_override(
+    overrides: list[str],
+) -> None:
+    with pytest.raises(ValueError, match="accepts only"):
+        stage_cli._validate_overrides(overrides)

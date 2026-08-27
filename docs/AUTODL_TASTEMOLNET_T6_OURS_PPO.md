@@ -83,6 +83,15 @@ Downstream code must call `hold_taste_ppo_output()` or
 `validate_taste_ppo_output()`. Merely checking for `PASS`, required files, or a
 log marker is not authoritative.
 
+T6 independently reopens the receipt-only T2 authority inherited through T5.
+It accepts only the fresh five-file adoption root plus reviewed gate, receipt,
+and embedded-source SHA-256 pins; the consumer checks the canonical hash DAG,
+physical binding, fixed source identities, and formal 19-file GINE inventory
+without reopening historical controller/training/execution roots. The complete
+T2 downstream binding and all three hashes are written into T6 input and gate
+evidence and must match T3, T4, and T5 exactly. This is provenance validation,
+not an execution release; the tracked release gate remains false.
+
 ## Remaining release gates
 
 Before any T6 science, a successor must:

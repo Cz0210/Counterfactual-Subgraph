@@ -10711,3 +10711,32 @@ Local implementation, focused/affected regression tests, and static AutoDL/
 Slurm checks are complete. External controller-receipt integration, strict
 post-child adoption, an `/autodl-fs` link/fsync micro-probe, immutable deploy,
 and T6 science remain pending.
+
+## [2026-08-28] Make the fresh T2 receipt the only downstream GINE authority
+
+### Motivation
+
+T3 and T4 originally reopened the formal GINE bundle directly. That verified
+the bundle bytes but did not prove that the reviewed five-file T2 adoption had
+accepted those bytes, so an equal legacy bundle could bypass the new T2
+authority while later T5/T6 artifacts claimed a continuous provenance chain.
+
+### Decision
+
+Expose a receipt-only held consumer taking the fresh adoption root and exact
+gate, receipt, and embedded-source SHA-256 pins. It validates the exact
+five-file canonical hash DAG, physical publication binding, frozen source
+CID/run/commits, and recorded 19-file formal GINE inventory. It intentionally
+does not reopen the historical failed controller, training-state, execution,
+or identity-fix roots. T3 holds and records the complete binding through its
+terminal commit; T4 must exact-match it and T3; T5 freezes and reopens it; T6
+reopens it and persists the complete binding plus all three pins.
+
+### Consequences
+
+- Historical control-plane failure remains immutable evidence, not a runtime
+  dependency or alternate PASS source.
+- Any T2 receipt/hash/inode replacement or cross-stage binding mismatch fails
+  before a downstream PASS marker.
+- T3--T6 release bits, GPU ownership, matrix state, and science status remain
+  unchanged and disabled until separately reviewed execution authorities exist.

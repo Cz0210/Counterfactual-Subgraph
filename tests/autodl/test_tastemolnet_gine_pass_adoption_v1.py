@@ -93,8 +93,8 @@ def _fixture(
 ) -> tuple[adoption.T2PassAdoptionSources, dict[str, Path]]:
     runtime = tmp_path / "runtime"
     control = runtime / "control"
-    controller = control / "tastemolnet-gine-training-v2" / adoption.SOURCE_CID
-    training = control / "tastemolnet-gine-state-v2" / adoption.SOURCE_CID
+    controller = control / "tastemolnet-gine-v2" / adoption.SOURCE_CID
+    training = control / "tastemolnet-gine-training-v2" / adoption.SOURCE_CID
     output = runtime / adoption.SOURCE_OUTPUT_RELATIVE
     run_state = (
         control / "experiment_registry" / "run_state" / adoption.SOURCE_RUN_ID
@@ -841,6 +841,36 @@ def test_preflight_is_read_only_and_default_publish_is_stage_frozen(
     assert not sources.adoption_root.exists()
 
 
+def test_controller_and_training_state_use_distinct_live_namespace_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, paths = _fixture(tmp_path, monkeypatch)
+    evidence = adoption.preflight_t2_gine_pass_adoption(sources)
+
+    assert paths["controller"].parent.name == "tastemolnet-gine-v2"
+    assert paths["training"].parent.name == "tastemolnet-gine-training-v2"
+    assert paths["controller"] != paths["training"]
+    spec = json.loads(
+        (paths["controller"] / "controller_spec.json").read_text(encoding="utf-8")
+    )
+    assert spec["controller_root"] == str(paths["controller"])
+    assert spec["training_state_root"] == str(paths["training"])
+    assert evidence["failed_controller"]["root"] == str(paths["controller"])
+    assert evidence["training_state"]["root"] == str(paths["training"])
+
+    wrong_training = adoption.T2PassAdoptionSources._build_for_tests(
+        control_root=sources.control_root,
+        controller_root=sources.controller_root,
+        output_root=sources.output_root,
+        training_state_root=sources.control_root / "wrong-training-root" / adoption.SOURCE_CID,
+        execution_project_root=sources.execution_project_root,
+        identity_fix_project_root=sources.identity_fix_project_root,
+        proc_root=sources.proc_root,
+    )
+    with pytest.raises(adoption.T2PassAdoptionError, match="canonical root"):
+        adoption.preflight_t2_gine_pass_adoption(wrong_training)
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     (
@@ -1011,6 +1041,96 @@ def test_reviewed_publish_is_exact_five_file_receipt_and_status_is_read_only(
     assert before == {path.name: _sha(path) for path in sources.adoption_root.iterdir()}
     with pytest.raises(adoption.T2PassAdoptionError, match="already exists"):
         adoption.publish_t2_gine_pass_adoption(sources)
+
+
+def _publish_receipt_only_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[adoption.T2PassAdoptionSources, dict[str, object]]:
+    sources, _paths = _fixture(tmp_path, monkeypatch)
+    evidence = adoption.preflight_t2_gine_pass_adoption(sources)
+    _authorize_from_evidence(monkeypatch, evidence)
+    result = adoption.publish_t2_gine_pass_adoption(sources)
+    return sources, result
+
+
+def test_receipt_only_holder_does_not_reopen_historical_control_or_code_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, result = _publish_receipt_only_fixture(tmp_path, monkeypatch)
+    unavailable = tmp_path / "unavailable-historical-authorities"
+    unavailable.mkdir()
+    for index, historical_root in enumerate(
+        (
+            sources.controller_root,
+            sources.training_state_root,
+            sources.execution_project_root,
+            sources.identity_fix_project_root,
+        )
+    ):
+        historical_root.rename(unavailable / f"historical-{index}")
+
+    with adoption.hold_t2_gine_pass_adoption(
+        sources.adoption_root,
+        expected_gate_sha256=str(result["gate_sha256"]),
+        expected_receipt_sha256=str(result["receipt_sha256"]),
+        expected_source_evidence_sha256=str(result["source_evidence_sha256"]),
+    ) as held:
+        evidence = held.revalidate()
+
+    assert evidence["status"] == "PASS"
+    assert evidence["formal_bundle_root"] == str(sources.output_root)
+    assert len(evidence["formal_bundle_inventory"]) == 19
+    assert {
+        row["path"] for row in evidence["formal_bundle_inventory"]
+    } == adoption.CHECKPOINT_FILES
+
+
+@pytest.mark.parametrize(
+    "wrong_pin",
+    ("gate_sha256", "receipt_sha256", "source_evidence_sha256"),
+)
+def test_receipt_only_holder_rejects_each_wrong_expected_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrong_pin: str,
+) -> None:
+    sources, result = _publish_receipt_only_fixture(tmp_path, monkeypatch)
+    pins = {
+        "gate_sha256": str(result["gate_sha256"]),
+        "receipt_sha256": str(result["receipt_sha256"]),
+        "source_evidence_sha256": str(result["source_evidence_sha256"]),
+    }
+    pins[wrong_pin] = "0" * 64
+
+    with pytest.raises(adoption.T2PassAdoptionError):
+        adoption.hold_t2_gine_pass_adoption(
+            sources.adoption_root,
+            expected_gate_sha256=pins["gate_sha256"],
+            expected_receipt_sha256=pins["receipt_sha256"],
+            expected_source_evidence_sha256=pins["source_evidence_sha256"],
+        )
+
+
+def test_receipt_only_holder_rejects_equal_byte_manifest_inode_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources, result = _publish_receipt_only_fixture(tmp_path, monkeypatch)
+    held = adoption.hold_t2_gine_pass_adoption(
+        sources.adoption_root,
+        expected_gate_sha256=str(result["gate_sha256"]),
+        expected_receipt_sha256=str(result["receipt_sha256"]),
+        expected_source_evidence_sha256=str(result["source_evidence_sha256"]),
+    )
+    try:
+        manifest = sources.adoption_root / "manifest.json"
+        replacement = sources.adoption_root / ".manifest.equal-byte-copy"
+        shutil.copy2(manifest, replacement)
+        os.replace(replacement, manifest)
+        with pytest.raises(adoption.T2PassAdoptionError):
+            held.revalidate()
+    finally:
+        held.close()
 
 
 def test_source_or_receipt_tamper_fails_closed_without_repair(

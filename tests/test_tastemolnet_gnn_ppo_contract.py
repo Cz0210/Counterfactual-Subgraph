@@ -20,6 +20,12 @@ from src.train.tastemolnet_gnn_ppo import (
     validate_taste_ppo_output,
 )
 from src.utils import retained_output_directory as retained
+from src.utils.tastemolnet_gine_pass_adoption_v1 import (
+    ADOPTION_MARKER,
+    DOWNSTREAM_BINDING_SCHEMA,
+    SOURCE_CID,
+    SOURCE_RUN_ID,
+)
 
 
 def _row(destination: int) -> dict[str, object]:
@@ -212,6 +218,72 @@ def _checkpoint_reload() -> dict[str, object]:
     }
 
 
+def _canonical_sha256(payload: object) -> str:
+    return __import__("hashlib").sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _t2_adoption_binding() -> dict[str, object]:
+    adoption_root = Path("/private/reviewed/t2-adoption") / SOURCE_CID
+    formal_inventory = [
+        {
+            "path": "model.pt",
+            "kind": "file",
+            "identity": {
+                "device": 1,
+                "inode": 2,
+                "mode": 0o100600,
+                "uid": 3,
+                "gid": 4,
+                "nlink": 1,
+                "size": 5,
+                "blocks": 8,
+                "mtime_ns": 6,
+                "ctime_ns": 7,
+            },
+            "sha256": "d" * 64,
+        }
+    ]
+    return {
+        "schema_version": DOWNSTREAM_BINDING_SCHEMA,
+        "stage": "T2_GINE_FULL",
+        "status": "PASS",
+        "state": ADOPTION_MARKER,
+        "source_cid": SOURCE_CID,
+        "source_run_id": SOURCE_RUN_ID,
+        "adoption_root": str(adoption_root),
+        "adoption_root_inventory_sha256": "9" * 64,
+        "gate_path": str(adoption_root / "gate.json"),
+        "gate_sha256": "a" * 64,
+        "receipt_path": str(adoption_root / "manifest.json"),
+        "receipt_sha256": "b" * 64,
+        "source_evidence_sha256": "c" * 64,
+        "formal_bundle_root": "/private/reviewed/t2-bundle",
+        "formal_bundle_inventory": formal_inventory,
+        "formal_bundle_inventory_sha256": _canonical_sha256(formal_inventory),
+        "formal_bundle_model_sha256": "d" * 64,
+        "formal_bundle_sha256s_sha256": "e" * 64,
+    }
+
+
+def _t2_gate_hashes(
+    binding: dict[str, object] | None = None,
+) -> dict[str, str]:
+    reviewed = _t2_adoption_binding() if binding is None else binding
+    return {
+        "t2_adoption_gate_sha256": str(reviewed["gate_sha256"]),
+        "t2_adoption_receipt_sha256": str(reviewed["receipt_sha256"]),
+        "t2_adoption_binding_sha256": _canonical_sha256(reviewed),
+    }
+
+
 def test_taste_reward_manifest_and_five_step_gate_pass() -> None:
     oracle = _oracle()
     manifest = build_taste_reward_manifest(
@@ -235,6 +307,7 @@ def test_taste_reward_manifest_and_five_step_gate_pass() -> None:
         reward_manifest=manifest,
         oracle_provenance=oracle,
         policy_initializer_hash="d" * 64,
+        **_t2_gate_hashes(),
         t3_gate_sha256="5" * 64,
         t4_gate_sha256="6" * 64,
         value_head_parameter_sha256="8" * 64,
@@ -324,6 +397,7 @@ def test_taste_gate_rejects_checkpoint_tensor_identity_not_bound_to_policy(
         reward_manifest=manifest,
         oracle_provenance=oracle,
         policy_initializer_hash="d" * 64,
+        **_t2_gate_hashes(),
         t3_gate_sha256="5" * 64,
         t4_gate_sha256="6" * 64,
         value_head_parameter_sha256="8" * 64,
@@ -363,6 +437,7 @@ def test_taste_gate_rejects_loaded_policy_or_reference_not_bound_to_t5(
         reward_manifest=manifest,
         oracle_provenance=oracle,
         policy_initializer_hash="d" * 64,
+        **_t2_gate_hashes(),
         t3_gate_sha256="5" * 64,
         t4_gate_sha256="6" * 64,
         value_head_parameter_sha256="8" * 64,
@@ -424,6 +499,7 @@ def test_taste_smoke_gate_fails_without_real_update_and_flip() -> None:
         reward_manifest=manifest,
         oracle_provenance=oracle,
         policy_initializer_hash="4" * 64,
+        **_t2_gate_hashes(),
         t3_gate_sha256="5" * 64,
         t4_gate_sha256="6" * 64,
         value_head_parameter_sha256="8" * 64,
@@ -776,6 +852,7 @@ def test_checkpoint_reload_rejects_fd_backed_or_wrong_base_model_metadata(
         ("strict_flip_count", 0),
         ("three_class_oracle", False),
         ("policy_parameters_changed", False),
+        ("input_t2_adoption_binding_sha256", "0" * 64),
     ),
 )
 def test_published_t6_consumer_reopens_exact_gate_inventory_and_checkpoints(
@@ -852,6 +929,8 @@ def test_published_t6_consumer_reopens_exact_gate_inventory_and_checkpoints(
     )
     policy_after = final_reload["adapter_parameter_sha256"]
     value_after = final_reload["value_head_parameter_sha256"]
+    t2_binding = _t2_adoption_binding()
+    t2_hashes = _t2_gate_hashes(t2_binding)
     gate = build_taste_smoke_gate(
         policy_parameter_hash_before="1" * 64,
         policy_parameter_hash_after=policy_after,
@@ -867,15 +946,24 @@ def test_published_t6_consumer_reopens_exact_gate_inventory_and_checkpoints(
         reward_manifest=reward,
         oracle_provenance=oracle,
         policy_initializer_hash="d" * 64,
+        **t2_hashes,
         t3_gate_sha256="5" * 64,
         t4_gate_sha256="6" * 64,
         value_head_parameter_sha256=value_after,
     )
     assert gate["status"] == "PASS"
-    if gate_field is not None:
+    if gate_field is not None and gate_field != "input_t2_adoption_binding_sha256":
         gate = {**gate, gate_field: gate_value}
+    input_t2_hashes = dict(t2_hashes)
+    if gate_field == "input_t2_adoption_binding_sha256":
+        input_t2_hashes["t2_adoption_binding_sha256"] = str(gate_value)
     documents = {
-        "policy_provenance.json": {"status": "PASS"},
+        "policy_provenance.json": {
+            "status": "PASS",
+            "frozen_oracle_identity": {
+                "t2_adoption_binding": t2_binding,
+            },
+        },
         "downstream_policy_binding.json": {"status": "PASS"},
         "parent_selection.json": {"status": "PASS"},
         "run_manifest.json": {
@@ -896,7 +984,11 @@ def test_published_t6_consumer_reopens_exact_gate_inventory_and_checkpoints(
         "reward_manifest.json": reward,
         "gate.json": gate,
         "ppo_gate.json": gate,
-        "input_hashes.json": {"status": "PASS"},
+        "input_hashes.json": {
+            "status": "PASS",
+            "t2_adoption_binding": t2_binding,
+            **input_t2_hashes,
+        },
     }
     for name, payload in documents.items():
         (root / name).write_bytes(runner._json_document_bytes(payload))
@@ -945,6 +1037,9 @@ def test_published_t6_consumer_reopens_exact_gate_inventory_and_checkpoints(
             evidence["policy_checkpoint_hash"]
             == final_reload["policy_checkpoint_hash"]
         )
+    elif gate_field == "input_t2_adoption_binding_sha256":
+        with pytest.raises(ValueError, match="T2 adoption"):
+            validate_taste_ppo_output(root)
     else:
         with pytest.raises(ValueError, match="cannot be independently derived"):
             validate_taste_ppo_output(root)

@@ -54,6 +54,14 @@ from src.utils.tastemolnet_downstream_policy import (
     TasteDownstreamPolicy,
     load_tastemolnet_downstream_policy,
 )
+from src.utils.tastemolnet_gine_pass_adoption_v1 import (
+    ADOPTION_MARKER,
+    DOWNSTREAM_BINDING_KEYS,
+    DOWNSTREAM_BINDING_SCHEMA,
+    HeldT2PassAdoption,
+    T2PassAdoptionError,
+    hold_t2_gine_pass_adoption,
+)
 
 try:
     from rdkit import Chem
@@ -108,8 +116,171 @@ HELD_STAGE_EVIDENCE_KEYS = frozenset(
         "checkpoint_inventory_sha256",
         "checkpoint_stat_inventory_sha256",
         "checkpoint_sha256s_sha256",
+        "t2_adoption_gate_sha256",
+        "t2_adoption_receipt_sha256",
+        "t2_adoption_binding_sha256",
     }
 )
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_t2_adoption_binding_value(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TasteGNNStageError("fresh T2 adoption binding is not one mapping")
+    if set(value) != DOWNSTREAM_BINDING_KEYS:
+        raise TasteGNNStageError("fresh T2 adoption binding schema changed")
+    if (
+        value.get("schema_version") != DOWNSTREAM_BINDING_SCHEMA
+        or value.get("stage") != "T2_GINE_FULL"
+        or value.get("status") != "PASS"
+        or value.get("state") != ADOPTION_MARKER
+    ):
+        raise TasteGNNStageError("fresh T2 adoption is not PASS")
+    for key in (
+        "adoption_root_inventory_sha256",
+        "gate_sha256",
+        "receipt_sha256",
+        "source_evidence_sha256",
+        "formal_bundle_inventory_sha256",
+        "formal_bundle_model_sha256",
+        "formal_bundle_sha256s_sha256",
+    ):
+        _hex(value.get(key), field=f"t2_adoption.{key}")
+    for key in (
+        "adoption_root",
+        "gate_path",
+        "receipt_path",
+        "formal_bundle_root",
+    ):
+        item = value.get(key)
+        if (
+            type(item) is not str
+            or not Path(item).is_absolute()
+            or Path(os.path.abspath(item)) != Path(item)
+        ):
+            raise TasteGNNStageError(
+                f"fresh T2 adoption {key} is not exact absolute"
+            )
+    if Path(value["gate_path"]) != Path(value["adoption_root"]) / "gate.json":
+        raise TasteGNNStageError("fresh T2 adoption gate path changed")
+    if Path(value["receipt_path"]) != Path(value["adoption_root"]) / "manifest.json":
+        raise TasteGNNStageError("fresh T2 adoption receipt path changed")
+    inventory = value.get("formal_bundle_inventory")
+    if not isinstance(inventory, list) or not inventory:
+        raise TasteGNNStageError("fresh T2 formal inventory is absent")
+    if _canonical_sha256(inventory) != value["formal_bundle_inventory_sha256"]:
+        raise TasteGNNStageError("fresh T2 formal inventory digest changed")
+    return json.loads(json.dumps(value))
+
+
+def _validated_t2_adoption_binding(
+    authority: HeldT2PassAdoption,
+) -> dict[str, Any]:
+    try:
+        value = authority.revalidate()
+    except (T2PassAdoptionError, OSError, ValueError) as exc:
+        raise TasteGNNStageError(
+            f"fresh T2 GINE PASS adoption authority failed: {exc}"
+        ) from exc
+    return _validate_t2_adoption_binding_value(value)
+
+
+def _t2_binding_stage_evidence(gate: Mapping[str, Any]) -> dict[str, str]:
+    binding = _validate_t2_adoption_binding_value(
+        gate.get("t2_adoption_binding")
+    )
+    return {
+        "t2_adoption_gate_sha256": str(binding["gate_sha256"]),
+        "t2_adoption_receipt_sha256": str(binding["receipt_sha256"]),
+        "t2_adoption_binding_sha256": _canonical_sha256(binding),
+    }
+
+
+def _formal_bundle_inventory(root: PhysicalDirectory) -> dict[str, Any]:
+    """Rebuild the adoption inventory without reopening split-evidence payloads.
+
+    The fresh receipt records both every file's physical identity and the
+    already-verified bundle hash manifest.  Reconstructing from those two held
+    authorities preserves T4's calibration-cache-only data-access boundary;
+    T3 separately performs the full byte verification before publication.
+    """
+
+    root.verify(label="T2 formal bundle before adoption inventory")
+    hashes = _checkpoint_sha_inventory(root)
+    hashes["sha256sums.txt"] = _sha256_at(
+        root, "sha256sums.txt", label="T2 adoption checkpoint hash inventory"
+    )
+    rows: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(root.descriptor)):
+        if Path(name).name != name:
+            raise TasteGNNStageError("T2 formal bundle contains an unsafe name")
+        info = os.stat(name, dir_fd=root.descriptor, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise TasteGNNStageError(
+                f"T2 formal bundle contains a non-file entry: {name}"
+            )
+        rows.append(
+            {
+                "path": name,
+                "kind": "file",
+                "identity": {
+                    "device": int(info.st_dev),
+                    "inode": int(info.st_ino),
+                    "mode": int(info.st_mode),
+                    "uid": int(info.st_uid),
+                    "nlink": int(info.st_nlink),
+                    "size": int(info.st_size),
+                    "mtime_ns": int(info.st_mtime_ns),
+                    "ctime_ns": int(info.st_ctime_ns),
+                },
+                "sha256": hashes.get(name),
+            }
+        )
+    if any(type(row["sha256"]) is not str for row in rows):
+        raise TasteGNNStageError("T2 adoption hash inventory does not close the bundle")
+    rows.sort(key=lambda row: (str(row["path"]), str(row["kind"])))
+    root.verify(label="T2 formal bundle after adoption inventory")
+    return {"inventory": rows, "inventory_sha256": _canonical_sha256(rows)}
+
+
+def _bind_t2_adoption_to_checkpoint(
+    authority: HeldT2PassAdoption,
+    checkpoint: PhysicalDirectory,
+) -> dict[str, Any]:
+    binding = _validated_t2_adoption_binding(authority)
+    if str(checkpoint.path) != binding["formal_bundle_root"]:
+        raise TasteGNNStageError(
+            "checkpoint path differs from fresh T2 adoption formal bundle"
+        )
+    observed = _formal_bundle_inventory(checkpoint)
+    if (
+        observed["inventory"] != binding["formal_bundle_inventory"]
+        or observed["inventory_sha256"]
+        != binding["formal_bundle_inventory_sha256"]
+        or _sha256_at(checkpoint, "model.pt", label="T2 adopted model.pt")
+        != binding["formal_bundle_model_sha256"]
+        or _sha256_at(
+            checkpoint,
+            "sha256sums.txt",
+            label="T2 adopted checkpoint hash inventory",
+        )
+        != binding["formal_bundle_sha256s_sha256"]
+    ):
+        raise TasteGNNStageError(
+            "checkpoint physical inventory differs from fresh T2 adoption receipt"
+        )
+    return binding
 
 
 class TasteGNNStageError(RuntimeError):
@@ -1659,6 +1830,7 @@ class HeldTasteStageOutput:
                 gate.get("checkpoint_sha256s_sha256"),
                 field="held_stage.checkpoint_sha256s_sha256",
             ),
+            **_t2_binding_stage_evidence(gate),
         }
         if current_snapshot != self.snapshot or current != dict(self.evidence):
             raise TasteGNNStageError("held Taste stage output authority changed")
@@ -1719,6 +1891,7 @@ def hold_taste_stage_output(root: str | Path) -> HeldTasteStageOutput:
                 gate.get("checkpoint_sha256s_sha256"),
                 field="held_stage.checkpoint_sha256s_sha256",
             ),
+            **_t2_binding_stage_evidence(gate),
         }
         held = HeldTasteStageOutput(
             directory=directory,
@@ -1833,6 +2006,9 @@ def hold_taste_checkpoint_bundle(
         "checkpoint_inventory_sha256",
         "checkpoint_stat_inventory_sha256",
         "checkpoint_sha256s_sha256",
+        "t2_adoption_gate_sha256",
+        "t2_adoption_receipt_sha256",
+        "t2_adoption_binding_sha256",
     ):
         _hex(evidence[key], field=f"checkpoint_stage_evidence.{key}")
     requested = Path(path).expanduser()
@@ -1858,8 +2034,9 @@ def hold_taste_checkpoint_bundle(
         raise
 
 
-def run_t3_existing_fit_adoption(
+def _run_t3_existing_fit_adoption(
     *,
+    t2_adoption: HeldT2PassAdoption,
     checkpoint_dir: str | Path,
     graph_cache_root: str | Path,
     artifact_root: str | Path,
@@ -1885,6 +2062,9 @@ def run_t3_existing_fit_adoption(
         ):
             raise TasteGNNStageError("T3 authority does not permit existing-fit adoption")
         checkpoint_root = _physical_directory(checkpoint_dir, field="T2 checkpoint")
+        t2_binding = _bind_t2_adoption_to_checkpoint(
+            t2_adoption, checkpoint_root
+        )
         cache_root = _physical_directory(
             graph_cache_root, field="graph-cache exclusion authority"
         )
@@ -1906,6 +2086,7 @@ def run_t3_existing_fit_adoption(
                 checkpoint,
                 cache_root.path,
                 execution_root.path,
+                t2_adoption.root,
                 *policy.protected_paths(),
             ),
             forbidden_identity_paths=forbidden_identities,
@@ -1937,74 +2118,84 @@ def run_t3_existing_fit_adoption(
             raise TasteGNNStageError("T3 checkpoint ID differs from model.pt")
         policy_binding = policy.evidence(stage=T3_STAGE)
         adoption = {
-        "schema_version": "tastemolnet_t3_existing_fit_adoption_v1",
-        "status": "PASS",
-        "stage": T3_STAGE,
-        "dataset": "tastemolnet",
-        "checkpoint_dir": str(checkpoint),
-        "checkpoint_id": checkpoint_id,
-        "checkpoint_inventory_sha256": before["inventory_sha256"],
-        "checkpoint_stat_inventory_sha256": stat_before["inventory_sha256"],
-        "checkpoint_sha256s_sha256": _sha256_at(
-            checkpoint_root, "sha256sums.txt", label="checkpoint SHA inventory"
-        ),
-        "source_bundle_unchanged": True,
-        "checkpoint_copied": False,
-        "temperature_refit_performed": False,
-        "bundle_evidence_files_opened": ["validation_predictions.csv"],
-        "external_split_payload_files_opened": [],
-        "validation_predictions_source": "immutable_t2_bundle",
-        "calibration": calibration,
-        "num_classes": NUM_CLASSES,
-        "source_label": SOURCE_LABEL,
-        "strict_flip": "pred_before == 1 and pred_after != 1",
-        "test_loaded": False,
-        "data_redistribution_allowed": False,
+            "schema_version": "tastemolnet_t3_existing_fit_adoption_v1",
+            "status": "PASS",
+            "stage": T3_STAGE,
+            "dataset": "tastemolnet",
+            "checkpoint_dir": str(checkpoint),
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_inventory_sha256": before["inventory_sha256"],
+            "checkpoint_stat_inventory_sha256": stat_before["inventory_sha256"],
+            "checkpoint_sha256s_sha256": _sha256_at(
+                checkpoint_root, "sha256sums.txt", label="checkpoint SHA inventory"
+            ),
+            "source_bundle_unchanged": True,
+            "checkpoint_copied": False,
+            "temperature_refit_performed": False,
+            "bundle_evidence_files_opened": ["validation_predictions.csv"],
+            "external_split_payload_files_opened": [],
+            "validation_predictions_source": "immutable_t2_bundle",
+            "calibration": calibration,
+            "num_classes": NUM_CLASSES,
+            "source_label": SOURCE_LABEL,
+            "strict_flip": "pred_before == 1 and pred_after != 1",
+            "test_loaded": False,
+            "data_redistribution_allowed": False,
+            "t2_adoption_binding": t2_binding,
         }
         oracle_reference = {
-        "schema_version": "tastemolnet_t3_oracle_reference_v1",
-        "dataset": "tastemolnet",
-        "checkpoint_id": checkpoint_id,
-        "selected_inference_asset": "model.pt",
-        "model_sha256": _sha256_at(checkpoint_root, "model.pt", label="model.pt"),
-        "last_checkpoint_terminal_only": True,
-        "last_sha256": _sha256_at(checkpoint_root, "last.pt", label="last.pt"),
-        "temperature_scaling_sha256": _sha256_at(
-            checkpoint_root,
-            "temperature_scaling.json",
-            label="temperature scaling",
-        ),
-        "config_sha256": _sha256_at(checkpoint_root, "config.yaml", label="config"),
-        "feature_schema_sha256": _sha256_at(
-            checkpoint_root, "feature_schema.json", label="feature schema"
-        ),
-        "label_map_sha256": _sha256_at(
-            checkpoint_root, "label_map.json", label="label map"
-        ),
-        "num_classes": NUM_CLASSES,
-        "source_label": SOURCE_LABEL,
-        "rf_oracle_used": False,
+            "schema_version": "tastemolnet_t3_oracle_reference_v1",
+            "dataset": "tastemolnet",
+            "checkpoint_id": checkpoint_id,
+            "selected_inference_asset": "model.pt",
+            "model_sha256": _sha256_at(
+                checkpoint_root, "model.pt", label="model.pt"
+            ),
+            "last_checkpoint_terminal_only": True,
+            "last_sha256": _sha256_at(
+                checkpoint_root, "last.pt", label="last.pt"
+            ),
+            "temperature_scaling_sha256": _sha256_at(
+                checkpoint_root,
+                "temperature_scaling.json",
+                label="temperature scaling",
+            ),
+            "config_sha256": _sha256_at(
+                checkpoint_root, "config.yaml", label="config"
+            ),
+            "feature_schema_sha256": _sha256_at(
+                checkpoint_root, "feature_schema.json", label="feature schema"
+            ),
+            "label_map_sha256": _sha256_at(
+                checkpoint_root, "label_map.json", label="label map"
+            ),
+            "num_classes": NUM_CLASSES,
+            "source_label": SOURCE_LABEL,
+            "rf_oracle_used": False,
+            "t2_adoption_binding": t2_binding,
         }
         gate = {
-        "schema_version": "tastemolnet_main_stage_gate_v1",
-        "stage": T3_STAGE,
-        "status": "PASS",
-        "marker": T3_MARKER,
-        "depends_on": ["T2_GINE_FULL"],
-        "t2_science_bundle_verified": True,
-        "checkpoint_dir": str(checkpoint),
-        "checkpoint_id": checkpoint_id,
-        "checkpoint_inventory_sha256": before["inventory_sha256"],
-        "checkpoint_stat_inventory_sha256": stat_before["inventory_sha256"],
-        "checkpoint_sha256s_sha256": _sha256_at(
-            checkpoint_root, "sha256sums.txt", label="checkpoint SHA inventory"
-        ),
-        "downstream_policy_sha256": policy.file_sha256,
-        "existing_fit_adopted": True,
-        "temperature_refit_performed": False,
-        "test_loaded": False,
+            "schema_version": "tastemolnet_main_stage_gate_v1",
+            "stage": T3_STAGE,
+            "status": "PASS",
+            "marker": T3_MARKER,
+            "depends_on": [ADOPTION_MARKER],
+            "t2_science_bundle_verified": True,
+            "t2_adoption_binding": t2_binding,
+            "checkpoint_dir": str(checkpoint),
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_inventory_sha256": before["inventory_sha256"],
+            "checkpoint_stat_inventory_sha256": stat_before["inventory_sha256"],
+            "checkpoint_sha256s_sha256": _sha256_at(
+                checkpoint_root, "sha256sums.txt", label="checkpoint SHA inventory"
+            ),
+            "downstream_policy_sha256": policy.file_sha256,
+            "existing_fit_adopted": True,
+            "temperature_refit_performed": False,
+            "test_loaded": False,
         }
         checkpoint_root.verify(label="T2 checkpoint before T3 publication")
+        _validated_t2_adoption_binding(t2_adoption)
         policy.verify_authorities()
         execution_root.verify(label="loaded execution source before T3 publication")
         cache_root.verify(label="graph-cache exclusion before T3 publication")
@@ -2025,6 +2216,7 @@ def run_t3_existing_fit_adoption(
         # Prepared evidence is not a PASS boundary.  Close every retained input
         # authority before the marker is created as the final commit operation.
         checkpoint_root.verify(label="T2 checkpoint after T3 preparation")
+        _validated_t2_adoption_binding(t2_adoption)
         if before != _checkpoint_snapshot(checkpoint_root):
             raise TasteGNNStageError("T3 checkpoint bytes drifted during preparation")
         if stat_before != _checkpoint_stat_snapshot(checkpoint_root):
@@ -2034,6 +2226,10 @@ def run_t3_existing_fit_adoption(
         cache_root.verify(label="graph-cache exclusion after T3 preparation")
         prepared_output.revalidate()
         def retained_t3_input_closure() -> None:
+            if _validated_t2_adoption_binding(t2_adoption) != t2_binding:
+                raise TasteGNNStageError(
+                    "fresh T2 adoption binding drifted at T3 PASS boundary"
+                )
             checkpoint_root.verify(label="T2 checkpoint at T3 PASS boundary")
             if before != _checkpoint_snapshot(checkpoint_root):
                 raise TasteGNNStageError(
@@ -2064,6 +2260,46 @@ def run_t3_existing_fit_adoption(
         if execution_root is not None:
             execution_root.close()
         policy.close()
+
+
+def run_t3_existing_fit_adoption(
+    *,
+    t2_adoption_root: str | Path,
+    t2_adoption_gate_sha256: str,
+    t2_adoption_receipt_sha256: str,
+    t2_source_evidence_sha256: str,
+    checkpoint_dir: str | Path,
+    graph_cache_root: str | Path,
+    artifact_root: str | Path,
+    output_dir: str | Path,
+    downstream_policy_path: str | Path,
+    base_policy_path: str | Path,
+) -> dict[str, Any]:
+    """Run T3 only while the fresh T2 PASS adoption remains held."""
+
+    try:
+        authority = hold_t2_gine_pass_adoption(
+            t2_adoption_root,
+            expected_gate_sha256=t2_adoption_gate_sha256,
+            expected_receipt_sha256=t2_adoption_receipt_sha256,
+            expected_source_evidence_sha256=t2_source_evidence_sha256,
+        )
+    except (T2PassAdoptionError, OSError, ValueError) as exc:
+        raise TasteGNNStageError(
+            f"T3 requires the fresh T2 GINE PASS adoption: {exc}"
+        ) from exc
+    try:
+        return _run_t3_existing_fit_adoption(
+            t2_adoption=authority,
+            checkpoint_dir=checkpoint_dir,
+            graph_cache_root=graph_cache_root,
+            artifact_root=artifact_root,
+            output_dir=output_dir,
+            downstream_policy_path=downstream_policy_path,
+            base_policy_path=base_policy_path,
+        )
+    finally:
+        authority.close()
 
 
 def _real_connected_deletions(
@@ -2477,8 +2713,9 @@ def run_bounded_oracle_smoke(
     }
 
 
-def run_t4_calibration_cache_smoke(
+def _run_t4_calibration_cache_smoke(
     *,
+    t2_adoption: HeldT2PassAdoption,
     checkpoint_dir: str | Path,
     t3_gate_path: str | Path,
     graph_cache_root: str | Path,
@@ -2519,6 +2756,9 @@ def run_t4_calibration_cache_smoke(
         raise TasteGNNStageError("T4 bounded cohort/deletion parameters changed")
 
     checkpoint_root = _physical_directory(checkpoint_dir, field="T2 checkpoint")
+    t2_binding = _bind_t2_adoption_to_checkpoint(
+        t2_adoption, checkpoint_root
+    )
     cache_directory = _physical_directory(graph_cache_root, field="graph-cache root")
     execution_root = _physical_directory(
         EXECUTION_SOURCE_ROOT, field="loaded execution source root"
@@ -2547,6 +2787,7 @@ def run_t4_calibration_cache_smoke(
             cache_directory.path,
             t3_output.path,
             execution_root.path,
+            t2_adoption.root,
             *policy.protected_paths(),
         ),
         forbidden_identity_paths=forbidden_identities,
@@ -2576,6 +2817,10 @@ def run_t4_calibration_cache_smoke(
         raise TasteGNNStageError("T4 predecessor T3 science semantics changed")
     if t3_gate.get("downstream_policy_sha256") != policy.file_sha256:
         raise TasteGNNStageError("T3 and T4 downstream-policy authorities differ")
+    if t3_gate.get("t2_adoption_binding") != t2_binding:
+        raise TasteGNNStageError(
+            "T3 and T4 fresh T2 adoption authorities differ"
+        )
 
     checkpoint_root.verify(label="T2 checkpoint before T4 verification")
     before = _checkpoint_stat_snapshot(checkpoint_root)
@@ -2726,6 +2971,7 @@ def run_t4_calibration_cache_smoke(
         "checkpoint_load_count": 1,
         "rf_oracle_used": False,
         "test_loaded": False,
+        "t2_adoption_binding": t2_binding,
     }
     gate = {
         "schema_version": "tastemolnet_main_stage_gate_v1",
@@ -2734,6 +2980,7 @@ def run_t4_calibration_cache_smoke(
         "marker": T4_MARKER,
         "depends_on": [T3_STAGE],
         "t3_gate_sha256": _sha256_at(t3_output, "gate.json", label="T3 gate"),
+        "t2_adoption_binding": t2_binding,
         "checkpoint_dir": str(checkpoint),
         "checkpoint_id": checkpoint_id,
         "checkpoint_inventory_sha256": expected_full_inventory,
@@ -2750,6 +2997,7 @@ def run_t4_calibration_cache_smoke(
         "per_example_predictions_written": False,
     }
     checkpoint_root.verify(label="T2 checkpoint before T4 publication")
+    _validated_t2_adoption_binding(t2_adoption)
     cache_directory.verify(label="graph-cache root before T4 publication")
     t3_output.verify(label="T3 output before T4 publication")
     policy.verify_authorities()
@@ -2787,6 +3035,7 @@ def run_t4_calibration_cache_smoke(
     )
     # Complete the retained closure while the output is still non-terminal.
     checkpoint_root.verify(label="T2 checkpoint after T4 preparation")
+    _validated_t2_adoption_binding(t2_adoption)
     if before != _checkpoint_stat_snapshot(checkpoint_root):
         raise TasteGNNStageError(
             "T4 checkpoint stat inventory drifted during preparation"
@@ -2820,6 +3069,10 @@ def run_t4_calibration_cache_smoke(
     execution_root.verify(label="loaded execution source after T4 preparation")
     try:
         def retained_t4_input_closure() -> None:
+            if _validated_t2_adoption_binding(t2_adoption) != t2_binding:
+                raise TasteGNNStageError(
+                    "fresh T2 adoption binding drifted at T4 PASS boundary"
+                )
             checkpoint_root.verify(label="T2 checkpoint at T4 PASS boundary")
             if before != _checkpoint_stat_snapshot(checkpoint_root):
                 raise TasteGNNStageError(
@@ -2871,6 +3124,71 @@ def run_t4_calibration_cache_smoke(
     execution_root.close()
     policy.close()
     return smoke
+
+
+def run_t4_calibration_cache_smoke(
+    *,
+    t2_adoption_root: str | Path,
+    t2_adoption_gate_sha256: str,
+    t2_adoption_receipt_sha256: str,
+    t2_source_evidence_sha256: str,
+    checkpoint_dir: str | Path,
+    t3_gate_path: str | Path,
+    graph_cache_root: str | Path,
+    artifact_root: str | Path,
+    output_dir: str | Path,
+    downstream_policy_path: str | Path,
+    base_policy_path: str | Path,
+    gpu_uuid: str,
+    physical_gpu_index: int = 1,
+    device: str = "cuda:0",
+    batch_size: int = 32,
+    source_count: int = 16,
+    max_deletions_per_parent: int = 4,
+    oracle_factory: Callable[..., GNNOracle] | None = None,
+) -> dict[str, Any]:
+    """Run T4 only while the same fresh T2 adoption as T3 remains held."""
+
+    # Keep the cheap direct-child GPU binding ahead of the expensive historical
+    # source audit, but never create/open a stage output before T2 is held.
+    if type(physical_gpu_index) is not int or physical_gpu_index != 1:
+        raise TasteGNNStageError("Taste T4 is frozen to physical GPU index 1")
+    if type(gpu_uuid) is not str or not gpu_uuid.startswith("GPU-"):
+        raise TasteGNNStageError("Taste T4 requires the physical GPU1 UUID")
+    if device != "cuda:0":
+        raise TasteGNNStageError("Taste T4 visible-device mapping must use cuda:0")
+    _require_gpu1_environment(gpu_uuid=gpu_uuid)
+    try:
+        authority = hold_t2_gine_pass_adoption(
+            t2_adoption_root,
+            expected_gate_sha256=t2_adoption_gate_sha256,
+            expected_receipt_sha256=t2_adoption_receipt_sha256,
+            expected_source_evidence_sha256=t2_source_evidence_sha256,
+        )
+    except (T2PassAdoptionError, OSError, ValueError) as exc:
+        raise TasteGNNStageError(
+            f"T4 requires the fresh T2 GINE PASS adoption: {exc}"
+        ) from exc
+    try:
+        return _run_t4_calibration_cache_smoke(
+            t2_adoption=authority,
+            checkpoint_dir=checkpoint_dir,
+            t3_gate_path=t3_gate_path,
+            graph_cache_root=graph_cache_root,
+            artifact_root=artifact_root,
+            output_dir=output_dir,
+            downstream_policy_path=downstream_policy_path,
+            base_policy_path=base_policy_path,
+            gpu_uuid=gpu_uuid,
+            physical_gpu_index=physical_gpu_index,
+            device=device,
+            batch_size=batch_size,
+            source_count=source_count,
+            max_deletions_per_parent=max_deletions_per_parent,
+            oracle_factory=oracle_factory,
+        )
+    finally:
+        authority.close()
 
 
 __all__ = [

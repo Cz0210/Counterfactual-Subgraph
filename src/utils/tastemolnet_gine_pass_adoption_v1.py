@@ -49,6 +49,31 @@ FIVE_FILE_SET = (
     "output_hashes.json",
     "gate.json",
 )
+DOWNSTREAM_BINDING_SCHEMA = (
+    "tastemolnet_t2_gine_pass_downstream_binding_v1"
+)
+DOWNSTREAM_BINDING_KEYS = frozenset(
+    {
+        "schema_version",
+        "stage",
+        "status",
+        "state",
+        "source_cid",
+        "source_run_id",
+        "adoption_root",
+        "adoption_root_inventory_sha256",
+        "gate_path",
+        "gate_sha256",
+        "receipt_path",
+        "receipt_sha256",
+        "source_evidence_sha256",
+        "formal_bundle_root",
+        "formal_bundle_inventory",
+        "formal_bundle_inventory_sha256",
+        "formal_bundle_model_sha256",
+        "formal_bundle_sha256s_sha256",
+    }
+)
 
 SOURCE_CID = "tastemolnet_gine_v2_20260827T160626Z_583bf668"
 SOURCE_RUN_ID = (
@@ -1284,11 +1309,18 @@ class _SourceHold:
         elif source.proc_root == Path("/proc"):
             raise T2PassAdoptionError("test proc override must not alias production /proc")
         expected_controller = (
+            source.control_root / "tastemolnet-gine-v2" / SOURCE_CID
+        )
+        expected_training = (
             source.control_root / "tastemolnet-gine-training-v2" / SOURCE_CID
         )
         expected_output = source.runtime_root / SOURCE_OUTPUT_RELATIVE
         if source.controller_root != expected_controller:
             raise T2PassAdoptionError("old controller root is not the deployed canonical root")
+        if source.training_state_root != expected_training:
+            raise T2PassAdoptionError(
+                "old training-state root is not the deployed canonical root"
+            )
         if source.output_root != expected_output:
             raise T2PassAdoptionError("scientific output root is not the deployed canonical root")
         mutually_disjoint = (
@@ -3344,8 +3376,381 @@ def validate_t2_gine_pass_adoption(
             }
 
 
+def _validate_receipt_only_documents(
+    adoption: HeldTree,
+    *,
+    adoption_root: Path,
+    expected_gate_sha256: str,
+    expected_receipt_sha256: str,
+    expected_source_evidence_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]], dict[str, str]]:
+    """Validate the immutable five-file T2 authority without old-source access."""
+
+    if (
+        not adoption_root.is_absolute()
+        or Path(os.path.normpath(str(adoption_root))) != adoption_root
+        or adoption_root.name != SOURCE_CID
+        or adoption_root.parent.name != ADOPTION_NAMESPACE
+    ):
+        raise T2PassAdoptionError("T2 adoption root path formula changed")
+    for label, digest in (
+        ("expected gate", expected_gate_sha256),
+        ("expected receipt", expected_receipt_sha256),
+        ("expected source evidence", expected_source_evidence_sha256),
+    ):
+        if type(digest) is not str or not SHA256_RE.fullmatch(digest):
+            raise T2PassAdoptionError(f"{label} SHA-256 is malformed")
+    if set(adoption.files) != set(FIVE_FILE_SET) or any(
+        row["kind"] == "directory" for row in adoption.inventory
+    ):
+        raise T2PassAdoptionError("T2 adoption is not the exact five-file root")
+    if stat.S_IMODE(adoption.root.identity["mode"]) != 0o700 or any(
+        stat.S_IMODE(adoption.file(name).identity["mode"]) != 0o600
+        for name in FIVE_FILE_SET
+    ):
+        raise T2PassAdoptionError(
+            "T2 adoption root/files are not owner-private 0700/0600"
+        )
+    values: dict[str, Mapping[str, Any]] = {
+        name: adoption.file(name).json() for name in FIVE_FILE_SET
+    }
+    for name, value in values.items():
+        if adoption.file(name).bytes() != _json_bytes(value):
+            raise T2PassAdoptionError(
+                f"T2 adoption {name} is not deterministic canonical JSON"
+            )
+    hashes = {name: adoption.file(name).sha256 for name in FIVE_FILE_SET}
+    if (
+        hashes["gate.json"] != expected_gate_sha256
+        or hashes["manifest.json"] != expected_receipt_sha256
+    ):
+        raise T2PassAdoptionError("T2 adoption expected gate/receipt pin changed")
+
+    input_hashes = values["input_hashes.json"]
+    state = values["state.json"]
+    manifest = values["manifest.json"]
+    output_hashes = values["output_hashes.json"]
+    gate = values["gate.json"]
+    source_evidence = input_hashes.get("source_evidence")
+    if not isinstance(source_evidence, Mapping):
+        raise T2PassAdoptionError("T2 adoption lacks embedded source evidence")
+    embedded_source_sha = source_evidence.get("source_evidence_sha256")
+    source_without_digest = dict(source_evidence)
+    source_without_digest.pop("source_evidence_sha256", None)
+    if (
+        embedded_source_sha != expected_source_evidence_sha256
+        or input_hashes.get("source_evidence_sha256") != embedded_source_sha
+        or _stable_sha256(source_without_digest) != embedded_source_sha
+    ):
+        raise T2PassAdoptionError("T2 embedded source-evidence digest changed")
+
+    document_hashes = {
+        name: hashes[name] for name in FIVE_FILE_SET[:-1]
+    }
+    input_sha = hashes["input_hashes.json"]
+    state_sha = hashes["state.json"]
+    manifest_sha = hashes["manifest.json"]
+    if (
+        state.get("input_hashes_sha256") != input_sha
+        or state.get("source_evidence_sha256") != embedded_source_sha
+        or manifest.get("input_hashes_sha256") != input_sha
+        or manifest.get("state_sha256") != state_sha
+        or manifest.get("source_evidence_sha256") != embedded_source_sha
+        or output_hashes.get("receipt_file") != "manifest.json"
+        or output_hashes.get("receipt_sha256") != manifest_sha
+        or output_hashes.get("files")
+        != {
+            "input_hashes.json": input_sha,
+            "state.json": state_sha,
+            "manifest.json": manifest_sha,
+        }
+        or gate.get("files") != document_hashes
+        or gate.get("receipt_file") != "manifest.json"
+        or gate.get("receipt_sha256") != manifest_sha
+        or gate.get("source_evidence_sha256") != embedded_source_sha
+    ):
+        raise T2PassAdoptionError("T2 five-file receipt hash DAG changed")
+    exact_common = {
+        "stage": "T2_GINE_FULL",
+        "marker": ADOPTION_MARKER,
+    }
+    if any(
+        value.get(key) != expected
+        for value in (input_hashes, state, manifest, output_hashes, gate)
+        for key, expected in exact_common.items()
+    ):
+        raise T2PassAdoptionError("T2 five-file stage/marker semantics changed")
+    if (
+        input_hashes.get("schema_version")
+        != "tastemolnet_t2_gine_pass_input_hashes_v1"
+        or input_hashes.get("status") != "VERIFIED_READ_ONLY"
+        or state.get("schema_version")
+        != "tastemolnet_t2_gine_pass_adoption_state_v1"
+        or state.get("status") != "PASS"
+        or state.get("state") != ADOPTION_MARKER
+        or manifest.get("schema_version")
+        != "tastemolnet_t2_gine_pass_adoption_receipt_v1"
+        or manifest.get("receipt_kind") != ADOPTION_MARKER
+        or manifest.get("status") != "PASS"
+        or output_hashes.get("schema_version")
+        != "tastemolnet_t2_gine_pass_output_hashes_v1"
+        or output_hashes.get("status") != "PASS_PENDING_GATE"
+        or output_hashes.get("gate_excluded_to_avoid_hash_cycle") is not True
+        or gate.get("schema_version")
+        != "tastemolnet_t2_gine_pass_adoption_gate_v1"
+        or gate.get("status") != "PASS"
+        or gate.get("state") != ADOPTION_MARKER
+        or gate.get("failures") != []
+        or gate.get("gate_published_last") is not True
+        or gate.get("no_fallible_operation_after_gate_publication") is not True
+        or gate.get("downstream_release_scope")
+        != ["T3_GINE_CALIBRATED", "T4_ORACLE_SMOKE"]
+    ):
+        raise T2PassAdoptionError("T2 five-file typed PASS semantics changed")
+    if (
+        manifest.get("source_cid") != SOURCE_CID
+        or manifest.get("source_run_id") != SOURCE_RUN_ID
+        or manifest.get("source_execution_commit") != SOURCE_EXECUTION_COMMIT
+        or manifest.get("source_identity_fix_commit")
+        != SOURCE_IDENTITY_FIX_COMMIT
+        or manifest.get("five_file_set") != list(FIVE_FILE_SET)
+        or manifest.get("downstream_consumers")
+        != ["T3_GINE_CALIBRATED", "T4_ORACLE_SMOKE"]
+        or manifest.get("downstream_must_bind_receipt_sha256") is not True
+        or manifest.get("release_authorized") is not True
+        or manifest.get("science_executed_by_adoption") is not False
+        or state.get("source_cid") != SOURCE_CID
+        or state.get("source_run_id") != SOURCE_RUN_ID
+    ):
+        raise T2PassAdoptionError("T2 receipt source identity changed")
+
+    control_root = adoption_root.parent.parent
+    runtime_root = control_root.parent
+    expected_controller_root = control_root / "tastemolnet-gine-v2" / SOURCE_CID
+    expected_training_root = (
+        control_root / "tastemolnet-gine-training-v2" / SOURCE_CID
+    )
+    expected_output_root = runtime_root / SOURCE_OUTPUT_RELATIVE
+    source_result = source_evidence.get("source_result")
+    failed_controller = source_evidence.get("failed_controller")
+    scientific = source_evidence.get("scientific_output")
+    training = source_evidence.get("training_state")
+    source_code = source_evidence.get("source_code")
+    boundary = source_evidence.get("adoption_boundary")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (
+            source_result,
+            failed_controller,
+            scientific,
+            training,
+            source_code,
+            boundary,
+        )
+    ):
+        raise T2PassAdoptionError("T2 receipt source sections are malformed")
+    if (
+        source_result.get("dataset") != "tastemolnet"
+        or source_result.get("stage") != "T2_GINE_FULL"
+        or source_result.get("source_cid") != SOURCE_CID
+        or source_result.get("source_run_id") != SOURCE_RUN_ID
+        or source_result.get("backbone") != "gine"
+        or not _exact_int(source_result.get("seed"), 7)
+        or not _exact_int(source_result.get("num_classes"), 3)
+        or source_result.get("label_map")
+        != {"0": "Bitter", "1": "Sweet", "2": "Tasteless"}
+        or not _exact_int(source_result.get("source_label"), 1)
+        or source_result.get("strict_flip")
+        != "pred_before == 1 and pred_after != 1"
+        or failed_controller.get("root") != str(expected_controller_root)
+        or failed_controller.get("phase") != "FAILED"
+        or failed_controller.get("reason") != SOURCE_FAILED_REASON
+        or failed_controller.get("scientific_false_negative") is not True
+        or training.get("root") != str(expected_training_root)
+        or scientific.get("root") != str(expected_output_root)
+        or scientific.get("status") != "PASS"
+        or boundary.get("control_root") != str(control_root)
+        or boundary.get("adoption_root") != str(adoption_root)
+    ):
+        raise T2PassAdoptionError("T2 receipt canonical source paths/semantics changed")
+    execution_git = source_code.get("execution_git")
+    identity_fix_git = source_code.get("identity_fix_git")
+    if (
+        not isinstance(execution_git, Mapping)
+        or not isinstance(identity_fix_git, Mapping)
+        or execution_git.get("commit") != SOURCE_EXECUTION_COMMIT
+        or identity_fix_git.get("commit") != SOURCE_IDENTITY_FIX_COMMIT
+    ):
+        raise T2PassAdoptionError("T2 receipt source Git identity changed")
+
+    inventory = scientific.get("inventory")
+    if not isinstance(inventory, list) or len(inventory) != len(CHECKPOINT_FILES):
+        raise T2PassAdoptionError("T2 formal bundle inventory length changed")
+    if _stable_sha256(inventory) != scientific.get("inventory_sha256"):
+        raise T2PassAdoptionError("T2 formal bundle inventory digest changed")
+    files: dict[str, Mapping[str, Any]] = {}
+    for row in inventory:
+        if (
+            not isinstance(row, Mapping)
+            or set(row) != {"path", "kind", "identity", "sha256"}
+            or row.get("kind") != "file"
+            or type(row.get("path")) is not str
+            or row["path"] in files
+            or row["path"] not in CHECKPOINT_FILES
+            or not isinstance(row.get("identity"), Mapping)
+            or set(row["identity"]) != FILE_IDENTITY_FIELDS
+            or type(row.get("sha256")) is not str
+            or not SHA256_RE.fullmatch(row["sha256"])
+        ):
+            raise T2PassAdoptionError("T2 formal bundle inventory row changed")
+        files[row["path"]] = row
+    if set(files) != CHECKPOINT_FILES:
+        raise T2PassAdoptionError("T2 formal bundle file set changed")
+    if (
+        scientific.get("model_sha256") != files["model.pt"]["sha256"]
+        or scientific.get("sha256sums_sha256")
+        != files["sha256sums.txt"]["sha256"]
+    ):
+        raise T2PassAdoptionError("T2 formal model/hash-inventory pin changed")
+    dependency = manifest.get("t3_dependency_contract")
+    if not isinstance(dependency, Mapping) or (
+        dependency.get("required_t2_gate_file") != "gate.json"
+        or dependency.get("required_t2_receipt_file") != "manifest.json"
+        or dependency.get("required_formal_bundle_root")
+        != scientific.get("root")
+        or dependency.get("required_formal_bundle_inventory_sha256")
+        != scientific.get("inventory_sha256")
+        or dependency.get("required_model_sha256")
+        != scientific.get("model_sha256")
+        or dependency.get("other_t2_authorities_allowed") is not False
+    ):
+        raise T2PassAdoptionError("T2 formal downstream dependency changed")
+    publication_boundary = manifest.get("publication_boundary")
+    if (
+        not isinstance(publication_boundary, Mapping)
+        or publication_boundary.get("only_write_root") != str(adoption_root)
+    ):
+        raise T2PassAdoptionError("T2 receipt publication root changed")
+    assert adoption.root.fd is not None
+    if gate.get("physical_binding") != _publication_binding(
+        adoption.root.fd,
+        {name: adoption.file(name) for name in FIVE_FILE_SET[:-1]},
+    ):
+        raise T2PassAdoptionError("T2 receipt physical binding changed")
+
+    evidence = {
+        "schema_version": DOWNSTREAM_BINDING_SCHEMA,
+        "stage": "T2_GINE_FULL",
+        "status": "PASS",
+        "state": ADOPTION_MARKER,
+        "source_cid": SOURCE_CID,
+        "source_run_id": SOURCE_RUN_ID,
+        "adoption_root": str(adoption_root),
+        "adoption_root_inventory_sha256": adoption.inventory_sha256,
+        "gate_path": str(adoption_root / "gate.json"),
+        "gate_sha256": hashes["gate.json"],
+        "receipt_path": str(adoption_root / "manifest.json"),
+        "receipt_sha256": hashes["manifest.json"],
+        "source_evidence_sha256": embedded_source_sha,
+        "formal_bundle_root": str(scientific["root"]),
+        "formal_bundle_inventory": json.loads(json.dumps(inventory)),
+        "formal_bundle_inventory_sha256": str(scientific["inventory_sha256"]),
+        "formal_bundle_model_sha256": str(scientific["model_sha256"]),
+        "formal_bundle_sha256s_sha256": str(
+            scientific["sha256sums_sha256"]
+        ),
+    }
+    if set(evidence) != DOWNSTREAM_BINDING_KEYS:
+        raise T2PassAdoptionError("T2 downstream binding keys changed")
+    adoption.verify()
+    return evidence, values, hashes
+
+
+@dataclass(slots=True)
+class HeldT2PassAdoption:
+    """Descriptor-held, receipt-only T2 authority for downstream stages."""
+
+    root: Path
+    tree: HeldTree
+    expected_gate_sha256: str
+    expected_receipt_sha256: str
+    expected_source_evidence_sha256: str
+    values: Mapping[str, Mapping[str, Any]]
+    hashes: Mapping[str, str]
+    evidence: Mapping[str, Any]
+
+    def revalidate(self) -> dict[str, Any]:
+        self.tree.verify()
+        evidence, values, hashes = _validate_receipt_only_documents(
+            self.tree,
+            adoption_root=self.root,
+            expected_gate_sha256=self.expected_gate_sha256,
+            expected_receipt_sha256=self.expected_receipt_sha256,
+            expected_source_evidence_sha256=self.expected_source_evidence_sha256,
+        )
+        if (
+            values != dict(self.values)
+            or hashes != dict(self.hashes)
+            or evidence != dict(self.evidence)
+        ):
+            raise T2PassAdoptionError("held T2 adoption receipt changed")
+        self.tree.verify()
+        return json.loads(json.dumps(evidence))
+
+    def close(self) -> None:
+        self.tree.close()
+
+    def __enter__(self) -> "HeldT2PassAdoption":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - process-exit cleanup.
+        self.close()
+
+
+def hold_t2_gine_pass_adoption(
+    adoption_root: str | Path,
+    *,
+    expected_gate_sha256: str,
+    expected_receipt_sha256: str,
+    expected_source_evidence_sha256: str,
+) -> HeldT2PassAdoption:
+    """Open only the immutable fresh receipt; never reopen historical sources."""
+
+    root = _absolute(adoption_root, label="T2 adoption root")
+    tree = HeldTree(root, label="T2 downstream adoption receipt")
+    try:
+        tree.open()
+        evidence, values, hashes = _validate_receipt_only_documents(
+            tree,
+            adoption_root=root,
+            expected_gate_sha256=expected_gate_sha256,
+            expected_receipt_sha256=expected_receipt_sha256,
+            expected_source_evidence_sha256=expected_source_evidence_sha256,
+        )
+        held = HeldT2PassAdoption(
+            root=root,
+            tree=tree,
+            expected_gate_sha256=expected_gate_sha256,
+            expected_receipt_sha256=expected_receipt_sha256,
+            expected_source_evidence_sha256=expected_source_evidence_sha256,
+            values=json.loads(json.dumps(values)),
+            hashes=dict(hashes),
+            evidence=evidence,
+        )
+        held.revalidate()
+        return held
+    except BaseException:
+        tree.close()
+        raise
+
+
 __all__ = [
     "ADOPTION_MARKER",
+    "DOWNSTREAM_BINDING_KEYS",
+    "DOWNSTREAM_BINDING_SCHEMA",
     "FIVE_FILE_SET",
     "SOURCE_CID",
     "SOURCE_EXECUTION_COMMIT",
@@ -3354,9 +3759,11 @@ __all__ = [
     "T2PassAdoptionError",
     "T2PassAdoptionReleaseDisabled",
     "T2PassAdoptionSources",
+    "HeldT2PassAdoption",
     "adoption_output_root",
     "preflight_t2_gine_pass_adoption",
     "publish_t2_gine_pass_adoption",
     "reviewed_release_candidate",
+    "hold_t2_gine_pass_adoption",
     "validate_t2_gine_pass_adoption",
 ]

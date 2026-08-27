@@ -198,7 +198,14 @@ CSV, SMILES, molecule IDs, or test payloads; the supplemental policy remains
 no-redistribution and AutoDL-only. T3/T4 outputs are exact direct fresh children
 under the Taste GINE seed-7 artifact root, are published through retained
 root-to-leaf descriptors, and reclose every input before creating the PASS
-marker as the final commit. The same supplemental policy now also types a
+marker as the final commit. Their only T2 authority is the descriptor-held
+fresh five-file adoption root plus reviewed gate, receipt, and embedded-source
+SHA-256 pins. The receipt-only holder checks the canonical hash DAG, physical
+file bindings, fixed source IDs, and the formal 19-file GINE inventory without
+reopening the historical controller, training-state, or execution roots. T3
+records the full binding, T4 must match it exactly, T5 freezes and reopens it,
+and T6 records the same binding plus all three pins. The same supplemental
+policy now also types a
 future T6 Ours smoke as train-only,
 using only the frozen prepared train CSV with a frozen-GINE reward and no
 RF/no-validation/no-calibration/no-test; it does not by itself implement or

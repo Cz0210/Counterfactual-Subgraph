@@ -14,6 +14,11 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from src.rewards.gnn_ppo_reward import TASTE_GNN_PPO_REWARD_SCHEMA
+from src.utils.tastemolnet_gine_pass_adoption_v1 import (
+    ADOPTION_MARKER,
+    DOWNSTREAM_BINDING_KEYS,
+    DOWNSTREAM_BINDING_SCHEMA,
+)
 from src.utils.retained_output_directory import (
     HeldPublishedTerminalOutput,
 )
@@ -109,6 +114,62 @@ def _is_sha256(value: Any) -> bool:
     return type(value) is str and len(value) == 64 and all(
         character in "0123456789abcdef" for character in value
     )
+
+
+def _validate_t2_adoption_binding(value: Any) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != set(DOWNSTREAM_BINDING_KEYS):
+        raise ValueError("Taste PPO T2 adoption binding keys changed")
+    if (
+        value.get("schema_version") != DOWNSTREAM_BINDING_SCHEMA
+        or value.get("stage") != "T2_GINE_FULL"
+        or value.get("status") != "PASS"
+        or value.get("state") != ADOPTION_MARKER
+    ):
+        raise ValueError("Taste PPO T2 adoption binding is not PASS")
+    for key in (
+        "adoption_root_inventory_sha256",
+        "gate_sha256",
+        "receipt_sha256",
+        "source_evidence_sha256",
+        "formal_bundle_inventory_sha256",
+        "formal_bundle_model_sha256",
+        "formal_bundle_sha256s_sha256",
+    ):
+        if not _is_sha256(value.get(key)):
+            raise ValueError(f"Taste PPO T2 adoption {key} changed")
+    for key in (
+        "adoption_root",
+        "gate_path",
+        "receipt_path",
+        "formal_bundle_root",
+    ):
+        item = value.get(key)
+        if (
+            type(item) is not str
+            or not Path(item).is_absolute()
+            or Path(os.path.abspath(item)) != Path(item)
+            or "/proc/self/fd/" in item
+        ):
+            raise ValueError(f"Taste PPO T2 adoption {key} changed")
+    if Path(value["gate_path"]) != Path(value["adoption_root"]) / "gate.json":
+        raise ValueError("Taste PPO T2 adoption gate path changed")
+    if Path(value["receipt_path"]) != Path(value["adoption_root"]) / "manifest.json":
+        raise ValueError("Taste PPO T2 adoption receipt path changed")
+    rows = value.get("formal_bundle_inventory")
+    if type(rows) is not list or not rows:
+        raise ValueError("Taste PPO T2 formal inventory is absent")
+    digest = hashlib.sha256(
+        json.dumps(
+            rows,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if digest != value["formal_bundle_inventory_sha256"]:
+        raise ValueError("Taste PPO T2 formal inventory digest changed")
+    return json.loads(json.dumps(value))
 
 
 def _canonical_sha256(payload: Mapping[str, Any]) -> str:
@@ -982,6 +1043,9 @@ def build_taste_smoke_gate(
     reward_manifest: Mapping[str, Any],
     oracle_provenance: Mapping[str, Any],
     policy_initializer_hash: str,
+    t2_adoption_gate_sha256: str,
+    t2_adoption_receipt_sha256: str,
+    t2_adoption_binding_sha256: str,
     t3_gate_sha256: str,
     t4_gate_sha256: str,
     value_head_parameter_sha256: str,
@@ -997,6 +1061,9 @@ def build_taste_smoke_gate(
         "reference_t5_identity_after": reference_t5_identity_after,
         "expected_t5_reference_policy_hash": expected_t5_reference_policy_hash,
         "policy_initializer_hash": policy_initializer_hash,
+        "t2_adoption_gate_sha256": t2_adoption_gate_sha256,
+        "t2_adoption_receipt_sha256": t2_adoption_receipt_sha256,
+        "t2_adoption_binding_sha256": t2_adoption_binding_sha256,
         "t3_gate_sha256": t3_gate_sha256,
         "t4_gate_sha256": t4_gate_sha256,
         "value_head_parameter_sha256": value_head_parameter_sha256,
@@ -1164,6 +1231,9 @@ def build_taste_smoke_gate(
         ),
         "t3_gate_sha256": t3_gate_sha256,
         "t4_gate_sha256": t4_gate_sha256,
+        "t2_adoption_gate_sha256": t2_adoption_gate_sha256,
+        "t2_adoption_receipt_sha256": t2_adoption_receipt_sha256,
+        "t2_adoption_binding_sha256": t2_adoption_binding_sha256,
         "strict_flip_count": strict_flip_count,
         "destination_labels": destinations,
         "rf_oracle_used": False,
@@ -1229,6 +1299,8 @@ class HeldTastePPOOutput:
         state = self._json("state.json")
         reward = self._json("reward_manifest.json")
         oracle = self._json("oracle_provenance.json")
+        policy_provenance = self._json("policy_provenance.json")
+        input_hashes = self._json("input_hashes.json")
         run_manifest = self._json("run_manifest.json")
         observer_state = self._json("observer_state.json")
         if (
@@ -1239,6 +1311,24 @@ class HeldTastePPOOutput:
             or gate.get("failures") != []
         ):
             raise ValueError("Taste PPO terminal gate is not exact PASS")
+        frozen_oracle = policy_provenance.get("frozen_oracle_identity")
+        if type(frozen_oracle) is not dict:
+            raise ValueError("Taste PPO lacks T5 frozen-oracle identity")
+        t2_binding = _validate_t2_adoption_binding(
+            frozen_oracle.get("t2_adoption_binding")
+        )
+        expected_t2 = {
+            "t2_adoption_gate_sha256": t2_binding["gate_sha256"],
+            "t2_adoption_receipt_sha256": t2_binding["receipt_sha256"],
+            "t2_adoption_binding_sha256": _canonical_sha256(t2_binding),
+        }
+        if any(
+            gate.get(key) != digest or input_hashes.get(key) != digest
+            for key, digest in expected_t2.items()
+        ) or input_hashes.get("t2_adoption_binding") != t2_binding:
+            raise ValueError(
+                "Taste PPO T2 adoption does not match T5/T6 authority"
+            )
         for key, value in gate.items():
             if key == "schema_version":
                 continue
@@ -1441,6 +1531,15 @@ class HeldTastePPOOutput:
             reward_manifest=reward,
             oracle_provenance=oracle,
             policy_initializer_hash=gate.get("policy_initializer_hash"),
+            t2_adoption_gate_sha256=gate.get(
+                "t2_adoption_gate_sha256"
+            ),
+            t2_adoption_receipt_sha256=gate.get(
+                "t2_adoption_receipt_sha256"
+            ),
+            t2_adoption_binding_sha256=gate.get(
+                "t2_adoption_binding_sha256"
+            ),
             t3_gate_sha256=gate.get("t3_gate_sha256"),
             t4_gate_sha256=gate.get("t4_gate_sha256"),
             value_head_parameter_sha256=gate.get(

@@ -187,6 +187,15 @@ The lower-level `hold_source_model_for_clean_policy(...)` and one-shot
 bounded inspection. They are not a substitute for the combined T6 loader
 authority.
 
+The frozen oracle identity also contains the complete receipt-only T2 adoption
+binding. T5 reopens the fresh exact-five-file root with the reviewed gate,
+receipt, and source-evidence SHA-256 values, verifies its canonical hash DAG,
+physical publication binding, fixed source identities, and formal 19-file GINE
+inventory, and keeps that holder alive through terminal publication. It never
+reopens the historical failed controller or training/execution roots. T3 and
+T4 must already agree on this same binding; any mismatch blocks T5. This
+provenance closure does not change the release-disabled state.
+
 ## AutoDL entrypoint (release-disabled)
 
 The wrapper is foreground-only and does not acquire GPU locks or launch itself

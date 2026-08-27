@@ -17,7 +17,6 @@ from src.eval.tastemolnet_gnn_stages import (
     run_t4_calibration_cache_smoke,
     verify_stage_output,
 )
-
 PROJECT_ROOT = Path(__file__).resolve(strict=True).parents[2]
 HPC_CONFIG = PROJECT_ROOT / "configs/hpc.yaml"
 HPC_CONFIG_SHA256 = "7d3fb9e5c42101ae4a2ee5c43f400710fad6227014c573b1550872c7005e0110"
@@ -43,15 +42,26 @@ def _validate_configs(values: list[str]) -> None:
         raise ValueError("tracked configs/hpc.yaml SHA-256 changed")
 
 
+def _validate_overrides(values: list[str]) -> None:
+    """Accept only the documented inference/evaluation fail-closed override."""
+
+    if values not in ([], ["inference.fallback_to_heuristic=false"]):
+        raise ValueError(
+            "--set accepts only inference.fallback_to_heuristic=false"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", action="append", required=True)
+    parser.add_argument("--set", action="append", default=[])
     commands = parser.add_subparsers(dest="action", required=True)
 
     t3 = commands.add_parser(
         "t3-adopt", help="Adopt T2's existing validation-fitted temperature"
     )
     t3.add_argument("--checkpoint-dir", required=True)
+    _add_t2_adoption_arguments(t3)
     t3.add_argument("--graph-cache-root", required=True)
     t3.add_argument("--artifact-root", required=True)
     t3.add_argument("--output-dir", required=True)
@@ -62,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         "t4-oracle-smoke", help="Run the bounded calibration-cache-only smoke"
     )
     t4.add_argument("--checkpoint-dir", required=True)
+    _add_t2_adoption_arguments(t4)
     t4.add_argument("--t3-gate", required=True)
     t4.add_argument("--graph-cache-root", required=True)
     t4.add_argument("--artifact-root", required=True)
@@ -80,11 +91,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_t2_adoption_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--t2-adoption-root", required=True)
+    parser.add_argument("--t2-adoption-gate-sha256", required=True)
+    parser.add_argument("--t2-adoption-receipt-sha256", required=True)
+    parser.add_argument("--t2-source-evidence-sha256", required=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _validate_configs(args.config)
+    _validate_overrides(args.set)
     if args.action == "t3-adopt":
         result = run_t3_existing_fit_adoption(
+            t2_adoption_root=args.t2_adoption_root,
+            t2_adoption_gate_sha256=args.t2_adoption_gate_sha256,
+            t2_adoption_receipt_sha256=args.t2_adoption_receipt_sha256,
+            t2_source_evidence_sha256=args.t2_source_evidence_sha256,
             checkpoint_dir=args.checkpoint_dir,
             graph_cache_root=args.graph_cache_root,
             artifact_root=args.artifact_root,
@@ -97,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.action == "t4-oracle-smoke":
         result = run_t4_calibration_cache_smoke(
+            t2_adoption_root=args.t2_adoption_root,
+            t2_adoption_gate_sha256=args.t2_adoption_gate_sha256,
+            t2_adoption_receipt_sha256=args.t2_adoption_receipt_sha256,
+            t2_source_evidence_sha256=args.t2_source_evidence_sha256,
             checkpoint_dir=args.checkpoint_dir,
             t3_gate_path=args.t3_gate,
             graph_cache_root=args.graph_cache_root,

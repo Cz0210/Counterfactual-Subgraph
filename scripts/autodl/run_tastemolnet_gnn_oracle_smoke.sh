@@ -14,12 +14,18 @@ STAGE_SCRIPT="$PROJECT_ROOT/scripts/autodl/tastemolnet_gnn_stage.py"
 BASE_POLICY="$PROJECT_ROOT/configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml"
 DOWNSTREAM_POLICY="$PROJECT_ROOT/configs/data_usage/tastemolnet_downstream_research_no_redistribution_v1.json"
 SOURCE_CHECKPOINT="${TASTEMOLNET_T2_BUNDLE:?Set TASTEMOLNET_T2_BUNDLE to the verified immutable T2 bundle}"
+T2_ADOPTION_ROOT="${TASTEMOLNET_T2_ADOPTION_ROOT:?Set TASTEMOLNET_T2_ADOPTION_ROOT to the fresh adopted PASS root}"
+T2_ADOPTION_GATE_SHA256="${TASTEMOLNET_T2_ADOPTION_GATE_SHA256:?Set TASTEMOLNET_T2_ADOPTION_GATE_SHA256 to the reviewed gate digest}"
+T2_ADOPTION_RECEIPT_SHA256="${TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256:?Set TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256 to the reviewed receipt digest}"
+T2_SOURCE_EVIDENCE_SHA256="${TASTEMOLNET_T2_SOURCE_EVIDENCE_SHA256:?Set TASTEMOLNET_T2_SOURCE_EVIDENCE_SHA256 to the reviewed source-evidence digest}"
 T3_OUTPUT="${TASTEMOLNET_T3_OUTPUT:?Set TASTEMOLNET_T3_OUTPUT to the passed T3 evidence root}"
 for required in \
   "$STAGE_SCRIPT" \
   "$BASE_POLICY" \
   "$DOWNSTREAM_POLICY" \
   "$SOURCE_CHECKPOINT/sha256sums.txt" \
+  "$T2_ADOPTION_ROOT/gate.json" \
+  "$T2_ADOPTION_ROOT/manifest.json" \
   "$T3_OUTPUT/gate.json" \
   "$T3_OUTPUT/sha256sums.txt" \
   "$TASTEMOLNET_GRAPH_CACHE_ROOT/manifest.json" \
@@ -94,6 +100,10 @@ exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
     --config "$PROJECT_ROOT/configs/hpc.yaml" \
     t4-oracle-smoke \
     --checkpoint-dir "$SOURCE_CHECKPOINT" \
+    --t2-adoption-root "$T2_ADOPTION_ROOT" \
+    --t2-adoption-gate-sha256 "$T2_ADOPTION_GATE_SHA256" \
+    --t2-adoption-receipt-sha256 "$T2_ADOPTION_RECEIPT_SHA256" \
+    --t2-source-evidence-sha256 "$T2_SOURCE_EVIDENCE_SHA256" \
     --t3-gate "$T3_OUTPUT/gate.json" \
     --graph-cache-root "$TASTEMOLNET_GRAPH_CACHE_ROOT" \
     --artifact-root "$AUTODL_ARTIFACT_ROOT" \

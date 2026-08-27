@@ -21,8 +21,13 @@ exit 64
 # Unreachable documentation-only CLI parity. Never submit this script.
 python -B scripts/autodl/tastemolnet_gnn_stage.py \
   --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
   t3-adopt \
   --checkpoint-dir /absolute/immutable/t2-bundle \
+  --t2-adoption-root /absolute/runtime/control/tastemolnet-t2-gine-pass-adoption-v1/source-cid \
+  --t2-adoption-gate-sha256 REVIEWED_64_HEX_GATE_SHA256 \
+  --t2-adoption-receipt-sha256 REVIEWED_64_HEX_RECEIPT_SHA256 \
+  --t2-source-evidence-sha256 REVIEWED_64_HEX_SOURCE_EVIDENCE_SHA256 \
   --graph-cache-root /absolute/private/graph-cache \
   --artifact-root /absolute/artifact-root \
   --output-dir /absolute/artifact-root/gnn_oracles/tastemolnet/gine/seed7/calibrated-documentation \
@@ -31,8 +36,13 @@ python -B scripts/autodl/tastemolnet_gnn_stage.py \
 
 python -B scripts/autodl/tastemolnet_gnn_stage.py \
   --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
   t4-oracle-smoke \
   --checkpoint-dir /absolute/immutable/t2-bundle \
+  --t2-adoption-root /absolute/runtime/control/tastemolnet-t2-gine-pass-adoption-v1/source-cid \
+  --t2-adoption-gate-sha256 REVIEWED_64_HEX_GATE_SHA256 \
+  --t2-adoption-receipt-sha256 REVIEWED_64_HEX_RECEIPT_SHA256 \
+  --t2-source-evidence-sha256 REVIEWED_64_HEX_SOURCE_EVIDENCE_SHA256 \
   --t3-gate /absolute/artifact-root/gnn_oracles/tastemolnet/gine/seed7/calibrated-documentation/gate.json \
   --graph-cache-root /absolute/private/graph-cache \
   --artifact-root /absolute/artifact-root \

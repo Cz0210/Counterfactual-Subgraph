@@ -84,6 +84,16 @@ The supplemental policy contains a typed train-only/no-RF/no-calibration/no-test
 T6 authority whose sole training payload is the frozen prepared train CSV, but
 T6 runtime/controller implementation remains a separate reviewed successor.
 
+The downstream chain must not reconstruct T2 from the failed historical
+controller. Its sole dependency is the fresh five-file adoption root held with
+reviewed gate, receipt, and source-evidence SHA-256 pins. The receipt-only
+consumer validates canonical documents, their hash DAG and physical binding,
+the fixed source identities, and the formal 19-file GINE inventory without
+reopening historical controller/training/execution roots. T3 retains and
+records the full binding; T4 exact-matches it; T5 freezes/reopens it; T6 records
+the full binding plus all three pins. None of these changes releases T3--T6 or
+changes the controller/GPU/matrix state by itself.
+
 ## Runtime evidence locations
 
 The immutable deployment/launch step copies a runtime-populated version of

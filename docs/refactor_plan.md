@@ -1906,6 +1906,6 @@ Mutagenicity roadmaps.
   exact external release receipt, then a clean one-parent commit changing only
   the release config. Never patch or reconcile this version's partial/final
   root.
-- [ ] Implement T3 so its only T2 authority is the validated fresh gate/receipt
+- [x] Implement T3 so its only T2 authority is the validated fresh gate/receipt
   SHA plus the exact formal-bundle inventory in that receipt; require T4 to
   retain that receipt binding and consume T3's own gate before PASS.

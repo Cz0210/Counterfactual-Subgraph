@@ -15,6 +15,8 @@ The frozen source identity is:
 - controller CID:
   `tastemolnet_gine_v2_20260827T160626Z_583bf668`;
 - controller root:
+  `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-gine-v2/tastemolnet_gine_v2_20260827T160626Z_583bf668`;
+- separate training-state root:
   `/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-gine-training-v2/tastemolnet_gine_v2_20260827T160626Z_583bf668`;
 - formal output root:
   `/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/tastemolnet/gine/seed7/full-20260827T160626Z`;
@@ -137,6 +139,19 @@ authority. T4 binds the same receipt SHA and still requires T3's own gate. The
 output-hash DAG excludes the gate itself to avoid a self-hash cycle. Every
 JSON file uses one deterministic canonical encoding; even same-meaning
 whitespace changes fail status validation.
+
+Downstream stages use `hold_t2_gine_pass_adoption(...)` with exactly four
+authorities: the fresh adoption root, expected `gate.json` SHA-256, expected
+`manifest.json` SHA-256, and expected embedded source-evidence SHA-256. The
+holder validates the exact five-file set, canonical JSON/hash DAG, physical
+publication binding, fixed source CID/run/commit identities, and the formal
+19-file GINE inventory. It deliberately does not reopen the historical GINE
+controller, training-state, execution, or identity-fix roots. T3 retains this
+holder through marker publication and records its complete downstream binding;
+T4 requires byte-for-byte equality with T3. T5 and T6 independently reopen the
+same receipt-only authority, with T6 persisting the complete binding and the
+three reviewed SHA-256 pins. Release remains disabled until the separate
+reviewed external authority is installed.
 
 ## Release freeze and external authority
 

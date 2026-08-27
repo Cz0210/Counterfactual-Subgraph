@@ -866,10 +866,13 @@ def _stage_authorities(
     *,
     downstream_policy: Path,
     base_policy: Path,
-) -> tuple[Any, Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any, Any]:
     from src.eval.tastemolnet_gnn_stages import hold_taste_stage_output
     from src.train.tastemolnet_clean_policy import (
         hold_clean_policy_load_authority,
+    )
+    from src.utils.tastemolnet_gine_pass_adoption_v1 import (
+        hold_t2_gine_pass_adoption,
     )
     from src.utils.tastemolnet_downstream_policy import (
         load_tastemolnet_downstream_policy,
@@ -879,6 +882,21 @@ def _stage_authorities(
     t5 = t5_load.output
     t5_evidence = t5.revalidate()
     frozen = t5_evidence["frozen_oracle_identity"]
+    t2_binding = frozen.get("t2_adoption_binding")
+    if type(t2_binding) is not dict:
+        raise ValueError("Taste T5 lacks the fresh T2 adoption binding")
+    t2 = stack.enter_context(
+        hold_t2_gine_pass_adoption(
+            t2_binding.get("adoption_root"),
+            expected_gate_sha256=t2_binding.get("gate_sha256"),
+            expected_receipt_sha256=t2_binding.get("receipt_sha256"),
+            expected_source_evidence_sha256=t2_binding.get(
+                "source_evidence_sha256"
+            ),
+        )
+    )
+    if t2.revalidate() != t2_binding:
+        raise ValueError("Taste T5/T6 fresh T2 adoption authority differs")
     t3 = stack.enter_context(
         hold_taste_stage_output(Path(frozen["t3_output_root"]))
     )
@@ -966,11 +984,25 @@ def _stage_authorities(
     for field in checkpoint_fields:
         if frozen.get(field) != t3_evidence.get(field):
             raise ValueError("Taste T5 frozen GINE differs from T3/T4 authority")
+    expected_t2_stage = {
+        "t2_adoption_gate_sha256": t2_binding.get("gate_sha256"),
+        "t2_adoption_receipt_sha256": t2_binding.get("receipt_sha256"),
+        "t2_adoption_binding_sha256": _canonical_sha256(t2_binding),
+    }
+    for label, evidence in (("T3", t3_evidence), ("T4", t4_evidence)):
+        if any(
+            evidence.get(key) != expected
+            for key, expected in expected_t2_stage.items()
+        ):
+            raise ValueError(
+                f"Taste {label} T2 adoption differs from T5 frozen authority"
+            )
     if frozen.get("checkpoint_sha256") != frozen.get("checkpoint_id"):
         raise ValueError("Taste T5 frozen selected checkpoint identity changed")
     t5_load.revalidate()
     policy.revalidate(stage=STAGE)
-    return t3, t4, t5_load, policy
+    t2.revalidate()
+    return t2, t3, t4, t5_load, policy
 
 
 def run(args: Any) -> int:
@@ -988,7 +1020,7 @@ def run(args: Any) -> int:
             _hold_external_release_authority(stack, release)
         )
         _assert_gpu1_runtime(execution_authority)
-        t3, t4, t5_load, policy = _stage_authorities(
+        t2_adoption, t3, t4, t5_load, policy = _stage_authorities(
             stack,
             args.t5_output,
             downstream_policy=args.downstream_policy,
@@ -1069,6 +1101,7 @@ def run(args: Any) -> int:
         checkpoint_authority.revalidate()
         train_authority.revalidate()
         input_paths = [
+            Path(frozen["t2_adoption_binding"]["adoption_root"]),
             checkpoint,
             train_csv,
             Path(t5_evidence["output_root"]),
@@ -1188,6 +1221,7 @@ def run(args: Any) -> int:
         )
         t5_load.revalidate_load_token(load_token)
         for authority in (
+            t2_adoption,
             t3,
             t4,
             t5_load,
@@ -1351,6 +1385,8 @@ def run(args: Any) -> int:
             )
         oracle = reward_adapter.provenance()
         reward = build_taste_reward_manifest(rows, oracle_provenance=oracle)
+        t2_binding = frozen["t2_adoption_binding"]
+        t2_binding_sha256 = _canonical_sha256(t2_binding)
         gate = build_taste_smoke_gate(
             policy_parameter_hash_before=policy_before,
             policy_parameter_hash_after=policy_after,
@@ -1366,6 +1402,9 @@ def run(args: Any) -> int:
             reward_manifest=reward,
             oracle_provenance=oracle,
             policy_initializer_hash=t5_evidence["policy_initializer_hash"],
+            t2_adoption_gate_sha256=t2_binding["gate_sha256"],
+            t2_adoption_receipt_sha256=t2_binding["receipt_sha256"],
+            t2_adoption_binding_sha256=t2_binding_sha256,
             t3_gate_sha256=frozen["t3_gate_sha256"],
             t4_gate_sha256=frozen["t4_gate_sha256"],
             value_head_parameter_sha256=value_head_after,
@@ -1376,6 +1415,10 @@ def run(args: Any) -> int:
         atomic_json(output / "ppo_gate.json", gate)
         input_hashes = {
             "schema_version": "tastemolnet_ours_ppo_input_hashes_v1",
+            "t2_adoption_binding": t2_binding,
+            "t2_adoption_gate_sha256": t2_binding["gate_sha256"],
+            "t2_adoption_receipt_sha256": t2_binding["receipt_sha256"],
+            "t2_adoption_binding_sha256": t2_binding_sha256,
             "t3_gate_sha256": frozen["t3_gate_sha256"],
             "t4_gate_sha256": frozen["t4_gate_sha256"],
             "t5_gate_sha256": t5_evidence["t5_gate_sha256"],
@@ -1480,6 +1523,7 @@ def run(args: Any) -> int:
             if _verify_execution_checkout(release) != execution_identity:
                 raise RuntimeError("Taste T6 execution identity drifted at PASS boundary")
             for authority in (
+                t2_adoption,
                 t3,
                 t4,
                 t5_load,

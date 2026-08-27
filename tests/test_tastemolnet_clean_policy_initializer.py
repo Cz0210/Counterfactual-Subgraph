@@ -68,6 +68,11 @@ class _FakeHeldStage:
             "checkpoint_inventory_sha256": gate["checkpoint_inventory_sha256"],
             "checkpoint_stat_inventory_sha256": gate["checkpoint_stat_inventory_sha256"],
             "checkpoint_sha256s_sha256": gate["checkpoint_sha256s_sha256"],
+            "t2_adoption_gate_sha256": gate["t2_adoption_binding"]["gate_sha256"],
+            "t2_adoption_receipt_sha256": gate["t2_adoption_binding"]["receipt_sha256"],
+            "t2_adoption_binding_sha256": t5._canonical_sha256(  # noqa: SLF001
+                gate["t2_adoption_binding"]
+            ),
         }
 
     def revalidate(self) -> dict[str, str]:
@@ -100,6 +105,20 @@ class _FakeHeldCheckpoint:
         pass
 
 
+class _FakeHeldT2Adoption:
+    def __init__(self, root: Path) -> None:
+        self.root = root.resolve()
+        self.binding = json.loads(
+            (self.root / "manifest.json").read_text(encoding="utf-8")
+        )
+
+    def revalidate(self) -> dict[str, object]:
+        return json.loads(json.dumps(self.binding))
+
+    def close(self) -> None:
+        pass
+
+
 def _patch_gnn_api(monkeypatch: pytest.MonkeyPatch) -> None:
     def hold_stage(root: str | Path) -> _FakeHeldStage:
         return _FakeHeldStage(Path(root))
@@ -110,7 +129,24 @@ def _patch_gnn_api(monkeypatch: pytest.MonkeyPatch) -> None:
         assert str(Path(path).resolve()) == expected_stage_evidence["checkpoint_dir"]
         return _FakeHeldCheckpoint(Path(path), expected_stage_evidence)
 
+    def hold_t2(
+        root: str | Path,
+        *,
+        expected_gate_sha256: str,
+        expected_receipt_sha256: str,
+        expected_source_evidence_sha256: str,
+    ) -> _FakeHeldT2Adoption:
+        held = _FakeHeldT2Adoption(Path(root))
+        assert held.binding["gate_sha256"] == expected_gate_sha256
+        assert held.binding["receipt_sha256"] == expected_receipt_sha256
+        assert (
+            held.binding["source_evidence_sha256"]
+            == expected_source_evidence_sha256
+        )
+        return held
+
     monkeypatch.setattr(t5, "_load_taste_gnn_stage_api", lambda: (hold_stage, hold_checkpoint))
+    monkeypatch.setattr(t5, "hold_t2_gine_pass_adoption", hold_t2)
 
 
 def _valid_lora_tensors() -> dict[str, torch.Tensor]:
@@ -350,6 +386,39 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
     stat_inventory_sha = "7" * 64
     sha_inventory_sha = "8" * 64
     downstream_policy_sha = "9" * 64
+    adoption_root = (
+        tmp_path
+        / "runtime"
+        / "control"
+        / "tastemolnet-t2-gine-pass-adoption-v1"
+        / "tastemolnet-gine-v2-20260827T160838Z-274631"
+    )
+    adoption_root.mkdir(parents=True, mode=0o700)
+    formal_inventory = [{"path": "model.pt", "sha256": model_sha}]
+    t2_binding = {
+        "schema_version": t5.DOWNSTREAM_BINDING_SCHEMA,
+        "stage": "T2_GINE_FULL",
+        "status": "PASS",
+        "state": t5.ADOPTION_MARKER,
+        "source_cid": "tastemolnet-gine-v2-20260827T160838Z-274631",
+        "source_run_id": "tastemolnet-t2-gine-full-20260827T161802Z-698faeec",
+        "adoption_root": str(adoption_root.resolve()),
+        "adoption_root_inventory_sha256": "0" * 64,
+        "gate_path": str((adoption_root / "gate.json").resolve()),
+        "gate_sha256": "1" * 64,
+        "receipt_path": str((adoption_root / "manifest.json").resolve()),
+        "receipt_sha256": "2" * 64,
+        "source_evidence_sha256": "3" * 64,
+        "formal_bundle_root": str(checkpoint.resolve()),
+        "formal_bundle_inventory": formal_inventory,
+        "formal_bundle_inventory_sha256": t5._canonical_sha256(  # noqa: SLF001
+            formal_inventory
+        ),
+        "formal_bundle_model_sha256": model_sha,
+        "formal_bundle_sha256s_sha256": sha_inventory_sha,
+    }
+    _json(adoption_root / "gate.json", {"status": "PASS"})
+    _json(adoption_root / "manifest.json", t2_binding)
 
     t3 = tmp_path / "gates" / "t3"
     t4 = tmp_path / "gates" / "t4"
@@ -360,8 +429,9 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
         "stage": "T3_GINE_CALIBRATED",
         "status": "PASS",
         "marker": "TASTE_GINE_CALIBRATION_PASS",
-        "depends_on": ["T2_GINE_FULL"],
+        "depends_on": [t5.ADOPTION_MARKER],
         "t2_science_bundle_verified": True,
+        "t2_adoption_binding": t2_binding,
         "checkpoint_dir": str(checkpoint.resolve()),
         "checkpoint_id": model_sha,
         "checkpoint_inventory_sha256": inventory_sha,
@@ -390,6 +460,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
             "num_classes": 3,
             "source_label": 1,
             "rf_oracle_used": False,
+            "t2_adoption_binding": t2_binding,
         },
     )
     t4_gate = {
@@ -413,6 +484,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
         "calibration_payload_loaded": True,
         "test_loaded": False,
         "per_example_predictions_written": False,
+        "t2_adoption_binding": t2_binding,
     }
     t4_hash = _json(t4 / "gate.json", t4_gate)
     _json(
@@ -439,6 +511,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
             "checkpoint_load_count": 1,
             "rf_oracle_used": False,
             "test_loaded": False,
+            "t2_adoption_binding": t2_binding,
         },
     )
     policy = load_tastemolnet_research_policy(POLICY)
@@ -499,6 +572,7 @@ def _release_fixture(tmp_path: Path) -> dict[str, object]:
                 "feature_schema_sha256": feature_sha,
                 "temperature_calibration_sha256": temperature_sha,
                 "downstream_policy_sha256": downstream_policy_sha,
+                "t2_adoption_binding": t2_binding,
                 "t3_output_root": str(t3.resolve()),
                 "t3_gate_sha256": t3_hash,
                 "t3_root_inventory_sha256": _tree_sha(t3),
