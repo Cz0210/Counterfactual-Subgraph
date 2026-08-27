@@ -20,6 +20,7 @@ from src.oracles.gnn_oracle import (
     GNNOracle,
     fit_temperature_scaling,
     load_gnn_checkpoint_bundle,
+    load_gnn_checkpoint_payloads,
     save_gnn_checkpoint_bundle,
     verify_checkpoint_bundle,
 )
@@ -264,9 +265,70 @@ def test_checkpoint_bundle_roundtrip_and_hash_gate(tmp_path: Path) -> None:
         )
     assert metadata["checkpoint_id"] == result["checkpoint_id"]
     assert metadata["test_evaluation_status"]["status"] == "NOT_EVALUATED"
+    payload_names = {
+        "model.pt",
+        "model_card.json",
+        "feature_schema.json",
+        "label_map.json",
+        "split_manifest.json",
+        "test_evaluation_status.json",
+        "temperature_scaling.json",
+    }
+    payloads = {name: (checkpoint / name).read_bytes() for name in payload_names}
+    payload_model, payload_metadata = load_gnn_checkpoint_payloads(
+        payloads, device="cpu"
+    )
+    with torch.no_grad():
+        np.testing.assert_allclose(
+            model(batch).numpy(), payload_model(batch).numpy(), rtol=0.0, atol=0.0
+        )
+    assert payload_metadata["checkpoint_id"] == result["checkpoint_id"]
+    payload_oracle = GNNOracle.from_payloads(
+        payloads, device="cpu", checkpoint_dir=None
+    )
+    assert payload_oracle.checkpoint_id == result["checkpoint_id"]
     (checkpoint / "model_card.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="SHA mismatch"):
         verify_checkpoint_bundle(checkpoint)
+
+
+def test_in_memory_checkpoint_loader_rejects_model_card_type_drift(
+    tmp_path: Path,
+) -> None:
+    model, schema = _model()
+    checkpoint = tmp_path / "checkpoint"
+    save_gnn_checkpoint_bundle(
+        model=model,
+        checkpoint_dir=checkpoint,
+        feature_schema=schema,
+        config={"gnn": model.config.to_dict()},
+        model_card={"dataset": "bace", "source_label": 1},
+        label_map={0: "Inactive", 1: "Active"},
+        split_manifest={"test_used_for_checkpoint_selection": False},
+        training_metrics={"best_epoch": 1},
+        test_evaluation_status={
+            "status": "NOT_EVALUATED",
+            "test_loaded": False,
+            "reason": "held_out_until_frozen_final_evaluation",
+            "path": "/frozen/test.csv",
+            "sha256": "a" * 64,
+        },
+    )
+    names = {
+        "model.pt",
+        "model_card.json",
+        "feature_schema.json",
+        "label_map.json",
+        "split_manifest.json",
+        "test_evaluation_status.json",
+        "temperature_scaling.json",
+    }
+    payloads = {name: (checkpoint / name).read_bytes() for name in names}
+    card = json.loads(payloads["model_card.json"])
+    card["num_classes"] = 2.0
+    payloads["model_card.json"] = (json.dumps(card) + "\n").encode()
+    with pytest.raises(ValueError, match="model-card authority changed"):
+        load_gnn_checkpoint_payloads(payloads)
 
 
 def test_temperature_scaling_is_validation_only_and_argmax_invariant() -> None:

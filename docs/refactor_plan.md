@@ -1801,6 +1801,25 @@ Mutagenicity roadmaps.
 - [ ] Add an explicit main-controller resume action that may run T3 only from
   strict T2 PASS/T3 READY, then T4 only from T3 PASS/T4 READY; it must never
   fall back to T2 or launch another classifier training run.
+- [x] Implement the real bounded Taste T6 Ours PPO smoke on top of the shared
+  stable decoded-chemistry loop with three-class GINE reward rows, exact T5
+  policy/reference identities, five-to-ten update evidence, and final/periodic
+  adapter plus value-head reload closure.
+- [x] Keep T6 train-only and non-redistributing: descriptor-hold the exact train
+  CSV and predecessor authorities while leaving validation, calibration, test,
+  RF, and GNN-ablation routes unopened.
+- [x] Add a fresh retained output root, exact terminal layout, physical
+  inventory, durable flush, exact candidate JSONL binding, marker-last commit,
+  and a strict public T6 terminal validator.
+- [ ] Issue a typed controller-owned T6 execution receipt that binds the
+  immutable integration commit/tree, exact wrapper/config blobs, T3--T5 gates,
+  GPU-1 lease/PID generation, storage authority, and one fresh output root.
+- [ ] Make the controller/registry call the strict retained T6 output consumer
+  before adopting PASS; the generic required-file check is insufficient.
+- [ ] On `/autodl-fs`, run a no-science scratch probe for held-inode `linkat`,
+  unlink, directory fsync, and strict reopen before enabling T6.
+- [ ] Keep `tastemolnet_t6_execution_release_v1.json` and the AutoDL wrapper
+  disabled until those release reviews and exact production pins pass.
 
 ## 2026-08-25: c766 failed-selection recovery authority
 

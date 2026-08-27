@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -460,6 +461,134 @@ def _torch_load(path: Path, *, map_location: Any) -> Mapping[str, Any]:
     return payload
 
 
+def _json_payload_bytes(
+    payloads: Mapping[str, bytes],
+    name: str,
+) -> dict[str, Any]:
+    data = payloads.get(name)
+    if type(data) is not bytes or not data:
+        raise ValueError(f"Frozen GNN payload {name} is missing")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Frozen GNN payload {name} is malformed") from exc
+    if type(value) is not dict:
+        raise ValueError(f"Frozen GNN payload {name} must contain one JSON object")
+    return value
+
+
+def load_gnn_checkpoint_payloads(
+    payloads: Mapping[str, bytes],
+    *,
+    device: str | Any = "cpu",
+) -> tuple[MolecularGNN, dict[str, Any]]:
+    """Load a GNN only from already-authorized in-memory checkpoint bytes.
+
+    A retained directory authority is responsible for proving the complete
+    bundle inventory before supplying these payloads.  This loader performs no
+    pathname reopen, which lets downstream jobs remain safe against a
+    swap-load-restore race on an otherwise immutable checkpoint directory.
+    """
+
+    required = {
+        "model.pt",
+        "model_card.json",
+        "feature_schema.json",
+        "label_map.json",
+        "split_manifest.json",
+        "test_evaluation_status.json",
+        "temperature_scaling.json",
+    }
+    if type(payloads) is not dict or set(payloads) != required:
+        raise ValueError("Frozen GNN in-memory payload set differs from contract")
+    model_bytes = payloads["model.pt"]
+    if type(model_bytes) is not bytes or not model_bytes:
+        raise ValueError("Frozen GNN model payload is empty")
+    feature_schema_payload = _json_payload_bytes(payloads, "feature_schema.json")
+    feature_schema = MolecularFeatureSchema.from_dict(feature_schema_payload)
+    torch = _require_torch()
+    try:
+        try:
+            model_payload = torch.load(
+                io.BytesIO(model_bytes), map_location=device, weights_only=True
+            )
+        except TypeError:  # pragma: no cover - old torch.
+            model_payload = torch.load(io.BytesIO(model_bytes), map_location=device)
+    except Exception as exc:
+        raise ValueError("Frozen GNN model payload could not be deserialized") from exc
+    if type(model_payload) is not dict:
+        raise ValueError("Frozen GNN model payload must contain one mapping")
+    if model_payload.get("bundle_version") != CHECKPOINT_BUNDLE_VERSION:
+        raise ValueError("Frozen GNN model bundle version changed")
+    if (
+        type(model_payload.get("feature_schema_sha256")) is not str
+        or model_payload["feature_schema_sha256"]
+        != feature_schema_payload.get("schema_sha256")
+    ):
+        raise ValueError("Frozen GNN model/feature fingerprints differ")
+    state_dict = model_payload.get("state_dict")
+    if type(state_dict) is not dict or not state_dict:
+        raise ValueError("Frozen GNN model state is empty")
+    config = MolecularGNNConfig.from_mapping(model_payload.get("model_config"))
+    model = MolecularGNN(
+        config,
+        node_cardinalities=feature_schema.node_cardinalities,
+        edge_cardinalities=feature_schema.edge_cardinalities,
+    )
+    model.load_state_dict(state_dict, strict=True)
+    model.to(device)
+    model.eval()
+
+    checkpoint_id = hashlib.sha256(model_bytes).hexdigest()
+    model_card = _json_payload_bytes(payloads, "model_card.json")
+    if (
+        model_card.get("checkpoint_bundle_version") != CHECKPOINT_BUNDLE_VERSION
+        or model_card.get("checkpoint_id") != checkpoint_id
+        or model_card.get("feature_schema_sha256")
+        != feature_schema_payload.get("schema_sha256")
+        or type(model_card.get("backbone")) is not str
+        or model_card.get("backbone") != config.backbone
+        or type(model_card.get("num_classes")) is not int
+        or model_card.get("num_classes") != config.num_classes
+        or type(model_card.get("source_label")) is not int
+        or not 0 <= model_card["source_label"] < config.num_classes
+        or model_card.get("oracle_backend") != "gnn"
+        or model_card.get("classifier_type") != "gnn"
+        or model_card.get("rf_oracle_used") is not False
+    ):
+        raise ValueError("Frozen GNN model-card authority changed")
+    temperature = _json_payload_bytes(payloads, "temperature_scaling.json")
+    temperature_value = temperature.get("temperature")
+    if (
+        type(temperature_value) not in (int, float)
+        or isinstance(temperature_value, bool)
+        or not math.isfinite(float(temperature_value))
+        or float(temperature_value) <= 0.0
+    ):
+        raise ValueError("Frozen GNN temperature authority changed")
+    label_map = _json_payload_bytes(payloads, "label_map.json")
+    if set(label_map) != {str(index) for index in range(config.num_classes)} or any(
+        type(value) is not str or not value for value in label_map.values()
+    ):
+        raise ValueError("Frozen GNN label-map authority changed")
+    split_manifest = _json_payload_bytes(payloads, "split_manifest.json")
+    test_status = _json_payload_bytes(payloads, "test_evaluation_status.json")
+    if (
+        test_status.get("status") != "NOT_EVALUATED"
+        or test_status.get("test_loaded") is not False
+    ):
+        raise ValueError("Frozen GNN test authority changed")
+    return model, {
+        "checkpoint_id": checkpoint_id,
+        "model_card": model_card,
+        "feature_schema": feature_schema,
+        "temperature_scaling": temperature,
+        "label_map": label_map,
+        "split_manifest": split_manifest,
+        "test_evaluation_status": test_status,
+    }
+
+
 def load_gnn_checkpoint_bundle(
     checkpoint_dir: str | Path,
     *,
@@ -577,6 +706,34 @@ class GNNOracle(BaseOracle):
             num_classes=int(card["num_classes"]),
             source_label=int(card["source_label"]),
             temperature=temperature,
+            edge_feature_dim=len(feature_schema.edge_fields),
+            default_batch_size=batch_size,
+            checkpoint_dir=checkpoint_dir,
+        )
+
+    @classmethod
+    def from_payloads(
+        cls,
+        payloads: Mapping[str, bytes],
+        *,
+        device: str | Any = "cpu",
+        batch_size: int = 256,
+        checkpoint_dir: str | Path | None = None,
+    ) -> "GNNOracle":
+        """Build an oracle from descriptor-authorized in-memory payloads."""
+
+        model, metadata = load_gnn_checkpoint_payloads(payloads, device=device)
+        card = metadata["model_card"]
+        temperature = metadata["temperature_scaling"]["temperature"]
+        feature_schema: MolecularFeatureSchema = metadata["feature_schema"]
+        return cls(
+            model,
+            device=device,
+            checkpoint_id=metadata["checkpoint_id"],
+            backbone=card["backbone"],
+            num_classes=card["num_classes"],
+            source_label=card["source_label"],
+            temperature=float(temperature),
             edge_feature_dim=len(feature_schema.edge_fields),
             default_batch_size=batch_size,
             checkpoint_dir=checkpoint_dir,
@@ -912,6 +1069,7 @@ __all__ = [
     "expected_calibration_error",
     "fit_temperature_scaling",
     "load_gnn_checkpoint_bundle",
+    "load_gnn_checkpoint_payloads",
     "save_gnn_checkpoint_bundle",
     "sha256_file",
     "update_checkpoint_sha256sums",

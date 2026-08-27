@@ -1737,6 +1737,9 @@ def run_stable_decoded_chem_ppo_loop(
                 tokenizer=tokenizer,
                 output_dir=checkpoint_dir,
                 torch=torch,
+                save_tokenizer=not bool(
+                    getattr(args, "skip_tokenizer_checkpoint", False)
+                ),
             )
             _call_run_observer(
                 run_observer,
@@ -1878,6 +1881,7 @@ def run_stable_decoded_chem_ppo_loop(
         tokenizer=tokenizer,
         output_dir=output_dir,
         torch=torch,
+        save_tokenizer=not bool(getattr(args, "skip_tokenizer_checkpoint", False)),
     )
     _call_run_observer(
         run_observer,

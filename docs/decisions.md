@@ -10654,3 +10654,60 @@ creation. The paired Slurm entrypoint is static AutoDL-only refusal.
 Local isolated implementation, focused/static tests, and documentation only.
 No commit, push, SSH, deployment, process action, controller/GPU-lock/matrix
 mutation, scientific-root write, model load, or new science was performed.
+## [2026-08-28] Implement Taste T6 Ours PPO behind an external release authority
+
+### Motivation
+
+TasteMolNet T6 must exercise the existing stable decoded-chemistry PPO loop
+against the frozen three-class GINE oracle. A configuration-only or synthetic
+smoke is not scientific evidence, while a direct runnable script would bypass
+the T3--T5, policy-v2, GPU, output, and controller authorities.
+
+### Decision
+
+Add a Taste-specific T6 runner that reuses
+`run_stable_decoded_chem_ppo_loop` for five to ten real optimizer updates. It
+loads only frozen train prompts, keeps validation/calibration/test payloads
+closed, uses GINE with `num_classes=3` and `source_label=1`, and defines a
+strict flip as `pred_before == 1 and pred_after != 1`. Candidate reward rows,
+the frozen reference policy, LoRA adapter tensors, value-head tensors, and the
+final/periodic checkpoints are cross-bound to the in-memory computation.
+
+Use descriptor-held T3, T4, T5, GINE, train-file, policy, release-receipt, and
+fresh-output authorities. Runtime model loads may use `/proc/self/fd/N`, but
+checkpoint metadata is rebound to the reviewed lexical source-model identity,
+and the shared-loop logger rewrites its descriptor-backed I/O root to the
+reviewed lexical output root. No durable output may contain an FD path. T6
+checkpoints contain
+only the adapter, value head, and PEFT model card; the tokenizer remains the
+separately held T5 source-model authority and is deliberately not copied into
+T6. The terminal tree has an exact file/directory layout, durable leaf and
+bottom-up directory flush, exact candidate JSONL bytes, a physical inventory,
+and a held-inode marker-last commit. Public consumers must use
+`hold_taste_ppo_output()` or `validate_taste_ppo_output()` rather than testing
+for a `PASS` pathname.
+
+Keep the checked-in release bit false and every deployment/evidence pin null.
+Activation requires a later immutable integration commit and a typed external
+controller receipt that binds the controller generation, GPU-1 lease, exact
+execution tree/config/wrapper, T3--T5 gates, fresh output root, and storage
+authority. The controller must run the strict retained terminal consumer
+before it adopts T6 PASS. The paired Slurm script remains a static AutoDL-only
+refusal.
+
+### Consequences
+
+- A real T6 run cannot silently fall back to RF, CPU, another GPU, another
+  dataset split, a synthetic candidate pool, or a rewritten PPO algorithm.
+- Equal-byte inode replacement, unknown checkpoint directories/files,
+  candidate JSON ambiguities, checkpoint config drift, and failed marker
+  publication remain fail closed.
+- This implementation commit is not itself an execution authorization. No T6
+  science should be started merely by changing an environment variable.
+
+### Status
+
+Local implementation, focused/affected regression tests, and static AutoDL/
+Slurm checks are complete. External controller-receipt integration, strict
+post-child adoption, an `/autodl-fs` link/fsync micro-probe, immutable deploy,
+and T6 science remain pending.

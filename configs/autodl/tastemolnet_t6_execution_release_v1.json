@@ -1,0 +1,16 @@
+{
+  "schema_version": "tastemolnet_t6_execution_release_v1",
+  "release_enabled": false,
+  "release_state": "RELEASE_DISABLED_PENDING_INTEGRATION_COMMIT_AND_EXTERNAL_AUTHORITY",
+  "implementation_commit": null,
+  "implementation_tree": null,
+  "external_authority_path": null,
+  "external_authority_sha256": null,
+  "t3_gate_sha256": null,
+  "t4_gate_sha256": null,
+  "t5_gate_sha256": null,
+  "t5_output_inventory_sha256": null,
+  "controller_receipt_sha256": null,
+  "gpu_index": 1,
+  "output_parent": null
+}

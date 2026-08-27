@@ -84,6 +84,10 @@ See:
   recovery from the c766 disconnected-anchor evidence into an exact
   multi-component partition and streaming downstream; release pins remain
   mandatory and the failed source is never treated as an ordinary PASS)
+- `docs/AUTODL_TASTEMOLNET_T6_OURS_PPO.md` (release-disabled implementation
+  contract for the real bounded three-class TasteMolNet Ours PPO smoke; it
+  cannot run until a reviewed controller receipt and strict terminal consumer
+  are integrated)
 
 ---
 

@@ -2388,6 +2388,7 @@ def save_decoded_chem_checkpoint(
     tokenizer: Any,
     output_dir: Path,
     torch: Any,
+    save_tokenizer: bool = True,
 ) -> Path:
     """Persist policy/tokenizer plus the standalone value head for local PPO."""
 
@@ -2396,7 +2397,8 @@ def save_decoded_chem_checkpoint(
         policy_model.save_pretrained(str(output_dir))
     else:
         raise RuntimeError("Decoded chemistry PPO could not save the policy model.")
-    tokenizer.save_pretrained(str(output_dir))
+    if save_tokenizer:
+        tokenizer.save_pretrained(str(output_dir))
     if hasattr(value_model, "v_head"):
         torch.save(value_model.v_head.state_dict(), output_dir / "decoded_chem_value_head.pt")
     return output_dir
