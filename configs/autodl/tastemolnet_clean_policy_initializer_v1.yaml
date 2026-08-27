@@ -1,0 +1,32 @@
+schema_version: tastemolnet_clean_policy_initializer_config_v1
+dataset: tastemolnet
+stage: T5_CLEAN_POLICY_READY
+initializer_mode: fresh_zero_step_lora
+
+# The repository intentionally carries no runnable production pins yet.  A
+# separately reviewed, SHA-pinned authority must bind the final execution
+# commit, real T3/T4 gates, source, and a physical execution receipt before a
+# later reviewed release may enable T5 publication.
+tracked_release_enabled: false
+tracked_release_state: RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT
+external_sha_pinned_release_authority_required: true
+
+output_parent: /autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/clean-policy-initializer
+fresh_output_required: true
+private_output: true
+
+# A zero-step LoRA opens no Taste split.  "train_only" is the maximum any
+# future initializer is allowed to access; it is not a claim that train was
+# read by this route.
+initializer_data_split_used: none
+taste_split_access_max: train_only
+train_only_fallback_implemented: false
+
+rf_reference_count: 0
+gnn_reward_used: false
+validation_loaded: false
+calibration_loaded: false
+test_loaded: false
+data_redistribution_allowed: false
+hpc_execution_allowed: false
+required_pass_marker: "[TASTE_CLEAN_POLICY_INITIALIZER_PASS]"

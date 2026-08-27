@@ -830,7 +830,7 @@ def test_main_prepare_supersedes_only_old_block_and_materializes_t0_t16(
     assert stage_status["T1_DATA_READY"] == "PASS"
     assert stage_status["T2_GINE_FULL"] == "READY"
     assert stage_status["T5_CLEAN_POLICY_READY"] == (
-        "READY_CLASSIFIER_INDEPENDENT_PRECOMPUTE"
+        "RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT"
     )
     assert queue["resource_lanes"]["gpu1_taste_gine_full"] == {
         "gpu_index": 1,
@@ -842,7 +842,13 @@ def test_main_prepare_supersedes_only_old_block_and_materializes_t0_t16(
     assert gpu2["status"] == "READY_CLASSIFIER_INDEPENDENT_PRECOMPUTE"
     assert gpu2["science_started"] is False
     assert gpu2["classifier_dependent"] is False
-    assert gpu2["allowed_splits"] == ["train", "validation", "calibration"]
+    assert gpu2["allowed_splits"] == ["train"]
+    assert gpu2["initializer_data_split_used"] == "none"
+    assert gpu2["taste_split_access_max"] == "train_only"
+    assert gpu2["t5_release_enabled"] is False
+    assert gpu2["t5_release_state"] == (
+        "RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT"
+    )
     assert gpu2["test_loaded"] is False
     assert queue["gnn_ablation_started"] is False
 

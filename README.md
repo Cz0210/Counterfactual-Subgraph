@@ -177,7 +177,12 @@ and uses atomic directory no-replace. Upstream licence terms remain exactly
 route may emit `LICENSE_PASS`. See
 `docs/TASTEMOLNET_DATA_USAGE_POLICY.md` and
 `docs/AUTODL_TASTEMOLNET_MAIN_TABLE_V1_HANDOFF.md` and
-`docs/AUTODL_TASTEMOLNET_MULTICLASS_BASELINE_ADAPTERS.md`.
+`docs/AUTODL_TASTEMOLNET_MULTICLASS_BASELINE_ADAPTERS.md`. The T5 clean-policy
+initializer is a separate, release-disabled-by-default zero-step LoRA route
+with one combined descriptor-held source/adapter consumer authority. A
+controller declaration is not GPU-lock ownership, so release remains disabled
+until final T3/T4/source pins and a physical execution receipt are reviewed; see
+`docs/AUTODL_TASTEMOLNET_CLEAN_POLICY_INITIALIZER.md`.
 
 After a formal Taste GINE bundle closes, T3 adopts its existing
 validation-fitted temperature without refitting or copying the checkpoint.

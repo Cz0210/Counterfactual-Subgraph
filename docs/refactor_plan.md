@@ -1,5 +1,31 @@
 # Refactor Plan
 
+## 2026-08-28: TasteMolNet T5 clean-policy initializer
+
+- [x] Add a Taste-owned typed initializer schema instead of relabeling BACE
+  provenance, manifests, or markers.
+- [x] Implement only the generic ChemLLM fresh zero-step LoRA path and record
+  `initializer_data_split_used=none` separately from the train-only access
+  ceiling; leave train-only SFT explicitly unimplemented without authority.
+- [x] Require a raw-SHA-pinned release authority over policy v2, its receipt,
+  immutable Git identity, full source-model physical authority, and the typed,
+  descriptor-held common GINE/T3/T4 interface.
+- [x] Publish a fresh private root with the T0--T16 five-file evidence closure,
+  adapter provenance, output inventory, and PASS-last marker.
+- [x] Parse and audit real safetensors tensors, prove LoRA B is still zero,
+  perform a fresh-base `PeftModel.from_pretrained` reload, and distinguish the
+  bare-base identity from the base-plus-adapter reference-policy identity.
+- [x] Add a combined descriptor-held T5/source loading token for T6 with
+  loaded-policy verification and physical stat/ctime swap-restore detection.
+- [x] Bind staging/adapter/parent inodes through no-replace publication, repeat
+  external authority validation after publication, and write PASS last.
+- [x] Add an AutoDL foreground wrapper, static-refusal paired Slurm wrapper,
+  hostile publication/tensor/cross-binding tests, and a runbook.
+- [ ] Fill and independently review the final T3/T4/source pins and define a
+  physical controller execution receipt before enabling any public T5 model
+  load or output creation; the tracked config and public builder remain
+  disabled.
+
 ## 2026-08-25 release blocker: restart-safe GREED full scan
 
 - [x] Separate the long-lived pair-semantics science root from fresh controller

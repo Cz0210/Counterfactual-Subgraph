@@ -69,6 +69,54 @@ implementation, not a T6 implementation or launch.
 
 Accepted for code/tests; remote deployment and science remain separately gated.
 
+## [2026-08-28] Reject the first Taste T5 initializer freeze and require a physical successor
+
+### Rejected candidate evidence
+
+The first isolated T5 candidate was reviewed at base commit
+`3a90fd8697b58bad4f95f3be9347b327d5c51043`, staged tree
+`ed84fa2f4cb57b0f5f45861e54da144c8489c70f`, and full-index binary patch
+SHA-256 `faa5eebeb2ac76ac5c503e5c2ebb3b195fd15d05636245f8eefe7464d2cbbe0e`.
+That identity is retained here as rejected evidence and must not be released.
+
+### Reason
+
+The candidate accepted arbitrary non-empty bytes as safetensors, did not bind
+the T3/T4 gates back to the common GINE checkpoint, exposed path-based model
+and adapter loads outside its retained file-descriptor authorities, did not
+bind the published name to the retained staging inode, mislabeled the bare
+base hash as the reference-policy hash, and asserted GPU-lock ownership
+without a physical execution receipt.
+
+### Successor requirement
+
+The successor must parse and reload the real zero-step LoRA, consume the typed
+T3/T4 held interfaces, keep source/adapter paths descriptor-backed throughout
+loads, publish and validate through the retained staging inode, distinguish
+base-model and base-plus-adapter identities, and describe controller identity
+as declaration-only until a separate execution-receipt contract is reviewed.
+No production pin is enabled by this local successor work.
+
+### Successor resolution
+
+The local successor now performs real safetensors parsing, exact LoRA A/B
+key/rank/shape/dtype/finite checks, zero-B proof, and a fresh-base PEFT reload.
+It consumes the descriptor-held typed T3/T4 APIs and binds their gates, root
+inventories, full/stat/SHA checkpoint inventories, config, feature, label, and
+temperature identities back to one common GINE. Source, adapter, and published
+roots retain both descriptors and full inode/ctime inventories, so
+swap-load-restore does not disappear merely because bytes are restored.
+
+Publication binds the named parent/staging/adapter inodes, validates external
+authorities after no-replace rename, and writes PASS last. The reference policy
+uses a distinct canonical base-plus-adapter identity. T6 receives a combined
+held-load token and verifies both loaded policy/reference PEFT states. GPU state
+is only `controller_declared_only`; there is no lock-ownership claim, and the
+public builder stops on
+`RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT` before opening
+an authority or model. A later physical execution-receipt contract requires a
+new review.
+
 ## [2026-08-25] Separate GREED scan science state from controller receipts
 
 ### Background
@@ -10457,3 +10505,59 @@ metrics, and terminal training checkpoint.
 - T6 can load its GINE and train metadata through retained descriptors without
   reopening validation, calibration, or test payloads.
 - This change does not release a controller, deploy code, or start science.
+
+## [2026-08-28] Keep Taste T5 dataset-independent and release-authority bound
+
+### Motivation
+
+The mature BACE initializer contains useful loader mechanics, but its schema,
+dataset claims, audit selection, and terminal marker are BACE authority. A
+renamed BACE manifest would not prove a Taste policy is generic, and writing
+`split_used=train_only` for a zero-step adapter that opened no split would be a
+false provenance claim. T6 also needs a stable read-only identity for the exact
+policy and reference model rather than a mutable adapter pathname.
+
+### Decision
+
+Add a Taste-owned T5 contract that implements only a fresh zero-optimizer-step
+LoRA from an explicitly generic ChemLLM base. Record
+`initializer_data_split_used=none`, `taste_split_access_max=train_only`, and an
+empty loaded-split list as separate facts. Do not implement the optional
+train-only SFT fallback until a later authority explicitly requests it.
+
+Keep the tracked configuration disabled until a separately reviewed file and
+its expected raw SHA bind policy-v2/receipt, the generic source inventory, the
+clean execution commit/tree, and the common three-class GINE plus T3/T4 PASS
+identities. A controller declaration is not lock ownership: the public builder
+also remains disabled until a separately reviewed physical execution receipt
+is implemented. Reopen the complete content authority around every internal
+adapter materialization/load step. RF, GNN reward, validation, calibration,
+test, HPC, and data redistribution remain absent.
+
+Publish only to a fresh private timestamp root with an atomic directory
+no-replace operation. The root contains a complete LoRA, Taste provenance, the
+five stage evidence files, and a PASS-last
+`[TASTE_CLEAN_POLICY_INITIALIZER_PASS]` marker. Expose a stable T6 consumer
+module with both one-shot validation and a combined descriptor-held
+source/adapter load token. The closure uses hash identity while its live
+authority additionally retains inode/ctime state to detect swap-load-restore.
+
+### Consequences
+
+- A generic zero-step initializer is directly loadable by the existing stable
+  PPO/PEFT runtime but is never validated through the BACE schema.
+- `train_only` remains an access ceiling, not a fabricated claim that this
+  route read Taste train rows.
+- Missing production T3/T4 or Git/source pins keep T5 explicitly disabled and
+  cannot create the final output root.
+- Missing physical execution-receipt authority also keeps the public builder
+  disabled before authority/model loading.
+- T5 does not itself count as training science or a matrix cell.
+
+### Status
+
+Local implementation, documentation, and hostile tests only. No commit,
+bundle, SSH, deployment, controller/GPU-lock/matrix write, production model
+load, adapter creation from the real base, dataset access, or scientific
+experiment was performed. One tiny local CPU PEFT model was used only for a
+real safetensors save/reload format test.

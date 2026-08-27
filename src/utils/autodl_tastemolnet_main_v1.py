@@ -477,7 +477,7 @@ def _queue(spec: TasteMainSpec, *, t2_status: str) -> dict[str, Any]:
         elif stage == "T3_GINE_CALIBRATED" and t2_status == "PASS":
             status = "READY"
         elif stage == "T5_CLEAN_POLICY_READY":
-            status = "READY_CLASSIFIER_INDEPENDENT_PRECOMPUTE"
+            status = "RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT"
         else:
             status = "WAITING_DEPENDENCY"
         rows.append(
@@ -505,7 +505,11 @@ def _queue(spec: TasteMainSpec, *, t2_status: str) -> dict[str, Any]:
             "gpu2_classifier_independent_precompute": {
                 "gpu_index": 2,
                 "status": "READY_CLASSIFIER_INDEPENDENT_PRECOMPUTE",
-                "allowed_splits": ["train", "validation", "calibration"],
+                "allowed_splits": ["train"],
+                "initializer_data_split_used": "none",
+                "taste_split_access_max": "train_only",
+                "t5_release_enabled": False,
+                "t5_release_state": "RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT",
                 "test_loaded": False,
                 "classifier_dependent": False,
                 "science_started": False,
@@ -701,7 +705,7 @@ def prepare_tastemolnet_main(spec: TasteMainSpec) -> dict[str, Any]:
         STAGES[0]: "PASS",
         STAGES[1]: "PASS",
         STAGES[2]: "READY",
-        STAGES[5]: "READY_CLASSIFIER_INDEPENDENT_PRECOMPUTE",
+        STAGES[5]: "RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT",
     }
     stage_evidence = {
         STAGES[0]: {"policy_adoption_sha256": stable_json_sha256(adoption)},
@@ -717,7 +721,11 @@ def prepare_tastemolnet_main(spec: TasteMainSpec) -> dict[str, Any]:
         STAGES[5]: {
             "gpu_index": 2,
             "science_started": False,
-            "allowed_splits": ["train", "validation", "calibration"],
+            "allowed_splits": ["train"],
+            "initializer_data_split_used": "none",
+            "taste_split_access_max": "train_only",
+            "t5_release_enabled": False,
+            "t5_release_state": "RELEASE_DISABLED_PENDING_FINAL_T3_T4_SOURCE_EXECUTION_RECEIPT",
             "test_loaded": False,
             "classifier_dependent": False,
         },
