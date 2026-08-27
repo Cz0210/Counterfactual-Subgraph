@@ -1849,3 +1849,44 @@ Mutagenicity roadmaps.
 - [x] Bind the controller to the reviewed v3 canonical task-state projection
   hashes and add a cross-module profile equality test so a stale pre-v3 digest
   cannot make production spec generation deterministically reject the receipt.
+
+## 2026-08-28: TasteMolNet T2 completed-result adoption boundary
+
+- [x] Add a versioned, read-only source validator for the completed Taste GINE
+  run that preserves the old controller's exact
+  `FAILED/WORKER_PROCESS_IDENTITY_DRIFT` record.
+- [x] Bind the deployed `583bf` execution source, `3a90` identity fix, typed
+  trainer authority, dead PID set, registry/runtime PASS records,
+  held runtime-log PASS/OK/exit-0 markers, `training_complete`, exact 18-hash
+  checkpoint closure, and full
+  output/training-state inventories under retained `openat`/`O_NOFOLLOW`
+  authorities.
+- [x] Define a deterministic five-file `T2_GINE_FULL_PASS_ADOPTED` receipt in
+  the exact independent control namespace, with `manifest.json` as the receipt
+  and a physically bound `gate.json` exposed by the final no-replace rename.
+- [x] Preserve the old controller FAILED false-negative and the independent
+  registry/runtime/training-complete/formal-bundle PASS facts explicitly;
+  revalidate held old sources around every write, keep main/matrix outside the
+  open/write set, and constrain future T3 authority to the fresh T2
+  gate/receipt plus its exact formal-bundle inventory.
+- [x] Keep the tracked release config at exact native `authorization=false`
+  with null external-authority path/hash; expose only usable read-only
+  preflight/status behavior in this stage-freeze.
+- [x] Bind all four preterminal documents and their held directory by physical
+  identity in the terminal gate; require no validation/fsync after publication
+  and non-throwing cleanup, and reject equal-byte leaf/root replacement in
+  status.
+- [x] Require literal production `/proc`, exact FAILED-state and process
+  schemas, native integer PID fields, and fail-closed live/PID-reuse handling.
+- [x] Harden immutable Git audits with fixed `/usr/bin/git`, isolated config and
+  environment, explicit gitdir/worktree authorities, critical committed blobs,
+  and rejection of dirty/staged/untracked/ignored/index-hidden/bytecode state.
+- [x] Add the paired AutoDL CLI, static-refusal Slurm parity, focused hostile
+  tests, and operator documentation.
+- [ ] After a separate production evidence capture and review, create the
+  exact external release receipt, then a clean one-parent commit changing only
+  the release config. Never patch or reconcile this version's partial/final
+  root.
+- [ ] Implement T3 so its only T2 authority is the validated fresh gate/receipt
+  SHA plus the exact formal-bundle inventory in that receipt; require T4 to
+  retain that receipt binding and consume T3's own gate before PASS.

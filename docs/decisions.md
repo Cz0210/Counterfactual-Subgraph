@@ -10561,3 +10561,96 @@ bundle, SSH, deployment, controller/GPU-lock/matrix write, production model
 load, adapter creation from the real base, dataset access, or scientific
 experiment was performed. One tiny local CPU PEFT model was used only for a
 real safetensors save/reload format test.
+
+## [2026-08-28] Replace in-place Taste T2 reconciliation with fresh read-only adoption
+
+### Motivation
+
+The completed Taste GINE result and its failed controller express two
+different facts: science reached a closed PASS bundle, while the old
+controller persisted an identity-drift failure under its then-deployed
+comparison logic. Rewriting that failed controller in place would merge those
+facts and retain write authority over scientific/controller roots that must
+now be historical. It would also introduce repair and crash windows into the
+source of truth.
+
+### Decision
+
+Do not reconcile, resume, or otherwise write the old GINE controller,
+training-state, output, registry, main controller, matrix, or GPU locks. Add a
+versioned successor that holds all source pathname edges and files through
+`openat`/`O_NOFOLLOW` descriptors, validates exact
+`583bf668896142d8cc292cd624fbbffc20faf688` execution identity and
+`3a90fd8697b58bad4f95f3be9347b327d5c51043` identity-fix source, and requires
+the controller to remain exactly `FAILED/WORKER_PROCESS_IDENTITY_DRIFT`.
+
+The adoption also binds every declared PID as absent, the typed trainer-child
+authority, source run's final registry PASS, runtime PASS state, training
+log PASS/OK/exit-0 markers, completion and canonical contract, latest
+checkpoint, exact eighteen-entry
+checkpoint hash closure, and full physical output/training-state inventories.
+It rechecks three-class GINE semantics, label map, Sweet source label,
+health/reload gates, no-RF provenance, held-out/cache boundaries, scoped
+research/reporting permission, and no redistribution.
+
+Publish only to deterministic fresh root
+`<control_root>/tastemolnet-t2-gine-pass-adoption-v1/<source_cid>`. The root
+contains exactly `input_hashes.json`, `state.json`, `manifest.json`,
+`output_hashes.json`, and PASS-last `gate.json`; `manifest.json` is the receipt
+whose SHA later T3/T4 stages must bind. There is no generic PASS marker and no
+same-root recovery: an existing or interrupted root requires a newly versioned
+successor.
+
+Keep the historical controller failure and the scientific PASS as separate,
+typed facts: the former is an explicit control-plane scientific false negative,
+while registry/runtime/training-complete/formal-output authorities remain PASS.
+Retain the four preterminal receipt files and revalidate every held old-source
+identity before every receipt write and through the terminal gate commit. Bind
+the four files' physical identities and held directory in the gate, prepare and
+sync the gate under a non-authorizing name, and expose it only with the final
+`renameat2(RENAME_NOREPLACE)` operation. No validation or fsync follows that
+commit; cleanup is non-throwing. Main-controller and matrix paths remain outside the publisher's open
+and write sets. T3 may consume only a validated fresh T2 gate/receipt binding
+plus the exact formal-output inventory recorded by that receipt; neither the
+old controller nor main/matrix state is an alternate T2 authority.
+
+Retain and revalidate the fresh namespace and final CID directory path edges
+as well, including the exact prefix listing after every no-clobber write. A
+rename/replacement or injected destination file must stop publication before a
+gate. Read-only status recomputes those physical identities and may endorse
+PASS only under the same physically held external release authority;
+canonical-looking JSON or equal-byte inode replacement cannot manufacture a
+valid status.
+
+Freeze this implementation with a tracked release config whose exact native
+Boolean authorization is false and whose external-authority path/hash are
+null. Replace the former release-normalized self-pin with an independent
+reviewed receipt: it must bind the clean implementation commit/tree, exact
+critical blobs, and every exact native source pin. A future clean one-parent
+release commit may change only the release config to bind that receipt. Audit
+all three checkouts with fixed root-owned `/usr/bin/git`, explicit retained
+gitdir/worktree paths, isolated Git config/environment, replacement objects
+disabled, and rejection of dirty/staged/untracked/ignored, skip-worktree,
+assume-unchanged, and bytecode-cache state. Production PID checks always use
+literal physical `/proc`; the CLI has no proc-root override. Preflight and
+status are read-only; publish returns the blocked exit before destination
+creation. The paired Slurm entrypoint is static AutoDL-only refusal.
+
+### Consequences
+
+- Scientific completion can be represented without falsifying or mutating the
+  old controller's historical failure.
+- A source swap, symlink, hardlink, content/stat drift, live declared PID,
+  checkpoint omission, policy/classifier drift, receipt whitespace change, or
+  partial output fails closed.
+- T3/T4 gain a deterministic receipt-hash dependency without writing the main
+  controller or matrix.
+- Publication needs a later independent evidence capture, external-receipt
+  review, and exact one-config release child; this implementation cannot be
+  activated by runtime input.
+
+### Status
+
+Local isolated implementation, focused/static tests, and documentation only.
+No commit, push, SSH, deployment, process action, controller/GPU-lock/matrix
+mutation, scientific-root write, model load, or new science was performed.

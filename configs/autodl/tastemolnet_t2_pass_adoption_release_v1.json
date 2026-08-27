@@ -1,0 +1,8 @@
+{
+  "authorization": false,
+  "dataset": "tastemolnet",
+  "external_authority_path": null,
+  "external_authority_sha256": null,
+  "schema_version": "tastemolnet_t2_gine_pass_release_config_v1",
+  "stage": "T2_GINE_FULL"
+}
