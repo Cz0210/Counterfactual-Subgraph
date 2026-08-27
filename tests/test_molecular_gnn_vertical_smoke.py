@@ -122,7 +122,7 @@ def test_taste_determinism_is_error_mode_and_no_gpu_runtime_fails_closed(
         _set_seed(7, exact_cuda=True)
 
     if not torch.cuda.is_available():
-        monkeypatch.setenv("AUTODL_PHYSICAL_GPU_INDEX", "2")
+        monkeypatch.setenv("AUTODL_PHYSICAL_GPU_INDEX", "1")
         monkeypatch.setenv("AUTODL_PHYSICAL_GPU_UUID", "GPU-fixture")
         with pytest.raises(
             MolecularGNNResumeError, match="exactly one masked CUDA device"
@@ -370,7 +370,7 @@ def test_published_bundle_crash_resumes_only_through_controller_exp_run_and_trai
     runtime_data = tmp_path / "runtime-data"
     runtime_data.mkdir()
     control_root = runtime_data / "control"
-    cid = "tastemolnet_gine_v1_20260825T000000Z_c0ffee00"
+    cid = "tastemolnet_gine_v2_20260827T000000Z_c0ffee00"
     receipt_path = controller_root / PUBLISHED_ADOPTION_NAME
     train_script = (PROJECT_ROOT / "scripts/train_molecular_gnn.py").resolve(
         strict=True

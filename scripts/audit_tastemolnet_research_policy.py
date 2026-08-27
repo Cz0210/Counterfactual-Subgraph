@@ -16,13 +16,15 @@ from src.utils.tastemolnet_research_policy import (
     NO_REDISTRIBUTION_MARKER,
     PENDING_AUDIT_MARKER,
     PENDING_STATUS,
+    POLICY_V2_AUDIT_MARKER,
     TasteResearchPolicyError,
     load_tastemolnet_research_policy,
     validate_tastemolnet_local_authority,
 )
 
 
-RECEIPT_SCHEMA = "tastemolnet_research_reporting_policy_receipt_v1"
+RECEIPT_SCHEMA_V1 = "tastemolnet_research_reporting_policy_receipt_v1"
+RECEIPT_SCHEMA = "tastemolnet_research_reporting_policy_receipt_v2"
 ACTIVE_MARKER = ACTIVE_AUDIT_MARKER
 PENDING_MARKER = PENDING_AUDIT_MARKER
 
@@ -82,15 +84,23 @@ def audit_research_policy(
         policy_path, expected_file_sha256=expected_policy_sha256
     )
     if require_active:
-        policy.require_active()
+        policy.require_main_route()
     authority = validate_tastemolnet_local_authority(
         policy,
         prepared_root=prepared,
         graph_cache_root=cache,
     )
-    marker = ACTIVE_MARKER if policy.active else PENDING_MARKER
+    marker = (
+        POLICY_V2_AUDIT_MARKER
+        if policy.active and policy.version == 2
+        else ACTIVE_MARKER
+        if policy.active
+        else PENDING_MARKER
+    )
     receipt = {
-        "schema_version": RECEIPT_SCHEMA,
+        "schema_version": (
+            RECEIPT_SCHEMA if policy.version == 2 else RECEIPT_SCHEMA_V1
+        ),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "dataset": "tastemolnet",
         "status": policy.status,

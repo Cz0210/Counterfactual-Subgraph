@@ -51,11 +51,11 @@ from src.utils.tastemolnet_research_policy import (
 )
 
 
-SCHEMA = "autodl_tastemolnet_gine_persistent_controller_v1"
-CLAIM_SCHEMA = "autodl_tastemolnet_gine_controller_root_claim_v1"
-STATE_SCHEMA = "autodl_tastemolnet_gine_controller_state_v1"
-TERMINAL_SCHEMA = "autodl_tastemolnet_gine_controller_terminal_v1"
-CID_PATTERN = re.compile(r"^tastemolnet_gine_v1_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
+SCHEMA = "autodl_tastemolnet_gine_persistent_controller_v2"
+CLAIM_SCHEMA = "autodl_tastemolnet_gine_controller_root_claim_v2"
+STATE_SCHEMA = "autodl_tastemolnet_gine_controller_state_v2"
+TERMINAL_SCHEMA = "autodl_tastemolnet_gine_controller_terminal_v2"
+CID_PATTERN = re.compile(r"^tastemolnet_gine_v2_[0-9]{8}T[0-9]{6}Z_[0-9a-f]{8}$")
 ROOT_SENTINEL = ".controller-root-identity"
 ROOT_LOCK = ".controller.lock"
 ROOT_CLAIM = "controller_root_claim.json"
@@ -138,6 +138,7 @@ FROZEN_SCIENCE_ENV_KEYS = (
     "TASTEMOLNET_GNN_TRAINING_STATE_ROOT",
     "TASTEMOLNET_GINE_CONTROLLER_CID",
     "TASTEMOLNET_GINE_CONTROLLER_ROOT",
+    "TASTEMOLNET_GPU_INDEX",
     "AUTODL_RUNTIME_ROOT",
     "AUTODL_ARTIFACT_ROOT",
     "AUTODL_CONTROL_ROOT",
@@ -150,6 +151,8 @@ FROZEN_SCIENCE_ENV_KEYS = (
     "PRIMARY_GNN_BACKBONE",
     "PRIMARY_SEED",
     "MIN_PERSISTENT_FREE_GB",
+    "MIN_FREE_AFTER_RESERVATIONS_GB",
+    "TASTEMOLNET_STORAGE_RESERVATION_GB",
     "TASTEMOLNET_GPU_WAIT_DEADLINE_SECONDS",
     "TASTEMOLNET_GPU_WAIT_POLL_SECONDS",
     "TASTEMOLNET_PUBLISHED_OUTPUT_ADOPTION_RECEIPT",
@@ -174,6 +177,9 @@ FROZEN_BASE_ENV_KEYS = (
 )
 REQUIRED_OUTPUT_FILES = (
     "model.pt",
+    "last.pt",
+    "last_checkpoint.json",
+    "checkpoint_reload.json",
     "model_card.json",
     "feature_schema.json",
     "training_metrics.json",
@@ -515,6 +521,8 @@ class TasteGINEControllerSpec:
             "TASTE_DATA_REDISTRIBUTION_ALLOWED": "0",
             "TASTE_UPSTREAM_LICENSE_STATUS": "NOT_EXPLICITLY_STATED",
             "AUTODL_MAX_GPUS": "4",
+            "TASTEMOLNET_GPU_INDEX": "1",
+            "TASTEMOLNET_STORAGE_RESERVATION_GB": "20",
             "PRIMARY_GNN_BACKBONE": "gine",
             "PRIMARY_SEED": "7",
             "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
@@ -530,9 +538,21 @@ class TasteGINEControllerSpec:
             raise TasteGINEControllerError(
                 "Taste persistent free-space threshold must be an integer"
             ) from exc
-        if minimum_free_gb < 20:
+        if minimum_free_gb < 100:
             raise TasteGINEControllerError(
-                "Taste persistent free-space threshold must be at least 20 GiB"
+                "Taste persistent free-space threshold must be at least 100 GiB"
+            )
+        try:
+            minimum_after_reservations_gb = int(
+                environment_authority["MIN_FREE_AFTER_RESERVATIONS_GB"]
+            )
+        except ValueError as exc:
+            raise TasteGINEControllerError(
+                "Taste post-reservation free-space floor must be an integer"
+            ) from exc
+        if minimum_after_reservations_gb < 100:
+            raise TasteGINEControllerError(
+                "Taste post-reservation free-space floor must be at least 100 GiB"
             )
         expected_paths = {
             "TASTEMOLNET_GNN_FULL_OUTPUT": str(output),
@@ -556,6 +576,7 @@ class TasteGINEControllerSpec:
             environment_authority["TASTEMOLNET_POLICY_FILE"],
             expected_file_sha256=environment_authority["TASTEMOLNET_POLICY_SHA256"],
         )
+        policy.require_main_route()
         authority = validate_tastemolnet_local_authority(
             policy,
             prepared_root=environment_authority["TASTEMOLNET_PREPARED_ROOT"],
@@ -566,6 +587,7 @@ class TasteGINEControllerSpec:
             policy=policy,
             authority=authority,
             require_active=True,
+            require_policy_version=2,
         )
         environment_authority.update(
             {
@@ -592,8 +614,17 @@ class TasteGINEControllerSpec:
             or not isinstance(merged_config.get("training"), Mapping)
             or int(merged_config["training"].get("primary_seed", -1)) != 7
             or not isinstance(merged_config.get("autodl"), Mapping)
+            or merged_config["autodl"].get("schema_version")
+            != "tastemolnet_gine_research_autodl_v2"
             or merged_config["autodl"].get("backbone") != "gine"
             or merged_config["autodl"].get("classifier_family") != "gine"
+            or merged_config["autodl"].get("physical_gpu_index") != 1
+            or merged_config["autodl"].get("policy_file_sha256")
+            != policy.file_sha256
+            or merged_config["autodl"].get("prepared_output_manifest_sha256")
+            != authority.prepared_output_manifest_sha256
+            or merged_config["autodl"].get("split_manifest_sha256")
+            != authority.split_manifest_sha256
         ):
             raise TasteGINEControllerError(
                 "verified Taste configuration does not bind GINE/seed-7"
@@ -664,7 +695,7 @@ class TasteGINEControllerSpec:
             "poll_seconds": self.poll_seconds,
             "terminal_stability_seconds": self.terminal_stability_seconds,
             "resource_wait_deadline_seconds": self.resource_wait_deadline_seconds,
-            "physical_gpu_index": 2,
+            "physical_gpu_index": 1,
             "retry_policy": "one_process_loss_retry_same_training_state_root",
             "required_output_files": list(REQUIRED_OUTPUT_FILES),
             "terminal_marker": "[TASTE_GINE_THREE_CLASS_PASS]",
@@ -967,7 +998,7 @@ def _expected_exp_run_argv(
         "--stage",
         "TASTEMOLNET_GINE_FULL_RESEARCH_V1",
         "--gpu-index",
-        "2",
+        "1",
         "--gpu-uuid",
         gpu_uuid,
         "--gpu-required",
@@ -2368,8 +2399,9 @@ class TasteGINEPersistentController:
                 raise TasteGINEControllerError("frozen controller config changed")
         environment = self.spec.environment_authority
         try:
-            minimum_free_gb = int(
-                environment.get("MIN_PERSISTENT_FREE_GB", "-1")
+            minimum_free_gb = int(environment.get("MIN_PERSISTENT_FREE_GB", "-1"))
+            minimum_after_reservations_gb = int(
+                environment.get("MIN_FREE_AFTER_RESERVATIONS_GB", "-1")
             )
         except (TypeError, ValueError) as exc:
             raise TasteGINEControllerError(
@@ -2382,7 +2414,9 @@ class TasteGINEPersistentController:
             or environment.get("PYTHONHASHSEED") != "7"
             or environment.get("NVIDIA_TF32_OVERRIDE") != "0"
             or environment.get("CUDNN_DETERMINISTIC") != "1"
-            or minimum_free_gb < 20
+            or environment.get("TASTEMOLNET_GPU_INDEX") != "1"
+            or minimum_free_gb < 100
+            or minimum_after_reservations_gb < 100
         ):
             raise TasteGINEControllerError(
                 "frozen GINE/seed/free-space/determinism route changed"
@@ -2391,6 +2425,7 @@ class TasteGINEPersistentController:
             environment["TASTEMOLNET_POLICY_FILE"],
             expected_file_sha256=environment["TASTEMOLNET_POLICY_SHA256"],
         )
+        policy.require_main_route()
         authority = validate_tastemolnet_local_authority(
             policy,
             prepared_root=environment["TASTEMOLNET_PREPARED_ROOT"],
@@ -2401,6 +2436,7 @@ class TasteGINEPersistentController:
             policy=policy,
             authority=authority,
             require_active=True,
+            require_policy_version=2,
         )
         if (
             policy.canonical_sha256 != environment.get("policy_canonical_sha256")
@@ -2854,6 +2890,7 @@ class TasteGINEPersistentController:
                 policy=policy,
                 authority=authority,
                 require_active=True,
+                require_policy_version=2,
             )
             if (
                 policy.evidence() != policy_evidence

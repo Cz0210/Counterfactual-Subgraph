@@ -35,11 +35,11 @@ def _spec(tmp_path: Path, worker: Path) -> TasteGINEControllerSpec:
         "PYTHONPATH": str(PROJECT_ROOT),
         "TASTEMOLNET_GNN_FULL_OUTPUT": str(output),
         "TASTEMOLNET_GNN_TRAINING_STATE_ROOT": str(state),
-        "TASTEMOLNET_GINE_CONTROLLER_CID": "tastemolnet_gine_v1_20260825T000000Z_deadbeef",
+        "TASTEMOLNET_GINE_CONTROLLER_CID": "tastemolnet_gine_v2_20260827T000000Z_deadbeef",
         "TASTEMOLNET_GINE_CONTROLLER_ROOT": str(tmp_path / "controller"),
     }
     return TasteGINEControllerSpec(
-        cid="tastemolnet_gine_v1_20260825T000000Z_deadbeef",
+        cid="tastemolnet_gine_v2_20260827T000000Z_deadbeef",
         controller_root=tmp_path / "controller",
         project_root=PROJECT_ROOT,
         output_dir=output,

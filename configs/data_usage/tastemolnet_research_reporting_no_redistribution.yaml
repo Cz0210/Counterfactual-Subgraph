@@ -1,14 +1,15 @@
-schema_version: tastemolnet_research_reporting_policy_v1
-policy_id: tastemolnet-research-reporting-no-redistribution-20260825
+schema_version: tastemolnet_research_reporting_policy_v2
+policy_id: tastemolnet-research-reporting-no-redistribution-v2-20260825
 effective_date: "2026-08-25"
 authorization_basis: explicit_user_instruction
 authorization_state: ACTIVE_SCOPED_AUTHORIZATION
 dataset: tastemolnet
-policy_version: 1
+policy_version: 2
 authorization_source: user_project_owner_instruction
 authorization_date: "2026-08-25"
 research_compute_allowed: true
 paper_result_reporting_allowed: true
+data_redistribution_allowed: false
 upstream_license_status: NOT_EXPLICITLY_STATED
 upstream_license_claimed_resolved: false
 raw_data_redistribution_allowed: false
@@ -65,7 +66,7 @@ execution:
   platform: autodl
   hpc_execution_allowed: false
   run_tastemolnet: 1
-  gpu_index: 2
+  gpu_index: 1
   gpu_lock_mode: exclusive
   fresh_output_required: true
   classifier:

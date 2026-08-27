@@ -508,7 +508,7 @@ def _taste_runtime_authority(
         args.taste_policy_file,
         expected_file_sha256=args.taste_policy_sha256,
     )
-    policy.require_active()
+    policy.require_main_route()
     authority = validate_tastemolnet_local_authority(
         policy,
         prepared_root=args.taste_prepared_root,
@@ -519,6 +519,7 @@ def _taste_runtime_authority(
         policy=policy,
         authority=authority,
         require_active=True,
+        require_policy_version=2,
     )
     expected_split_root = authority.prepared_root / "splits"
     for split, path in split_paths.items():
@@ -551,6 +552,102 @@ def _write_new_json(path: Path, payload: Mapping[str, Any]) -> None:
             os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _replace_json_before_publication(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically replace a private staging JSON before the bundle is published."""
+
+    data = (json.dumps(dict(payload), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_last_training_checkpoint(
+    *, training_state_root: Path, bundle_dir: Path
+) -> dict[str, Any]:
+    """Copy the authenticated latest epoch state into the fresh final bundle."""
+
+    latest_path = training_state_root / "latest_checkpoint.json"
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    if not isinstance(latest, dict):
+        raise MolecularGNNResumeError("latest checkpoint authority is not an object")
+    relative = latest.get("checkpoint_file")
+    expected_sha256 = latest.get("checkpoint_sha256")
+    completed_epoch = latest.get("completed_epoch")
+    if (
+        not isinstance(relative, str)
+        or Path(relative).name != relative
+        or not relative.startswith("checkpoint-")
+        or not relative.endswith(".pt")
+        or not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or type(completed_epoch) is not int
+        or completed_epoch < 1
+    ):
+        raise MolecularGNNResumeError("latest checkpoint authority is malformed")
+    source = training_state_root / relative
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, flags)
+    target = bundle_dir / "last.pt"
+    temporary = bundle_dir / ".last.pt.tmp"
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise MolecularGNNResumeError("latest checkpoint is not one regular file")
+        with os.fdopen(os.dup(descriptor), "rb", closefd=True) as input_handle:
+            with temporary.open("xb") as output_handle:
+                shutil.copyfileobj(input_handle, output_handle, length=8 * 1024 * 1024)
+                output_handle.flush()
+                os.fsync(output_handle.fileno())
+        after = os.fstat(descriptor)
+        named = os.stat(source, follow_symlinks=False)
+        identity = lambda value: (  # noqa: E731
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        if identity(before) != identity(after) or identity(after) != identity(named):
+            raise MolecularGNNResumeError("latest checkpoint changed while copied")
+        if sha256_file(source) != expected_sha256 or sha256_file(temporary) != expected_sha256:
+            raise MolecularGNNResumeError("latest checkpoint SHA-256 changed")
+        os.link(temporary, target)
+        directory = os.open(bundle_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+    receipt = {
+        "schema_version": "tastemolnet_last_training_checkpoint_v1",
+        "checkpoint_file": "last.pt",
+        "checkpoint_sha256": expected_sha256,
+        "source_checkpoint_file": relative,
+        "source_checkpoint_sha256": expected_sha256,
+        "completed_epoch": completed_epoch,
+        "same_bytes_as_latest_epoch_checkpoint": True,
+        "training_state_root": str(training_state_root),
+    }
+    _write_new_json(bundle_dir / "last_checkpoint.json", receipt)
+    return receipt
 
 
 def _training_resume_contract(
@@ -710,6 +807,10 @@ def _runtime_identity(*, torch: Any, device: str, taste_full: bool) -> dict[str,
         "TASTEMOLNET_GNN_TRAINING_STATE_ROOT",
         "TASTEMOLNET_GINE_CONTROLLER_CID",
         "TASTEMOLNET_GINE_CONTROLLER_ROOT",
+        "TASTEMOLNET_GPU_INDEX",
+        "TASTEMOLNET_STORAGE_RESERVATION_GB",
+        "MIN_PERSISTENT_FREE_GB",
+        "MIN_FREE_AFTER_RESERVATIONS_GB",
         "TASTEMOLNET_PUBLISHED_OUTPUT_ADOPTION_RECEIPT",
         "TASTEMOLNET_RESOURCE_WAIT_DEADLINE_EPOCH",
         "OMP_NUM_THREADS",
@@ -732,11 +833,11 @@ def _runtime_identity(*, torch: Any, device: str, taste_full: bool) -> dict[str,
     if taste_full:
         if device != "cuda:0":
             raise MolecularGNNResumeError(
-                "TasteMolNet full training requires logical cuda:0 behind the GPU2 mask"
+                "TasteMolNet full training requires logical cuda:0 behind the GPU1 mask"
             )
-        if physical_index != "2" or not physical_uuid or not physical_uuid.startswith("GPU-"):
+        if physical_index != "1" or not physical_uuid or not physical_uuid.startswith("GPU-"):
             raise MolecularGNNResumeError(
-                "TasteMolNet full training requires physical GPU2 UUID runtime authority"
+                "TasteMolNet full training requires physical GPU1 UUID runtime authority"
             )
         if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
             raise MolecularGNNResumeError(
@@ -1083,6 +1184,7 @@ def _reload_oracle_smoke(
     dataset: MolecularGraphDataset,
     *,
     device: str,
+    require_taste_closure: bool = True,
 ) -> dict[str, Any]:
     """Exercise the persisted bundle and calibrated-probability API once."""
 
@@ -1090,6 +1192,7 @@ def _reload_oracle_smoke(
         checkpoint_dir,
         device=device,
         batch_size=min(8, len(dataset)),
+        require_taste_closure=require_taste_closure,
     )
     graphs = [dataset[index] for index in range(min(8, len(dataset)))]
     batched = oracle.predict_proba(graphs)
@@ -1157,7 +1260,12 @@ def _reload_oracle_smoke(
         "deletion_residual_smiles": deletion.residual_smiles,
         "pred_before": pred_before,
         "pred_after": pred_after,
-        "cf_flip": pred_before != pred_after,
+        "source_label": int(oracle.source_label),
+        "destination_label": pred_after,
+        "strict_flip": (
+            pred_before == int(oracle.source_label)
+            and pred_after != int(oracle.source_label)
+        ),
         "cf_drop": source_probability_before - source_probability_after,
         "empty_deletion_failed_closed": True,
         "invalid_deletion_failed_closed": True,
@@ -1302,6 +1410,21 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile,
         split_paths=split_paths,
     )
+    if taste_runtime is not None:
+        policy, authority, _ = taste_runtime
+        autodl_config = config.get("autodl")
+        if not isinstance(autodl_config, Mapping) or (
+            autodl_config.get("policy_file_sha256") != policy.file_sha256
+            or autodl_config.get("physical_gpu_index") != 1
+            or autodl_config.get("prepared_output_manifest_sha256")
+            != authority.prepared_output_manifest_sha256
+            or autodl_config.get("split_manifest_sha256")
+            != authority.split_manifest_sha256
+            or autodl_config.get("min_free_after_reservations_gb") != 100
+        ):
+            raise TasteResearchPolicyError(
+                "Taste AutoDL config lost policy-v2/GPU1/data authority"
+            )
     output_dir = Path(os.path.abspath(Path(args.output_dir).expanduser()))
     git_state = _git_state()
     if taste_runtime is not None:
@@ -1392,6 +1515,12 @@ def main(argv: list[str] | None = None) -> int:
         ]
         try:
             minimum_free_gb = int(os.environ.get("MIN_PERSISTENT_FREE_GB", "-1"))
+            minimum_after_reservations_gb = int(
+                os.environ.get("MIN_FREE_AFTER_RESERVATIONS_GB", "-1")
+            )
+            storage_reservation_gb = int(
+                os.environ.get("TASTEMOLNET_STORAGE_RESERVATION_GB", "-1")
+            )
         except ValueError as exc:
             raise MolecularGNNResumeError(
                 "Taste minimum persistent free-space threshold is malformed"
@@ -1400,10 +1529,12 @@ def main(argv: list[str] | None = None) -> int:
             args.backbone != "gine"
             or seed != 7
             or gnn_configs != [verified_gine]
-            or minimum_free_gb < 20
+            or minimum_free_gb < 100
+            or minimum_after_reservations_gb != 100
+            or storage_reservation_gb != 20
         ):
             raise MolecularGNNResumeError(
-                "Taste full training must use the verified GINE config, seed 7, and >=20 GiB gate"
+                "Taste full training must use GINE/seed-7 and the exact 20/100 GiB reservation gate"
             )
     _set_seed(seed, exact_cuda=taste_runtime is not None)
     device = _resolve_device(args.device, config)
@@ -1648,7 +1779,7 @@ def main(argv: list[str] | None = None) -> int:
         model.train()
         total_loss = 0.0
         total_examples = 0
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader, start=1):
             batch = batch.to(device)
             optimizer.zero_grad(set_to_none=True)
             logits = model(batch)
@@ -1659,6 +1790,22 @@ def main(argv: list[str] | None = None) -> int:
             count = int(batch.y.numel())
             total_loss += float(loss.item()) * count
             total_examples += count
+            if taste_runtime is not None and (
+                batch_index == 1 or batch_index % 50 == 0
+            ):
+                print(
+                    json.dumps(
+                        {
+                            "event": "TASTE_GINE_BATCH_PROGRESS",
+                            "epoch": epoch,
+                            "batch": batch_index,
+                            "examples_seen_in_epoch": total_examples,
+                            "batch_loss": float(loss.item()),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
         validation = _evaluate(
             model,
             validation_loader,
@@ -2031,6 +2178,48 @@ def main(argv: list[str] | None = None) -> int:
         _write_new_json(bundle_dir / "data_use_policy_binding.json", policy_binding)
         _write_new_json(bundle_dir / "graph_cache_usage.json", graph_cache_usage)
         _write_new_json(bundle_dir / "oracle_manifest.json", oracle_manifest)
+        if resume_store is None or training_state_dir is None:
+            raise MolecularGNNResumeError(
+                "Taste full training requires one persistent latest-checkpoint authority"
+            )
+        last_checkpoint = _publish_last_training_checkpoint(
+            training_state_root=training_state_dir,
+            bundle_dir=bundle_dir,
+        )
+        _write_new_json(
+            bundle_dir / "checkpoint_reload.json",
+            {
+                "schema_version": "tastemolnet_gine_checkpoint_reload_v1",
+                "status": "PENDING_PRIVATE_STAGING_RELOAD",
+                "checkpoint_reload_pass": False,
+                "last_checkpoint": last_checkpoint,
+            },
+        )
+        update_checkpoint_sha256sums(bundle_dir)
+        bundle["audit"] = verify_checkpoint_bundle(
+            bundle_dir, require_taste_closure=False
+        )
+        reload_smoke = _reload_oracle_smoke(
+            bundle_dir,
+            validation_dataset,
+            device=device,
+            require_taste_closure=False,
+        )
+        checkpoint_reload = {
+            "schema_version": "tastemolnet_gine_checkpoint_reload_v1",
+            "status": "PASS",
+            "checkpoint_id": reload_smoke["checkpoint_id"],
+            "checkpoint_reload_pass": True,
+            "batch_single_probability_equivalence": True,
+            "all_probabilities_finite": True,
+            "num_classes": 3,
+            "source_label": 1,
+            "last_checkpoint": last_checkpoint,
+            "oracle_reload": reload_smoke,
+        }
+        _replace_json_before_publication(
+            bundle_dir / "checkpoint_reload.json", checkpoint_reload
+        )
         update_checkpoint_sha256sums(bundle_dir)
         bundle["audit"] = verify_checkpoint_bundle(bundle_dir)
         final_runtime = _taste_runtime_authority(

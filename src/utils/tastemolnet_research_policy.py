@@ -12,13 +12,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
 from typing import Any, Mapping
 
 
-POLICY_SCHEMA = "tastemolnet_research_reporting_policy_v1"
+POLICY_V1_SCHEMA = "tastemolnet_research_reporting_policy_v1"
+POLICY_SCHEMA = "tastemolnet_research_reporting_policy_v2"
+POLICY_V1_ID = "tastemolnet-research-reporting-no-redistribution-20260825"
+POLICY_ID = "tastemolnet-research-reporting-no-redistribution-v2-20260825"
 PENDING_STATE = "PENDING_ROOT_ACTIVATION"
 ACTIVE_STATE = "ACTIVE_SCOPED_AUTHORIZATION"
 PENDING_STATUS = "POLICY_READY_EXECUTION_DISABLED"
@@ -29,6 +33,7 @@ UPSTREAM_COMMIT = "16af8ead8a17b6bd3941d9eb5879c5be75c14114"
 UPSTREAM_DATA_FILE = "processed_data/taste_scaffold_split.csv"
 SOURCE_CSV_SHA256 = "b7308b3277fd07ed6af4b861c0d2ce2d843f92cc81a9e5e4efd65cf4040a291b"
 ACTIVE_AUDIT_MARKER = "TASTE_RESEARCH_AND_PAPER_REPORTING_AUTHORIZED"
+POLICY_V2_AUDIT_MARKER = "TASTE_RESEARCH_POLICY_V2_PASS"
 NO_REDISTRIBUTION_MARKER = "TASTE_NO_DATA_REDISTRIBUTION_GUARD_PASS"
 PENDING_AUDIT_MARKER = "TASTEMOLNET_POLICY_READY_EXECUTION_DISABLED"
 
@@ -70,10 +75,43 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], *, field: str) -> 
 
 
 def _hex(value: Any, *, field: str) -> str:
-    result = str(value or "").lower()
+    if type(value) is not str:
+        raise TasteResearchPolicyError(f"{field} must be one native JSON string")
+    result = value.lower()
     if len(result) != 64 or any(character not in _HEX_64 for character in result):
         raise TasteResearchPolicyError(f"{field} must be one lowercase SHA-256")
     return result
+
+
+def _exact_native_equal(actual: Any, expected: Any, *, field: str) -> None:
+    """Compare JSON-like authority without Python's bool/int coercions."""
+
+    if type(actual) is not type(expected):
+        raise TasteResearchPolicyError(f"{field} changed native JSON type")
+    if type(expected) is dict:
+        if any(type(key) is not str for key in actual):
+            raise TasteResearchPolicyError(f"{field} contains a non-string key")
+        if set(actual) != set(expected):
+            raise TasteResearchPolicyError(f"{field} keys changed")
+        for key in expected:
+            _exact_native_equal(actual[key], expected[key], field=f"{field}.{key}")
+        return
+    if type(expected) is list:
+        if len(actual) != len(expected):
+            raise TasteResearchPolicyError(f"{field} length changed")
+        for index, (observed, wanted) in enumerate(zip(actual, expected, strict=True)):
+            _exact_native_equal(observed, wanted, field=f"{field}[{index}]")
+        return
+    if type(expected) is float and not math.isfinite(actual):
+        raise TasteResearchPolicyError(f"{field} must be finite")
+    if actual != expected:
+        raise TasteResearchPolicyError(f"{field} changed value")
+
+
+def _native_int(value: Any, *, field: str) -> int:
+    if type(value) is not int:
+        raise TasteResearchPolicyError(f"{field} must be one native JSON integer")
+    return value
 
 
 def _read_physical(path: str | Path) -> tuple[Path, bytes]:
@@ -109,45 +147,52 @@ def _read_physical(path: str | Path) -> tuple[Path, bytes]:
 
 
 def _validate(payload: Mapping[str, Any]) -> None:
+    schema = payload.get("schema_version")
+    version = payload.get("policy_version")
+    if type(version) is not int or version not in {1, 2}:
+        raise TasteResearchPolicyError("policy_version must be native JSON integer 1 or 2")
+    if (schema, version) not in {(POLICY_V1_SCHEMA, 1), (POLICY_SCHEMA, 2)}:
+        raise TasteResearchPolicyError("policy schema/version changed")
+    top_level_keys = {
+        "schema_version",
+        "policy_id",
+        "effective_date",
+        "authorization_basis",
+        "authorization_state",
+        "dataset",
+        "policy_version",
+        "authorization_source",
+        "authorization_date",
+        "research_compute_allowed",
+        "paper_result_reporting_allowed",
+        "upstream_license_status",
+        "upstream_license_claimed_resolved",
+        "raw_data_redistribution_allowed",
+        "cleaned_dataset_redistribution_allowed",
+        "full_smiles_label_table_release_allowed",
+        "reconstructable_dataset_artifact_allowed",
+        "preprocessing_code_release_allowed",
+        "configuration_release_allowed",
+        "aggregated_metrics_release_allowed",
+        "figure_release_allowed",
+        "trained_model_release_allowed",
+        "required_citations",
+        "fixed_upstream_commit",
+        "fixed_csv_sha256",
+        "dataset_identity",
+        "permissions",
+        "data_handling",
+        "execution",
+        "publication",
+        "hash_contract",
+    }
+    if version == 2:
+        top_level_keys.add("data_redistribution_allowed")
     _exact_keys(
         payload,
-        {
-            "schema_version",
-            "policy_id",
-            "effective_date",
-            "authorization_basis",
-            "authorization_state",
-            "dataset",
-            "policy_version",
-            "authorization_source",
-            "authorization_date",
-            "research_compute_allowed",
-            "paper_result_reporting_allowed",
-            "upstream_license_status",
-            "upstream_license_claimed_resolved",
-            "raw_data_redistribution_allowed",
-            "cleaned_dataset_redistribution_allowed",
-            "full_smiles_label_table_release_allowed",
-            "reconstructable_dataset_artifact_allowed",
-            "preprocessing_code_release_allowed",
-            "configuration_release_allowed",
-            "aggregated_metrics_release_allowed",
-            "figure_release_allowed",
-            "trained_model_release_allowed",
-            "required_citations",
-            "fixed_upstream_commit",
-            "fixed_csv_sha256",
-            "dataset_identity",
-            "permissions",
-            "data_handling",
-            "execution",
-            "publication",
-            "hash_contract",
-        },
+        top_level_keys,
         field="policy",
     )
-    if payload.get("schema_version") != POLICY_SCHEMA:
-        raise TasteResearchPolicyError("policy schema changed")
     state = str(payload.get("authorization_state") or "")
     if state not in {PENDING_STATE, ACTIVE_STATE}:
         raise TasteResearchPolicyError("authorization_state is invalid")
@@ -161,10 +206,10 @@ def _validate(payload: Mapping[str, Any]) -> None:
 
     active = state == ACTIVE_STATE
     expected_top_level = {
-        "policy_id": "tastemolnet-research-reporting-no-redistribution-20260825",
+        "policy_id": POLICY_ID if version == 2 else POLICY_V1_ID,
         "effective_date": "2026-08-25",
         "dataset": "tastemolnet",
-        "policy_version": 1,
+        "policy_version": version,
         "authorization_source": (
             "user_project_owner_instruction"
             if active
@@ -192,9 +237,27 @@ def _validate(payload: Mapping[str, Any]) -> None:
         "fixed_upstream_commit": UPSTREAM_COMMIT,
         "fixed_csv_sha256": SOURCE_CSV_SHA256,
     }
+    if version == 2:
+        expected_top_level["data_redistribution_allowed"] = False
+    boolean_fields = {
+        "research_compute_allowed",
+        "paper_result_reporting_allowed",
+        "upstream_license_claimed_resolved",
+        "raw_data_redistribution_allowed",
+        "cleaned_dataset_redistribution_allowed",
+        "full_smiles_label_table_release_allowed",
+        "reconstructable_dataset_artifact_allowed",
+        "preprocessing_code_release_allowed",
+        "configuration_release_allowed",
+        "aggregated_metrics_release_allowed",
+        "figure_release_allowed",
+    }
+    if version == 2:
+        boolean_fields.add("data_redistribution_allowed")
+    if any(type(payload.get(key)) is not bool for key in boolean_fields):
+        raise TasteResearchPolicyError("top-level policy booleans changed type")
     for key, expected in expected_top_level.items():
-        if payload.get(key) != expected:
-            raise TasteResearchPolicyError(f"top-level policy field changed: {key}")
+        _exact_native_equal(payload.get(key), expected, field=f"policy.{key}")
 
     dataset = _mapping(payload.get("dataset_identity"), field="dataset_identity")
     expected_dataset = {
@@ -216,8 +279,7 @@ def _validate(payload: Mapping[str, Any]) -> None:
             "test": 1328,
         },
     }
-    if dict(dataset) != expected_dataset:
-        raise TasteResearchPolicyError("dataset/source authority changed")
+    _exact_native_equal(dataset, expected_dataset, field="dataset_identity")
     _hex(
         dataset.get("prepared_output_manifest_sha256"),
         field="dataset_identity.prepared_output_manifest_sha256",
@@ -234,7 +296,7 @@ def _validate(payload: Mapping[str, Any]) -> None:
         if state == PENDING_STATE
         else "ALLOWED_AFTER_PUBLIC_ARTIFACT_AUDIT"
     )
-    if dict(permissions) != {
+    _exact_native_equal(permissions, {
         "research_execution": expected_permission,
         "paper_reporting": expected_permission,
         "dataset_redistribution": "FORBIDDEN",
@@ -243,19 +305,17 @@ def _validate(payload: Mapping[str, Any]) -> None:
         "molecule_level_publication": "FORBIDDEN",
         "aggregate_publication": expected_aggregate,
         "model_artifact_publication": "INTERNAL_ONLY",
-    }:
-        raise TasteResearchPolicyError("permission matrix changed")
+    }, field="permissions")
 
     handling = _mapping(payload.get("data_handling"), field="data_handling")
-    if dict(handling) != {
+    _exact_native_equal(handling, {
         "reuse_existing_prepared_data_only": True,
         "reuse_existing_graph_cache_only": True,
         "data_preparation_allowed": False,
         "network_download_allowed": False,
         "source_copy_allowed": False,
         "public_artifact_audit_required": True,
-    }:
-        raise TasteResearchPolicyError("data-handling restrictions changed")
+    }, field="data_handling")
 
     execution = _mapping(payload.get("execution"), field="execution")
     _exact_keys(
@@ -276,32 +336,36 @@ def _validate(payload: Mapping[str, Any]) -> None:
     expected_run = 0 if state == PENDING_STATE else 1
     run = execution.get("run_tastemolnet")
     if (
-        isinstance(run, bool)
+        type(run) is not int
         or run != expected_run
         or execution.get("phase") != "TASTEMOLNET_GINE_FULL_RESEARCH_V1"
         or execution.get("platform") != "autodl"
         or execution.get("hpc_execution_allowed") is not False
-        or execution.get("gpu_index") != 2
+        or type(execution.get("gpu_index")) is not int
+        or execution.get("gpu_index") != (1 if version == 2 else 2)
         or execution.get("gpu_lock_mode") != "exclusive"
         or execution.get("fresh_output_required") is not True
     ):
         raise TasteResearchPolicyError("execution boundary changed")
-    if dict(_mapping(execution.get("classifier"), field="classifier")) != {
+    classifier = _mapping(execution.get("classifier"), field="classifier")
+    _exact_native_equal(classifier, {
         "oracle_backend": "gnn",
         "classifier_family": "gine",
         "rf_oracle_used": False,
         "num_classes": 3,
         "source_label": 1,
-    }:
-        raise TasteResearchPolicyError("frozen three-class GINE changed")
-    if dict(_mapping(execution.get("split_access"), field="split_access")) != {
+    }, field="execution.classifier")
+    _exact_native_equal(
+        _mapping(execution.get("split_access"), field="split_access"),
+        {
         "train_loaded": True,
         "validation_loaded": True,
         "calibration_loaded": False,
         "test_loaded": False,
         "test_metadata_hash_only": True,
-    }:
-        raise TasteResearchPolicyError("split-access boundary changed")
+        },
+        field="execution.split_access",
+    )
 
     publication = _mapping(payload.get("publication"), field="publication")
     _exact_keys(
@@ -309,27 +373,27 @@ def _validate(payload: Mapping[str, Any]) -> None:
         {"allowed_categories", "forbidden_categories", "marker"},
         field="publication",
     )
-    if publication.get("allowed_categories") != [
+    _exact_native_equal(publication.get("allowed_categories"), [
         "aggregate_metrics",
         "aggregate_tables",
         "aggregate_figures",
         "method_configuration",
         "provenance_hashes",
-    ] or publication.get("forbidden_categories") != [
+    ], field="publication.allowed_categories")
+    _exact_native_equal(publication.get("forbidden_categories"), [
         "source_csv",
         "prepared_split_rows",
         "graph_cache_payloads",
         "molecule_identifiers",
         "smiles_or_molecular_records",
         "per_example_predictions",
-    ]:
-        raise TasteResearchPolicyError("publication allow/deny categories changed")
+    ], field="publication.forbidden_categories")
     if publication.get("marker") != (
         "TASTEMOLNET_PUBLIC_ARTIFACT_NO_DATA_REDISTRIBUTION_AUDIT"
     ):
         raise TasteResearchPolicyError("publication marker changed")
     hash_contract = _mapping(payload.get("hash_contract"), field="hash_contract")
-    if dict(hash_contract) != {
+    _exact_native_equal(hash_contract, {
         "policy_file_hash": "sha256_raw_bytes",
         "policy_semantic_hash": "canonical_json_sha256_v1",
         "runtime_must_bind": [
@@ -340,8 +404,7 @@ def _validate(payload: Mapping[str, Any]) -> None:
             "split_manifest_sha256",
             "graph_cache_manifest_sha256",
         ],
-    }:
-        raise TasteResearchPolicyError("runtime hash-binding contract changed")
+    }, field="hash_contract")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +423,10 @@ class TasteResearchPolicy:
         return self.authorization_state == ACTIVE_STATE
 
     @property
+    def version(self) -> int:
+        return int(self.payload["policy_version"])
+
+    @property
     def status(self) -> str:
         """The unresolved upstream-terms status; never an authorization claim."""
 
@@ -370,8 +437,8 @@ class TasteResearchPolicy:
         return ACTIVE_STATUS if self.active else PENDING_STATUS
 
     def evidence(self) -> dict[str, Any]:
-        return {
-            "schema_version": POLICY_SCHEMA,
+        evidence = {
+            "schema_version": str(self.payload["schema_version"]),
             "policy_id": str(self.payload["policy_id"]),
             "policy_path": str(self.path),
             "policy_file_sha256": self.file_sha256,
@@ -388,10 +455,28 @@ class TasteResearchPolicy:
             "paper_results_reporting_allowed_by_project_policy": self.active,
             "license_conclusion": "NOT_GRANTED_OR_INFERRED",
         }
+        if self.version == 2:
+            evidence.update(
+                {
+                    "policy_version": 2,
+                    "research_compute_allowed": self.active,
+                    "paper_result_reporting_allowed": self.active,
+                    "data_redistribution_allowed": False,
+                    "main_route_state": (
+                        "READY_FOR_MAIN_ROUTE" if self.active else PENDING_STATUS
+                    ),
+                }
+            )
+        return evidence
 
     def require_active(self) -> None:
         if not self.active:
             raise TasteResearchPolicyError("TASTEMOLNET_POLICY_NOT_ACTIVATED")
+
+    def require_main_route(self) -> None:
+        self.require_active()
+        if self.version != 2 or self.payload.get("schema_version") != POLICY_SCHEMA:
+            raise TasteResearchPolicyError("TASTEMOLNET_POLICY_V2_REQUIRED")
 
 
 def _read_json_physical(path: Path) -> dict[str, Any]:
@@ -507,7 +592,8 @@ def validate_tastemolnet_local_authority(
     output_manifest = _read_json_physical(output_manifest_path)
     files = output_manifest.get("files")
     if (
-        output_manifest.get("schema_version") != 1
+        type(output_manifest.get("schema_version")) is not int
+        or output_manifest.get("schema_version") != 1
         or not isinstance(files, Mapping)
         or output_manifest.get("manifest_digest") != stable_json_sha256(files)
     ):
@@ -524,6 +610,7 @@ def validate_tastemolnet_local_authority(
             not isinstance(identity, Mapping)
             or _hex(identity.get("sha256"), field=f"prepared:{relative}")
             != sha256_file(prepared / relative)
+            or type(identity.get("bytes")) is not int
             or identity.get("bytes") != (prepared / relative).stat().st_size
         ):
             raise TasteResearchPolicyError(f"prepared file identity changed: {relative}")
@@ -533,7 +620,9 @@ def validate_tastemolnet_local_authority(
         raise TasteResearchPolicyError("prepared split manifest authority changed")
     if (
         split_manifest.get("dataset") != "tastemolnet"
+        or type(split_manifest.get("num_classes")) is not int
         or split_manifest.get("num_classes") != 3
+        or type(split_manifest.get("source_label")) is not int
         or split_manifest.get("source_label") != 1
         or split_manifest.get("label_map")
         != {"0": "Bitter", "1": "Sweet", "2": "Tasteless"}
@@ -542,14 +631,16 @@ def validate_tastemolnet_local_authority(
     ):
         raise TasteResearchPolicyError("prepared split contract changed")
     statistics = _read_json_physical(split_statistics_path)
-    prepared_rows = int(statistics.get("total_clean_rows", -1))
+    prepared_rows = _native_int(
+        statistics.get("total_clean_rows"), field="split_statistics.total_clean_rows"
+    )
     raw_splits = statistics.get("splits")
     if not isinstance(raw_splits, Mapping):
         raise TasteResearchPolicyError("prepared split statistics changed")
-    split_rows = {
-        split: int(_mapping(raw_splits.get(split), field=f"split:{split}").get("rows", -1))
-        for split in ("train", "validation", "calibration", "test")
-    }
+    split_rows = {}
+    for split in ("train", "validation", "calibration", "test"):
+        row = _mapping(raw_splits.get(split), field=f"split:{split}")
+        split_rows[split] = _native_int(row.get("rows"), field=f"split:{split}.rows")
     if prepared_rows != policy_dataset.get("prepared_rows") or split_rows != policy_dataset.get("split_rows"):
         raise TasteResearchPolicyError("prepared row counts changed")
 
@@ -559,6 +650,7 @@ def validate_tastemolnet_local_authority(
     if (
         cache_manifest.get("schema_version") != "molecular_graph_cache_manifest_v1"
         or cache_manifest.get("dataset") != "tastemolnet"
+        or type(cache_manifest.get("num_classes")) is not int
         or cache_manifest.get("num_classes") != 3
         or cache_manifest.get("split_order")
         != ["train", "validation", "calibration", "test"]
@@ -576,18 +668,26 @@ def validate_tastemolnet_local_authority(
         expected_hash = _hex(identity.get("cache_sha256"), field=f"cache:{split}:sha256")
         if sha256_file(cache / filename) != expected_hash:
             raise TasteResearchPolicyError(f"graph-cache {split} hash changed")
-        if identity.get("num_classes") != 3 or identity.get("safe_load_verified") is not True:
+        if (
+            type(identity.get("num_classes")) is not int
+            or identity.get("num_classes") != 3
+            or identity.get("safe_load_verified") is not True
+        ):
             raise TasteResearchPolicyError(f"graph-cache {split} semantic contract changed")
         if identity.get("source_csv_sha256") != sha256_file(prepared / "splits" / f"{split}.csv"):
             raise TasteResearchPolicyError(f"graph-cache {split} source hash changed")
-        count = int(identity.get("graph_count", -1))
+        count = _native_int(identity.get("graph_count"), field=f"cache:{split}.graph_count")
         if count != split_rows[split]:
             raise TasteResearchPolicyError(f"graph-cache {split} row count changed")
         graph_cache_rows += count
         cache_files.add(filename)
     if _inventory_files(cache, excluded=set()) != cache_files:
         raise TasteResearchPolicyError("graph-cache physical inventory changed")
-    if graph_cache_rows != prepared_rows or cache_manifest.get("total_graph_count") != prepared_rows:
+    if (
+        type(cache_manifest.get("total_graph_count")) is not int
+        or graph_cache_rows != prepared_rows
+        or cache_manifest.get("total_graph_count") != prepared_rows
+    ):
         raise TasteResearchPolicyError("graph-cache total row count changed")
     return TasteLocalDataAuthority(
         prepared_root=prepared,
@@ -616,6 +716,7 @@ def validate_tastemolnet_policy_receipt(
     policy: TasteResearchPolicy,
     authority: TasteLocalDataAuthority,
     require_active: bool,
+    require_policy_version: int | None = None,
 ) -> TastePolicyReceipt:
     """Reopen a fresh policy-audit receipt and all of its typed authority."""
 
@@ -644,23 +745,28 @@ def validate_tastemolnet_policy_receipt(
     }
     _exact_keys(payload, expected_keys, field="policy_receipt")
     expected_marker = (
-        ACTIVE_AUDIT_MARKER
+        POLICY_V2_AUDIT_MARKER
+        if policy.active and policy.version == 2
+        else ACTIVE_AUDIT_MARKER
         if policy.active
         else PENDING_AUDIT_MARKER
     )
     expected_run = 1 if policy.active else 0
+    expected_receipt_schema = (
+        "tastemolnet_research_reporting_policy_receipt_v2"
+        if policy.version == 2
+        else "tastemolnet_research_reporting_policy_receipt_v1"
+    )
     if (
-        payload.get("schema_version") != "tastemolnet_research_reporting_policy_receipt_v1"
+        payload.get("schema_version") != expected_receipt_schema
         or not isinstance(payload.get("created_at"), str)
         or not payload.get("created_at")
         or payload.get("dataset") != "tastemolnet"
         or payload.get("status") != policy.status
         or payload.get("authorization_state") != policy.authorization_state
         or payload.get("authorization_status") != policy.authorization_status
-        or payload.get("policy") != policy.evidence()
-        or payload.get("private_data_authority") != authority.evidence()
+        or type(payload.get("run_tastemolnet")) is not int
         or payload.get("run_tastemolnet") != expected_run
-        or isinstance(payload.get("run_tastemolnet"), bool)
         or payload.get("heavy_route_authorized") is not policy.active
         or payload.get("paper_reporting_authorized") is not policy.active
         or payload.get("dataset_redistribution_authorized") is not False
@@ -674,6 +780,12 @@ def validate_tastemolnet_policy_receipt(
         != (NO_REDISTRIBUTION_MARKER if policy.active else None)
     ):
         raise TasteResearchPolicyError("typed Taste policy receipt changed")
+    _exact_native_equal(payload.get("policy"), policy.evidence(), field="policy_receipt.policy")
+    _exact_native_equal(
+        payload.get("private_data_authority"),
+        authority.evidence(),
+        field="policy_receipt.private_data_authority",
+    )
     marker_path = source.parent / expected_marker
     marker_source, marker_data = _read_physical(marker_path)
     if marker_data != (expected_marker + "\n").encode("utf-8"):
@@ -694,6 +806,10 @@ def validate_tastemolnet_policy_receipt(
         raise TasteResearchPolicyError("Taste policy audit output inventory changed")
     if require_active:
         policy.require_active()
+    if require_policy_version is not None and policy.version != require_policy_version:
+        raise TasteResearchPolicyError(
+            f"Taste policy version {require_policy_version} is required"
+        )
     return TastePolicyReceipt(path=source, sha256=sha256_file(source), payload=payload)
 
 
@@ -730,7 +846,9 @@ __all__ = [
     "PENDING_STATE",
     "PENDING_AUDIT_MARKER",
     "PENDING_STATUS",
+    "POLICY_V2_AUDIT_MARKER",
     "POLICY_SCHEMA",
+    "POLICY_V1_SCHEMA",
     "NO_REDISTRIBUTION_MARKER",
     "SOURCE_CSV_SHA256",
     "UPSTREAM_COMMIT",

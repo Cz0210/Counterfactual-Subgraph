@@ -11,7 +11,7 @@ paths:
 run:
   notes: tastemolnet_gine_three_class_scoped_research_active_no_redistribution
 autodl:
-  schema_version: tastemolnet_gine_research_autodl_v1
+  schema_version: tastemolnet_gine_research_autodl_v2
   dataset: tastemolnet
   oracle_backend: gnn
   classifier_type: gnn
@@ -24,14 +24,15 @@ autodl:
   split_root_env: TASTEMOLNET_SPLIT_ROOT
   graph_cache_root_env: TASTEMOLNET_GRAPH_CACHE_ROOT
   policy_path: configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml
-  policy_file_sha256: 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983
+  policy_file_sha256: b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b
   prepared_output_manifest_sha256: 36aaf17bf45e0a092a96a0379fab31d9e6bfcd719b87cb4ffa4e57a6642bb645
   split_manifest_sha256: 841f3b911e5d353c1e00f010bafcc8a6f7b3433082dba8a8979fab1b558251af
   policy_receipt_env: TASTEMOLNET_POLICY_RECEIPT
-  physical_gpu_index: 2
+  physical_gpu_index: 1
   gpu_lock_mode: exclusive
   max_gpus: 4
   gpu_hard_limit: 4
+  min_free_after_reservations_gb: 100
   dedicated_persistent_controller_required: true
   durable_exec_startup_barrier_required: true
   same_state_root_process_loss_retries: 1

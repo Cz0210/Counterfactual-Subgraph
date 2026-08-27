@@ -22,13 +22,16 @@ from src.utils.tastemolnet_research_policy import (
 )
 
 
-FRAGMENT_SCHEMA = "tastemolnet_gine_research_controller_fragment_v1"
-TASK_SCHEMA = "tastemolnet_gine_full_research_task_v1"
-TASK_ID = "tastemolnet_gine_full_research_v1"
+FRAGMENT_SCHEMA = "tastemolnet_gine_research_controller_fragment_v2"
+TASK_SCHEMA = "tastemolnet_gine_full_research_task_v2"
+TASK_ID = "tastemolnet_gine_full_research_v2"
 STAGE = "TASTEMOLNET_GINE_FULL_RESEARCH_V1"
 PENDING_REASON = "TASTEMOLNET_POLICY_PENDING_ROOT_ACTIVATION"
 REQUIRED_OUTPUT_FILES = (
     "model.pt",
+    "last.pt",
+    "last_checkpoint.json",
+    "checkpoint_reload.json",
     "model_card.json",
     "feature_schema.json",
     "training_metrics.json",
@@ -90,6 +93,7 @@ def build_tastemolnet_gine_research_fragment(
     authority_evidence = None
     receipt_evidence = None
     if policy.active:
+        policy.require_main_route()
         assert prepared is not None and cache is not None and receipt_path is not None
         for private_root in (prepared, cache):
             if (
@@ -108,6 +112,7 @@ def build_tastemolnet_gine_research_fragment(
             policy=policy,
             authority=authority,
             require_active=True,
+            require_policy_version=2,
         )
         authority_evidence = authority.evidence()
         receipt_evidence = {
@@ -130,7 +135,7 @@ def build_tastemolnet_gine_research_fragment(
     cid_suffix = hashlib.sha256(
         f"{expected}\0{policy.file_sha256}".encode("utf-8")
     ).hexdigest()[:8]
-    controller_cid = f"tastemolnet_gine_v1_20260825T000000Z_{cid_suffix}"
+    controller_cid = f"tastemolnet_gine_v2_20260827T000000Z_{cid_suffix}"
     controller_root = str(
         output_root.parent / f".{output_root.name}.controller-{controller_cid}"
     )
@@ -142,14 +147,14 @@ def build_tastemolnet_gine_research_fragment(
         "enabled": policy.active,
         "blocked_reason": None if policy.active else PENDING_REASON,
         "resource": "gpu",
-        "physical_gpu_index": 2,
+        "physical_gpu_index": 1,
         "gpu_lock_mode": "exclusive",
         "gpu_memory_reservation_mb": 0,
         "gpu_shared_workload_class": None,
         "run_tastemolnet": 1 if policy.active else 0,
         "environment": {
             "RUN_TASTEMOLNET": "1" if policy.active else "0",
-            "TASTEMOLNET_GPU_INDEX": "2",
+            "TASTEMOLNET_GPU_INDEX": "1",
             "TASTEMOLNET_POLICY_FILE": str(policy.path),
             "TASTEMOLNET_POLICY_SHA256": policy.file_sha256,
             "TASTEMOLNET_POLICY_RECEIPT": (
@@ -234,7 +239,7 @@ def build_tastemolnet_gine_research_fragment(
         "controller_contract": {
             "dedicated_tastemolnet_controller_required": True,
             "generic_four_gpu_controller_eligible": False,
-            "exact_physical_gpu_index": 2,
+            "exact_physical_gpu_index": 1,
             "exclusive_gpu_lock_required": True,
             "fresh_controller_root_required": True,
             "persistent_process_loss_supervision": True,
@@ -263,10 +268,14 @@ def validate_tastemolnet_gine_research_fragment(
         task.get("schema_version") != TASK_SCHEMA
         or task.get("id") != TASK_ID
         or task.get("stage") != STAGE
-        or task.get("physical_gpu_index") != 2
+        or type(task.get("physical_gpu_index")) is not int
+        or task.get("physical_gpu_index") != 1
         or task.get("gpu_lock_mode") != "exclusive"
+        or type(task.get("gpu_memory_reservation_mb")) is not int
         or task.get("gpu_memory_reservation_mb") != 0
+        or type(task.get("classifier_contract", {}).get("num_classes")) is not int
         or task.get("classifier_contract", {}).get("num_classes") != 3
+        or type(task.get("classifier_contract", {}).get("source_label")) is not int
         or task.get("classifier_contract", {}).get("source_label") != 1
         or task.get("classifier_contract", {}).get("rf_oracle_used") is not False
         or task.get("test_loaded") is not False
@@ -282,6 +291,7 @@ def validate_tastemolnet_gine_research_fragment(
     if active:
         if (
             task.get("enabled") is not True
+            or type(task.get("run_tastemolnet")) is not int
             or task.get("run_tastemolnet") != 1
             or task.get("command") != task.get("command_template")
             or not isinstance(task.get("policy_receipt"), dict)
@@ -303,6 +313,7 @@ def validate_tastemolnet_gine_research_fragment(
     else:
         if (
             task.get("enabled") is not False
+            or type(task.get("run_tastemolnet")) is not int
             or task.get("run_tastemolnet") != 0
             or task.get("command") is not None
             or task.get("blocked_reason") != PENDING_REASON

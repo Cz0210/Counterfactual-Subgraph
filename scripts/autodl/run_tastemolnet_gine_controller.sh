@@ -7,10 +7,18 @@ source "$SCRIPT_DIR/common.sh"
 export AUTODL_MAX_GPUS=4
 [[ "$PRIMARY_GNN_BACKBONE" == "gine" ]] || { echo "Taste controller freezes PRIMARY_GNN_BACKBONE=gine" >&2; exit 64; }
 [[ "$PRIMARY_SEED" == "7" ]] || { echo "Taste controller freezes PRIMARY_SEED=7" >&2; exit 64; }
-MIN_PERSISTENT_FREE_GB="${MIN_PERSISTENT_FREE_GB:-20}"
-[[ "$MIN_PERSISTENT_FREE_GB" =~ ^[0-9]+$ ]] && (( MIN_PERSISTENT_FREE_GB >= 20 )) \
-  || { echo "Taste controller requires MIN_PERSISTENT_FREE_GB>=20" >&2; exit 64; }
+MIN_PERSISTENT_FREE_GB="${MIN_PERSISTENT_FREE_GB:-100}"
+MIN_FREE_AFTER_RESERVATIONS_GB="${MIN_FREE_AFTER_RESERVATIONS_GB:-100}"
+[[ "$MIN_PERSISTENT_FREE_GB" =~ ^[0-9]+$ ]] && (( MIN_PERSISTENT_FREE_GB >= 100 )) \
+  || { echo "Taste controller requires MIN_PERSISTENT_FREE_GB>=100" >&2; exit 64; }
+[[ "$MIN_FREE_AFTER_RESERVATIONS_GB" =~ ^[0-9]+$ ]] && (( MIN_FREE_AFTER_RESERVATIONS_GB >= 100 )) \
+  || { echo "Taste controller requires MIN_FREE_AFTER_RESERVATIONS_GB>=100" >&2; exit 64; }
 export MIN_PERSISTENT_FREE_GB
+export MIN_FREE_AFTER_RESERVATIONS_GB
+TASTEMOLNET_STORAGE_RESERVATION_GB="${TASTEMOLNET_STORAGE_RESERVATION_GB:-20}"
+[[ "$TASTEMOLNET_STORAGE_RESERVATION_GB" == "20" ]] \
+  || { echo "Taste controller freezes a 20 GiB planning reservation" >&2; exit 64; }
+export TASTEMOLNET_STORAGE_RESERVATION_GB
 [[ "${CUBLAS_WORKSPACE_CONFIG:-:4096:8}" == ":4096:8" ]] \
   || { echo "Taste controller freezes CUBLAS_WORKSPACE_CONFIG=:4096:8" >&2; exit 64; }
 [[ "${PYTHONHASHSEED:-7}" == "7" ]] \
@@ -25,6 +33,7 @@ export NVIDIA_TF32_OVERRIDE=0
 export CUDNN_DETERMINISTIC=1
 
 [[ "$RUN_TASTEMOLNET" == "1" ]] || { echo "RUN_TASTEMOLNET must be 1" >&2; exit 64; }
+[[ "${TASTEMOLNET_GPU_INDEX:-}" == "1" ]] || { echo "Taste controller freezes physical GPU1" >&2; exit 64; }
 [[ "${TASTE_UPSTREAM_LICENSE_STATUS:-}" == "NOT_EXPLICITLY_STATED" ]] || { echo "Taste upstream status must remain NOT_EXPLICITLY_STATED" >&2; exit 64; }
 : "${TASTEMOLNET_GINE_CONTROLLER_CID:?TASTEMOLNET_GINE_CONTROLLER_CID is required}"
 : "${TASTEMOLNET_GINE_CONTROLLER_ROOT:?TASTEMOLNET_GINE_CONTROLLER_ROOT is required}"

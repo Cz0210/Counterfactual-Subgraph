@@ -88,7 +88,9 @@ The held-out test is not loaded during training; the full GINE fragment exposes
 only its path and SHA until the frozen-oracle evaluation gate.
 
 The AutoDL route is dedicated, CPU-controller/GPU-worker scoped,
-exclusive to physical GPU 2, and requires fresh controller and science roots.
+exclusive to physical GPU 1 for the formal GINE, and requires fresh controller
+and science roots. Physical GPU 2 is a separate classifier-independent READY
+lane and is not silently used by the classifier.
 HPC is forbidden for this campaign. Paired Slurm files exist only to satisfy
 repository CLI parity and intentionally exit before running the command.
 
@@ -101,7 +103,7 @@ state file is fsynced, and only the current and previous epochs are retained;
 each safe deletion is recorded in `checkpoint_cleanup.json`.  A resumed worker
 must match the complete canonical configuration, every config-file SHA,
 dotlist/CLI overrides, clean Git commit/tree/source hashes, Python/Torch/CUDA
-runtime, physical GPU-2 UUID, and original input/policy contract exactly.  The
+runtime, physical GPU-1 UUID, and original input/policy contract exactly.  The
 output parent is held by an inode-bound directory descriptor, lock, sentinel,
 and contract claim for the full training/finalization lifetime.  The classifier
 bundle uses the single deterministic sibling
@@ -118,7 +120,7 @@ Python, all three config SHAs, exact argv, frozen scientific environment,
 policy receipt, private prepared/cache authority, controller CID, and the
 output/state roots.  A durable exec-startup barrier closes the register/release
 window; controller restart adopts only the recorded live PID generation, and
-at most one genuine process-loss retry may reuse the same state root.  GPU-2
+at most one genuine process-loss retry may reuse the same state root.  GPU-1
 waiting stays inside the same worker generation with a fixed deadline and
 bounded controller event/worker logs.  Terminal publication holds and
 revalidates the state root, named writer lock, output parent, finalization
@@ -175,7 +177,7 @@ and cache roots and writes only to a fresh audit root:
 PYTHONPATH=$PWD python scripts/audit_tastemolnet_research_policy.py \
   --config configs/hpc.yaml \
   --policy configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml \
-  --expected-policy-sha256 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983 \
+  --expected-policy-sha256 b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b \
   --prepared-root /absolute/existing/prepared-root \
   --graph-cache-root /absolute/existing/graph-cache-root \
   --output-dir /absolute/fresh/policy-audit-root \
@@ -183,7 +185,7 @@ PYTHONPATH=$PWD python scripts/audit_tastemolnet_research_policy.py \
 ```
 
 With the checked-in policy this emits
-`TASTE_RESEARCH_AND_PAPER_REPORTING_AUTHORIZED` and
+`TASTE_RESEARCH_POLICY_V2_PASS` and
 `TASTE_NO_DATA_REDISTRIBUTION_GUARD_PASS`. Neither marker is a licence PASS.
 
 The runnable GINE fragment requires the existing private authority and its
@@ -193,7 +195,7 @@ fresh policy receipt:
 PYTHONPATH=$PWD python scripts/autodl/build_tastemolnet_gine_research_tasks.py \
   --config configs/hpc.yaml \
   --policy configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml \
-  --expected-policy-sha256 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983 \
+  --expected-policy-sha256 b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b \
   --prepared-root /absolute/existing/prepared-root \
   --graph-cache-root /absolute/existing/graph-cache-root \
   --policy-receipt /absolute/fresh/policy-audit-root/tastemolnet_policy_receipt.json \
@@ -203,7 +205,7 @@ PYTHONPATH=$PWD python scripts/autodl/build_tastemolnet_gine_research_tasks.py \
 ```
 
 The resulting task has `enabled=true`, `run_tastemolnet=1`, a validated policy
-receipt, exact existing prepared/cache roots, physical-GPU-2 exclusivity, and
+receipt, exact existing prepared/cache roots, physical-GPU-1 exclusivity, and
 a fresh science root.  It launches the dedicated controller wrapper rather
 than the scientific worker directly:
 
@@ -223,3 +225,12 @@ paired `scripts/slurm/run_tastemolnet_gine_controller.sh` is deliberately a
 static HPC refusal and never starts Taste science. The legacy binary
 licence audit remains historical and can emit only
 `BLOCKED_LICENSE_REVIEW`; it cannot authorize this scoped route.
+
+The fresh main-table launcher is
+`scripts/autodl/launch_tastemolnet_main_v1.sh`. It creates the policy adoption
+receipt under `control/tastemolnet-main-v1`, records the old block as
+`SUPERSEDED_POLICY_V1`, initializes the T0--T16 evidence skeleton, and starts
+the persistent GINE controller through `nohup`. It freezes
+`RUN_GNN_ABLATION=0`, `MAX_CONCURRENT_TASTE_FULL=2`, a 20-GiB planning
+reservation, and `MIN_FREE_AFTER_RESERVATIONS_GB=100`. It does not modify the
+historical controller or the main-result matrix.

@@ -43,6 +43,9 @@ TASTE_REQUIRED_CHECKPOINT_FILES = (
     "data_use_policy_binding.json",
     "graph_cache_usage.json",
     "oracle_manifest.json",
+    "last.pt",
+    "last_checkpoint.json",
+    "checkpoint_reload.json",
 )
 
 
@@ -199,6 +202,12 @@ def verify_checkpoint_bundle(
         oracle_manifest = json.loads(
             (root / "oracle_manifest.json").read_text(encoding="utf-8")
         )
+        last_checkpoint = json.loads(
+            (root / "last_checkpoint.json").read_text(encoding="utf-8")
+        )
+        checkpoint_reload = json.loads(
+            (root / "checkpoint_reload.json").read_text(encoding="utf-8")
+        )
         if (
             binding.get("schema_version") != "tastemolnet_training_policy_binding_v1"
             or binding.get("dataset") != "tastemolnet"
@@ -261,8 +270,41 @@ def verify_checkpoint_bundle(
             or oracle_manifest.get("health_gate", {}).get("status") != "PASS"
         ):
             raise ValueError("TasteMolNet three-class GINE oracle manifest changed.")
+        if (
+            last_checkpoint.get("schema_version")
+            != "tastemolnet_last_training_checkpoint_v1"
+            or last_checkpoint.get("checkpoint_file") != "last.pt"
+            or last_checkpoint.get("same_bytes_as_latest_epoch_checkpoint") is not True
+            or type(last_checkpoint.get("completed_epoch")) is not int
+            or last_checkpoint.get("completed_epoch") < 1
+            or last_checkpoint.get("checkpoint_sha256") != sha256_file(root / "last.pt")
+            or last_checkpoint.get("source_checkpoint_sha256")
+            != last_checkpoint.get("checkpoint_sha256")
+        ):
+            raise ValueError("TasteMolNet latest-epoch checkpoint closure changed.")
+        if (
+            checkpoint_reload.get("schema_version")
+            != "tastemolnet_gine_checkpoint_reload_v1"
+            or checkpoint_reload.get("status") != "PASS"
+            or checkpoint_reload.get("checkpoint_reload_pass") is not True
+            or checkpoint_reload.get("batch_single_probability_equivalence") is not True
+            or checkpoint_reload.get("all_probabilities_finite") is not True
+            or checkpoint_reload.get("num_classes") != 3
+            or checkpoint_reload.get("source_label") != 1
+            or checkpoint_reload.get("checkpoint_id") != sha256_file(root / "model.pt")
+            or checkpoint_reload.get("last_checkpoint") != last_checkpoint
+        ):
+            raise ValueError("TasteMolNet checkpoint reload evidence changed.")
         serialized_taste = json.dumps(
-            [binding, cache_usage, oracle_manifest, model_card], sort_keys=True
+            [
+                binding,
+                cache_usage,
+                oracle_manifest,
+                last_checkpoint,
+                checkpoint_reload,
+                model_card,
+            ],
+            sort_keys=True,
         )
         if "TASTE_LICENSE_PASS" in serialized_taste or "LICENSE_PASS" in serialized_taste:
             raise ValueError("TasteMolNet bundle may not claim an upstream license PASS.")
@@ -423,9 +465,14 @@ def load_gnn_checkpoint_bundle(
     *,
     device: str | Any = "cpu",
     verify_hashes: bool = True,
+    require_taste_closure: bool = True,
 ) -> tuple[MolecularGNN, dict[str, Any]]:
     root = Path(checkpoint_dir).expanduser().resolve()
-    audit = verify_checkpoint_bundle(root, verify_hashes=verify_hashes)
+    audit = verify_checkpoint_bundle(
+        root,
+        verify_hashes=verify_hashes,
+        require_taste_closure=require_taste_closure,
+    )
     feature_schema_payload = json.loads(
         (root / "feature_schema.json").read_text(encoding="utf-8")
     )
@@ -511,9 +558,13 @@ class GNNOracle(BaseOracle):
         device: str | Any = "cpu",
         batch_size: int = 256,
         verify_hashes: bool = True,
+        require_taste_closure: bool = True,
     ) -> "GNNOracle":
         model, metadata = load_gnn_checkpoint_bundle(
-            checkpoint_dir, device=device, verify_hashes=verify_hashes
+            checkpoint_dir,
+            device=device,
+            verify_hashes=verify_hashes,
+            require_taste_closure=require_taste_closure,
         )
         card = metadata["model_card"]
         temperature = float(metadata["temperature_scaling"].get("temperature", 1.0))

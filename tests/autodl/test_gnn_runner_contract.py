@@ -161,6 +161,8 @@ def test_every_python_entrypoint_has_paired_slurm_status_wrapper() -> None:
         "run_four_gpu_recovery_controller",
         "status_four_gpu_recovery",
         "run_tastemolnet_gine_controller",
+        "run_tastemolnet_main_v1",
+        "status_tastemolnet_main_v1",
     ):
         wrapper = PROJECT_ROOT / "scripts" / "slurm" / f"{name}.sh"
         assert wrapper.is_file(), name
@@ -168,6 +170,23 @@ def test_every_python_entrypoint_has_paired_slurm_status_wrapper() -> None:
         assert "#SBATCH --partition=A800" in text
         assert "#SBATCH --gres=gpu:a800:1" in text
         assert "--config configs/hpc.yaml" in text
+
+
+def test_tastemolnet_main_clis_bind_the_loaded_project_root_and_hpc_config() -> None:
+    runner = (AUTODL / "run_tastemolnet_main_v1.py").read_text(encoding="utf-8")
+    status = (AUTODL / "status_tastemolnet_main_v1.py").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "args.project_root.resolve(strict=True) != PROJECT_ROOT.resolve(strict=True)"
+        in runner
+    )
+    assert 'args.project_root / "configs/hpc.yaml"' in runner
+    assert (
+        "Taste main project root must equal the loaded immutable CLI root" in runner
+    )
+    assert "PROJECT_ROOT / \"configs/hpc.yaml\"" in status
+    assert "Taste status freezes configs/hpc.yaml" in status
 
 
 def test_autodl_shells_pin_one_explicit_python_interpreter() -> None:

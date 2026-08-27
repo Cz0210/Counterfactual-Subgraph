@@ -1682,7 +1682,8 @@ Mutagenicity roadmaps.
 - [x] Add a manifest-closed public-artifact audit that rejects raw/cleaned or
   reconstructable dataset content, molecule-level records, per-example
   predictions, hidden archives, and protected hashes.
-- [x] Freeze a dedicated GPU-2-exclusive, fresh-root, true three-class GINE
+- [x] Supersede that v1 execution placement with a policy-v2,
+  GPU-1-exclusive, fresh-root, true three-class GINE
   task fragment with Sweet=1 strict untargeted flips, no RF, no test loading,
   and no HPC eligibility.
 - [x] Activate only private research computation and aggregate paper reporting:
@@ -1696,13 +1697,13 @@ Mutagenicity roadmaps.
   terminal reopen, and staged immutable-output publication.
 - [x] Bind resume to the complete canonical config and config-file/override
   hashes, clean commit/tree/source identity, Python/Torch/CUDA runtime, and
-  physical GPU-2 UUID; prove uninterrupted and crash/resume RNG/model parity.
+  physical GPU-1 UUID; prove uninterrupted and crash/resume RNG/model parity.
 - [x] Hold a physical output-parent dirfd/lock/sentinel/claim for the long
   route, reject output/state overlap with prepared/cache roots before loading,
   and publish the deterministic contract staging root with atomic no-replace.
 - [x] Add the dedicated persistent Taste controller, durable startup barrier,
   same-generation orphan adoption, one process-loss-only same-state retry,
-  bounded GPU-2 waiting/logs, terminal babysit, and typed terminal status.
+  bounded GPU-1 waiting/logs, terminal babysit, and typed terminal status.
 - [x] Keep terminal source/state/output/finalization authorities held through
   stable full inventories and publish controller `PASS` last; reject same-byte
   staging, state-root, named-lock, and output-parent replacement.
@@ -1718,7 +1719,8 @@ Mutagenicity roadmaps.
   and retain exact PID/start/cwd/argv/cmd/exe/ancestry ownership across
   `exp_run` parent loss without concurrent retry.
 - [x] Fail closed on deterministic CUDA/PyG parity drift and freeze the exact
-  GINE/seed-7/minimum-20-GiB route plus NumPy/RDKit/PyG/cuDNN/driver/runtime
+  GINE/seed-7/20-GiB-reservation/100-GiB-post-reservation route plus
+  NumPy/RDKit/PyG/cuDNN/driver/runtime
   manifest closure.
 - [x] Hold and verify manifest-bound train/validation cache path/SHA/inode
   before and after deserialization, carry it across resume/terminal, and keep
@@ -1734,9 +1736,12 @@ Mutagenicity roadmaps.
   argv-phase validation; boundedly retry transient teardown/exec snapshots but
   fail closed when an exact live generation retains empty or malformed argv.
 - [ ] Complete independent review, immutable AutoDL deployment, and the first
-  durable three-class GINE checkpoint on physical GPU 2.
+  durable three-class GINE checkpoint on physical GPU 1.
 - [ ] Deploy only from an immutable execution worktree and only to fresh AutoDL
   controller/science roots; do not modify existing experiments.
+- [x] Add a fresh policy-v2 main-controller namespace, typed old-block adoption,
+  T0--T16 evidence skeleton, main-controller owner lock, event logs, GPU-2
+  classifier-independent READY lane, and an explicit no-ablation contract.
 
 ## 2026-08-25: c766 failed-selection recovery authority
 

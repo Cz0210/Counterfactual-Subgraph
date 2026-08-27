@@ -62,10 +62,14 @@ def _pending_policy(tmp_path: Path) -> Path:
 
 def test_checked_policy_is_active_scoped_without_license_conclusion() -> None:
     policy = load_tastemolnet_research_policy(POLICY)
+    assert policy.version == 2
+    assert policy.payload["schema_version"] == (
+        "tastemolnet_research_reporting_policy_v2"
+    )
     assert policy.authorization_state == ACTIVE_STATE
     assert policy.active is True
     assert policy.payload["execution"]["run_tastemolnet"] == 1
-    assert policy.payload["execution"]["gpu_index"] == 2
+    assert policy.payload["execution"]["gpu_index"] == 1
     assert policy.payload["execution"]["gpu_lock_mode"] == "exclusive"
     assert policy.payload["execution"]["hpc_execution_allowed"] is False
     assert policy.payload["execution"]["classifier"] == {
@@ -87,6 +91,7 @@ def test_checked_policy_is_active_scoped_without_license_conclusion() -> None:
     assert policy.payload["permissions"]["dataset_redistribution"] == "FORBIDDEN"
     assert policy.payload["research_compute_allowed"] is True
     assert policy.payload["paper_result_reporting_allowed"] is True
+    assert policy.payload["data_redistribution_allowed"] is False
     assert policy.payload["upstream_license_claimed_resolved"] is False
     assert policy.payload["raw_data_redistribution_allowed"] is False
     assert policy.payload["cleaned_dataset_redistribution_allowed"] is False
@@ -121,15 +126,52 @@ def test_exact_active_shape_is_scoped_and_never_a_license_conclusion(tmp_path: P
     assert "passed" not in evidence
 
 
+@pytest.mark.parametrize("value", [True, 1.0, "1", None])
+def test_run_tastemolnet_requires_a_native_json_integer(
+    tmp_path: Path, value: object
+) -> None:
+    payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+    payload["execution"]["run_tastemolnet"] = value
+    path = tmp_path / "typed-run-policy.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    with pytest.raises(TasteResearchPolicyError, match="execution boundary"):
+        load_tastemolnet_research_policy(path)
+
+
 @pytest.mark.parametrize(
     ("section", "key", "value", "message"),
     [
-        ("permissions", "dataset_redistribution", "ALLOWED", "permission matrix"),
-        ("execution.classifier", "rf_oracle_used", True, "three-class GINE"),
-        ("execution.classifier", "num_classes", 2, "three-class GINE"),
-        ("execution", "gpu_index", 1, "execution boundary"),
-        ("execution.split_access", "test_loaded", True, "split-access"),
-        ("dataset_identity", "upstream_terms_status", "MIT", "dataset/source"),
+        (
+            "permissions",
+            "dataset_redistribution",
+            "ALLOWED",
+            "permissions.dataset_redistribution changed value",
+        ),
+        (
+            "execution.classifier",
+            "rf_oracle_used",
+            True,
+            "execution.classifier.rf_oracle_used changed value",
+        ),
+        (
+            "execution.classifier",
+            "num_classes",
+            2,
+            "execution.classifier.num_classes changed value",
+        ),
+        ("execution", "gpu_index", 2, "execution boundary"),
+        (
+            "execution.split_access",
+            "test_loaded",
+            True,
+            "execution.split_access.test_loaded changed value",
+        ),
+        (
+            "dataset_identity",
+            "upstream_terms_status",
+            "MIT",
+            "dataset_identity.upstream_terms_status changed value",
+        ),
     ],
 )
 def test_policy_weakening_fails_closed(
@@ -152,3 +194,28 @@ def test_raw_file_hash_binding_detects_policy_drift(tmp_path: Path) -> None:
     copied.write_bytes(POLICY.read_bytes() + b"\n")
     with pytest.raises(TasteResearchPolicyError, match="file SHA-256 changed"):
         load_tastemolnet_research_policy(copied, expected_file_sha256=expected)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("dataset_identity", "prepared_rows", 13421.0),
+        ("data_handling", "reuse_existing_prepared_data_only", 1),
+        ("execution.classifier", "num_classes", 3.0),
+        ("execution.classifier", "rf_oracle_used", 0),
+        ("execution.split_access", "test_metadata_hash_only", 1),
+    ],
+)
+def test_nested_policy_authority_rejects_python_bool_int_numeric_coercions(
+    tmp_path: Path, section: str, key: str, value: object
+) -> None:
+    payload = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+    target = payload
+    for part in section.split("."):
+        target = target[part]
+    target[key] = value
+    path = tmp_path / "nested-type-tamper.yaml"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(TasteResearchPolicyError, match="native JSON type"):
+        load_tastemolnet_research_policy(path)

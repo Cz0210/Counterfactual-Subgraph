@@ -159,13 +159,15 @@ not append to active controller manifests or duplicate the already-running
 ComRecGC M=500 pair. See `docs/AUTODL_BACE_EQUIVALENCE_SIDECAR.md`.
 
 The TasteMolNet baseline routes share one explicit three-class GINE and
-an untargeted Sweet-to-non-Sweet strict-flip contract. The historical baseline
-fragment remains terminally blocked, while a separate scoped
-research/reporting-without-redistribution policy and dedicated GINE controller
-fragment are active for private AutoDL research (`RUN_TASTEMOLNET=1`) under the
-project owner's scoped instruction. Execution still requires a checksum-closed
-policy/data/cache receipt, physical GPU 2, and fresh output, training-state,
-and dedicated controller roots.  The controller durably gates worker startup,
+an untargeted Sweet-to-non-Sweet strict-flip contract. The historical
+licence-review block remains immutable evidence but is superseded for private
+research by policy v2; it is not rewritten or called a licence PASS. The fresh
+main controller binds the policy/data/cache receipt, reserves physical GPU 1
+for the formal GINE, exposes a separate classifier-independent GPU-2 READY
+lane, keeps backbone ablation disabled, and never registers the GINE as a main
+method cell. Execution requires fresh output, training-state, and controller
+roots plus a 20-GiB planning reservation that leaves at least 100 GiB free.
+The GINE controller durably gates worker startup,
 adopts the same live PID generation after controller loss, permits only one
 process-loss retry against the same checkpoint root, and revalidates the full
 output/state/policy closure while holding their physical authorities until
@@ -174,6 +176,7 @@ and uses atomic directory no-replace. Upstream licence terms remain exactly
 `NOT_EXPLICITLY_STATED`; project authorization is recorded separately and no
 route may emit `LICENSE_PASS`. See
 `docs/TASTEMOLNET_DATA_USAGE_POLICY.md` and
+`docs/AUTODL_TASTEMOLNET_MAIN_TABLE_V1_HANDOFF.md` and
 `docs/AUTODL_TASTEMOLNET_MULTICLASS_BASELINE_ADAPTERS.md`.
 
 ---

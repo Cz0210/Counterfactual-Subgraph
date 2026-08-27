@@ -19,10 +19,18 @@ source "$SCRIPT_DIR/common.sh"
 : "${TASTEMOLNET_POLICY_FILE:?TASTEMOLNET_POLICY_FILE is required}"
 : "${TASTEMOLNET_POLICY_SHA256:?TASTEMOLNET_POLICY_SHA256 is required}"
 : "${TASTEMOLNET_POLICY_RECEIPT:?TASTEMOLNET_POLICY_RECEIPT is required}"
+: "${TASTEMOLNET_GPU_INDEX:?TASTEMOLNET_GPU_INDEX is required}"
+[[ "$TASTEMOLNET_GPU_INDEX" == "1" ]] || { echo "Taste full route freezes physical GPU1" >&2; exit 64; }
 
-MIN_PERSISTENT_FREE_GB="${MIN_PERSISTENT_FREE_GB:-20}"
-[[ "$MIN_PERSISTENT_FREE_GB" =~ ^[0-9]+$ ]] && (( MIN_PERSISTENT_FREE_GB >= 20 )) \
-  || { echo "Taste full route requires MIN_PERSISTENT_FREE_GB>=20" >&2; exit 64; }
+MIN_PERSISTENT_FREE_GB="${MIN_PERSISTENT_FREE_GB:-100}"
+MIN_FREE_AFTER_RESERVATIONS_GB="${MIN_FREE_AFTER_RESERVATIONS_GB:-100}"
+TASTEMOLNET_STORAGE_RESERVATION_GB="${TASTEMOLNET_STORAGE_RESERVATION_GB:-20}"
+[[ "$MIN_PERSISTENT_FREE_GB" =~ ^[0-9]+$ ]] && (( MIN_PERSISTENT_FREE_GB >= 100 )) \
+  || { echo "Taste full route requires MIN_PERSISTENT_FREE_GB>=100" >&2; exit 64; }
+[[ "$MIN_FREE_AFTER_RESERVATIONS_GB" =~ ^[0-9]+$ ]] && (( MIN_FREE_AFTER_RESERVATIONS_GB >= 100 )) \
+  || { echo "Taste full route requires MIN_FREE_AFTER_RESERVATIONS_GB>=100" >&2; exit 64; }
+[[ "$TASTEMOLNET_STORAGE_RESERVATION_GB" == "20" ]] \
+  || { echo "Taste full route freezes a 20 GiB planning reservation" >&2; exit 64; }
 RESOURCE_WAIT_STARTED="$(date +%s)"
 RESOURCE_WAIT_DEADLINE_SECONDS="${TASTEMOLNET_GPU_WAIT_DEADLINE_SECONDS:-604800}"
 RESOURCE_WAIT_POLL_SECONDS="${TASTEMOLNET_GPU_WAIT_POLL_SECONDS:-30}"
@@ -48,7 +56,7 @@ while true; do
   AVAILABLE_KB="$(df -Pk "$AUTODL_RUNTIME_ROOT" | awk 'NR == 2 {print $4}')"
   DISK_READY=0
   if [[ "$AVAILABLE_KB" =~ ^[0-9]+$ ]] \
-    && (( AVAILABLE_KB >= MIN_PERSISTENT_FREE_GB * 1024 * 1024 )); then
+    && (( AVAILABLE_KB >= (MIN_FREE_AFTER_RESERVATIONS_GB + TASTEMOLNET_STORAGE_RESERVATION_GB) * 1024 * 1024 )); then
     DISK_READY=1
   fi
   GPU_LINE=""
@@ -72,7 +80,7 @@ while true; do
     if [[ $GPU_RC -ne 0 && $GPU_RC -ne 3 ]]; then
       exit "$GPU_RC"
     fi
-    GPU_LINE="$(printf '%s\n' "$GPU_INVENTORY" | awk -F '\t' '$1 == "2" {print; exit}')"
+    GPU_LINE="$(printf '%s\n' "$GPU_INVENTORY" | awk -F '\t' -v expected="$TASTEMOLNET_GPU_INDEX" '$1 == expected {print; exit}')"
     if [[ -n "$GPU_LINE" ]]; then
       GPU_READY=1
     fi
@@ -82,17 +90,17 @@ while true; do
   fi
   RESOURCE_WAIT_NOW="$(date +%s)"
   if (( RESOURCE_WAIT_NOW >= RESOURCE_WAIT_DEADLINE_EPOCH )); then
-    echo "TASTEMOLNET_RESOURCE_WAIT_DEADLINE_EXCEEDED disk_ready=$DISK_READY gpu2_ready=$GPU_READY" >&2
+    echo "TASTEMOLNET_RESOURCE_WAIT_DEADLINE_EXCEEDED disk_ready=$DISK_READY gpu1_ready=$GPU_READY" >&2
     exit 75
   fi
   RESOURCE_WAIT_POLLS=$((RESOURCE_WAIT_POLLS + 1))
   if (( RESOURCE_WAIT_POLLS <= 20 || RESOURCE_WAIT_POLLS % 120 == 0 )); then
-    echo "WAITING_FOR_PHYSICAL_GPU2_AND_DISK elapsed_seconds=$((RESOURCE_WAIT_NOW - RESOURCE_WAIT_STARTED)) deadline_epoch=$RESOURCE_WAIT_DEADLINE_EPOCH disk_ready=$DISK_READY gpu2_ready=$GPU_READY available_kb=$AVAILABLE_KB minimum_gb=$MIN_PERSISTENT_FREE_GB" >&2
+    echo "WAITING_FOR_PHYSICAL_GPU1_AND_DISK elapsed_seconds=$((RESOURCE_WAIT_NOW - RESOURCE_WAIT_STARTED)) deadline_epoch=$RESOURCE_WAIT_DEADLINE_EPOCH disk_ready=$DISK_READY gpu1_ready=$GPU_READY available_kb=$AVAILABLE_KB minimum_gb=$MIN_PERSISTENT_FREE_GB" >&2
   fi
   sleep "$RESOURCE_WAIT_POLL_SECONDS"
 done
 IFS=$'\t' read -r GPU_INDEX GPU_UUID <<< "$GPU_LINE"
-[[ "$GPU_INDEX" == "2" ]] || { echo "Taste route requires physical GPU2" >&2; exit 75; }
+[[ "$GPU_INDEX" == "$TASTEMOLNET_GPU_INDEX" ]] || { echo "Taste route requires physical GPU1" >&2; exit 75; }
 
 OUTPUT_DIR="${TASTEMOLNET_GNN_FULL_OUTPUT:-$(autodl_new_output_dir tastemolnet "$PRIMARY_GNN_BACKBONE" full)}"
 TRAINING_STATE_ROOT="${TASTEMOLNET_GNN_TRAINING_STATE_ROOT:-${OUTPUT_DIR}.training_state}"
@@ -159,6 +167,9 @@ exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   "${PUBLISHED_ADOPTION_EXP_ARGS[@]}" \
   --expected-output "$OUTPUT_DIR" \
   --required-output-file model.pt \
+  --required-output-file last.pt \
+  --required-output-file last_checkpoint.json \
+  --required-output-file checkpoint_reload.json \
   --required-output-file model_card.json \
   --required-output-file feature_schema.json \
   --required-output-file training_metrics.json \

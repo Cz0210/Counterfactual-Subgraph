@@ -10254,3 +10254,50 @@ same observation primitive to the `exp_run` worker and adopted trainer child.
 Local superseding implementation and focused tests pending fresh independent
 review. No new commit, bundle, push, SSH, deployment, process signal, GPU
 allocation, TasteMolNet dataset read, or scientific experiment was performed.
+
+## [2026-08-27] Supersede the stale Taste execution block with policy v2 and a fresh main controller
+
+### Motivation
+
+The historical four-dataset controller correctly recorded the former
+licence-review decision, but no Taste heavy science was started. The project
+owner has since explicitly authorized private research compute and aggregate
+paper reporting while continuing to forbid redistribution of raw, cleaned,
+row-level, or reconstructable Taste data. Rewriting the old controller would
+destroy provenance; continuing to treat it as current would incorrectly block
+authorized science.
+
+### Decision
+
+Keep every historical manifest/state/gate byte outside this route read-only.
+Introduce policy schema v2 and a typed fresh adoption receipt that records
+`SUPERSEDED_POLICY_V1`, `old_science_adopted=false`, and
+`READY_FOR_MAIN_ROUTE`. Policy v1 remains readable as history but cannot
+authorize the main route. Nested policy booleans and counts use exact native
+JSON types, so Python bool/int or int/float equality cannot authorize drift.
+
+Run the formal three-class GINE only on physical GPU 1 from a clean immutable
+execution tree. Freeze a 20-GiB planning reservation and a 100-GiB
+post-reservation floor. Publish `last.pt` plus a typed real checkpoint-reload
+receipt, and emit first-batch progress. Create a separate fresh main-controller
+namespace with an owner lock, immutable controller spec, T0--T16 evidence,
+event logs, a GPU-2 classifier-independent READY lane, protected GPU-0/GPU-3
+lanes, and `RUN_GNN_ABLATION=0`. The classifier is never a matrix method cell.
+
+### Consequences
+
+- The old licence-review record remains true historical evidence but no longer
+  outranks live policy-v2/controller/science evidence.
+- GPU 1 may run the formal GINE without touching the BACE processes on GPU 0
+  or GPU 3; GPU 2 is not silently assigned classifier-dependent work.
+- Dataset redistribution remains forbidden even when compute and aggregate
+  reporting are allowed.
+- Later calibration, oracle smoke, four-method smoke/full, matrix registration,
+  and paper artifacts remain dependent on explicit typed PASS gates; this
+  change does not fabricate them.
+
+### Status
+
+Implementation and focused verification precede immutable AutoDL deployment.
+Runtime PIDs, GPU UUIDs, checkpoints, and PASS markers must be reported only
+after direct live verification.

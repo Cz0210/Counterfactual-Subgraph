@@ -29,7 +29,7 @@ python scripts/train_molecular_gnn.py \
   --device cuda:0 \
   --graph-cache-root /absolute/existing/private/cache \
   --taste-policy-file configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml \
-  --taste-policy-sha256 9a1bc033a0abd300e17bb79eb5f01a98accd790fc086d0f8119f289376e0d983 \
+  --taste-policy-sha256 b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b \
   --taste-policy-receipt /absolute/fresh/policy-audit/tastemolnet_policy_receipt.json \
   --taste-prepared-root /absolute/existing/private/prepared \
   --training-state-dir /absolute/fresh/private/training-state
