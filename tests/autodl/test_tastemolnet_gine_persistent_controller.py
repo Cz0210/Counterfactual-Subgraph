@@ -93,6 +93,7 @@ def _write_synthetic_trainer_authority(
     parent_start: int,
     child_pid: int,
     child_start: int,
+    parent_argv: list[str] | None = None,
 ) -> tuple[Path, dict[str, object], dict[str, object]]:
     control_root = Path(spec.environment_authority["AUTODL_CONTROL_ROOT"])
     run_root = control_root / "experiment_registry/run_state" / run_id
@@ -114,7 +115,14 @@ def _write_synthetic_trainer_authority(
         pid=parent_pid,
         start=parent_start,
         ppid=1,
-        argv=[sys.executable, str(PROJECT_ROOT / "scripts/autodl/exp_run.py")],
+        argv=(
+            list(parent_argv)
+            if parent_argv is not None
+            else [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts/autodl/exp_run.py"),
+            ]
+        ),
     )
     child = _synthetic_process_snapshot(
         pid=child_pid,
@@ -158,6 +166,36 @@ def _spec_with_control_root(
             "environment_authority": {
                 **base.environment_authority,
                 "AUTODL_CONTROL_ROOT": str(tmp_path / "autodl-control"),
+            },
+        }
+    )
+
+
+def _formal_exp_run_spec(
+    tmp_path: Path,
+    worker: Path,
+    *,
+    python_token: str = sys.executable,
+) -> TasteGINEControllerSpec:
+    base = _spec_with_control_root(tmp_path, worker)
+    return TasteGINEControllerSpec(
+        **{
+            **{
+                name: getattr(base, name)
+                for name in base.__dataclass_fields__
+            },
+            "environment_authority": {
+                **base.environment_authority,
+                "AUTODL_PYTHON": python_token,
+                "AUTODL_DATA_ROOT": str(tmp_path / "data"),
+                "PRIMARY_GNN_BACKBONE": "gine",
+                "PRIMARY_SEED": "7",
+                "TASTEMOLNET_SPLIT_ROOT": str(tmp_path / "splits"),
+                "TASTEMOLNET_GRAPH_CACHE_ROOT": str(tmp_path / "cache"),
+                "TASTEMOLNET_POLICY_FILE": str(tmp_path / "policy.yaml"),
+                "TASTEMOLNET_POLICY_SHA256": "a" * 64,
+                "TASTEMOLNET_POLICY_RECEIPT": str(tmp_path / "receipt.json"),
+                "TASTEMOLNET_PREPARED_ROOT": str(tmp_path / "prepared"),
             },
         }
     )
@@ -1278,3 +1316,381 @@ def test_exp_run_exec_phase_requires_the_exact_reviewed_command(tmp_path: Path) 
             spec=spec,
             barrier_record={"launcher_argv": []},
         )
+
+
+def _write_reviewed_trainer_authority(
+    *,
+    spec: TasteGINEControllerSpec,
+    run_id: str,
+    parent_pid: int,
+    parent_start: int,
+    child_pid: int,
+    child_start: int,
+) -> tuple[Path, dict[str, object], dict[str, object]]:
+    parent_argv = controller_module._expected_exp_run_argv(
+        spec,
+        gpu_uuid="GPU-1234abcd",
+        input_manifest=None,
+        resume_training=False,
+    )
+    return _write_synthetic_trainer_authority(
+        spec=spec,
+        run_id=run_id,
+        parent_pid=parent_pid,
+        parent_start=parent_start,
+        child_pid=child_pid,
+        child_start=child_start,
+        parent_argv=list(parent_argv),
+    )
+
+
+def test_exp_run_exec_phase_preserves_both_frozen_symlink_tokens(
+    tmp_path: Path,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    physical_python = Path(sys.executable).resolve(strict=True)
+    python_alias = tmp_path / "reviewed-python"
+    python_alias.symlink_to(physical_python)
+    spec = _formal_exp_run_spec(
+        tmp_path,
+        worker,
+        python_token=str(python_alias),
+    )
+    argv = controller_module._expected_exp_run_argv(
+        spec,
+        gpu_uuid="GPU-1234abcd",
+        input_manifest=None,
+        resume_training=False,
+    )
+    delimiter = argv.index("--")
+    trainer_python_index = delimiter + 1
+    assert argv[0] == str(python_alias)
+    assert argv[trainer_python_index] == str(python_alias)
+
+    snapshot = {
+        "argv": list(argv),
+        "cwd": str(PROJECT_ROOT.resolve(strict=True)),
+        "exe": str(physical_python),
+    }
+    assert controller_module._classify_process_phase(
+        snapshot,
+        spec=spec,
+        barrier_record={"launcher_argv": []},
+    ) == "exp_run_target"
+
+    for index in (0, trainer_python_index):
+        changed = list(argv)
+        changed[index] = str(physical_python)
+        with pytest.raises(
+            controller_module.TasteGINEControllerError,
+            match="not an allowed exec phase",
+        ):
+            controller_module._classify_process_phase(
+                {**snapshot, "argv": changed},
+                spec=spec,
+                barrier_record={"launcher_argv": []},
+            )
+
+
+def test_failed_identity_drift_adopts_terminal_without_launch_after_bound_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+    _, parent, child = _write_reviewed_trainer_authority(
+        spec=spec,
+        run_id="completed-generation",
+        parent_pid=81001,
+        parent_start=101,
+        child_pid=81002,
+        child_start=102,
+    )
+    proc_calls: list[int] = []
+    _install_linux_proc_fixture(
+        monkeypatch,
+        {int(parent["pid"]): None, int(child["pid"]): None},
+        proc_calls,
+    )
+    terminal = {"fixture": "complete-terminal-evidence"}
+    publications: list[tuple[object, int, int]] = []
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("FAILED terminal adoption must not launch a process")
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="WORKER_PROCESS_IDENTITY_DRIFT",
+        )
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        monkeypatch.setattr(controller, "_terminal_evidence", lambda: terminal)
+        monkeypatch.setattr(
+            controller,
+            "_publish_terminal",
+            lambda evidence, *, attempt, launch_index: publications.append(
+                (evidence, attempt, launch_index)
+            ),
+        )
+        assert controller.run() == 0
+
+    assert proc_calls == [int(parent["pid"]), int(child["pid"])]
+    assert publications == [(terminal, 0, 0)]
+
+
+def test_failed_identity_drift_with_absent_terminal_never_launches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+    _, parent, child = _write_reviewed_trainer_authority(
+        spec=spec,
+        run_id="terminal-absent",
+        parent_pid=82001,
+        parent_start=201,
+        child_pid=82002,
+        child_start=202,
+    )
+    proc_calls: list[int] = []
+    _install_linux_proc_fixture(
+        monkeypatch,
+        {int(parent["pid"]): None, int(child["pid"]): None},
+        proc_calls,
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("terminal-absent FAILED state must remain inert")
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="WORKER_PROCESS_IDENTITY_DRIFT",
+        )
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        monkeypatch.setattr(controller, "_terminal_evidence", lambda: None)
+        monkeypatch.setattr(controller, "_publish_terminal", forbidden)
+        assert controller.run() == 2
+
+    assert proc_calls == [int(parent["pid"]), int(child["pid"])]
+
+
+def test_other_failed_reason_never_enters_terminal_adoption_or_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("other FAILED reasons must remain inert")
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="SCIENTIFIC_OR_NORMAL_PROCESS_FAILURE",
+        )
+        monkeypatch.setattr(
+            controller,
+            "_failed_identity_drift_generations_are_quiescent",
+            forbidden,
+        )
+        monkeypatch.setattr(controller, "_terminal_evidence", forbidden)
+        monkeypatch.setattr(controller, "_publish_terminal", forbidden)
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        assert controller.run() == 2
+
+
+@pytest.mark.parametrize("live_role", ("exp-run-parent", "trainer-child"))
+def test_failed_identity_drift_with_any_bound_live_pid_never_adopts_or_launches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_role: str,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+    _, parent, child = _write_reviewed_trainer_authority(
+        spec=spec,
+        run_id="live-generation",
+        parent_pid=83001,
+        parent_start=301,
+        child_pid=83002,
+        child_start=302,
+    )
+    observations: dict[int, tuple[int, str] | None] = {
+        int(parent["pid"]): None,
+        int(child["pid"]): None,
+    }
+    live = parent if live_role == "exp-run-parent" else child
+    observations[int(live["pid"])] = (int(live["linux_start_ticks"]), "S")
+    proc_calls: list[int] = []
+    _install_linux_proc_fixture(monkeypatch, observations, proc_calls)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a live bound PID must block adoption and launch")
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="WORKER_PROCESS_IDENTITY_DRIFT",
+        )
+        monkeypatch.setattr(controller, "_terminal_evidence", forbidden)
+        monkeypatch.setattr(controller, "_publish_terminal", forbidden)
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        assert controller.run() == 2
+
+    assert proc_calls == [int(parent["pid"]), int(child["pid"])]
+
+
+def test_failed_identity_drift_partial_authority_collision_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+    run_root = (
+        Path(spec.environment_authority["AUTODL_CONTROL_ROOT"])
+        / "experiment_registry/run_state/partial-collision"
+    )
+    run_root.mkdir(parents=True)
+    authority_path = run_root / controller_module.TRAINER_CHILD_AUTHORITY_NAME
+    authority_path.write_text(
+        json.dumps(
+            {
+                "controller_cid": spec.cid,
+                "controller_root": str(tmp_path / "different-controller"),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    authority_path.chmod(0o600)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("partial authority collision must remain inert")
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="WORKER_PROCESS_IDENTITY_DRIFT",
+        )
+        monkeypatch.setattr(controller, "_terminal_evidence", forbidden)
+        monkeypatch.setattr(controller, "_publish_terminal", forbidden)
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        assert controller.run() == 2
+
+
+def test_failed_identity_drift_terminal_probe_error_remains_inert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("terminal probe failure must not publish or launch")
+
+    def failed_terminal_probe() -> None:
+        raise controller_module.TasteGINEControllerError(
+            "synthetic terminal evidence failure"
+        )
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="WORKER_PROCESS_IDENTITY_DRIFT",
+        )
+        monkeypatch.setattr(
+            controller,
+            "_failed_identity_drift_generations_are_quiescent",
+            lambda: True,
+        )
+        monkeypatch.setattr(controller, "_terminal_evidence", failed_terminal_probe)
+        monkeypatch.setattr(controller, "_publish_terminal", forbidden)
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        assert controller.run() == 2
+
+
+def test_failed_identity_drift_symlinked_run_directory_remains_inert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _write_worker(tmp_path / "worker.py", "raise SystemExit(0)\n")
+    spec = _formal_exp_run_spec(tmp_path, worker)
+    authority_path, parent, child = _write_reviewed_trainer_authority(
+        spec=spec,
+        run_id="symlinked-generation",
+        parent_pid=84001,
+        parent_start=401,
+        child_pid=84002,
+        child_start=402,
+    )
+    physical_run_root = tmp_path / "physical-symlinked-generation"
+    authority_path.parent.rename(physical_run_root)
+    authority_path.parent.symlink_to(physical_run_root, target_is_directory=True)
+    proc_calls: list[int] = []
+    _install_linux_proc_fixture(
+        monkeypatch,
+        {int(parent["pid"]): None, int(child["pid"]): None},
+        proc_calls,
+    )
+    original_load_json = controller_module._load_json
+    authority_raw_reads: list[Path] = []
+
+    def reject_symlinked_authority_read(
+        path: Path, *, label: str
+    ) -> dict[str, object]:
+        if path == authority_path:
+            authority_raw_reads.append(path)
+            raise AssertionError(
+                "symlinked trainer authority was read before rejection"
+            )
+        return original_load_json(path, label=label)
+
+    monkeypatch.setattr(
+        controller_module, "_load_json", reject_symlinked_authority_read
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("symlinked authority must not probe terminal or launch")
+
+    with TasteGINEPersistentController(spec, resume=False) as controller:
+        controller._write_state(
+            "FAILED",
+            attempt=0,
+            launch_index=0,
+            retries_used=0,
+            reason="WORKER_PROCESS_IDENTITY_DRIFT",
+        )
+        monkeypatch.setattr(controller, "_terminal_evidence", forbidden)
+        monkeypatch.setattr(controller, "_publish_terminal", forbidden)
+        monkeypatch.setattr(controller, "_launch", forbidden)
+        monkeypatch.setattr(controller_module.subprocess, "Popen", forbidden)
+        assert controller.run() == 2
+
+    assert proc_calls == []
+    assert authority_raw_reads == []

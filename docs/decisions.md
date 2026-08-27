@@ -10301,3 +10301,50 @@ lanes, and `RUN_GNN_ABLATION=0`. The classifier is never a matrix method cell.
 Implementation and focused verification precede immutable AutoDL deployment.
 Runtime PIDs, GPU UUIDs, checkpoints, and PASS markers must be reported only
 after direct live verification.
+
+## [2026-08-28] Preserve frozen Python argv and narrowly adopt completed Taste identity drift
+
+### Motivation
+
+The deployed Taste GINE worker used the frozen launcher token
+`.../bin/python` at both Python positions in the nested `exp_run` command,
+while that path physically resolved to `.../bin/python3.10`. The controller
+resolved the expected argv tokens but correctly compared `/proc/exe` to the
+physical executable. This inconsistent normalization rejected an otherwise
+exact reviewed command and left the controller `FAILED` with
+`WORKER_PROCESS_IDENTITY_DRIFT` after the completed trainer exited.
+
+### Decision
+
+Preserve `AUTODL_PYTHON` exactly in both frozen argv positions and continue to
+validate `/proc/exe` separately against its resolved physical executable.
+Neither spelling is interchangeable: a process must retain the reviewed raw
+argv token and the reviewed physical executable identity.
+
+Permit one narrow terminal-only reconciliation when the durable controller
+state is exactly `FAILED/WORKER_PROCESS_IDENTITY_DRIFT`. At least one matching
+trainer-child authority must bind both the controller CID and root. Every
+matching authority must retain the exact reviewed `exp_run` parent and trainer
+startup-launcher snapshots, remain inode/content stable across inspection, and
+prove both PID/start generations exited. Only then may the already complete
+terminal closure be reopened and `_publish_terminal()` called with the frozen
+attempt and launch index. The controller never launches, retries, resumes, or
+signals science in this path. Missing terminal evidence, any live generation,
+missing/malformed/partial-collision authority, or any other FAILED reason
+remains return code 2.
+
+### Consequences
+
+- A reviewed Python symlink no longer creates false argv drift, while a changed
+  raw argv token or changed physical executable still fails closed.
+- A scientifically complete output can receive only its pre-existing terminal
+  publication; this exception cannot become a generic FAILED recovery route.
+- Main-controller namespace, policy-v2 adoption, GPU lanes, matrix registry,
+  output/training roots, and the historical licence block are unchanged.
+
+### Status
+
+Local isolated successor implementation, deterministic hostile tests, and
+static validation only. The production diagnosis was read-only. No remote
+write, process signal, restart, controller/GPU-lock/matrix mutation, deployment,
+or new scientific computation was performed by this decision.

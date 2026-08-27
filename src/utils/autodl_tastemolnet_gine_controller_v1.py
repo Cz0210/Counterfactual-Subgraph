@@ -973,7 +973,12 @@ def _expected_exp_run_argv(
     published_adoption: bool = False,
 ) -> tuple[str, ...]:
     environment = spec.environment_authority
-    python = str(Path(environment["AUTODL_PYTHON"]).resolve(strict=True))
+    # argv preserves the exact frozen launcher token.  /proc/exe is validated
+    # separately against its resolved physical executable in
+    # ``_classify_process_phase``.  Resolving this token here would reject the
+    # reviewed ``.../bin/python -> python3.10`` invocation even though its
+    # executable identity is exact.
+    python = environment["AUTODL_PYTHON"]
     project = str(spec.project_root.resolve(strict=True))
     exp_run = str((spec.project_root / "scripts/autodl/exp_run.py").resolve(strict=True))
     train_script = str(
@@ -1396,6 +1401,12 @@ def _load_trainer_child_authority_structure(
     """
 
     try:
+        assert_no_symlink_components(
+            path, label="trainer child authority path"
+        )
+    except MolecularGNNResumeError as exc:
+        raise TasteGINEControllerError(str(exc)) from exc
+    try:
         text, authority_identity = _load_text_bound(
             path, label="trainer child authority"
         )
@@ -1502,6 +1513,12 @@ def _load_trainer_child_authority_structure(
 def _verify_trainer_child_authority_evidence(
     path: Path, *, identity: Mapping[str, Any], sha256: str
 ) -> None:
+    try:
+        assert_no_symlink_components(
+            path, label="trainer child authority evidence path"
+        )
+    except MolecularGNNResumeError as exc:
+        raise TasteGINEControllerError(str(exc)) from exc
     text, observed_identity = _load_text_bound(
         path, label="trainer child authority evidence"
     )
@@ -3527,6 +3544,77 @@ class TasteGINEPersistentController:
         self._validate_state(state)
         return state
 
+    def _failed_identity_drift_generations_are_quiescent(self) -> bool:
+        """Prove that a reviewed exp_run/trainer pair exited before adoption.
+
+        This is deliberately narrower than generic FAILED recovery.  Every
+        durable trainer authority that collides with this controller must bind
+        both its CID and root, must describe the exact reviewed exp_run and
+        trainer startup argv/executable phases, and both PID/start generations
+        must be conclusively absent.  Any malformed, partial, live, or
+        ambiguous authority keeps the controller FAILED.
+        """
+
+        raw_control_root = self.spec.environment_authority.get(
+            "AUTODL_CONTROL_ROOT"
+        )
+        if not raw_control_root:
+            return False
+        runs_root = _absolute(raw_control_root) / "experiment_registry/run_state"
+        if not runs_root.is_dir():
+            return False
+        try:
+            paths = sorted(runs_root.glob(f"*/{TRAINER_CHILD_AUTHORITY_NAME}"))
+        except OSError:
+            return False
+        matched = 0
+        for path in paths:
+            try:
+                assert_no_symlink_components(
+                    path, label="failed-run trainer child authority path"
+                )
+            except MolecularGNNResumeError as exc:
+                raise TasteGINEControllerError(str(exc)) from exc
+            raw = _load_json(path, label="failed-run trainer child authority")
+            cid_matches = raw.get("controller_cid") == self.spec.cid
+            root_matches = raw.get("controller_root") == str(self.root)
+            if not cid_matches and not root_matches:
+                continue
+            if not cid_matches or not root_matches:
+                raise TasteGINEControllerError(
+                    "trainer authority partially collides with failed controller"
+                )
+            matched += 1
+            if matched > MAX_STARTUP_GENERATIONS:
+                raise TasteGINEControllerError(
+                    "failed controller trainer authority count exceeds generation cap"
+                )
+            authority, identity, digest = _load_trainer_child_authority_structure(
+                path, spec=self.spec
+            )
+            parent = authority["parent_exp_run"]
+            child = authority["child_registered"]
+            barrier = authority["barrier_record"]
+            if (
+                _classify_process_phase(
+                    parent, spec=self.spec, barrier_record=barrier
+                )
+                != "exp_run_target"
+                or _classify_trainer_phase(child, barrier_record=barrier)
+                != "trainer_startup_launcher"
+            ):
+                raise TasteGINEControllerError(
+                    "failed controller generations are not reviewed execution phases"
+                )
+            parent_live = _declared_trainer_child_is_live(parent)
+            child_live = _declared_trainer_child_is_live(child)
+            _verify_trainer_child_authority_evidence(
+                path, identity=identity, sha256=digest
+            )
+            if parent_live or child_live:
+                return False
+        return matched > 0
+
     def run(self) -> int:
         if self._terminal_readonly is not None:
             return 0
@@ -3544,7 +3632,40 @@ class TasteGINEPersistentController:
         phase = str(state.get("phase"))
         attempt = int(state.get("attempt", 0))
         if phase in {"FAILED"}:
-            return 2
+            if state.get("reason") != "WORKER_PROCESS_IDENTITY_DRIFT":
+                return 2
+            try:
+                generations_are_quiescent = (
+                    self._failed_identity_drift_generations_are_quiescent()
+                )
+            except (
+                TasteGINEControllerError,
+                OSError,
+                TypeError,
+                ValueError,
+                KeyError,
+            ):
+                return 2
+            if not generations_are_quiescent:
+                return 2
+            try:
+                evidence = self._terminal_evidence()
+            except (
+                TasteGINEControllerError,
+                OSError,
+                TypeError,
+                ValueError,
+                KeyError,
+            ):
+                return 2
+            if evidence is None:
+                return 2
+            self._publish_terminal(
+                evidence,
+                attempt=attempt,
+                launch_index=int(state.get("launch_index", 0)),
+            )
+            return 0
         if phase == "ARMING":
             launch_index = int(state.get("launch_index", 0))
             lock_path, record_path = self._barrier_paths(launch_index)
