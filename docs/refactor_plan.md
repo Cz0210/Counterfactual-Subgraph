@@ -7,8 +7,10 @@
 - [x] Expose the ordinary registry's single-candidate gate without scientific
   recomputation or writes.
 - [x] Add double stat/hash inventory closure, two-root procfs writer audits,
-  receipt-only atomic publication, strict reopen validation, CLI, and paired
-  Slurm refusal.
+  receipt-only atomic publication, strict reopen validation, PASS-last with
+  owned-inode cleanup, CLI, and paired Slurm refusal.
+- [x] Add a combined matrix-audit size/SHA closure and fsync every sibling
+  directory before publishing terminal `matrix_status.json` last.
 - [x] Add drift, registry rejection, destination, tamper, fixed-identity, and
   public-registry-gate regression tests.
 - [ ] Obtain detached review from a clean commit, deploy one fresh receipt on

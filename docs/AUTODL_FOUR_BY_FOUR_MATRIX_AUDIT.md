@@ -167,6 +167,7 @@ The command writes exactly the registry/audit layer:
 ```text
 matrix_status.csv
 matrix_status.json
+combined_audit.json
 oracle_registry.json
 evaluation_contract.json
 artifact_inventory.csv
@@ -194,6 +195,13 @@ deliberately omits the numeric fields. A test-derived or incompletely
 attributed contract becomes `INVALID_FAIL_CLOSED`. The registry never mines
 Figure 4/test curves for these values.
 
+`combined_audit.json` closes the byte size and SHA-256 of every registry
+artifact other than itself, including the terminal `matrix_status.json`
+payload. It also records the exact status histogram, matrix count, read-only
+source policy, and absence of scientific recomputation or numeric imputation.
+All siblings and their containing directories are fsynced before
+`matrix_status.json` is atomically published last.
+
 Inventory hashing is deliberately bounded by `--max-hash-bytes` (64 MiB per
 file by default). Larger files are listed as `SKIPPED_SIZE_LIMIT`; model and raw
 payload SHA values are read from their frozen manifests rather than repeatedly
@@ -206,7 +214,7 @@ cells is itself a valid audit result.
 ## Controller hand-off contract
 
 This is a finite foreground CPU command; it does not daemonize. A controller
-task can require the seven top-level files and four threshold-contract files
+task can require the eight top-level files and four threshold-contract files
 listed above and use:
 
 ```text

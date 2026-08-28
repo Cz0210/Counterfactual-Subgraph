@@ -61,6 +61,12 @@ The stdout marker and `PASS` bytes are exactly:
 [BACE_OURS_FREEZE_ADOPTION_PASS]
 ```
 
+Publication first atomically installs the two receipt JSON files without a
+terminal marker.  It reopens that final directory and repeats all source,
+writer, and registry checks; only then is `PASS` created and fsynced last.  If
+that post-publish verification fails, the fresh directory may remain for
+diagnosis but it contains no `PASS` and is not reusable.
+
 ## Reopen the receipt
 
 ```bash

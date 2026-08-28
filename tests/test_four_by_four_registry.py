@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.autodl import audit_four_methods_four_datasets as audit_cli
+from src.eval import four_by_four_registry as registry_module
 from src.eval.four_by_four_registry import (
     AuditConfig,
     CellStatus,
@@ -487,6 +488,7 @@ def test_writer_emits_required_outputs_and_refuses_nonempty_root(tmp_path: Path)
     expected = {
         "matrix_status.csv",
         "matrix_status.json",
+        "combined_audit.json",
         "oracle_registry.json",
         "evaluation_contract.json",
         "artifact_inventory.csv",
@@ -503,6 +505,20 @@ def test_writer_emits_required_outputs_and_refuses_nonempty_root(tmp_path: Path)
     assert payload["audit_complete"] is True
     assert payload["all_cells_complete"] is False
     assert payload["no_numeric_imputation"] is True
+    combined = json.loads((output / "combined_audit.json").read_text(encoding="utf-8"))
+    assert combined["audit_complete"] is True
+    assert combined["matrix_complete_cells"] == 0
+    assert combined["matrix_total_cells"] == 16
+    assert combined["source_artifacts_read_only"] is True
+    assert combined["scientific_metrics_recomputed"] is False
+    assert combined["numeric_imputation_used"] is False
+    for name, identity in combined["files"].items():
+        artifact = output / name
+        assert artifact.stat().st_size == identity["bytes"]
+        assert hashlib.sha256(artifact.read_bytes()).hexdigest() == identity["sha256"]
+    assert combined["matrix_status_sha256"] == hashlib.sha256(
+        (output / "matrix_status.json").read_bytes()
+    ).hexdigest()
     assert result.evaluation_contract["final_export_gate"]["required_value"] is True
     threshold_files = sorted(
         path.name for path in (output / "threshold_contracts").iterdir()
@@ -510,6 +526,30 @@ def test_writer_emits_required_outputs_and_refuses_nonempty_root(tmp_path: Path)
     assert threshold_files == ["aids.json", "bace.json", "mutagenicity.json", "tastemolnet.json"]
     with pytest.raises(FileExistsError):
         write_registry_outputs(result, output)
+
+
+def test_registry_never_publishes_terminal_matrix_before_combined_hash_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scan = tmp_path / "outputs"
+    scan.mkdir()
+    result = audit_registry(
+        AuditConfig(scan_roots=(scan,), output_root=tmp_path / "registry")
+    )
+    original = registry_module._atomic_write
+
+    def _fail_combined(path: Path, payload: bytes) -> None:
+        if path.name == "combined_audit.json":
+            raise OSError("forced combined closure failure")
+        original(path, payload)
+
+    monkeypatch.setattr(registry_module, "_atomic_write", _fail_combined)
+    output = tmp_path / "registry"
+    with pytest.raises(OSError, match="forced combined closure failure"):
+        write_registry_outputs(result, output)
+
+    assert not (output / "matrix_status.json").exists()
+    assert not (output / "combined_audit.json").exists()
 
 
 def test_threshold_contract_is_evaluator_ready_only_with_calibration_provenance() -> None:

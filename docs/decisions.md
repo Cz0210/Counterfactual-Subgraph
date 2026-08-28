@@ -20,8 +20,12 @@ Before publication, hash and stat every source file twice, audit Linux procfs
 for writable descriptors under both roots, and invoke the same ordinary
 registry candidate gate used by the matrix audit.  Publish only a three-file
 receipt (`adoption_manifest.json`, `verification.json`, and the exact
-`[BACE_OURS_FREEZE_ADOPTION_PASS]` marker) by atomic no-replace rename under a
-fresh `matrix/adoptions/bace_ours_frozen_*` directory.  Do not copy scientific
+`[BACE_OURS_FREEZE_ADOPTION_PASS]` marker) under a fresh
+`matrix/adoptions/bace_ours_frozen_*` directory.  Atomically publish the two
+receipt JSON files first, reopen them and every external gate at the final
+path, and only then durably create `PASS` as the last terminal operation.  A
+post-publish verification failure may retain the two diagnostic JSON files but
+must not leave `PASS`.  Do not copy scientific
 CSVs, open raw test data, or recompute any numeric value.
 
 ### Consequences
@@ -30,6 +34,9 @@ CSVs, open raw test data, or recompute any numeric value.
   remain at the checksum-pinned standardized root.
 - A fresh matrix audit must still explicitly scan that source and independently
   reach `FROZEN_PASS`; the receipt alone cannot fill a cell.
+- Each fresh matrix audit writes `combined_audit.json` with the size/SHA closure
+  of every sibling, fsyncs the sibling directories, and publishes
+  `matrix_status.json` last; the old six-cell audit is never overwritten.
 - Source drift, a live writer, identity mismatch, dirty execution checkout,
   non-fresh destination, or registry downgrade blocks the marker.
 - This decision authorizes only BACE Ours receipt publication.  It does not

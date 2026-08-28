@@ -223,6 +223,66 @@ def test_adoption_rejects_wrong_destination_and_receipt_tampering(
         adoption.validate_adoption_receipt(output, policy=policy)
 
 
+def test_post_publish_validation_failure_cannot_leave_terminal_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    monkeypatch.setattr(adoption, "scan_live_writers", _writer_audit)
+    monkeypatch.setattr(
+        adoption, "audit_explicit_candidate", lambda *args, **kwargs: _candidate(policy)
+    )
+    matrix = tmp_path / "matrix"
+    matrix.mkdir()
+    output = matrix / "adoptions/bace_ours_frozen_post_publish_failure"
+
+    def _reject(*args: object, **kwargs: object) -> dict[str, object]:
+        raise adoption.BACEOursFreezeAdoptionError("forced post-publish rejection")
+
+    monkeypatch.setattr(adoption, "_validate_adoption_receipt", _reject)
+    with pytest.raises(
+        adoption.BACEOursFreezeAdoptionError, match="forced post-publish rejection"
+    ):
+        adoption.adopt_bace_ours_frozen_cell(
+            matrix_root=matrix,
+            output_root=output,
+            policy=policy,
+            require_clean_git=False,
+        )
+
+    assert output.is_dir()
+    assert not (output / "PASS").exists()
+    assert sorted(path.name for path in output.iterdir()) == [
+        "adoption_manifest.json",
+        "verification.json",
+    ]
+
+
+def test_pass_directory_fsync_failure_removes_owned_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "receipt"
+    output.mkdir()
+    expected = adoption._stat_identity(output)
+    original_fsync = adoption.os.fsync
+    calls = 0
+
+    def _fail_directory_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("forced PASS directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(adoption.os, "fsync", _fail_directory_fsync)
+    with pytest.raises(OSError, match="forced PASS directory fsync failure"):
+        adoption._publish_pass_last(
+            output,
+            expected_directory_identity=expected,
+        )
+
+    assert not (output / "PASS").exists()
+
+
 def test_policy_rejects_changes_to_fixed_scientific_identity(tmp_path: Path) -> None:
     policy = _policy(tmp_path)
     payload = json.loads(policy.path.read_text(encoding="utf-8"))

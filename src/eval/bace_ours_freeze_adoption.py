@@ -377,6 +377,93 @@ def _validate_recorded_writer_audits(value: Any) -> None:
             raise BACEOursFreezeAdoptionError("recorded writer audit closure changed")
 
 
+def _publish_pass_last(
+    directory: Path, *, expected_directory_identity: tuple[int, int, int, int, int, int]
+) -> None:
+    """Durably create the terminal marker after every fallible receipt gate."""
+
+    directory_descriptor = os.open(
+        directory,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    pass_descriptor = -1
+    created_identity: tuple[int, int] | None = None
+    try:
+        opened_directory = os.fstat(directory_descriptor)
+        if (
+            opened_directory.st_dev,
+            opened_directory.st_ino,
+            opened_directory.st_size,
+            opened_directory.st_mtime_ns,
+            opened_directory.st_ctime_ns,
+            opened_directory.st_nlink,
+        ) != expected_directory_identity:
+            raise BACEOursFreezeAdoptionError(
+                "adoption root identity changed before PASS publication"
+            )
+        pass_descriptor = os.open(
+            "PASS",
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        opened = os.fstat(pass_descriptor)
+        created_identity = (opened.st_dev, opened.st_ino)
+        payload = f"{PASS_MARKER}\n".encode("ascii")
+        written = 0
+        while written < len(payload):
+            count = os.write(pass_descriptor, payload[written:])
+            if count <= 0:
+                raise OSError("short write while publishing BACE adoption PASS")
+            written += count
+        os.fsync(pass_descriptor)
+        os.close(pass_descriptor)
+        pass_descriptor = -1
+        os.fsync(directory_descriptor)
+        final_path = directory.stat(follow_symlinks=False)
+        final_descriptor = os.fstat(directory_descriptor)
+        if (final_path.st_dev, final_path.st_ino) != (
+            final_descriptor.st_dev,
+            final_descriptor.st_ino,
+        ):
+            raise BACEOursFreezeAdoptionError(
+                "adoption root was replaced during PASS publication"
+            )
+    except BaseException:
+        if pass_descriptor >= 0:
+            try:
+                os.close(pass_descriptor)
+            except OSError:
+                pass
+        if created_identity is not None:
+            try:
+                observed = os.stat(
+                    "PASS", dir_fd=directory_descriptor, follow_symlinks=False
+                )
+                if (observed.st_dev, observed.st_ino) == created_identity:
+                    os.unlink("PASS", dir_fd=directory_descriptor)
+                    try:
+                        os.fsync(directory_descriptor)
+                    except OSError:
+                        pass
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        try:
+            os.close(directory_descriptor)
+        except OSError:
+            # The marker and containing directory were already fsynced.  A
+            # close-only error must not turn a durable terminal into a false
+            # function failure with a residual PASS.
+            pass
+
+
 def adopt_bace_ours_frozen_cell(
     *,
     matrix_root: str | Path,
@@ -459,7 +546,6 @@ def adopt_bace_ours_frozen_cell(
             "numeric_values_changed": False,
         }
         _write_new(temporary / "verification.json", _json_bytes(verification))
-        _write_new(temporary / "PASS", f"{PASS_MARKER}\n".encode("ascii"))
         _fsync_directory(temporary)
         parent_descriptor = os.open(expected_parent, os.O_RDONLY)
         try:
@@ -472,10 +558,15 @@ def adopt_bace_ours_frozen_cell(
             _fsync_directory(expected_parent)
         finally:
             os.close(parent_descriptor)
-        validate_adoption_receipt(
+        reopened = _validate_adoption_receipt(
             destination,
             policy=policy,
             proc_root=proc_root,
+            require_pass=False,
+        )
+        _publish_pass_last(
+            destination,
+            expected_directory_identity=tuple(reopened["output_root_identity"]),
         )
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -489,23 +580,26 @@ def adopt_bace_ours_frozen_cell(
     }
 
 
-def validate_adoption_receipt(
+def _validate_adoption_receipt(
     root: str | Path,
     *,
     policy: AdoptionPolicy | None = None,
     proc_root: str | Path = "/proc",
+    require_pass: bool,
 ) -> dict[str, Any]:
     policy = policy or load_policy()
     output = _physical_directory(Path(root).expanduser(), label="adoption root")
-    if sorted(entry.name for entry in output.iterdir()) != [
-        "PASS",
-        "adoption_manifest.json",
-        "verification.json",
-    ]:
+    output_identity = _stat_identity(output)
+    expected_files = ["adoption_manifest.json", "verification.json"]
+    if require_pass:
+        expected_files.insert(0, "PASS")
+    if sorted(entry.name for entry in output.iterdir()) != expected_files:
         raise BACEOursFreezeAdoptionError("adoption receipt file set changed")
     if any(entry.is_symlink() or not entry.is_file() for entry in output.iterdir()):
         raise BACEOursFreezeAdoptionError("adoption receipt files must be physical")
-    if (output / "PASS").read_bytes() != f"{PASS_MARKER}\n".encode("ascii"):
+    if require_pass and (output / "PASS").read_bytes() != f"{PASS_MARKER}\n".encode(
+        "ascii"
+    ):
         raise BACEOursFreezeAdoptionError("adoption PASS marker changed")
     manifest_bytes = (output / "adoption_manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
@@ -562,13 +656,30 @@ def validate_adoption_receipt(
         or verification.get("numeric_values_changed") is not False
     ):
         raise BACEOursFreezeAdoptionError("adoption receipt closure changed")
+    if _stat_identity(output) != output_identity:
+        raise BACEOursFreezeAdoptionError("adoption root drifted during validation")
     return {
         "status": "PASS",
         "output_root": str(output),
         "source_standardized_root": evidence["source_root"],
         "source_inventory_sha256": evidence["source_inventory_sha256"],
+        "output_root_identity": list(output_identity),
         "marker": PASS_MARKER,
     }
+
+
+def validate_adoption_receipt(
+    root: str | Path,
+    *,
+    policy: AdoptionPolicy | None = None,
+    proc_root: str | Path = "/proc",
+) -> dict[str, Any]:
+    return _validate_adoption_receipt(
+        root,
+        policy=policy,
+        proc_root=proc_root,
+        require_pass=True,
+    )
 
 
 __all__ = [

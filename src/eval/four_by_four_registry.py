@@ -1851,6 +1851,14 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _report(result: RegistryResult) -> str:
     lines = [
         "# Four methods × four datasets adoption report",
@@ -1943,11 +1951,52 @@ def write_registry_outputs(result: RegistryResult, output_root: str | Path) -> P
             + "\n"
         ).encode("utf-8")
     marker_payload = outputs.pop("matrix_status.json")
+    audited_payloads = {**outputs, "matrix_status.json": marker_payload}
+    combined_audit = {
+        "schema_version": "four_methods_four_datasets_combined_audit_v1",
+        "status": "PASS",
+        "audit_complete": True,
+        "matrix_complete_cells": result.matrix_complete_cells,
+        "matrix_total_cells": result.matrix_total_cells,
+        "all_cells_complete": result.matrix_complete_cells == result.matrix_total_cells,
+        "distance_line": DISTANCE_LINE,
+        "cf_mode": CF_MODE,
+        "k_prefixes": list(K_PREFIXES),
+        "table2_k": TABLE2_K,
+        "cell_status_counts": {
+            status.value: sum(
+                row.get("status") == status.value for row in result.matrix_rows
+            )
+            for status in CellStatus
+        },
+        "matrix_status_sha256": hashlib.sha256(marker_payload).hexdigest(),
+        "files": {
+            name: {
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            for name, payload in sorted(audited_payloads.items())
+        },
+        "source_artifacts_read_only": True,
+        "scientific_metrics_recomputed": False,
+        "numeric_imputation_used": False,
+    }
+    outputs["combined_audit.json"] = (
+        json.dumps(combined_audit, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    ).encode("utf-8")
     for name, payload in outputs.items():
         _atomic_write(root / name, payload)
+    for directory in sorted(
+        {(root / name).parent for name in outputs},
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        _fsync_directory(directory)
     # The controller marker is published last so a visible audit_complete=true
-    # also proves that every required sibling artifact was already materialized.
+    # also proves that every required sibling artifact, including the combined
+    # hash closure, was already materialized and directory-fsynced.
     _atomic_write(root / "matrix_status.json", marker_payload)
+    _fsync_directory(root)
     return root
 
 
