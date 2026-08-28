@@ -84,6 +84,47 @@ def test_validation_evidence_rejects_single_class_collapse() -> None:
         adoption._read_validation_predictions(_prediction_bytes(collapsed=True))
 
 
+def test_validation_evidence_accepts_float32_serialization_roundoff() -> None:
+    output = io.StringIO(newline="")
+    fields = [
+        "molecule_id",
+        "smiles",
+        "split",
+        "label",
+        "predicted_label",
+        "logits",
+        "probabilities",
+        "source_graph_hash",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    logits_by_class = (
+        [8.0, -2.0, -3.0],
+        [-2.0, 8.0, -3.0],
+        [-3.0, -2.0, 8.0],
+    )
+    for index, (label, row_logits) in enumerate(
+        zip((0, 1, 2), logits_by_class, strict=True)
+    ):
+        probabilities = adoption._softmax(
+            np.asarray([row_logits], dtype=np.float64)
+        )[0].astype(np.float32)
+        writer.writerow(
+            {
+                "molecule_id": f"taste-{index}",
+                "smiles": ["CC", "CN", "CO"][index],
+                "split": "val",
+                "label": label,
+                "predicted_label": int(np.argmax(probabilities)),
+                "logits": json.dumps(row_logits),
+                "probabilities": json.dumps(probabilities.tolist()),
+                "source_graph_hash": str(index + 1) * 64,
+            }
+        )
+    evidence = adoption._read_validation_predictions(output.getvalue().encode("utf-8"))
+    assert evidence["predicted_classes"] == [0, 1, 2]
+
+
 def test_historical_temperature_is_authenticated_but_not_adopted_as_t3() -> None:
     stored = adoption._read_validation_predictions(_prediction_bytes())
     evidence = adoption._audit_historical_temperature(_temperature_payload(stored), stored)

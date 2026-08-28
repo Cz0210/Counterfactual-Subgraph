@@ -42,6 +42,7 @@ EXPECTED_SOURCE_COMMIT = "583bf668896142d8cc292cd624fbbffc20faf688"
 EXPECTED_FAILURE_REASON = "WORKER_PROCESS_IDENTITY_DRIFT"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+CSV_FLOAT32_PROBABILITY_ATOL = float(2 * np.finfo(np.float32).eps)
 
 REQUIRED_BUNDLE_FILES = frozenset(
     {
@@ -418,7 +419,15 @@ def _read_validation_predictions(data: bytes) -> dict[str, Any]:
         raise TasteT2AdoptionError("validation molecule IDs are duplicated")
     logit_array = np.asarray(logits, dtype=np.float64)
     probability_array = np.asarray(probabilities, dtype=np.float64)
-    if not np.allclose(_softmax(logit_array), probability_array, rtol=0.0, atol=1e-7):
+    # The historical writer serialized float32 softmax values.  Permit exactly
+    # two float32 epsilons for that representation boundary; model replay below
+    # remains governed by its separately recorded frozen tolerance.
+    if not np.allclose(
+        _softmax(logit_array),
+        probability_array,
+        rtol=0.0,
+        atol=CSV_FLOAT32_PROBABILITY_ATOL,
+    ):
         raise TasteT2AdoptionError("validation probabilities do not reproduce from logits")
     label_array = np.asarray(labels, dtype=np.int64)
     metrics = classification_metrics(label_array, probability_array, num_classes=3)

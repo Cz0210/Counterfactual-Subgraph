@@ -10939,3 +10939,10 @@ named `sha256s.txt`; the two names belong to different schemas.
 - The verifier now consumes the actual held historical manifest.
 - The pre-publication failure created no PASS receipt and changed no source
   artifact, so a corrected independent invocation is safe.
+
+The next pre-publication AutoDL check measured a maximum raw-softmax versus
+stored-probability difference of `1.26654272070148e-07`, matching the stored
+probability-sum float32 roundoff (`1.2665987014770508e-07`). The CSV boundary
+therefore uses an explicit tolerance of two float32 epsilons. This does not
+change the separately frozen model-replay tolerances or accept calibrated
+probabilities as raw probabilities.
