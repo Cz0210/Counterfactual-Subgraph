@@ -48,6 +48,29 @@
   release successor changing only the release pins.  Do not deploy or run
   science from this stage-freeze.
 
+## 2026-08-28: TasteMolNet T5 managed-v2 clean-base adoption
+
+- [x] Keep the historical zero-step LoRA initializer intact and add a separate
+  current-campaign route whose exact semantic state is
+  `ADOPTED_CLEAN_GENERIC_BASE` rather than fabricated SFT.
+- [x] Hash the complete external ChemLLM source tree and validate InternLM
+  causal-LM config, tokenizer identity, safetensors index, every referenced
+  shard header, exact tensor-to-shard map, and total tensor payload bytes.
+- [x] Reject PEFT/adapter/LoRA artifacts, Taste/RF-specific evidence, dataset
+  payload file types/directories, Taste split loading, reward-oracle use,
+  optimizer steps, weight copying, and matrix-cell registration.
+- [x] Restrict the worker to the two small candidate JSON files plus managed-v2
+  raw/exit/SEALED evidence. Require an independent process to hold the source,
+  repeat the complete content hash, validate EXITED lineage, and uniquely
+  write verification/gate/PASS through atomic directory no-replace.
+- [x] Add inspect/build/verifier CLIs, one three-phase AutoDL wrapper, paired
+  static-refusal Slurm parity scripts, hostile source/index tests, an
+  end-to-end managed-v2 publication test, and an operator runbook.
+- [ ] Run inspect, worker, and verifier from one exact clean AutoDL execution
+  commit against the private generic ChemLLM root; record the UUID attempt,
+  generation token, published root, source inventory SHA, gate SHA, and the
+  verifier-only `[TASTE_T5_CLEAN_SFT_PASS]` line. No GPU or training is needed.
+
 ## 2026-08-28: T8 fresh-review blocker closure
 
 - [x] Align the concrete official GlobalGCE generator with the planned held-

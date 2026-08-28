@@ -416,7 +416,11 @@ def _inventory_directory(root: Path, *, label: str) -> tuple[dict[str, dict[str,
     )
 
 
-def inspect_generic_chemllm_base(model_path: str | Path) -> dict[str, Any]:
+def inspect_generic_chemllm_base(
+    model_path: str | Path,
+    *,
+    include_files: bool = False,
+) -> dict[str, Any]:
     root = _absolute(model_path, label="source_model_path", must_exist=True)
     if not root.is_dir():
         raise TasteCleanPolicyError("source_model_path must be one directory")
@@ -444,7 +448,7 @@ def inspect_generic_chemllm_base(model_path: str | Path) -> dict[str, Any]:
         and "chemllm" not in config_identity
     ) or model_type not in {"internlm2", "internlm"}:
         raise TasteCleanPolicyError("source is not an explicitly identifiable generic ChemLLM base")
-    return {
+    result = {
         "schema_version": SOURCE_INVENTORY_SCHEMA,
         "classification": SOURCE_CLASSIFICATION,
         "eligible": True,
@@ -463,6 +467,15 @@ def inspect_generic_chemllm_base(model_path: str | Path) -> dict[str, Any]:
         "calibration_loaded": False,
         "test_loaded": False,
     }
+    if include_files:
+        # The managed-v2 clean-base adoption needs a self-contained source
+        # receipt.  Keep the historical default payload unchanged for callers
+        # that only consume the aggregate inventory identity.
+        result["source_model_files"] = inventory
+        result["source_model_total_bytes"] = sum(
+            int(item["bytes"]) for item in inventory.values()
+        )
+    return result
 
 
 def _load_yaml(path: Path) -> Mapping[str, Any]:

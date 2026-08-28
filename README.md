@@ -202,6 +202,17 @@ controller declaration is not GPU-lock ownership, so release remains disabled
 until final T3/T4/source pins and a physical execution receipt are reviewed; see
 `docs/AUTODL_TASTEMOLNET_CLEAN_POLICY_INITIALIZER.md`.
 
+For the current TasteMolNet four-method campaign, T5 may instead adopt the
+unchanged generic `ChemLLM-7B-Chat` base without creating a LoRA or opening any
+Taste split. The managed-v2 worker records a complete per-file source
+inventory and stops at `SEALED`; a separate verifier rehashes the entire
+external model tree, validates the Hugging Face config/tokenizer and exact
+safetensors index-to-shard closure, and atomically publishes the small receipt.
+Its semantic state is `ADOPTED_CLEAN_GENERIC_BASE`, `optimizer_steps=0`, loaded
+Taste splits are `[]`, and it is not a matrix method cell. No model weight is
+copied into the receipt. See
+`docs/AUTODL_TASTEMOLNET_T5_CLEAN_BASE_ADOPTION_V2.md`.
+
 After a formal Taste GINE bundle closes, T3 adopts its existing
 validation-fitted temperature without refitting or copying the checkpoint.
 T4 then uses only the authenticated calibration graph cache for a bounded

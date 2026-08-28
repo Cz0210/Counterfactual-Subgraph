@@ -11406,6 +11406,61 @@ no graph/checkpoint payload in managed evidence.
   remain null. No science, deployment, remote command, or GPU launch is part of
   this code-only change.
 
+## [2026-08-28] Adopt the unchanged generic ChemLLM base as current-campaign T5
+
+### Motivation
+
+The current TasteMolNet campaign needs a clean policy predecessor, but a
+zero-step LoRA would add randomly initialized adapter state without learning
+from any example. Calling that artifact SFT would overstate the science. The
+operator explicitly permits a clean generic-base adoption PASS instead of a
+training run. The existing T5 initializer remains useful historical code but
+is release-disabled and requires predecessor/controller authorities that are
+not needed to prove the identity of an unchanged dataset-independent base.
+
+### Decision
+
+Add a separate managed-execution-v2 route whose only accepted semantic state
+is `ADOPTED_CLEAN_GENERIC_BASE`. It opens no Taste file, performs zero optimizer
+steps, uses no RF or GINE reward, creates no adapter, copies no model weights,
+and does not count as one of the sixteen method/dataset cells. Its operational
+verifier marker is `[TASTE_T5_CLEAN_SFT_PASS]`, but the structured evidence
+must always record `training_performed=false`, `optimizer_steps=0`, and
+`taste_splits_loaded=[]`; the marker must never be interpreted as an SFT claim.
+
+The worker hashes every physical file in the external ChemLLM tree and writes
+only `source_inventory.json` and `clean_base_adoption_candidate.json` below the
+managed artifact directory. Source validation requires an InternLM causal-LM
+config, one InternLM tokenizer asset, a safetensors index that exactly closes
+all and only the model shards, exact agreement between the index tensor map and
+every shard header, and agreement between indexed total size and tensor payload
+bytes. Adapter/PEFT/LoRA names and metadata, Taste/RF identifiers, and dataset
+payload paths or file types are rejected.
+
+The worker has no terminal API and stops after managed-v2 raw evidence,
+zero-exit evidence, and `SEALED.json`. A separate clean-checkout verifier holds
+the source tree by descriptor, repeats the complete content inventory, checks
+the launcher/worker EXITED lineage and exact attempt inputs, and revalidates
+the source stat/ctime closure immediately before invoking the frozen atomic
+no-replace publisher. Only that verifier writes `verification.json`,
+`gate.json`, and `PASS`. The terminal receipt contains hashes and metadata,
+never safetensors or tokenizer/model payloads.
+
+### Consequences
+
+- T5 can close without occupying GPU 1/2 and without opening train,
+  validation, calibration, or test data.
+- The external ChemLLM directory remains the downstream read-only model
+  authority; moving or changing any file invalidates the receipt's source pin.
+- This adoption does not inherit the old LoRA initializer's T3/T4 binding.
+  A later T6 release must independently hold and cross-bind this T5 source
+  receipt with the selected T3/T4/GINE authorities before model loading.
+- The historical initializer and its disabled release contract are preserved;
+  this decision neither rewrites it nor labels it PASS.
+- The implementation commit authorizes no deployment, GPU work, Taste data
+  access, or scientific/matrix result. A real PASS requires the independent
+  AutoDL verifier run against the exact private source tree.
+
 ## [2026-08-28] Harden the T8 official boundary and adopt managed execution v2
 
 ### Motivation
