@@ -2127,3 +2127,28 @@ Mutagenicity roadmaps.
 - [ ] Have a separate verifier reopen SEALED, call the T7 method verifier, and
   pass that result into managed-v2 atomic publication. Do not infer PASS from a
   PID, log line, worker exit, or generic file list.
+
+## 2026-08-28: Taste-specific GCF NeuroSED auxiliary model
+
+- [x] Pin and audit the official GREED and GREED-experiments commits plus the
+  bundled GCFExplainer model/loader hashes.
+- [x] Preserve the official eight-layer GIN, 64/64 dimensions, NormSED
+  training forward, interval loss, AdamW, CyclicLR, and 0.1 gradient clipping.
+- [x] Export a plain isomorphic state dictionary that the existing GCF fork's
+  NormGED runner loads without schema adaptation; retain its graph-element
+  normalization semantics.
+- [x] Build exact-bound connected induced BFS subgraph-to-own-parent pairs
+  independently from train and validation, with no classifier or label use.
+- [x] Fit only on train and select only on validation; reject calibration/test
+  payloads and publish only aggregate split hashes/counts.
+- [x] Use UUIDv4 checkpoint directories and one selected `best.pt` binding;
+  never overwrite or reuse a checkpoint directory.
+- [x] Add finite loss/distance/rank, strict checkpoint reload, batch/single,
+  CPU/GPU tolerance, feature-schema, runner-load, and leakage health checks.
+- [x] Run through managed execution v2: worker raw/exit/SEALED only,
+  independent scientific verification, and atomic no-replace publication.
+- [x] Add a physical-GPU-1 AutoDL launcher and paired static-refusal Slurm
+  wrappers; keep auto-termination and GNN ablation disabled.
+- [ ] Run the fresh real AutoDL training attempt, publish a verifier PASS, and
+  bind its exact `best.pt`/gate hashes into T7 and T12. Code integration alone
+  is not scientific completion.

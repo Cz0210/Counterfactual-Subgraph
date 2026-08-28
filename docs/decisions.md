@@ -11420,3 +11420,51 @@ requires exact equality with the full startup bundle before it can publish.
   managed-v1 registry are deliberately not connected.
 - This change performs no deployment, science run, controller mutation, or
   downstream release.
+
+## [2026-08-28] Train a Taste-specific NeuroSED without calibration/test leakage
+
+### Motivation
+
+Projecting an AIDS, Mutagenicity, or BACE NeuroSED checkpoint into Taste's
+feature space would not provide a dataset-specific auxiliary distance model,
+while replacing NeuroSED with deletion-only distance would change the official
+GCFExplainer method. Taste therefore needs a fresh auxiliary model without
+changing the frozen three-class calibrated GINE or exposing held-out data.
+
+### Decision
+
+Pin GREED commit `1c756f49625abb62c9f6de5b0059876a4c7499c1` and its
+experiments commit `e85423dc943fda1979811e7449846efffec2a1e1`. Preserve the
+eight-layer GIN, 64-dimensional hidden/output representations, directional
+NormSED training forward, interval criterion, AdamW, CyclicLR, and exact 0.1
+gradient clipping. Export a plain state dictionary whose parameter schema is
+strictly isomorphic to the bundled GCF fork's NormGED loader. Preserve the
+fork's downstream division by the sum of graph element counts.
+
+Derive one-hot explicit-hydrogen atom channels only from train and reject
+validation-unseen atoms. Construct deterministic connected induced BFS
+subgraph-to-own-parent pairs separately within train and validation and use the
+known omitted-node-plus-omitted-edge construction count as exact equal lower
+and upper bounds. Labels and the GINE are not used. Train only on train and use
+validation only for early stopping and checkpoint selection. Never open a
+calibration/test payload, ID, SMILES, graph hash, pair, label, or embedding.
+
+Create every selected checkpoint under a new UUIDv4 directory. Publish the
+selected bytes once as `best.pt` for GCF. Run the route on physical AutoDL GPU
+1 under the shared UUID lock and managed execution v2. The worker produces
+scientific files plus raw/exit/SEALED evidence but cannot sign PASS. A separate
+verifier closes hashes, reloads both training and runner schemas, checks finite
+validation error/rank, batch/single and CPU/GPU tolerance on synthetic probes,
+and atomically publishes the terminal directory. Failures quarantine without
+signals. Slurm remains an explicit static refusal.
+
+### Consequences
+
+- NeuroSED remains an auxiliary distance model and never becomes a classifier
+  or matrix method cell.
+- T7/T12 can retain official mutation/VRRW and full-graph distance semantics
+  while using a Taste-specific checkpoint.
+- Public artifacts expose aggregate hashes/metrics only, not reconstructable
+  Taste rows or pair data.
+- This implementation does not launch training or assert a scientific PASS;
+  T7/T12 remain blocked until a fresh independent-verifier terminal is bound.

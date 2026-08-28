@@ -1,0 +1,40 @@
+schema_version: tastemolnet_gcf_neurosed_execution_v1
+dataset: tastemolnet
+role: GCF_AUXILIARY_DISTANCE_MODEL
+classifier: false
+source_label_independent: true
+official_sources:
+  greed_commit: 1c756f49625abb62c9f6de5b0059876a4c7499c1
+  greed_experiments_commit: e85423dc943fda1979811e7449846efffec2a1e1
+architecture:
+  training_model: NormSEDModel
+  runner_model: NormGEDModel
+  num_layers: 8
+  hidden_dim: 64
+  output_dim: 64
+  convolution: gin
+  pooling: add
+training:
+  seed: 7
+  train_pairs: 50000
+  validation_pairs: 5000
+  batch_size: 128
+  max_epochs: 200
+  early_stopping_patience: 20
+  learning_rate: 0.001
+  weight_decay: 0.001
+  cyclic_step_size_up: 2000
+  cyclic_step_size_down: 2000
+  max_grad_norm: 0.1
+  num_workers: 0
+  require_cuda_health_gate: true
+data_boundary:
+  fit_splits: [train]
+  selection_splits: [validation]
+  calibration_loaded: false
+  test_loaded: false
+managed_execution:
+  protocol: v2
+  worker_writes_pass: false
+  independent_verifier_required: true
+  auto_terminate_uncontrolled_children: false

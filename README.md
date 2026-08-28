@@ -99,6 +99,9 @@ See:
 - `docs/AUTODL_TASTEMOLNET_T8_GLOBALGCE_SMOKE.md` (release-disabled contract
   for the real bounded native GlobalGCE two-target smoke on physical GPU 2;
   the paired Slurm entrypoint is an intentional static refusal)
+- `docs/TASTE_GCF_NEUROSED_PROTOCOL.md` (Taste-specific, train-fit/
+  validation-select NeuroSED auxiliary distance model, official GREED/GCF
+  runner semantics, no calibration/test access, and managed-v2 publication)
 
 ---
 
