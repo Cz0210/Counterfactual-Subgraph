@@ -1,5 +1,48 @@
 # Decisions Log
 
+## [2026-08-28] Replace legacy T4 publication with a managed-v2 GPU-2 successor
+
+### Motivation
+
+The historical T4 path consumed an older T3 adoption layout, was frozen to
+physical GPU 1, and let the science process write its own terminal marker. The
+fresh T3 result is instead a managed-v2 publication containing a newly fitted
+validation-only temperature under `artifacts/checkpoint`, and the active Taste
+schedule assigns the bounded oracle smoke to physical GPU 2.
+
+### Decision
+
+Add a successor which descriptor-retains the exact managed T3 tree, verifies
+its generic gate and nested scientific PASS, and loads only its selected GINE
+checkpoint plus graph-cache `manifest.json` and `calibration.pt`. Bind physical
+GPU index 2, its UUID, `CUDA_VISIBLE_DEVICES=2`, and visible `cuda:0`. Run the
+fixed sixteen-parent/four-deletion smoke with full three-class probability and
+batch/single checks, real connected deletions, invalid/full-parent controls,
+and observed Sweet-to-Bitter and Sweet-to-Tasteless flips.
+
+The worker emits only aggregate candidate documents. A different method
+verifier repeats the science, compares the SEALED evidence, and is the only
+caller of the managed-v2 terminal publisher. PASS remains generic managed-v2
+evidence with method semantics nested in independent verification. Attempt,
+staging, and generation identities are UUIDs; input authorities remain held;
+ABA or lineage drift quarantines without signals; automatic child termination
+is false.
+
+### Consequences
+
+- T4 opens no train, validation, test, or CSV payload and publishes no SMILES,
+  molecule IDs, per-example predictions, graph payloads, or paper-cell claim.
+- The model is constructed once per scientific process; the independent
+  verifier deliberately performs its own separately loaded replay.
+- The prior T4 implementation remains historical and is not a valid successor
+  terminal for this route.
+- This code change performs no deployment, science run, HPC submission, or GNN
+  ablation; those require the clean committed execution identity.
+
+### Status
+
+Implemented and locally tested; AutoDL deployment/execution remains pending.
+
 ## [2026-08-28] Freeze the release-disabled TasteMolNet T9 COMRECGC core
 
 ### Motivation

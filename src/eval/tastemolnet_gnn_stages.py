@@ -2640,6 +2640,20 @@ def run_bounded_oracle_smoke(
     pair_records = oracle.predict_records(pair_graphs, batch_size=batch_size)
     if len(pair_records) != 2 * len(pair_index):
         raise TasteGNNStageError("Taste T4 pair prediction count changed")
+    pair_batched = oracle.predict_proba(pair_graphs, batch_size=batch_size)
+    pair_singles = np.vstack(
+        [oracle.predict_proba([graph], batch_size=1) for graph in pair_graphs]
+    )
+    if (
+        pair_batched.shape != (len(pair_graphs), NUM_CLASSES)
+        or pair_singles.shape != pair_batched.shape
+        or not np.isfinite(pair_batched).all()
+        or not np.isfinite(pair_singles).all()
+        or not np.allclose(pair_batched, pair_singles, rtol=0.0, atol=1e-7)
+    ):
+        raise TasteGNNStageError(
+            "Taste T4 deletion-pair batch/single probabilities differ"
+        )
     semantics: list[CounterfactualRecord] = []
     for offset, (_cohort_position, _fragment, _outcome) in enumerate(pair_index):
         before = pair_records[2 * offset]
@@ -2691,7 +2705,14 @@ def run_bounded_oracle_smoke(
         "parent_deletion_counts_by_position": deletion_counts,
         "valid_deletion_count": len(semantics),
         "batch_examples": len(selected),
-        "batch_single_max_abs_difference": float(np.max(np.abs(batched - singles))),
+        "batch_single_max_abs_difference": float(
+            max(
+                np.max(np.abs(batched - singles)),
+                np.max(np.abs(pair_batched - pair_singles)),
+            )
+        ),
+        "batch_single_graph_count": len(selected_graphs) + len(pair_graphs),
+        "all_three_probabilities_validated": True,
         "checkpoint_load_count": 1,
         "checkpoint_id": oracle.checkpoint_id,
         "temperature": float(oracle.temperature),

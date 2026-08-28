@@ -533,3 +533,9 @@ identity-drift controller failure and never retrains the classifier.
 TasteMolNet T3 performs a new validation-only scalar-temperature fit through a
 managed-v2 worker and independent verifier, as documented in
 `docs/AUTODL_TASTEMOLNET_T3_CALIBRATION_V2.md`.
+
+TasteMolNet T4 now has a managed-v2 GPU-2 successor that consumes only the
+published T3 checkpoint and authenticated calibration graph cache, repeats the
+bounded three-class smoke in an independent verifier, and publishes aggregate
+evidence atomically. See
+`docs/AUTODL_TASTEMOLNET_T4_ORACLE_SMOKE_V2.md`.

@@ -1,5 +1,21 @@
 # Refactor Plan
 
+## 2026-08-28: TasteMolNet T4 managed-v2 GPU-2 successor
+
+- [x] Consume only the generic managed T3 PASS plus nested scientific
+  verification and the exact `artifacts/checkpoint` directory.
+- [x] Bind physical GPU 2 and UUID to visible `cuda:0`; keep one model load per
+  scientific process.
+- [x] Select sixteen true/predicted Sweet calibration parents with exactly four
+  real connected deletions each and validate all three probabilities,
+  batch/single parity, both flip destinations, no flip, and invalid controls.
+- [x] Keep the worker aggregate-only and SEALED; repeat science in a separate
+  verifier and reserve gate/PASS publication for managed-v2 atomic rename.
+- [x] Add AutoDL CLIs, static-refusal paired Slurm scripts, focused tests, and
+  an operator runbook.
+- [ ] Deploy the clean reviewed commit and run worker/verifier on GPU 2; do not
+  launch from this implementation branch and do not start an ablation.
+
 ## 2026-08-28: TasteMolNet T9 COMRECGC release-disabled core
 
 - [x] Freeze the three-class bridge to `1 - p(Sweet)` walk importance and
