@@ -141,11 +141,32 @@ def load_policy(path: str | Path = DEFAULT_POLICY) -> AdoptionPolicy:
     }
     if any(expected.get(field) != value for field, value in fixed_identity.items()):
         raise BACEOursFreezeAdoptionError("fixed BACE Ours identity changed")
+    hash_fields = {
+        "dataset_hash",
+        "feature_schema_sha256",
+        "molclr_checkpoint_hash",
+        "oracle_hash",
+        "split_hash",
+        "temperature_scaling_sha256",
+        "threshold_config_hash",
+    }
+    if any(
+        not isinstance(expected.get(field), str)
+        or not _SHA256_RE.fullmatch(expected[field])
+        for field in hash_fields
+    ):
+        raise BACEOursFreezeAdoptionError("pinned BACE Ours hash identity is malformed")
+    if not Path(str(expected.get("oracle_checkpoint") or "")).is_absolute():
+        raise BACEOursFreezeAdoptionError("pinned BACE oracle checkpoint is not absolute")
+    source_root = Path(str(payload.get("source_root") or ""))
+    writer_guard_root = Path(str(payload.get("writer_guard_root") or ""))
+    if not source_root.is_absolute() or not writer_guard_root.is_absolute():
+        raise BACEOursFreezeAdoptionError("pinned BACE source roots must be absolute")
     return AdoptionPolicy(
         path=source,
         sha256=_sha256_bytes(payload_bytes),
-        source_root=Path(str(payload.get("source_root") or "")),
-        writer_guard_root=Path(str(payload.get("writer_guard_root") or "")),
+        source_root=source_root,
+        writer_guard_root=writer_guard_root,
         expected_identity=dict(expected),
         source_files=normalized_files,
     )
@@ -362,7 +383,6 @@ def adopt_bace_ours_frozen_cell(
     output_root: str | Path,
     policy: AdoptionPolicy | None = None,
     proc_root: str | Path = "/proc",
-    require_writer_audit: bool = True,
     require_clean_git: bool = True,
 ) -> dict[str, Any]:
     policy = policy or load_policy()
@@ -387,7 +407,7 @@ def adopt_bace_ours_frozen_cell(
     evidence = validate_source_candidate(
         policy,
         proc_root=proc_root,
-        require_writer_audit=require_writer_audit,
+        require_writer_audit=True,
     )
     git_identity = (
         _git_identity(PROJECT_ROOT)
@@ -456,7 +476,6 @@ def adopt_bace_ours_frozen_cell(
             destination,
             policy=policy,
             proc_root=proc_root,
-            require_writer_audit=require_writer_audit,
         )
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -475,7 +494,6 @@ def validate_adoption_receipt(
     *,
     policy: AdoptionPolicy | None = None,
     proc_root: str | Path = "/proc",
-    require_writer_audit: bool = True,
 ) -> dict[str, Any]:
     policy = policy or load_policy()
     output = _physical_directory(Path(root).expanduser(), label="adoption root")
@@ -495,7 +513,7 @@ def validate_adoption_receipt(
     evidence = validate_source_candidate(
         policy,
         proc_root=proc_root,
-        require_writer_audit=require_writer_audit,
+        require_writer_audit=True,
     )
     execution_git = manifest.get("execution_git") if isinstance(manifest, dict) else None
     if not isinstance(execution_git, dict) or set(execution_git) != {"commit", "tree"}:

@@ -21,14 +21,14 @@ def _write_json(path: Path, value: object) -> None:
 def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
     source = tmp_path / "source"
     guard = tmp_path / "writer-guard"
-    source.mkdir()
+    source.mkdir(parents=True)
     guard.mkdir()
     files: dict[str, bytes] = {
         "PASS": b"PASS\n",
         "oracle_manifest.json": json.dumps(
             {
                 "feature_schema_sha256": "f" * 64,
-                "temperature_scaling_sha256": "t" * 64,
+                "temperature_scaling_sha256": "a" * 64,
             },
             sort_keys=True,
         ).encode()
@@ -70,21 +70,21 @@ def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
     expected = {
         "cf_mode": "strict_flip",
         "classifier_family": "gine",
-        "dataset_hash": "d" * 64,
+        "dataset_hash": "1" * 64,
         "feature_schema_sha256": "f" * 64,
         "k_max": 20,
         "method": "Ours",
-        "molclr_checkpoint_hash": "m" * 64,
+        "molclr_checkpoint_hash": "b" * 64,
         "num_classes": 2,
         "oracle_backend": "gnn",
         "oracle_checkpoint": "/frozen/bace/oracle",
-        "oracle_hash": "o" * 64,
+        "oracle_hash": "c" * 64,
         "rf_oracle_used": False,
         "source_label": 1,
-        "split_hash": "s" * 64,
+        "split_hash": "d" * 64,
         "table2_k": 10,
-        "temperature_scaling_sha256": "t" * 64,
-        "threshold_config_hash": "h" * 64,
+        "temperature_scaling_sha256": "a" * 64,
+        "threshold_config_hash": "e" * 64,
     }
     policy_path = tmp_path / "policy.json"
     _write_json(
@@ -229,4 +229,20 @@ def test_policy_rejects_changes_to_fixed_scientific_identity(tmp_path: Path) -> 
     payload["expected_identity"]["k_max"] = 19
     _write_json(policy.path, payload)
     with pytest.raises(adoption.BACEOursFreezeAdoptionError, match="fixed BACE"):
+        adoption.load_policy(policy.path)
+
+
+def test_policy_requires_absolute_roots_and_sha256_identities(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+    payload = json.loads(policy.path.read_text(encoding="utf-8"))
+    payload["expected_identity"]["oracle_hash"] = "not-a-sha"
+    _write_json(policy.path, payload)
+    with pytest.raises(adoption.BACEOursFreezeAdoptionError, match="hash identity"):
+        adoption.load_policy(policy.path)
+
+    policy = _policy(tmp_path / "second")
+    payload = json.loads(policy.path.read_text(encoding="utf-8"))
+    payload["source_root"] = "relative/source"
+    _write_json(policy.path, payload)
+    with pytest.raises(adoption.BACEOursFreezeAdoptionError, match="must be absolute"):
         adoption.load_policy(policy.path)
