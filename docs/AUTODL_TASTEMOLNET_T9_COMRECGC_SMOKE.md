@@ -96,7 +96,9 @@ PASS
 
 No SMILES, molecule ID, graph payload, checkpoint payload, or row-level
 prediction is persisted.  `PASS` contains exactly
-`[TASTE_COMRECGC_SMOKE_PASS]\n`.  Publication uses the retained output tree,
+`[TASTE_T9_COMRECGC_SMOKE_PASS]\n`. The structured `marker` fields and stdout
+use the identical already-bracketed string without a newline; code must not
+add or remove a second pair of brackets. Publication uses the retained output tree,
 prevalidates the complete prepared image with the same public strict consumer,
 revalidates managed ACTIVE plus every immutable input inside the final
 callback, and exposes the exact prepared marker inode with no replacement.

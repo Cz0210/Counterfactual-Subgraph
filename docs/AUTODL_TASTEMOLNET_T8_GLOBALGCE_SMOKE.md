@@ -154,6 +154,12 @@ and rehashes it, then performs the same rename. No hardlink is used.
 The legacy six-file T8 terminal candidate and its marker-last consumer remain
 testable predecessor code only; they are not a production publication route.
 Checking only file names, worker raw evidence, or stdout is never authority.
+Its stage marker is nevertheless frozen by the T0--T16 contract as exactly
+`[TASTE_T8_GLOBALGCE_SMOKE_PASS]`: legacy structured `marker` fields, stdout,
+and the legacy `PASS` leaf use that same already-bracketed string, with exactly
+one trailing newline only in the leaf. The active managed-v2 terminal continues
+to use its generic `[MANAGED_EXECUTION_V2_PASS]` outer marker; T8 success
+remains nested method verification and is not inferred from stdout.
 
 ## Release checklist
 

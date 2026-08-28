@@ -1,5 +1,16 @@
 # Refactor Plan
 
+## 2026-08-28: TasteMolNet T6/T8/T9 marker contract
+
+- [x] Freeze the exact T0--T16 marker literals for T6 Ours PPO, T8 GlobalGCE,
+  and T9 COMRECGC without modifying the concurrently owned T7 route.
+- [x] Store one already-bracketed literal in structured scientific evidence,
+  print it unchanged, and append exactly one newline only in method-specific
+  `PASS` leaves.
+- [x] Keep the generic managed-v2 outer PASS marker distinct from nested
+  method verification and preserve every release-disabled gate.
+- [x] Update focused tests and runbooks; no deployment or science is included.
+
 ## 2026-08-28: TasteMolNet T4 managed-v2 GPU-2 successor
 
 - [x] Consume only the generic managed T3 PASS plus nested scientific

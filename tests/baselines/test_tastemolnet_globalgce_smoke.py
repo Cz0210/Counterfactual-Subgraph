@@ -32,6 +32,10 @@ from src.utils.tastemolnet_t8_managed_v2 import (
 from src.utils.terminal_publisher_v2 import open_sealed_worker_artifact
 
 
+def test_t8_stage_marker_contract_is_exact() -> None:
+    assert t8.PASS_MARKER == "[TASTE_T8_GLOBALGCE_SMOKE_PASS]"
+
+
 class _FakeScorer:
     checkpoint_id = "a" * 64
     num_classes = 3

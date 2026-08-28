@@ -25,7 +25,7 @@ from src.utils.retained_output_directory import (
 
 
 TASTE_PPO_STAGE = "T6_OURS_SMOKE"
-TASTE_PPO_MARKER = "TASTE_OURS_SMOKE_PASS"
+TASTE_PPO_MARKER = "[TASTE_T6_OURS_PPO_SMOKE_PASS]"
 TASTE_PPO_REWARD_MANIFEST_SCHEMA = "tastemolnet_gnn_ppo_reward_manifest_v1"
 TASTE_PPO_GATE_SCHEMA = "tastemolnet_ours_ppo_smoke_gate_v1"
 TASTE_PPO_OBSERVER_SCHEMA = "tastemolnet_ppo_observer_v1"
@@ -1272,7 +1272,7 @@ class HeldTastePPOOutput:
         self._authority = HeldPublishedTerminalOutput.open(
             root,
             marker_name="PASS",
-            marker_payload=f"[{TASTE_PPO_MARKER}]\n".encode("utf-8"),
+            marker_payload=f"{TASTE_PPO_MARKER}\n".encode("utf-8"),
         )
         try:
             self._evidence = self._validate()

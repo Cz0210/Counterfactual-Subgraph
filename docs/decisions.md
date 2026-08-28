@@ -1,5 +1,37 @@
 # Decisions Log
 
+## [2026-08-28] Freeze T6/T8/T9 smoke markers to the T0--T16 contract
+
+### Motivation
+
+The unrun Taste smoke implementations used descriptive marker names that did
+not carry their assigned T-stage numbers. T6 also stored an unbracketed value
+in structured evidence while its stdout and `PASS` leaf added brackets at the
+call site. That made controller configuration and terminal verification prone
+to a silent one- or two-bracket mismatch.
+
+### Decision
+
+Freeze the exact stage markers to `[TASTE_T6_OURS_PPO_SMOKE_PASS]`,
+`[TASTE_T8_GLOBALGCE_SMOKE_PASS]`, and
+`[TASTE_T9_COMRECGC_SMOKE_PASS]`. Each scientific implementation stores the
+same already-bracketed value in structured `marker` fields and prints that
+value unchanged. A method-specific `PASS` leaf contains the same bytes plus
+exactly one trailing newline. Managed-v2 publication retains its generic outer
+marker; the method marker remains inside independent verification. T7 is not
+changed because its successor is owned by the concurrent NeuroSED/GCF work.
+
+### Consequences
+
+- Controller log-marker pins can use the same literal as scientific evidence.
+- Consumers reject legacy marker spellings and bracket-normalization tricks.
+- This change authorizes no release, deployment, or experiment.
+
+### Status
+
+Implemented in code, focused tests, and operator documentation; all three
+science routes remain unrun and release disabled.
+
 ## [2026-08-28] Replace legacy T4 publication with a managed-v2 GPU-2 successor
 
 ### Motivation
@@ -72,7 +104,7 @@ Freeze the release-disabled T9 core around the following boundaries:
   `122f9341a360e9f06bb58a2f5823bb596021f6bf` only through retained file
   descriptors whose SHA-256 values equal the checked-in reviewed map; and
 - expose a strict aggregate-only seven-file terminal consumer ending in
-  `[TASTE_COMRECGC_SMOKE_PASS]`, with no molecule rows, SMILES, graph payload,
+  `[TASTE_T9_COMRECGC_SMOKE_PASS]`, with no molecule rows, SMILES, graph payload,
   or checkpoint payload persisted.
 
 The tracked release config remains a native false with null mutable pins.  The
@@ -186,7 +218,7 @@ and is superseded by the managed-v2 decision later in this file. Its terminal
 authority was exactly six files: `input_hashes.json`,
 `state.json`, `manifest.json`, `gate.json`, `output_hashes.json`, and `PASS`.
 The first five are canonical hash-closed aggregate evidence; `PASS` contains
-`[TASTE_GLOBALGCE_SMOKE_PASS]` and is the final no-replace publication syscall.
+`[TASTE_T8_GLOBALGCE_SMOKE_PASS]` and is the final no-replace publication syscall.
 The producer performs no fallible validation, fsync, pathname reopen, cleanup,
 or logging after that commit. Downstream adoption must use the strict retained
 consumer, which rejects unknown files and physical replacement even when bytes

@@ -83,6 +83,12 @@ Downstream code must call `hold_taste_ppo_output()` or
 `validate_taste_ppo_output()`. Merely checking for `PASS`, required files, or a
 log marker is not authoritative.
 
+The T0--T16 marker contract for this stage is exactly
+`[TASTE_T6_OURS_PPO_SMOKE_PASS]`. The same already-bracketed string is stored
+in every structured `marker` field, printed as the log marker, and written to
+the `PASS` leaf followed by exactly one newline. Callers must not add or remove
+a second pair of brackets.
+
 T6 independently reopens the receipt-only T2 authority inherited through T5.
 It accepts only the fresh five-file adoption root plus reviewed gate, receipt,
 and embedded-source SHA-256 pins; the consumer checks the canonical hash DAG,

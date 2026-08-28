@@ -45,6 +45,11 @@ from src.baselines.comrecgc.held_upstream import (
 ATOMS = (1, 6, 8)
 
 
+def test_t9_stage_marker_contract_is_exact() -> None:
+    assert smoke_module.PASS_MARKER == "[TASTE_T9_COMRECGC_SMOKE_PASS]"
+    assert PASS_BYTES == b"[TASTE_T9_COMRECGC_SMOKE_PASS]\n"
+
+
 def _fake_official_checkout(root: Path) -> dict[str, str]:
     payloads = {
         "util.py": b"TOKEN = 'reviewed-util'\n",

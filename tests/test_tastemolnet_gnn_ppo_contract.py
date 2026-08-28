@@ -1016,7 +1016,7 @@ def test_published_t6_consumer_reopens_exact_gate_inventory_and_checkpoints(
     prepared = retained.prepare_terminal_output(
         output,
         marker_name="PASS",
-        marker_payload=b"[TASTE_OURS_SMOKE_PASS]\n",
+        marker_payload=b"[TASTE_T6_OURS_PPO_SMOKE_PASS]\n",
     )
     monkeypatch.setattr(
         retained,
@@ -1116,7 +1116,8 @@ def test_formal_t6_entrypoints_freeze_real_gpu1_stable_loop_and_no_test_access()
     assert "--required-output-file downstream_policy_binding.json" in wrapper
     assert "--required-output-file adapter_model.safetensors" in wrapper
     assert "adapter_model.safetensors|adapter_model.bin" not in wrapper
-    assert "--required-log-marker '[TASTE_OURS_SMOKE_PASS]'" in wrapper
+    assert TASTE_PPO_MARKER == "[TASTE_T6_OURS_PPO_SMOKE_PASS]"
+    assert f"--required-log-marker '{TASTE_PPO_MARKER}'" in wrapper
     assert "exit 64" in slurm
     assert "--config configs/hpc.yaml" in slurm
     assert "inference.fallback_to_heuristic=false" in slurm

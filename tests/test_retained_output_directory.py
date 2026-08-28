@@ -29,14 +29,14 @@ def test_fresh_output_retains_tree_and_commits_marker_last(
         prepared = retained.prepare_terminal_output(
             output,
             marker_name="PASS",
-            marker_payload=b"[TASTE_OURS_SMOKE_PASS]\n",
+            marker_payload=b"[TASTE_T6_OURS_PPO_SMOKE_PASS]\n",
         )
         monkeypatch.setattr(retained, "_link_held_noreplace", _portable_link)
         assert not (output.path / "PASS").exists()
         assert (output.path / ".PASS.prepared").is_file()
         prepared.commit(retained_input_closure=lambda: None)
         assert (output.path / "PASS").read_bytes() == (
-            b"[TASTE_OURS_SMOKE_PASS]\n"
+            b"[TASTE_T6_OURS_PPO_SMOKE_PASS]\n"
         )
         assert not (output.path / ".PASS.prepared").exists()
         prepared.close()

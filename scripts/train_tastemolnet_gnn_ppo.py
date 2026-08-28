@@ -1509,7 +1509,7 @@ def run(args: Any) -> int:
         prepared = prepare_terminal_output(
             output_authority,
             marker_name="PASS",
-            marker_payload=f"[{TASTE_PPO_MARKER}]\n".encode("utf-8"),
+            marker_payload=f"{TASTE_PPO_MARKER}\n".encode("utf-8"),
         )
         periodic_root = f"checkpoint-{args.updates}"
         _assert_terminal_layout(prepared.tree.inventory, updates=args.updates)
@@ -1583,7 +1583,7 @@ def run(args: Any) -> int:
         # Emit the external log condition before the terminal commit.  exp_run
         # also requires the descriptor-bound PASS and all output files, so a
         # later commit failure cannot be mistaken for a successful run.
-        print(f"[{TASTE_PPO_MARKER}]", flush=True)
+        print(TASTE_PPO_MARKER, flush=True)
         retained_stack = stack.pop_all()
         try:
             prepared.commit(retained_input_closure=retained_input_closure)

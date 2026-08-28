@@ -118,7 +118,7 @@ exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   --required-output-file adapter_config.json \
   --required-output-file adapter_model.safetensors \
   --required-output-file PASS \
-  --required-log-marker '[TASTE_OURS_SMOKE_PASS]' \
+  --required-log-marker '[TASTE_T6_OURS_PPO_SMOKE_PASS]' \
   -- \
   "$AUTODL_PYTHON" -B "$TRAIN_SCRIPT" \
     --config "$PROJECT_ROOT/configs/hpc.yaml" \
