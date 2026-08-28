@@ -550,3 +550,9 @@ published T3 checkpoint and authenticated calibration graph cache, repeats the
 bounded three-class smoke in an independent verifier, and publishes aggregate
 evidence atomically. See
 `docs/AUTODL_TASTEMOLNET_T4_ORACLE_SMOKE_V2.md`.
+
+The production Taste GCFExplainer NeuroSED successor uses deterministic
+fixed-budget independent query-target pairs and only real pinned pyged/GEDLIB
+interval labels. Build, benchmark, and budget-selection code is fail-closed;
+the local dependency audit is blocked and claims no scientific PASS. See
+`docs/TASTE_GCF_NEUROSED_FIXED_BUDGET_PROTOCOL.md`.

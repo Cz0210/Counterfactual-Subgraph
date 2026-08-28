@@ -11744,3 +11744,52 @@ generation token.
 - Root integration must adapt the NeuroSED launcher, worker, and verifier to
   the final shared controller-holder API before any GPU allocation or science.
 - No checkpoint, scientific PASS, T7 release, or matrix result is claimed.
+
+## [2026-08-28] Supersede the own-parent NeuroSED route with independent fixed-budget pairs
+
+### Motivation
+
+The production Taste GCFExplainer requirement is full GREED/NeuroSED pair and
+label semantics under a bounded GEDLIB cost. The previous research adaptation
+paired a parent with its own sampled subgraph and used an exact deletion count.
+That is neither upstream `make_inner_dataset` sampling nor the generated-query
+to original-target direction consumed by GCF. Running an exhaustive Taste
+train-by-train product is unnecessary and operationally unsafe, but replacing
+it with the own-parent shortcut would change the scientific method.
+
+### Decision
+
+Supersede the own-parent route for production with deterministic seed-7
+fixed-budget independent query-source/target sampling inside train or inside
+validation. Require distinct graph IDs, retain size/class diagnostics without
+using class as supervision, never materialize the Cartesian product, and leave
+every pair unlabeled until authenticated `pyged.sed` returns its lower and
+upper F2 bounds. Preserve the directional zero-insertion/unit-deletion SED
+costs and generated-query-to-original-target runtime direction.
+
+Treat the finite pair count as the only resource-control extension. Determine
+it from disjoint real 100/500/1000 GEDLIB benchmarks, worker contention gates,
+and the 24-hour p95 projection. Only 5k/10k/20k train budgets and their
+1k/2k/4k validation budgets are legal. A failed minimum tier produces
+`BLOCKED_GEDLIB_THROUGHPUT`; a missing real build produces
+`BLOCKED_GEDLIB_BUILD`. Neither condition authorizes approximate, neural,
+own-parent, symmetric-cache, or fabricated labels.
+
+Build only from pre-provisioned pinned sources in a fresh environment. The
+local source snapshot lacks GEDLIB and pybind11, so this commit records a real
+blocked smoke with no PASS marker and starts no remote science. Keep the
+existing epoch-level trainer blocked as a research adaptation; production
+still requires the pinned GREED batch-interleaved selector, compact directional
+label cache/reserve handling, independent verification, and managed release.
+
+### Consequences
+
+- The deterministic sampler, benchmark authority, and budget planner can be
+  reviewed and tested without RDKit, PyTorch, pyged, or network access.
+- No build, benchmark, pair-builder, fixed-budget model, T7, or T12 scientific
+  PASS is claimed by code integration.
+- AutoDL must provide and approve an exact GEDLIB commit and pybind11 package,
+  then run the real benchmark tiers before a budget or training run exists.
+- The absent upstream GCF commit remains explicit: the current vendored
+  snapshot is bound only by critical source hashes and cannot be assigned a
+  fabricated commit identity.

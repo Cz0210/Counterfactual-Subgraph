@@ -2265,3 +2265,26 @@ Mutagenicity roadmaps.
   attempt, publish one generic managed-v2 verifier PASS, and bind its exact
   final/checkpoint/gate hashes into T7 and T12. Code integration alone is not
   scientific completion.
+
+## 2026-08-28: Official-semantics NeuroSED fixed-budget successor
+
+- [x] Re-audit the pinned GREED/GREED-expts pair builder, F2 pyged wrapper,
+  directional SED costs, and batch-interleaved selector contract.
+- [x] Add an offline-only isolated pyged/GEDLIB build smoke that authenticates
+  source commits/hashes and fails as `BLOCKED_GEDLIB_BUILD` when a pinned
+  GEDLIB or pybind11 tree is unavailable. It never installs or substitutes a
+  neural/approximate label backend.
+- [x] Add a seed-7 deterministic, split-confined independent query-target
+  sampler with no self pairs, no Cartesian product, no GED labels, and
+  disjoint 100/500/1000 benchmark cohorts.
+- [x] Add real-backend benchmark parsing/resource metrics and a fixed planner
+  restricted to 5k/10k/20k train plus 1k/2k/4k validation pairs.
+- [x] Document that fixed pair count is a project resource-control extension,
+  while pair roles, pyged interval labels, official selector, and generated-
+  query-to-original-target inference remain scientific requirements.
+- [ ] Provision and approve an exact GEDLIB commit and pybind11 CMake package
+  on AutoDL; run the real build smoke and disjoint 100/500/1000 benchmarks.
+- [ ] Add compact directional pair-label cache/output, deterministic reserve
+  replacement, official-builder fixture equivalence, and split-isolation gate.
+- [ ] Wire the successful pair budget into the exact batch-interleaved trainer
+  and managed verifier. No checkpoint or downstream T7/T12 PASS exists yet.
