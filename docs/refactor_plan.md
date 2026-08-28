@@ -20,9 +20,12 @@
 - [x] Lower the fresh exact-component controller CPU reservation from sixteen
   to twelve without changing scientific inputs, exactness, block order, or
   checkpoint semantics.
+- [x] Keep the launcher preflight and diagnostic contract at the same exact
+  twelve-worker literal; reject legacy 16 before creating launch evidence.
 - [x] Keep CUDA hidden and GPU locks absent; preserve every protected process
   and prohibit old-brute signals outside the dedicated handover gate.
-- [ ] Run focused controller/stage tests and obtain fresh detached review.
+- [x] Run focused controller/stage/launcher tests.
+- [ ] Obtain fresh detached review of the complete successor.
 - [ ] Create a pin-only immutable execution successor and deploy one fresh CID.
 
 ## 2026-08-28: TasteMolNet T6/T8/T9 marker contract

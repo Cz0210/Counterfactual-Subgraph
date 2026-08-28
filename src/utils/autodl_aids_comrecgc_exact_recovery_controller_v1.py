@@ -1232,7 +1232,7 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
         raise RecoveryControllerError("production process authority must be /proc")
     thread_count = int(resources.get("thread_count", 0))
     if thread_count != DEFAULT_THREAD_COUNT:
-        raise RecoveryControllerError("CPU coexistence thread count must remain 16")
+        raise RecoveryControllerError("CPU coexistence thread count must remain 12")
     if resources.get("cpu_only") is not True or resources.get("gpu_lock_required") is not False:
         raise RecoveryControllerError("recovery route must be CPU-only and GPU-lock-free")
     probe = resources.get("coexistence_probe")

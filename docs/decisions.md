@@ -47,7 +47,9 @@ staged controller froze sixteen and therefore cannot be released unchanged.
 ### Decision
 
 Freeze `DEFAULT_THREAD_COUNT=12` in the exact-component recovery manifest and
-all stage environments.  This changes only the CPU reservation: the pinned
+all stage environments.  Freeze the outer launcher preflight to the same
+literal and regression-test that 12 passes while 0, 8, and 16 fail before a
+controller log or PID is created.  This changes only the CPU reservation: the pinned
 91,916,686-row authority, exact component algorithm, block order, checkpoints,
 and downstream numerical contracts remain unchanged.  The old brute process
 remains read-only and receives no signal from this change.
