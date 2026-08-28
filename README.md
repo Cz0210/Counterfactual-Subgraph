@@ -92,6 +92,10 @@ See:
   launcher+worker lineage, quarantine-without-signals, SEALED worker evidence,
   independent verification, and atomic directory publication without mutable
   file links)
+- `docs/AUTODL_TASTEMOLNET_T7_GCF_SMOKE.md` (release-disabled bounded native
+  full-graph GCFExplainer smoke using the same calibrated three-class GINE;
+  binary BACE adapters, NeuroSED claims, RF, test payloads, and molecule-bearing
+  output are excluded)
 
 ---
 
@@ -213,7 +217,32 @@ policy now also types a
 future T6 Ours smoke as train-only,
 using only the frozen prepared train CSV with a frozen-GINE reward and no
 RF/no-validation/no-calibration/no-test; it does not by itself implement or
-launch T6.
+launch T6. T7 similarly remains release-disabled until a typed T2 adoption,
+retained T3/T4 authorities, their common checkpoint, and controller/GPU-1
+receipts are pinned. Its smoke reuses the official native full-graph VRRW loop
+but separates `1-p(Sweet)` importance from the actual three-class
+`argmax != Sweet` candidate condition and uses the independently verified
+Taste-specific NeuroSED through the official normalized threshold-coverage
+function. Global selection and full/paper readiness remain explicitly
+unevaluated. The reusable
+`TasteFrozenGINENativeAdapter` preserves original three-class order and native
+graph identity for later method smokes. Its stable source-graph entrypoints
+override the shared binary lineage codec with identity labels `0/1/2`, matching
+PyG `y` and per-record `source_label`, and expose only the two untargeted
+destination classes. T7 itself keeps the receipt-only T2
+five-file authority and exact T3/T4 binding/checkpoint evidence open through a
+final checkout/blob/controller/GPU revalidation. Its sixteen official VRRW
+steps are physically interrupted 8+8: a private UUIDv4/generation/inode/SHA-
+bound `checkpoints/<uuid>/` checkpoint
+captures the complete walk, bridge, scorer, and RNG state, all in-memory
+progress is reset, and continuation must restore the exact saved cursor rather
+than restart from the seed. T7 is a managed-execution-v2 worker: it writes only
+raw evidence, worker-exit evidence, and SEALED, then stops. A separate
+verifier cross-binds NeuroSED/GINE/checkpoint evidence and owns atomic
+no-replace publication; T7 contains no hardlink terminal publisher and cannot
+write PASS, a final gate, or an adoption receipt. See
+`docs/TASTE_GCF_NEUROSED_PROTOCOL.md` and
+`docs/AUTODL_TASTEMOLNET_T7_GCF_SMOKE.md`.
 
 The GlobalGCE frozen-GINE bridge now has an explicit multiclass target view:
 official internal classes `0/1` map to the reviewed frozen source/destination

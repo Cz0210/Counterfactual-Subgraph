@@ -10972,3 +10972,274 @@ the new temperature document and oracle manifest become downstream authority.
 - The worker cannot emit the T3 PASS marker; only the independent verifier can
   print it after publication.
 - T3 is auxiliary infrastructure and never counts as a four-method matrix cell.
+
+## [2026-08-28] Implement Taste T7 as a classifier-interface native-GCF smoke
+
+### Motivation
+
+TasteMolNet T7 must exercise GCFExplainer's native complete-graph edit and
+random-walk behavior against the same frozen calibrated three-class GINE used
+by T3/T4. The existing BACE adapter is binary and its official reinforcement
+predicate treats an importance score of at least 0.5 as a counterfactual. For
+three classes, `1-p(Sweet)>0.5` does not imply that Sweet ceased to be the
+argmax. The BACE route also binds a BACE-specific graph schema and adapted
+NeuroSED artifact that are not Taste authorities.
+
+### Decision
+
+Reuse only the vendored official full-graph node/edge mutation enumeration and
+VRRW loop. Add a Taste adapter that decodes each complete edited graph, scores
+it with the exact held calibrated GINE, returns importance `1-p(Sweet)`, and
+maintains a separate `argmax != Sweet` predicate for official reinforcement.
+At the bounded alpha-one smoke endpoint, provide an all-ones neutral coverage
+matrix so official transition importance is exactly the classifier score.
+This is a classifier-interface/native-VRRW smoke only: NeuroSED distance,
+global selection/order, full readiness, and paper eligibility are all
+`NOT_EVALUATED`.
+
+Use only the frozen train CSV for a deterministic bounded Sweet source pool.
+Require the exact five-file T2 adoption and physically held T3/T4 authorities;
+require both stages to bind one checkpoint and read its model, schema, label
+map, split manifest, untouched test status, and validation-fitted temperature
+through the retained checkpoint API. Keep validation, calibration, and test
+CSV payloads unopened. RF and every BACE dataset/model/distance/output artifact
+are forbidden.
+
+Keep runtime release-disabled until a clean one-parent release child binds a
+typed external authority, live controller identity, exclusive physical-GPU-1
+lease, exact output root, implementation commit/tree, critical blobs, and all
+T2/T3/T4 hashes. Neither CLI inputs nor environment variables are release
+capabilities. The AutoDL wrapper refuses before GPU discovery; the paired Slurm
+script is static refusal.
+
+Publish only an exact private summary tree. Validate the official temporary
+native `counterfactuals.pt` in memory, then discard it with the temporary
+runtime. Persist no SMILES, molecule IDs, graph tensors, or reconstructable
+dataset rows. The marker-last output retains opaque graph identities and
+probability/decision evidence so a strict held consumer can recompute every
+score and candidate predicate and reject extra files or inode drift.
+
+### Consequences
+
+- A binary 0.5 shortcut, deletion-only conversion, synthetic candidate list,
+  BACE artifact, RF oracle, or self-declared PASS cannot satisfy T7.
+- A bounded PASS proves native official mutation/random-walk execution and at
+  least one valid non-Sweet complete graph; it does not prove the full method,
+  NeuroSED distance, global selector, or a paper result.
+- The no-redistribution policy remains enforceable without discarding enough
+  opaque evidence to audit the smoke's multiclass semantics.
+- T7 remains unavailable until integration and external authority review; this
+  implementation does not start or authorize science.
+
+### Status
+
+Implemented in an isolated worktree with release pins null. No commit, push,
+SSH, deployment, controller/GPU-lock/matrix mutation, scientific-root write,
+model load, or science run was performed. Fresh review and stage-freeze remain
+required.
+
+## [2026-08-28] Harden the rejected Taste T7 candidate as a receipt-only successor
+
+### Motivation
+
+Independent review found that the first T7 stage-freeze did not install the
+official module-global `importance_args` used by the real restart path, reopened
+historical T2 sources, accepted Python Boolean/numeric-string aliases in parts
+of its terminal schema, and linked PASS before removing a hidden prepared
+marker. Its final callback also retained input descriptors but did not repeat
+the immutable checkout, critical-blob, or controller full-cmdline checks.
+
+### Decision
+
+Base the successor on the reviewed receipt-only T2-to-T4 implementation. Hold
+the exact five-file T2 root with root/gate/receipt/embedded-source pins for the
+entire run; require T3 and T4 to carry its same canonical binding and checkpoint
+closure. Preserve and export `TasteFrozenGINENativeAdapter` so later Taste
+method smokes reuse the same original-order classifier and native graph
+identity.
+
+Scope the official `vrrw.importance_args` module global around the real walk,
+restoring an old value or deleting a previously absent attribute in `finally`.
+At the final marker callback, repeat clean immutable checkout validation,
+reject hidden index flags, rehash critical blobs, and repeat controller
+PID-generation/full-cmdline and GPU checks. Fsync the complete prepared tree,
+then make PASS visible with one final `RENAME_NOREPLACE`; successful publication
+has no later fallible syscall whose error can replace PASS.
+
+The strict output consumer now rejects Boolean-as-integer and numeric-string
+aliases, requires exact adapter and batch-scorer schemas, binds the adapter
+checkpoint to the input checkpoint, and closes call/decode/scored-row counts.
+Output paths may not overlap either the repository or official-source root in
+either ancestor direction. The static release literal is checked before the
+AutoDL wrapper sources `common.sh`.
+
+### Consequences
+
+- Historical T2 controller/training/execution roots are evidence embedded in
+  the adopted receipt only; they are no longer runtime dependencies.
+- The checked-in release remains `false` with every pin `null`; this hardening
+  neither creates an execution lease nor starts science.
+- A future T9 successor can import the adapter and held predecessor evidence
+  instead of copying classification or graph-identity behavior.
+
+## [2026-08-28] Require a physical mid-walk checkpoint for the Taste T7 smoke
+
+### Motivation
+
+The first bounded T7 successor executed sixteen official VRRW steps in one
+uninterrupted call. Although its terminal summary could report the final step
+count, it did not satisfy the four-method smoke gate's checkpoint/resume
+requirement. Re-seeding and replaying from step one would not be resume: it
+would repeat the initial official restart, scoring, reinforcement, and RNG
+consumption while discarding the live step-eight cursor and accumulated VRRW
+frequency/transition state.
+
+### Decision
+
+Split the same official bounded walk at exactly eight of sixteen steps. After
+step eight, capture the next graph cursor and the complete mutable official
+VRRW state, bridge records/counters, adapter and exact-batch-scorer counters,
+native action counts, and Python/NumPy/Torch/available-CUDA RNG states. Write
+that payload once to a mode-0600 file in a fresh mode-0700 private temporary
+directory, fsync file and directory, and bind its SHA-256 plus complete
+device/inode/mode/link/owner/size/time identity.
+
+Raise and catch one typed planned-interruption exception only after that
+durable write. Drop the in-memory checkpoint payload, reset every official,
+bridge, scorer, action-count, and RNG progress component to a provably
+different state, then reload only from the revalidated held checkpoint inode.
+Require exact saved/restored semantic and RNG digests before continuing. Call
+the real official loop for steps nine through sixteen, substituting the saved
+cursor only for its initial resume entry so no fresh restart is scored or
+reinforced. All later official move, teleport, restart, sampling, frequency,
+and candidate-order semantics remain unchanged.
+
+Publish aggregate-only resume evidence: native Boolean proofs for checkpoint
+write, planned interruption, reload, and resume; exact `8 + 8 = 16` counts;
+physical checkpoint/SHA binding; saved/reset/restored state and RNG digests;
+prefix, suffix, full-trace, and boundary commitments; and a recomputable
+continuity digest. The strict retained consumer requires the entire exact
+schema and rejects Boolean/integer aliases, numeric strings, false counts,
+restore drift, or cursor discontinuity.
+
+Do not persist the private `.pt` payload, molecule rows, or graph tensors in
+the terminal output. Keep the checkpoint inode held through continuation and
+evidence construction. Do not implement a checked-path `unlink`: replacement
+between identity check and deletion could target a foreign same-user inode.
+Descriptor close is non-destructive; the enclosing private temporary runtime
+owns ordinary lifecycle cleanup, and terminal evidence states this honestly.
+
+### Consequences
+
+- T7 now exercises actual progress serialization and restoration rather than
+  deterministic replay from the original seed.
+- A missing, byte-drifted, equal-byte-replaced, or restore-mismatched
+  checkpoint fails before terminal publication.
+- The final root remains summary-only and non-redistributing; checkpoint SHA,
+  physical identity, and aggregate trace commitments are evidence, not graph
+  payload.
+- Managed controller integration, release flags/pins, deployment, GPU work,
+  science, and full/paper readiness remain unchanged and disabled.
+
+### Status
+
+Accepted for the isolated T7 stage-freeze and hostile local tests. No commit,
+push, deployment, controller mutation, or science run is authorized by this
+decision.
+
+## [2026-08-28] Replace the rejected T7 detached-marker and path-only runtime designs
+
+**Status: REJECTED AND SUPERSEDED.** The hardlink portion of this historical
+decision must not be implemented or released. The runtime-namespace finding is
+retained and strengthened by the next decision.
+
+### Motivation
+
+Fresh review and an exact AutoDL target-filesystem probe invalidated the first
+terminal primitive. A normal named file unlinked to link count zero cannot be
+relinked there: `linkat(AT_EMPTY_PATH)` returned `ENOENT`, while `O_TMPFILE`
+was unsupported. Only a held normal inode linked through `/proc/self/fd` with
+`AT_SYMLINK_FOLLOW` succeeded. Review also found that holding only the
+checkpoint file/directory did not close replacement of the complete private
+runtime namespace.
+
+### Decision
+
+Keep one fixed mode-0600 `.PASS.authority` file named for the lifetime of the
+terminal output. Fsync it and every payload before the final retained-input
+closure. Publish `PASS` by exactly one no-replace proc-fd hardlink syscall;
+never unlink the authority. No stat, fsync, revalidation, close, or input
+cleanup error is allowed to propagate after that syscall succeeds. The strict
+consumer holds both names and requires identical device/inode/bytes and link
+count exactly two. The exact root contains the hidden authority explicitly,
+while the payload inventory excludes authority, `PASS`, and
+`output_hashes.json` itself. A cleaned scratch preflight runs on the exact
+output filesystem before any model/data load or GPU science and binds its
+receipt to the later held parent inode/device.
+
+Create a dedicated `runtime` child under one private temporary envelope. Hold
+the full runtime ancestor chain and the temporary parent/name, and create/open
+the direct checkpoint directory and file relative to those held descriptors.
+Revalidate the namespace after write and load, immediately after continuation,
+and before terminal evidence. Bind the checkpoint-directory physical identity
+so whole-runtime and whole-checkpoint-directory rename/equal-copy/restore
+attacks fail closed. Descriptor close remains non-destructive; the restored
+private envelope is removed by its owner and no checkpoint payload escapes.
+
+### Consequences
+
+- Pre-link failures or a preoccupied `PASS` cannot authorize the output.
+- Missing, replaced, byte-drifted, or extra-hardlinked authority names and
+  extra root files fail the public retained consumer.
+- The implementation depends only on the exact primitive proven on AutoDL's
+  `fuse.autofs`; it does not silently fall back to an unsupported kernel path.
+- Release remains disabled with null pins. This decision authorizes no commit,
+  push, deployment, controller mutation, GPU work, or science.
+
+## [2026-08-28] Move T7 to managed execution v2 and real Taste NeuroSED
+
+### Motivation
+
+The final security review forbids any mutable or worker-owned hardlink terminal
+primitive. It also requires T7 to preserve the official GCFExplainer distance
+semantics: a neutral coverage matrix is not a Taste GCF smoke. Worker-generated
+scientific evidence cannot authorize its own adoption.
+
+### Decision
+
+T7 now depends on the frozen managed execution v2 API. Each run creates one
+unreused UUIDv4 attempt and worker staging generation. The worker is limited to
+`raw_evidence.json`, `worker_exit.json`, and `SEALED.json`; it imports neither
+the SEALED opener nor the atomic verifier/publisher. Raw evidence binds the
+expected final path and the path/kind/canonical SHA of the independently
+verified Taste NeuroSED predecessor. A pure T7 method verifier recomputes the
+three-class GINE, official full-graph, NeuroSED, split-isolation,
+checkpoint/resume, and predecessor bindings. Only a separate process may pass
+that verification to managed v2 for same-filesystem no-replace rename or
+cross-filesystem copy/fsync/rehash plus no-replace atomic rename.
+
+The scientific bridge retains the same calibrated three-class GINE and exact
+`predicted_label != 1` candidate predicate with `1-p_source` classifier score.
+It loads the held Taste-specific `NormGEDModel(8,input_dim,64,64)` checkpoint
+through descriptor authority and calls the vendored official normalized
+threshold-coverage implementation. Calibration and test remain unopened by
+T7, and the NeuroSED PASS must prove train-only fitting and validation-only
+selection.
+
+Every VRRW progress checkpoint now lives under a fresh
+`checkpoints/<checkpoint_uuid>/` with a canonical UUIDv4 and generation token.
+The temporary parent, runtime root, checkpoint container, UUID directory, and
+file identities remain held and are revalidated after write/load, immediately
+after continuation, and before raw evidence. Runtime/container/directory
+rename-plus-equal-copy-plus-restore is rejected, and temporary cleanup leaves
+no graph/checkpoint payload in managed evidence.
+
+### Consequences
+
+- T7 contains no terminal hardlink publisher and cannot issue PASS, a final
+  gate, verification, adoption, or release authority.
+- A missing managed-v2 PASS, NeuroSED PASS/checkpoint, or API signature blocks
+  before model/data science.
+- The checked-in release remains disabled and all deployment/predecessor pins
+  remain null. No science, deployment, remote command, or GPU launch is part of
+  this code-only change.

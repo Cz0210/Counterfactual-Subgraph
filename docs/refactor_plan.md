@@ -2005,3 +2005,76 @@ Mutagenicity roadmaps.
   file, T2 receipt gate, and T2 source-evidence hashes.
 - [ ] Execute the worker and verifier from one clean AutoDL execution worktree,
   then bind T4 to that exact managed gate and checkpoint directory.
+
+## 2026-08-28: TasteMolNet T7 bounded native-GCF smoke
+
+- [x] Reject direct reuse of the BACE binary GCF adapter: its two-class model
+  card/schema projection and native score-at-0.5 predicate cannot represent
+  the three-class `argmax != Sweet` candidate condition.
+- [x] Reuse the vendored official full-graph mutation enumeration and VRRW loop
+  with a project-owned calibrated three-class bridge. Freeze importance to
+  `1-p(Sweet)`, keep the candidate predicate separate, and call the official
+  normalized NeuroSED threshold-coverage function with the held Taste model.
+- [x] Split the exact sixteen-step official walk at step eight, fsync one
+  private inode/SHA-bound full-progress checkpoint, deliberately interrupt,
+  erase official/bridge/scorer/RNG memory, reload only from that held physical
+  file, and continue from the saved cursor without a seed-based fresh restart.
+- [x] Require strict aggregate proofs for checkpoint write/interruption/reload/
+  resume, exact `8 + 8 = 16`, saved/reset/restored state and RNG identities,
+  prefix preservation, and first-post-resume cursor continuity. Reject missing,
+  drifted, equal-byte-replaced, fake-typed/count, and restore-mismatch evidence.
+- [x] Keep checkpoint and graph payloads outside terminal output. Retain the
+  private checkpoint through evidence construction and leave pathname cleanup
+  to the enclosing temporary runtime; never use check-then-unlink as an exact
+  inode deletion claim.
+- [x] Bind the private runtime to a dedicated temporary parent/name and retain
+  its full ancestor namespace. Create/open a never-reused UUIDv4
+  `checkpoints/<uuid>/` child with a generation token, reclose runtime,
+  checkpoint-container, and checkpoint names after write/load/continuation and
+  before evidence, and reject whole-directory rename/equal-copy/restore.
+- [x] Require independently verified Taste NeuroSED PASS, load its held
+  checkpoint through descriptor authority, and keep global selector/order,
+  full readiness, and paper eligibility explicitly `NOT_EVALUATED`.
+- [x] Parse only the exact frozen train CSV, derive the one-hot native atom edit
+  vocabulary from train, and select eight GINE-correct Sweet parents from a
+  deterministic 64-parent train pool. Keep validation/calibration/test payloads
+  closed and forbid RF.
+- [x] Require the validated T2 adoption plus physically held T3/T4 outputs and
+  their one common checkpoint. Retain typed external controller/GPU-1 lease,
+  train, release, managed-v2, and predecessor authorities through the final
+  pre-seal revalidation and scientific-input close.
+- [x] Consume T2 only through the receipt-only five-file holder with exact
+  gate/receipt/embedded-source pins; require both T3 and T4 to match its full
+  canonical binding and one checkpoint, with no historical source-root
+  fallback.
+- [x] Remove the T7 hardlink publisher. Create a unique managed-v2 attempt and
+  worker staging root; emit only aggregate `raw_evidence.json`,
+  `worker_exit.json`, and `SEALED.json`. The worker cannot write PASS, a final
+  gate, verification, adoption, or release evidence.
+- [x] Add a pure independent method verifier that recomputes all
+  score/prediction/candidate, NeuroSED, checkpoint-resume, native-action, and
+  predecessor cross-bindings. Atomic same/cross-filesystem publication remains
+  exclusively in the frozen managed-v2 independent verifier API.
+- [x] At the final pre-seal callback, repeat immutable checkout/critical-blob,
+  controller full-cmdline/PID generation, GPU, receipt, stage, checkpoint, and
+  train validation; reject skip-worktree/assume-unchanged concealment.
+- [x] Export the original-order three-class native GINE adapter and retained
+  receipt-only T2/T3/T4 evidence boundary for successor T9 reuse without
+  duplicating classifier or graph-identity logic.
+- [x] Override the reused lineage codec's binary task fields at the stable Taste
+  boundary: `label`, `gnn_label`, PyG `y`, and `source_label` remain native
+  `0/1/2`; omit scalar `target_label` and expose the other two classes as the
+  exact untargeted destinations.
+- [x] Bind the worker to frozen managed execution v2 attempt/staging APIs and
+  require the managed-v2 PASS SHA in attempt inputs. Keep the existing
+  controller/GPU checks as additional release-time inputs until the controller
+  handoff adopts the frozen managed-v2 process-lineage receipt.
+- [x] Add a thin AutoDL CLI/wrapper, paired static-refusal Slurm entrypoint,
+  hostile contract tests, and operator documentation.
+- [ ] Obtain fresh independent review, then stage-freeze the committed tree.
+- [ ] Later create a clean one-parent release successor changing only the
+  release config and wrapper literal, populated with exact integration,
+  T2/T3/T4, controller, GPU lease, output, and critical-blob pins.
+- [ ] Have a separate verifier reopen SEALED, call the T7 method verifier, and
+  pass that result into managed-v2 atomic publication. Do not infer PASS from a
+  PID, log line, worker exit, or generic file list.
