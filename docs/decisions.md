@@ -101,22 +101,24 @@ changed because its successor is owned by the concurrent NeuroSED/GCF work.
 Implemented in code, focused tests, and operator documentation; all three
 science routes remain unrun and release disabled.
 
-## [2026-08-28] Replace legacy T4 publication with a managed-v2 GPU-2 successor
+## [2026-08-28] Freeze managed Taste release v3 and move T4 to GPU 1
 
 ### Motivation
 
-The historical T4 path consumed an older T3 adoption layout, was frozen to
-physical GPU 1, and let the science process write its own terminal marker. The
+The historical T4 path consumed an older T3 adoption layout and let the
+science process write its own terminal marker. The
 fresh T3 result is instead a managed-v2 publication containing a newly fitted
 validation-only temperature under `artifacts/checkpoint`, and the active Taste
-schedule assigns the bounded oracle smoke to physical GPU 2.
+schedule assigns the bounded oracle smoke to physical GPU 1. The previous
+authority draft also lacked a complete external launcher trust root, phase
+barrier, and auditable GPU lease lifecycle.
 
 ### Decision
 
 Add a successor which descriptor-retains the exact managed T3 tree, verifies
 its generic gate and nested scientific PASS, and loads only its selected GINE
 checkpoint plus graph-cache `manifest.json` and `calibration.pt`. Bind physical
-GPU index 2, its UUID, `CUDA_VISIBLE_DEVICES=2`, and visible `cuda:0`. Run the
+GPU index 1, its UUID, `CUDA_VISIBLE_DEVICES=1`, and visible `cuda:0`. Run the
 fixed sixteen-parent/four-deletion smoke with full three-class probability and
 batch/single checks, real connected deletions, invalid/full-parent controls,
 and observed Sweet-to-Bitter and Sweet-to-Tasteless flips.
@@ -128,6 +130,15 @@ evidence with method semantics nested in independent verification. Attempt,
 staging, and generation identities are UUIDs; input authorities remain held;
 ABA or lineage drift quarantines without signals; automatic child termination
 is false.
+
+The compatibility `taste_main_v2` files implement the managed Taste
+release-v3 foundation, not the complete `main_completion_v4` scheduler. A
+distinct supervisor registers and independently verifies the controller child
+before publishing an immutable launcher receipt. Heartbeats, activations,
+renewals, and releases are append-only chains. The outer T4 runner holds the
+canonical GPU UUID lock continuously through scientific worker, SEALED
+handoff, independent verifier, and terminal publication. T4 is fixed to GPU 1;
+the reserved NeuroSED authority lane is GPU 2. GPU 0 and GPU 3 remain protected.
 
 ### Consequences
 
@@ -11809,3 +11820,32 @@ still need integration with real artifacts. The readiness model-card gate also
 requires a full upstream GCF commit; `UNAVAILABLE_FROM_VENDORED_SNAPSHOT` is an
 intentional hard failure rather than a value that critical blob hashes can
 silently replace.
+
+## [2026-08-28] Authenticate Taste method control authority with generations
+
+### Motivation
+
+Managed-v2 attempts previously cross-checked an operator-provided
+`controller_id`, which did not prove that a live controller generation held the
+GPU assignment at worker or verifier release time.
+
+### Decision
+
+Create one immutable main-v2 receipt for the clean Git controller process and
+append a new UUID/sequence heartbeat every ten seconds. Bind each heartbeat to
+the receipt SHA, prior heartbeat SHA, process generation, policy facts, and at
+most two fixed task/GPU leases. Consumers hold exact receipt, heartbeat, and
+lease files with `O_NOFOLLOW`, verify the live process generation, and adopt
+only a complete append-only successor chain. T4 holds this authority throughout
+worker science and independent verification and revalidates immediately before
+terminal publication.
+
+### Consequences
+
+- An arbitrary controller string can no longer release T4.
+- This historical main-v2 draft assigned NeuroSED/GPU1 and T4/GPU2; the
+  release-v3 successor decision at the top of this file supersedes that map
+  with T4/GPU1 and NeuroSED/GPU2 while GPU0/GPU3 remain protected.
+- Status is read-only and every anomaly is quarantined without process signals.
+- The controller may monitor dependencies, but it is not yet the full T6--T16
+  main-table scheduler.

@@ -1,136 +1,101 @@
-# TasteMolNet T4 multiclass oracle smoke, managed v2
+# TasteMolNet T4 multiclass oracle smoke, managed release v3
 
-## Frozen boundary
+## Frozen science boundary
 
-This successor consumes the independently published managed-v2 T3 root:
+T4 consumes the exact published managed T3 root:
 
 ```text
-/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/
-tastemolnet/gine/seed7/calibrated-20260828T054900Z-746545ed
+/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/tastemolnet/gine/seed7/calibrated-20260828T054900Z-746545ed
 ```
 
-The line break above is display-only. The physical path is one direct
-`calibrated-*` child of the TasteMolNet `gine/seed7` artifact root. T4 accepts
-only the generic managed `gate.json` plus its SHA-bound `verification.json`,
-then validates the nested `tastemolnet_t3_calibration_v2` scientific PASS. Its
-only checkpoint is `<T3>/artifacts/checkpoint`.
+It validates the generic managed gate, nested T3 scientific verification, and
+the complete `artifacts/checkpoint` inventory. It opens only authenticated
+graph-cache `manifest.json` and `calibration.pt`; train, validation, test, CSV,
+and RF-oracle payloads are forbidden.
 
-T4 opens only the authenticated graph-cache `manifest.json` and
-`calibration.pt`. It never opens train, validation, test, or a CSV payload. It
-uses physical GPU index 2, `CUDA_VISIBLE_DEVICES=2`, visible `cuda:0`, and the
-controller-provided physical GPU UUID. The process verifies the index/UUID
-again with `nvidia-smi` and requires exactly one visible CUDA device.
+The managed release-v3 authority binding assigns T4 to physical GPU 1,
+`CUDA_VISIBLE_DEVICES=1`, visible `cuda:0`, and the exact `nvidia-smi` GPU UUID.
+The smoke deterministically selects 16 calibration molecules with true label 1
+and frozen-GINE prediction 1, then evaluates exactly four real connected
+deletions per parent. It checks batch/single equivalence, all three
+probabilities, observed `1->0`, `1->2`, and `1->1`, invalid/full deletion
+controls, and one model load per scientific process.
 
-The deterministic smoke selects sixteen calibration rows with true label 1
-and frozen-GINE prediction 1, retaining exactly four real connected one- or
-two-atom deletions per parent. It validates every three-wide probability
-vector, parent and deletion-pair batch/single parity, full-parent and invalid
-deletion controls, and observed `1->0`, `1->2`, and no-flip outcomes. One model
-object is constructed per scientific process.
+## Managed execution
 
-## Publication ownership
+The only production entrypoint is the outer runner:
 
-The method worker writes only:
-
-- four aggregate JSON documents;
-- `t4_oracle_smoke_candidate.json`; and
-- `sha256sums.txt`.
-
-The generic managed worker adds only `raw_evidence.json`, `worker_exit.json`,
-and `SEALED.json`. It cannot write PASS, a gate, or verification evidence.
-
-A separate method verifier repeats the science from the retained T3 and cache
-authorities. Only after the replay matches the SEALED candidate does the
-managed-v2 terminal publisher write `verification.json`, generic `gate.json`,
-and `PASS`, then atomically publish the complete directory with no replacement.
-Every attempt, worker staging root, and generation token is a permanent UUID;
-partial names are burned. `AUTO_TERMINATE_UNCONTROLLED_CHILDREN` is fixed to
-`0`; any anomaly is quarantined without a process signal.
-
-Published method evidence is aggregate-only. It contains no SMILES, molecule
-ID, per-example prediction, graph payload, CSV, or matrix-cell claim.
-
-## AutoDL worker launch
-
-Run from the reviewed clean immutable checkout. First fill the physical graph
-cache root and GPU-2 UUID. The four managed input hashes are shell-computable;
-the T3 gate and verification recursively bind the model, fresh temperature,
-feature schema, T2 receipt, and exact checkpoint inventory.
-
-```bash
-export AUTO_TERMINATE_UNCONTROLLED_CHILDREN=0
-export AUTODL_PHYSICAL_GPU_INDEX=2
-export AUTODL_PHYSICAL_GPU_UUID=GPU-REVIEWED-GPU2-UUID
-export CUDA_VISIBLE_DEVICES=2
-
-T3_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/tastemolnet/gine/seed7/calibrated-20260828T054900Z-746545ed
-GRAPH_CACHE_ROOT=/absolute/existing/tastemolnet/graph-cache
-STAGE_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/control/tastemolnet-main-v2/stages/T4_ORACLE_SMOKE
-CONTROLLER_ID=tastemolnet-main-v2
-GIT_COMMIT="$(git rev-parse HEAD)"
-CONFIG_HASH="$(sha256sum configs/hpc.yaml | awk '{print $1}')"
-T3_GATE_HASH="$(sha256sum "$T3_ROOT/gate.json" | awk '{print $1}')"
-T3_VERIFICATION_HASH="$(sha256sum "$T3_ROOT/verification.json" | awk '{print $1}')"
-CACHE_MANIFEST_HASH="$(sha256sum "$GRAPH_CACHE_ROOT/manifest.json" | awk '{print $1}')"
-CALIBRATION_CACHE_HASH="$(sha256sum "$GRAPH_CACHE_ROOT/calibration.pt" | awk '{print $1}')"
-
-/root/miniconda3/envs/smiles_pip118/bin/python -B scripts/autodl/managed_worker_v2.py \
-  --stage-root "$STAGE_ROOT" \
-  --controller-id "$CONTROLLER_ID" \
-  --task-id T4_ORACLE_SMOKE \
-  --git-commit "$GIT_COMMIT" \
-  --config-hash "$CONFIG_HASH" \
-  --input-hash "t3_gate=$T3_GATE_HASH" \
-  --input-hash "t3_verification=$T3_VERIFICATION_HASH" \
-  --input-hash "graph_cache_manifest=$CACHE_MANIFEST_HASH" \
-  --input-hash "calibration_cache=$CALIBRATION_CACHE_HASH" \
-  --cwd "$PWD" \
-  -- \
-  /root/miniconda3/envs/smiles_pip118/bin/python -I -B \
-    scripts/autodl/tastemolnet_t4_oracle_smoke_worker_v2.py \
-    --config configs/hpc.yaml \
-    --set inference.fallback_to_heuristic=false \
-    --t3-root "$T3_ROOT" \
-    --graph-cache-root "$GRAPH_CACHE_ROOT" \
-    --gpu-uuid "$AUTODL_PHYSICAL_GPU_UUID" \
-    --batch-size 32
+```text
+scripts/autodl/tastemolnet_t4_managed_runner_v2.py
 ```
 
-Record the emitted `attempt_id`, `generation_token`, and `staging_path`. A
-nonzero worker or anything other than `SEALED` is not verifier input.
+It owns one UUID managed attempt and continuously holds the canonical GPU1 UUID
+lock across:
 
-## Independent verifier launch
+```text
+worker -> SEALED -> independent verifier -> atomic terminal publish -> release ACK
+```
 
-Use the same clean commit, input authorities, GPU-2 UUID, and environment. The
-final path must be a fresh direct `t4-oracle-smoke-*` sibling of T3.
+The worker can write only aggregate method documents and candidate evidence.
+The verifier independently repeats the science and is the only caller allowed
+to publish `verification.json`, `gate.json`, and `PASS`. Direct worker and
+verifier Slurm scripts are static AutoDL-only refusals.
+
+The managed attempt input hashes are exactly:
+
+```text
+t3_gate
+t3_verification
+graph_cache_manifest
+calibration_cache
+controller_launcher_receipt
+controller_receipt
+controller_anchor_heartbeat
+gpu1_lease
+```
+
+The anchor heartbeat is historical immutable input H1. Worker and verifier
+holders independently prove H1 belongs to the full sequence-1-to-terminal
+chain, while adopting fresh H2+ terminal generations. Candidate evidence
+records worker-initial and worker-final terminal heartbeats separately; a
+normal heartbeat advance therefore cannot create a false quarantine.
+
+The activation phases are `WORKER_ACTIVE`, `WAITING_VERIFIER`,
+`VERIFIER_ACTIVE`, and `RELEASE_REQUESTED`. A science child blocks for at most
+45 seconds waiting for its exact phase acknowledgement. The runner requests an
+append-only renewal after acquiring GPU1, giving the bounded smoke two lease
+windows. Release occurs only after the independent verifier exits successfully
+and the final path exists.
+
+## CLI shape
+
+Run only from a reviewed clean immutable AutoDL checkout after the controller
+has acknowledged a fresh GPU1 lease:
 
 ```bash
-SEALED=/absolute/value/from/worker/staging_path
-ATTEMPT_ID=UUID-FROM-WORKER
-GENERATION_TOKEN=UUID-FROM-WORKER
-FINAL_PATH="$(dirname "$T3_ROOT")/t4-oracle-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
-
-/root/miniconda3/envs/smiles_pip118/bin/python -I -B \
-  scripts/autodl/tastemolnet_t4_oracle_smoke_verifier_v2.py \
-  --config configs/hpc.yaml \
+python -I -B scripts/autodl/tastemolnet_t4_managed_runner_v2.py \
+  --config "$PWD/configs/hpc.yaml" \
   --set inference.fallback_to_heuristic=false \
-  --sealed "$SEALED" \
-  --final-path "$FINAL_PATH" \
-  --t3-root "$T3_ROOT" \
-  --graph-cache-root "$GRAPH_CACHE_ROOT" \
-  --gpu-uuid "$AUTODL_PHYSICAL_GPU_UUID" \
-  --expected-attempt-id "$ATTEMPT_ID" \
-  --expected-generation-token "$GENERATION_TOKEN" \
-  --expected-controller-id "$CONTROLLER_ID" \
-  --expected-git-commit "$GIT_COMMIT" \
-  --batch-size 32
+  --stage-root /absolute/control/T4_ORACLE_SMOKE \
+  --final-path /autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/tastemolnet/gine/seed7/t4-oracle-smoke-UUID \
+  --t3-root /autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/tastemolnet/gine/seed7/calibrated-20260828T054900Z-746545ed \
+  --graph-cache-root /absolute/private/graph-cache \
+  --gpu-uuid GPU-REVIEWED-GPU1-UUID \
+  --controller-launcher-receipt /absolute/launcher/launcher_receipt.json \
+  --controller-receipt /absolute/controller/controller_receipt.json \
+  --controller-anchor-heartbeat /absolute/controller/heartbeats/00000000000000000001-00000000-0000-4000-8000-000000000001.json \
+  --expected-controller-id taste-main-v2-UUID \
+  --expected-git-commit COMMIT \
+  --expected-git-tree TREE \
+  --expected-controller-launcher-receipt-sha256 SHA256 \
+  --expected-controller-receipt-sha256 SHA256 \
+  --expected-controller-anchor-heartbeat-sha256 SHA256 \
+  --gpu-lease /absolute/controller/gpu_leases/T4_ORACLE_SMOKE-UUID.json \
+  --expected-gpu-lease-uuid UUID \
+  --expected-gpu-lease-sha256 SHA256
 ```
 
-Success requires a generic managed PASS gate whose nested verification has
-stage `T4_ORACLE_SMOKE`, marker `[TASTE_T4_ORACLE_SMOKE_PASS]`, both flip
-destinations, 16 parents, 64 deletions, GPU2/UUID binding, and all access flags.
-The scripts under `scripts/slurm/` are mandatory static CLI parity and always
-refuse HPC science.
-
-This stage is an oracle-interface smoke, not one of the four paper methods and
-not authorization for a GNN ablation.
+This repository change does not launch the command. A real successful terminal
+verification uses `[TASTE_T4_ORACLE_SMOKE_PASS]`; implementation tests do not
+emit that runtime marker. T4 is an oracle-interface prerequisite, not a paper
+matrix cell and not authorization for a GNN ablation.

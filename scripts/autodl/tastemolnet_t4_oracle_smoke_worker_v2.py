@@ -19,7 +19,13 @@ from src.eval.tastemolnet_t4_oracle_smoke_v2 import (  # noqa: E402
     TasteT4OracleSmokeError,
     build_t4_candidate,
 )
-from src.utils.process_identity_v2 import require_auto_termination_disabled  # noqa: E402
+from src.utils.process_identity_v2 import (  # noqa: E402
+    ProcessIdentityV2Error,
+    require_auto_termination_disabled,
+)
+from src.utils.autodl_tastemolnet_main_v2 import (  # noqa: E402
+    TasteMainV2AuthorityError,
+)
 
 
 def _config(path: str) -> Path:
@@ -40,6 +46,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--t3-root", type=Path, required=True)
     parser.add_argument("--graph-cache-root", type=Path, required=True)
     parser.add_argument("--gpu-uuid", required=True)
+    parser.add_argument("--controller-launcher-receipt", type=Path, required=True)
+    parser.add_argument("--controller-receipt", type=Path, required=True)
+    parser.add_argument("--controller-anchor-heartbeat", type=Path, required=True)
+    parser.add_argument("--expected-controller-id", required=True)
+    parser.add_argument("--expected-git-commit", required=True)
+    parser.add_argument("--expected-git-tree", required=True)
+    parser.add_argument(
+        "--expected-controller-launcher-receipt-sha256", required=True
+    )
+    parser.add_argument("--expected-controller-receipt-sha256", required=True)
+    parser.add_argument(
+        "--expected-controller-anchor-heartbeat-sha256", required=True
+    )
+    parser.add_argument("--expected-gpu-lease-uuid", required=True)
+    parser.add_argument("--expected-gpu-lease-sha256", required=True)
+    parser.add_argument(
+        "--controller-max-heartbeat-age-seconds", type=float, default=35
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--artifact-root", type=Path)
     return parser.parse_args(argv)
@@ -63,12 +87,38 @@ def main(argv: list[str] | None = None) -> int:
             attempt_id=attempt_id,
             generation_token=generation_token,
             gpu_uuid=args.gpu_uuid,
+            controller_launcher_receipt_path=args.controller_launcher_receipt,
+            controller_receipt_path=args.controller_receipt,
+            controller_anchor_heartbeat_path=args.controller_anchor_heartbeat,
+            expected_controller_id=args.expected_controller_id,
+            expected_git_commit=args.expected_git_commit,
+            expected_git_tree=args.expected_git_tree,
+            expected_controller_launcher_receipt_sha256=(
+                args.expected_controller_launcher_receipt_sha256
+            ),
+            expected_controller_receipt_sha256=(
+                args.expected_controller_receipt_sha256
+            ),
+            expected_controller_anchor_heartbeat_sha256=(
+                args.expected_controller_anchor_heartbeat_sha256
+            ),
+            expected_gpu_lease_uuid=args.expected_gpu_lease_uuid,
+            expected_gpu_lease_sha256=args.expected_gpu_lease_sha256,
+            controller_max_heartbeat_age_seconds=(
+                args.controller_max_heartbeat_age_seconds
+            ),
             batch_size=args.batch_size,
         )
         result["config_sha256"] = hashlib.sha256(args.config.read_bytes()).hexdigest()
         print(json.dumps(result, sort_keys=True), flush=True)
         return 0
-    except (TasteT4OracleSmokeError, OSError, ValueError) as exc:
+    except (
+        TasteMainV2AuthorityError,
+        TasteT4OracleSmokeError,
+        ProcessIdentityV2Error,
+        OSError,
+        ValueError,
+    ) as exc:
         print(f"T4_ORACLE_SMOKE_WORKER_BLOCKED: {exc}", file=sys.stderr)
         return 75
 

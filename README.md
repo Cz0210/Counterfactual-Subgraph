@@ -545,7 +545,7 @@ TasteMolNet T3 performs a new validation-only scalar-temperature fit through a
 managed-v2 worker and independent verifier, as documented in
 `docs/AUTODL_TASTEMOLNET_T3_CALIBRATION_V2.md`.
 
-TasteMolNet T4 now has a managed-v2 GPU-2 successor that consumes only the
+TasteMolNet T4 now has a managed release-v3 GPU-1 successor that consumes only the
 published T3 checkpoint and authenticated calibration graph cache, repeats the
 bounded three-class smoke in an independent verifier, and publishes aggregate
 evidence atomically. See
@@ -556,3 +556,12 @@ fixed-budget independent query-target pairs and only real pinned pyged/GEDLIB
 interval labels. Build, benchmark, and budget-selection code is fail-closed;
 the local dependency audit is blocked and claims no scientific PASS. See
 `docs/TASTE_GCF_NEUROSED_FIXED_BUDGET_PROTOCOL.md`.
+
+Taste main-v2 compatibility entrypoints now provide the managed Taste
+release-v3 authority foundation: an external immutable launcher trust root,
+append-only 10-second heartbeat generations, live PID-generation validation,
+activation/renewal/release chains, and fixed controller-acknowledged T4/GPU1
+and NeuroSED/GPU2 leases. This is an authority/monitor layer, not the complete
+`main_completion_v4` scheduler. Method-specific blockers are recorded in
+`docs/MANAGED_TASTE_RELEASE_V3_BLOCKERS.json`. See
+`docs/AUTODL_TASTEMOLNET_MAIN_V2_CONTROLLER_AUTHORITY.md`.

@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import stat
-import subprocess
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve(strict=True).parents[2]
@@ -22,6 +21,7 @@ from src.eval.tastemolnet_t4_oracle_smoke_v2 import (  # noqa: E402
     verify_and_publish_t4,
 )
 from src.utils.process_identity_v2 import require_auto_termination_disabled  # noqa: E402
+from src.utils.autodl_tastemolnet_main_v2 import inspect_clean_git  # noqa: E402
 
 
 def _config(path: str) -> Path:
@@ -35,23 +35,8 @@ def _config(path: str) -> Path:
     return selected
 
 
-def _clean_commit() -> str:
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    if status.stdout:
-        raise TasteT4OracleSmokeError("independent verifier checkout is dirty")
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+def _clean_git() -> tuple[str, str]:
+    return inspect_clean_git(PROJECT_ROOT)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -67,6 +52,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-generation-token", required=True)
     parser.add_argument("--expected-controller-id", required=True)
     parser.add_argument("--expected-git-commit", required=True)
+    parser.add_argument("--expected-git-tree", required=True)
+    parser.add_argument("--controller-launcher-receipt", type=Path, required=True)
+    parser.add_argument("--controller-receipt", type=Path, required=True)
+    parser.add_argument("--controller-anchor-heartbeat", type=Path, required=True)
+    parser.add_argument(
+        "--expected-controller-launcher-receipt-sha256", required=True
+    )
+    parser.add_argument("--expected-controller-receipt-sha256", required=True)
+    parser.add_argument(
+        "--expected-controller-anchor-heartbeat-sha256", required=True
+    )
+    parser.add_argument("--expected-gpu-lease-uuid", required=True)
+    parser.add_argument("--expected-gpu-lease-sha256", required=True)
+    parser.add_argument(
+        "--controller-max-heartbeat-age-seconds", type=float, default=35
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     return parser.parse_args(argv)
 
@@ -77,8 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         require_auto_termination_disabled()
         if args.set != ["inference.fallback_to_heuristic=false"]:
             raise TasteT4OracleSmokeError("fail-closed inference override is required")
-        if _clean_commit() != args.expected_git_commit:
-            raise TasteT4OracleSmokeError("verifier checkout commit differs from authority")
+        commit, tree = _clean_git()
+        if commit != args.expected_git_commit or tree != args.expected_git_tree:
+            raise TasteT4OracleSmokeError("verifier checkout differs from authority")
         publication, verification = verify_and_publish_t4(
             sealed_path=args.sealed,
             final_path=args.final_path,
@@ -89,7 +91,25 @@ def main(argv: list[str] | None = None) -> int:
             expected_generation_token=args.expected_generation_token,
             expected_controller_id=args.expected_controller_id,
             expected_git_commit=args.expected_git_commit,
+            expected_git_tree=args.expected_git_tree,
             expected_config_hash=hashlib.sha256(args.config.read_bytes()).hexdigest(),
+            controller_launcher_receipt_path=args.controller_launcher_receipt,
+            controller_receipt_path=args.controller_receipt,
+            controller_anchor_heartbeat_path=args.controller_anchor_heartbeat,
+            expected_controller_launcher_receipt_sha256=(
+                args.expected_controller_launcher_receipt_sha256
+            ),
+            expected_controller_receipt_sha256=(
+                args.expected_controller_receipt_sha256
+            ),
+            expected_controller_anchor_heartbeat_sha256=(
+                args.expected_controller_anchor_heartbeat_sha256
+            ),
+            expected_gpu_lease_uuid=args.expected_gpu_lease_uuid,
+            expected_gpu_lease_sha256=args.expected_gpu_lease_sha256,
+            controller_max_heartbeat_age_seconds=(
+                args.controller_max_heartbeat_age_seconds
+            ),
             batch_size=args.batch_size,
         )
         print(

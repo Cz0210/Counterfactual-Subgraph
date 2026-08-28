@@ -41,11 +41,32 @@
   method verification and preserve every release-disabled gate.
 - [x] Update focused tests and runbooks; no deployment or science is included.
 
-## 2026-08-28: TasteMolNet T4 managed-v2 GPU-2 successor
+## 2026-08-28: Managed Taste release-v3 authority foundation
+
+- [x] Add an immutable controller receipt binding UUID/ID, PID generation,
+  executable/command/cwd/cgroup, clean commit/tree, launch policy, and free
+  persistent-space observation.
+- [x] Replace mutable heartbeat state with append-only UUID/sequence generation
+  files every ten seconds and a retained `O_NOFOLLOW` consumer that validates
+  freshness, live `/proc`, and the complete forward hash chain.
+- [x] Require a distinct external supervisor receipt and registration/handshake
+  barrier before the controller may create its own PID-generation receipt.
+- [x] Restrict controller acknowledgements to at most two fixed leases:
+  T4/GPU1 and NeuroSED/GPU2; keep GPU0/GPU3 protected.
+- [x] Add append-only activation, renewal, and clean release acknowledgement;
+  hold the canonical project UUID lock across worker, SEALED, verifier, and
+  terminal publication, with no process-signal API.
+- [x] Require T4 worker and verifier to retain receipt/heartbeat/lease evidence
+  and revalidate at their final boundaries, not merely accept controller text.
+- [ ] Integrate the no-lease holder into T5 and method-specific runners into
+  T6/T8/T9. This commit is not `main_completion_v4`; exact blockers are in the
+  machine-readable scope document.
+
+## 2026-08-28: TasteMolNet T4 managed release-v3 GPU-1 successor
 
 - [x] Consume only the generic managed T3 PASS plus nested scientific
   verification and the exact `artifacts/checkpoint` directory.
-- [x] Bind physical GPU 2 and UUID to visible `cuda:0`; keep one model load per
+- [x] Bind physical GPU 1 and UUID to visible `cuda:0`; keep one model load per
   scientific process.
 - [x] Select sixteen true/predicted Sweet calibration parents with exactly four
   real connected deletions each and validate all three probabilities,
@@ -54,7 +75,9 @@
   verifier and reserve gate/PASS publication for managed-v2 atomic rename.
 - [x] Add AutoDL CLIs, static-refusal paired Slurm scripts, focused tests, and
   an operator runbook.
-- [ ] Deploy the clean reviewed commit and run worker/verifier on GPU 2; do not
+- [x] Add a foreground outer runner that holds the canonical GPU UUID lock
+  continuously through worker, SEALED, verifier, publish, and release ACK.
+- [ ] Deploy the clean reviewed commit and run worker/verifier on GPU 1; do not
   launch from this implementation branch and do not start an ablation.
 
 ## 2026-08-28: TasteMolNet T9 COMRECGC release-disabled core

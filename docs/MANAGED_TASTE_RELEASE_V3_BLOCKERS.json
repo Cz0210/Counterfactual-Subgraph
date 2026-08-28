@@ -1,0 +1,42 @@
+{
+  "schema_version": "managed_taste_release_v3_scope_blockers_v1",
+  "managed_taste_release_version": 3,
+  "scope_commit_state": "IMPLEMENTED_NOT_DEPLOYED",
+  "complete_main_completion_v4_controller": false,
+  "science_started_by_this_change": false,
+  "runtime_marker_emitted": false,
+  "fixed_gpu_bindings": {
+    "T4_ORACLE_SMOKE": 1,
+    "TASTE_GCF_NEUROSED": 2
+  },
+  "capabilities": {
+    "external_launcher_receipt": "IMPLEMENTED",
+    "controller_pid_generation": "IMPLEMENTED",
+    "append_only_heartbeat_chain": "IMPLEMENTED",
+    "terminal_only_heartbeat_freshness": "IMPLEMENTED",
+    "canonical_gpu_uuid_lock": "IMPLEMENTED",
+    "controller_coordination_lock": "IMPLEMENTED",
+    "active_phase_barrier": "IMPLEMENTED",
+    "append_only_lease_renewal": "IMPLEMENTED",
+    "clean_release_ack": "IMPLEMENTED",
+    "no_signal_quarantine": "IMPLEMENTED",
+    "t4_managed_outer_runner": "IMPLEMENTED_NOT_LAUNCHED",
+    "no_gpu_lease_holder_api": "IMPLEMENTED",
+    "t5_cli_wiring": "BLOCKED_NEXT_COMMIT",
+    "t6_cli_wiring": "BLOCKED_NEXT_COMMIT",
+    "t8_cli_wiring": "BLOCKED_NEXT_COMMIT",
+    "t9_cli_wiring": "BLOCKED_NEXT_COMMIT",
+    "main_completion_v4_scheduler": "BLOCKED_NEXT_COMMIT",
+    "official_fixed_budget_neurosed": "OUT_OF_SCOPE_NOT_IMPLEMENTED"
+  },
+  "safe_to_start": {
+    "T4_ORACLE_SMOKE": false,
+    "T5_CLEAN_SFT": false,
+    "T6_OURS_PPO_SMOKE": false,
+    "T8_GLOBALGCE_SMOKE": false,
+    "T9_COMRECGC_SMOKE": false,
+    "MAIN_COMPLETION_V4": false
+  },
+  "manual_intervention_required": true,
+  "manual_intervention_reason": "Integrate this tested foundation, wire method-specific successors, review immutable execution commit, and launch from AutoDL only."
+}

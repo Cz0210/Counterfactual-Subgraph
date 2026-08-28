@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 import re
 import stat
-import subprocess
+import time
 from typing import Any, Callable, Mapping
 
 from src.data.molecular_graph_dataset import (
@@ -47,6 +47,12 @@ from src.utils.managed_execution_v2 import (
     WORKER_EXIT_SCHEMA,
     WORKER_RAW_EVIDENCE_SCHEMA,
 )
+from src.utils.autodl_tastemolnet_main_v2 import (
+    DEFAULT_MAX_HEARTBEAT_AGE_SECONDS,
+    TasteMainV2AuthorityError,
+    hold_taste_main_v2_controller_authority,
+    probe_physical_gpus,
+)
 from src.utils.terminal_publisher_v2 import (
     HeldSealedArtifactV2,
     TerminalPublicationV2,
@@ -59,11 +65,15 @@ SCHEMA_VERSION = "tastemolnet_t4_oracle_smoke_v2"
 STAGE = "T4_ORACLE_SMOKE"
 TASK_ID = "T4_ORACLE_SMOKE"
 PASS_MARKER = "[TASTE_T4_ORACLE_SMOKE_PASS]"
-PHYSICAL_GPU_INDEX = 2
+PHYSICAL_GPU_INDEX = 1
 VISIBLE_DEVICE = "cuda:0"
-CUDA_VISIBLE_DEVICES = "2"
+CUDA_VISIBLE_DEVICES = "1"
 SOURCE_COUNT = 16
 DELETIONS_PER_PARENT = 4
+PUBLISHED_T3_ROOT = Path(
+    "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/"
+    "tastemolnet/gine/seed7/calibrated-20260828T054900Z-746545ed"
+)
 T4_CANDIDATE_NAME = "t4_oracle_smoke_candidate.json"
 METHOD_DOCUMENTS = frozenset(
     {
@@ -82,6 +92,15 @@ _GPU_UUID = re.compile(r"^GPU-[0-9A-Fa-f-]+$")
 
 class TasteT4OracleSmokeError(RuntimeError):
     """The T4 authority, science, candidate, or independent check failed."""
+
+
+def _require_published_t3_root(path: str | Path) -> Path:
+    selected = Path(path)
+    if selected != PUBLISHED_T3_ROOT:
+        raise TasteT4OracleSmokeError(
+            "T4 must consume the exact reviewed managed T3 publication"
+        )
+    return selected
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -397,6 +416,9 @@ class HeldPublishedT3:
             or temperature.get("calibration_payload_loaded") is not False
             or temperature.get("test_payload_loaded") is not False
             or model_card.get("checkpoint_id") != model_sha
+            or not _SHA256.fullmatch(
+                str(model_card.get("graph_cache_manifest_sha256", ""))
+            )
             or science.get("model_sha256") != model_sha
             or science.get("temperature_scaling_sha256") != temperature_sha
             or science.get("feature_schema_file_sha256") != feature_file_sha
@@ -431,6 +453,9 @@ class HeldPublishedT3:
             "temperature_scaling_sha256": temperature_sha,
             "feature_schema_file_sha256": feature_file_sha,
             "feature_schema_sha256": feature_schema["schema_sha256"],
+            "graph_cache_manifest_sha256": model_card[
+                "graph_cache_manifest_sha256"
+            ],
             "source_t2_receipt_id": science.get("t2_receipt_id"),
             "source_t2_gate_sha256": science.get("t2_receipt_gate_sha256"),
             "source_t2_evidence_sha256": science.get("source_evidence_sha256"),
@@ -566,32 +591,60 @@ class T4ScienceRun:
 ScienceRunner = Callable[..., T4ScienceRun]
 
 
-def _require_gpu2_environment(*, gpu_uuid: str) -> dict[str, Any]:
+def collect_t4_managed_input_hashes(
+    *,
+    t3_root: str | Path,
+    graph_cache_root: str | Path,
+    controller_launcher_receipt_sha256: str,
+    controller_receipt_sha256: str,
+    controller_anchor_heartbeat_sha256: str,
+    gpu_lease_sha256: str,
+) -> dict[str, str]:
+    """Hold the published T3/cache metadata and derive exact attempt pins."""
+
+    t3 = HeldPublishedT3(_require_published_t3_root(t3_root))
+    cache: HeldCalibrationCache | None = None
+    try:
+        cache = HeldCalibrationCache(
+            graph_cache_root,
+            expected_manifest_sha256=t3.binding["graph_cache_manifest_sha256"],
+        )
+        result = {
+            "t3_gate": t3.binding["t3_gate_sha256"],
+            "t3_verification": t3.binding["t3_verification_sha256"],
+            "graph_cache_manifest": cache.manifest.sha256,
+            "calibration_cache": cache.calibration.sha256,
+            "controller_launcher_receipt": controller_launcher_receipt_sha256,
+            "controller_receipt": controller_receipt_sha256,
+            "controller_anchor_heartbeat": controller_anchor_heartbeat_sha256,
+            "gpu1_lease": gpu_lease_sha256,
+        }
+        if any(not _SHA256.fullmatch(value) for value in result.values()):
+            raise TasteT4OracleSmokeError("T4 managed input hash is malformed")
+        t3.verify()
+        cache.verify()
+        return result
+    finally:
+        if cache is not None:
+            cache.close()
+        t3.close()
+
+
+def _require_gpu1_environment(*, gpu_uuid: str) -> dict[str, Any]:
     if not _GPU_UUID.fullmatch(gpu_uuid):
         raise TasteT4OracleSmokeError("physical GPU UUID is malformed")
     if os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != str(PHYSICAL_GPU_INDEX):
-        raise TasteT4OracleSmokeError("T4 lacks physical GPU2 index binding")
+        raise TasteT4OracleSmokeError("T4 lacks physical GPU1 index binding")
     if os.environ.get("AUTODL_PHYSICAL_GPU_UUID") != gpu_uuid:
         raise TasteT4OracleSmokeError("T4 GPU UUID differs from controller binding")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != CUDA_VISIBLE_DEVICES:
-        raise TasteT4OracleSmokeError("CUDA visibility is not physical GPU2")
-    probe = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,uuid",
-            "--format=csv,noheader,nounits",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    observed: dict[int, str] = {}
-    for line in probe.stdout.splitlines():
-        left, separator, right = line.partition(",")
-        if separator:
-            observed[int(left.strip())] = right.strip()
+        raise TasteT4OracleSmokeError("CUDA visibility is not physical GPU1")
+    try:
+        observed = probe_physical_gpus()
+    except TasteMainV2AuthorityError as exc:
+        raise TasteT4OracleSmokeError(str(exc)) from exc
     if observed.get(PHYSICAL_GPU_INDEX) != gpu_uuid:
-        raise TasteT4OracleSmokeError("nvidia-smi GPU2 UUID binding changed")
+        raise TasteT4OracleSmokeError("nvidia-smi GPU1 UUID binding changed")
     try:
         import torch
     except ImportError as exc:  # pragma: no cover - AutoDL owns torch.
@@ -600,7 +653,7 @@ def _require_gpu2_environment(*, gpu_uuid: str) -> dict[str, Any]:
         raise TasteT4OracleSmokeError("T4 must see exactly one CUDA device")
     torch.cuda.set_device(0)
     if torch.cuda.current_device() != 0:
-        raise TasteT4OracleSmokeError("physical GPU2 is not mapped to cuda:0")
+        raise TasteT4OracleSmokeError("physical GPU1 is not mapped to cuda:0")
     return {
         "physical_gpu_index": PHYSICAL_GPU_INDEX,
         "physical_gpu_uuid": gpu_uuid,
@@ -653,8 +706,8 @@ def _execute_science(
 ) -> T4ScienceRun:
     if type(batch_size) is not int or batch_size <= 0:
         raise TasteT4OracleSmokeError("batch size must be a positive native integer")
-    gpu = _require_gpu2_environment(gpu_uuid=gpu_uuid)
-    t3 = HeldPublishedT3(t3_root)
+    gpu = _require_gpu1_environment(gpu_uuid=gpu_uuid)
+    t3 = HeldPublishedT3(_require_published_t3_root(t3_root))
     cache: HeldCalibrationCache | None = None
     try:
         model_card = t3.files["artifacts/checkpoint/model_card.json"].json()
@@ -806,6 +859,19 @@ def build_t4_candidate(
     attempt_id: str,
     generation_token: str,
     gpu_uuid: str,
+    controller_launcher_receipt_path: str | Path,
+    controller_receipt_path: str | Path,
+    controller_anchor_heartbeat_path: str | Path,
+    expected_controller_id: str,
+    expected_git_commit: str,
+    expected_git_tree: str,
+    expected_controller_launcher_receipt_sha256: str,
+    expected_controller_receipt_sha256: str,
+    expected_controller_anchor_heartbeat_sha256: str,
+    expected_gpu_lease_uuid: str,
+    expected_gpu_lease_sha256: str,
+    controller_max_heartbeat_age_seconds: float = DEFAULT_MAX_HEARTBEAT_AGE_SECONDS,
+    controller_barrier_timeout_seconds: int = 45,
     batch_size: int = 32,
     science_runner: ScienceRunner = _execute_science,
 ) -> dict[str, Any]:
@@ -816,68 +882,140 @@ def build_t4_candidate(
         raise TasteT4OracleSmokeError("managed artifact root must be exact and physical")
     if {entry.name for entry in os.scandir(output)} != {".generation_token.json"}:
         raise TasteT4OracleSmokeError("managed artifact root is not fresh")
-    run = science_runner(
-        t3_root=t3_root,
-        graph_cache_root=graph_cache_root,
-        gpu_uuid=gpu_uuid,
-        batch_size=batch_size,
-    )
-    try:
-        _validate_documents(run.documents)
-        run.revalidate()
-        document_hashes: dict[str, str] = {}
-        for name in sorted(METHOD_DOCUMENTS):
-            data = _canonical_json_bytes(run.documents[name])
-            _write_exclusive(output / name, data)
-            document_hashes[name] = _sha256(data)
-        candidate = {
-            "schema_version": SCHEMA_VERSION,
-            "stage": STAGE,
-            "candidate_status": "SEALED_CANDIDATE",
-            "managed_attempt_id": attempt_id,
-            "managed_generation_token": generation_token,
-            "input_hashes": dict(run.input_hashes),
-            "document_hashes": document_hashes,
-            "selected_count": SOURCE_COUNT,
-            "deletions_per_parent": DELETIONS_PER_PARENT,
-            "physical_gpu_index": PHYSICAL_GPU_INDEX,
-            "physical_gpu_uuid": gpu_uuid,
-            "visible_device": VISIBLE_DEVICE,
-            "model_load_count": 1,
-            "independent_verification_required": True,
-            "worker_terminal_authority": False,
-            "per_example_output_written": False,
-            "matrix_method_cell": False,
-        }
-        candidate_data = _canonical_json_bytes(candidate)
-        _write_exclusive(output / T4_CANDIDATE_NAME, candidate_data)
-        hashes = {**document_hashes, T4_CANDIDATE_NAME: _sha256(candidate_data)}
-        _write_exclusive(
-            output / "sha256sums.txt",
-            "".join(
-                f"{digest}  {name}\n" for name, digest in sorted(hashes.items())
-            ).encode("utf-8"),
-        )
-        descriptor = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    if controller_barrier_timeout_seconds != 45:
+        raise TasteT4OracleSmokeError("production controller barrier must be 45 seconds")
+    deadline = time.monotonic() + controller_barrier_timeout_seconds
+    while True:
         try:
-            os.fsync(descriptor)
+            authority_context = hold_taste_main_v2_controller_authority(
+                controller_receipt_path,
+                controller_anchor_heartbeat_path,
+                expected_controller_id,
+                expected_git_commit,
+                expected_git_tree,
+                controller_max_heartbeat_age_seconds,
+                expected_launcher_receipt_path=controller_launcher_receipt_path,
+                expected_launcher_receipt_sha256=(
+                    expected_controller_launcher_receipt_sha256
+                ),
+                expected_receipt_sha256=expected_controller_receipt_sha256,
+                expected_heartbeat_sha256=(
+                    expected_controller_anchor_heartbeat_sha256
+                ),
+                expected_task_id=TASK_ID,
+                expected_gpu_index=PHYSICAL_GPU_INDEX,
+                expected_gpu_uuid=gpu_uuid,
+                expected_lease_uuid=expected_gpu_lease_uuid,
+                expected_lease_sha256=expected_gpu_lease_sha256,
+                expected_attempt_id=attempt_id,
+                expected_generation_token=generation_token,
+                expected_activation_phase="WORKER_ACTIVE",
+            )
+            break
+        except (OSError, ValueError, TasteMainV2AuthorityError) as exc:
+            if time.monotonic() >= deadline:
+                raise TasteT4OracleSmokeError(
+                    f"controller ACTIVE barrier rejected: {exc}"
+                ) from exc
+            time.sleep(0.25)
+    with authority_context as authority:
+        initial_authority = dict(authority.evidence)
+        if initial_authority.get("anchor_heartbeat_sequence") != 1:
+            raise TasteT4OracleSmokeError(
+                "T4 managed input must anchor controller heartbeat sequence 1"
+            )
+        run = science_runner(
+            t3_root=t3_root,
+            graph_cache_root=graph_cache_root,
+            gpu_uuid=gpu_uuid,
+            batch_size=batch_size,
+        )
+        try:
+            managed_input_hashes = {
+                **run.input_hashes,
+                "controller_launcher_receipt": initial_authority[
+                    "launcher_receipt_sha256"
+                ],
+                "controller_receipt": authority.receipt.sha256,
+                "controller_anchor_heartbeat": initial_authority[
+                    "anchor_heartbeat_sha256"
+                ],
+                "gpu1_lease": initial_authority["lease_sha256"],
+            }
+            if (
+                managed_input_hashes["controller_launcher_receipt"]
+                != expected_controller_launcher_receipt_sha256
+                or managed_input_hashes["controller_receipt"]
+                != expected_controller_receipt_sha256
+                or managed_input_hashes["controller_anchor_heartbeat"]
+                != expected_controller_anchor_heartbeat_sha256
+                or managed_input_hashes["gpu1_lease"] != expected_gpu_lease_sha256
+            ):
+                raise TasteT4OracleSmokeError("controller authority input hashes drifted")
+            _validate_documents(run.documents)
+            run.revalidate()
+            document_hashes: dict[str, str] = {}
+            for name in sorted(METHOD_DOCUMENTS):
+                data = _canonical_json_bytes(run.documents[name])
+                _write_exclusive(output / name, data)
+                document_hashes[name] = _sha256(data)
+            candidate = {
+                "schema_version": SCHEMA_VERSION,
+                "stage": STAGE,
+                "candidate_status": "SEALED_CANDIDATE",
+                "managed_attempt_id": attempt_id,
+                "managed_generation_token": generation_token,
+                "input_hashes": dict(managed_input_hashes),
+                "controller_authority": {
+                    "worker_initial": initial_authority,
+                    "worker_final": dict(authority.revalidate()),
+                    "held_across_science": True,
+                    "release_authority": False,
+                },
+                "document_hashes": document_hashes,
+                "selected_count": SOURCE_COUNT,
+                "deletions_per_parent": DELETIONS_PER_PARENT,
+                "physical_gpu_index": PHYSICAL_GPU_INDEX,
+                "physical_gpu_uuid": gpu_uuid,
+                "visible_device": VISIBLE_DEVICE,
+                "model_load_count": 1,
+                "independent_verification_required": True,
+                "worker_terminal_authority": False,
+                "per_example_output_written": False,
+                "matrix_method_cell": False,
+            }
+            candidate_data = _canonical_json_bytes(candidate)
+            _write_exclusive(output / T4_CANDIDATE_NAME, candidate_data)
+            hashes = {**document_hashes, T4_CANDIDATE_NAME: _sha256(candidate_data)}
+            _write_exclusive(
+                output / "sha256sums.txt",
+                "".join(
+                    f"{digest}  {name}\n" for name, digest in sorted(hashes.items())
+                ).encode("utf-8"),
+            )
+            descriptor = os.open(
+                output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            run.revalidate()
+            authority.revalidate()
+            return {
+                "state": "SEALED_CANDIDATE",
+                "stage": STAGE,
+                "artifact_root": str(output),
+                "input_hashes": dict(managed_input_hashes),
+                "selected_count": SOURCE_COUNT,
+                "valid_deletion_count": SOURCE_COUNT * DELETIONS_PER_PARENT,
+                "physical_gpu_index": PHYSICAL_GPU_INDEX,
+                "physical_gpu_uuid": gpu_uuid,
+                "model_load_count": 1,
+                "independent_verification_required": True,
+            }
         finally:
-            os.close(descriptor)
-        run.revalidate()
-        return {
-            "state": "SEALED_CANDIDATE",
-            "stage": STAGE,
-            "artifact_root": str(output),
-            "input_hashes": dict(run.input_hashes),
-            "selected_count": SOURCE_COUNT,
-            "valid_deletion_count": SOURCE_COUNT * DELETIONS_PER_PARENT,
-            "physical_gpu_index": PHYSICAL_GPU_INDEX,
-            "physical_gpu_uuid": gpu_uuid,
-            "model_load_count": 1,
-            "independent_verification_required": True,
-        }
-    finally:
-        run.close()
+            run.close()
 
 
 def _read_held(held: HeldSealedArtifactV2, relative: str) -> bytes:
@@ -991,7 +1129,18 @@ def verify_and_publish_t4(
     expected_generation_token: str,
     expected_controller_id: str,
     expected_git_commit: str,
+    expected_git_tree: str,
     expected_config_hash: str,
+    controller_launcher_receipt_path: str | Path,
+    controller_receipt_path: str | Path,
+    controller_anchor_heartbeat_path: str | Path,
+    expected_controller_launcher_receipt_sha256: str,
+    expected_controller_receipt_sha256: str,
+    expected_controller_anchor_heartbeat_sha256: str,
+    expected_gpu_lease_uuid: str,
+    expected_gpu_lease_sha256: str,
+    controller_max_heartbeat_age_seconds: float = DEFAULT_MAX_HEARTBEAT_AGE_SECONDS,
+    controller_barrier_timeout_seconds: int = 45,
     batch_size: int = 32,
     science_runner: ScienceRunner = _execute_science,
 ) -> tuple[TerminalPublicationV2, dict[str, Any]]:
@@ -1007,11 +1156,51 @@ def verify_and_publish_t4(
         raise TasteT4OracleSmokeError(
             "T4 final path must be a t4-oracle-smoke-* sibling of T3"
         )
-    with open_sealed_worker_artifact(
+    if controller_barrier_timeout_seconds != 45:
+        raise TasteT4OracleSmokeError("production controller barrier must be 45 seconds")
+    deadline = time.monotonic() + controller_barrier_timeout_seconds
+    while True:
+        try:
+            authority_context = hold_taste_main_v2_controller_authority(
+            controller_receipt_path,
+            controller_anchor_heartbeat_path,
+            expected_controller_id,
+            expected_git_commit,
+            expected_git_tree,
+            controller_max_heartbeat_age_seconds,
+            expected_launcher_receipt_path=controller_launcher_receipt_path,
+            expected_launcher_receipt_sha256=(
+                expected_controller_launcher_receipt_sha256
+            ),
+            expected_receipt_sha256=expected_controller_receipt_sha256,
+            expected_heartbeat_sha256=(
+                expected_controller_anchor_heartbeat_sha256
+            ),
+            expected_task_id=TASK_ID,
+            expected_gpu_index=PHYSICAL_GPU_INDEX,
+            expected_gpu_uuid=gpu_uuid,
+            expected_lease_uuid=expected_gpu_lease_uuid,
+            expected_lease_sha256=expected_gpu_lease_sha256,
+            expected_attempt_id=expected_attempt_id,
+            expected_generation_token=expected_generation_token,
+            expected_activation_phase="VERIFIER_ACTIVE",
+            )
+            break
+        except (OSError, ValueError, TasteMainV2AuthorityError) as exc:
+            if time.monotonic() >= deadline:
+                raise TasteT4OracleSmokeError(
+                    f"controller VERIFIER barrier rejected: {exc}"
+                ) from exc
+            time.sleep(0.25)
+    with authority_context as authority, open_sealed_worker_artifact(
         sealed_path,
         expected_attempt_id=expected_attempt_id,
         expected_generation_token=expected_generation_token,
     ) as held:
+        if authority.evidence.get("anchor_heartbeat_sequence") != 1:
+            raise TasteT4OracleSmokeError(
+                "T4 verifier must anchor controller heartbeat sequence 1"
+            )
         run = science_runner(
             t3_root=t3_root,
             graph_cache_root=graph_cache_root,
@@ -1019,13 +1208,24 @@ def verify_and_publish_t4(
             batch_size=batch_size,
         )
         try:
+            expected_input_hashes = {
+                **run.input_hashes,
+                "controller_launcher_receipt": (
+                    expected_controller_launcher_receipt_sha256
+                ),
+                "controller_receipt": expected_controller_receipt_sha256,
+                "controller_anchor_heartbeat": (
+                    expected_controller_anchor_heartbeat_sha256
+                ),
+                "gpu1_lease": expected_gpu_lease_sha256,
+            }
             _validate_documents(run.documents)
             _verify_worker_evidence(
                 held,
                 expected_controller_id=expected_controller_id,
                 expected_git_commit=expected_git_commit,
                 expected_config_hash=expected_config_hash,
-                expected_input_hashes=run.input_hashes,
+                expected_input_hashes=expected_input_hashes,
             )
             payloads = _candidate_payloads(held)
             hashes = _parse_sha256s(
@@ -1051,7 +1251,7 @@ def verify_and_publish_t4(
                 or candidate.get("candidate_status") != "SEALED_CANDIDATE"
                 or candidate.get("managed_attempt_id") != held.sealed.attempt_id
                 or candidate.get("managed_generation_token") != held.sealed.generation_token
-                or candidate.get("input_hashes") != run.input_hashes
+                or candidate.get("input_hashes") != expected_input_hashes
                 or candidate.get("document_hashes")
                 != {name: hashes[name] for name in METHOD_DOCUMENTS}
                 or candidate.get("selected_count") != SOURCE_COUNT
@@ -1066,7 +1266,43 @@ def verify_and_publish_t4(
                 or candidate.get("matrix_method_cell") is not False
             ):
                 raise TasteT4OracleSmokeError("T4 candidate manifest contract changed")
+            candidate_authority = candidate.get("controller_authority")
+            if type(candidate_authority) is not dict:
+                raise TasteT4OracleSmokeError("T4 candidate lacks held controller authority")
+            initial_authority = candidate_authority.get("worker_initial")
+            final_authority = candidate_authority.get("worker_final")
+            if (
+                type(initial_authority) is not dict
+                or type(final_authority) is not dict
+                or candidate_authority.get("held_across_science") is not True
+                or candidate_authority.get("release_authority") is not False
+                or initial_authority.get("controller_id") != expected_controller_id
+                or initial_authority.get("git_commit") != expected_git_commit
+                or initial_authority.get("git_tree") != expected_git_tree
+                or initial_authority.get("receipt_sha256")
+                != expected_controller_receipt_sha256
+                or initial_authority.get("launcher_receipt_sha256")
+                != expected_controller_launcher_receipt_sha256
+                or initial_authority.get("anchor_heartbeat_sha256")
+                != expected_controller_anchor_heartbeat_sha256
+                or initial_authority.get("anchor_heartbeat_sequence") != 1
+                or initial_authority.get("activation_phase") != "WORKER_ACTIVE"
+                or initial_authority.get("lease_uuid") != expected_gpu_lease_uuid
+                or initial_authority.get("lease_sha256") != expected_gpu_lease_sha256
+                or initial_authority.get("physical_gpu_index") != PHYSICAL_GPU_INDEX
+                or initial_authority.get("physical_gpu_uuid") != gpu_uuid
+                or final_authority.get("controller_id") != expected_controller_id
+                or final_authority.get("receipt_sha256")
+                != expected_controller_receipt_sha256
+                or final_authority.get("lease_uuid") != expected_gpu_lease_uuid
+                or final_authority.get("lease_sha256") != expected_gpu_lease_sha256
+                or final_authority.get("anchor_heartbeat_sha256")
+                != expected_controller_anchor_heartbeat_sha256
+                or final_authority.get("anchor_heartbeat_sequence") != 1
+            ):
+                raise TasteT4OracleSmokeError("T4 worker controller authority changed")
             run.revalidate()
+            verifier_authority = authority.revalidate()
             smoke = run.documents["oracle_smoke.json"]
             t3_binding = run.documents["t3_binding.json"]
             verification = {
@@ -1076,6 +1312,24 @@ def verify_and_publish_t4(
                 "marker": PASS_MARKER,
                 "independent_scientific_verifier": True,
                 "verifier_git_commit": expected_git_commit,
+                "verifier_git_tree": expected_git_tree,
+                "controller_authority": verifier_authority,
+                "controller_receipt_sha256": expected_controller_receipt_sha256,
+                "controller_launcher_receipt_sha256": (
+                    expected_controller_launcher_receipt_sha256
+                ),
+                "controller_anchor_heartbeat_sha256": (
+                    expected_controller_anchor_heartbeat_sha256
+                ),
+                "worker_initial_heartbeat_sha256": initial_authority[
+                    "heartbeat_sha256"
+                ],
+                "worker_final_heartbeat_sha256": final_authority[
+                    "heartbeat_sha256"
+                ],
+                "verifier_heartbeat_sha256": verifier_authority["heartbeat_sha256"],
+                "gpu1_lease_sha256": expected_gpu_lease_sha256,
+                "gpu1_lease_uuid": expected_gpu_lease_uuid,
                 "t3_root": str(predecessor),
                 "t3_gate_sha256": t3_binding["t3_gate_sha256"],
                 "t3_verification_sha256": t3_binding["t3_verification_sha256"],
@@ -1122,6 +1376,10 @@ def verify_and_publish_t4(
                 ),
             }
             run.revalidate()
+            verification["controller_authority"] = authority.revalidate()
+            verification["verifier_heartbeat_sha256"] = verification[
+                "controller_authority"
+            ]["heartbeat_sha256"]
             publication = verify_and_publish_sealed_attempt(
                 held, final_path=destination, verification=verification
             )
@@ -1137,6 +1395,7 @@ __all__ = [
     "METHOD_DOCUMENTS",
     "PASS_MARKER",
     "PHYSICAL_GPU_INDEX",
+    "PUBLISHED_T3_ROOT",
     "SCHEMA_VERSION",
     "SOURCE_COUNT",
     "STAGE",
@@ -1144,5 +1403,6 @@ __all__ = [
     "TASK_ID",
     "TasteT4OracleSmokeError",
     "build_t4_candidate",
+    "collect_t4_managed_input_hashes",
     "verify_and_publish_t4",
 ]

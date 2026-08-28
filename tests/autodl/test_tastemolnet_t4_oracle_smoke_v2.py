@@ -3,7 +3,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,9 @@ from src.utils.managed_execution_v2 import (
     write_worker_exit,
     write_worker_raw_evidence,
 )
+from src.utils import autodl_tastemolnet_main_v2 as main_v2
+from src.utils.process_identity_v2 import ProcessSnapshotV2, capture_process_snapshot
+from tests.autodl.test_tastemolnet_main_v2_controller import GPU_INVENTORY, _policy
 from src.utils.terminal_publisher_v2 import seal_worker_staging
 from tests.autodl.test_tastemolnet_t3_calibration_v2 import (
     _make_source_bundle,
@@ -79,10 +85,10 @@ def _documents() -> dict[str, dict[str, object]]:
     }
     provenance: dict[str, object] = {
         "schema_version": "tastemolnet_t4_oracle_provenance_v2",
-        "physical_gpu_index": 2,
+        "physical_gpu_index": 1,
         "physical_gpu_uuid": GPU_UUID,
         "visible_device": "cuda:0",
-        "cuda_visible_devices": "2",
+        "cuda_visible_devices": "1",
         "checkpoint_load_count": 1,
         "model_sha256": "5" * 64,
         "temperature_scaling_sha256": "6" * 64,
@@ -112,6 +118,98 @@ INPUT_HASHES = {
 }
 
 
+def _controller_authority(
+    tmp_path: Path,
+    *,
+    git_commit: str,
+) -> tuple[
+    main_v2.ControllerCreation,
+    main_v2.GpuLeaseCreation,
+    main_v2.HeartbeatCreation,
+    str,
+    str,
+]:
+    data_root = tmp_path.resolve() / "controller-authority"
+    data_root.mkdir()
+    controller_uuid = str(uuid.uuid4())
+    controller_id = f"taste-main-v2-{controller_uuid}"
+    git_tree = "f" * 40
+    snapshot = capture_process_snapshot(os.getpid())
+    policy = _policy(data_root)
+    controllers, launchers = main_v2.ensure_controller_namespace_parents(
+        policy["persistent_control_root"]
+    )
+    launcher_root = launchers / controller_uuid
+    launcher_snapshot = ProcessSnapshotV2(
+        pid=snapshot.ppid,
+        ppid=1,
+        pid_start_ticks=snapshot.pid_start_ticks + 1,
+        boot_id=snapshot.boot_id,
+        executable_realpath=snapshot.executable_realpath,
+        command=snapshot.command,
+        command_hash=snapshot.command_hash,
+        cwd_realpath=snapshot.cwd_realpath,
+        cgroup_path=snapshot.cgroup_path,
+    )
+    main_v2._create_fresh_namespace(
+        launcher_root, children=(main_v2.PUBLICATION_STAGING_DIRECTORY,)
+    )
+    launcher_payload = {
+        "schema_version": main_v2.LAUNCHER_RECEIPT_SCHEMA,
+        "managed_taste_release_version": main_v2.MANAGED_TASTE_RELEASE_VERSION,
+        "controller_id": controller_id,
+        "controller_uuid": controller_uuid,
+        "launcher_generation_token": str(uuid.uuid4()),
+        "launcher_process": launcher_snapshot.to_dict(),
+        "controller_process": snapshot.to_dict(),
+        "git_commit": git_commit,
+        "git_tree": git_tree,
+        "project_root": str(Path.cwd().resolve()),
+        "policy_facts": policy,
+        "policy_facts_sha256": main_v2._sha256(main_v2._json_bytes(policy)),
+        "state": "CONTROLLER_SPAWNED",
+        "created_at": "2026-08-28T00:00:00Z",
+        "created_at_ns": 1,
+        "auto_terminate_uncontrolled_children": False,
+        "signal_authority": False,
+    }
+    launcher_path = launcher_root / main_v2.LAUNCHER_RECEIPT_NAME
+    launcher_data = main_v2._json_bytes(launcher_payload)
+    main_v2._publish_immutable(
+        launcher_path,
+        launcher_data,
+        staging_root=launcher_root / main_v2.PUBLICATION_STAGING_DIRECTORY,
+    )
+    launcher = SimpleNamespace(
+        receipt_path=launcher_path,
+        receipt_sha256=main_v2._sha256(launcher_data),
+    )
+    created = main_v2.create_controller_receipt(
+        controller_root=controllers / controller_uuid,
+        project_root=Path.cwd(),
+        controller_id=controller_id,
+        controller_uuid=controller_uuid,
+        launcher_receipt_path=launcher.receipt_path,
+        expected_launcher_receipt_sha256=launcher.receipt_sha256,
+        git_identity=(git_commit, git_tree),
+        process_snapshot=snapshot,
+        policy_facts=policy,
+    )
+    lease = main_v2.create_gpu_lease_request(
+        controller_receipt_path=created.receipt_path,
+        task_id=t4.TASK_ID,
+        physical_gpu_index=t4.PHYSICAL_GPU_INDEX,
+        physical_gpu_uuid=GPU_UUID,
+    )
+    heartbeat = main_v2.write_heartbeat_generation(
+        controller_receipt_path=created.receipt_path,
+        sequence=1,
+        previous_heartbeat_sha256=None,
+        gpu_inventory=GPU_INVENTORY,
+    )
+    return created, lease, heartbeat, controller_id, git_tree
+
+
 def _runner(**_kwargs: object) -> t4.T4ScienceRun:
     return t4.T4ScienceRun(
         documents=copy.deepcopy(_documents()),
@@ -131,6 +229,20 @@ def test_worker_source_has_no_method_pass_authority() -> None:
     ).read_text(encoding="utf-8")
     assert t4.PASS_MARKER not in worker
     assert "print(PASS_MARKER" in verifier
+
+
+def test_managed_input_collector_requires_exact_published_t3_root(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(t4.TasteT4OracleSmokeError, match="exact reviewed"):
+        t4.collect_t4_managed_input_hashes(
+            t3_root=tmp_path.resolve(),
+            graph_cache_root=tmp_path.resolve(),
+            controller_launcher_receipt_sha256="1" * 64,
+            controller_receipt_sha256="2" * 64,
+            controller_anchor_heartbeat_sha256="3" * 64,
+            gpu_lease_sha256="4" * 64,
+        )
 
 
 def test_t4_holds_the_real_managed_t3_publication_shape(
@@ -243,22 +355,47 @@ def test_managed_worker_and_independent_replay_publish(tmp_path: Path, monkeypat
     graph_cache.mkdir()
     stage_root = tmp_path / "control/T4_ORACLE_SMOKE"
     stage_root.mkdir(parents=True)
-    controller_id = "taste-main-v2-test"
     git_commit = "b" * 40
     config_hash = "c" * 64
+    controller, lease, heartbeat, controller_id, git_tree = _controller_authority(
+        tmp_path, git_commit=git_commit
+    )
+    managed_input_hashes = {
+        **INPUT_HASHES,
+        "controller_launcher_receipt": controller.payload[
+            "launcher_receipt_sha256"
+        ],
+        "controller_receipt": controller.receipt_sha256,
+        "controller_anchor_heartbeat": heartbeat.sha256,
+        "gpu1_lease": lease.sha256,
+    }
     with create_managed_attempt(
         stage_root=stage_root,
         controller_id=controller_id,
         task_id=t4.TASK_ID,
         git_commit=git_commit,
         config_hash=config_hash,
-        input_hashes=INPUT_HASHES,
+        input_hashes=managed_input_hashes,
         attempt_id="00000000-0000-4000-8000-000000000010",
         boot_id="test-boot",
     ) as attempt:
         with create_worker_staging(
             attempt, staging_id="00000000-0000-4000-8000-000000000011"
         ) as staging:
+            worker_activation = main_v2.create_gpu_lease_activation(
+                controller_receipt_path=controller.receipt_path,
+                lease_path=lease.path,
+                expected_lease_sha256=lease.sha256,
+                attempt_id=attempt.attempt_id,
+                generation_token=staging.generation_token,
+                phase="WORKER_ACTIVE",
+            )
+            worker_heartbeat = main_v2.write_heartbeat_generation(
+                controller_receipt_path=controller.receipt_path,
+                sequence=2,
+                previous_heartbeat_sha256=heartbeat.sha256,
+                gpu_inventory=GPU_INVENTORY,
+            )
             t4.build_t4_candidate(
                 t3_root=t3_root,
                 graph_cache_root=graph_cache,
@@ -266,6 +403,21 @@ def test_managed_worker_and_independent_replay_publish(tmp_path: Path, monkeypat
                 attempt_id=attempt.attempt_id,
                 generation_token=staging.generation_token,
                 gpu_uuid=GPU_UUID,
+                controller_launcher_receipt_path=controller.payload[
+                    "launcher_receipt_path"
+                ],
+                controller_receipt_path=controller.receipt_path,
+                controller_anchor_heartbeat_path=heartbeat.path,
+                expected_controller_id=controller_id,
+                expected_git_commit=git_commit,
+                expected_git_tree=git_tree,
+                expected_controller_launcher_receipt_sha256=controller.payload[
+                    "launcher_receipt_sha256"
+                ],
+                expected_controller_receipt_sha256=controller.receipt_sha256,
+                expected_controller_anchor_heartbeat_sha256=heartbeat.sha256,
+                expected_gpu_lease_uuid=lease.lease_uuid,
+                expected_gpu_lease_sha256=lease.sha256,
                 science_runner=_runner,
             )
             raw = write_worker_raw_evidence(
@@ -293,6 +445,32 @@ def test_managed_worker_and_independent_replay_publish(tmp_path: Path, monkeypat
             )
             exited.close()
             sealed = seal_worker_staging(staging)
+        waiting_activation = main_v2.create_gpu_lease_activation(
+            controller_receipt_path=controller.receipt_path,
+            lease_path=lease.path,
+            expected_lease_sha256=lease.sha256,
+            attempt_id=sealed.attempt_id,
+            generation_token=sealed.generation_token,
+            activation_sequence=2,
+            previous_activation_sha256=worker_activation.sha256,
+            phase="WAITING_VERIFIER",
+        )
+        verifier_activation = main_v2.create_gpu_lease_activation(
+            controller_receipt_path=controller.receipt_path,
+            lease_path=lease.path,
+            expected_lease_sha256=lease.sha256,
+            attempt_id=sealed.attempt_id,
+            generation_token=sealed.generation_token,
+            activation_sequence=3,
+            previous_activation_sha256=waiting_activation.sha256,
+            phase="VERIFIER_ACTIVE",
+        )
+        verifier_heartbeat = main_v2.write_heartbeat_generation(
+            controller_receipt_path=controller.receipt_path,
+            sequence=3,
+            previous_heartbeat_sha256=worker_heartbeat.sha256,
+            gpu_inventory=GPU_INVENTORY,
+        )
         final = seed_root / "t4-oracle-smoke-fixture"
         publication, verification = t4.verify_and_publish_t4(
             sealed_path=sealed.staging_path,
@@ -304,13 +482,30 @@ def test_managed_worker_and_independent_replay_publish(tmp_path: Path, monkeypat
             expected_generation_token=sealed.generation_token,
             expected_controller_id=controller_id,
             expected_git_commit=git_commit,
+            expected_git_tree=git_tree,
             expected_config_hash=config_hash,
+            controller_launcher_receipt_path=controller.payload[
+                "launcher_receipt_path"
+            ],
+            controller_receipt_path=controller.receipt_path,
+            controller_anchor_heartbeat_path=heartbeat.path,
+            expected_controller_launcher_receipt_sha256=controller.payload[
+                "launcher_receipt_sha256"
+            ],
+            expected_controller_receipt_sha256=controller.receipt_sha256,
+            expected_controller_anchor_heartbeat_sha256=heartbeat.sha256,
+            expected_gpu_lease_uuid=lease.lease_uuid,
+            expected_gpu_lease_sha256=lease.sha256,
             science_runner=_runner,
         )
     assert publication.final_path == final
     assert verification["marker"] == t4.PASS_MARKER
-    assert verification["physical_gpu_index"] == 2
+    assert verification["physical_gpu_index"] == 1
     assert verification["valid_deletion_count"] == 64
+    assert verification["controller_anchor_heartbeat_sha256"] == heartbeat.sha256
+    assert verification["worker_initial_heartbeat_sha256"] == worker_heartbeat.sha256
+    assert verification["worker_initial_heartbeat_sha256"] != heartbeat.sha256
+    assert verification["verifier_heartbeat_sha256"] == verifier_heartbeat.sha256
     assert load_verified_gate(final)["status"] == "PASS"
     assert (final / "PASS").read_text(encoding="utf-8") == "[MANAGED_EXECUTION_V2_PASS]\n"
     assert not (final / "artifacts/gate.json").exists()
