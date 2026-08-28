@@ -10946,3 +10946,29 @@ probability-sum float32 roundoff (`1.2665987014770508e-07`). The CSV boundary
 therefore uses an explicit tolerance of two float32 epsilons. This does not
 change the separately frozen model-replay tolerances or accept calibrated
 probabilities as raw probabilities.
+
+## [2026-08-28] Refit Taste T3 temperature under managed execution v2
+
+### Motivation
+
+The existing Taste T3 candidate only authenticated and adopted the temperature
+already stored by T2. The main experiment decision instead requires a fresh
+scalar fit using validation only, with no calibration/test payload access.
+
+### Decision
+
+Add a worker-only T3 candidate builder and a separate scientific verifier. The
+worker writes a fresh checkpoint candidate below its managed artifact root;
+the verifier retains that SEALED tree, the exact T2 adoption receipt, and the
+19-file source bundle, repeats the fit, and publishes with atomic no-replace
+managed-v2 semantics. T2 training/reload metadata remains historical, while
+the new temperature document and oracle manifest become downstream authority.
+
+### Consequences
+
+- Model and feature-schema bytes remain identical to adopted T2.
+- T3 records NLL, ECE, Brier, argmax invariance, row-order hash, and separate
+  model/temperature/schema hashes.
+- The worker cannot emit the T3 PASS marker; only the independent verifier can
+  print it after publication.
+- T3 is auxiliary infrastructure and never counts as a four-method matrix cell.

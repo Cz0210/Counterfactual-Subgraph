@@ -1994,3 +1994,14 @@ Mutagenicity roadmaps.
   verifier-authored PASS marker.
 - [ ] Run the verifier from the immutable AutoDL execution commit and bind its
   exact receipt into the fresh T3 calibration stage.
+
+## 2026-08-28: TasteMolNet T3 fresh calibration v2
+
+- [x] Add a validation-prediction-only fresh scalar fit that records NLL, ECE,
+  Brier, argmax invariance, and validation row-order hash.
+- [x] Keep the worker at `SEALED_CANDIDATE`; independently repeat the fit and
+  publish only through managed-v2 atomic no-replace terminal publication.
+- [x] Preserve model and feature-schema bytes and bind the fresh temperature
+  file, T2 receipt gate, and T2 source-evidence hashes.
+- [ ] Execute the worker and verifier from one clean AutoDL execution worktree,
+  then bind T4 to that exact managed gate and checkpoint directory.

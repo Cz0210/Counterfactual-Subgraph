@@ -485,3 +485,7 @@ AutoDL's completed TasteMolNet GINE result is adopted through the independent
 v2 verifier documented in
 `docs/AUTODL_TASTEMOLNET_T2_ADOPTION_V2.md`. The verifier preserves the old
 identity-drift controller failure and never retrains the classifier.
+
+TasteMolNet T3 performs a new validation-only scalar-temperature fit through a
+managed-v2 worker and independent verifier, as documented in
+`docs/AUTODL_TASTEMOLNET_T3_CALIBRATION_V2.md`.
