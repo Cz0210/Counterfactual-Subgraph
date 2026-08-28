@@ -10892,3 +10892,30 @@ rename. Mutable file links and copytruncate are excluded.
   failures, so fixed-path delete/recreate ABA is not an authorized retry.
 - T3--T9 remain unreleased until their workers and independent verifiers use
   this API; this code freeze runs no science and asserts no scientific PASS.
+
+## [2026-08-28] Adopt the completed Taste GINE by replay, not controller repair
+
+### Motivation
+
+The completed TasteMolNet GINE bundle is scientifically closed, while its old
+controller correctly retains `FAILED/WORKER_PROCESS_IDENTITY_DRIFT`. Rerunning
+the classifier would discard valid work, but rewriting that control history or
+trusting its worker-authored records alone would create false provenance.
+
+### Decision
+
+Add an independent v2 verifier that holds the exact bundle and declared input
+files by physical inode, validates the complete hash/config/class/data-use
+closure, reloads the frozen GINE, and replays every validation prediction from
+the held validation cache. Publish only a fresh UUID receipt below
+`tastemolnet-main-v2/adoptions/T2_GINE`; retain the historical controller and
+training evidence byte-for-byte. Authenticate the old validation temperature
+as evidence only and require a fresh validation-only T3 calibration bundle.
+
+### Consequences
+
+- T2 can become `ADOPTED_SCIENTIFIC_PASS` without another GINE training run.
+- The old process failure is superseded only for the scientific artifact and
+  remains the authoritative control-plane history.
+- Calibration/test are not loaded for adoption replay, RF remains absent, and
+  the receipt is not a method-matrix cell.

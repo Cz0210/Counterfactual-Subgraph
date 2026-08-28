@@ -480,3 +480,8 @@ After that, start by implementing:
 - `scripts/infer_single.py`
 
 These three pieces define the earliest stable backbone of the project.
+
+AutoDL's completed TasteMolNet GINE result is adopted through the independent
+v2 verifier documented in
+`docs/AUTODL_TASTEMOLNET_T2_ADOPTION_V2.md`. The verifier preserves the old
+identity-drift controller failure and never retrains the classifier.

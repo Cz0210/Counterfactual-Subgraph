@@ -1979,3 +1979,18 @@ Mutagenicity roadmaps.
   no route is released merely by this core implementation.
 - [ ] Run an exact AutoDL target-filesystem rename preflight in the immutable
   execution tree before releasing any scientific attempt.
+
+## 2026-08-28: TasteMolNet T2 scientific adoption v2
+
+- [x] Preserve the historical controller's exact
+  `FAILED/WORKER_PROCESS_IDENTITY_DRIFT` state and training PASS evidence.
+- [x] Verify the exact 19-file scientific bundle, label/config/cache/split/Git
+  closure, finite three-class metrics, all positive recalls, and absence of RF,
+  calibration-load, test-load, or redistribution.
+- [x] Reload the frozen GINE and reproduce every validation prediction from the
+  held validation cache within recorded numeric tolerances.
+- [x] Publish a fresh UUID receipt only under
+  `tastemolnet-main-v2/adoptions/T2_GINE`, using atomic no-replace rename and a
+  verifier-authored PASS marker.
+- [ ] Run the verifier from the immutable AutoDL execution commit and bind its
+  exact receipt into the fresh T3 calibration stage.
