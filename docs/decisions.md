@@ -1,5 +1,40 @@
 # Decisions Log
 
+## [2026-08-28] Adopt the existing frozen BACE Ours cell by receipt only
+
+### Motivation
+
+The exact BACE Ours standardized `attempt-0` already satisfies the ordinary
+four-by-four registry as `FROZEN_PASS`.  Re-running its candidate generation,
+oracle, calibration, distance computation, or test evaluation would waste GPU
+time and could create a second scientific identity.  A paper-matrix successor
+still needs durable evidence that the exact historical bytes were deliberately
+adopted from a quiescent source.
+
+### Decision
+
+Pin the physical standardized root, its separate raw-writer guard root, all
+sixteen source file SHA-256 values, and the BACE/GINE/oracle/dataset/split/
+MolCLR/threshold/temperature/feature identities in one checked-in policy.
+Before publication, hash and stat every source file twice, audit Linux procfs
+for writable descriptors under both roots, and invoke the same ordinary
+registry candidate gate used by the matrix audit.  Publish only a three-file
+receipt (`adoption_manifest.json`, `verification.json`, and the exact
+`[BACE_OURS_FREEZE_ADOPTION_PASS]` marker) by atomic no-replace rename under a
+fresh `matrix/adoptions/bace_ours_frozen_*` directory.  Do not copy scientific
+CSVs, open raw test data, or recompute any numeric value.
+
+### Consequences
+
+- The receipt records adoption provenance; the authoritative scientific files
+  remain at the checksum-pinned standardized root.
+- A fresh matrix audit must still explicitly scan that source and independently
+  reach `FROZEN_PASS`; the receipt alone cannot fill a cell.
+- Source drift, a live writer, identity mismatch, dirty execution checkout,
+  non-fresh destination, or registry downgrade blocks the marker.
+- This decision authorizes only BACE Ours receipt publication.  It does not
+  rerun BACE Ours or alter the protected BACE GCFExplainer/ComRecGC processes.
+
 ## [2026-08-28] Cap AIDS exact-component recovery at twelve CPU workers
 
 ### Motivation

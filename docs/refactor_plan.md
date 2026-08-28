@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-08-28: BACE Ours frozen-cell receipt adoption
+
+- [x] Pin the exact source root, raw-writer guard root, sixteen source hashes,
+  and complete BACE GINE/data/oracle/calibration identity.
+- [x] Expose the ordinary registry's single-candidate gate without scientific
+  recomputation or writes.
+- [x] Add double stat/hash inventory closure, two-root procfs writer audits,
+  receipt-only atomic publication, strict reopen validation, CLI, and paired
+  Slurm refusal.
+- [x] Add drift, registry rejection, destination, tamper, fixed-identity, and
+  public-registry-gate regression tests.
+- [ ] Obtain detached review from a clean commit, deploy one fresh receipt on
+  AutoDL, and run one fresh matrix audit that independently advances 6/16 to
+  7/16.  Do not report PASS from local tests.
+
 ## 2026-08-28: Twelve-worker AIDS exact recovery successor
 
 - [x] Lower the fresh exact-component controller CPU reservation from sixteen

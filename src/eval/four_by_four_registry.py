@@ -1476,6 +1476,33 @@ def _audit_candidate(
     )
 
 
+def audit_explicit_candidate(
+    root: str | Path,
+    *,
+    dataset: str,
+    method: str,
+    expectations: Mapping[str, Any] | None = None,
+    max_hash_bytes: int = 64 * 1024 * 1024,
+) -> CandidateAudit:
+    """Run the ordinary registry gate for one explicitly identified cell.
+
+    This is the narrow public entrypoint used by receipt-only adoption tools;
+    it performs no scientific recomputation and writes no output.
+    """
+
+    canonical_data = canonical_dataset(dataset)
+    canonical_method_name = canonical_method(method)
+    if canonical_data is None or canonical_method_name is None:
+        raise ValueError("explicit candidate identity is not part of the 4x4 matrix")
+    return _audit_candidate(
+        Path(root).expanduser().resolve(strict=True),
+        expectations=expectations or {},
+        max_hash_bytes=max_hash_bytes,
+        explicit_dataset=canonical_data,
+        explicit_method=canonical_method_name,
+    )
+
+
 def _scan_roots(
     roots: Sequence[Path], *, max_hash_bytes: int
 ) -> tuple[set[Path], list[dict[str, Any]]]:
@@ -1926,6 +1953,7 @@ def write_registry_outputs(result: RegistryResult, output_root: str | Path) -> P
 
 __all__ = [
     "AuditConfig",
+    "CandidateAudit",
     "CellStatus",
     "DATASETS",
     "DISTANCE_LINE",
@@ -1936,6 +1964,7 @@ __all__ = [
     "TABLE2_K",
     "THRESHOLD_ARTIFACT_NAMES",
     "audit_registry",
+    "audit_explicit_candidate",
     "build_evaluation_contract",
     "build_threshold_contracts",
     "canonical_dataset",

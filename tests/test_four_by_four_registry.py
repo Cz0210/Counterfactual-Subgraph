@@ -14,6 +14,7 @@ from src.eval.four_by_four_registry import (
     DATASETS,
     MATRIX_FIELDS,
     METHODS,
+    audit_explicit_candidate,
     audit_registry,
     build_threshold_contracts,
     write_registry_outputs,
@@ -244,6 +245,28 @@ def test_complete_rf_cell_is_adoptable_and_source_tree_is_read_only(tmp_path: Pa
         for path in scan.rglob("*")
         if path.is_file()
     }
+
+
+def test_explicit_candidate_public_gate_uses_ordinary_registry_rules(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "aids/ours"
+    _complete_cell(
+        root,
+        dataset="AIDS",
+        method="Ours",
+        oracle_backend="rf",
+        classifier_family="random_forest",
+        rf_oracle_used=True,
+        frozen=True,
+    )
+
+    candidate = audit_explicit_candidate(root, dataset="AIDS", method="Ours")
+
+    assert candidate.dataset == "AIDS"
+    assert candidate.method == "Ours"
+    assert candidate.status is CellStatus.FROZEN_PASS
+    assert candidate.reason_codes == []
 
 
 def test_bace_rf_artifact_is_stale_oracle_not_adopted(tmp_path: Path) -> None:
