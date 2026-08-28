@@ -88,6 +88,10 @@ See:
   contract for the real bounded three-class TasteMolNet Ours PPO smoke; it
   cannot run until a reviewed controller receipt and strict terminal consumer
   are integrated)
+- `docs/AUTODL_MANAGED_EXECUTION_V2.md` (UUID attempt/checkpoint identities,
+  launcher+worker lineage, quarantine-without-signals, SEALED worker evidence,
+  independent verification, and atomic directory publication without mutable
+  file links)
 
 ---
 

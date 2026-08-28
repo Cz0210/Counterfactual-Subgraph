@@ -10860,3 +10860,35 @@ a v2 checkpoint.
   optimizer state adoption.
 - This prerequisite does not implement or release T8. No controller, GPU,
   dataset, output, or scientific process is started by this change.
+## [2026-08-28] Supersede mutable terminal links with managed execution v2
+
+### Motivation
+
+The uncommitted managed-v1 candidate still coupled terminal authority to a
+mutable named inode and did not make a UUID attempt/checkpoint generation plus
+an independent verifier the only route to PASS. A worker or path ABA could
+therefore be confused with scientific release authority even when its bytes
+looked plausible.
+
+### Decision
+
+Introduce isolated v2 modules for UUIDv4 attempts/checkpoints, complete
+launcher and worker process lineage, and quarantine-only anomaly handling with
+`AUTO_TERMINATE_UNCONTROLLED_CHILDREN=0`. Workers may produce only raw
+evidence, worker exit evidence, and a descriptor-scanned SEALED inventory.
+Only an independent verifier may add verification/gate/PASS and atomically
+publish the complete directory. Same-filesystem publication uses atomic
+no-replace directory rename. Cross-filesystem publication copies into a unique
+destination-side directory, fsyncs and rehashes it, then uses the same atomic
+rename. Mutable file links and copytruncate are excluded.
+
+### Consequences
+
+- PID disappearance or legitimate re-parenting is runtime audit evidence, not
+  the sole scientific-adoption criterion.
+- Drift, orphan, heartbeat, child, or terminal anomalies become QUARANTINED
+  without SIGTERM/SIGKILL and cannot release dependencies.
+- Attempt/checkpoint directory UUIDs are permanently burned, including partial
+  failures, so fixed-path delete/recreate ABA is not an authorized retry.
+- T3--T9 remain unreleased until their workers and independent verifiers use
+  this API; this code freeze runs no science and asserts no scientific PASS.

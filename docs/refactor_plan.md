@@ -1960,3 +1960,22 @@ Mutagenicity roadmaps.
 - [ ] Bind T2/T3/T4 held authorities, managed GPU-2 execution/completion
   receipts, one fresh private output, strict retained consumer, and controller
   adoption before enabling any science.
+## 2026-08-28: Managed execution protocol v2
+
+- [x] Use permanent RFC-4122 UUIDv4 identities for attempts, checkpoints, and
+  worker staging directories; burn rather than delete/reuse partial paths.
+- [x] Bind controller/attempt plus launcher and worker PID/start/boot/exe/argv/
+  cwd/cgroup evidence, accepting launcher exec and legitimate re-parenting.
+- [x] Fix automatic termination to false and represent drift, unexpected
+  child/orphan, heartbeat loss, and terminal mismatch as fail-closed quarantine.
+- [x] Separate worker raw/exit/SEALED writes from independent verifier-only
+  verification/gate/PASS writes.
+- [x] Replace mutable file-link publication with fsynced atomic no-replace
+  directory rename, including destination-side copy/rehash for cross-FS use.
+- [x] Add exact symlink, inode-swap, directory-ABA, post-seal modification,
+  same/cross-FS publication, worker-self-PASS, process-lineage, no-signal, and
+  fifty-round concurrent ABA tests.
+- [ ] Integrate each T3--T9 worker and its method-specific independent verifier;
+  no route is released merely by this core implementation.
+- [ ] Run an exact AutoDL target-filesystem rename preflight in the immutable
+  execution tree before releasing any scientific attempt.
