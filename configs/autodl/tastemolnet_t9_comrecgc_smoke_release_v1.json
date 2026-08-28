@@ -1,0 +1,24 @@
+{
+  "schema_version": "tastemolnet_t9_comrecgc_smoke_release_v1",
+  "release_enabled": false,
+  "release_state": "RELEASE_DISABLED_PENDING_MANAGED_EXECUTION_AND_FINAL_INTEGRATION",
+  "implementation_commit": null,
+  "implementation_tree": null,
+  "route_authority_path": null,
+  "route_authority_sha256": null,
+  "output_parent": null,
+  "managed_receipt_kind": "taste_t9_gpu2_v1",
+  "managed_task_id": "tastemolnet_t9_comrecgc_smoke",
+  "managed_validator": "taste_t9_v1",
+  "gpu_index": 2,
+  "official_commit": "122f9341a360e9f06bb58a2f5823bb596021f6bf",
+  "official_file_sha256": {
+    "comrecgc.py": "921b9bfc1cc0e3efff90bf24bf9c7b754ea99563a62bba6d7197ede37785f90d",
+    "common_recourse.py": "c5009ef5d73059dbea2d77e983a36a8140f1c2cca3b89664fec08f1ad7b4d6c5",
+    "data.py": "9674555b455a0d306e3272bb26c5b756ccd10f188ce2d3c97d7357752fd3e37f",
+    "distance.py": "d81182ccb31ef0fc5aef6a95a7debc6c17e3b495596e4ee3ff1642adf29745c3",
+    "gnn.py": "7f5cdd6eeb0d97566854f8078194527e09614b8e8d255ad189a0f7f777325fd8",
+    "neurosed/models.py": "8025f0cdc187625fb9d469a9ec0791694f3e923ee94e3d9084cb74a066397a60",
+    "util.py": "6489a02e7a0d6498a5f9e7b1a9a4ebc137e3d26541bd2a605bff9f54b1cf74ce"
+  }
+}

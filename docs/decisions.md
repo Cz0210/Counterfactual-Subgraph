@@ -1,5 +1,66 @@
 # Decisions Log
 
+## [2026-08-28] Freeze the release-disabled TasteMolNet T9 COMRECGC core
+
+### Motivation
+
+TasteMolNet T9 needs a bounded native COMRECGC smoke without reviving the
+binary-classifier assumptions used by earlier routes.  The implementation
+candidate must preserve the official random-walk, candidate-frequency, and
+common-recourse mechanisms while using the same frozen three-class GINE as the
+other Taste stages.  Freezing those scientific semantics separately from the
+managed execution runner keeps review of the algorithmic boundary distinct
+from authorization to run it.
+
+### Decision
+
+Freeze the release-disabled T9 core around the following boundaries:
+
+- score native walk importance as `1 - p[:, 1]`, but classify a candidate only
+  when the three-class argmax is not Sweet (`1`);
+- identify native states by a canonical attributed-graph SHA-256 that excludes
+  GINE embeddings, Python `hash()`, parent metadata, and lineage, while keeping
+  lineage as separate native state;
+- retain the official serial stateful heads, frequency collection, DBSCAN,
+  coverage, and greedy common-recourse selection at the exact smoke settings,
+  including `M=500`, a durable checkpoint/reload after completed step 250,
+  eight train-only predicted-Sweet sources, and seed 7;
+- load the seven executable files from official COMRECGC commit
+  `122f9341a360e9f06bb58a2f5823bb596021f6bf` only through retained file
+  descriptors whose SHA-256 values equal the checked-in reviewed map; and
+- expose a strict aggregate-only seven-file terminal consumer ending in
+  `[TASTE_COMRECGC_SMOKE_PASS]`, with no molecule rows, SMILES, graph payload,
+  or checkpoint payload persisted.
+
+The tracked release config remains a native false with null mutable pins.  The
+CLI can strictly validate an existing result while disabled, but its science
+branch intentionally names a not-yet-implemented
+`run_tastemolnet_comrecgc_smoke`.  A later integration must acquire and retain
+the reviewed managed ACTIVE authority, T2 receipt-only authority, T3/T4 stage
+authorities, frozen checkpoint, train CSV, official checkout, GPU-2 lease, and
+fresh output authority through the last fallible pre-PASS callback.  It must
+also register the `taste_t9_v1` strict result dispatch and controller task
+before a separately reviewed one-parent release successor may fill any pin.
+
+### Consequences
+
+- The frozen core is testable without authorizing AutoDL science or presenting
+  the stage as runnable.
+- A self-signed upstream checkout, altered smoke parameter, binary candidate
+  shortcut, identity based on model embeddings, incomplete midpoint restore,
+  or row-level output fails closed.
+- GPU-2 lane ordering after T8 remains a controller scheduling dependency;
+  T9's scientific predecessors remain T2, T3, and T4.
+- Full-budget `M=50000`, deployment, controller mutation, and scientific
+  execution are outside this freeze and remain pending.
+
+### Status
+
+Local release-disabled core, strict consumer, static release perimeter,
+focused/adjacent tests, and documentation only.  The managed runner, result
+dispatch, controller integration, immutable release receipt, deployment, and
+science have not been implemented or performed.
+
 ## [2026-08-28] Adopt the existing Taste GINE calibration and smoke only the calibration cache
 
 ### Background

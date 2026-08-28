@@ -1,5 +1,37 @@
 # Refactor Plan
 
+## 2026-08-28: TasteMolNet T9 COMRECGC release-disabled core
+
+- [x] Freeze the three-class bridge to `1 - p(Sweet)` walk importance and
+  `argmax != Sweet` candidate membership; keep GINE embeddings distance-only.
+- [x] Use canonical attributed native graph identity independent of parent
+  metadata and lineage, while preserving native lineage, stateful heads, and
+  candidate-frequency state separately.
+- [x] Run the core smoke for exactly `M=500` with a real held checkpoint/reload
+  after completed step 250 and exact restoration of official, bridge, loop,
+  and RNG state; keep full `M=50000` explicitly unrun.
+- [x] Preserve official source-major recourse pair order, DBSCAN, coverage, and
+  greedy common-recourse selection with the frozen smoke parameters.
+- [x] Pin the official COMRECGC commit and seven reviewed executable source
+  hashes, import from retained descriptors, and reject self-signed or swapped
+  checkouts.
+- [x] Add strict aggregate-only terminal documents/consumer, a disabled static
+  release config, fail-closed AutoDL wrapper, AutoDL-only Slurm refusal,
+  hostile tests, and an operator runbook.
+- [ ] Implement `run_tastemolnet_comrecgc_smoke` around retained managed ACTIVE,
+  T2 receipt-only, T3/T4, checkpoint, train CSV, official-source, GPU-2, and
+  fresh-output authorities; revalidate all authorities in the last fallible
+  callback before exposing PASS.
+- [ ] Add managed task/result dispatch for receipt kind `taste_t9_gpu2_v1`, task
+  `tastemolnet_t9_comrecgc_smoke`, stage `T9_COMRECGC_SMOKE`, and validator
+  `taste_t9_v1`; keep the scientific predecessor set exactly T2/T3/T4.
+- [ ] Integrate the continuation controller so GPU 2 schedules T8 before T9,
+  then independently held-reopens T9 before publishing managed COMPLETION.
+- [ ] After independent review of the final clean commit/tree, output parent,
+  storage authority, task manifests, and route receipt, create a one-parent
+  release successor changing only the release pins.  Do not deploy or run
+  science from this stage-freeze.
+
 ## 2026-08-28: TasteMolNet T5 clean-policy initializer
 
 - [x] Add a Taste-owned typed initializer schema instead of relabeling BACE
