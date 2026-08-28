@@ -10919,3 +10919,23 @@ as evidence only and require a fresh validation-only T3 calibration bundle.
   remains the authoritative control-plane history.
 - Calibration/test are not loaded for adoption replay, RF remains absent, and
   the receipt is not a method-matrix cell.
+
+## [2026-08-28] Bind T2 adoption to the bundle's canonical checksum filename
+
+### Motivation
+
+The first AutoDL invocation stopped before receipt creation because the
+verifier opened `sha256s.txt`, while the immutable historical bundle and its
+exact inventory use `sha256sums.txt`.
+
+### Decision
+
+Open, parse, and exclude only `sha256sums.txt` when validating the checksum
+manifest. Keep the independently generated adoption-receipt checksum file
+named `sha256s.txt`; the two names belong to different schemas.
+
+### Consequences
+
+- The verifier now consumes the actual held historical manifest.
+- The pre-publication failure created no PASS receipt and changed no source
+  artifact, so a corrected independent invocation is safe.

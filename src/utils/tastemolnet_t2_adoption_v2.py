@@ -254,7 +254,7 @@ def _parse_sha256s(data: bytes) -> dict[str, str]:
     try:
         lines = data.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
-        raise TasteT2AdoptionError("sha256s.txt is not UTF-8") from exc
+        raise TasteT2AdoptionError("sha256sums.txt is not UTF-8") from exc
     for line in lines:
         digest, separator, name = line.partition("  ")
         if (
@@ -263,11 +263,11 @@ def _parse_sha256s(data: bytes) -> dict[str, str]:
             or Path(name).name != name
             or name in result
         ):
-            raise TasteT2AdoptionError("sha256s.txt is malformed")
+            raise TasteT2AdoptionError("sha256sums.txt is malformed")
         result[name] = digest
-    expected = REQUIRED_BUNDLE_FILES - {"sha256s.txt"}
+    expected = REQUIRED_BUNDLE_FILES - {"sha256sums.txt"}
     if set(result) != expected:
-        raise TasteT2AdoptionError("sha256s.txt does not close the exact bundle")
+        raise TasteT2AdoptionError("sha256sums.txt does not close the exact bundle")
     return result
 
 
@@ -760,7 +760,7 @@ def adopt_tastemolnet_t2_scientific_result(
     historical_holds: list[HeldFile] = []
     input_holds: list[HeldFile] = []
     try:
-        sha256s = _parse_sha256s(bundle.files["sha256s.txt"].bytes())
+        sha256s = _parse_sha256s(bundle.files["sha256sums.txt"].bytes())
         for name, expected in sha256s.items():
             if bundle.files[name].sha256 != expected:
                 raise TasteT2AdoptionError(f"scientific bundle hash mismatch: {name}")

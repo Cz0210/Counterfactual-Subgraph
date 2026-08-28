@@ -103,10 +103,10 @@ def test_historical_temperature_rejects_test_fit() -> None:
 def test_sha_inventory_must_close_exact_bundle() -> None:
     lines = b"".join(
         f"{'0' * 64}  {name}\n".encode("utf-8")
-        for name in sorted(adoption.REQUIRED_BUNDLE_FILES - {"sha256s.txt"})
+        for name in sorted(adoption.REQUIRED_BUNDLE_FILES - {"sha256sums.txt"})
     )
     assert set(adoption._parse_sha256s(lines)) == adoption.REQUIRED_BUNDLE_FILES - {
-        "sha256s.txt"
+        "sha256sums.txt"
     }
     with pytest.raises(adoption.TasteT2AdoptionError, match="exact bundle"):
         adoption._parse_sha256s(lines + f"{'1' * 64}  extra.json\n".encode("utf-8"))
