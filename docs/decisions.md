@@ -1,5 +1,30 @@
 # Decisions Log
 
+## [2026-08-28] Cap AIDS exact-component recovery at twelve CPU workers
+
+### Motivation
+
+The fixed-budget NeuroSED campaign will benchmark GEDLIB concurrently with the
+CPU-only AIDS recovery and the two protected BACE legacy processes.  The new
+resource contract caps the AIDS exact route at twelve workers; the previously
+staged controller froze sixteen and therefore cannot be released unchanged.
+
+### Decision
+
+Freeze `DEFAULT_THREAD_COUNT=12` in the exact-component recovery manifest and
+all stage environments.  This changes only the CPU reservation: the pinned
+91,916,686-row authority, exact component algorithm, block order, checkpoints,
+and downstream numerical contracts remain unchanged.  The old brute process
+remains read-only and receives no signal from this change.
+
+### Consequences
+
+- A fresh controller/review/release commit is required; old unready specs are
+  not patched or adopted.
+- GEDLIB worker selection must still prove that neither AIDS nor protected
+  BACE throughput drops by more than ten percent.
+- This decision alone does not authorize launch or old-brute handover.
+
 ## [2026-08-28] Freeze T6/T8/T9 smoke markers to the T0--T16 contract
 
 ### Motivation

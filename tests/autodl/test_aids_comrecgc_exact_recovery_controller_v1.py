@@ -327,7 +327,7 @@ def _spec(
             "max_rss_scope": (
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
-            "thread_count": 16,
+            "thread_count": 12,
             "cpu_only": True,
             "gpu_lock_required": False,
             "proc_root": "/proc",
@@ -403,7 +403,7 @@ def test_resource_budget_is_derived_and_below_old_100gib_floor(tmp_path: Path) -
     assert manifest["resources"]["max_rss_scope"] == (
         "exact_dbscan_process_with_native_peak_certificate"
     )
-    assert manifest["resources"]["thread_count"] == 16
+    assert manifest["resources"]["thread_count"] == 12
 
 
 def test_disk_preflight_enforces_maximum_output_bytes(
@@ -686,7 +686,7 @@ def _spawn_lifecycle_contract(tmp_path: Path) -> tuple[dict[str, object], dict[s
     }
     manifest: dict[str, object] = {
         "project_root": str(tmp_path),
-        "resources": {"proc_root": str(tmp_path / "proc"), "thread_count": 16},
+        "resources": {"proc_root": str(tmp_path / "proc"), "thread_count": 12},
     }
     return manifest, stage, argv
 
@@ -1056,7 +1056,7 @@ def test_fast_exact_terminal_closes_coexistence_from_persisted_peak_rss(
         "controller_root": str(tmp_path),
         "stages": [stage],
         "resources": {
-            "thread_count": 16,
+            "thread_count": 12,
             "max_rss_bytes": recovery.DEFAULT_MAX_RSS_BYTES,
             "max_rss_scope": (
                 "exact_dbscan_process_with_native_peak_certificate"
@@ -1623,7 +1623,7 @@ def test_prelaunch_claim_is_cid_local_no_clobber_and_forces_resume(
     root = Path(manifest["controller_root"])
     assert prepared["controller_root"] == str(root)
     assert prepared["controller_invocation_requires_resume"] is True
-    assert prepared["thread_count"] == 16
+    assert prepared["thread_count"] == 12
     assert Path(prepared["log_path"]).parent == root / "logs"
     assert Path(prepared["pid_path"]).parent == root / "logs"
     assert Path(prepared["prelaunch_receipt_path"]).parent == root / "logs"
@@ -1754,7 +1754,7 @@ def test_controller_stage_gates_are_typed_restartable_and_final_is_ordinary(
                     "controller_id": recovery.CONTROLLER_ID,
                     "controller_manifest_sha256": manifest["manifest_sha256"],
                     "worker_argv_sha256": stage["commands"]["fresh_sha256"],
-                    "thread_count": 16,
+                    "thread_count": 12,
                     "cuda_visible_devices": "",
                     "gpu_lock_acquired": False,
                     "start_progress": 0,
@@ -1897,7 +1897,7 @@ def test_cpu_environment_cannot_see_gpu_and_freezes_libraries(tmp_path: Path) ->
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
-    )} == {"16"}
+    )} == {"12"}
 
 
 def test_source_authority_rejects_failed_gate_relabelled_pass(tmp_path: Path) -> None:

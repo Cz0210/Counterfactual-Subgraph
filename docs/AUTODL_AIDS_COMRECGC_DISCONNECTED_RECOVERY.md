@@ -63,7 +63,7 @@ The adoption receipt uses a dedicated `RECOVERY_ONLY_READY` type and
 and ordinary dependency readers must reject it. Only the final controller
 terminal is ordinary-PASS eligible.
 
-The resource identity freezes 16 CPU threads, hides CUDA, acquires no GPU lock,
+The resource identity freezes 12 CPU threads, hides CUDA, acquires no GPU lock,
 and derives a formula-bound maximum new-output budget plus an 8 GiB safety
 floor. The 96 GiB RSS contract is deliberately scoped to the exact DBSCAN
 process: its native memory guard and terminal peak-RSS certificate close that

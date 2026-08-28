@@ -27,10 +27,10 @@ def _frozen_recovery_cpu_environment(
         "CUDA_VISIBLE_DEVICES": "",
         "DEVICE": "cpu",
         "GPU_REQUIRED": "0",
-        "OMP_NUM_THREADS": "16",
-        "MKL_NUM_THREADS": "16",
-        "OPENBLAS_NUM_THREADS": "16",
-        "NUMEXPR_NUM_THREADS": "16",
+        "OMP_NUM_THREADS": "12",
+        "MKL_NUM_THREADS": "12",
+        "OPENBLAS_NUM_THREADS": "12",
+        "NUMEXPR_NUM_THREADS": "12",
     }
     for field, value in expected.items():
         monkeypatch.setenv(field, value)
@@ -134,8 +134,8 @@ def _stage_row(
 def test_stage_environment_rejects_gpu_or_thread_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest = {"resources": {"thread_count": 16}}
-    assert stages._require_cpu_stage_environment(manifest)["OMP_NUM_THREADS"] == "16"
+    manifest = {"resources": {"thread_count": 12}}
+    assert stages._require_cpu_stage_environment(manifest)["OMP_NUM_THREADS"] == "12"
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     with pytest.raises(stages.RecoveryStageError, match="CPU-only stage environment"):
         stages._require_cpu_stage_environment(manifest)
@@ -179,7 +179,7 @@ def test_subset_stage_keeps_partial_attempt_and_restarts_in_fresh_child(
             "physical_pairs_sha256": "c" * 64,
         },
         "runtime_inputs": {"expected_sklearn_version": "1.7.2"},
-        "resources": {"subset_size": 3, "block_size": 4, "thread_count": 16},
+        "resources": {"subset_size": 3, "block_size": 4, "thread_count": 12},
     }
     monkeypatch.setattr(stages, "load_bound_controller_manifest", lambda path: manifest)
     monkeypatch.setattr(
@@ -326,7 +326,7 @@ def test_exact_stage_archives_13_small_files_bootstraps_and_never_copies_failed(
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
             "block_size": 4,
-            "thread_count": 16,
+            "thread_count": 12,
         },
         "stages": [
             _stage_row(
@@ -442,7 +442,7 @@ def test_partial_final_owner_requires_explicit_resume(
         "downstream_gate": tmp_path / "downstream-gate.json",
     }
     manifest = {
-        "resources": {"thread_count": 16},
+        "resources": {"thread_count": 12},
         "stages": [
             _stage_row(
                 controller.FINAL_STAGE,
@@ -510,7 +510,7 @@ def test_downstream_stage_uses_native_component_summary_and_full_reopen(
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
             "block_size": 4,
-            "thread_count": 16,
+            "thread_count": 12,
         },
     }
     monkeypatch.setattr(stages, "load_bound_controller_manifest", lambda path: manifest)
@@ -592,7 +592,7 @@ def test_final_stage_reopens_standardized_closure_and_is_idempotent(
     manifest = {
         "manifest_path": str(manifest_path),
         "manifest_sha256": "a" * 64,
-        "resources": {"thread_count": 16},
+        "resources": {"thread_count": 12},
         "stages": [
             _stage_row(controller.FINAL_STAGE, output, terminal, bindings)
         ],

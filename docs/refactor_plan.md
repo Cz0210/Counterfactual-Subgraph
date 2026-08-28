@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-08-28: Twelve-worker AIDS exact recovery successor
+
+- [x] Lower the fresh exact-component controller CPU reservation from sixteen
+  to twelve without changing scientific inputs, exactness, block order, or
+  checkpoint semantics.
+- [x] Keep CUDA hidden and GPU locks absent; preserve every protected process
+  and prohibit old-brute signals outside the dedicated handover gate.
+- [ ] Run focused controller/stage tests and obtain fresh detached review.
+- [ ] Create a pin-only immutable execution successor and deploy one fresh CID.
+
 ## 2026-08-28: TasteMolNet T6/T8/T9 marker contract
 
 - [x] Freeze the exact T0--T16 marker literals for T6 Ours PPO, T8 GlobalGCE,
