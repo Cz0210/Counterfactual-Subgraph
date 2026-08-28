@@ -12,6 +12,7 @@ from src.baselines.globalgce_frozen_gine_bridge import (  # noqa: E402
     EDGE_SCORE_RELAXATION,
     FrozenGINEDifferentiableBridge,
     GlobalGCEClassZeroTargetAdapter,
+    GlobalGCETargetClassAdapter,
 )
 from src.data.molecular_graph_featurizer import (  # noqa: E402
     MolecularGraphFeaturizer,
@@ -21,13 +22,13 @@ from src.models.molecular_gnn import MolecularGNN, MolecularGNNConfig  # noqa: E
 from scripts.autodl.run_bace_baseline_gnn_route import build_parser  # noqa: E402
 
 
-def _model() -> MolecularGNN:
+def _model(*, num_classes: int = 2) -> MolecularGNN:
     torch.manual_seed(17)
     schema = default_molecular_feature_schema()
     model = MolecularGNN(
         MolecularGNNConfig(
             backbone="gine",
-            num_classes=2,
+            num_classes=num_classes,
             num_layers=2,
             hidden_dim=16,
             dropout=0.0,
@@ -271,3 +272,127 @@ def test_official_target_one_is_only_a_loss_view_of_frozen_class_zero() -> None:
     assert torch.equal(adapted["y_pred"][:, 1], ordinary["y_pred"][:, 0])
     assert torch.equal(adapted["y_pred"][:, 0], ordinary["y_pred"][:, 1])
     assert adapted["bridge_audit"]["frozen_bace_destination_label"] == 0
+
+
+@pytest.mark.parametrize(
+    ("target_label", "expected_order"),
+    ((0, (1, 0, 2)), (2, (1, 2, 0))),
+)
+def test_multiclass_target_adapter_uses_one_three_class_gine_without_projection(
+    target_label: int,
+    expected_order: tuple[int, int, int],
+) -> None:
+    bridge = FrozenGINEDifferentiableBridge(
+        _model(num_classes=3),
+        feature_schema=default_molecular_feature_schema(),
+        atom_symbols=("C", "O"),
+        bond_names=("no_edge", "single", "double", "triple"),
+        checkpoint_id="1" * 64,
+        temperature=1.0,
+        expected_num_classes=3,
+    )
+    features, adjacency, edges = _dense_ethanol()
+    ordinary = bridge(features, adjacency, edges)
+    adapted = GlobalGCETargetClassAdapter(
+        bridge,
+        source_label=1,
+        target_label=target_label,
+    )(features, adjacency, edges)
+    assert tuple(adapted["bridge_audit"]["frozen_class_order_seen_by_official"]) == (
+        expected_order
+    )
+    for internal, frozen in enumerate(expected_order):
+        assert torch.equal(
+            adapted["y_pred"][:, internal], ordinary["y_pred"][:, frozen]
+        )
+    assert adapted["bridge_audit"]["num_classes"] == 3
+    assert adapted["bridge_audit"]["frozen_source_label"] == 1
+    assert adapted["bridge_audit"]["frozen_target_label"] == target_label
+
+
+@pytest.mark.parametrize("target_label", (0, 2))
+def test_multiclass_target_loss_keeps_every_frozen_logit_in_softmax_gradient(
+    target_label: int,
+) -> None:
+    model = _model(num_classes=3)
+    bridge = FrozenGINEDifferentiableBridge(
+        model,
+        feature_schema=default_molecular_feature_schema(),
+        atom_symbols=("C", "O"),
+        bond_names=("no_edge", "single", "double", "triple"),
+        checkpoint_id="4" * 64,
+        temperature=1.25,
+        expected_num_classes=3,
+    )
+    captured_logits: list[torch.Tensor] = []
+
+    def _capture_logits(_module, _inputs, output) -> None:
+        output.retain_grad()
+        captured_logits.append(output)
+
+    hook = model.classifier.register_forward_hook(_capture_logits)
+    try:
+        features, adjacency, edges = _dense_ethanol()
+        adapted = GlobalGCETargetClassAdapter(
+            bridge,
+            source_label=1,
+            target_label=target_label,
+        )(features, adjacency, edges)
+        torch.nn.functional.nll_loss(
+            adapted["y_pred"],
+            torch.tensor([1]),
+        ).backward()
+    finally:
+        hook.remove()
+
+    assert len(captured_logits) == 1
+    gradient = captured_logits[0].grad
+    assert gradient is not None
+    assert tuple(gradient.shape) == (1, 3)
+    assert torch.all(gradient.abs() > 0.0)
+    assert all(parameter.grad is None for parameter in model.parameters())
+    assert all(parameter.requires_grad is False for parameter in model.parameters())
+    assert sum(
+        float(value.grad.detach().abs().sum())
+        for value in (features, adjacency, edges)
+        if value.grad is not None
+    ) > 0.0
+
+
+@pytest.mark.parametrize(
+    ("source_label", "target_label"),
+    ((True, 0), (1, False), (1, 1), (-1, 0), (1, 3)),
+)
+def test_multiclass_target_adapter_rejects_untyped_or_invalid_labels(
+    source_label: object,
+    target_label: object,
+) -> None:
+    bridge = FrozenGINEDifferentiableBridge(
+        _model(num_classes=3),
+        feature_schema=default_molecular_feature_schema(),
+        atom_symbols=("C", "O"),
+        bond_names=("no_edge", "single", "double", "triple"),
+        checkpoint_id="2" * 64,
+        temperature=1.0,
+        expected_num_classes=3,
+    )
+    with pytest.raises(ValueError, match="distinct exact classes"):
+        GlobalGCETargetClassAdapter(
+            bridge,
+            source_label=source_label,  # type: ignore[arg-type]
+            target_label=target_label,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("bad", (True, 3.0, 1, 4))
+def test_bridge_rejects_untyped_or_wrong_expected_class_count(bad: object) -> None:
+    with pytest.raises(ValueError, match="class count|exact integer"):
+        FrozenGINEDifferentiableBridge(
+            _model(num_classes=3),
+            feature_schema=default_molecular_feature_schema(),
+            atom_symbols=("C", "O"),
+            bond_names=("no_edge", "single", "double", "triple"),
+            checkpoint_id="3" * 64,
+            temperature=1.0,
+            expected_num_classes=bad,  # type: ignore[arg-type]
+        )

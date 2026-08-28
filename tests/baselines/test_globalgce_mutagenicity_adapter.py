@@ -18,6 +18,8 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     TrainParent,
     _add_bond_once,
     _build_dense_dataset,
+    _build_training_resume_identity,
+    _load_general_train_rows,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
@@ -106,6 +108,23 @@ def _write_many_parent_train(path: Path, count: int) -> None:
             "teacher_correct": "true",
         }
         for index in range(int(count))
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_three_class_train(path: Path) -> None:
+    rows = [
+        {
+            "molecule_id": f"taste-{label}-{index}",
+            "smiles": ("C" * (2 + label + index)) + ("O" if label == 0 else ""),
+            "label": label,
+            "split": "train",
+        }
+        for label in range(3)
+        for index in range(2)
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -232,6 +251,247 @@ class _FakeGenerator:
                 "source_atom_mapping_unique": True,
                 "source_formal_charge_nonzero_atom_count": 0,
             },
+        )
+
+
+def test_official_generator_accepts_two_taste_target_branches_on_one_three_class_gine(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    checkpoint = tmp_path / "gine"
+    checkpoint.mkdir()
+    (checkpoint / "model.pt").write_bytes(b"frozen-three-class-gine")
+
+    branches = [
+        OfficialGlobalGCEMutagenicityGenerator(
+            official,
+            native_train_csv=train_csv,
+            dataset_name="TasteMolNet",
+            frozen_gine_checkpoint=checkpoint,
+            num_classes=3,
+            source_label=1,
+            target_label=target,
+        )
+        for target in (0, 2)
+    ]
+    assert [branch.target_label for branch in branches] == [0, 2]
+    assert all(branch.source_label == 1 for branch in branches)
+    assert all(branch.num_classes == 3 for branch in branches)
+    assert [branch.config_identity()["target_label"] for branch in branches] == [0, 2]
+    assert all(branch.config_identity()["num_classes"] == 3 for branch in branches)
+    loaded = _load_general_train_rows(train_csv, num_classes=3)
+    assert {row.label for row in loaded} == {0, 1, 2}
+
+
+@pytest.mark.parametrize("bad_label", ("0.9", "1.5", "NaN", "True", "+1", "01"))
+def test_multiclass_native_train_rejects_noncanonical_integer_labels(
+    tmp_path: Path,
+    bad_label: str,
+) -> None:
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    with train_csv.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["label"] = bad_label
+    with train_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(ValueError, match="exact integer label"):
+        _load_general_train_rows(train_csv, num_classes=3)
+
+
+@pytest.mark.parametrize("bad_split", ("", "TRAIN", " train", "validation"))
+def test_multiclass_native_train_requires_explicit_exact_train_split(
+    tmp_path: Path,
+    bad_split: str,
+) -> None:
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    with train_csv.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["split"] = bad_split
+    with train_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    with pytest.raises(ValueError, match="non-train split"):
+        _load_general_train_rows(train_csv, num_classes=3)
+
+
+def test_taste_multiclass_generator_requires_the_frozen_gine(tmp_path: Path) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    with pytest.raises(ValueError, match="requires one frozen GINE"):
+        OfficialGlobalGCEMutagenicityGenerator(
+            official,
+            native_train_csv=train_csv,
+            dataset_name="TasteMolNet",
+            num_classes=3,
+            source_label=1,
+            target_label=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "dataset_alias",
+    ("tastemolnet", "taste", "bst", "bitter_sweet_tasteless"),
+)
+def test_every_registered_taste_alias_rejects_binary_gtgnn_fallback(
+    tmp_path: Path,
+    dataset_alias: str,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    with pytest.raises(
+        ValueError,
+        match="TasteMolNet GlobalGCE requires the frozen three-class GINE",
+    ):
+        OfficialGlobalGCEMutagenicityGenerator(
+            official,
+            native_train_csv=train_csv,
+            dataset_name=dataset_alias,
+            num_classes=2,
+            source_label=1,
+            target_label=0,
+            frozen_gine_checkpoint=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "dataset_alias",
+    ("tastemolnet", "taste", "bst", "bitter_sweet_tasteless"),
+)
+def test_every_registered_taste_alias_uses_same_three_class_gine_route(
+    tmp_path: Path,
+    dataset_alias: str,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    checkpoint = tmp_path / "gine"
+    checkpoint.mkdir()
+    (checkpoint / "model.pt").write_bytes(b"frozen-three-class-gine")
+    generator = OfficialGlobalGCEMutagenicityGenerator(
+        official,
+        native_train_csv=train_csv,
+        dataset_name=dataset_alias,
+        num_classes=3,
+        source_label=1,
+        target_label=2,
+        frozen_gine_checkpoint=checkpoint,
+    )
+    assert generator.dataset_id == "tastemolnet"
+    assert generator.dataset_name == "TasteMolNet"
+    assert generator.num_classes == 3
+    assert generator.source_label == 1
+    assert generator.target_label == 2
+
+
+def test_bace_binary_native_gtgnn_constructor_remains_available(tmp_path: Path) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "binary_train.csv"
+    _write_train(train_csv)
+    generator = OfficialGlobalGCEMutagenicityGenerator(
+        official,
+        native_train_csv=train_csv,
+        dataset_name="BACE",
+        num_classes=2,
+        source_label=1,
+        target_label=0,
+    )
+    assert generator.frozen_gine_checkpoint is None
+    assert generator.num_classes == 2
+
+
+def test_binary_bace_v2_identity_keeps_native_route_and_ordered_cohorts(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "binary_train.csv"
+    _write_train(train_csv)
+    native = [
+        TrainParent("n0a", "CC", 0, "train"),
+        TrainParent("n0b", "CCC", 0, "train"),
+        TrainParent("n1a", "CCO", 1, "train"),
+        TrainParent("n1b", "CCN", 1, "train"),
+    ]
+    source = [
+        TrainParent("s1", "CCO", 1, "train"),
+        TrainParent("s2", "CCN", 1, "train"),
+        TrainParent("s3", "CCC", 1, "train"),
+        TrainParent("s4", "CCCl", 1, "train"),
+        TrainParent("filtered-out", "CCBr", 1, "train"),
+    ]
+
+    def _identity(rows: list[TrainParent]) -> tuple[dict, str]:
+        return _build_training_resume_identity(
+            dataset_name="BACE",
+            num_classes=2,
+            source_label=1,
+            target_label=0,
+            official_src=official,
+            native_train_csv=train_csv,
+            native_parents=native,
+            native_train_idx=[0, 2],
+            native_val_idx=[1, 3],
+            source_parents=rows,
+            source_train_idx=[0, 2],
+            source_val_idx=[1, 3],
+            frozen_gine_checkpoint=None,
+            seed=7,
+            epochs=1,
+            top_k_native=20,
+            learning_rate=0.001,
+            dropout=0.5,
+            min_freq=7,
+            gspan_flush_every=256,
+            gspan_max_in_memory_candidates=256,
+            gspan_exact_top_k_pruning=False,
+            gspan_adoption_identity=None,
+        )
+
+    identity, digest = _identity(source)
+    reordered, reordered_digest = _identity(list(reversed(source)))
+    assert identity["oracle_identity"]["backend"] == "official_native_gtgnn"
+    assert identity["oracle_identity"]["num_classes"] == 2
+    assert identity["source_train_cohort"]["count"] == 4
+    assert len(digest) == 64
+    assert reordered["source_train_cohort"] != identity["source_train_cohort"]
+    assert reordered_digest != digest
+
+
+@pytest.mark.parametrize(
+    ("num_classes", "source_label", "target_label"),
+    ((True, 1, 0), (3.0, 1, 0), (3, True, 0), (3, 1, False), (3, 1, 1), (3, 1, 3)),
+)
+def test_official_generator_rejects_untyped_or_invalid_multiclass_contract(
+    tmp_path: Path,
+    num_classes: object,
+    source_label: object,
+    target_label: object,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train_csv = tmp_path / "taste_train.csv"
+    _write_three_class_train(train_csv)
+    with pytest.raises(ValueError, match="num_classes|exact integers|distinct frozen"):
+        OfficialGlobalGCEMutagenicityGenerator(
+            official,
+            native_train_csv=train_csv,
+            num_classes=num_classes,  # type: ignore[arg-type]
+            source_label=source_label,  # type: ignore[arg-type]
+            target_label=target_label,  # type: ignore[arg-type]
         )
 
 

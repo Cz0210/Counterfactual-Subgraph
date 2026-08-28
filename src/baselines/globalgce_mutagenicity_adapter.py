@@ -26,7 +26,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, Sequence
 
+from src.data.dataset_registry import get_dataset_spec
+
 from .globalgce_resumable import (
+    GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION,
+    normalize_globalgce_training_resume_identity,
     train_globalgce_resumable,
     validate_exact_top_k_proof_identity,
 )
@@ -274,6 +278,7 @@ class _DenseMoleculeDataset:
         bond_names: Sequence[str],
         source_atom_attributes: Sequence[Sequence[dict[str, Any]]],
         dataset_name: str = DATASET_NAME,
+        num_classes: int = 2,
     ) -> None:
         self.dataset_name = str(dataset_name)
         self.parent_ids = list(parent_ids)
@@ -289,7 +294,9 @@ class _DenseMoleculeDataset:
         self.max_num_nodes = int(feat.shape[1])
         self.node_feat_dim = int(feat.shape[-1])
         self.edge_attr_dim = int(edge_attr.shape[-1]) if edge_attr is not None else 0
-        self.num_classes = 2
+        if type(num_classes) is not int or num_classes < 2:
+            raise ValueError("Dense GlobalGCE num_classes must be an exact integer >= 2.")
+        self.num_classes = num_classes
         self.index = torch_module.arange(len(parent_ids), dtype=torch_module.long)
         self.atom_symbols = list(atom_symbols)
         self.bond_names = list(bond_names)
@@ -602,6 +609,32 @@ def _canonical_smiles(smiles: str) -> str | None:
     return Chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
 
 
+def _exact_csv_class_integer(
+    value: Any,
+    *,
+    path: Path,
+    row_number: int,
+    field: str,
+) -> int:
+    """Parse one canonical non-negative decimal class token.
+
+    CSV class identities are not measurements.  Float coercion would silently
+    map values such as ``0.9`` and ``1.5`` to valid classes, so accept only the
+    native textual grammar emitted by the prepared split writers.
+    """
+
+    if (
+        type(value) is not str
+        or not value
+        or any(character not in "0123456789" for character in value)
+        or (len(value) > 1 and value[0] == "0")
+    ):
+        raise ValueError(
+            f"Invalid exact integer {field} at {path}:{row_number}: {value!r}"
+        )
+    return int(value)
+
+
 def load_strict_train_parents(
     train_csv: str | Path,
     *,
@@ -622,7 +655,7 @@ def load_strict_train_parents(
         )
     if int(parent_limit) < 0:
         raise ValueError("parent_limit must be non-negative.")
-    required = {"molecule_id", "label"}
+    required = {"molecule_id", "label", "split"}
     smiles_col = "smiles" if rows and "smiles" in rows[0] else "parent_smiles"
     required.add(smiles_col)
     missing = sorted(required - set(rows[0] if rows else ()))
@@ -632,14 +665,16 @@ def load_strict_train_parents(
     seen: set[str] = set()
     for row_number, row in enumerate(rows, start=2):
         parent_id = str(row.get("molecule_id") or "").strip()
-        split = str(row.get("split") or "train").strip().lower()
-        try:
-            label = int(float(str(row.get("label") or "")))
-        except ValueError as exc:
-            raise ValueError(f"Invalid label at {path}:{row_number}") from exc
+        split = row.get("split")
+        label = _exact_csv_class_integer(
+            row.get("label"),
+            path=path,
+            row_number=row_number,
+            field="label",
+        )
         if not parent_id or parent_id in seen:
             raise ValueError(f"Missing/duplicate molecule_id at {path}:{row_number}")
-        if split != "train":
+        if type(split) is not str or split != "train":
             raise ValueError(
                 f"Strict GlobalGCE input must be train-only, found split={split!r}."
             )
@@ -648,7 +683,12 @@ def load_strict_train_parents(
                 f"Strict GlobalGCE source label must be {SOURCE_LABEL}."
             )
         teacher_pred = row.get("teacher_pred")
-        if teacher_pred not in (None, "") and int(float(str(teacher_pred))) != 1:
+        if teacher_pred not in (None, "") and _exact_csv_class_integer(
+            teacher_pred,
+            path=path,
+            row_number=row_number,
+            field="teacher_pred",
+        ) != 1:
             raise ValueError("Strict source parent is not teacher-predicted label 1.")
         if "teacher_correct" in row and not _bool_value(row.get("teacher_correct")):
             raise ValueError("Strict source parent is not teacher-correct.")
@@ -702,28 +742,286 @@ def _ids_hash(parents: Sequence[TrainParent], indices: Sequence[int]) -> str:
     return hashlib.sha256(_json_dumps(ids).encode("utf-8")).hexdigest()
 
 
+def _ordered_parent_cohort_hash(
+    parents: Sequence[TrainParent],
+    indices: Sequence[int] | None = None,
+) -> str:
+    selected = range(len(parents)) if indices is None else indices
+    payload = [
+        {
+            "position": position,
+            "parent_id": parents[index].parent_id,
+            "canonical_smiles": parents[index].smiles,
+            "label": parents[index].label,
+            "split": parents[index].split,
+        }
+        for position, index in enumerate(selected)
+    ]
+    return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def _cohort_resume_identity(
+    parents: Sequence[TrainParent],
+    *,
+    train_idx: Sequence[int],
+    val_idx: Sequence[int],
+) -> dict[str, Any]:
+    ordered_indices = [*train_idx, *val_idx]
+    if (
+        not train_idx
+        or not val_idx
+        or len(set(ordered_indices)) != len(ordered_indices)
+        or any(
+            type(index) is not int or not 0 <= index < len(parents)
+            for index in ordered_indices
+        )
+    ):
+        raise ValueError("GlobalGCE resume cohort indices are invalid.")
+    return {
+        "count": len(ordered_indices),
+        "ordered_sha256": _ordered_parent_cohort_hash(
+            parents,
+            ordered_indices,
+        ),
+        "train_count": len(train_idx),
+        "train_ordered_sha256": _ordered_parent_cohort_hash(parents, train_idx),
+        "val_count": len(val_idx),
+        "val_ordered_sha256": _ordered_parent_cohort_hash(parents, val_idx),
+    }
+
+
+def _identity_sha256(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def _official_source_resume_identity(official_src: Path) -> dict[str, Any]:
+    files: dict[str, dict[str, Any]] = {}
+    for relative in (
+        "main.py",
+        "models/GTGNN.py",
+        "models/GlobalGCE.py",
+        "models/models_utils.py",
+        "models/fsg.py",
+        "data/data_preprocess.py",
+        "data/dataset.py",
+    ):
+        path = official_src / relative
+        if path.is_file():
+            files[relative] = {
+                "bytes": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
+    if not files:
+        raise ValueError("GlobalGCE official source identity is empty.")
+    payload: dict[str, Any] = {
+        "schema_version": "globalgce_official_source_resume_identity_v1",
+        "root": str(official_src),
+        "files": files,
+    }
+    payload["identity_sha256"] = _identity_sha256(payload)
+    return payload
+
+
+def _frozen_gine_resume_identity(
+    checkpoint_root: Path,
+    *,
+    expected_dataset_name: str,
+    expected_num_classes: int,
+    expected_source_label: int,
+) -> dict[str, Any]:
+    from src.data.dataset_registry import normalize_dataset_id
+    from src.oracles.gnn_oracle import verify_checkpoint_bundle
+
+    root = checkpoint_root.expanduser().resolve(strict=True)
+    audit = verify_checkpoint_bundle(root, verify_hashes=True)
+    manifest_path = root / "sha256sums.txt"
+    declared: dict[str, str] = {}
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+        digest, separator, relative = line.partition("  ")
+        if (
+            not separator
+            or Path(relative).name != relative
+            or relative in declared
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("Frozen GINE checksum manifest is not canonical.")
+        declared[relative] = digest
+    inventory = []
+    for relative, digest in sorted(declared.items()):
+        path = root / relative
+        if path.is_symlink() or not path.is_file() or _sha256_file(path) != digest:
+            raise ValueError("Frozen GINE checksum inventory changed.")
+        inventory.append(
+            {
+                "name": relative,
+                "bytes": path.stat().st_size,
+                "sha256": digest,
+            }
+        )
+    temperature_path = root / "temperature_scaling.json"
+    temperature_payload = _read_json(temperature_path)
+    temperature = temperature_payload.get("temperature")
+    if (
+        type(temperature) not in (int, float)
+        or isinstance(temperature, bool)
+        or not math.isfinite(float(temperature))
+        or float(temperature) <= 0.0
+    ):
+        raise ValueError("Frozen GINE temperature identity is invalid.")
+    model_card = audit.get("model_card")
+    try:
+        expected_dataset = normalize_dataset_id(expected_dataset_name)
+        observed_dataset = normalize_dataset_id(
+            model_card.get("dataset") if type(model_card) is dict else ""
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Frozen GINE model-card dataset identity changed.") from exc
+    if (
+        type(model_card) is not dict
+        or observed_dataset != expected_dataset
+        or model_card.get("backbone") != "gine"
+        or type(model_card.get("num_classes")) is not int
+        or model_card["num_classes"] != expected_num_classes
+        or type(model_card.get("source_label")) is not int
+        or model_card["source_label"] != expected_source_label
+    ):
+        raise ValueError("Frozen GINE model-card class identity changed.")
+    payload = {
+        "schema_version": "globalgce_frozen_gine_resume_identity_v1",
+        "backend": "frozen_gine",
+        "checkpoint_root": str(root),
+        "checkpoint_id": _sha256_file(root / "model.pt"),
+        "dataset": expected_dataset,
+        "num_classes": expected_num_classes,
+        "source_label": expected_source_label,
+        "temperature_hex": float(temperature).hex(),
+        "temperature_scaling_sha256": _sha256_file(temperature_path),
+        "sha256sums_sha256": _sha256_file(manifest_path),
+        "inventory": inventory,
+        "inventory_sha256": _identity_sha256({"files": inventory}),
+    }
+    payload["identity_sha256"] = _identity_sha256(payload)
+    return payload
+
+
+def _build_training_resume_identity(
+    *,
+    dataset_name: str,
+    num_classes: int,
+    source_label: int,
+    target_label: int,
+    official_src: Path,
+    native_train_csv: Path,
+    native_parents: Sequence[TrainParent],
+    native_train_idx: Sequence[int],
+    native_val_idx: Sequence[int],
+    source_parents: Sequence[TrainParent],
+    source_train_idx: Sequence[int],
+    source_val_idx: Sequence[int],
+    frozen_gine_checkpoint: Path | None,
+    seed: int,
+    epochs: int,
+    top_k_native: int,
+    learning_rate: float,
+    dropout: float,
+    min_freq: int | None,
+    gspan_flush_every: int,
+    gspan_max_in_memory_candidates: int,
+    gspan_exact_top_k_pruning: bool,
+    gspan_adoption_identity: dict[str, Any] | None,
+) -> tuple[dict[str, Any], str]:
+    if frozen_gine_checkpoint is not None:
+        oracle_identity = _frozen_gine_resume_identity(
+            frozen_gine_checkpoint,
+            expected_dataset_name=dataset_name,
+            expected_num_classes=num_classes,
+            expected_source_label=source_label,
+        )
+    else:
+        native_csv_identity = {
+            "path": str(native_train_csv),
+            "bytes": native_train_csv.stat().st_size,
+            "sha256": _sha256_file(native_train_csv),
+        }
+        oracle_identity: dict[str, Any] = {
+            "schema_version": "globalgce_native_binary_gtgnn_resume_identity_v1",
+            "backend": "official_native_gtgnn",
+            "num_classes": 2,
+            "native_train_csv": native_csv_identity,
+        }
+        oracle_identity["identity_sha256"] = _identity_sha256(oracle_identity)
+    identity = {
+        "schema_version": GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION,
+        "dataset": dataset_name,
+        "num_classes": num_classes,
+        "source_label": source_label,
+        "target_label": target_label,
+        "oracle_identity": oracle_identity,
+        "native_train_cohort": _cohort_resume_identity(
+            native_parents,
+            train_idx=native_train_idx,
+            val_idx=native_val_idx,
+        ),
+        "source_train_cohort": _cohort_resume_identity(
+            source_parents,
+            train_idx=source_train_idx,
+            val_idx=source_val_idx,
+        ),
+        "official_source_identity": _official_source_resume_identity(official_src),
+        "training_config": {
+            "seed": seed,
+            "epochs": epochs,
+            "top_k_native": top_k_native,
+            "learning_rate_hex": float(learning_rate).hex(),
+            "dropout_hex": float(dropout).hex(),
+            "min_freq": min_freq,
+            "gspan_flush_every": gspan_flush_every,
+            "gspan_max_in_memory_candidates": gspan_max_in_memory_candidates,
+            "gspan_exact_top_k_pruning": gspan_exact_top_k_pruning,
+            "gspan_adoption_identity": gspan_adoption_identity,
+        },
+    }
+    return normalize_globalgce_training_resume_identity(identity)
+
+
 def _load_general_train_rows(
     path: Path,
     *,
     allowed_parent_ids: Sequence[str] | None = None,
+    num_classes: int = 2,
 ) -> list[TrainParent]:
+    if type(num_classes) is not int or num_classes < 2:
+        raise ValueError("Native train num_classes must be an exact integer >= 2.")
     _reject_non_train_path(path, description="Native GNN train CSV")
     rows = _read_csv(path)
     if not rows:
         raise ValueError(f"Native GNN train CSV is empty: {path}")
+    required = {"molecule_id", "label", "split"}
     smiles_col = "smiles" if "smiles" in rows[0] else "parent_smiles"
+    required.add(smiles_col)
+    missing = sorted(required - set(rows[0]))
+    if missing:
+        raise ValueError(f"Native GNN train CSV is missing columns: {missing}")
     parents: list[TrainParent] = []
     seen: set[str] = set()
     for row_number, row in enumerate(rows, start=2):
         parent_id = str(row.get("molecule_id") or "").strip()
-        split = str(row.get("split") or "train").strip().lower()
+        split = row.get("split")
         if not parent_id or parent_id in seen:
             raise ValueError(f"Invalid native train molecule_id at {path}:{row_number}")
-        if split != "train":
+        if type(split) is not str or split != "train":
             raise ValueError("Native GNN training data contains non-train split.")
-        label = int(float(str(row.get("label") or "")))
-        if label not in (0, 1):
-            raise ValueError("Native GNN training labels must be binary.")
+        label = _exact_csv_class_integer(
+            row.get("label"),
+            path=path,
+            row_number=row_number,
+            field="label",
+        )
+        if not 0 <= label < num_classes:
+            raise ValueError(
+                "Native GNN training label is outside its frozen class range."
+            )
         canonical = _canonical_smiles(str(row.get(smiles_col) or ""))
         if canonical is None:
             raise ValueError(f"Invalid native train SMILES at {path}:{row_number}")
@@ -743,10 +1041,9 @@ def _load_general_train_rows(
                 f"missing_count={len(missing)}, examples={missing[:5]}"
             )
         parents = [parent for parent in parents if parent.parent_id in requested]
-    if {parent.label for parent in parents} != {0, 1}:
+    if {parent.label for parent in parents} != set(range(num_classes)):
         raise ValueError(
-            "Official GlobalGCE requires a two-class native GNN train set. "
-            "The current native train CSV does not contain both labels."
+            "Official GlobalGCE native metadata requires every frozen class."
         )
     parents.sort(key=lambda row: row.parent_id)
     return parents
@@ -858,7 +1155,16 @@ def _build_dense_dataset(
     atom_symbols: Sequence[str] | None = None,
     max_num_nodes: int | None = None,
     dataset_name: str = DATASET_NAME,
+    num_classes: int = 2,
+    source_label: int = SOURCE_LABEL,
 ) -> _DenseMoleculeDataset:
+    if (
+        type(num_classes) is not int
+        or num_classes < 2
+        or type(source_label) is not int
+        or not 0 <= source_label < num_classes
+    ):
+        raise ValueError("Dense GlobalGCE class contract is invalid.")
     molecules = [_kekulized_molecule(parent.smiles) for parent in parents]
     source_atom_attributes = [
         _source_atom_attribute_sidecar(parent.smiles, molecule)
@@ -935,7 +1241,7 @@ def _build_dense_dataset(
                 bond_index[_bond_name(bond)],
             ] = 1.0
         # Official GlobalGCE recourses internal class 0 graphs toward class 1.
-        labels[graph_index] = 0 if parent.label == SOURCE_LABEL else 1
+        labels[graph_index] = 0 if parent.label == source_label else 1
         num_nodes[graph_index] = molecule.GetNumAtoms()
         num_edges[graph_index] = molecule.GetNumBonds() * 2
     return _DenseMoleculeDataset(
@@ -954,6 +1260,7 @@ def _build_dense_dataset(
         bond_names=("no_edge", "single", "double", "triple"),
         source_atom_attributes=source_atom_attributes,
         dataset_name=dataset_name,
+        num_classes=num_classes,
     )
 
 
@@ -1797,6 +2104,8 @@ def _prepare_native_and_source_datasets(
     torch_module: Any,
     dataset_name: str = DATASET_NAME,
     native_train_parent_ids: Sequence[str] | None = None,
+    num_classes: int = 2,
+    source_label: int = SOURCE_LABEL,
 ) -> tuple[
     list[TrainParent],
     list[int],
@@ -1809,6 +2118,7 @@ def _prepare_native_and_source_datasets(
     native_parents = _load_general_train_rows(
         native_train_csv,
         allowed_parent_ids=native_train_parent_ids,
+        num_classes=num_classes,
     )
     native_train_idx, native_val_idx = _stratified_native_split(
         native_parents,
@@ -1821,6 +2131,8 @@ def _prepare_native_and_source_datasets(
         test_idx=[],
         torch_module=torch_module,
         dataset_name=dataset_name,
+        num_classes=num_classes,
+        source_label=source_label,
     )
     source_train_idx, source_val_idx = _stable_split(parents, seed=int(seed))
     source_dataset = _build_dense_dataset(
@@ -1835,6 +2147,8 @@ def _prepare_native_and_source_datasets(
             max(Chem.MolFromSmiles(parent.smiles).GetNumAtoms() for parent in parents),
         ),
         dataset_name=dataset_name,
+        num_classes=num_classes,
+        source_label=source_label,
     )
     return (
         native_parents,
@@ -1860,6 +2174,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         frozen_gine_checkpoint: str | Path | None = None,
         source_label: int = SOURCE_LABEL,
         target_label: int = TARGET_LABEL,
+        num_classes: int = 2,
         native_train_parent_ids: Sequence[str] | None = None,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
@@ -1870,15 +2185,22 @@ class OfficialGlobalGCEMutagenicityGenerator:
         self.native_train_csv = Path(
             configured or repo_root / DEFAULT_NATIVE_TRAIN_CSV
         ).expanduser().resolve()
-        self.dataset_name = str(dataset_name)
+        dataset_spec = get_dataset_spec(str(dataset_name))
+        self.dataset_id = dataset_spec.dataset_id
+        self.dataset_name = dataset_spec.display_name
         self.min_freq = int(min_freq) if min_freq is not None else None
         self.frozen_gine_checkpoint = (
             None
             if frozen_gine_checkpoint is None
             else Path(frozen_gine_checkpoint).expanduser().resolve()
         )
-        self.source_label = int(source_label)
-        self.target_label = int(target_label)
+        if type(num_classes) is not int or num_classes < 2:
+            raise ValueError("GlobalGCE num_classes must be an exact integer >= 2.")
+        if type(source_label) is not int or type(target_label) is not int:
+            raise ValueError("GlobalGCE source/target labels must be exact integers.")
+        self.num_classes = num_classes
+        self.source_label = source_label
+        self.target_label = target_label
         self.native_train_parent_ids = (
             None
             if native_train_parent_ids is None
@@ -1895,8 +2217,29 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 set(self.native_train_parent_ids)
             ):
                 raise ValueError("Native GNN parent-ID filter contains duplicates.")
-        if {self.source_label, self.target_label} != {0, 1}:
-            raise ValueError("GlobalGCE binary source/target labels must be {0,1}.")
+        if (
+            not 0 <= self.source_label < self.num_classes
+            or not 0 <= self.target_label < self.num_classes
+            or self.source_label == self.target_label
+        ):
+            raise ValueError(
+                "GlobalGCE source/target labels must be distinct frozen classes."
+            )
+        if self.num_classes > 2 and self.frozen_gine_checkpoint is None:
+            raise ValueError(
+                "Multiclass GlobalGCE requires one frozen GINE; the official "
+                "native GTGNN path is binary-only."
+            )
+        if self.dataset_id == "tastemolnet" and (
+            self.num_classes != dataset_spec.num_classes
+            or self.source_label != dataset_spec.source_label
+            or self.target_label not in {0, 2}
+            or self.frozen_gine_checkpoint is None
+        ):
+            raise ValueError(
+                "TasteMolNet GlobalGCE requires the frozen three-class GINE, "
+                "Sweet source label 1, and destination 0 or 2."
+            )
         if self.min_freq is not None and self.min_freq < 2:
             raise ValueError("GlobalGCE min_freq must be at least two.")
 
@@ -1945,6 +2288,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             ),
             "source_label": self.source_label,
             "target_label": self.target_label,
+            "num_classes": self.num_classes,
         }
 
     def probe_codec(
@@ -1978,6 +2322,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
             torch_module=torch,
             dataset_name=self.dataset_name,
             native_train_parent_ids=self.native_train_parent_ids,
+            num_classes=self.num_classes,
+            source_label=self.source_label,
         )
         attribute_audit_path = (
             Path(output_path).expanduser().resolve().parent
@@ -2037,6 +2383,19 @@ class OfficialGlobalGCEMutagenicityGenerator:
         ) = None,
         rules_only: bool = False,
     ) -> NativeGenerationResult:
+        if not parents:
+            raise ValueError("GlobalGCE requires a non-empty source train cohort.")
+        if len({parent.parent_id for parent in parents}) != len(parents):
+            raise ValueError("GlobalGCE source train parent IDs must be unique.")
+        if any(
+            type(parent.label) is not int
+            or parent.label != self.source_label
+            or parent.split != "train"
+            for parent in parents
+        ):
+            raise ValueError(
+                "GlobalGCE source parents must be exact source-label train rows."
+            )
         if int(generation_chunk_size) <= 0:
             raise ValueError("generation_chunk_size must be positive.")
         if int(generation_num_workers) < 0:
@@ -2057,7 +2416,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             )
         if not self.native_train_csv.is_file():
             raise FileNotFoundError(
-                "Official GlobalGCE requires the current two-class processed train "
+                "Official GlobalGCE requires the reviewed processed train "
                 f"CSV for its native GNN: {self.native_train_csv}"
             )
         modules = _import_official_modules(self.official_src)
@@ -2096,6 +2455,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
             torch_module=torch,
             dataset_name=self.dataset_name,
             native_train_parent_ids=self.native_train_parent_ids,
+            num_classes=self.num_classes,
+            source_label=self.source_label,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         codec_summary = probe_source_graph_codec(
@@ -2147,6 +2508,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             )
         if can_resume_trained_model:
             expected_state = {
+                "dataset_name": self.dataset_name,
                 "seed": int(seed),
                 "epochs": int(epochs),
                 "top_k_native": int(top_k_native),
@@ -2161,6 +2523,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     else None
                 ),
                 "selected_parent_count": len(parents),
+                "num_classes": self.num_classes,
+                "source_label": self.source_label,
+                "target_label": self.target_label,
             }
             if use_frozen_gine:
                 expected_state["prediction_backend"] = (
@@ -2204,6 +2569,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             from src.baselines.globalgce_frozen_gine_bridge import (
                 FrozenGINEDifferentiableBridge,
                 GlobalGCEClassZeroTargetAdapter,
+                GlobalGCETargetClassAdapter,
             )
 
             bridge = FrozenGINEDifferentiableBridge.from_checkpoint(
@@ -2211,21 +2577,50 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 atom_symbols=tuple(source_dataset.atom_symbols),
                 bond_names=tuple(source_dataset.bond_names),
                 device=resolved_device,
+                expected_num_classes=self.num_classes,
             )
-            gnn_model = GlobalGCEClassZeroTargetAdapter(bridge)
-            gnn_summary = {
-                "prediction_backend": "frozen_gine_differentiable_bridge",
-                "classifier_family": "gine",
-                "oracle_backend": "gnn",
-                "rf_oracle_used": False,
-                "checkpoint_dir": str(frozen_gine_root),
-                "checkpoint_id": bridge.checkpoint_id,
-                "classifier_parameters_frozen": True,
-                "official_internal_target_label": 1,
-                "frozen_bace_source_label": self.source_label,
-                "frozen_bace_target_label": self.target_label,
-                "class_order_adapter": "official_1_maps_to_frozen_gine_0",
-            }
+            legacy_bace_target_view = (
+                self.num_classes == 2
+                and self.source_label == 1
+                and self.target_label == 0
+            )
+            if legacy_bace_target_view:
+                gnn_model = GlobalGCEClassZeroTargetAdapter(bridge)
+                gnn_summary = {
+                    "prediction_backend": "frozen_gine_differentiable_bridge",
+                    "classifier_family": "gine",
+                    "oracle_backend": "gnn",
+                    "rf_oracle_used": False,
+                    "checkpoint_dir": str(frozen_gine_root),
+                    "checkpoint_id": bridge.checkpoint_id,
+                    "classifier_parameters_frozen": True,
+                    "official_internal_target_label": 1,
+                    "frozen_bace_source_label": self.source_label,
+                    "frozen_bace_target_label": self.target_label,
+                    "class_order_adapter": "official_1_maps_to_frozen_gine_0",
+                }
+            else:
+                gnn_model = GlobalGCETargetClassAdapter(
+                    bridge,
+                    source_label=self.source_label,
+                    target_label=self.target_label,
+                )
+                gnn_summary = {
+                    "prediction_backend": "frozen_gine_differentiable_bridge",
+                    "classifier_family": "gine",
+                    "oracle_backend": "gnn",
+                    "rf_oracle_used": False,
+                    "checkpoint_dir": str(frozen_gine_root),
+                    "checkpoint_id": bridge.checkpoint_id,
+                    "classifier_parameters_frozen": True,
+                    "official_internal_target_label": 1,
+                    "num_classes": self.num_classes,
+                    "frozen_source_label": self.source_label,
+                    "frozen_target_label": self.target_label,
+                    "class_order_adapter": (
+                        "official_0_1_maps_to_frozen_source_target"
+                    ),
+                }
         else:
             native_train_loader = DataLoader(
                 Subset(native_dataset, native_train_idx),
@@ -2288,7 +2683,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 checkpoint=frozen_gine_root,
                 device=resolved_device,
                 batch_size=256,
-                num_classes=2,
+                num_classes=self.num_classes,
                 source_label=self.source_label,
             )
             featurizer = MolecularGraphFeaturizer(bridge.feature_schema)
@@ -2356,6 +2751,52 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "GlobalGCE classifier did not retain both internal train and "
                 "validation source-label partitions."
             )
+        training_resume_identity, training_resume_identity_sha256 = (
+            _build_training_resume_identity(
+                dataset_name=self.dataset_name,
+                num_classes=self.num_classes,
+                source_label=self.source_label,
+                target_label=self.target_label,
+                official_src=self.official_src,
+                native_train_csv=self.native_train_csv,
+                native_parents=native_parents,
+                native_train_idx=native_train_idx,
+                native_val_idx=native_val_idx,
+                source_parents=parents,
+                source_train_idx=source_train_idx,
+                source_val_idx=source_val_idx,
+                frozen_gine_checkpoint=frozen_gine_root,
+                seed=int(seed),
+                epochs=int(epochs),
+                top_k_native=int(top_k_native),
+                learning_rate=float(learning_rate),
+                dropout=float(dropout),
+                min_freq=self.min_freq,
+                gspan_flush_every=int(gspan_flush_every),
+                gspan_max_in_memory_candidates=int(
+                    gspan_max_in_memory_candidates
+                ),
+                gspan_exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
+                gspan_adoption_identity=(
+                    dict(gspan_adoption_identity)
+                    if gspan_adoption_proof is not None
+                    else None
+                ),
+            )
+        )
+        if can_resume_trained_model:
+            for key, expected in (
+                ("training_resume_identity", training_resume_identity),
+                (
+                    "training_resume_identity_sha256",
+                    training_resume_identity_sha256,
+                ),
+            ):
+                if training_state.get(key) != expected:
+                    raise ValueError(
+                        "GlobalGCE trained-model resume identity mismatch "
+                        f"for {key}."
+                    )
         source_dataset.train_idx = list(source_train_idx)
         source_dataset.val_idx = list(source_val_idx)
         source_dataset.test_idx = []
@@ -2467,6 +2908,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     if gspan_adoption_proof is not None
                     else None
                 ),
+                resume_identity=training_resume_identity,
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
             if gspan_exact_top_k_pruning and not exact_top_k_proof:
@@ -2478,31 +2920,37 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "GlobalGCE training did not bind the adopted mining proof."
                 )
             training_state_payload = {
-                    "seed": int(seed),
-                    "epochs": int(epochs),
-                    "top_k_native": int(top_k_native),
-                    "learning_rate": float(learning_rate),
-                    "dropout": float(dropout),
-                    "gspan_exact_top_k_pruning": bool(
-                        gspan_exact_top_k_pruning
-                    ),
-                    "gspan_adoption_identity": (
-                        dict(gspan_adoption_identity)
-                        if gspan_adoption_proof is not None
-                        else None
-                    ),
-                    "selected_parent_count": len(parents),
-                    "source_train_idx": list(source_train_idx),
-                    "source_val_idx": list(source_val_idx),
-                    "gnn_training": gnn_summary,
-                    "gnn_checkpoint_sha256": _sha256_file(gnn_checkpoint),
-                    "globalgce_model_checkpoint_sha256": _sha256_file(
-                        model_checkpoint
-                    ),
-                    "rules_checkpoint_sha256": _sha256_file(rules_checkpoint),
-                    "trained_once": True,
-                    "rule_selection_performed_once": True,
-                }
+                "dataset_name": self.dataset_name,
+                "seed": int(seed),
+                "epochs": int(epochs),
+                "top_k_native": int(top_k_native),
+                "learning_rate": float(learning_rate),
+                "dropout": float(dropout),
+                "gspan_exact_top_k_pruning": bool(gspan_exact_top_k_pruning),
+                "gspan_adoption_identity": (
+                    dict(gspan_adoption_identity)
+                    if gspan_adoption_proof is not None
+                    else None
+                ),
+                "selected_parent_count": len(parents),
+                "num_classes": self.num_classes,
+                "source_label": self.source_label,
+                "target_label": self.target_label,
+                "training_resume_identity": training_resume_identity,
+                "training_resume_identity_sha256": (
+                    training_resume_identity_sha256
+                ),
+                "source_train_idx": list(source_train_idx),
+                "source_val_idx": list(source_val_idx),
+                "gnn_training": gnn_summary,
+                "gnn_checkpoint_sha256": _sha256_file(gnn_checkpoint),
+                "globalgce_model_checkpoint_sha256": _sha256_file(
+                    model_checkpoint
+                ),
+                "rules_checkpoint_sha256": _sha256_file(rules_checkpoint),
+                "trained_once": True,
+                "rule_selection_performed_once": True,
+            }
             if gspan_exact_top_k_pruning:
                 training_state_payload["gspan_exact_top_k_proof"] = dict(
                     exact_top_k_proof
@@ -2552,8 +3000,11 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "oracle_backend": "gnn",
             "rf_oracle_used": False if use_frozen_gine else None,
             "classifier_parameters_frozen": True,
-            "frozen_bace_source_label": self.source_label,
-            "frozen_bace_target_label": self.target_label,
+            "num_classes": self.num_classes,
+            "frozen_source_label": self.source_label,
+            "frozen_target_label": self.target_label,
+            "training_resume_identity": training_resume_identity,
+            "training_resume_identity_sha256": training_resume_identity_sha256,
             "native_gnn_train_csv": str(self.native_train_csv),
             "native_gnn_train_rows": len(native_parents),
             "native_gnn_internal_train_ids_hash": _ids_hash(
@@ -2578,7 +3029,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "generation_uses_inference_mode": True,
             "generation_requires_gradients": False,
             "trained_model_resumed": can_resume_trained_model,
-            "training_checkpoint_policy": "gspan_root_chunks_plus_epoch_atomic_v1",
+            "training_checkpoint_policy": (
+                "gspan_root_chunks_plus_epoch_atomic_identity_v2"
+            ),
             "gspan_exact_top_k_pruning": bool(gspan_exact_top_k_pruning),
             "unused_pandas_report_materialization": False,
             **codec_summary,
@@ -2587,6 +3040,13 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "calibration_loaded": False,
             "test_loaded": False,
         }
+        if self.num_classes == 2:
+            training_summary.update(
+                {
+                    "frozen_bace_source_label": self.source_label,
+                    "frozen_bace_target_label": self.target_label,
+                }
+            )
         if gspan_exact_top_k_pruning:
             training_summary["gspan_exact_top_k_proof"] = (
                 validate_exact_top_k_proof_identity(exact_top_k_proof)
@@ -2871,8 +3331,15 @@ def _stratified_native_split(
 ) -> tuple[list[int], list[int]]:
     train: list[int] = []
     val: list[int] = []
-    for label in (0, 1):
+    labels = sorted({parent.label for parent in parents})
+    if len(labels) < 2:
+        raise ValueError("Native GlobalGCE split requires at least two classes.")
+    for label in labels:
         indices = [index for index, parent in enumerate(parents) if parent.label == label]
+        if len(indices) < 2:
+            raise ValueError(
+                "Native GlobalGCE split requires two rows in every represented class."
+            )
         indices.sort(
             key=lambda index: hashlib.sha256(
                 f"{seed}\t{parents[index].parent_id}".encode("utf-8")

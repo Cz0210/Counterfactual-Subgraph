@@ -336,12 +336,23 @@ class FrozenGINEDifferentiableBridge:
         checkpoint_id: str,
         temperature: float,
         device: str | Any = "cpu",
+        expected_num_classes: int = 2,
     ) -> None:
         torch = _torch()
         if str(getattr(model.config, "backbone", "")).lower() != "gine":
             raise FrozenGINEBridgeError("GlobalGCE bridge requires the frozen GINE")
-        if int(getattr(model.config, "num_classes", 0)) != 2:
-            raise FrozenGINEBridgeError("BACE GlobalGCE bridge requires two classes")
+        if type(expected_num_classes) is not int or expected_num_classes < 2:
+            raise FrozenGINEBridgeError(
+                "GlobalGCE expected_num_classes must be an exact integer >= 2"
+            )
+        observed_num_classes = getattr(model.config, "num_classes", None)
+        if (
+            type(observed_num_classes) is not int
+            or observed_num_classes != expected_num_classes
+        ):
+            raise FrozenGINEBridgeError(
+                "GlobalGCE bridge class count differs from its frozen contract"
+            )
         if not math.isfinite(float(temperature)) or float(temperature) <= 0.0:
             raise FrozenGINEBridgeError("Frozen GINE temperature must be positive")
         symbols = tuple(str(value) for value in atom_symbols)
@@ -358,6 +369,7 @@ class FrozenGINEDifferentiableBridge:
         self.bond_names = bonds
         self.checkpoint_id = str(checkpoint_id)
         self.temperature = float(temperature)
+        self.num_classes = expected_num_classes
         self.device = torch.device(device)
         self.last_audit: dict[str, Any] = {}
         self._atomic_field = _schema_index(
@@ -375,6 +387,7 @@ class FrozenGINEDifferentiableBridge:
         atom_symbols: Sequence[str],
         bond_names: Sequence[str],
         device: str | Any = "cpu",
+        expected_num_classes: int = 2,
     ) -> "FrozenGINEDifferentiableBridge":
         root = Path(checkpoint_dir).expanduser().resolve(strict=True)
         model, metadata = load_gnn_checkpoint_bundle(root, device=device)
@@ -389,6 +402,7 @@ class FrozenGINEDifferentiableBridge:
             checkpoint_id=sha256_file(root / "model.pt"),
             temperature=temperature,
             device=device,
+            expected_num_classes=expected_num_classes,
         )
 
     def train(self, mode: bool = True) -> "FrozenGINEDifferentiableBridge":
@@ -628,6 +642,7 @@ class FrozenGINEDifferentiableBridge:
             "schema_version": BRIDGE_SCHEMA_VERSION,
             "checkpoint_id": self.checkpoint_id,
             "classifier_family": "gine",
+            "num_classes": self.num_classes,
             "rf_oracle_used": False,
             "edge_score_contract": "pinned_official_unbounded_affine_class_scores",
             "edge_score_relaxation": EDGE_SCORE_RELAXATION,
@@ -641,6 +656,85 @@ class FrozenGINEDifferentiableBridge:
         return {
             "y_pred": log_probabilities,
             "logits": joined,
+            "bridge_audit": dict(self.last_audit),
+        }
+
+
+class GlobalGCETargetClassAdapter:
+    """Expose one reviewed multiclass target as official internal class one.
+
+    Pinned GlobalGCE optimizes ``y_cf=1``.  This adapter is only a loss view:
+    internal column zero is the frozen source class, internal column one is
+    the requested destination, and remaining frozen classes follow in numeric
+    order.  The bridge and every final hard-oracle check retain the original
+    calibrated class order.
+    """
+
+    def __init__(
+        self,
+        bridge: FrozenGINEDifferentiableBridge,
+        *,
+        source_label: int,
+        target_label: int,
+    ) -> None:
+        if (
+            type(source_label) is not int
+            or type(target_label) is not int
+            or not 0 <= source_label < bridge.num_classes
+            or not 0 <= target_label < bridge.num_classes
+            or source_label == target_label
+        ):
+            raise FrozenGINEBridgeError(
+                "GlobalGCE source/target labels must be distinct exact classes"
+            )
+        self.bridge = bridge
+        self.source_label = source_label
+        self.target_label = target_label
+        self.class_order = (
+            source_label,
+            target_label,
+            *(
+                label
+                for label in range(bridge.num_classes)
+                if label not in {source_label, target_label}
+            ),
+        )
+        self.last_audit: dict[str, Any] = {}
+
+    def train(self, mode: bool = True) -> "GlobalGCETargetClassAdapter":
+        self.bridge.train(mode)
+        return self
+
+    def eval(self) -> "GlobalGCETargetClassAdapter":
+        self.bridge.eval()
+        return self
+
+    def parameters(self, recurse: bool = True) -> Any:
+        return self.bridge.parameters(recurse=recurse)
+
+    def named_parameters(self, recurse: bool = True) -> Any:
+        return self.bridge.named_parameters(recurse=recurse)
+
+    def to(self, device: str | Any) -> "GlobalGCETargetClassAdapter":
+        self.bridge.to(device)
+        return self
+
+    def __call__(self, features: Any, adjacency: Any, edge_attributes: Any) -> dict[str, Any]:
+        result = self.bridge(features, adjacency, edge_attributes)
+        self.last_audit = {
+            **self.bridge.last_audit,
+            "official_internal_source_label": 0,
+            "official_internal_target_label": 1,
+            "frozen_source_label": self.source_label,
+            "frozen_target_label": self.target_label,
+            "frozen_class_order_seen_by_official": list(self.class_order),
+            "class_order_adapter": "official_0_1_maps_to_frozen_source_target",
+        }
+        indices = list(self.class_order)
+        return {
+            **result,
+            "y_pred": result["y_pred"][:, indices],
+            "logits": result["logits"][:, indices],
             "bridge_audit": dict(self.last_audit),
         }
 
@@ -699,4 +793,5 @@ __all__ = [
     "FrozenGINEBridgeError",
     "FrozenGINEDifferentiableBridge",
     "GlobalGCEClassZeroTargetAdapter",
+    "GlobalGCETargetClassAdapter",
 ]

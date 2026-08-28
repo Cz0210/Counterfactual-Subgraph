@@ -1941,3 +1941,22 @@ Mutagenicity roadmaps.
 - [x] Implement T3 so its only T2 authority is the validated fresh gate/receipt
   SHA plus the exact formal-bundle inventory in that receipt; require T4 to
   retain that receipt binding and consume T3's own gate before PASS.
+
+## 2026-08-28: TasteMolNet GlobalGCE two-target smoke
+
+- [x] Generalize the differentiable frozen-GINE bridge to an exact native
+  multiclass contract and add a target view mapping official internal class
+  `0/1` to one reviewed source/destination pair without changing the frozen
+  calibrated class order.
+- [x] Generalize train metadata and resume identity to bind all three classes,
+  source label 1, and one explicit destination branch; retain one frozen GINE
+  and reject cross-target resume.
+- [x] Reject fractional/native-float labels and implicit split defaults, forbid
+  multiclass native-GTGNN fallback, and bind partial plus terminal training
+  checkpoints to the full calibrated GINE/cohort/config identity.
+- [ ] Implement the release-disabled T8 producer over train-only Sweet parents,
+  execute independent destinations 0 and 2, merge/canonical-deduplicate, and
+  validate final untargeted `pred_after != 1` with the original class order.
+- [ ] Bind T2/T3/T4 held authorities, managed GPU-2 execution/completion
+  receipts, one fresh private output, strict retained consumer, and controller
+  adoption before enabling any science.

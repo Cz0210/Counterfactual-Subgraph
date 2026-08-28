@@ -1,13 +1,42 @@
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 from collections import defaultdict
+from copy import deepcopy
 from types import SimpleNamespace
 
-from src.baselines.globalgce_resumable import resumable_gspan_root_chunks
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+
+import src.baselines.globalgce_resumable as resumable_module
+from src.baselines.globalgce_resumable import (
+    GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1,
+    GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2,
+    GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION,
+    normalize_globalgce_training_resume_identity,
+    resumable_gspan_root_chunks,
+    train_globalgce_resumable,
+    validate_globalgce_epoch_checkpoint_identity,
+)
 
 
 Projected = list
+
+
+def _canonical_sha256(payload) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def PDFS(graph_id, edge, previous):
@@ -137,3 +166,254 @@ def test_root_chunk_resume_matches_uninterrupted_reference(tmp_path) -> None:
     databases = sorted(tmp_path.glob("support_*/frequent_patterns.sqlite3"))
     assert len(databases) == 1
     assert list(tmp_path.glob("support_*/checkpoint.json"))
+
+
+def _training_resume_identity(*, target_label: int = 0) -> dict:
+    cohort = {
+        "count": 6,
+        "ordered_sha256": "1" * 64,
+        "train_count": 3,
+        "train_ordered_sha256": "2" * 64,
+        "val_count": 3,
+        "val_ordered_sha256": "3" * 64,
+    }
+    inventory = [
+        {"name": "model.pt", "bytes": 41, "sha256": "4" * 64},
+        {
+            "name": "temperature_scaling.json",
+            "bytes": 42,
+            "sha256": "5" * 64,
+        },
+    ]
+    oracle_identity = {
+        "schema_version": "globalgce_frozen_gine_resume_identity_v1",
+        "backend": "frozen_gine",
+        "checkpoint_root": "/frozen/tastemolnet/gine",
+        "checkpoint_id": "4" * 64,
+        "dataset": "tastemolnet",
+        "num_classes": 3,
+        "source_label": 1,
+        "temperature_hex": float(1.25).hex(),
+        "temperature_scaling_sha256": "5" * 64,
+        "sha256sums_sha256": "6" * 64,
+        "inventory": inventory,
+        "inventory_sha256": _canonical_sha256({"files": inventory}),
+    }
+    oracle_identity["identity_sha256"] = _canonical_sha256(oracle_identity)
+    official_source_identity = {
+        "schema_version": "globalgce_official_source_resume_identity_v1",
+        "root": "/frozen/official/globalgce",
+        "files": {
+            "models/GlobalGCE.py": {
+                "bytes": 43,
+                "sha256": "7" * 64,
+            }
+        },
+    }
+    official_source_identity["identity_sha256"] = _canonical_sha256(
+        official_source_identity
+    )
+    return {
+        "schema_version": GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION,
+        "dataset": "TasteMolNet",
+        "num_classes": 3,
+        "source_label": 1,
+        "target_label": target_label,
+        "oracle_identity": oracle_identity,
+        "native_train_cohort": dict(cohort),
+        "source_train_cohort": {
+            **cohort,
+            "ordered_sha256": "6" * 64,
+            "train_ordered_sha256": "7" * 64,
+            "val_ordered_sha256": "8" * 64,
+        },
+        "official_source_identity": official_source_identity,
+        "training_config": {
+            "seed": 7,
+            "epochs": 1,
+            "top_k_native": 20,
+            "learning_rate_hex": float(0.001).hex(),
+            "dropout_hex": float(0.5).hex(),
+            "min_freq": 7,
+            "gspan_flush_every": 256,
+            "gspan_max_in_memory_candidates": 256,
+            "gspan_exact_top_k_pruning": False,
+            "gspan_adoption_identity": None,
+        },
+    }
+
+
+def _identity_bound_checkpoint(identity: dict) -> dict:
+    normalized, digest = normalize_globalgce_training_resume_identity(identity)
+    return {
+        "checkpoint_schema_version": GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2,
+        "resume_identity": normalized,
+        "resume_identity_sha256": digest,
+    }
+
+
+def test_partial_checkpoint_rejects_cross_target_resume() -> None:
+    target_zero = _training_resume_identity(target_label=0)
+    target_two = _training_resume_identity(target_label=2)
+    checkpoint = _identity_bound_checkpoint(target_zero)
+    with pytest.raises(ValueError, match="resume identity mismatch"):
+        validate_globalgce_epoch_checkpoint_identity(checkpoint, target_two)
+
+
+def test_v2_identity_rejects_incomplete_frozen_gine_or_training_config() -> None:
+    missing_temperature = _training_resume_identity()
+    missing_temperature["oracle_identity"].pop("temperature_scaling_sha256")
+    with pytest.raises(ValueError, match="frozen-GINE resume identity"):
+        normalize_globalgce_training_resume_identity(missing_temperature)
+
+    missing_gspan_limit = _training_resume_identity()
+    missing_gspan_limit["training_config"].pop(
+        "gspan_max_in_memory_candidates"
+    )
+    with pytest.raises(ValueError, match="configuration identity"):
+        normalize_globalgce_training_resume_identity(missing_gspan_limit)
+
+
+@pytest.mark.parametrize("drift", ("source_ids", "gine", "temperature"))
+def test_partial_checkpoint_rejects_cohort_or_oracle_drift(drift: str) -> None:
+    identity = _training_resume_identity(target_label=0)
+    expected = deepcopy(identity)
+    if drift == "source_ids":
+        expected["source_train_cohort"]["train_ordered_sha256"] = "a" * 64
+    elif drift == "gine":
+        expected["oracle_identity"]["checkpoint_id"] = "b" * 64
+        expected["oracle_identity"]["inventory"][0]["sha256"] = "b" * 64
+        expected["oracle_identity"]["inventory_sha256"] = _canonical_sha256(
+            {"files": expected["oracle_identity"]["inventory"]}
+        )
+    else:
+        expected["oracle_identity"]["temperature_hex"] = float(2.0).hex()
+    if drift in {"gine", "temperature"}:
+        expected["oracle_identity"]["identity_sha256"] = _canonical_sha256(
+            {
+                key: value
+                for key, value in expected["oracle_identity"].items()
+                if key != "identity_sha256"
+            }
+        )
+    with pytest.raises(ValueError, match="resume identity mismatch"):
+        validate_globalgce_epoch_checkpoint_identity(
+            _identity_bound_checkpoint(identity),
+            expected,
+        )
+
+
+class _TinyGlobalGCE(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(0.25))
+        self.device = torch.device("cpu")
+        self.gt_gnn = SimpleNamespace(eval=lambda: None)
+        self.fsg = SimpleNamespace(topk=1)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        return self
+
+    def get_rules(self, _frequent_subgraphs):
+        return {"weight": self.weight.detach().clone()}
+
+    def run_one_batch(self, _rules, _data):
+        loss = (self.weight - 1.0).square()
+        zero = loss * 0.0
+        return loss, zero, zero, loss
+
+
+def _tiny_eval(_expanded_val, model, _pred_model, _rules):
+    loss = (model.weight - 1.0).square()
+    zero = loss * 0.0
+    return {"loss": loss, "loss_kl": zero, "loss_sim": zero, "loss_cfe": loss}
+
+
+def _run_tiny_identity_training(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    identity: dict | None,
+    resume: bool,
+) -> None:
+    monkeypatch.setattr(
+        resumable_module,
+        "_get_fs_expanded_data_from_adoption",
+        lambda **_kwargs: ((["fss"], ["train"], ["val"], ["test"]), {}),
+    )
+    train_globalgce_resumable(
+        epochs=0,
+        pred_model=SimpleNamespace(),
+        model=_TinyGlobalGCE(),
+        learning_rate=0.01,
+        train_loader=SimpleNamespace(),
+        val_loader=SimpleNamespace(),
+        save_rule_path=tmp_path / "rules.pt",
+        save_model_path=tmp_path / "model.pt",
+        checkpoint_dir=tmp_path / "checkpoints",
+        torch_module=torch,
+        numpy_module=np,
+        test_globalgce=_tiny_eval,
+        gspan_module=SimpleNamespace(),
+        resume=resume,
+        gspan_adoption_proof=tmp_path / "adoption.json",
+        resume_identity=identity,
+    )
+
+
+def test_legacy_no_identity_api_keeps_typed_v1_terminal_heartbeat(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_tiny_identity_training(
+        tmp_path,
+        monkeypatch,
+        identity=None,
+        resume=False,
+    )
+    heartbeat = json.loads(
+        (tmp_path / "checkpoints" / "training_heartbeat.json").read_text()
+    )
+    assert heartbeat["stage"] == "complete"
+    assert heartbeat["schema_version"] == GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1
+    assert "resume_identity" not in heartbeat
+    assert "resume_identity_sha256" not in heartbeat
+
+
+def test_epoch_and_terminal_identity_allow_same_branch_and_reject_other_target(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_zero = _training_resume_identity(target_label=0)
+    _run_tiny_identity_training(
+        tmp_path,
+        monkeypatch,
+        identity=target_zero,
+        resume=False,
+    )
+    checkpoint = torch.load(
+        tmp_path / "checkpoints" / "training_checkpoint.pt",
+        map_location="cpu",
+    )
+    validated = validate_globalgce_epoch_checkpoint_identity(checkpoint, target_zero)
+    heartbeat = json.loads(
+        (tmp_path / "checkpoints" / "training_heartbeat.json").read_text()
+    )
+    assert heartbeat["stage"] == "complete"
+    assert heartbeat["schema_version"] == GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2
+    assert heartbeat["resume_identity_sha256"] == validated["resume_identity_sha256"]
+
+    _run_tiny_identity_training(
+        tmp_path,
+        monkeypatch,
+        identity=target_zero,
+        resume=True,
+    )
+    with pytest.raises(ValueError, match="resume identity mismatch"):
+        _run_tiny_identity_training(
+            tmp_path,
+            monkeypatch,
+            identity=_training_resume_identity(target_label=2),
+            resume=True,
+        )

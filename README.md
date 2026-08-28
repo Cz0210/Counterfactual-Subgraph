@@ -211,6 +211,18 @@ using only the frozen prepared train CSV with a frozen-GINE reward and no
 RF/no-validation/no-calibration/no-test; it does not by itself implement or
 launch T6.
 
+The GlobalGCE frozen-GINE bridge now has an explicit multiclass target view:
+official internal classes `0/1` map to the reviewed frozen source/destination
+classes while the calibrated three-class logits remain intact. This permits
+separate Sweet-to-Bitter and Sweet-to-Tasteless branches on one GINE without
+training binary classifiers. The bridge generalization is only a prerequisite;
+the Taste T8 smoke, held predecessor chain, controller receipt, output gate,
+and execution release remain unimplemented and must not be inferred from it.
+Its native metadata reader accepts only explicit `split=train` rows and
+canonical integer class tokens. Multiclass training cannot fall back to the
+official binary GTGNN, and versioned epoch/terminal resume identities prevent
+target, cohort, calibrated-GINE, or training-config drift.
+
 ---
 
 ## 3. Planned Repository Layout

@@ -10801,3 +10801,62 @@ reopens it and persists the complete binding plus all three pins.
   before a downstream PASS marker.
 - T3--T6 release bits, GPU ownership, matrix state, and science status remain
   unchanged and disabled until separately reviewed execution authorities exist.
+
+## [2026-08-28] Preserve one three-class GINE across GlobalGCE target branches
+
+### Motivation
+
+Official GlobalGCE optimizes an internal target class `1`, while TasteMolNet
+requires two destination branches from Sweet (`1`) to Bitter (`0`) and
+Tasteless (`2`). Training separate binary classifiers or collapsing
+`1 - p(Sweet)` into one binary target would change the reviewed oracle and
+could accept a candidate whose calibrated argmax is still Sweet.
+
+### Rejected predecessor
+
+Independent review rejected the first local foundation candidate at base HEAD
+`31dd9f46f9ed0fdf88ee533a6c5b0584ed428c3e`, base tree
+`186aa30d710fc3a5038f3998657961334405327f`, staged tree
+`d9f0385e51d38fe1db7b610925c75c31cbe3240f`, ordinary patch SHA-256
+`7fd64231399500eda72fa65e488f769c2d52388fa497e456fad86eb640ca1ff6`,
+and full-index patch SHA-256
+`8c9b4c1f53f8be8e602ed99aa01d3aa79bec77d9ed826bf5220146160932de97`.
+It truncated finite non-integer CSV labels, admitted a three-class request into
+the binary native GTGNN path, and bound target/class identity only after a
+training run had already reached its terminal checkpoint.
+
+### Decision
+
+Parameterize the differentiable GINE bridge by an exact frozen class count and
+introduce a target-class view that orders logits as source, requested target,
+then all remaining original classes. Official internal `0/1` therefore maps to
+one explicit frozen source/target pair, but the underlying checkpoint,
+temperature, features, and original three-class logits remain unchanged.
+Generalize native train metadata to require every frozen class and bind dataset,
+class count, source, and target into resume state so branches cannot reuse one
+another's learned GlobalGCE state. Class labels now use canonical non-negative
+integer text and every row must explicitly declare `split=train`; no float
+coercion or implicit split default remains. Multiclass and every Taste route
+require a frozen GINE, while the historical two-class native GTGNN surface is
+retained as an explicitly versioned legacy path.
+
+The successor also binds every epoch checkpoint and its terminal heartbeat to
+one canonical v2 identity covering dataset/classes/source/destination, ordered
+native and source train/validation cohorts, official source files, full frozen
+GINE checksum inventory and calibrated temperature, and all rule-training and
+gSpan settings. A v2 caller cannot adopt an unbound v1 checkpoint. The legacy
+no-identity API remains typed v1 for historical binary callers and cannot read
+a v2 checkpoint.
+
+### Consequences
+
+- Sweet-to-Bitter and Sweet-to-Tasteless can share the exact same frozen GINE
+  while retaining target-specific official optimization.
+- Final candidate acceptance still requires an independent original-order
+  three-class oracle and untargeted `pred_after != 1`; the adapter is only a
+  differentiable loss view.
+- A target-0 partial training checkpoint cannot be resumed as target 2, and
+  train-cohort, frozen-checkpoint, or temperature drift fails before model or
+  optimizer state adoption.
+- This prerequisite does not implement or release T8. No controller, GPU,
+  dataset, output, or scientific process is started by this change.

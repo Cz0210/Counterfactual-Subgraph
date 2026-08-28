@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import math
 import os
 import pickle
 import random
@@ -18,6 +19,442 @@ from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
+
+
+GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION = (
+    "globalgce_training_resume_identity_v2"
+)
+GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1 = "globalgce_epoch_checkpoint_v1"
+GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2 = "globalgce_epoch_checkpoint_v2"
+_TRAINING_RESUME_IDENTITY_KEYS = {
+    "schema_version",
+    "dataset",
+    "num_classes",
+    "source_label",
+    "target_label",
+    "oracle_identity",
+    "native_train_cohort",
+    "source_train_cohort",
+    "official_source_identity",
+    "training_config",
+}
+_COHORT_IDENTITY_KEYS = {
+    "count",
+    "ordered_sha256",
+    "train_count",
+    "train_ordered_sha256",
+    "val_count",
+    "val_ordered_sha256",
+}
+_FROZEN_GINE_IDENTITY_KEYS = {
+    "schema_version",
+    "backend",
+    "checkpoint_root",
+    "checkpoint_id",
+    "dataset",
+    "num_classes",
+    "source_label",
+    "temperature_hex",
+    "temperature_scaling_sha256",
+    "sha256sums_sha256",
+    "inventory",
+    "inventory_sha256",
+    "identity_sha256",
+}
+_NATIVE_BINARY_IDENTITY_KEYS = {
+    "schema_version",
+    "backend",
+    "num_classes",
+    "native_train_csv",
+    "identity_sha256",
+}
+_FILE_IDENTITY_KEYS = {"path", "bytes", "sha256"}
+_INVENTORY_ENTRY_KEYS = {"name", "bytes", "sha256"}
+_OFFICIAL_SOURCE_IDENTITY_KEYS = {
+    "schema_version",
+    "root",
+    "files",
+    "identity_sha256",
+}
+_OFFICIAL_SOURCE_FILE_KEYS = {"bytes", "sha256"}
+_TRAINING_CONFIG_IDENTITY_KEYS = {
+    "seed",
+    "epochs",
+    "top_k_native",
+    "learning_rate_hex",
+    "dropout_hex",
+    "min_freq",
+    "gspan_flush_every",
+    "gspan_max_in_memory_candidates",
+    "gspan_exact_top_k_pruning",
+    "gspan_adoption_identity",
+}
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _canonical_json_sha256(payload: Any) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "GlobalGCE training resume identity is not canonical JSON."
+        ) from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_float_hex(value: Any, *, positive: bool = False) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        parsed = float.fromhex(value)
+    except ValueError:
+        return False
+    return (
+        math.isfinite(parsed)
+        and parsed.hex() == value
+        and (not positive or parsed > 0.0)
+    )
+
+
+def _dataset_identity_token(value: Any) -> str:
+    if type(value) is not str:
+        return ""
+    return "".join(character for character in value.lower() if character.isalnum())
+
+
+def _validate_file_identity(payload: Any) -> None:
+    if (
+        type(payload) is not dict
+        or set(payload) != _FILE_IDENTITY_KEYS
+        or type(payload.get("path")) is not str
+        or not payload["path"]
+        or type(payload.get("bytes")) is not int
+        or payload["bytes"] < 0
+        or not _is_sha256(payload.get("sha256"))
+    ):
+        raise ValueError("GlobalGCE native checkpoint file identity is invalid.")
+
+
+def _validate_oracle_identity(
+    payload: Any,
+    *,
+    dataset: str,
+    num_classes: int,
+    source_label: int,
+) -> None:
+    if type(payload) is not dict:
+        raise ValueError("GlobalGCE training resume oracle identity is invalid.")
+    backend = payload.get("backend")
+    if backend == "frozen_gine":
+        if (
+            set(payload) != _FROZEN_GINE_IDENTITY_KEYS
+            or payload.get("schema_version")
+            != "globalgce_frozen_gine_resume_identity_v1"
+            or type(payload.get("checkpoint_root")) is not str
+            or not payload["checkpoint_root"]
+            or not _is_sha256(payload.get("checkpoint_id"))
+            or _dataset_identity_token(payload.get("dataset"))
+            != _dataset_identity_token(dataset)
+            or type(payload.get("num_classes")) is not int
+            or payload["num_classes"] != num_classes
+            or type(payload.get("source_label")) is not int
+            or payload["source_label"] != source_label
+            or not _canonical_float_hex(payload.get("temperature_hex"), positive=True)
+            or not _is_sha256(payload.get("temperature_scaling_sha256"))
+            or not _is_sha256(payload.get("sha256sums_sha256"))
+            or not _is_sha256(payload.get("inventory_sha256"))
+            or not _is_sha256(payload.get("identity_sha256"))
+        ):
+            raise ValueError("GlobalGCE frozen-GINE resume identity is invalid.")
+        inventory = payload.get("inventory")
+        if type(inventory) is not list or not inventory:
+            raise ValueError("GlobalGCE frozen-GINE inventory is empty.")
+        names: set[str] = set()
+        inventory_by_name: dict[str, dict[str, Any]] = {}
+        for entry in inventory:
+            if (
+                type(entry) is not dict
+                or set(entry) != _INVENTORY_ENTRY_KEYS
+                or type(entry.get("name")) is not str
+                or not entry["name"]
+                or Path(entry["name"]).name != entry["name"]
+                or entry["name"] in names
+                or type(entry.get("bytes")) is not int
+                or entry["bytes"] < 0
+                or not _is_sha256(entry.get("sha256"))
+            ):
+                raise ValueError("GlobalGCE frozen-GINE inventory is invalid.")
+            names.add(entry["name"])
+            inventory_by_name[entry["name"]] = entry
+        model_entry = inventory_by_name.get("model.pt")
+        temperature_entry = inventory_by_name.get("temperature_scaling.json")
+        if (
+            model_entry is None
+            or model_entry["sha256"] != payload["checkpoint_id"]
+            or temperature_entry is None
+            or temperature_entry["sha256"]
+            != payload["temperature_scaling_sha256"]
+            or payload["inventory_sha256"]
+            != _canonical_json_sha256({"files": inventory})
+            or payload["identity_sha256"]
+            != _canonical_json_sha256(
+                {key: value for key, value in payload.items() if key != "identity_sha256"}
+            )
+        ):
+            raise ValueError("GlobalGCE frozen-GINE identity hashes are inconsistent.")
+        return
+    if backend == "official_native_gtgnn":
+        if (
+            set(payload) != _NATIVE_BINARY_IDENTITY_KEYS
+            or payload.get("schema_version")
+            != "globalgce_native_binary_gtgnn_resume_identity_v1"
+            or num_classes != 2
+            or type(payload.get("num_classes")) is not int
+            or payload.get("num_classes") != 2
+            or not _is_sha256(payload.get("identity_sha256"))
+        ):
+            raise ValueError("GlobalGCE native binary resume identity is invalid.")
+        _validate_file_identity(payload.get("native_train_csv"))
+        if payload["identity_sha256"] != _canonical_json_sha256(
+            {key: value for key, value in payload.items() if key != "identity_sha256"}
+        ):
+            raise ValueError("GlobalGCE native binary identity hash is inconsistent.")
+        return
+    raise ValueError("GlobalGCE training resume oracle backend is invalid.")
+
+
+def _validate_official_source_identity(payload: Any) -> None:
+    if (
+        type(payload) is not dict
+        or set(payload) != _OFFICIAL_SOURCE_IDENTITY_KEYS
+        or payload.get("schema_version")
+        != "globalgce_official_source_resume_identity_v1"
+        or type(payload.get("root")) is not str
+        or not payload["root"]
+        or type(payload.get("files")) is not dict
+        or not payload["files"]
+        or not _is_sha256(payload.get("identity_sha256"))
+    ):
+        raise ValueError("GlobalGCE official source resume identity is invalid.")
+    for name, file_identity in payload["files"].items():
+        if (
+            type(name) is not str
+            or not name
+            or type(file_identity) is not dict
+            or set(file_identity) != _OFFICIAL_SOURCE_FILE_KEYS
+            or type(file_identity.get("bytes")) is not int
+            or file_identity["bytes"] < 0
+            or not _is_sha256(file_identity.get("sha256"))
+        ):
+            raise ValueError("GlobalGCE official source file identity is invalid.")
+    if payload["identity_sha256"] != _canonical_json_sha256(
+        {key: value for key, value in payload.items() if key != "identity_sha256"}
+    ):
+        raise ValueError("GlobalGCE official source identity hash is inconsistent.")
+
+
+def _validate_training_config_identity(payload: Any) -> None:
+    if (
+        type(payload) is not dict
+        or set(payload) != _TRAINING_CONFIG_IDENTITY_KEYS
+        or type(payload.get("seed")) is not int
+        or payload["seed"] < 0
+        or type(payload.get("epochs")) is not int
+        or payload["epochs"] < 0
+        or type(payload.get("top_k_native")) is not int
+        or payload["top_k_native"] <= 0
+        or not _canonical_float_hex(payload.get("learning_rate_hex"), positive=True)
+        or not _canonical_float_hex(payload.get("dropout_hex"))
+        or (
+            payload.get("min_freq") is not None
+            and (
+                type(payload["min_freq"]) is not int
+                or payload["min_freq"] < 2
+            )
+        )
+        or type(payload.get("gspan_flush_every")) is not int
+        or payload["gspan_flush_every"] <= 0
+        or type(payload.get("gspan_max_in_memory_candidates")) is not int
+        or payload["gspan_max_in_memory_candidates"] <= 0
+        or type(payload.get("gspan_exact_top_k_pruning")) is not bool
+        or (
+            payload.get("gspan_adoption_identity") is not None
+            and (
+                type(payload["gspan_adoption_identity"]) is not dict
+                or not payload["gspan_adoption_identity"]
+            )
+        )
+    ):
+        raise ValueError("GlobalGCE training resume configuration identity is invalid.")
+
+
+def normalize_globalgce_training_resume_identity(
+    identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Return one typed, canonical identity for an epoch/terminal checkpoint.
+
+    The legacy unversioned checkpoint surface is retained only when callers do
+    not provide an identity.  A v2 caller must provide the complete contract;
+    it can never reinterpret a v1 checkpoint as a v2 Taste or BACE run.
+    """
+
+    if type(identity) is not dict or set(identity) != _TRAINING_RESUME_IDENTITY_KEYS:
+        raise ValueError("GlobalGCE training resume identity has an invalid schema.")
+    if identity.get("schema_version") != GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION:
+        raise ValueError("GlobalGCE training resume identity version changed.")
+    dataset = identity.get("dataset")
+    num_classes = identity.get("num_classes")
+    source_label = identity.get("source_label")
+    target_label = identity.get("target_label")
+    if (
+        type(dataset) is not str
+        or not dataset.strip()
+        or not _dataset_identity_token(dataset)
+    ):
+        raise ValueError("GlobalGCE training resume dataset is invalid.")
+    if (
+        type(num_classes) is not int
+        or num_classes < 2
+        or type(source_label) is not int
+        or type(target_label) is not int
+        or not 0 <= source_label < num_classes
+        or not 0 <= target_label < num_classes
+        or source_label == target_label
+    ):
+        raise ValueError("GlobalGCE training resume class contract is invalid.")
+    for key in ("native_train_cohort", "source_train_cohort"):
+        cohort = identity.get(key)
+        if type(cohort) is not dict or set(cohort) != _COHORT_IDENTITY_KEYS:
+            raise ValueError(f"GlobalGCE training resume {key} schema is invalid.")
+        for count_key in ("count", "train_count", "val_count"):
+            if type(cohort.get(count_key)) is not int or cohort[count_key] <= 0:
+                raise ValueError(
+                    f"GlobalGCE training resume {key}.{count_key} is invalid."
+                )
+        if cohort["train_count"] + cohort["val_count"] != cohort["count"]:
+            raise ValueError(f"GlobalGCE training resume {key} is not a partition.")
+        for hash_key in (
+            "ordered_sha256",
+            "train_ordered_sha256",
+            "val_ordered_sha256",
+        ):
+            if not _is_sha256(cohort.get(hash_key)):
+                raise ValueError(
+                    f"GlobalGCE training resume {key}.{hash_key} is invalid."
+                )
+    _validate_oracle_identity(
+        identity.get("oracle_identity"),
+        dataset=dataset,
+        num_classes=num_classes,
+        source_label=source_label,
+    )
+    _validate_official_source_identity(identity.get("official_source_identity"))
+    _validate_training_config_identity(identity.get("training_config"))
+    try:
+        encoded = json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("GlobalGCE training resume identity is not canonical JSON.") from exc
+    normalized = json.loads(encoded.decode("utf-8"))
+    if type(normalized) is not dict or normalized != identity:
+        raise ValueError("GlobalGCE training resume identity changed during canonicalization.")
+    return normalized, hashlib.sha256(encoded).hexdigest()
+
+
+def validate_globalgce_epoch_checkpoint_identity(
+    checkpoint: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reject a partial checkpoint from another dataset, cohort, or target."""
+
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError("GlobalGCE training checkpoint must be a mapping.")
+    expected, expected_sha256 = normalize_globalgce_training_resume_identity(
+        expected_identity
+    )
+    if checkpoint.get("checkpoint_schema_version") != GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2:
+        raise ValueError("GlobalGCE training checkpoint is not identity-bound v2.")
+    actual = checkpoint.get("resume_identity")
+    if type(actual) is not dict:
+        raise ValueError("GlobalGCE training checkpoint has no resume identity.")
+    normalized, actual_sha256 = normalize_globalgce_training_resume_identity(actual)
+    if (
+        normalized != expected
+        or actual_sha256 != expected_sha256
+        or checkpoint.get("resume_identity_sha256") != expected_sha256
+    ):
+        raise ValueError("GlobalGCE training checkpoint resume identity mismatch.")
+    return {
+        "schema_version": GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2,
+        "resume_identity": expected,
+        "resume_identity_sha256": expected_sha256,
+    }
+
+
+def _serialize_numpy_rng_state(numpy_module: Any) -> dict[str, Any]:
+    algorithm, keys, position, has_gauss, cached_gaussian = (
+        numpy_module.random.get_state()
+    )
+    return {
+        "schema_version": "globalgce_numpy_rng_state_v1",
+        "algorithm": str(algorithm),
+        "keys": [int(value) for value in keys.tolist()],
+        "position": int(position),
+        "has_gauss": int(has_gauss),
+        "cached_gaussian": float(cached_gaussian),
+    }
+
+
+def _restore_numpy_rng_state(numpy_module: Any, payload: Mapping[str, Any]) -> None:
+    if (
+        type(payload) is not dict
+        or set(payload)
+        != {
+            "schema_version",
+            "algorithm",
+            "keys",
+            "position",
+            "has_gauss",
+            "cached_gaussian",
+        }
+        or payload.get("schema_version") != "globalgce_numpy_rng_state_v1"
+        or type(payload.get("algorithm")) is not str
+        or type(payload.get("keys")) is not list
+        or not payload["keys"]
+        or any(type(value) is not int or not 0 <= value < 2**32 for value in payload["keys"])
+        or type(payload.get("position")) is not int
+        or type(payload.get("has_gauss")) is not int
+        or payload["has_gauss"] not in (0, 1)
+        or type(payload.get("cached_gaussian")) is not float
+    ):
+        raise ValueError("GlobalGCE NumPy RNG checkpoint state is invalid.")
+    numpy_module.random.set_state(
+        (
+            payload["algorithm"],
+            numpy_module.asarray(payload["keys"], dtype=numpy_module.uint32),
+            payload["position"],
+            payload["has_gauss"],
+            payload["cached_gaussian"],
+        )
+    )
 
 
 def _atomic_bytes(path: Path, payload: bytes) -> None:
@@ -922,6 +1359,7 @@ def train_globalgce_resumable(
     gspan_adoption_proof: str | Path | None = None,
     on_exact_top_k_proof: Callable[[dict[str, Any]], None] | None = None,
     on_gspan_adoption_proof: Callable[[dict[str, Any]], None] | None = None,
+    resume_identity: Mapping[str, Any] | None = None,
 ) -> Any:
     """Run the official loop with atomic epoch checkpoints and exact RNG state."""
 
@@ -933,6 +1371,31 @@ def train_globalgce_resumable(
         raise ValueError(
             "GlobalGCE mining adoption and fresh exact-top-k mining are mutually exclusive"
         )
+    config = {"epochs": int(epochs), "learning_rate": float(learning_rate)}
+    normalized_resume_identity: dict[str, Any] | None = None
+    resume_identity_sha256: str | None = None
+    if resume_identity is not None:
+        normalized_resume_identity, resume_identity_sha256 = (
+            normalize_globalgce_training_resume_identity(resume_identity)
+        )
+    checkpoint: Mapping[str, Any] | None = None
+    if resume and checkpoint_path.is_file():
+        checkpoint = torch_module.load(checkpoint_path, map_location=model.device)
+        if checkpoint.get("config") != config:
+            raise ValueError("GlobalGCE training checkpoint configuration mismatch.")
+        if normalized_resume_identity is None:
+            if checkpoint.get("checkpoint_schema_version") not in (
+                None,
+                GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1,
+            ):
+                raise ValueError(
+                    "Legacy GlobalGCE caller cannot consume a v2 identity-bound checkpoint."
+                )
+        else:
+            validate_globalgce_epoch_checkpoint_identity(
+                checkpoint,
+                normalized_resume_identity,
+            )
     if gspan_adoption_proof is not None:
         (
             (fss, expanded_train, expanded_val, expanded_test),
@@ -974,11 +1437,7 @@ def train_globalgce_resumable(
     best_loss = float("inf")
     best_state: dict[str, Any] | None = None
     next_epoch = 0
-    config = {"epochs": int(epochs), "learning_rate": float(learning_rate)}
-    if resume and checkpoint_path.is_file():
-        checkpoint = torch_module.load(checkpoint_path, map_location=model.device)
-        if checkpoint.get("config") != config:
-            raise ValueError("GlobalGCE training checkpoint configuration mismatch.")
+    if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state"])
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         scheduler.load_state_dict(checkpoint["scheduler_state"])
@@ -989,7 +1448,13 @@ def train_globalgce_resumable(
         best_state = model.state_dict() if checkpoint.get("best_state_seen") else None
         next_epoch = int(checkpoint["next_epoch"])
         random.setstate(checkpoint["python_rng_state"])
-        numpy_module.random.set_state(checkpoint["numpy_rng_state"])
+        if normalized_resume_identity is not None:
+            _restore_numpy_rng_state(
+                numpy_module,
+                checkpoint["numpy_rng_state"],
+            )
+        else:
+            numpy_module.random.set_state(checkpoint["numpy_rng_state"])
         torch_module.set_rng_state(checkpoint["torch_rng_state"])
         if torch_module.cuda.is_available() and checkpoint.get("cuda_rng_state"):
             torch_module.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
@@ -1030,6 +1495,19 @@ def train_globalgce_resumable(
                     best_state = model.state_dict()
         state = {
             "config": config,
+            "checkpoint_schema_version": (
+                GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2
+                if normalized_resume_identity is not None
+                else GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1
+            ),
+            **(
+                {
+                    "resume_identity": normalized_resume_identity,
+                    "resume_identity_sha256": resume_identity_sha256,
+                }
+                if normalized_resume_identity is not None
+                else {}
+            ),
             "next_epoch": epoch + 1,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
@@ -1037,7 +1515,11 @@ def train_globalgce_resumable(
             "best_loss": best_loss,
             "best_state_seen": best_state is not None,
             "python_rng_state": random.getstate(),
-            "numpy_rng_state": numpy_module.random.get_state(),
+            "numpy_rng_state": (
+                _serialize_numpy_rng_state(numpy_module)
+                if normalized_resume_identity is not None
+                else numpy_module.random.get_state()
+            ),
             "torch_rng_state": torch_module.get_rng_state(),
             "cuda_rng_state": (
                 torch_module.cuda.get_rng_state_all()
@@ -1049,7 +1531,11 @@ def train_globalgce_resumable(
         _atomic_json(
             heartbeat_path,
             {
-                "schema_version": "globalgce_epoch_checkpoint_v1",
+                "schema_version": (
+                    GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2
+                    if normalized_resume_identity is not None
+                    else GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1
+                ),
                 "stage": "training",
                 "epoch": epoch,
                 "next_epoch": epoch + 1,
@@ -1057,6 +1543,14 @@ def train_globalgce_resumable(
                 "metrics": metrics,
                 "checkpoint_path": str(checkpoint_path),
                 "checkpoint_bytes": checkpoint_path.stat().st_size,
+                **(
+                    {
+                        "resume_identity": normalized_resume_identity,
+                        "resume_identity_sha256": resume_identity_sha256,
+                    }
+                    if normalized_resume_identity is not None
+                    else {}
+                ),
                 "updated_at_epoch_seconds": time.time(),
             },
         )
@@ -1069,10 +1563,22 @@ def train_globalgce_resumable(
     _atomic_json(
         heartbeat_path,
         {
-            "schema_version": "globalgce_epoch_checkpoint_v1",
+            "schema_version": (
+                GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2
+                if normalized_resume_identity is not None
+                else GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V1
+            ),
             "stage": "complete",
             "next_epoch": int(epochs) + 1,
             "best_loss": best_loss,
+            **(
+                {
+                    "resume_identity": normalized_resume_identity,
+                    "resume_identity_sha256": resume_identity_sha256,
+                }
+                if normalized_resume_identity is not None
+                else {}
+            ),
             "updated_at_epoch_seconds": time.time(),
         },
     )
