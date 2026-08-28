@@ -27,7 +27,16 @@
     "t8_cli_wiring": "BLOCKED_NEXT_COMMIT",
     "t9_cli_wiring": "BLOCKED_NEXT_COMMIT",
     "main_completion_v4_scheduler": "BLOCKED_NEXT_COMMIT",
-    "official_fixed_budget_neurosed": "OUT_OF_SCOPE_NOT_IMPLEMENTED"
+    "official_fixed_budget_neurosed": "CONTRACTS_IMPLEMENTED_NOT_WIRED_OR_RUN",
+    "official_gcf_source_pin": "IMPLEMENTED_NOT_DEPLOYED",
+    "gedlib_build_smoke": "BLOCKED_PREPROVISIONED_GEDLIB_AND_PYBIND11_REQUIRED",
+    "gedlib_real_100_500_1000_benchmark": "BLOCKED_BUILD_NOT_RUN",
+    "gedlib_worker_trial_cohort_builder": "BLOCKED_NOT_IMPLEMENTED",
+    "gedlib_worker_resource_evidence_producer": "BLOCKED_NOT_IMPLEMENTED",
+    "gedlib_worker_selection": "BLOCKED_COHORT_AND_RESOURCE_EVIDENCE_REQUIRED",
+    "compact_label_writer_and_reopen": "BLOCKED_NOT_WIRED_TO_REAL_GED_ROWS",
+    "official_selector_trainer_wiring": "BLOCKED_NOT_IMPLEMENTED",
+    "t7_generated_query_original_target_wiring": "BLOCKED_NOT_IMPLEMENTED"
   },
   "safe_to_start": {
     "T4_ORACLE_SMOKE": false,
@@ -35,8 +44,10 @@
     "T6_OURS_PPO_SMOKE": false,
     "T8_GLOBALGCE_SMOKE": false,
     "T9_COMRECGC_SMOKE": false,
+    "TASTE_GCF_NEUROSED": false,
+    "T7_GCF_SMOKE": false,
     "MAIN_COMPLETION_V4": false
   },
   "manual_intervention_required": true,
-  "manual_intervention_reason": "Integrate this tested foundation, wire method-specific successors, review immutable execution commit, and launch from AutoDL only."
+  "manual_intervention_reason": "Deploy the reviewed integration from AutoDL and pre-provision the pinned GEDLIB v1.0 checkout plus a pinned pybind11 CMake package. Code must still add reviewed disjoint worker-trial cohort and protected-process resource-evidence producers before any real worker selection or benchmark PASS."
 }

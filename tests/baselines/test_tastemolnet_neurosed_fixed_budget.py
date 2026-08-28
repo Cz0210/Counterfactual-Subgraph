@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+import shutil
 
 import pytest
 
+import src.eval.tastemolnet_neurosed_fixed_budget as fixed_budget_eval
 from src.data.tastemolnet_neurosed_fixed_budget import (
     FixedBudgetGraph,
     FixedBudgetPairError,
+    PAIR_SAMPLER_MANIFEST_SCHEMA,
     fixed_budget_pair_manifest,
     partition_disjoint_benchmarks,
     reserve_pair_count,
@@ -31,13 +35,17 @@ from src.eval.tastemolnet_neurosed_fixed_budget import (
 )
 from src.eval.tastemolnet_neurosed_official_fixed_budget import (
     GENERATED_QUERY_ROLE,
+    OFFICIAL_GCF_COMMIT,
+    OFFICIAL_GCF_REPOSITORY,
     OFFICIAL_FIXED_MODEL_CARD_SCHEMA,
     ORIGINAL_TARGET_ROLE,
+    VENDORED_GCF_RETAINED_INVENTORY_SHA256,
     VENDORED_GCF_SOURCE_SHA256,
     GeneratedQueryOriginalTargetBinding,
     OfficialFixedBudgetGateError,
     validate_official_fixed_budget_model_card,
     verify_official_fixed_budget_readiness,
+    verify_vendored_gcf_retained_inventory,
 )
 from src.eval.tastemolnet_neurosed_gate import STRICT_OFFICIAL_PROVENANCE
 from src.train.tastemolnet_neurosed_official_selector import (
@@ -49,6 +57,7 @@ from src.utils.tastemolnet_neurosed_gedlib_build import blocked_build_manifest
 
 SHA = "a" * 64
 COMMIT = "b" * 40
+GCF_ROOT = Path(__file__).resolve().parents[2] / "baselines/gcfexplainer_official"
 
 
 def _chain(graph_id: str, nodes: int, *, split: str = "train", label: int = 0) -> FixedBudgetGraph:
@@ -124,14 +133,70 @@ def _report(
         feature_schema_sha256=SHA,
         resource_metrics=(
             {
-                "host_load_gate_pass": True,
-                "iowait_gate_pass": True,
-                "bace_legacy_throughput_drop_le_10pct": True,
-                "aids_exact_throughput_drop_le_10pct": True,
+                "worker_resource_evidence": _pass_resource_evidence()
             }
             if resource_gates
             else None
         ),
+    )
+
+
+def _pass_resource_evidence() -> dict:
+    payload = {
+        "schema_version": fixed_budget_eval.GEDLIB_WORKER_RESOURCE_EVIDENCE_SCHEMA,
+        "status": "PASS",
+        "marker": None,
+        "machine_generated": True,
+        "producer_implemented": True,
+        "producer_source_sha256": "9" * 64,
+        "benchmark_process_identity": {"pid": 123, "pid_start_ticks": 456},
+        "pre_sample": {"unix_time_ns": 1, "iowait_ticks": 10},
+        "during_samples": [{"unix_time_ns": 2, "iowait_ticks": 11}],
+        "post_sample": {"unix_time_ns": 3, "iowait_ticks": 12},
+        "protected_processes": {
+            "bace_legacy": {"pid": 10, "pid_start_ticks": 20},
+            "aids_exact": {"pid": 30, "pid_start_ticks": 40},
+        },
+        "missing_required_evidence": [],
+        "host_load_gate_pass": True,
+        "iowait_gate_pass": True,
+        "bace_legacy_throughput_drop_percent": 0.0,
+        "aids_exact_throughput_drop_percent": 0.0,
+    }
+    payload["evidence_sha256"] = _stable(payload)
+    return payload
+
+
+def _future_worker_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    physical_core_count: int = 1,
+) -> dict:
+    monkeypatch.setattr(
+        fixed_budget_eval,
+        "REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256",
+        "9" * 64,
+    )
+    monkeypatch.setattr(
+        fixed_budget_eval, "WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED", True
+    )
+    monkeypatch.setattr(
+        fixed_budget_eval,
+        "REVIEWED_WORKER_TRIAL_COHORT_BUILDER_SHA256",
+        "8" * 64,
+    )
+    reports = {
+        workers: _report(
+            f"future-worker-{workers}",
+            100,
+            workers=workers,
+            resource_gates=True,
+        )
+        for workers in (1, 2, 4, 8)
+        if workers <= physical_core_count
+    }
+    return fixed_budget_eval.build_gedlib_worker_selection_manifest(
+        reports, physical_core_count=physical_core_count
     )
 
 
@@ -255,13 +320,14 @@ def json_bytes(value) -> bytes:
     ).encode("utf-8")
 
 
-def test_budget_planner_selects_largest_affordable_approved_budget() -> None:
+def test_budget_planner_selects_largest_affordable_approved_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     report = _report("p", 1000, latency=4.0, workers=1)
     plan = select_fixed_pair_budget(
         report,
-        selected_workers=1,
+        worker_selection_manifest=_future_worker_manifest(monkeypatch),
         disk_reservation_pass=True,
-        cpu_contention_gate_pass=True,
     )
     assert plan["status"] == "PASS"
     assert plan["selected_neurosed_train_pair_budget"] == 10000
@@ -270,13 +336,14 @@ def test_budget_planner_selects_largest_affordable_approved_budget() -> None:
     assert plan["approximate_label_fallback_used"] is False
 
 
-def test_budget_planner_blocks_instead_of_falling_back_to_shortcut() -> None:
+def test_budget_planner_blocks_instead_of_falling_back_to_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     report = _report("p", 1000, latency=20.0, workers=1)
     plan = select_fixed_pair_budget(
         report,
-        selected_workers=1,
+        worker_selection_manifest=_future_worker_manifest(monkeypatch),
         disk_reservation_pass=True,
-        cpu_contention_gate_pass=True,
     )
     assert plan["status"] == "BLOCKED_GEDLIB_THROUGHPUT"
     assert plan["selected_neurosed_train_pair_budget"] is None
@@ -284,21 +351,22 @@ def test_budget_planner_blocks_instead_of_falling_back_to_shortcut() -> None:
     assert set(plan["projections"]) == {"5000", "10000", "20000"}
 
 
-def test_timeout_or_reservation_gate_blocks_budget_selection() -> None:
+def test_timeout_or_reservation_gate_blocks_budget_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_selection = _future_worker_manifest(monkeypatch)
     report = _report("p", 1000, latency=1.0, timeouts=51, workers=1)
     plan = select_fixed_pair_budget(
         report,
-        selected_workers=1,
+        worker_selection_manifest=worker_selection,
         disk_reservation_pass=True,
-        cpu_contention_gate_pass=True,
     )
     assert plan["status"] == "BLOCKED_GEDLIB_THROUGHPUT"
     healthy = _report("q", 1000, latency=1.0, workers=1)
     no_disk = select_fixed_pair_budget(
         healthy,
-        selected_workers=1,
+        worker_selection_manifest=worker_selection,
         disk_reservation_pass=False,
-        cpu_contention_gate_pass=True,
     )
     assert no_disk["status"] == "BLOCKED_GEDLIB_THROUGHPUT"
 
@@ -351,18 +419,33 @@ def test_timeout_reserve_uses_sampler_order_and_never_invents_labels() -> None:
     assert selection["reserve_used"] == 1
 
 
-def test_worker_selector_uses_fresh_pairs_and_contention_gates() -> None:
+def test_worker_selector_uses_fresh_pairs_and_contention_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        fixed_budget_eval,
+        "REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256",
+        "9" * 64,
+    )
+    monkeypatch.setattr(
+        fixed_budget_eval, "WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED", True
+    )
+    monkeypatch.setattr(
+        fixed_budget_eval,
+        "REVIEWED_WORKER_TRIAL_COHORT_BUILDER_SHA256",
+        "8" * 64,
+    )
     reports = {
         1: _report("w1", 100, workers=1, resource_gates=True),
         2: _report("w2", 100, workers=2, resource_gates=True),
     }
-    assert select_gedlib_worker_count(reports, physical_core_count=4) == 2
+    assert select_gedlib_worker_count(reports, physical_core_count=2) == 2
     reports[2]["pair_ids"][0] = reports[1]["pair_ids"][0]
     reports[2]["pair_ids_sha256"] = hashlib.sha256(
         json_bytes(reports[2]["pair_ids"])
     ).hexdigest()
     with pytest.raises(NeuroSEDFixedBudgetError, match="reused"):
-        select_gedlib_worker_count(reports, physical_core_count=4)
+        select_gedlib_worker_count(reports, physical_core_count=2)
 
 
 def test_blocked_build_can_never_emit_a_pass_marker_or_fallback() -> None:
@@ -574,7 +657,46 @@ def _stable(value) -> str:
     ).hexdigest()
 
 
-def _label_manifest(split: str, count: int) -> dict:
+def _sampler_manifest(split: str, selected_budget: int) -> dict:
+    payload = {
+        "schema_version": PAIR_SAMPLER_MANIFEST_SCHEMA,
+        "dataset": "tastemolnet",
+        "split": split,
+        "pair_count": reserve_pair_count(selected_budget),
+        "pair_sampling_seed": 7,
+        "pair_builder": (
+            "deterministic_official_style_independent_unstratified_query_target_v2"
+        ),
+        "independent_query_target_pairs": True,
+        "query_graph_id_differs_from_target_graph_id": True,
+        "parent_own_subgraph_shortcut": False,
+        "cartesian_product_materialized": False,
+        "source_target_draws_with_replacement": True,
+        "source_target_rng_streams_independent": True,
+        "distinct_graph_ids_enforced_by_rejection": True,
+        "size_or_class_used_to_select_filter_or_order_pairs": False,
+        "size_and_class_diagnostics_computed_after_sampling": True,
+        "ged_labels_present": False,
+        "class_label_used_as_supervision": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "all_query_ids_subset_of_declared_split": True,
+        "all_target_ids_subset_of_declared_split": True,
+        "source_csv_sha256": "e" * 64,
+        "feature_schema_sha256": SHA,
+        "graph_inventory_sha256": "f" * 64,
+        "pair_ids_sha256": "1" * 64,
+        "query_graph_ids_sha256": "2" * 64,
+        "target_graph_ids_sha256": "3" * 64,
+        "metadata_rows_sha256": "4" * 64,
+    }
+    payload["manifest_sha256"] = _stable(payload)
+    return payload
+
+
+def _label_manifest(
+    split: str, count: int, *, pair_sampler_manifest_sha256: str
+) -> dict:
     payload = {
         "schema_version": PAIR_LABELS_MANIFEST_SCHEMA,
         "status": "READY_FOR_INDEPENDENT_VERIFICATION",
@@ -599,7 +721,7 @@ def _label_manifest(split: str, count: int) -> dict:
         "pyged_module_sha256": SHA,
         "gedlib_config_sha256": SHA,
         "feature_schema_sha256": SHA,
-        "pair_sampler_manifest_sha256": SHA,
+        "pair_sampler_manifest_sha256": pair_sampler_manifest_sha256,
         "gedlib_build_manifest_sha256": SHA,
         "calibration_loaded": False,
         "test_loaded": False,
@@ -669,7 +791,11 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "edit_cost_contract": dict(OFFICIAL_SED_EDIT_COSTS),
         "strict_official_provenance": dict(STRICT_OFFICIAL_PROVENANCE),
         "vendored_gcf_source_sha256": dict(VENDORED_GCF_SOURCE_SHA256),
-        "official_gcf_commit": "c" * 40,
+        "vendored_gcf_retained_inventory_sha256": (
+            VENDORED_GCF_RETAINED_INVENTORY_SHA256
+        ),
+        "official_gcf_repository": OFFICIAL_GCF_REPOSITORY,
+        "official_gcf_commit": OFFICIAL_GCF_COMMIT,
         "official_greed_commit": STRICT_OFFICIAL_PROVENANCE["greed_commit"],
         "gedlib_commit": COMMIT,
         "pyged_module_sha256": SHA,
@@ -680,8 +806,12 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "pair_budget_plan_sha256": SHA,
         "train_pair_labels_manifest_sha256": train_labels["manifest_sha256"],
         "validation_pair_labels_manifest_sha256": val_labels["manifest_sha256"],
-        "train_pair_sampler_manifest_sha256": SHA,
-        "validation_pair_sampler_manifest_sha256": SHA,
+        "train_pair_sampler_manifest_sha256": train_labels[
+            "pair_sampler_manifest_sha256"
+        ],
+        "validation_pair_sampler_manifest_sha256": val_labels[
+            "pair_sampler_manifest_sha256"
+        ],
         "selector_trace_sha256": selector["trace_sha256"],
         "distance_direction_trace_sha256": direction["trace_sha256"],
         "selected_checkpoint_sha256": selected_checkpoint,
@@ -689,8 +819,18 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
 
 
 def test_model_card_and_health_gate_are_ready_not_self_signed_pass() -> None:
-    train_labels = _label_manifest("train", 5000)
-    validation_labels = _label_manifest("validation", 1000)
+    train_sampler = _sampler_manifest("train", 5000)
+    validation_sampler = _sampler_manifest("validation", 1000)
+    train_labels = _label_manifest(
+        "train",
+        5000,
+        pair_sampler_manifest_sha256=train_sampler["manifest_sha256"],
+    )
+    validation_labels = _label_manifest(
+        "validation",
+        1000,
+        pair_sampler_manifest_sha256=validation_sampler["manifest_sha256"],
+    )
     selector = _stopped_selector_trace()
     binding = GeneratedQueryOriginalTargetBinding.create(
         _FakeDistanceModel(),
@@ -702,22 +842,83 @@ def test_model_card_and_health_gate_are_ready_not_self_signed_pass() -> None:
     )
     direction = binding.direction_manifest()
     card = _strict_fixed_model_card(train_labels, validation_labels, selector, direction)
-    validate_official_fixed_budget_model_card(card)
+    validate_official_fixed_budget_model_card(card, vendored_gcf_root=GCF_ROOT)
     readiness = verify_official_fixed_budget_readiness(
         model_card=card,
+        train_pair_sampler_manifest=train_sampler,
+        validation_pair_sampler_manifest=validation_sampler,
         train_pair_labels_manifest=train_labels,
         validation_pair_labels_manifest=validation_labels,
         selector_trace=selector,
         distance_direction_trace=direction,
+        vendored_gcf_root=GCF_ROOT,
     )
     assert readiness["status"] == "READY_FOR_MANAGED_INDEPENDENT_VERIFICATION"
     assert readiness["marker"] is None
     assert readiness["scientific_pass_claimed"] is False
+    wrong_seed = dict(train_sampler)
+    wrong_seed["pair_sampling_seed"] = 17
+    wrong_seed["manifest_sha256"] = _stable(
+        {key: value for key, value in wrong_seed.items() if key != "manifest_sha256"}
+    )
+    with pytest.raises(OfficialFixedBudgetGateError, match="sampler contract changed"):
+        verify_official_fixed_budget_readiness(
+            model_card=card,
+            train_pair_sampler_manifest=wrong_seed,
+            validation_pair_sampler_manifest=validation_sampler,
+            train_pair_labels_manifest=train_labels,
+            validation_pair_labels_manifest=validation_labels,
+            selector_trace=selector,
+            distance_direction_trace=direction,
+            vendored_gcf_root=GCF_ROOT,
+        )
     blocked = dict(card)
     blocked["official_gcf_commit"] = "UNAVAILABLE_FROM_VENDORED_SNAPSHOT"
     with pytest.raises(OfficialFixedBudgetGateError, match="GCF commit"):
-        validate_official_fixed_budget_model_card(blocked)
+        validate_official_fixed_budget_model_card(
+            blocked, vendored_gcf_root=GCF_ROOT
+        )
+    wrong_commit = dict(card)
+    wrong_commit["official_gcf_commit"] = "c" * 40
+    with pytest.raises(OfficialFixedBudgetGateError, match="GCF commit changed"):
+        validate_official_fixed_budget_model_card(
+            wrong_commit, vendored_gcf_root=GCF_ROOT
+        )
+    wrong_repository = dict(card)
+    wrong_repository["official_gcf_repository"] = "https://example.invalid/fork"
+    with pytest.raises(OfficialFixedBudgetGateError, match="GCF repository changed"):
+        validate_official_fixed_budget_model_card(
+            wrong_repository, vendored_gcf_root=GCF_ROOT
+        )
     shortcut = dict(card)
     shortcut["parent_own_subgraph_shortcut"] = True
     with pytest.raises(OfficialFixedBudgetGateError, match="contract changed"):
-        validate_official_fixed_budget_model_card(shortcut)
+        validate_official_fixed_budget_model_card(
+            shortcut, vendored_gcf_root=GCF_ROOT
+        )
+
+
+def test_vendored_gcf_inventory_is_reopened_and_tamper_fails(tmp_path: Path) -> None:
+    verified = verify_vendored_gcf_retained_inventory(GCF_ROOT)
+    assert verified["file_count"] == 17
+    assert verified["inventory_sha256"] == VENDORED_GCF_RETAINED_INVENTORY_SHA256
+
+    tampered = tmp_path / "gcf"
+    shutil.copytree(GCF_ROOT, tampered)
+    (tampered / "distance.py").write_bytes(
+        (tampered / "distance.py").read_bytes() + b"\n# tampered\n"
+    )
+    with pytest.raises(OfficialFixedBudgetGateError, match="file hash changed"):
+        verify_vendored_gcf_retained_inventory(tampered)
+
+    shutil.copytree(GCF_ROOT, tmp_path / "gcf-extra")
+    (tmp_path / "gcf-extra" / "unexpected.py").write_text("pass\n", encoding="utf-8")
+    with pytest.raises(OfficialFixedBudgetGateError, match="file inventory changed"):
+        verify_vendored_gcf_retained_inventory(tmp_path / "gcf-extra")
+
+    real_parent = tmp_path / "real-parent"
+    shutil.copytree(GCF_ROOT, real_parent / "gcf")
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(OfficialFixedBudgetGateError, match="symlink ancestor"):
+        verify_vendored_gcf_retained_inventory(linked_parent / "gcf")

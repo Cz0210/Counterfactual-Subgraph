@@ -2298,8 +2298,12 @@ Mutagenicity roadmaps.
   GEDLIB or pybind11 tree is unavailable. It never installs or substitutes a
   neural/approximate label backend.
 - [x] Add a seed-7 deterministic, split-confined independent query-target
-  sampler with no self pairs, no Cartesian product, no GED labels, and
-  disjoint 100/500/1000 benchmark cohorts.
+  sampler with full-pool, with-replacement role draws, no self pairs, no
+  Cartesian product, no GED labels, and disjoint 100/500/1000 benchmark
+  cohorts. Size/class strata are post-sampling diagnostics only and cannot
+  select, filter, rebalance, reroll, order, or define pair identity. Seed 7 is
+  fail-closed in the sampler/manifest/CLI and readiness cross-binds both
+  self-hashed sampler manifests.
 - [x] Add real-backend benchmark parsing/resource metrics and a fixed planner
   restricted to 5k/10k/20k train plus 1k/2k/4k validation pairs.
 - [x] Document that fixed pair count is a project resource-control extension,
@@ -2319,6 +2323,35 @@ Mutagenicity roadmaps.
   train update after the stopping event.
 - [x] Add a generated-query/original-target API binding and a fixed-budget
   model-card/readiness gate whose output is readiness only with a null marker.
-- [ ] Recover the unavailable upstream GCF commit; wire the selector into real
+- [x] Recover and authenticate upstream GCF commit
+  `cc7ca30eb2026c57f20cd6afe2ee621f486fcf2e`; every retained vendored file is
+  byte-identical and only upstream dataset/model artifacts are omitted. The
+  readiness gate descriptor-reopens and hashes the exact retained inventory
+  rather than trusting model-card metadata.
+- [ ] Wire the selector into real
   training and the direction binding into T7; independently reopen all compact
   labels/traces/checkpoint bytes before any scientific PASS.
+
+## 2026-08-29: GEDLIB worker-selection manifest closure
+
+- [x] Require fresh, pair-disjoint real reports for every physical-core-
+  eligible worker candidate in `1/2/4/8`, with at least 100 pairs each.
+- [x] Exclude timeout/error, unhealthy load/iowait, and greater-than-10%
+  BACE/AIDS contention candidates before deterministic throughput ranking.
+- [x] Embed reports and the recomputed selection in one strict manifest and
+  make fixed-budget planning consume that manifest instead of a worker integer
+  or manual CPU-contention boolean.
+- [x] Update the AutoDL CLI, paired static Slurm wrapper, protocol, decision
+  record, and focused fail-closed tests.
+- [x] Remove manually reported BACE/AIDS drop percentages and host/iowait
+  flags; emit a hash-bound machine blocker and reject self-declared resource
+  PASS while no reviewed evidence-producer source pin exists.
+- [ ] Implement and independently review the resource producer with exact
+  protected-process identities, timestamped pre/during counters, periodic
+  load/iowait samples, and recomputed <=10% BACE/AIDS drop gates.
+- [ ] Implement the separate deterministic worker-trial cohort inventory; the
+  existing unique 1600-pair planning partition cannot supply four additional
+  mutually disjoint 100-pair trials. Until then retain the machine blocker
+  `WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED`.
+- [ ] Run all worker trials and the separate disjoint 100/500/1000 planning
+  cohorts on AutoDL; local code integration is not a scientific PASS.

@@ -25,8 +25,21 @@ from src.data.tastemolnet_neurosed_fixed_budget import (
 BENCHMARK_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_v1"
 BENCHMARK_SUMMARY_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_summary_v1"
 PAIR_BUDGET_PLAN_SCHEMA = "tastemolnet_neurosed_pair_budget_plan_v1"
+GEDLIB_WORKER_SELECTION_SCHEMA = (
+    "tastemolnet_neurosed_gedlib_worker_selection_v1"
+)
+GEDLIB_WORKER_RESOURCE_EVIDENCE_SCHEMA = (
+    "tastemolnet_neurosed_gedlib_worker_resource_evidence_v1"
+)
+# No reviewed producer currently samples protected-job progress before/during
+# each GEDLIB trial.  A self-declared PASS document must remain unusable until
+# this pin is replaced by the reviewed producer source hash.
+REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256: str | None = None
+WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED = False
+REVIEWED_WORKER_TRIAL_COHORT_BUILDER_SHA256: str | None = None
 PAIR_LABELS_MANIFEST_SCHEMA = "tastemolnet_neurosed_pair_labels_manifest_v1"
 OBSERVATION_STATUSES = frozenset({"SUCCESS", "TIMEOUT", "GEDLIB_ERROR"})
+LEGAL_GEDLIB_WORKER_COUNTS = (1, 2, 4, 8)
 OFFICIAL_SED_EDIT_COSTS = {
     "node_insertion": 0,
     "node_deletion": 1,
@@ -62,6 +75,18 @@ def _finite_nonnegative(value: Any, *, label: str) -> float:
         raise NeuroSEDFixedBudgetError(f"{label} must be numeric") from exc
     if not math.isfinite(parsed) or parsed < 0:
         raise NeuroSEDFixedBudgetError(f"{label} must be finite and non-negative")
+    return parsed
+
+
+def _finite(value: Any, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise NeuroSEDFixedBudgetError(f"{label} must be numeric")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise NeuroSEDFixedBudgetError(f"{label} must be numeric") from exc
+    if not math.isfinite(parsed):
+        raise NeuroSEDFixedBudgetError(f"{label} must be finite")
     return parsed
 
 
@@ -386,24 +411,440 @@ def validation_pair_budget(train_pair_budget: int) -> int:
     return min(4000, max(1000, math.floor(int(train_pair_budget) * 0.20)))
 
 
+def _legal_gedlib_worker_candidates(physical_core_count: Any) -> tuple[int, ...]:
+    if type(physical_core_count) is not int or physical_core_count < 1:
+        raise NeuroSEDFixedBudgetError("physical core count must be a positive integer")
+    return tuple(
+        workers
+        for workers in LEGAL_GEDLIB_WORKER_COUNTS
+        if workers <= physical_core_count
+    )
+
+
+def blocked_gedlib_worker_resource_evidence(
+    *,
+    benchmark_process_identity: Mapping[str, Any],
+    pre_sample: Mapping[str, Any],
+    post_sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the only currently valid resource evidence: an explicit block."""
+
+    payload: dict[str, Any] = {
+        "schema_version": GEDLIB_WORKER_RESOURCE_EVIDENCE_SCHEMA,
+        "status": "BLOCKED_RESOURCE_EVIDENCE_PRODUCER_MISSING",
+        "marker": None,
+        "machine_generated": True,
+        "producer_implemented": False,
+        "producer_source_sha256": None,
+        "benchmark_process_identity": dict(benchmark_process_identity),
+        "pre_sample": dict(pre_sample),
+        "during_samples": [],
+        "post_sample": dict(post_sample),
+        "protected_processes": {
+            "bace_legacy": None,
+            "aids_exact": None,
+        },
+        "missing_required_evidence": [
+            "authenticated_bace_legacy_process_identity",
+            "authenticated_aids_exact_process_identity",
+            "bace_pre_and_during_progress_counters",
+            "aids_pre_and_during_progress_counters",
+            "periodic_load_and_iowait_samples",
+            "reviewed_resource_evidence_producer_source",
+        ],
+        "host_load_gate_pass": None,
+        "iowait_gate_pass": None,
+        "bace_legacy_throughput_drop_percent": None,
+        "aids_exact_throughput_drop_percent": None,
+    }
+    payload["evidence_sha256"] = _stable_sha256(payload)
+    return payload
+
+
+def _validate_worker_resource_evidence(
+    resources: Any,
+) -> dict[str, Any]:
+    """Validate a resource-evidence binding or return an explicit blocker."""
+
+    if type(resources) is not dict:
+        return {
+            "status": "MISSING",
+            "evidence_sha256": None,
+            "eligible": False,
+        }
+    evidence = resources.get("worker_resource_evidence")
+    if type(evidence) is not dict:
+        return {
+            "status": "MISSING",
+            "evidence_sha256": None,
+            "eligible": False,
+        }
+    if evidence.get("schema_version") != GEDLIB_WORKER_RESOURCE_EVIDENCE_SCHEMA:
+        raise NeuroSEDFixedBudgetError("worker resource evidence schema changed")
+    recorded_sha256 = str(evidence.get("evidence_sha256") or "")
+    unsigned = dict(evidence)
+    unsigned.pop("evidence_sha256", None)
+    if (
+        len(recorded_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in recorded_sha256)
+        or recorded_sha256 != _stable_sha256(unsigned)
+    ):
+        raise NeuroSEDFixedBudgetError("worker resource evidence hash changed")
+    status = evidence.get("status")
+    if status == "PASS":
+        if REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256 is None:
+            raise NeuroSEDFixedBudgetError(
+                "worker resource evidence PASS has no reviewed producer"
+            )
+        required = (
+            "pre_sample",
+            "during_samples",
+            "post_sample",
+            "benchmark_process_identity",
+            "protected_processes",
+        )
+        if any(evidence.get(field) is None for field in required):
+            raise NeuroSEDFixedBudgetError(
+                "worker resource evidence lacks machine samples or process identity"
+            )
+        if (
+            evidence.get("producer_source_sha256")
+            != REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256
+        ):
+            raise NeuroSEDFixedBudgetError(
+                "worker resource evidence producer source changed"
+            )
+        return {
+            "status": "PASS",
+            "evidence_sha256": recorded_sha256,
+            "eligible": True,
+            "host_load_gate_pass": evidence.get("host_load_gate_pass"),
+            "iowait_gate_pass": evidence.get("iowait_gate_pass"),
+            "bace_legacy_throughput_drop_percent": evidence.get(
+                "bace_legacy_throughput_drop_percent"
+            ),
+            "aids_exact_throughput_drop_percent": evidence.get(
+                "aids_exact_throughput_drop_percent"
+            ),
+        }
+    if (
+        status != "BLOCKED_RESOURCE_EVIDENCE_PRODUCER_MISSING"
+        or evidence.get("producer_implemented") is not False
+        or evidence.get("producer_source_sha256") is not None
+    ):
+        raise NeuroSEDFixedBudgetError("worker resource evidence status changed")
+    if (
+        evidence.get("machine_generated") is not True
+        or type(evidence.get("benchmark_process_identity")) is not dict
+        or type(evidence.get("pre_sample")) is not dict
+        or type(evidence.get("during_samples")) is not list
+        or type(evidence.get("post_sample")) is not dict
+        or evidence.get("protected_processes")
+        != {"bace_legacy": None, "aids_exact": None}
+        or type(evidence.get("missing_required_evidence")) is not list
+        or not evidence.get("missing_required_evidence")
+    ):
+        raise NeuroSEDFixedBudgetError(
+            "blocked worker resource evidence manifest changed"
+        )
+    return {
+        "status": status,
+        "evidence_sha256": recorded_sha256,
+        "eligible": False,
+    }
+
+
+def build_gedlib_worker_selection_manifest(
+    reports: Mapping[int, Mapping[str, Any]],
+    *,
+    physical_core_count: int,
+) -> dict[str, Any]:
+    """Recompute a complete worker choice from real, disjoint GEDLIB trials.
+
+    Every legal worker count available on the current physical host must have
+    one real report with at least 100 unique pairs.  Unhealthy trials remain in
+    the manifest as evidence but cannot participate in throughput ranking.
+    """
+
+    candidates = _legal_gedlib_worker_candidates(physical_core_count)
+    if type(reports) is not dict or set(reports) != set(candidates):
+        raise NeuroSEDFixedBudgetError(
+            "worker selection requires every physical-core-eligible 1/2/4/8 trial"
+        )
+    checked_reports: dict[str, dict[str, Any]] = {}
+    candidate_evidence: dict[str, dict[str, Any]] = {}
+    seen_pair_ids: set[str] = set()
+    backend_reference: dict[str, Any] | None = None
+    eligible: list[tuple[float, int]] = []
+    backend_fields = (
+        "pyged_module_sha256",
+        "gedlib_commit",
+        "gedlib_config_sha256",
+        "feature_schema_sha256",
+        "ged_method",
+        "edit_cost_contract",
+        "ged_direction",
+        "label_representation",
+        "label_transform",
+        "label_dtype",
+    )
+    for workers in candidates:
+        raw = reports[workers]
+        budget = raw.get("benchmark_budget")
+        if type(budget) is not int or budget < 100:
+            raise NeuroSEDFixedBudgetError(
+                "worker trial must contain at least 100 fresh real pairs"
+            )
+        report = validate_benchmark_report(raw, expected_budget=budget)
+        if report["worker_count"] != workers:
+            raise NeuroSEDFixedBudgetError("worker trial count differs from candidate")
+        cohort = set(report["pair_ids"])
+        if cohort.intersection(seen_pair_ids):
+            raise NeuroSEDFixedBudgetError("worker trials reused benchmark pairs")
+        seen_pair_ids.update(cohort)
+
+        backend = {field: report.get(field) for field in backend_fields}
+        if backend_reference is None:
+            backend_reference = backend
+        elif backend != backend_reference:
+            raise NeuroSEDFixedBudgetError(
+                "worker trial backend/config changed between candidates"
+            )
+
+        wall_seconds = _finite_nonnegative(
+            report.get("wall_seconds"), label="worker trial wall_seconds"
+        )
+        if wall_seconds <= 0:
+            raise NeuroSEDFixedBudgetError("worker trial wall_seconds must be positive")
+        throughput = _finite_nonnegative(
+            report.get("pairs_per_hour"), label="worker trial pairs/hour"
+        )
+        recomputed_throughput = (
+            int(report["successful_pair_count"]) * 3600.0 / wall_seconds
+        )
+        if not math.isclose(
+            throughput, recomputed_throughput, rel_tol=1e-12, abs_tol=1e-9
+        ):
+            raise NeuroSEDFixedBudgetError("worker trial throughput cannot be reproduced")
+
+        resource_evidence = _validate_worker_resource_evidence(
+            report.get("resource_metrics")
+        )
+        host_load_pass: bool | None = None
+        iowait_pass: bool | None = None
+        bace_drop: float | None = None
+        aids_drop: float | None = None
+        if resource_evidence["eligible"]:
+            host_load_pass = resource_evidence.get("host_load_gate_pass")
+            iowait_pass = resource_evidence.get("iowait_gate_pass")
+            if type(host_load_pass) is not bool or type(iowait_pass) is not bool:
+                raise NeuroSEDFixedBudgetError(
+                    "worker resource load/iowait gates must be machine booleans"
+                )
+            bace_drop = _finite(
+                resource_evidence.get("bace_legacy_throughput_drop_percent"),
+                label="BACE legacy throughput drop percent",
+            )
+            aids_drop = _finite(
+                resource_evidence.get("aids_exact_throughput_drop_percent"),
+                label="AIDS exact throughput drop percent",
+            )
+
+        exclusion_reasons: list[str] = []
+        if int(report["timeout_count"]) != 0:
+            exclusion_reasons.append("TIMEOUT_OBSERVED")
+        if int(report["failure_count"]) != 0:
+            exclusion_reasons.append("GEDLIB_ERROR_OBSERVED")
+        if not resource_evidence["eligible"]:
+            exclusion_reasons.append("MACHINE_RESOURCE_EVIDENCE_UNAVAILABLE")
+        else:
+            if host_load_pass is not True:
+                exclusion_reasons.append("HOST_LOAD_UNHEALTHY")
+            if iowait_pass is not True:
+                exclusion_reasons.append("IOWAIT_UNHEALTHY")
+            if bace_drop is not None and bace_drop > 10.0:
+                exclusion_reasons.append("BACE_LEGACY_DROP_GT_10PCT")
+            if aids_drop is not None and aids_drop > 10.0:
+                exclusion_reasons.append("AIDS_EXACT_DROP_GT_10PCT")
+        if not WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED:
+            exclusion_reasons.append("WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED")
+        is_eligible = not exclusion_reasons
+        if is_eligible:
+            eligible.append((throughput, workers))
+        checked_reports[str(workers)] = report
+        candidate_evidence[str(workers)] = {
+            "worker_count": workers,
+            "benchmark_budget": budget,
+            "fresh_unique_pair_count": len(cohort),
+            "pair_ids_sha256": report["pair_ids_sha256"],
+            "report_sha256": _stable_sha256(report),
+            "pairs_per_hour": throughput,
+            "timeout_count": int(report["timeout_count"]),
+            "gedlib_error_count": int(report["failure_count"]),
+            "worker_resource_evidence_status": resource_evidence["status"],
+            "worker_resource_evidence_sha256": resource_evidence[
+                "evidence_sha256"
+            ],
+            "host_load_gate_pass": host_load_pass,
+            "iowait_gate_pass": iowait_pass,
+            "bace_legacy_throughput_drop_percent": bace_drop,
+            "aids_exact_throughput_drop_percent": aids_drop,
+            "contention_drop_limit_percent": 10.0,
+            "eligible": is_eligible,
+            "exclusion_reasons": exclusion_reasons,
+        }
+
+    eligible.sort(key=lambda item: (-item[0], item[1]))
+    resource_evidence_authority_complete = all(
+        row["worker_resource_evidence_status"] == "PASS"
+        for row in candidate_evidence.values()
+    )
+    selected_workers = (
+        eligible[0][1]
+        if eligible
+        and resource_evidence_authority_complete
+        and WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED
+        else None
+    )
+    if not WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED:
+        status = "WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED"
+    elif not resource_evidence_authority_complete:
+        status = "BLOCKED_GEDLIB_RESOURCE_EVIDENCE"
+    elif selected_workers is not None:
+        status = "PASS"
+    else:
+        status = "BLOCKED_GEDLIB_WORKER_SELECTION"
+    payload: dict[str, Any] = {
+        "schema_version": GEDLIB_WORKER_SELECTION_SCHEMA,
+        "status": status,
+        "selection_policy": "highest_healthy_real_pairs_per_hour_then_lower_worker_count",
+        "physical_core_count": physical_core_count,
+        "physical_core_count_source": "runtime_physical_core_probe",
+        "legal_worker_counts": list(LEGAL_GEDLIB_WORKER_COUNTS),
+        "required_worker_candidates": list(candidates),
+        "all_required_candidate_reports_present": True,
+        "minimum_fresh_pairs_per_candidate": 100,
+        "worker_trial_pair_cohorts_disjoint": True,
+        "worker_trial_cohort_builder_implemented": (
+            WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED
+        ),
+        "worker_trial_cohort_builder_sha256": (
+            REVIEWED_WORKER_TRIAL_COHORT_BUILDER_SHA256
+        ),
+        "worker_trial_cohort_builder_status": (
+            "IMPLEMENTED"
+            if WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED
+            else "WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED"
+        ),
+        "timeout_or_failure_candidates_excluded": True,
+        "contention_drop_limit_percent": 10.0,
+        "manual_worker_override_used": False,
+        "resource_evidence_producer_implemented": (
+            REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256 is not None
+        ),
+        "all_required_resource_evidence_authenticated": (
+            resource_evidence_authority_complete
+        ),
+        "resource_evidence_producer_sha256": (
+            REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256
+        ),
+        "resource_evidence_blocker": (
+            "reviewed protected-job resource/throughput evidence producer is missing"
+            if REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256 is None
+            else None
+        ),
+        "infrastructure_blockers": [
+            value
+            for value in (
+                (
+                    None
+                    if WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED
+                    else "WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED"
+                ),
+                (
+                    None
+                    if REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256 is not None
+                    else "WORKER_RESOURCE_EVIDENCE_PRODUCER_NOT_IMPLEMENTED"
+                ),
+            )
+            if value is not None
+        ],
+        "backend_authority": backend_reference,
+        "candidate_evidence": candidate_evidence,
+        "reports": checked_reports,
+        "selected_gedlib_workers": selected_workers,
+    }
+    payload["manifest_sha256"] = _stable_sha256(payload)
+    return payload
+
+
+def validate_gedlib_worker_selection_manifest(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild a worker manifest so a selected integer is never trusted."""
+
+    payload = dict(manifest)
+    if payload.get("schema_version") != GEDLIB_WORKER_SELECTION_SCHEMA:
+        raise NeuroSEDFixedBudgetError("GEDLIB worker selection schema changed")
+    reports = payload.get("reports")
+    if type(reports) is not dict:
+        raise NeuroSEDFixedBudgetError("GEDLIB worker selection reports are missing")
+    parsed_reports: dict[int, Mapping[str, Any]] = {}
+    for key, report in reports.items():
+        if type(key) is not str or not key.isdigit() or type(report) is not dict:
+            raise NeuroSEDFixedBudgetError("GEDLIB worker selection report map changed")
+        parsed_reports[int(key)] = report
+    expected = build_gedlib_worker_selection_manifest(
+        parsed_reports,
+        physical_core_count=payload.get("physical_core_count"),
+    )
+    if payload != expected:
+        raise NeuroSEDFixedBudgetError("GEDLIB worker selection manifest changed")
+    return payload
+
+
+def select_gedlib_worker_count(
+    reports: Mapping[int, Mapping[str, Any]],
+    *,
+    physical_core_count: int,
+) -> int:
+    """Return the machine-selected worker count from the strict manifest."""
+
+    manifest = build_gedlib_worker_selection_manifest(
+        reports, physical_core_count=physical_core_count
+    )
+    selected = manifest["selected_gedlib_workers"]
+    if selected is None:
+        raise NeuroSEDFixedBudgetError("no worker count passed contention gates")
+    return int(selected)
+
+
 def select_fixed_pair_budget(
     benchmark_1000: Mapping[str, Any],
     *,
-    selected_workers: int,
+    worker_selection_manifest: Mapping[str, Any],
     disk_reservation_pass: bool,
-    cpu_contention_gate_pass: bool,
     maximum_label_hours: float = 24.0,
     timeout_rate_maximum: float = 0.05,
     safety_factor: float = 1.25,
 ) -> dict[str, Any]:
-    """Choose the largest approved budget or fail with projected ETAs."""
+    """Choose a fixed budget from one revalidated machine worker manifest."""
 
     report = validate_benchmark_report(benchmark_1000, expected_budget=1000)
-    if int(selected_workers) not in (1, 2, 4, 8):
-        raise NeuroSEDFixedBudgetError("selected workers must be 1, 2, 4, or 8")
-    if int(selected_workers) != report["worker_count"]:
+    worker_manifest = validate_gedlib_worker_selection_manifest(
+        worker_selection_manifest
+    )
+    if worker_manifest["status"] != "PASS":
+        raise NeuroSEDFixedBudgetError("GEDLIB worker selection is not PASS")
+    selected_workers = int(worker_manifest["selected_gedlib_workers"])
+    if selected_workers != report["worker_count"]:
         raise NeuroSEDFixedBudgetError(
-            "1000-pair benchmark worker count differs from selected workers"
+            "1000-pair benchmark worker count differs from machine selection"
+        )
+    backend = worker_manifest["backend_authority"]
+    if any(report.get(field) != value for field, value in backend.items()):
+        raise NeuroSEDFixedBudgetError(
+            "1000-pair benchmark backend differs from worker-selection trials"
         )
     hours_limit = _finite_nonnegative(maximum_label_hours, label="maximum label hours")
     timeout_limit = _finite_nonnegative(
@@ -434,7 +875,7 @@ def select_fixed_pair_budget(
         report["timeout_rate"] <= timeout_limit
         and report["failure_count"] == 0
         and disk_reservation_pass is True
-        and cpu_contention_gate_pass is True
+        and worker_manifest["status"] == "PASS"
     )
     if all_common_gates:
         for train_budget in reversed(ALLOWED_TRAIN_PAIR_BUDGETS):
@@ -453,10 +894,13 @@ def select_fixed_pair_budget(
         "safety_factor": factor,
         "ged_p95_seconds_per_pair": p95,
         "selected_gedlib_workers": int(selected_workers),
+        "worker_selection_manifest_sha256": worker_manifest["manifest_sha256"],
+        "worker_selection_policy": worker_manifest["selection_policy"],
+        "manual_worker_override_used": False,
         "observed_timeout_rate": report["timeout_rate"],
         "observed_gedlib_error_count": report["failure_count"],
         "disk_reservation_pass": disk_reservation_pass is True,
-        "cpu_contention_gate_pass": cpu_contention_gate_pass is True,
+        "cpu_contention_gate_pass": True,
         "projections": projections,
         "selected_neurosed_train_pair_budget": selected,
         "selected_neurosed_validation_pair_budget": (
@@ -467,43 +911,6 @@ def select_fixed_pair_budget(
     }
     payload["plan_sha256"] = _stable_sha256(payload)
     return payload
-
-
-def select_gedlib_worker_count(
-    reports: Mapping[int, Mapping[str, Any]],
-    *,
-    physical_core_count: int,
-) -> int:
-    """Choose highest healthy throughput from fresh >=100-pair worker trials."""
-
-    allowed = {worker for worker in (1, 2, 4, 8) if worker <= int(physical_core_count)}
-    if not reports or not set(reports).issubset(allowed):
-        raise NeuroSEDFixedBudgetError("worker benchmark set is invalid for this host")
-    checked: list[tuple[float, int]] = []
-    seen_pair_ids: set[str] = set()
-    for worker, raw in reports.items():
-        budget = int(raw.get("benchmark_budget", 0))
-        report = validate_benchmark_report(raw, expected_budget=budget)
-        if budget < 100 or report["worker_count"] != worker:
-            raise NeuroSEDFixedBudgetError("worker trial must use >=100 fresh pairs")
-        cohort = set(report["pair_ids"])
-        if cohort.intersection(seen_pair_ids):
-            raise NeuroSEDFixedBudgetError("worker trials reused benchmark pairs")
-        seen_pair_ids.update(cohort)
-        resources = report.get("resource_metrics")
-        if (
-            type(resources) is not dict
-            or resources.get("host_load_gate_pass") is not True
-            or resources.get("iowait_gate_pass") is not True
-            or resources.get("bace_legacy_throughput_drop_le_10pct") is not True
-            or resources.get("aids_exact_throughput_drop_le_10pct") is not True
-        ):
-            continue
-        checked.append((_finite_nonnegative(report["pairs_per_hour"], label="pairs/hour"), worker))
-    if not checked:
-        raise NeuroSEDFixedBudgetError("no worker count passed contention gates")
-    checked.sort(key=lambda item: (-item[0], item[1]))
-    return checked[0][1]
 
 
 def directional_ged_cache_key(
@@ -945,11 +1352,17 @@ def build_official_pair_labels_manifest(
 __all__ = [
     "BENCHMARK_SCHEMA",
     "BENCHMARK_SUMMARY_SCHEMA",
+    "GEDLIB_WORKER_RESOURCE_EVIDENCE_SCHEMA",
+    "GEDLIB_WORKER_SELECTION_SCHEMA",
+    "LEGAL_GEDLIB_WORKER_COUNTS",
     "NeuroSEDFixedBudgetError",
     "OFFICIAL_SED_EDIT_COSTS",
     "OFFICIAL_GED_DIRECTION",
     "PAIR_BUDGET_PLAN_SCHEMA",
     "PAIR_LABELS_MANIFEST_SCHEMA",
+    "REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256",
+    "blocked_gedlib_worker_resource_evidence",
+    "build_gedlib_worker_selection_manifest",
     "build_official_pair_labels_manifest",
     "combine_disjoint_benchmark_reports",
     "directional_ged_cache_key",
@@ -961,5 +1374,6 @@ __all__ = [
     "select_successful_reserve_pairs",
     "summarize_real_gedlib_observations",
     "validate_benchmark_report",
+    "validate_gedlib_worker_selection_manifest",
     "validation_pair_budget",
 ]

@@ -16,16 +16,6 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 echo "REFUSING_HPC_EXECUTION: Taste NeuroSED pair planning is AutoDL-only." >&2
+echo "WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED" >&2
+echo "WORKER_RESOURCE_EVIDENCE_PRODUCER_NOT_IMPLEMENTED" >&2
 exit 78
-
-# Unreachable documentation-only CLI parity. Never submit this script.
-python -B scripts/autodl/select_tastemolnet_neurosed_pair_budget.py \
-  --config configs/hpc.yaml \
-  --set inference.fallback_to_heuristic=false \
-  --benchmark-100 /absolute/gedlib_benchmark_100.json \
-  --benchmark-500 /absolute/gedlib_benchmark_500.json \
-  --benchmark-1000 /absolute/gedlib_benchmark_1000.json \
-  --selected-workers 1 \
-  --disk-reservation-pass \
-  --cpu-contention-gate-pass \
-  --output-dir /absolute/fresh/plan

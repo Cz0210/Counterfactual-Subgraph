@@ -28,8 +28,12 @@ from src.data.tastemolnet_neurosed_fixed_budget import (  # noqa: E402
 )
 from src.eval.tastemolnet_neurosed_fixed_budget import (  # noqa: E402
     OFFICIAL_SED_EDIT_COSTS,
+    REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256,
+    WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED,
+    blocked_gedlib_worker_resource_evidence,
     summarize_real_gedlib_observations,
 )
+from src.utils.process_identity_v2 import capture_process_snapshot  # noqa: E402
 from src.utils.tastemolnet_neurosed_gedlib_build import (  # noqa: E402
     BUILD_SCHEMA,
     PINNED_GREED_COMMIT,
@@ -180,6 +184,15 @@ def _physical_core_count() -> int:
     return int(os.cpu_count() or 1)
 
 
+def _resource_sample() -> dict[str, Any]:
+    return {
+        "unix_time_ns": time.time_ns(),
+        "monotonic_time_ns": time.monotonic_ns(),
+        "load_average": list(os.getloadavg()),
+        "iowait_ticks": _iowait_ticks(),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-manifest", type=Path, required=True)
@@ -190,10 +203,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, choices=(1, 2, 4, 8), required=True)
     parser.add_argument("--gedlib-time-limit-seconds", type=int, default=1)
     parser.add_argument("--hard-wall-seconds", type=float, required=True)
-    parser.add_argument("--bace-legacy-throughput-drop-percent", type=float, required=True)
-    parser.add_argument("--aids-exact-throughput-drop-percent", type=float, required=True)
-    parser.add_argument("--host-load-gate-pass", action="store_true")
-    parser.add_argument("--iowait-gate-pass", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
 
@@ -204,6 +213,25 @@ def main() -> int:
         raise RuntimeError("GEDLIB time limits must be positive")
     if args.workers > _physical_core_count():
         raise RuntimeError("GEDLIB workers exceed physical core count")
+    if (
+        REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256 is None
+        or not WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED
+    ):
+        sample = _resource_sample()
+        blocker = blocked_gedlib_worker_resource_evidence(
+            benchmark_process_identity=capture_process_snapshot(
+                os.getpid()
+            ).to_dict(),
+            pre_sample=sample,
+            post_sample=sample,
+        )
+        _atomic_text(
+            args.output_dir / "gedlib_worker_resource_evidence_blocker.json",
+            json.dumps(blocker, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        )
+        print("BLOCKED_GEDLIB_RESOURCE_EVIDENCE", file=sys.stderr)
+        print("WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED", file=sys.stderr)
+        return 78
     build = _load_json(args.build_manifest)
     smoke = build.get("smoke")
     source = build.get("source_authority")
@@ -267,6 +295,8 @@ def main() -> int:
             raise RuntimeError("pair reconstruction changed")
         prepared.append((row, query.pyged_data(), target_graph.pyged_data()))
     method_args = [f"--threads 1 --time-limit {args.gedlib_time_limit_seconds}"]
+    benchmark_process_identity = capture_process_snapshot(os.getpid()).to_dict()
+    pre_resource_sample = _resource_sample()
     before_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     before_iowait = _iowait_ticks()
     started = time.perf_counter()
@@ -338,8 +368,7 @@ def main() -> int:
         )
     after_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     after_iowait = _iowait_ticks()
-    bace_drop = float(args.bace_legacy_throughput_drop_percent)
-    aids_drop = float(args.aids_exact_throughput_drop_percent)
+    post_resource_sample = _resource_sample()
     aggregate_cpu_percent = 100.0 * (
         (after_usage.ru_utime - before_usage.ru_utime)
         + (after_usage.ru_stime - before_usage.ru_stime)
@@ -359,12 +388,11 @@ def main() -> int:
             if before_iowait is not None and after_iowait is not None
             else None
         ),
-        "host_load_gate_pass": args.host_load_gate_pass,
-        "iowait_gate_pass": args.iowait_gate_pass,
-        "bace_legacy_throughput_drop_percent": bace_drop,
-        "aids_exact_throughput_drop_percent": aids_drop,
-        "bace_legacy_throughput_drop_le_10pct": bace_drop <= 10.0,
-        "aids_exact_throughput_drop_le_10pct": aids_drop <= 10.0,
+        "worker_resource_evidence": blocked_gedlib_worker_resource_evidence(
+            benchmark_process_identity=benchmark_process_identity,
+            pre_sample=pre_resource_sample,
+            post_sample=post_resource_sample,
+        ),
     }
     config_sha = hashlib.sha256(
         json.dumps(
@@ -405,9 +433,13 @@ def main() -> int:
         report_path,
         json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
     )
-    healthy = summary["timeout_rate"] <= 0.05 and summary["failure_count"] == 0
+    healthy = (
+        summary["timeout_rate"] <= 0.05
+        and summary["failure_count"] == 0
+        and resources["worker_resource_evidence"]["status"] == "PASS"
+    )
     if not healthy:
-        print("BLOCKED_GEDLIB_THROUGHPUT", file=sys.stderr)
+        print("BLOCKED_GEDLIB_RESOURCE_EVIDENCE", file=sys.stderr)
         return 78
     print(f"[TASTE_NEUROSED_GED_BENCHMARK_{args.benchmark_budget}_PASS]")
     return 0

@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 PAIR_SAMPLING_SEED = 7
+PAIR_SAMPLER_MANIFEST_SCHEMA = "tastemolnet_neurosed_fixed_budget_pairs_v1"
 BENCHMARK_BUDGETS = (100, 500, 1000)
 ALLOWED_TRAIN_PAIR_BUDGETS = (5000, 10000, 20000)
 ALLOWED_SPLITS = frozenset({"train", "validation"})
@@ -174,7 +175,12 @@ class FixedBudgetQuery:
 
 @dataclass(frozen=True, slots=True)
 class FixedBudgetPair:
-    """An independent query-source/target pair with no GED label."""
+    """An independent query-source/target pair with no GED label.
+
+    ``sampling_stratum`` is a backward-compatible metadata name for a
+    diagnostic computed *after* the ordered source/target draws are complete.
+    It must never influence which graphs are drawn, accepted, or ordered.
+    """
 
     pair_id: str
     query: FixedBudgetQuery
@@ -195,7 +201,6 @@ class FixedBudgetPair:
             target_graph_id=self.target.graph_id,
             query_instance_sha256=self.query.graph_sha256,
             sampling_seed=self.sampling_seed,
-            sampling_stratum=self.sampling_stratum,
         )
         if self.pair_id != expected:
             raise FixedBudgetPairError("pair_id does not bind the pair payload")
@@ -326,7 +331,11 @@ def sample_official_style_query(
     )
 
 
-def _size_bins(graphs: Sequence[FixedBudgetGraph]) -> dict[str, str]:
+def _diagnostic_size_bins(
+    graphs: Sequence[FixedBudgetGraph],
+) -> dict[str, str]:
+    """Return post-sampling size diagnostics; never use these bins to draw."""
+
     ordered = sorted(graphs, key=lambda graph: (graph.num_nodes, graph.graph_id))
     result: dict[str, str] = {}
     names = ("small", "medium", "large")
@@ -336,65 +345,33 @@ def _size_bins(graphs: Sequence[FixedBudgetGraph]) -> dict[str, str]:
     return result
 
 
-def _strata(
-    graphs: Sequence[FixedBudgetGraph],
+def _diagnostic_stratum(
+    query_source: FixedBudgetGraph,
+    target: FixedBudgetGraph,
     bins: Mapping[str, str],
-) -> list[tuple[str, str, str]]:
-    by_bin: dict[str, list[FixedBudgetGraph]] = {
-        name: [graph for graph in graphs if bins[graph.graph_id] == name]
-        for name in ("small", "medium", "large")
-    }
-    all_labeled = all(graph.class_label is not None for graph in graphs)
-    result: list[tuple[str, str, str]] = []
-    for query_bin in ("small", "medium", "large"):
-        for target_bin in ("small", "medium", "large"):
-            query_graphs = by_bin[query_bin]
-            target_graphs = by_bin[target_bin]
-            if not query_graphs or not target_graphs:
-                continue
-            if not all_labeled:
-                if any(q.graph_id != t.graph_id for q in query_graphs for t in target_graphs):
-                    result.append((query_bin, target_bin, "unknown"))
-                continue
-            if any(
-                q.graph_id != t.graph_id and q.class_label == t.class_label
-                for q in query_graphs
-                for t in target_graphs
-            ):
-                result.append((query_bin, target_bin, "same"))
-            if any(
-                q.graph_id != t.graph_id and q.class_label != t.class_label
-                for q in query_graphs
-                for t in target_graphs
-            ):
-                result.append((query_bin, target_bin, "cross"))
-    if not result:
-        raise FixedBudgetPairError("no independent query-target stratum is viable")
-    return result
+) -> str:
+    """Describe an already-sampled pair without affecting its identity."""
+
+    if query_source.class_label is None or target.class_label is None:
+        class_relation = "unknown"
+    elif query_source.class_label == target.class_label:
+        class_relation = "same"
+    else:
+        class_relation = "cross"
+    return (
+        f"query_size={bins[query_source.graph_id]}|"
+        f"target_size={bins[target.graph_id]}|class={class_relation}"
+    )
 
 
-def _draw_independent_sources(
-    *,
-    graphs: Sequence[FixedBudgetGraph],
-    bins: Mapping[str, str],
-    stratum: tuple[str, str, str],
-    rng: random.Random,
-    max_attempts: int = 512,
-) -> tuple[FixedBudgetGraph, FixedBudgetGraph]:
-    query_bin, target_bin, relation = stratum
-    query_pool = [graph for graph in graphs if bins[graph.graph_id] == query_bin]
-    target_pool = [graph for graph in graphs if bins[graph.graph_id] == target_bin]
-    for _ in range(max_attempts):
-        query_source = query_pool[rng.randrange(len(query_pool))]
-        target = target_pool[rng.randrange(len(target_pool))]
-        if query_source.graph_id == target.graph_id:
-            continue
-        if relation == "same" and query_source.class_label != target.class_label:
-            continue
-        if relation == "cross" and query_source.class_label == target.class_label:
-            continue
-        return query_source, target
-    raise FixedBudgetPairError(f"could not draw independent sources for {stratum}")
+@dataclass(frozen=True, slots=True)
+class _FixedBudgetPairDraft:
+    """A sampled scientific pair before any class/size diagnostics are read."""
+
+    query_source: FixedBudgetGraph
+    query: FixedBudgetQuery
+    target: FixedBudgetGraph
+    sampling_seed: int
 
 
 def _pair_id(
@@ -404,7 +381,6 @@ def _pair_id(
     target_graph_id: str,
     query_instance_sha256: str,
     sampling_seed: int,
-    sampling_stratum: str,
 ) -> str:
     return _stable_sha256(
         {
@@ -413,7 +389,6 @@ def _pair_id(
             "target_graph_id": target_graph_id,
             "query_instance_sha256": query_instance_sha256,
             "sampling_seed": int(sampling_seed),
-            "sampling_stratum": sampling_stratum,
         }
     )
 
@@ -429,33 +404,53 @@ def sample_fixed_budget_pairs(
     node_limit_query: int | None = None,
     max_pair_attempts: int | None = None,
 ) -> list[FixedBudgetPair]:
-    """Sample a deterministic budget without constructing a Cartesian product."""
+    """Sample official-style independent draws under a deterministic budget.
+
+    Query sources and targets are drawn with replacement from the complete
+    same-split input sequence using separate deterministic RNG streams.  The
+    only pair-level rejection is the required distinct-graph-ID constraint
+    (plus failure to construct a valid official-style query).  Class labels,
+    graph sizes, and scaffolds are not read until all ordered draws have been
+    accepted, when they are attached as diagnostics only.
+    """
 
     if split not in ALLOWED_SPLITS:
         raise FixedBudgetPairError("pair split must be train or validation")
+    if type(seed) is not int or seed != PAIR_SAMPLING_SEED:
+        raise FixedBudgetPairError("pair sampling seed must remain fixed at 7")
     if int(pair_count) <= 0:
         raise FixedBudgetPairError("pair_count must be positive")
     if not graphs or any(graph.split != split for graph in graphs):
         raise FixedBudgetPairError("all graphs must belong to the requested split")
     if len({graph.graph_id for graph in graphs}) != len(graphs):
         raise FixedBudgetPairError("graph IDs must be unique within the split")
-    bins = _size_bins(graphs)
-    strata = _strata(graphs, bins)
-    rng = random.Random(int(seed))
-    pairs: list[FixedBudgetPair] = []
-    seen_pair_ids: set[str] = set()
+    if len(graphs) < 2:
+        raise FixedBudgetPairError(
+            "independent query-target sampling requires at least two graphs"
+        )
+
+    graph_pool = tuple(graphs)
+    query_source_rng = random.Random(
+        _seed_for(seed, split, "official_query_source_draws")
+    )
+    target_rng = random.Random(_seed_for(seed, split, "official_target_draws"))
+    drafts: list[_FixedBudgetPairDraft] = []
     maximum = int(max_pair_attempts or max(10_000, pair_count * 64))
     attempt = 0
-    while len(pairs) < int(pair_count) and attempt < maximum:
-        stratum = strata[len(pairs) % len(strata)]
-        query_source, target = _draw_independent_sources(
-            graphs=graphs,
-            bins=bins,
-            stratum=stratum,
-            rng=rng,
-        )
-        query_seed = _seed_for(seed, split, len(pairs), attempt, query_source.graph_id)
+    while len(drafts) < int(pair_count) and attempt < maximum:
+        query_source = graph_pool[query_source_rng.randrange(len(graph_pool))]
+        target = graph_pool[target_rng.randrange(len(graph_pool))]
         attempt += 1
+        if query_source.graph_id == target.graph_id:
+            continue
+        query_seed = _seed_for(
+            seed,
+            split,
+            "query_instance",
+            len(drafts),
+            attempt,
+            query_source.graph_id,
+        )
         try:
             query = sample_official_style_query(
                 query_source,
@@ -466,35 +461,58 @@ def sample_fixed_budget_pairs(
             )
         except FixedBudgetPairError:
             continue
-        stratum_name = (
-            f"query_size={stratum[0]}|target_size={stratum[1]}|class={stratum[2]}"
+        pair_seed = _seed_for(
+            seed,
+            split,
+            "pair_instance",
+            len(drafts),
+            attempt,
+            target.graph_id,
         )
-        pair_seed = _seed_for(seed, split, len(pairs), attempt, target.graph_id)
+        drafts.append(
+            _FixedBudgetPairDraft(
+                query_source=query_source,
+                query=query,
+                target=target,
+                sampling_seed=pair_seed,
+            )
+        )
+    if len(drafts) != int(pair_count):
+        raise FixedBudgetPairError(
+            f"sampled {len(drafts)} of {pair_count} requested independent pairs"
+        )
+
+    # This is deliberately a second phase: diagnostics cannot feed back into
+    # source/target draws, query retries, acceptance, or ordered pair identity.
+    bins = _diagnostic_size_bins(graph_pool)
+    pairs: list[FixedBudgetPair] = []
+    seen_pair_ids: set[str] = set()
+    for draft in drafts:
+        stratum_name = _diagnostic_stratum(
+            draft.query_source,
+            draft.target,
+            bins,
+        )
         identifier = _pair_id(
             split=split,
-            query_graph_id=query_source.graph_id,
-            target_graph_id=target.graph_id,
-            query_instance_sha256=query.graph_sha256,
-            sampling_seed=pair_seed,
-            sampling_stratum=stratum_name,
+            query_graph_id=draft.query_source.graph_id,
+            target_graph_id=draft.target.graph_id,
+            query_instance_sha256=draft.query.graph_sha256,
+            sampling_seed=draft.sampling_seed,
         )
         if identifier in seen_pair_ids:
-            continue
+            raise FixedBudgetPairError("sampled pair instance identity collision")
         seen_pair_ids.add(identifier)
         pairs.append(
             FixedBudgetPair(
                 pair_id=identifier,
-                query=query,
-                target=target,
-                query_scaffold=query_source.scaffold,
-                target_scaffold=target.scaffold,
-                sampling_seed=pair_seed,
+                query=draft.query,
+                target=draft.target,
+                query_scaffold=draft.query_source.scaffold,
+                target_scaffold=draft.target.scaffold,
+                sampling_seed=draft.sampling_seed,
                 sampling_stratum=stratum_name,
             )
-        )
-    if len(pairs) != int(pair_count):
-        raise FixedBudgetPairError(
-            f"sampled {len(pairs)} of {pair_count} requested independent pairs"
         )
     return pairs
 
@@ -536,6 +554,8 @@ def fixed_budget_pair_manifest(
 
     if not pairs or any(pair.query.split != split for pair in pairs):
         raise FixedBudgetPairError("pair manifest split mismatch")
+    if type(seed) is not int or seed != PAIR_SAMPLING_SEED:
+        raise FixedBudgetPairError("pair manifest seed must remain fixed at 7")
     rows = [pair.metadata() for pair in pairs]
     query_ids = {row["query_graph_id"] for row in rows}
     target_ids = {row["target_graph_id"] for row in rows}
@@ -545,13 +565,15 @@ def fixed_budget_pair_manifest(
         row["sampling_stratum"].rsplit("=", 1)[-1]
         for row in rows
     }
-    return {
-        "schema_version": "tastemolnet_neurosed_fixed_budget_pairs_v1",
+    payload = {
+        "schema_version": PAIR_SAMPLER_MANIFEST_SCHEMA,
         "dataset": "tastemolnet",
         "split": split,
         "pair_count": len(rows),
         "pair_sampling_seed": int(seed),
-        "pair_builder": "deterministic_official_style_independent_query_target_v1",
+        "pair_builder": (
+            "deterministic_official_style_independent_unstratified_query_target_v2"
+        ),
         "official_pair_builder_signature": (
             "neuro.datasets.make_inner_dataset(graphs,n_pairs,n_hops_query,"
             "trav_prob_query,node_lim_query=None,n_hops_target=None,targets=None)"
@@ -562,6 +584,11 @@ def fixed_budget_pair_manifest(
         ),
         "parent_own_subgraph_shortcut": False,
         "cartesian_product_materialized": False,
+        "source_target_draws_with_replacement": True,
+        "source_target_rng_streams_independent": True,
+        "distinct_graph_ids_enforced_by_rejection": True,
+        "size_or_class_used_to_select_filter_or_order_pairs": False,
+        "size_and_class_diagnostics_computed_after_sampling": True,
         "ged_labels_present": False,
         "class_label_used_as_supervision": False,
         "calibration_loaded": False,
@@ -584,6 +611,18 @@ def fixed_budget_pair_manifest(
         f"{split}_target_ids_hash": target_ids_hash,
         "metadata_rows_sha256": _stable_sha256(rows),
     }
+    return bind_fixed_budget_pair_manifest(payload)
+
+
+def bind_fixed_budget_pair_manifest(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the canonical self-hashed sampler manifest after all additions."""
+
+    payload = dict(manifest)
+    payload.pop("manifest_sha256", None)
+    payload["manifest_sha256"] = _stable_sha256(payload)
+    return payload
 
 
 def reserve_pair_count(budget: int) -> int:
@@ -603,6 +642,8 @@ __all__ = [
     "FixedBudgetPairError",
     "FixedBudgetQuery",
     "PAIR_SAMPLING_SEED",
+    "PAIR_SAMPLER_MANIFEST_SCHEMA",
+    "bind_fixed_budget_pair_manifest",
     "fixed_budget_pair_manifest",
     "partition_disjoint_benchmarks",
     "reserve_pair_count",

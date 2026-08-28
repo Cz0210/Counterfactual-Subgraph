@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils.tastemolnet_neurosed_gedlib_build import (  # noqa: E402
+    PINNED_GEDLIB_COMMIT,
     TasteGEDLIBBuildError,
     atomic_write_json,
     blocked_build_manifest,
@@ -26,7 +27,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--greed-root", type=Path, required=True)
     parser.add_argument("--greed-expts-root", type=Path, required=True)
     parser.add_argument("--gedlib-root", type=Path, required=True)
-    parser.add_argument("--expected-gedlib-commit", required=True)
+    parser.add_argument(
+        "--expected-gedlib-commit", default=PINNED_GEDLIB_COMMIT
+    )
     parser.add_argument("--pybind11-cmake-dir", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)

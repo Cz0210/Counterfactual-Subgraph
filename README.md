@@ -554,7 +554,9 @@ evidence atomically. See
 The production Taste GCFExplainer NeuroSED successor uses deterministic
 fixed-budget independent query-target pairs and only real pinned pyged/GEDLIB
 interval labels. Build, benchmark, and budget-selection code is fail-closed;
-the local dependency audit is blocked and claims no scientific PASS. See
+the official GCF source is pinned to
+`cc7ca30eb2026c57f20cd6afe2ee621f486fcf2e`, while the local GEDLIB dependency
+audit remains blocked and claims no scientific PASS. See
 `docs/TASTE_GCF_NEUROSED_FIXED_BUDGET_PROTOCOL.md`.
 
 Taste main-v2 compatibility entrypoints now provide the managed Taste

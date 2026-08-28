@@ -1,0 +1,14 @@
+{
+  "marker": null,
+  "resource_evidence_producer": {
+    "reviewed_source_sha256": null,
+    "status": "WORKER_RESOURCE_EVIDENCE_PRODUCER_NOT_IMPLEMENTED"
+  },
+  "safe_to_select_workers": false,
+  "schema_version": "tastemolnet_neurosed_worker_trial_blockers_v1",
+  "status": "BLOCKED",
+  "worker_trial_cohort_builder": {
+    "reviewed_source_sha256": null,
+    "status": "WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED"
+  }
+}

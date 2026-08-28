@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.data.tastemolnet_neurosed_fixed_budget import (  # noqa: E402
     FixedBudgetGraph,
     FixedBudgetPairError,
+    bind_fixed_budget_pair_manifest,
     fixed_budget_pair_manifest,
     partition_disjoint_benchmarks,
     sample_fixed_budget_pairs,
@@ -219,7 +220,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-feature-schema-sha256", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--pair-count", type=int, required=True)
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--seed", type=int, choices=(7,), default=7)
     parser.add_argument("--n-hops-query", type=int, required=True)
     parser.add_argument("--traversal-probability-query", type=float, required=True)
     parser.add_argument("--node-limit-query", type=int)
@@ -322,6 +323,7 @@ def main() -> int:
         manifest["benchmark_budgets"] = [100, 500, 1000]
         manifest["benchmark_cohorts_disjoint"] = True
         manifest["benchmark_cohort_file_sha256"] = hashes
+    manifest = bind_fixed_budget_pair_manifest(manifest)
     _atomic_text(
         output / "pair_sampler_manifest.json",
         json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",

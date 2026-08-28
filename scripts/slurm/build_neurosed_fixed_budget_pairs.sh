@@ -29,6 +29,7 @@ python -B scripts/build_neurosed_fixed_budget_pairs.py \
   --expected-feature-schema-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   --output-dir /absolute/fresh/pairs \
   --pair-count 1600 \
+  --seed 7 \
   --n-hops-query 5 \
   --traversal-probability-query 0.5 \
   --write-disjoint-benchmark-cohorts

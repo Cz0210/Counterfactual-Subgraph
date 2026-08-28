@@ -1,5 +1,85 @@
 # Decisions Log
 
+## [2026-08-29] Authenticate the vendored GCFExplainer source against upstream
+
+### Motivation
+
+The official fixed-budget NeuroSED readiness gate correctly rejected the
+vendored GCFExplainer snapshot because it had critical file hashes but no
+authenticated upstream commit. A free-form 40-character model-card value was
+not sufficient provenance for a production Taste GCF route.
+
+### Decision
+
+Pin the official repository commit
+`cc7ca30eb2026c57f20cd6afe2ee621f486fcf2e`. A recursive comparison against
+that checkout proves every retained file in `baselines/gcfexplainer_official/`
+is byte-identical; the project snapshot only omits upstream dataset/model
+artifacts. Require this exact commit and the existing five critical executable
+file hashes in every fixed-budget model card. At readiness time,
+descriptor-reopen the exact 17-file retained inventory, reject symlinks and
+extra entries, hash the real bytes, and bind the complete inventory digest;
+model-card strings alone are not source authentication.
+
+### Consequences
+
+- The missing-GCF-identity blocker is closed without changing executable
+  science code.
+- GEDLIB/pybind11 provisioning, the real build, disjoint throughput benchmark,
+  compact labels, training, managed verification, and T7 remain blocked or
+  unrun; this provenance result emits no scientific marker.
+- The pinned GREED README prescribes GEDLIB branch/tag v1.0. The build gate
+  resolves and freezes that tag to
+  `120856f670e013f080b116c0be4cc6bd72fc935d`; an operator-supplied alternative
+  commit is rejected rather than treated as equivalent.
+
+## [2026-08-29] Make GEDLIB worker selection a replayable manifest authority
+
+### Motivation
+
+The fixed-budget planner accepted an operator-provided `--selected-workers`
+integer and a separate CPU-contention boolean. Those values were not closed by
+the real worker trials, so a healthy 1/2/4/8 benchmark set could be bypassed or
+partially omitted before budget projection.
+
+### Decision
+
+Require one fresh, mutually disjoint, at-least-100-pair real GEDLIB report for
+every legal 1/2/4/8 candidate available on the runtime physical cores. Embed
+all reports in a machine-generated manifest, exclude timeout/error, unhealthy
+load/iowait, or greater-than-10% BACE/AIDS contention candidates, and select
+the highest reproducible pairs/hour with a deterministic lower-worker tie
+break. Rebuild that manifest inside the budget planner; remove the manual
+worker and CPU-contention CLI inputs.
+
+No reviewed producer currently authenticates the protected BACE/AIDS process
+generations and samples their pre/during progress counters. Freeze its source
+pin as null: benchmark preflight emits a self-hashed blocker evidence document
+and exits before pyged/workers, worker selection returns
+`BLOCKED_GEDLIB_RESOURCE_EVIDENCE`, and a
+self-declared evidence PASS is rejected.
+Even after that producer is reviewed, one missing/unauthenticated required
+candidate blocks selection globally; only authenticated-but-unhealthy trials
+may be excluded while another authenticated candidate is selected.
+
+The current sampler has only the unique 1600-pair 100/500/1000 planning
+partition and no official path for four additional disjoint worker cohorts.
+Record `WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED` as a second machine
+blocker and remove the misleading four-report example from the static Slurm
+wrapper.
+
+### Consequences
+
+- The selected integer is evidence output, never operator authority.
+- Missing candidates, reused pairs, backend drift, manifest tampering, or a
+  selected-worker mismatch against the 1000-pair report fail closed.
+- Implementing and reviewing the protected-job resource evidence producer is
+  now an explicit prerequisite to any non-null worker selection.
+- Implementing a deterministic, hash-closed worker-trial cohort builder that
+  is disjoint from planning is a separate prerequisite.
+- Real AutoDL trials remain unrun, so this closes code review only and emits no
+  scientific marker.
+
 ## [2026-08-28] Adopt the existing frozen BACE Ours cell by receipt only
 
 ### Motivation
@@ -11772,10 +11852,15 @@ it with the own-parent shortcut would change the scientific method.
 
 Supersede the own-parent route for production with deterministic seed-7
 fixed-budget independent query-source/target sampling inside train or inside
-validation. Require distinct graph IDs, retain size/class diagnostics without
-using class as supervision, never materialize the Cartesian product, and leave
-every pair unlabeled until authenticated `pyged.sed` returns its lower and
-upper F2 bounds. Preserve the directional zero-insertion/unit-deletion SED
+validation. Draw both roles with replacement from the complete same-split
+sequence through separate deterministic RNG streams and require distinct graph
+IDs. Compute size/class strata only after the ordered pair decisions are
+complete: neither field may select, filter, rebalance, reroll, order, or enter
+the scientific pair identity. Reject any top-level seed other than exactly 7,
+self-hash both sampler manifests, and require the readiness verifier to reopen
+and cross-bind their contents. Never materialize the Cartesian product, and
+leave every pair unlabeled until authenticated `pyged.sed` returns its lower
+and upper F2 bounds. Preserve the directional zero-insertion/unit-deletion SED
 costs and generated-query-to-original-target runtime direction.
 
 Treat the finite pair count as the only resource-control extension. Determine

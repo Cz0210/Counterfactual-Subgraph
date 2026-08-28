@@ -45,6 +45,7 @@ The offline audit used these pre-provisioned source trees:
 | --- | --- |
 | GREED | `1c756f49625abb62c9f6de5b0059876a4c7499c1` |
 | GREED experiments | `e85423dc943fda1979811e7449846efffec2a1e1` |
+| GEDLIB v1.0 required by pinned GREED | `120856f670e013f080b116c0be4cc6bd72fc935d` |
 | GREED `neuro/datasets.py` | `aa1bab19394b2fcad4d6f1c45c5206f0485cc098dbd4742bf1396d229c0fa1ad` |
 | GREED `neuro/train.py` | `8e4d425d9d63e0aa56d5a1e6e25738f511ca7b52b08ac297fcf2c1678bdf9e28` |
 | GREED `neuro/models.py` | `c5653dd9eeec1add8d6ae6253c30908df5ab8962ea0d9f9a6f25d32c393e0e70` |
@@ -52,18 +53,25 @@ The offline audit used these pre-provisioned source trees:
 | GREED `pyged/src/pyged.cpp` | `55b35f952ea4070fad430d0911d29bfca21b4e10926e9bd7d56d2515d6499b16` |
 | GREED `pyged/CMakeLists.txt` | `597f2f23252b0681d8de0d4c48cd4d10fad59d5c9130262fe2e7d3753737a010` |
 | GREED-expts AIDS training notebook | `49a7bc0095d879bf49454cd6c18e42bb687c149a32e425b59c2acbe6c2df0114` |
+| official GCFExplainer | `cc7ca30eb2026c57f20cd6afe2ee621f486fcf2e` |
 | vendored GCF `neurosed/models.py` | `8025f0cdc187625fb9d469a9ec0791694f3e923ee94e3d9084cb74a066397a60` |
 | vendored GCF `distance.py` | `d81182ccb31ef0fc5aef6a95a7debc6c17e3b495596e4ee3ff1642adf29745c3` |
 | vendored GCF `importance.py` | `5e364634fcf6fac9c5e16b5d9dc2f53837ab67508421e5076010c1e9cdac33be` |
 | vendored GCF `vrrw.py` | `89ff1a9dbb9561d33dd4fbc1bffe84e60deeb069948778b39b75dc5c93a59fce` |
 | vendored GCF `summary.py` | `371ca30b9672bd17b472d261327dc343b989b52150257de8a8ce1c868389af44` |
 
-`official_neurosed_commit` is the pinned GREED commit above. The vendored GCF
-directory has no independent Git metadata, so `official_gcf_commit` is
-currently `UNAVAILABLE_FROM_VENDORED_SNAPSHOT`. Its critical file hashes are
-the available project authority. A future release must either recover and pin
-the upstream GCF commit or explicitly approve and authenticate the complete
-vendored snapshot; this implementation does not invent a commit.
+`official_neurosed_commit` is the pinned GREED commit above. The official
+GCFExplainer repository was independently checked at the full commit
+`cc7ca30eb2026c57f20cd6afe2ee621f486fcf2e`. A recursive byte comparison found
+that every retained file under `baselines/gcfexplainer_official/` is identical
+to that commit; the vendored tree only omits upstream dataset/model artifacts.
+The release gate therefore pins the exact repository URL and commit in
+addition to the critical executable-file hashes above. The readiness validator
+descriptor-reopens all 17 retained files, rejects symlinks and extra files or
+directories, and binds the complete inventory digest
+`467205d647d8a1be55f129a936ace8be48904eeb2b802e909a8c62cc6088c606`.
+It rejects another repository or commit rather than trusting self-reported
+model-card metadata.
 
 The audited official pair builder is:
 
@@ -76,9 +84,14 @@ neuro.datasets.make_inner_dataset(
 
 It calls `make_queries(targets, ...)` and independently calls
 `random.choices(targets, k=n_pairs)`, then sends the ordered query-target rows
-to `inner_sed`. The fixed sampler preserves that role separation while adding
-a seed-7 deterministic budget, size strata, and same/cross-class diversity
-diagnostics. Class is never a distance target.
+to `inner_sed`. The fixed sampler preserves that role separation with separate
+seed-7 deterministic query-source and target RNG streams drawing with
+replacement from the complete same-split graph sequence. It rejects an
+otherwise accepted draw only when the graph IDs are equal or the query-source
+cannot yield a valid official-style query. Only after the ordered pair draws
+are complete does it derive size bins and same/cross-class diagnostics. Those
+diagnostics never select, filter, rebalance, reroll, or order pairs and are not
+part of pair identity. Class is never a distance target.
 
 ## 3. Real pyged/GEDLIB contract
 
@@ -107,8 +120,9 @@ query and target order in the key, and sets reverse sharing to false.
 
 The isolated builder accepts only already-provisioned source and dependencies.
 It authenticates GREED and GREED-expts, authenticates an operator-supplied
-full GEDLIB commit, creates a fresh build root, disables only the unused Gurobi
-compile/link branch, retains F2, compiles one worker, imports only the produced
+GEDLIB checkout at the exact official v1.0 commit above, creates a fresh build
+root, disables only the unused Gurobi compile/link branch, retains F2,
+compiles one worker, imports only the produced
 module, and verifies zero insertion versus positive deletion on tiny graphs.
 It records Python/compiler/CMake versions and build flags. It never runs
 `pip`, `conda`, `git clone`, or any network command, and never mutates
@@ -131,10 +145,14 @@ split values.
 The pair builder reads one normalized absolute, non-symlink CSV through a held
 descriptor, verifies its SHA-256 before use, reconstructs the reviewed feature
 schema, and writes unlabeled metadata. Each row records the required graph IDs,
-split, sizes, scaffolds, seeds, stratum, and reconstruction hashes. The sampler
-does not materialize a Cartesian product. A requested training/validation
-budget must additionally have `ceil(1.10 * budget)` deterministic candidates;
-successful rows are taken in sampler order, with no GED-result-based choice.
+split, sizes, scaffolds, seeds, post-sampling diagnostic stratum, and
+reconstruction hashes. The source/target draw path never reads class labels,
+scaffolds, or size bins and does not materialize a Cartesian product. A
+top-level seed other than exactly `7` is rejected by the sampler, manifest
+builder, and CLI. Each final sampler manifest carries a canonical self-hash. A
+requested training/validation budget must additionally have
+`ceil(1.10 * budget)` deterministic candidates; successful rows are taken in
+sampler order, with no GED-result-based choice.
 
 The 100-, 500-, and 1000-pair benchmark cohorts are disjoint slices of one
 deterministic 1600-pair inventory. File hashes and the actual ordered pair-ID
@@ -151,6 +169,7 @@ gedlib_benchmark_100.json
 gedlib_benchmark_500.json
 gedlib_benchmark_1000.json
 gedlib_benchmark_summary.json
+gedlib_worker_selection.json
 ```
 
 Raw observations distinguish `SUCCESS`, `TIMEOUT`, and `GEDLIB_ERROR`.
@@ -167,12 +186,53 @@ reserve selector consumes rows only in deterministic sampler order and either
 reaches the requested success count or returns
 `BLOCKED_GEDLIB_LABEL_YIELD`.
 
-Worker trials use 1, 2, 4, and 8 workers, subject to physical-core availability,
-with at least 100 fresh pairs per trial. The selected count is the highest
-healthy throughput after host-load, iowait, BACE legacy, and AIDS exact
-contention gates. All GED workers set `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`,
+Worker trials use every member of `1, 2, 4, 8` that does not exceed the
+runtime-detected physical-core count. Every candidate is mandatory and uses a
+fresh, mutually disjoint cohort of at least 100 real pairs; these cohorts are
+also disjoint from the 100/500/1000 planning cohorts. A missing candidate,
+duplicate pair, backend/config drift, or unreproducible throughput blocks the
+selection rather than permitting an operator choice.
+
+`gedlib_worker_selection.json` embeds and canonical-hashes all candidate
+reports. It excludes any candidate with a timeout, GEDLIB error, unhealthy
+host-load/iowait gate, BACE legacy throughput drop above 10%, or AIDS exact
+throughput drop above 10%, then chooses the remaining highest measured
+pairs/hour (lower worker count breaks an exact tie). Its validator rebuilds
+the whole manifest and selection. The budget planner consumes that validated
+manifest and has no `--selected-workers` or manual CPU-contention override.
+All GED workers set `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`,
 `OPENBLAS_NUM_THREADS=1`, and `TOKENIZERS_PARALLELISM=false`. Protected jobs
 are never stopped by this route.
+
+There is currently no reviewed producer that authenticates the protected
+BACE/AIDS process generations and samples their progress plus load/iowait
+before and during each GEDLIB trial. Consequently the benchmark CLI no longer
+accepts operator-supplied throughput-drop percentages or health flags. It
+binds a self-hashed
+`tastemolnet_neurosed_gedlib_worker_resource_evidence_v1` blocker containing
+its own process identity and host sample, then exits 78 before importing pyged
+or starting any worker process and without a benchmark PASS marker. Worker
+selection replays that blocker and returns
+`BLOCKED_GEDLIB_RESOURCE_EVIDENCE` with `selected_gedlib_workers=null`.
+A self-authored resource-evidence `PASS` is rejected while the reviewed
+producer source SHA remains null. The future producer must add authenticated
+BACE/AIDS identities, timestamped pre/during progress counters, periodic
+load/iowait samples, and recomputed drop percentages before this gate can
+select any worker count. After that producer exists, every required worker
+candidate must carry authenticated resource evidence: one missing or
+unauthenticated candidate blocks the complete selection, while a fully
+authenticated candidate with timeout/error or measured unhealthy contention
+is merely excluded from ranking so another authenticated candidate may win.
+
+The checked-in pair builder also emits only the unique 1600-pair planning
+inventory partitioned as 100/500/1000. It cannot yet emit four additional
+worker-trial cohorts that are mutually disjoint and disjoint from those 1600
+pairs. Therefore `WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED` is an
+independent machine blocker. The tracked blocker document is
+`configs/autodl/tastemolnet_neurosed_worker_trial_blockers_v1.json`; its marker
+is null and `safe_to_select_workers=false`. The paired Slurm refusal prints
+both infrastructure blockers and deliberately contains no example four-report
+command that could be mistaken for a runnable release route.
 
 ## 6. Fixed-budget planner
 
@@ -187,8 +247,10 @@ planner computes:
 ```
 
 It chooses the largest tier whose projected label time is no more than 24
-hours, timeout rate is no more than 0.05, and whose disk-reservation and CPU-
-contention gates passed. If even 5000 fails, the result is
+hours, timeout rate is no more than 0.05, whose disk reservation passed, and
+whose machine-replayed worker-selection manifest is PASS. The selected count
+must equal the worker count of the real 1000-pair report and all backend pins
+must match. If even 5000 fails, the result is
 `BLOCKED_GEDLIB_THROUGHPUT` plus all three ETAs. It cannot select an unapproved
 budget or fall back to own-parent or approximate labels.
 
@@ -224,13 +286,17 @@ API or unexpected matrix shape is rejected. This binding is tested with an
 in-memory model but is not yet wired into T7.
 
 The fixed-budget model-card/readiness validator cross-binds train/validation
-label manifests, the selector trace, and the direction trace. It requires real
+sampler manifests, label manifests, the selector trace, and the direction
+trace. It revalidates seed 7, the unstratified independent-draw contract, the
+exact 10% reserve count, and each sampler self-hash rather than trusting the
+model-card seed field. It requires real
 pyged labels, exact approved budgets, compact storage, no held-out data,
 official F2 costs, successful reload/batch checks, and all source/checkpoint
 hashes. Its output is only
 `READY_FOR_MANAGED_INDEPENDENT_VERIFICATION` with `marker=null`. It also
-requires a full upstream GCF commit, so the currently unavailable vendored-
-snapshot commit remains a hard release blocker.
+descriptor-reopens the complete retained GCF tree and binds it to the
+authenticated upstream repository/commit. The former missing-GCF-identity
+blocker is closed; this does not close any GEDLIB, training, or T7 blocker.
 
 ## 8. Remaining release blockers
 
@@ -248,9 +314,9 @@ budget PASS or T7 run:
    membership without loading held-out scientific payloads;
 5. wire the tested GREED batch-interleaved selector state machine into the
    PyTorch optimizer/checkpoint loop and independently replay its trace;
-6. recover a full upstream GCF commit, wire the tested generated-query to
-   original-target binding into T7, then train and independently verify a
-   fresh checkpoint under the managed controller/resource gates.
+6. wire the tested generated-query to original-target binding into T7, then
+   train and independently verify a fresh checkpoint under the managed
+   controller/resource gates.
 
 Until all six complete, do not emit
 `[TASTE_NEUROSED_PAIR_BUILDER_PASS]`,

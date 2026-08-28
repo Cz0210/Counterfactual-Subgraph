@@ -29,8 +29,4 @@ python -B scripts/autodl/benchmark_tastemolnet_neurosed_gedlib.py \
   --benchmark-budget 100 \
   --workers 1 \
   --hard-wall-seconds 600 \
-  --bace-legacy-throughput-drop-percent 0 \
-  --aids-exact-throughput-drop-percent 0 \
-  --host-load-gate-pass \
-  --iowait-gate-pass \
   --output-dir /absolute/fresh/benchmark

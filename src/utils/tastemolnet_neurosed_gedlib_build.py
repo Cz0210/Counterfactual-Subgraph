@@ -24,6 +24,7 @@ from typing import Any, Mapping, Sequence
 BUILD_SCHEMA = "tastemolnet_neurosed_gedlib_build_v1"
 PINNED_GREED_COMMIT = "1c756f49625abb62c9f6de5b0059876a4c7499c1"
 PINNED_GREED_EXPTS_COMMIT = "e85423dc943fda1979811e7449846efffec2a1e1"
+PINNED_GEDLIB_COMMIT = "120856f670e013f080b116c0be4cc6bd72fc935d"
 PINNED_SOURCE_SHA256 = {
     "neuro/datasets.py": "aa1bab19394b2fcad4d6f1c45c5206f0485cc098dbd4742bf1396d229c0fa1ad",
     "neuro/train.py": "8e4d425d9d63e0aa56d5a1e6e25738f511ca7b52b08ac297fcf2c1678bdf9e28",
@@ -133,6 +134,10 @@ def audit_preprovisioned_dependencies(
 ) -> dict[str, Any]:
     """Check all offline dependencies before creating an isolated build root."""
 
+    if expected_gedlib_commit != PINNED_GEDLIB_COMMIT:
+        raise TasteGEDLIBBuildError(
+            "GEDLIB must match the v1.0 commit prescribed by pinned GREED"
+        )
     gedlib = Path(gedlib_root).resolve()
     pybind_cmake = Path(pybind11_cmake_dir).resolve()
     missing: list[str] = []
@@ -189,7 +194,7 @@ def audit_preprovisioned_dependencies(
     return {
         "gedlib_root": str(gedlib),
         "gedlib_commit": gedlib_commit,
-        "gedlib_version": "v1.0_commit_pinned",
+        "gedlib_version": f"v1.0@{PINNED_GEDLIB_COMMIT}",
         "pybind11_cmake_dir": str(pybind_cmake),
         "pybind11_cmake_sha256": {
             "pybind11Config.cmake": sha256_file(pybind_config),
@@ -487,6 +492,7 @@ __all__ = [
     "OFFICIAL_METHOD_NAME",
     "PINNED_GREED_COMMIT",
     "PINNED_GREED_EXPTS_COMMIT",
+    "PINNED_GEDLIB_COMMIT",
     "PINNED_SOURCE_SHA256",
     "TasteGEDLIBBuildError",
     "atomic_write_json",

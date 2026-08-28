@@ -25,6 +25,6 @@ python -B scripts/autodl/build_tastemolnet_neurosed_gedlib.py \
   --greed-root /absolute/pinned/greed \
   --greed-expts-root /absolute/pinned/greed-expts \
   --gedlib-root /absolute/pinned/gedlib \
-  --expected-gedlib-commit 0000000000000000000000000000000000000000 \
+  --expected-gedlib-commit 120856f670e013f080b116c0be4cc6bd72fc935d \
   --pybind11-cmake-dir /absolute/pinned/pybind11/share/cmake/pybind11 \
   --output-root /root/autodl-tmp/envs/taste-neurosed-gedlib-hash

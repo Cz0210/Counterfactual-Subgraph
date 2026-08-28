@@ -10,9 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
+from pathlib import Path
+import stat
 from typing import Any, Mapping, Sequence
 
-from src.data.tastemolnet_neurosed_fixed_budget import ALLOWED_TRAIN_PAIR_BUDGETS
+from src.data.tastemolnet_neurosed_fixed_budget import (
+    ALLOWED_TRAIN_PAIR_BUDGETS,
+    PAIR_SAMPLER_MANIFEST_SCHEMA,
+    PAIR_SAMPLING_SEED,
+    reserve_pair_count,
+)
 from src.eval.tastemolnet_neurosed_fixed_budget import (
     OFFICIAL_GED_DIRECTION,
     OFFICIAL_SED_EDIT_COSTS,
@@ -30,6 +38,8 @@ DISTANCE_DIRECTION_SCHEMA = "tastemolnet_gcf_distance_direction_trace_v1"
 READINESS_SCHEMA = "tastemolnet_neurosed_official_fixed_budget_readiness_v1"
 GENERATED_QUERY_ROLE = "generated_counterfactual_candidate"
 ORIGINAL_TARGET_ROLE = "original_input_graph"
+OFFICIAL_GCF_REPOSITORY = "https://github.com/mertkosan/GCFExplainer"
+OFFICIAL_GCF_COMMIT = "cc7ca30eb2026c57f20cd6afe2ee621f486fcf2e"
 VENDORED_GCF_SOURCE_SHA256 = {
     "neurosed/models.py": (
         "8025f0cdc187625fb9d469a9ec0791694f3e923ee94e3d9084cb74a066397a60"
@@ -47,6 +57,50 @@ VENDORED_GCF_SOURCE_SHA256 = {
         "371ca30b9672bd17b472d261327dc343b989b52150257de8a8ce1c868389af44"
     ),
 }
+VENDORED_GCF_RETAINED_FILE_SHA256 = {
+    "LICENSE": "152d96bfd035aaa192679224694c6b5fd267623ebfaa810a60b775b9dca35b49",
+    "README.md": "e3a06e4bff0faba70754fd8750378eff2fb9ef33697b57bfaba8547d7300b37f",
+    "data.py": "de92d342ee3a6be9f08dc4b578c4691c9cb457a5d5e30266a9a6e73677564bd1",
+    "data/aids/gnn/model_best.pth": (
+        "ad066cc678cbbde3a4eb6f91ea3d20a538b7bab0cb7d45c63e99c0ba17197ef5"
+    ),
+    "data/aids/neurosed/best_model.pt": (
+        "887b330c390ba9ecfb545b3a14b7d71ebeb8e72006873cc3d467c2dcad87dd82"
+    ),
+    "distance.py": "d81182ccb31ef0fc5aef6a95a7debc6c17e3b495596e4ee3ff1642adf29745c3",
+    "environment.yml": (
+        "0912b96dbd04ad33a178e3b0a2615dc27618734d7c6ac900baa02320cb046ccd"
+    ),
+    "gcfexplainer_case_study.png": (
+        "14fa9bec9063338f9a7f8bce2782339c646554b686f74c3146582ae02d49aa01"
+    ),
+    "gcfexplainer_coverage_cost.png": (
+        "96713f35a44ab368602ef0453d1204b7661fdce7cf18d4cde0c4b9c51aba72c8"
+    ),
+    "gnn.py": "cfca49b1bb2bfffc5f1d4f80ad1784185ee68408c18f07e9167a027fb7bcdaa1",
+    "importance.py": (
+        "5e364634fcf6fac9c5e16b5d9dc2f53837ab67508421e5076010c1e9cdac33be"
+    ),
+    "neurosed/models.py": (
+        "8025f0cdc187625fb9d469a9ec0791694f3e923ee94e3d9084cb74a066397a60"
+    ),
+    "paper.pdf": "a32288d5bf9684f44965f91ebc09e87eb488141a6752c6be50cc40482dc09989",
+    "slides.pdf": "d8841a73f6c8ba237794b52a666c798d67820fd17b84a346df8b96755330e82d",
+    "summary.py": "371ca30b9672bd17b472d261327dc343b989b52150257de8a8ce1c868389af44",
+    "util.py": "6489a02e7a0d6498a5f9e7b1a9a4ebc137e3d26541bd2a605bff9f54b1cf74ce",
+    "vrrw.py": "89ff1a9dbb9561d33dd4fbc1bffe84e60deeb069948778b39b75dc5c93a59fce",
+}
+VENDORED_GCF_RETAINED_DIRECTORIES = (
+    ".",
+    "data",
+    "data/aids",
+    "data/aids/gnn",
+    "data/aids/neurosed",
+    "neurosed",
+)
+VENDORED_GCF_RETAINED_INVENTORY_SHA256 = (
+    "467205d647d8a1be55f129a936ace8be48904eeb2b802e909a8c62cc6088c606"
+)
 
 
 class OfficialFixedBudgetGateError(RuntimeError):
@@ -81,6 +135,107 @@ def _commit(value: Any, *, label: str) -> str:
     ):
         raise OfficialFixedBudgetGateError(f"{label} is not a full Git commit")
     return commit
+
+
+def _sha256_open_file(file_descriptor: int) -> tuple[str, os.stat_result]:
+    before = os.fstat(file_descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise OfficialFixedBudgetGateError("vendored GCF inventory contains non-file")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(file_descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after = os.fstat(file_descriptor)
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+        raise OfficialFixedBudgetGateError("vendored GCF file changed while hashing")
+    return digest.hexdigest(), after
+
+
+def verify_vendored_gcf_retained_inventory(
+    vendored_gcf_root: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Descriptor-reopen the exact retained upstream GCF file inventory."""
+
+    root = Path(vendored_gcf_root)
+    if not root.is_absolute() or Path(os.path.normpath(root)) != root:
+        raise OfficialFixedBudgetGateError(
+            "vendored GCF root must be normalized and absolute"
+        )
+    current = Path(root.anchor)
+    try:
+        for component in root.parts[1:]:
+            current /= component
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                raise OfficialFixedBudgetGateError(
+                    "vendored GCF root has a symlink ancestor"
+                )
+    except OSError as error:
+        raise OfficialFixedBudgetGateError(
+            "vendored GCF root ancestry cannot be authenticated"
+        ) from error
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    try:
+        root_fd = os.open(root, os.O_RDONLY | directory | nofollow)
+    except OSError as error:
+        raise OfficialFixedBudgetGateError(
+            "vendored GCF root is unavailable or not a real directory"
+        ) from error
+    actual: dict[str, str] = {}
+    directories: set[str] = set()
+    try:
+        for dirpath, dirnames, filenames, dir_fd in os.fwalk(
+            ".", topdown=True, follow_symlinks=False, dir_fd=root_fd
+        ):
+            relative_directory = Path(dirpath).as_posix()
+            directories.add(relative_directory)
+            for name in tuple(dirnames):
+                entry = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if not stat.S_ISDIR(entry.st_mode):
+                    raise OfficialFixedBudgetGateError(
+                        "vendored GCF inventory contains symlink/non-directory"
+                    )
+            for name in filenames:
+                relative = (Path(dirpath) / name).as_posix()
+                if relative.startswith("./"):
+                    relative = relative[2:]
+                try:
+                    file_fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=dir_fd)
+                except OSError as error:
+                    raise OfficialFixedBudgetGateError(
+                        f"vendored GCF file cannot be reopened safely: {relative}"
+                    ) from error
+                try:
+                    actual[relative], _ = _sha256_open_file(file_fd)
+                finally:
+                    os.close(file_fd)
+    finally:
+        os.close(root_fd)
+    expected_directories = set(VENDORED_GCF_RETAINED_DIRECTORIES)
+    if directories != expected_directories:
+        raise OfficialFixedBudgetGateError("vendored GCF directory inventory changed")
+    if set(actual) != set(VENDORED_GCF_RETAINED_FILE_SHA256):
+        raise OfficialFixedBudgetGateError("vendored GCF retained file inventory changed")
+    changed = sorted(
+        path
+        for path, expected in VENDORED_GCF_RETAINED_FILE_SHA256.items()
+        if actual.get(path) != expected
+    )
+    if changed:
+        raise OfficialFixedBudgetGateError(
+            f"vendored GCF file hash changed: {changed[0]}"
+        )
+    inventory_sha256 = _stable_sha256(actual)
+    if inventory_sha256 != VENDORED_GCF_RETAINED_INVENTORY_SHA256:
+        raise OfficialFixedBudgetGateError("vendored GCF inventory digest changed")
+    return {
+        "root_realpath": os.path.realpath(root),
+        "file_count": len(actual),
+        "inventory_sha256": inventory_sha256,
+    }
 
 
 def _matrix_shape(value: Any) -> tuple[int, int] | None:
@@ -207,8 +362,10 @@ class GeneratedQueryOriginalTargetBinding:
 
 def validate_official_fixed_budget_model_card(
     model_card: Mapping[str, Any],
+    *,
+    vendored_gcf_root: str | os.PathLike[str],
 ) -> dict[str, Any]:
-    """Validate the model-card claims required before independent verification."""
+    """Validate claims and reopen the exact vendored GCF source inventory."""
 
     card = dict(model_card)
     exact = {
@@ -290,7 +447,24 @@ def validate_official_fixed_budget_model_card(
         raise OfficialFixedBudgetGateError("strict official GREED provenance changed")
     if card.get("vendored_gcf_source_sha256") != VENDORED_GCF_SOURCE_SHA256:
         raise OfficialFixedBudgetGateError("vendored GCF source authority changed")
-    _commit(card.get("official_gcf_commit"), label="official GCF commit")
+    if (
+        card.get("vendored_gcf_retained_inventory_sha256")
+        != VENDORED_GCF_RETAINED_INVENTORY_SHA256
+    ):
+        raise OfficialFixedBudgetGateError("vendored GCF inventory claim changed")
+    if card.get("official_gcf_repository") != OFFICIAL_GCF_REPOSITORY:
+        raise OfficialFixedBudgetGateError("official GCF repository changed")
+    official_gcf_commit = _commit(
+        card.get("official_gcf_commit"), label="official GCF commit"
+    )
+    if official_gcf_commit != OFFICIAL_GCF_COMMIT:
+        raise OfficialFixedBudgetGateError("official GCF commit changed")
+    verified_gcf = verify_vendored_gcf_retained_inventory(vendored_gcf_root)
+    if (
+        verified_gcf["inventory_sha256"]
+        != card["vendored_gcf_retained_inventory_sha256"]
+    ):
+        raise OfficialFixedBudgetGateError("model card does not bind vendored GCF")
     if card.get("official_greed_commit") != STRICT_OFFICIAL_PROVENANCE["greed_commit"]:
         raise OfficialFixedBudgetGateError("official GREED commit changed")
     _commit(card.get("gedlib_commit"), label="GEDLIB commit")
@@ -313,17 +487,99 @@ def validate_official_fixed_budget_model_card(
     return card
 
 
+def _validate_pair_sampler_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    split: str,
+    selected_budget: int,
+    feature_schema_sha256: str,
+) -> dict[str, Any]:
+    payload = dict(manifest)
+    exact = {
+        "schema_version": PAIR_SAMPLER_MANIFEST_SCHEMA,
+        "dataset": "tastemolnet",
+        "split": split,
+        "pair_sampling_seed": PAIR_SAMPLING_SEED,
+        "pair_builder": (
+            "deterministic_official_style_independent_unstratified_query_target_v2"
+        ),
+        "independent_query_target_pairs": True,
+        "query_graph_id_differs_from_target_graph_id": True,
+        "parent_own_subgraph_shortcut": False,
+        "cartesian_product_materialized": False,
+        "source_target_draws_with_replacement": True,
+        "source_target_rng_streams_independent": True,
+        "distinct_graph_ids_enforced_by_rejection": True,
+        "size_or_class_used_to_select_filter_or_order_pairs": False,
+        "size_and_class_diagnostics_computed_after_sampling": True,
+        "ged_labels_present": False,
+        "class_label_used_as_supervision": False,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        "all_query_ids_subset_of_declared_split": True,
+        "all_target_ids_subset_of_declared_split": True,
+    }
+    if any(
+        type(payload.get(key)) is not type(value) or payload.get(key) != value
+        for key, value in exact.items()
+    ):
+        raise OfficialFixedBudgetGateError(f"{split} pair sampler contract changed")
+    if payload.get("pair_count") != reserve_pair_count(selected_budget):
+        raise OfficialFixedBudgetGateError(
+            f"{split} pair sampler does not contain the exact reserve"
+        )
+    if payload.get("feature_schema_sha256") != feature_schema_sha256:
+        raise OfficialFixedBudgetGateError(
+            f"{split} pair sampler feature schema changed"
+        )
+    for field in (
+        "source_csv_sha256",
+        "feature_schema_sha256",
+        "graph_inventory_sha256",
+        "pair_ids_sha256",
+        "query_graph_ids_sha256",
+        "target_graph_ids_sha256",
+        "metadata_rows_sha256",
+    ):
+        _sha256(payload.get(field), label=f"{split} sampler {field}")
+    claimed = _sha256(
+        payload.get("manifest_sha256"), label=f"{split} sampler manifest"
+    )
+    if claimed != _stable_sha256(
+        {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    ):
+        raise OfficialFixedBudgetGateError(f"{split} pair sampler hash changed")
+    return payload
+
+
 def verify_official_fixed_budget_readiness(
     *,
     model_card: Mapping[str, Any],
+    train_pair_sampler_manifest: Mapping[str, Any],
+    validation_pair_sampler_manifest: Mapping[str, Any],
     train_pair_labels_manifest: Mapping[str, Any],
     validation_pair_labels_manifest: Mapping[str, Any],
     selector_trace: Mapping[str, Any],
     distance_direction_trace: Mapping[str, Any],
+    vendored_gcf_root: str | os.PathLike[str],
 ) -> dict[str, Any]:
     """Cross-bind local contracts; return readiness, never a scientific PASS."""
 
-    card = validate_official_fixed_budget_model_card(model_card)
+    card = validate_official_fixed_budget_model_card(
+        model_card, vendored_gcf_root=vendored_gcf_root
+    )
+    train_sampler = _validate_pair_sampler_manifest(
+        train_pair_sampler_manifest,
+        split="train",
+        selected_budget=card["train_pair_budget"],
+        feature_schema_sha256=card["feature_schema_sha256"],
+    )
+    validation_sampler = _validate_pair_sampler_manifest(
+        validation_pair_sampler_manifest,
+        split="validation",
+        selected_budget=card["validation_pair_budget"],
+        feature_schema_sha256=card["feature_schema_sha256"],
+    )
     train_labels = dict(train_pair_labels_manifest)
     validation_labels = dict(validation_pair_labels_manifest)
     selector = dict(selector_trace)
@@ -417,12 +673,19 @@ def verify_official_fixed_budget_readiness(
     ):
         raise OfficialFixedBudgetGateError("GCF generated-query direction changed")
     bindings = {
+        "train_pair_sampler_manifest_sha256": train_sampler["manifest_sha256"],
+        "validation_pair_sampler_manifest_sha256": validation_sampler[
+            "manifest_sha256"
+        ],
         "train_pair_labels_manifest_sha256": train_labels["manifest_sha256"],
         "validation_pair_labels_manifest_sha256": validation_labels[
             "manifest_sha256"
         ],
         "selector_trace_sha256": str(selector.get("trace_sha256") or ""),
         "distance_direction_trace_sha256": str(direction.get("trace_sha256") or ""),
+        "vendored_gcf_retained_inventory_sha256": (
+            VENDORED_GCF_RETAINED_INVENTORY_SHA256
+        ),
     }
     if any(card.get(field) != digest for field, digest in bindings.items()):
         raise OfficialFixedBudgetGateError("model card does not bind fixed-budget evidence")
@@ -434,6 +697,8 @@ def verify_official_fixed_budget_readiness(
         "real_gedlib_execution_required": True,
         "checkpoint_execution_required": True,
         "model_card_contract_valid": True,
+        "train_pair_sampler_contract_valid": True,
+        "validation_pair_sampler_contract_valid": True,
         "train_pair_labels_contract_valid": True,
         "validation_pair_labels_contract_valid": True,
         "official_selector_contract_valid": True,
@@ -446,11 +711,16 @@ __all__ = [
     "DISTANCE_DIRECTION_SCHEMA",
     "GENERATED_QUERY_ROLE",
     "GeneratedQueryOriginalTargetBinding",
+    "OFFICIAL_GCF_COMMIT",
+    "OFFICIAL_GCF_REPOSITORY",
     "OFFICIAL_FIXED_MODEL_CARD_SCHEMA",
     "ORIGINAL_TARGET_ROLE",
     "OfficialFixedBudgetGateError",
     "READINESS_SCHEMA",
     "VENDORED_GCF_SOURCE_SHA256",
+    "VENDORED_GCF_RETAINED_FILE_SHA256",
+    "VENDORED_GCF_RETAINED_INVENTORY_SHA256",
     "validate_official_fixed_budget_model_card",
+    "verify_vendored_gcf_retained_inventory",
     "verify_official_fixed_budget_readiness",
 ]
