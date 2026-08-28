@@ -2288,3 +2288,14 @@ Mutagenicity roadmaps.
   replacement, official-builder fixture equivalence, and split-isolation gate.
 - [ ] Wire the successful pair budget into the exact batch-interleaved trainer
   and managed verifier. No checkpoint or downstream T7/T12 PASS exists yet.
+- [x] Add local lower/upper/exact-bound label validation, deterministic timeout
+  reserve selection, and explicit symmetric/asymmetric cache-policy tests. The
+  compact label writer and real GED rows remain outstanding.
+- [x] Add a pure GREED `train_full` selector state machine that enforces
+  validation-before-batch, strict-lower selection, exact `>` stopping, and no
+  train update after the stopping event.
+- [x] Add a generated-query/original-target API binding and a fixed-budget
+  model-card/readiness gate whose output is readiness only with a null marker.
+- [ ] Recover the unavailable upstream GCF commit; wire the selector into real
+  training and the direction binding into T7; independently reopen all compact
+  labels/traces/checkpoint bytes before any scientific PASS.

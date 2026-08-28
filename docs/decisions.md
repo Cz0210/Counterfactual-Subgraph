@@ -11793,3 +11793,19 @@ label cache/reserve handling, independent verification, and managed release.
 - The absent upstream GCF commit remains explicit: the current vendored
   snapshot is bound only by critical source hashes and cannot be assigned a
   fabricated commit identity.
+
+Pure local contracts now make the remaining scientific boundary executable
+without weakening it. Successful pyged observations retain lower and upper
+bounds plus the exact/bound flag and undergo only the upstream float32 storage
+cast. Reserve replacement is first-success-in-sampler-order; asymmetric SED
+keys never share reverse entries. A GREED selector state machine enforces one
+validation event before each training batch, strict-lower checkpointing, and
+the upstream `>` patience stop before its paired update. The GCF binding embeds
+original inputs as targets and exposes generated candidates only as queries.
+
+These components emit readiness metadata, not PASS. The trainer, compact label
+writer/reopener, official fixture comparison, T7 binding, and managed verifier
+still need integration with real artifacts. The readiness model-card gate also
+requires a full upstream GCF commit; `UNAVAILABLE_FROM_VENDORED_SNAPSHOT` is an
+intentional hard failure rather than a value that critical blob hashes can
+silently replace.

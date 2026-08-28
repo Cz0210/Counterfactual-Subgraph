@@ -314,6 +314,10 @@ def main() -> int:
         observations.append(
             {
                 "pair_id": row["pair_id"],
+                "query_graph_id": row["query_graph_id"],
+                "target_graph_id": row["target_graph_id"],
+                "query_split": row["query_split"],
+                "target_split": row["target_split"],
                 "status": result["status"],
                 "latency_seconds": result["latency_seconds"],
                 "lower_bound": result["lower_bound"],
@@ -324,6 +328,12 @@ def main() -> int:
                 "target_num_nodes": row["target_num_nodes"],
                 "query_num_edges": row["query_num_edges"],
                 "target_num_edges": row["target_num_edges"],
+                "query_canonical_graph_sha256": row[
+                    "query_canonical_graph_sha256"
+                ],
+                "target_canonical_graph_sha256": row[
+                    "target_canonical_graph_sha256"
+                ],
             }
         )
     after_usage = resource.getrusage(resource.RUSAGE_CHILDREN)

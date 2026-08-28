@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 from statistics import mean
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -24,6 +25,7 @@ from src.data.tastemolnet_neurosed_fixed_budget import (
 BENCHMARK_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_v1"
 BENCHMARK_SUMMARY_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_summary_v1"
 PAIR_BUDGET_PLAN_SCHEMA = "tastemolnet_neurosed_pair_budget_plan_v1"
+PAIR_LABELS_MANIFEST_SCHEMA = "tastemolnet_neurosed_pair_labels_manifest_v1"
 OBSERVATION_STATUSES = frozenset({"SUCCESS", "TIMEOUT", "GEDLIB_ERROR"})
 OFFICIAL_SED_EDIT_COSTS = {
     "node_insertion": 0,
@@ -514,6 +516,58 @@ def directional_ged_cache_key(
 ) -> str:
     """Bind an ordered SED cache key; reverse pairs never share an entry."""
 
+    policy = ged_cache_symmetry_policy(OFFICIAL_SED_EDIT_COSTS)
+    if policy["symmetric"] is not False or policy["share_reverse_cache"] is not False:
+        raise NeuroSEDFixedBudgetError("official SED unexpectedly became symmetric")
+    return ged_cache_key(
+        query_canonical_graph_sha256=query_canonical_graph_sha256,
+        target_canonical_graph_sha256=target_canonical_graph_sha256,
+        gedlib_config_sha256=gedlib_config_sha256,
+        feature_schema_sha256=feature_schema_sha256,
+        edit_cost_contract=OFFICIAL_SED_EDIT_COSTS,
+        direction=direction,
+    )
+
+
+def ged_cache_symmetry_policy(edit_cost_contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Determine reverse-cache safety from the complete scalar cost contract."""
+
+    expected = set(OFFICIAL_SED_EDIT_COSTS)
+    if set(edit_cost_contract) != expected:
+        raise NeuroSEDFixedBudgetError("GED cache edit-cost fields changed")
+    costs = {
+        key: _finite_nonnegative(edit_cost_contract[key], label=f"{key} cost")
+        for key in sorted(expected)
+    }
+    symmetric = (
+        costs["node_insertion"] == costs["node_deletion"]
+        and costs["edge_insertion"] == costs["edge_deletion"]
+    )
+    return {
+        "schema_version": "tastemolnet_neurosed_ged_cache_policy_v1",
+        "symmetric": symmetric,
+        "share_reverse_cache": symmetric,
+        "query_target_order_in_cache_key": not symmetric,
+        "edit_cost_contract": costs,
+        "policy_reason": (
+            "insertion_and_deletion_costs_match"
+            if symmetric
+            else "insertion_and_deletion_costs_differ"
+        ),
+    }
+
+
+def ged_cache_key(
+    *,
+    query_canonical_graph_sha256: str,
+    target_canonical_graph_sha256: str,
+    gedlib_config_sha256: str,
+    feature_schema_sha256: str,
+    edit_cost_contract: Mapping[str, Any],
+    direction: str = OFFICIAL_GED_DIRECTION,
+) -> str:
+    """Build a symmetric or ordered key only after explicit cost inspection."""
+
     digests = {
         "query_canonical_graph_sha256": query_canonical_graph_sha256,
         "target_canonical_graph_sha256": target_canonical_graph_sha256,
@@ -526,8 +580,30 @@ def directional_ged_cache_key(
         ):
             raise NeuroSEDFixedBudgetError(f"{label} is not a lowercase SHA256")
     if direction != OFFICIAL_GED_DIRECTION:
-        raise NeuroSEDFixedBudgetError("official SED cache direction changed")
-    return _stable_sha256({**digests, "direction": direction})
+        raise NeuroSEDFixedBudgetError("GED cache direction changed")
+    policy = ged_cache_symmetry_policy(edit_cost_contract)
+    if policy["symmetric"]:
+        query_hash, target_hash = sorted(
+            (str(query_canonical_graph_sha256), str(target_canonical_graph_sha256))
+        )
+        role_binding = {
+            "unordered_graph_sha256": [query_hash, target_hash],
+            "direction": "symmetric",
+        }
+    else:
+        role_binding = {
+            "query_canonical_graph_sha256": str(query_canonical_graph_sha256),
+            "target_canonical_graph_sha256": str(target_canonical_graph_sha256),
+            "direction": direction,
+        }
+    return _stable_sha256(
+        {
+            **role_binding,
+            "gedlib_config_sha256": str(gedlib_config_sha256),
+            "feature_schema_sha256": str(feature_schema_sha256),
+            "edit_cost_contract": policy["edit_cost_contract"],
+        }
+    )
 
 
 def select_successful_reserve_pairs(
@@ -590,6 +666,282 @@ def select_successful_reserve_pairs(
     }
 
 
+def _float32(value: float, *, label: str) -> float:
+    try:
+        result = struct.unpack("!f", struct.pack("!f", float(value)))[0]
+    except (OverflowError, struct.error) as exc:
+        raise NeuroSEDFixedBudgetError(f"{label} cannot be stored as float32") from exc
+    if not math.isfinite(result) or result < 0:
+        raise NeuroSEDFixedBudgetError(f"{label} float32 value is invalid")
+    return result
+
+
+def official_ged_interval_label(
+    observation: Mapping[str, Any],
+    *,
+    gedlib_commit: str,
+    pyged_module_sha256: str,
+    gedlib_config_sha256: str,
+    feature_schema_sha256: str,
+    pair_sampler_manifest_sha256: str,
+    gedlib_build_manifest_sha256: str,
+    ged_method_args: str,
+) -> dict[str, Any]:
+    """Convert one successful real-pyged result to the official training row."""
+
+    if observation.get("status") != "SUCCESS":
+        raise NeuroSEDFixedBudgetError("only SUCCESS observations may become labels")
+    pair_id = str(observation.get("pair_id") or "")
+    if not pair_id:
+        raise NeuroSEDFixedBudgetError("GED label pair_id is empty")
+    query_graph_id = str(observation.get("query_graph_id") or "")
+    target_graph_id = str(observation.get("target_graph_id") or "")
+    query_split = str(observation.get("query_split") or "")
+    target_split = str(observation.get("target_split") or "")
+    if (
+        not query_graph_id
+        or not target_graph_id
+        or query_graph_id == target_graph_id
+        or query_split not in ("train", "validation")
+        or target_split != query_split
+    ):
+        raise NeuroSEDFixedBudgetError("GED label pair role/split contract changed")
+    lower_raw = _finite_nonnegative(
+        observation.get("lower_bound"), label="pyged lower bound"
+    )
+    upper_raw = _finite_nonnegative(
+        observation.get("upper_bound"), label="pyged upper bound"
+    )
+    if lower_raw > upper_raw:
+        raise NeuroSEDFixedBudgetError("pyged lower bound exceeds upper bound")
+    exact = observation.get("exact_bound")
+    if type(exact) is not bool or exact is not (lower_raw == upper_raw):
+        raise NeuroSEDFixedBudgetError("pyged exact/bound flag changed")
+    canonical_query = str(observation.get("query_canonical_graph_sha256") or "")
+    canonical_target = str(observation.get("target_canonical_graph_sha256") or "")
+    cache_key = directional_ged_cache_key(
+        query_canonical_graph_sha256=canonical_query,
+        target_canonical_graph_sha256=canonical_target,
+        gedlib_config_sha256=gedlib_config_sha256,
+        feature_schema_sha256=feature_schema_sha256,
+    )
+    for label, digest in (
+        ("pyged_module_sha256", pyged_module_sha256),
+        ("gedlib_config_sha256", gedlib_config_sha256),
+        ("feature_schema_sha256", feature_schema_sha256),
+        ("pair_sampler_manifest_sha256", pair_sampler_manifest_sha256),
+        ("gedlib_build_manifest_sha256", gedlib_build_manifest_sha256),
+    ):
+        if len(str(digest)) != 64 or any(
+            character not in "0123456789abcdef" for character in str(digest)
+        ):
+            raise NeuroSEDFixedBudgetError(f"{label} is invalid")
+    if len(str(gedlib_commit)) != 40 or any(
+        character not in "0123456789abcdef" for character in str(gedlib_commit)
+    ):
+        raise NeuroSEDFixedBudgetError("GEDLIB label commit is invalid")
+    if ged_method_args != "--threads 1 --time-limit 1":
+        raise NeuroSEDFixedBudgetError("official F2 GED method arguments changed")
+    lower = _float32(lower_raw, label="lower bound")
+    upper = _float32(upper_raw, label="upper bound")
+    if lower > upper:
+        raise NeuroSEDFixedBudgetError("float32 lower bound exceeds upper bound")
+    return {
+        "schema_version": "tastemolnet_neurosed_official_ged_label_v1",
+        "pair_id": pair_id,
+        "query_graph_id": query_graph_id,
+        "target_graph_id": target_graph_id,
+        "query_split": query_split,
+        "target_split": target_split,
+        "status": "SUCCESS",
+        "lower_bound": lower,
+        "upper_bound": upper,
+        "exact_bound": exact,
+        "stored_bounds_equal": lower == upper,
+        "bounds_kind": "exact" if exact else "interval",
+        "ged_method": "f2",
+        "ged_method_args": ged_method_args,
+        "gedlib_commit": str(gedlib_commit),
+        "pyged_module_sha256": str(pyged_module_sha256),
+        "gedlib_config_sha256": str(gedlib_config_sha256),
+        "feature_schema_sha256": str(feature_schema_sha256),
+        "pair_sampler_manifest_sha256": str(pair_sampler_manifest_sha256),
+        "gedlib_build_manifest_sha256": str(gedlib_build_manifest_sha256),
+        "query_canonical_graph_sha256": canonical_query,
+        "target_canonical_graph_sha256": canonical_target,
+        "direction": OFFICIAL_GED_DIRECTION,
+        "cache_key": cache_key,
+        "cache_symmetric": False,
+        "reverse_cache_shared": False,
+        "query_target_order_in_cache_key": True,
+        "pyged_return_dtype": "float64",
+        "label_dtype": "float32",
+        "label_transform": "official_torch_float32_storage_cast_only",
+        "target_representation": "ordered_query_target_lower_upper_interval",
+        "bound_average_used": False,
+        "single_bound_substitution_used": False,
+        "approximate_or_neural_label_used": False,
+    }
+
+
+def build_official_pair_labels_manifest(
+    labels: Sequence[Mapping[str, Any]],
+    *,
+    split: str,
+    requested_pair_count: int,
+    reserve_selection: Mapping[str, Any],
+    compact_storage_format: str,
+    compact_labels_sha256: str,
+) -> dict[str, Any]:
+    """Close selected real labels without publishing a large JSON row dump."""
+
+    if split not in ("train", "validation"):
+        raise NeuroSEDFixedBudgetError("label split must be train or validation")
+    requested = int(requested_pair_count)
+    if requested <= 0 or len(labels) != requested:
+        raise NeuroSEDFixedBudgetError("successful label count differs from budget")
+    if compact_storage_format not in ("parquet", "arrow_ipc", "numpy_npz"):
+        raise NeuroSEDFixedBudgetError("full labels must use compact columnar/binary storage")
+    if len(str(compact_labels_sha256)) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in str(compact_labels_sha256)
+    ):
+        raise NeuroSEDFixedBudgetError("compact label file SHA256 is invalid")
+    selected_ids = reserve_selection.get("selected_pair_ids")
+    if (
+        reserve_selection.get("status") != "PASS"
+        or reserve_selection.get("requested_pair_count") != requested
+        or reserve_selection.get("successful_pair_count") != requested
+        or type(selected_ids) is not list
+        or selected_ids != [row.get("pair_id") for row in labels]
+    ):
+        raise NeuroSEDFixedBudgetError("reserve selection does not bind label order")
+    required = {
+        "schema_version": "tastemolnet_neurosed_official_ged_label_v1",
+        "status": "SUCCESS",
+        "ged_method": "f2",
+        "direction": OFFICIAL_GED_DIRECTION,
+        "pyged_return_dtype": "float64",
+        "label_dtype": "float32",
+        "label_transform": "official_torch_float32_storage_cast_only",
+        "target_representation": "ordered_query_target_lower_upper_interval",
+        "bound_average_used": False,
+        "single_bound_substitution_used": False,
+        "approximate_or_neural_label_used": False,
+        "cache_symmetric": False,
+        "reverse_cache_shared": False,
+        "query_target_order_in_cache_key": True,
+    }
+    pair_ids: list[str] = []
+    seen_pair_ids: set[str] = set()
+    exact_count = 0
+    common_fields = (
+        "gedlib_commit",
+        "pyged_module_sha256",
+        "gedlib_config_sha256",
+        "feature_schema_sha256",
+        "ged_method_args",
+        "pair_sampler_manifest_sha256",
+        "gedlib_build_manifest_sha256",
+    )
+    common: dict[str, Any] | None = None
+    for index, raw in enumerate(labels):
+        row = dict(raw)
+        if any(row.get(key) != value for key, value in required.items()):
+            raise NeuroSEDFixedBudgetError(f"official GED label row {index} changed")
+        lower = _finite_nonnegative(row.get("lower_bound"), label="stored lower bound")
+        upper = _finite_nonnegative(row.get("upper_bound"), label="stored upper bound")
+        exact = row.get("exact_bound")
+        if (
+            lower > upper
+            or type(exact) is not bool
+            or row.get("stored_bounds_equal") is not (lower == upper)
+            or row.get("bounds_kind") != ("exact" if exact else "interval")
+        ):
+            raise NeuroSEDFixedBudgetError("stored GED interval is invalid")
+        if row.get("query_split") != split or row.get("target_split") != split:
+            raise NeuroSEDFixedBudgetError("stored GED label split changed")
+        if (
+            not str(row.get("query_graph_id") or "")
+            or not str(row.get("target_graph_id") or "")
+            or row.get("query_graph_id") == row.get("target_graph_id")
+        ):
+            raise NeuroSEDFixedBudgetError("stored GED label graph roles changed")
+        pair_id = str(row.get("pair_id") or "")
+        if (
+            len(pair_id) != 64
+            or any(character not in "0123456789abcdef" for character in pair_id)
+            or pair_id in seen_pair_ids
+        ):
+            raise NeuroSEDFixedBudgetError("official GED label pair IDs are invalid")
+        pair_ids.append(pair_id)
+        seen_pair_ids.add(pair_id)
+        expected_cache_key = directional_ged_cache_key(
+            query_canonical_graph_sha256=str(
+                row.get("query_canonical_graph_sha256") or ""
+            ),
+            target_canonical_graph_sha256=str(
+                row.get("target_canonical_graph_sha256") or ""
+            ),
+            gedlib_config_sha256=str(row.get("gedlib_config_sha256") or ""),
+            feature_schema_sha256=str(row.get("feature_schema_sha256") or ""),
+        )
+        if row.get("cache_key") != expected_cache_key:
+            raise NeuroSEDFixedBudgetError("official GED label cache key changed")
+        exact_count += int(exact)
+        observed_common = {key: row.get(key) for key in common_fields}
+        if common is None:
+            common = observed_common
+        elif observed_common != common:
+            raise NeuroSEDFixedBudgetError("GED backend changed within label file")
+    assert common is not None
+    attempted = reserve_selection.get("attempted_pair_count")
+    timeout_count = reserve_selection.get("timeout_count")
+    error_count = reserve_selection.get("error_count")
+    reserve_used = reserve_selection.get("reserve_used")
+    if (
+        type(attempted) is not int
+        or type(timeout_count) is not int
+        or type(error_count) is not int
+        or type(reserve_used) is not int
+        or min(attempted, timeout_count, error_count, reserve_used) < 0
+        or attempted != requested + timeout_count + error_count
+        or reserve_used != attempted - requested
+    ):
+        raise NeuroSEDFixedBudgetError("reserve outcome accounting changed")
+    payload = {
+        "schema_version": PAIR_LABELS_MANIFEST_SCHEMA,
+        "status": "READY_FOR_INDEPENDENT_VERIFICATION",
+        "split": split,
+        "requested_pair_count": requested,
+        "attempted_pair_count": attempted,
+        "successful_pair_count": requested,
+        "timeout_count": timeout_count,
+        "error_count": error_count,
+        "reserve_used": reserve_used,
+        "pair_ids_sha256": _stable_sha256(pair_ids),
+        "exact_bound_pair_count": exact_count,
+        "interval_bound_pair_count": requested - exact_count,
+        "finite_labels": True,
+        "all_lower_bounds_le_upper_bounds": True,
+        "real_pyged_gedlib_labels": True,
+        "timeout_or_error_rows_used_as_labels": False,
+        "selected_in_sampler_order": True,
+        "ged_value_based_selection_used": False,
+        "compact_storage_format": compact_storage_format,
+        "compact_labels_sha256": str(compact_labels_sha256),
+        "large_per_pair_json_debug_dump_used": False,
+        "cache_symmetric": False,
+        "reverse_cache_shared": False,
+        "query_target_order_in_cache_key": True,
+        "calibration_loaded": False,
+        "test_loaded": False,
+        **common,
+    }
+    payload["manifest_sha256"] = _stable_sha256(payload)
+    return payload
+
+
 __all__ = [
     "BENCHMARK_SCHEMA",
     "BENCHMARK_SUMMARY_SCHEMA",
@@ -597,8 +949,13 @@ __all__ = [
     "OFFICIAL_SED_EDIT_COSTS",
     "OFFICIAL_GED_DIRECTION",
     "PAIR_BUDGET_PLAN_SCHEMA",
+    "PAIR_LABELS_MANIFEST_SCHEMA",
+    "build_official_pair_labels_manifest",
     "combine_disjoint_benchmark_reports",
     "directional_ged_cache_key",
+    "ged_cache_key",
+    "ged_cache_symmetry_policy",
+    "official_ged_interval_label",
     "select_fixed_pair_budget",
     "select_gedlib_worker_count",
     "select_successful_reserve_pairs",
