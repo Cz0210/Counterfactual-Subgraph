@@ -14,9 +14,18 @@ from types import ModuleType
 from typing import Any, Mapping
 import uuid
 
+from src.data.tastemolnet_neurosed_pairs import (
+    TastePairDataset,
+    build_connected_bfs_pairs,
+    derive_feature_schema,
+    pair_manifest as build_pair_manifest,
+    parse_taste_split_rows_bytes,
+    rows_to_graphs,
+)
 from src.models.tastemolnet_neurosed import (
     build_runner_model,
     build_training_model,
+    interval_loss,
     load_runner_checkpoint,
     model_contract,
     runtime_stack,
@@ -39,13 +48,61 @@ REQUIRED_BUNDLE_FILES = frozenset(
         "git_state.json",
         "checkpoint_manifest.json",
         "health_gate.json",
+        "authority_manifest.json",
+        "controller_authority.json",
         "sha256sums.txt",
     }
 )
 
+STRICT_OFFICIAL_PROVENANCE = {
+    "greed_commit": "1c756f49625abb62c9f6de5b0059876a4c7499c1",
+    "datasets_py_sha256": (
+        "aa1bab19394b2fcad4d6f1c45c5206f0485cc098dbd4742bf1396d229c0fa1ad"
+    ),
+    "train_py_sha256": (
+        "8e4d425d9d63e0aa56d5a1e6e25738f511ca7b52b08ac297fcf2c1678bdf9e28"
+    ),
+    "pyged_cpp_sha256": (
+        "55b35f952ea4070fad430d0911d29bfca21b4e10926e9bd7d56d2515d6499b16"
+    ),
+    "pair_builder": "neuro.datasets.make_inner_dataset",
+    "sed_bounds": "neuro.datasets.inner_sed_via_pyged.sed",
+    "selection_loop": "neuro.train.train_full_batch_interleaved_validation",
+    "runtime_direction": "generated_query_to_original_parent_target",
+}
+
 
 class TasteNeuroSEDGateError(RuntimeError):
     """Raised when the independent verifier cannot close the bundle."""
+
+
+def require_release_eligible_official_semantics(
+    model_card: Mapping[str, Any],
+) -> None:
+    """Prevent a research-only Taste adaptation from receiving generic PASS."""
+
+    if (
+        model_card.get("scientific_release_eligible") is not True
+        or model_card.get("full_official_neurosed_semantics_claimed") is not True
+        or model_card.get("upstream_greed_pair_sampling_unchanged") is not True
+        or model_card.get("training_direction_matches_gcf_runtime") is not True
+        or model_card.get(
+            "upstream_greed_batch_interleaved_selection_loop_unchanged"
+        )
+        is not True
+        or model_card.get("strict_official_pair_builder_implemented") is not True
+        or model_card.get("strict_official_pyged_bounds_authenticated") is not True
+        or model_card.get(
+            "strict_official_batch_interleaved_selector_implemented"
+        )
+        is not True
+        or model_card.get("strict_official_provenance")
+        != STRICT_OFFICIAL_PROVENANCE
+    ):
+        raise TasteNeuroSEDGateError(
+            "strict official NeuroSED pair/pyged/selector semantics are not "
+            "implemented; the Taste directional adaptation is not release eligible"
+        )
 
 
 def _sha256_file(path: Path) -> str:
@@ -319,6 +376,139 @@ def _finite_metric(value: Any, *, label: str) -> float:
     return result
 
 
+def _average_ranks(values: list[float]) -> list[float]:
+    order = sorted(range(len(values)), key=lambda index: (values[index], index))
+    ranks = [0.0] * len(values)
+    cursor = 0
+    while cursor < len(order):
+        end = cursor + 1
+        while end < len(order) and values[order[end]] == values[order[cursor]]:
+            end += 1
+        rank = (cursor + 1 + end) / 2.0
+        for index in order[cursor:end]:
+            ranks[index] = rank
+        cursor = end
+    return ranks
+
+
+def _spearman(left_values: list[float], right_values: list[float]) -> float:
+    left = _average_ranks(left_values)
+    right = _average_ranks(right_values)
+    left_mean = sum(left) / len(left)
+    right_mean = sum(right) / len(right)
+    numerator = sum(
+        (a - left_mean) * (b - right_mean) for a, b in zip(left, right)
+    )
+    left_norm = math.sqrt(sum((value - left_mean) ** 2 for value in left))
+    right_norm = math.sqrt(sum((value - right_mean) ** 2 for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return float(numerator / (left_norm * right_norm))
+
+
+def recompute_validation_metrics(
+    checkpoint: str | Path,
+    *,
+    validation_csv_bytes: bytes,
+    feature_schema: Mapping[str, Any],
+    config: Mapping[str, Any],
+    published_pair_manifest: Mapping[str, Any],
+    device: str,
+) -> dict[str, Any]:
+    """Rebuild held validation pairs and independently rescore ``best.pt``."""
+
+    torch, _tg, _gcf_models = runtime_stack()
+    from torch_geometric.loader import DataLoader
+
+    rows, row_evidence = parse_taste_split_rows_bytes(
+        validation_csv_bytes, expected_split="validation"
+    )
+    graphs = rows_to_graphs(rows, feature_schema)
+    pairs = build_connected_bfs_pairs(
+        graphs,
+        split="validation",
+        num_pairs=int(config["validation_pairs"]),
+        seed=int(config["seed"]) + 1,
+    )
+    rebuilt_pair_manifest = build_pair_manifest(pairs, split="validation")
+    for name in (
+        "pair_count",
+        "pair_ids_hash",
+        "parent_graph_ids_hash",
+        "minimum_edit_count",
+        "maximum_edit_count",
+        "mean_edit_count",
+    ):
+        observed = rebuilt_pair_manifest[name]
+        expected = published_pair_manifest.get(name)
+        if isinstance(observed, float):
+            if not isinstance(expected, (int, float)) or not math.isclose(
+                observed, float(expected), rel_tol=0.0, abs_tol=1e-12
+            ):
+                raise TasteNeuroSEDGateError(
+                    f"rebuilt validation pair manifest differs: {name}"
+                )
+        elif observed != expected:
+            raise TasteNeuroSEDGateError(
+                f"rebuilt validation pair manifest differs: {name}"
+            )
+    loader = DataLoader(
+        TastePairDataset(pairs),
+        batch_size=int(config["batch_size"]),
+        shuffle=False,
+        num_workers=0,
+    )
+    model = build_training_model(
+        input_dim=int(feature_schema["input_dim"]), device=device
+    )
+    try:
+        state = torch.load(checkpoint, map_location=device, weights_only=True)
+    except TypeError:  # pragma: no cover - older AutoDL torch.
+        state = torch.load(checkpoint, map_location=device)
+    result = model.load_state_dict(state, strict=True)
+    if result.missing_keys or result.unexpected_keys:
+        raise TasteNeuroSEDGateError("selected checkpoint NormSED reload changed")
+    model.eval()
+    predictions: list[float] = []
+    targets: list[float] = []
+    losses: list[float] = []
+    with torch.no_grad():
+        for ordered_source, ordered_target, lb, ub in loader:
+            ordered_source = ordered_source.to(device)
+            ordered_target = ordered_target.to(device)
+            lb = lb.to(device=device, dtype=torch.float32)
+            ub = ub.to(device=device, dtype=torch.float32)
+            prediction = model(ordered_source, ordered_target)
+            loss = interval_loss(lb, ub, prediction)
+            losses.append(float(loss.detach().cpu().item()))
+            predictions.extend(
+                float(value) for value in prediction.detach().cpu().tolist()
+            )
+            targets.extend(float(value) for value in lb.detach().cpu().tolist())
+    values = predictions + targets + losses
+    if not predictions or not all(math.isfinite(value) for value in values):
+        raise TasteNeuroSEDGateError("independent validation replay is non-finite")
+    errors = [prediction - target for prediction, target in zip(predictions, targets)]
+    mse = sum(error * error for error in errors) / len(errors)
+    return {
+        "schema_version": "tastemolnet_gcf_neurosed_validation_replay_v1",
+        "pair_count": len(predictions),
+        "interval_loss": sum(losses) / len(losses),
+        "mae": sum(abs(error) for error in errors) / len(errors),
+        "rmse": math.sqrt(mse),
+        "spearman_rank": _spearman(predictions, targets),
+        "minimum_distance": min(predictions),
+        "maximum_distance": max(predictions),
+        "validation_csv_sha256": hashlib.sha256(validation_csv_bytes).hexdigest(),
+        "validation_graph_ids_hash": row_evidence["graph_ids_hash"],
+        "rebuilt_pair_ids_hash": rebuilt_pair_manifest["pair_ids_hash"],
+        "selected_best_checkpoint_reloaded": True,
+        "deterministic_validation_pairs_rebuilt": True,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+
+
 def _require_uuid4(value: Any, *, label: str) -> str:
     if not isinstance(value, str):
         raise TasteNeuroSEDGateError(f"{label} is not a UUID string")
@@ -331,10 +521,74 @@ def _require_uuid4(value: Any, *, label: str) -> str:
     return value
 
 
+_CONTROLLER_STABLE_FIELDS = (
+    "controller_id",
+    "controller_uuid",
+    "pid",
+    "pid_start_ticks",
+    "boot_id",
+    "exe",
+    "command_hash",
+    "cwd",
+    "cgroup",
+    "git_commit",
+    "git_tree",
+    "receipt_path",
+    "receipt_sha256",
+)
+
+
+def validate_controller_heartbeat_progression(
+    bundled_controller: Mapping[str, Any],
+    verifier_authority: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate H1 -> worker-latest -> verifier-terminal without equating hashes.
+
+    The immutable worker-attempt input is H1.  The worker holder may legally
+    advance to a later generation while training, and the verifier holder may
+    advance again.  Receipt/process identity must remain stable and heartbeat
+    sequences must be monotonic; heartbeat hashes are deliberately *not*
+    required to be equal.
+    """
+
+    worker_latest = bundled_controller.get("worker_latest")
+    worker_initial = bundled_controller.get("worker_initial_heartbeat")
+    if (
+        bundled_controller.get("schema_version")
+        != "tastemolnet_gcf_neurosed_controller_binding_v2"
+        or type(worker_latest) is not dict
+        or type(worker_initial) is not dict
+        or any(
+            worker_latest.get(field) != verifier_authority.get(field)
+            for field in _CONTROLLER_STABLE_FIELDS
+        )
+        or worker_latest.get("state") != "RUNNING"
+        or worker_latest.get("controller_state") != "MONITORING"
+        or verifier_authority.get("state") != "RUNNING"
+        or verifier_authority.get("controller_state") != "MONITORING"
+        or type(worker_initial.get("sequence")) is not int
+        or type(worker_latest.get("sequence")) is not int
+        or type(verifier_authority.get("sequence")) is not int
+        or int(worker_latest["sequence"]) < int(worker_initial["sequence"])
+        or int(verifier_authority["sequence"]) < int(worker_latest["sequence"])
+        or worker_initial.get("receipt_sha256")
+        != worker_latest.get("receipt_sha256")
+        or not isinstance(worker_initial.get("heartbeat_sha256"), str)
+        or not isinstance(worker_latest.get("heartbeat_sha256"), str)
+        or not isinstance(verifier_authority.get("heartbeat_sha256"), str)
+    ):
+        raise TasteNeuroSEDGateError("held controller receipt/heartbeat changed")
+    return dict(worker_initial), dict(worker_latest)
+
+
 def verify_bundle(
     bundle_root: str | Path,
     *,
     require_cuda_tolerance: bool,
+    train_csv_bytes: bytes,
+    validation_csv_bytes: bytes,
+    authoritative_lineage: Mapping[str, Any],
+    controller_authority: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Independently verify one SEALED scientific bundle before publication."""
 
@@ -371,6 +625,8 @@ def verify_bundle(
     worker_health = _read_json(root / "health_gate.json")
     config = _read_json(root / "config.yaml")
     git_state = _read_json(root / "git_state.json")
+    bundled_authority = _read_json(root / "authority_manifest.json")
+    bundled_controller = _read_json(root / "controller_authority.json")
 
     if (
         model_card.get("dataset") != "tastemolnet"
@@ -379,6 +635,28 @@ def verify_bundle(
         or model_card.get("source_label_independent") is not True
         or model_card.get("train_only_fit") is not True
         or model_card.get("validation_only_selection") is not True
+        or model_card.get("training_loop_authority")
+        != "reviewed_taste_epoch_level_adaptation_v1"
+        or model_card.get(
+            "upstream_greed_batch_interleaved_selection_loop_unchanged"
+        )
+        is not False
+        or model_card.get("upstream_greed_pair_sampling_unchanged") is not False
+        or model_card.get("upstream_greed_pair_sampling")
+        != "independent_query_subgraph_to_random_target_with_pyged_bounds"
+        or model_card.get("gcf_runtime_direction")
+        != "generated_query_to_original_parent_target"
+        or model_card.get("training_direction_matches_gcf_runtime") is not False
+        or model_card.get("full_official_neurosed_semantics_claimed") is not False
+        or model_card.get("scientific_release_eligible") is not False
+        or model_card.get("strict_official_pair_builder_implemented") is not False
+        or model_card.get("strict_official_pyged_bounds_authenticated") is not False
+        or model_card.get(
+            "strict_official_batch_interleaved_selector_implemented"
+        )
+        is not False
+        or model_card.get("strict_official_provenance")
+        != STRICT_OFFICIAL_PROVENANCE
         or model_card.get("calibration_loaded") is not False
         or model_card.get("test_loaded") is not False
         or split_manifest.get("opened_payload_splits") != ["train", "validation"]
@@ -423,9 +701,43 @@ def verify_bundle(
         or train_pairs.get("split") != "train"
         or validation_pairs.get("split") != "validation"
         or train_pairs.get("pair_builder")
-        != "connected_induced_bfs_subgraph_to_own_parent"
+        != "taste_connected_induced_bfs_nested_pair_v1"
         or validation_pairs.get("pair_builder")
-        != "connected_induced_bfs_subgraph_to_own_parent"
+        != "taste_connected_induced_bfs_nested_pair_v1"
+        or train_pairs.get("pair_direction")
+        != "parent_to_connected_induced_bfs_subgraph"
+        or validation_pairs.get("pair_direction")
+        != "parent_to_connected_induced_bfs_subgraph"
+        or train_pairs.get("upstream_greed_pair_sampling_unchanged") is not False
+        or validation_pairs.get("upstream_greed_pair_sampling_unchanged")
+        is not False
+        or train_pairs.get("upstream_greed_pair_sampling")
+        != "independent_query_subgraph_to_random_target_with_pyged_bounds"
+        or validation_pairs.get("upstream_greed_pair_sampling")
+        != train_pairs.get("upstream_greed_pair_sampling")
+        or train_pairs.get("gcf_runtime_direction")
+        != "generated_query_to_original_parent_target"
+        or validation_pairs.get("gcf_runtime_direction")
+        != train_pairs.get("gcf_runtime_direction")
+        or train_pairs.get("training_direction_matches_gcf_runtime") is not False
+        or validation_pairs.get("training_direction_matches_gcf_runtime")
+        is not False
+        or train_pairs.get("full_official_pair_semantics_claimed") is not False
+        or validation_pairs.get("full_official_pair_semantics_claimed") is not False
+        or train_pairs.get("reverse_subgraph_to_parent_cost_is_zero") is not True
+        or validation_pairs.get("reverse_subgraph_to_parent_cost_is_zero")
+        is not True
+        or train_pairs.get("edit_cost_contract")
+        != {
+            "node_insertion": 0,
+            "node_deletion": 1,
+            "edge_insertion": 0,
+            "edge_deletion": 1,
+            "node_relabel": 1,
+            "edge_relabel": 0,
+        }
+        or validation_pairs.get("edit_cost_contract")
+        != train_pairs.get("edit_cost_contract")
         or train_pairs.get("interval_bounds_exact") is not True
         or validation_pairs.get("interval_bounds_exact") is not True
         or train_pairs.get("connected_queries") is not True
@@ -463,7 +775,10 @@ def verify_bundle(
         or config.get("scheduler") != "CyclicLR"
         or config.get("criterion") != "GREED interval loss"
         or config.get("pair_builder")
-        != "connected_induced_bfs_subgraph_to_own_parent"
+        != "taste_connected_induced_bfs_nested_pair_v1"
+        or config.get("pair_semantics") != "directional_exact_deletion_v1"
+        or model_card.get("pair_semantics")
+        != "directional_exact_deletion_v1"
     ):
         raise TasteNeuroSEDGateError("NeuroSED resolved execution config changed")
 
@@ -592,6 +907,94 @@ def verify_bundle(
     if checksums["best.pt"] != checksums[selected_relative]:
         raise TasteNeuroSEDGateError("best.pt differs from selected UUID checkpoint")
 
+    lineage_train = authoritative_lineage.get("train")
+    lineage_validation = authoritative_lineage.get("validation")
+    if (
+        bundled_authority != dict(authoritative_lineage)
+        or checksums["authority_manifest.json"]
+        != hashlib.sha256(
+            (root / "authority_manifest.json").read_bytes()
+        ).hexdigest()
+        or authoritative_lineage.get("schema_version")
+        != "tastemolnet_gcf_neurosed_authority_v2"
+        or authoritative_lineage.get("t3_split_manifest_byte_identical_to_t2")
+        is not True
+        or authoritative_lineage.get("calibration_loaded") is not False
+        or authoritative_lineage.get("test_loaded") is not False
+        or type(lineage_train) is not dict
+        or type(lineage_validation) is not dict
+        or lineage_train.get("source_sha256")
+        != split_manifest.get("train_source_csv_sha256")
+        or hashlib.sha256(train_csv_bytes).hexdigest()
+        != lineage_train.get("source_sha256")
+        or lineage_validation.get("source_sha256")
+        != split_manifest.get("validation_source_csv_sha256")
+        or hashlib.sha256(validation_csv_bytes).hexdigest()
+        != lineage_validation.get("source_sha256")
+    ):
+        raise TasteNeuroSEDGateError("held authoritative validation lineage changed")
+    replay_train_rows, _replay_train_rows_evidence = parse_taste_split_rows_bytes(
+        train_csv_bytes, expected_split="train"
+    )
+    replay_validation_rows, _replay_validation_rows_evidence = (
+        parse_taste_split_rows_bytes(
+            validation_csv_bytes, expected_split="validation"
+        )
+    )
+    replay_feature_schema = derive_feature_schema(
+        replay_train_rows, replay_validation_rows
+    )
+    if replay_feature_schema != feature_schema:
+        raise TasteNeuroSEDGateError(
+            "held train/validation feature vocabulary differs from worker"
+        )
+    replay_train_graphs = rows_to_graphs(replay_train_rows, replay_feature_schema)
+    replay_train_pairs = build_connected_bfs_pairs(
+        replay_train_graphs,
+        split="train",
+        num_pairs=int(config["train_pairs"]),
+        seed=int(config["seed"]),
+    )
+    if build_pair_manifest(replay_train_pairs, split="train") != train_pairs:
+        raise TasteNeuroSEDGateError(
+            "independently rebuilt train pair manifest differs from worker"
+        )
+    bundled_controller_initial, bundled_controller_latest = (
+        validate_controller_heartbeat_progression(
+            bundled_controller,
+            controller_authority,
+        )
+    )
+    replay_device = "cuda:0" if require_cuda_tolerance else "cpu"
+    validation_replay = recompute_validation_metrics(
+        root / "best.pt",
+        validation_csv_bytes=validation_csv_bytes,
+        feature_schema=feature_schema,
+        config=config,
+        published_pair_manifest=validation_pairs,
+        device=replay_device,
+    )
+    metric_tolerance = {"relative": 1e-6, "absolute": 1e-7}
+    for name in (
+        "interval_loss",
+        "mae",
+        "rmse",
+        "spearman_rank",
+        "minimum_distance",
+        "maximum_distance",
+    ):
+        if not math.isclose(
+            float(validation_replay[name]),
+            float(validation[name]),
+            rel_tol=metric_tolerance["relative"],
+            abs_tol=metric_tolerance["absolute"],
+        ):
+            raise TasteNeuroSEDGateError(
+                f"independent validation replay differs from worker metric: {name}"
+            )
+    if validation_replay["pair_count"] != validation.get("pair_count"):
+        raise TasteNeuroSEDGateError("independent validation replay count changed")
+
     for name in ("best.pt", "model.pt"):
         model = load_runner_checkpoint(root / name, input_dim=input_dim, device="cpu")
         del model
@@ -600,7 +1003,7 @@ def verify_bundle(
         input_dim=input_dim,
         require_cuda_tolerance=require_cuda_tolerance,
     )
-    return {
+    verification = {
         "schema_version": "tastemolnet_gcf_neurosed_independent_verification_v1",
         "status": "PASS",
         "independent_scientific_verifier": True,
@@ -617,26 +1020,105 @@ def verify_bundle(
         "test_loaded": False,
         "feature_schema_compatible": True,
         "checkpoint_health": health,
+        "validation_replay": validation_replay,
+        "validation_metric_tolerance": metric_tolerance,
+        "worker_validation_metrics_reproduced": True,
+        "authoritative_split_lineage": dict(authoritative_lineage),
+        "controller_authority": {
+            field: bundled_controller_latest[field]
+            for field in _CONTROLLER_STABLE_FIELDS
+        },
+        "controller_worker_initial_heartbeat": dict(
+            bundled_controller_initial
+        ),
+        "controller_worker_latest_heartbeat_sha256": bundled_controller_latest[
+            "heartbeat_sha256"
+        ],
+        "controller_worker_latest_heartbeat_sequence": bundled_controller_latest[
+            "sequence"
+        ],
+        "controller_verifier_heartbeat_sha256": controller_authority[
+            "heartbeat_sha256"
+        ],
+        "controller_verifier_heartbeat_sequence": controller_authority[
+            "sequence"
+        ],
         "worker_did_not_self_sign_pass": True,
         "managed_input_binding": {
             "source_execution_config_sha256": config[
                 "source_execution_config_sha256"
             ],
-            "train_csv_sha256": split_manifest["train_source_csv_sha256"],
-            "validation_csv_sha256": split_manifest[
-                "validation_source_csv_sha256"
-            ],
-            "preparation_split_manifest_sha256": split_manifest[
-                "preparation_split_manifest_sha256"
-            ],
+            "input_hashes": {
+                "controller_receipt": bundled_controller_initial[
+                    "receipt_sha256"
+                ],
+                "worker_initial_heartbeat": bundled_controller_initial[
+                    "heartbeat_sha256"
+                ],
+                "t2_receipt_gate": authoritative_lineage[
+                    "t2_receipt_gate_sha256"
+                ],
+                "t2_source_evidence": authoritative_lineage[
+                    "t2_source_evidence_sha256"
+                ],
+                "t2_source_sha256s": authoritative_lineage[
+                    "t2_source_sha256s_sha256"
+                ],
+                "t2_source_split_manifest": authoritative_lineage[
+                    "t2_source_split_manifest_sha256"
+                ],
+                "t3_gate": authoritative_lineage["t3_gate_sha256"],
+                "t3_verification": authoritative_lineage[
+                    "t3_verification_sha256"
+                ],
+                "t3_checkpoint_split_manifest": authoritative_lineage[
+                    "t3_checkpoint_split_manifest_sha256"
+                ],
+                "train_csv": split_manifest["train_source_csv_sha256"],
+                "validation_csv": split_manifest[
+                    "validation_source_csv_sha256"
+                ],
+            },
             "execution_git_commit": git_state["commit"],
         },
+        "t7_consumer": {
+            "schema_version": "tastemolnet_gcf_neurosed_t7_consumer_v1",
+            "dataset": "tastemolnet",
+            "role": "GCF_AUXILIARY_DISTANCE_MODEL",
+            "classifier": False,
+            "source_label_independent": True,
+            "train_only_fit": True,
+            "validation_only_selection": True,
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "health_gate_status": "PASS",
+            "checkpoint_relative_path": "artifacts/best.pt",
+            "checkpoint_sha256": checksums["best.pt"],
+            "feature_schema_relative_path": "artifacts/feature_schema.json",
+            "feature_schema_sha256": checksums["feature_schema.json"],
+            "feature_atomic_numbers": list(atom_vocabulary),
+            "feature_input_dim": input_dim,
+            "sha256s_relative_path": "artifacts/sha256sums.txt",
+            "sha256s_sha256": _sha256_file(root / "sha256sums.txt"),
+            "neurosed_train_graph_ids_hash": split_manifest[
+                "neurosed_train_graph_ids_hash"
+            ],
+            "neurosed_validation_graph_ids_hash": split_manifest[
+                "neurosed_validation_graph_ids_hash"
+            ],
+        },
     }
+    require_release_eligible_official_semantics(model_card)
+    return verification
 
 
 __all__ = [
     "REQUIRED_BUNDLE_FILES",
+    "STRICT_OFFICIAL_PROVENANCE",
     "TasteNeuroSEDGateError",
     "checkpoint_health",
+    "recompute_validation_metrics",
+    "require_release_eligible_official_semantics",
+    "validate_controller_heartbeat_progression",
     "verify_bundle",
 ]

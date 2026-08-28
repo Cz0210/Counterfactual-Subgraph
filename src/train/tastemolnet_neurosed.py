@@ -19,8 +19,7 @@ from src.data.tastemolnet_neurosed_pairs import (
     build_connected_bfs_pairs,
     derive_feature_schema,
     pair_manifest,
-    read_preparation_split_manifest,
-    read_taste_split_rows,
+    parse_taste_split_rows_bytes,
     rows_to_graphs,
     split_boundary_manifest,
 )
@@ -32,6 +31,7 @@ from src.models.tastemolnet_neurosed import (
     model_contract,
     runtime_stack,
 )
+from src.eval.tastemolnet_neurosed_gate import STRICT_OFFICIAL_PROVENANCE
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +49,13 @@ class TasteNeuroSEDTrainConfig:
     max_grad_norm: float = DEFAULT_MAX_GRAD_NORM
     num_workers: int = 0
     require_cuda_health_gate: bool = True
+    pair_semantics: str = "PENDING_SCIENTIFIC_REVIEW"
 
     def validate(self) -> None:
+        if self.pair_semantics != "directional_exact_deletion_v1":
+            raise ValueError(
+                "Taste NeuroSED pair semantics require explicit reviewed selection"
+            )
         if self.seed != 7:
             raise ValueError("formal Taste NeuroSED seed must be 7")
         integer_fields = {
@@ -207,12 +212,12 @@ def _evaluate(model: Any, loader: Any, *, device: str) -> dict[str, Any]:
     losses: list[float] = []
     model.eval()
     with torch.no_grad():
-        for query, parent, lb, ub in loader:
-            query = query.to(device)
-            parent = parent.to(device)
+        for ordered_source, ordered_target, lb, ub in loader:
+            ordered_source = ordered_source.to(device)
+            ordered_target = ordered_target.to(device)
             lb = lb.to(device=device, dtype=torch.float32)
             ub = ub.to(device=device, dtype=torch.float32)
-            prediction = model(query, parent)
+            prediction = model(ordered_source, ordered_target)
             loss = interval_loss(lb, ub, prediction)
             losses.append(float(loss.detach().cpu().item()))
             predictions.extend(float(value) for value in prediction.detach().cpu().tolist())
@@ -345,11 +350,14 @@ def train_tastemolnet_neurosed(
     *,
     train_csv: str | Path,
     validation_csv: str | Path,
-    preparation_split_manifest: str | Path,
+    train_csv_bytes: bytes,
+    validation_csv_bytes: bytes,
     output_root: str | Path,
     execution_git_commit: str,
     execution_git_tree: str,
     source_execution_config_sha256: str,
+    authoritative_lineage: Mapping[str, Any],
+    controller_authority: Mapping[str, Any],
     config: TasteNeuroSEDTrainConfig,
     device: str,
 ) -> dict[str, Any]:
@@ -380,23 +388,69 @@ def train_tastemolnet_neurosed(
     _prepare_output_root(destination)
     train_path = Path(train_csv).absolute()
     validation_path = Path(validation_csv).absolute()
-    preparation_path = Path(preparation_split_manifest).absolute()
-    if not train_path.parent == validation_path.parent == preparation_path.parent:
+    if train_path.parent != validation_path.parent:
         raise RuntimeError(
-            "Taste train/validation payloads and split manifest must share one "
-            "physical preparation split root"
+            "Taste train/validation payloads must share one physical split root"
         )
-    train_rows, train_evidence = read_taste_split_rows(
-        train_path, expected_split="train"
+    train_rows, train_evidence = parse_taste_split_rows_bytes(
+        train_csv_bytes, expected_split="train"
     )
-    validation_rows, validation_evidence = read_taste_split_rows(
-        validation_path, expected_split="validation"
+    validation_rows, validation_evidence = parse_taste_split_rows_bytes(
+        validation_csv_bytes, expected_split="validation"
     )
+    train_evidence = {
+        **train_evidence,
+        "source_csv_sha256": hashlib.sha256(train_csv_bytes).hexdigest(),
+    }
+    validation_evidence = {
+        **validation_evidence,
+        "source_csv_sha256": hashlib.sha256(validation_csv_bytes).hexdigest(),
+    }
     train_ids = {row.molecule_id for row in train_rows}
     validation_ids = {row.molecule_id for row in validation_rows}
     if train_ids & validation_ids:
         raise RuntimeError("Taste train and validation molecule IDs overlap")
-    preparation_evidence = read_preparation_split_manifest(preparation_path)
+    train_authority = authoritative_lineage.get("train")
+    validation_authority = authoritative_lineage.get("validation")
+    if (
+        authoritative_lineage.get("schema_version")
+        != "tastemolnet_gcf_neurosed_authority_v2"
+        or authoritative_lineage.get("t3_split_manifest_byte_identical_to_t2")
+        is not True
+        or authoritative_lineage.get("calibration_loaded") is not False
+        or authoritative_lineage.get("test_loaded") is not False
+        or type(train_authority) is not dict
+        or type(validation_authority) is not dict
+        or train_authority.get("source_path") != str(train_path)
+        or validation_authority.get("source_path") != str(validation_path)
+        or train_authority.get("source_sha256")
+        != train_evidence["source_csv_sha256"]
+        or validation_authority.get("source_sha256")
+        != validation_evidence["source_csv_sha256"]
+        or train_authority.get("num_records") != len(train_rows)
+        or validation_authority.get("num_records") != len(validation_rows)
+    ):
+        raise RuntimeError("Taste NeuroSED authoritative split lineage changed")
+    worker_latest = controller_authority.get("worker_latest")
+    worker_initial = controller_authority.get("worker_initial_heartbeat")
+    if (
+        controller_authority.get("schema_version")
+        != "tastemolnet_gcf_neurosed_controller_binding_v2"
+        or type(worker_latest) is not dict
+        or type(worker_initial) is not dict
+        or worker_latest.get("controller_id") is None
+        or worker_latest.get("state") != "RUNNING"
+        or worker_latest.get("controller_state") != "MONITORING"
+        or worker_latest.get("git_commit") != execution_git_commit
+        or worker_latest.get("git_tree") != execution_git_tree
+        or worker_initial.get("receipt_sha256")
+        != worker_latest.get("receipt_sha256")
+        or not isinstance(worker_initial.get("heartbeat_sha256"), str)
+        or type(worker_initial.get("sequence")) is not int
+        or type(worker_latest.get("sequence")) is not int
+        or int(worker_latest["sequence"]) < int(worker_initial["sequence"])
+    ):
+        raise RuntimeError("Taste main-v2 controller authority changed")
     feature_schema = derive_feature_schema(train_rows, validation_rows)
     train_graphs = rows_to_graphs(train_rows, feature_schema)
     validation_graphs = rows_to_graphs(validation_rows, feature_schema)
@@ -417,8 +471,44 @@ def train_tastemolnet_neurosed(
     split_manifest = split_boundary_manifest(
         train_evidence=train_evidence,
         validation_evidence=validation_evidence,
-        preparation_manifest=preparation_evidence,
+        preparation_manifest={
+            "sha256": authoritative_lineage[
+                "t2_source_split_manifest_sha256"
+            ]
+        },
         train_validation_intersection_empty=not bool(train_ids & validation_ids),
+    )
+    split_manifest.update(
+        {
+            "authority_schema": authoritative_lineage["schema_version"],
+            "authority_manifest_sha256": hashlib.sha256(
+                _canonical_bytes(authoritative_lineage)
+            ).hexdigest(),
+            "t2_receipt_gate_sha256": authoritative_lineage[
+                "t2_receipt_gate_sha256"
+            ],
+            "t2_source_evidence_sha256": authoritative_lineage[
+                "t2_source_evidence_sha256"
+            ],
+            "t3_gate_sha256": authoritative_lineage["t3_gate_sha256"],
+            "t3_verification_sha256": authoritative_lineage[
+                "t3_verification_sha256"
+            ],
+            "train_authoritative_num_records": train_authority["num_records"],
+            "train_authoritative_label_counts": train_authority["label_counts"],
+            "train_authoritative_dataset_fingerprint": train_authority[
+                "dataset_fingerprint"
+            ],
+            "validation_authoritative_num_records": validation_authority[
+                "num_records"
+            ],
+            "validation_authoritative_label_counts": validation_authority[
+                "label_counts"
+            ],
+            "validation_authoritative_dataset_fingerprint": validation_authority[
+                "dataset_fingerprint"
+            ],
+        }
     )
 
     train_loader = _loader(TastePairDataset(train_pairs), config=config, shuffle=True)
@@ -450,13 +540,13 @@ def train_tastemolnet_neurosed(
         model.train()
         losses: list[float] = []
         gradient_norms: list[float] = []
-        for query, parent, lb, ub in train_loader:
-            query = query.to(device)
-            parent = parent.to(device)
+        for ordered_source, ordered_target, lb, ub in train_loader:
+            ordered_source = ordered_source.to(device)
+            ordered_target = ordered_target.to(device)
             lb = lb.to(device=device, dtype=torch.float32)
             ub = ub.to(device=device, dtype=torch.float32)
             optimizer.zero_grad(set_to_none=True)
-            prediction = model(query, parent)
+            prediction = model(ordered_source, ordered_target)
             loss = interval_loss(lb, ub, prediction)
             if not bool(torch.isfinite(loss).item()):
                 raise RuntimeError("Taste NeuroSED training loss is non-finite")
@@ -583,13 +673,37 @@ def train_tastemolnet_neurosed(
         "source_label_independent": True,
         "train_only_fit": True,
         "validation_only_selection": True,
+        "training_loop_authority": "reviewed_taste_epoch_level_adaptation_v1",
+        "upstream_greed_batch_interleaved_selection_loop_unchanged": False,
+        "adaptation_note": (
+            "Taste keeps the pinned model/forward/loss/optimizer/scheduler but "
+            "uses reviewed epoch-level validation selection and patience."
+        ),
         "calibration_loaded": False,
         "test_loaded": False,
         "rf_oracle_used": False,
         "frozen_classifier_replaced": False,
         "architecture": model_contract(input_dim),
         "downstream_checkpoint": "best.pt",
-        "official_mutation_vrrw_semantics_unchanged": True,
+        "vrrw_semantics_verified_by_neurosed_training": False,
+        "vrrw_semantics_scope": "T7_CONSUMER_ONLY",
+        "taste_pair_direction_adaptation": (
+            "parent_to_connected_induced_bfs_subgraph_for_exact_directional_deletions"
+        ),
+        "pair_semantics": config.pair_semantics,
+        "upstream_greed_pair_sampling_unchanged": False,
+        "upstream_greed_pair_sampling": (
+            "independent_query_subgraph_to_random_target_with_pyged_bounds"
+        ),
+        "gcf_runtime_direction": "generated_query_to_original_parent_target",
+        "training_direction_matches_gcf_runtime": False,
+        "full_official_neurosed_semantics_claimed": False,
+        "scientific_release_eligible": False,
+        "strict_official_pair_builder_implemented": False,
+        "strict_official_pyged_bounds_authenticated": False,
+        "strict_official_batch_interleaved_selector_implemented": False,
+        "strict_official_provenance": dict(STRICT_OFFICIAL_PROVENANCE),
+        "reverse_subgraph_to_parent_cost_under_pinned_greed_is_zero": True,
         "data_redistribution_allowed": False,
     }
     health_gate = {
@@ -614,7 +728,8 @@ def train_tastemolnet_neurosed(
         "optimizer": "AdamW",
         "scheduler": "CyclicLR",
         "criterion": "GREED interval loss",
-        "pair_builder": "connected_induced_bfs_subgraph_to_own_parent",
+        "pair_builder": "taste_connected_induced_bfs_nested_pair_v1",
+        "pair_direction": "parent_to_connected_induced_bfs_subgraph",
         "opened_payload_splits": ["train", "validation"],
         "calibration_loaded": False,
         "test_loaded": False,
@@ -634,6 +749,8 @@ def train_tastemolnet_neurosed(
         ),
         "checkpoint_manifest.json": checkpoint_manifest,
         "health_gate.json": health_gate,
+        "authority_manifest.json": dict(authoritative_lineage),
+        "controller_authority.json": dict(controller_authority),
     }
     for name, payload in documents.items():
         _write_json_exclusive(destination / name, payload)

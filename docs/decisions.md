@@ -11540,12 +11540,14 @@ strictly isomorphic to the bundled GCF fork's NormGED loader. Preserve the
 fork's downstream division by the sum of graph element counts.
 
 Derive one-hot explicit-hydrogen atom channels only from train and reject
-validation-unseen atoms. Construct deterministic connected induced BFS
-subgraph-to-own-parent pairs separately within train and validation and use the
-known omitted-node-plus-omitted-edge construction count as exact equal lower
-and upper bounds. Labels and the GINE are not used. Train only on train and use
-validation only for early stopping and checkpoint selection. Never open a
-calibration/test payload, ID, SMILES, graph hash, pair, label, or embedding.
+validation-unseen atoms. The initial implementation constructed deterministic
+connected induced BFS subgraph-to-own-parent pairs separately within train and
+validation and treated the omitted-node-plus-omitted-edge count as an exact
+bound. The successor decision immediately below records why that ordering is
+invalid under the pinned directional costs and blocks it from launch. Labels
+and the GINE are not used. Train only on train and use validation only for
+early stopping and checkpoint selection. Never open a calibration/test
+payload, ID, SMILES, graph hash, pair, label, or embedding.
 
 Create every selected checkpoint under a new UUIDv4 directory. Publish the
 selected bytes once as `best.pt` for GCF. Run the route on physical AutoDL GPU
@@ -11560,9 +11562,84 @@ signals. Slurm remains an explicit static refusal.
 
 - NeuroSED remains an auxiliary distance model and never becomes a classifier
   or matrix method cell.
-- T7/T12 can retain official mutation/VRRW and full-graph distance semantics
-  while using a Taste-specific checkpoint.
+- The architecture and GCF checkpoint loader remain compatible, but the
+  successor below blocks any claim that pair sampling/direction provides full
+  official NeuroSED training semantics.
 - Public artifacts expose aggregate hashes/metrics only, not reconstructable
   Taste rows or pair data.
 - This implementation does not launch training or assert a scientific PASS;
   T7/T12 remain blocked until a fresh independent-verifier terminal is bound.
+
+## [2026-08-28] Block NeuroSED launch pending directional-pair and controller review
+
+### Motivation
+
+Successor review found that the initial nested-pair order was scientifically
+invalid. GREED assigns zero insertion cost and unit deletion cost, so the
+recorded omitted-node-plus-omitted-edge target is not the SED of
+`(subgraph, parent)`; that ordered distance is zero. Review also found that a
+published managed-v2 final cannot be opened with the staging-only SEALED
+consumer, that T2/T3 lineage and independent data replay needed stronger
+closure, and that an immutable attempt heartbeat H1 must not be confused with
+the later worker/verifier heartbeat generation.
+
+### Decision
+
+Represent the exact nested deletion target only as the explicit Taste
+adaptation `directional_exact_deletion_v1`, ordered `(parent, subgraph)`, with
+unit node/edge deletion, zero node/edge insertion, unit node relabel, and zero
+edge relabel costs. Keep the checked-in value
+`PENDING_SCIENTIFIC_REVIEW`; the launcher fails before GPU discovery unless a
+reviewed configuration and an explicit environment selection both choose the
+adaptation. Do not implement or silently select an independent-pair/pyged
+route in this successor.
+
+Pinned upstream `make_inner_dataset` instead independently samples a query
+subgraph and random target and obtains SED bounds from `pyged`. T7 runtime
+embeds original parent/targets and evaluates generated graphs as queries, so
+its direction is generated-query to original-target, the opposite of the
+exact-deletion adaptation's training order. Record both mismatches in pair
+manifests, the model card, and the independent gate. Passing loader/reload
+tests proves state-dictionary compatibility only and must not be called full
+official NeuroSED semantics.
+
+Keep `reviewed_taste_epoch_level_adaptation_v1` honest: full-validation,
+epoch-level selection changes the checkpoint/stopping cadence and can change
+the optimization trajectory relative to GREED's batch-interleaved loop. It is
+not described as an unchanged upstream loop and also requires scientific
+review.
+
+Add a descriptor-retained published-final consumer that validates the generic
+managed gate, verification, PASS, generation, SEALED source inventory,
+published inventory, directory digests, and required artifacts without
+retaining one duplicate ancestor chain per checkpoint. T7 consumes that one
+generic NeuroSED final and no NeuroSED-specific PASS type. Bind the authentic
+T2 adoption/source and T3 managed final, require byte-identical split
+manifests, hold train/validation and configuration bytes across parse/hash/use,
+and have the verifier independently reconstruct the train vocabulary/pairs and
+validation pairs/metrics from those held bytes.
+
+Record the worker-initial heartbeat H1 as an immutable attempt input and worker
+latest/verifier terminal generations separately. Require stable receipt and
+process identity plus monotonic `H1 <= worker_latest <= verifier_terminal`, not
+equal heartbeat hashes. Do not duplicate the main-v2 controller implementation:
+launch remains disabled until the shared holder verifies the external launcher
+receipt, full heartbeat chain, and an ACTIVE GPU1 lease bound to physical
+index/UUID and the actual managed worker PID generation, attempt, and
+generation token.
+
+### Consequences
+
+- This successor is code/test/documentation only and is safe to cherry-pick,
+  but it is intentionally not a production launch commit.
+- The user must decide whether to approve the directional nested-deletion pair
+  adaptation despite its upstream-sampling and T7-runtime-direction mismatch,
+  and whether to approve the epoch-level selection adaptation, or commission
+  an upstream-faithful alternative.
+- Under the current full-official T12 requirement the adaptation is a research
+  draft/negative control only: the verifier requires exact upstream pair,
+  pyged, direction, and batch-interleaved-selector provenance and therefore
+  hard-rejects this bundle before generic PASS.
+- Root integration must adapt the NeuroSED launcher, worker, and verifier to
+  the final shared controller-holder API before any GPU allocation or science.
+- No checkpoint, scientific PASS, T7 release, or matrix result is claimed.

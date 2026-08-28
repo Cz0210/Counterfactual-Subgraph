@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
 import json
@@ -13,6 +14,7 @@ import pytest
 
 from src.data.tastemolnet_neurosed_pairs import (
     TasteNeuroSEDPairError,
+    TastePairDataset,
     build_connected_bfs_pairs,
     derive_feature_schema,
     pair_manifest,
@@ -34,6 +36,25 @@ from src.train.tastemolnet_neurosed import TasteNeuroSEDTrainConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "src/data/tastemolnet_neurosed_pairs.py",
+        "src/eval/tastemolnet_neurosed_gate.py",
+        "src/train/tastemolnet_neurosed.py",
+        "src/utils/managed_final_consumer_v2.py",
+        "src/utils/tastemolnet_neurosed_authority.py",
+        "src/utils/tastemolnet_t7_gcf_release.py",
+        "scripts/autodl/run_tastemolnet_neurosed_managed.py",
+        "scripts/autodl/train_tastemolnet_neurosed.py",
+        "scripts/autodl/verify_tastemolnet_neurosed.py",
+    ],
+)
+def test_neurosed_successor_python_sources_parse(relative_path: str) -> None:
+    path = PROJECT_ROOT / relative_path
+    ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
 def _write_split(path: Path, split: str, rows: list[tuple[str, str]]) -> None:
@@ -111,14 +132,71 @@ def test_formal_config_preserves_official_optimizer_and_boundary() -> None:
         "test_loaded: false",
         "worker_writes_pass: false",
         "auto_terminate_uncontrolled_children: false",
+        "pair_semantics: PENDING_SCIENTIFIC_REVIEW",
     ):
         assert needle in config
-    TasteNeuroSEDTrainConfig().validate()
+    with pytest.raises(ValueError, match="explicit reviewed selection"):
+        TasteNeuroSEDTrainConfig().validate()
+    TasteNeuroSEDTrainConfig(
+        pair_semantics="directional_exact_deletion_v1"
+    ).validate()
 
 
 def test_formal_config_rejects_nonofficial_gradient_clip() -> None:
     with pytest.raises(ValueError, match="gradient clipping"):
-        TasteNeuroSEDTrainConfig(max_grad_norm=1.0).validate()
+        TasteNeuroSEDTrainConfig(
+            max_grad_norm=1.0,
+            pair_semantics="directional_exact_deletion_v1",
+        ).validate()
+
+
+def test_release_gate_rejects_directional_research_adaptation() -> None:
+    from src.eval.tastemolnet_neurosed_gate import (
+        STRICT_OFFICIAL_PROVENANCE,
+        TasteNeuroSEDGateError,
+        require_release_eligible_official_semantics,
+    )
+
+    research_card = {
+        "scientific_release_eligible": False,
+        "full_official_neurosed_semantics_claimed": False,
+        "upstream_greed_pair_sampling_unchanged": False,
+        "training_direction_matches_gcf_runtime": False,
+        "upstream_greed_batch_interleaved_selection_loop_unchanged": False,
+        "strict_official_pair_builder_implemented": False,
+        "strict_official_pyged_bounds_authenticated": False,
+        "strict_official_batch_interleaved_selector_implemented": False,
+        "strict_official_provenance": dict(STRICT_OFFICIAL_PROVENANCE),
+    }
+    with pytest.raises(TasteNeuroSEDGateError, match="not release eligible"):
+        require_release_eligible_official_semantics(research_card)
+
+
+def test_release_gate_requires_exact_strict_official_provenance() -> None:
+    from src.eval.tastemolnet_neurosed_gate import (
+        STRICT_OFFICIAL_PROVENANCE,
+        TasteNeuroSEDGateError,
+        require_release_eligible_official_semantics,
+    )
+
+    strict_card = {
+        "scientific_release_eligible": True,
+        "full_official_neurosed_semantics_claimed": True,
+        "upstream_greed_pair_sampling_unchanged": True,
+        "training_direction_matches_gcf_runtime": True,
+        "upstream_greed_batch_interleaved_selection_loop_unchanged": True,
+        "strict_official_pair_builder_implemented": True,
+        "strict_official_pyged_bounds_authenticated": True,
+        "strict_official_batch_interleaved_selector_implemented": True,
+        "strict_official_provenance": dict(STRICT_OFFICIAL_PROVENANCE),
+    }
+    require_release_eligible_official_semantics(strict_card)
+    strict_card["strict_official_provenance"] = {
+        **STRICT_OFFICIAL_PROVENANCE,
+        "pair_builder": "adapted",
+    }
+    with pytest.raises(TasteNeuroSEDGateError, match="not release eligible"):
+        require_release_eligible_official_semantics(strict_card)
 
 
 def test_split_reader_accepts_only_declared_train_validation(tmp_path: Path) -> None:
@@ -213,8 +291,30 @@ def test_connected_bfs_pairs_are_nested_exact_intervals(tmp_path: Path) -> None:
     assert manifest["connected_queries"] is True
     assert manifest["all_lb_equal_ub"] is True
     assert manifest["cross_parent_pairs"] is False
+    assert manifest["pair_direction"] == "parent_to_connected_induced_bfs_subgraph"
+    assert manifest["upstream_greed_pair_sampling_unchanged"] is False
+    assert manifest["upstream_greed_pair_sampling"] == (
+        "independent_query_subgraph_to_random_target_with_pyged_bounds"
+    )
+    assert manifest["gcf_runtime_direction"] == (
+        "generated_query_to_original_parent_target"
+    )
+    assert manifest["training_direction_matches_gcf_runtime"] is False
+    assert manifest["full_official_pair_semantics_claimed"] is False
+    assert manifest["edit_cost_contract"] == {
+        "node_insertion": 0,
+        "node_deletion": 1,
+        "edge_insertion": 0,
+        "edge_deletion": 1,
+        "node_relabel": 1,
+        "edge_relabel": 0,
+    }
     assert all(pair.lb == pair.ub == pair.removed_nodes + pair.removed_edges for pair in pairs)
     assert all(pair.query.num_nodes < pair.parent.num_nodes for pair in pairs)
+    ordered_source, ordered_target, lower, upper = TastePairDataset(pairs)[0]
+    assert ordered_source.num_nodes == pairs[0].parent.num_nodes
+    assert ordered_target.num_nodes == pairs[0].query.num_nodes
+    assert float(lower) == float(upper) == pairs[0].lb
 
 
 def test_feature_schema_rejects_validation_unseen_atom(tmp_path: Path) -> None:
@@ -288,7 +388,8 @@ def test_managed_worker_cannot_self_sign_neurosed_pass() -> None:
         PROJECT_ROOT / "scripts/autodl/verify_tastemolnet_neurosed.py"
     ).read_text(encoding="utf-8")
     assert "[TASTE_GCF_NEUROSED_PASS]" not in worker
-    assert "[TASTE_GCF_NEUROSED_PASS]" in verifier
+    assert "[TASTE_GCF_NEUROSED_PASS]" not in verifier
+    assert "[TASTE_GCF_NEUROSED_MANAGED_V2_PUBLISHED]" in verifier
     assert "verify_and_publish_sealed_attempt" in verifier
     assert "open_sealed_worker_artifact" in verifier
 
@@ -303,9 +404,11 @@ def _fake_held_managed_evidence(tmp_path: Path) -> tuple[object, dict[str, objec
     generation_token = str(uuid.uuid4())
     binding: dict[str, object] = {
         "source_execution_config_sha256": "a" * 64,
-        "train_csv_sha256": "b" * 64,
-        "validation_csv_sha256": "c" * 64,
-        "preparation_split_manifest_sha256": "d" * 64,
+        "input_hashes": {
+            "train_csv": "b" * 64,
+            "validation_csv": "c" * 64,
+            "worker_initial_heartbeat": "d" * 64,
+        },
         "execution_git_commit": "e" * 40,
     }
     attempt = {
@@ -316,7 +419,7 @@ def _fake_held_managed_evidence(tmp_path: Path) -> tuple[object, dict[str, objec
         "input_hashes": {
             "train_csv": "b" * 64,
             "validation_csv": "c" * 64,
-            "preparation_split_manifest": "d" * 64,
+            "worker_initial_heartbeat": "d" * 64,
         },
         "config_hash": "a" * 64,
         "git_commit": "e" * 40,
@@ -364,7 +467,10 @@ def _fake_held_managed_evidence(tmp_path: Path) -> tuple[object, dict[str, objec
         ),
         files=tuple(files),
     )
-    return held, {"managed_input_binding": binding}, descriptors
+    return held, {
+        "managed_input_binding": binding,
+        "controller_authority": {"controller_id": "controller"},
+    }, descriptors
 
 
 def test_independent_verifier_binds_managed_inputs(tmp_path: Path) -> None:
@@ -384,7 +490,7 @@ def test_independent_verifier_rejects_managed_input_drift(tmp_path: Path) -> Non
     from scripts.autodl.verify_tastemolnet_neurosed import _verify_managed_binding
 
     held, verification, descriptors = _fake_held_managed_evidence(tmp_path)
-    verification["managed_input_binding"]["train_csv_sha256"] = "f" * 64  # type: ignore[index]
+    verification["managed_input_binding"]["input_hashes"]["train_csv"] = "f" * 64  # type: ignore[index]
     try:
         with pytest.raises(ValueError, match="inputs differ"):
             _verify_managed_binding(held, verification)
@@ -393,23 +499,122 @@ def test_independent_verifier_rejects_managed_input_drift(tmp_path: Path) -> Non
             os.close(descriptor)
 
 
+def _controller_generation(sequence: int, heartbeat_sha256: str) -> dict[str, object]:
+    return {
+        "controller_id": "controller",
+        "controller_uuid": str(uuid.uuid4()),
+        "pid": 123,
+        "pid_start_ticks": 456,
+        "boot_id": str(uuid.uuid4()),
+        "exe": "/usr/bin/python3",
+        "command_hash": "a" * 64,
+        "cwd": "/workspace",
+        "cgroup": "/controller",
+        "git_commit": "b" * 40,
+        "git_tree": "c" * 40,
+        "receipt_path": "/authority/controller_receipt.json",
+        "receipt_sha256": "d" * 64,
+        "heartbeat_sha256": heartbeat_sha256,
+        "sequence": sequence,
+        "state": "RUNNING",
+        "controller_state": "MONITORING",
+    }
+
+
+def test_controller_heartbeat_progression_allows_h1_h2_h3_race() -> None:
+    from src.eval.tastemolnet_neurosed_gate import (
+        validate_controller_heartbeat_progression,
+    )
+
+    worker_latest = _controller_generation(2, "2" * 64)
+    verifier_terminal = dict(worker_latest)
+    verifier_terminal.update(sequence=3, heartbeat_sha256="3" * 64)
+    bundled = {
+        "schema_version": "tastemolnet_gcf_neurosed_controller_binding_v2",
+        "worker_initial_heartbeat": {
+            "receipt_sha256": "d" * 64,
+            "heartbeat_sha256": "1" * 64,
+            "sequence": 1,
+        },
+        "worker_latest": worker_latest,
+    }
+    initial, latest = validate_controller_heartbeat_progression(
+        bundled, verifier_terminal
+    )
+    assert initial["heartbeat_sha256"] == "1" * 64
+    assert latest["heartbeat_sha256"] == "2" * 64
+    assert verifier_terminal["heartbeat_sha256"] == "3" * 64
+
+
+def test_controller_heartbeat_progression_rejects_regression() -> None:
+    from src.eval.tastemolnet_neurosed_gate import (
+        TasteNeuroSEDGateError,
+        validate_controller_heartbeat_progression,
+    )
+
+    worker_latest = _controller_generation(2, "2" * 64)
+    verifier_terminal = dict(worker_latest)
+    verifier_terminal.update(sequence=1, heartbeat_sha256="1" * 64)
+    bundled = {
+        "schema_version": "tastemolnet_gcf_neurosed_controller_binding_v2",
+        "worker_initial_heartbeat": {
+            "receipt_sha256": "d" * 64,
+            "heartbeat_sha256": "0" * 64,
+            "sequence": 1,
+        },
+        "worker_latest": worker_latest,
+    }
+    with pytest.raises(TasteNeuroSEDGateError, match="heartbeat changed"):
+        validate_controller_heartbeat_progression(bundled, verifier_terminal)
+
+
 def test_autodl_launcher_uses_managed_v2_and_never_signals() -> None:
     launcher = (
         PROJECT_ROOT / "scripts/autodl/launch_tastemolnet_neurosed.sh"
     ).read_text(encoding="utf-8")
-    assert "managed_worker_v2.py" in launcher
-    assert "verify_tastemolnet_neurosed.py" in launcher
+    assert "run_tastemolnet_neurosed_managed.py" in launcher
     assert "gpu-index 1" in launcher
     assert "AUTO_TERMINATE_UNCONTROLLED_CHILDREN=0" in launcher
     assert "RUN_GNN_ABLATION=0" in launcher
+    pending = (
+        "NEUROSED_PAIR_AND_RUNTIME_DIRECTION_MISMATCH_PENDING_SCIENTIFIC_REVIEW"
+    )
+    assert pending in launcher
+    assert launcher.index(pending) < (
+        launcher.index("gpu_inventory.py")
+    )
+    assert "--controller-receipt" in launcher
+    assert "--controller-heartbeat" in launcher
+    assert "--t2-receipt-root" in launcher
+    assert "--t3-final-root" in launcher
     assert re.search(r"\b(?:kill|pkill|killall)\b", launcher) is None
     assert "calibration.csv" not in launcher
     assert "test.csv" not in launcher
 
 
+def test_managed_runner_holds_config_bytes_and_pins_worker_initial_h1() -> None:
+    runner = (
+        PROJECT_ROOT / "scripts/autodl/run_tastemolnet_neurosed_managed.py"
+    ).read_text(encoding="utf-8")
+    worker = (
+        PROJECT_ROOT / "scripts/autodl/train_tastemolnet_neurosed.py"
+    ).read_text(encoding="utf-8")
+    assert "hold_readonly_file(args.neurosed_config)" in runner
+    assert '"worker_initial_heartbeat"' in runner
+    assert '"controller_heartbeat"' not in runner
+    assert "--expected-neurosed-config-sha256" in runner
+    assert "hold_readonly_file(" in worker
+    assert "config_file.read_bytes()" in worker
+    assert "Path(args.neurosed_config).read_bytes()" not in worker
+
+
 @pytest.mark.parametrize(
     "name",
-    ["train_tastemolnet_neurosed.sh", "verify_tastemolnet_neurosed.sh"],
+    [
+        "train_tastemolnet_neurosed.sh",
+        "verify_tastemolnet_neurosed.sh",
+        "run_tastemolnet_neurosed_managed.sh",
+    ],
 )
 def test_slurm_wrappers_are_static_refusals(name: str) -> None:
     wrapper = (PROJECT_ROOT / "scripts/slurm" / name).read_text(encoding="utf-8")

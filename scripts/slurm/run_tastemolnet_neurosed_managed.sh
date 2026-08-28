@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Static CLI parity only. Taste NeuroSED is AutoDL-only.
-#SBATCH --job-name=taste-neurosed-verify-refuse
+# Static CLI parity only. Taste NeuroSED managed launch is AutoDL-only.
+#SBATCH --job-name=taste-neurosed-managed-refuse
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out
@@ -15,16 +15,15 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-echo "REFUSING_HPC_EXECUTION: TasteMolNet NeuroSED verification is AutoDL-only." >&2
+echo "REFUSING_HPC_EXECUTION: TasteMolNet NeuroSED is AutoDL-only and pair semantics remain review-blocked." >&2
 exit 78
 
 # Unreachable documentation-only CLI parity. Never submit this script.
-python -B scripts/autodl/verify_tastemolnet_neurosed.py \
+python -B scripts/autodl/run_tastemolnet_neurosed_managed.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
-  --sealed /absolute/managed/staging/SEALED.json \
-  --final-path /absolute/fresh/final-root \
-  --expected-attempt-id 00000000-0000-4000-8000-000000000000 \
+  --python /absolute/autodl/python \
+  --neurosed-config configs/autodl/tastemolnet_neurosed_v1.yaml \
   --train-csv /absolute/private/splits/train.csv \
   --validation-csv /absolute/private/splits/validation.csv \
   --t2-receipt-root /absolute/t2/receipt \
@@ -33,7 +32,9 @@ python -B scripts/autodl/verify_tastemolnet_neurosed.py \
   --controller-receipt /absolute/controller/receipt.json \
   --controller-heartbeat /absolute/controller/heartbeat.json \
   --expected-controller-id controller-id \
-  --expected-controller-receipt-sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --stage-root /absolute/managed/stage \
+  --final-root /absolute/fresh/final-root \
   --execution-git-commit 0000000000000000000000000000000000000000 \
   --execution-git-tree 0000000000000000000000000000000000000000 \
+  --device cuda:0 \
   --require-cuda-tolerance

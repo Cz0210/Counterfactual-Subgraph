@@ -19,6 +19,36 @@ if [[ "${1:-}" == "--inside-gpu-lock" ]]; then
 fi
 
 if [[ "$inside_gpu_lock" == "0" ]]; then
+  controller_receipt=""
+  controller_heartbeat=""
+  t2_receipt_root=""
+  t2_source_bundle_root=""
+  t3_final_root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --controller-receipt) controller_receipt="${2:?missing controller receipt}"; shift 2 ;;
+      --controller-heartbeat) controller_heartbeat="${2:?missing controller heartbeat}"; shift 2 ;;
+      --t2-receipt-root) t2_receipt_root="${2:?missing T2 receipt root}"; shift 2 ;;
+      --t2-source-bundle-root) t2_source_bundle_root="${2:?missing T2 source bundle}"; shift 2 ;;
+      --t3-final-root) t3_final_root="${2:?missing T3 final root}"; shift 2 ;;
+      *) echo "unknown Taste NeuroSED launcher argument: $1" >&2; exit 64 ;;
+    esac
+  done
+  [[ -n "$controller_receipt" && -n "$controller_heartbeat" ]] \
+    || { echo "controller receipt and heartbeat paths are required" >&2; exit 64; }
+  [[ -n "$t2_receipt_root" && -n "$t2_source_bundle_root" && -n "$t3_final_root" ]] \
+    || { echo "T2 receipt/source and T3 final roots are required" >&2; exit 64; }
+  reviewed_pair_semantics="$(
+    "$AUTODL_PYTHON" -c '
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    print(yaml.safe_load(handle)["training"]["pair_semantics"])
+' "$PROJECT_ROOT/configs/autodl/tastemolnet_neurosed_v1.yaml"
+  )"
+  [[ "$reviewed_pair_semantics" == "directional_exact_deletion_v1" ]] \
+    || { echo "NEUROSED_PAIR_AND_RUNTIME_DIRECTION_MISMATCH_PENDING_SCIENTIFIC_REVIEW" >&2; exit 78; }
+  [[ "${TASTEMOLNET_NEUROSED_PAIR_SEMANTICS:-}" == "$reviewed_pair_semantics" ]] \
+    || { echo "explicit reviewed NeuroSED pair semantics are required" >&2; exit 78; }
   [[ "${RUN_TASTEMOLNET:-0}" == "1" ]] \
     || { echo "RUN_TASTEMOLNET=1 is required" >&2; exit 64; }
   [[ "${TASTE_RESEARCH_COMPUTE_ALLOWED:-0}" == "1" ]] \
@@ -74,10 +104,15 @@ print(rows[0]["uuid"])
       "$AUTODL_RUNTIME_ROOT" \
       "$AUTODL_CONTROL_ROOT" \
       "$TASTEMOLNET_SPLIT_ROOT" \
-      "${TASTEMOLNET_NEUROSED_FINAL_ROOT:-}"
+      "${TASTEMOLNET_NEUROSED_FINAL_ROOT:-}" \
+      "$controller_receipt" \
+      "$controller_heartbeat" \
+      "$t2_receipt_root" \
+      "$t2_source_bundle_root" \
+      "$t3_final_root"
 fi
 
-[[ $# -eq 7 ]] || { echo "internal Taste NeuroSED launch arguments changed" >&2; exit 64; }
+[[ $# -eq 12 ]] || { echo "internal Taste NeuroSED launch arguments changed" >&2; exit 64; }
 gpu_uuid="$1"
 controller_id="$2"
 AUTODL_DATA_ROOT="$3"
@@ -85,6 +120,11 @@ AUTODL_RUNTIME_ROOT="$4"
 AUTODL_CONTROL_ROOT="$5"
 TASTEMOLNET_SPLIT_ROOT="$6"
 requested_final_root="$7"
+controller_receipt="$8"
+controller_heartbeat="$9"
+t2_receipt_root="${10}"
+t2_source_bundle_root="${11}"
+t3_final_root="${12}"
 export AUTODL_DATA_ROOT AUTODL_RUNTIME_ROOT AUTODL_CONTROL_ROOT TASTEMOLNET_SPLIT_ROOT
 export RUN_TASTEMOLNET=1
 export TASTE_RESEARCH_COMPUTE_ALLOWED=1
@@ -101,10 +141,14 @@ export RUN_GNN_ABLATION=0
 
 train_csv="$TASTEMOLNET_SPLIT_ROOT/train.csv"
 validation_csv="$TASTEMOLNET_SPLIT_ROOT/validation.csv"
-split_manifest="$TASTEMOLNET_SPLIT_ROOT/split_manifest.json"
 neurosed_config="$PROJECT_ROOT/configs/autodl/tastemolnet_neurosed_v1.yaml"
-for required in "$train_csv" "$validation_csv" "$split_manifest" "$neurosed_config"; do
+for required in "$train_csv" "$validation_csv" "$neurosed_config" \
+  "$controller_receipt" "$controller_heartbeat"; do
   autodl_require_file "$required"
+done
+for required_dir in "$t2_receipt_root" "$t2_source_bundle_root" "$t3_final_root"; do
+  [[ -d "$required_dir" && ! -L "$required_dir" ]] \
+    || { echo "required authority root is absent or aliased: $required_dir" >&2; exit 64; }
 done
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -118,54 +162,29 @@ final_root="${requested_final_root:-$final_parent/$stamp}"
 
 stage_root="$AUTODL_CONTROL_ROOT/tastemolnet-main-v2/stages/TASTE_GCF_NEUROSED"
 mkdir -p "$stage_root"
-attempt_id="$($AUTODL_PYTHON -c 'import uuid; print(uuid.uuid4())')"
 git_commit="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
 git_tree="$(git -C "$PROJECT_ROOT" rev-parse HEAD^{tree})"
 [[ -z "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=all)" ]] \
   || { echo "Taste NeuroSED requires a clean immutable execution worktree" >&2; exit 64; }
-config_hash="$(sha256sum "$neurosed_config" | awk '{print $1}')"
-train_hash="$(sha256sum "$train_csv" | awk '{print $1}')"
-validation_hash="$(sha256sum "$validation_csv" | awk '{print $1}')"
-split_hash="$(sha256sum "$split_manifest" | awk '{print $1}')"
-
-"$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/managed_worker_v2.py" \
+"$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/run_tastemolnet_neurosed_managed.py" \
+  --python "$AUTODL_PYTHON" \
+  --config "$PROJECT_ROOT/configs/hpc.yaml" \
+  --neurosed-config "$neurosed_config" \
+  --train-csv "$train_csv" \
+  --validation-csv "$validation_csv" \
+  --t2-receipt-root "$t2_receipt_root" \
+  --t2-source-bundle-root "$t2_source_bundle_root" \
+  --t3-final-root "$t3_final_root" \
+  --controller-receipt "$controller_receipt" \
+  --controller-heartbeat "$controller_heartbeat" \
+  --expected-controller-id "$controller_id" \
   --stage-root "$stage_root" \
-  --controller-id "$controller_id" \
-  --task-id TASTE_GCF_NEUROSED \
-  --git-commit "$git_commit" \
-  --config-hash "$config_hash" \
-  --input-hash "train_csv=$train_hash" \
-  --input-hash "validation_csv=$validation_hash" \
-  --input-hash "preparation_split_manifest=$split_hash" \
-  --attempt-id "$attempt_id" \
-  --cwd "$PROJECT_ROOT" \
-  --config "$PROJECT_ROOT/configs/hpc.yaml" \
-  -- \
-  "$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/train_tastemolnet_neurosed.py" \
-    --config "$PROJECT_ROOT/configs/hpc.yaml" \
-    --neurosed-config "$neurosed_config" \
-    --train-csv "$train_csv" \
-    --validation-csv "$validation_csv" \
-    --preparation-split-manifest "$split_manifest" \
-    --execution-git-commit "$git_commit" \
-    --execution-git-tree "$git_tree" \
-    --device cuda:0
-
-shopt -s nullglob
-sealed_paths=("$stage_root/attempts/$attempt_id"/worker_staging/*/SEALED.json)
-shopt -u nullglob
-[[ ${#sealed_paths[@]} -eq 1 ]] \
-  || { echo "Taste NeuroSED worker did not produce exactly one SEALED artifact" >&2; exit 75; }
-
-"$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/verify_tastemolnet_neurosed.py" \
-  --config "$PROJECT_ROOT/configs/hpc.yaml" \
-  --set inference.fallback_to_heuristic=false \
-  --sealed "${sealed_paths[0]}" \
-  --final-path "$final_root" \
-  --expected-attempt-id "$attempt_id" \
+  --final-root "$final_root" \
+  --execution-git-commit "$git_commit" \
+  --execution-git-tree "$git_tree" \
+  --device cuda:0 \
   --require-cuda-tolerance
 
-echo "neurosed_attempt_id=$attempt_id"
 echo "neurosed_gpu=1"
 echo "neurosed_gpu_uuid=$gpu_uuid"
 echo "neurosed_root=$final_root"

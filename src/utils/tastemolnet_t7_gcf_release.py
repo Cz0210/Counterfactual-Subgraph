@@ -168,7 +168,11 @@ def assert_execution_released() -> dict[str, Any]:
         "gpu_lease_receipt_sha256",
         "managed_execution_v2_pass_sha256",
         "taste_gcf_neurosed_pass_sha256",
+        "taste_gcf_neurosed_gate_sha256",
+        "taste_gcf_neurosed_verification_sha256",
         "taste_gcf_neurosed_checkpoint_sha256",
+        "taste_gcf_neurosed_feature_schema_sha256",
+        "taste_gcf_neurosed_sha256s_sha256",
     ):
         _sha256(release.get(field), field=field)
     _absolute(
@@ -177,6 +181,7 @@ def assert_execution_released() -> dict[str, Any]:
     _absolute(release.get("output_parent"), field="output_parent")
     for field in (
         "managed_execution_v2_pass_path",
+        "taste_gcf_neurosed_final_root",
         "taste_gcf_neurosed_pass_path",
         "taste_gcf_neurosed_checkpoint_path",
         "managed_stage_root",
@@ -394,12 +399,19 @@ def hold_external_authority(
         type(neurosed) is not dict
         or set(neurosed)
         != {
+            "final_root",
             "pass_path",
             "pass_sha256",
+            "gate_sha256",
+            "verification_sha256",
             "checkpoint_path",
             "checkpoint_sha256",
+            "feature_schema_sha256",
+            "sha256s_sha256",
             "distance_threshold",
         }
+        or neurosed.get("final_root")
+        != release["taste_gcf_neurosed_final_root"]
         or neurosed.get("pass_path")
         != release["taste_gcf_neurosed_pass_path"]
         or neurosed.get("pass_sha256")
@@ -408,6 +420,14 @@ def hold_external_authority(
         != release["taste_gcf_neurosed_checkpoint_path"]
         or neurosed.get("checkpoint_sha256")
         != release["taste_gcf_neurosed_checkpoint_sha256"]
+        or neurosed.get("gate_sha256")
+        != release["taste_gcf_neurosed_gate_sha256"]
+        or neurosed.get("verification_sha256")
+        != release["taste_gcf_neurosed_verification_sha256"]
+        or neurosed.get("feature_schema_sha256")
+        != release["taste_gcf_neurosed_feature_schema_sha256"]
+        or neurosed.get("sha256s_sha256")
+        != release["taste_gcf_neurosed_sha256s_sha256"]
         or isinstance(neurosed.get("distance_threshold"), bool)
         or not isinstance(neurosed.get("distance_threshold"), (int, float))
         or not math.isfinite(float(neurosed["distance_threshold"]))
@@ -836,10 +856,13 @@ def hold_managed_neurosed_predecessors(
     stack: ExitStack,
     release: Mapping[str, Any],
     authority: Mapping[str, Any],
-) -> tuple[Any, Any, Any, dict[str, Any], float]:
-    """Retain managed-v2 PASS and the exact Taste NeuroSED PASS/checkpoint."""
+) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, dict[str, Any], float]:
+    """Retain and validate one generic managed-v2 NeuroSED final root."""
 
+    from src.utils.managed_execution_v2 import GATE_SCHEMA, VERIFICATION_SCHEMA
+    from src.utils.process_identity_v2 import canonical_json_bytes
     from src.utils.retained_readonly_file import hold_readonly_file
+    from src.utils.managed_final_consumer_v2 import hold_verified_managed_final
 
     managed_pass = stack.enter_context(
         hold_readonly_file(
@@ -853,68 +876,50 @@ def hold_managed_neurosed_predecessors(
     if managed_pass.read_bytes() != b"[MANAGED_EXECUTION_V2_PASS]\n":
         raise TasteGCFSmokeError("managed execution v2 PASS marker changed")
 
+    final_root = _absolute(
+        release["taste_gcf_neurosed_final_root"],
+        field="Taste NeuroSED managed final root",
+    )
+    neurosed_final = stack.enter_context(
+        hold_verified_managed_final(
+            final_root,
+            required_relative_paths=(
+                "artifacts/best.pt",
+                "artifacts/feature_schema.json",
+                "artifacts/sha256sums.txt",
+            ),
+        )
+    )
     neurosed_pass_path = _absolute(
         release["taste_gcf_neurosed_pass_path"],
-        field="Taste NeuroSED PASS",
+        field="Taste NeuroSED generic PASS",
     )
+    checkpoint_path = _absolute(
+        release["taste_gcf_neurosed_checkpoint_path"],
+        field="Taste NeuroSED checkpoint",
+    )
+    if (
+        neurosed_pass_path != final_root / "PASS"
+        or checkpoint_path != final_root / "artifacts/best.pt"
+    ):
+        raise TasteGCFSmokeError("Taste NeuroSED paths escape one managed final root")
     neurosed_pass = stack.enter_context(
         hold_readonly_file(
             neurosed_pass_path,
             expected_sha256=release["taste_gcf_neurosed_pass_sha256"],
         )
     )
-    evidence = _json(neurosed_pass.read_bytes(), field="Taste NeuroSED PASS")
-    expected_keys = {
-        "schema_version",
-        "status",
-        "marker",
-        "checkpoint_sha256",
-        "feature_schema_sha256",
-        "neurosed_train_graph_ids_hash",
-        "neurosed_validation_graph_ids_hash",
-        "calibration_loaded",
-        "test_loaded",
-        "role",
-        "classifier",
-        "source_label_independent",
-        "train_only_fit",
-        "validation_only_selection",
-        "health_gate_status",
-    }
-    if (
-        set(evidence) != expected_keys
-        or evidence.get("schema_version")
-        != "tastemolnet_gcf_neurosed_pass_v1"
-        or evidence.get("status") != "PASS"
-        or evidence.get("marker") != "TASTE_GCF_NEUROSED_PASS"
-        or evidence.get("checkpoint_sha256")
-        != release["taste_gcf_neurosed_checkpoint_sha256"]
-        or evidence.get("role") != "GCF_AUXILIARY_DISTANCE_MODEL"
-        or evidence.get("classifier") is not False
-        or evidence.get("source_label_independent") is not True
-        or evidence.get("train_only_fit") is not True
-        or evidence.get("validation_only_selection") is not True
-        or evidence.get("calibration_loaded") is not False
-        or evidence.get("test_loaded") is not False
-        or evidence.get("health_gate_status") != "PASS"
-    ):
-        raise TasteGCFSmokeError("Taste NeuroSED PASS evidence changed")
-    for field in (
-        "checkpoint_sha256",
-        "feature_schema_sha256",
-        "neurosed_train_graph_ids_hash",
-        "neurosed_validation_graph_ids_hash",
-    ):
-        _sha256(evidence.get(field), field=f"Taste NeuroSED {field}")
-    evidence = {
-        **evidence,
-        "pass_path": str(neurosed_pass_path),
-        "pass_sha256": release["taste_gcf_neurosed_pass_sha256"],
-    }
-
-    checkpoint_path = _absolute(
-        release["taste_gcf_neurosed_checkpoint_path"],
-        field="Taste NeuroSED checkpoint",
+    neurosed_gate = stack.enter_context(
+        hold_readonly_file(
+            final_root / "gate.json",
+            expected_sha256=release["taste_gcf_neurosed_gate_sha256"],
+        )
+    )
+    neurosed_verification = stack.enter_context(
+        hold_readonly_file(
+            final_root / "verification.json",
+            expected_sha256=release["taste_gcf_neurosed_verification_sha256"],
+        )
     )
     neurosed_checkpoint = stack.enter_context(
         hold_readonly_file(
@@ -922,14 +927,140 @@ def hold_managed_neurosed_predecessors(
             expected_sha256=release["taste_gcf_neurosed_checkpoint_sha256"],
         )
     )
+    neurosed_feature_schema = stack.enter_context(
+        hold_readonly_file(
+            final_root / "artifacts/feature_schema.json",
+            expected_sha256=release["taste_gcf_neurosed_feature_schema_sha256"],
+        )
+    )
+    neurosed_sha256s = stack.enter_context(
+        hold_readonly_file(
+            final_root / "artifacts/sha256sums.txt",
+            expected_sha256=release["taste_gcf_neurosed_sha256s_sha256"],
+        )
+    )
+    if neurosed_pass.read_bytes() != b"[MANAGED_EXECUTION_V2_PASS]\n":
+        raise TasteGCFSmokeError("Taste NeuroSED generic PASS marker changed")
+    gate = _json(neurosed_gate.read_bytes(), field="Taste NeuroSED gate")
+    verification = _json(
+        neurosed_verification.read_bytes(), field="Taste NeuroSED verification"
+    )
+    feature_schema_payload = _json(
+        neurosed_feature_schema.read_bytes(), field="Taste NeuroSED feature schema"
+    )
+    domain = verification.get("verification")
+    consumer = domain.get("t7_consumer") if type(domain) is dict else None
+    published_inventory = verification.get("published_inventory")
+    if (
+        gate.get("schema_version") != GATE_SCHEMA
+        or gate.get("status") != "PASS"
+        or gate.get("independent_verifier") is not True
+        or gate.get("science_adopted") is not True
+        or gate.get("downstream_released") is not True
+        or gate.get("verification_sha256") != neurosed_verification.sha256
+        or verification.get("schema_version") != VERIFICATION_SCHEMA
+        or verification.get("status") != "PASS"
+        or verification.get("independent_verifier") is not True
+        or verification.get("attempt_id") != neurosed_final.sealed.attempt_id
+        or verification.get("generation_token")
+        != neurosed_final.sealed.generation_token
+        or verification.get("sealed_sha256") != neurosed_final.sealed.seal_sha256
+        or verification.get("source_inventory_sha256")
+        != neurosed_final.sealed.inventory_sha256
+        or verification.get("published_inventory_sha256")
+        != gate.get("published_inventory_sha256")
+        or hashlib.sha256(canonical_json_bytes(published_inventory)).hexdigest()
+        != verification.get("published_inventory_sha256")
+        or published_inventory != neurosed_final.inventory.payload()
+        or type(consumer) is not dict
+        or consumer.get("schema_version")
+        != "tastemolnet_gcf_neurosed_t7_consumer_v1"
+        or consumer.get("dataset") != "tastemolnet"
+        or consumer.get("role") != "GCF_AUXILIARY_DISTANCE_MODEL"
+        or consumer.get("classifier") is not False
+        or consumer.get("source_label_independent") is not True
+        or consumer.get("train_only_fit") is not True
+        or consumer.get("validation_only_selection") is not True
+        or consumer.get("calibration_loaded") is not False
+        or consumer.get("test_loaded") is not False
+        or consumer.get("health_gate_status") != "PASS"
+        or consumer.get("checkpoint_relative_path") != "artifacts/best.pt"
+        or consumer.get("checkpoint_sha256") != neurosed_checkpoint.sha256
+        or consumer.get("feature_schema_relative_path")
+        != "artifacts/feature_schema.json"
+        or consumer.get("feature_schema_sha256") != neurosed_feature_schema.sha256
+        or consumer.get("feature_atomic_numbers")
+        != feature_schema_payload.get("feature_atomic_numbers")
+        or consumer.get("feature_input_dim")
+        != feature_schema_payload.get("input_dim")
+        or feature_schema_payload.get("feature_atomic_numbers")
+        != sorted(set(feature_schema_payload.get("feature_atomic_numbers", [])))
+        or consumer.get("sha256s_relative_path") != "artifacts/sha256sums.txt"
+        or consumer.get("sha256s_sha256") != neurosed_sha256s.sha256
+    ):
+        raise TasteGCFSmokeError("Taste NeuroSED managed final evidence changed")
+    for field in (
+        "checkpoint_sha256",
+        "feature_schema_sha256",
+        "sha256s_sha256",
+        "neurosed_train_graph_ids_hash",
+        "neurosed_validation_graph_ids_hash",
+    ):
+        _sha256(consumer.get(field), field=f"Taste NeuroSED {field}")
+    checksum_rows: dict[str, str] = {}
+    for line in neurosed_sha256s.read_bytes().decode("utf-8").splitlines():
+        digest, separator, relative = line.partition("  ")
+        if not separator or relative in checksum_rows:
+            raise TasteGCFSmokeError("Taste NeuroSED sha256sums is malformed")
+        checksum_rows[relative] = _sha256(digest, field=f"NeuroSED {relative}")
+    if (
+        checksum_rows.get("best.pt") != neurosed_checkpoint.sha256
+        or checksum_rows.get("feature_schema.json") != neurosed_feature_schema.sha256
+    ):
+        raise TasteGCFSmokeError("Taste NeuroSED artifact hash closure changed")
+    evidence = {
+        "schema_version": "tastemolnet_gcf_neurosed_managed_final_v1",
+        "status": "PASS",
+        "marker": "MANAGED_EXECUTION_V2_PASS",
+        "final_root": str(final_root),
+        "attempt_id": neurosed_final.sealed.attempt_id,
+        "generation_token": neurosed_final.sealed.generation_token,
+        "pass_path": str(neurosed_pass_path),
+        "pass_sha256": neurosed_pass.sha256,
+        "gate_path": str(final_root / "gate.json"),
+        "gate_sha256": neurosed_gate.sha256,
+        "verification_path": str(final_root / "verification.json"),
+        "verification_sha256": neurosed_verification.sha256,
+        "source_inventory_sha256": neurosed_final.sealed.inventory_sha256,
+        "published_inventory_sha256": verification[
+            "published_inventory_sha256"
+        ],
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_sha256": neurosed_checkpoint.sha256,
+        "feature_schema_path": str(final_root / "artifacts/feature_schema.json"),
+        "feature_schema_sha256": neurosed_feature_schema.sha256,
+        "sha256s_path": str(final_root / "artifacts/sha256sums.txt"),
+        "sha256s_sha256": neurosed_sha256s.sha256,
+        "t7_consumer": dict(consumer),
+    }
     distance_threshold = float(authority["neurosed"]["distance_threshold"])
     managed_pass.revalidate()
+    neurosed_final.revalidate()
     neurosed_pass.revalidate()
+    neurosed_gate.revalidate()
+    neurosed_verification.revalidate()
     neurosed_checkpoint.revalidate()
+    neurosed_feature_schema.revalidate()
+    neurosed_sha256s.revalidate()
     return (
         managed_pass,
+        neurosed_final,
         neurosed_pass,
+        neurosed_gate,
+        neurosed_verification,
         neurosed_checkpoint,
+        neurosed_feature_schema,
+        neurosed_sha256s,
         evidence,
         distance_threshold,
     )
@@ -960,8 +1091,13 @@ class HeldTasteGCFInputs:
     train_bytes: bytes
     train_contract: Mapping[str, Any]
     managed_v2_pass: Any
+    neurosed_final: Any
     neurosed_pass: Any
+    neurosed_gate: Any
+    neurosed_verification: Any
     neurosed_checkpoint: Any
+    neurosed_feature_schema: Any
+    neurosed_sha256s: Any
     neurosed_evidence: Mapping[str, Any]
     neurosed_distance_threshold: float
     output_root: Path
@@ -981,8 +1117,20 @@ class HeldTasteGCFInputs:
             "taste_gcf_neurosed_pass": self.neurosed_evidence[
                 "pass_sha256"
             ],
+            "taste_gcf_neurosed_gate": self.neurosed_evidence[
+                "gate_sha256"
+            ],
+            "taste_gcf_neurosed_verification": self.neurosed_evidence[
+                "verification_sha256"
+            ],
             "taste_gcf_neurosed_checkpoint": self.neurosed_evidence[
                 "checkpoint_sha256"
+            ],
+            "taste_gcf_neurosed_feature_schema": self.neurosed_evidence[
+                "feature_schema_sha256"
+            ],
+            "taste_gcf_neurosed_sha256s": self.neurosed_evidence[
+                "sha256s_sha256"
             ],
             "taste_gine_t2_gate": self.t2["gate_sha256"],
             "taste_gine_t3_gate": self.stage_evidence["t3"]["gate_sha256"],
@@ -991,8 +1139,13 @@ class HeldTasteGCFInputs:
         }
 
     def revalidate_neurosed(self) -> None:
+        self.neurosed_final.revalidate()
         self.neurosed_pass.revalidate()
+        self.neurosed_gate.revalidate()
+        self.neurosed_verification.revalidate()
         self.neurosed_checkpoint.revalidate()
+        self.neurosed_feature_schema.revalidate()
+        self.neurosed_sha256s.revalidate()
 
     def revalidate(self) -> None:
         self.release_file.revalidate()
@@ -1068,8 +1221,13 @@ def hold_tastemolnet_t7_inputs(
         )
         (
             managed_v2_pass,
+            neurosed_final,
             neurosed_pass,
+            neurosed_gate,
+            neurosed_verification,
             neurosed_checkpoint,
+            neurosed_feature_schema,
+            neurosed_sha256s,
             neurosed_evidence,
             neurosed_distance_threshold,
         ) = hold_managed_neurosed_predecessors(stack, release, authority)
@@ -1113,6 +1271,10 @@ def hold_tastemolnet_t7_inputs(
                 field="managed execution v2 PASS path",
             ),
             _absolute(
+                release["taste_gcf_neurosed_final_root"],
+                field="Taste NeuroSED managed final root",
+            ),
+            _absolute(
                 release["taste_gcf_neurosed_pass_path"],
                 field="Taste NeuroSED PASS path",
             ),
@@ -1152,8 +1314,13 @@ def hold_tastemolnet_t7_inputs(
             train_bytes=train_bytes,
             train_contract=train_contract,
             managed_v2_pass=managed_v2_pass,
+            neurosed_final=neurosed_final,
             neurosed_pass=neurosed_pass,
+            neurosed_gate=neurosed_gate,
+            neurosed_verification=neurosed_verification,
             neurosed_checkpoint=neurosed_checkpoint,
+            neurosed_feature_schema=neurosed_feature_schema,
+            neurosed_sha256s=neurosed_sha256s,
             neurosed_evidence=neurosed_evidence,
             neurosed_distance_threshold=neurosed_distance_threshold,
             output_root=output,

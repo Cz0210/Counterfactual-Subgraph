@@ -38,7 +38,7 @@ METHOD = "GCFExplainer"
 NUM_CLASSES = 3
 SOURCE_LABEL = 1
 LABEL_MAP = {"0": "Bitter", "1": "Sweet", "2": "Tasteless"}
-PASS_MARKER = "TASTE_T7_GCF_SMOKE_PASS"
+PASS_MARKER = "[TASTE_T7_GCF_SMOKE_PASS]"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_CONFIG_PATH = (
@@ -80,10 +80,15 @@ RELEASE_KEYS = frozenset(
         "gpu_lease_receipt_sha256",
         "managed_execution_v2_pass_path",
         "managed_execution_v2_pass_sha256",
+        "taste_gcf_neurosed_final_root",
         "taste_gcf_neurosed_pass_path",
         "taste_gcf_neurosed_pass_sha256",
+        "taste_gcf_neurosed_gate_sha256",
+        "taste_gcf_neurosed_verification_sha256",
         "taste_gcf_neurosed_checkpoint_path",
         "taste_gcf_neurosed_checkpoint_sha256",
+        "taste_gcf_neurosed_feature_schema_sha256",
+        "taste_gcf_neurosed_sha256s_sha256",
         "managed_stage_root",
         "gpu_index",
         "output_parent",
@@ -2465,49 +2470,78 @@ def execute_native_vrrw_smoke(
         "schema_version",
         "status",
         "marker",
+        "final_root",
+        "attempt_id",
+        "generation_token",
         "pass_path",
         "pass_sha256",
+        "gate_path",
+        "gate_sha256",
+        "verification_path",
+        "verification_sha256",
+        "source_inventory_sha256",
+        "published_inventory_sha256",
+        "checkpoint_path",
         "checkpoint_sha256",
+        "feature_schema_path",
         "feature_schema_sha256",
-        "neurosed_train_graph_ids_hash",
-        "neurosed_validation_graph_ids_hash",
-        "calibration_loaded",
-        "test_loaded",
-        "role",
-        "classifier",
-        "source_label_independent",
-        "train_only_fit",
-        "validation_only_selection",
-        "health_gate_status",
+        "sha256s_path",
+        "sha256s_sha256",
+        "t7_consumer",
     }
+    consumer = (
+        neurosed_evidence.get("t7_consumer")
+        if type(neurosed_evidence) is dict
+        else None
+    )
     if (
         type(neurosed_evidence) is not dict
         or set(neurosed_evidence) != expected_neurosed_evidence
         or neurosed_evidence.get("schema_version")
-        != "tastemolnet_gcf_neurosed_pass_v1"
+        != "tastemolnet_gcf_neurosed_managed_final_v1"
         or neurosed_evidence.get("status") != "PASS"
-        or neurosed_evidence.get("marker") != "TASTE_GCF_NEUROSED_PASS"
-        or neurosed_evidence.get("role")
+        or neurosed_evidence.get("marker") != "MANAGED_EXECUTION_V2_PASS"
+        or type(consumer) is not dict
+        or consumer.get("schema_version")
+        != "tastemolnet_gcf_neurosed_t7_consumer_v1"
+        or consumer.get("role")
         != "GCF_AUXILIARY_DISTANCE_MODEL"
-        or neurosed_evidence.get("classifier") is not False
-        or neurosed_evidence.get("source_label_independent") is not True
-        or neurosed_evidence.get("train_only_fit") is not True
-        or neurosed_evidence.get("validation_only_selection") is not True
-        or neurosed_evidence.get("calibration_loaded") is not False
-        or neurosed_evidence.get("test_loaded") is not False
-        or neurosed_evidence.get("health_gate_status") != "PASS"
+        or consumer.get("classifier") is not False
+        or consumer.get("source_label_independent") is not True
+        or consumer.get("train_only_fit") is not True
+        or consumer.get("validation_only_selection") is not True
+        or consumer.get("calibration_loaded") is not False
+        or consumer.get("test_loaded") is not False
+        or consumer.get("health_gate_status") != "PASS"
+        or consumer.get("checkpoint_sha256")
+        != neurosed_evidence.get("checkpoint_sha256")
+        or consumer.get("feature_schema_sha256")
+        != neurosed_evidence.get("feature_schema_sha256")
+        or consumer.get("sha256s_sha256")
+        != neurosed_evidence.get("sha256s_sha256")
+        or consumer.get("feature_atomic_numbers")
+        != list(graph_schema.feature_atomic_numbers)
+        or consumer.get("feature_input_dim") != graph_schema.node_feature_dim
     ):
         raise TasteGCFSmokeError(
             "Taste NeuroSED predecessor evidence is not an exact PASS"
         )
     for field in (
         "pass_sha256",
+        "gate_sha256",
+        "verification_sha256",
+        "source_inventory_sha256",
+        "published_inventory_sha256",
         "checkpoint_sha256",
         "feature_schema_sha256",
+        "sha256s_sha256",
+    ):
+        _sha256(neurosed_evidence.get(field), field=f"NeuroSED {field}")
+    for field in (
         "neurosed_train_graph_ids_hash",
         "neurosed_validation_graph_ids_hash",
     ):
-        _sha256(neurosed_evidence.get(field), field=f"NeuroSED {field}")
+        _sha256(consumer.get(field), field=f"NeuroSED {field}")
     checkpoint_path = Path(neurosed_checkpoint_path)
     if (
         not checkpoint_path.is_absolute()
@@ -2786,8 +2820,20 @@ def build_worker_raw_evidence(
         "taste_gcf_neurosed_pass_sha256": inputs.neurosed_evidence[
             "pass_sha256"
         ],
+        "taste_gcf_neurosed_gate_sha256": inputs.neurosed_evidence[
+            "gate_sha256"
+        ],
+        "taste_gcf_neurosed_verification_sha256": inputs.neurosed_evidence[
+            "verification_sha256"
+        ],
         "taste_gcf_neurosed_checkpoint_sha256": inputs.neurosed_evidence[
             "checkpoint_sha256"
+        ],
+        "taste_gcf_neurosed_feature_schema_sha256": inputs.neurosed_evidence[
+            "feature_schema_sha256"
+        ],
+        "taste_gcf_neurosed_sha256s_sha256": inputs.neurosed_evidence[
+            "sha256s_sha256"
         ],
         "t2_receipt_sha256": inputs.t2["receipt_sha256"],
         "t2_gate_sha256": inputs.t2["gate_sha256"],
@@ -3043,8 +3089,20 @@ def verify_t7_worker_raw_evidence(
         "taste_gcf_neurosed_pass": expected_input_hashes.get(
             "taste_gcf_neurosed_pass_sha256"
         ),
+        "taste_gcf_neurosed_gate": expected_input_hashes.get(
+            "taste_gcf_neurosed_gate_sha256"
+        ),
+        "taste_gcf_neurosed_verification": expected_input_hashes.get(
+            "taste_gcf_neurosed_verification_sha256"
+        ),
         "taste_gcf_neurosed_checkpoint": expected_input_hashes.get(
             "taste_gcf_neurosed_checkpoint_sha256"
+        ),
+        "taste_gcf_neurosed_feature_schema": expected_input_hashes.get(
+            "taste_gcf_neurosed_feature_schema_sha256"
+        ),
+        "taste_gcf_neurosed_sha256s": expected_input_hashes.get(
+            "taste_gcf_neurosed_sha256s_sha256"
         ),
         "taste_gine_t2_gate": expected_input_hashes.get("t2_gate_sha256"),
         "taste_gine_t3_gate": expected_input_hashes.get("t3_gate_sha256"),

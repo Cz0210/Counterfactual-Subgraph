@@ -15,8 +15,9 @@ release and cannot start science:
 
 A later reviewed one-parent release commit may change only the release JSON and
 the wrapper literal. It must additionally pin managed execution v2 PASS, the
-managed stage root, Taste NeuroSED PASS and checkpoint, and the exact absent
-final path. The worker cannot choose or publish that final path.
+managed stage root, the one Taste NeuroSED generic managed final (root, PASS,
+gate, verification, checkpoint, feature schema, and checksum manifest), and the
+exact absent final path. The worker cannot choose or publish that final path.
 
 ## Why the BACE adapter is not reused
 
@@ -152,9 +153,11 @@ before managed-v2 sealing:
 6. the one checkpoint identity common to T3 and T4, held with
    `hold_taste_checkpoint_bundle`;
 7. managed execution v2 PASS and one fresh managed stage root;
-8. independently verified Taste NeuroSED PASS plus its exact held `best.pt`;
+8. one independently verified Taste NeuroSED managed-v2 final, held as a
+   single root with its generic `PASS`, `gate.json`, `verification.json`, exact
+   `best.pt`, feature schema, and checksum manifest;
 9. only the train CSV path/hash/counts named by the frozen GINE checkpoint's
-split manifest.
+   split manifest.
 
 The T3 and T4 evidence must match each other on every checkpoint identity and
 must match the held T2 formal-bundle root, model digest, and hash-inventory
@@ -165,7 +168,7 @@ identity checks. The wrapper's literal release refusal runs before even
 `common.sh` is sourced.
 
 Validation, calibration, and test CSV payloads are not opened by T7. The
-NeuroSED predecessor independently proves train-only fitting,
+NeuroSED managed final independently proves train-only fitting,
 validation-only selection, and `calibration_loaded=false` /
 `test_loaded=false`; see `docs/TASTE_GCF_NEUROSED_PROTOCOL.md`. T3/T4 are
 predecessor authorities; their payloads are not repurposed as T7 generation
@@ -194,7 +197,7 @@ A separate verifier process opens SEALED with the frozen managed-v2 API,
 descriptor-holds every file/directory, rejects symlink/inode/ABA or
 modified-after-seal drift, and runs `verify_t7_worker_raw_evidence`. That
 method verifier cross-binds attempt/generation, expected final path, managed-v2
-PASS, Taste NeuroSED PASS/checkpoint, frozen GINE/T2/T3/T4 inputs, checkpoint
+PASS, the Taste NeuroSED generic final/checkpoint, frozen GINE/T2/T3/T4 inputs, checkpoint
 resume proof, official full-graph actions, and exact three-class
 score/candidate semantics. Only after that verification returns PASS may the
 managed-v2 verifier write `verification.json`, `gate.json`, and `PASS`, then
@@ -236,6 +239,10 @@ The worker CLI prints only its SEALED receipt and never prints a success marker.
 and is read-only. The independent verifier owns terminal reporting. The Slurm
 file documents the same CLI but exits before it; TasteMolNet policy-v2 science
 is AutoDL-only.
+
+The structured T7 method-verification marker is exactly
+`[TASTE_T7_GCF_SMOKE_PASS]` (including brackets). It is domain evidence inside
+the generic managed-v2 verification; it is not a second terminal PASS file.
 
 ## Work intentionally not performed here
 

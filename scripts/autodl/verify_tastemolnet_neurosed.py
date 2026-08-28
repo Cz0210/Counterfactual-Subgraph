@@ -24,6 +24,21 @@ from src.utils.terminal_publisher_v2 import (  # noqa: E402
     open_sealed_worker_artifact,
     verify_and_publish_sealed_attempt,
 )
+from src.utils.tastemolnet_neurosed_authority import (  # noqa: E402
+    hold_tastemolnet_neurosed_data_authority,
+)
+
+
+def _hold_controller_authority(*args: object, **kwargs: object) -> object:
+    try:
+        from src.utils.autodl_tastemolnet_main_v2 import (
+            hold_taste_main_v2_controller_authority,
+        )
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Taste main-v2 controller authority integration is required"
+        ) from exc
+    return hold_taste_main_v2_controller_authority(*args, **kwargs)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,6 +50,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-attempt-id", required=True)
     parser.add_argument("--expected-generation-token")
     parser.add_argument("--require-cuda-tolerance", action="store_true")
+    parser.add_argument("--train-csv", type=Path, required=True)
+    parser.add_argument("--validation-csv", type=Path, required=True)
+    parser.add_argument("--t2-receipt-root", type=Path, required=True)
+    parser.add_argument("--t2-source-bundle-root", type=Path, required=True)
+    parser.add_argument("--t3-final-root", type=Path, required=True)
+    parser.add_argument("--controller-receipt", type=Path, required=True)
+    parser.add_argument("--controller-heartbeat", type=Path, required=True)
+    parser.add_argument("--expected-controller-id", required=True)
+    parser.add_argument("--expected-controller-receipt-sha256", required=True)
+    parser.add_argument("--execution-git-commit", required=True)
+    parser.add_argument("--execution-git-tree", required=True)
     return parser.parse_args(argv)
 
 
@@ -106,18 +132,18 @@ def _verify_managed_binding(
     binding = scientific_verification.get("managed_input_binding")
     if not isinstance(binding, dict):
         raise ValueError("scientific bundle lacks managed input binding")
-    expected_inputs = {
-        "train_csv": binding.get("train_csv_sha256"),
-        "validation_csv": binding.get("validation_csv_sha256"),
-        "preparation_split_manifest": binding.get(
-            "preparation_split_manifest_sha256"
-        ),
-    }
+    expected_inputs = binding.get("input_hashes")
     if (
+        not isinstance(expected_inputs, dict)
+        or
         attempt.get("input_hashes") != expected_inputs
         or attempt.get("config_hash")
         != binding.get("source_execution_config_sha256")
         or attempt.get("git_commit") != binding.get("execution_git_commit")
+        or attempt.get("controller_id")
+        != scientific_verification.get("controller_authority", {}).get(
+            "controller_id"
+        )
     ):
         raise ValueError("managed attempt inputs differ from the scientific bundle")
     return {
@@ -136,7 +162,20 @@ def _verify_managed_binding(
 
 def run(args: argparse.Namespace) -> int:
     require_auto_termination_disabled()
-    with open_sealed_worker_artifact(
+    with _hold_controller_authority(
+        args.controller_receipt,
+        args.controller_heartbeat,
+        expected_controller_id=args.expected_controller_id,
+        expected_git_commit=args.execution_git_commit,
+        expected_git_tree=args.execution_git_tree,
+        expected_receipt_sha256=args.expected_controller_receipt_sha256,
+    ) as controller, hold_tastemolnet_neurosed_data_authority(
+        t2_receipt_root=args.t2_receipt_root,
+        t2_source_bundle_root=args.t2_source_bundle_root,
+        t3_final_root=args.t3_final_root,
+        train_csv=args.train_csv,
+        validation_csv=args.validation_csv,
+    ) as data_authority, open_sealed_worker_artifact(
         args.sealed,
         expected_attempt_id=args.expected_attempt_id,
         expected_generation_token=args.expected_generation_token,
@@ -144,16 +183,24 @@ def run(args: argparse.Namespace) -> int:
         verification = verify_bundle(
             held.sealed.artifact_root,
             require_cuda_tolerance=args.require_cuda_tolerance,
+            train_csv_bytes=data_authority.train_bytes,
+            validation_csv_bytes=data_authority.validation_bytes,
+            authoritative_lineage=data_authority.evidence,
+            controller_authority=controller.evidence,
         )
         verification["managed_attempt_binding"] = _verify_managed_binding(
             held, verification
         )
+        data_authority.revalidate()
+        controller.revalidate()
         held.revalidate()
         publication = verify_and_publish_sealed_attempt(
             held,
             final_path=args.final_path,
             verification=verification,
         )
+        data_authority.revalidate()
+        controller.revalidate()
     print(
         json.dumps(
             {
@@ -172,7 +219,7 @@ def run(args: argparse.Namespace) -> int:
         ),
         flush=True,
     )
-    print("[TASTE_GCF_NEUROSED_PASS]", flush=True)
+    print("[TASTE_GCF_NEUROSED_MANAGED_V2_PUBLISHED]", flush=True)
     return 0
 
 

@@ -1,10 +1,10 @@
 """Leakage-safe TasteMolNet graph-pair construction for NeuroSED.
 
 Only the caller-supplied ``train.csv`` and ``validation.csv`` payloads are
-opened.  Each supervised pair is a connected induced BFS subgraph followed by
-its own parent graph.  Because node labels and retained edges are unchanged,
-the construction edit count is known exactly and is used as both interval
-bounds (``lb == ub``).
+opened.  Each nested graph pair contains a connected induced BFS subgraph and
+its own parent.  The ordered SED input is parent then subgraph: under GREED's
+zero insertion/unit deletion costs, omitted nodes and edges are therefore the
+exact directional edit count and both interval bounds (``lb == ub``).
 
 No labels are consulted: the auxiliary distance model is source-label
 independent and is never a classifier.
@@ -122,14 +122,6 @@ def read_taste_split_rows(
                 break
             chunks.append(block)
         source_bytes = b"".join(chunks)
-        try:
-            source_text = source_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise TasteNeuroSEDPairError(
-                f"Taste {expected_split} CSV is not UTF-8"
-            ) from exc
-        reader = csv.DictReader(io.StringIO(source_text, newline=""))
-        rows_raw = [dict(row) for row in reader]
         after = os.fstat(descriptor)
         named_after = os.stat(source, follow_symlinks=False)
         if (
@@ -146,6 +138,34 @@ def read_taste_split_rows(
     finally:
         os.close(descriptor)
 
+    rows, evidence = parse_taste_split_rows_bytes(
+        source_bytes, expected_split=expected_split
+    )
+    return rows, {
+        **evidence,
+        "source_csv_sha256": hashlib.sha256(source_bytes).hexdigest(),
+    }
+
+
+def parse_taste_split_rows_bytes(
+    source_bytes: bytes,
+    *,
+    expected_split: str,
+) -> tuple[list[TasteSplitRow], dict[str, Any]]:
+    """Parse descriptor-held split bytes without reopening a named path."""
+
+    if expected_split not in ALLOWED_PAYLOAD_SPLITS:
+        raise TasteNeuroSEDPairError(
+            "NeuroSED may parse only train and validation payloads"
+        )
+    try:
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TasteNeuroSEDPairError(
+            f"Taste {expected_split} CSV is not UTF-8"
+        ) from exc
+    reader = csv.DictReader(io.StringIO(source_text, newline=""), strict=True)
+    rows_raw = [dict(row) for row in reader]
     if not rows_raw:
         raise TasteNeuroSEDPairError(f"Taste {expected_split} CSV is empty")
     rows: list[TasteSplitRow] = []
@@ -172,7 +192,6 @@ def read_taste_split_rows(
     return rows, {
         "split": expected_split,
         "row_count": len(rows),
-        "source_csv_sha256": hashlib.sha256(source_bytes).hexdigest(),
         "graph_ids_hash": ids_hash,
         "all_rows_declared_expected_split": True,
         "labels_opened_but_not_consumed": True,
@@ -404,7 +423,7 @@ def build_connected_bfs_pairs(
     num_pairs: int,
     seed: int,
 ) -> list[TastePair]:
-    """Build deterministic nested pairs without cross-split graph mixing."""
+    """Build nested graphs whose ordered SED direction is parent-to-subgraph."""
 
     if split not in ALLOWED_PAYLOAD_SPLITS:
         raise TasteNeuroSEDPairError("pair split must be train or validation")
@@ -459,9 +478,25 @@ def pair_manifest(pairs: Sequence[TastePair], *, split: str) -> dict[str, Any]:
         "schema_version": "tastemolnet_gcf_neurosed_pair_manifest_v1",
         "split": split,
         "pair_count": len(pairs),
-        "pair_builder": "connected_induced_bfs_subgraph_to_own_parent",
-        "pair_direction": "subgraph_to_parent",
-        "distance_label": "known_nested_node_plus_edge_edit_count",
+        "pair_builder": "taste_connected_induced_bfs_nested_pair_v1",
+        "pair_direction": "parent_to_connected_induced_bfs_subgraph",
+        "upstream_greed_pair_sampling_unchanged": False,
+        "upstream_greed_pair_sampling": (
+            "independent_query_subgraph_to_random_target_with_pyged_bounds"
+        ),
+        "gcf_runtime_direction": "generated_query_to_original_parent_target",
+        "training_direction_matches_gcf_runtime": False,
+        "full_official_pair_semantics_claimed": False,
+        "distance_label": "known_directional_deletion_node_plus_edge_edit_count",
+        "edit_cost_contract": {
+            "node_insertion": 0,
+            "node_deletion": 1,
+            "edge_insertion": 0,
+            "edge_deletion": 1,
+            "node_relabel": 1,
+            "edge_relabel": 0,
+        },
+        "reverse_subgraph_to_parent_cost_is_zero": True,
         "interval_bounds_exact": True,
         "all_lb_equal_ub": True,
         "minimum_edit_count": min(labels),
@@ -478,7 +513,7 @@ def pair_manifest(pairs: Sequence[TastePair], *, split: str) -> dict[str, Any]:
 
 
 class TastePairDataset:
-    """Minimal PyG-compatible tuple dataset."""
+    """Return the explicit Taste adaptation order: parent, then subgraph."""
 
     def __init__(self, pairs: Sequence[TastePair]) -> None:
         self.pairs = list(pairs)
@@ -490,8 +525,8 @@ class TastePairDataset:
         torch, _Data, _Chem = _require_chemistry()
         pair = self.pairs[index]
         return (
-            pair.query,
             pair.parent,
+            pair.query,
             torch.tensor(pair.lb, dtype=torch.float32),
             torch.tensor(pair.ub, dtype=torch.float32),
         )
@@ -551,6 +586,7 @@ __all__ = [
     "build_connected_bfs_pairs",
     "derive_feature_schema",
     "pair_manifest",
+    "parse_taste_split_rows_bytes",
     "read_preparation_split_manifest",
     "read_taste_split_rows",
     "rows_to_graphs",

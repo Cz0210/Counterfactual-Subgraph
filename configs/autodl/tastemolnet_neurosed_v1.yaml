@@ -15,6 +15,9 @@ architecture:
   convolution: gin
   pooling: add
 training:
+  # Fail closed: this Taste nested-pair adaptation differs from upstream
+  # sampling and reverses T7's generated-query -> original-target direction.
+  pair_semantics: PENDING_SCIENTIFIC_REVIEW
   seed: 7
   train_pairs: 50000
   validation_pairs: 5000

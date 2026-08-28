@@ -43,6 +43,10 @@ from src.utils import tastemolnet_t7_managed_v2 as t7_managed
 from src.utils.tastemolnet_t7_gcf_release import assert_execution_released
 
 
+def test_t7_structured_pass_marker_matches_final_contract() -> None:
+    assert taste_gcf.PASS_MARKER == "[TASTE_T7_GCF_SMOKE_PASS]"
+
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -163,7 +167,11 @@ def _dummy_inputs() -> SimpleNamespace:
         train_contract={"sha256": "f" * 64},
         neurosed_evidence={
             "pass_sha256": "9" * 64,
+            "gate_sha256": "1" * 64,
+            "verification_sha256": "2" * 64,
             "checkpoint_sha256": "0" * 64,
+            "feature_schema_sha256": "3" * 64,
+            "sha256s_sha256": "4" * 64,
         },
         controller={"run_id": "run-t7"},
         gpu={"gpu_index": 1, "gpu_uuid": "GPU-test"},
@@ -179,7 +187,11 @@ def _dummy_managed_worker() -> SimpleNamespace:
     managed_input_hashes = {
         "managed_execution_v2_pass": "8" * 64,
         "taste_gcf_neurosed_pass": "9" * 64,
+        "taste_gcf_neurosed_gate": "1" * 64,
+        "taste_gcf_neurosed_verification": "2" * 64,
         "taste_gcf_neurosed_checkpoint": "0" * 64,
+        "taste_gcf_neurosed_feature_schema": "3" * 64,
+        "taste_gcf_neurosed_sha256s": "4" * 64,
         "taste_gine_t2_gate": "9" * 64,
         "taste_gine_t3_gate": "a" * 64,
         "taste_oracle_t4_gate": "d" * 64,
@@ -1419,6 +1431,10 @@ def test_t7_managed_adapter_is_worker_only_and_seals_in_order(
                 "input_hashes": {
                     "managed_execution_v2_pass": "8" * 64,
                     "taste_gcf_neurosed_pass": "9" * 64,
+                    "taste_gcf_neurosed_gate": "1" * 64,
+                    "taste_gcf_neurosed_verification": "2" * 64,
+                    "taste_gcf_neurosed_feature_schema": "3" * 64,
+                    "taste_gcf_neurosed_sha256s": "4" * 64,
                 }
             }
 
@@ -1492,6 +1508,10 @@ def test_t7_managed_adapter_is_worker_only_and_seals_in_order(
         input_hashes={
             "managed_execution_v2_pass": "8" * 64,
             "taste_gcf_neurosed_pass": "9" * 64,
+            "taste_gcf_neurosed_gate": "1" * 64,
+            "taste_gcf_neurosed_verification": "2" * 64,
+            "taste_gcf_neurosed_feature_schema": "3" * 64,
+            "taste_gcf_neurosed_sha256s": "4" * 64,
         },
         neurosed_pass_path=tmp_path / "neurosed-pass.json",
         neurosed_pass_sha256="9" * 64,
@@ -1518,6 +1538,10 @@ def test_t7_managed_adapter_uses_exact_frozen_v2_api_unmocked(
     input_hashes = {
         "managed_execution_v2_pass": "8" * 64,
         "taste_gcf_neurosed_pass": "9" * 64,
+        "taste_gcf_neurosed_gate": "1" * 64,
+        "taste_gcf_neurosed_verification": "2" * 64,
+        "taste_gcf_neurosed_feature_schema": "3" * 64,
+        "taste_gcf_neurosed_sha256s": "4" * 64,
     }
     worker = t7_managed.create_t7_managed_worker(
         stage_root=stage_root,
@@ -1573,7 +1597,11 @@ def test_t7_independent_verification_publishes_only_through_managed_v2(
     managed_input_hashes = {
         "managed_execution_v2_pass": "8" * 64,
         "taste_gcf_neurosed_pass": "9" * 64,
+        "taste_gcf_neurosed_gate": "1" * 64,
+        "taste_gcf_neurosed_verification": "2" * 64,
         "taste_gcf_neurosed_checkpoint": "0" * 64,
+        "taste_gcf_neurosed_feature_schema": "3" * 64,
+        "taste_gcf_neurosed_sha256s": "4" * 64,
         "taste_gine_t2_gate": "9" * 64,
         "taste_gine_t3_gate": "a" * 64,
         "taste_oracle_t4_gate": "d" * 64,

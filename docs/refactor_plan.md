@@ -2176,8 +2176,18 @@ Mutagenicity roadmaps.
 - [x] Export a plain isomorphic state dictionary that the existing GCF fork's
   NormGED runner loads without schema adaptation; retain its graph-element
   normalization semantics.
-- [x] Build exact-bound connected induced BFS subgraph-to-own-parent pairs
-  independently from train and validation, with no classifier or label use.
+- [x] Correct the ordered exact-bound pair to parent-to-connected-induced-BFS
+  subgraph so the omitted node/edge count agrees with GREED's zero insertion
+  and unit deletion costs; expose this only as the named Taste adaptation
+  `directional_exact_deletion_v1`.
+- [x] Leave the checked-in pair semantics `PENDING_SCIENTIFIC_REVIEW` and make
+  the AutoDL wrapper fail before GPU discovery unless a reviewed config and
+  explicit environment selection agree. Do not silently default to the Taste
+  adaptation or claim upstream pair construction.
+- [x] Record that upstream pairs use independently sampled query/target graphs
+  plus `pyged` bounds and that T7 consumes generated-query to original-target,
+  opposite to the nested-deletion training order. Treat runner reload as
+  checkpoint compatibility only, never full official NeuroSED semantics.
 - [x] Fit only on train and select only on validation; reject calibration/test
   payloads and publish only aggregate split hashes/counts.
 - [x] Use UUIDv4 checkpoint directories and one selected `best.pt` binding;
@@ -2186,8 +2196,31 @@ Mutagenicity roadmaps.
   CPU/GPU tolerance, feature-schema, runner-load, and leakage health checks.
 - [x] Run through managed execution v2: worker raw/exit/SEALED only,
   independent scientific verification, and atomic no-replace publication.
-- [x] Add a physical-GPU-1 AutoDL launcher and paired static-refusal Slurm
-  wrappers; keep auto-termination and GNN ablation disabled.
-- [ ] Run the fresh real AutoDL training attempt, publish a verifier PASS, and
-  bind its exact `best.pt`/gate hashes into T7 and T12. Code integration alone
-  is not scientific completion.
+- [x] Consume T2/T3 through retained authoritative lineage, hold config bytes
+  across parse/hash/use, independently rebuild train vocabulary/pairs and
+  validation pairs/metrics, and retain one strict published managed-final root
+  through T7 consumption without a second PASS type.
+- [x] Distinguish immutable worker-initial H1 from worker-latest and
+  verifier-terminal heartbeat generations; require monotonic sequence and
+  stable receipt/process identity rather than equal heartbeat hashes.
+- [x] Add a launch-disabled physical-GPU-1 AutoDL wrapper skeleton and paired
+  static-refusal Slurm wrappers; keep auto-termination and GNN ablation
+  disabled.
+- [ ] Scientifically review whether to approve
+  `directional_exact_deletion_v1` and
+  `reviewed_taste_epoch_level_adaptation_v1`. The latter changes selection/
+  stopping cadence and may change the optimization trajectory relative to the
+  pinned GREED batch-interleaved loop.
+- [ ] Implement and authenticate the strict official alternative required for
+  release: upstream independently sampled query/target pairs, real pinned
+  pyged SED bounds, generated-query to original-target direction, and GREED's
+  batch-interleaved validation selector. The present verifier hard-rejects the
+  research adaptation before generic PASS.
+- [ ] Integrate the shared main-v2 full-chain controller holder and require an
+  ACTIVE GPU1 lease bound to physical index/UUID and the actual managed worker
+  PID generation, attempt ID, and generation token. Until then launch remains
+  disabled.
+- [ ] Only after both decisions/integration, run the fresh real AutoDL training
+  attempt, publish one generic managed-v2 verifier PASS, and bind its exact
+  final/checkpoint/gate hashes into T7 and T12. Code integration alone is not
+  scientific completion.
