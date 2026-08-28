@@ -1945,12 +1945,13 @@ class HeldTasteCheckpointBundle:
         return dict(self.evidence)
 
     def read_frozen_gine_payload(self, name: str) -> bytes:
-        """Descriptor-relative read for the exact payloads T6 may consume."""
+        """Descriptor-relative read for exact frozen-GINE downstream payloads."""
 
         child = _safe_child_name(name, label="frozen GINE payload")
         if child not in T6_FROZEN_GINE_PAYLOAD_FILES:
             raise TasteGNNStageError(
-                f"T6 may not open checkpoint payload through this API: {child}"
+                "downstream stages may not open checkpoint payload through "
+                f"this API: {child}"
             )
         self.revalidate()
         expected = self.snapshot["files"][child]["sha256"]

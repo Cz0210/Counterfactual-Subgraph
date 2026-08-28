@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -48,6 +49,22 @@ TASTE_REQUIRED_CHECKPOINT_FILES = (
     "last_checkpoint.json",
     "checkpoint_reload.json",
 )
+
+
+def _descriptor_path_or_resolve(path_like: str | Path) -> Path:
+    """Preserve an already-held Linux procfs directory authority."""
+
+    path = Path(path_like).expanduser()
+    parts = path.parts
+    if (
+        sys.platform.startswith("linux")
+        and len(parts) >= 5
+        and parts[0] == os.sep
+        and parts[1:4] == ("proc", "self", "fd")
+        and parts[4].isdigit()
+    ):
+        return path
+    return path.resolve()
 
 
 def _require_torch() -> Any:
@@ -127,7 +144,7 @@ def _atomic_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
 
 
 def update_checkpoint_sha256sums(checkpoint_dir: str | Path) -> Path:
-    root = Path(checkpoint_dir).expanduser().resolve()
+    root = _descriptor_path_or_resolve(checkpoint_dir)
     lines = [
         f"{sha256_file(path)}  {path.name}"
         for path in sorted(root.iterdir())
@@ -144,7 +161,7 @@ def verify_checkpoint_bundle(
     verify_hashes: bool = True,
     require_taste_closure: bool = True,
 ) -> dict[str, Any]:
-    root = Path(checkpoint_dir).expanduser().resolve()
+    root = _descriptor_path_or_resolve(checkpoint_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"GNN checkpoint directory does not exist: {root}")
     missing = [name for name in REQUIRED_CHECKPOINT_FILES if not (root / name).is_file()]
@@ -367,7 +384,7 @@ def save_gnn_checkpoint_bundle(
     """Write the complete immutable classifier bundle expected by downstream jobs."""
 
     torch = _require_torch()
-    root = Path(checkpoint_dir).expanduser().resolve()
+    root = _descriptor_path_or_resolve(checkpoint_dir)
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"GNN checkpoint output must be fresh: {root}")
     root.mkdir(parents=True, exist_ok=True)
@@ -596,7 +613,7 @@ def load_gnn_checkpoint_bundle(
     verify_hashes: bool = True,
     require_taste_closure: bool = True,
 ) -> tuple[MolecularGNN, dict[str, Any]]:
-    root = Path(checkpoint_dir).expanduser().resolve()
+    root = _descriptor_path_or_resolve(checkpoint_dir)
     audit = verify_checkpoint_bundle(
         root,
         verify_hashes=verify_hashes,
@@ -669,7 +686,9 @@ class GNNOracle(BaseOracle):
         self.edge_feature_dim = int(edge_feature_dim)
         self.default_batch_size = int(default_batch_size)
         self.checkpoint_dir = (
-            None if checkpoint_dir is None else Path(checkpoint_dir).expanduser().resolve()
+            None
+            if checkpoint_dir is None
+            else _descriptor_path_or_resolve(checkpoint_dir)
         )
         self.validate_contract()
         if self.edge_feature_dim <= 0 or self.default_batch_size <= 0:

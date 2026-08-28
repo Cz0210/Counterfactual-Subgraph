@@ -12,11 +12,16 @@ import csv
 import gc
 import hashlib
 import importlib
+import importlib.machinery
+import importlib.metadata
+import inspect
 import json
 import math
 import os
 import random
 import resource
+import site
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,12 +29,15 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from src.data.dataset_registry import get_dataset_spec
 
+from .globalgce_bace_native_rules import OFFICIAL_GLOBALGCE_COMMIT
+
 from .globalgce_resumable import (
     GLOBALGCE_TRAINING_RESUME_IDENTITY_SCHEMA_VERSION,
+    _normalize_checkpoint_file_evidence,
     normalize_globalgce_training_resume_identity,
     train_globalgce_resumable,
     validate_exact_top_k_proof_identity,
@@ -84,6 +92,57 @@ REQUIRED_OUTPUT_FILES = (
     "generation_resume_checkpoint.json",
     "_RUN_COMPLETE.json",
 )
+FROZEN_GINE_IN_MEMORY_FILES = frozenset(
+    {
+        "model.pt",
+        "model_card.json",
+        "feature_schema.json",
+        "label_map.json",
+        "split_manifest.json",
+        "test_evaluation_status.json",
+        "temperature_scaling.json",
+    }
+)
+OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA = "official_globalgce_api_signature_v1"
+OFFICIAL_GLOBALGCE_MODULE_PROVENANCE_SCHEMA = (
+    "official_globalgce_module_provenance_v1"
+)
+OFFICIAL_API_SIGNATURE_FILE = "official_api_signature.json"
+PYTHON_MODULE_PROVENANCE_FILE = "python_module_provenance.json"
+PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES = {
+    "models.GTGNN.GTGNN": (
+        "(x_dim, h_dim, n_out, num_edge_attr, device, save_model_path)"
+    ),
+    "models.GlobalGCE.GlobalGCE": (
+        "(x_dim, h_dim, z_dim, edge_attr_dim, dropout, fs_min_nodes, "
+        "fs_max_nodes, topk_fs, random_subgraph, save_fs_path, device, gt_gnn)"
+    ),
+    "models.GlobalGCE.GlobalGCE.get_fs_expanded_data": (
+        "(self, train_loader, crop_expansion=False)"
+    ),
+    "models.GlobalGCE.GlobalGCE.get_rules": "(self, fss)",
+    "models.GlobalGCE.GlobalGCE.run_one_batch": "(self, rules, data)",
+    "models.GlobalGCE.generate_cfs": "(dataloader, rules, device)",
+    "models.GlobalGCE.concate_inputs_with_local_recourse": (
+        "(features, adj, edge_attrs, fs_index_list, mask_idx_list, rules, device)"
+    ),
+    "models.fsg.FrequentSubgraphGenerator": (
+        "(fs_min_vertices, fs_max_vertices, save_fs_path, topk, "
+        "random_subgraph=False)"
+    ),
+    "models.gSpan.gSpan.gSpan": (
+        "(nx_graph_list, min_support=10, min_num_vertices=1, "
+        "max_num_vertices=inf, max_ngraphs=inf, is_undirected=True, "
+        "verbose=False, visualize=False, where=False)"
+    ),
+    "models.models_utils.train_globalgce": (
+        "(epochs, pred_model, model, lr, train_loader, val_loader, "
+        "save_rule_path, save_model_path)"
+    ),
+    "models.models_utils.test_globalgce": (
+        "(data_loader, model, gnn_model, rules)"
+    ),
+}
 
 
 class GlobalGCEMutagenicityCodecError(RuntimeError):
@@ -218,6 +277,10 @@ class NativeGeneratorProtocol(Protocol):
             Callable[[int, int, int, list[dict[str, Any]]], None] | None
         ),
         rules_only: bool = False,
+        expected_resume_checkpoint: Mapping[str, Any] | None = None,
+        on_resume_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+        after_epoch_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+        on_generation_complete: Callable[[], None] | None = None,
     ) -> "NativeGenerationResult":
         ...
 
@@ -520,6 +583,18 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
+def _read_csv_payload(payload: bytes) -> list[dict[str, str]]:
+    if type(payload) is not bytes or not payload:
+        raise ValueError("Descriptor-authorized native train CSV payload is empty.")
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "Descriptor-authorized native train CSV payload is not UTF-8."
+        ) from exc
+    return [dict(row) for row in csv.DictReader(io.StringIO(text, newline=""))]
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -528,8 +603,30 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _descriptor_path_or_resolve(
+    path_like: str | Path,
+    *,
+    strict: bool = False,
+) -> Path:
+    """Preserve a Linux /proc/self/fd authority instead of resolving its link."""
+
+    path = Path(path_like).expanduser()
+    parts = path.parts
+    if (
+        sys.platform.startswith("linux")
+        and len(parts) >= 5
+        and parts[0] == os.sep
+        and parts[1:4] == ("proc", "self", "fd")
+        and parts[4].isdigit()
+    ):
+        if strict and not path.exists():
+            raise FileNotFoundError(path)
+        return path
+    return path.resolve(strict=strict)
+
+
 def _file_identity(path_like: str | Path) -> dict[str, Any]:
-    path = Path(path_like).expanduser().resolve()
+    path = _descriptor_path_or_resolve(path_like)
     stat = path.stat()
     payload: dict[str, Any] = {
         "path": str(path),
@@ -832,7 +929,7 @@ def _frozen_gine_resume_identity(
     from src.data.dataset_registry import normalize_dataset_id
     from src.oracles.gnn_oracle import verify_checkpoint_bundle
 
-    root = checkpoint_root.expanduser().resolve(strict=True)
+    root = _descriptor_path_or_resolve(checkpoint_root, strict=True)
     audit = verify_checkpoint_bundle(root, verify_hashes=True)
     manifest_path = root / "sha256sums.txt"
     declared: dict[str, str] = {}
@@ -990,11 +1087,12 @@ def _load_general_train_rows(
     *,
     allowed_parent_ids: Sequence[str] | None = None,
     num_classes: int = 2,
+    payload: bytes | None = None,
 ) -> list[TrainParent]:
     if type(num_classes) is not int or num_classes < 2:
         raise ValueError("Native train num_classes must be an exact integer >= 2.")
     _reject_non_train_path(path, description="Native GNN train CSV")
-    rows = _read_csv(path)
+    rows = _read_csv(path) if payload is None else _read_csv_payload(payload)
     if not rows:
         raise ValueError(f"Native GNN train CSV is empty: {path}")
     required = {"molecule_id", "label", "split"}
@@ -1050,7 +1148,7 @@ def _load_general_train_rows(
 
 
 def _resolve_official_src(official_root: str | Path) -> Path:
-    root = Path(official_root).expanduser().resolve()
+    root = _descriptor_path_or_resolve(official_root)
     candidates = (root, root / "src")
     for candidate in candidates:
         if (
@@ -1264,20 +1362,527 @@ def _build_dense_dataset(
     )
 
 
-def _import_official_modules(official_src: Path) -> dict[str, Any]:
+_OFFICIAL_SOURCE_AUTHORITY_KEYS = frozenset(
+    {"device", "inode", "bytes", "sha256"}
+)
+
+
+def _normalize_official_source_authority(
+    value: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]] | None:
+    if value is None:
+        return None
+    if type(value) is not dict or not value:
+        raise ValueError(
+            "Official GlobalGCE source authority must be one nonempty dict."
+        )
+    normalized: dict[str, dict[str, Any]] = {}
+    for relative, evidence in value.items():
+        path = Path(relative) if type(relative) is str else Path(".")
+        if (
+            type(relative) is not str
+            or not relative
+            or path.is_absolute()
+            or path.as_posix() != relative
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or path.suffix != ".py"
+            or type(evidence) is not dict
+            or set(evidence) != _OFFICIAL_SOURCE_AUTHORITY_KEYS
+            or any(
+                type(evidence.get(field)) is not int or evidence[field] < minimum
+                for field, minimum in (
+                    ("device", 0),
+                    ("inode", 1),
+                    ("bytes", 1),
+                )
+            )
+            or type(evidence.get("sha256")) is not str
+            or len(evidence["sha256"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in evidence["sha256"]
+            )
+        ):
+            raise ValueError("Official GlobalGCE source authority is malformed.")
+        normalized[relative] = dict(evidence)
+    return normalized
+
+
+def _hash_open_regular_source(path: Path) -> dict[str, Any]:
+    named = os.stat(path, follow_symlinks=False)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+            or any(
+                int(getattr(named, field)) != int(getattr(observed, field))
+                for field in ("st_dev", "st_ino", "st_size")
+            )
+        ):
+            raise RuntimeError("Official GlobalGCE imported source leaf changed.")
+        size = int(observed.st_size)
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < size:
+            block = os.pread(descriptor, min(1024 * 1024, size - offset), offset)
+            if not block:
+                raise RuntimeError("Official GlobalGCE imported source ended early.")
+            digest.update(block)
+            offset += len(block)
+        if os.pread(descriptor, 1, size):
+            raise RuntimeError("Official GlobalGCE imported source grew while hashing.")
+        return {
+            "device": int(observed.st_dev),
+            "inode": int(observed.st_ino),
+            "bytes": size,
+            "sha256": digest.hexdigest(),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _reject_official_import_artifacts(official_src: Path) -> None:
+    """Refuse bytecode/native shadows before Python can select them."""
+
+    for entry in os.scandir(official_src):
+        if entry.name == "__pycache__" or Path(entry.name).suffix.lower() in {
+            ".pyc",
+            ".pyo",
+            ".so",
+            ".dylib",
+        }:
+            raise RuntimeError(
+                "Official GlobalGCE source root contains runtime code artifacts."
+            )
+    for relative_root in ("models", "data"):
+        root = official_src / relative_root
+        if not root.is_dir():
+            continue
+        for directory, directory_names, file_names in os.walk(root, followlinks=False):
+            if "__pycache__" in directory_names:
+                raise RuntimeError(
+                    "Official GlobalGCE source closure contains __pycache__."
+                )
+            for name in file_names:
+                if Path(name).suffix.lower() in {".pyc", ".pyo", ".so", ".dylib"}:
+                    raise RuntimeError(
+                        "Official GlobalGCE source closure contains runtime code "
+                        "artifacts."
+                    )
+
+
+def _is_official_module_name(name: str) -> bool:
+    return (
+        name == "models"
+        or name.startswith("models.")
+        or name == "data"
+        or name.startswith("data.")
+        or name == "utils"
+    )
+
+
+def _official_module_names() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            name
+            for name in sys.modules
+            if _is_official_module_name(name)
+        )
+    )
+
+
+def _validate_official_module(
+    name: str,
+    module: Any,
+    *,
+    official_src: Path,
+    expected_source_authority: Mapping[str, Mapping[str, Any]] | None,
+) -> None:
+    module_file = getattr(module, "__file__", None)
+    if module_file is None:
+        paths = tuple(str(path) for path in getattr(module, "__path__", ()))
+        if (
+            name not in {"models", "data"}
+            or paths != (str(official_src / name),)
+        ):
+            raise RuntimeError(
+                "Cached official GlobalGCE module has no exact source origin."
+            )
+        return
+    path = Path(str(module_file))
+    if path.suffix != ".py":
+        raise RuntimeError(
+            "Official GlobalGCE module was not loaded from Python source."
+        )
+    try:
+        relative = path.relative_to(official_src).as_posix()
+    except ValueError as exc:
+        raise RuntimeError(
+            "Cached official GlobalGCE module originated outside the held checkout."
+        ) from exc
+    if not (
+        relative == "utils.py"
+        or relative.startswith("models/")
+        or relative.startswith("data/")
+    ):
+        raise RuntimeError("Official GlobalGCE module source origin changed.")
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(spec, "loader", None)
+    if (
+        spec is None
+        or type(getattr(spec, "origin", None)) is not str
+        or Path(spec.origin) != path
+        or not isinstance(loader, importlib.machinery.SourceFileLoader)
+        or Path(str(getattr(loader, "path", ""))) != path
+    ):
+        raise RuntimeError(
+            "Official GlobalGCE module loader/source origin changed."
+        )
+    observed = _hash_open_regular_source(path)
+    if expected_source_authority is not None:
+        expected = expected_source_authority.get(relative)
+        if expected is None or observed != dict(expected):
+            raise RuntimeError(
+                "Official GlobalGCE module differs from the held source authority."
+            )
+
+
+def _validate_official_module_closure(
+    *,
+    official_src: Path,
+    expected_source_authority: Mapping[str, Mapping[str, Any]] | None,
+) -> None:
+    names = _official_module_names()
+    if not names or "models" not in names:
+        raise RuntimeError("Official GlobalGCE model module closure is incomplete.")
+    for name in names:
+        _validate_official_module(
+            name,
+            sys.modules[name],
+            official_src=official_src,
+            expected_source_authority=expected_source_authority,
+        )
+
+
+def _validate_named_official_source_authority(
+    official_src: Path,
+    authority: Mapping[str, Mapping[str, Any]],
+) -> None:
+    for relative, expected in authority.items():
+        observed = _hash_open_regular_source(official_src / relative)
+        if observed != dict(expected):
+            raise RuntimeError(
+                "Official GlobalGCE named source differs from held authority."
+            )
+
+
+def _import_official_modules(
+    official_src: Path,
+    *,
+    expected_source_authority: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    official_src = _descriptor_path_or_resolve(official_src, strict=True)
+    normalized_authority = _normalize_official_source_authority(
+        expected_source_authority
+    )
+    _reject_official_import_artifacts(official_src)
+    if normalized_authority is not None:
+        _validate_named_official_source_authority(
+            official_src,
+            normalized_authority,
+        )
+
+    # A prior branch may leave a valid official closure in this interpreter.
+    # Validate it before removal so a preloaded attacker cannot be silently
+    # laundered, then import a fresh branch-local closure from the held root.
+    prior_names = _official_module_names()
+    if prior_names:
+        for name in prior_names:
+            _validate_official_module(
+                name,
+                sys.modules[name],
+                official_src=official_src,
+                expected_source_authority=normalized_authority,
+            )
+        if normalized_authority is not None:
+            _validate_named_official_source_authority(
+                official_src,
+                normalized_authority,
+            )
+        for name in reversed(prior_names):
+            sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
     source_text = str(official_src)
-    if source_text not in sys.path:
-        sys.path.insert(0, source_text)
-    models_utils = importlib.import_module("models.models_utils")
-    return {
-        "GTGNN": importlib.import_module("models.GTGNN").GTGNN,
-        "GlobalGCE": importlib.import_module("models.GlobalGCE").GlobalGCE,
-        "generate_cfs": importlib.import_module("models.GlobalGCE").generate_cfs,
-        "train_globalgce": models_utils.train_globalgce,
-        "test_globalgce": models_utils.test_globalgce,
-        "fsg_module": importlib.import_module("models.fsg"),
-        "gspan_module": importlib.import_module("models.gSpan.gSpan"),
+    original_path = list(sys.path)
+    original_dont_write_bytecode = sys.dont_write_bytecode
+    sys.path[:] = [source_text, *(entry for entry in sys.path if entry != source_text)]
+    sys.dont_write_bytecode = True
+    try:
+        models_utils = importlib.import_module("models.models_utils")
+        gtgnn = importlib.import_module("models.GTGNN")
+        globalgce = importlib.import_module("models.GlobalGCE")
+        fsg_module = importlib.import_module("models.fsg")
+        gspan_module = importlib.import_module("models.gSpan.gSpan")
+        _validate_official_module_closure(
+            official_src=official_src,
+            expected_source_authority=normalized_authority,
+        )
+        if normalized_authority is not None:
+            _validate_named_official_source_authority(
+                official_src,
+                normalized_authority,
+            )
+        return {
+            "GTGNN": gtgnn.GTGNN,
+            "GlobalGCE": globalgce.GlobalGCE,
+            "generate_cfs": globalgce.generate_cfs,
+            "train_globalgce": models_utils.train_globalgce,
+            "test_globalgce": models_utils.test_globalgce,
+            "fsg_module": fsg_module,
+            "gspan_module": gspan_module,
+            "gtgnn_module": gtgnn,
+            "globalgce_module": globalgce,
+            "models_utils_module": models_utils,
+        }
+    except BaseException:
+        for name in reversed(_official_module_names()):
+            sys.modules.pop(name, None)
+        raise
+    finally:
+        sys.dont_write_bytecode = original_dont_write_bytecode
+        sys.path[:] = original_path
+
+
+def validate_official_globalgce_api_signatures(
+    modules: Mapping[str, Any],
+) -> dict[str, Any]:
+    globalgce = modules.get("globalgce_module")
+    models_utils = modules.get("models_utils_module")
+    gtgnn = modules.get("gtgnn_module")
+    fsg = modules.get("fsg_module")
+    gspan = modules.get("gspan_module")
+    if any(value is None for value in (globalgce, models_utils, gtgnn, fsg, gspan)):
+        raise RuntimeError("BLOCKED_OFFICIAL_API_SIGNATURE_DRIFT")
+    entrypoints = {
+        "models.GTGNN.GTGNN": gtgnn.GTGNN,
+        "models.GlobalGCE.GlobalGCE": globalgce.GlobalGCE,
+        "models.GlobalGCE.GlobalGCE.get_fs_expanded_data": (
+            globalgce.GlobalGCE.get_fs_expanded_data
+        ),
+        "models.GlobalGCE.GlobalGCE.get_rules": globalgce.GlobalGCE.get_rules,
+        "models.GlobalGCE.GlobalGCE.run_one_batch": (
+            globalgce.GlobalGCE.run_one_batch
+        ),
+        "models.GlobalGCE.generate_cfs": globalgce.generate_cfs,
+        "models.GlobalGCE.concate_inputs_with_local_recourse": (
+            globalgce.concate_inputs_with_local_recourse
+        ),
+        "models.fsg.FrequentSubgraphGenerator": fsg.FrequentSubgraphGenerator,
+        "models.gSpan.gSpan.gSpan": gspan.gSpan,
+        "models.models_utils.train_globalgce": models_utils.train_globalgce,
+        "models.models_utils.test_globalgce": models_utils.test_globalgce,
     }
+    observed: dict[str, str] = {}
+    for name, target in entrypoints.items():
+        signature = inspect.signature(target)
+        if any(
+            parameter.kind
+            in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+            for parameter in signature.parameters.values()
+        ):
+            raise RuntimeError("BLOCKED_OFFICIAL_API_SIGNATURE_DRIFT")
+        rendered = str(signature)
+        observed[name] = rendered
+        if rendered != PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES[name]:
+            raise RuntimeError("BLOCKED_OFFICIAL_API_SIGNATURE_DRIFT")
+    return {
+        "schema_version": OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA,
+        "official_globalgce_commit": OFFICIAL_GLOBALGCE_COMMIT,
+        "signatures": observed,
+    }
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _module_provenance_entry(
+    *,
+    name: str,
+    module: Any,
+    expected_roots: Sequence[Path],
+    package_version: str,
+) -> dict[str, Any]:
+    raw = getattr(module, "__file__", None)
+    if type(raw) is not str or not raw or raw.endswith((".pyc", ".pyo")):
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    path = Path(raw)
+    try:
+        realpath = path.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE") from exc
+    normalized_roots = tuple(root.resolve(strict=True) for root in expected_roots)
+    if not any(_path_is_within(realpath, root) for root in normalized_roots):
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    evidence = _hash_open_regular_source(path)
+    return {
+        "module": name,
+        "module_file": str(path),
+        "realpath": str(realpath),
+        "sha256": evidence["sha256"],
+        "device": evidence["device"],
+        "inode": evidence["inode"],
+        "bytes": evidence["bytes"],
+        "package_version": package_version,
+        "expected_roots": [str(root) for root in normalized_roots],
+    }
+
+
+def capture_globalgce_module_provenance(
+    *,
+    official_src: Path,
+    expected_source_authority: Mapping[str, Mapping[str, Any]] | None,
+    require_isolated: bool,
+) -> dict[str, Any]:
+    if type(require_isolated) is not bool:
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    if require_isolated and (
+        not bool(sys.flags.isolated)
+        or not bool(sys.flags.no_user_site)
+        or "" in sys.path
+    ):
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    normalized_authority = _normalize_official_source_authority(
+        expected_source_authority
+    )
+    if require_isolated and normalized_authority is None:
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    _validate_official_module_closure(
+        official_src=official_src,
+        expected_source_authority=normalized_authority,
+    )
+    if normalized_authority is not None:
+        _validate_named_official_source_authority(
+            official_src,
+            normalized_authority,
+        )
+    try:
+        import torch
+        import torch_geometric
+
+        bridge = importlib.import_module(
+            "src.baselines.globalgce_frozen_gine_bridge"
+        )
+        oracle = importlib.import_module("src.oracles.gnn_oracle")
+        adapter = sys.modules[__name__]
+        torch_version = importlib.metadata.version("torch")
+        geometric_version = importlib.metadata.version("torch-geometric")
+    except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE") from exc
+    project_root = Path(__file__).resolve().parents[2]
+    site_roots = tuple(
+        Path(value)
+        for value in site.getsitepackages()
+        if _path_is_within(Path(value).resolve(), Path(sys.prefix).resolve())
+    )
+    if not site_roots:
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    entries: list[dict[str, Any]] = []
+    for name in _official_module_names():
+        # ``models``/``data`` may be namespace packages in the pinned
+        # checkout.  Their exact ``__path__`` is already enforced by
+        # ``_validate_official_module_closure``; provenance rows are reserved
+        # for real source leaves that can carry an fd-bound SHA256 identity.
+        if getattr(sys.modules[name], "__file__", None) is None:
+            continue
+        entries.append(
+            _module_provenance_entry(
+                name=name,
+                module=sys.modules[name],
+                expected_roots=(official_src,),
+                package_version=OFFICIAL_GLOBALGCE_COMMIT,
+            )
+        )
+    for name, module, version in (
+        ("torch", torch, torch_version),
+        ("torch_geometric", torch_geometric, geometric_version),
+        (
+            "src.baselines.globalgce_mutagenicity_adapter",
+            adapter,
+            "project-source",
+        ),
+        (
+            "src.baselines.globalgce_frozen_gine_bridge",
+            bridge,
+            "project-source",
+        ),
+        ("src.oracles.gnn_oracle", oracle, "project-source"),
+    ):
+        entries.append(
+            _module_provenance_entry(
+                name=name,
+                module=module,
+                expected_roots=(
+                    (project_root,)
+                    if name.startswith("src.")
+                    else site_roots
+                ),
+                package_version=version,
+            )
+        )
+    entries.sort(key=lambda row: row["module"])
+    observed_names = {row["module"] for row in entries}
+    if not {
+        "models.GTGNN",
+        "models.GlobalGCE",
+        "models.models_utils",
+        "models.fsg",
+        "models.gSpan.gSpan",
+        "torch",
+        "torch_geometric",
+        "src.baselines.globalgce_mutagenicity_adapter",
+        "src.baselines.globalgce_frozen_gine_bridge",
+        "src.oracles.gnn_oracle",
+    }.issubset(observed_names):
+        raise RuntimeError("BLOCKED_PYTHON_MODULE_PROVENANCE")
+    return {
+        "schema_version": OFFICIAL_GLOBALGCE_MODULE_PROVENANCE_SCHEMA,
+        "official_globalgce_commit": OFFICIAL_GLOBALGCE_COMMIT,
+        "isolated_python": bool(sys.flags.isolated),
+        "no_user_site": bool(sys.flags.no_user_site),
+        "entries": entries,
+    }
+
+
+def _write_canonical_identity_once(path: Path, value: Mapping[str, Any]) -> str:
+    payload = (_json_dumps(value) + "\n").encode("utf-8")
+    expected = hashlib.sha256(payload).hexdigest()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        if not path.is_file() or _sha256_file(path) != expected:
+            raise RuntimeError("GlobalGCE startup identity document changed.")
+        return expected
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise RuntimeError("GlobalGCE startup identity write failed.")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return expected
 
 
 def _train_native_gnn(
@@ -1936,7 +2541,7 @@ def probe_source_graph_codec(
     }
     if atom_attribute_audit_path is not None:
         _write_jsonl(
-            Path(atom_attribute_audit_path).expanduser().resolve(),
+            _descriptor_path_or_resolve(atom_attribute_audit_path),
             charge_audit_rows,
         )
     return summary
@@ -2104,6 +2709,7 @@ def _prepare_native_and_source_datasets(
     torch_module: Any,
     dataset_name: str = DATASET_NAME,
     native_train_parent_ids: Sequence[str] | None = None,
+    native_train_payload: bytes | None = None,
     num_classes: int = 2,
     source_label: int = SOURCE_LABEL,
 ) -> tuple[
@@ -2119,6 +2725,7 @@ def _prepare_native_and_source_datasets(
         native_train_csv,
         allowed_parent_ids=native_train_parent_ids,
         num_classes=num_classes,
+        payload=native_train_payload,
     )
     native_train_idx, native_val_idx = _stratified_native_split(
         native_parents,
@@ -2176,15 +2783,21 @@ class OfficialGlobalGCEMutagenicityGenerator:
         target_label: int = TARGET_LABEL,
         num_classes: int = 2,
         native_train_parent_ids: Sequence[str] | None = None,
+        frozen_gine_payloads: Mapping[str, bytes] | None = None,
+        native_train_payload: bytes | None = None,
+        official_source_authority: (
+            Mapping[str, Mapping[str, Any]] | None
+        ) = None,
+        require_isolated_imports: bool = False,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
         configured = native_train_csv or os.environ.get(
             "GLOBALGCE_MUTAGENICITY_NATIVE_TRAIN_CSV"
         )
-        self.native_train_csv = Path(
+        self.native_train_csv = _descriptor_path_or_resolve(
             configured or repo_root / DEFAULT_NATIVE_TRAIN_CSV
-        ).expanduser().resolve()
+        )
         dataset_spec = get_dataset_spec(str(dataset_name))
         self.dataset_id = dataset_spec.dataset_id
         self.dataset_name = dataset_spec.display_name
@@ -2192,8 +2805,46 @@ class OfficialGlobalGCEMutagenicityGenerator:
         self.frozen_gine_checkpoint = (
             None
             if frozen_gine_checkpoint is None
-            else Path(frozen_gine_checkpoint).expanduser().resolve()
+            else _descriptor_path_or_resolve(frozen_gine_checkpoint)
         )
+        if frozen_gine_payloads is not None and (
+            type(frozen_gine_payloads) is not dict
+            or set(frozen_gine_payloads) != FROZEN_GINE_IN_MEMORY_FILES
+            or any(
+                type(name) is not str or type(payload) is not bytes or not payload
+                for name, payload in frozen_gine_payloads.items()
+            )
+        ):
+            raise ValueError(
+                "Descriptor-authorized frozen GINE payloads require the exact "
+                "seven-file set of nonempty native bytes."
+            )
+        self.frozen_gine_payloads = (
+            None if frozen_gine_payloads is None else dict(frozen_gine_payloads)
+        )
+        self.native_train_payload = (
+            None if native_train_payload is None else bytes(native_train_payload)
+        )
+        self.official_source_authority = _normalize_official_source_authority(
+            official_source_authority
+        )
+        if type(require_isolated_imports) is not bool:
+            raise ValueError("GlobalGCE isolated-import requirement must be boolean.")
+        self.require_isolated_imports = require_isolated_imports
+        if native_train_payload is not None and (
+            type(native_train_payload) is not bytes or not native_train_payload
+        ):
+            raise ValueError(
+                "Descriptor-authorized native train payload must be nonempty bytes."
+            )
+        if (
+            self.frozen_gine_payloads is not None
+            and self.frozen_gine_checkpoint is None
+        ):
+            raise ValueError(
+                "Descriptor-authorized frozen GINE payloads require the exact "
+                "seven-file set and one full checkpoint authority."
+            )
         if type(num_classes) is not int or num_classes < 2:
             raise ValueError("GlobalGCE num_classes must be an exact integer >= 2.")
         if type(source_label) is not int or type(target_label) is not int:
@@ -2261,7 +2912,18 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "generator_class": type(self).__name__,
             "dataset_name": self.dataset_name,
             "min_freq": self.min_freq,
-            "native_train_csv": _file_identity(self.native_train_csv),
+            "native_train_csv": (
+                _file_identity(self.native_train_csv)
+                if self.native_train_payload is None
+                else {
+                    "path": str(self.native_train_csv),
+                    "kind": "descriptor_authorized_file_payload",
+                    "size": len(self.native_train_payload),
+                    "sha256": hashlib.sha256(
+                        self.native_train_payload
+                    ).hexdigest(),
+                }
+            ),
             "native_train_parent_id_count": (
                 None
                 if self.native_train_parent_ids is None
@@ -2276,6 +2938,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
             ),
             "official_src": str(self.official_src),
             "official_source_files": source_files,
+            "official_source_authority_sha256": (
+                None
+                if self.official_source_authority is None
+                else hashlib.sha256(
+                    _json_dumps(self.official_source_authority).encode("utf-8")
+                ).hexdigest()
+            ),
+            "official_globalgce_commit": OFFICIAL_GLOBALGCE_COMMIT,
+            "require_isolated_imports": self.require_isolated_imports,
             "prediction_backend": (
                 "frozen_gine_differentiable_bridge"
                 if self.frozen_gine_checkpoint is not None
@@ -2285,6 +2956,14 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 _file_identity(self.frozen_gine_checkpoint / "model.pt")
                 if self.frozen_gine_checkpoint is not None
                 else None
+            ),
+            "frozen_gine_payload_sha256": (
+                None
+                if self.frozen_gine_payloads is None
+                else {
+                    name: hashlib.sha256(payload).hexdigest()
+                    for name, payload in sorted(self.frozen_gine_payloads.items())
+                }
             ),
             "source_label": self.source_label,
             "target_label": self.target_label,
@@ -2298,7 +2977,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
         seed: int,
         output_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        if not self.native_train_csv.is_file():
+        if self.native_train_payload is None and not self.native_train_csv.is_file():
             raise FileNotFoundError(
                 "Native GNN train CSV is required for codec metadata: "
                 f"{self.native_train_csv}"
@@ -2322,11 +3001,12 @@ class OfficialGlobalGCEMutagenicityGenerator:
             torch_module=torch,
             dataset_name=self.dataset_name,
             native_train_parent_ids=self.native_train_parent_ids,
+            native_train_payload=self.native_train_payload,
             num_classes=self.num_classes,
             source_label=self.source_label,
         )
         attribute_audit_path = (
-            Path(output_path).expanduser().resolve().parent
+            _descriptor_path_or_resolve(output_path).parent
             / "source_atom_attribute_audit.jsonl"
             if output_path is not None
             else None
@@ -2353,7 +3033,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             }
         )
         if output_path is not None:
-            _write_json(Path(output_path).expanduser().resolve(), summary)
+            _write_json(_descriptor_path_or_resolve(output_path), summary)
         require_source_codec_gate(summary)
         return summary
 
@@ -2382,7 +3062,31 @@ class OfficialGlobalGCEMutagenicityGenerator:
             Callable[[int, int, int, list[dict[str, Any]]], None] | None
         ) = None,
         rules_only: bool = False,
+        expected_resume_checkpoint: Mapping[str, Any] | None = None,
+        on_resume_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+        after_epoch_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+        on_generation_complete: Callable[[], None] | None = None,
     ) -> NativeGenerationResult:
+        if expected_resume_checkpoint is not None:
+            _normalize_checkpoint_file_evidence(expected_resume_checkpoint)
+        for callback_name, callback in (
+            ("on_resume_checkpoint", on_resume_checkpoint),
+            ("after_epoch_checkpoint", after_epoch_checkpoint),
+            ("on_generation_complete", on_generation_complete),
+        ):
+            if callback is not None and not callable(callback):
+                raise TypeError(f"GlobalGCE {callback_name} must be callable or None.")
+        generation_complete_notified = False
+
+        def _notify_generation_complete() -> None:
+            nonlocal generation_complete_notified
+            if generation_complete_notified:
+                raise RuntimeError(
+                    "GlobalGCE generation completion callback was repeated."
+                )
+            generation_complete_notified = True
+            if on_generation_complete is not None:
+                on_generation_complete()
         if not parents:
             raise ValueError("GlobalGCE requires a non-empty source train cohort.")
         if len({parent.parent_id for parent in parents}) != len(parents):
@@ -2414,12 +3118,23 @@ class OfficialGlobalGCEMutagenicityGenerator:
             raise ValueError(
                 "start_parent_offset must be within the selected parent cohort."
             )
-        if not self.native_train_csv.is_file():
+        if self.native_train_payload is None and not self.native_train_csv.is_file():
             raise FileNotFoundError(
                 "Official GlobalGCE requires the reviewed processed train "
                 f"CSV for its native GNN: {self.native_train_csv}"
             )
-        modules = _import_official_modules(self.official_src)
+        modules = _import_official_modules(
+            self.official_src,
+            expected_source_authority=self.official_source_authority,
+        )
+        official_api_signature = validate_official_globalgce_api_signatures(
+            modules
+        )
+        python_module_provenance = capture_globalgce_module_provenance(
+            official_src=self.official_src,
+            expected_source_authority=self.official_source_authority,
+            require_isolated=self.require_isolated_imports,
+        )
         if self.min_freq is not None:
             # Official fsg.py indexes this process-local mapping directly.
             # The project resolves the value before training and records it in
@@ -2455,10 +3170,19 @@ class OfficialGlobalGCEMutagenicityGenerator:
             torch_module=torch,
             dataset_name=self.dataset_name,
             native_train_parent_ids=self.native_train_parent_ids,
+            native_train_payload=self.native_train_payload,
             num_classes=self.num_classes,
             source_label=self.source_label,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
+        official_api_signature_sha256 = _write_canonical_identity_once(
+            output_dir / OFFICIAL_API_SIGNATURE_FILE,
+            official_api_signature,
+        )
+        python_module_provenance_sha256 = _write_canonical_identity_once(
+            output_dir / PYTHON_MODULE_PROVENANCE_FILE,
+            python_module_provenance,
+        )
         codec_summary = probe_source_graph_codec(
             source_dataset,
             parents,
@@ -2572,13 +3296,22 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 GlobalGCETargetClassAdapter,
             )
 
-            bridge = FrozenGINEDifferentiableBridge.from_checkpoint(
-                frozen_gine_root,
-                atom_symbols=tuple(source_dataset.atom_symbols),
-                bond_names=tuple(source_dataset.bond_names),
-                device=resolved_device,
-                expected_num_classes=self.num_classes,
-            )
+            if self.frozen_gine_payloads is None:
+                bridge = FrozenGINEDifferentiableBridge.from_checkpoint(
+                    frozen_gine_root,
+                    atom_symbols=tuple(source_dataset.atom_symbols),
+                    bond_names=tuple(source_dataset.bond_names),
+                    device=resolved_device,
+                    expected_num_classes=self.num_classes,
+                )
+            else:
+                bridge = FrozenGINEDifferentiableBridge.from_payloads(
+                    self.frozen_gine_payloads,
+                    atom_symbols=tuple(source_dataset.atom_symbols),
+                    bond_names=tuple(source_dataset.bond_names),
+                    device=resolved_device,
+                    expected_num_classes=self.num_classes,
+                )
             legacy_bace_target_view = (
                 self.num_classes == 2
                 and self.source_label == 1
@@ -2675,17 +3408,27 @@ class OfficialGlobalGCEMutagenicityGenerator:
         elif use_frozen_gine:
             from src.data.molecular_graph_dataset import MolecularGraphData
             from src.data.molecular_graph_featurizer import MolecularGraphFeaturizer
-            from src.oracles.oracle_factory import build_oracle
+            if self.frozen_gine_payloads is None:
+                from src.oracles.oracle_factory import build_oracle
 
-            oracle = build_oracle(
-                dataset=str(self.dataset_name).lower(),
-                backend="gnn",
-                checkpoint=frozen_gine_root,
-                device=resolved_device,
-                batch_size=256,
-                num_classes=self.num_classes,
-                source_label=self.source_label,
-            )
+                oracle = build_oracle(
+                    dataset=str(self.dataset_name).lower(),
+                    backend="gnn",
+                    checkpoint=frozen_gine_root,
+                    device=resolved_device,
+                    batch_size=256,
+                    num_classes=self.num_classes,
+                    source_label=self.source_label,
+                )
+            else:
+                from src.oracles.gnn_oracle import GNNOracle
+
+                oracle = GNNOracle.from_payloads(
+                    self.frozen_gine_payloads,
+                    device=resolved_device,
+                    batch_size=256,
+                    checkpoint_dir=frozen_gine_root,
+                )
             featurizer = MolecularGraphFeaturizer(bridge.feature_schema)
             source_graphs = []
             for parent in parents:
@@ -2909,6 +3652,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     else None
                 ),
                 resume_identity=training_resume_identity,
+                expected_resume_checkpoint=expected_resume_checkpoint,
+                on_resume_checkpoint=on_resume_checkpoint,
+                after_epoch_checkpoint=after_epoch_checkpoint,
             )
             augmented_dataset = augmented_test_loader.dataset.dataset
             if gspan_exact_top_k_pruning and not exact_top_k_proof:
@@ -2990,6 +3736,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "models.GlobalGCE.generate_cfs",
                 "concate_inputs_with_local_recourse",
             ],
+            "official_globalgce_commit": OFFICIAL_GLOBALGCE_COMMIT,
+            "official_api_signature_sha256": (
+                official_api_signature_sha256
+            ),
+            "python_module_provenance_sha256": (
+                python_module_provenance_sha256
+            ),
+            "isolated_python": python_module_provenance["isolated_python"],
+            "no_user_site": python_module_provenance["no_user_site"],
             "native_gnn_required": not use_frozen_gine,
             "prediction_backend": (
                 "frozen_gine_differentiable_bridge"
@@ -3180,6 +3935,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 raise RuntimeError(
                     "Frozen-GINE GlobalGCE produced fewer than twenty valid native rules"
                 )
+            _notify_generation_complete()
             return NativeGenerationResult([], training_summary)
 
         rows_by_parent = _augmented_rows_by_source_parent(
@@ -3321,6 +4077,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 // int(generation_chunk_size)
             ),
         )
+        _notify_generation_complete()
         return NativeGenerationResult(all_records, training_summary)
 
 

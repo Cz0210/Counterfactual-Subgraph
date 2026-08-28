@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import os
 from collections import defaultdict
 from copy import deepcopy
 from types import SimpleNamespace
@@ -336,6 +337,9 @@ def _run_tiny_identity_training(
     *,
     identity: dict | None,
     resume: bool,
+    expected_resume_checkpoint=None,
+    on_resume_checkpoint=None,
+    after_epoch_checkpoint=None,
 ) -> None:
     monkeypatch.setattr(
         resumable_module,
@@ -359,7 +363,96 @@ def _run_tiny_identity_training(
         resume=resume,
         gspan_adoption_proof=tmp_path / "adoption.json",
         resume_identity=identity,
+        expected_resume_checkpoint=expected_resume_checkpoint,
+        on_resume_checkpoint=on_resume_checkpoint,
+        after_epoch_checkpoint=after_epoch_checkpoint,
     )
+
+
+def test_epoch_callback_can_prove_planned_stop_and_exact_resume(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _training_resume_identity(target_label=0)
+    checkpoint_events = []
+
+    def planned_stop(event):
+        checkpoint_events.append(event)
+        raise RuntimeError("planned epoch boundary")
+
+    with pytest.raises(RuntimeError, match="planned epoch boundary"):
+        _run_tiny_identity_training(
+            tmp_path,
+            monkeypatch,
+            identity=identity,
+            resume=True,
+            after_epoch_checkpoint=planned_stop,
+        )
+    assert len(checkpoint_events) == 1
+    planned = checkpoint_events[0]
+    assert planned["checkpoint_schema_version"] == (
+        GLOBALGCE_EPOCH_CHECKPOINT_SCHEMA_V2
+    )
+    assert planned["epoch"] == 0
+    assert planned["next_epoch"] == 1
+    assert planned["checkpoint_and_heartbeat_durable"] is True
+
+    resume_events = []
+    _run_tiny_identity_training(
+        tmp_path,
+        monkeypatch,
+        identity=identity,
+        resume=True,
+        expected_resume_checkpoint=planned["checkpoint_file"],
+        on_resume_checkpoint=resume_events.append,
+    )
+    assert len(resume_events) == 1
+    resumed = resume_events[0]
+    assert resumed["checkpoint_sha256"] == planned["checkpoint_sha256"]
+    assert resumed["checkpoint_file"] == planned["checkpoint_file"]
+    assert planned["heartbeat_file"]["sha256"]
+    assert resumed["resume_identity_sha256"] == planned["resume_identity_sha256"]
+    assert resumed["next_epoch"] == 1
+    assert resumed["rng_state_restored"] is True
+    assert resumed["model_state_restored"] is True
+    assert resumed["optimizer_state_restored"] is True
+    assert resumed["scheduler_state_restored"] is True
+
+
+def test_expected_checkpoint_rejects_same_byte_physical_leaf_swap(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _training_resume_identity(target_label=0)
+    checkpoint_events = []
+
+    def planned_stop(event):
+        checkpoint_events.append(event)
+        raise RuntimeError("planned epoch boundary")
+
+    with pytest.raises(RuntimeError, match="planned epoch boundary"):
+        _run_tiny_identity_training(
+            tmp_path,
+            monkeypatch,
+            identity=identity,
+            resume=True,
+            after_epoch_checkpoint=planned_stop,
+        )
+    planned = checkpoint_events[0]
+    checkpoint = tmp_path / "checkpoints" / "training_checkpoint.pt"
+    replacement = checkpoint.with_name(".same-bytes-replacement.pt")
+    replacement.write_bytes(checkpoint.read_bytes())
+    os.replace(replacement, checkpoint)
+    assert checkpoint.stat().st_ino != planned["checkpoint_file"]["inode"]
+
+    with pytest.raises(ValueError, match="planned physical leaf"):
+        _run_tiny_identity_training(
+            tmp_path,
+            monkeypatch,
+            identity=identity,
+            resume=True,
+            expected_resume_checkpoint=planned["checkpoint_file"],
+        )
 
 
 def test_legacy_no_identity_api_keeps_typed_v1_terminal_heartbeat(

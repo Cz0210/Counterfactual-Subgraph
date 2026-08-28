@@ -107,6 +107,53 @@
           "train": true,
           "validation": false
         }
+      },
+      "T8_GLOBALGCE_SMOKE": {
+        "allowed_input_files": [
+          "immutable_t2_bundle",
+          "immutable_t3_stage_output",
+          "immutable_t4_stage_output",
+          "frozen_train_csv",
+          "pinned_official_globalgce_checkout"
+        ],
+        "checkpoint_resume_required": true,
+        "device": "cuda:0",
+        "fresh_output_required": true,
+        "fresh_state_required": true,
+        "generation_chunk_size": 8,
+        "gspan_flush_every": 64,
+        "gspan_max_in_memory_candidates": 64,
+        "gpu_uuid_binding_required": true,
+        "learning_rate_hex": "0x1.999999999999ap-4",
+        "merge_canonical_dedup_required": true,
+        "min_freq": 2,
+        "minimum_strict_flips_per_branch": 1,
+        "mode": "train_only_two_target_native_globalgce_smoke",
+        "native_action_space": "lhs_rhs_graph_rewrite",
+        "num_classes": 3,
+        "num_epochs": 5,
+        "oracle_batch_size": 256,
+        "physical_gpu_index": 2,
+        "rf_oracle_used": false,
+        "run": 1,
+        "same_frozen_gine_required": true,
+        "seed": 7,
+        "source_count": 16,
+        "source_label": 1,
+        "source_scan_limit": 64,
+        "split_payload_access": {
+          "calibration": false,
+          "test": false,
+          "train": true,
+          "validation": false
+        },
+        "target_branches": [
+          0,
+          2
+        ],
+        "top_k_native": 20,
+        "dropout_hex": "0x1.0000000000000p-1",
+        "untargeted_strict_flip_required": true
       }
     }
   },

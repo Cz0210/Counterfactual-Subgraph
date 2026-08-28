@@ -85,6 +85,21 @@ def test_tracked_downstream_policy_is_exact_and_no_redistribution() -> None:
         "frozen_train_csv",
     ]
     assert policy.revalidate(stage="T6_OURS_SMOKE")["stage"] == "T6_OURS_SMOKE"
+    t8 = policy.stage("T8_GLOBALGCE_SMOKE")
+    assert t8["mode"] == "train_only_two_target_native_globalgce_smoke"
+    assert t8["target_branches"] == [0, 2]
+    assert t8["checkpoint_resume_required"] is True
+    assert t8["same_frozen_gine_required"] is True
+    assert t8["merge_canonical_dedup_required"] is True
+    assert t8["untargeted_strict_flip_required"] is True
+    assert t8["rf_oracle_used"] is False
+    assert t8["physical_gpu_index"] == 2
+    assert t8["split_payload_access"] == {
+        "train": True,
+        "validation": False,
+        "calibration": False,
+        "test": False,
+    }
     policy.close()
 
 
@@ -120,6 +135,21 @@ def test_public_held_policy_api_exposes_t6_hash_binding() -> None:
         ("execution", "stages", "T6_OURS_SMOKE", "num_classes"),
         ("execution", "stages", "T6_OURS_SMOKE", "source_label"),
         ("execution", "stages", "T6_OURS_SMOKE", "minimum_optimizer_steps"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "physical_gpu_index"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "run"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "num_classes"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "source_label"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "source_count"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "source_scan_limit"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "num_epochs"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "generation_chunk_size"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "gspan_flush_every"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "gspan_max_in_memory_candidates"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "min_freq"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "minimum_strict_flips_per_branch"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "oracle_batch_size"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "seed"),
+        ("execution", "stages", "T8_GLOBALGCE_SMOKE", "top_k_native"),
     ],
 )
 def test_downstream_integer_authority_rejects_bool_float_string_and_null(

@@ -4,8 +4,9 @@ The base TasteMolNet policy authorizes private research and aggregate paper
 reporting but freezes the T2 trainer to train/validation payloads.  This module
 adds a narrower, independently hashed authority for adopting the temperature
 already fitted by T2, a bounded calibration-cache oracle smoke, and a future
-train-only T6 Ours smoke using the frozen GINE reward. It never authorizes a
-refit, RF fallback, validation/calibration/test access in T6, or redistribution.
+    train-only T6 Ours smoke using the frozen GINE reward, and a bounded
+    train-only T8 native GlobalGCE smoke. It never authorizes a refit, RF
+    fallback, validation/calibration/test access in T6/T8, or redistribution.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ DOWNSTREAM_POLICY_VERSION = 1
 BASE_POLICY_FILE_SHA256 = "b370ed9655f0a566b3615fc321c547945dd73fcee27d637110b801a766e1ca1b"
 BASE_POLICY_CANONICAL_SHA256 = "422e50a0d613c47dd451d9386c7dc4707a079087ebe62b3d72e6a6784dd1da3d"
 # Filled after the tracked JSON is finalized. Loading fails closed on drift.
-DOWNSTREAM_POLICY_FILE_SHA256 = "0939ce2c016ff840e0f9fe7db65a397185b8acd8089b4fb62f1c7bbd5519b77c"
+DOWNSTREAM_POLICY_FILE_SHA256 = "ac284f64b58646953e803d9f933cdae9a6fd163ebfdbd0816e89da5b9c9ae3ed"
 EXECUTION_SOURCE_ROOT = Path(__file__).resolve(strict=True).parents[2]
 TRACKED_DOWNSTREAM_POLICY_PATH = (
     EXECUTION_SOURCE_ROOT
@@ -184,6 +185,50 @@ def _expected_payload() -> dict[str, Any]:
                         "train": True,
                         "validation": False,
                     },
+                },
+                "T8_GLOBALGCE_SMOKE": {
+                    "allowed_input_files": [
+                        "immutable_t2_bundle",
+                        "immutable_t3_stage_output",
+                        "immutable_t4_stage_output",
+                        "frozen_train_csv",
+                        "pinned_official_globalgce_checkout",
+                    ],
+                    "checkpoint_resume_required": True,
+                    "device": "cuda:0",
+                    "fresh_output_required": True,
+                    "fresh_state_required": True,
+                    "generation_chunk_size": 8,
+                    "gspan_flush_every": 64,
+                    "gspan_max_in_memory_candidates": 64,
+                    "gpu_uuid_binding_required": True,
+                    "learning_rate_hex": "0x1.999999999999ap-4",
+                    "merge_canonical_dedup_required": True,
+                    "min_freq": 2,
+                    "minimum_strict_flips_per_branch": 1,
+                    "mode": "train_only_two_target_native_globalgce_smoke",
+                    "native_action_space": "lhs_rhs_graph_rewrite",
+                    "num_classes": 3,
+                    "num_epochs": 5,
+                    "oracle_batch_size": 256,
+                    "physical_gpu_index": 2,
+                    "rf_oracle_used": False,
+                    "run": 1,
+                    "same_frozen_gine_required": True,
+                    "seed": 7,
+                    "source_count": 16,
+                    "source_label": 1,
+                    "source_scan_limit": 64,
+                    "split_payload_access": {
+                        "calibration": False,
+                        "test": False,
+                        "train": True,
+                        "validation": False,
+                    },
+                    "target_branches": [0, 2],
+                    "top_k_native": 20,
+                    "dropout_hex": "0x1.0000000000000p-1",
+                    "untargeted_strict_flip_required": True,
                 },
             },
         },

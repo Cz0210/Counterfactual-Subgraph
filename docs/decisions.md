@@ -61,6 +61,125 @@ focused/adjacent tests, and documentation only.  The managed runner, result
 dispatch, controller integration, immutable release receipt, deployment, and
 science have not been implemented or performed.
 
+## [2026-08-28] Fail closed on T8 self-signed consumption and cached official code
+
+### Background
+
+Fresh review found that the real official generator did not expose the two
+resume/completion parameters already required by the T8 protocol, public
+consumption derived all expectations from the terminal itself, and Python
+could reuse a preloaded `models.*` closure. It also confirmed that the
+inherited zero-link marker relink is not a viable Linux publication primitive.
+
+### Decision
+
+Make the real generator signature exactly carry the planned checkpoint and
+completion callback surface, validate both checkpoint evidence and callback
+types before execution, and keep the completion callback at one normal-return
+boundary. Public terminal holding now requires a live independent authority
+provider and exact full-authority equality, including managed task/run/GPU,
+ACTIVE/child, T2--T4, GINE, official, train, and policy bindings.
+
+Before every official import, validate any predecessor `models.*` closure
+against exact held source origin/inode/hash evidence, remove it, and import a
+fresh closure with bytecode writes disabled. Reject bytecode/native shadows,
+and make the Git/source holder reject untracked or ignored files in the
+official runtime source closure.
+
+### Consequences
+
+- A self-consistent rehashed terminal is no longer consumable without the
+  independently held pre-publication authority.
+- Two target branches still use the same three-class GINE and the existing
+  canonical merge plus untargeted strict-flip gate; no binary/RF route is
+  introduced.
+- `--validate-only`, release, deployment, and science remain disabled until a
+  reviewed managed COMPLETION/ACTIVE adapter exists.
+- T8 does not adopt the rejected zero-link marker primitive. A corrected
+  permanent-authority final-hardlink design remains an integration blocker.
+
+## [2026-08-28] Implement T8 as a resumed two-target native GlobalGCE smoke
+
+### Background
+
+The reviewed three-class foundation made one calibrated Taste GINE usable by
+GlobalGCE without collapsing the oracle to binary labels. T8 still required a
+real bounded execution boundary: both non-Sweet destinations had to exercise
+native training and resume, final acceptance had to use the original
+three-class order, and no molecule-level output could cross the terminal
+boundary. A wrapper PID, a generic required-file check, or a caller-provided
+GPU index is not sufficient execution authority.
+
+### Decision
+
+Implement two independent official GlobalGCE branches with Sweet source label
+1 and target labels 0 and 2. Both consume identical descriptor-authorized
+bytes for the frozen seven-file calibrated GINE and prepared train CSV. Each
+branch intentionally stops only after its durable epoch-0 checkpoint, then a
+second native call restores the same model, optimizer, scheduler, and
+Python/NumPy/Torch RNG identity and completes the bounded run. The apparent
+validation cohort inside GlobalGCE is a deterministic branch-local partition
+of the already authorized train rows; T8 never opens a dataset validation,
+calibration, or test payload.
+
+Each freshly created target directory is retained by descriptor. Its epoch-0
+checkpoint directory, checkpoint leaf, and heartbeat leaf remain physically
+held across the deliberate interruption and reload; the native loader checks
+and deserializes that exact checkpoint inode. The terminal branch tree is
+captured inside the generator completion callback, before control returns to
+path-based orchestration. Same-byte leaf swaps and target-directory swaps are
+therefore rejected instead of being adopted as resume or terminal proof.
+
+Merge branch rule catalogs by exact canonical LHS/RHS action content, apply
+the established attachment-aware native rewrite, and canonical-deduplicate
+generated residuals. Reload the same frozen GINE in original Bitter/Sweet/
+Tasteless order and accept only `pred_before == 1 and pred_after != 1`, with at
+least one accepted strict flip attributable to each target branch. Two binary
+classifiers, native GTGNN fallback, RF, BACE adapters, heuristic fallback,
+per-example terminal evidence, and data redistribution are rejected.
+
+The following predecessor terminal design is retained here as decision history
+and is superseded by the managed-v2 decision later in this file. Its terminal
+authority was exactly six files: `input_hashes.json`,
+`state.json`, `manifest.json`, `gate.json`, `output_hashes.json`, and `PASS`.
+The first five are canonical hash-closed aggregate evidence; `PASS` contains
+`[TASTE_GLOBALGCE_SMOKE_PASS]` and is the final no-replace publication syscall.
+The producer performs no fallible validation, fsync, pathname reopen, cleanup,
+or logging after that commit. Downstream adoption must use the strict retained
+consumer, which rejects unknown files and physical replacement even when bytes
+are unchanged.
+
+In that predecessor design, T8 consumed only the receipt-only T2 adoption plus held T3 and T4 outputs that
+all bind the same checkpoint, along with held train, checkpoint, policy, and
+pinned official-source authorities. Its managed execution literals are
+`taste_t8_gpu2_v1`, `tastemolnet_t8_globalgce_smoke`, and `taste_t8_v1`, with
+predecessors T2/T3/T4 and exclusive physical GPU 2 exposed alone as logical
+`cuda:0`. The implementation deliberately imports the reviewed managed-child
+API; it does not create a controller, lease, or receipt.
+
+### Consequences
+
+- The checked-in release config and AutoDL wrapper remain disabled, so no
+  caller-selected path, GPU probe, output, or science is touched by default.
+- The paired Slurm wrapper is CLI parity only and exits unconditionally before
+  Python because this Taste route is AutoDL-only.
+- Private branch state may contain rules/checkpoints needed for resume, but the
+  public root contains aggregates only and cannot redistribute train rows,
+  SMILES, IDs, rules, or per-example predictions.
+- A later reviewed one-parent release successor must pin the immutable
+  implementation, exact predecessor/input identities, official source,
+  managed GPU2 child, and fresh state/output parents, then require strict
+  consumer success before controller adoption.
+
+### Status
+
+Accepted for implementation and local no-cache tests only. Two integration
+blockers are explicit: this base lacks the reviewed
+`PreparedTerminalOutput.commit_final_rename`, and it lacks a managed
+`taste_t8_gpu2_v1` registry row plus `taste_t8_v1` completion dispatch. The
+release config/wrapper remain disabled; independent integration review,
+release, deployment, and science remain separate gates.
+
 ## [2026-08-28] Adopt the existing Taste GINE calibration and smoke only the calibration cache
 
 ### Background
@@ -11243,3 +11362,61 @@ no graph/checkpoint payload in managed evidence.
 - The checked-in release remains disabled and all deployment/predecessor pins
   remain null. No science, deployment, remote command, or GPU launch is part of
   this code-only change.
+
+## [2026-08-28] Harden the T8 official boundary and adopt managed execution v2
+
+### Motivation
+
+Fresh review rejected the T8 successor because the concrete official adapter
+did not yet expose the reviewed resume/completion callback contract, an output
+could derive its public expectations from worker-controlled evidence, and
+official Python imports could reuse a preloaded or bytecode-shadowed module.
+The frozen rejected identity was base commit
+`6db268e4ef6d3a0c4b4d80f3133476815c8d2b9c`, staged tree
+`9ef28ebf6d1b1c6b8e5d17387253008b2425d86f`, and cached-patch SHA-256
+`1c423f0697b37b328336f2a9edfb189ed5400cc55c382b5c1e507805823ea3fa`.
+
+### Decision
+
+Pin official GlobalGCE commit
+`157e65c2850bc787f229a1ee8c60564906b933f2` and compare the exact reviewed
+constructor/function signatures with `inspect.signature` before training.
+The concrete generator now has explicit checkpoint and completion callbacks;
+planned interruption, held-checkpoint reload, and the terminal completion
+callback are tested without a `TypeError` retry or variadic fallback.
+
+Run the official entrypoint with `python -I -B` and `PYTHONNOUSERSITE=1`.
+Descriptor-rooted imports reject foreign preloads, bytecode/native shadows,
+ignored or untracked runtime code, loader/origin drift, and inode/hash changes.
+Both target branches record the exact API document and full module provenance
+for official sources, globalgce, torch, torch_geometric, the project adapter,
+bridge, and oracle, and must agree on those documents.
+
+Adopt the exact managed-execution-v2 API frozen at commit
+`3405ae1d24fdaeb7a4af40b14823b36051966a35`. The scientific worker can write
+only raw evidence, exit evidence, and SEALED inventory. A separate verifier
+must hold and revalidate external task/run/GPU/ACTIVE plus T2/T3/T4/GINE/train/
+official/policy authority, validate the two destination branches and one
+three-class GINE, and then invoke the verifier-only atomic directory publisher.
+No hardlink, worker-created gate, or worker-created PASS is an accepted route.
+The release boundary exposes only a narrow held external-authority protocol;
+it rejects raw mappings and managed-v1 holder shapes and recomputes a closure
+hash over task/run/GPU/ACTIVE child, execution, fresh roots, T2--T4, GINE,
+train, official, and policy identity. No controller-side implementation is
+claimed or included in this commit. The same held adapter must provide an
+official API/import expectation captured outside the worker; the verifier
+requires exact equality with the full startup bundle before it can publish.
+
+### Consequences
+
+- Sweet-to-Bitter and Sweet-to-Tasteless remain separate native GlobalGCE
+  branches over the same frozen three-class GINE; merge, canonical dedup, and
+  original-order untargeted strict-flip validation are unchanged.
+- A wholly rehashed worker tree cannot supply its own expected authority, and
+  preloaded `models.*`/official `utils` or malicious `.pyc` origins fail closed.
+- Release remains disabled. A reviewed managed-v2 controller adapter for the
+  exact GPU/ACTIVE authority and an AutoDL target-filesystem atomic-rename
+  preflight are still required. The blocked predecessor marker primitive and
+  managed-v1 registry are deliberately not connected.
+- This change performs no deployment, science run, controller mutation, or
+  downstream release.

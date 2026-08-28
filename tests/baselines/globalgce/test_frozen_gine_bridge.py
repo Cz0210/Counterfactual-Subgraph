@@ -76,6 +76,52 @@ def _ordinary_logits(model: MolecularGNN) -> torch.Tensor:
     )
 
 
+def test_bridge_from_payloads_uses_only_in_memory_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.baselines import globalgce_frozen_gine_bridge as bridge_module
+
+    payloads = {
+        name: f"held:{name}".encode("utf-8")
+        for name in (
+            "model.pt",
+            "model_card.json",
+            "feature_schema.json",
+            "label_map.json",
+            "split_manifest.json",
+            "test_evaluation_status.json",
+            "temperature_scaling.json",
+        )
+    }
+    captured = {}
+
+    def fake_loader(values, *, device):
+        captured["payloads"] = values
+        captured["device"] = device
+        return _model(num_classes=3), {
+            "checkpoint_id": "9" * 64,
+            "feature_schema": default_molecular_feature_schema(),
+            "temperature_scaling": {"temperature": 1.5},
+        }
+
+    monkeypatch.setattr(
+        bridge_module,
+        "load_gnn_checkpoint_payloads",
+        fake_loader,
+    )
+    bridge = FrozenGINEDifferentiableBridge.from_payloads(
+        payloads,
+        atom_symbols=("C", "O"),
+        bond_names=("no_edge", "single", "double", "triple"),
+        device="cpu",
+        expected_num_classes=3,
+    )
+    assert captured == {"payloads": payloads, "device": "cpu"}
+    assert bridge.checkpoint_id == "9" * 64
+    assert bridge.temperature == 1.5
+    assert bridge.num_classes == 3
+
+
 def test_bridge_matches_hard_frozen_gine_and_only_transformation_gets_gradient() -> None:
     model = _model()
     bridge = FrozenGINEDifferentiableBridge(

@@ -12,6 +12,8 @@ import random
 import resource
 import shutil
 import sqlite3
+import stat
+import sys
 import tempfile
 import threading
 import time
@@ -89,6 +91,28 @@ _TRAINING_CONFIG_IDENTITY_KEYS = {
     "gspan_exact_top_k_pruning",
     "gspan_adoption_identity",
 }
+
+
+def _descriptor_path_or_resolve(
+    path_like: str | Path,
+    *,
+    strict: bool = False,
+) -> Path:
+    """Keep a held Linux procfs path anchored to its directory descriptor."""
+
+    path = Path(path_like).expanduser()
+    parts = path.parts
+    if (
+        sys.platform.startswith("linux")
+        and len(parts) >= 5
+        and parts[0] == os.sep
+        and parts[1:4] == ("proc", "self", "fd")
+        and parts[4].isdigit()
+    ):
+        if strict and not path.exists():
+            raise FileNotFoundError(path)
+        return path
+    return path.resolve(strict=strict)
 
 
 def _is_sha256(value: Any) -> bool:
@@ -468,6 +492,11 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         try:
             os.unlink(temporary)
@@ -579,8 +608,154 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+_CHECKPOINT_STAT_FIELDS = (
+    ("device", "st_dev"),
+    ("inode", "st_ino"),
+    ("mode", "st_mode"),
+    ("uid", "st_uid"),
+    ("gid", "st_gid"),
+    ("link_count", "st_nlink"),
+    ("bytes", "st_size"),
+    ("mtime_ns", "st_mtime_ns"),
+    ("ctime_ns", "st_ctime_ns"),
+)
+_CHECKPOINT_FILE_EVIDENCE_KEYS = {
+    *(name for name, _attribute in _CHECKPOINT_STAT_FIELDS),
+    "sha256",
+}
+
+
+def _hash_regular_fd(descriptor: int, size: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        block = os.pread(descriptor, min(1024 * 1024, size - offset), offset)
+        if not block:
+            raise RuntimeError("GlobalGCE checkpoint leaf ended while hashing")
+        digest.update(block)
+        offset += len(block)
+    if os.pread(descriptor, 1, size):
+        raise RuntimeError("GlobalGCE checkpoint leaf grew while hashing")
+    return digest.hexdigest()
+
+
+def _regular_fd_evidence(descriptor: int) -> dict[str, Any]:
+    observed = os.fstat(descriptor)
+    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise RuntimeError("GlobalGCE checkpoint leaf is not a single-link file")
+    return {
+        "device": int(observed.st_dev),
+        "inode": int(observed.st_ino),
+        "mode": int(observed.st_mode),
+        "uid": int(observed.st_uid),
+        "gid": int(observed.st_gid),
+        "link_count": int(observed.st_nlink),
+        "bytes": int(observed.st_size),
+        "mtime_ns": int(observed.st_mtime_ns),
+        "ctime_ns": int(observed.st_ctime_ns),
+        "sha256": _hash_regular_fd(descriptor, int(observed.st_size)),
+    }
+
+
+def _open_regular_file_evidence(path: Path) -> dict[str, Any]:
+    named_before = os.stat(path, follow_symlinks=False)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        evidence = _regular_fd_evidence(descriptor)
+        for named in (named_before, os.stat(path, follow_symlinks=False)):
+            if any(
+                int(getattr(named, attribute)) != evidence[name]
+                for name, attribute in _CHECKPOINT_STAT_FIELDS
+            ):
+                raise RuntimeError("GlobalGCE checkpoint leaf changed while opening")
+        return evidence
+    finally:
+        os.close(descriptor)
+
+
+def _normalize_checkpoint_file_evidence(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != _CHECKPOINT_FILE_EVIDENCE_KEYS:
+        raise ValueError("GlobalGCE expected checkpoint-file evidence changed")
+    if (
+        any(
+            type(value.get(key)) is not int or value[key] < minimum
+            for key, minimum in (
+                ("device", 0),
+                ("inode", 1),
+                ("mode", 1),
+                ("uid", 0),
+                ("gid", 0),
+                ("link_count", 1),
+                ("bytes", 1),
+                ("mtime_ns", 0),
+                ("ctime_ns", 0),
+            )
+        )
+        or value["link_count"] != 1
+        or not _is_sha256(value.get("sha256"))
+    ):
+        raise ValueError("GlobalGCE expected checkpoint-file identity is malformed")
+    return dict(value)
+
+
+def _load_torch_checkpoint_held(
+    torch_module: Any,
+    path: Path,
+    *,
+    map_location: Any,
+    expected_evidence: Mapping[str, Any] | None,
+) -> tuple[Any, dict[str, Any]]:
+    named_before = os.stat(path, follow_symlinks=False)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        before = _regular_fd_evidence(descriptor)
+        if expected_evidence is not None and before != _normalize_checkpoint_file_evidence(
+            expected_evidence
+        ):
+            raise ValueError(
+                "GlobalGCE resume checkpoint differs from the planned physical leaf"
+            )
+        named_identity = tuple(
+            int(getattr(named_before, attribute))
+            for _name, attribute in _CHECKPOINT_STAT_FIELDS
+        )
+        expected_identity = tuple(
+            before[name] for name, _attribute in _CHECKPOINT_STAT_FIELDS
+        )
+        if named_identity != expected_identity:
+            raise RuntimeError("GlobalGCE resume checkpoint changed while opening")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            checkpoint = torch_module.load(handle, map_location=map_location)
+        after = _regular_fd_evidence(descriptor)
+        named_after = os.stat(path, follow_symlinks=False)
+        if (
+            after != before
+            or tuple(
+                int(getattr(named_after, attribute))
+                for _name, attribute in _CHECKPOINT_STAT_FIELDS
+            )
+            != expected_identity
+        ):
+            raise RuntimeError("GlobalGCE resume checkpoint changed during load")
+        return checkpoint, before
+    finally:
+        os.close(descriptor)
+
+
 def _file_identity(path: Path) -> dict[str, Any]:
-    resolved = path.expanduser().resolve(strict=True)
+    resolved = _descriptor_path_or_resolve(path, strict=True)
     return {
         "path": str(resolved),
         "bytes": resolved.stat().st_size,
@@ -611,7 +786,7 @@ def _selected_rows_from_database(
 def validate_exact_top_k_audit(audit_path: str | Path) -> dict[str, Any]:
     """Recompute the terminal exact-top-k proof from checkpoint and SQLite."""
 
-    audit_file = Path(audit_path).expanduser().resolve(strict=True)
+    audit_file = _descriptor_path_or_resolve(audit_path, strict=True)
     if audit_file.name != "exact_top_k_audit.json":
         raise ValueError("GlobalGCE exact-top-k proof path has an invalid filename.")
     checkpoint_path = audit_file.parent / "checkpoint.json"
@@ -643,7 +818,9 @@ def validate_exact_top_k_audit(audit_path: str | Path) -> dict[str, Any]:
         raise ValueError("GlobalGCE exact-top-k checkpoint hash binding failed.")
     if audit.get("input_fingerprint") != checkpoint.get("input_fingerprint"):
         raise ValueError("GlobalGCE exact-top-k fingerprint closure failed.")
-    if Path(str(checkpoint.get("sqlite_path") or "")).resolve() != database_path:
+    if _descriptor_path_or_resolve(
+        str(checkpoint.get("sqlite_path") or "")
+    ) != database_path:
         raise ValueError("GlobalGCE exact-top-k SQLite path closure failed.")
     top_k = int(audit.get("top_k") or 0)
     if top_k <= 0:
@@ -770,7 +947,7 @@ def resumable_gspan_root_chunks(
     from its beginning; neither adopts a partial traversal.
     """
 
-    root = Path(checkpoint_root).expanduser().resolve()
+    root = _descriptor_path_or_resolve(checkpoint_root)
     root.mkdir(parents=True, exist_ok=True)
     gspan_class = gspan_module.gSpan
     original_run = gspan_class.run
@@ -1272,6 +1449,11 @@ def _atomic_torch_save(torch_module: Any, payload: Any, path: Path) -> None:
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -1360,10 +1542,13 @@ def train_globalgce_resumable(
     on_exact_top_k_proof: Callable[[dict[str, Any]], None] | None = None,
     on_gspan_adoption_proof: Callable[[dict[str, Any]], None] | None = None,
     resume_identity: Mapping[str, Any] | None = None,
+    expected_resume_checkpoint: Mapping[str, Any] | None = None,
+    on_resume_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    after_epoch_checkpoint: Callable[[dict[str, Any]], None] | None = None,
 ) -> Any:
     """Run the official loop with atomic epoch checkpoints and exact RNG state."""
 
-    checkpoint_root = Path(checkpoint_dir).expanduser().resolve()
+    checkpoint_root = _descriptor_path_or_resolve(checkpoint_dir)
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     checkpoint_path = checkpoint_root / "training_checkpoint.pt"
     heartbeat_path = checkpoint_root / "training_heartbeat.json"
@@ -1379,8 +1564,20 @@ def train_globalgce_resumable(
             normalize_globalgce_training_resume_identity(resume_identity)
         )
     checkpoint: Mapping[str, Any] | None = None
+    loaded_checkpoint_file: dict[str, Any] | None = None
+    if expected_resume_checkpoint is not None:
+        _normalize_checkpoint_file_evidence(expected_resume_checkpoint)
+        if not resume or not checkpoint_path.is_file():
+            raise ValueError(
+                "GlobalGCE expected resume checkpoint is absent before adoption"
+            )
     if resume and checkpoint_path.is_file():
-        checkpoint = torch_module.load(checkpoint_path, map_location=model.device)
+        checkpoint, loaded_checkpoint_file = _load_torch_checkpoint_held(
+            torch_module,
+            checkpoint_path,
+            map_location=model.device,
+            expected_evidence=expected_resume_checkpoint,
+        )
         if checkpoint.get("config") != config:
             raise ValueError("GlobalGCE training checkpoint configuration mismatch.")
         if normalized_resume_identity is None:
@@ -1458,6 +1655,28 @@ def train_globalgce_resumable(
         torch_module.set_rng_state(checkpoint["torch_rng_state"])
         if torch_module.cuda.is_available() and checkpoint.get("cuda_rng_state"):
             torch_module.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+        if on_resume_checkpoint is not None:
+            if loaded_checkpoint_file is None:
+                raise RuntimeError(
+                    "GlobalGCE resume callback lacks its held checkpoint leaf"
+                )
+            on_resume_checkpoint(
+                {
+                    "checkpoint_schema_version": checkpoint.get(
+                        "checkpoint_schema_version"
+                    ),
+                    "checkpoint_sha256": loaded_checkpoint_file["sha256"],
+                    "checkpoint_file": dict(loaded_checkpoint_file),
+                    "next_epoch": next_epoch,
+                    "resume_identity_sha256": checkpoint.get(
+                        "resume_identity_sha256"
+                    ),
+                    "rng_state_restored": True,
+                    "model_state_restored": True,
+                    "optimizer_state_restored": True,
+                    "scheduler_state_restored": True,
+                }
+            )
 
     for epoch in range(next_epoch, int(epochs) + 1):
         model.train()
@@ -1554,12 +1773,35 @@ def train_globalgce_resumable(
                 "updated_at_epoch_seconds": time.time(),
             },
         )
+        if after_epoch_checkpoint is not None:
+            checkpoint_file = _open_regular_file_evidence(checkpoint_path)
+            heartbeat_file = _open_regular_file_evidence(heartbeat_path)
+            after_epoch_checkpoint(
+                {
+                    "checkpoint_schema_version": state[
+                        "checkpoint_schema_version"
+                    ],
+                    "checkpoint_sha256": checkpoint_file["sha256"],
+                    "checkpoint_file": checkpoint_file,
+                    "heartbeat_file": heartbeat_file,
+                    "epoch": epoch,
+                    "next_epoch": epoch + 1,
+                    "resume_identity_sha256": state.get(
+                        "resume_identity_sha256"
+                    ),
+                    "checkpoint_and_heartbeat_durable": True,
+                }
+            )
     if best_state is None:
         raise RuntimeError("GlobalGCE training produced no validation checkpoint.")
     model.load_state_dict(best_state)
     best_rules = model.get_rules(fss)
-    _atomic_torch_save(torch_module, best_state, Path(save_model_path).resolve())
-    _atomic_torch_save(torch_module, best_rules, Path(save_rule_path).resolve())
+    _atomic_torch_save(
+        torch_module, best_state, _descriptor_path_or_resolve(save_model_path)
+    )
+    _atomic_torch_save(
+        torch_module, best_rules, _descriptor_path_or_resolve(save_rule_path)
+    )
     _atomic_json(
         heartbeat_path,
         {

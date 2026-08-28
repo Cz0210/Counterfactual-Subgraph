@@ -96,6 +96,9 @@ See:
   full-graph GCFExplainer smoke using the same calibrated three-class GINE;
   binary BACE adapters, NeuroSED claims, RF, test payloads, and molecule-bearing
   output are excluded)
+- `docs/AUTODL_TASTEMOLNET_T8_GLOBALGCE_SMOKE.md` (release-disabled contract
+  for the real bounded native GlobalGCE two-target smoke on physical GPU 2;
+  the paired Slurm entrypoint is an intentional static refusal)
 
 ---
 
@@ -244,17 +247,26 @@ write PASS, a final gate, or an adoption receipt. See
 `docs/TASTE_GCF_NEUROSED_PROTOCOL.md` and
 `docs/AUTODL_TASTEMOLNET_T7_GCF_SMOKE.md`.
 
-The GlobalGCE frozen-GINE bridge now has an explicit multiclass target view:
+The GlobalGCE frozen-GINE bridge has an explicit multiclass target view:
 official internal classes `0/1` map to the reviewed frozen source/destination
-classes while the calibrated three-class logits remain intact. This permits
-separate Sweet-to-Bitter and Sweet-to-Tasteless branches on one GINE without
-training binary classifiers. The bridge generalization is only a prerequisite;
-the Taste T8 smoke, held predecessor chain, controller receipt, output gate,
-and execution release remain unimplemented and must not be inferred from it.
-Its native metadata reader accepts only explicit `split=train` rows and
-canonical integer class tokens. Multiclass training cannot fall back to the
-official binary GTGNN, and versioned epoch/terminal resume identities prevent
-target, cohort, calibrated-GINE, or training-config drift.
+classes while the calibrated three-class logits remain intact. T8 now
+implements separate Sweet-to-Bitter and Sweet-to-Tasteless native GlobalGCE
+branches on that one GINE, deliberately checkpoint-stops and resumes both,
+then merges and canonical-deduplicates native LHS-to-RHS actions before an
+independent original-order three-class strict-flip check. Its only dataset
+payload is the descriptor-held prepared train CSV; the branch-local holdout is
+derived from those train rows and no validation, calibration, or test split is
+opened. The terminal root is aggregate-only and has exactly `state.json`,
+`manifest.json`, `gate.json`, `input_hashes.json`, `output_hashes.json`, and
+`PASS`.
+
+This is a stage-frozen, release-disabled implementation, not permission to
+run science. The AutoDL wrapper refuses before path or GPU inspection and the
+paired Slurm script always exits before Python. A later reviewed release must
+bind the exact T2 receipt-only authority, matching held T3/T4 checkpoint
+binding, managed physical-GPU2 child authority, immutable implementation and
+official source, fresh state/output roots, and the strict public T8 consumer.
+Environment variables cannot bypass the checked-in release bits.
 
 ---
 

@@ -30,7 +30,11 @@ from src.data.molecular_graph_featurizer import (
     MolecularFeatureSchema,
     MolecularGraphFeaturizer,
 )
-from src.oracles.gnn_oracle import load_gnn_checkpoint_bundle, sha256_file
+from src.oracles.gnn_oracle import (
+    load_gnn_checkpoint_bundle,
+    load_gnn_checkpoint_payloads,
+    sha256_file,
+)
 
 
 BRIDGE_SCHEMA_VERSION = "bace_globalgce_frozen_gine_st_bridge_v2"
@@ -401,6 +405,42 @@ class FrozenGINEDifferentiableBridge:
             bond_names=bond_names,
             checkpoint_id=sha256_file(root / "model.pt"),
             temperature=temperature,
+            device=device,
+            expected_num_classes=expected_num_classes,
+        )
+
+    @classmethod
+    def from_payloads(
+        cls,
+        payloads: Mapping[str, bytes],
+        *,
+        atom_symbols: Sequence[str],
+        bond_names: Sequence[str],
+        device: str | Any = "cpu",
+        expected_num_classes: int = 2,
+    ) -> "FrozenGINEDifferentiableBridge":
+        """Load the bridge from descriptor-authorized checkpoint bytes.
+
+        Long-running TasteMolNet jobs retain the physical GINE directory and
+        read the seven model payloads through its directory descriptor.  This
+        constructor keeps the differentiable bridge on that same authority;
+        it never reopens a user-controlled checkpoint pathname during model
+        deserialization.
+        """
+
+        model, metadata = load_gnn_checkpoint_payloads(
+            dict(payloads),
+            device=device,
+        )
+        return cls(
+            model,
+            feature_schema=metadata["feature_schema"],
+            atom_symbols=atom_symbols,
+            bond_names=bond_names,
+            checkpoint_id=str(metadata["checkpoint_id"]),
+            temperature=float(
+                metadata["temperature_scaling"].get("temperature", 1.0)
+            ),
             device=device,
             expected_num_classes=expected_num_classes,
         )

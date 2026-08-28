@@ -1,28 +1,38 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import inspect
 import json
 from pathlib import Path
+import sys
+from types import ModuleType
 
 import pytest
 from rdkit import Chem
 
 from src.baselines.globalgce_mutagenicity_adapter import (
+    FROZEN_GINE_IN_MEMORY_FILES,
     GlobalGCECodecMetadata,
     GlobalGCEEmptyCandidateUniverseError,
     GlobalGCEMutagenicityCodecError,
     NativeGenerationResult,
+    NativeGeneratorProtocol,
+    OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA,
     OfficialGlobalGCEMutagenicityGenerator,
+    PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES,
     PoolBuildConfig,
     TrainParent,
     _add_bond_once,
     _build_dense_dataset,
     _build_training_resume_identity,
+    _hash_open_regular_source,
+    _import_official_modules,
     _load_general_train_rows,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
+    capture_globalgce_module_provenance,
     decode_globalgce_molecule,
     globalgce_tensors_to_graph_record,
     load_strict_train_parents,
@@ -30,8 +40,79 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     probe_source_graph_codec,
     require_source_codec_gate,
     stable_candidate_id,
+    validate_official_globalgce_api_signatures,
     validate_globalgce_generation_loader,
 )
+
+
+def test_taste_generator_binds_exact_descriptor_authorized_gine_payloads(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    train = tmp_path / "train.csv"
+    _write_three_class_train(train)
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "model.pt").write_bytes(b"held-model")
+    payloads = {
+        name: f"held:{name}".encode("utf-8")
+        for name in FROZEN_GINE_IN_MEMORY_FILES
+    }
+    generator = OfficialGlobalGCEMutagenicityGenerator(
+        official,
+        native_train_csv=train,
+        dataset_name="tastemolnet",
+        min_freq=2,
+        frozen_gine_checkpoint=checkpoint,
+        frozen_gine_payloads=payloads,
+        native_train_payload=train.read_bytes(),
+        source_label=1,
+        target_label=2,
+        num_classes=3,
+    )
+    identity = generator.config_identity()
+    assert identity["prediction_backend"] == "frozen_gine_differentiable_bridge"
+    assert identity["num_classes"] == 3
+    assert identity["source_label"] == 1
+    assert identity["target_label"] == 2
+    assert identity["native_train_csv"]["kind"] == (
+        "descriptor_authorized_file_payload"
+    )
+    assert identity["frozen_gine_payload_sha256"] == {
+        name: hashlib.sha256(payload).hexdigest()
+        for name, payload in sorted(payloads.items())
+    }
+
+    incomplete = dict(payloads)
+    incomplete.pop("label_map.json")
+    with pytest.raises(ValueError, match="exact seven-file set"):
+        OfficialGlobalGCEMutagenicityGenerator(
+            official,
+            native_train_csv=train,
+            dataset_name="tastemolnet",
+            frozen_gine_checkpoint=checkpoint,
+            frozen_gine_payloads=incomplete,
+            native_train_payload=train.read_bytes(),
+            source_label=1,
+            target_label=0,
+            num_classes=3,
+        )
+
+    coerced = dict(payloads)
+    coerced["model.pt"] = bytearray(coerced["model.pt"])
+    with pytest.raises(ValueError, match="native bytes"):
+        OfficialGlobalGCEMutagenicityGenerator(
+            official,
+            native_train_csv=train,
+            dataset_name="tastemolnet",
+            frozen_gine_checkpoint=checkpoint,
+            frozen_gine_payloads=coerced,
+            native_train_payload=train.read_bytes(),
+            source_label=1,
+            target_label=0,
+            num_classes=3,
+        )
 
 
 def _write_train(path: Path) -> None:
@@ -1679,6 +1760,368 @@ def test_official_generation_releases_dense_chunk_outputs() -> None:
     assert "del chunk_loader, chunk_dataset" in source
     assert "if on_chunk is not None:" in source
     assert "all_records.extend(chunk_records)" in source
+
+
+def test_real_generator_resume_completion_signature_matches_protocol() -> None:
+    concrete = inspect.signature(OfficialGlobalGCEMutagenicityGenerator.generate)
+    protocol = inspect.signature(NativeGeneratorProtocol.generate)
+    for name in (
+        "expected_resume_checkpoint",
+        "on_resume_checkpoint",
+        "after_epoch_checkpoint",
+        "on_generation_complete",
+    ):
+        assert name in concrete.parameters
+        assert concrete.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert concrete.parameters[name].default is None
+        assert name in protocol.parameters
+        assert protocol.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert protocol.parameters[name].default is None
+    source = inspect.getsource(OfficialGlobalGCEMutagenicityGenerator.generate)
+    assert source.count("on_generation_complete()") == 1
+    # One local definition plus the successful rules-only and generation paths.
+    assert source.count("_notify_generation_complete()") == 3
+    assert "if rules_only:" in source
+    assert "except TypeError" not in source
+    assert "**kwargs" not in source
+
+
+def _exact_official_api_modules() -> dict[str, ModuleType]:
+    class GTGNN:
+        def __init__(
+            self, x_dim, h_dim, n_out, num_edge_attr, device, save_model_path
+        ):
+            pass
+
+    class GlobalGCE:
+        def __init__(
+            self,
+            x_dim,
+            h_dim,
+            z_dim,
+            edge_attr_dim,
+            dropout,
+            fs_min_nodes,
+            fs_max_nodes,
+            topk_fs,
+            random_subgraph,
+            save_fs_path,
+            device,
+            gt_gnn,
+        ):
+            pass
+
+        def get_fs_expanded_data(
+            self, train_loader, crop_expansion=False
+        ):
+            pass
+
+        def get_rules(self, fss):
+            pass
+
+        def run_one_batch(self, rules, data):
+            pass
+
+    def generate_cfs(dataloader, rules, device):
+        pass
+
+    def concate_inputs_with_local_recourse(
+        features,
+        adj,
+        edge_attrs,
+        fs_index_list,
+        mask_idx_list,
+        rules,
+        device,
+    ):
+        pass
+
+    class FrequentSubgraphGenerator:
+        def __init__(
+            self,
+            fs_min_vertices,
+            fs_max_vertices,
+            save_fs_path,
+            topk,
+            random_subgraph=False,
+        ):
+            pass
+
+    class gSpan:
+        def __init__(
+            self,
+            nx_graph_list,
+            min_support=10,
+            min_num_vertices=1,
+            max_num_vertices=float("inf"),
+            max_ngraphs=float("inf"),
+            is_undirected=True,
+            verbose=False,
+            visualize=False,
+            where=False,
+        ):
+            pass
+
+    def train_globalgce(
+        epochs,
+        pred_model,
+        model,
+        lr,
+        train_loader,
+        val_loader,
+        save_rule_path,
+        save_model_path,
+    ):
+        pass
+
+    def test_globalgce(data_loader, model, gnn_model, rules):
+        pass
+
+    gtgnn = ModuleType("models.GTGNN")
+    gtgnn.GTGNN = GTGNN
+    globalgce = ModuleType("models.GlobalGCE")
+    globalgce.GlobalGCE = GlobalGCE
+    globalgce.generate_cfs = generate_cfs
+    globalgce.concate_inputs_with_local_recourse = (
+        concate_inputs_with_local_recourse
+    )
+    fsg = ModuleType("models.fsg")
+    fsg.FrequentSubgraphGenerator = FrequentSubgraphGenerator
+    gspan = ModuleType("models.gSpan.gSpan")
+    gspan.gSpan = gSpan
+    models_utils = ModuleType("models.models_utils")
+    models_utils.train_globalgce = train_globalgce
+    models_utils.test_globalgce = test_globalgce
+    return {
+        "gtgnn_module": gtgnn,
+        "globalgce_module": globalgce,
+        "fsg_module": fsg,
+        "gspan_module": gspan,
+        "models_utils_module": models_utils,
+    }
+
+
+def test_official_api_signature_is_exact_and_variadics_fail_closed() -> None:
+    modules = _exact_official_api_modules()
+    evidence = validate_official_globalgce_api_signatures(modules)
+    assert evidence["schema_version"] == OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA
+    assert evidence["signatures"] == PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES
+
+    def variadic_generate_cfs(*args, **kwargs):
+        raise AssertionError((args, kwargs))
+
+    modules["globalgce_module"].generate_cfs = variadic_generate_cfs
+    with pytest.raises(RuntimeError, match="BLOCKED_OFFICIAL_API_SIGNATURE_DRIFT"):
+        validate_official_globalgce_api_signatures(modules)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "on_resume_checkpoint",
+        "after_epoch_checkpoint",
+        "on_generation_complete",
+    ),
+)
+def test_real_generator_rejects_noncallable_resume_callbacks_before_import(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    generator = OfficialGlobalGCEMutagenicityGenerator(official)
+    kwargs = {
+        "output_dir": tmp_path / "output",
+        "seed": 7,
+        "epochs": 1,
+        "top_k_native": 20,
+        "learning_rate": 0.1,
+        "dropout": 0.5,
+        "device": "cpu",
+        "resume": True,
+        field: object(),
+    }
+    with pytest.raises(TypeError, match=field):
+        generator.generate([], **kwargs)
+
+
+def test_real_generator_rejects_malformed_expected_checkpoint_before_import(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official"
+    _write_official_root(official)
+    generator = OfficialGlobalGCEMutagenicityGenerator(official)
+    with pytest.raises(ValueError, match="checkpoint-file evidence"):
+        generator.generate(
+            [],
+            output_dir=tmp_path / "output",
+            seed=7,
+            epochs=1,
+            top_k_native=20,
+            learning_rate=0.1,
+            dropout=0.5,
+            device="cpu",
+            resume=True,
+            expected_resume_checkpoint={"sha256": "a" * 64},
+        )
+
+
+def _write_importable_official_modules(root: Path) -> dict[str, dict]:
+    payloads = {
+        "models/__init__.py": "# exact official package\n",
+        "models/models_utils.py": (
+            "def train_globalgce(*args, **kwargs): return None\n"
+            "def test_globalgce(*args, **kwargs): return None\n"
+        ),
+        "models/GTGNN.py": "class GTGNN: pass\n",
+        "models/GlobalGCE.py": (
+            "class GlobalGCE: pass\n"
+            "def generate_cfs(*args, **kwargs): return []\n"
+        ),
+        "models/fsg.py": "MIN_FREQ = {}\n",
+        "models/gSpan/__init__.py": "# exact gSpan package\n",
+        "models/gSpan/gSpan.py": "class gSpan: pass\n",
+    }
+    for relative, payload in payloads.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+    return {
+        relative: _hash_open_regular_source(root / relative)
+        for relative in payloads
+    }
+
+
+def _displace_model_module_closure() -> dict[str, ModuleType]:
+    displaced = {
+        name: module
+        for name, module in tuple(sys.modules.items())
+        if name == "models"
+        or name.startswith("models.")
+        or name == "data"
+        or name.startswith("data.")
+        or name == "utils"
+    }
+    for name in displaced:
+        sys.modules.pop(name, None)
+    return displaced
+
+
+def _restore_model_module_closure(displaced: dict[str, ModuleType]) -> None:
+    for name in tuple(sys.modules):
+        if (
+            name == "models"
+            or name.startswith("models.")
+            or name == "data"
+            or name.startswith("data.")
+            or name == "utils"
+        ):
+            sys.modules.pop(name, None)
+    sys.modules.update(displaced)
+
+
+def test_official_import_rejects_preloaded_models_outside_held_authority(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official" / "src"
+    authority = _write_importable_official_modules(official)
+    displaced = _displace_model_module_closure()
+    try:
+        attacker = tmp_path / "attacker.py"
+        attacker.write_text("# attacker\n", encoding="utf-8")
+        sentinel = ModuleType("models")
+        sentinel.__file__ = str(attacker)
+        sys.modules["models"] = sentinel
+        with pytest.raises(RuntimeError, match="outside the held checkout"):
+            _import_official_modules(
+                official,
+                expected_source_authority=authority,
+            )
+    finally:
+        _restore_model_module_closure(displaced)
+
+
+def test_official_import_rejects_preloaded_utils_outside_held_authority(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official" / "src"
+    authority = _write_importable_official_modules(official)
+    displaced = _displace_model_module_closure()
+    try:
+        attacker = tmp_path / "utils.py"
+        attacker.write_text("# attacker utils\n", encoding="utf-8")
+        sentinel = ModuleType("utils")
+        sentinel.__file__ = str(attacker)
+        sys.modules["utils"] = sentinel
+        with pytest.raises(RuntimeError, match="outside the held checkout"):
+            _import_official_modules(
+                official,
+                expected_source_authority=authority,
+            )
+    finally:
+        _restore_model_module_closure(displaced)
+
+
+def test_module_provenance_requires_isolated_python_before_import(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="BLOCKED_PYTHON_MODULE_PROVENANCE"):
+        capture_globalgce_module_provenance(
+            official_src=tmp_path,
+            expected_source_authority=None,
+            require_isolated=True,
+        )
+
+
+def test_official_import_reloads_valid_prior_closure_and_rejects_pyc(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official" / "src"
+    authority = _write_importable_official_modules(official)
+    displaced = _displace_model_module_closure()
+    try:
+        first = _import_official_modules(
+            official,
+            expected_source_authority=authority,
+        )
+        prior_globalgce = sys.modules["models.GlobalGCE"]
+        second = _import_official_modules(
+            official,
+            expected_source_authority=authority,
+        )
+        assert first["GlobalGCE"] is not second["GlobalGCE"]
+        assert sys.modules["models.GlobalGCE"] is not prior_globalgce
+
+        cache = official / "models" / "__pycache__"
+        cache.mkdir()
+        (cache / "GlobalGCE.cpython-311.pyc").write_bytes(b"malicious")
+        with pytest.raises(RuntimeError, match="__pycache__"):
+            _import_official_modules(
+                official,
+                expected_source_authority=authority,
+            )
+    finally:
+        _restore_model_module_closure(displaced)
+
+
+def test_official_import_rejects_same_byte_source_inode_replacement(
+    tmp_path: Path,
+) -> None:
+    official = tmp_path / "official" / "src"
+    authority = _write_importable_official_modules(official)
+    displaced = _displace_model_module_closure()
+    try:
+        source = official / "models/GlobalGCE.py"
+        replacement = source.with_name(".GlobalGCE.py.replacement")
+        replacement.write_bytes(source.read_bytes())
+        replacement.replace(source)
+        with pytest.raises(RuntimeError, match="named source differs"):
+            _import_official_modules(
+                official,
+                expected_source_authority=authority,
+            )
+    finally:
+        _restore_model_module_closure(displaced)
 
 
 def test_generated_attribute_ambiguity_is_excluded_from_candidate_pool(

@@ -32,6 +32,23 @@
   release successor changing only the release pins.  Do not deploy or run
   science from this stage-freeze.
 
+## 2026-08-28: T8 fresh-review blocker closure
+
+- [x] Align the concrete official GlobalGCE generator with the planned held-
+  checkpoint reload and exactly-once completion callback protocol.
+- [x] Require an independently held full input authority for every public T8
+  terminal consumer; reject raw/self-derived expectations and wholly rehashed
+  fake roots.
+- [x] Isolate each official `models.*` import closure, validate source
+  origin/inode/hash against held authority, and reject ignored/untracked
+  runtime code plus bytecode/native shadows.
+- [x] Preserve the two Sweet-to-{Bitter,Tasteless} branches, one three-class
+  GINE, canonical merge, untargeted strict flip, split boundary, RF absence,
+  checkpoint-resume, aggregate schema, and no-redistribution gates.
+- [ ] Integrate a separately reviewed managed-v2 GPU/ACTIVE authority adapter
+  and run the exact AutoDL target-filesystem atomic no-replace preflight.
+  Release, deploy, and science remain disabled until both land.
+
 ## 2026-08-28: TasteMolNet T5 clean-policy initializer
 
 - [x] Add a Taste-owned typed initializer schema instead of relabeling BACE
@@ -1954,12 +1971,42 @@ Mutagenicity roadmaps.
 - [x] Reject fractional/native-float labels and implicit split defaults, forbid
   multiclass native-GTGNN fallback, and bind partial plus terminal training
   checkpoints to the full calibrated GINE/cohort/config identity.
-- [ ] Implement the release-disabled T8 producer over train-only Sweet parents,
+- [x] Implement the release-disabled T8 producer over train-only Sweet parents,
   execute independent destinations 0 and 2, merge/canonical-deduplicate, and
   validate final untargeted `pred_after != 1` with the original class order.
-- [ ] Bind T2/T3/T4 held authorities, managed GPU-2 execution/completion
-  receipts, one fresh private output, strict retained consumer, and controller
-  adoption before enabling any science.
+- [x] Add exact T2 receipt-only plus physically held T3/T4/checkpoint/policy/
+  train/official-source input closure, one fresh private state root, one fresh
+  aggregate-only output, and a strict retained public consumer that rejects
+  equal-byte inode replacement.
+- [x] Add the disabled AutoDL release config and foreground wrapper, require
+  exclusive physical GPU 2 exposed alone as `cuda:0`, and keep the paired
+  Slurm wrapper as a static refusal with full CLI parity. The later managed-v2
+  successor rejects the predecessor managed-v1 receipt/validator literals.
+- [x] Require both real branches to stop after durable epoch 0 and then resume
+  model, optimizer, scheduler, and Python/NumPy/Torch RNG state from the same
+  identity-bound checkpoint before their terminal rule catalogs are accepted.
+- [x] Retain each fresh target directory plus its planned checkpoint and
+  heartbeat physical leaves across interruption/reload, capture the terminal
+  branch tree inside the generator boundary, and reject directory or
+  same-byte leaf replacement with hostile tests.
+- [x] Supersede the predecessor six-file self-published terminal route for T8:
+  the worker now writes only managed-v2 raw/exit/SEALED evidence, while a
+  separate verifier revalidates an independent held authority and uses the
+  frozen atomic directory publisher for verification/gate/PASS. The worker
+  cannot self-sign, and a wholly rehashed fake-root authority is rejected.
+- [x] Pin and strictly inspect the exact official API before training, forbid
+  variadic or TypeError compatibility fallbacks, isolate official imports, and
+  carry full official plus torch/torch_geometric/project provenance into raw
+  evidence for independent revalidation.
+- [ ] Freeze and independently review the managed-v2 controller adapter that
+  supplies the held T8 task/run/GPU UUID/ACTIVE child authority cross-bound to
+  T2/T3/T4/GINE/train/official/policy identities. Do not wire the rejected
+  marker primitive, reuse a managed-v1 registry row, or create a local
+  controller/lease/receipt substitute.
+- [ ] In a later one-parent release successor, fill independently reviewed
+  implementation/input/output/GPU pins and enable the wrapper/config together;
+  then let the managed controller run the strict T8 consumer before adopting
+  PASS. No deployment or science is authorized by this implementation commit.
 ## 2026-08-28: Managed execution protocol v2
 
 - [x] Use permanent RFC-4122 UUIDv4 identities for attempts, checkpoints, and
@@ -1976,7 +2023,9 @@ Mutagenicity roadmaps.
   same/cross-FS publication, worker-self-PASS, process-lineage, no-signal, and
   fifty-round concurrent ABA tests.
 - [ ] Integrate each T3--T9 worker and its method-specific independent verifier;
-  no route is released merely by this core implementation.
+  T8's method boundary is implemented, but its reviewed managed-v2 GPU/ACTIVE
+  authority adapter is still absent, so no route is released merely by this
+  core implementation.
 - [ ] Run an exact AutoDL target-filesystem rename preflight in the immutable
   execution tree before releasing any scientific attempt.
 
