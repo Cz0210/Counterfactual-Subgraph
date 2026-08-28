@@ -1508,6 +1508,134 @@ def test_t7_managed_adapter_is_worker_only_and_seals_in_order(
     worker.close()
 
 
+def test_t7_managed_adapter_uses_exact_frozen_v2_api_unmocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTO_TERMINATE_UNCONTROLLED_CHILDREN", "0")
+    stage_root = tmp_path / "managed-stage"
+    stage_root.mkdir(mode=0o700)
+    final_path = tmp_path / "published" / "t7"
+    input_hashes = {
+        "managed_execution_v2_pass": "8" * 64,
+        "taste_gcf_neurosed_pass": "9" * 64,
+    }
+    worker = t7_managed.create_t7_managed_worker(
+        stage_root=stage_root,
+        expected_final_path=final_path,
+        controller_id="controller",
+        task_id="T7_GCF_SMOKE:test",
+        git_commit="a" * 40,
+        config_hash="1" * 64,
+        input_hashes=input_hashes,
+        neurosed_pass_path=tmp_path / "neurosed" / "PASS.json",
+        neurosed_pass_sha256="9" * 64,
+    )
+    payload = {
+        "schema_version": t7_managed.T7_RAW_EVIDENCE_SCHEMA,
+        "attempt_id": worker.attempt_id,
+        "generation_token": worker.generation_token,
+        "expected_final_path": str(final_path),
+        "predecessors": worker.predecessor_evidence(),
+    }
+    try:
+        assert worker.attempt_input_hashes() == input_hashes
+        sealed = worker.seal_raw_evidence(payload)
+        assert len(sealed.seal_sha256) == 64
+        assert len(sealed.inventory_sha256) == 64
+        outer = json.loads(
+            (sealed.staging_path / "raw_evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert outer["schema_version"] == "managed_worker_raw_evidence_v2"
+        assert outer["evidence"] == payload
+        assert not (sealed.staging_path / "PASS").exists()
+        assert not (sealed.staging_path / "gate.json").exists()
+        assert not (sealed.staging_path / "verification.json").exists()
+    finally:
+        worker.close()
+
+
+def test_t7_independent_verification_publishes_only_through_managed_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.utils.terminal_publisher_v2 import (
+        open_sealed_worker_artifact,
+        verify_and_publish_sealed_attempt,
+    )
+
+    monkeypatch.setenv("AUTO_TERMINATE_UNCONTROLLED_CHILDREN", "0")
+    stage_root = tmp_path / "managed-stage"
+    stage_root.mkdir(mode=0o700)
+    final_path = tmp_path / "published" / "t7"
+    final_path.parent.mkdir(mode=0o700)
+    inputs = _dummy_inputs()
+    managed_input_hashes = {
+        "managed_execution_v2_pass": "8" * 64,
+        "taste_gcf_neurosed_pass": "9" * 64,
+        "taste_gcf_neurosed_checkpoint": "0" * 64,
+        "taste_gine_t2_gate": "9" * 64,
+        "taste_gine_t3_gate": "a" * 64,
+        "taste_oracle_t4_gate": "d" * 64,
+        "taste_train_csv": "f" * 64,
+    }
+    worker = t7_managed.create_t7_managed_worker(
+        stage_root=stage_root,
+        expected_final_path=final_path,
+        controller_id="controller",
+        task_id="T7_GCF_SMOKE:test",
+        git_commit="a" * 40,
+        config_hash="1" * 64,
+        input_hashes=managed_input_hashes,
+        neurosed_pass_path=tmp_path / "neurosed" / "PASS.json",
+        neurosed_pass_sha256="9" * 64,
+    )
+    try:
+        raw = build_worker_raw_evidence(
+            inputs=inputs,
+            managed_worker=worker,
+            train_evidence={"graph_schema_sha256": "0" * 64},
+            science={
+                "trace": [_trace_row([0.6, 0.1, 0.3])],
+                "summary": {
+                    **_science_summary(),
+                    "neurosed_predecessor": {
+                        **_science_summary()["neurosed_predecessor"],
+                        "pass_path": str(tmp_path / "neurosed" / "PASS.json"),
+                    },
+                },
+            },
+        )
+        sealed = worker.seal_raw_evidence(raw)
+        verification = verify_t7_worker_raw_evidence(
+            raw,
+            expected_attempt_id=worker.attempt_id,
+            expected_generation_token=worker.generation_token,
+            expected_final_path=final_path,
+            expected_predecessor=worker.predecessor_evidence()[0],
+            expected_input_hashes=raw["input_hashes"],
+        )
+        with open_sealed_worker_artifact(
+            sealed.seal_path,
+            expected_attempt_id=worker.attempt_id,
+            expected_generation_token=worker.generation_token,
+        ) as held:
+            publication = verify_and_publish_sealed_attempt(
+                held,
+                final_path=final_path,
+                verification=verification,
+            )
+        assert publication.final_path == final_path
+        assert (final_path / "PASS").read_bytes() == (
+            b"[MANAGED_EXECUTION_V2_PASS]\n"
+        )
+        assert taste_gcf.load_tastemolnet_gcf_verified_gate(final_path)[
+            "status"
+        ] == "PASS"
+    finally:
+        worker.close()
+
+
 def test_t7_worker_source_has_no_verifier_or_legacy_publisher() -> None:
     adapter_source = (
         ROOT / "src/utils/tastemolnet_t7_managed_v2.py"
