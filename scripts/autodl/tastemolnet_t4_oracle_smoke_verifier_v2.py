@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.eval.tastemolnet_t4_oracle_smoke_v2 import (  # noqa: E402
     PASS_MARKER,
+    SINGLE_DESTINATION_WARNING_MARKER,
     TasteT4OracleSmokeError,
     verify_and_publish_t4,
 )
@@ -128,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
             flush=True,
         )
+        if verification["destination_diversity_single_class_warning"]:
+            print(SINGLE_DESTINATION_WARNING_MARKER, flush=True)
         print(PASS_MARKER, flush=True)
         return 0
     except BaseException as exc:

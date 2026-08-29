@@ -1,14 +1,15 @@
-"""Managed-v2 successor for the bounded TasteMolNet T4 oracle smoke.
+"""Managed-v2 successor for the adaptive bounded TasteMolNet T4 oracle smoke.
 
 The scientific worker writes only aggregate candidate evidence.  A distinct
 method verifier reopens the worker's SEALED tree, independently repeats the
-bounded calibration-cache smoke on the same physical GPU binding, and delegates
+adaptive calibration-cache smoke on the same physical GPU binding, and delegates
 the only PASS/gate writes to :mod:`src.utils.terminal_publisher_v2`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import csv
 import hashlib
 import io
 import json
@@ -28,11 +29,14 @@ from src.data.molecular_graph_featurizer import MolecularFeatureSchema
 from src.eval.tastemolnet_gnn_stages import (
     NUM_CLASSES,
     SOURCE_LABEL,
+    T4_ADAPTIVE_SEARCH_SCHEDULE,
+    T4_MIN_FLIPPED_PARENTS,
+    T4_MIN_STRICT_FLIPS,
     PhysicalDirectory,
     TasteGNNStageError,
     _load_gnn_oracle_anchored,
     _physical_directory,
-    run_bounded_oracle_smoke,
+    run_adaptive_oracle_smoke,
 )
 from src.eval.tastemolnet_t3_calibration_v2 import (
     CANDIDATE_CHECKPOINT_FILES as T3_CHECKPOINT_FILES,
@@ -65,23 +69,33 @@ SCHEMA_VERSION = "tastemolnet_t4_oracle_smoke_v2"
 STAGE = "T4_ORACLE_SMOKE"
 TASK_ID = "T4_ORACLE_SMOKE"
 PASS_MARKER = "[TASTE_T4_ORACLE_SMOKE_PASS]"
+SINGLE_DESTINATION_WARNING_MARKER = "[TASTE_T4_SINGLE_DESTINATION_WARNING]"
 PHYSICAL_GPU_INDEX = 1
 VISIBLE_DEVICE = "cuda:0"
 CUDA_VISIBLE_DEVICES = "1"
-SOURCE_COUNT = 16
-DELETIONS_PER_PARENT = 4
+SEARCH_SCHEDULE = T4_ADAPTIVE_SEARCH_SCHEDULE
+MIN_STRICT_FLIPS = T4_MIN_STRICT_FLIPS
+MIN_FLIPPED_PARENTS = T4_MIN_FLIPPED_PARENTS
+# Compatibility aliases now represent the authorized adaptive maxima rather
+# than a required exact cohort shape.
+SOURCE_COUNT = SEARCH_SCHEDULE[-1][0]
+DELETIONS_PER_PARENT = SEARCH_SCHEDULE[-1][1]
 PUBLISHED_T3_ROOT = Path(
     "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/gnn_oracles/"
     "tastemolnet/gine/seed7/calibrated-20260828T054900Z-746545ed"
 )
 T4_CANDIDATE_NAME = "t4_oracle_smoke_candidate.json"
-METHOD_DOCUMENTS = frozenset(
+DESTINATION_DISTRIBUTION_NAME = "destination_distribution.csv"
+JSON_METHOD_DOCUMENTS = frozenset(
     {
         "oracle_smoke.json",
         "oracle_provenance.json",
         "data_access_manifest.json",
         "t3_binding.json",
     }
+)
+METHOD_DOCUMENTS = frozenset(
+    set(JSON_METHOD_DOCUMENTS) | {DESTINATION_DISTRIBUTION_NAME}
 )
 CANDIDATE_FILES = frozenset(
     set(METHOD_DOCUMENTS) | {T4_CANDIDATE_NAME, "sha256sums.txt"}
@@ -576,7 +590,7 @@ class HeldCalibrationCache:
 
 @dataclass(slots=True)
 class T4ScienceRun:
-    documents: dict[str, dict[str, Any]]
+    documents: dict[str, Any]
     input_hashes: dict[str, str]
     _revalidate: Callable[[], None]
     _close: Callable[[], None]
@@ -663,38 +677,257 @@ def _require_gpu1_environment(*, gpu_uuid: str) -> dict[str, Any]:
     }
 
 
+def _destination_distribution_csv(smoke: Mapping[str, Any]) -> str:
+    """Render aggregate-only destination counts, including non-flips."""
+
+    strict = int(smoke["strict_flip_count"])
+    valid = int(smoke["valid_deletion_count"])
+    rows = (
+        (0, "Bitter", int(smoke["destination_0_count"]), "strict_flip"),
+        (1, "Sweet", valid - strict, "non_flip"),
+        (2, "Tasteless", int(smoke["destination_2_count"]), "strict_flip"),
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(
+        ("source_label", "destination_label", "destination_name", "count", "kind")
+    )
+    for destination, name, count, kind in rows:
+        writer.writerow((SOURCE_LABEL, destination, name, count, kind))
+    return output.getvalue()
+
+
+def _document_bytes(name: str, value: Any) -> bytes:
+    if name in JSON_METHOD_DOCUMENTS:
+        if type(value) is not dict:
+            raise TasteT4OracleSmokeError(f"{name} must be one JSON object")
+        return _canonical_json_bytes(value)
+    if name == DESTINATION_DISTRIBUTION_NAME and type(value) is str:
+        return value.encode("utf-8")
+    raise TasteT4OracleSmokeError(f"unsupported T4 method document: {name}")
+
+
+def _validate_destination_distribution_csv(
+    value: Any, *, smoke: Mapping[str, Any]
+) -> None:
+    if type(value) is not str:
+        raise TasteT4OracleSmokeError("destination_distribution.csv must be UTF-8 text")
+    try:
+        rows = list(csv.DictReader(io.StringIO(value)))
+    except (csv.Error, UnicodeError) as exc:
+        raise TasteT4OracleSmokeError(
+            "destination_distribution.csv is malformed"
+        ) from exc
+    if not rows or set(rows[0]) != {
+        "source_label",
+        "destination_label",
+        "destination_name",
+        "count",
+        "kind",
+    }:
+        raise TasteT4OracleSmokeError(
+            "destination_distribution.csv columns changed"
+        )
+    expected = [
+        {
+            "source_label": "1",
+            "destination_label": "0",
+            "destination_name": "Bitter",
+            "count": str(smoke["destination_0_count"]),
+            "kind": "strict_flip",
+        },
+        {
+            "source_label": "1",
+            "destination_label": "1",
+            "destination_name": "Sweet",
+            "count": str(
+                int(smoke["valid_deletion_count"])
+                - int(smoke["strict_flip_count"])
+            ),
+            "kind": "non_flip",
+        },
+        {
+            "source_label": "1",
+            "destination_label": "2",
+            "destination_name": "Tasteless",
+            "count": str(smoke["destination_2_count"]),
+            "kind": "strict_flip",
+        },
+    ]
+    if rows != expected:
+        raise TasteT4OracleSmokeError(
+            "destination_distribution.csv differs from oracle_smoke.json"
+        )
+
+
 def _validate_aggregate_smoke(smoke: Mapping[str, Any]) -> None:
     distribution = smoke.get("destination_distribution")
     overall = distribution.get("overall") if type(distribution) is dict else None
     transitions = overall.get("transitions") if type(overall) is dict else None
+    schedule = [
+        {
+            "round": index,
+            "parent_limit": parent_limit,
+            "deletion_cap_per_parent": deletion_cap,
+        }
+        for index, (parent_limit, deletion_cap) in enumerate(SEARCH_SCHEDULE, start=1)
+    ]
+    rounds = smoke.get("rounds_executed")
+    terminal_round = smoke.get("terminal_round")
+    selected_count = smoke.get("selected_count")
+    deletion_counts = smoke.get("parent_deletion_counts_by_position")
+    deletion_cap = smoke.get("deletion_cap_per_parent")
+    valid_deletion_count = smoke.get("valid_deletion_count")
+    strict_flip_count = smoke.get("strict_flip_count")
+    flipped_parent_count = smoke.get("distinct_flipped_parent_count")
+    destination_0_count = smoke.get("destination_0_count")
+    destination_2_count = smoke.get("destination_2_count")
     if (
-        smoke.get("status") != "PASS"
-        or smoke.get("selected_count") != SOURCE_COUNT
-        or smoke.get("parent_deletion_counts_by_position")
-        != [DELETIONS_PER_PARENT] * SOURCE_COUNT
-        or smoke.get("valid_deletion_count") != SOURCE_COUNT * DELETIONS_PER_PARENT
+        smoke.get("schema_version")
+        != "tastemolnet_t4_adaptive_oracle_smoke_metrics_v1"
+        or smoke.get("status") != "PASS"
+        or smoke.get("adaptive_calibration_search") is not True
+        or smoke.get("search_schedule") != schedule
+        or type(rounds) is not list
+        or not rounds
+        or len(rounds) > len(schedule)
+        or type(terminal_round) is not int
+        or terminal_round != len(rounds)
+        or type(selected_count) is not int
+        or selected_count <= 0
+        or selected_count > schedule[terminal_round - 1]["parent_limit"]
+        or type(deletion_cap) is not int
+        or deletion_cap != schedule[terminal_round - 1]["deletion_cap_per_parent"]
+        or type(deletion_counts) is not list
+        or len(deletion_counts) != selected_count
+        or any(
+            type(count) is not int or count < 0 or count > deletion_cap
+            for count in deletion_counts
+        )
+        or type(valid_deletion_count) is not int
+        or valid_deletion_count != sum(deletion_counts)
+        or valid_deletion_count <= 0
+        or smoke.get("at_least_one_connected_deletion") is not True
+        or smoke.get("all_selected_have_connected_deletions")
+        is not all(count > 0 for count in deletion_counts)
         or smoke.get("all_selected_true_source") is not True
         or smoke.get("all_selected_predicted_source") is not True
-        or smoke.get("all_selected_have_four_connected_deletions") is not True
+        or smoke.get("batch_examples") != selected_count
         or smoke.get("checkpoint_load_count") != 1
         or smoke.get("num_classes") != NUM_CLASSES
         or smoke.get("source_label") != SOURCE_LABEL
         or smoke.get("strict_flip") != "pred_before == 1 and pred_after != 1"
+        or type(strict_flip_count) is not int
+        or strict_flip_count < MIN_STRICT_FLIPS
+        or strict_flip_count > valid_deletion_count
+        or smoke.get("minimum_strict_flip_count") != MIN_STRICT_FLIPS
+        or type(flipped_parent_count) is not int
+        or flipped_parent_count < MIN_FLIPPED_PARENTS
+        or flipped_parent_count > selected_count
+        or smoke.get("minimum_distinct_flipped_parent_count")
+        != MIN_FLIPPED_PARENTS
+        or smoke.get("strict_flip_gate_pass") is not True
         or smoke.get("all_three_probabilities_validated") is not True
+        or smoke.get("all_three_logits_validated") is not True
+        or smoke.get("three_class_api_validated") is not True
+        or not isinstance(smoke.get("batch_single_max_abs_difference"), (int, float))
+        or isinstance(smoke.get("batch_single_max_abs_difference"), bool)
+        or not math.isfinite(float(smoke["batch_single_max_abs_difference"]))
+        or float(smoke["batch_single_max_abs_difference"]) > 1e-7
         or smoke.get("empty_deletion_failed_closed") is not True
         or smoke.get("invalid_deletion_failed_closed") is not True
+        or smoke.get("calibration_payload_loaded") is not True
+        or smoke.get("train_payload_loaded") is not False
+        or smoke.get("validation_payload_loaded") is not False
+        or smoke.get("test_payload_loaded") is not False
+        or smoke.get("test_loaded") is not False
+        or smoke.get("rf_oracle_used") is not False
         or smoke.get("per_example_predictions_written") is not False
         or smoke.get("smiles_written") is not False
         or smoke.get("molecule_identifiers_written") is not False
         or type(transitions) is not dict
+        or set(transitions) != {"1->0", "1->2"}
+        or distribution.get("schema_version") != 1
+        or distribution.get("source_label") != SOURCE_LABEL
+        or distribution.get("num_classes") != NUM_CLASSES
+        or distribution.get("by_rule") != {}
+        or overall.get("total_records") != valid_deletion_count
         or type(transitions.get("1->0")) is not dict
-        or type(transitions.get("1->1")) is not dict
         or type(transitions.get("1->2")) is not dict
-        or transitions["1->0"].get("count", 0) <= 0
-        or transitions["1->1"].get("count", 0) <= 0
-        or transitions["1->2"].get("count", 0) <= 0
+        or type(destination_0_count) is not int
+        or type(destination_2_count) is not int
+        or destination_0_count < 0
+        or destination_2_count < 0
+        or destination_0_count != transitions["1->0"].get("count")
+        or destination_2_count != transitions["1->2"].get("count")
+        or destination_0_count + destination_2_count != strict_flip_count
+        or overall.get("total_strict_flips") != strict_flip_count
     ):
-        raise TasteT4OracleSmokeError("T4 aggregate smoke contract changed")
+        raise TasteT4OracleSmokeError("T4 adaptive aggregate smoke contract changed")
+    for index, row in enumerate(rounds):
+        expected_schedule = schedule[index]
+        if (
+            type(row) is not dict
+            or row.get("round") != expected_schedule["round"]
+            or row.get("parent_limit") != expected_schedule["parent_limit"]
+            or row.get("deletion_cap_per_parent")
+            != expected_schedule["deletion_cap_per_parent"]
+            or type(row.get("selected_count")) is not int
+            or row["selected_count"] <= 0
+            or row["selected_count"] > row["parent_limit"]
+            or type(row.get("valid_deletion_count")) is not int
+            or row["valid_deletion_count"] < 0
+            or type(row.get("strict_flip_count")) is not int
+            or row["strict_flip_count"] < 0
+            or row["strict_flip_count"] > row["valid_deletion_count"]
+            or type(row.get("distinct_flipped_parent_count")) is not int
+            or row["distinct_flipped_parent_count"] < 0
+            or row["distinct_flipped_parent_count"] > row["selected_count"]
+            or type(row.get("destination_0_count")) is not int
+            or type(row.get("destination_2_count")) is not int
+            or row["destination_0_count"] < 0
+            or row["destination_2_count"] < 0
+            or row["destination_0_count"] + row["destination_2_count"]
+            != row["strict_flip_count"]
+            or row.get("gate_pass")
+            is not (
+                row["strict_flip_count"] >= MIN_STRICT_FLIPS
+                and row["distinct_flipped_parent_count"] >= MIN_FLIPPED_PARENTS
+            )
+            or (index < len(rounds) - 1 and row["gate_pass"] is not False)
+            or (index == len(rounds) - 1 and row["gate_pass"] is not True)
+        ):
+            raise TasteT4OracleSmokeError("T4 adaptive round evidence changed")
+    terminal = rounds[-1]
+    if (
+        terminal["selected_count"] != selected_count
+        or terminal["valid_deletion_count"] != valid_deletion_count
+        or terminal["strict_flip_count"] != strict_flip_count
+        or terminal["distinct_flipped_parent_count"] != flipped_parent_count
+        or terminal["destination_0_count"] != destination_0_count
+        or terminal["destination_2_count"] != destination_2_count
+    ):
+        raise TasteT4OracleSmokeError("T4 terminal round summary changed")
+    observed = [
+        destination
+        for destination, count in ((0, destination_0_count), (2, destination_2_count))
+        if count > 0
+    ]
+    expected_status = (
+        "DESTINATION_DIVERSITY_PASS"
+        if len(observed) == 2
+        else "DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING"
+    )
+    if (
+        not observed
+        or smoke.get("observed_destination_labels") != observed
+        or smoke.get("destination_diversity_status") != expected_status
+        or smoke.get("destination_diversity_single_class_warning")
+        is not (len(observed) == 1)
+        or smoke.get("strict_flip_to_bitter_observed") is not (0 in observed)
+        or smoke.get("strict_flip_to_tasteless_observed") is not (2 in observed)
+    ):
+        raise TasteT4OracleSmokeError("T4 destination warning contract changed")
 
 
 def _execute_science(
@@ -736,13 +969,11 @@ def _execute_science(
             or float(oracle.temperature) != t3.binding["temperature"]
         ):
             raise TasteT4OracleSmokeError("loaded oracle differs from T3 authority")
-        smoke = run_bounded_oracle_smoke(
+        smoke = run_adaptive_oracle_smoke(
             dataset=dataset,
             oracle=oracle,
             feature_schema=feature_schema,
             batch_size=batch_size,
-            source_count=SOURCE_COUNT,
-            max_deletions_per_parent=DELETIONS_PER_PARENT,
         )
         _validate_aggregate_smoke(smoke)
         cache_binding = cache.binding()
@@ -771,6 +1002,20 @@ def _execute_science(
             "validation_payload_loaded": False,
             "test_payload_loaded": False,
             "model_load_scope": "once_per_scientific_process",
+            "adaptive_calibration_search": True,
+            "search_schedule": [
+                {
+                    "round": index,
+                    "parent_limit": parent_limit,
+                    "deletion_cap_per_parent": deletion_cap,
+                }
+                for index, (parent_limit, deletion_cap) in enumerate(
+                    SEARCH_SCHEDULE, start=1
+                )
+            ],
+            "minimum_strict_flip_count": MIN_STRICT_FLIPS,
+            "minimum_distinct_flipped_parent_count": MIN_FLIPPED_PARENTS,
+            "destination_diversity_required": False,
         }
         access = {
             "schema_version": "tastemolnet_t4_data_access_v2",
@@ -785,6 +1030,7 @@ def _execute_science(
             "oracle_provenance.json": provenance,
             "data_access_manifest.json": access,
             "t3_binding.json": t3_binding,
+            DESTINATION_DISTRIBUTION_NAME: _destination_distribution_csv(smoke),
         }
         input_hashes = {
             "t3_gate": t3_binding["t3_gate_sha256"],
@@ -821,17 +1067,35 @@ def _execute_science(
 def _validate_documents(documents: Mapping[str, Any]) -> None:
     if set(documents) != set(METHOD_DOCUMENTS):
         raise TasteT4OracleSmokeError("T4 method document inventory changed")
-    if any(type(value) is not dict for value in documents.values()):
-        raise TasteT4OracleSmokeError("T4 method document is not one JSON object")
+    if any(type(documents[name]) is not dict for name in JSON_METHOD_DOCUMENTS):
+        raise TasteT4OracleSmokeError("T4 JSON method document is not one object")
     _validate_aggregate_smoke(documents["oracle_smoke.json"])
+    _validate_destination_distribution_csv(
+        documents[DESTINATION_DISTRIBUTION_NAME],
+        smoke=documents["oracle_smoke.json"],
+    )
     provenance = documents["oracle_provenance.json"]
     access = documents["data_access_manifest.json"]
     t3_binding = documents["t3_binding.json"]
+    expected_schedule = [
+        {
+            "round": index,
+            "parent_limit": parent_limit,
+            "deletion_cap_per_parent": deletion_cap,
+        }
+        for index, (parent_limit, deletion_cap) in enumerate(SEARCH_SCHEDULE, start=1)
+    ]
     if (
         provenance.get("physical_gpu_index") != PHYSICAL_GPU_INDEX
         or provenance.get("visible_device") != VISIBLE_DEVICE
         or provenance.get("cuda_visible_devices") != CUDA_VISIBLE_DEVICES
         or provenance.get("checkpoint_load_count") != 1
+        or provenance.get("adaptive_calibration_search") is not True
+        or provenance.get("search_schedule") != expected_schedule
+        or provenance.get("destination_diversity_required") is not False
+        or provenance.get("minimum_strict_flip_count") != MIN_STRICT_FLIPS
+        or provenance.get("minimum_distinct_flipped_parent_count")
+        != MIN_FLIPPED_PARENTS
         or provenance.get("model_sha256") != t3_binding.get("model_sha256")
         or provenance.get("temperature_scaling_sha256")
         != t3_binding.get("temperature_scaling_sha256")
@@ -845,7 +1109,9 @@ def _validate_documents(documents: Mapping[str, Any]) -> None:
         or t3_binding.get("selection_split") != "validation"
     ):
         raise TasteT4OracleSmokeError("T4 aggregate provenance/access contract changed")
-    encoded = _canonical_json_bytes(documents)
+    encoded = b"".join(
+        _document_bytes(name, documents[name]) for name in sorted(METHOD_DOCUMENTS)
+    )
     forbidden = (b'"smiles":', b'"molecule_id":', b'"parent_smiles":', b'"rows":')
     if any(token in encoded for token in forbidden):
         raise TasteT4OracleSmokeError("T4 aggregate documents contain row-level data")
@@ -956,9 +1222,10 @@ def build_t4_candidate(
             run.revalidate()
             document_hashes: dict[str, str] = {}
             for name in sorted(METHOD_DOCUMENTS):
-                data = _canonical_json_bytes(run.documents[name])
+                data = _document_bytes(name, run.documents[name])
                 _write_exclusive(output / name, data)
                 document_hashes[name] = _sha256(data)
+            smoke = run.documents["oracle_smoke.json"]
             candidate = {
                 "schema_version": SCHEMA_VERSION,
                 "stage": STAGE,
@@ -973,8 +1240,24 @@ def build_t4_candidate(
                     "release_authority": False,
                 },
                 "document_hashes": document_hashes,
-                "selected_count": SOURCE_COUNT,
-                "deletions_per_parent": DELETIONS_PER_PARENT,
+                "adaptive_calibration_search": True,
+                "search_schedule": smoke["search_schedule"],
+                "terminal_round": smoke["terminal_round"],
+                "selected_count": smoke["selected_count"],
+                "deletion_cap_per_parent": smoke["deletion_cap_per_parent"],
+                "valid_deletion_count": smoke["valid_deletion_count"],
+                "strict_flip_count": smoke["strict_flip_count"],
+                "distinct_flipped_parent_count": smoke[
+                    "distinct_flipped_parent_count"
+                ],
+                "minimum_strict_flip_count": MIN_STRICT_FLIPS,
+                "minimum_distinct_flipped_parent_count": MIN_FLIPPED_PARENTS,
+                "destination_0_count": smoke["destination_0_count"],
+                "destination_2_count": smoke["destination_2_count"],
+                "destination_diversity_status": smoke[
+                    "destination_diversity_status"
+                ],
+                "destination_diversity_required": False,
                 "physical_gpu_index": PHYSICAL_GPU_INDEX,
                 "physical_gpu_uuid": gpu_uuid,
                 "visible_device": VISIBLE_DEVICE,
@@ -1007,8 +1290,16 @@ def build_t4_candidate(
                 "stage": STAGE,
                 "artifact_root": str(output),
                 "input_hashes": dict(managed_input_hashes),
-                "selected_count": SOURCE_COUNT,
-                "valid_deletion_count": SOURCE_COUNT * DELETIONS_PER_PARENT,
+                "terminal_round": smoke["terminal_round"],
+                "selected_count": smoke["selected_count"],
+                "valid_deletion_count": smoke["valid_deletion_count"],
+                "strict_flip_count": smoke["strict_flip_count"],
+                "distinct_flipped_parent_count": smoke[
+                    "distinct_flipped_parent_count"
+                ],
+                "destination_diversity_status": smoke[
+                    "destination_diversity_status"
+                ],
                 "physical_gpu_index": PHYSICAL_GPU_INDEX,
                 "physical_gpu_uuid": gpu_uuid,
                 "model_load_count": 1,
@@ -1236,10 +1527,18 @@ def verify_and_publish_t4(
             for name, digest in hashes.items():
                 if _sha256(payloads[name]) != digest:
                     raise TasteT4OracleSmokeError(f"T4 candidate hash changed: {name}")
-            candidate_documents = {
+            candidate_documents: dict[str, Any] = {
                 name: _json(payloads[name], label=f"candidate {name}")
-                for name in METHOD_DOCUMENTS
+                for name in JSON_METHOD_DOCUMENTS
             }
+            try:
+                candidate_documents[DESTINATION_DISTRIBUTION_NAME] = payloads[
+                    DESTINATION_DISTRIBUTION_NAME
+                ].decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise TasteT4OracleSmokeError(
+                    "candidate destination_distribution.csv is not UTF-8"
+                ) from exc
             if not _equivalent(candidate_documents, run.documents):
                 raise TasteT4OracleSmokeError("independent T4 replay differs from worker")
             candidate = _json(
@@ -1254,8 +1553,35 @@ def verify_and_publish_t4(
                 or candidate.get("input_hashes") != expected_input_hashes
                 or candidate.get("document_hashes")
                 != {name: hashes[name] for name in METHOD_DOCUMENTS}
-                or candidate.get("selected_count") != SOURCE_COUNT
-                or candidate.get("deletions_per_parent") != DELETIONS_PER_PARENT
+                or candidate.get("adaptive_calibration_search") is not True
+                or candidate.get("search_schedule")
+                != run.documents["oracle_smoke.json"]["search_schedule"]
+                or candidate.get("terminal_round")
+                != run.documents["oracle_smoke.json"]["terminal_round"]
+                or candidate.get("selected_count")
+                != run.documents["oracle_smoke.json"]["selected_count"]
+                or candidate.get("deletion_cap_per_parent")
+                != run.documents["oracle_smoke.json"]["deletion_cap_per_parent"]
+                or candidate.get("valid_deletion_count")
+                != run.documents["oracle_smoke.json"]["valid_deletion_count"]
+                or candidate.get("strict_flip_count")
+                != run.documents["oracle_smoke.json"]["strict_flip_count"]
+                or candidate.get("distinct_flipped_parent_count")
+                != run.documents["oracle_smoke.json"][
+                    "distinct_flipped_parent_count"
+                ]
+                or candidate.get("minimum_strict_flip_count") != MIN_STRICT_FLIPS
+                or candidate.get("minimum_distinct_flipped_parent_count")
+                != MIN_FLIPPED_PARENTS
+                or candidate.get("destination_0_count")
+                != run.documents["oracle_smoke.json"]["destination_0_count"]
+                or candidate.get("destination_2_count")
+                != run.documents["oracle_smoke.json"]["destination_2_count"]
+                or candidate.get("destination_diversity_status")
+                != run.documents["oracle_smoke.json"][
+                    "destination_diversity_status"
+                ]
+                or candidate.get("destination_diversity_required") is not False
                 or candidate.get("physical_gpu_index") != PHYSICAL_GPU_INDEX
                 or candidate.get("physical_gpu_uuid") != gpu_uuid
                 or candidate.get("visible_device") != VISIBLE_DEVICE
@@ -1349,15 +1675,49 @@ def verify_and_publish_t4(
                 "physical_gpu_uuid": gpu_uuid,
                 "cuda_visible_devices": CUDA_VISIBLE_DEVICES,
                 "visible_device": VISIBLE_DEVICE,
-                "selected_count": SOURCE_COUNT,
-                "valid_deletion_count": SOURCE_COUNT * DELETIONS_PER_PARENT,
+                "adaptive_calibration_search": True,
+                "search_schedule": smoke["search_schedule"],
+                "rounds_executed": smoke["rounds_executed"],
+                "terminal_round": smoke["terminal_round"],
+                "selected_count": smoke["selected_count"],
+                "deletion_cap_per_parent": smoke["deletion_cap_per_parent"],
+                "valid_deletion_count": smoke["valid_deletion_count"],
+                "strict_flip_count": smoke["strict_flip_count"],
+                "minimum_strict_flip_count": MIN_STRICT_FLIPS,
+                "distinct_flipped_parent_count": smoke[
+                    "distinct_flipped_parent_count"
+                ],
+                "minimum_distinct_flipped_parent_count": MIN_FLIPPED_PARENTS,
+                "strict_flip_gate_pass": True,
+                "destination_0_count": smoke["destination_0_count"],
+                "destination_2_count": smoke["destination_2_count"],
+                "destination_diversity_status": smoke[
+                    "destination_diversity_status"
+                ],
+                "destination_diversity_required": False,
+                "destination_diversity_single_class_warning": smoke[
+                    "destination_diversity_single_class_warning"
+                ],
+                "destination_warning_marker": (
+                    SINGLE_DESTINATION_WARNING_MARKER
+                    if smoke["destination_diversity_single_class_warning"]
+                    else None
+                ),
                 "batch_single_max_abs_difference": smoke[
                     "batch_single_max_abs_difference"
                 ],
                 "all_three_probabilities_validated": True,
-                "strict_flip_to_bitter_observed": True,
-                "strict_flip_to_tasteless_observed": True,
-                "no_flip_observed": True,
+                "all_three_logits_validated": True,
+                "three_class_api_validated": True,
+                "strict_flip_to_bitter_observed": smoke[
+                    "strict_flip_to_bitter_observed"
+                ],
+                "strict_flip_to_tasteless_observed": smoke[
+                    "strict_flip_to_tasteless_observed"
+                ],
+                "no_flip_observed": (
+                    smoke["valid_deletion_count"] > smoke["strict_flip_count"]
+                ),
                 "invalid_deletion_failed_closed": True,
                 "full_parent_deletion_failed_closed": True,
                 "model_load_count_per_scientific_process": 1,
@@ -1392,11 +1752,17 @@ __all__ = [
     "CANDIDATE_FILES",
     "CUDA_VISIBLE_DEVICES",
     "DELETIONS_PER_PARENT",
+    "DESTINATION_DISTRIBUTION_NAME",
+    "JSON_METHOD_DOCUMENTS",
+    "MIN_FLIPPED_PARENTS",
+    "MIN_STRICT_FLIPS",
     "METHOD_DOCUMENTS",
     "PASS_MARKER",
     "PHYSICAL_GPU_INDEX",
     "PUBLISHED_T3_ROOT",
     "SCHEMA_VERSION",
+    "SEARCH_SCHEDULE",
+    "SINGLE_DESTINATION_WARNING_MARKER",
     "SOURCE_COUNT",
     "STAGE",
     "T4ScienceRun",

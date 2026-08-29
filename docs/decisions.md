@@ -91,6 +91,53 @@ the model-card boundary.
   checkpoint selection, and generated-query to original-target GCF distance
   direction remain release requirements.
 
+## [2026-08-29] Replace T4 destination diversity with an adaptive calibration gate
+
+### Motivation
+
+The fixed sixteen-parent/four-deletion smoke made simultaneous observation of
+Sweet-to-Bitter and Sweet-to-Tasteless a release requirement. That small-sample
+diversity condition is not part of strict counterfactual correctness and can
+block all downstream Taste experiments even when the frozen three-class oracle
+produces many real Sweet-to-non-Sweet flips. The project owner has authorized a
+bounded adaptive calibration-only successor and explicitly made destination
+diversity diagnostic rather than terminal.
+
+### Decision
+
+Keep the existing managed-v2 worker/verifier and managed release-v3 GPU-1
+authority. Replace only the T4 scientific search with deterministic rounds of
+16 parents and at most 8 deletions, 64 and at most 16, then 128 and at most 32.
+Every parent comes from the authenticated calibration cache, has true label 1,
+and is predicted as label 1 before deletion. Stop at the first round containing
+at least 16 strict flips across at least 8 distinct parents, where both
+`1 -> 0` and `1 -> 2` satisfy `pred_before == 1 and pred_after != 1`.
+
+Continue to validate real connected deletions, three-class probabilities,
+batch/single parity, fail-closed invalid/full-parent controls, one model load per
+scientific process, and no train/validation/test/RF access. Publish only
+aggregate documents, including `destination_distribution.csv`. Both
+destinations produce `DESTINATION_DIVERSITY_PASS`; exactly one produces
+`DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING` and remains releasable. A search
+that never reaches the flip and parent-coverage minima fails. Deterministic unit
+fixtures cover `1 -> 0`, `1 -> 2`, and `1 -> 1` independently.
+
+### Consequences
+
+- The 2026-08-28 fixed `16 x 4` destination-diversity decision remains
+  historical evidence but is superseded for new T4 executions.
+- The warning cannot block T4, T6, or the main Taste experiment queue.
+- No test or RF payload is opened, and no row-level identifier, SMILES, or
+  prediction is published.
+- This implementation change does not itself claim a runtime PASS, launch an
+  ablation, or authorize GPU 0/GPU 3 use. A fresh reviewed immutable execution
+  and independent verifier publication remain required.
+
+### Status
+
+Implementation, focused tests, documentation, and paired Slurm synchronization
+are complete locally. Independent review and fresh AutoDL execution are
+pending.
 ## [2026-08-29] Accept hash-matched empty official Python initializers for K20
 
 ### Motivation

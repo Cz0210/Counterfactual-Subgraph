@@ -1315,7 +1315,9 @@ class _FakeOracle:
         return {
             "predicted_label": after,
             "probabilities": probabilities,
-            "logits": [0.0, 1.0, 0.0],
+            "logits": [
+                _FakeOracle.temperature * math.log(value) for value in probabilities
+            ],
             "source_probability": probabilities[1],
             "confidence": max(probabilities),
             "checkpoint_id": _FakeOracle.checkpoint_id,
@@ -1754,6 +1756,12 @@ def test_t4_rejects_missing_multiclass_destination(
                 **result,
                 "predicted_label": 0,
                 "probabilities": [0.8, 0.1, 0.1],
+                "logits": [
+                    _FakeOracle.temperature * math.log(value)
+                    for value in [0.8, 0.1, 0.1]
+                ],
+                "source_probability": 0.1,
+                "confidence": 0.8,
             }
         return result
 
@@ -1766,6 +1774,192 @@ def test_t4_rejects_missing_multiclass_destination(
             batch_size=8,
             source_count=16,
             max_deletions_per_parent=4,
+        )
+
+
+def _install_adaptive_deletion_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        stages,
+        "_real_connected_deletions",
+        lambda _smiles, *, parent_id, maximum: [
+            ("C", _outcome(int(parent_id.split("-")[1])))
+            for _index in range(maximum)
+        ],
+    )
+    monkeypatch.setattr(
+        stages,
+        "_graph_from_smiles",
+        lambda _featurizer, _smiles, molecule_id: MolecularGraphData(
+            x=((0,),),
+            edge_index=((), ()),
+            edge_attr=(),
+            y=-1,
+            molecule_id=molecule_id,
+            smiles="C",
+            split="oracle_smoke",
+            graph_sha256=hashlib.sha256(molecule_id.encode()).hexdigest(),
+        ),
+    )
+
+
+def _adaptive_record(
+    original: Any,
+    graph: MolecularGraphData,
+    *,
+    destination: int,
+) -> dict[str, Any]:
+    result = original(graph)
+    if graph.molecule_id.startswith("t4-adaptive-"):
+        probabilities = {
+            0: [0.8, 0.1, 0.1],
+            1: [0.1, 0.8, 0.1],
+            2: [0.1, 0.1, 0.8],
+        }[destination]
+        result = {
+            **result,
+            "predicted_label": destination,
+            "probabilities": probabilities,
+            "logits": [
+                _FakeOracle.temperature * math.log(value) for value in probabilities
+            ],
+            "source_probability": probabilities[1],
+            "confidence": probabilities[destination],
+        }
+    return result
+
+
+def test_t4_adaptive_search_stops_at_first_passing_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_adaptive_deletion_fixtures(monkeypatch)
+    original = _FakeOracle._record
+
+    def destinations(graph: MolecularGraphData) -> dict[str, Any]:
+        destination = 1
+        if graph.molecule_id.startswith("t4-adaptive-"):
+            parent_position = int(graph.molecule_id.split("-")[3][1:])
+            destination = (0, 2, 1)[parent_position % 3]
+        return _adaptive_record(original, graph, destination=destination)
+
+    monkeypatch.setattr(_FakeOracle, "_record", staticmethod(destinations))
+    result = stages.run_adaptive_oracle_smoke(
+        dataset=_FakeDataset(count=130),
+        oracle=_FakeOracle(),
+        feature_schema=default_molecular_feature_schema(),
+        batch_size=8,
+    )
+    assert result["status"] == "PASS"
+    assert result["terminal_round"] == 1
+    assert result["selected_count"] == 16
+    assert result["deletion_cap_per_parent"] == 8
+    assert result["strict_flip_count"] >= 16
+    assert result["distinct_flipped_parent_count"] >= 8
+    assert result["batch_single_graph_count"] == 16 + 16 * 8
+    assert result["destination_0_count"] > 0
+    assert result["destination_2_count"] > 0
+    assert result["destination_diversity_status"] == "DESTINATION_DIVERSITY_PASS"
+    assert result["test_loaded"] is False
+    assert result["rf_oracle_used"] is False
+    assert "parent-" not in json.dumps(result, sort_keys=True)
+
+
+def test_t4_adaptive_search_expands_and_single_destination_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_adaptive_deletion_fixtures(monkeypatch)
+    original = _FakeOracle._record
+
+    def destinations(graph: MolecularGraphData) -> dict[str, Any]:
+        destination = 1
+        if graph.molecule_id.startswith("t4-adaptive-"):
+            round_index = int(graph.molecule_id.split("-")[2][1:])
+            parent_position = int(graph.molecule_id.split("-")[3][1:])
+            if round_index >= 2 and parent_position >= 16:
+                destination = 0
+        return _adaptive_record(original, graph, destination=destination)
+
+    monkeypatch.setattr(_FakeOracle, "_record", staticmethod(destinations))
+    result = stages.run_adaptive_oracle_smoke(
+        dataset=_FakeDataset(count=130),
+        oracle=_FakeOracle(),
+        feature_schema=default_molecular_feature_schema(),
+        batch_size=8,
+    )
+    assert result["terminal_round"] == 2
+    assert [row["gate_pass"] for row in result["rounds_executed"]] == [
+        False,
+        True,
+    ]
+    assert result["destination_0_count"] > 0
+    assert result["destination_2_count"] == 0
+    assert result["destination_diversity_status"] == (
+        "DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING"
+    )
+    assert result["destination_diversity_single_class_warning"] is True
+
+
+def test_t4_adaptive_search_continues_after_empty_first_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def deletions(_smiles: str, *, parent_id: str, maximum: int):
+        parent_index = int(parent_id.split("-")[1])
+        if parent_index < 16:
+            return []
+        return [("C", _outcome(parent_index)) for _index in range(maximum)]
+
+    monkeypatch.setattr(stages, "_real_connected_deletions", deletions)
+    monkeypatch.setattr(
+        stages,
+        "_graph_from_smiles",
+        lambda _featurizer, _smiles, molecule_id: MolecularGraphData(
+            x=((0,),),
+            edge_index=((), ()),
+            edge_attr=(),
+            y=-1,
+            molecule_id=molecule_id,
+            smiles="C",
+            split="oracle_smoke",
+            graph_sha256=hashlib.sha256(molecule_id.encode()).hexdigest(),
+        ),
+    )
+    original = _FakeOracle._record
+
+    def later_flip(graph: MolecularGraphData) -> dict[str, Any]:
+        destination = 0 if graph.molecule_id.startswith("t4-adaptive-") else 1
+        return _adaptive_record(original, graph, destination=destination)
+
+    monkeypatch.setattr(_FakeOracle, "_record", staticmethod(later_flip))
+    result = stages.run_adaptive_oracle_smoke(
+        dataset=_FakeDataset(count=130),
+        oracle=_FakeOracle(),
+        feature_schema=default_molecular_feature_schema(),
+        batch_size=8,
+    )
+    assert result["terminal_round"] == 2
+    assert result["rounds_executed"][0]["valid_deletion_count"] == 0
+    assert result["rounds_executed"][0]["gate_pass"] is False
+    assert result["strict_flip_count"] >= 16
+    assert result["distinct_flipped_parent_count"] >= 8
+
+
+def test_t4_adaptive_search_rejects_zero_strict_flips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_adaptive_deletion_fixtures(monkeypatch)
+    original = _FakeOracle._record
+
+    def no_flip(graph: MolecularGraphData) -> dict[str, Any]:
+        return _adaptive_record(original, graph, destination=1)
+
+    monkeypatch.setattr(_FakeOracle, "_record", staticmethod(no_flip))
+    with pytest.raises(stages.TasteGNNStageError, match="did not reach"):
+        stages.run_adaptive_oracle_smoke(
+            dataset=_FakeDataset(count=130),
+            oracle=_FakeOracle(),
+            feature_schema=default_molecular_feature_schema(),
+            batch_size=8,
         )
 
 

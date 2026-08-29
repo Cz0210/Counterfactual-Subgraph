@@ -15,11 +15,27 @@ and RF-oracle payloads are forbidden.
 
 The managed release-v3 authority binding assigns T4 to physical GPU 1,
 `CUDA_VISIBLE_DEVICES=1`, visible `cuda:0`, and the exact `nvidia-smi` GPU UUID.
-The smoke deterministically selects 16 calibration molecules with true label 1
-and frozen-GINE prediction 1, then evaluates exactly four real connected
-deletions per parent. It checks batch/single equivalence, all three
-probabilities, observed `1->0`, `1->2`, and `1->1`, invalid/full deletion
-controls, and one model load per scientific process.
+The smoke deterministically selects calibration molecules with true label 1
+and frozen-GINE prediction 1. It expands only when the current round has not
+reached the terminal gate:
+
+```text
+round 1:  16 source parents, at most  8 connected deletions per parent
+round 2:  64 source parents, at most 16 connected deletions per parent
+round 3: 128 source parents, at most 32 connected deletions per parent
+```
+
+The first round with at least 16 real strict flips from at least 8 distinct
+parents passes. Both `1 -> 0` and `1 -> 2` are valid strict flips. Seeing both
+records `DESTINATION_DIVERSITY_PASS`; seeing only one records
+`DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING` and does not block T4 or downstream
+Taste stages. Failure to reach the flip/parent minima after round 3 blocks T4.
+
+The worker and independent verifier check batch/single equivalence, all three
+probabilities, invalid/full deletion controls, and one model load per scientific
+process. Deterministic unit fixtures independently assert that `1 -> 0` and
+`1 -> 2` flip while `1 -> 1` does not. Only `calibration.pt` is loaded: train,
+validation, test, CSV source payloads, and RF-oracle use remain forbidden.
 
 ## Managed execution
 
@@ -36,7 +52,8 @@ lock across:
 worker -> SEALED -> independent verifier -> atomic terminal publish -> release ACK
 ```
 
-The worker can write only aggregate method documents and candidate evidence.
+The worker can write only aggregate method documents and candidate evidence,
+including the three-row aggregate `destination_distribution.csv`.
 The verifier independently repeats the science and is the only caller allowed
 to publish `verification.json`, `gate.json`, and `PASS`. Direct worker and
 verifier Slurm scripts are static AutoDL-only refusals.
@@ -95,7 +112,16 @@ python -I -B scripts/autodl/tastemolnet_t4_managed_runner_v2.py \
   --expected-gpu-lease-sha256 SHA256
 ```
 
+The reviewed controller/runner environment records
+`ALLOW_TASTE_T4_ADAPTIVE_CALIBRATION_SEARCH=1`,
+`TASTE_T4_REQUIRE_BOTH_DESTINATIONS=0`, `TASTE_T4_MIN_STRICT_FLIPS=16`, and
+`TASTE_T4_MIN_FLIPPED_PARENTS=8`. These policy values describe the frozen code
+contract; changing them does not override the constants in an immutable
+execution tree.
+
 This repository change does not launch the command. A real successful terminal
-verification uses `[TASTE_T4_ORACLE_SMOKE_PASS]`; implementation tests do not
-emit that runtime marker. T4 is an oracle-interface prerequisite, not a paper
-matrix cell and not authorization for a GNN ablation.
+verification uses `[TASTE_T4_ORACLE_SMOKE_PASS]`; a successful single-destination
+run also emits `[TASTE_T4_SINGLE_DESTINATION_WARNING]` before PASS.
+Implementation tests do not emit either runtime marker. T4 is an
+oracle-interface prerequisite, not a paper matrix cell and not authorization
+for a GNN ablation.

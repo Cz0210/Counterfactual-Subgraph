@@ -12,6 +12,10 @@ import pytest
 
 from src.eval import tastemolnet_t4_oracle_smoke_v2 as t4
 from src.eval import tastemolnet_t3_calibration_v2 as t3
+from src.eval.counterfactual_semantics import (
+    compute_counterfactual_semantics,
+    strict_flip,
+)
 from src.utils.managed_execution_v2 import (
     create_managed_attempt,
     create_worker_staging,
@@ -32,35 +36,90 @@ from tests.autodl.test_tastemolnet_t3_calibration_v2 import (
 GPU_UUID = "GPU-11111111-2222-3333-4444-555555555555"
 
 
-def _documents() -> dict[str, dict[str, object]]:
+def _documents() -> dict[str, object]:
+    schedule = [
+        {
+            "round": index,
+            "parent_limit": parent_limit,
+            "deletion_cap_per_parent": deletion_cap,
+        }
+        for index, (parent_limit, deletion_cap) in enumerate(
+            t4.SEARCH_SCHEDULE, start=1
+        )
+    ]
     smoke: dict[str, object] = {
-        "schema_version": "tastemolnet_t4_bounded_oracle_smoke_metrics_v1",
+        "schema_version": "tastemolnet_t4_adaptive_oracle_smoke_metrics_v1",
         "status": "PASS",
+        "adaptive_calibration_search": True,
+        "search_schedule": schedule,
+        "rounds_executed": [
+            {
+                "round": 1,
+                "parent_limit": 16,
+                "deletion_cap_per_parent": 8,
+                "selected_count": 16,
+                "valid_deletion_count": 128,
+                "strict_flip_count": 20,
+                "distinct_flipped_parent_count": 10,
+                "destination_0_count": 15,
+                "destination_2_count": 5,
+                "gate_pass": True,
+            }
+        ],
+        "terminal_round": 1,
         "selected_count": 16,
-        "parent_deletion_counts_by_position": [4] * 16,
-        "valid_deletion_count": 64,
+        "parent_deletion_counts_by_position": [8] * 16,
+        "deletion_cap_per_parent": 8,
+        "valid_deletion_count": 128,
+        "batch_examples": 16,
+        "at_least_one_connected_deletion": True,
         "all_selected_true_source": True,
         "all_selected_predicted_source": True,
-        "all_selected_have_four_connected_deletions": True,
+        "all_selected_have_connected_deletions": True,
         "checkpoint_load_count": 1,
         "num_classes": 3,
         "source_label": 1,
         "strict_flip": "pred_before == 1 and pred_after != 1",
+        "strict_flip_count": 20,
+        "minimum_strict_flip_count": 16,
+        "distinct_flipped_parent_count": 10,
+        "minimum_distinct_flipped_parent_count": 8,
+        "strict_flip_gate_pass": True,
         "all_three_probabilities_validated": True,
+        "all_three_logits_validated": True,
+        "three_class_api_validated": True,
         "batch_single_max_abs_difference": 0.0,
         "empty_deletion_failed_closed": True,
         "invalid_deletion_failed_closed": True,
+        "calibration_payload_loaded": True,
+        "train_payload_loaded": False,
+        "validation_payload_loaded": False,
+        "test_payload_loaded": False,
+        "test_loaded": False,
+        "rf_oracle_used": False,
         "per_example_predictions_written": False,
         "smiles_written": False,
         "molecule_identifiers_written": False,
+        "destination_0_count": 15,
+        "destination_2_count": 5,
+        "observed_destination_labels": [0, 2],
+        "destination_diversity_status": "DESTINATION_DIVERSITY_PASS",
+        "destination_diversity_single_class_warning": False,
+        "strict_flip_to_bitter_observed": True,
+        "strict_flip_to_tasteless_observed": True,
         "destination_distribution": {
+            "schema_version": 1,
+            "source_label": 1,
+            "num_classes": 3,
             "overall": {
+                "total_records": 128,
+                "total_strict_flips": 20,
                 "transitions": {
-                    "1->0": {"count": 5},
-                    "1->1": {"count": 54},
+                    "1->0": {"count": 15},
                     "1->2": {"count": 5},
                 }
-            }
+            },
+            "by_rule": {},
         },
     }
     t3_binding: dict[str, object] = {
@@ -92,6 +151,11 @@ def _documents() -> dict[str, dict[str, object]]:
         "checkpoint_load_count": 1,
         "model_sha256": "5" * 64,
         "temperature_scaling_sha256": "6" * 64,
+        "adaptive_calibration_search": True,
+        "search_schedule": schedule,
+        "minimum_strict_flip_count": 16,
+        "minimum_distinct_flipped_parent_count": 8,
+        "destination_diversity_required": False,
     }
     access: dict[str, object] = {
         "schema_version": "tastemolnet_t4_data_access_v2",
@@ -102,12 +166,16 @@ def _documents() -> dict[str, dict[str, object]]:
         "csv_payload_opened": False,
         "per_example_output_written": False,
     }
-    return {
+    documents: dict[str, object] = {
         "oracle_smoke.json": smoke,
         "oracle_provenance.json": provenance,
         "data_access_manifest.json": access,
         "t3_binding.json": t3_binding,
     }
+    documents[t4.DESTINATION_DISTRIBUTION_NAME] = (
+        t4._destination_distribution_csv(smoke)
+    )
+    return documents
 
 
 INPUT_HASHES = {
@@ -228,6 +296,8 @@ def test_worker_source_has_no_method_pass_authority() -> None:
         root / "scripts/autodl/tastemolnet_t4_oracle_smoke_verifier_v2.py"
     ).read_text(encoding="utf-8")
     assert t4.PASS_MARKER not in worker
+    assert t4.SINGLE_DESTINATION_WARNING_MARKER not in worker
+    assert "print(SINGLE_DESTINATION_WARNING_MARKER" in verifier
     assert "print(PASS_MARKER" in verifier
 
 
@@ -343,6 +413,63 @@ def test_aggregate_guard_rejects_row_level_smiles() -> None:
     documents = _documents()
     documents["oracle_smoke.json"]["rows"] = [{"smiles": "CC"}]
     with pytest.raises(t4.TasteT4OracleSmokeError, match="row-level"):
+        t4._validate_documents(documents)
+
+
+@pytest.mark.parametrize(
+    ("pred_after", "expected"),
+    [(0, True), (2, True), (1, False)],
+)
+def test_t4_strict_flip_unit_fixtures(pred_after: int, expected: bool) -> None:
+    probabilities = {
+        0: [0.8, 0.1, 0.1],
+        1: [0.1, 0.8, 0.1],
+        2: [0.1, 0.1, 0.8],
+    }
+    result = compute_counterfactual_semantics(
+        source_label=1,
+        pred_before=1,
+        pred_after=pred_after,
+        probabilities_before=probabilities[1],
+        probabilities_after=probabilities[pred_after],
+    )
+    assert strict_flip(1, pred_after, 1) is expected
+    assert result.cf_flip is expected
+
+
+def test_t4_single_destination_is_a_nonblocking_warning() -> None:
+    documents = _documents()
+    smoke = documents["oracle_smoke.json"]
+    assert isinstance(smoke, dict)
+    smoke["rounds_executed"][0]["destination_0_count"] = 20
+    smoke["rounds_executed"][0]["destination_2_count"] = 0
+    smoke["destination_0_count"] = 20
+    smoke["destination_2_count"] = 0
+    smoke["observed_destination_labels"] = [0]
+    smoke["destination_diversity_status"] = (
+        "DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING"
+    )
+    smoke["destination_diversity_single_class_warning"] = True
+    smoke["strict_flip_to_bitter_observed"] = True
+    smoke["strict_flip_to_tasteless_observed"] = False
+    smoke["destination_distribution"]["overall"]["transitions"]["1->0"][
+        "count"
+    ] = 20
+    smoke["destination_distribution"]["overall"]["transitions"]["1->2"][
+        "count"
+    ] = 0
+    documents[t4.DESTINATION_DISTRIBUTION_NAME] = (
+        t4._destination_distribution_csv(smoke)
+    )
+    t4._validate_documents(documents)
+
+
+def test_t4_zero_strict_flip_gate_is_rejected() -> None:
+    documents = _documents()
+    smoke = documents["oracle_smoke.json"]
+    assert isinstance(smoke, dict)
+    smoke["strict_flip_count"] = 0
+    with pytest.raises(t4.TasteT4OracleSmokeError, match="adaptive aggregate"):
         t4._validate_documents(documents)
 
 
@@ -501,7 +628,13 @@ def test_managed_worker_and_independent_replay_publish(tmp_path: Path, monkeypat
     assert publication.final_path == final
     assert verification["marker"] == t4.PASS_MARKER
     assert verification["physical_gpu_index"] == 1
-    assert verification["valid_deletion_count"] == 64
+    assert verification["valid_deletion_count"] == 128
+    assert verification["strict_flip_count"] == 20
+    assert verification["distinct_flipped_parent_count"] == 10
+    assert verification["destination_diversity_status"] == (
+        "DESTINATION_DIVERSITY_PASS"
+    )
+    assert (final / "artifacts/destination_distribution.csv").is_file()
     assert verification["controller_anchor_heartbeat_sha256"] == heartbeat.sha256
     assert verification["worker_initial_heartbeat_sha256"] == worker_heartbeat.sha256
     assert verification["worker_initial_heartbeat_sha256"] != heartbeat.sha256

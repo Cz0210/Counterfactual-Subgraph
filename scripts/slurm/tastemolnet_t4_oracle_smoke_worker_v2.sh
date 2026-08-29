@@ -14,7 +14,8 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-echo "TasteMolNet T4 managed-v2 science is AutoDL-only; this Slurm wrapper is static CLI parity." >&2
+echo "TasteMolNet T4 adaptive calibration-only managed-v2 science is AutoDL-only; this Slurm wrapper is static CLI parity." >&2
+echo "Gate: 16x8->64x16->128x32, strict_flips>=16, distinct_parents>=8; destination diversity is nonblocking." >&2
 exit 64
 
 # Unreachable documentation-only CLI parity. Never submit this script.

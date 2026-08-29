@@ -218,12 +218,16 @@ copied into the receipt. See
 
 After a formal Taste GINE bundle closes, T3 adopts its existing
 validation-fitted temperature without refitting or copying the checkpoint.
-T4 then uses only the authenticated calibration graph cache for a bounded
-sixteen-parent multiclass oracle smoke on physical GPU 1, with exactly four
-real connected deletions per parent and both non-Sweet strict-flip destinations
-required. The T4 evidence is aggregate-only and never writes a split prediction
-CSV, SMILES, molecule IDs, or test payloads; the supplemental policy remains
-no-redistribution and AutoDL-only. T3/T4 outputs are exact direct fresh children
+T4 then uses only the authenticated calibration graph cache for an adaptive
+multiclass oracle smoke on physical GPU 1. It expands deterministically through
+`16 x 8`, `64 x 16`, and `128 x 32` parent/deletion caps, stopping once at
+least 16 real strict flips cover at least 8 distinct true/predicted-Sweet
+parents. Either non-Sweet destination is sufficient; observing only one writes
+`DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING` but does not block PASS. The T4
+evidence is aggregate-only, includes `destination_distribution.csv`, and never
+writes a split prediction CSV, SMILES, molecule IDs, or test payloads; the
+supplemental policy remains no-redistribution and AutoDL-only. T3/T4 outputs are
+exact direct fresh children
 under the Taste GINE seed-7 artifact root, are published through retained
 root-to-leaf descriptors, and reclose every input before creating the PASS
 marker as the final commit. Their only T2 authority is the descriptor-held

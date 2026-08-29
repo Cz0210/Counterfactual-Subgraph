@@ -1,4 +1,4 @@
-"""Immutable TasteMolNet T3 adoption and bounded T4 oracle-smoke science.
+"""Immutable TasteMolNet T3 adoption and adaptive T4 oracle-smoke science.
 
 T3 validates and adopts the temperature already fitted on T2 validation
 logits.  It never invokes a fitter and never copies or mutates the classifier
@@ -77,6 +77,9 @@ LABEL_MAP = {"0": "Bitter", "1": "Sweet", "2": "Tasteless"}
 INT_LABEL_MAP = {0: "Bitter", 1: "Sweet", 2: "Tasteless"}
 NUM_CLASSES = 3
 SOURCE_LABEL = 1
+T4_ADAPTIVE_SEARCH_SCHEDULE = ((16, 8), (64, 16), (128, 32))
+T4_MIN_STRICT_FLIPS = 16
+T4_MIN_FLIPPED_PARENTS = 8
 _HEX = frozenset("0123456789abcdef")
 T4_CHECKPOINT_PAYLOAD_FILES = (
     "model.pt",
@@ -2376,6 +2379,11 @@ def _validate_probability_record(record: Mapping[str, Any], *, checkpoint_id: st
         raise TasteGNNStageError("oracle record checkpoint identity changed")
     if type(record.get("num_classes")) is not int or record.get("num_classes") != NUM_CLASSES:
         raise TasteGNNStageError("oracle record is not three-class")
+    if record.get("source_label") != SOURCE_LABEL:
+        raise TasteGNNStageError("oracle record source label changed")
+    predicted = record.get("predicted_label")
+    if type(predicted) is not int or predicted < 0 or predicted >= NUM_CLASSES:
+        raise TasteGNNStageError("oracle predicted label is outside the three classes")
     values = record.get("probabilities")
     if not isinstance(values, list) or len(values) != NUM_CLASSES:
         raise TasteGNNStageError("oracle probability vector is not three-wide")
@@ -2386,6 +2394,46 @@ def _validate_probability_record(record: Mapping[str, Any], *, checkpoint_id: st
         float(probabilities.sum()), 1.0, rel_tol=0.0, abs_tol=1e-6
     ):
         raise TasteGNNStageError("oracle probabilities are outside the simplex")
+    logits = record.get("logits")
+    if not isinstance(logits, list) or len(logits) != NUM_CLASSES:
+        raise TasteGNNStageError("oracle logits vector is not three-wide")
+    normalized_logits = np.asarray(
+        [_finite(value, field="oracle.logit") for value in logits], dtype=np.float64
+    )
+    if not np.isfinite(normalized_logits).all():
+        raise TasteGNNStageError("oracle logits contain a non-finite value")
+    temperature = _finite(record.get("temperature"), field="oracle.temperature", positive=True)
+    shifted = normalized_logits / temperature
+    shifted -= float(np.max(shifted))
+    exponentials = np.exp(shifted)
+    probabilities_from_logits = exponentials / float(exponentials.sum())
+    if int(np.argmax(probabilities)) != predicted:
+        raise TasteGNNStageError("oracle predicted label differs from probability argmax")
+    if int(np.argmax(normalized_logits)) != predicted:
+        raise TasteGNNStageError("oracle predicted label differs from logits argmax")
+    if not np.allclose(
+        probabilities_from_logits, probabilities, rtol=0.0, atol=1e-7
+    ):
+        raise TasteGNNStageError("oracle probabilities differ from calibrated logits")
+    source_probability = _finite(
+        record.get("source_probability"), field="oracle.source_probability"
+    )
+    confidence = _finite(record.get("confidence"), field="oracle.confidence")
+    if (
+        not math.isclose(
+            source_probability,
+            float(probabilities[SOURCE_LABEL]),
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+        or not math.isclose(
+            confidence,
+            float(probabilities[predicted]),
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        )
+    ):
+        raise TasteGNNStageError("oracle confidence fields differ from probabilities")
 
 
 def _load_calibration_cache(
@@ -2729,6 +2777,325 @@ def run_bounded_oracle_smoke(
         },
         "empty_deletion_failed_closed": True,
         "invalid_deletion_failed_closed": True,
+        "per_example_predictions_written": False,
+        "smiles_written": False,
+        "molecule_identifiers_written": False,
+    }
+
+
+def run_adaptive_oracle_smoke(
+    *,
+    dataset: MolecularGraphDataset,
+    oracle: GNNOracle,
+    feature_schema: MolecularFeatureSchema,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Run the authorized calibration-only adaptive T4 search.
+
+    The search keeps calibration source order fixed and expands only the number
+    of eligible source parents and the per-parent connected-deletion cap.  It
+    never opens another split and never uses destination diversity as a PASS
+    requirement.
+    """
+
+    if type(batch_size) is not int or batch_size <= 0:
+        raise TasteGNNStageError("Taste T4 batch size must be a native positive integer")
+    graphs = [dataset[index] for index in range(len(dataset))]
+    records = oracle.predict_records(graphs, batch_size=batch_size)
+    if len(records) != len(graphs):
+        raise TasteGNNStageError("oracle prediction count differs from calibration cache")
+    for record in records:
+        _validate_probability_record(record, checkpoint_id=oracle.checkpoint_id)
+
+    eligible = [
+        (index, graph, record)
+        for index, (graph, record) in enumerate(zip(graphs, records, strict=True))
+        if int(graph.y) == SOURCE_LABEL
+        and int(record["predicted_label"]) == SOURCE_LABEL
+    ]
+    if not eligible:
+        raise TasteGNNStageError(
+            "Taste T4 found no calibration parent with true_label=1 and pred_before=1"
+        )
+
+    full_parent = enumerate_connected_hard_deletions("CC", "CC")
+    invalid = enumerate_connected_hard_deletions("CC", "not-a-smiles")
+    if not full_parent or any(outcome.valid for outcome in full_parent):
+        raise TasteGNNStageError("Taste T4 full-parent deletion did not fail closed")
+    if invalid:
+        raise TasteGNNStageError("Taste T4 invalid deletion did not fail closed")
+
+    featurizer = MolecularGraphFeaturizer(feature_schema)
+    round_summaries: list[dict[str, Any]] = []
+    terminal: dict[str, Any] | None = None
+    terminal_selected: list[
+        tuple[int, MolecularGraphData, list[tuple[str, HardDeletionOutcome]]]
+    ] = []
+    terminal_semantics: list[CounterfactualRecord] = []
+    terminal_distribution: dict[str, Any] | None = None
+    terminal_deletion_counts: list[int] = []
+    terminal_batch_single_max = 0.0
+    terminal_batch_single_graph_count = 0
+
+    for round_index, (parent_limit, deletion_cap) in enumerate(
+        T4_ADAPTIVE_SEARCH_SCHEDULE, start=1
+    ):
+        selected_source = eligible[:parent_limit]
+        selected: list[
+            tuple[int, MolecularGraphData, list[tuple[str, HardDeletionOutcome]]]
+        ] = []
+        for source_index, graph, _record in selected_source:
+            actions = _real_connected_deletions(
+                graph.smiles,
+                parent_id=graph.molecule_id,
+                maximum=deletion_cap,
+            )
+            selected.append((source_index, graph, actions))
+
+        selected_graphs = [row[1] for row in selected]
+        parent_batched = np.asarray(
+            [row[2]["probabilities"] for row in selected_source], dtype=np.float64
+        )
+        parent_singles = np.vstack(
+            [oracle.predict_proba([graph], batch_size=1) for graph in selected_graphs]
+        )
+        if (
+            parent_batched.shape != (len(selected_graphs), NUM_CLASSES)
+            or parent_singles.shape != parent_batched.shape
+            or not np.isfinite(parent_batched).all()
+            or not np.isfinite(parent_singles).all()
+            or not np.allclose(parent_batched, parent_singles, rtol=0.0, atol=1e-7)
+        ):
+            raise TasteGNNStageError("Taste T4 batch/single probabilities differ")
+
+        residual_graphs: list[MolecularGraphData] = []
+        residual_parent_positions: list[int] = []
+        deletion_counts: list[int] = []
+        for cohort_position, (_source_index, _graph, actions) in enumerate(selected):
+            deletion_counts.append(len(actions))
+            for action_index, (_fragment, outcome) in enumerate(actions):
+                residual_graphs.append(
+                    _graph_from_smiles(
+                        featurizer,
+                        str(outcome.residual_smiles),
+                        (
+                            f"t4-adaptive-r{round_index}-p{cohort_position}-"
+                            f"a{action_index}"
+                        ),
+                    )
+                )
+                residual_parent_positions.append(cohort_position)
+
+        # An early prefix may contain no usable connected deletions even when a
+        # later, larger prefix does.  Record the empty round and continue the
+        # authorized schedule instead of asking the oracle to predict an empty
+        # graph sequence (which is intentionally rejected by GNNOracle).
+        residual_records = (
+            oracle.predict_records(residual_graphs, batch_size=batch_size)
+            if residual_graphs
+            else []
+        )
+        if len(residual_records) != len(residual_graphs):
+            raise TasteGNNStageError("Taste T4 residual prediction count changed")
+        for record in residual_records:
+            _validate_probability_record(record, checkpoint_id=oracle.checkpoint_id)
+
+        residual_sample_count = len(residual_graphs)
+        residual_batch_single_max = 0.0
+        if residual_sample_count:
+            residual_sample = residual_graphs[:residual_sample_count]
+            residual_batched = np.asarray(
+                [
+                    residual_records[index]["probabilities"]
+                    for index in range(residual_sample_count)
+                ],
+                dtype=np.float64,
+            )
+            residual_singles = np.vstack(
+                [
+                    oracle.predict_proba([graph], batch_size=1)
+                    for graph in residual_sample
+                ]
+            )
+            if (
+                residual_batched.shape != (residual_sample_count, NUM_CLASSES)
+                or residual_singles.shape != residual_batched.shape
+                or not np.isfinite(residual_batched).all()
+                or not np.isfinite(residual_singles).all()
+                or not np.allclose(
+                    residual_batched, residual_singles, rtol=0.0, atol=1e-7
+                )
+            ):
+                raise TasteGNNStageError(
+                    "Taste T4 deletion batch/single probabilities differ"
+                )
+            residual_batch_single_max = float(
+                np.max(np.abs(residual_batched - residual_singles))
+            )
+
+        semantics: list[CounterfactualRecord] = []
+        flipped_parent_positions: set[int] = set()
+        for residual_position, after in enumerate(residual_records):
+            cohort_position = residual_parent_positions[residual_position]
+            before = selected_source[cohort_position][2]
+            if int(before["predicted_label"]) != SOURCE_LABEL:
+                raise TasteGNNStageError(
+                    "Taste T4 deletion pair escaped the source cohort"
+                )
+            semantic = compute_counterfactual_semantics(
+                source_label=SOURCE_LABEL,
+                pred_before=before["predicted_label"],
+                pred_after=after["predicted_label"],
+                probabilities_before=before["probabilities"],
+                probabilities_after=after["probabilities"],
+            )
+            semantics.append(semantic)
+            if semantic.cf_flip:
+                flipped_parent_positions.add(cohort_position)
+
+        distribution = destination_distribution(
+            semantics,
+            source_label=SOURCE_LABEL,
+            num_classes=NUM_CLASSES,
+            label_map=INT_LABEL_MAP,
+        )
+        transitions = distribution["overall"]["transitions"]
+        strict_flip_count = int(distribution["overall"]["total_strict_flips"])
+        distinct_flipped_parent_count = len(flipped_parent_positions)
+        round_summary = {
+            "round": round_index,
+            "parent_limit": parent_limit,
+            "deletion_cap_per_parent": deletion_cap,
+            "selected_count": len(selected),
+            "valid_deletion_count": len(semantics),
+            "strict_flip_count": strict_flip_count,
+            "distinct_flipped_parent_count": distinct_flipped_parent_count,
+            "destination_0_count": int(transitions["1->0"]["count"]),
+            "destination_2_count": int(transitions["1->2"]["count"]),
+            "gate_pass": (
+                strict_flip_count >= T4_MIN_STRICT_FLIPS
+                and distinct_flipped_parent_count >= T4_MIN_FLIPPED_PARENTS
+            ),
+        }
+        round_summaries.append(round_summary)
+        if round_summary["gate_pass"]:
+            terminal = round_summary
+            terminal_selected = selected
+            terminal_semantics = semantics
+            terminal_distribution = distribution
+            terminal_deletion_counts = deletion_counts
+            terminal_batch_single_max = float(
+                max(
+                    np.max(np.abs(parent_batched - parent_singles)),
+                    residual_batch_single_max,
+                )
+            )
+            terminal_batch_single_graph_count = (
+                len(selected_graphs) + residual_sample_count
+            )
+            break
+
+    if terminal is None or terminal_distribution is None:
+        last = round_summaries[-1]
+        raise TasteGNNStageError(
+            "Taste T4 adaptive calibration search did not reach "
+            f"strict_flips>={T4_MIN_STRICT_FLIPS} and "
+            f"distinct_flipped_parents>={T4_MIN_FLIPPED_PARENTS}; "
+            f"observed {last['strict_flip_count']} flips from "
+            f"{last['distinct_flipped_parent_count']} parents"
+        )
+
+    transitions = terminal_distribution["overall"]["transitions"]
+    destination_0_count = int(transitions["1->0"]["count"])
+    destination_2_count = int(transitions["1->2"]["count"])
+    observed_destinations = [
+        destination
+        for destination, count in ((0, destination_0_count), (2, destination_2_count))
+        if count > 0
+    ]
+    diversity_status = (
+        "DESTINATION_DIVERSITY_PASS"
+        if len(observed_destinations) == 2
+        else "DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING"
+    )
+    drops = np.asarray(
+        [record.cf_drop for record in terminal_semantics], dtype=np.float64
+    )
+    return {
+        "schema_version": "tastemolnet_t4_adaptive_oracle_smoke_metrics_v1",
+        "status": "PASS",
+        "adaptive_calibration_search": True,
+        "search_schedule": [
+            {
+                "round": index,
+                "parent_limit": parent_limit,
+                "deletion_cap_per_parent": deletion_cap,
+            }
+            for index, (parent_limit, deletion_cap) in enumerate(
+                T4_ADAPTIVE_SEARCH_SCHEDULE, start=1
+            )
+        ],
+        "rounds_executed": round_summaries,
+        "terminal_round": terminal["round"],
+        "selected_count": len(terminal_selected),
+        "selection_rule": (
+            "calibration_source_order_true_label_1_and_pred_before_1_with_"
+            "adaptive_connected_deletion_caps"
+        ),
+        "selected_cohort_digest": _cohort_digest(terminal_selected),
+        "calibration_graph_count": len(dataset),
+        "correctly_predicted_source_scanned": len(eligible),
+        "all_selected_true_source": True,
+        "all_selected_predicted_source": True,
+        "all_selected_have_connected_deletions": all(
+            count > 0 for count in terminal_deletion_counts
+        ),
+        "at_least_one_connected_deletion": bool(terminal_semantics),
+        "parent_deletion_counts_by_position": terminal_deletion_counts,
+        "deletion_cap_per_parent": terminal["deletion_cap_per_parent"],
+        "valid_deletion_count": len(terminal_semantics),
+        "batch_examples": len(terminal_selected),
+        "batch_single_max_abs_difference": terminal_batch_single_max,
+        "batch_single_graph_count": terminal_batch_single_graph_count,
+        "all_three_probabilities_validated": True,
+        "all_three_logits_validated": True,
+        "three_class_api_validated": True,
+        "checkpoint_load_count": 1,
+        "checkpoint_id": oracle.checkpoint_id,
+        "temperature": float(oracle.temperature),
+        "num_classes": NUM_CLASSES,
+        "source_label": SOURCE_LABEL,
+        "strict_flip": "pred_before == 1 and pred_after != 1",
+        "strict_flip_count": terminal["strict_flip_count"],
+        "minimum_strict_flip_count": T4_MIN_STRICT_FLIPS,
+        "distinct_flipped_parent_count": terminal[
+            "distinct_flipped_parent_count"
+        ],
+        "minimum_distinct_flipped_parent_count": T4_MIN_FLIPPED_PARENTS,
+        "strict_flip_gate_pass": True,
+        "destination_distribution": terminal_distribution,
+        "destination_0_count": destination_0_count,
+        "destination_2_count": destination_2_count,
+        "observed_destination_labels": observed_destinations,
+        "destination_diversity_status": diversity_status,
+        "destination_diversity_single_class_warning": (
+            diversity_status == "DESTINATION_DIVERSITY_SINGLE_CLASS_WARNING"
+        ),
+        "strict_flip_to_bitter_observed": destination_0_count > 0,
+        "strict_flip_to_tasteless_observed": destination_2_count > 0,
+        "cf_drop": {
+            "mean": float(drops.mean()),
+            "minimum": float(drops.min()),
+            "maximum": float(drops.max()),
+        },
+        "empty_deletion_failed_closed": True,
+        "invalid_deletion_failed_closed": True,
+        "calibration_payload_loaded": True,
+        "train_payload_loaded": False,
+        "validation_payload_loaded": False,
+        "test_payload_loaded": False,
+        "test_loaded": False,
+        "rf_oracle_used": False,
         "per_example_predictions_written": False,
         "smiles_written": False,
         "molecule_identifiers_written": False,
@@ -3221,12 +3588,16 @@ __all__ = [
     "T3_STAGE",
     "T4_MARKER",
     "T4_STAGE",
+    "T4_ADAPTIVE_SEARCH_SCHEDULE",
+    "T4_MIN_FLIPPED_PARENTS",
+    "T4_MIN_STRICT_FLIPS",
     "HELD_STAGE_EVIDENCE_KEYS",
     "HeldTasteCheckpointBundle",
     "HeldTasteStageOutput",
     "TasteGNNStageError",
     "hold_taste_stage_output",
     "hold_taste_checkpoint_bundle",
+    "run_adaptive_oracle_smoke",
     "run_bounded_oracle_smoke",
     "run_t3_existing_fit_adoption",
     "run_t4_calibration_cache_smoke",

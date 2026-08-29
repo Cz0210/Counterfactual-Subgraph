@@ -36,6 +36,26 @@
   validation label stores, then train and independently verify the official
   GREED architecture/selection loop before T7.
 
+## 2026-08-29: TasteMolNet T4 adaptive calibration-only successor
+
+- [x] Supersede the fixed `16 x 4`/two-destination science gate with the
+  deterministic `16 x 8` -> `64 x 16` -> `128 x 32` calibration-only search.
+- [x] Restrict every parent to true label 1 and pre-deletion prediction 1; stop
+  only at 16 strict flips spanning at least 8 distinct parents.
+- [x] Keep `1 -> 0` and `1 -> 2` equally valid. Publish aggregate
+  `destination_distribution.csv`; make one observed destination a warning and
+  zero destinations a failed strict-flip gate.
+- [x] Preserve three-class probability and batch/single checks, real connected
+  deletion semantics, one oracle load per scientific process, and explicit
+  no-train/no-validation/no-test/no-RF evidence.
+- [x] Add deterministic `1 -> 0`, `1 -> 2`, and `1 -> 1` unit fixtures plus
+  adaptive expansion, empty-prefix, warning-only, and zero-flip regressions.
+- [x] Reuse the managed-v2 worker/verifier and release-v3 authority path without
+  adding a new trust or controller framework; synchronize the AutoDL-only
+  paired Slurm wrappers and operator runbook.
+- [ ] Obtain an independent P0/P1 review, integrate the clean commit, and
+  deploy one fresh T4 attempt on physical GPU 1. Runtime PASS remains unclaimed
+  until the independent verifier publishes it.
 ## 2026-08-29: Content-bind the AIDS controller root preclaim
 
 - [x] Preserve the exact imported `a8c42be4` -> `4b7fcde1` -> `f4fcfcd8`
@@ -120,9 +140,10 @@
   verification and the exact `artifacts/checkpoint` directory.
 - [x] Bind physical GPU 1 and UUID to visible `cuda:0`; keep one model load per
   scientific process.
-- [x] Select sixteen true/predicted Sweet calibration parents with exactly four
-  real connected deletions each and validate all three probabilities,
-  batch/single parity, both flip destinations, no flip, and invalid controls.
+- [x] Historical predecessor selected sixteen true/predicted Sweet calibration
+  parents with exactly four real connected deletions and required both flip
+  destinations. The 2026-08-29 adaptive successor above supersedes only that
+  science gate while retaining this managed release-v3 authority boundary.
 - [x] Keep the worker aggregate-only and SEALED; repeat science in a separate
   verifier and reserve gate/PASS publication for managed-v2 atomic rename.
 - [x] Add AutoDL CLIs, static-refusal paired Slurm scripts, focused tests, and
