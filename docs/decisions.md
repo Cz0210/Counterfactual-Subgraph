@@ -1,5 +1,45 @@
 # Decisions Log
 
+## [2026-08-29] Start the reviewed AIDS exact-component route with eight CPU workers
+
+### Motivation
+
+The fast main-table completion policy authorizes the already reviewed AIDS
+exact-component science and asks the fresh route to start with eight CPU
+workers, while retaining twelve as the maximum bounded CPU allocation.  A
+read-only AutoDL audit reconfirmed the physical scientific input: 91,916,686
+rows from 1,283 parents by 71,642 candidates, 560 closed source chunks in
+strict order, column 0 parent / column 1 candidate, and candidate-major /
+parent-minor row order.  The adopted DBSCAN and downstream implementation
+already freeze Euclidean `eps=0.02`, `min_samples=3`, self-neighbour semantics,
+exact multi-component partitioning, streaming centroids, strict `<` radius and
+centroid-norm filters, coverage, and the official greedy selector.
+
+### Decision
+
+Make eight the generated production-spec default and accept only the closed
+integer range 8--12 in the manifest and launcher.  The selected count remains
+part of the immutable manifest and the frozen BLAS/OpenMP environment; it
+cannot be changed inside an existing attempt.  Scaling to twelve therefore
+requires a fresh not-yet-started attempt or a separately reviewed resume
+contract, never an in-place manifest edit.
+
+Do not change rows, chunk/input authority, pair orientation, DBSCAN parameters,
+checkpoint identity, component algorithm, streaming summary, radius, coverage,
+or greedy semantics.  Production authorization and release pins remain
+explicit; this change does not create an automatic release bypass or signal
+the protected old process.
+
+### Consequences
+
+- The fresh CPU route can coexist with the live BACE GPU jobs and begin with
+  the requested eight-worker reservation.
+- Values below eight or above twelve fail before a controller log/PID is
+  created.
+- The protected old AIDS process remains untouched until the dedicated
+  handover verifier and exact-generation stop executor are separately
+  authorized and run.
+
 ## [2026-08-29] Use one bounded pinned non-MIP GEDLIB selector for Taste NeuroSED
 
 ### Motivation

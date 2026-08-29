@@ -47,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--project-root", type=_absolute, default=PROJECT_ROOT)
     generate.add_argument("--controller-manifest", type=_absolute, required=True)
     generate.add_argument("--timestamp")
+    generate.add_argument(
+        "--thread-count",
+        type=int,
+        choices=range(8, 13),
+        default=8,
+        help="CPU worker/thread budget; the fast route starts with 8 (max 12)",
+    )
     generate.add_argument("--output", type=_absolute, required=True)
     return parser
 
@@ -66,6 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             project_root=args.project_root,
             controller_manifest_path=args.controller_manifest,
             timestamp=args.timestamp,
+            thread_count=args.thread_count,
         )
         result = {
             "status": "PASS",
@@ -75,6 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "controller_manifest_path": payload["controller_manifest_path"],
             "production_deployment_authorized": False,
             "release_pins_intentionally_unset": True,
+            "thread_count": int(payload["resources"]["thread_count"]),
         }
         marker = "[AIDS_EXACT_RECOVERY_PRODUCTION_SPEC_GENERATED]"
     elif args.action == "validate":

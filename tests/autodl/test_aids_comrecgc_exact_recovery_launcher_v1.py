@@ -95,8 +95,11 @@ esac
     )
 
 
-def test_launcher_accepts_twelve_worker_prelaunch_context(tmp_path: Path) -> None:
-    completed = _run_launcher(tmp_path, thread_count=12)
+@pytest.mark.parametrize("thread_count", [8, 9, 10, 11, 12])
+def test_launcher_accepts_bounded_worker_prelaunch_context(
+    tmp_path: Path, thread_count: int
+) -> None:
+    completed = _run_launcher(tmp_path, thread_count=thread_count)
 
     assert completed.returncode == 0, completed.stderr
     assert "launched cid=exact-cid launch_id=launch-id" in completed.stdout
@@ -104,8 +107,8 @@ def test_launcher_accepts_twelve_worker_prelaunch_context(tmp_path: Path) -> Non
     assert (tmp_path / "controller/controller.log").is_file()
 
 
-@pytest.mark.parametrize("thread_count", [0, 8, 16])
-def test_launcher_rejects_any_non_twelve_worker_context(
+@pytest.mark.parametrize("thread_count", [0, 7, 13, 16])
+def test_launcher_rejects_worker_context_outside_fast_release_bound(
     tmp_path: Path, thread_count: int
 ) -> None:
     completed = _run_launcher(tmp_path, thread_count=thread_count)

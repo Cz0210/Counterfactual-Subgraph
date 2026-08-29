@@ -5,6 +5,9 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import sys
 
+import pytest
+
+from scripts.autodl import build_aids_comrecgc_exact_recovery_v1 as build_cli
 from scripts.autodl import run_aids_comrecgc_exact_recovery_stage as stage_cli
 from src.baselines.comrecgc.failed_selection_adoption import PRODUCTION_AUTHORITY
 from src.utils import autodl_aids_comrecgc_exact_recovery_controller_v1 as controller
@@ -36,6 +39,49 @@ def test_controller_projection_contract_matches_reviewed_adoption_profile() -> N
         "close": PRODUCTION_AUTHORITY.close_state_authority.projection_sha256,
         "final": PRODUCTION_AUTHORITY.final_state_authority.projection_sha256,
     }
+
+
+@pytest.mark.parametrize("thread_count", [8, 9, 10, 11, 12])
+def test_production_builder_cli_accepts_bounded_worker_count(
+    thread_count: int,
+) -> None:
+    parsed = build_cli.build_parser().parse_args(
+        [
+            "generate-production",
+            "--adoption-output",
+            "/adoption",
+            "--controller-parent",
+            "/controllers",
+            "--python",
+            "/python",
+            "--controller-manifest",
+            "/controller.json",
+            "--thread-count",
+            str(thread_count),
+            "--output",
+            "/spec.json",
+        ]
+    )
+    assert parsed.thread_count == thread_count
+
+
+def test_production_builder_cli_defaults_to_eight_workers() -> None:
+    parsed = build_cli.build_parser().parse_args(
+        [
+            "generate-production",
+            "--adoption-output",
+            "/adoption",
+            "--controller-parent",
+            "/controllers",
+            "--python",
+            "/python",
+            "--controller-manifest",
+            "/controller.json",
+            "--output",
+            "/spec.json",
+        ]
+    )
+    assert parsed.thread_count == 8
 
 
 def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
@@ -200,6 +246,8 @@ def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
     )
     assert built["release_ready"] is False
     assert built["production_deployment_authorized"] is False
+    assert built["resources"]["thread_count"] == 8
+    assert built["resources"]["old_brute_handover"] == controller.handover_contract()
     stages = {row["stage_id"]: row for row in built["stages"]}
     assert stages[controller.EXACT_STAGE]["output_dir"].endswith(
         "/science/common_recourse/external_memory"
@@ -220,3 +268,25 @@ def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
     assert controller.sha256_file(receipt_path) == controller.sha256_file(
         stages[controller.ADOPTION_STAGE]["terminal_path"]
     )
+
+
+@pytest.mark.parametrize("thread_count", [0, 7, 13, 64])
+def test_production_spec_rejects_worker_count_outside_fast_release_bound(
+    tmp_path: Path, monkeypatch, thread_count: int
+) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    python = Path(sys.executable).resolve(strict=True)
+    adoption_output = tmp_path / "adoption"
+    controller_parent = tmp_path / "controllers"
+    adoption_output.mkdir()
+    controller_parent.mkdir()
+    with pytest.raises(builder.RecoverySpecError, match="between 8 and 12"):
+        builder.generate_production_spec(
+            adoption_output=adoption_output,
+            controller_parent=controller_parent,
+            python=python,
+            project_root=project_root,
+            controller_manifest_path=tmp_path / "controller.json",
+            timestamp="20260829T010203Z",
+            thread_count=thread_count,
+        )

@@ -1,5 +1,24 @@
 # Refactor Plan
 
+## 2026-08-29: AIDS exact fast-release CPU envelope
+
+- [x] Reopen the real AutoDL input authority and confirm 91,916,686 rows,
+  1,283 parents, 71,642 candidates, 560 ordered chunks, and
+  `col0=parent,col1=candidate` candidate-major/parent-minor orientation.
+- [x] Reconfirm the reviewed exact multi-component DBSCAN and streaming
+  centroid / strict-radius / coverage / official-greedy science path without
+  changing its numerical contract.
+- [x] Make eight workers the fresh-spec default and enforce a closed 8--12
+  launcher/manifest range; keep the chosen count immutable within an attempt.
+- [x] Keep production release pins and deployment authorization explicit; do
+  not add a current-HEAD auto-authorization shortcut.
+- [ ] After independent review, integrate the clean execution commit, generate
+  one fresh AutoDL adoption/spec/manifest, and launch the initial eight-worker
+  route.
+- [ ] Reopen the first durable checkpoint in a separate process, prove at
+  least ten continuous minutes of positive exact progress, then use only the
+  separately authorized exact-PID graceful-stop path for the old brute.
+
 ## 2026-08-29: bounded non-MIP Taste GEDLIB release path
 
 - [x] Patch the authenticated pinned pyged overlay so Gurobi-only F2/BLP enum

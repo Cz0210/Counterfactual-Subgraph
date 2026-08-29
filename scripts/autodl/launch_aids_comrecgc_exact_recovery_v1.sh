@@ -48,7 +48,8 @@ PRELAUNCH_RECEIPT=${CONTEXT[6]}
 THREAD_COUNT=${CONTEXT[7]}
 [[ "$CONTROLLER_ROOT" == /* && "$LOG" == "$CONTROLLER_ROOT"/* ]] || exit 70
 [[ "$PID_PATH" == "$CONTROLLER_ROOT"/* && "$PRELAUNCH_RECEIPT" == "$CONTROLLER_ROOT"/* ]] || exit 70
-[[ "$THREAD_COUNT" == "12" ]] || exit 70
+[[ "$THREAD_COUNT" =~ ^[0-9]+$ ]] || exit 70
+(( THREAD_COUNT >= 8 && THREAD_COUNT <= 12 )) || exit 70
 
 export OMP_NUM_THREADS=$THREAD_COUNT
 export MKL_NUM_THREADS=$THREAD_COUNT

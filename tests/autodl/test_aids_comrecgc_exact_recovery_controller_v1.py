@@ -328,7 +328,7 @@ def _spec(
             "max_rss_scope": (
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
-            "thread_count": 12,
+            "thread_count": recovery.DEFAULT_THREAD_COUNT,
             "cpu_only": True,
             "gpu_lock_required": False,
             "proc_root": "/proc",
@@ -404,7 +404,20 @@ def test_resource_budget_is_derived_and_below_old_100gib_floor(tmp_path: Path) -
     assert manifest["resources"]["max_rss_scope"] == (
         "exact_dbscan_process_with_native_peak_certificate"
     )
-    assert manifest["resources"]["thread_count"] == 12
+    assert manifest["resources"]["thread_count"] == 8
+
+
+@pytest.mark.parametrize("thread_count", [0, 7, 13, 16])
+def test_controller_rejects_worker_count_outside_fast_release_bound(
+    tmp_path: Path, thread_count: int
+) -> None:
+    spec_path, value = _spec(tmp_path)
+    value["resources"]["thread_count"] = thread_count
+    _write_json(spec_path, value)
+    with pytest.raises(
+        recovery.RecoveryControllerError, match="between 8 and 12"
+    ):
+        recovery.build_controller_payload(spec_path)
 
 
 def test_disk_preflight_enforces_maximum_output_bytes(
@@ -1703,7 +1716,7 @@ def test_prelaunch_claim_is_cid_local_no_clobber_and_forces_resume(
     root = Path(manifest["controller_root"])
     assert prepared["controller_root"] == str(root)
     assert prepared["controller_invocation_requires_resume"] is True
-    assert prepared["thread_count"] == 12
+    assert prepared["thread_count"] == 8
     assert Path(prepared["log_path"]).parent == root / "logs"
     assert Path(prepared["pid_path"]).parent == root / "logs"
     assert Path(prepared["prelaunch_receipt_path"]).parent == root / "logs"
@@ -1834,7 +1847,7 @@ def test_controller_stage_gates_are_typed_restartable_and_final_is_ordinary(
                     "controller_id": recovery.CONTROLLER_ID,
                     "controller_manifest_sha256": manifest["manifest_sha256"],
                     "worker_argv_sha256": stage["commands"]["fresh_sha256"],
-                    "thread_count": 12,
+                    "thread_count": manifest["resources"]["thread_count"],
                     "cuda_visible_devices": "",
                     "gpu_lock_acquired": False,
                     "start_progress": 0,
@@ -1977,7 +1990,7 @@ def test_cpu_environment_cannot_see_gpu_and_freezes_libraries(tmp_path: Path) ->
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
-    )} == {"12"}
+    )} == {"8"}
 
 
 def test_source_authority_rejects_failed_gate_relabelled_pass(tmp_path: Path) -> None:

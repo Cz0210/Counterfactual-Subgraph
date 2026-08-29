@@ -24,6 +24,8 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     DEFAULT_SAFETY_FLOOR_BYTES,
     DEFAULT_SUBSET_SIZE,
     DEFAULT_THREAD_COUNT,
+    MAX_THREAD_COUNT,
+    MIN_THREAD_COUNT,
     DEPENDENCIES,
     DOWNSTREAM_STAGE,
     EXACT_STAGE,
@@ -388,10 +390,13 @@ def generate_production_spec(
     project_root: str | Path,
     controller_manifest_path: str | Path,
     timestamp: str | None = None,
+    thread_count: int = DEFAULT_THREAD_COUNT,
     adoption_validator: Callable[..., Mapping[str, Any]] | None = None,
     manifest_loader: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
     project = _physical_dir(project_root, label="project root")
+    if not MIN_THREAD_COUNT <= int(thread_count) <= MAX_THREAD_COUNT:
+        raise RecoverySpecError("thread_count must remain between 8 and 12")
     interpreter = _physical_file(python, label="AutoDL Python")
     adoption_root = _physical_dir(adoption_output, label="adoption output")
     parent = _physical_dir(controller_parent, label="controller parent")
@@ -528,7 +533,7 @@ def generate_production_spec(
             "max_rss_scope": (
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
-            "thread_count": DEFAULT_THREAD_COUNT,
+            "thread_count": int(thread_count),
             "cpu_only": True,
             "gpu_lock_required": False,
             "proc_root": "/proc",

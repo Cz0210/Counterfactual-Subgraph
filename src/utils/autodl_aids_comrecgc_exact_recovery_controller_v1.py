@@ -132,7 +132,9 @@ EXPECTED_CANDIDATE_COUNT = 71_642
 EXPECTED_SUBSET_NAMES = ("first", "random", "dense", "sparse", "theta_boundary")
 DEFAULT_SUBSET_SIZE = 2_000
 DEFAULT_BLOCK_SIZE = 65_536
-DEFAULT_THREAD_COUNT = 12
+MIN_THREAD_COUNT = 8
+MAX_THREAD_COUNT = 12
+DEFAULT_THREAD_COUNT = MIN_THREAD_COUNT
 DEFAULT_MAX_RSS_BYTES = 96 * 1024**3
 DEFAULT_SAFETY_FLOOR_BYTES = 8 * 1024**3
 
@@ -1234,8 +1236,10 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
     if resources.get("proc_root", "/proc") != "/proc":
         raise RecoveryControllerError("production process authority must be /proc")
     thread_count = int(resources.get("thread_count", 0))
-    if thread_count != DEFAULT_THREAD_COUNT:
-        raise RecoveryControllerError("CPU coexistence thread count must remain 12")
+    if not MIN_THREAD_COUNT <= thread_count <= MAX_THREAD_COUNT:
+        raise RecoveryControllerError(
+            "CPU coexistence thread count must remain between 8 and 12"
+        )
     if resources.get("cpu_only") is not True or resources.get("gpu_lock_required") is not False:
         raise RecoveryControllerError("recovery route must be CPU-only and GPU-lock-free")
     probe = resources.get("coexistence_probe")

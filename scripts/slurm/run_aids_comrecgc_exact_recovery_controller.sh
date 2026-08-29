@@ -15,5 +15,5 @@ echo "[ENV] python=$(command -v python)"
 python --version
 python -c 'import torch; print(f"[ENV] cuda_available={torch.cuda.is_available()}")'
 echo "do not submit: the recovery controller must not acquire an HPC GPU" >&2
-echo "reference: python scripts/autodl/run_aids_comrecgc_exact_recovery_controller.py --config configs/hpc.yaml --manifest /absolute/manifest.json" >&2
+echo "reference (controller manifest pins one immutable 8-12 worker count; start with 8): python scripts/autodl/run_aids_comrecgc_exact_recovery_controller.py --config configs/hpc.yaml --manifest /absolute/manifest.json" >&2
 exit 78
