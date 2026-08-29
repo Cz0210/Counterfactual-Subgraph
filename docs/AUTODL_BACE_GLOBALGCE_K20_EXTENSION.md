@@ -40,10 +40,12 @@ The controller:
   other than the bound science child, and requires the set to be empty after
   child exit and at release;
 - holds no child-signal authority and never calls a process termination API;
-  before any OS thread exists it process-wide blocks SIGINT, SIGTERM, and
-  SIGHUP, synchronously drains them into a deferred stop request, and keeps the
-  lock until the child exits naturally; the exec'd raw-round process restores
-  normal delivery for itself and never receives a controller-forwarded signal;
+  the thin CLI blocks SIGINT, SIGTERM, and SIGHUP before importing any science
+  dependency that can create native threads, then the controller proves every
+  live Linux task inherited that mask, synchronously drains requests into a
+  deferred stop event, and keeps the lock until the child exits naturally; the
+  exec'd raw-round process restores normal delivery before its own science
+  imports and never receives a controller-forwarded signal;
 - uses only the frozen 360-parent train source manifest and native train CSV,
   the same frozen BACE GINE, min-frequency 7, 100 epochs, and pinned official
   GlobalGCE implementation;
@@ -69,9 +71,12 @@ semantic-unique, hard-validated publication may write
 
 ## AutoDL command
 
-Run through `nohup` or `tmux` from a reviewed immutable execution checkout.
-All paths below must be replaced with reviewed physical paths; the output root
-must be absent and be a direct child of the `bace_globalgce_k20` namespace.
+Run through `tmux`, or a detached `setsid` wrapper that explicitly restores
+default HUP/INT/TERM dispositions before `exec`, from a reviewed immutable
+execution checkout. Plain `nohup` is rejected because its ignored SIGHUP would
+defeat synchronous deferred-stop evidence. All paths below must be replaced
+with reviewed physical paths; the output root must be absent and be a direct
+child of the `bace_globalgce_k20` namespace.
 
 ```bash
 export AUTO_TERMINATE_UNCONTROLLED_CHILDREN=0

@@ -1,5 +1,37 @@
 # Decisions Log
 
+## [2026-08-29] Install the K20 controller signal mask before science imports
+
+### Motivation
+
+The first immutable AutoDL launch failed closed before creating its output
+root: imported numerical/scientific dependencies had already created native OS
+threads when `run_extension` attempted the single-thread signal-mask gate.
+Local hostile tests did not reproduce that runtime import behavior.
+
+### Decision
+
+The thin K20 CLI now classifies the exact controller/raw-round command before
+importing the scientific core.  A controller blocks SIGINT, SIGTERM, and
+SIGHUP while `/proc/self/task` still contains only its initial task and passes
+the predecessor mask into `run_extension`.  After heavy imports, the core
+reopens every live task's `/proc/.../status` and requires all `SigBlk` values to
+contain the complete release mask.  It repeats that process-wide proof at each
+controller revalidation.  A raw-round exec unblocks the same signals before
+its scientific imports, so the controller still has no child-signal channel.
+The bootstrap rejects an ignored release-signal disposition; therefore plain
+`nohup` is not a valid launcher, while `tmux` or a detached `setsid` wrapper
+that restores HUP/INT/TERM defaults is valid.
+
+### Consequences
+
+- The failed controller emitted only a structured BLOCKED log and no science
+  output root or GPU2 child; its controller identity is not reused.
+- The production guarantee now covers native-library threads created during
+  imports instead of assuming those imports are single-threaded.
+- A fresh reviewed commit, detached AutoDL worktree, controller UUID, log, and
+  output root remain required before another launch.
+
 ## [2026-08-29] Replace the AIDS zero-byte root preclaim with a content-bound claim
 
 ### Motivation

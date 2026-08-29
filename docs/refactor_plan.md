@@ -1783,6 +1783,10 @@ Mutagenicity roadmaps.
 - [ ] Obtain independent P0/P1 review, create a clean immutable execution
   commit/worktree, and launch the real GPU2 child. Local tests are not either
   runtime PASS marker.
+- [x] After the first AutoDL launch failed before output creation because
+  native imports had already created OS threads, move the controller signal
+  mask into the thin CLI before science imports and verify every live Linux
+  task inherited it; raw-round children unblock before their own imports.
 
 ## 2026-08-24: COMRECGC deterministic divergence trace
 

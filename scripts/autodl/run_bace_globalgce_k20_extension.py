@@ -5,8 +5,80 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+import signal
 import sys
+
+
+_RELEASE_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+_CONTROLLER_COMMAND = "controller"
+_RAW_ROUND_COMMAND = "raw-round"
+
+
+def _command_before_science_imports(argv: list[str]) -> str | None:
+    commands = [
+        value
+        for value in argv
+        if value in {_CONTROLLER_COMMAND, _RAW_ROUND_COMMAND}
+    ]
+    if not commands:
+        return None
+    if len(commands) != 1:
+        raise RuntimeError("K20 requires exactly one unambiguous command token")
+    return commands[0]
+
+
+def _install_mask_before_science_imports(argv: list[str]) -> set[signal.Signals] | None:
+    """Install the controller mask before imports can create native threads."""
+
+    command = _command_before_science_imports(argv)
+    if command is None:
+        return None
+    if command == _RAW_ROUND_COMMAND:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _RELEASE_SIGNALS)
+        return None
+
+    ignored = sorted(
+        item.name for item in _RELEASE_SIGNALS if signal.getsignal(item) is signal.SIG_IGN
+    )
+    if ignored:
+        raise RuntimeError(
+            f"K20 controller inherited ignored release signals: {ignored}"
+        )
+    task_root = Path("/proc/self/task")
+    if task_root.is_dir():
+        task_ids = tuple(
+            sorted(entry.name for entry in task_root.iterdir() if entry.name.isdigit())
+        )
+        if task_ids != (str(os.getpid()),):
+            raise RuntimeError(
+                "K20 controller must install its signal mask before science imports"
+            )
+    previous = set(signal.pthread_sigmask(signal.SIG_BLOCK, _RELEASE_SIGNALS))
+    if previous.intersection(_RELEASE_SIGNALS):
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        raise RuntimeError("K20 controller inherited an ambiguous blocked stop signal")
+    return previous
+
+
+try:
+    _PREIMPORT_PREVIOUS_SIGNAL_MASK = _install_mask_before_science_imports(sys.argv[1:])
+except (OSError, RuntimeError, ValueError) as exc:
+    print(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "signal_sent": False,
+                "auto_terminate_uncontrolled_children": False,
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+    raise SystemExit(75) from exc
 
 
 PROJECT_ROOT = Path(__file__).resolve(strict=True).parents[2]
@@ -97,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
                 gnn_checkpoint=args.gnn_checkpoint,
                 protected_gpu0_process=args.protected_gpu0_process,
                 protected_gpu3_process=args.protected_gpu3_process,
+                preinstalled_signal_mask=_PREIMPORT_PREVIOUS_SIGNAL_MASK,
             )
         else:
             unblock_deferred_signals_for_science_child()

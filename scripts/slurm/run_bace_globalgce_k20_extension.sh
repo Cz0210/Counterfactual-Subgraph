@@ -27,6 +27,7 @@ python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 
 # This recovery route owns physical AutoDL GPU index 2.  Slurm allocates an
 # arbitrary visible GPU and therefore cannot prove that physical identity.
+# The AutoDL thin CLI installs its deferred signal mask before science imports.
 echo "BLOCKED_STATIC_REFUSAL: use the reviewed AutoDL physical-GPU2 controller route" >&2
 exit 75
 

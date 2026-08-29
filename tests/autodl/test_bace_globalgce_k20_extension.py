@@ -566,6 +566,29 @@ def test_controller_signal_mask_rejects_an_existing_thread() -> None:
         worker.join()
 
 
+def test_process_wide_signal_mask_accepts_threads_that_inherit_it() -> None:
+    if not Path("/proc/self/task").is_dir():
+        pytest.skip("Linux procfs is required for the process-wide mask proof")
+    previous = k20.signal.pthread_sigmask(k20.signal.SIG_BLOCK, k20.RELEASE_SIGNALS)
+    release = threading.Event()
+    ready = threading.Event()
+
+    def wait() -> None:
+        ready.set()
+        release.wait()
+
+    worker = threading.Thread(target=wait)
+    worker.start()
+    ready.wait()
+    try:
+        k20._require_process_wide_deferred_signal_mask()
+        assert k20._adopt_preinstalled_signal_mask(set(previous)) == set(previous)
+    finally:
+        release.set()
+        worker.join()
+        k20.signal.pthread_sigmask(k20.signal.SIG_SETMASK, previous)
+
+
 def test_wait_rejects_a_foreign_gpu2_compute_pid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -779,9 +802,31 @@ def test_cli_has_separate_controller_and_raw_round_subcommands() -> None:
     assert args.protected_gpu0_process == "1:2"
     assert args.protected_gpu3_process == "3:4"
     source = runner.read_text(encoding="utf-8")
+    assert source.index("_install_mask_before_science_imports(sys.argv[1:])") < source.index(
+        "from src.baselines.bace_globalgce_k20_extension import"
+    )
+    assert "preinstalled_signal_mask=_PREIMPORT_PREVIOUS_SIGNAL_MASK" in source
     assert source.index("unblock_deferred_signals_for_science_child()") < source.index(
         "result = run_raw_round("
     )
+
+
+def test_cli_bootstrap_rejects_ambiguous_commands_and_ignored_hup() -> None:
+    runner = Path("scripts/autodl/run_bace_globalgce_k20_extension.py").resolve()
+    spec = importlib.util.spec_from_file_location("k20_runner_bootstrap_test", runner)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with pytest.raises(RuntimeError, match="unambiguous"):
+        module._command_before_science_imports(["controller", "raw-round"])
+
+    previous = module.signal.getsignal(module.signal.SIGHUP)
+    module.signal.signal(module.signal.SIGHUP, module.signal.SIG_IGN)
+    try:
+        with pytest.raises(RuntimeError, match="ignored release signals"):
+            module._install_mask_before_science_imports(["controller"])
+    finally:
+        module.signal.signal(module.signal.SIGHUP, previous)
 
 
 def test_slurm_is_static_refusal_before_documentation_cli() -> None:

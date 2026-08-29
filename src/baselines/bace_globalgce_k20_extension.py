@@ -320,6 +320,62 @@ def _require_deferred_signal_mask() -> None:
         raise BACEGlobalGCEK20Error("K20 controller signal mask changed")
 
 
+def _require_process_wide_deferred_signal_mask() -> None:
+    """Prove that every currently live Linux task inherited the release mask."""
+
+    _require_deferred_signal_mask()
+    task_root = Path("/proc/self/task")
+    if not task_root.is_dir():
+        if threading.active_count() != 1:
+            raise BACEGlobalGCEK20Error(
+                "process-wide controller signal mask requires Linux procfs"
+            )
+        return
+    required_bits = sum(1 << (int(item) - 1) for item in RELEASE_SIGNALS)
+    for _attempt in range(3):
+        task_ids = tuple(
+            sorted(entry.name for entry in task_root.iterdir() if entry.name.isdigit())
+        )
+        try:
+            for task_id in task_ids:
+                status = (task_root / task_id / "status").read_text(
+                    encoding="utf-8"
+                )
+                fields = {
+                    key: value.strip()
+                    for key, _, value in (
+                        line.partition(":") for line in status.splitlines()
+                    )
+                    if key
+                }
+                blocked = int(fields.get("SigBlk", ""), 16)
+                if blocked & required_bits != required_bits:
+                    raise BACEGlobalGCEK20Error(
+                        f"OS thread {task_id} did not inherit the controller signal mask"
+                    )
+        except FileNotFoundError:
+            continue
+        observed_after = tuple(
+            sorted(entry.name for entry in task_root.iterdir() if entry.name.isdigit())
+        )
+        if task_ids == observed_after:
+            return
+    raise BACEGlobalGCEK20Error(
+        "controller OS-thread inventory changed during signal-mask audit"
+    )
+
+
+def _adopt_preinstalled_signal_mask(
+    previous: set[signal.Signals],
+) -> set[signal.Signals]:
+    if set(previous).intersection(RELEASE_SIGNALS):
+        raise BACEGlobalGCEK20Error(
+            "pre-import controller signal-mask predecessor is ambiguous"
+        )
+    _require_process_wide_deferred_signal_mask()
+    return set(previous)
+
+
 def _drain_deferred_signals(stop_requested: threading.Event) -> None:
     """Synchronously convert blocked signals into one durable stop request."""
 
@@ -1273,6 +1329,7 @@ def run_extension(
     protected_gpu0_process: str,
     protected_gpu3_process: str,
     heartbeat_interval_seconds: int = HEARTBEAT_INTERVAL_SECONDS,
+    preinstalled_signal_mask: set[signal.Signals] | None = None,
 ) -> dict[str, Any]:
     """Own physical GPU2, run the bounded schedule, and publish exactly K20."""
 
@@ -1303,7 +1360,11 @@ def run_extension(
         gpu3=protected_gpu3_process,
     )
     stop_requested = threading.Event()
-    previous_signal_mask = _install_deferred_signal_mask()
+    previous_signal_mask = (
+        _install_deferred_signal_mask()
+        if preinstalled_signal_mask is None
+        else _adopt_preinstalled_signal_mask(preinstalled_signal_mask)
+    )
     root: Path | None = None
     result: dict[str, Any] | None = None
     try:
@@ -1368,6 +1429,7 @@ def run_extension(
 
             def revalidate() -> None:
                 _drain_deferred_signals(stop_requested)
+                _require_process_wide_deferred_signal_mask()
                 lease.verify()
                 _snapshot_matches(controller)
                 current_inventory = _gpu_inventory()
