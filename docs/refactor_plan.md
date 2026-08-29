@@ -2604,10 +2604,13 @@ Mutagenicity roadmaps.
   query-to-original-target inference remain scientific requirements.
 - [ ] Provision and approve an exact GEDLIB commit and pybind11 CMake package
   on AutoDL; run the real build smoke and disjoint 100/500/1000 benchmarks.
-- [ ] Add compact directional pair-label cache/output, deterministic reserve
-  replacement, official-builder fixture equivalence, and split-isolation gate.
-- [ ] Wire the successful pair budget into the exact batch-interleaved trainer
-  and managed verifier. No checkpoint or downstream T7/T12 PASS exists yet.
+- [x] Add compact directional NumPy pair-label output, authority-bound selected
+  canary cache adoption, exact-inventory failure closure, optional physically
+  present reserve handling, and split-isolation evidence.
+- [x] Wire the frozen 5000/1000 budget into the exact batch-interleaved trainer,
+  pre-update UUID checkpoint selector, generated-query/original-target health
+  assertion, GCF runner reload, and a separate PASS-last verifier process.
+  Code integration alone still creates no checkpoint or downstream T7/T12 PASS.
 - [x] Add local lower/upper/exact-bound label validation, deterministic timeout
   reserve selection, and explicit symmetric/asymmetric cache-policy tests. The
   compact label writer and real GED rows remain outstanding.
@@ -2621,9 +2624,9 @@ Mutagenicity roadmaps.
   byte-identical and only upstream dataset/model artifacts are omitted. The
   readiness gate descriptor-reopens and hashes the exact retained inventory
   rather than trusting model-card metadata.
-- [ ] Wire the selector into real
-  training and the direction binding into T7; independently reopen all compact
-  labels/traces/checkpoint bytes before any scientific PASS.
+- [x] Wire the selector into real training and independently reopen compact
+  labels, selector/direction traces, checkpoint bytes, validation metrics, and
+  GCF runner state before NeuroSED PASS.  T7 consumption remains pending.
 
 ## 2026-08-29: GEDLIB worker-selection manifest closure
 

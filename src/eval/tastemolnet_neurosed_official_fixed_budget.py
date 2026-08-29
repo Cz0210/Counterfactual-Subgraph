@@ -431,7 +431,6 @@ def validate_official_fixed_budget_model_card(
         "gcf_runner_load_passed": True,
         "feature_schema_compatible": True,
         "pair_sampling_seed": 7,
-        "deterministic_reserve_fraction": 0.10,
         "disk_reservation_pass": True,
         "cpu_contention_gate_pass": True,
         "worker_wrote_pass": False,
@@ -447,6 +446,38 @@ def validate_official_fixed_budget_model_card(
     ):
         raise OfficialFixedBudgetGateError(
             "official fixed-budget NeuroSED model-card contract changed"
+        )
+    inventory_mode = card.get("inventory_mode")
+    reserve_fraction = card.get("deterministic_reserve_fraction")
+    if inventory_mode == "exact_budget":
+        if (
+            reserve_fraction != 0.0
+            or card.get("train_reserve_candidate_count")
+            != card.get("train_pair_budget")
+            or card.get("validation_reserve_candidate_count")
+            != card.get("validation_pair_budget")
+            or card.get("train_reserve_surplus") != 0
+            or card.get("validation_reserve_surplus") != 0
+        ):
+            raise OfficialFixedBudgetGateError(
+                "exact-budget inventory reserve accounting changed"
+            )
+    elif inventory_mode in (None, "frozen_10pct_reserve"):
+        if reserve_fraction != 0.10:
+            raise OfficialFixedBudgetGateError("reserve fraction changed")
+    else:
+        raise OfficialFixedBudgetGateError("pair inventory mode changed")
+    if (
+        card.get("minimum_persistent_free_bytes") != 100 * 1024**3
+        or type(card.get("persistent_free_after_label_artifacts_bytes")) is not int
+        or card["persistent_free_after_label_artifacts_bytes"]
+        < card["minimum_persistent_free_bytes"]
+        or card.get("ged_label_workers") not in (1, 2)
+        or card.get("cpu_contention_evidence")
+        != "bounded_one_or_two_worker_policy_completed_all_fixed_labels"
+    ):
+        raise OfficialFixedBudgetGateError(
+            "fixed-budget storage/CPU execution evidence changed"
         )
     train_budget = card.get("train_pair_budget")
     validation_budget = card.get("validation_pair_budget")
@@ -554,9 +585,12 @@ def _validate_pair_sampler_manifest(
         for key, value in exact.items()
     ):
         raise OfficialFixedBudgetGateError(f"{split} pair sampler contract changed")
-    if payload.get("pair_count") != reserve_pair_count(selected_budget):
+    if payload.get("pair_count") not in (
+        selected_budget,
+        reserve_pair_count(selected_budget),
+    ):
         raise OfficialFixedBudgetGateError(
-            f"{split} pair sampler does not contain the exact reserve"
+            f"{split} pair sampler is neither exact-budget nor exact-reserve"
         )
     if payload.get("feature_schema_sha256") != feature_schema_sha256:
         raise OfficialFixedBudgetGateError(
@@ -667,6 +701,13 @@ def verify_official_fixed_budget_readiness(
         selected_budget=card["validation_pair_budget"],
         feature_schema_sha256=card["feature_schema_sha256"],
     )
+    if card.get("inventory_mode") == "exact_budget" and (
+        train_sampler.get("pair_count") != card["train_pair_budget"]
+        or validation_sampler.get("pair_count") != card["validation_pair_budget"]
+    ):
+        raise OfficialFixedBudgetGateError(
+            "model card exact-budget mode differs from sampler inventories"
+        )
     train_labels = dict(train_pair_labels_manifest)
     validation_labels = dict(validation_pair_labels_manifest)
     selector = dict(selector_trace)

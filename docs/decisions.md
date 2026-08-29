@@ -41,6 +41,59 @@ Accepted
 
 ---
 
+## [2026-08-30] Wire the exact-budget Taste NeuroSED production path
+
+### Motivation
+
+AutoDL already has an authenticated branch GEDLIB build, two independently
+verified deterministic canary replays, and frozen split-local pair inventories.
+The inventories contain exactly 5000 train and 1000 validation rows, not the
+historical 5500/1100 reserve shape.  Requiring an absent reserve would block
+before science, while claiming one would falsify provenance.
+
+### Decision
+
+Add a compact pickle-free NumPy GED-label writer and a separate fixed-budget
+trainer.  Accept either an exact-budget inventory or a physically present 10%
+reserve, and record which mode was opened.  For the active exact inventory set
+reserve fraction and surplus to zero; any failed GED call is terminal
+`BLOCKED_GEDLIB_LABEL_YIELD`.  Reopen both selected branch canary observation
+files, compare all pair/role/hash/status/bound fields, prove their 100 IDs are
+the train-inventory prefix, and adopt successful directional cache rows.
+
+Train with the pinned GREED-expts AIDS notebook parameters: shuffled batches
+200/1000, AdamW at `1e-3` learning rate and weight decay, CyclicLR 2000/2000,
+cycle patience 5, and gradient clipping 0.1.  Use only the existing model
+helper and `OfficialBatchInterleavedSelector`, never the historical own-parent
+epoch-selector trainer.  Every improved checkpoint is captured before its
+paired update in a fresh UUID root.  `best.pt` and `model.pt` are identical
+copies of the selected pre-update bytes.  Explicitly verify the directional
+NormSED training forward and different NormGED runner forward, per-model
+batch/single agreement, runner loading, and generated-query to original-target
+API direction.
+
+The worker may write only verifier readiness.  A second invocation in a new
+Python process reopens the checksum inventory, labels, pair manifests,
+selection receipt, checkpoint, model card, selector trace, direction trace,
+validation metrics, and vendored GCF source; it replays the selector state
+machine and writes `[TASTE_NEUROSED_FIXED_BUDGET_PASS]` last.  This change does
+not deploy code, run GEDLIB, allocate a GPU, or claim a runtime PASS.  The
+single-argv `--train-and-verify` mode launches this same verifier as a separate
+Python process and reports the exact PASS-file path to managed scheduling.
+
+### Consequences
+
+- No new solver or pair-budget research is introduced.
+- Exact 5000/1000 failures cannot silently resample absent reserve rows.
+- The selected 100-pair canary is reused without recomputation.
+- T7 still requires a real independently verified AutoDL checkpoint.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Separate Taste T9 checkpoint authority from model loading
 
 ### Motivation

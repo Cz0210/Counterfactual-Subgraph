@@ -880,9 +880,16 @@ def _strict_fixed_model_card(
         "gcf_runner_load_passed": True,
         "feature_schema_compatible": True,
         "pair_sampling_seed": 7,
+        "inventory_mode": "frozen_10pct_reserve",
         "deterministic_reserve_fraction": 0.10,
         "disk_reservation_pass": True,
         "cpu_contention_gate_pass": True,
+        "minimum_persistent_free_bytes": 100 * 1024**3,
+        "persistent_free_after_label_artifacts_bytes": 101 * 1024**3,
+        "ged_label_workers": 1,
+        "cpu_contention_evidence": (
+            "bounded_one_or_two_worker_policy_completed_all_fixed_labels"
+        ),
         "worker_wrote_pass": False,
         "scientific_release_eligible": True,
         "full_official_neurosed_semantics_claimed": False,
@@ -958,6 +965,18 @@ def test_model_card_and_health_gate_are_ready_not_self_signed_pass() -> None:
         receipt,
     )
     validate_official_fixed_budget_model_card(card, vendored_gcf_root=GCF_ROOT)
+    exact_card = dict(card)
+    exact_card.update(
+        inventory_mode="exact_budget",
+        deterministic_reserve_fraction=0.0,
+        train_reserve_candidate_count=5000,
+        validation_reserve_candidate_count=1000,
+        train_reserve_surplus=0,
+        validation_reserve_surplus=0,
+    )
+    validate_official_fixed_budget_model_card(
+        exact_card, vendored_gcf_root=GCF_ROOT
+    )
     reduced_card = dict(card)
     reduced_card.update(
         train_pair_budget=2000,

@@ -345,9 +345,17 @@ The pure selector state machine mirrors pinned `neuro.train.train_full`:
 - every permitted training update records AdamW completion, one CyclicLR step,
   and gradient clipping at `0.1`.
 
-Each candidate must bind checkpoint bytes captured at that pre-update event.
-The state machine produces `READY_FOR_INDEPENDENT_VERIFICATION`, never a
-checkpoint or PASS by itself. It is not yet wired into the PyTorch trainer.
+Each candidate binds checkpoint bytes captured at that pre-update event.  The
+production trainer uses the pinned GREED-expts AIDS call: train batch 200,
+validation batch 1000, both shuffled, AdamW `lr=weight_decay=1e-3`,
+`cycle_patience=5`, CyclicLR steps 2000/2000, and clipping at `0.1`.  It writes
+`best.pt` from the selected pre-update candidate and makes `model.pt` an exact
+byte copy of the same selected state.  The worker stops at
+`READY_FOR_INDEPENDENT_VERIFICATION`; a second CLI process reopens and replays
+the selector before it can write the scientific PASS marker.  For a controller
+that owns only one command argv, `--train-and-verify` performs the training and
+then launches that verifier as a child Python process; the parent command is
+successful only after reopening the verifier's PASS-last file.
 
 The direction binding calls `embed_targets(original_inputs)` first and then
 exposes only `predict_outer_with_queries(generated_candidates)`. Every matrix
@@ -356,11 +364,21 @@ entry records query and target graph hashes with roles
 API or unexpected matrix shape is rejected. This binding is tested with an
 in-memory model but is not yet wired into T7.
 
+The production writer accepts the frozen inventory shape actually present on
+AutoDL: exactly 5000 train rows and 1000 validation rows, with zero surplus.
+It never claims the historical 10% reserve for those files.  If any exact-
+inventory GED call fails, the run ends as `BLOCKED_GEDLIB_LABEL_YIELD`; it may
+not resample or manufacture a replacement.  A future inventory that physically
+contains the preregistered 10% reserve remains accepted and uses first-success
+sampler order.  The two independently verified selected-backend canary replays
+are reopened, compared field-by-field, proven to be the exact train prefix,
+and their successful directional rows are adopted as cache rather than rerun.
+
 The fixed-budget model-card/readiness validator cross-binds train/validation
 sampler manifests, label manifests, the selector trace, and the direction
 trace. It revalidates seed 7, the unstratified independent-draw contract, the
-exact 10% reserve count, and each sampler self-hash rather than trusting the
-model-card seed field. It requires real
+declared exact-budget or physically present reserve count, and each sampler
+self-hash rather than trusting model-card fields. It requires real
 pyged labels, exact approved budgets, compact storage, no held-out data,
 the retained directional SED costs, the explicit non-MIP backend identity,
 successful reload/batch checks, and all source/checkpoint hashes. Its output is
@@ -372,24 +390,16 @@ blocker is closed; this does not close any GEDLIB, training, or T7 blocker.
 
 ## 8. Remaining release blockers
 
-This phase deliberately stops before scientific training. The following still
-must be implemented and independently verified before any official fixed-
-budget PASS or T7 run:
+The writer/trainer/verifier path is implemented but this code-only change does
+not claim that AutoDL labels or a checkpoint exist.  The following runtime
+work remains before T7:
 
-1. provision and pin GEDLIB plus pybind11 on AutoDL, then obtain the real build
-   smoke and real 100/500/1000 reports;
-2. write and independently reopen the compact directional label files; the
-   lower/upper/exact flag, reserve ordering, and asymmetric cache contracts now
-   exist locally but have no real GED rows;
-3. compare a small fixture field-by-field with the pinned official builder;
-4. bind train/validation split-isolation evidence against calibration/test
-   membership without loading held-out scientific payloads;
-5. wire the tested GREED batch-interleaved selector state machine into the
-   PyTorch optimizer/checkpoint loop and independently replay its trace;
-6. wire the tested generated-query to original-target binding into T7, then
-   train and independently verify a fresh checkpoint under the managed
-   controller/resource gates.
+1. deploy this immutable code on AutoDL and run the writer against the already
+   verified build, selection/receipt, feature schema, and exact 5000/1000 pair
+   roots;
+2. run the official trainer and its separate verifier on a released GPU;
+3. bind the resulting PASS/checkpoint into T7 and its managed method verifier.
 
 Until all six complete, do not emit
-`[TASTE_NEUROSED_PAIR_BUILDER_PASS]`,
-`[TASTE_NEUROSED_OFFICIAL_FIXED_BUDGET_PASS]`, or any T7/T12 PASS.
+`[TASTE_NEUROSED_FIXED_BUDGET_PASS]` or any T7/T12 PASS merely because this
+code compiles; the marker is emitted only by the independent artifact reopen.
