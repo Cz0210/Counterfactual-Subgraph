@@ -49,7 +49,7 @@ SUBSET_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_production_subset_stage_v1"
 FINAL_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_recovered_standardized_freeze_v1"
 COEXISTENCE_SCHEMA = "aids_comrecgc_exact_recovery_coexistence_probe_v2"
 RESOURCE_SCHEMA = "aids_comrecgc_exact_recovery_resource_budget_v1"
-HANDOVER_SCHEMA = "aids_comrecgc_old_brute_handover_eligibility_v2"
+HANDOVER_SCHEMA = "aids_comrecgc_old_brute_handover_eligibility_v3"
 EXACT_PROGRESS_MONITOR_SCHEMA = (
     "aids_comrecgc_exact_recovery_progress_monitor_v1"
 )
@@ -832,6 +832,10 @@ def handover_contract() -> dict[str, Any]:
         "maximum_new_route_eta_seconds": HANDOVER_MAX_ETA_SECONDS,
         "minimum_relative_speedup": HANDOVER_MIN_RELATIVE_SPEEDUP,
         "conservative_exact_work_rows": HANDOVER_CONSERVATIVE_WORK_ROWS,
+        "eta_or_relative_speedup_gate_required": False,
+        "eligibility_policy": (
+            "durable_checkpoint_independent_reload_and_10m_positive_progress"
+        ),
         "durable_evidence": {
             "controller_generation_schema": (
                 HANDOVER_CONTROLLER_GENERATION_SCHEMA
@@ -5939,6 +5943,7 @@ def _old_brute_handover_status(
         "eta_within_48h_pass": eta_within_48h_pass,
         "relative_speedup_100x_pass": relative_speedup_100x_pass,
         "eta_or_100x_pass": eta_or_100x_pass,
+        "eta_or_100x_gate_required": False,
         "old_brute_exact_generation_alive_pass": (
             old_brute_generation_alive_pass
         ),
@@ -5957,7 +5962,6 @@ def _old_brute_handover_status(
             "first_durable_checkpoint_pass",
             "continuous_progress_10m_pass",
             "positive_throughput_pass",
-            "eta_or_100x_pass",
             "old_brute_exact_generation_alive_pass",
             "new_exact_worker_generation_bound_pass",
             "controller_status_allows_handover",
@@ -5975,6 +5979,7 @@ def _old_brute_handover_status(
         "maximum_new_route_eta_seconds": HANDOVER_MAX_ETA_SECONDS,
         "minimum_relative_speedup": HANDOVER_MIN_RELATIVE_SPEEDUP,
         "conservative_exact_work_rows": HANDOVER_CONSERVATIVE_WORK_ROWS,
+        "eta_or_relative_speedup_gate_required": False,
         "progress_rows": progress_rows,
         "progress_delta_rows": progress_delta_rows,
         "continuous_progress_seconds": continuous_progress_seconds,
@@ -5985,9 +5990,7 @@ def _old_brute_handover_status(
         "conservative_eta_seconds": conservative_eta_seconds,
         "checkpoint_snapshot": checkpoint,
         "resume_smoke_receipt": resume_smoke,
-        "external_old_route_speedup_evidence_required": (
-            not eta_within_48h_pass
-        ),
+        "external_old_route_speedup_evidence_required": False,
         "external_old_route_speedup_evidence_accepted_here": False,
         "eligible_to_request_old_brute_stop": eligible,
         "old_route_signal_authorized_here": False,

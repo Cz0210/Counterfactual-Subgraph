@@ -1,5 +1,62 @@
 # Decisions Log
 
+## [2026-08-29] Remove ETA and relative-speedup gates from AIDS old-brute handover
+
+### Motivation
+
+The latest operator authorization permits the exact old brute to be retired
+after the new exact route has produced a recoverable durable checkpoint,
+survived an independent controller reload/reattachment, and demonstrated at
+least ten continuous minutes of positive authenticated progress.  The older
+handover contract additionally required a projected ETA of at most 48 hours
+or unavailable 100x evidence, which could block an otherwise authorized safe
+handover indefinitely.
+
+### Decision
+
+Bump the handover schema to v3 and make ETA/relative-speedup values diagnostic
+only.  Eligibility continues to require reviewed release authority, source and
+pair-store closure, exact old/new PID-generation bindings, durable checkpoint
+and independent reload evidence, ten continuous minutes of fresh progress,
+positive throughput, and a non-blocked controller.  The controller still has
+no signal API; a separately reviewed executor must reopen the exact old
+generation before issuing the one authorized graceful `SIGTERM`.
+
+### Consequences
+
+- A healthy new exact route is not rejected solely because its conservative
+  full-run ETA exceeds 48 hours.
+- Checkpoint, reload, duration, progress, process identity, and release gates
+  remain fail closed.
+- This change authorizes no signal by itself and does not stop the live old
+  process.
+
+## [2026-08-29] Expose explicit trusted-operator AIDS release pins
+
+### Motivation
+
+The production-spec generator intentionally emitted only an unlaunchable
+template, leaving six release pins unset and deployment authorization false.
+The owner has now explicitly authorized the independently reviewed eight-worker
+exact route, so deployment needs a reviewable CLI boundary rather than editing
+generated JSON by hand.
+
+### Decision
+
+Allow `generate-production` to receive each reviewed component commit and one
+explicit `--authorize-production-deployment` flag. Authorization fails unless
+all pins are full Git SHAs, the immutable science pin is unchanged, and the
+controller pin exactly equals the clean execution worktree HEAD. Existing
+ancestry, entrypoint-hash, adoption, source, and manifest gates remain in
+force. Omitting the flag preserves the historical release-unready behavior.
+
+### Consequences
+
+- A trusted single operator can create a launchable spec without mutating it
+  after generation.
+- Partial pins or an old controller pin cannot accompany an authorized spec.
+- This interface does not weaken scientific or process-identity validation.
+
 ## [2026-08-29] Start the reviewed AIDS exact-component route with eight CPU workers
 
 ### Motivation
@@ -221,8 +278,8 @@ cmdline SHA-256. Eligibility requires the exact old generation and command to
 remain live, reviewed release ancestry and a clean
 execution tree, typed adoption/source closure, a new-route hash-chained durable
 checkpoint observed across a real controller restart, at least ten continuous
-minutes of fresh exact progress, positive throughput, and a conservative new
-route ETA no greater than 48 hours.
+minutes of fresh exact progress, and positive throughput. The later v3 policy
+above makes conservative ETA a diagnostic rather than an eligibility gate.
 
 The original contract's optional 100x branch remains fail closed here: this
 controller does not accept caller-supplied old-route throughput. A future
@@ -233,9 +290,8 @@ reports `eligible_to_request_old_brute_stop`; it never calls a signal API.
 ### Consequences
 
 - PID reuse, exec/cmdline replacement, a dead old generation, checkpoint
-  tamper, a same-controller
-  pseudo-resume, stale/discontinuous progress, nonpositive throughput, or an
-  excessive ETA all keep the certificate `NOT_ELIGIBLE`.
+  tamper, a same-controller pseudo-resume, stale/discontinuous progress, or
+  nonpositive throughput all keep the certificate `NOT_ELIGIBLE`.
 - A later executor must reopen the exact old PID/start-tick generation and own
   the one graceful `SIGTERM`; no general kill or `SIGKILL` is authorized.
 - This successor is code, tests, and documentation only. It does not deploy,

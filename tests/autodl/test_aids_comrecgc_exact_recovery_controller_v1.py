@@ -2405,6 +2405,10 @@ def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
         "checkpoint_snapshot": {**resume_checkpoint, "progress_rows": progress},
         "resume_smoke_receipt": {"checkpoint_snapshot": resume_checkpoint},
     }
+    # Latest release authorization deliberately removes the legacy ETA/100x
+    # prerequisite.  Keep a hostile >48h diagnostic ETA to prove it cannot
+    # block a recoverable, independently reloaded, progressing exact route.
+    durable["conservative_eta_seconds"] = recovery.HANDOVER_MAX_ETA_SECONDS + 1.0
     monkeypatch.setattr(
         recovery,
         "_verify_durable_handover_evidence",
@@ -2425,13 +2429,15 @@ def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
     assert handover["conditions"]["first_durable_checkpoint_pass"] is True
     assert handover["conditions"]["continuous_progress_10m_pass"] is True
     assert handover["conditions"]["positive_throughput_pass"] is True
-    assert handover["conditions"]["eta_within_48h_pass"] is True
+    assert handover["conditions"]["eta_within_48h_pass"] is False
     assert handover["conditions"]["relative_speedup_100x_pass"] is False
-    assert handover["conditions"]["eta_or_100x_pass"] is True
+    assert handover["conditions"]["eta_or_100x_pass"] is False
+    assert handover["conditions"]["eta_or_100x_gate_required"] is False
     assert handover["conditions"]["old_brute_exact_generation_alive_pass"] is True
     assert handover["conditions"]["new_exact_worker_generation_bound_pass"] is True
     assert handover["old_route_signal_authorized_here"] is False
     assert handover["old_route_signal_sent"] is False
+    assert handover["external_old_route_speedup_evidence_required"] is False
     assert signals == []
 
     # Public hashes over mutable state are no longer handover authority. Even

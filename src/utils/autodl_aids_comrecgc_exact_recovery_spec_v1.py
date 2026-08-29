@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from typing import Any, Callable, Mapping
 
@@ -392,6 +393,8 @@ def generate_production_spec(
     controller_manifest_path: str | Path,
     timestamp: str | None = None,
     thread_count: int = DEFAULT_THREAD_COUNT,
+    release_pins: Mapping[str, str] | None = None,
+    production_deployment_authorized: bool = False,
     adoption_validator: Callable[..., Mapping[str, Any]] | None = None,
     manifest_loader: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
@@ -481,8 +484,40 @@ def generate_production_spec(
         block_size=DEFAULT_BLOCK_SIZE,
         safety_floor_bytes=DEFAULT_SAFETY_FLOOR_BYTES,
     )
-    pins = {name: None for name in REQUIRED_RELEASE_PINS}
+    pins: dict[str, str | None] = {name: None for name in REQUIRED_RELEASE_PINS}
     pins["science_commit"] = SCIENCE_RELEASE_COMMIT
+    supplied_pins = dict(release_pins or {})
+    if set(supplied_pins) - set(REQUIRED_RELEASE_PINS):
+        raise RecoverySpecError("unknown release pin")
+    for name, value in supplied_pins.items():
+        if (
+            not isinstance(value, str)
+            or len(value) != 40
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise RecoverySpecError(f"release pin is not a full Git SHA: {name}")
+        if name == "science_commit" and value != SCIENCE_RELEASE_COMMIT:
+            raise RecoverySpecError("science release pin changed")
+        pins[name] = value
+    if production_deployment_authorized:
+        missing = [name for name, value in pins.items() if value is None]
+        if missing:
+            raise RecoverySpecError(
+                "authorized production spec is missing release pins: "
+                + ",".join(missing)
+            )
+        try:
+            execution_commit = subprocess.check_output(
+                ["git", "-C", str(project), "rev-parse", "HEAD"],
+                text=True,
+                timeout=30,
+            ).strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RecoverySpecError("cannot resolve authorized execution commit") from exc
+        if pins["controller_commit"] != execution_commit:
+            raise RecoverySpecError(
+                "authorized controller pin must equal the execution commit"
+            )
     return {
         "schema_version": SPEC_SCHEMA,
         "controller_id": CONTROLLER_ID,
@@ -491,7 +526,9 @@ def generate_production_spec(
         "controller_root": str(controller_root),
         "controller_manifest_path": str(manifest_path),
         "adoption_authority_parent": str(adoption_root.parent),
-        "production_deployment_authorized": False,
+        "production_deployment_authorized": bool(
+            production_deployment_authorized
+        ),
         "stages": stages,
         "adoption_contract": {
             "receipt_schema": receipt["schema_version"],

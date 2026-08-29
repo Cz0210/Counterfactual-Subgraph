@@ -84,6 +84,40 @@ def test_production_builder_cli_defaults_to_eight_workers() -> None:
     assert parsed.thread_count == 8
 
 
+def test_production_builder_cli_exposes_explicit_release_authority() -> None:
+    commit = "a" * 40
+    parsed = build_cli.build_parser().parse_args(
+        [
+            "generate-production",
+            "--adoption-output",
+            "/adoption",
+            "--controller-parent",
+            "/controllers",
+            "--python",
+            "/python",
+            "--controller-manifest",
+            "/controller.json",
+            "--adoption-commit",
+            commit,
+            "--controller-commit",
+            commit,
+            "--exact-runner-commit",
+            commit,
+            "--subset-runner-commit",
+            commit,
+            "--downstream-runner-commit",
+            commit,
+            "--standardization-runner-commit",
+            commit,
+            "--authorize-production-deployment",
+            "--output",
+            "/spec.json",
+        ]
+    )
+    assert parsed.controller_commit == commit
+    assert parsed.authorize_production_deployment is True
+
+
 def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
     tmp_path: Path, monkeypatch
 ) -> None:

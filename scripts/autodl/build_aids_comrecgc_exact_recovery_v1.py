@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=_absolute, required=True)
     generate = commands.add_parser(
         "generate-production",
-        help="derive a release-unready production spec from typed adoption evidence",
+        help="derive a production spec from typed adoption evidence",
     )
     generate.add_argument("--adoption-output", type=_absolute, required=True)
     generate.add_argument("--controller-parent", type=_absolute, required=True)
@@ -54,6 +54,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="CPU worker/thread budget; the fast route starts with 8 (max 12)",
     )
+    generate.add_argument("--adoption-commit")
+    generate.add_argument("--controller-commit")
+    generate.add_argument("--exact-runner-commit")
+    generate.add_argument("--subset-runner-commit")
+    generate.add_argument("--downstream-runner-commit")
+    generate.add_argument("--standardization-runner-commit")
+    generate.add_argument(
+        "--authorize-production-deployment",
+        action="store_true",
+        help=(
+            "explicit trusted-operator authorization; requires every release "
+            "pin and controller_commit equal to the execution HEAD"
+        ),
+    )
     generate.add_argument("--output", type=_absolute, required=True)
     return parser
 
@@ -65,6 +79,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_production_spec,
         )
 
+        release_pins = {
+            name: value
+            for name, value in {
+                "adoption_commit": args.adoption_commit,
+                "controller_commit": args.controller_commit,
+                "exact_runner_commit": args.exact_runner_commit,
+                "subset_runner_commit": args.subset_runner_commit,
+                "downstream_runner_commit": args.downstream_runner_commit,
+                "standardization_runner_commit": (
+                    args.standardization_runner_commit
+                ),
+            }.items()
+            if value is not None
+        }
         payload = write_production_spec(
             output=args.output,
             adoption_output=args.adoption_output,
@@ -74,6 +102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             controller_manifest_path=args.controller_manifest,
             timestamp=args.timestamp,
             thread_count=args.thread_count,
+            release_pins=release_pins,
+            production_deployment_authorized=(
+                args.authorize_production_deployment
+            ),
         )
         result = {
             "status": "PASS",
@@ -81,8 +113,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "cid": payload["cid"],
             "controller_root": payload["controller_root"],
             "controller_manifest_path": payload["controller_manifest_path"],
-            "production_deployment_authorized": False,
-            "release_pins_intentionally_unset": True,
+            "production_deployment_authorized": payload[
+                "production_deployment_authorized"
+            ],
+            "missing_release_pins": [
+                name
+                for name, value in payload["release_pins"].items()
+                if value is None
+            ],
             "thread_count": int(payload["resources"]["thread_count"]),
         }
         marker = "[AIDS_EXACT_RECOVERY_PRODUCTION_SPEC_GENERATED]"

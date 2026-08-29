@@ -1,5 +1,25 @@
 # Refactor Plan
 
+## 2026-08-29: Align AIDS exact handover with latest authorization
+
+- [x] Make ETA<=48h and relative-speedup evidence diagnostic rather than
+  eligibility requirements.
+- [x] Retain durable checkpoint, independent reload/reattachment, ten-minute
+  positive-progress, exact old/new process generation, source, and release
+  gates.
+- [x] Bump the handover contract schema and add a >48h ETA regression that
+  remains eligible only when every safety gate passes.
+- [ ] Keep the old brute untouched until a separately reviewed exact-PID
+  graceful-stop executor reopens all required evidence.
+
+## 2026-08-29: Explicit AIDS production release authority
+
+- [x] Add reviewed component commit inputs and one explicit trusted-operator
+  deployment authorization flag to the typed production-spec generator.
+- [x] Require a complete pin set, immutable science pin, and controller pin
+  equal to the execution HEAD before an authorized spec can be written.
+- [x] Keep an invocation without explicit authorization release-unready.
+
 ## 2026-08-29: AIDS exact fast-release CPU envelope
 
 - [x] Reopen the real AutoDL input authority and confirm 91,916,686 rows,
@@ -67,7 +87,8 @@
 - [x] Require a second controller generation to reattach the exact worker and
   reopen a positive hash-chained new-route checkpoint before handover can pass.
 - [x] Hash-bind the continuous-progress monitor and require fresh observations,
-  at least ten minutes of progress, positive throughput, and ETA at most 48h.
+  at least ten minutes of progress and positive throughput; the later v3
+  policy makes ETA diagnostic only.
 - [x] Keep caller-supplied relative speedup rejected and every signal API
   outside this read-only certificate.
 - [ ] Obtain independent detached review before deployment or handover. Until
