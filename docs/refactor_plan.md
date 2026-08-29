@@ -2426,3 +2426,17 @@ Mutagenicity roadmaps.
   `WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED`.
 - [ ] Run all worker trials and the separate disjoint 100/500/1000 planning
   cohorts on AutoDL; local code integration is not a scientific PASS.
+
+## 2026-08-29: BACE GCF 50k post-generation closure
+
+- [x] Confirm the immutable GCFExplainer generation naturally completed all
+  50,000 traversed steps and reuse its completed summary without regeneration.
+- [x] Make the frozen-GINE provenance scan token-aware so legitimate
+  `counterfactual*` manifest fields do not match the standalone `rf` backend
+  token, while explicit RF keys, values, model names, and filenames still fail.
+- [x] Cover the exact live-manifest field shape plus positive RF-contamination
+  controls in the focused baseline-route tests and keep the paired Slurm CLI
+  wrapper synchronized.
+- [ ] Deploy the reviewed successor in an immutable AutoDL worktree, rerun only
+  candidate freeze and downstream calibration/test/export, then atomically
+  refresh the matrix. Never rerun the completed 50k generation.

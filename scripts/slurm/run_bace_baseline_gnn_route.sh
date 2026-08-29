@@ -5,6 +5,8 @@
 # requires the frozen calibrated GINE checkpoint, frozen train source manifest,
 # and complete processed train CSV; the adapter maps the exact frozen 869 IDs.
 # The historical RF build_bace_train_pool wrapper is not an exact-route CLI.
+# GINE provenance rejects the standalone `rf` token, not the letters inside
+# legitimate `counterfactual*` generation fields used by candidate export.
 # `globalgce-bridge-smoke` also exercises the pinned official decoder's
 # negative affine edge-score domain; an identity one-hot smoke is insufficient.
 # V6 may pass either a deep --gspan-adoption-proof or the controller-owned

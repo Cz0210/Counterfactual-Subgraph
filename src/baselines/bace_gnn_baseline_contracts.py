@@ -133,6 +133,15 @@ def assert_gine_clean_manifest(
     forbidden_text = json.dumps(dict(manifest), sort_keys=True).lower()
     forbidden_value = False
 
+    def is_rf_provenance_key(key: str) -> bool:
+        normalized = key.strip().lower().replace("-", "_")
+        tokens = [token for token in normalized.split("_") if token]
+        return (
+            "rf" in tokens
+            or "random_forest" in normalized
+            or "randomforest" in normalized
+        )
+
     def visit(value: Any, key: str = "") -> None:
         nonlocal forbidden_value
         if forbidden_value:
@@ -144,6 +153,13 @@ def assert_gine_clean_manifest(
         elif isinstance(value, (list, tuple, set)):
             for child in value:
                 visit(child, key)
+        elif is_rf_provenance_key(normalized_key) and value not in (
+            False,
+            0,
+            None,
+            "",
+        ):
+            forbidden_value = True
         elif isinstance(value, str):
             normalized = value.strip().lower().replace("-", "_")
             if normalized in {
@@ -154,8 +170,6 @@ def assert_gine_clean_manifest(
                 "rf_contaminated",
             }:
                 forbidden_value = True
-        elif "rf" in normalized_key and value not in (False, 0, None, ""):
-            forbidden_value = True
 
     visit(manifest)
     if forbidden_value or any(

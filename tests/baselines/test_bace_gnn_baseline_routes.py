@@ -340,6 +340,9 @@ def test_clean_manifest_gate_rejects_rf_and_split_leakage() -> None:
         "oracle_checkpoint_hash": CHECKPOINT_ID,
         "calibration_loaded": False,
         "test_loaded": False,
+        "available_model_counterfactual_count": 24_140,
+        "counterfactuals_path": "/immutable/train/counterfactuals.pt",
+        "counterfactuals_sha256": "a" * 64,
     }
     assert_gine_clean_manifest(
         clean, checkpoint_id=CHECKPOINT_ID, require_train_only=True
@@ -353,6 +356,12 @@ def test_clean_manifest_gate_rejects_rf_and_split_leakage() -> None:
     with pytest.raises(ValueError, match="forbidden RF"):
         assert_gine_clean_manifest(
             {**clean, "teacher_backend": "rf"},
+            checkpoint_id=CHECKPOINT_ID,
+            require_train_only=True,
+        )
+    with pytest.raises(ValueError, match="forbidden RF"):
+        assert_gine_clean_manifest(
+            {**clean, "historical_rf_checkpoint": "/immutable/model.pt"},
             checkpoint_id=CHECKPOINT_ID,
             require_train_only=True,
         )

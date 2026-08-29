@@ -12135,6 +12135,45 @@ terminal publication.
 - The controller may monitor dependencies, but it is not yet the full T6--T16
   main-table scheduler.
 
+## [2026-08-29] Treat RF as a provenance token in BACE GINE manifests
+
+### Motivation
+
+The BACE GCFExplainer worker naturally completed all 50,000 generation steps
+and its official summary passed, but candidate freeze rejected that clean
+summary. The generic provenance visitor searched for the two letters `rf`
+anywhere in a key, so ordinary fields such as `counterfactuals_path`,
+`counterfactuals_sha256`, and `available_model_counterfactual_count` were
+misclassified as RandomForest evidence. This was a post-generation gate bug;
+the completed scientific generation and summary were not corrupt.
+
+### Decision
+
+Interpret an RF key only when normalized underscore-delimited key tokens contain
+the standalone token `rf`, or when the key explicitly names `random_forest` or
+`randomforest`. Preserve the existing exact forbidden RF string values and
+serialized model/file-name checks. Keep `rf_oracle_used=false` mandatory and
+retain the frozen GINE checkpoint, train-only, calibration-closed, and
+test-closed requirements.
+
+Resume only the missing candidate-freeze and downstream stages from the held
+50k generation and passed summary. Do not regenerate any VRRW step.
+
+### Consequences
+
+- Legitimate counterfactual field names no longer block a GINE-clean manifest.
+- Keys such as `historical_rf_checkpoint`, explicit `teacher_backend=rf`, and
+  RF model filenames still fail closed.
+- The repair changes no candidates, ranking, classifier, dataset, split,
+  calibration, test, or matrix result; a real cell PASS still requires the
+  existing downstream gates and atomic matrix refresh.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Keep BACE GlobalGCE K fixed while extending raw native rules
 
 ### Motivation
