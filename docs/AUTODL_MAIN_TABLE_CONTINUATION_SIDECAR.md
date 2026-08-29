@@ -153,7 +153,7 @@ shell:
   "label_assertions": {
     "/train_success_count": 5000,
     "/validation_success_count": 1000,
-    "/backend": "branch",
+    "/ged_backend": "branch",
     "/state": "PASS",
     "/calibration_loaded": false,
     "/test_loaded": false
@@ -168,7 +168,7 @@ shell:
   "fixed_environment": {"RUN_GNN_ABLATION": "0"},
   "science_process_token": "train_fixed_budget_neurosed.py",
   "attempt_parent": "/absolute/fresh/neurosed/parent",
-  "success_marker_template": "{attempt_root}/best.pt"
+  "success_marker_template": "{attempt_root}/PASS"
 }
 ```
 

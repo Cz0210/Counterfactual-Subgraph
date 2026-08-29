@@ -363,7 +363,7 @@ def load_continuation_spec(path: str | Path) -> dict[str, Any]:
         expected_label_contract = {
             "train_success_count": 5000,
             "validation_success_count": 1000,
-            "backend": "branch",
+            "ged_backend": "branch",
             "calibration_loaded": False,
             "test_loaded": False,
         }
