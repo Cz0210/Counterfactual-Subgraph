@@ -83,11 +83,14 @@ summary, or freeze mutation without replaying the 91.9M-row downstream scan on
 every dashboard poll. A missing final `PASS` can be reconstructed only after
 all scientific stage validators, including the full downstream replay, reopen.
 
-The controller root is claimed by a CID-and-manifest-SHA parent-side empty
-file created with `O_EXCL`, fsynced, and flocked during initialization. The
-root, `gates/`, `logs/`, and owner receipt are then idempotently finalized;
-failure at any creation or owner-publication point is recoverable only through
-same-CID `resume`. The owner and final terminal bind the preclaim inode. Output
+The controller root is claimed by a CID-and-manifest-SHA parent-side JSON file
+created with `O_EXCL`, flocked, written with a fresh random attempt id and
+nonce, and fsynced with its parent during initialization. The immutable owner
+receipt binds its content SHA-256 plus complete inode/mode/owner/link/size/
+mtime/ctime identity. The root, `gates/`, `logs/`, and owner receipt are then
+idempotently finalized; same-CID `resume` reopens and verifies the exact claim
+content and physical receipt. A zero/partial claim or any replacement/ABA is a
+manual-diagnosis blocker rather than a repairable empty-prefix window. Output
 usage is a hard controller-publication gate: exact net growth is reserved before
 controller-owned state/gate/terminal/PASS writes, and usage is also checked
 every 60 seconds while a worker is live. A live bound worker that crosses the

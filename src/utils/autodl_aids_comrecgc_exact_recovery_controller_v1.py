@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -39,7 +40,7 @@ from src.utils.autodl_exec_startup_barrier import (
 
 SPEC_SCHEMA = "aids_comrecgc_exact_recovery_controller_v1_spec_v1"
 MANIFEST_SCHEMA = "aids_comrecgc_exact_recovery_controller_v1_manifest_v1"
-OWNER_SCHEMA = "aids_comrecgc_exact_recovery_controller_owner_v2"
+OWNER_SCHEMA = "aids_comrecgc_exact_recovery_controller_owner_v3"
 STATE_SCHEMA = "aids_comrecgc_exact_recovery_controller_state_v2"
 STAGE_GATE_SCHEMA = "aids_comrecgc_exact_recovery_typed_stage_gate_v1"
 TERMINAL_SCHEMA = "aids_comrecgc_exact_recovery_controller_terminal_v2"
@@ -52,6 +53,8 @@ EXACT_MONOTONIC_PROGRESS_FIELD = "component_recovery_monotonic_rows"
 CLOSURE_INVENTORY_SCHEMA = "aids_comrecgc_exact_recovery_stage_closure_inventory_v1"
 CLOSURE_REHASH_MAX_BYTES = 16 * 1024**2
 ROOT_CLAIM_SUFFIX = ".controller-root-claim.lock"
+ROOT_CLAIM_SCHEMA = "aids_comrecgc_exact_recovery_controller_root_claim_v2"
+ROOT_CLAIM_MAX_BYTES = 4096
 STARTUP_BARRIER_BINDING_SCHEMA = (
     "aids_comrecgc_exact_recovery_exec_startup_binding_v1"
 )
@@ -2578,6 +2581,166 @@ def _root_claim_path(manifest: Mapping[str, Any]) -> Path:
     )
 
 
+def _root_claim_payload(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": ROOT_CLAIM_SCHEMA,
+        "controller_id": CONTROLLER_ID,
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "controller_root": str(Path(manifest["controller_root"])),
+        "claim_attempt_id": secrets.token_hex(16),
+        "claim_nonce": secrets.token_hex(32),
+        "created_at": _utc_now(),
+    }
+
+
+def _validate_root_claim_payload(
+    manifest: Mapping[str, Any], payload: Any
+) -> dict[str, Any]:
+    required = {
+        "schema_version",
+        "controller_id",
+        "controller_manifest_sha256",
+        "controller_root",
+        "claim_attempt_id",
+        "claim_nonce",
+        "created_at",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise RecoveryControllerError("controller root preclaim identity changed")
+    attempt = payload.get("claim_attempt_id")
+    nonce = payload.get("claim_nonce")
+    if (
+        payload.get("schema_version") != ROOT_CLAIM_SCHEMA
+        or payload.get("controller_id") != CONTROLLER_ID
+        or payload.get("controller_manifest_sha256")
+        != manifest["manifest_sha256"]
+        or payload.get("controller_root")
+        != str(Path(manifest["controller_root"]))
+        or not isinstance(attempt, str)
+        or re.fullmatch(r"[0-9a-f]{32}", attempt) is None
+        or not isinstance(nonce, str)
+        or re.fullmatch(r"[0-9a-f]{64}", nonce) is None
+        or not isinstance(payload.get("created_at"), str)
+        or not payload["created_at"]
+    ):
+        raise RecoveryControllerError("controller root preclaim identity changed")
+    return dict(payload)
+
+
+def _root_claim_stat_tuple(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_uid),
+        int(value.st_gid),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
+def _read_root_claim_binding(
+    manifest: Mapping[str, Any],
+    *,
+    descriptor: int | None = None,
+) -> dict[str, Any]:
+    """Reopen one physical claim and bind content plus ABA-sensitive stat."""
+
+    path = _root_claim_path(manifest)
+    if path.is_symlink():
+        raise RecoveryControllerError("controller root preclaim is not physical")
+    owned_descriptor = descriptor is None
+    if descriptor is None:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError as exc:
+            raise RecoveryControllerError("controller root preclaim is absent") from exc
+        except OSError as exc:
+            raise RecoveryControllerError(
+                "controller root preclaim is not physical"
+            ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        try:
+            named_before = path.lstat()
+        except FileNotFoundError as exc:
+            raise RecoveryControllerError(
+                "controller root preclaim is absent"
+            ) from exc
+        expected = _root_claim_stat_tuple(opened)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or opened.st_size <= 0
+            or opened.st_size > ROOT_CLAIM_MAX_BYTES
+            or _root_claim_stat_tuple(named_before) != expected
+        ):
+            raise RecoveryControllerError(
+                "controller root preclaim identity changed"
+            )
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < opened.st_size:
+            block = os.pread(descriptor, opened.st_size - offset, offset)
+            if not block:
+                raise RecoveryControllerError(
+                    "controller root preclaim identity changed"
+                )
+            chunks.append(block)
+            offset += len(block)
+        if os.pread(descriptor, 1, opened.st_size):
+            raise RecoveryControllerError("controller root preclaim identity changed")
+        encoded = b"".join(chunks)
+        try:
+            decoded = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecoveryControllerError(
+                "controller root preclaim identity changed"
+            ) from exc
+        payload = _validate_root_claim_payload(manifest, decoded)
+        after_fd = os.fstat(descriptor)
+        try:
+            named_after = path.lstat()
+        except FileNotFoundError as exc:
+            raise RecoveryControllerError(
+                "controller root preclaim identity changed"
+            ) from exc
+        if (
+            _root_claim_stat_tuple(after_fd) != expected
+            or _root_claim_stat_tuple(named_after) != expected
+        ):
+            raise RecoveryControllerError(
+                "controller root preclaim identity changed"
+            )
+        return {
+            "path": str(path),
+            "device": int(opened.st_dev),
+            "inode": int(opened.st_ino),
+            "mode": int(opened.st_mode),
+            "uid": int(opened.st_uid),
+            "gid": int(opened.st_gid),
+            "nlink": int(opened.st_nlink),
+            "size": int(opened.st_size),
+            "mtime_ns": int(opened.st_mtime_ns),
+            "ctime_ns": int(opened.st_ctime_ns),
+            "content_sha256": hashlib.sha256(encoded).hexdigest(),
+            "claim_attempt_id": payload["claim_attempt_id"],
+            "claim_nonce_sha256": hashlib.sha256(
+                payload["claim_nonce"].encode("ascii")
+            ).hexdigest(),
+        }
+    finally:
+        if owned_descriptor:
+            os.close(descriptor)
+
+
 def _validate_controller_owner_claim(
     manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -2592,30 +2755,7 @@ def _validate_controller_owner_claim(
     ]
     if conflicting:
         raise RecoveryControllerError("controller CID has a conflicting root claim")
-    if claim_path.is_symlink():
-        raise RecoveryControllerError("controller root preclaim is not physical")
-    try:
-        claim_stat = claim_path.stat()
-    except FileNotFoundError as exc:
-        raise RecoveryControllerError("controller root preclaim is absent") from exc
-    if (
-        not stat.S_ISREG(claim_stat.st_mode)
-        or stat.S_IMODE(claim_stat.st_mode) != 0o600
-        or claim_stat.st_uid != os.getuid()
-        or claim_stat.st_nlink != 1
-        or claim_stat.st_size != 0
-    ):
-        raise RecoveryControllerError("controller root preclaim identity changed")
-    preclaim = {
-        "path": str(claim_path),
-        "device": int(claim_stat.st_dev),
-        "inode": int(claim_stat.st_ino),
-        "mode": int(claim_stat.st_mode),
-        "uid": int(claim_stat.st_uid),
-        "gid": int(claim_stat.st_gid),
-        "nlink": int(claim_stat.st_nlink),
-        "size": 0,
-    }
+    preclaim = _read_root_claim_binding(manifest)
     owner_path = root / "owner_claim.json"
     if _inspect_immutable_publication(owner_path):
         raise RecoveryControllerError(
@@ -2647,10 +2787,10 @@ def _controller_root_claim_lock(
 ) -> Iterator[dict[str, Any]]:
     """Own an atomic parent-side claim while finalizing the fresh root.
 
-    The empty O_EXCL file is itself the crash-safe claim; it does not have a
-    partially-written JSON state.  Its name binds the CID and immutable
-    controller-manifest SHA.  A same-CID ``resume`` can therefore finish
-    ``gates``/``logs``/``owner_claim.json`` after failure at any prior step.
+    The O_EXCL file carries a fresh attempt id and unpredictable nonce bound to
+    the CID, root, and immutable controller-manifest SHA.  Resume accepts it
+    only when its content hash and complete ctime/mtime/stat receipt still
+    match the immutable owner claim.
     """
 
     path = _root_claim_path(manifest)
@@ -2684,53 +2824,40 @@ def _controller_root_claim_lock(
         except OSError as exc:
             raise RecoveryControllerError("controller root preclaim is not physical") from exc
     try:
-        if created:
-            os.fsync(descriptor)
-            _fsync_directory(parent)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError) as exc:
             raise RecoveryControllerError(
                 "another controller initializer owns this CID"
             ) from exc
-        opened = os.fstat(descriptor)
-        current = path.stat()
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(opened.st_mode)
-            or stat.S_IMODE(opened.st_mode) != 0o600
-            or opened.st_uid != os.getuid()
-            or opened.st_nlink != 1
-            or opened.st_size != 0
-            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-        ):
-            raise RecoveryControllerError("controller root preclaim identity changed")
-        identity = {
-            "path": str(path),
-            "device": int(opened.st_dev),
-            "inode": int(opened.st_ino),
-            "mode": int(opened.st_mode),
-            "uid": int(opened.st_uid),
-            "gid": int(opened.st_gid),
-            "nlink": int(opened.st_nlink),
-            "size": 0,
-        }
+        if created:
+            payload = _json_payload_bytes(_root_claim_payload(manifest))
+            if len(payload) > ROOT_CLAIM_MAX_BYTES:
+                raise RecoveryControllerError(
+                    "controller root preclaim payload exceeds its bound"
+                )
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise RecoveryControllerError(
+                        "controller root preclaim write made no progress"
+                    )
+                offset += written
+            os.ftruncate(descriptor, len(payload))
+            os.fsync(descriptor)
+            _fsync_directory(parent)
+        identity = _read_root_claim_binding(
+            manifest,
+            descriptor=descriptor,
+        )
         try:
             yield identity
         finally:
-            final_fd = os.fstat(descriptor)
-            final_path = path.stat()
-            if (
-                path.is_symlink()
-                or (final_fd.st_dev, final_fd.st_ino)
-                != (identity["device"], identity["inode"])
-                or (final_path.st_dev, final_path.st_ino)
-                != (identity["device"], identity["inode"])
-                or final_fd.st_size != 0
-                or stat.S_IMODE(final_fd.st_mode) != 0o600
-                or final_fd.st_uid != os.getuid()
-                or final_fd.st_nlink != 1
-            ):
+            if _read_root_claim_binding(
+                manifest,
+                descriptor=descriptor,
+            ) != identity:
                 raise RecoveryControllerError(
                     "controller root preclaim changed while held"
                 )

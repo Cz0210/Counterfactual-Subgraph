@@ -1,5 +1,21 @@
 # Refactor Plan
 
+## 2026-08-29: Content-bind the AIDS controller root preclaim
+
+- [x] Preserve the exact imported `a8c42be4` -> `4b7fcde1` -> `f4fcfcd8`
+  review evidence and keep those source objects unchanged.
+- [x] Supersede the zero-byte claim in the current 12-worker controller with
+  one `O_EXCL` claim carrying a fresh attempt id, unpredictable nonce,
+  controller/root/manifest identity, and a bounded JSON schema.
+- [x] Bind claim content SHA-256, nonce SHA-256, attempt id, device, inode,
+  owner/mode/link count, size, mtime, and ctime into the immutable owner
+  receipt; reopen and recheck the same binding while the claim flock is held.
+- [x] Add zero-byte replacement, copied-content replacement, same-inode ABA,
+  same-inode content mutation, ordinary resume, and receipt-field regression
+  tests.
+- [ ] Obtain independent detached review before creating an execution pin or
+  fresh CID. No old-brute signal or scientific launch is authorized here.
+
 ## 2026-08-28: BACE Ours frozen-cell receipt adoption
 
 - [x] Pin the exact source root, raw-writer guard root, sixteen source hashes,

@@ -1,5 +1,59 @@
 # Decisions Log
 
+## [2026-08-29] Replace the AIDS zero-byte root preclaim with a content-bound claim
+
+### Motivation
+
+The exact private lineage `a8c42be4a4f7df89cb4dc2fc79713d6ce8fae923`
+-> `4b7fcde15a7b2dd4ba0249651cec18bffaddec72` ->
+`f4fcfcd8a126efb483402e9a815ce2dd08bb746e` was imported through the verified
+bundle whose SHA-256 is
+`4e6536c6ade21dc5d35deed285c25580e0be14a1dea18e7a269d9f063876c137`.
+Independent AutoDL replay retained 84 passing focused tests but exposed one
+real fail-open: unlinking and recreating the empty 0600 controller-root claim
+could reuse its inode, so the old device/inode/mode/owner/link/size receipt
+could accept the replacement. The original imported objects remain immutable
+review evidence and are not merged as a private branch.
+
+The `141b37c60d43a17c49c93f96b99904748c77aa0d` integration base already
+contains the later equivalent twelve-worker AIDS controller. Apply the repair
+to that current controller instead of replacing it with the older imported
+tree.
+
+### Decision
+
+Make every fresh root claim a bounded JSON document created with `O_EXCL`.
+Before any root is finalized, write and fsync a fresh random attempt id and
+nonce together with the exact controller id, controller root, controller-
+manifest SHA, schema, and creation time; then fsync the parent directory. Bump
+the owner receipt schema and bind the claim's content SHA-256, nonce SHA-256,
+attempt id, device, inode, mode, uid, gid, link count, size, nanosecond mtime,
+and nanosecond ctime.
+
+Fresh initialization and resume both hold the claim flock, read through the
+opened no-follow descriptor, compare the named path before and after, validate
+the strict payload, and recheck the complete content/stat binding before
+unlock. A zero/partial claim left by a crash is retained but cannot be resumed;
+manual diagnosis and a fresh CID are required rather than filling or replacing
+it. Copying the original bytes is insufficient because the owner receipt also
+binds the physical inode and ctime. A hardlink/unlink/relink ABA keeps the inode
+and bytes but changes ctime and therefore also fails closed.
+
+### Consequences
+
+- Zero-byte replacement, copied-content replacement, rapid inode reuse,
+  same-inode content mutation, and same-inode ABA cannot satisfy resume.
+- Ordinary same-CID resume retains the exact content/stat receipt and remains
+  idempotent after root or owner-publication interruption.
+- Historical zero-byte-claim roots require their historical code and cannot be
+  silently adopted by this successor.
+- This change creates no execution pin, launches no science, and sends no
+  signal to the old AIDS brute process. Independent review remains mandatory.
+
+### Status
+
+Local successor implementation and focused tests; deployment not authorized.
+
 ## [2026-08-29] Authenticate the vendored GCFExplainer source against upstream
 
 ### Motivation

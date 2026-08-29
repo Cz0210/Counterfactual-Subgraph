@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -1525,12 +1526,91 @@ def test_controller_root_preclaim_replacement_or_conflict_is_rejected(
     claim.unlink()
     claim.write_bytes(b"")
     claim.chmod(0o600)
-    with pytest.raises(recovery.RecoveryControllerError, match="owner claim mismatch"):
+    with pytest.raises(recovery.RecoveryControllerError, match="preclaim identity"):
         recovery._claim_controller_root(runtime, resume=True)
     conflicting = {**runtime, "manifest_sha256": "d" * 64}
     with pytest.raises(recovery.RecoveryControllerError, match="conflicting root claim"):
         recovery._claim_controller_root(conflicting, resume=True)
     assert root.is_dir()
+
+
+def test_root_preclaim_receipt_binds_nonce_content_and_stat(tmp_path: Path) -> None:
+    _path, manifest = _built_manifest(tmp_path)
+    runtime = {**manifest, "manifest_sha256": "c" * 64}
+    root = recovery._claim_controller_root(runtime, resume=False)
+    claim = recovery._root_claim_path(runtime)
+    owner = json.loads((root / "owner_claim.json").read_text(encoding="utf-8"))
+    binding = owner["root_preclaim"]
+    payload_bytes = claim.read_bytes()
+    payload = json.loads(payload_bytes)
+    observed = claim.stat()
+
+    assert payload["schema_version"] == recovery.ROOT_CLAIM_SCHEMA
+    assert payload["controller_id"] == recovery.CONTROLLER_ID
+    assert payload["controller_manifest_sha256"] == runtime["manifest_sha256"]
+    assert payload["controller_root"] == runtime["controller_root"]
+    assert len(payload["claim_attempt_id"]) == 32
+    assert len(payload["claim_nonce"]) == 64
+    assert binding["size"] == len(payload_bytes) == observed.st_size
+    assert binding["mtime_ns"] == observed.st_mtime_ns
+    assert binding["ctime_ns"] == observed.st_ctime_ns
+    assert binding["nlink"] == observed.st_nlink == 1
+    assert binding["content_sha256"] == hashlib.sha256(payload_bytes).hexdigest()
+    assert binding["claim_attempt_id"] == payload["claim_attempt_id"]
+    assert binding["claim_nonce_sha256"] == hashlib.sha256(
+        payload["claim_nonce"].encode("ascii")
+    ).hexdigest()
+    assert recovery._claim_controller_root(runtime, resume=True) == root
+
+
+def test_root_preclaim_copy_content_replacement_fails_closed(tmp_path: Path) -> None:
+    _path, manifest = _built_manifest(tmp_path)
+    runtime = {**manifest, "manifest_sha256": "c" * 64}
+    recovery._claim_controller_root(runtime, resume=False)
+    claim = recovery._root_claim_path(runtime)
+    payload = claim.read_bytes()
+    claim.unlink()
+    claim.write_bytes(payload)
+    claim.chmod(0o600)
+
+    with pytest.raises(recovery.RecoveryControllerError, match="owner claim mismatch"):
+        recovery._claim_controller_root(runtime, resume=True)
+
+
+def test_root_preclaim_same_inode_aba_fails_closed(tmp_path: Path) -> None:
+    _path, manifest = _built_manifest(tmp_path)
+    runtime = {**manifest, "manifest_sha256": "c" * 64}
+    recovery._claim_controller_root(runtime, resume=False)
+    claim = recovery._root_claim_path(runtime)
+    original = claim.stat()
+    backup = claim.parent / f".{claim.name}.aba-backup"
+
+    os.link(claim, backup, follow_symlinks=False)
+    claim.unlink()
+    os.link(backup, claim, follow_symlinks=False)
+    backup.unlink()
+    restored = claim.stat()
+    assert (restored.st_dev, restored.st_ino) == (original.st_dev, original.st_ino)
+    assert restored.st_nlink == 1
+
+    with pytest.raises(recovery.RecoveryControllerError, match="owner claim mismatch"):
+        recovery._claim_controller_root(runtime, resume=True)
+
+
+def test_root_preclaim_same_inode_content_tamper_fails_closed(tmp_path: Path) -> None:
+    _path, manifest = _built_manifest(tmp_path)
+    runtime = {**manifest, "manifest_sha256": "c" * 64}
+    recovery._claim_controller_root(runtime, resume=False)
+    claim = recovery._root_claim_path(runtime)
+    original_inode = claim.stat().st_ino
+    payload = json.loads(claim.read_text(encoding="utf-8"))
+    payload["claim_nonce"] = "0" * 64
+    claim.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    claim.chmod(0o600)
+    assert claim.stat().st_ino == original_inode
+
+    with pytest.raises(recovery.RecoveryControllerError, match="owner claim mismatch"):
+        recovery._claim_controller_root(runtime, resume=True)
 
 
 def test_controller_root_preclaim_symlink_or_truncation_is_rejected(
