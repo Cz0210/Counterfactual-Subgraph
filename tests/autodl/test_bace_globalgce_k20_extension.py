@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -566,27 +567,34 @@ def test_controller_signal_mask_rejects_an_existing_thread() -> None:
         worker.join()
 
 
-def test_process_wide_signal_mask_accepts_threads_that_inherit_it() -> None:
+def test_process_wide_signal_mask_survives_real_preimport_bootstrap() -> None:
     if not Path("/proc/self/task").is_dir():
         pytest.skip("Linux procfs is required for the process-wide mask proof")
-    previous = k20.signal.pthread_sigmask(k20.signal.SIG_BLOCK, k20.RELEASE_SIGNALS)
-    release = threading.Event()
-    ready = threading.Event()
+    runner = Path("scripts/autodl/run_bace_globalgce_k20_extension.py").resolve()
+    probe = f"""
+import importlib.util
+import sys
 
-    def wait() -> None:
-        ready.set()
-        release.wait()
-
-    worker = threading.Thread(target=wait)
-    worker.start()
-    ready.wait()
-    try:
-        k20._require_process_wide_deferred_signal_mask()
-        assert k20._adopt_preinstalled_signal_mask(set(previous)) == set(previous)
-    finally:
-        release.set()
-        worker.join()
-        k20.signal.pthread_sigmask(k20.signal.SIG_SETMASK, previous)
+runner = {str(runner)!r}
+sys.argv = [runner, "controller"]
+spec = importlib.util.spec_from_file_location("k20_preimport_probe", runner)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+from src.baselines import bace_globalgce_k20_extension as core
+core._require_process_wide_deferred_signal_mask()
+core._adopt_preinstalled_signal_mask(module._PREIMPORT_PREVIOUS_SIGNAL_MASK)
+print("PROCESS_WIDE_PREIMPORT_MASK_PASS")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", probe],
+        cwd=runner.parents[2],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "PROCESS_WIDE_PREIMPORT_MASK_PASS"
 
 
 def test_wait_rejects_a_foreign_gpu2_compute_pid(
