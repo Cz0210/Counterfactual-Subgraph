@@ -18,7 +18,9 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
+def _policy(
+    tmp_path: Path, *, tampered_classifier_manifest: str | None = None
+) -> adoption.AdoptionPolicy:
     source = tmp_path / "source"
     guard = tmp_path / "writer-guard"
     source.mkdir(parents=True)
@@ -27,6 +29,11 @@ def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
         "PASS": b"PASS\n",
         "oracle_manifest.json": json.dumps(
             {
+                "classifier_family": (
+                    "gin"
+                    if tampered_classifier_manifest == "oracle_manifest.json"
+                    else "gine"
+                ),
                 "feature_schema_sha256": "f" * 64,
                 "temperature_scaling_sha256": "a" * 64,
             },
@@ -35,6 +42,11 @@ def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
         + b"\n",
         "summary.json": json.dumps(
             {
+                "classifier_family": (
+                    "gin"
+                    if tampered_classifier_manifest == "summary.json"
+                    else "gine"
+                ),
                 "num_classes": 2,
                 "source_label": 1,
                 "rf_oracle_used": False,
@@ -43,6 +55,17 @@ def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
                 "test_loaded_only_after_freeze": True,
                 "test_used_for_selection": False,
                 "threshold_fitted_on_test": False,
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n",
+        "run_manifest.json": json.dumps(
+            {
+                "classifier_family": (
+                    "gin"
+                    if tampered_classifier_manifest == "run_manifest.json"
+                    else "gine"
+                ),
             },
             sort_keys=True,
         ).encode()
@@ -57,6 +80,11 @@ def _policy(tmp_path: Path) -> adoption.AdoptionPolicy:
         + b"\n",
         "final_artifact_audit.json": json.dumps(
             {
+                "classifier_family": (
+                    "gin"
+                    if tampered_classifier_manifest == "final_artifact_audit.json"
+                    else "gine"
+                ),
                 "final_artifact_audit_passed": True,
                 "hash_closure_complete": True,
                 "no_numeric_imputation": True,
@@ -106,7 +134,6 @@ def _candidate(policy: adoption.AdoptionPolicy) -> CandidateAudit:
     expected = policy.expected_identity
     row = {
         "cf_mode": expected["cf_mode"],
-        "classifier_family": expected["classifier_family"],
         "dataset_hash": expected["dataset_hash"],
         "k_max": expected["k_max"],
         "method": expected["method"],
@@ -167,6 +194,51 @@ def test_receipt_only_adoption_is_closed_and_reopenable(
         adoption.PASS_MARKER + "\n"
     )
     assert adoption.validate_adoption_receipt(output, policy=policy)["status"] == "PASS"
+
+
+def test_realistic_frozen_registry_row_omits_classifier_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    candidate = _candidate(policy)
+    assert candidate.status is CellStatus.FROZEN_PASS
+    assert "classifier_family" not in candidate.row
+    monkeypatch.setattr(adoption, "scan_live_writers", _writer_audit)
+    monkeypatch.setattr(
+        adoption, "audit_explicit_candidate", lambda *args, **kwargs: candidate
+    )
+
+    evidence = adoption.validate_source_candidate(policy)
+
+    assert evidence["registry_status"] == "FROZEN_PASS"
+    assert "classifier_family" not in evidence["registry_row"]
+
+
+@pytest.mark.parametrize(
+    "manifest_name",
+    [
+        "summary.json",
+        "oracle_manifest.json",
+        "run_manifest.json",
+        "final_artifact_audit.json",
+    ],
+)
+def test_direct_classifier_family_tamper_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    manifest_name: str,
+) -> None:
+    policy = _policy(tmp_path, tampered_classifier_manifest=manifest_name)
+    monkeypatch.setattr(adoption, "scan_live_writers", _writer_audit)
+    monkeypatch.setattr(
+        adoption, "audit_explicit_candidate", lambda *args, **kwargs: _candidate(policy)
+    )
+
+    with pytest.raises(
+        adoption.BACEOursFreezeAdoptionError,
+        match=rf"classifier family changed in {manifest_name}",
+    ):
+        adoption.validate_source_candidate(policy)
 
 
 def test_adoption_rejects_drift_and_non_frozen_registry_status(

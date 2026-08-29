@@ -1,5 +1,40 @@
 # Decisions Log
 
+## [2026-08-29] Align BACE Ours adoption with the ordinary registry row schema
+
+### Motivation
+
+The frozen BACE Ours candidate passed the ordinary four-by-four registry, but
+the receipt-only deployment verifier then required `classifier_family` in the
+registry row.  That field is intentionally absent from the ordinary
+`FROZEN_PASS` row schema, so the fresh adoption stopped before publication even
+though the checksum-pinned source manifests all recorded `gine`.
+
+### Decision
+
+Do not expand or reinterpret the ordinary registry schema.  Remove only the
+invalid registry-row projection for `classifier_family`, while continuing to
+require the policy's fixed `classifier_family=gine` identity.  Independently
+open and require that exact value in `summary.json`, `oracle_manifest.json`,
+`run_manifest.json`, and `final_artifact_audit.json` under the existing
+source-file hash and no-writer closure.  A missing or changed value in any one
+of those four manifests remains fatal.
+
+### Consequences
+
+- A real `FROZEN_PASS` row without `classifier_family` can reach the direct
+  immutable-manifest checks instead of failing on a nonexistent field.
+- Classifier-family drift is still rejected four times at the scientific
+  source boundary and cannot be hidden by a registry schema change.
+- Candidate bytes, hashes, scientific metrics, selector/test order, adoption
+  CLI, and paired static Slurm wrapper are unchanged.  The failed
+  pre-publication attempt created no receipt or matrix PASS; deployment still
+  requires a new fresh adoption root and fresh atomic matrix audit.
+
+### Status
+
+Accepted
+
 ## [2026-08-29] Authenticate the vendored GCFExplainer source against upstream
 
 ### Motivation

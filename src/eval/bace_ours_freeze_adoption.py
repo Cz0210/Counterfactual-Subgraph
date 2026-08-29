@@ -264,7 +264,6 @@ def validate_source_candidate(
     expected = policy.expected_identity
     row_fields = {
         "cf_mode": "cf_mode",
-        "classifier_family": "classifier_family",
         "dataset_hash": "dataset_hash",
         "k_max": "k_max",
         "method": "method",
@@ -284,7 +283,18 @@ def validate_source_candidate(
     oracle = _read_json(source / "oracle_manifest.json")
     summary = _read_json(source / "summary.json")
     evaluation = _read_json(source / "evaluation_manifest.json")
+    run = _read_json(source / "run_manifest.json")
     audit = _read_json(source / "final_artifact_audit.json")
+    for manifest_name, manifest in (
+        ("summary.json", summary),
+        ("oracle_manifest.json", oracle),
+        ("run_manifest.json", run),
+        ("final_artifact_audit.json", audit),
+    ):
+        if manifest.get("classifier_family") != expected["classifier_family"]:
+            raise BACEOursFreezeAdoptionError(
+                f"BACE Ours classifier family changed in {manifest_name}"
+            )
     if (
         oracle.get("feature_schema_sha256") != expected["feature_schema_sha256"]
         or oracle.get("temperature_scaling_sha256")
