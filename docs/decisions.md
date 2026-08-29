@@ -11988,3 +11988,59 @@ terminal publication.
 - Status is read-only and every anomaly is quarantined without process signals.
 - The controller may monitor dependencies, but it is not yet the full T6--T16
   main-table scheduler.
+
+## [2026-08-29] Keep BACE GlobalGCE K fixed while extending raw native rules
+
+### Motivation
+
+The previous BACE GlobalGCE science attempt trained the pinned official model
+against the frozen GINE but its twenty decoded tensors did not yield twenty
+valid native LHS-to-RHS rules. Treating that failed catalog as K20, lowering K,
+duplicating rules, or choosing a retry from test behavior would corrupt the
+paper cell. A new run also needs a real GPU2 science child rather than a live
+controller with no child.
+
+### Decision
+
+Keep final K exactly 20 and use one bounded train-only raw-rule escalation:
+seed 7 contributes 80 raw slots; if needed seed 17 contributes 120 more for a
+cumulative 200; if still needed seed 27 contributes 300 more for a cumulative
+500. Each increment runs in a fresh exact-top-k root with the same frozen
+360-parent BACE train cohort, min-frequency 7, 100 epochs, pinned official
+GlobalGCE, and frozen BACE GINE. Calibration and test paths are not accepted by
+the controller and cannot affect continuation.
+
+Hold physical GPU2's one hard-coded canonical non-blocking `flock` for every
+child lifetime. Bind protected GPU0/GPU3 process generations to the live GPU
+UUID/PID inventory and expected BACE method commands. At every heartbeat GPU2's
+compute set may contain only the bound science child, and it must be empty after
+child exit and before release. The controller has no
+child-signal API. It must enter with one OS thread, block SIGINT/SIGTERM/SIGHUP
+before later threads can inherit a different mask, and synchronously drain
+pending signals into deferred stop requests; the raw-round process unblocks
+them only for itself after exec. The lock remains held until the child exits
+naturally. Nonzero science exit is accepted only as exact code 20 plus a
+structured hash-closed shortfall receipt and last-written marker, never a log
+phrase.
+
+Reopen each catalog row through the native rule decoder, recompute its content
+hash and selector chemistry, reject identity or provenance drift, and
+deduplicate by canonical transformation content excluding caller-controlled
+candidate ID and native index. Repeat clean Git, config, Python, complete train
+contract, every tracked official Python source/import authority, every required
+frozen-GINE bundle file, GPU lease, and protected-role checks immediately before
+the final marker. Pre-marker artifacts use only
+`SEALED_CANDIDATE`/`RELEASE`; no `_RUN_COMPLETE.json` or PASS heartbeat is
+written. Publish the first 20 transformations in deterministic
+round/seed/native order, then write PASS as the sole and final commit point.
+
+### Consequences
+
+- `[BACE_GLOBALGCE_K20_EXTENSION_LAUNCHED]` requires a real child PID/start
+  ticks and fresh root; it is not a scientific PASS.
+- `[BACE_GLOBALGCE_K20_PASS]` requires exactly twenty unique hard-validated
+  rules, an unchanged frozen checkpoint, and train-only provenance.
+- Exhausting budget 500 below K20 is an explicit blocker; it does not permit a
+  smaller, duplicated, invalid, or test-selected universe.
+- This is a candidate-pool resource extension, not a change to GlobalGCE's
+  paper selector and not a GNN-backbone ablation.

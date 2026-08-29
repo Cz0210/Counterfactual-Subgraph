@@ -52,6 +52,9 @@ EXPECTED_TRAIN_TARGET_COUNT = 509
 EXPECTED_VALIDATION_COUNT = 162
 EXPECTED_VALIDATION_SOURCE_COUNT = 92
 EXPECTED_VALIDATION_TARGET_COUNT = 70
+BACE_GLOBALGCE_RULE_POOL_SHORTFALL = (
+    "BACE GlobalGCE did not freeze twenty unique valid rules"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +409,8 @@ class OfficialGlobalGCEBACEGenerator(OfficialGlobalGCEMutagenicityGenerator):
         min_freq: int,
         frozen_gine_checkpoint: str | Path | None = None,
         native_train_parent_ids: Sequence[str] | None = None,
+        official_source_authority: Mapping[str, Mapping[str, Any]] | None = None,
+        require_isolated_imports: bool = False,
     ) -> None:
         super().__init__(
             official_root,
@@ -416,6 +421,8 @@ class OfficialGlobalGCEBACEGenerator(OfficialGlobalGCEMutagenicityGenerator):
             source_label=1,
             target_label=0,
             native_train_parent_ids=native_train_parent_ids,
+            official_source_authority=official_source_authority,
+            require_isolated_imports=require_isolated_imports,
         )
 
 
@@ -537,6 +544,8 @@ def build_bace_frozen_gine_rule_pool(
         min_freq=int(min_freq),
         frozen_gine_checkpoint=checkpoint,
         native_train_parent_ids=train_contract.native_train_parent_ids,
+        official_source_authority=official_audit["runtime_source_authority"],
+        require_isolated_imports=True,
     )
     adoption_identity = (
         validate_globalgce_gspan_adoption_proof(resolved.gspan_adoption_proof)
@@ -686,7 +695,7 @@ def build_bace_frozen_gine_rule_pool(
                 GlobalGCENativeRule.from_payload(row)
                 rows.append(row)
     if len(rows) < 20 or len({str(row["candidate_id"]) for row in rows}) != len(rows):
-        raise RuntimeError("BACE GlobalGCE did not freeze twenty unique valid rules")
+        raise RuntimeError(BACE_GLOBALGCE_RULE_POOL_SHORTFALL)
     after_checkpoint_hash = sha256_file(checkpoint / "model.pt")
     if after_checkpoint_hash != before_checkpoint_hash:
         raise RuntimeError("Frozen BACE GINE checkpoint bytes changed during GlobalGCE")
@@ -817,6 +826,7 @@ def build_bace_frozen_gine_rule_pool(
 
 
 __all__ = [
+    "BACE_GLOBALGCE_RULE_POOL_SHORTFALL",
     "BACEGlobalGCETrainContract",
     "DATASET_NAME",
     "EXPECTED_NATIVE_TRAIN_COUNT",

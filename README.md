@@ -73,6 +73,9 @@ See:
 - `docs/EXPERIMENT_TRACKING.md`
 - `docs/EXPERIMENT_LOG.md`
 - `docs/AUTODL_BACE_FROZEN_GNN_DOWNSTREAM.md` (foreground B7 prep and B8--B14)
+- `docs/AUTODL_BACE_GLOBALGCE_K20_EXTENSION.md` (GPU2-only, train-only
+  80/200/500 raw native-rule escalation while the published selector remains
+  fixed at K=20)
 - `docs/AUTODL_AM_LEGACY_STANDARDIZATION.md` (strict frozen-result adoption and
   deterministic matched-protocol re-export plus fail-closed
   AIDS/Mutagenicity legacy inventory)

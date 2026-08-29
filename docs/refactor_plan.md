@@ -1757,6 +1757,33 @@ Mutagenicity roadmaps.
 - [ ] Complete training, calibration, held-out evaluation, standardization,
   and final frozen-GINE closure.
 
+## 2026-08-29: BACE GlobalGCE fixed-K raw-rule extension
+
+- [x] Keep the downstream selector fixed at K=20 while defining the exact
+  cumulative raw-rule schedule: seed 7 / 80, add seed 17 through cumulative
+  200, and add seed 27 through cumulative 500.
+- [x] Add a real GPU2 controller with one hard-coded global lock, live
+  GPU-UUID/PID/task-role binding for protected GPU0/GPU3 jobs, and deferred
+  SIGINT/SIGTERM/SIGHUP handling installed process-wide before any OS thread;
+  synchronously drain requests, keep the lock until natural child exit, and
+  never forward a signal to the child. Reject every extra GPU2 compute PID
+  during a child lifetime and require GPU2 empty after exit/release.
+- [x] Use only train manifests, the same frozen BACE GINE, min-frequency 7,
+  pinned official GlobalGCE, fresh roots, and exact-top-k raw mining.
+- [x] Reopen native tensors, recompute rule-content/selector identities,
+  semantic-deduplicate without candidate ID/native index, stop immediately at
+  20 valid unique transformations, and publish PASS last only for exactly K20.
+- [x] Require structured shortfall receipts instead of log phrases, repeat the
+  Git/data/full official-import/full GINE-bundle contract immediately before
+  the final marker, keep all
+  pre-marker status at SEALED_CANDIDATE/RELEASE, and statically refuse Slurm.
+- [x] Add separate controller/raw-round CLI surfaces, hostile
+  schedule/leakage/tamper/lock/role/signal/PASS-last tests, and an AutoDL
+  runbook.
+- [ ] Obtain independent P0/P1 review, create a clean immutable execution
+  commit/worktree, and launch the real GPU2 child. Local tests are not either
+  runtime PASS marker.
+
 ## 2026-08-24: COMRECGC deterministic divergence trace
 
 - [x] Add a safe JSON-only first-divergence report for selected transitions and

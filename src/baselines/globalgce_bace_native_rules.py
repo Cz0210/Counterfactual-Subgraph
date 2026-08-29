@@ -18,8 +18,10 @@ import ast
 import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
+import stat
 import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -38,6 +40,18 @@ OFFICIAL_SOURCE_SHA256 = {
     "src/utils.py": "95a0d9f2953bdafa3cf1cb891958e45b4faaea876cf2ae86c5fb4f069745748a",
     "src/data/dataset.py": "e2e1e54197cf01c31f33f655d2d1dafd35ec7e99533ebb4ab6ccbbb2ff889aa0",
 }
+OFFICIAL_RUNTIME_FILES = frozenset(
+    {
+        "src/main.py",
+        "src/models/GTGNN.py",
+        "src/models/GlobalGCE.py",
+        "src/models/models_utils.py",
+        "src/models/fsg.py",
+        "src/models/gSpan/gSpan.py",
+        "src/data/data_preprocess.py",
+        "src/data/dataset.py",
+    }
+)
 ACTION_ENGINE_VERSION = "globalgce_native_attachment_rule_v2"
 OFFICIAL_TENSOR_PARITY_VERSION = "globalgce_official_tensor_parity_v1"
 RULE_SELECTOR_CHEMISTRY_VERSION = "globalgce_native_rule_selector_chemistry_v1"
@@ -71,6 +85,130 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _official_git_bytes(root: Path, *arguments: str) -> bytes:
+    """Run Git without ambient configuration or replace-object authority."""
+
+    completed = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-C",
+            str(root),
+            *arguments,
+        ],
+        check=True,
+        capture_output=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CEILING_DIRECTORIES": str(root.parent),
+        },
+    )
+    return completed.stdout
+
+
+def _official_runtime_source_authority(root: Path) -> dict[str, dict[str, Any]]:
+    """Bind every tracked Python source byte actually reachable by imports."""
+
+    hidden = _official_git_bytes(root, "ls-files", "-v", "-z")
+    for raw in hidden.split(b"\0"):
+        if not raw:
+            continue
+        record = raw.decode("utf-8")
+        if len(record) < 3 or record[1] != " ":
+            raise GlobalGCENativeRuleError("GlobalGCE Git index inventory is malformed")
+        if record[0] == "S" or record[0].islower():
+            raise GlobalGCENativeRuleError(
+                "GlobalGCE checkout has skip-worktree/assume-unchanged entries"
+            )
+    if _official_git_bytes(
+        root, "status", "--porcelain", "--untracked-files=all"
+    ):
+        raise GlobalGCENativeRuleError("GlobalGCE official checkout is not clean")
+    ignored = tuple(
+        raw.decode("utf-8")
+        for raw in _official_git_bytes(
+            root,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "src",
+        ).split(b"\0")
+        if raw
+    )
+    if any(
+        "__pycache__" in Path(relative).parts
+        or Path(relative).suffix.lower() in {".py", ".pyc", ".pyo", ".so", ".dylib"}
+        for relative in ignored
+    ):
+        raise GlobalGCENativeRuleError(
+            "GlobalGCE source closure contains ignored runtime code"
+        )
+
+    tree_records = _official_git_bytes(
+        root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", "src"
+    )
+    tracked: dict[str, str] = {}
+    for raw in tree_records.split(b"\0"):
+        if not raw:
+            continue
+        metadata, separator, encoded_path = raw.partition(b"\t")
+        fields = metadata.decode("ascii").split()
+        relative = encoded_path.decode("utf-8") if separator else ""
+        if len(fields) != 3 or fields[1] != "blob" or not relative:
+            raise GlobalGCENativeRuleError("GlobalGCE HEAD source tree is malformed")
+        if Path(relative).suffix == ".py":
+            if fields[0] != "100644":
+                raise GlobalGCENativeRuleError(
+                    f"GlobalGCE Python source has unsafe Git mode: {relative}"
+                )
+            tracked[relative] = fields[2]
+    if not OFFICIAL_RUNTIME_FILES.issubset(tracked):
+        missing = sorted(OFFICIAL_RUNTIME_FILES - set(tracked))
+        raise GlobalGCENativeRuleError(
+            f"GlobalGCE runtime source closure is incomplete: {missing}"
+        )
+
+    authority: dict[str, dict[str, Any]] = {}
+    for relative, blob in sorted(tracked.items()):
+        path = root / relative
+        observed = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+            or observed.st_size <= 0
+        ):
+            raise GlobalGCENativeRuleError(
+                f"GlobalGCE runtime source is not one regular file: {relative}"
+            )
+        committed = _official_git_bytes(root, "cat-file", "blob", blob)
+        digest = hashlib.sha256(committed).hexdigest()
+        if len(committed) != observed.st_size or _sha256_file(path) != digest:
+            raise GlobalGCENativeRuleError(
+                f"GlobalGCE runtime source differs from pinned HEAD: {relative}"
+            )
+        source_relative = Path(relative).relative_to("src").as_posix()
+        authority[source_relative] = {
+            "device": int(observed.st_dev),
+            "inode": int(observed.st_ino),
+            "bytes": int(observed.st_size),
+            "sha256": digest,
+        }
+    return authority
+
+
 def validate_official_globalgce_root(
     official_root: str | Path,
     *,
@@ -85,11 +223,7 @@ def validate_official_globalgce_root(
             f"GlobalGCE official root must contain src/: {root}"
         )
     try:
-        commit = subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            text=True,
-            stderr=subprocess.STDOUT,
-        ).strip()
+        commit = _official_git_bytes(root, "rev-parse", "HEAD").decode("ascii").strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise GlobalGCENativeRuleError(
             f"Cannot resolve GlobalGCE official commit at {root}"
@@ -117,11 +251,15 @@ def validate_official_globalgce_root(
             "sha256": actual,
             "size": path.stat().st_size,
         }
+    runtime_source_authority = _official_runtime_source_authority(root)
     return {
         "official_root": str(root),
         "official_source_root": str(source),
         "official_commit": commit,
         "source_files": identities,
+        "runtime_source_authority": runtime_source_authority,
+        "runtime_source_inventory_sha256": stable_sha256(runtime_source_authority),
+        "clean_checkout": True,
     }
 
 
@@ -968,6 +1106,7 @@ __all__ = [
     "NativeParentTensors",
     "OFFICIAL_GLOBALGCE_COMMIT",
     "OFFICIAL_SOURCE_SHA256",
+    "OFFICIAL_RUNTIME_FILES",
     "RULE_SELECTOR_CHEMISTRY_VERSION",
     "apply_official_rule_tensors",
     "apply_rule_to_parent",
