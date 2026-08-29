@@ -1,5 +1,35 @@
 # Decisions Log
 
+## [2026-08-29] Accept hash-matched empty official Python initializers for K20
+
+### Motivation
+
+The third immutable AutoDL K20 startup reached the full official-source audit
+and then failed before output creation because the pinned clean GlobalGCE
+checkout contains a tracked zero-byte `src/__init__.py`. Git records that file
+as an ordinary `100644` blob with the SHA-256 of empty content. The runtime
+closure incorrectly treated every zero-byte Python source as missing even
+though it subsequently compares each file's size and digest with its exact Git
+blob. No GPU2 science child was created and the controller identity is retired.
+
+### Decision
+
+Permit byte size zero in the complete tracked-Python authority and in its
+downstream normalizer. Continue to require Git mode `100644`, a clean checkout,
+one regular filesystem leaf with link count one, exact Git blob length and
+SHA-256, stable inode/device/size on descriptor reopen, and no bytecode,
+native, ignored, untracked, skip-worktree, or assume-unchanged runtime code.
+Critical official source files retain their separate nonempty/hash pins.
+
+### Consequences
+
+- Exact empty package initializers no longer block the pinned official commit.
+- A missing, symlinked, linked, dirty, truncated, grown, or hash-mismatched
+  source still fails closed.
+- The next AutoDL attempt requires a fresh reviewed commit, detached clean
+  worktree, controller UUID, output root, and log. No runtime launch or PASS is
+  claimed by this code change.
+
 ## [2026-08-29] Install the K20 controller signal mask before science imports
 
 ### Motivation

@@ -13,6 +13,7 @@ import pytest
 
 from src.baselines import bace_globalgce_k20_extension as k20
 from src.baselines import globalgce_bace_native_rules as native_rules
+from src.baselines import globalgce_mutagenicity_adapter as globalgce_adapter
 from src.oracles.gnn_oracle import REQUIRED_CHECKPOINT_FILES
 from src.baselines.globalgce_bace_native_rules import GlobalGCENativeRule
 from src.utils.process_identity_v2 import ProcessSnapshotV2, stable_json_sha256
@@ -739,6 +740,7 @@ def test_official_runtime_import_closure_rejects_dirty_gtgnn(
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"# {relative}\n", encoding="utf-8")
+    (root / "src/__init__.py").write_bytes(b"")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(
@@ -767,6 +769,12 @@ def test_official_runtime_import_closure_rejects_dirty_gtgnn(
     audit = native_rules.validate_official_globalgce_root(root, expected_commit=commit)
     assert "models/GTGNN.py" in audit["runtime_source_authority"]
     assert "models/gSpan/gSpan.py" in audit["runtime_source_authority"]
+    empty_initializer = audit["runtime_source_authority"]["__init__.py"]
+    assert empty_initializer["bytes"] == 0
+    assert empty_initializer["sha256"] == hashlib.sha256(b"").hexdigest()
+    assert globalgce_adapter._normalize_official_source_authority(
+        {"__init__.py": empty_initializer}
+    ) == {"__init__.py": empty_initializer}
     assert audit["clean_checkout"] is True
 
     (root / "src/models/GTGNN.py").write_text("# dirty\n", encoding="utf-8")

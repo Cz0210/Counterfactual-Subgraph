@@ -1787,6 +1787,13 @@ Mutagenicity roadmaps.
   native imports had already created OS threads, move the controller signal
   mask into the thin CLI before science imports and verify every live Linux
   task inherited it; raw-round children unblock before their own imports.
+- [x] After the third pre-output launch exposed the pinned checkout's exact
+  tracked empty `src/__init__.py`, accept zero-byte tracked Python leaves only
+  when the ordinary-file/link and exact Git blob length/SHA authority closes;
+  keep critical official sources separately nonempty and hash-pinned.
+- [ ] Launch a fresh reviewed successor with reset HUP/INT/TERM dispositions
+  and record a real GPU2 science-child PID/root before printing the launch
+  marker.
 
 ## 2026-08-24: COMRECGC deterministic divergence trace
 

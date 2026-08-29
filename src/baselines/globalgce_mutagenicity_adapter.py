@@ -1393,7 +1393,7 @@ def _normalize_official_source_authority(
                 for field, minimum in (
                     ("device", 0),
                     ("inode", 1),
-                    ("bytes", 1),
+                    ("bytes", 0),
                 )
             )
             or type(evidence.get("sha256")) is not str

@@ -188,7 +188,6 @@ def _official_runtime_source_authority(root: Path) -> dict[str, dict[str, Any]]:
         if (
             not stat.S_ISREG(observed.st_mode)
             or observed.st_nlink != 1
-            or observed.st_size <= 0
         ):
             raise GlobalGCENativeRuleError(
                 f"GlobalGCE runtime source is not one regular file: {relative}"

@@ -59,6 +59,9 @@ The controller:
 - re-audits Git, config, Python, all train-contract manifests and hashes, every
   required frozen-GINE bundle file, and every tracked official Python source
   (including `GTGNN.py` and `gSpan.py`) after every child and twice at release;
+  an exact tracked zero-byte package initializer is accepted only when its Git
+  blob length and SHA-256 agree, while the regular-file, single-link, inode,
+  clean-checkout, and runtime-reopen checks remain mandatory;
   official imports require the captured inode/byte/hash authority and the final
   signal-drain/check occurs immediately before `PASS`.
 
@@ -108,3 +111,12 @@ Code review and local focused tests are prerequisites only. Do not claim either
 runtime marker until the exact AutoDL child/root and final immutable artifacts
 exist. A failed round or fewer than 20 unique rules after raw budget 500 is a
 real blocker and does not authorize a smaller K or fabricated replacement.
+
+Three reviewed AutoDL startup attempts failed before output creation and never
+started a GPU2 science child: the first exposed post-import signal masking, the
+second correctly rejected a background shell's inherited ignored `SIGINT`, and
+the third exposed the false rejection of official commit
+`157e65c2850bc787f229a1ee8c60564906b933f2`'s exact tracked empty
+`src/__init__.py`. Controller identities and roots from those attempts are not
+reused. A successor launch must use `setsid` with
+`/usr/bin/env --default-signal=HUP,INT,TERM` and a fresh UUID/root.
