@@ -47,6 +47,10 @@ from src.eval.tastemolnet_neurosed_official_fixed_budget import (
     verify_official_fixed_budget_readiness,
     verify_vendored_gcf_retained_inventory,
 )
+from src.eval.tastemolnet_neurosed_non_mip import (
+    build_candidate_report,
+    select_non_mip_backend,
+)
 from src.eval.tastemolnet_neurosed_gate import STRICT_OFFICIAL_PROVENANCE
 from src.train.tastemolnet_neurosed_official_selector import (
     OfficialBatchInterleavedSelector,
@@ -272,6 +276,8 @@ def test_benchmark_cohorts_are_disjoint_and_have_exact_sizes() -> None:
 
 
 def test_reserve_and_validation_budgets_follow_fixed_contract() -> None:
+    assert reserve_pair_count(2000) == 2200
+    assert validation_pair_budget(2000) == 500
     assert reserve_pair_count(5000) == 5500
     assert validation_pair_budget(5000) == 1000
     assert validation_pair_budget(10000) == 2000
@@ -526,7 +532,8 @@ def test_official_label_contract_keeps_both_bounds_and_reserve_order() -> None:
             feature_schema_sha256=SHA,
             pair_sampler_manifest_sha256=SHA,
             gedlib_build_manifest_sha256=SHA,
-            ged_method_args="--threads 1 --time-limit 1",
+            ged_method="branch",
+            ged_method_args="--threads 1",
         )
         for row in observations[1:]
     ]
@@ -556,7 +563,8 @@ def test_official_label_contract_keeps_both_bounds_and_reserve_order() -> None:
             feature_schema_sha256=SHA,
             pair_sampler_manifest_sha256=SHA,
             gedlib_build_manifest_sha256=SHA,
-            ged_method_args="--threads 1 --time-limit 1",
+            ged_method="branch",
+            ged_method_args="--threads 1",
         )
 
 
@@ -706,6 +714,15 @@ def _label_manifest(
         "exact_bound_pair_count": 0,
         "interval_bound_pair_count": count,
         "real_pyged_gedlib_labels": True,
+        "ged_method": "branch",
+        "ged_method_args": "--threads 1",
+        "GED_LABEL_BACKEND_VARIANT": "NON_MIP_GEDLIB",
+        "F2_BLP_USED": False,
+        "GUROBI_USED": False,
+        "ged_label_backend_variant": "NON_MIP_GEDLIB",
+        "ged_method_switched_from_official": True,
+        "f2_blp_used": False,
+        "gurobi_used": False,
         "timeout_or_error_rows_used_as_labels": False,
         "selected_in_sampler_order": True,
         "ged_value_based_selection_used": False,
@@ -730,7 +747,79 @@ def _label_manifest(
     return payload
 
 
-def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> dict:
+def _non_mip_selection_and_receipt() -> tuple[dict, dict]:
+    pair_ids = [f"pair-{index:03d}" for index in range(100)]
+    rows = [
+        {
+            "pair_id": pair_id,
+            "status": "SUCCESS",
+            "lower_bound": 1.0,
+            "upper_bound": 2.0,
+        }
+        for pair_id in pair_ids
+    ]
+    outcomes_sha256 = _stable(rows)
+    replay_artifacts = [
+        {
+            "replay_index": replay_index,
+            "method": "branch",
+            "method_args": "--threads 1",
+            "observations_path": f"/tmp/branch-replay-{replay_index}.jsonl",
+            "observations_sha256": str(replay_index) * 64,
+            "benchmark_report_path": f"/tmp/branch-replay-{replay_index}.json",
+            "benchmark_report_sha256": str(replay_index + 2) * 64,
+            "benchmark_status": "PASS",
+            "pair_ids_sha256": _stable(pair_ids),
+            "outcome_sha256": outcomes_sha256,
+            "successful_pair_count": 100,
+            "selector_observed_wall_seconds": 10.0,
+            "benchmark_wall_seconds": 10.0,
+            "pyged_module_sha256": SHA,
+            "gedlib_commit": COMMIT,
+        }
+        for replay_index in (1, 2)
+    ]
+    report = build_candidate_report(
+        method="branch",
+        method_args="--threads 1",
+        pair_ids=pair_ids,
+        replay_observations=(rows, rows),
+        replay_wall_seconds=(10.0, 10.0),
+        replay_artifacts=replay_artifacts,
+    )
+    selection = select_non_mip_backend(
+        {"branch": report},
+        worker_count=8,
+        pyged_module_sha256=SHA,
+        gedlib_commit=COMMIT,
+    )
+    receipt = {
+        "schema_version": "tastemolnet_neurosed_non_mip_gedlib_verifier_v1",
+        "status": "PASS",
+        "marker": "[TASTE_NON_MIP_GEDLIB_BACKEND_VERIFIED]",
+        "independent_process_reopened_all_candidate_artifacts": True,
+        "selection_manifest_path": "/tmp/non-mip-selection.json",
+        "selection_manifest_sha256": "e" * 64,
+        "selection_sha256": selection["selection_sha256"],
+        "selected_ged_backend": selection["selected_ged_backend"],
+        "selected_ged_backend_config": selection["backend_config"],
+        "GED_LABEL_BACKEND_VARIANT": selection["GED_LABEL_BACKEND_VARIANT"],
+        "F2_BLP_USED": False,
+        "GUROBI_USED": False,
+        "selected_neurosed_train_pair_budget": selection[
+            "selected_neurosed_train_pair_budget"
+        ],
+        "selected_neurosed_validation_pair_budget": selection[
+            "selected_neurosed_validation_pair_budget"
+        ],
+    }
+    receipt["receipt_sha256"] = _stable(receipt)
+    return selection, receipt
+
+
+def _strict_fixed_model_card(
+    train_labels, val_labels, selector, direction, selection, receipt
+) -> dict:
     selected_checkpoint = selector["selected_checkpoint_sha256"]
     return {
         "schema_version": OFFICIAL_FIXED_MODEL_CARD_SCHEMA,
@@ -743,6 +832,7 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "calibration_loaded": False,
         "test_loaded": False,
         "pair_budget_strategy": "fixed_budget_resource_control",
+        "fixed_pair_budget": True,
         "fixed_pair_budget_is_project_extension": True,
         "official_pair_semantics": True,
         "fixed_budget_extension_documented": True,
@@ -755,8 +845,18 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "parent_own_subgraph_shortcut": False,
         "class_label_used_as_supervision": False,
         "real_pyged_gedlib_labels": True,
-        "ged_method": "f2",
-        "ged_method_switched_from_official": False,
+        "ged_backend_variant": "non_mip",
+        "ged_label_backend_variant": "NON_MIP_GEDLIB",
+        "GED_LABEL_BACKEND_VARIANT": "NON_MIP_GEDLIB",
+        "F2_BLP_USED": False,
+        "GUROBI_USED": False,
+        "ged_method": "branch",
+        "ged_method_args": "--threads 1",
+        "selected_ged_backend": "branch",
+        "selected_ged_backend_config": "--threads 1",
+        "ged_method_switched_from_official": True,
+        "f2_blp_used": False,
+        "gurobi_used": False,
         "approximate_or_neural_labels_used": False,
         "timeout_or_error_rows_used_as_labels": False,
         "label_representation": "ordered_query_target_lower_upper_interval",
@@ -767,6 +867,8 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "single_bound_substitution_used": False,
         "training_loop_authority": "neuro.train.train_full_batch_interleaved_validation",
         "upstream_greed_batch_interleaved_selection_loop_unchanged": True,
+        "official_model_training_semantics": True,
+        "non_mip_selector_independently_verified": True,
         "strict_official_batch_interleaved_selector_implemented": True,
         "gcf_runtime_direction": "generated_query_to_original_target",
         "training_direction_matches_gcf_runtime": True,
@@ -783,7 +885,7 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "cpu_contention_gate_pass": True,
         "worker_wrote_pass": False,
         "scientific_release_eligible": True,
-        "full_official_neurosed_semantics_claimed": True,
+        "full_official_neurosed_semantics_claimed": False,
         "train_pair_budget": 5000,
         "validation_pair_budget": 1000,
         "successful_train_pair_count": 5000,
@@ -815,6 +917,11 @@ def _strict_fixed_model_card(train_labels, val_labels, selector, direction) -> d
         "selector_trace_sha256": selector["trace_sha256"],
         "distance_direction_trace_sha256": direction["trace_sha256"],
         "selected_checkpoint_sha256": selected_checkpoint,
+        "non_mip_gedlib_selection_sha256": selection["selection_sha256"],
+        "non_mip_gedlib_selection_manifest_file_sha256": receipt[
+            "selection_manifest_sha256"
+        ],
+        "non_mip_selector_verifier_receipt_sha256": receipt["receipt_sha256"],
     }
 
 
@@ -841,10 +948,30 @@ def test_model_card_and_health_gate_are_ready_not_self_signed_pass() -> None:
         ["generated"], generated_query_hashes=["2" * 64]
     )
     direction = binding.direction_manifest()
-    card = _strict_fixed_model_card(train_labels, validation_labels, selector, direction)
+    selection, receipt = _non_mip_selection_and_receipt()
+    card = _strict_fixed_model_card(
+        train_labels,
+        validation_labels,
+        selector,
+        direction,
+        selection,
+        receipt,
+    )
     validate_official_fixed_budget_model_card(card, vendored_gcf_root=GCF_ROOT)
+    reduced_card = dict(card)
+    reduced_card.update(
+        train_pair_budget=2000,
+        validation_pair_budget=500,
+        successful_train_pair_count=2000,
+        successful_validation_pair_count=500,
+    )
+    validate_official_fixed_budget_model_card(
+        reduced_card, vendored_gcf_root=GCF_ROOT
+    )
     readiness = verify_official_fixed_budget_readiness(
         model_card=card,
+        non_mip_selection_manifest=selection,
+        non_mip_selector_verifier_receipt=receipt,
         train_pair_sampler_manifest=train_sampler,
         validation_pair_sampler_manifest=validation_sampler,
         train_pair_labels_manifest=train_labels,
@@ -864,6 +991,8 @@ def test_model_card_and_health_gate_are_ready_not_self_signed_pass() -> None:
     with pytest.raises(OfficialFixedBudgetGateError, match="sampler contract changed"):
         verify_official_fixed_budget_readiness(
             model_card=card,
+            non_mip_selection_manifest=selection,
+            non_mip_selector_verifier_receipt=receipt,
             train_pair_sampler_manifest=wrong_seed,
             validation_pair_sampler_manifest=validation_sampler,
             train_pair_labels_manifest=train_labels,

@@ -1,5 +1,22 @@
 # Refactor Plan
 
+## 2026-08-29: bounded non-MIP Taste GEDLIB release path
+
+- [x] Patch the authenticated pinned pyged overlay so Gurobi-only F2/BLP enum
+  mappings are removed together with the wrapper's `GUROBI` define.
+- [x] Smoke the authenticated deterministic pinned non-MIP Branch candidate and expose immutable method
+  arguments in the build manifest.
+- [x] Add a two-replay, same-real-100-train-pair selector with >=95% success,
+  deterministic outcomes, finite bounds, per-candidate ten-minute, total
+  thirty-minute, and fastest-eligible gates.
+- [x] Add an independent verifier that reopens and hashes every observations
+  and benchmark artifact and recomputes candidate and final selection fields.
+- [x] Replace the exploratory 5k/10k/20k decision with one 5k/1k primary budget
+  and an ETA>24h 2k/500 resource-reduced budget, seed 7.
+- [ ] Produce real AutoDL build/selector manifests and compact train and
+  validation label stores, then train and independently verify the official
+  GREED architecture/selection loop before T7.
+
 ## 2026-08-29: Content-bind the AIDS controller root preclaim
 
 - [x] Preserve the exact imported `a8c42be4` -> `4b7fcde1` -> `f4fcfcd8`

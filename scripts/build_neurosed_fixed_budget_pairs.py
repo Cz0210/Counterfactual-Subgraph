@@ -270,11 +270,12 @@ def main() -> int:
         node_limit_query=args.node_limit_query,
     )
     metadata_rows = [pair.metadata() for pair in pairs]
+    pairs_text = _jsonl(metadata_rows)
     output = args.output_dir
     if output.exists() and any(output.iterdir()):
         raise FixedBudgetPairError("pair output directory is not fresh")
     output.mkdir(parents=True, exist_ok=True)
-    _atomic_text(output / "pairs.jsonl", _jsonl(metadata_rows))
+    _atomic_text(output / "pairs.jsonl", pairs_text)
     graph_rows = [
         {
             "graph_id": graph.graph_id,
@@ -290,7 +291,8 @@ def main() -> int:
         }
         for graph in graphs
     ]
-    _atomic_text(output / "graph_inventory.jsonl", _jsonl(graph_rows))
+    graph_inventory_text = _jsonl(graph_rows)
+    _atomic_text(output / "graph_inventory.jsonl", graph_inventory_text)
     manifest = fixed_budget_pair_manifest(
         pairs,
         split=args.expected_split,
@@ -308,8 +310,9 @@ def main() -> int:
             "graph_hydrogen_mode": hydrogen_mode,
             "feature_atomic_number_vocabulary": list(vocabulary),
             "graph_inventory_sha256": _sha256(
-                _jsonl(graph_rows).encode("utf-8")
+                graph_inventory_text.encode("utf-8")
             ),
+            "pairs_jsonl_sha256": _sha256(pairs_text.encode("utf-8")),
         }
     )
     if args.write_disjoint_benchmark_cohorts:

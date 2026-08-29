@@ -1,5 +1,56 @@
 # Decisions Log
 
+## [2026-08-29] Use one bounded pinned non-MIP GEDLIB selector for Taste NeuroSED
+
+### Motivation
+
+The pinned GREED wrapper names F2/BLP methods only when its own `GUROBI`
+preprocessor flag is enabled. The AutoDL host has no approved Gurobi 9.1.1
+runtime or licence, and waiting for or installing one is no longer part of the
+main-table path. Removing only the wrapper define is invalid because its
+F2/BLP enum references then fail compilation.
+
+### Decision
+
+Build one isolated wrapper from the exact pinned GREED and GEDLIB commits while
+removing the Gurobi define and the F2/BLP mapper branches. Retain exactly the
+one authenticated deterministic non-MIP candidate, `branch`. Both exposed
+IPFP and `anchor_aware_ged` are excluded: IPFP's default initializer uses an
+unseeded C++ `random_device` path, and anchor-aware GED invokes that IPFP path
+internally without setting a deterministic initializer. On one fixed seed-7
+cohort of 100 real independent train query-target
+pairs, run each candidate twice with single-thread deterministic settings, at
+most ten minutes per candidate and thirty minutes total. An eligible candidate
+must replay identical statuses/bounds, succeed on at least 95 pairs, and return
+finite `lower <= upper`; select the highest eligible successful-pair throughput.
+An independent verifier reopens both observations JSONL files and both
+benchmark manifests for every eligible candidate, checks their SHA-256 values,
+recomputes outcome hashes, success counts, determinism, throughput, and the
+final choice, then emits a separate receipt.
+
+Use selected throughput to project 6000 labels. Select 5000 train and 1000
+validation pairs when the projection is at most 24 hours; otherwise select the
+explicit resource-reduced 2000/500 budget. Do not run the historical
+5k/10k/20k search or make 500/1000 tiers separate release blockers.
+Given the ten-minute and >=95/100 selector gates, the reduced branch is a
+defensive policy and may be dormant for a passing candidate; it remains legal
+for a separately observed projection above 24 hours and is tested directly at
+the model-card boundary.
+
+### Consequences
+
+- Manifests state `GED_LABEL_BACKEND_VARIANT=NON_MIP_GEDLIB`,
+  `F2_BLP_USED=false`, and `GUROBI_USED=false`; this is never reported as the
+  upstream F2/BLP configuration.
+- Model cards set `full_official_neurosed_semantics_claimed=false`. They may
+  separately attest the preserved upstream model/loss/interleaved-selection
+  semantics, but never the complete upstream GED backend configuration.
+- Pair sources remain split-local, independent, and label-agnostic;
+  calibration and test are not opened.
+- Only label solving changes. Official GREED model/loss/interleaved validation,
+  checkpoint selection, and generated-query to original-target GCF distance
+  direction remain release requirements.
+
 ## [2026-08-29] Accept hash-matched empty official Python initializers for K20
 
 ### Motivation

@@ -1,4 +1,30 @@
-# Taste GCFExplainer NeuroSED: official semantics with a fixed pair budget
+# Taste GCFExplainer NeuroSED: fixed-budget non-MIP GEDLIB release route
+
+> **2026-08-29 main-table release override.** The historical F2/Gurobi and
+> 100/500/1000 plus 5k/10k/20k planning gates below remain as provenance only.
+> The active route uses pinned GEDLIB non-MIP candidates
+> `branch`, tested twice on the same 100 real
+> independent train pairs. It requires >=95% success, identical fixed-seed
+> outcomes, finite `lower <= upper`, <=10 minutes per candidate and <=30
+> minutes total, then selects the fastest passing backend. Manifests must say
+> `GED_LABEL_BACKEND_VARIANT=NON_MIP_GEDLIB`, `F2_BLP_USED=false`, and
+> `GUROBI_USED=false`.
+>
+> The active fixed budget is train=5000, validation=1000, seed=7. If the real
+> 100-pair canary projects more than 24 hours for all 6000 labels, the only
+> allowed reduction is train=2000, validation=500 and it must be recorded as
+> resource-reduced. No 10k/20k search and no separate 500/1000 benchmark
+> release blockers remain. Independent split-local pairs, no
+> parent/own-subgraph shortcut, no calibration/test access, official GREED
+> training/checkpoint semantics, and generated-query to original-target GCF
+> direction remain unchanged.
+> Pinned IPFP is excluded because its default initialization uses an unseeded
+> C++ `random_device` path. `anchor_aware_ged` is also excluded because it
+> invokes that IPFP path internally without a deterministic initializer.
+> A separate verifier must reopen every candidate's two observations files and
+> benchmark reports, check their digests, and recompute bounds, success rate,
+> determinism, throughput, selected backend, and budget before its receipt can
+> be referenced by a model card.
 
 Status: implementation and offline audit only. No real GED label, benchmark
 PASS, pair-budget selection PASS, NeuroSED checkpoint, or T7 result is claimed
@@ -23,10 +49,11 @@ The following are retained official semantics:
 - GCF inference is directed from the generated candidate query to the original
   input target.
 
-The only project resource-control extension is a deterministic finite number
-of independent pairs. It replaces neither the pair roles nor the label
-backend. In particular, it is not an upstream GREED default and it is not an
-exhaustive `train x train` product.
+The project extensions are a deterministic finite number of independent pairs
+and the explicitly selected pinned non-MIP GEDLIB label backend. They replace
+neither the pair roles nor the interval-label representation. This route is
+not the complete upstream F2/BLP configuration, is not an upstream GREED
+default, and is not an exhaustive `train x train` product.
 
 These are prohibited:
 
@@ -95,9 +122,12 @@ part of pair identity. Class is never a distance target.
 
 ## 3. Real pyged/GEDLIB contract
 
-The pinned wrapper uses method `f2` and an argument of the form
-`--threads <n> --time-limit 1`. The project keeps `f2`; it does not switch to a
-different method to avoid a dependency. Its SED costs are directional:
+The pinned upstream wrapper uses method `f2` and an argument of the form
+`--threads <n> --time-limit 1`, but that path requires the unavailable Gurobi
+build/runtime. The active route deliberately switches to the authenticated
+GEDLIB `branch` method with `--threads 1` and records the switch in every
+manifest. It never claims F2/BLP use. The retained SED edit costs are
+directional:
 
 | Edit | Cost |
 | --- | ---: |
@@ -121,8 +151,8 @@ query and target order in the key, and sets reverse sharing to false.
 The isolated builder accepts only already-provisioned source and dependencies.
 It authenticates GREED and GREED-expts, authenticates an operator-supplied
 GEDLIB checkout at the exact official v1.0 commit above, creates a fresh build
-root, disables only the unused Gurobi compile/link branch, retains F2,
-compiles one worker, imports only the produced
+root, removes the wrapper's Gurobi-only F2/BLP exposure, exposes only the
+deterministic `branch` candidate, compiles one worker, imports only the produced
 module, and verifies zero insertion versus positive deletion on tiny graphs.
 It records Python/compiler/CMake versions and build flags. It never runs
 `pip`, `conda`, `git clone`, or any network command, and never mutates
@@ -161,8 +191,9 @@ disjointness from hashes alone.
 
 ## 5. Benchmark and worker selection
 
-Each benchmark calls the authenticated isolated `pyged` module and real F2
-backend. It writes:
+Each active selector replay calls the authenticated isolated `pyged` module
+and real GEDLIB `branch` backend. The historical tiered F2 filenames below are
+retained only as provenance for the superseded planning route:
 
 ```text
 gedlib_benchmark_100.json
@@ -291,8 +322,9 @@ trace. It revalidates seed 7, the unstratified independent-draw contract, the
 exact 10% reserve count, and each sampler self-hash rather than trusting the
 model-card seed field. It requires real
 pyged labels, exact approved budgets, compact storage, no held-out data,
-official F2 costs, successful reload/batch checks, and all source/checkpoint
-hashes. Its output is only
+the retained directional SED costs, the explicit non-MIP backend identity,
+successful reload/batch checks, and all source/checkpoint hashes. Its output is
+only
 `READY_FOR_MANAGED_INDEPENDENT_VERIFICATION` with `marker=null`. It also
 descriptor-reopens the complete retained GCF tree and binds it to the
 authenticated upstream repository/commit. The former missing-GCF-identity

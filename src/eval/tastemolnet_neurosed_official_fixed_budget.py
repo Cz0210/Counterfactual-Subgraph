@@ -16,7 +16,6 @@ import stat
 from typing import Any, Mapping, Sequence
 
 from src.data.tastemolnet_neurosed_fixed_budget import (
-    ALLOWED_TRAIN_PAIR_BUDGETS,
     PAIR_SAMPLER_MANIFEST_SCHEMA,
     PAIR_SAMPLING_SEED,
     reserve_pair_count,
@@ -28,11 +27,18 @@ from src.eval.tastemolnet_neurosed_fixed_budget import (
     validation_pair_budget,
 )
 from src.eval.tastemolnet_neurosed_gate import STRICT_OFFICIAL_PROVENANCE
+from src.eval.tastemolnet_neurosed_non_mip import (
+    validate_non_mip_selection_manifest,
+)
 from src.train.tastemolnet_neurosed_official_selector import SELECTOR_TRACE_SCHEMA
+from src.utils.tastemolnet_neurosed_gedlib_build import (
+    GED_LABEL_BACKEND_VARIANT,
+    NON_MIP_METHOD_CONFIGS,
+)
 
 
 OFFICIAL_FIXED_MODEL_CARD_SCHEMA = (
-    "tastemolnet_gcf_neurosed_official_fixed_budget_model_card_v1"
+    "tastemolnet_gcf_neurosed_official_fixed_budget_model_card_v2"
 )
 DISTANCE_DIRECTION_SCHEMA = "tastemolnet_gcf_distance_direction_trace_v1"
 READINESS_SCHEMA = "tastemolnet_neurosed_official_fixed_budget_readiness_v1"
@@ -379,6 +385,7 @@ def validate_official_fixed_budget_model_card(
         "calibration_loaded": False,
         "test_loaded": False,
         "pair_budget_strategy": "fixed_budget_resource_control",
+        "fixed_pair_budget": True,
         "fixed_pair_budget_is_project_extension": True,
         "official_pair_semantics": True,
         "fixed_budget_extension_documented": True,
@@ -391,8 +398,14 @@ def validate_official_fixed_budget_model_card(
         "parent_own_subgraph_shortcut": False,
         "class_label_used_as_supervision": False,
         "real_pyged_gedlib_labels": True,
-        "ged_method": "f2",
-        "ged_method_switched_from_official": False,
+        "ged_backend_variant": "non_mip",
+        "ged_label_backend_variant": GED_LABEL_BACKEND_VARIANT,
+        "GED_LABEL_BACKEND_VARIANT": GED_LABEL_BACKEND_VARIANT,
+        "F2_BLP_USED": False,
+        "GUROBI_USED": False,
+        "ged_method_switched_from_official": True,
+        "f2_blp_used": False,
+        "gurobi_used": False,
         "approximate_or_neural_labels_used": False,
         "timeout_or_error_rows_used_as_labels": False,
         "label_representation": "ordered_query_target_lower_upper_interval",
@@ -405,6 +418,8 @@ def validate_official_fixed_budget_model_card(
             "neuro.train.train_full_batch_interleaved_validation"
         ),
         "upstream_greed_batch_interleaved_selection_loop_unchanged": True,
+        "official_model_training_semantics": True,
+        "non_mip_selector_independently_verified": True,
         "strict_official_batch_interleaved_selector_implemented": True,
         "gcf_runtime_direction": "generated_query_to_original_target",
         "training_direction_matches_gcf_runtime": True,
@@ -421,7 +436,10 @@ def validate_official_fixed_budget_model_card(
         "cpu_contention_gate_pass": True,
         "worker_wrote_pass": False,
         "scientific_release_eligible": True,
-        "full_official_neurosed_semantics_claimed": True,
+        # The model/loss/selector remain upstream-compatible, but replacing
+        # F2 with an explicitly selected non-MIP GEDLIB backend is not the
+        # complete upstream NeuroSED configuration.
+        "full_official_neurosed_semantics_claimed": False,
     }
     if any(
         type(card.get(key)) is not type(value) or card.get(key) != value
@@ -434,13 +452,22 @@ def validate_official_fixed_budget_model_card(
     validation_budget = card.get("validation_pair_budget")
     if (
         type(train_budget) is not int
-        or train_budget not in ALLOWED_TRAIN_PAIR_BUDGETS
+        or train_budget not in (2000, 5000)
         or type(validation_budget) is not int
         or validation_budget != validation_pair_budget(train_budget)
         or card.get("successful_train_pair_count") != train_budget
         or card.get("successful_validation_pair_count") != validation_budget
     ):
         raise OfficialFixedBudgetGateError("fixed train/validation pair budget changed")
+    ged_method = card.get("ged_method")
+    if (
+        ged_method not in NON_MIP_METHOD_CONFIGS
+        or card.get("ged_method_args") != NON_MIP_METHOD_CONFIGS.get(ged_method)
+        or card.get("selected_ged_backend") != ged_method
+        or card.get("selected_ged_backend_config")
+        != NON_MIP_METHOD_CONFIGS.get(ged_method)
+    ):
+        raise OfficialFixedBudgetGateError("non-MIP GEDLIB backend changed")
     if card.get("edit_cost_contract") != OFFICIAL_SED_EDIT_COSTS:
         raise OfficialFixedBudgetGateError("official SED edit-cost contract changed")
     if card.get("strict_official_provenance") != STRICT_OFFICIAL_PROVENANCE:
@@ -482,6 +509,9 @@ def validate_official_fixed_budget_model_card(
         "selector_trace_sha256",
         "distance_direction_trace_sha256",
         "selected_checkpoint_sha256",
+        "non_mip_gedlib_selection_sha256",
+        "non_mip_gedlib_selection_manifest_file_sha256",
+        "non_mip_selector_verifier_receipt_sha256",
     ):
         _sha256(card.get(field), label=field)
     return card
@@ -555,6 +585,8 @@ def _validate_pair_sampler_manifest(
 def verify_official_fixed_budget_readiness(
     *,
     model_card: Mapping[str, Any],
+    non_mip_selection_manifest: Mapping[str, Any],
+    non_mip_selector_verifier_receipt: Mapping[str, Any],
     train_pair_sampler_manifest: Mapping[str, Any],
     validation_pair_sampler_manifest: Mapping[str, Any],
     train_pair_labels_manifest: Mapping[str, Any],
@@ -568,6 +600,61 @@ def verify_official_fixed_budget_readiness(
     card = validate_official_fixed_budget_model_card(
         model_card, vendored_gcf_root=vendored_gcf_root
     )
+    selection = validate_non_mip_selection_manifest(
+        non_mip_selection_manifest, reopen_artifacts=False
+    )
+    receipt = dict(non_mip_selector_verifier_receipt)
+    claimed_receipt_sha256 = _sha256(
+        receipt.pop("receipt_sha256", None),
+        label="non-MIP selector verifier receipt",
+    )
+    if claimed_receipt_sha256 != _stable_sha256(receipt):
+        raise OfficialFixedBudgetGateError("non-MIP verifier receipt hash changed")
+    receipt["receipt_sha256"] = claimed_receipt_sha256
+    if (
+        receipt.get("schema_version")
+        != "tastemolnet_neurosed_non_mip_gedlib_verifier_v1"
+        or receipt.get("status") != "PASS"
+        or receipt.get("marker") != "[TASTE_NON_MIP_GEDLIB_BACKEND_VERIFIED]"
+        or receipt.get("independent_process_reopened_all_candidate_artifacts")
+        is not True
+        or receipt.get("selection_sha256") != selection["selection_sha256"]
+        or receipt.get("selected_ged_backend")
+        != selection["selected_ged_backend"]
+        or receipt.get("selected_ged_backend_config")
+        != selection["backend_config"]
+        or receipt.get("GED_LABEL_BACKEND_VARIANT")
+        != selection["GED_LABEL_BACKEND_VARIANT"]
+        or receipt.get("F2_BLP_USED") is not False
+        or receipt.get("GUROBI_USED") is not False
+        or receipt.get("selected_neurosed_train_pair_budget")
+        != selection["selected_neurosed_train_pair_budget"]
+        or receipt.get("selected_neurosed_validation_pair_budget")
+        != selection["selected_neurosed_validation_pair_budget"]
+    ):
+        raise OfficialFixedBudgetGateError("non-MIP verifier receipt changed")
+    if (
+        card.get("non_mip_gedlib_selection_sha256")
+        != selection["selection_sha256"]
+        or card.get("non_mip_gedlib_selection_manifest_file_sha256")
+        != receipt.get("selection_manifest_sha256")
+        or card.get("non_mip_selector_verifier_receipt_sha256")
+        != receipt["receipt_sha256"]
+        or card.get("selected_ged_backend")
+        != selection["selected_ged_backend"]
+        or card.get("selected_ged_backend_config") != selection["backend_config"]
+        or card.get("ged_method") != selection["selected_ged_backend"]
+        or card.get("ged_method_args") != selection["backend_config"]
+        or card.get("train_pair_budget")
+        != selection["selected_neurosed_train_pair_budget"]
+        or card.get("validation_pair_budget")
+        != selection["selected_neurosed_validation_pair_budget"]
+        or card.get("pyged_module_sha256") != selection["pyged_module_sha256"]
+        or card.get("gedlib_commit") != selection["gedlib_commit"]
+    ):
+        raise OfficialFixedBudgetGateError(
+            "model card does not bind non-MIP selection/verifier"
+        )
     train_sampler = _validate_pair_sampler_manifest(
         train_pair_sampler_manifest,
         split="train",
@@ -607,6 +694,17 @@ def verify_official_fixed_budget_readiness(
             or manifest.get("compact_storage_format")
             not in ("parquet", "arrow_ipc", "numpy_npz")
             or manifest.get("gedlib_commit") != card["gedlib_commit"]
+            or manifest.get("ged_method") != card["ged_method"]
+            or manifest.get("ged_method_args") != card["ged_method_args"]
+            or manifest.get("ged_label_backend_variant")
+            != card["ged_label_backend_variant"]
+            or manifest.get("GED_LABEL_BACKEND_VARIANT")
+            != card["GED_LABEL_BACKEND_VARIANT"]
+            or manifest.get("F2_BLP_USED") is not False
+            or manifest.get("GUROBI_USED") is not False
+            or manifest.get("ged_method_switched_from_official") is not True
+            or manifest.get("f2_blp_used") is not False
+            or manifest.get("gurobi_used") is not False
             or manifest.get("pyged_module_sha256")
             != card["pyged_module_sha256"]
             or manifest.get("gedlib_build_manifest_sha256")
@@ -686,6 +784,8 @@ def verify_official_fixed_budget_readiness(
         "vendored_gcf_retained_inventory_sha256": (
             VENDORED_GCF_RETAINED_INVENTORY_SHA256
         ),
+        "non_mip_gedlib_selection_sha256": selection["selection_sha256"],
+        "non_mip_selector_verifier_receipt_sha256": receipt["receipt_sha256"],
     }
     if any(card.get(field) != digest for field, digest in bindings.items()):
         raise OfficialFixedBudgetGateError("model card does not bind fixed-budget evidence")

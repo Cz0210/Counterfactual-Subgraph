@@ -28,14 +28,12 @@ from src.data.tastemolnet_neurosed_fixed_budget import (  # noqa: E402
 )
 from src.eval.tastemolnet_neurosed_fixed_budget import (  # noqa: E402
     OFFICIAL_SED_EDIT_COSTS,
-    REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256,
-    WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED,
-    blocked_gedlib_worker_resource_evidence,
     summarize_real_gedlib_observations,
 )
-from src.utils.process_identity_v2 import capture_process_snapshot  # noqa: E402
 from src.utils.tastemolnet_neurosed_gedlib_build import (  # noqa: E402
     BUILD_SCHEMA,
+    GED_LABEL_BACKEND_VARIANT,
+    NON_MIP_METHOD_CONFIGS,
     PINNED_GREED_COMMIT,
     sha256_file,
 )
@@ -89,6 +87,7 @@ def _worker(
     module_dir: str,
     query_data: tuple[list[int], list[tuple[int, int]]],
     target_data: tuple[list[int], list[tuple[int, int]]],
+    method: str,
     method_args: list[str],
 ) -> dict[str, Any]:
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -99,7 +98,7 @@ def _worker(
     started = time.perf_counter()
     try:
         pyged = importlib.import_module("pyged")
-        lower, upper = pyged.sed(query_data, target_data, ["f2"], method_args)
+        lower, upper = pyged.sed(query_data, target_data, [method], method_args)
         elapsed = time.perf_counter() - started
         lower_value = float(lower)
         upper_value = float(upper)
@@ -195,13 +194,15 @@ def _resource_sample() -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/hpc.yaml")
+    parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--build-manifest", type=Path, required=True)
     parser.add_argument("--pair-sampler-manifest", type=Path, required=True)
     parser.add_argument("--pairs-jsonl", type=Path, required=True)
     parser.add_argument("--graph-inventory-jsonl", type=Path, required=True)
     parser.add_argument("--benchmark-budget", type=int, choices=(100, 500, 1000), required=True)
     parser.add_argument("--workers", type=int, choices=(1, 2, 4, 8), required=True)
-    parser.add_argument("--gedlib-time-limit-seconds", type=int, default=1)
+    parser.add_argument("--method", choices=tuple(NON_MIP_METHOD_CONFIGS), required=True)
     parser.add_argument("--hard-wall-seconds", type=float, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser.parse_args()
@@ -209,29 +210,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.gedlib_time_limit_seconds <= 0 or args.hard_wall_seconds <= 0:
-        raise RuntimeError("GEDLIB time limits must be positive")
+    if args.hard_wall_seconds <= 0 or args.hard_wall_seconds > 600:
+        raise RuntimeError("candidate hard wall must be in (0,600] seconds")
     if args.workers > _physical_core_count():
         raise RuntimeError("GEDLIB workers exceed physical core count")
-    if (
-        REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256 is None
-        or not WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED
-    ):
-        sample = _resource_sample()
-        blocker = blocked_gedlib_worker_resource_evidence(
-            benchmark_process_identity=capture_process_snapshot(
-                os.getpid()
-            ).to_dict(),
-            pre_sample=sample,
-            post_sample=sample,
-        )
-        _atomic_text(
-            args.output_dir / "gedlib_worker_resource_evidence_blocker.json",
-            json.dumps(blocker, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        )
-        print("BLOCKED_GEDLIB_RESOURCE_EVIDENCE", file=sys.stderr)
-        print("WORKER_TRIAL_COHORT_BUILDER_NOT_IMPLEMENTED", file=sys.stderr)
-        return 78
     build = _load_json(args.build_manifest)
     smoke = build.get("smoke")
     source = build.get("source_authority")
@@ -241,9 +223,16 @@ def main() -> int:
         or build.get("status") != "PASS"
         or build.get("marker") != "[TASTE_NEUROSED_GEDLIB_BUILD_PASS]"
         or build.get("network_install_performed") is not False
+        or build.get("GED_LABEL_BACKEND_VARIANT") != GED_LABEL_BACKEND_VARIANT
+        or build.get("F2_BLP_USED") is not False
+        or build.get("GUROBI_USED") is not False
+        or build.get("ged_label_backend_variant") != GED_LABEL_BACKEND_VARIANT
+        or build.get("f2_blp_used") is not False
         or build.get("gurobi_used") is not False
-        or build.get("ged_method") != "f2"
-        or build.get("ged_method_switched_from_official") is not False
+        or build.get("ged_method") is not None
+        or build.get("selected_ged_backend") is not None
+        or build.get("candidate_ged_backends") != list(NON_MIP_METHOD_CONFIGS)
+        or build.get("ged_method_switched_from_official") is not True
         or type(smoke) is not dict
         or type(source) is not dict
         or type(dependencies) is not dict
@@ -269,6 +258,12 @@ def main() -> int:
     expected_cohort_sha = pair_manifest.get("benchmark_cohort_file_sha256", {}).get(
         str(args.benchmark_budget)
     )
+    if (
+        expected_cohort_sha is None
+        and pair_manifest.get("pair_count") == args.benchmark_budget
+        and args.pairs_jsonl.name == "pairs.jsonl"
+    ):
+        expected_cohort_sha = pair_manifest.get("pairs_jsonl_sha256")
     if expected_cohort_sha != sha256_file(args.pairs_jsonl):
         raise RuntimeError("disjoint benchmark pair file SHA256 changed")
     graph_rows = _load_jsonl(args.graph_inventory_jsonl)
@@ -294,15 +289,21 @@ def main() -> int:
         ):
             raise RuntimeError("pair reconstruction changed")
         prepared.append((row, query.pyged_data(), target_graph.pyged_data()))
-    method_args = [f"--threads 1 --time-limit {args.gedlib_time_limit_seconds}"]
-    benchmark_process_identity = capture_process_snapshot(os.getpid()).to_dict()
+    method_args = [NON_MIP_METHOD_CONFIGS[args.method]]
     pre_resource_sample = _resource_sample()
     before_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     before_iowait = _iowait_ticks()
     started = time.perf_counter()
     executor = ProcessPoolExecutor(max_workers=args.workers)
     futures = [
-        executor.submit(_worker, str(module.parent), query_data, target_data, method_args)
+        executor.submit(
+            _worker,
+            str(module.parent),
+            query_data,
+            target_data,
+            args.method,
+            method_args,
+        )
         for _row, query_data, target_data in prepared
     ]
     done, pending = wait(futures, timeout=args.hard_wall_seconds)
@@ -315,6 +316,13 @@ def main() -> int:
             process.terminate()
         for process in processes:
             process.join(timeout=5)
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+        for process in processes:
+            process.join(timeout=5)
+        if any(process.is_alive() for process in processes):
+            raise RuntimeError("owned GEDLIB benchmark worker could not be reaped")
         executor.shutdown(wait=False, cancel_futures=True)
     else:
         executor.shutdown(wait=True)
@@ -388,16 +396,13 @@ def main() -> int:
             if before_iowait is not None and after_iowait is not None
             else None
         ),
-        "worker_resource_evidence": blocked_gedlib_worker_resource_evidence(
-            benchmark_process_identity=benchmark_process_identity,
-            pre_sample=pre_resource_sample,
-            post_sample=post_resource_sample,
-        ),
+        "trusted_single_operator_root": True,
+        "protected_job_contention_evidence_required": False,
     }
     config_sha = hashlib.sha256(
         json.dumps(
             {
-                "method": "f2",
+                "method": args.method,
                 "method_args": method_args,
                 "edit_costs": OFFICIAL_SED_EDIT_COSTS,
                 "build_overlay": build["build_overlay"],
@@ -416,6 +421,8 @@ def main() -> int:
         gedlib_config_sha256=config_sha,
         feature_schema_sha256=str(pair_manifest["feature_schema_sha256"]),
         resource_metrics=resources,
+        ged_method=args.method,
+        ged_method_args=method_args[0],
     )
     output = args.output_dir
     observations_path = output / (
@@ -434,12 +441,11 @@ def main() -> int:
         json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
     )
     healthy = (
-        summary["timeout_rate"] <= 0.05
-        and summary["failure_count"] == 0
-        and resources["worker_resource_evidence"]["status"] == "PASS"
+        summary["successful_pair_count"] / summary["attempted_pair_count"] >= 0.95
+        and summary["timeout_rate"] <= 0.05
     )
     if not healthy:
-        print("BLOCKED_GEDLIB_RESOURCE_EVIDENCE", file=sys.stderr)
+        print("BLOCKED_NON_MIP_GEDLIB_CANDIDATE", file=sys.stderr)
         return 78
     print(f"[TASTE_NEUROSED_GED_BENCHMARK_{args.benchmark_budget}_PASS]")
     return 0

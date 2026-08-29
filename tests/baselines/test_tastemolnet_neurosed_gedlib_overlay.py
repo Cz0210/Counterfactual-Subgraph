@@ -3,7 +3,9 @@ from pathlib import Path
 import pytest
 
 from src.utils.tastemolnet_neurosed_gedlib_build import (
+    NON_MIP_METHOD_CONFIGS,
     TasteGEDLIBBuildError,
+    _non_mip_cpp_text,
     _offline_cmake_text,
 )
 
@@ -90,3 +92,54 @@ target_include_directories(pyged PUBLIC
         match="legacy GEDLIB include reference remains",
     ):
         _offline_cmake_text(source, gedlib_root=Path("/opt/taste/pinned-gedlib"))
+
+
+def test_cpp_overlay_removes_gurobi_only_methods_and_retains_deterministic_candidates() -> None:
+    source = """\
+#define GUROBI
+ged::Options::GEDMethod method_name_to_option(std::string name)
+{
+    if (name == "anchor_aware_ged") {
+        return ged::Options::GEDMethod::ANCHOR_AWARE_GED;
+    } else if (name == "blp_no_edge_labels") {
+        return ged::Options::GEDMethod::BLP_NO_EDGE_LABELS;
+    } else if (name == "branch") {
+        return ged::Options::GEDMethod::BRANCH;
+    } else if (name == "f2") {
+        return ged::Options::GEDMethod::F2;
+    } else if (name == "ipfp") {
+        return ged::Options::GEDMethod::IPFP;
+    }
+}
+void choose(std::vector<std::string> method_name, Env& env) {
+    if (method_name[0] == "ged_f2") {
+        env.set_edit_costs(new GEDEditCosts());
+        method_name[0] = "f2";
+    } else if (method_name[0] == "ged_branch") {
+        env.set_edit_costs(new GEDEditCosts());
+        method_name[0] = "branch";
+    } else {
+        env.set_edit_costs(new SEDEditCosts());
+    }
+}
+"""
+
+    overlay = _non_mip_cpp_text(source)
+
+    assert "#define GUROBI" not in overlay
+    assert "BLP_NO_EDGE_LABELS" not in overlay
+    assert "Options::GEDMethod::F2" not in overlay
+    assert 'method_name[0] = "f2"' not in overlay
+    for method in NON_MIP_METHOD_CONFIGS:
+        assert overlay.count(f'name == "{method}"') == 1
+
+
+def test_cpp_overlay_fails_closed_when_one_gurobi_mapper_is_missing() -> None:
+    with pytest.raises(TasteGEDLIBBuildError, match="method mapper changed"):
+        _non_mip_cpp_text(
+            "#define GUROBI\n"
+            'if (name == "anchor_aware_ged") { return A; }\n'
+            'else if (name == "branch") { return B; }\n'
+            'else if (name == "f2") { return ged::Options::GEDMethod::F2; }\n'
+            'else if (name == "ipfp") { return C; }\n'
+        )

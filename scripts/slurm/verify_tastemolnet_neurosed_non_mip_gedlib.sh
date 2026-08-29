@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Static CLI parity only. Taste NeuroSED fixed-budget work is AutoDL-only.
-#SBATCH --job-name=taste-gedlib-bench-refuse
+#SBATCH --job-name=taste-non-mip-verify-refuse
 #SBATCH --partition=A800
 #SBATCH --gres=gpu:a800:1
 #SBATCH --output=logs/%j.out
@@ -15,19 +15,12 @@ export PYTHONPATH=$PWD
 echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
-echo "REFUSING_HPC_EXECUTION: Taste NeuroSED GEDLIB benchmark is AutoDL-only." >&2
+echo "REFUSING_HPC_EXECUTION: Taste non-MIP GEDLIB verification is AutoDL-only." >&2
 exit 78
 
 # Unreachable documentation-only CLI parity. Never submit this script.
-python -B scripts/autodl/benchmark_tastemolnet_neurosed_gedlib.py \
+python -B scripts/autodl/verify_tastemolnet_neurosed_non_mip_gedlib.py \
   --config configs/hpc.yaml \
   --set inference.fallback_to_heuristic=false \
-  --build-manifest /absolute/build-manifest.json \
-  --pair-sampler-manifest /absolute/pair_sampler_manifest.json \
-  --pairs-jsonl /absolute/benchmark_pairs_100.jsonl \
-  --graph-inventory-jsonl /absolute/graph_inventory.jsonl \
-  --benchmark-budget 100 \
-  --workers 1 \
-  --method branch \
-  --hard-wall-seconds 600 \
-  --output-dir /absolute/fresh/benchmark
+  --selection-manifest /absolute/non_mip_gedlib_selection.json \
+  --receipt /absolute/fresh/non_mip_gedlib_verifier_receipt.json

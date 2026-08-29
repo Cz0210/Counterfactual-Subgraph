@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-BUILD_SCHEMA = "tastemolnet_neurosed_gedlib_build_v1"
+BUILD_SCHEMA = "tastemolnet_neurosed_gedlib_build_v2"
 PINNED_GREED_COMMIT = "1c756f49625abb62c9f6de5b0059876a4c7499c1"
 PINNED_GREED_EXPTS_COMMIT = "e85423dc943fda1979811e7449846efffec2a1e1"
 PINNED_GEDLIB_COMMIT = "120856f670e013f080b116c0be4cc6bd72fc935d"
@@ -35,6 +36,10 @@ PINNED_SOURCE_SHA256 = {
 }
 OFFICIAL_METHOD_NAME = ("f2",)
 OFFICIAL_METHOD_ARGS_SINGLE_WORKER = ("--threads 1 --time-limit 1",)
+GED_LABEL_BACKEND_VARIANT = "NON_MIP_GEDLIB"
+NON_MIP_METHOD_CONFIGS: dict[str, str] = {
+    "branch": "--threads 1",
+}
 
 
 class TasteGEDLIBBuildError(RuntimeError):
@@ -207,7 +212,7 @@ def audit_preprovisioned_dependencies(
 
 
 def _offline_cmake_text(original: str, *, gedlib_root: Path) -> str:
-    """Create a Gurobi-free F2 build overlay without changing pyged behavior."""
+    """Create a Gurobi-free build overlay for the pinned non-MIP methods."""
 
     source_lines = original.splitlines()
     old_include = "\t${CMAKE_SOURCE_DIR}/ext/gedlib"
@@ -231,6 +236,78 @@ def _offline_cmake_text(original: str, *, gedlib_root: Path) -> str:
         )
     if "gurobi" in result.lower():
         raise TasteGEDLIBBuildError("Gurobi link reference remains in offline overlay")
+    return result
+
+
+def _non_mip_cpp_text(original: str) -> str:
+    """Remove Gurobi-only mappings and retain deterministic pinned candidates.
+
+    The pinned wrapper defines ``GUROBI`` itself and consequently exposes F2
+    and BLP enum members even on hosts with no licensed runtime.  The build
+    overlay must remove that define *and* the two mapper branches; deleting the
+    define alone leaves uncompilable enum references behind.
+    """
+
+    if original.count("#define GUROBI") != 1:
+        raise TasteGEDLIBBuildError("official pyged Gurobi define anchor changed")
+    result = original.replace(
+        "#define GUROBI",
+        "// GUROBI intentionally disabled: NON_MIP_GEDLIB label backend",
+    )
+    for official_method in (
+        "anchor_aware_ged",
+        "blp_no_edge_labels",
+        "branch",
+        "f2",
+        "ipfp",
+    ):
+        if original.count(f'name == "{official_method}"') != 1:
+            raise TasteGEDLIBBuildError("official pyged method mapper changed")
+    mapper = re.compile(
+        r"ged::Options::GEDMethod method_name_to_option\(std::string name\)\s*"
+        r"\{.*?\n\}",
+        re.DOTALL,
+    )
+    result, replacements = mapper.subn(
+        """ged::Options::GEDMethod method_name_to_option(std::string name)
+{
+\tif (name == \"branch\") {
+\t\treturn ged::Options::GEDMethod::BRANCH;
+\t} else {
+\t\tthrow std::invalid_argument(\"unknown method\");
+\t}
+}""",
+        result,
+        count=1,
+    )
+    if replacements != 1:
+        raise TasteGEDLIBBuildError("official pyged method mapper changed")
+    f2_quick_fix = re.compile(
+        r'if \(method_name\[0\] == "ged_f2"\) \{\s*'
+        r'env\.set_edit_costs\(new GEDEditCosts\(\)\);\s*'
+        r'method_name\[0\] = "f2";\s*'
+        r'\} else if \(method_name\[0\] == "ged_branch"\) \{'
+    )
+    result, replacements = f2_quick_fix.subn(
+        'if (method_name[0] == "ged_branch") {', result, count=1
+    )
+    if replacements != 1:
+        raise TasteGEDLIBBuildError("official pyged GED/F2 quick-fix anchor changed")
+    forbidden = (
+        "#define GUROBI",
+        "Options::GEDMethod::F2",
+        "Options::GEDMethod::BLP_NO_EDGE_LABELS",
+        "Options::GEDMethod::ANCHOR_AWARE_GED",
+        "Options::GEDMethod::IPFP",
+        'method_name[0] = "f2"',
+    )
+    if any(token in result for token in forbidden):
+        raise TasteGEDLIBBuildError("Gurobi-only pyged method remains in overlay")
+    for method in NON_MIP_METHOD_CONFIGS:
+        if result.count(f'name == "{method}"') != 1:
+            raise TasteGEDLIBBuildError(
+                f"pinned non-MIP pyged method changed: {method}"
+            )
     return result
 
 
@@ -275,49 +352,58 @@ def _real_pyged_smoke(lib_dir: Path) -> dict[str, Any]:
         imported = Path(module.__file__).resolve()
         if imported != module_path:
             raise TasteGEDLIBBuildError("pyged imported outside isolated build root")
-        equal_lb, equal_ub = module.sed(
-            ([0], []),
-            ([0], []),
-            list(OFFICIAL_METHOD_NAME),
-            list(OFFICIAL_METHOD_ARGS_SINGLE_WORKER),
-        )
-        small_lb, small_ub = module.sed(
-            ([0], []),
-            ([0, 0], [(0, 1), (1, 0)]),
-            list(OFFICIAL_METHOD_NAME),
-            list(OFFICIAL_METHOD_ARGS_SINGLE_WORKER),
-        )
-        reverse_lb, reverse_ub = module.sed(
-            ([0, 0], [(0, 1), (1, 0)]),
-            ([0], []),
-            list(OFFICIAL_METHOD_NAME),
-            list(OFFICIAL_METHOD_ARGS_SINGLE_WORKER),
-        )
+        method_smokes: dict[str, dict[str, Any]] = {}
+        for method, method_args in NON_MIP_METHOD_CONFIGS.items():
+            equal_lb, equal_ub = module.sed(
+                ([0], []), ([0], []), [method], [method_args]
+            )
+            small_lb, small_ub = module.sed(
+                ([0], []),
+                ([0, 0], [(0, 1), (1, 0)]),
+                [method],
+                [method_args],
+            )
+            reverse_lb, reverse_ub = module.sed(
+                ([0, 0], [(0, 1), (1, 0)]),
+                ([0], []),
+                [method],
+                [method_args],
+            )
+            values = [equal_lb, equal_ub, small_lb, small_ub, reverse_lb, reverse_ub]
+            if any(not math.isfinite(float(value)) for value in values):
+                raise TasteGEDLIBBuildError(
+                    f"pyged {method} smoke returned a non-finite bound"
+                )
+            if not (
+                float(equal_lb) == 0.0
+                and float(equal_ub) == 0.0
+                and 0.0 <= float(small_lb) <= float(small_ub)
+                and float(small_ub) == 0.0
+                and 0.0 <= float(reverse_lb) <= float(reverse_ub)
+                and float(reverse_ub) > 0.0
+            ):
+                raise TasteGEDLIBBuildError(
+                    f"pyged {method} smoke violates pinned SED direction/bounds"
+                )
+            method_smokes[method] = {
+                "method_args": method_args,
+                "equal_bounds": [float(equal_lb), float(equal_ub)],
+                "zero_insertion_bounds": [float(small_lb), float(small_ub)],
+                "positive_deletion_bounds": [float(reverse_lb), float(reverse_ub)],
+                "finite_lower_le_upper": True,
+                "sed_cost_direction_authenticated": True,
+            }
     finally:
         sys.path.pop(0)
         sys.modules.pop("pyged", None)
         if previous is not None:
             sys.modules["pyged"] = previous
-    values = [equal_lb, equal_ub, small_lb, small_ub, reverse_lb, reverse_ub]
-    if any(not math.isfinite(float(value)) for value in values):
-        raise TasteGEDLIBBuildError("pyged smoke returned a non-finite bound")
-    if not (
-        float(equal_lb) == 0.0
-        and float(equal_ub) == 0.0
-        and float(small_lb) == 0.0
-        and float(small_ub) == 0.0
-        and 0.0 <= float(reverse_lb) <= float(reverse_ub)
-        and float(reverse_ub) > 0.0
-    ):
-        raise TasteGEDLIBBuildError("pyged smoke does not implement pinned SED asymmetry")
     return {
         "module_path": str(module_path),
         "module_sha256": sha256_file(module_path),
-        "method_name": list(OFFICIAL_METHOD_NAME),
-        "method_args": list(OFFICIAL_METHOD_ARGS_SINGLE_WORKER),
-        "equal_bounds": [float(equal_lb), float(equal_ub)],
-        "zero_insertion_bounds": [float(small_lb), float(small_ub)],
-        "positive_deletion_bounds": [float(reverse_lb), float(reverse_ub)],
+        "candidate_methods": list(NON_MIP_METHOD_CONFIGS),
+        "method_smokes": method_smokes,
+        "all_candidates_finite_lower_le_upper": True,
         "sed_cost_direction_authenticated": True,
     }
 
@@ -359,9 +445,7 @@ def isolated_build_smoke(
     lib.mkdir()
     greed = Path(greed_root).resolve()
     cpp = (greed / "pyged" / "src" / "pyged.cpp").read_text(encoding="utf-8")
-    if cpp.count("#define GUROBI") != 1:
-        raise TasteGEDLIBBuildError("official pyged Gurobi define anchor changed")
-    patched_cpp = cpp.replace("#define GUROBI", "// GUROBI disabled: pinned F2 non-MIP build")
+    patched_cpp = _non_mip_cpp_text(cpp)
     (source / "src").mkdir()
     (source / "src" / "pyged.cpp").write_text(patched_cpp, encoding="utf-8")
     cmake_text = (greed / "pyged" / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -417,9 +501,16 @@ def isolated_build_smoke(
         "build_root": str(destination),
         "build_isolated_from_smiles_pip118": True,
         "network_install_performed": False,
+        "GED_LABEL_BACKEND_VARIANT": GED_LABEL_BACKEND_VARIANT,
+        "F2_BLP_USED": False,
+        "GUROBI_USED": False,
+        "ged_label_backend_variant": GED_LABEL_BACKEND_VARIANT,
+        "f2_blp_used": False,
         "gurobi_used": False,
-        "ged_method": "f2",
-        "ged_method_switched_from_official": False,
+        "ged_method": None,
+        "selected_ged_backend": None,
+        "candidate_ged_backends": list(NON_MIP_METHOD_CONFIGS),
+        "ged_method_switched_from_official": True,
         "build_flags": {
             "cmake_build_type": "Release",
             "target_compile_options": ["-fpermissive"],
@@ -430,7 +521,7 @@ def isolated_build_smoke(
             "tokenizers_parallelism": False,
         },
         "build_overlay": {
-            "mode": "official_pyged_f2_non_mip_gurobi_disabled_v1",
+            "mode": "pinned_pyged_deterministic_non_mip_methods_gurobi_disabled_v2",
             "patched_pyged_cpp_sha256": hashlib.sha256(
                 patched_cpp.encode("utf-8")
             ).hexdigest(),
@@ -463,6 +554,9 @@ def blocked_build_manifest(
         "gedlib_root": str(gedlib_root),
         "requested_output_root": str(output_root),
         "real_pyged_smoke_passed": False,
+        "GED_LABEL_BACKEND_VARIANT": GED_LABEL_BACKEND_VARIANT,
+        "F2_BLP_USED": False,
+        "GUROBI_USED": False,
         "approximate_or_neural_fallback_used": False,
         "network_install_performed": False,
     }
@@ -496,6 +590,8 @@ def atomic_write_json(path: str | Path, payload: Mapping[str, Any]) -> None:
 
 __all__ = [
     "BUILD_SCHEMA",
+    "GED_LABEL_BACKEND_VARIANT",
+    "NON_MIP_METHOD_CONFIGS",
     "OFFICIAL_METHOD_ARGS_SINGLE_WORKER",
     "OFFICIAL_METHOD_NAME",
     "PINNED_GREED_COMMIT",

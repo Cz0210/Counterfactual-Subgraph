@@ -338,13 +338,15 @@ def test_cli_and_paired_wrapper_expose_manifest_inputs_only() -> None:
     ):
         assert manual_input not in benchmark_cli
         assert manual_input not in benchmark_wrapper
-    assert "blocked_gedlib_worker_resource_evidence" in benchmark_cli
-    assert benchmark_cli.index("REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256") < (
-        benchmark_cli.index("ProcessPoolExecutor(")
-    )
-    assert benchmark_cli.index("WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED") < (
-        benchmark_cli.index("ProcessPoolExecutor(")
-    )
+    # The historical F2 worker-scaling route above remains fail-closed.  The
+    # active main-table override is a fixed-worker, bounded non-MIP replay and
+    # therefore must expose its backend/deadline and reap only owned children.
+    assert "NON_MIP_METHOD_CONFIGS" in benchmark_cli
+    assert "GED_LABEL_BACKEND_VARIANT" in benchmark_cli
+    assert "--hard-wall-seconds" in benchmark_cli
+    assert "process.terminate()" in benchmark_cli
+    assert "process.kill()" in benchmark_cli
+    assert "--method branch" in benchmark_wrapper
 
     blocker = json.loads(
         (

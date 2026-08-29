@@ -20,9 +20,13 @@ from src.data.tastemolnet_neurosed_fixed_budget import (
     BENCHMARK_BUDGETS,
     reserve_pair_count,
 )
+from src.utils.tastemolnet_neurosed_gedlib_build import (
+    GED_LABEL_BACKEND_VARIANT,
+    NON_MIP_METHOD_CONFIGS,
+)
 
 
-BENCHMARK_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_v1"
+BENCHMARK_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_v2"
 BENCHMARK_SUMMARY_SCHEMA = "tastemolnet_neurosed_gedlib_benchmark_summary_v1"
 PAIR_BUDGET_PLAN_SCHEMA = "tastemolnet_neurosed_pair_budget_plan_v1"
 GEDLIB_WORKER_SELECTION_SCHEMA = (
@@ -37,7 +41,7 @@ GEDLIB_WORKER_RESOURCE_EVIDENCE_SCHEMA = (
 REVIEWED_WORKER_RESOURCE_EVIDENCE_PRODUCER_SHA256: str | None = None
 WORKER_TRIAL_COHORT_BUILDER_IMPLEMENTED = False
 REVIEWED_WORKER_TRIAL_COHORT_BUILDER_SHA256: str | None = None
-PAIR_LABELS_MANIFEST_SCHEMA = "tastemolnet_neurosed_pair_labels_manifest_v1"
+PAIR_LABELS_MANIFEST_SCHEMA = "tastemolnet_neurosed_pair_labels_manifest_v2"
 OBSERVATION_STATUSES = frozenset({"SUCCESS", "TIMEOUT", "GEDLIB_ERROR"})
 LEGAL_GEDLIB_WORKER_COUNTS = (1, 2, 4, 8)
 OFFICIAL_SED_EDIT_COSTS = {
@@ -130,6 +134,8 @@ def summarize_real_gedlib_observations(
     feature_schema_sha256: str,
     pair_cohort_sha256: str | None = None,
     resource_metrics: Mapping[str, Any] | None = None,
+    ged_method: str = "f2",
+    ged_method_args: str = "--threads 1 --time-limit 1",
 ) -> dict[str, Any]:
     """Summarize raw observations from the authenticated real backend.
 
@@ -230,13 +236,34 @@ def summarize_real_gedlib_observations(
         c not in "0123456789abcdef" for c in str(gedlib_commit)
     ):
         raise NeuroSEDFixedBudgetError("GEDLIB commit must be a full lowercase Git SHA")
+    if ged_method == "f2":
+        if ged_method_args != "--threads 1 --time-limit 1":
+            raise NeuroSEDFixedBudgetError("official F2 arguments changed")
+        backend_variant = "F2_BLP"
+        f2_blp_used = True
+        switched_from_official = False
+    elif ged_method in NON_MIP_METHOD_CONFIGS:
+        if ged_method_args != NON_MIP_METHOD_CONFIGS[ged_method]:
+            raise NeuroSEDFixedBudgetError("non-MIP GEDLIB arguments changed")
+        backend_variant = GED_LABEL_BACKEND_VARIANT
+        f2_blp_used = False
+        switched_from_official = True
+    else:
+        raise NeuroSEDFixedBudgetError("GEDLIB method is not pinned")
     return {
         "schema_version": BENCHMARK_SCHEMA,
         "status": "PASS" if failures == 0 else "PASS_WITH_GEDLIB_ERRORS",
         "real_pyged_gedlib_labels": True,
         "approximate_or_neural_labels_used": False,
-        "ged_method": "f2",
-        "ged_method_switched_from_official": False,
+        "ged_method": ged_method,
+        "ged_method_args": ged_method_args,
+        "GED_LABEL_BACKEND_VARIANT": backend_variant,
+        "F2_BLP_USED": f2_blp_used,
+        "GUROBI_USED": False,
+        "ged_label_backend_variant": backend_variant,
+        "f2_blp_used": f2_blp_used,
+        "gurobi_used": False,
+        "ged_method_switched_from_official": switched_from_official,
         "edit_cost_contract": dict(OFFICIAL_SED_EDIT_COSTS),
         "ged_direction": OFFICIAL_GED_DIRECTION,
         "label_representation": "lower_upper_interval_bounds",
@@ -291,12 +318,36 @@ def validate_benchmark_report(
 
     payload = dict(report)
     latency = payload.get("latency_seconds")
+    method = payload.get("ged_method")
+    method_args = payload.get("ged_method_args")
+    official_method = method == "f2"
+    non_mip_method = method in NON_MIP_METHOD_CONFIGS
+    backend_contract_valid = (
+        official_method
+        and method_args == "--threads 1 --time-limit 1"
+        and payload.get("ged_label_backend_variant") == "F2_BLP"
+        and payload.get("GED_LABEL_BACKEND_VARIANT") == "F2_BLP"
+        and payload.get("F2_BLP_USED") is True
+        and payload.get("GUROBI_USED") is False
+        and payload.get("f2_blp_used") is True
+        and payload.get("gurobi_used") is False
+        and payload.get("ged_method_switched_from_official") is False
+    ) or (
+        non_mip_method
+        and method_args == NON_MIP_METHOD_CONFIGS[method]
+        and payload.get("ged_label_backend_variant") == GED_LABEL_BACKEND_VARIANT
+        and payload.get("GED_LABEL_BACKEND_VARIANT") == GED_LABEL_BACKEND_VARIANT
+        and payload.get("F2_BLP_USED") is False
+        and payload.get("GUROBI_USED") is False
+        and payload.get("f2_blp_used") is False
+        and payload.get("gurobi_used") is False
+        and payload.get("ged_method_switched_from_official") is True
+    )
     if (
         payload.get("schema_version") != BENCHMARK_SCHEMA
         or payload.get("real_pyged_gedlib_labels") is not True
         or payload.get("approximate_or_neural_labels_used") is not False
-        or payload.get("ged_method") != "f2"
-        or payload.get("ged_method_switched_from_official") is not False
+        or not backend_contract_valid
         or payload.get("edit_cost_contract") != OFFICIAL_SED_EDIT_COSTS
         or payload.get("ged_direction") != OFFICIAL_GED_DIRECTION
         or payload.get("label_representation") != "lower_upper_interval_bounds"
@@ -406,8 +457,10 @@ def combine_disjoint_benchmark_reports(
 
 
 def validation_pair_budget(train_pair_budget: int) -> int:
+    if int(train_pair_budget) == 2000:
+        return 500
     if int(train_pair_budget) not in ALLOWED_TRAIN_PAIR_BUDGETS:
-        raise NeuroSEDFixedBudgetError("train pair budget is not 5k/10k/20k")
+        raise NeuroSEDFixedBudgetError("train pair budget is not approved")
     return min(4000, max(1000, math.floor(int(train_pair_budget) * 0.20)))
 
 
@@ -1092,6 +1145,7 @@ def official_ged_interval_label(
     feature_schema_sha256: str,
     pair_sampler_manifest_sha256: str,
     gedlib_build_manifest_sha256: str,
+    ged_method: str,
     ged_method_args: str,
 ) -> dict[str, Any]:
     """Convert one successful real-pyged result to the official training row."""
@@ -1147,14 +1201,26 @@ def official_ged_interval_label(
         character not in "0123456789abcdef" for character in str(gedlib_commit)
     ):
         raise NeuroSEDFixedBudgetError("GEDLIB label commit is invalid")
-    if ged_method_args != "--threads 1 --time-limit 1":
-        raise NeuroSEDFixedBudgetError("official F2 GED method arguments changed")
+    if ged_method == "f2":
+        if ged_method_args != "--threads 1 --time-limit 1":
+            raise NeuroSEDFixedBudgetError("official F2 GED method arguments changed")
+        backend_variant = "F2_BLP"
+        f2_blp_used = True
+        switched_from_official = False
+    elif ged_method in NON_MIP_METHOD_CONFIGS:
+        if ged_method_args != NON_MIP_METHOD_CONFIGS[ged_method]:
+            raise NeuroSEDFixedBudgetError("non-MIP GED method arguments changed")
+        backend_variant = GED_LABEL_BACKEND_VARIANT
+        f2_blp_used = False
+        switched_from_official = True
+    else:
+        raise NeuroSEDFixedBudgetError("GED label method is not pinned")
     lower = _float32(lower_raw, label="lower bound")
     upper = _float32(upper_raw, label="upper bound")
     if lower > upper:
         raise NeuroSEDFixedBudgetError("float32 lower bound exceeds upper bound")
     return {
-        "schema_version": "tastemolnet_neurosed_official_ged_label_v1",
+        "schema_version": "tastemolnet_neurosed_official_ged_label_v2",
         "pair_id": pair_id,
         "query_graph_id": query_graph_id,
         "target_graph_id": target_graph_id,
@@ -1166,8 +1232,15 @@ def official_ged_interval_label(
         "exact_bound": exact,
         "stored_bounds_equal": lower == upper,
         "bounds_kind": "exact" if exact else "interval",
-        "ged_method": "f2",
+        "ged_method": ged_method,
         "ged_method_args": ged_method_args,
+        "GED_LABEL_BACKEND_VARIANT": backend_variant,
+        "F2_BLP_USED": f2_blp_used,
+        "GUROBI_USED": False,
+        "ged_label_backend_variant": backend_variant,
+        "ged_method_switched_from_official": switched_from_official,
+        "f2_blp_used": f2_blp_used,
+        "gurobi_used": False,
         "gedlib_commit": str(gedlib_commit),
         "pyged_module_sha256": str(pyged_module_sha256),
         "gedlib_config_sha256": str(gedlib_config_sha256),
@@ -1224,9 +1297,8 @@ def build_official_pair_labels_manifest(
     ):
         raise NeuroSEDFixedBudgetError("reserve selection does not bind label order")
     required = {
-        "schema_version": "tastemolnet_neurosed_official_ged_label_v1",
+        "schema_version": "tastemolnet_neurosed_official_ged_label_v2",
         "status": "SUCCESS",
-        "ged_method": "f2",
         "direction": OFFICIAL_GED_DIRECTION,
         "pyged_return_dtype": "float64",
         "label_dtype": "float32",
@@ -1243,11 +1315,19 @@ def build_official_pair_labels_manifest(
     seen_pair_ids: set[str] = set()
     exact_count = 0
     common_fields = (
+        "ged_method",
+        "ged_method_args",
+        "GED_LABEL_BACKEND_VARIANT",
+        "F2_BLP_USED",
+        "GUROBI_USED",
+        "ged_label_backend_variant",
+        "ged_method_switched_from_official",
+        "f2_blp_used",
+        "gurobi_used",
         "gedlib_commit",
         "pyged_module_sha256",
         "gedlib_config_sha256",
         "feature_schema_sha256",
-        "ged_method_args",
         "pair_sampler_manifest_sha256",
         "gedlib_build_manifest_sha256",
     )
@@ -1256,6 +1336,36 @@ def build_official_pair_labels_manifest(
         row = dict(raw)
         if any(row.get(key) != value for key, value in required.items()):
             raise NeuroSEDFixedBudgetError(f"official GED label row {index} changed")
+        method = row.get("ged_method")
+        if method == "f2":
+            backend_valid = (
+                row.get("ged_method_args") == "--threads 1 --time-limit 1"
+                and row.get("GED_LABEL_BACKEND_VARIANT") == "F2_BLP"
+                and row.get("F2_BLP_USED") is True
+                and row.get("GUROBI_USED") is False
+                and row.get("ged_label_backend_variant") == "F2_BLP"
+                and row.get("ged_method_switched_from_official") is False
+                and row.get("f2_blp_used") is True
+                and row.get("gurobi_used") is False
+            )
+        else:
+            backend_valid = (
+                method in NON_MIP_METHOD_CONFIGS
+                and row.get("ged_method_args") == NON_MIP_METHOD_CONFIGS.get(method)
+                and row.get("GED_LABEL_BACKEND_VARIANT")
+                == GED_LABEL_BACKEND_VARIANT
+                and row.get("F2_BLP_USED") is False
+                and row.get("GUROBI_USED") is False
+                and row.get("ged_label_backend_variant")
+                == GED_LABEL_BACKEND_VARIANT
+                and row.get("ged_method_switched_from_official") is True
+                and row.get("f2_blp_used") is False
+                and row.get("gurobi_used") is False
+            )
+        if not backend_valid:
+            raise NeuroSEDFixedBudgetError(
+                f"official GED label row {index} backend changed"
+            )
         lower = _finite_nonnegative(row.get("lower_bound"), label="stored lower bound")
         upper = _finite_nonnegative(row.get("upper_bound"), label="stored upper bound")
         exact = row.get("exact_bound")

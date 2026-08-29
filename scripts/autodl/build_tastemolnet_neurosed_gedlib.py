@@ -24,6 +24,8 @@ from src.utils.tastemolnet_neurosed_gedlib_build import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/hpc.yaml")
+    parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--greed-root", type=Path, required=True)
     parser.add_argument("--greed-expts-root", type=Path, required=True)
     parser.add_argument("--gedlib-root", type=Path, required=True)
