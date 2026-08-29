@@ -652,6 +652,81 @@ def test_independent_replay_rejects_science_drift(tmp_path: Path, monkeypatch) -
     assert not t4._equivalent(documents, changed)
 
 
+def test_independent_replay_accepts_observed_cuda_aggregate_tail() -> None:
+    worker = _documents()
+    replay = copy.deepcopy(worker)
+    worker["oracle_smoke.json"].update(
+        {
+            "batch_single_max_abs_difference": 1.6626104781813922e-7,
+            "cf_drop": {
+                "mean": 0.0390631366505899,
+                "minimum": -0.34636996734167425,
+                "maximum": 0.8125,
+            },
+        }
+    )
+    replay["oracle_smoke.json"].update(
+        {
+            "batch_single_max_abs_difference": 1.629783244e-7,
+            "cf_drop": {
+                "mean": 0.0390631380093,
+                "minimum": -0.346369953849,
+                "maximum": 0.8125,
+            },
+        }
+    )
+
+    assert t4._equivalent(worker, replay)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["batch_single_max_abs_difference", "mean", "minimum"],
+)
+def test_independent_replay_rejects_cuda_aggregate_drift_above_envelope(
+    field: str,
+) -> None:
+    worker = _documents()
+    worker["oracle_smoke.json"]["cf_drop"] = {
+        "mean": 0.1,
+        "minimum": -0.2,
+        "maximum": 0.3,
+    }
+    replay = copy.deepcopy(worker)
+    if field == "batch_single_max_abs_difference":
+        replay["oracle_smoke.json"][field] = 2e-6
+    else:
+        replay["oracle_smoke.json"]["cf_drop"][field] += 2e-6
+
+    assert not t4._equivalent(worker, replay)
+
+
+def test_independent_replay_keeps_other_floats_discrete_values_and_hashes_strict(
+) -> None:
+    documents = _documents()
+
+    changed_float = copy.deepcopy(documents)
+    changed_float["t3_binding.json"]["temperature"] += 5e-7
+    assert not t4._equivalent(documents, changed_float)
+
+    documents["oracle_smoke.json"]["cf_drop"] = {
+        "mean": 0.1,
+        "minimum": -0.2,
+        "maximum": 0.3,
+    }
+    changed_maximum = copy.deepcopy(documents)
+    changed_maximum["oracle_smoke.json"]["cf_drop"]["maximum"] += 5e-7
+    assert not t4._equivalent(documents, changed_maximum)
+
+    changed_count = copy.deepcopy(documents)
+    changed_count["oracle_smoke.json"]["strict_flip_count"] += 1
+    assert not t4._equivalent(documents, changed_count)
+
+    changed_hash = copy.deepcopy(documents)
+    changed_hash["t3_binding.json"]["model_sha256"] = "0" * 64
+    assert not t4._equivalent(documents, changed_hash)
+
+
 def test_aggregate_accepts_measured_cuda_tail_within_frozen_tolerance() -> None:
     documents = _documents()
     documents["oracle_smoke.json"]["batch_single_max_abs_difference"] = 5e-7

@@ -1,5 +1,17 @@
 # Refactor Plan
 
+## 2026-08-29: Close the Taste T4 independent CUDA replay envelope
+
+- [x] Compare the SEALED worker with repeated GPU1 verifier science and isolate
+  the mismatch to three aggregate float leaves; all counts, destinations,
+  discrete fields, and bindings reproduced exactly.
+- [x] Apply the frozen `1e-6` absolute envelope only to batch/single maximum
+  difference and counterfactual-drop mean/minimum during independent replay.
+- [x] Add regressions for the measured real tail, above-envelope drift, and
+  unchanged strict comparison of other floats, discrete values, and hashes.
+- [ ] Integrate into a new immutable AutoDL worktree and launch a fresh T4
+  attempt; do not reuse or promote the quarantined namespace.
+
 ## 2026-08-29: Taste NeuroSED canonical feature-schema producer
 
 - [x] Add a thin AutoDL producer that opens only SHA/role-bound train and

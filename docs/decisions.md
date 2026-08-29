@@ -1,5 +1,39 @@
 # Decisions Log
 
+## [2026-08-29] Bound only the observed Taste T4 CUDA replay aggregates
+
+### Motivation
+
+A SEALED adaptive T4 worker and two independent GPU1 replays agreed on every
+discrete scientific field: 38 strict flips, 17 distinct parents, and the full
+`1 -> 0` / `1 -> 2` destination distribution.  The verifier quarantined the
+attempt because three reduction-derived aggregates differed by at most about
+`1.35e-8`, below the already frozen `1e-6` batch/single CUDA tolerance.
+
+### Decision
+
+Use the existing `T4_BATCH_SINGLE_ATOL=1e-6` absolute, zero-relative envelope
+only at the exact replay paths
+`oracle_smoke.json.batch_single_max_abs_difference`,
+`oracle_smoke.json.cf_drop.mean`, and
+`oracle_smoke.json.cf_drop.minimum`.  Require those leaves to remain finite.
+Keep the prior comparator for every other float and exact equality for types,
+keys, list shape, discrete values, destination counts, and authority hashes.
+
+### Consequences
+
+- CUDA reduction-order tails no longer create a false replay quarantine.
+- Any change above `1e-6`, any non-finite value, or any unlisted scientific or
+  authority change remains a hard failure.
+- The quarantined attempt remains immutable and is not promoted; a runtime
+  PASS still requires a fresh managed worker and independent verifier.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Treat the AIDS pair-semantics bitmap as a contained artifact tree
 
 ### Motivation

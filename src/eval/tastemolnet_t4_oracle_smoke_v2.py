@@ -103,6 +103,13 @@ CANDIDATE_FILES = frozenset(
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GPU_UUID = re.compile(r"^GPU-[0-9A-Fa-f-]+$")
+_CUDA_REPLAY_AGGREGATE_PATHS = frozenset(
+    {
+        ("oracle_smoke.json", "batch_single_max_abs_difference"),
+        ("oracle_smoke.json", "cf_drop", "mean"),
+        ("oracle_smoke.json", "cf_drop", "minimum"),
+    }
+)
 
 
 class TasteT4OracleSmokeError(RuntimeError):
@@ -1350,18 +1357,35 @@ def _candidate_payloads(held: HeldSealedArtifactV2) -> dict[str, bytes]:
     }
 
 
-def _equivalent(left: Any, right: Any) -> bool:
+def _equivalent(
+    left: Any,
+    right: Any,
+    *,
+    _path: tuple[str | int, ...] = (),
+) -> bool:
     if type(left) is not type(right):
         return False
     if type(left) is dict:
         return set(left) == set(right) and all(
-            _equivalent(left[key], right[key]) for key in left
+            _equivalent(left[key], right[key], _path=(*_path, key)) for key in left
         )
     if type(left) is list:
         return len(left) == len(right) and all(
-            _equivalent(a, b) for a, b in zip(left, right, strict=True)
+            _equivalent(a, b, _path=(*_path, index))
+            for index, (a, b) in enumerate(zip(left, right, strict=True))
         )
     if type(left) is float:
+        if _path in _CUDA_REPLAY_AGGREGATE_PATHS:
+            return (
+                math.isfinite(left)
+                and math.isfinite(right)
+                and math.isclose(
+                    left,
+                    right,
+                    rel_tol=0.0,
+                    abs_tol=T4_BATCH_SINGLE_ATOL,
+                )
+            )
         return math.isclose(left, right, rel_tol=1e-8, abs_tol=1e-10)
     return left == right
 

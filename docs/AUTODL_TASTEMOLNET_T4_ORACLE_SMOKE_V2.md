@@ -58,6 +58,16 @@ The verifier independently repeats the science and is the only caller allowed
 to publish `verification.json`, `gate.json`, and `PASS`. Direct worker and
 verifier Slurm scripts are static AutoDL-only refusals.
 
+CUDA/PyG reduction order may change three aggregate float leaves without
+changing any prediction. Independent replay therefore compares only
+`oracle_smoke.json.batch_single_max_abs_difference`,
+`oracle_smoke.json.cf_drop.mean`, and
+`oracle_smoke.json.cf_drop.minimum` with the frozen `1e-6` absolute,
+zero-relative envelope. Every other float keeps its prior comparator, while
+document structure, discrete fields, destination counts, bindings, and hashes
+remain exact. The worker's own batch/single value must independently be finite
+and no greater than `1e-6`.
+
 The managed attempt input hashes are exactly:
 
 ```text
