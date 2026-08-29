@@ -50,6 +50,7 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     SUBSET_MAX_ATTEMPTS,
     SUBSET_STAGE,
     derive_output_budget,
+    handover_contract,
     sha256_file,
     stable_json_sha256,
 )
@@ -537,6 +538,7 @@ def generate_production_spec(
             "cpu_only": True,
             "gpu_lock_required": False,
             "proc_root": "/proc",
+            "old_brute_handover": handover_contract(),
             "coexistence_probe": {
                 "min_progress_rows": DEFAULT_BLOCK_SIZE,
                 "max_load_per_cpu": 0.8,

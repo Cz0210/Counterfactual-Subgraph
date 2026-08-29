@@ -57,6 +57,22 @@
   deploy one fresh T4 attempt on physical GPU 1. Runtime PASS remains unclaimed
   until the independent verifier publishes it.
 
+## 2026-08-29: Restore the dedicated AIDS old-brute handover gate
+
+- [x] Preserve the tree-only lineage integration evidence and explicitly port
+  only the reviewed 4b handover prerequisites into the current controller.
+- [x] Bind protected PID `273939`, start ticks `687141119`, and raw cmdline
+  SHA-256 in the generated and validated resource contract; require that exact
+  generation and command to be live.
+- [x] Require a second controller generation to reattach the exact worker and
+  reopen a positive hash-chained new-route checkpoint before handover can pass.
+- [x] Hash-bind the continuous-progress monitor and require fresh observations,
+  at least ten minutes of progress, positive throughput, and ETA at most 48h.
+- [x] Keep caller-supplied relative speedup rejected and every signal API
+  outside this read-only certificate.
+- [ ] Obtain independent detached review before deployment or handover. Until
+  then the protected old process receives no signal.
+
 ## 2026-08-29: Align AIDS adoption with the pinned real manifest shape
 
 - [x] Preserve the production manifest SHA and require the real absent

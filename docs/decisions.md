@@ -200,6 +200,47 @@ that restores HUP/INT/TERM defaults is valid.
 - A fresh reviewed commit, detached AutoDL worktree, controller UUID, log, and
   output root remain required before another launch.
 
+## [2026-08-29] Restore the dedicated AIDS old-brute handover certificate
+
+### Motivation
+
+The reviewed private commit `4b7fcde15a7b2dd4ba0249651cec18bffaddec72`
+contains a fail-closed, read-only old-route handover gate, but the reviewed
+tree-preserving lineage integration intentionally kept the current successor
+tree. Object-graph reachability therefore did not deploy that gate. The
+protected brute worker remains the exact PID generation `273939/687141119` and
+must receive no signal merely because the private commits are ancestors.
+
+### Decision
+
+Port only the handover certificate, authenticated exact-checkpoint reopen,
+second-controller reattachment receipt, and continuous-progress monitor needed
+by the current twelve-worker controller. Freeze the old process identity in the
+generated and validated production resource contract, including its raw
+cmdline SHA-256. Eligibility requires the exact old generation and command to
+remain live, reviewed release ancestry and a clean
+execution tree, typed adoption/source closure, a new-route hash-chained durable
+checkpoint observed across a real controller restart, at least ten continuous
+minutes of fresh exact progress, positive throughput, and a conservative new
+route ETA no greater than 48 hours.
+
+The original contract's optional 100x branch remains fail closed here: this
+controller does not accept caller-supplied old-route throughput. A future
+separately reviewed stop executor may provide exact-generation live speedup
+evidence when the conservative ETA branch is unavailable. This controller only
+reports `eligible_to_request_old_brute_stop`; it never calls a signal API.
+
+### Consequences
+
+- PID reuse, exec/cmdline replacement, a dead old generation, checkpoint
+  tamper, a same-controller
+  pseudo-resume, stale/discontinuous progress, nonpositive throughput, or an
+  excessive ETA all keep the certificate `NOT_ELIGIBLE`.
+- A later executor must reopen the exact old PID/start-tick generation and own
+  the one graceful `SIGTERM`; no general kill or `SIGKILL` is authorized.
+- This successor is code, tests, and documentation only. It does not deploy,
+  launch science, start handover, or signal the protected process.
+
 ## [2026-08-29] Match AIDS adoption structure to the pinned real manifest
 
 ### Motivation
