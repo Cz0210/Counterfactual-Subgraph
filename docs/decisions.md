@@ -1,5 +1,37 @@
 # Decisions Log
 
+## [2026-08-29] Treat the AIDS pair-semantics bitmap as a contained artifact tree
+
+### Motivation
+
+The pinned production pair-semantics contract lives at
+`pair_semantics_science/close_pair_contract.json` and canonically references
+its scan artifact at
+`pair_semantics_science/distance_scan/close_pair_bitmap.greed.uint8.npy`.
+The adoption validator incorrectly required the bitmap and contract to share
+one immediate parent, so a complete real authority scan failed after hashing
+the frozen 91,916,686-row store even though the bitmap is a physical descendant
+of the contract-owned root.
+
+### Decision
+
+Require the bitmap to be one regular, no-symlink physical path beneath the
+pair-semantics contract parent rather than requiring the same immediate parent.
+Apply the same containment check during the pre-write source-overlap discovery
+and the full authority scan. Keep the existing content hash, link-count,
+pre/post stat, held-directory, terminal-reopen, and receipt-stat bindings.
+
+### Consequences
+
+- The canonical `distance_scan/` layout can be adopted without changing or
+  regenerating any frozen scientific artifact.
+- Siblings, symlinked files or directories, lexical `..` aliases, hardlink
+  aliases, and inode/content replacement remain rejected.
+- This changes only authority-path validation; pair/vector bytes, exact DBSCAN
+  science, release pins, worker count, handover gates, and signal policy are
+  unchanged. Deployment still requires a newly reviewed immutable execution
+  commit and a new adoption child.
+
 ## [2026-08-29] Remove ETA and relative-speedup gates from AIDS old-brute handover
 
 ### Motivation

@@ -2069,11 +2069,8 @@ def _validate_close_authority(
     pair_semantics_bitmap_path = _physical_file(
         str(pair_contract.get("close_bitmap") or ""),
         label="pair-semantics close bitmap",
+        beneath=pair_contract_path.parent,
     )
-    if pair_semantics_bitmap_path.parent != pair_contract_path.parent:
-        raise FailedSelectionAdoptionError(
-            "pair-semantics bitmap escaped its authority root"
-        )
     tracker.add(
         pair_semantics_bitmap_path,
         role="pair-semantics close bitmap",
@@ -3288,8 +3285,13 @@ def _discover_source_locations(profile: FailedSelectionAuthority) -> tuple[Path,
         paths.final_state,
     }
 
-    def add_file(path: Path, *, label: str) -> Path:
-        physical = _physical_file(path, label=label)
+    def add_file(
+        path: Path,
+        *,
+        label: str,
+        beneath: Path | None = None,
+    ) -> Path:
+        physical = _physical_file(path, label=label, beneath=beneath)
         locations.add(physical)
         locations.add(_physical_dir(physical.parent, label=f"parent of {label}"))
         return physical
@@ -3335,6 +3337,7 @@ def _discover_source_locations(profile: FailedSelectionAuthority) -> tuple[Path,
     add_file(
         Path(str(pair_contract.get("close_bitmap") or "")),
         label="overlap-gate pair-semantics bitmap",
+        beneath=pair_contract_path.parent,
     )
     pair_manifest_path = add_file(
         Path(str(pair_contract.get("source_pair_store_manifest") or "")),

@@ -28,6 +28,17 @@
   managed worker plus independent verifier complete; never reuse the failed
   stage/final/controller namespaces.
 
+## 2026-08-29: Accept the canonical nested AIDS pair-semantics bitmap
+
+- [x] Reproduce the production adoption failure against the pinned
+  `pair_semantics_science/distance_scan/close_pair_bitmap.greed.uint8.npy`.
+- [x] Replace the incorrect same-immediate-parent rule with physical descendant
+  containment under the pair-semantics contract root.
+- [x] Keep sibling, symlink, directory-alias, lexical `..`, hash drift, inode
+  replacement, and source-directory replacement fail closed.
+- [ ] Integrate the independently reviewed fix into a new immutable execution
+  worktree before retrying adoption; do not reuse an empty failed attempt.
+
 ## 2026-08-29: Align AIDS exact handover with latest authorization
 
 - [x] Make ETA<=48h and relative-speedup evidence diagnostic rather than

@@ -228,6 +228,7 @@ class AuthorityFixture:
     final_root: Path
     vector_path: Path
     pair_contract: Path
+    pair_semantics_bitmap: Path
     selection: Path
 
 
@@ -284,7 +285,7 @@ def _build_fixture(tmp_path: Path) -> AuthorityFixture:
     )
     bitmap_path = _npy(close_root / "close_bitmap.npy", np.ones(6, dtype=np.bool_))
     pair_semantics_bitmap = _npy(
-        pair_semantics_root / "close_bitmap.npy",
+        pair_semantics_root / "distance_scan" / "close_bitmap.npy",
         np.ones(6, dtype=np.bool_),
     )
     pair_contract = _json(
@@ -754,6 +755,7 @@ def _build_fixture(tmp_path: Path) -> AuthorityFixture:
         final_root=final_root,
         vector_path=vector_path,
         pair_contract=pair_contract,
+        pair_semantics_bitmap=pair_semantics_bitmap,
         selection=selection,
     )
 
@@ -763,6 +765,30 @@ def _adopt(case: AuthorityFixture) -> dict:
         output_dir=case.output,
         profile=case.profile,
         proc_root=case.proc,
+    )
+
+
+def _rebind_pair_semantics_bitmap(
+    case: AuthorityFixture,
+    bitmap_reference: Path,
+) -> None:
+    pair_contract = json.loads(case.pair_contract.read_text(encoding="utf-8"))
+    pair_contract["close_bitmap"] = str(bitmap_reference)
+    pair_contract["close_bitmap_hash"] = _sha(bitmap_reference)
+    _json(case.pair_contract, pair_contract)
+
+    close_manifest_path = case.close_root / "close_pair_contract.json"
+    close_manifest = json.loads(close_manifest_path.read_text(encoding="utf-8"))
+    identity = close_manifest["scientific_identity"]
+    identity["pair_semantics_contract_sha256"] = _sha(case.pair_contract)
+    identity["pair_semantics_contract_stat_identity"] = _file_stat(
+        case.pair_contract
+    )
+    close_manifest["scientific_identity_sha256"] = _stable(identity)
+    _json(close_manifest_path, close_manifest)
+    case.profile = replace(
+        case.profile,
+        close_manifest_sha256=_sha(close_manifest_path),
     )
 
 
@@ -800,6 +826,7 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
     tmp_path: Path,
 ) -> None:
     case = _build_fixture(tmp_path)
+    assert case.pair_semantics_bitmap.parent.parent == case.pair_contract.parent
     first = _adopt(case)
     second = _adopt(case)
     assert first == second
@@ -842,6 +869,74 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
         case.output / "failed_selection_adoption_receipt.json"
     )
     assert not (case.output / "PASS").exists()
+
+
+@pytest.mark.parametrize(
+    ("variant", "message"),
+    [
+        ("sibling", "escaped its authority root"),
+        ("file_symlink", "symlink component"),
+        ("directory_alias", "symlink component"),
+        ("dotdot", "not one physical path"),
+    ],
+)
+def test_pair_semantics_bitmap_rejects_nonphysical_descendant_references(
+    tmp_path: Path,
+    variant: str,
+    message: str,
+) -> None:
+    case = _build_fixture(tmp_path)
+    contract_root = case.pair_contract.parent
+    if variant == "sibling":
+        reference = contract_root.parent / "sibling-close-bitmap.npy"
+        shutil.copy2(case.pair_semantics_bitmap, reference)
+    elif variant == "file_symlink":
+        reference = contract_root / "close-bitmap-link.npy"
+        reference.symlink_to(case.pair_semantics_bitmap)
+    elif variant == "directory_alias":
+        alias = contract_root / "distance-scan-alias"
+        alias.symlink_to(case.pair_semantics_bitmap.parent, target_is_directory=True)
+        reference = alias / case.pair_semantics_bitmap.name
+    elif variant == "dotdot":
+        reference = (
+            case.pair_semantics_bitmap.parent
+            / ".."
+            / case.pair_semantics_bitmap.parent.name
+            / case.pair_semantics_bitmap.name
+        )
+    else:  # pragma: no cover - parameter list is closed above.
+        raise AssertionError(variant)
+    _rebind_pair_semantics_bitmap(case, reference)
+
+    with pytest.raises(FailedSelectionAdoptionError, match=message):
+        _adopt(case)
+    assert not case.output.exists()
+    lock = case.output.parent / (
+        f".{case.output.name}.failed-selection-adoption.lock"
+    )
+    assert not lock.exists()
+
+
+def test_nested_pair_semantics_bitmap_replacement_is_rejected_on_reopen(
+    tmp_path: Path,
+) -> None:
+    case = _build_fixture(tmp_path)
+    receipt = _adopt(case)
+    expected_sha256 = _sha(case.pair_semantics_bitmap)
+    payload = case.pair_semantics_bitmap.read_bytes()
+    original_inode = case.pair_semantics_bitmap.stat().st_ino
+    case.pair_semantics_bitmap.unlink()
+    case.pair_semantics_bitmap.write_bytes(payload)
+    assert case.pair_semantics_bitmap.stat().st_ino != original_inode
+    assert _sha(case.pair_semantics_bitmap) == expected_sha256
+
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="terminal adoption evidence changed: source_artifacts",
+    ):
+        _adopt(case)
+    assert receipt["status"] == "RECOVERY_ONLY_READY"
+    assert not (case.output / READY_NAME).exists()
 
 
 def test_source_manifest_requires_real_absent_taste_flag_even_if_rehashed(
