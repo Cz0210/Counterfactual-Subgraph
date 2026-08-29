@@ -1214,6 +1214,108 @@ def test_anchor_shortcut_is_elementwise_sklearn_exact_with_boundary_and_duplicat
     assert reopened.neighbor_counts_path is None
 
 
+def test_anchor_shortcut_rechecks_identity_bound_self_after_gram_roundoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    num_samples = 2_000
+    anchor_count = 273
+    values = np.zeros((num_samples, 64), dtype=np.float32)
+    vectors = _save(tmp_path / "vectors.npy", values)
+    anchor_indices = external._deterministic_anchor_indices(
+        num_samples, anchor_count
+    )
+    injected_squared = np.linspace(2.0**-63, 2.0**-61, 113)
+    real_matmul = np.matmul
+    observed: dict[str, np.ndarray] = {}
+
+    def inject_production_self_roundoff(left, right, *args, **kwargs):
+        result = real_matmul(left, right, *args, **kwargs)
+        if left.shape == (num_samples, 64) and right.shape == (64, anchor_count):
+            for column, sample in enumerate(anchor_indices[:113].tolist()):
+                result[int(sample), column] -= injected_squared[column] / 2.0
+            block_squared = np.einsum("ij,ij->i", left, left)
+            anchor_squared = np.einsum("ij,ij->i", right.T, right.T)
+            observed["gram_squared"] = np.asarray(
+                [
+                    block_squared[int(sample)]
+                    + anchor_squared[column]
+                    - 2.0 * result[int(sample), column]
+                    for column, sample in enumerate(anchor_indices[:113].tolist())
+                ],
+                dtype=np.float64,
+            )
+            observed["direct"] = np.asarray(
+                [
+                    np.linalg.norm(left[int(sample)] - right[:, column])
+                    for column, sample in enumerate(anchor_indices[:113].tolist())
+                ],
+                dtype=np.float64,
+            )
+        return result
+
+    monkeypatch.setattr(external.np, "matmul", inject_production_self_roundoff)
+    contract = external.ExternalDBSCANContract(
+        eps=0.02,
+        min_samples=3,
+        query_block_size=2_000,
+        checkpoint_interval_blocks=1,
+        max_rss_bytes=external._rss_bytes() + 512 * 1024**2,
+        expected_sklearn_version=sklearn.__version__,
+        shortcut_mode=external.ALL_CORE_ONE_COMPONENT_SHORTCUT,
+        shortcut_anchor_count=anchor_count,
+        shortcut_query_block_size=num_samples,
+        exact_fallback_max_samples=num_samples,
+    )
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "identity-self-roundoff",
+        contract=contract,
+    )
+
+    assert observed["gram_squared"].min() == pytest.approx(2.0**-63)
+    assert observed["gram_squared"].max() == pytest.approx(2.0**-61)
+    assert np.array_equal(observed["direct"], np.zeros(113, dtype=np.float64))
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    boundary = json.loads(
+        Path(manifest["boundary_certificate_path"]).read_text(encoding="utf-8")
+    )
+    assert boundary["eps"] == 0.02
+    assert boundary["near_boundary_direct_norm_recompute_count"] == 0
+    assert (
+        boundary["identity_bound_self_direct_norm_recompute_count"]
+        == anchor_count
+    )
+
+
+def test_identity_self_recheck_does_not_accept_nonself_membership_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    real_matmul = np.matmul
+    injected = False
+
+    def inject_nonself_drift(left, right, *args, **kwargs):
+        nonlocal injected
+        result = real_matmul(left, right, *args, **kwargs)
+        if not injected and left.shape == (3, 64) and right.shape == (64, 4):
+            result[0, 1] = -0.500001
+            injected = True
+        return result
+
+    monkeypatch.setattr(external.np, "matmul", inject_nonself_drift)
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="sklearn/float64 anchor counts differ",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=tmp_path / "nonself-drift",
+            contract=_shortcut_contract(),
+        )
+    assert injected is True
+
+
 def test_inconclusive_anchor_witness_falls_back_only_below_explicit_limit(
     tmp_path: Path,
 ) -> None:
@@ -1576,6 +1678,53 @@ def test_anchor_shortcut_terminal_rejects_tampered_split_certificate(
     ):
         external.fit_external_memory_dbscan(
             vectors_path=vectors, work_dir=root, contract=contract, resume=True
+        )
+
+
+def test_anchor_shortcut_resume_rejects_resigned_self_recheck_count(
+    tmp_path: Path,
+) -> None:
+    values = _all_core_values()
+    vectors = _save(tmp_path / "vectors.npy", values)
+    contract = _shortcut_contract()
+    root = tmp_path / "resigned-self-recheck-count"
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors, work_dir=root, contract=contract
+    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    proof_path = Path(manifest["shortcut_proof_path"])
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    boundary_path = Path(manifest["boundary_certificate_path"])
+    boundary = json.loads(boundary_path.read_text(encoding="utf-8"))
+    boundary["identity_bound_self_direct_norm_recompute_count"] = (
+        int(proof["anchor_count"]) - 1
+    )
+    boundary_path.write_text(
+        json.dumps(boundary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    boundary_sha = external._sha256_file(boundary_path)
+    proof["boundary_certificate_sha256"] = boundary_sha
+    proof_path.write_text(
+        json.dumps(proof, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest["boundary_certificate_sha256"] = boundary_sha
+    manifest["shortcut_proof_sha256"] = external._sha256_file(proof_path)
+    result.manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        external.ExternalMemoryDBSCANError,
+        match="terminal boundary certificate is incomplete",
+    ):
+        external.fit_external_memory_dbscan(
+            vectors_path=vectors,
+            work_dir=root,
+            contract=contract,
+            resume=True,
         )
 
 

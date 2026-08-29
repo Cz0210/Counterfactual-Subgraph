@@ -1,5 +1,46 @@
 # Decisions Log
 
+## [2026-08-30] Directly recheck identity-bound AIDS DBSCAN self-neighbors
+
+### Motivation
+
+The production-shaped sparse subset boundary pass uses the exact Gram identity
+to evaluate 2,000 float64 vectors against 273 anchors.  For 113 anchor rows,
+different reduction rounding left positive self squared distances from
+`2^-63` through `2^-61` (direct distances about `3.29e-10` through
+`6.59e-10`).  The direct norm between the sample row and its identity-bound
+anchor row was exactly zero in every case.  Because these values are near zero
+rather than near `eps=0.02`, the existing epsilon-boundary direct recheck did
+not cover them and the exact self-neighbor assertion failed closed.
+
+### Decision
+
+Keep Euclidean `eps=0.02`, inclusive `distance <= eps`, self-neighbor, strict
+centroid-radius, coverage, and greedy semantics unchanged.  In the terminal
+float64 boundary pass, identify self only through the frozen global sample
+index to anchor-column mapping, recompute that one pair by direct norm, require
+the result to be finite and exactly zero, and only then remove it from the
+distinct-other-anchor count.  Record the number of direct identity rechecks
+and require it to equal the proof's authenticated anchor count on reopen.
+All non-self pairs continue to use the existing Gram result and only the
+existing near-epsilon direct-norm recheck.
+
+### Consequences
+
+- Exact mathematical self membership is restored without a tolerance,
+  approximation, epsilon widening, or forced diagonal assignment.
+- A source/anchor identity mismatch still fails; non-self Gram or epsilon
+  membership drift remains fail closed.
+- Existing radius, centroid, coverage, partition, and official-greedy science
+  is unchanged.  Deployment requires a new immutable checkout and fresh AIDS
+  attempt; no protected process signal is authorized here.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Separate Taste T9 checkpoint authority from model loading
 
 ### Motivation

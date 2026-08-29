@@ -1153,6 +1153,7 @@ def _write_shortcut_split_certificates(
     anchor_squared = np.einsum("ij,ij->i", anchors, anchors)
     exact_boundary_edge_count = 0
     near_boundary_recompute_count = 0
+    identity_bound_self_recompute_count = 0
     non_anchor_attachment_count = 0
     minimum_certifying_margin = float("inf")
     maximum_certifying_distance = 0.0
@@ -1178,6 +1179,25 @@ def _write_shortcut_split_certificates(
                     np.linalg.norm(block[int(row)] - anchors[int(column)])
                 )
             near_boundary_recompute_count += int(np.count_nonzero(near))
+        # The Gram identity ``||x||^2 + ||a||^2 - 2 x.a`` can leave a tiny
+        # positive residual for the exact same float64 vector because its
+        # reductions need not round identically.  These pairs are not near the
+        # epsilon boundary, so bind them by sample identity and recompute only
+        # their direct norm before enforcing/excluding the one self neighbor.
+        # Every non-self membership remains governed by the unchanged Gram +
+        # epsilon-boundary path below.
+        for sample, column in anchor_column_by_sample.items():
+            if offset <= sample < stop:
+                local = sample - offset
+                self_distance = float(
+                    np.linalg.norm(block[local] - anchors[column])
+                )
+                if not np.isfinite(self_distance) or self_distance != 0.0:
+                    raise ExternalMemoryDBSCANError(
+                        "float64 boundary pass lost an anchor self-neighbor"
+                    )
+                distances[local, column] = self_distance
+                identity_bound_self_recompute_count += 1
         within = distances <= eps
         for sample, column in anchor_column_by_sample.items():
             if offset <= sample < stop:
@@ -1228,6 +1248,11 @@ def _write_shortcut_split_certificates(
             phase="shortcut_float64_boundary_revalidation",
         )
     del lower
+    if identity_bound_self_recompute_count != anchor_count:
+        raise ExternalMemoryDBSCANError(
+            "float64 boundary pass did not recheck every identity-bound "
+            "anchor self-neighbor"
+        )
 
     expected_edges = {
         (int(source), int(target)) for source, target in anchor_edges.tolist()
@@ -1271,6 +1296,9 @@ def _write_shortcut_split_certificates(
         "sklearn_anchor_count_witness_exactly_matched": True,
         "near_boundary_recompute_guard": comparison_guard,
         "near_boundary_direct_norm_recompute_count": near_boundary_recompute_count,
+        "identity_bound_self_direct_norm_recompute_count": (
+            identity_bound_self_recompute_count
+        ),
         "minimum_margin_to_eps_among_certifying_edges": (
             None
             if needed_other_neighbors == 0
@@ -3227,6 +3255,12 @@ def _validate_split_shortcut_certificates(
         or boundary.get("float64_revalidation_complete") is not True
         or int(boundary.get("float64_revalidated_row_count", -1)) != n_samples
         or boundary.get("sklearn_anchor_count_witness_exactly_matched") is not True
+        or int(
+            boundary.get(
+                "identity_bound_self_direct_norm_recompute_count", -1
+            )
+        )
+        != int(proof.get("anchor_count", -2))
         or int(boundary.get("uncertain_edges_accepted", -1)) != 0
     ):
         raise ExternalMemoryDBSCANError("terminal boundary certificate is incomplete")

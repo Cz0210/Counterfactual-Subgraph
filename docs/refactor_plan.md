@@ -1,5 +1,20 @@
 # Refactor Plan
 
+## 2026-08-30: Recheck identity-bound DBSCAN anchor self-neighbors directly
+
+- [x] Reproduce the production-shaped `2000 x 64` / 273-anchor Gram path in
+  which 113 identity self pairs retain positive squared residuals between
+  `2^-63` and `2^-61` although their direct float64 norms are exactly zero.
+- [x] Direct-norm recheck every sample-index-bound anchor self pair before
+  enforcing and excluding self, without widening `eps=0.02` or changing any
+  non-self membership comparison.
+- [x] Bind the exact self-recheck count to the proof anchor count on terminal
+  reopen, and retain fail-closed rejection of non-self drift and re-signed
+  count tampering.
+- [ ] Integrate and deploy only through a fresh immutable AutoDL checkout and
+  fresh AIDS exact-recovery attempt; never reuse the failed output namespace
+  or signal the protected old brute process before every handover gate passes.
+
 ## 2026-08-29: Separate Taste T9 checkpoint authority from model-load payloads
 
 - [x] Keep `config.yaml` in the exact descriptor-held T3 checkpoint authority.
