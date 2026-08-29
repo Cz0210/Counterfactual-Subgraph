@@ -2663,6 +2663,27 @@ Mutagenicity roadmaps.
   candidate freeze and downstream calibration/test/export, then atomically
   refresh the matrix. Never rerun the completed 50k generation.
 
+## 2026-08-30: BACE ComRecGC committed-checkpoint convergence audit
+
+- [x] Add one pure evaluation library for the preregistered 50k/10k/2.5k,
+  two-window convergence gate; do not add another controller or CLI.
+- [x] Bind the caller-frozen 360-parent and resolved-config hashes, the latest
+  three 500-step committed checkpoint generations, and paired local/mirror or
+  retention receipts without deserializing generation state.
+- [x] Treat a trace part as CLOSED only after its immediate numeric successor
+  exists; validate complete moves as either one teleport or five exact,
+  non-null, frozen-parent selected transitions with heads 0--4.
+- [x] Reconstruct candidate frequency with `Counter` and deterministic
+  `(-frequency, SHA-256)` ranking, then compute Top100/Top20 Jaccard, the
+  historical direct-Pearson rank metric with missing rank 101, and Top20
+  distinct-parent coverage over 360.
+- [x] Write only a caller-provided fresh audit root, issue a convergence receipt
+  only after both windows pass, and expose no process-signal or running-root
+  mutation surface.
+- [ ] Invoke the library from the minimal continuation sidecar at committed
+  step 17,500 and perform any graceful stop only in the separately authorized,
+  exact-PID controller boundary.
+
 ## 2026-08-29: AIDS old-brute handover durable-evidence successor
 
 - [x] Remove mutable `resume_smoke` entirely and remove

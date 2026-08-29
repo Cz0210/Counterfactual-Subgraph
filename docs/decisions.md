@@ -12926,3 +12926,58 @@ termination operation.
 Accepted
 
 ---
+
+## [2026-08-30] Audit BACE ComRecGC convergence from committed trace evidence only
+
+### Motivation
+
+The protected BACE ComRecGC trajectory is expensive, but a convergence check
+must not deserialize its multi-gigabyte checkpoint state, mutate its output,
+or infer stability from a file that the live writer may still be publishing.
+The preregistered gate also requires deterministic candidate ranks and two
+consecutive windows rather than a single favorable snapshot.
+
+### Decision
+
+Add `src/eval/bace_comrecgc_convergence.py` as a pure, importable audit library.
+The caller must freeze the exact resolved-config and ordered 360-parent hashes
+and request a 2,500-step evaluation boundary. The audit accepts the three
+required 500-step checkpoint generations only through paired local/mirror
+completion evidence or paired retention histories. It validates declared
+payload sizes but never opens or rehashes `generation_state.pt` or the SQLite
+graph store.
+
+A selected-action trace part is CLOSED only when its immediate numeric
+successor exists. Every covered move is exactly one headless teleport or five
+selected transitions with heads 0 through 4. Selected rows require exact action
+resolution, a nonempty recorded action, a frozen parent, and lowercase source
+and target graph SHA-256 identities. Candidate frequency is reconstructed with
+`Counter` and ranked by `(-frequency, SHA-256)`. The historical
+`rank_spearman` field remains the direct Pearson correlation of deterministic
+Top100-union ranks with missing rank 101; it does not call SciPy or rerank ties.
+Coverage is the distinct frozen parents attached to the current Top20 divided
+by 360.
+
+The library writes `convergence.json` only below a caller-provided fresh audit
+root. It writes `CONVERGED_EARLY_STOP.json` only when both latest windows meet
+all preregistered thresholds. It has no signal API and cannot modify the live
+generation, trace, checkpoint, controller, or test artifacts.
+
+### Consequences
+
+- A last trace part without a successor is never consumed, even when it already
+  contains 512 parseable rows.
+- Pruned checkpoint generations remain usable only through matching paired
+  retention receipts; at least one of the three generations must still expose
+  a live provenance manifest.
+- A convergence receipt authorizes only the caller's separately reviewed
+  exact-PID graceful-stop boundary; the evaluation library itself sends no
+  signal.
+- Test data, state tensors, RNG state, and the authoritative graph store are
+  absent from the convergence decision.
+
+### Status
+
+Accepted
+
+---
