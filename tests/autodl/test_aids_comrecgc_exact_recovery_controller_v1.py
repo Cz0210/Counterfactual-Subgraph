@@ -1894,6 +1894,19 @@ def test_controller_stage_gates_are_typed_restartable_and_final_is_ordinary(
 
     monkeypatch.setattr(recovery, "_run_or_attach_stage", fake_run)
     monkeypatch.setattr(recovery, "validate_stage_terminal", fake_validate)
+    monkeypatch.setattr(
+        recovery,
+        "_ensure_current_controller_generation",
+        lambda **kwargs: {
+            "payload": {"generation": 0},
+            "artifact": {"path": str(Path(manifest["controller_root"]) / "fixture")},
+        },
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_publish_resume_receipt_if_reattached",
+        lambda **kwargs: None,
+    )
     terminal = recovery.run_controller(path, resume=False, poll_seconds=0.1)
     assert observed == list(recovery.STAGE_ORDER)
     assert terminal["status"] == "PASS"
@@ -2010,86 +2023,6 @@ def test_source_authority_rejects_failed_gate_relabelled_pass(tmp_path: Path) ->
         recovery.build_controller_payload(spec_path)
 
 
-def test_resume_smoke_requires_a_second_controller_and_live_exact_reattachment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "controller"
-    (root / "gates").mkdir(parents=True)
-    (root / "logs").mkdir()
-    (root / ".controller.lock").write_bytes(b"")
-    checkpoint_path = tmp_path / "exact/dbscan/checkpoint.json"
-    exact_stage = {
-        "stage_id": recovery.EXACT_STAGE,
-        "progress_checkpoint_path": str(checkpoint_path),
-    }
-    vector_sha = "a" * 64
-    manifest = {
-        "manifest_sha256": "b" * 64,
-        "controller_root": str(root),
-        "resources": {"proc_root": "/proc"},
-        "source_authority": {"source_vectors_sha256": vector_sha},
-        "stages": [exact_stage],
-    }
-    held = SimpleNamespace(identity=recovery._current_lock_identity(root))
-    state = {
-        "controller_process": None,
-        "worker": {
-            "stage_id": recovery.EXACT_STAGE,
-            "pid": 300,
-            "start_ticks": 33,
-            "argv_sha256": "c" * 64,
-        },
-        "resume_smoke": None,
-    }
-    current = {"pid": 200, "start_ticks": 22, "argv_sha256": "d" * 64}
-    assert recovery._record_resume_smoke_if_reattached(
-        manifest=manifest,
-        root=root,
-        state=state,
-        current_controller=current,
-        held=held,
-    ) is None
-    assert state["resume_smoke"] is None
-
-    state["controller_process"] = {
-        "pid": 100,
-        "start_ticks": 11,
-        "argv_sha256": "e" * 64,
-    }
-    monkeypatch.setattr(recovery, "_pid_alive", lambda *args, **kwargs: False)
-    monkeypatch.setattr(
-        recovery,
-        "_validated_bound_worker_pid_for_signal",
-        lambda **kwargs: 300,
-    )
-    monkeypatch.setattr(
-        recovery,
-        "_validated_exact_checkpoint_snapshot",
-        lambda stage: {
-            "path": str(checkpoint_path),
-            "sha256_at_observation": "f" * 64,
-            "checkpoint_payload_sha256": "0" * 64,
-            "identity_sha256": "1" * 64,
-            "progress_ledgers_sha256": "2" * 64,
-            "progress_rows": recovery.DEFAULT_BLOCK_SIZE,
-            "vectors_sha256": vector_sha,
-        },
-    )
-    receipt = recovery._record_resume_smoke_if_reattached(
-        manifest=manifest,
-        root=root,
-        state=state,
-        current_controller=current,
-        held=held,
-    )
-    assert receipt is not None
-    assert receipt["status"] == "PASS"
-    assert receipt["science_worker_reattached"] is True
-    assert receipt["signals_sent"] == []
-    assert receipt["previous_controller"]["pid"] == 100
-    assert receipt["resumed_controller"]["pid"] == 200
-
-
 def test_handover_checkpoint_reopens_authenticated_hash_chain(tmp_path: Path) -> None:
     from src.baselines.comrecgc import external_memory_dbscan as dbscan
 
@@ -2178,6 +2111,195 @@ def test_old_brute_live_check_reopens_only_the_frozen_generation(
     assert recovery._old_brute_generation_alive(manifest) is False
 
 
+def test_handover_generation_chain_rejects_resign_copy_aba_and_hardlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _path, built = _built_manifest(tmp_path)
+    manifest = {**built, "manifest_sha256": "c" * 64}
+    root = recovery._claim_controller_root(manifest, resume=False)
+    ticks = 11
+
+    def process_observation(pid: int, start: int, *, proc_root: Path) -> dict[str, object]:
+        del proc_root
+        return {
+            "pid": pid,
+            "start_ticks": start,
+            "cmdline_sha256": f"{start:064x}",
+            "argv_sha256": f"{start + 1:064x}",
+        }
+
+    monkeypatch.setattr(
+        recovery,
+        "_read_proc_start_ticks",
+        lambda pid, **kwargs: ticks,
+    )
+    monkeypatch.setattr(recovery, "_live_process_observation", process_observation)
+    monkeypatch.setattr(recovery, "_pid_alive", lambda *args, **kwargs: False)
+    first = recovery._ensure_current_controller_generation(
+        manifest=manifest,
+        current_controller={"pid": os.getpid(), "start_ticks": ticks},
+    )
+    ticks = 22
+    second = recovery._ensure_current_controller_generation(
+        manifest=manifest,
+        current_controller={"pid": os.getpid(), "start_ticks": ticks},
+    )
+    assert second["payload"]["previous_generation_artifact"] == first["artifact"]
+
+    first_path = Path(first["artifact"]["path"])
+    external = tmp_path / "hostile-hardlink.json"
+    os.link(first_path, external)
+    with pytest.raises(recovery.RecoveryControllerError, match="stat closure"):
+        recovery._load_controller_generation_chain(manifest)
+    external.unlink()
+    # Removing the link restores nlink=1 but changes ctime: the successor's
+    # full artifact binding still detects this ABA transition.
+    with pytest.raises(
+        recovery.RecoveryControllerError, match="generation closure changed"
+    ):
+        recovery._load_controller_generation_chain(manifest)
+
+    # Restore neither file nor metadata: a delete/copy/re-sign operation is
+    # equally unable to reproduce inode/ctime already sealed by generation 1.
+    encoded = first_path.read_bytes()
+    first_path.unlink()
+    first_path.write_bytes(encoded)
+    first_path.chmod(0o600)
+    with pytest.raises(
+        recovery.RecoveryControllerError, match="generation closure changed"
+    ):
+        recovery._load_controller_generation_chain(manifest)
+
+
+def test_handover_timestamp_resign_and_second_publication_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _path, built = _built_manifest(tmp_path)
+    manifest = {**built, "manifest_sha256": "d" * 64}
+    root = recovery._claim_controller_root(manifest, resume=False)
+    monkeypatch.setattr(
+        recovery,
+        "_read_proc_start_ticks",
+        lambda pid, **kwargs: 44,
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_live_process_observation",
+        lambda pid, start, **kwargs: {
+            "pid": pid,
+            "start_ticks": start,
+            "cmdline_sha256": "1" * 64,
+            "argv_sha256": "2" * 64,
+        },
+    )
+    row = recovery._ensure_current_controller_generation(
+        manifest=manifest,
+        current_controller={"pid": os.getpid(), "start_ticks": 44},
+    )
+    path = Path(row["artifact"]["path"])
+    with pytest.raises(recovery.RecoveryControllerError, match="already exists"):
+        recovery._publish_handover_artifact(manifest, path, row["payload"])
+
+    resigned = json.loads(path.read_text(encoding="utf-8"))
+    resigned["observed_epoch"] -= 601.0
+    projected = dict(resigned)
+    projected.pop("receipt_sha256")
+    resigned["receipt_sha256"] = recovery.stable_json_sha256(projected)
+    path.unlink()
+    _write_json(path, resigned)
+    path.chmod(0o600)
+    with pytest.raises(recovery.RecoveryControllerError, match="durable ctime"):
+        recovery._load_controller_generation_chain(manifest)
+
+
+def test_durable_handover_verifier_uses_ledger_ctime_not_payload_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = {
+        "pid": 10,
+        "start_ticks": 20,
+        "cmdline_sha256": "1" * 64,
+        "argv_sha256": "2" * 64,
+    }
+    worker = {
+        "stage_id": recovery.EXACT_STAGE,
+        **process,
+        "worker_argv_sha256": "3" * 64,
+    }
+    generations = [
+        {"payload": {"generation": 0, "controller_process": {**process, "pid": 9}}, "artifact": {"path": "g0"}},
+        {"payload": {"generation": 1, "controller_process": process}, "artifact": {"path": "g1"}},
+    ]
+    checkpoint = {
+        "path": "/checkpoint.json",
+        "sha256_at_observation": "4" * 64,
+        "checkpoint_payload_sha256": "5" * 64,
+        "identity_sha256": "6" * 64,
+        "progress_ledgers_sha256": "7" * 64,
+        "progress_rows": 12_000_000,
+        "vectors_sha256": "8" * 64,
+        "stat_identity_at_observation": {"inode": 1},
+    }
+    resume = {
+        "payload": {
+            "reattached_exact_worker": worker,
+            "checkpoint_snapshot": {**checkpoint, "progress_rows": 1},
+        },
+        "artifact": {"path": "resume"},
+    }
+    now = 10_000.0
+    ages = (701.0, 601.0, 501.0, 401.0, 301.0, 201.0, 101.0, 1.0)
+    rows = [
+        {
+            "payload": {
+                "sequence": sequence,
+                # Deliberately hostile and unordered: verifier must ignore it.
+                "observed_epoch": now + 500_000.0 - sequence * 999_999.0,
+                "exact_worker_process": worker,
+                "checkpoint_snapshot": {
+                    **checkpoint,
+                    "progress_rows": 1_000_000 + sequence * 1_833_333,
+                },
+            },
+            "artifact": {
+                "stat_identity": {"ctime_ns": int((now - age) * 1e9)}
+            },
+        }
+        for sequence, age in enumerate(ages)
+    ]
+    rows[-1]["payload"]["checkpoint_snapshot"] = checkpoint
+    manifest = {
+        "controller_root": "/controller",
+        "stages": [
+            {
+                "stage_id": recovery.EXACT_STAGE,
+                "progress_checkpoint_path": "/checkpoint.json",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        recovery, "_load_controller_generation_chain", lambda value: generations
+    )
+    monkeypatch.setattr(recovery, "_validate_resume_receipt", lambda **kwargs: resume)
+    monkeypatch.setattr(
+        recovery, "_load_progress_observation_chain", lambda **kwargs: rows
+    )
+    monkeypatch.setattr(
+        recovery, "_reopen_receipted_exact_worker", lambda **kwargs: worker
+    )
+    monkeypatch.setattr(
+        recovery, "_exact_checkpoint_observation", lambda stage: checkpoint
+    )
+    monkeypatch.setattr(recovery.time, "time", lambda: now)
+    verified = recovery._verify_durable_handover_evidence(
+        manifest=manifest
+    )
+    assert verified["continuous_progress_seconds"] == pytest.approx(600.0)
+    assert verified["continuous_progress_pass"] is True
+    assert verified["progress_delta_rows"] == 10_999_998
+    assert verified["successor_seal_sequence"] == 7
+
+
 def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2260,22 +2382,33 @@ def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
     monkeypatch.setattr(
         recovery, "_release_commits_are_ancestors", lambda *args, **kwargs: True
     )
-    monkeypatch.setattr(
-        recovery, "_validate_resume_smoke", lambda manifest, value: dict(value)
-    )
     monkeypatch.setattr(recovery, "_old_brute_generation_alive", lambda manifest: True)
+    durable = {
+        "resume_smoke_pass": True,
+        "first_durable_checkpoint_pass": True,
+        "continuous_progress_pass": True,
+        "positive_throughput_pass": True,
+        "new_exact_worker_generation_bound_pass": True,
+        "progress_rows": progress,
+        "progress_delta_rows": progress,
+        "continuous_progress_seconds": 601.0,
+        "observation_age_seconds": 1.0,
+        "last_change_age_seconds": 1.0,
+        "throughput_rows_per_second": progress / 601.0,
+        "conservative_remaining_rows": (
+            recovery.HANDOVER_CONSERVATIVE_WORK_ROWS - progress
+        ),
+        "conservative_eta_seconds": (
+            recovery.HANDOVER_CONSERVATIVE_WORK_ROWS - progress
+        )
+        / (progress / 601.0),
+        "checkpoint_snapshot": {**resume_checkpoint, "progress_rows": progress},
+        "resume_smoke_receipt": {"checkpoint_snapshot": resume_checkpoint},
+    }
     monkeypatch.setattr(
         recovery,
-        "_validated_bound_worker_pid_for_signal",
-        lambda **kwargs: 300,
-    )
-    monkeypatch.setattr(
-        recovery,
-        "_validated_exact_checkpoint_snapshot",
-        lambda stage: {
-            **resume_checkpoint,
-            "progress_rows": progress,
-        },
+        "_verify_durable_handover_evidence",
+        lambda **kwargs: dict(durable),
     )
 
     handover = recovery._old_brute_handover_status(
@@ -2301,19 +2434,29 @@ def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
     assert handover["old_route_signal_sent"] is False
     assert signals == []
 
-    tampered_state = json.loads(json.dumps(state))
-    tampered_state["exact_progress_monitor"]["progress"] += 1
-    tampered = recovery._old_brute_handover_status(
-        manifest=manifest, result=result, state=tampered_state
+    # Public hashes over mutable state are no longer handover authority. Even
+    # a hostile re-sign cannot alter the independently reopened ledger result.
+    resigned_state = json.loads(json.dumps(state))
+    resigned_state["exact_progress_monitor"]["progress"] += 1
+    resigned_state["exact_progress_monitor"]["monitor_sha256"] = (
+        recovery.stable_json_sha256(
+            {
+                key: value
+                for key, value in resigned_state["exact_progress_monitor"].items()
+                if key != "monitor_sha256"
+            }
+        )
     )
-    assert tampered["eligible_to_request_old_brute_stop"] is False
-    assert "continuous_progress" in tampered["errors"]
+    tampered = recovery._old_brute_handover_status(
+        manifest=manifest, result=result, state=resigned_state
+    )
+    assert tampered["eligible_to_request_old_brute_stop"] is True
     assert signals == []
 
     monkeypatch.setattr(
         recovery,
-        "_validated_bound_worker_pid_for_signal",
-        lambda **kwargs: None,
+        "_verify_durable_handover_evidence",
+        lambda **kwargs: {**durable, "new_exact_worker_generation_bound_pass": False},
     )
     unbound_new_worker = recovery._old_brute_handover_status(
         manifest=manifest, result=result, state=state
@@ -2327,8 +2470,8 @@ def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
 
     monkeypatch.setattr(
         recovery,
-        "_validated_bound_worker_pid_for_signal",
-        lambda **kwargs: 300,
+        "_verify_durable_handover_evidence",
+        lambda **kwargs: dict(durable),
     )
     monkeypatch.setattr(recovery, "_old_brute_generation_alive", lambda manifest: False)
     refused = recovery._old_brute_handover_status(

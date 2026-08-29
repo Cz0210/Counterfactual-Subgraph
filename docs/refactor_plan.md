@@ -2506,3 +2506,22 @@ Mutagenicity roadmaps.
 - [ ] Deploy the reviewed successor in an immutable AutoDL worktree, rerun only
   candidate freeze and downstream calibration/test/export, then atomically
   refresh the matrix. Never rerun the completed 50k generation.
+
+## 2026-08-29: AIDS old-brute handover durable-evidence successor
+
+- [x] Remove mutable `resume_smoke` entirely and remove
+  `exact_progress_monitor` from handover authority while retaining only the
+  latter for ordinary route diagnostics.
+- [x] Add owner/root-claim-bound, 0600 O_EXCL controller-generation and resume
+  receipts with unpredictable attempt/nonce content and fsync closure.
+- [x] Add a bounded append-only exact-progress ledger whose records bind the
+  prior full artifact identity, live controller and worker procfs generation,
+  and authenticated DBSCAN checkpoint hashes.
+- [x] Add an independent read-only verifier with no mutable-state input; derive
+  cadence, ten-minute duration, freshness, throughput, and ETA from record
+  ctimes and checkpoint deltas only, and reserve the chain head as a successor
+  seal rather than decision-bearing progress.
+- [x] Cover public-hash re-signing, copy/inode ABA, hardlink ABA, duplicate
+  O_EXCL publication, and timestamp backdating in focused tests.
+- [ ] Obtain independent P0/P1 review of this successor commit before any
+  feature push, AutoDL deployment, handover execution, or old-process signal.

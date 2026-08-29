@@ -49,11 +49,21 @@ SUBSET_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_production_subset_stage_v1"
 FINAL_STAGE_RECEIPT_SCHEMA = "aids_comrecgc_recovered_standardized_freeze_v1"
 COEXISTENCE_SCHEMA = "aids_comrecgc_exact_recovery_coexistence_probe_v2"
 RESOURCE_SCHEMA = "aids_comrecgc_exact_recovery_resource_budget_v1"
-RESUME_SMOKE_SCHEMA = "aids_comrecgc_exact_recovery_resume_smoke_v1"
-HANDOVER_SCHEMA = "aids_comrecgc_old_brute_handover_eligibility_v1"
+HANDOVER_SCHEMA = "aids_comrecgc_old_brute_handover_eligibility_v2"
 EXACT_PROGRESS_MONITOR_SCHEMA = (
     "aids_comrecgc_exact_recovery_progress_monitor_v1"
 )
+HANDOVER_CONTROLLER_GENERATION_SCHEMA = (
+    "aids_comrecgc_handover_controller_generation_v2"
+)
+HANDOVER_RESUME_RECEIPT_SCHEMA = "aids_comrecgc_handover_resume_receipt_v2"
+HANDOVER_PROGRESS_OBSERVATION_SCHEMA = (
+    "aids_comrecgc_handover_progress_observation_v2"
+)
+HANDOVER_EVIDENCE_MAX_GENERATIONS = 32
+HANDOVER_EVIDENCE_MAX_OBSERVATIONS = 4096
+HANDOVER_EVIDENCE_MAX_BYTES = 256 * 1024
+HANDOVER_EVIDENCE_CLOCK_SKEW_SECONDS = 5.0
 EXACT_MONOTONIC_PROGRESS_FIELD = "component_recovery_monotonic_rows"
 CLOSURE_INVENTORY_SCHEMA = "aids_comrecgc_exact_recovery_stage_closure_inventory_v1"
 CLOSURE_REHASH_MAX_BYTES = 16 * 1024**2
@@ -748,6 +758,10 @@ def derive_output_budget(
         * STARTUP_BARRIER_RECORD_MAX_BYTES
         * STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
     )
+    handover_evidence_bound = (
+        2 * HANDOVER_EVIDENCE_MAX_GENERATIONS
+        + HANDOVER_EVIDENCE_MAX_OBSERVATIONS
+    ) * HANDOVER_EVIDENCE_MAX_BYTES
     fixed = {
         "standardized_exports_and_freeze": 1024**3,
         # One preserved interrupted attempt for each deterministic stage after
@@ -760,6 +774,7 @@ def derive_output_budget(
         "all_subset_attempts_dense_edge_upper_bound": subset_bound,
         "progress_ledger_upper_bound": checkpoint_bound,
         "startup_barrier_record_and_temp_upper_bound": startup_barrier_bound,
+        "durable_handover_evidence_upper_bound": handover_evidence_bound,
     }
     max_output = sum(arrays.values()) + sum(fixed.values())
     return {
@@ -777,6 +792,9 @@ def derive_output_budget(
         "startup_barrier_publication_file_multiplier": (
             STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER
         ),
+        "handover_evidence_max_generations": HANDOVER_EVIDENCE_MAX_GENERATIONS,
+        "handover_evidence_max_observations": HANDOVER_EVIDENCE_MAX_OBSERVATIONS,
+        "handover_evidence_max_bytes_each": HANDOVER_EVIDENCE_MAX_BYTES,
         "zero_copy_source_bytes_excluded": True,
         "source_pair_store_regenerated": False,
         "arrays": arrays,
@@ -791,7 +809,8 @@ def derive_output_budget(
             "sum(2*N*uint32 + N*int64 + 2*N*bool) + max(row_array) + "
             "8*5*S^2*uint64 + ceil(N/B)*16KiB + 1GiB final + "
             "4*1GiB interrupted-stage archives + 512MiB + "
-            "2*(4+5)*32*64KiB startup records"
+            "2*(4+5)*32*64KiB startup records + "
+            "(2*32+4096)*256KiB durable handover evidence"
         ),
     }
 
@@ -813,6 +832,20 @@ def handover_contract() -> dict[str, Any]:
         "maximum_new_route_eta_seconds": HANDOVER_MAX_ETA_SECONDS,
         "minimum_relative_speedup": HANDOVER_MIN_RELATIVE_SPEEDUP,
         "conservative_exact_work_rows": HANDOVER_CONSERVATIVE_WORK_ROWS,
+        "durable_evidence": {
+            "controller_generation_schema": (
+                HANDOVER_CONTROLLER_GENERATION_SCHEMA
+            ),
+            "resume_receipt_schema": HANDOVER_RESUME_RECEIPT_SCHEMA,
+            "progress_observation_schema": (
+                HANDOVER_PROGRESS_OBSERVATION_SCHEMA
+            ),
+            "publication": "O_EXCL_0600_file_fsync_parent_fsync",
+            "elapsed_time_authority": "physical_file_ctime_ns",
+            "mutable_state_is_authority": False,
+            "max_generations": HANDOVER_EVIDENCE_MAX_GENERATIONS,
+            "max_observations": HANDOVER_EVIDENCE_MAX_OBSERVATIONS,
+        },
         "old_route_signal_authorized_here": False,
     }
 
@@ -2823,6 +2856,197 @@ def _validate_controller_owner_claim(
     }
 
 
+def _handover_owner_binding(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable root authority used by every handover record."""
+
+    root = Path(manifest["controller_root"])
+    owner = _validate_controller_owner_claim(manifest)
+    return {
+        "owner_claim_path": owner["owner_claim_path"],
+        "owner_claim_sha256": owner["owner_claim_sha256"],
+        "root_preclaim": dict(owner["root_preclaim"]),
+        "gates_stat_identity": _directory_identity(root / "gates"),
+    }
+
+
+def _handover_stat_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "uid": int(value.st_uid),
+        "gid": int(value.st_gid),
+        "nlink": int(value.st_nlink),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _read_handover_artifact(
+    path: Path, *, label: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Descriptor-reopen one immutable record and return content/stat binding."""
+
+    if path.is_symlink():
+        raise RecoveryControllerError(f"{label} is not a physical file")
+    try:
+        named_before = path.lstat()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except (FileNotFoundError, OSError) as exc:
+        raise RecoveryControllerError(f"{label} is absent or not physical") from exc
+    try:
+        opened = os.fstat(descriptor)
+        expected = _handover_stat_identity(opened)
+        if (
+            _handover_stat_identity(named_before) != expected
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or opened.st_size <= 0
+            or opened.st_size > HANDOVER_EVIDENCE_MAX_BYTES
+        ):
+            raise RecoveryControllerError(f"{label} stat closure changed")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < opened.st_size:
+            block = os.pread(descriptor, opened.st_size - offset, offset)
+            if not block:
+                raise RecoveryControllerError(f"{label} read was truncated")
+            chunks.append(block)
+            offset += len(block)
+        if os.pread(descriptor, 1, opened.st_size):
+            raise RecoveryControllerError(f"{label} grew during read")
+        encoded = b"".join(chunks)
+        try:
+            payload = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecoveryControllerError(f"{label} JSON changed") from exc
+        after_fd = os.fstat(descriptor)
+        try:
+            named_after = path.lstat()
+        except FileNotFoundError as exc:
+            raise RecoveryControllerError(f"{label} path disappeared") from exc
+        if (
+            _handover_stat_identity(after_fd) != expected
+            or _handover_stat_identity(named_after) != expected
+        ):
+            raise RecoveryControllerError(f"{label} changed during reopen")
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise RecoveryControllerError(f"{label} must contain one JSON object")
+    return payload, {
+        "path": str(path),
+        "content_sha256": hashlib.sha256(encoded).hexdigest(),
+        "stat_identity": expected,
+    }
+
+
+def _publish_handover_artifact(
+    manifest: Mapping[str, Any], path: Path, payload: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Publish once with O_EXCL, complete write, fsync, and parent fsync."""
+
+    root = Path(manifest["controller_root"])
+    gates = root / "gates"
+    if (
+        path.parent != gates
+        or gates.is_symlink()
+        or gates.resolve(strict=True) != gates
+    ):
+        raise RecoveryControllerError("handover evidence escaped bound gates directory")
+    encoded = _json_payload_bytes(payload)
+    if len(encoded) > HANDOVER_EVIDENCE_MAX_BYTES:
+        raise RecoveryControllerError("handover evidence exceeds its size bound")
+    _reserve_output_growth(manifest, [(path, len(encoded), False)])
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise RecoveryControllerError(
+            f"handover evidence already exists: {path}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or opened.st_size != 0
+        ):
+            raise RecoveryControllerError("handover O_EXCL claim identity changed")
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise RecoveryControllerError(
+                    "handover evidence write made no progress"
+                )
+            offset += written
+        os.ftruncate(descriptor, len(encoded))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_directory(gates)
+    reopened, binding = _read_handover_artifact(
+        path, label="published handover evidence"
+    )
+    if reopened != dict(payload):
+        raise RecoveryControllerError("published handover evidence content changed")
+    _disk_preflight(manifest)
+    return reopened, binding
+
+
+def _handover_generation_path(root: Path, generation: int) -> Path:
+    if not 0 <= generation < HANDOVER_EVIDENCE_MAX_GENERATIONS:
+        raise RecoveryControllerError("handover controller generation is invalid")
+    return root / "gates" / f"90_handover_controller_{generation:02d}.json"
+
+
+def _handover_resume_path(root: Path, generation: int) -> Path:
+    if not 1 <= generation < HANDOVER_EVIDENCE_MAX_GENERATIONS:
+        raise RecoveryControllerError("handover resume generation is invalid")
+    return root / "gates" / f"91_handover_resume_{generation:02d}.json"
+
+
+def _handover_observation_path(root: Path, generation: int, sequence: int) -> Path:
+    if (
+        not 1 <= generation < HANDOVER_EVIDENCE_MAX_GENERATIONS
+        or not 0 <= sequence < HANDOVER_EVIDENCE_MAX_OBSERVATIONS
+    ):
+        raise RecoveryControllerError("handover observation coordinate is invalid")
+    return (
+        root
+        / "gates"
+        / f"92_handover_progress_{generation:02d}_{sequence:04d}.json"
+    )
+
+
+def _artifact_observed_epoch(binding: Mapping[str, Any]) -> float:
+    stat_identity = binding.get("stat_identity")
+    if not isinstance(stat_identity, Mapping):
+        raise RecoveryControllerError("handover artifact stat binding is absent")
+    return int(stat_identity["ctime_ns"]) / 1_000_000_000.0
+
+
+def _validate_artifact_clock(
+    payload: Mapping[str, Any], binding: Mapping[str, Any]
+) -> None:
+    observed = payload.get("observed_epoch")
+    if (
+        isinstance(observed, bool)
+        or not isinstance(observed, (int, float))
+        or abs(float(observed) - _artifact_observed_epoch(binding))
+        > HANDOVER_EVIDENCE_CLOCK_SKEW_SECONDS
+    ):
+        raise RecoveryControllerError(
+            "handover payload timestamp does not match durable ctime"
+        )
+
+
 @contextmanager
 def _controller_root_claim_lock(
     manifest: Mapping[str, Any], *, fresh: bool
@@ -3500,141 +3724,836 @@ def _validated_exact_checkpoint_snapshot(
     }
 
 
-def _validate_resume_smoke(
-    manifest: Mapping[str, Any], value: Any
+def _live_process_observation(
+    pid: int, start_ticks: int, *, proc_root: Path
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise RecoveryControllerError("exact resume smoke is absent")
-    projected = dict(value)
-    receipt_sha = projected.pop("receipt_sha256", None)
-    expected_keys = {
-        "schema_version",
-        "status",
-        "controller_manifest_sha256",
-        "previous_controller",
-        "resumed_controller",
-        "reattached_exact_worker",
-        "checkpoint_snapshot",
-        "controller_lock_identity",
-        "science_worker_reattached",
-        "signals_sent",
-        "recorded_at",
-        "receipt_sha256",
-    }
-    previous = value.get("previous_controller")
-    resumed = value.get("resumed_controller")
-    worker = value.get("reattached_exact_worker")
-    checkpoint = value.get("checkpoint_snapshot")
-    if (
-        set(value) != expected_keys
-        or value.get("schema_version") != RESUME_SMOKE_SCHEMA
-        or value.get("status") != "PASS"
-        or value.get("controller_manifest_sha256") != manifest["manifest_sha256"]
-        or not isinstance(previous, Mapping)
-        or not isinstance(resumed, Mapping)
-        or not isinstance(worker, Mapping)
-        or not isinstance(checkpoint, Mapping)
-        or int(previous.get("pid", 0)) <= 0
-        or int(previous.get("start_ticks", 0)) <= 0
-        or int(resumed.get("pid", 0)) <= 0
-        or int(resumed.get("start_ticks", 0)) <= 0
-        or (
-            int(previous["pid"]),
-            int(previous["start_ticks"]),
-        )
-        == (int(resumed["pid"]), int(resumed["start_ticks"]))
-        or int(worker.get("pid", 0)) <= 0
-        or int(worker.get("start_ticks", 0)) <= 0
-        or worker.get("stage_id") != EXACT_STAGE
-        or checkpoint.get("path")
-        != _stage(manifest, EXACT_STAGE)["progress_checkpoint_path"]
-        or int(checkpoint.get("progress_rows", 0)) <= 0
-        or not _is_sha256(checkpoint.get("sha256_at_observation"))
-        or not _is_sha256(checkpoint.get("checkpoint_payload_sha256"))
-        or not _is_sha256(checkpoint.get("identity_sha256"))
-        or not _is_sha256(checkpoint.get("progress_ledgers_sha256"))
-        or checkpoint.get("vectors_sha256")
-        != manifest["source_authority"]["source_vectors_sha256"]
-        or value.get("controller_lock_identity")
-        != _current_lock_identity(Path(manifest["controller_root"]))
-        or value.get("science_worker_reattached") is not True
-        or value.get("signals_sent") != []
-        or not isinstance(value.get("recorded_at"), str)
-        or not value.get("recorded_at")
-        or receipt_sha != stable_json_sha256(projected)
+    """Triple-reopen one live PID generation and its raw command line."""
+
+    if pid <= 0 or start_ticks <= 0 or not _pid_alive(
+        pid, start_ticks, proc_root=proc_root
     ):
-        raise RecoveryControllerError("exact resume smoke closure changed")
-    return dict(value)
+        raise RecoveryControllerError("handover process generation is not live")
+    argv = _proc_argv(pid, proc_root=proc_root)
+    cmdline_sha = _proc_cmdline_sha256(pid, start_ticks, proc_root=proc_root)
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not _is_sha256(cmdline_sha)
+        or not _pid_alive(pid, start_ticks, proc_root=proc_root)
+    ):
+        raise RecoveryControllerError("handover process procfs closure changed")
+    argv_after = _proc_argv(pid, proc_root=proc_root)
+    cmdline_sha_after = _proc_cmdline_sha256(
+        pid, start_ticks, proc_root=proc_root
+    )
+    if (
+        argv_after != argv
+        or cmdline_sha_after != cmdline_sha
+        or not _pid_alive(pid, start_ticks, proc_root=proc_root)
+    ):
+        raise RecoveryControllerError("handover process changed during reopen")
+    return {
+        "pid": int(pid),
+        "start_ticks": int(start_ticks),
+        "cmdline_sha256": str(cmdline_sha),
+        "argv_sha256": stable_json_sha256(argv),
+    }
 
 
-def _record_resume_smoke_if_reattached(
+def _validate_controller_generation_payload(
     *,
     manifest: Mapping[str, Any],
-    root: Path,
-    state: dict[str, Any],
-    current_controller: Mapping[str, Any],
-    held: HeldControllerLock,
-) -> dict[str, Any] | None:
-    existing = state.get("resume_smoke")
-    if existing is not None:
-        return _validate_resume_smoke(manifest, existing)
-    previous = state.get("controller_process")
-    worker = state.get("worker")
-    if not isinstance(previous, Mapping) or not isinstance(worker, Mapping):
-        return None
-    try:
-        previous_pid = int(previous["pid"])
-        previous_ticks = int(previous["start_ticks"])
-        current_pid = int(current_controller["pid"])
-        current_ticks = int(current_controller["start_ticks"])
-    except (KeyError, TypeError, ValueError):
-        return None
+    payload: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    generation: int,
+    previous_artifact: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "controller_manifest_sha256",
+        "owner_binding",
+        "generation",
+        "previous_generation_artifact",
+        "controller_process",
+        "generation_attempt_id",
+        "generation_nonce",
+        "signals_sent",
+        "observed_epoch",
+        "observed_at",
+        "receipt_sha256",
+    }
+    projected = dict(payload)
+    receipt_sha = projected.pop("receipt_sha256", None)
+    process = payload.get("controller_process")
+    process_keys = {"pid", "start_ticks", "cmdline_sha256", "argv_sha256"}
     if (
-        previous_pid <= 0
-        or previous_ticks <= 0
-        or current_pid <= 0
-        or current_ticks <= 0
-        or (previous_pid, previous_ticks) == (current_pid, current_ticks)
-    ):
-        return None
-    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
-    if _pid_alive(previous_pid, previous_ticks, proc_root=proc_root):
-        raise RecoveryControllerError(
-            "previous controller generation is still alive during resume smoke"
+        set(payload) != expected_keys
+        or payload.get("schema_version")
+        != HANDOVER_CONTROLLER_GENERATION_SCHEMA
+        or payload.get("controller_manifest_sha256")
+        != manifest["manifest_sha256"]
+        or payload.get("owner_binding") != _handover_owner_binding(manifest)
+        or payload.get("generation") != generation
+        or payload.get("previous_generation_artifact") != previous_artifact
+        or not isinstance(process, Mapping)
+        or set(process) != process_keys
+        or isinstance(process.get("pid"), bool)
+        or int(process.get("pid", 0)) <= 0
+        or isinstance(process.get("start_ticks"), bool)
+        or int(process.get("start_ticks", 0)) <= 0
+        or not _is_sha256(process.get("cmdline_sha256"))
+        or not _is_sha256(process.get("argv_sha256"))
+        or re.fullmatch(
+            r"[0-9a-f]{32}", str(payload.get("generation_attempt_id", ""))
         )
-    exact_stage = _stage(manifest, EXACT_STAGE)
-    worker_pid = _validated_bound_worker_pid_for_signal(
-        root=root,
-        stage=exact_stage,
-        worker=worker,
-        proc_root=proc_root,
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(payload.get("generation_nonce", ""))
+        )
+        is None
+        or payload.get("signals_sent") != []
+        or not isinstance(payload.get("observed_at"), str)
+        or not payload.get("observed_at")
+        or receipt_sha != stable_json_sha256(projected)
+    ):
+        raise RecoveryControllerError(
+            "handover controller generation closure changed"
+        )
+    _validate_artifact_clock(payload, binding)
+    return dict(payload)
+
+
+def _load_controller_generation_chain(
+    manifest: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    root = Path(manifest["controller_root"])
+    gates = root / "gates"
+    prefix = "90_handover_controller_"
+    pattern = re.compile(r"^90_handover_controller_([0-9]{2})\.json$")
+    indexed: dict[int, Path] = {}
+    for path in gates.iterdir():
+        if not path.name.startswith(prefix):
+            continue
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise RecoveryControllerError(
+                "malformed handover controller generation artifact"
+            )
+        generation = int(match.group(1))
+        if generation in indexed:
+            raise RecoveryControllerError("duplicate handover controller generation")
+        indexed[generation] = path
+    if indexed and sorted(indexed) != list(range(max(indexed) + 1)):
+        raise RecoveryControllerError("handover controller generation chain has gaps")
+    if len(indexed) > HANDOVER_EVIDENCE_MAX_GENERATIONS:
+        raise RecoveryControllerError("handover controller generation budget exceeded")
+    rows: list[dict[str, Any]] = []
+    previous_artifact: Mapping[str, Any] | None = None
+    for generation in sorted(indexed):
+        expected_path = _handover_generation_path(root, generation)
+        if indexed[generation] != expected_path:
+            raise RecoveryControllerError("handover generation path changed")
+        payload, artifact = _read_handover_artifact(
+            expected_path, label="handover controller generation"
+        )
+        payload = _validate_controller_generation_payload(
+            manifest=manifest,
+            payload=payload,
+            binding=artifact,
+            generation=generation,
+            previous_artifact=previous_artifact,
+        )
+        rows.append({"payload": payload, "artifact": artifact})
+        previous_artifact = artifact
+    return rows
+
+
+def _ensure_current_controller_generation(
+    *,
+    manifest: Mapping[str, Any],
+    current_controller: Mapping[str, Any],
+) -> dict[str, Any]:
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    try:
+        pid = int(current_controller["pid"])
+        start_ticks = int(current_controller["start_ticks"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecoveryControllerError("current controller identity is invalid") from exc
+    if (pid, start_ticks) != (
+        os.getpid(),
+        _read_proc_start_ticks(os.getpid(), proc_root=proc_root),
+    ):
+        raise RecoveryControllerError("current controller procfs identity changed")
+    process = _live_process_observation(pid, start_ticks, proc_root=proc_root)
+    rows = _load_controller_generation_chain(manifest)
+    if rows:
+        latest = rows[-1]
+        if latest["payload"]["controller_process"] == process:
+            return latest
+        old = latest["payload"]["controller_process"]
+        if _pid_alive(
+            int(old["pid"]), int(old["start_ticks"]), proc_root=proc_root
+        ):
+            raise RecoveryControllerError(
+                "prior handover controller generation is still live"
+            )
+    generation = len(rows)
+    path = _handover_generation_path(
+        Path(manifest["controller_root"]), generation
     )
-    if worker_pid is None:
+    payload: dict[str, Any] = {
+        "schema_version": HANDOVER_CONTROLLER_GENERATION_SCHEMA,
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "owner_binding": _handover_owner_binding(manifest),
+        "generation": generation,
+        "previous_generation_artifact": (
+            rows[-1]["artifact"] if rows else None
+        ),
+        "controller_process": process,
+        "generation_attempt_id": secrets.token_hex(16),
+        "generation_nonce": secrets.token_hex(32),
+        "signals_sent": [],
+        "observed_epoch": time.time(),
+        "observed_at": _utc_now(),
+    }
+    payload["receipt_sha256"] = stable_json_sha256(payload)
+    _publish_handover_artifact(manifest, path, payload)
+    return _load_controller_generation_chain(manifest)[-1]
+
+
+def _exact_checkpoint_observation(stage: Mapping[str, Any]) -> dict[str, Any]:
+    path = Path(str(stage["progress_checkpoint_path"]))
+    before = _stat_identity(path)
+    snapshot = _validated_exact_checkpoint_snapshot(stage)
+    after = _stat_identity(path)
+    if before != after:
+        raise RecoveryControllerError(
+            "exact handover checkpoint stat changed during observation"
+        )
+    return {**snapshot, "stat_identity_at_observation": after}
+
+
+def _validate_checkpoint_observation_shape(
+    *, manifest: Mapping[str, Any], checkpoint: Any, require_positive: bool
+) -> dict[str, Any]:
+    expected_keys = {
+        "path",
+        "sha256_at_observation",
+        "checkpoint_payload_sha256",
+        "identity_sha256",
+        "progress_ledgers_sha256",
+        "progress_rows",
+        "vectors_sha256",
+        "stat_identity_at_observation",
+    }
+    expected_stat_keys = {
+        "device",
+        "inode",
+        "mode",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+        "nlink",
+    }
+    stat_identity = (
+        checkpoint.get("stat_identity_at_observation")
+        if isinstance(checkpoint, Mapping)
+        else None
+    )
+    progress = checkpoint.get("progress_rows") if isinstance(checkpoint, Mapping) else None
+    if (
+        not isinstance(checkpoint, Mapping)
+        or set(checkpoint) != expected_keys
+        or checkpoint.get("path")
+        != _stage(manifest, EXACT_STAGE)["progress_checkpoint_path"]
+        or isinstance(progress, bool)
+        or not isinstance(progress, int)
+        or int(progress) < (1 if require_positive else 0)
+        or int(progress) > HANDOVER_CONSERVATIVE_WORK_ROWS
+        or checkpoint.get("vectors_sha256")
+        != manifest["source_authority"]["source_vectors_sha256"]
+        or not all(
+            _is_sha256(checkpoint.get(name))
+            for name in (
+                "sha256_at_observation",
+                "checkpoint_payload_sha256",
+                "identity_sha256",
+                "progress_ledgers_sha256",
+            )
+        )
+        or not isinstance(stat_identity, Mapping)
+        or set(stat_identity) != expected_stat_keys
+        or any(
+            isinstance(stat_identity.get(name), bool)
+            or not isinstance(stat_identity.get(name), int)
+            for name in expected_stat_keys
+        )
+        or int(stat_identity.get("device", -1)) < 0
+        or int(stat_identity.get("inode", 0)) <= 0
+        or not stat.S_ISREG(int(stat_identity.get("mode", 0)))
+        or int(stat_identity.get("size", 0)) <= 0
+        or int(stat_identity.get("mtime_ns", -1)) < 0
+        or int(stat_identity.get("ctime_ns", -1)) < 0
+        or int(stat_identity.get("nlink", 0)) <= 0
+    ):
+        raise RecoveryControllerError("handover checkpoint observation shape changed")
+    return dict(checkpoint)
+
+
+def _live_exact_worker_observation(
+    *, manifest: Mapping[str, Any], state: Mapping[str, Any]
+) -> dict[str, Any]:
+    root = Path(manifest["controller_root"])
+    stage = _stage(manifest, EXACT_STAGE)
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    worker = state.get("worker")
+    pid = _validated_bound_worker_pid_for_signal(
+        root=root, stage=stage, worker=worker, proc_root=proc_root
+    )
+    if pid is None or not isinstance(worker, Mapping):
+        raise RecoveryControllerError("exact handover worker is not live and bound")
+    process = _live_process_observation(
+        pid, int(worker["start_ticks"]), proc_root=proc_root
+    )
+    return {
+        "stage_id": EXACT_STAGE,
+        **process,
+        "worker_argv_sha256": str(worker["argv_sha256"]),
+    }
+
+
+def _reopen_receipted_exact_worker(
+    *, manifest: Mapping[str, Any], worker: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Reopen a receipted exact worker without trusting mutable state.json."""
+
+    stage = _stage(manifest, EXACT_STAGE)
+    allowed_worker_argv = {
+        value
+        for value in (
+            stage["commands"].get("fresh_sha256"),
+            stage["commands"].get("resume_sha256"),
+        )
+        if value is not None
+    }
+    if (
+        worker.get("stage_id") != EXACT_STAGE
+        or worker.get("worker_argv_sha256") not in allowed_worker_argv
+    ):
+        raise RecoveryControllerError("receipted exact worker command is not frozen")
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    process = _live_process_observation(
+        int(worker["pid"]), int(worker["start_ticks"]), proc_root=proc_root
+    )
+    reopened = {
+        "stage_id": EXACT_STAGE,
+        **process,
+        "worker_argv_sha256": worker["worker_argv_sha256"],
+    }
+    if reopened != dict(worker):
+        raise RecoveryControllerError("receipted exact worker procfs identity changed")
+    return reopened
+
+
+def _validate_resume_receipt(
+    *,
+    manifest: Mapping[str, Any],
+    generations: Sequence[Mapping[str, Any]],
+    require_live: bool,
+) -> dict[str, Any]:
+    if len(generations) < 2:
+        raise RecoveryControllerError("durable resume requires two generations")
+    current = generations[-1]
+    previous = generations[-2]
+    generation = int(current["payload"]["generation"])
+    path = _handover_resume_path(Path(manifest["controller_root"]), generation)
+    payload, artifact = _read_handover_artifact(
+        path, label="handover resume receipt"
+    )
+    expected_keys = {
+        "schema_version",
+        "controller_manifest_sha256",
+        "owner_binding",
+        "previous_controller_artifact",
+        "resumed_controller_artifact",
+        "reattached_exact_worker",
+        "checkpoint_snapshot",
+        "resume_attempt_id",
+        "resume_nonce",
+        "science_worker_reattached",
+        "signals_sent",
+        "observed_epoch",
+        "observed_at",
+        "receipt_sha256",
+    }
+    projected = dict(payload)
+    receipt_sha = projected.pop("receipt_sha256", None)
+    worker = payload.get("reattached_exact_worker")
+    checkpoint = payload.get("checkpoint_snapshot")
+    if (
+        set(payload) != expected_keys
+        or payload.get("schema_version") != HANDOVER_RESUME_RECEIPT_SCHEMA
+        or payload.get("controller_manifest_sha256")
+        != manifest["manifest_sha256"]
+        or payload.get("owner_binding") != _handover_owner_binding(manifest)
+        or payload.get("previous_controller_artifact") != previous["artifact"]
+        or payload.get("resumed_controller_artifact") != current["artifact"]
+        or not isinstance(worker, Mapping)
+        or set(worker)
+        != {
+            "stage_id",
+            "pid",
+            "start_ticks",
+            "cmdline_sha256",
+            "argv_sha256",
+            "worker_argv_sha256",
+        }
+        or worker.get("stage_id") != EXACT_STAGE
+        or int(worker.get("pid", 0)) <= 0
+        or int(worker.get("start_ticks", 0)) <= 0
+        or not _is_sha256(worker.get("cmdline_sha256"))
+        or not _is_sha256(worker.get("argv_sha256"))
+        or not _is_sha256(worker.get("worker_argv_sha256"))
+        or not isinstance(checkpoint, Mapping)
+        or re.fullmatch(
+            r"[0-9a-f]{32}", str(payload.get("resume_attempt_id", ""))
+        )
+        is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("resume_nonce", "")))
+        is None
+        or payload.get("science_worker_reattached") is not True
+        or payload.get("signals_sent") != []
+        or not isinstance(payload.get("observed_at"), str)
+        or not payload.get("observed_at")
+        or receipt_sha != stable_json_sha256(projected)
+    ):
+        raise RecoveryControllerError("durable handover resume closure changed")
+    _validate_checkpoint_observation_shape(
+        manifest=manifest, checkpoint=checkpoint, require_positive=True
+    )
+    _validate_artifact_clock(payload, artifact)
+    previous_process = previous["payload"]["controller_process"]
+    resumed_process = current["payload"]["controller_process"]
+    if previous_process == resumed_process:
+        raise RecoveryControllerError("durable resume did not change controller generation")
+    if require_live:
+        proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+        if _pid_alive(
+            int(previous_process["pid"]),
+            int(previous_process["start_ticks"]),
+            proc_root=proc_root,
+        ):
+            raise RecoveryControllerError("previous controller is still live")
+        if (
+            _live_process_observation(
+                int(resumed_process["pid"]),
+                int(resumed_process["start_ticks"]),
+                proc_root=proc_root,
+            )
+            != resumed_process
+        ):
+            raise RecoveryControllerError("resumed controller procfs identity changed")
+        _reopen_receipted_exact_worker(manifest=manifest, worker=worker)
+    return {"payload": dict(payload), "artifact": artifact}
+
+
+def _publish_resume_receipt_if_reattached(
+    *,
+    manifest: Mapping[str, Any],
+    state: dict[str, Any],
+    generation: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    generations = _load_controller_generation_chain(manifest)
+    if len(generations) < 2 or generations[-1]["artifact"] != generation["artifact"]:
         return None
-    checkpoint = _validated_exact_checkpoint_snapshot(exact_stage)
+    path = _handover_resume_path(
+        Path(manifest["controller_root"]),
+        int(generation["payload"]["generation"]),
+    )
+    if path.exists() or path.is_symlink():
+        return _validate_resume_receipt(
+            manifest=manifest,
+            generations=generations,
+            require_live=True,
+        )
+    previous_process = generations[-2]["payload"]["controller_process"]
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    if _pid_alive(
+        int(previous_process["pid"]),
+        int(previous_process["start_ticks"]),
+        proc_root=proc_root,
+    ):
+        raise RecoveryControllerError("previous controller is live during resume")
+    try:
+        worker = _live_exact_worker_observation(manifest=manifest, state=state)
+        checkpoint = _exact_checkpoint_observation(_stage(manifest, EXACT_STAGE))
+    except RecoveryControllerError:
+        return None
     if int(checkpoint["progress_rows"]) <= 0:
         return None
     payload: dict[str, Any] = {
-        "schema_version": RESUME_SMOKE_SCHEMA,
-        "status": "PASS",
+        "schema_version": HANDOVER_RESUME_RECEIPT_SCHEMA,
         "controller_manifest_sha256": manifest["manifest_sha256"],
-        "previous_controller": dict(previous),
-        "resumed_controller": dict(current_controller),
-        "reattached_exact_worker": {
-            "stage_id": EXACT_STAGE,
-            "pid": worker_pid,
-            "start_ticks": int(worker["start_ticks"]),
-            "argv_sha256": worker["argv_sha256"],
-        },
+        "owner_binding": _handover_owner_binding(manifest),
+        "previous_controller_artifact": generations[-2]["artifact"],
+        "resumed_controller_artifact": generations[-1]["artifact"],
+        "reattached_exact_worker": worker,
         "checkpoint_snapshot": checkpoint,
-        "controller_lock_identity": held.identity,
+        "resume_attempt_id": secrets.token_hex(16),
+        "resume_nonce": secrets.token_hex(32),
         "science_worker_reattached": True,
         "signals_sent": [],
-        "recorded_at": _utc_now(),
+        "observed_epoch": time.time(),
+        "observed_at": _utc_now(),
     }
     payload["receipt_sha256"] = stable_json_sha256(payload)
-    state["resume_smoke"] = payload
-    return _validate_resume_smoke(manifest, payload)
+    _publish_handover_artifact(manifest, path, payload)
+    return _validate_resume_receipt(
+        manifest=manifest,
+        generations=generations,
+        require_live=True,
+    )
+
+
+def _validate_progress_observation_payload(
+    *,
+    manifest: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    generation: Mapping[str, Any],
+    resume: Mapping[str, Any],
+    sequence: int,
+    previous_artifact: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "controller_manifest_sha256",
+        "owner_binding",
+        "generation_artifact",
+        "resume_receipt_artifact",
+        "sequence",
+        "previous_observation_artifact",
+        "controller_process",
+        "exact_worker_process",
+        "checkpoint_snapshot",
+        "observation_attempt_id",
+        "observation_nonce",
+        "observed_epoch",
+        "observed_at",
+        "receipt_sha256",
+    }
+    projected = dict(payload)
+    receipt_sha = projected.pop("receipt_sha256", None)
+    checkpoint = payload.get("checkpoint_snapshot")
+    if (
+        set(payload) != expected_keys
+        or payload.get("schema_version")
+        != HANDOVER_PROGRESS_OBSERVATION_SCHEMA
+        or payload.get("controller_manifest_sha256")
+        != manifest["manifest_sha256"]
+        or payload.get("owner_binding") != _handover_owner_binding(manifest)
+        or payload.get("generation_artifact") != generation["artifact"]
+        or payload.get("resume_receipt_artifact") != resume["artifact"]
+        or payload.get("sequence") != sequence
+        or payload.get("previous_observation_artifact") != previous_artifact
+        or payload.get("controller_process")
+        != generation["payload"]["controller_process"]
+        or payload.get("exact_worker_process")
+        != resume["payload"]["reattached_exact_worker"]
+        or not isinstance(checkpoint, Mapping)
+        or re.fullmatch(
+            r"[0-9a-f]{32}", str(payload.get("observation_attempt_id", ""))
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(payload.get("observation_nonce", ""))
+        )
+        is None
+        or not isinstance(payload.get("observed_at"), str)
+        or not payload.get("observed_at")
+        or receipt_sha != stable_json_sha256(projected)
+    ):
+        raise RecoveryControllerError("handover progress observation changed")
+    _validate_checkpoint_observation_shape(
+        manifest=manifest, checkpoint=checkpoint, require_positive=False
+    )
+    _validate_artifact_clock(payload, binding)
+    return dict(payload)
+
+
+def _load_progress_observation_chain(
+    *,
+    manifest: Mapping[str, Any],
+    generation: Mapping[str, Any],
+    resume: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    root = Path(manifest["controller_root"])
+    gates = root / "gates"
+    generation_index = int(generation["payload"]["generation"])
+    prefix = f"92_handover_progress_{generation_index:02d}_"
+    pattern = re.compile(
+        rf"^92_handover_progress_{generation_index:02d}_([0-9]{{4}})\.json$"
+    )
+    indexed: dict[int, Path] = {}
+    for path in gates.iterdir():
+        if not path.name.startswith("92_handover_progress_"):
+            continue
+        if not path.name.startswith(prefix):
+            # Historical generations may retain their own sealed chains.
+            if re.fullmatch(
+                r"92_handover_progress_[0-9]{2}_[0-9]{4}\.json",
+                path.name,
+            ) is None:
+                raise RecoveryControllerError(
+                    "malformed handover progress observation artifact"
+                )
+            continue
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise RecoveryControllerError(
+                "malformed current handover progress observation"
+            )
+        sequence = int(match.group(1))
+        if sequence in indexed:
+            raise RecoveryControllerError("duplicate handover progress observation")
+        indexed[sequence] = path
+    if indexed and sorted(indexed) != list(range(max(indexed) + 1)):
+        raise RecoveryControllerError("handover progress observation chain has gaps")
+    if len(indexed) > HANDOVER_EVIDENCE_MAX_OBSERVATIONS:
+        raise RecoveryControllerError("handover progress observation budget exceeded")
+    rows: list[dict[str, Any]] = []
+    previous_artifact: Mapping[str, Any] | None = None
+    previous_progress: int | None = None
+    checkpoint_identity: str | None = None
+    for sequence in sorted(indexed):
+        expected_path = _handover_observation_path(
+            root, generation_index, sequence
+        )
+        if indexed[sequence] != expected_path:
+            raise RecoveryControllerError("handover progress path changed")
+        payload, artifact = _read_handover_artifact(
+            expected_path, label="handover progress observation"
+        )
+        payload = _validate_progress_observation_payload(
+            manifest=manifest,
+            payload=payload,
+            binding=artifact,
+            generation=generation,
+            resume=resume,
+            sequence=sequence,
+            previous_artifact=previous_artifact,
+        )
+        progress = int(payload["checkpoint_snapshot"]["progress_rows"])
+        identity = str(payload["checkpoint_snapshot"]["identity_sha256"])
+        if previous_progress is not None and progress <= previous_progress:
+            raise RecoveryControllerError(
+                "handover progress observations are not strictly increasing"
+            )
+        if checkpoint_identity is not None and identity != checkpoint_identity:
+            raise RecoveryControllerError(
+                "handover checkpoint identity changed across observations"
+            )
+        rows.append({"payload": payload, "artifact": artifact})
+        previous_artifact = artifact
+        previous_progress = progress
+        checkpoint_identity = identity
+    return rows
+
+
+def _record_durable_progress_observation(
+    *, manifest: Mapping[str, Any], state: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Append one real procfs/checkpoint observation after durable resume."""
+
+    generations = _load_controller_generation_chain(manifest)
+    if len(generations) < 2:
+        return None
+    generation = generations[-1]
+    try:
+        resume = _validate_resume_receipt(
+            manifest=manifest,
+            generations=generations,
+            require_live=True,
+        )
+    except RecoveryControllerError as exc:
+        if "absent" in str(exc):
+            return None
+        raise
+    worker = _live_exact_worker_observation(manifest=manifest, state=state)
+    if worker != resume["payload"]["reattached_exact_worker"]:
+        raise RecoveryControllerError("handover exact worker generation changed")
+    checkpoint = _exact_checkpoint_observation(_stage(manifest, EXACT_STAGE))
+    rows = _load_progress_observation_chain(
+        manifest=manifest, generation=generation, resume=resume
+    )
+    if rows:
+        previous_checkpoint = rows[-1]["payload"]["checkpoint_snapshot"]
+        if int(checkpoint["progress_rows"]) < int(previous_checkpoint["progress_rows"]):
+            raise RecoveryControllerError("handover checkpoint progress regressed")
+        if int(checkpoint["progress_rows"]) == int(previous_checkpoint["progress_rows"]):
+            return rows[-1]
+        if checkpoint["identity_sha256"] != previous_checkpoint["identity_sha256"]:
+            raise RecoveryControllerError("handover checkpoint identity changed")
+    sequence = len(rows)
+    if sequence >= HANDOVER_EVIDENCE_MAX_OBSERVATIONS:
+        raise RecoveryControllerError("handover progress observation budget exhausted")
+    process = generation["payload"]["controller_process"]
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    if (
+        _live_process_observation(
+            int(process["pid"]), int(process["start_ticks"]), proc_root=proc_root
+        )
+        != process
+    ):
+        raise RecoveryControllerError("handover controller generation changed")
+    payload: dict[str, Any] = {
+        "schema_version": HANDOVER_PROGRESS_OBSERVATION_SCHEMA,
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "owner_binding": _handover_owner_binding(manifest),
+        "generation_artifact": generation["artifact"],
+        "resume_receipt_artifact": resume["artifact"],
+        "sequence": sequence,
+        "previous_observation_artifact": rows[-1]["artifact"] if rows else None,
+        "controller_process": process,
+        "exact_worker_process": worker,
+        "checkpoint_snapshot": checkpoint,
+        "observation_attempt_id": secrets.token_hex(16),
+        "observation_nonce": secrets.token_hex(32),
+        "observed_epoch": time.time(),
+        "observed_at": _utc_now(),
+    }
+    payload["receipt_sha256"] = stable_json_sha256(payload)
+    path = _handover_observation_path(
+        Path(manifest["controller_root"]),
+        int(generation["payload"]["generation"]),
+        sequence,
+    )
+    _publish_handover_artifact(manifest, path, payload)
+    return _load_progress_observation_chain(
+        manifest=manifest, generation=generation, resume=resume
+    )[-1]
+
+
+def _verify_durable_handover_evidence(
+    *, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Independent read-only verifier; mutable monitor fields are not inputs."""
+
+    generations = _load_controller_generation_chain(manifest)
+    if len(generations) < 2:
+        raise RecoveryControllerError("handover has fewer than two generations")
+    generation = generations[-1]
+    resume = _validate_resume_receipt(
+        manifest=manifest,
+        generations=generations,
+        require_live=True,
+    )
+    rows = _load_progress_observation_chain(
+        manifest=manifest, generation=generation, resume=resume
+    )
+    if len(rows) < 3:
+        raise RecoveryControllerError(
+            "handover progress ledger lacks a successor seal"
+        )
+    live_worker = _reopen_receipted_exact_worker(
+        manifest=manifest,
+        worker=resume["payload"]["reattached_exact_worker"],
+    )
+    if live_worker != resume["payload"]["reattached_exact_worker"]:
+        raise RecoveryControllerError("handover live worker no longer matches resume")
+    for row in rows:
+        if row["payload"]["exact_worker_process"] != live_worker:
+            raise RecoveryControllerError(
+                "handover observation worker generation changed"
+            )
+    current_checkpoint = _exact_checkpoint_observation(
+        _stage(manifest, EXACT_STAGE)
+    )
+    resume_checkpoint = resume["payload"]["checkpoint_snapshot"]
+    seal_checkpoint = rows[-1]["payload"]["checkpoint_snapshot"]
+    if (
+        current_checkpoint["path"] != resume_checkpoint["path"]
+        or current_checkpoint["identity_sha256"]
+        != resume_checkpoint["identity_sha256"]
+        or current_checkpoint["identity_sha256"]
+        != seal_checkpoint["identity_sha256"]
+        or current_checkpoint["vectors_sha256"]
+        != resume_checkpoint["vectors_sha256"]
+        or int(current_checkpoint["progress_rows"])
+        < int(seal_checkpoint["progress_rows"])
+        or int(resume_checkpoint["progress_rows"]) <= 0
+    ):
+        raise RecoveryControllerError(
+            "current checkpoint no longer extends durable handover evidence"
+        )
+
+    # The chain head is a seal for the last decision-bearing observation. It
+    # is verified above but never contributes progress or elapsed time, so
+    # every record used by the decision has a successor binding its complete
+    # content/stat identity. Filesystem ctime, not a payload timestamp,
+    # supplies cadence, elapsed-time, and freshness authority.
+    sealed_rows = rows[:-1]
+    seal_epoch = _artifact_observed_epoch(rows[-1]["artifact"])
+    last_sealed_epoch = _artifact_observed_epoch(sealed_rows[-1]["artifact"])
+    if (
+        seal_epoch < last_sealed_epoch
+        or seal_epoch - last_sealed_epoch > HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+    ):
+        raise RecoveryControllerError("handover successor seal cadence changed")
+    suffix_start = len(sealed_rows) - 1
+    while suffix_start > 0:
+        newer = _artifact_observed_epoch(sealed_rows[suffix_start]["artifact"])
+        older = _artifact_observed_epoch(
+            sealed_rows[suffix_start - 1]["artifact"]
+        )
+        gap = newer - older
+        if gap < 0:
+            raise RecoveryControllerError("handover ledger ctime regressed")
+        if gap > HANDOVER_MAX_OBSERVATION_AGE_SECONDS:
+            break
+        suffix_start -= 1
+    first = sealed_rows[suffix_start]
+    last = sealed_rows[-1]
+    first_epoch = _artifact_observed_epoch(first["artifact"])
+    last_epoch = _artifact_observed_epoch(last["artifact"])
+    now_epoch = time.time()
+    if seal_epoch > now_epoch + HANDOVER_EVIDENCE_CLOCK_SKEW_SECONDS:
+        raise RecoveryControllerError("handover ledger ctime is in the future")
+    duration = max(0.0, last_epoch - first_epoch)
+    observation_age = max(0.0, now_epoch - last_epoch)
+    first_progress = int(first["payload"]["checkpoint_snapshot"]["progress_rows"])
+    last_progress = int(last["payload"]["checkpoint_snapshot"]["progress_rows"])
+    progress_delta = last_progress - first_progress
+    throughput = progress_delta / duration if duration > 0 and progress_delta > 0 else None
+    remaining = max(0, HANDOVER_CONSERVATIVE_WORK_ROWS - last_progress)
+    eta = remaining / throughput if throughput is not None and throughput > 0 else None
+    continuous_pass = bool(
+        duration >= HANDOVER_MIN_PROGRESS_SECONDS
+        and observation_age <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
+        and progress_delta > 0
+    )
+    positive_throughput_pass = bool(throughput is not None and throughput > 0)
+    return {
+        "resume_smoke_pass": True,
+        "first_durable_checkpoint_pass": True,
+        "continuous_progress_pass": continuous_pass,
+        "positive_throughput_pass": positive_throughput_pass,
+        "new_exact_worker_generation_bound_pass": True,
+        "progress_rows": last_progress,
+        "progress_delta_rows": progress_delta,
+        "continuous_progress_seconds": duration,
+        "observation_age_seconds": observation_age,
+        "last_change_age_seconds": observation_age,
+        "throughput_rows_per_second": throughput,
+        "conservative_remaining_rows": remaining,
+        "conservative_eta_seconds": eta,
+        "checkpoint_snapshot": current_checkpoint,
+        "resume_smoke_receipt": resume["payload"],
+        "controller_generation_count": len(generations),
+        "progress_observation_count": len(rows),
+        "continuous_suffix_start_sequence": int(first["payload"]["sequence"]),
+        "successor_seal_sequence": int(rows[-1]["payload"]["sequence"]),
+    }
 
 
 def _validate_exact_progress_monitor(
@@ -3727,7 +4646,8 @@ def _initial_state(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "controller_process": None,
         "worker": None,
         "startup_barrier": None,
-        "resume_smoke": None,
+        "durable_handover_generation": None,
+        "durable_resume_receipt_path": None,
         "exact_coexistence_baseline": None,
         "exact_progress_monitor": None,
         "updated_at": _utc_now(),
@@ -3746,8 +4666,9 @@ def _load_state(root: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
         or set(value.get("stages", {})) != set(STAGE_ORDER)
     ):
         raise RecoveryControllerError("controller mutable state identity mismatch")
-    if value.get("resume_smoke") is not None:
-        _validate_resume_smoke(manifest, value["resume_smoke"])
+    # c082 roots may carry the superseded self-signed projection. It is not
+    # validated, copied forward, or consulted by the durable handover gate.
+    value.pop("resume_smoke", None)
     if value.get("exact_progress_monitor") is not None:
         _validate_exact_progress_monitor(
             controller_manifest_sha256=manifest["manifest_sha256"],
@@ -4275,6 +5196,10 @@ def _run_or_attach_stage(
                 start_progress = int(worker["start_progress"])
                 probe_argv_sha256 = str(worker["argv_sha256"])
             start_time = time.monotonic() - float(worker.get("elapsed_seconds", 0.0))
+            if stage_id == EXACT_STAGE:
+                _record_durable_progress_observation(
+                    manifest=manifest, state=state
+                )
         elif terminal.is_file():
             _wait_for_process_group_quiescence(
                 int(worker.get("process_group_id", pid)),
@@ -4479,6 +5404,10 @@ def _run_or_attach_stage(
                     _disk_preflight(manifest)
                     probe_complete = True
             _update_exact_progress_monitor(stage=stage, state=state)
+            if stage_id == EXACT_STAGE:
+                _record_durable_progress_observation(
+                    manifest=manifest, state=state
+                )
             state["worker"]["elapsed_seconds"] = time.monotonic() - start_time
             _save_state(manifest, root, state, guard)
             time.sleep(poll_seconds)
@@ -4739,12 +5668,25 @@ def run_controller(
                 "argv_sha256": stable_json_sha256(sys.argv),
                 "registered_at": _utc_now(),
             }
-            _record_resume_smoke_if_reattached(
+            handover_generation = _ensure_current_controller_generation(
                 manifest=manifest,
-                root=root,
-                state=state,
                 current_controller=current_controller,
-                held=held,
+            )
+            durable_resume = _publish_resume_receipt_if_reattached(
+                manifest=manifest,
+                state=state,
+                generation=handover_generation,
+            )
+            # Mutable state is diagnostic only. Handover eligibility reopens
+            # the O_EXCL generation/resume artifacts and never trusts this
+            # projection or its publicly recomputable hash.
+            state["durable_handover_generation"] = int(
+                handover_generation["payload"]["generation"]
+            )
+            state["durable_resume_receipt_path"] = (
+                durable_resume["artifact"]["path"]
+                if durable_resume is not None
+                else None
             )
             state["controller_process"] = current_controller
             _save_state(manifest, root, state, held.verify)
@@ -4920,50 +5862,7 @@ def _old_brute_handover_status(
             )
 
     resume_smoke_pass = False
-    resume_smoke: dict[str, Any] | None = None
-    if isinstance(state, Mapping) and state.get("resume_smoke") is not None:
-        try:
-            resume_smoke = _validate_resume_smoke(
-                manifest, state.get("resume_smoke")
-            )
-        except Exception as exc:
-            errors["resume_smoke"] = f"{type(exc).__name__}:{exc}"
-        else:
-            resume_smoke_pass = True
-
-    checkpoint: dict[str, Any] | None = None
-    try:
-        checkpoint = _validated_exact_checkpoint_snapshot(
-            _stage(manifest, EXACT_STAGE)
-        )
-    except Exception as exc:
-        errors["first_durable_checkpoint"] = f"{type(exc).__name__}:{exc}"
     first_durable_checkpoint_pass = False
-    if resume_smoke_pass and checkpoint is not None and resume_smoke is not None:
-        resume_checkpoint = resume_smoke["checkpoint_snapshot"]
-        first_durable_checkpoint_pass = bool(
-            int(resume_checkpoint.get("progress_rows", 0)) > 0
-            and resume_checkpoint.get("path")
-            == _stage(manifest, EXACT_STAGE)["progress_checkpoint_path"]
-            and resume_checkpoint.get("vectors_sha256")
-            == manifest["source_authority"]["source_vectors_sha256"]
-            and checkpoint.get("identity_sha256")
-            == resume_checkpoint.get("identity_sha256")
-            and int(checkpoint.get("progress_rows", -1))
-            >= int(resume_checkpoint.get("progress_rows", 0))
-        )
-        if not first_durable_checkpoint_pass:
-            resume_smoke_pass = False
-            errors["resume_smoke_checkpoint"] = (
-                "current checkpoint no longer extends the new-route resume checkpoint"
-            )
-
-    monitor = (
-        state.get("exact_progress_monitor")
-        if isinstance(state, Mapping)
-        else None
-    )
-    now = time.time()
     observation_age_seconds: float | None = None
     last_change_age_seconds: float | None = None
     continuous_progress_seconds: float | None = None
@@ -4974,63 +5873,35 @@ def _old_brute_handover_status(
     conservative_eta_seconds: float | None = None
     continuous_progress_pass = False
     positive_throughput_pass = False
-    if isinstance(monitor, Mapping):
-        try:
-            monitor = _validate_exact_progress_monitor(
-                controller_manifest_sha256=manifest["manifest_sha256"],
-                value=monitor,
-            )
-            observed_epoch = float(monitor["observed_epoch"])
-            last_change_epoch = float(monitor["last_change_epoch"])
-            continuous_since = float(
-                monitor["continuous_progress_since_epoch"]
-            )
-            continuous_start_progress = int(
-                monitor["continuous_start_progress"]
-            )
-            progress_rows = int(monitor["progress"])
-            baseline_progress = int(monitor["baseline_progress"])
-            if (
-                progress_rows < baseline_progress
-                or continuous_start_progress < baseline_progress
-                or progress_rows < continuous_start_progress
-                or progress_rows > HANDOVER_CONSERVATIVE_WORK_ROWS
-                or continuous_since > last_change_epoch
-                or last_change_epoch > observed_epoch
-                or observed_epoch > now
-                or (
-                    checkpoint is not None
-                    and progress_rows > int(checkpoint["progress_rows"])
-                )
-            ):
-                raise ValueError("monitored progress ordering changed")
-            observation_age_seconds = max(0.0, now - observed_epoch)
-            last_change_age_seconds = max(0.0, now - last_change_epoch)
-            continuous_progress_seconds = max(0.0, now - continuous_since)
-            progress_delta_rows = progress_rows - continuous_start_progress
-            continuous_progress_pass = bool(
-                result.get("scientific_worker_alive") is True
-                and result.get("current_stage") == EXACT_STAGE
-                and observation_age_seconds
-                <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
-                and last_change_age_seconds
-                <= HANDOVER_MAX_OBSERVATION_AGE_SECONDS
-                and continuous_progress_seconds >= HANDOVER_MIN_PROGRESS_SECONDS
-                and progress_delta_rows > 0
-            )
-            if continuous_progress_seconds > 0 and progress_delta_rows > 0:
-                throughput_rows_per_second = (
-                    progress_delta_rows / continuous_progress_seconds
-                )
-                positive_throughput_pass = throughput_rows_per_second > 0.0
-                conservative_remaining_rows = max(
-                    0, HANDOVER_CONSERVATIVE_WORK_ROWS - progress_rows
-                )
-                conservative_eta_seconds = (
-                    conservative_remaining_rows / throughput_rows_per_second
-                )
-        except (KeyError, TypeError, ValueError, RecoveryControllerError) as exc:
-            errors["continuous_progress"] = f"{type(exc).__name__}:{exc}"
+    checkpoint: dict[str, Any] | None = None
+    resume_smoke: dict[str, Any] | None = None
+    new_exact_worker_generation_bound_pass = False
+    try:
+        durable = _verify_durable_handover_evidence(
+            manifest=manifest
+        )
+    except Exception as exc:
+        errors["durable_handover_evidence"] = f"{type(exc).__name__}:{exc}"
+    else:
+        resume_smoke_pass = bool(durable["resume_smoke_pass"])
+        first_durable_checkpoint_pass = bool(
+            durable["first_durable_checkpoint_pass"]
+        )
+        continuous_progress_pass = bool(durable["continuous_progress_pass"])
+        positive_throughput_pass = bool(durable["positive_throughput_pass"])
+        new_exact_worker_generation_bound_pass = bool(
+            durable["new_exact_worker_generation_bound_pass"]
+        )
+        observation_age_seconds = durable["observation_age_seconds"]
+        last_change_age_seconds = durable["last_change_age_seconds"]
+        continuous_progress_seconds = durable["continuous_progress_seconds"]
+        progress_rows = durable["progress_rows"]
+        progress_delta_rows = durable["progress_delta_rows"]
+        throughput_rows_per_second = durable["throughput_rows_per_second"]
+        conservative_remaining_rows = durable["conservative_remaining_rows"]
+        conservative_eta_seconds = durable["conservative_eta_seconds"]
+        checkpoint = durable["checkpoint_snapshot"]
+        resume_smoke = durable["resume_smoke_receipt"]
 
     eta_within_48h_pass = bool(
         positive_throughput_pass
@@ -5043,22 +5914,6 @@ def _old_brute_handover_status(
     relative_speedup_100x_pass = False
     eta_or_100x_pass = eta_within_48h_pass or relative_speedup_100x_pass
     old_brute_generation_alive_pass = _old_brute_generation_alive(manifest)
-    new_exact_worker_generation_bound_pass = False
-    if isinstance(state, Mapping):
-        try:
-            new_exact_worker_generation_bound_pass = (
-                _validated_bound_worker_pid_for_signal(
-                    root=Path(manifest["controller_root"]),
-                    stage=_stage(manifest, EXACT_STAGE),
-                    worker=state.get("worker"),
-                    proc_root=Path(
-                        str(manifest["resources"].get("proc_root", "/proc"))
-                    ),
-                )
-                is not None
-            )
-        except Exception as exc:
-            errors["new_exact_worker"] = f"{type(exc).__name__}:{exc}"
     controller_status_allows_handover = bool(
         result.get("status") not in {
             "BLOCKED",

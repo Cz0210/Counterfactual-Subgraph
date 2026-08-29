@@ -12385,3 +12385,47 @@ round/seed/native order, then write PASS as the sole and final commit point.
   smaller, duplicated, invalid, or test-selected universe.
 - This is a candidate-pool resource extension, not a change to GlobalGCE's
   paper selector and not a GNN-backbone ablation.
+
+## [2026-08-29] Replace mutable AIDS handover assertions with durable evidence
+
+### Motivation
+
+The first dedicated old-brute handover gate stored its restart smoke and
+ten-minute progress window in mutable `state.json`.  Their hashes were public
+and recomputable, so a same-authority caller could replace the state, backdate
+the claimed window, and re-sign it without proving a second controller
+reattachment or real elapsed progress.
+
+### Decision
+
+Remove mutable resume receipts entirely; retain the mutable progress monitor
+only for ordinary route diagnostics and exclude it from handover eligibility.
+Under the already bound controller owner/root claim and
+physical `gates/` inode, publish each controller generation, each exact-worker
+reattachment, and each increasing authenticated checkpoint observation as a
+0600 `O_EXCL` record with a complete write, file `fsync`, and parent-directory
+`fsync`.  Bind every successor to the prior record's content SHA-256 and full
+device/inode/mode/uid/gid/nlink/size/mtime/ctime identity, plus unpredictable
+attempt and nonce values.  Each observation reopens the live controller and
+exact-worker PID/start/cmdline identities and the authenticated DBSCAN
+checkpoint hashes.
+
+Use a separate read-only verifier that accepts no `state.json` argument.  It
+reopens the latest two controller generations, immutable resume receipt,
+append-only observation chain, live controller/worker procfs identities, and
+current checkpoint closure.  Continuous time, cadence, freshness, throughput,
+and ETA come only from filesystem ctime differences and strictly increasing
+authenticated checkpoint progress; payload timestamps cannot contribute.  The
+chain head is only a successor seal, so every observation used for a decision
+is itself content/stat-bound by a later immutable record.
+
+### Consequences
+
+- Re-signing mutable state can no longer make the old-brute gate eligible.
+- Zero/partial files, copy replacement, symlink/hardlink substitution, inode
+  reuse/ABA, chain gaps, and payload timestamp backdating fail closed.
+- A fresh route must survive a genuine controller restart and then accumulate
+  at least ten minutes of fresh, at-most-two-minute-gap observations.
+- The output budget now reserves the bounded generation/resume/observation
+  inventory.  This controller still sends no old-route signal; deployment and
+  any one-time graceful stop remain separately reviewed actions.
