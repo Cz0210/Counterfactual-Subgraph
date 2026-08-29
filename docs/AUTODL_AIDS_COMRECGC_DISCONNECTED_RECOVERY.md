@@ -128,6 +128,9 @@ ADOPTION=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/recovery
 PARENT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs
 SPEC=/autodl-fs/data/counterfactual-subgraph-runtime/control/<fresh-cid>.spec.json
 MANIFEST=/autodl-fs/data/counterfactual-subgraph-runtime/control/<fresh-cid>.manifest.json
+EXEC_COMMIT=$(git -C "$PROJECT" rev-parse HEAD)
+ADOPTION_COMMIT=7370006da6175851def0f151ca6fb4dfb44f2ab7
+RUNNER_COMMIT=ab14be7c70803384eb6904d85bbf87b070d8d961
 
 "$PY" "$PROJECT/scripts/autodl/build_aids_comrecgc_exact_recovery_v1.py" \
   --config "$PROJECT/configs/hpc.yaml" generate-production \
@@ -136,6 +139,14 @@ MANIFEST=/autodl-fs/data/counterfactual-subgraph-runtime/control/<fresh-cid>.man
   --python "$PY" \
   --project-root "$PROJECT" \
   --controller-manifest "$MANIFEST" \
+  --thread-count 8 \
+  --adoption-commit "$ADOPTION_COMMIT" \
+  --controller-commit "$EXEC_COMMIT" \
+  --exact-runner-commit "$RUNNER_COMMIT" \
+  --subset-runner-commit "$RUNNER_COMMIT" \
+  --downstream-runner-commit "$RUNNER_COMMIT" \
+  --standardization-runner-commit "$RUNNER_COMMIT" \
+  --authorize-production-deployment \
   --output "$SPEC"
 
 "$PY" "$PROJECT/scripts/autodl/build_aids_comrecgc_exact_recovery_v1.py" \

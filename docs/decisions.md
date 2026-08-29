@@ -46,9 +46,11 @@ generated JSON by hand.
 Allow `generate-production` to receive each reviewed component commit and one
 explicit `--authorize-production-deployment` flag. Authorization fails unless
 all pins are full Git SHAs, the immutable science pin is unchanged, and the
-controller pin exactly equals the clean execution worktree HEAD. Existing
-ancestry, entrypoint-hash, adoption, source, and manifest gates remain in
-force. Omitting the flag preserves the historical release-unready behavior.
+controller pin exactly equals the clean execution worktree HEAD. Repeat that
+exact equality at manifest build, manifest validation, launch-time load, and
+handover review; ancestry alone is insufficient. Existing ancestry,
+entrypoint-hash, adoption, source, and manifest gates remain in force.
+Omitting the flag preserves the historical release-unready behavior.
 
 ### Consequences
 

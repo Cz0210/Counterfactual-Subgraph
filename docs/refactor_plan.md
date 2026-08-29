@@ -17,7 +17,8 @@
 - [x] Add reviewed component commit inputs and one explicit trusted-operator
   deployment authorization flag to the typed production-spec generator.
 - [x] Require a complete pin set, immutable science pin, and controller pin
-  equal to the execution HEAD before an authorized spec can be written.
+  equal to the execution HEAD at generation, manifest build/validation,
+  launch-time load, and handover review.
 - [x] Keep an invocation without explicit authorization release-unready.
 
 ## 2026-08-29: AIDS exact fast-release CPU envelope

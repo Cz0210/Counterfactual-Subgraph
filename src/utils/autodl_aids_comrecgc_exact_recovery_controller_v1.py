@@ -1329,6 +1329,18 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
     pins = spec.get("release_pins")
     if not isinstance(pins, Mapping):
         raise RecoveryControllerError("release pins are absent")
+    deployment_authorized = spec.get("production_deployment_authorized")
+    if deployment_authorized not in {True, False}:
+        raise RecoveryControllerError(
+            "production deployment authorization must be explicit"
+        )
+    if (
+        deployment_authorized is True
+        and pins.get("controller_commit") != execution_commit
+    ):
+        raise RecoveryControllerError(
+            "authorized controller release pin must equal execution commit"
+        )
     ready, missing_pins = _release_requirement_state(pins, adoption_contract)
     if not _release_commits_are_ancestors(
         project_root, execution_commit=execution_commit, pins=pins
@@ -1397,9 +1409,6 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
             raise RecoveryControllerError(
                 f"typed stage argv authority mismatch: {stage_id}.{role}"
             )
-    deployment_authorized = spec.get("production_deployment_authorized")
-    if deployment_authorized not in {True, False}:
-        raise RecoveryControllerError("production deployment authorization must be explicit")
     payload: dict[str, Any] = {
         "schema_version": MANIFEST_SCHEMA,
         "controller_id": CONTROLLER_ID,
@@ -1469,6 +1478,14 @@ def validate_controller_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
     ready, missing = _release_requirement_state(
         payload.get("release_pins", {}), payload.get("adoption_contract", {})
     )
+    if (
+        payload.get("production_deployment_authorized") is True
+        and payload.get("release_pins", {}).get("controller_commit")
+        != payload.get("execution_commit")
+    ):
+        raise RecoveryControllerError(
+            "authorized controller release pin differs from execution commit"
+        )
     if payload.get("release_ready") is not ready or payload.get("missing_release_pins") != missing:
         raise RecoveryControllerError("release pin state mismatch")
     return {"status": "PASS", "release_ready": ready, "missing_release_pins": missing}
@@ -1497,6 +1514,13 @@ def load_bound_controller_manifest(path: str | Path) -> dict[str, Any]:
         )
     if result.get("production_deployment_authorized") is not True:
         raise RecoveryControllerError("PRODUCTION_DEPLOYMENT_NOT_AUTHORIZED")
+    if (
+        result.get("release_pins", {}).get("controller_commit")
+        != result.get("execution_commit")
+    ):
+        raise RecoveryControllerError(
+            "authorized controller release pin changed before launch"
+        )
     project_root = Path(result["project_root"])
     if not _execution_tree_clean(project_root):
         raise RecoveryControllerError("release execution worktree became dirty")
@@ -5835,6 +5859,8 @@ def _old_brute_handover_status(
     review_release_pass = bool(
         manifest.get("release_ready") is True
         and manifest.get("production_deployment_authorized") is True
+        and manifest.get("release_pins", {}).get("controller_commit")
+        == manifest.get("execution_commit")
         and release_ancestry_pass
         and execution_tree_clean
     )

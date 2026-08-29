@@ -2316,7 +2316,7 @@ def test_aids_old_brute_handover_requires_typed_evidence_and_sends_no_signal(
         "project_root": str(Path(__file__).resolve().parents[2]),
         "controller_root": str(tmp_path / "controller"),
         "execution_commit": "a" * 40,
-        "release_pins": {"controller_commit": "b" * 40},
+        "release_pins": {"controller_commit": "a" * 40},
         "release_ready": True,
         "production_deployment_authorized": True,
         "source_authority": source,

@@ -303,6 +303,53 @@ def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
         stages[controller.ADOPTION_STAGE]["terminal_path"]
     )
 
+    execution_commit = controller._git_head(project_root)
+    reviewed_runner = "ab14be7c70803384eb6904d85bbf87b070d8d961"
+    release_pins = {
+        "adoption_commit": "7370006da6175851def0f151ca6fb4dfb44f2ab7",
+        "controller_commit": execution_commit,
+        "exact_runner_commit": reviewed_runner,
+        "subset_runner_commit": reviewed_runner,
+        "downstream_runner_commit": reviewed_runner,
+        "standardization_runner_commit": reviewed_runner,
+    }
+    authorized = builder.generate_production_spec(
+        adoption_output=adoption_output,
+        controller_parent=controller_parent,
+        python=Path(sys.executable).resolve(strict=True),
+        project_root=project_root,
+        controller_manifest_path=manifests / "authorized-controller.json",
+        timestamp="20260825T010204Z",
+        thread_count=8,
+        release_pins=release_pins,
+        production_deployment_authorized=True,
+        adoption_validator=lambda *, output_dir: receipt,
+        manifest_loader=lambda path: fake_controller,
+    )
+    assert authorized["production_deployment_authorized"] is True
+    assert authorized["release_pins"]["controller_commit"] == execution_commit
+
+    hostile = builder.generate_production_spec(
+        adoption_output=adoption_output,
+        controller_parent=controller_parent,
+        python=Path(sys.executable).resolve(strict=True),
+        project_root=project_root,
+        controller_manifest_path=manifests / "hostile-controller.json",
+        timestamp="20260825T010205Z",
+        thread_count=8,
+        adoption_validator=lambda *, output_dir: receipt,
+        manifest_loader=lambda path: fake_controller,
+    )
+    hostile["release_pins"].update(release_pins)
+    hostile["release_pins"]["controller_commit"] = controller.SCIENCE_RELEASE_COMMIT
+    hostile["production_deployment_authorized"] = True
+    hostile_path = _json(tmp_path / "hostile-stale-controller-spec.json", hostile)
+    with pytest.raises(
+        controller.RecoveryControllerError,
+        match="controller release pin must equal execution commit",
+    ):
+        controller.build_controller_payload(hostile_path)
+
 
 @pytest.mark.parametrize("thread_count", [0, 7, 13, 64])
 def test_production_spec_rejects_worker_count_outside_fast_release_bound(
