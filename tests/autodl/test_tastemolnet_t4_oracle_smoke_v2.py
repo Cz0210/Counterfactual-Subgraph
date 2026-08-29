@@ -650,3 +650,9 @@ def test_independent_replay_rejects_science_drift(tmp_path: Path, monkeypatch) -
     changed = copy.deepcopy(documents)
     changed["oracle_smoke.json"]["batch_single_max_abs_difference"] = 1e-3
     assert not t4._equivalent(documents, changed)
+
+
+def test_aggregate_accepts_measured_cuda_tail_within_frozen_tolerance() -> None:
+    documents = _documents()
+    documents["oracle_smoke.json"]["batch_single_max_abs_difference"] = 5e-7
+    t4._validate_documents(documents)

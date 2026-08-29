@@ -80,6 +80,11 @@ SOURCE_LABEL = 1
 T4_ADAPTIVE_SEARCH_SCHEDULE = ((16, 8), (64, 16), (128, 32))
 T4_MIN_STRICT_FLIPS = 16
 T4_MIN_FLIPPED_PARENTS = 8
+# CUDA graph reductions are not bitwise invariant to PyG batch packing.  The
+# real A800 smoke measured a 1.057543042e-7 probability tail difference while
+# every three-class argmax remained identical.  Keep a small absolute envelope
+# and independently require the predicted class to remain unchanged.
+T4_BATCH_SINGLE_ATOL = 1e-6
 _HEX = frozenset("0123456789abcdef")
 T4_CHECKPOINT_PAYLOAD_FILES = (
     "model.pt",
@@ -2542,6 +2547,27 @@ def _cohort_digest(selected: Sequence[tuple[int, MolecularGraphData, Any]]) -> s
     ).hexdigest()
 
 
+def _batch_single_probabilities_match(
+    batched: np.ndarray, singles: np.ndarray
+) -> bool:
+    """Accept bounded CUDA roundoff only when every predicted class agrees."""
+
+    left = np.asarray(batched, dtype=np.float64)
+    right = np.asarray(singles, dtype=np.float64)
+    if (
+        left.shape != right.shape
+        or left.ndim != 2
+        or left.shape[1] != NUM_CLASSES
+        or not np.isfinite(left).all()
+        or not np.isfinite(right).all()
+    ):
+        return False
+    return bool(
+        np.array_equal(np.argmax(left, axis=1), np.argmax(right, axis=1))
+        and np.allclose(left, right, rtol=0.0, atol=T4_BATCH_SINGLE_ATOL)
+    )
+
+
 def _load_gnn_oracle_anchored(
     checkpoint: PhysicalDirectory,
     *,
@@ -2655,9 +2681,7 @@ def run_bounded_oracle_smoke(
     selected_graphs = [row[1] for row in selected]
     batched = oracle.predict_proba(selected_graphs, batch_size=batch_size)
     singles = np.vstack([oracle.predict_proba([graph], batch_size=1) for graph in selected_graphs])
-    if not np.isfinite(batched).all() or not np.allclose(
-        batched, singles, rtol=0.0, atol=1e-7
-    ):
+    if not _batch_single_probabilities_match(batched, singles):
         raise TasteGNNStageError("Taste T4 batch/single probabilities differ")
 
     full_parent = enumerate_connected_hard_deletions("CC", "CC")
@@ -2695,9 +2719,7 @@ def run_bounded_oracle_smoke(
     if (
         pair_batched.shape != (len(pair_graphs), NUM_CLASSES)
         or pair_singles.shape != pair_batched.shape
-        or not np.isfinite(pair_batched).all()
-        or not np.isfinite(pair_singles).all()
-        or not np.allclose(pair_batched, pair_singles, rtol=0.0, atol=1e-7)
+        or not _batch_single_probabilities_match(pair_batched, pair_singles)
     ):
         raise TasteGNNStageError(
             "Taste T4 deletion-pair batch/single probabilities differ"
@@ -2862,9 +2884,9 @@ def run_adaptive_oracle_smoke(
         if (
             parent_batched.shape != (len(selected_graphs), NUM_CLASSES)
             or parent_singles.shape != parent_batched.shape
-            or not np.isfinite(parent_batched).all()
-            or not np.isfinite(parent_singles).all()
-            or not np.allclose(parent_batched, parent_singles, rtol=0.0, atol=1e-7)
+            or not _batch_single_probabilities_match(
+                parent_batched, parent_singles
+            )
         ):
             raise TasteGNNStageError("Taste T4 batch/single probabilities differ")
 
@@ -2920,10 +2942,8 @@ def run_adaptive_oracle_smoke(
             if (
                 residual_batched.shape != (residual_sample_count, NUM_CLASSES)
                 or residual_singles.shape != residual_batched.shape
-                or not np.isfinite(residual_batched).all()
-                or not np.isfinite(residual_singles).all()
-                or not np.allclose(
-                    residual_batched, residual_singles, rtol=0.0, atol=1e-7
+                or not _batch_single_probabilities_match(
+                    residual_batched, residual_singles
                 )
             ):
                 raise TasteGNNStageError(

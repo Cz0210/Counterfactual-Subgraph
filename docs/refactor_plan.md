@@ -1,5 +1,33 @@
 # Refactor Plan
 
+## 2026-08-29: Taste NeuroSED canonical feature-schema producer
+
+- [x] Add a thin AutoDL producer that opens only SHA/role-bound train and
+  validation inputs through the shared split loader, rejects ID overlap, and
+  calls `derive_feature_schema`.
+- [x] Atomically no-replace publish the exact
+  `tastemolnet_gcf_neurosed_feature_schema_v1` JSON and emit aggregate
+  no-calibration/no-test receipt evidence.
+- [x] Add strict `configs/hpc.yaml` plus `fallback=false` CLI validation,
+  paired static-refusal Slurm parity, and focused hostile/end-to-end tests.
+- [ ] Run once from the immutable AutoDL execution worktree and pin the schema
+  SHA into both split-local pair builders; local implementation is not a
+  scientific PASS.
+
+## 2026-08-29: Bound Taste T4 CUDA batch roundoff
+
+- [x] Reproduce the real A800 parent/residual batch-versus-single discrepancy
+  and confirm a `1.0575430420267651e-7` maximum probability tail with zero
+  three-class argmax disagreements.
+- [x] Freeze one `1e-6` absolute, zero-relative tolerance across bounded,
+  adaptive, and aggregate T4 checks while retaining finite/shape closure and
+  an independent exact-argmax gate.
+- [x] Add regressions that accept bounded same-class CUDA roundoff and reject
+  class drift even inside the numeric envelope.
+- [ ] Deploy from a fresh immutable AutoDL checkout and publish only after the
+  managed worker plus independent verifier complete; never reuse the failed
+  stage/final/controller namespaces.
+
 ## 2026-08-29: Align AIDS exact handover with latest authorization
 
 - [x] Make ETA<=48h and relative-speedup evidence diagnostic rather than

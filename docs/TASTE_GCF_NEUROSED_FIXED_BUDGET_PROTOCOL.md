@@ -172,6 +172,37 @@ only Taste validation graphs for both roles. Every row enforces
 `query_graph_id != target_graph_id`. Calibration and test are not accepted
 split values.
 
+### Canonical feature-schema producer
+
+Before either split-local pair inventory is built, materialize the NeuroSED
+feature schema with the dedicated AutoDL CLI:
+
+```bash
+python -B scripts/autodl/build_tastemolnet_neurosed_feature_schema.py \
+  --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
+  --train-csv /absolute/private/tastemolnet/splits/train.csv \
+  --expected-train-sha256 eac05f7003c37a24554aa2c22e1051edb90eb4a12f9b62ae6fd47d73efa59564 \
+  --validation-csv /absolute/private/tastemolnet/splits/validation.csv \
+  --expected-validation-sha256 eedb06c6997652113f234f085135acd4f6dafb10f0d5d4d8e3f432473712a016 \
+  --output-json /absolute/fresh/tastemolnet-neurosed/feature_schema.json
+```
+
+The command accepts only the tracked `configs/hpc.yaml` bytes and the one
+fail-closed inference override shown above. It calls the shared held-descriptor
+split loader for `train.csv` and `validation.csv`, verifies each file's SHA and
+declared role, rejects cross-split molecule-ID overlap, and calls the shared
+`derive_feature_schema`. The output file is a fresh atomic-no-replace canonical
+`tastemolnet_gcf_neurosed_feature_schema_v1` object; producer audit fields are
+not mixed into that downstream schema. The single aggregate JSON receipt on
+stdout records `opened_payload_splits=["train","validation"]`, both split
+roles/counts/hashes, and explicit false/empty evidence for calibration/test
+payload access. It contains no molecule ID or SMILES.
+
+The paired `scripts/slurm/build_tastemolnet_neurosed_feature_schema.sh` is
+syntax/CLI-parity evidence only and exits 78 before the Python command because
+this data route is AutoDL-only.
+
 The pair builder reads one normalized absolute, non-symlink CSV through a held
 descriptor, verifies its SHA-256 before use, reconstructs the reviewed feature
 schema, and writes unlabeled metadata. Each row records the required graph IDs,
@@ -183,6 +214,15 @@ builder, and CLI. Each final sampler manifest carries a canonical self-hash. A
 requested training/validation budget must additionally have
 `ceil(1.10 * budget)` deterministic candidates; successful rows are taken in
 sampler order, with no GED-result-based choice.
+
+For the present Taste project pair inventories, the preregistered query
+sampler values are `n_hops_query=5` and
+`traversal_probability_query=0.5` (the pinned upstream argument is named
+`trav_prob_query`). These are project sampling choices. The upstream function
+requires the caller to supply both values, and the pinned GREED-experiments
+AIDS material consumes prebuilt pairs rather than establishing `5`/`0.5` as
+official defaults. Therefore manifests and prose must not describe either
+number as an upstream AIDS or GREED claim.
 
 The 100-, 500-, and 1000-pair benchmark cohorts are disjoint slices of one
 deterministic 1600-pair inventory. File hashes and the actual ordered pair-ID

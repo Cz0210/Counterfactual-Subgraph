@@ -1334,6 +1334,22 @@ class _FakeOracle:
         return np.asarray([self._record(graph)["probabilities"] for graph in graphs])
 
 
+def test_t4_batch_single_tolerance_accepts_roundoff_but_not_class_drift() -> None:
+    batched = np.asarray(
+        [[0.1, 0.8, 0.1], [0.5000004, 0.4999996, 0.0]], dtype=np.float64
+    )
+    same_classes = np.asarray(
+        [[0.1000005, 0.7999995, 0.1], [0.5000001, 0.4999999, 0.0]],
+        dtype=np.float64,
+    )
+    changed_class = np.asarray(
+        [[0.1, 0.8, 0.1], [0.4999996, 0.5000004, 0.0]], dtype=np.float64
+    )
+    assert stages.T4_BATCH_SINGLE_ATOL == 1e-6
+    assert stages._batch_single_probabilities_match(batched, same_classes)
+    assert not stages._batch_single_probabilities_match(batched, changed_class)
+
+
 def _fake_t4_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[dict[str, Any], Path, Path, Path, Path]:

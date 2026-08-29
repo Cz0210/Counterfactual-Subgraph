@@ -12487,3 +12487,75 @@ is itself content/stat-bound by a later immutable record.
 - The output budget now reserves the bounded generation/resume/observation
   inventory.  This controller still sends no old-route signal; deployment and
   any one-time graceful stop remain separately reviewed actions.
+## [2026-08-29] Materialize the Taste NeuroSED feature schema before fixed-budget sampling
+
+### Motivation
+
+The available T3 GNN cache uses the separate `molecular_graph_v1` categorical
+schema and cannot serve as the explicit-hydrogen, one-hot atom vocabulary that
+the fixed-budget NeuroSED pair builder requires.  Train and validation pair
+sampling therefore lacked one concrete, split-closed schema authority even
+though the pinned non-MIP GEDLIB build was available.
+
+### Decision
+
+Add one thin producer that opens only SHA- and role-bound Taste train and
+validation CSVs through the shared split loader, rejects cross-split molecule
+ID overlap, and calls the existing `derive_feature_schema` implementation.
+Publish exactly one canonical `tastemolnet_gcf_neurosed_feature_schema_v1`
+document with atomic no-replace semantics.  Its aggregate receipt records that
+calibration and test were not opened and contains no molecule IDs or SMILES.
+The CLI accepts only the tracked `configs/hpc.yaml` plus
+`inference.fallback_to_heuristic=false`.
+
+Freeze `n_hops=5` and `traversal=0.5` as project-preregistered fixed-budget
+sampling choices.  They are not represented as upstream GREED/AIDS defaults.
+
+### Consequences
+
+- Train and validation pair builders can bind one real feature-schema SHA
+  without opening calibration or test payloads.
+- This producer does not create GED labels, a NeuroSED checkpoint, or a T7
+  result and therefore cannot publish a scientific PASS.
+- AutoDL must still materialize the schema from the immutable execution
+  checkout and pin its hash into both split-local pair manifests.
+
+### Status
+
+Accepted
+
+---
+
+## [2026-08-29] Bound Taste T4 CUDA batch roundoff without accepting class drift
+
+### Motivation
+
+The first real A800 adaptive T4 attempt reached the frozen three-class GINE
+oracle but failed its batch-versus-single probability check.  A direct replay
+over the same parent and residual graphs measured a maximum absolute difference
+of `1.0575430420267651e-7`; every argmax class agreed.  The former `1e-7`
+absolute threshold therefore rejected CUDA/PyG reduction-order roundoff rather
+than a scientific prediction change.
+
+### Decision
+
+Freeze the T4 batch/single absolute tolerance at `1e-6` with zero relative
+tolerance, finite values, and exact shape closure.  Independently require every
+three-class argmax to agree.  Apply the same constant in bounded science,
+adaptive science, and aggregate verification.  Any class drift remains a hard
+failure even when the probability difference is below `1e-6`.
+
+### Consequences
+
+- The measured A800 tail is accepted without changing the checkpoint, cohort,
+  deletion search, strict-flip thresholds, or destination policy.
+- NaN/Inf, shape drift, probability drift above `1e-6`, and any argmax drift
+  still fail closed.
+- The failed output namespace and quarantined controller are not reused; a
+  runtime PASS still requires a fresh managed attempt and independent verifier.
+
+### Status
+
+Accepted
+
+---

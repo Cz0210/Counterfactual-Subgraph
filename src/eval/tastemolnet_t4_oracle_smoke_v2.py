@@ -30,6 +30,7 @@ from src.eval.tastemolnet_gnn_stages import (
     NUM_CLASSES,
     SOURCE_LABEL,
     T4_ADAPTIVE_SEARCH_SCHEDULE,
+    T4_BATCH_SINGLE_ATOL,
     T4_MIN_FLIPPED_PARENTS,
     T4_MIN_STRICT_FLIPS,
     PhysicalDirectory,
@@ -833,7 +834,8 @@ def _validate_aggregate_smoke(smoke: Mapping[str, Any]) -> None:
         or not isinstance(smoke.get("batch_single_max_abs_difference"), (int, float))
         or isinstance(smoke.get("batch_single_max_abs_difference"), bool)
         or not math.isfinite(float(smoke["batch_single_max_abs_difference"]))
-        or float(smoke["batch_single_max_abs_difference"]) > 1e-7
+        or float(smoke["batch_single_max_abs_difference"])
+        > T4_BATCH_SINGLE_ATOL
         or smoke.get("empty_deletion_failed_closed") is not True
         or smoke.get("invalid_deletion_failed_closed") is not True
         or smoke.get("calibration_payload_loaded") is not True
