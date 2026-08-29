@@ -328,6 +328,12 @@ def _spec(
             "max_rss_scope": (
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
+            "subset_max_rss_bytes": recovery.DEFAULT_SUBSET_MAX_RSS_BYTES,
+            "subset_rss_working_margin_bytes": (
+                recovery.DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES
+            ),
+            "subset_max_rss_scope": recovery.SUBSET_MAX_RSS_SCOPE,
+            "subset_rss_budget_semantics": recovery.SUBSET_RSS_BUDGET_SEMANTICS,
             "thread_count": recovery.DEFAULT_THREAD_COUNT,
             "cpu_only": True,
             "gpu_lock_required": False,
@@ -405,7 +411,42 @@ def test_resource_budget_is_derived_and_below_old_100gib_floor(tmp_path: Path) -
     assert manifest["resources"]["max_rss_scope"] == (
         "exact_dbscan_process_with_native_peak_certificate"
     )
+    assert manifest["resources"]["subset_max_rss_bytes"] == 32 * 1024**3
+    assert manifest["resources"]["subset_rss_working_margin_bytes"] == 8 * 1024**3
+    assert (
+        manifest["resources"]["subset_max_rss_scope"]
+        == recovery.SUBSET_MAX_RSS_SCOPE
+    )
+    assert (
+        manifest["resources"]["subset_rss_budget_semantics"]
+        == recovery.SUBSET_RSS_BUDGET_SEMANTICS
+    )
     assert manifest["resources"]["thread_count"] == 8
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subset_max_rss_bytes", 31 * 1024**3),
+        ("subset_rss_working_margin_bytes", 7 * 1024**3),
+        ("subset_max_rss_scope", "drifted"),
+        ("subset_rss_budget_semantics", "drifted"),
+    ],
+)
+def test_controller_rejects_subset_rss_contract_drift(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    spec_path, spec = _spec(tmp_path)
+    spec["resources"][field] = value
+    _write_json(spec_path, spec)
+    with pytest.raises(
+        recovery.RecoveryControllerError,
+        match="production subset RSS contract changed",
+    ):
+        recovery.build_controller_manifest(
+            spec_path=spec_path,
+            output_path=tmp_path / "manifest.json",
+        )
 
 
 @pytest.mark.parametrize("thread_count", [0, 7, 13, 16])
@@ -671,12 +712,16 @@ class _SpawnLifecycleProcess:
         self._wait_result = wait_result
         self._wait_error = wait_error
         self._on_wait = on_wait
+        self.poll_calls = 0
+        self.wait_calls = 0
 
     def poll(self) -> int | None:
+        self.poll_calls += 1
         return self._poll_result
 
     def wait(self, timeout: float | None = None) -> int:
         del timeout
+        self.wait_calls += 1
         if callable(self._on_wait):
             self._on_wait()
         if self._wait_error is not None:
@@ -820,6 +865,81 @@ def test_process_group_quiescence_ignores_zombie_but_not_live_descendant(
     live_path.unlink()
     assert recovery._process_group_member_pids(4242, proc_root=proc) == ()
     recovery._wait_for_process_group_quiescence(4242, proc_root=proc)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_alive"),
+    [("S", True), ("R", True), ("Z", False), ("X", False), ("x", False)],
+)
+def test_pid_alive_rejects_terminal_proc_states(
+    tmp_path: Path, state: str, expected_alive: bool
+) -> None:
+    proc = tmp_path / "proc"
+    stat_path = proc / "4242/stat"
+    stat_path.parent.mkdir(parents=True)
+    fields = [state, "1", "4242", *(["0"] * 16), "99"]
+    stat_path.write_text(
+        f"4242 (worker with parens) {' '.join(fields)}\n", encoding="utf-8"
+    )
+    assert recovery._read_proc_start_ticks(4242, proc_root=proc) == 99
+    assert recovery._pid_alive(4242, 99, proc_root=proc) is expected_alive
+    assert recovery._pid_alive(4242, 100, proc_root=proc) is False
+
+
+def test_direct_child_nonzero_exit_is_polled_reaped_and_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, stage, _argv = _spawn_lifecycle_contract(tmp_path)
+    process = _SpawnLifecycleProcess(poll_result=17, wait_result=17)
+    monkeypatch.setattr(recovery, "_disk_preflight", lambda value: {})
+    monkeypatch.setattr(recovery.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(recovery, "_read_proc_start_ticks", lambda *args, **kwargs: 99)
+    monkeypatch.setattr(
+        recovery.ArmedExecStartupBarrier, "release", lambda self: None
+    )
+    state: dict[str, object] = {"worker": None, "startup_barrier": None}
+
+    def observed_launcher(*_args: object, **_kwargs: object) -> list[str]:
+        binding = state["startup_barrier"]
+        assert isinstance(binding, dict)
+        record = recovery.validate_startup_barrier_record(binding["record_path"])
+        return list(record.launcher_argv)
+
+    monkeypatch.setattr(recovery, "_proc_argv", observed_launcher)
+    monkeypatch.setattr(
+        recovery,
+        "_host_sample",
+        lambda **kwargs: {
+            "load_per_cpu": 0.0,
+            "cpu_total_ticks": 100,
+            "cpu_iowait_ticks": 0,
+        },
+    )
+    monkeypatch.setattr(recovery, "_save_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        recovery, "_wait_for_process_group_quiescence", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_pid_alive",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("owned Popen must be polled directly")
+        ),
+    )
+    with pytest.raises(
+        recovery.RecoveryControllerError,
+        match="stage worker failed: production_subset_equivalence:exit=17",
+    ):
+        recovery._run_or_attach_stage(
+            manifest=manifest,
+            stage=stage,
+            root=tmp_path,
+            state=state,
+            guard=lambda: None,
+            poll_seconds=0.1,
+        )
+    assert process.poll_calls == 1
+    assert process.wait_calls == 1
 
 
 def test_fresh_spawn_pid_bind_timeout_terminates_owned_worker(

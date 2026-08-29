@@ -24,6 +24,41 @@ or injected authority payloads remain fail closed.
 - The failed T9 stage remains unusable.  Runtime recovery requires a fresh
   managed attempt from a newly integrated immutable execution commit.
 
+## [2026-08-30] Bound AIDS subset RSS above its measured mmap-scan baseline and reap exited workers
+
+### Motivation
+
+The fresh exact-recovery route reached the production-subset preflight, but its
+first 2,000-row external DBSCAN failed before doing work because the process
+high-water RSS was 24,293,740,544 bytes while the stage hard-coded an 8 GiB
+absolute limit. The high-water value is expected: deterministic selection has
+already scanned the complete file-backed vector and distance mappings. The
+worker then exited with code 1, but the controller compared only PID start
+ticks, treated the unreaped zombie as live, and kept the stage `RUNNING`.
+
+### Decision
+
+Keep the exact DBSCAN 96 GiB scope unchanged. Give the subset process an
+independent 32 GiB authorized ceiling and derive its actual absolute limit once,
+immediately before subset DBSCAN, as measured `max(VmRSS, VmHWM)` plus exactly
+8 GiB. Persist this complete calculation in aggregate and per-subset manifests
+and bind it in the controller terminal validator. Poll directly owned workers
+through `Popen.poll()`, retain `wait()` and process-group quiescence checks, and
+treat procfs `Z`, `X`, and `x` states as dead for reattachment and status.
+
+### Consequences
+
+- The five subset definitions, sklearn comparison, exact DBSCAN parameters,
+  source authority, and full-production non-claim are unchanged.
+- A baseline-plus-margin value above 32 GiB still fails closed; the fix is not
+  an unbounded memory increase and does not borrow the exact-only 96 GiB scope.
+- A nonzero child exit reaches the existing controller exception path, which
+  persists controller and current stage as retryable `BLOCKED`; a dead leader
+  with live process-group descendants still blocks reattachment.
+- The already failed CID/attempt remains immutable. Any deployment must use a
+  newly integrated immutable checkout and fresh adoption/spec/manifest/CID;
+  this decision authorizes no signal to the protected legacy brute process.
+
 ### Status
 
 Accepted

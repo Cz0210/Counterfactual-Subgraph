@@ -510,7 +510,14 @@ def run_subset_stage(
                     seed=0,
                     scan_block_size=int(manifest["resources"]["block_size"]),
                     query_block_size=64,
-                    max_rss_bytes=8 * 1024**3,
+                    max_rss_bytes=int(
+                        manifest["resources"]["subset_max_rss_bytes"]
+                    ),
+                    working_rss_margin_bytes=int(
+                        manifest["resources"][
+                            "subset_rss_working_margin_bytes"
+                        ]
+                    ),
                     expected_sklearn_version=str(
                         runtime["expected_sklearn_version"]
                     ),

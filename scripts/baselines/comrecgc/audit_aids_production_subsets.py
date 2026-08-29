@@ -39,7 +39,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--scan-block-size", type=int, default=65_536)
     parser.add_argument("--query-block-size", type=int, default=64)
-    parser.add_argument("--max-rss-gb", type=float, default=8.0)
+    parser.add_argument(
+        "--max-rss-gb",
+        type=float,
+        default=32.0,
+        help="Authorized absolute subset-process RSS ceiling in GiB.",
+    )
+    parser.add_argument(
+        "--working-rss-margin-gb",
+        type=float,
+        default=8.0,
+        help="Bounded margin added to the measured post-selection RSS peak.",
+    )
     parser.add_argument("--expected-sklearn-version", required=True)
     return parser
 
@@ -64,6 +75,9 @@ def main() -> int:
             scan_block_size=args.scan_block_size,
             query_block_size=args.query_block_size,
             max_rss_bytes=int(args.max_rss_gb * 1024**3),
+            working_rss_margin_bytes=int(
+                args.working_rss_margin_gb * 1024**3
+            ),
             expected_sklearn_version=args.expected_sklearn_version,
         ),
     )

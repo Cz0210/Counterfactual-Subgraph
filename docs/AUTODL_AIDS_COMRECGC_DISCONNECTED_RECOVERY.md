@@ -76,6 +76,28 @@ survive worker generations. A worker that finishes before PID binding or
 within one block of a restart can close the probe only by binding the exact
 terminal and DBSCAN SHA plus the DBSCAN-observed peak RSS.
 
+The production-subset preflight has a separate RSS contract. Its deterministic
+dense/sparse and theta-boundary selection scans touch the complete file-backed
+vector and distance mappings, so Linux `VmHWM` legitimately includes roughly
+the source footprint before the 2,000-row DBSCAN begins. Immediately after
+those scans and the frozen sklearn import, the audit records
+`max(VmRSS, VmHWM)`, adds exactly 8 GiB of bounded working margin, and freezes
+that sum as the absolute limit used by all five external DBSCAN and downstream
+checks. The sum must remain at or below the independently authorized 32 GiB
+subset ceiling. Baseline, margin, effective limit, measurement semantics, and
+authorized ceiling are written into every subset audit and the aggregate
+manifest; this does not widen the exact-only 96 GiB contract or alter DBSCAN
+science.
+
+Direct child processes are polled through their owned `Popen` handle so an
+exit is reaped with `waitpid` before return-code and typed-terminal validation.
+For reattachment and read-only status, Linux `Z`, `X`, and `x` states are dead
+even when PID start ticks still match. A dead leader may be retried only after
+the existing process-group scan proves that no non-zombie member remains. A
+recorded dead worker is reported as stalled until the controller persists its
+normal retryable `BLOCKED` transition; it is never reported as viable running
+science.
+
 Every typed stage gate freezes its validator projection and a recursive file
 inventory. Small files are rehashed on every reopen; large arrays retain their
 publish-time SHA and must keep the exact inode, size, mtime, ctime, mode, and

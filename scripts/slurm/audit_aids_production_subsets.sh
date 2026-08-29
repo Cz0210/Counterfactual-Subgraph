@@ -32,6 +32,8 @@ run_autodl_only_reference() {
     --expected-close-pair-contract-sha256 "$EXPECTED_CLOSE_PAIR_CONTRACT_SHA256" \
     --physical-pairs "$PHYSICAL_PAIRS" \
     --expected-physical-pairs-sha256 "$EXPECTED_PHYSICAL_PAIRS_SHA256" \
+    --max-rss-gb 32 \
+    --working-rss-margin-gb 8 \
     --expected-sklearn-version "$EXPECTED_SKLEARN_VERSION" \
     --output-dir "$OUTPUT_DIR"
 }

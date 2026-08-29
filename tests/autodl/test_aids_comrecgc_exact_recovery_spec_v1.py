@@ -281,6 +281,13 @@ def test_production_spec_is_derived_from_typed_receipt_and_builds_native_dag(
     assert built["release_ready"] is False
     assert built["production_deployment_authorized"] is False
     assert built["resources"]["thread_count"] == 8
+    assert built["resources"]["subset_max_rss_bytes"] == 32 * 1024**3
+    assert built["resources"]["subset_rss_working_margin_bytes"] == 8 * 1024**3
+    assert built["resources"]["subset_max_rss_scope"] == controller.SUBSET_MAX_RSS_SCOPE
+    assert (
+        built["resources"]["subset_rss_budget_semantics"]
+        == controller.SUBSET_RSS_BUDGET_SEMANTICS
+    )
     assert built["resources"]["old_brute_handover"] == controller.handover_contract()
     stages = {row["stage_id"]: row for row in built["stages"]}
     assert stages[controller.EXACT_STAGE]["output_dir"].endswith(

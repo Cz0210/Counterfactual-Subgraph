@@ -10,6 +10,24 @@
 - [ ] Deploy only from a newly integrated immutable AutoDL worktree and a fresh
   T9 attempt; never reuse the fail-closed stage namespace.
 
+## 2026-08-30: Repair AIDS subset RSS preflight and zombie child reconciliation
+
+- [x] Attribute the 24,293,740,544-byte production high-water mark to the
+  required full-source mmap selection scans rather than the 2,000-row subset.
+- [x] Freeze a separate 32 GiB subset ceiling and derive the operational limit
+  from the post-scan measured peak plus a bounded 8 GiB working margin.
+- [x] Bind the baseline, margin, effective limit, and ceiling into aggregate
+  and per-subset manifests while leaving the exact-only 96 GiB scope unchanged.
+- [x] Poll and reap directly owned children; classify `Z`/`X`/`x` as dead for
+  reattachment/status and retain live-descendant and typed-terminal gates.
+- [x] Add focused regressions for the observed production peak, ceiling
+  rejection, spec/stage propagation, terminal proc states, and direct nonzero
+  exit reaping.
+- [ ] Integrate into a new immutable AutoDL checkout, create fresh adoption,
+  spec, manifest, CID, and output roots, and launch exact8. Never reuse the
+  failed CID or signal the protected old brute process before every handover
+  gate independently passes.
+
 ## 2026-08-29: Correct canonical AIDS component order
 
 - [x] Recompute the pinned anchor graph and confirm canonical sizes

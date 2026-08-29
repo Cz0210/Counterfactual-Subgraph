@@ -28,6 +28,7 @@ from .external_memory_dbscan import (
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalDBSCANContract,
     ExternalMemoryDBSCANError,
+    _rss_bytes,
     fit_external_memory_dbscan,
 )
 from .external_memory_recourse import trace_external_cluster_order
@@ -157,6 +158,7 @@ class ProductionSubsetAuditContract:
     scan_block_size: int = 65_536
     query_block_size: int = 64
     max_rss_bytes: int = 8 * 1024**3
+    working_rss_margin_bytes: int = 0
     expected_sklearn_version: str = ""
     expected_theta: float = 0.1
     expected_parent_count: int = 1_283
@@ -175,6 +177,8 @@ class ProductionSubsetAuditContract:
             or self.scan_block_size <= 0
             or self.query_block_size <= 0
             or self.max_rss_bytes <= 0
+            or self.working_rss_margin_bytes < 0
+            or self.working_rss_margin_bytes > self.max_rss_bytes
             or not self.expected_sklearn_version
             or self.expected_theta != 0.1
             or self.expected_parent_count <= 0
@@ -183,6 +187,36 @@ class ProductionSubsetAuditContract:
             != self.expected_parent_count * self.expected_candidate_count
         ):
             raise ExternalMemoryDBSCANError("invalid production-subset audit contract")
+
+
+def _derive_subset_rss_budget(
+    contract: ProductionSubsetAuditContract,
+) -> dict[str, Any]:
+    """Freeze one bounded absolute cap after the full-source selection scans."""
+
+    baseline = _rss_bytes()
+    margin = int(contract.working_rss_margin_bytes)
+    if margin:
+        effective = baseline + margin
+        mode = "measured_pre_dbscan_peak_plus_bounded_working_margin"
+    else:
+        effective = int(contract.max_rss_bytes)
+        mode = "absolute_contract_limit"
+    if effective > int(contract.max_rss_bytes):
+        raise ExternalMemoryDBSCANError(
+            "SUBSET_RSS_AUTHORIZED_CEILING_EXCEEDED:"
+            f"baseline={baseline}:working_margin={margin}:"
+            f"effective={effective}:authorized={contract.max_rss_bytes}"
+        )
+    return {
+        "measurement": "max_of_process_VmRSS_and_VmHWM_with_ru_maxrss_fallback",
+        "mode": mode,
+        "measured_after_full_source_selection_scans": True,
+        "baseline_rss_bytes": baseline,
+        "working_rss_margin_bytes": margin,
+        "effective_max_rss_bytes": effective,
+        "authorized_max_rss_bytes": int(contract.max_rss_bytes),
+    }
 
 
 def _logical_to_physical(view: ThetaClosePairView, logical: np.ndarray) -> np.ndarray:
@@ -609,6 +643,8 @@ def run_production_subset_equivalence_audit(
             f"SKLEARN_VERSION_MISMATCH:actual={sklearn_version}:"
             f"expected={contract.expected_sklearn_version}"
         )
+    rss_budget = _derive_subset_rss_budget(contract)
+    effective_max_rss_bytes = int(rss_budget["effective_max_rss_bytes"])
     results: dict[str, Any] = {}
     for name in SUBSET_NAMES:
         indices = selections[name]
@@ -652,7 +688,7 @@ def run_production_subset_equivalence_audit(
                 min_samples=contract.min_samples,
                 query_block_size=min(contract.query_block_size, count),
                 checkpoint_interval_blocks=1,
-                max_rss_bytes=contract.max_rss_bytes,
+                max_rss_bytes=effective_max_rss_bytes,
                 expected_sklearn_version=contract.expected_sklearn_version,
             ),
             expected_vectors_sha256=vectors_subset_sha,
@@ -690,7 +726,7 @@ def run_production_subset_equivalence_audit(
             radius=contract.radius,
             theta=view.theta,
             recourse_size=contract.recourse_size,
-            max_rss_bytes=contract.max_rss_bytes,
+            max_rss_bytes=effective_max_rss_bytes,
         )
         if production_downstream["selected"] != sklearn_summary["selected"]:
             raise ExternalMemoryDBSCANError(
@@ -707,7 +743,7 @@ def run_production_subset_equivalence_audit(
                     min_samples=contract.min_samples,
                     query_block_size=min(contract.query_block_size, count),
                     checkpoint_interval_blocks=1,
-                    max_rss_bytes=contract.max_rss_bytes,
+                    max_rss_bytes=effective_max_rss_bytes,
                     expected_sklearn_version=contract.expected_sklearn_version,
                     shortcut_mode=ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
                     shortcut_seed_count=min(3, count),
@@ -761,7 +797,7 @@ def run_production_subset_equivalence_audit(
                 radius=contract.radius,
                 theta=view.theta,
                 recourse_size=contract.recourse_size,
-                max_rss_bytes=contract.max_rss_bytes,
+                max_rss_bytes=effective_max_rss_bytes,
             )
             if certified_downstream["selected"] != sklearn_summary["selected"]:
                 raise ExternalMemoryDBSCANError(
@@ -825,6 +861,7 @@ def run_production_subset_equivalence_audit(
             "pairs_path": str(subset_root / "pair_indices.npy"),
             "pairs_sha256": pairs_subset_sha,
             "partition_canonicalization": "components ordered by minimum subset row; noise=-1",
+            "rss_budget": rss_budget,
             "sklearn_result": sklearn_summary,
             "external_result": external_summary,
             "production_downstream_result": production_downstream,
@@ -867,6 +904,7 @@ def run_production_subset_equivalence_audit(
         "status": "PASS",
         "run_complete": True,
         "contract": asdict(contract),
+        "rss_budget": rss_budget,
         "close_pair_contract_path": str(close_path),
         "close_pair_contract_sha256": close_sha,
         "physical_vectors_path": str(physical_vectors_path),

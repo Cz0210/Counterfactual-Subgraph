@@ -22,6 +22,8 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     CONTROLLER_ID,
     DEFAULT_BLOCK_SIZE,
     DEFAULT_MAX_RSS_BYTES,
+    DEFAULT_SUBSET_MAX_RSS_BYTES,
+    DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES,
     DEFAULT_SAFETY_FLOOR_BYTES,
     DEFAULT_SUBSET_SIZE,
     DEFAULT_THREAD_COUNT,
@@ -49,6 +51,8 @@ from src.utils.autodl_aids_comrecgc_exact_recovery_controller_v1 import (
     STARTUP_BARRIER_RECORD_MAX_BYTES,
     STARTUP_BARRIER_PUBLICATION_FILE_MULTIPLIER,
     SUBSET_MAX_ATTEMPTS,
+    SUBSET_MAX_RSS_SCOPE,
+    SUBSET_RSS_BUDGET_SEMANTICS,
     SUBSET_STAGE,
     derive_output_budget,
     handover_contract,
@@ -571,6 +575,12 @@ def generate_production_spec(
             "max_rss_scope": (
                 "exact_dbscan_process_with_native_peak_certificate"
             ),
+            "subset_max_rss_bytes": DEFAULT_SUBSET_MAX_RSS_BYTES,
+            "subset_rss_working_margin_bytes": (
+                DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES
+            ),
+            "subset_max_rss_scope": SUBSET_MAX_RSS_SCOPE,
+            "subset_rss_budget_semantics": SUBSET_RSS_BUDGET_SEMANTICS,
             "thread_count": int(thread_count),
             "cpu_only": True,
             "gpu_lock_required": False,

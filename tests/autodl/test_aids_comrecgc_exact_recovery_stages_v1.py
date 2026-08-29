@@ -15,6 +15,9 @@ from src.baselines.comrecgc.external_memory_dbscan import (
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalDBSCANContract,
 )
+from src.baselines.comrecgc.production_subset_audit import (
+    ProductionSubsetAuditContract,
+)
 from src.utils import autodl_aids_comrecgc_exact_recovery_controller_v1 as controller
 from src.utils import autodl_aids_comrecgc_exact_recovery_stages_v1 as stages
 
@@ -179,7 +182,15 @@ def test_subset_stage_keeps_partial_attempt_and_restarts_in_fresh_child(
             "physical_pairs_sha256": "c" * 64,
         },
         "runtime_inputs": {"expected_sklearn_version": "1.7.2"},
-        "resources": {"subset_size": 3, "block_size": 4, "thread_count": 12},
+        "resources": {
+            "subset_size": 3,
+            "block_size": 4,
+            "thread_count": 12,
+            "subset_max_rss_bytes": controller.DEFAULT_SUBSET_MAX_RSS_BYTES,
+            "subset_rss_working_margin_bytes": (
+                controller.DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES
+            ),
+        },
     }
     monkeypatch.setattr(stages, "load_bound_controller_manifest", lambda path: manifest)
     monkeypatch.setattr(
@@ -189,10 +200,14 @@ def test_subset_stage_keeps_partial_attempt_and_restarts_in_fresh_child(
     )
     _json(adoption_gate, {"gate_sha256": "d" * 64})
     calls = 0
+    observed_contracts: list[ProductionSubsetAuditContract] = []
 
     def fake_audit(*, output_dir: Path, **kwargs: object) -> dict[str, object]:
         nonlocal calls
         calls += 1
+        contract = kwargs["contract"]
+        assert isinstance(contract, ProductionSubsetAuditContract)
+        observed_contracts.append(contract)
         root = Path(output_dir)
         root.mkdir(parents=True)
         if calls == 1:
@@ -228,6 +243,14 @@ def test_subset_stage_keeps_partial_attempt_and_restarts_in_fresh_child(
     assert receipt["attempt"] == 1
     assert (output / "attempt-0/partial.bin").is_file()
     assert (output / "attempt-1/PASS").read_bytes() == b"PASS\n"
+    assert [row.max_rss_bytes for row in observed_contracts] == [
+        controller.DEFAULT_SUBSET_MAX_RSS_BYTES,
+        controller.DEFAULT_SUBSET_MAX_RSS_BYTES,
+    ]
+    assert [row.working_rss_margin_bytes for row in observed_contracts] == [
+        controller.DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES,
+        controller.DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES,
+    ]
     assert stages.run_subset_stage(
         controller_manifest=manifest_path,
         adoption_gate=adoption_gate,

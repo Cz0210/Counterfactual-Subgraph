@@ -9,7 +9,7 @@ disabled until every independently reviewed release pin is populated.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -161,6 +161,14 @@ MIN_THREAD_COUNT = 8
 MAX_THREAD_COUNT = 12
 DEFAULT_THREAD_COUNT = MIN_THREAD_COUNT
 DEFAULT_MAX_RSS_BYTES = 96 * 1024**3
+DEFAULT_SUBSET_MAX_RSS_BYTES = 32 * 1024**3
+DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES = 8 * 1024**3
+SUBSET_MAX_RSS_SCOPE = (
+    "production_subset_process_peak_including_full_source_selection_scans"
+)
+SUBSET_RSS_BUDGET_SEMANTICS = (
+    "measured_pre_dbscan_peak_plus_bounded_working_margin"
+)
 DEFAULT_SAFETY_FLOOR_BYTES = 8 * 1024**3
 
 REQUIRED_RELEASE_PINS = (
@@ -1301,6 +1309,16 @@ def build_controller_payload(spec_path: str | Path) -> dict[str, Any]:
         raise RecoveryControllerError("resource retention contract changed")
     if int(resources.get("max_rss_bytes", 0)) != DEFAULT_MAX_RSS_BYTES:
         raise RecoveryControllerError("recovery RSS budget must remain 96GiB")
+    if (
+        int(resources.get("subset_max_rss_bytes", 0))
+        != DEFAULT_SUBSET_MAX_RSS_BYTES
+        or int(resources.get("subset_rss_working_margin_bytes", 0))
+        != DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES
+        or resources.get("subset_max_rss_scope") != SUBSET_MAX_RSS_SCOPE
+        or resources.get("subset_rss_budget_semantics")
+        != SUBSET_RSS_BUDGET_SEMANTICS
+    ):
+        raise RecoveryControllerError("production subset RSS contract changed")
     if resources.get("old_brute_handover") != handover_contract():
         raise RecoveryControllerError("old-brute handover contract changed")
     if (
@@ -1755,7 +1773,64 @@ def _validate_subset_terminal(manifest: Mapping[str, Any]) -> dict[str, Any]:
         existing="file",
     )
     value = _read_json(subset_path, label="production subset equivalence")
-    from src.baselines.comrecgc.production_subset_audit import SCHEMA_VERSION as SUBSET_SCHEMA
+    from src.baselines.comrecgc.production_subset_audit import (
+        ProductionSubsetAuditContract,
+        SCHEMA_VERSION as SUBSET_SCHEMA,
+    )
+
+    expected_subset_contract = asdict(
+        ProductionSubsetAuditContract(
+            eps=0.02,
+            min_samples=3,
+            radius=0.02,
+            recourse_size=100,
+            subset_size=int(manifest["resources"]["subset_size"]),
+            seed=0,
+            scan_block_size=int(manifest["resources"]["block_size"]),
+            query_block_size=64,
+            max_rss_bytes=int(
+                manifest["resources"]["subset_max_rss_bytes"]
+            ),
+            working_rss_margin_bytes=int(
+                manifest["resources"]["subset_rss_working_margin_bytes"]
+            ),
+            expected_sklearn_version=str(
+                manifest["runtime_inputs"]["expected_sklearn_version"]
+            ),
+            expected_theta=0.1,
+            expected_parent_count=EXPECTED_PARENT_COUNT,
+            expected_candidate_count=EXPECTED_CANDIDATE_COUNT,
+            expected_physical_pair_count=EXPECTED_ROWS,
+        )
+    )
+    rss_budget = value.get("rss_budget")
+    if not isinstance(rss_budget, Mapping):
+        raise RecoveryControllerError("production subset RSS evidence is absent")
+    try:
+        baseline_rss = int(rss_budget["baseline_rss_bytes"])
+        working_margin = int(rss_budget["working_rss_margin_bytes"])
+        effective_max_rss = int(rss_budget["effective_max_rss_bytes"])
+        authorized_max_rss = int(rss_budget["authorized_max_rss_bytes"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RecoveryControllerError(
+            "production subset RSS evidence is malformed"
+        ) from exc
+    expected_margin = int(
+        manifest["resources"]["subset_rss_working_margin_bytes"]
+    )
+    expected_authorized = int(manifest["resources"]["subset_max_rss_bytes"])
+    if (
+        baseline_rss < 0
+        or working_margin != expected_margin
+        or authorized_max_rss != expected_authorized
+        or effective_max_rss != baseline_rss + expected_margin
+        or effective_max_rss > expected_authorized
+        or rss_budget.get("mode") != SUBSET_RSS_BUDGET_SEMANTICS
+        or rss_budget.get("measurement")
+        != "max_of_process_VmRSS_and_VmHWM_with_ru_maxrss_fallback"
+        or rss_budget.get("measured_after_full_source_selection_scans") is not True
+    ):
+        raise RecoveryControllerError("production subset RSS evidence changed")
 
     if (
         receipt.get("schema_version") != SUBSET_STAGE_RECEIPT_SCHEMA
@@ -1776,6 +1851,7 @@ def _validate_subset_terminal(manifest: Mapping[str, Any]) -> dict[str, Any]:
         or value.get("full_production_dbscan_equivalence_claimed") is not False
         or value.get("scope_warning") != "subset PASS is not full-production DBSCAN PASS"
         or value.get("approximation_used") is not False
+        or value.get("contract") != expected_subset_contract
         or set(value.get("subsets", {})) != set(EXPECTED_SUBSET_NAMES)
     ):
         raise RecoveryControllerError("production subset preflight contract mismatch")
@@ -1789,6 +1865,11 @@ def _validate_subset_terminal(manifest: Mapping[str, Any]) -> dict[str, Any]:
         audit_path = Path(str(row.get("audit_path") or "")).resolve(strict=True)
         if audit_path.parent.parent != subset_path.parent or sha256_file(audit_path) != row.get("audit_sha256"):
             raise RecoveryControllerError(f"production subset artifact mismatch: {name}")
+        audit = _read_json(audit_path, label=f"production subset audit: {name}")
+        if audit.get("rss_budget") != rss_budget:
+            raise RecoveryControllerError(
+                f"production subset RSS evidence mismatch: {name}"
+            )
     if value.get("result_sha256") != stable_json_sha256(
         {key: item for key, item in value.items() if key != "result_sha256"}
     ):
@@ -3315,16 +3396,33 @@ def _reserve_output_growth(
 
 
 def _read_proc_start_ticks(pid: int, *, proc_root: Path = Path("/proc")) -> int | None:
+    identity = _read_proc_identity(pid, proc_root=proc_root)
+    return None if identity is None else identity[1]
+
+
+def _read_proc_identity(
+    pid: int, *, proc_root: Path = Path("/proc")
+) -> tuple[str, int] | None:
     try:
         raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
         close = raw.rfind(")")
-        return int(raw[close + 2 :].split()[19])
-    except (FileNotFoundError, PermissionError, ValueError, IndexError):
+        fields = raw[close + 2 :].split()
+        state = fields[0]
+        start_ticks = int(fields[19])
+        if close < 0 or len(state) != 1 or start_ticks <= 0:
+            return None
+        return state, start_ticks
+    except (FileNotFoundError, PermissionError, OSError, UnicodeError, ValueError, IndexError):
         return None
 
 
 def _pid_alive(pid: int, start_ticks: int, *, proc_root: Path = Path("/proc")) -> bool:
-    return _read_proc_start_ticks(pid, proc_root=proc_root) == start_ticks
+    identity = _read_proc_identity(pid, proc_root=proc_root)
+    return (
+        identity is not None
+        and identity[1] == start_ticks
+        and identity[0] not in {"Z", "X", "x"}
+    )
 
 
 def _proc_argv(pid: int, *, proc_root: Path = Path("/proc")) -> list[str] | None:
@@ -3383,7 +3481,7 @@ def _process_group_member_pids(
             raise RecoveryControllerError(
                 f"cannot prove worker process-group quiescence: pid={pid_dir.name}"
             ) from exc
-        if observed_group == process_group_id and process_state not in {"Z", "X"}:
+        if observed_group == process_group_id and process_state not in {"Z", "X", "x"}:
             members.append(int(pid_dir.name))
     return tuple(sorted(members))
 
@@ -5406,7 +5504,11 @@ def _run_or_attach_stage(
     probe_path = root / "coexistence_probe.json"
     probe_complete = probe_path.exists() or stage_id != EXACT_STAGE
     try:
-        while _pid_alive(pid, start_ticks, proc_root=proc_root):
+        while (
+            process.poll() is None
+            if process is not None
+            else _pid_alive(pid, start_ticks, proc_root=proc_root)
+        ):
             guard()
             now = time.monotonic()
             if now - last_resource_check >= 60.0:
@@ -6217,6 +6319,9 @@ def controller_status(manifest_path: str | Path) -> dict[str, Any]:
         # an exact worker that has exceeded the frozen no-progress timeout is
         # not reported as viable merely because an older probe once passed.
         result["route_viability"] = result["scientific_progress_state"]
+    elif isinstance(worker_status, Mapping):
+        result["scientific_progress_state"] = "RUNNING_STALLED"
+        result["route_viability"] = "RUNNING_STALLED"
     elif result.get("controller_process_alive") is True:
         result["scientific_progress_state"] = "RUNNING_SLOW"
         result["route_viability"] = "RUNNING_SLOW"
@@ -6242,12 +6347,16 @@ __all__ = [
     "ADOPTION_STAGE",
     "CONTROLLER_ID",
     "DOWNSTREAM_STAGE",
+    "DEFAULT_SUBSET_MAX_RSS_BYTES",
+    "DEFAULT_SUBSET_RSS_WORKING_MARGIN_BYTES",
     "EXACT_STAGE",
     "FINAL_STAGE",
     "MANIFEST_SCHEMA",
     "RecoveryControllerError",
     "SCIENCE_RELEASE_COMMIT",
     "SPEC_SCHEMA",
+    "SUBSET_MAX_RSS_SCOPE",
+    "SUBSET_RSS_BUDGET_SEMANTICS",
     "STAGE_GATE_SCHEMA",
     "STAGE_ORDER",
     "SUBSET_STAGE",

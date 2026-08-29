@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 sklearn = pytest.importorskip("sklearn")
 
+from scripts.baselines.comrecgc import audit_aids_production_subsets as audit_cli  # noqa: E402
 from src.baselines.comrecgc.close_pair_view import (  # noqa: E402
     NORMALIZED_DISTANCE_CONTRACT,
     SCALE_CONTRACT,
@@ -25,6 +27,7 @@ from src.baselines.comrecgc.production_subset_audit import (  # noqa: E402
     run_production_subset_equivalence_audit,
     sha256_file,
 )
+from src.baselines.comrecgc import production_subset_audit as subset_audit  # noqa: E402
 
 
 def _save(path: Path, values: np.ndarray) -> Path:
@@ -122,7 +125,8 @@ def _contract() -> ProductionSubsetAuditContract:
         seed=19,
         scan_block_size=5,
         query_block_size=3,
-        max_rss_bytes=_rss_bytes() + 1024**3,
+        max_rss_bytes=_rss_bytes() + 4 * 1024**3,
+        working_rss_margin_bytes=1024**3,
         expected_sklearn_version=sklearn.__version__,
         expected_parent_count=6,
         expected_candidate_count=4,
@@ -144,6 +148,9 @@ def test_aids_production_subset_equivalence(tmp_path: Path) -> None:
     assert result["status"] == "PASS"
     assert result["all_subsets_pass"] is True
     assert result["full_production_dbscan_equivalence_claimed"] is False
+    assert result["rss_budget"]["mode"] == (
+        "measured_pre_dbscan_peak_plus_bounded_working_margin"
+    )
     assert set(result["subsets"]) == {
         "first",
         "random",
@@ -158,6 +165,68 @@ def test_aids_production_subset_equivalence(tmp_path: Path) -> None:
         assert audit["subset_scope_only"] is True
         assert audit["sklearn_result"] == audit["external_result"]
         assert len(np.load(output / name / "logical_indices.npy")) == 8
+        assert audit["rss_budget"] == result["rss_budget"]
+
+
+def test_production_subset_cli_defaults_match_bounded_rss_policy() -> None:
+    args = audit_cli.build_parser().parse_args(
+        [
+            "--close-pair-contract",
+            "/authority/close.json",
+            "--expected-close-pair-contract-sha256",
+            "a" * 64,
+            "--physical-pairs",
+            "/authority/pairs.npy",
+            "--expected-physical-pairs-sha256",
+            "b" * 64,
+            "--output-dir",
+            "/fresh/output",
+            "--expected-sklearn-version",
+            sklearn.__version__,
+        ]
+    )
+    assert args.max_rss_gb == 32.0
+    assert args.working_rss_margin_gb == 8.0
+
+
+def test_subset_rss_budget_uses_measured_peak_plus_bounded_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_production_peak = 24_293_740_544
+    monkeypatch.setattr(
+        subset_audit, "_rss_bytes", lambda: observed_production_peak
+    )
+    contract = replace(
+        _contract(),
+        max_rss_bytes=32 * 1024**3,
+        working_rss_margin_bytes=8 * 1024**3,
+    )
+    budget = subset_audit._derive_subset_rss_budget(contract)
+    assert budget == {
+        "measurement": "max_of_process_VmRSS_and_VmHWM_with_ru_maxrss_fallback",
+        "mode": "measured_pre_dbscan_peak_plus_bounded_working_margin",
+        "measured_after_full_source_selection_scans": True,
+        "baseline_rss_bytes": observed_production_peak,
+        "working_rss_margin_bytes": 8 * 1024**3,
+        "effective_max_rss_bytes": observed_production_peak + 8 * 1024**3,
+        "authorized_max_rss_bytes": 32 * 1024**3,
+    }
+
+
+def test_subset_rss_budget_rejects_peak_plus_margin_above_authorized_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(subset_audit, "_rss_bytes", lambda: 25 * 1024**3)
+    contract = replace(
+        _contract(),
+        max_rss_bytes=32 * 1024**3,
+        working_rss_margin_bytes=8 * 1024**3,
+    )
+    with pytest.raises(
+        ExternalMemoryDBSCANError,
+        match="SUBSET_RSS_AUTHORIZED_CEILING_EXCEEDED",
+    ):
+        subset_audit._derive_subset_rss_budget(contract)
 
 
 @pytest.mark.parametrize("target", ["close", "pairs"])
