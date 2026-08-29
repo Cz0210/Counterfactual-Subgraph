@@ -285,8 +285,10 @@ def _build_fixture(tmp_path: Path) -> AuthorityFixture:
     )
     bitmap_path = _npy(close_root / "close_bitmap.npy", np.ones(6, dtype=np.bool_))
     pair_semantics_bitmap = _npy(
-        pair_semantics_root / "distance_scan" / "close_bitmap.npy",
-        np.ones(6, dtype=np.bool_),
+        pair_semantics_root
+        / "distance_scan"
+        / "close_pair_bitmap.greed.uint8.npy",
+        np.ones(6, dtype=np.uint8),
     )
     pair_contract = _json(
         pair_semantics_root / "close_pair_contract.json",
@@ -792,6 +794,18 @@ def _rebind_pair_semantics_bitmap(
     )
 
 
+def _rebind_materialized_bitmap(case: AuthorityFixture) -> None:
+    bitmap_path = case.close_root / "close_bitmap.npy"
+    close_manifest_path = case.close_root / "close_pair_contract.json"
+    close_manifest = json.loads(close_manifest_path.read_text(encoding="utf-8"))
+    close_manifest["close_bitmap_hash"] = _sha(bitmap_path)
+    _json(close_manifest_path, close_manifest)
+    case.profile = replace(
+        case.profile,
+        close_manifest_sha256=_sha(close_manifest_path),
+    )
+
+
 def _rewrite_signed_terminal(case: AuthorityFixture, payload: dict) -> None:
     receipt = case.output / RECEIPT_NAME
     receipt.chmod(0o644)
@@ -827,6 +841,10 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
 ) -> None:
     case = _build_fixture(tmp_path)
     assert case.pair_semantics_bitmap.parent.parent == case.pair_contract.parent
+    materialized_bitmap = case.close_root / "close_bitmap.npy"
+    assert np.load(case.pair_semantics_bitmap, allow_pickle=False).dtype == np.uint8
+    assert np.load(materialized_bitmap, allow_pickle=False).dtype == np.bool_
+    assert _sha(case.pair_semantics_bitmap) != _sha(materialized_bitmap)
     first = _adopt(case)
     second = _adopt(case)
     assert first == second
@@ -869,6 +887,123 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
         case.output / "failed_selection_adoption_receipt.json"
     )
     assert not (case.output / "PASS").exists()
+
+
+@pytest.mark.parametrize("dtype", [np.bool_, np.int16])
+def test_pair_semantics_scan_bitmap_requires_uint8(
+    tmp_path: Path,
+    dtype: type[np.generic],
+) -> None:
+    case = _build_fixture(tmp_path)
+    _npy(case.pair_semantics_bitmap, np.ones(6, dtype=dtype))
+    _rebind_pair_semantics_bitmap(case, case.pair_semantics_bitmap)
+
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="pair-semantics scan bitmap schema changed",
+    ):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
+
+
+def test_materialized_close_bitmap_requires_bool(tmp_path: Path) -> None:
+    case = _build_fixture(tmp_path)
+    bitmap_path = case.close_root / "close_bitmap.npy"
+    _npy(bitmap_path, np.ones(6, dtype=np.uint8))
+    _rebind_materialized_bitmap(case)
+
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="close bitmap schema changed",
+    ):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
+
+
+def test_pair_semantics_scan_bitmap_rejects_non_binary_values(
+    tmp_path: Path,
+) -> None:
+    case = _build_fixture(tmp_path)
+    _npy(
+        case.pair_semantics_bitmap,
+        np.asarray([1, 1, 1, 2, 1, 1], dtype=np.uint8),
+    )
+    _rebind_pair_semantics_bitmap(case, case.pair_semantics_bitmap)
+
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="scan bitmap contains non-binary values",
+    ):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
+
+
+def test_pair_semantics_scan_bitmap_requires_bounded_row_equivalence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _build_fixture(tmp_path)
+    _npy(
+        case.pair_semantics_bitmap,
+        np.asarray([1, 1, 1, 1, 0, 1], dtype=np.uint8),
+    )
+    _rebind_pair_semantics_bitmap(case, case.pair_semantics_bitmap)
+    from src.baselines.comrecgc import failed_selection_adoption as adoption
+
+    monkeypatch.setattr(adoption, "PAIR_BITMAP_COMPARE_BLOCK_ROWS", 2)
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="not row-wise equivalent",
+    ):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
+
+
+def test_equivalent_false_bitmap_rows_contradict_all_pairs_close(
+    tmp_path: Path,
+) -> None:
+    case = _build_fixture(tmp_path)
+    scan = np.asarray([1, 1, 1, 0, 1, 1], dtype=np.uint8)
+    _npy(case.pair_semantics_bitmap, scan)
+    _rebind_pair_semantics_bitmap(case, case.pair_semantics_bitmap)
+    bitmap_path = case.close_root / "close_bitmap.npy"
+    _npy(bitmap_path, scan.astype(np.bool_))
+    _rebind_materialized_bitmap(case)
+
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="contradicts the all-pairs-close authority",
+    ):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
+
+
+@pytest.mark.parametrize("artifact", ["scan", "materialized"])
+def test_each_close_bitmap_is_bound_to_its_own_contract_hash(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    case = _build_fixture(tmp_path)
+    if artifact == "scan":
+        _npy(
+            case.pair_semantics_bitmap,
+            np.asarray([1, 1, 1, 0, 1, 1], dtype=np.uint8),
+        )
+    else:
+        _npy(
+            case.close_root / "close_bitmap.npy",
+            np.asarray([True, True, True, False, True, True], dtype=np.bool_),
+        )
+
+    with pytest.raises(FailedSelectionAdoptionError, match="SHA256 mismatch"):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
 
 
 @pytest.mark.parametrize(

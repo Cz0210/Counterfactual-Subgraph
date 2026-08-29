@@ -68,6 +68,43 @@ Accepted
 
 ---
 
+## [2026-08-29] Compare AIDS close bitmaps by typed row semantics
+
+### Motivation
+
+The pinned pair-semantics scan stores its 91,916,686 decisions as binary
+`uint8`, while the zero-copy close-view materializer stores the same decisions
+as NumPy `bool`.  Both files have their own canonical contract hashes.  The
+adoption validator incorrectly required those byte hashes to match and also
+required the scan artifact itself to be `bool`, so it rejected the genuine
+authority even though a bounded full scan proved every row equivalent.
+
+### Decision
+
+Validate each bitmap against the hash in its own owning contract.  Require the
+pair-semantics scan to be one-dimensional `uint8` with value domain `{0, 1}`
+and the materialized close bitmap to be one-dimensional `bool`, both at the
+exact physical row count.  Compare `uint8.astype(bool)` with the materialized
+bitmap row for row in bounded one-million-row blocks, and continue to require
+every row to agree with the all-pairs-close authority.  Do not compare byte
+hashes across the two different storage representations.
+
+### Consequences
+
+- The canonical scan and materialized view remain independently content-bound
+  while their common scientific meaning is checked exactly over every row.
+- Wrong dtype, non-binary scan values, row disagreement, false rows, shape
+  drift, hash drift, and path/inode replacement remain fail closed.
+- This changes only adoption validation.  It does not rewrite either source,
+  alter pair order or distance/DBSCAN science, authorize deployment, or permit
+  signalling the protected old worker.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Treat the AIDS pair-semantics bitmap as a contained artifact tree
 
 ### Motivation

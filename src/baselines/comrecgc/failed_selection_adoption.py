@@ -61,6 +61,7 @@ READY_NAME = "RECOVERY_EVIDENCE_READY"
 READY_PREPARED_NAME = ".RECOVERY_EVIDENCE_READY.prepared"
 READY_PREFIX = b"AIDS_C766_FAILED_SELECTION_RECOVERY_EVIDENCE_READY_V3\n"
 MUTABLE_STATE_VALUE = "<MUTABLE>"
+PAIR_BITMAP_COMPARE_BLOCK_ROWS = 1_000_000
 
 _SAFE_WORKER_EXIT_OBSERVATIONS = frozenset(
     {
@@ -1448,6 +1449,49 @@ def _npy_metadata(path: Path) -> tuple[np.ndarray, tuple[int, ...], np.dtype[Any
     return value, tuple(map(int, value.shape)), value.dtype
 
 
+def _validate_pair_bitmap_semantic_equivalence(
+    *,
+    scan_bitmap: np.ndarray,
+    materialized_bitmap: np.ndarray,
+    expected_rows: int,
+) -> None:
+    """Validate the two independently hashed close-bitmap representations."""
+
+    if (
+        tuple(map(int, scan_bitmap.shape)) != (expected_rows,)
+        or scan_bitmap.dtype != np.dtype(np.uint8)
+    ):
+        raise FailedSelectionAdoptionError(
+            "pair-semantics scan bitmap schema changed"
+        )
+    if (
+        tuple(map(int, materialized_bitmap.shape)) != (expected_rows,)
+        or materialized_bitmap.dtype != np.dtype(np.bool_)
+    ):
+        raise FailedSelectionAdoptionError("close bitmap schema changed")
+
+    for start in range(0, expected_rows, PAIR_BITMAP_COMPARE_BLOCK_ROWS):
+        stop = min(start + PAIR_BITMAP_COMPARE_BLOCK_ROWS, expected_rows)
+        scan_chunk = np.asarray(scan_bitmap[start:stop])
+        materialized_chunk = np.asarray(materialized_bitmap[start:stop])
+        if bool(np.any((scan_chunk != 0) & (scan_chunk != 1))):
+            raise FailedSelectionAdoptionError(
+                "pair-semantics scan bitmap contains non-binary values"
+            )
+        if not np.array_equal(
+            scan_chunk.astype(np.bool_, copy=False),
+            materialized_chunk,
+        ):
+            raise FailedSelectionAdoptionError(
+                "pair-semantics and materialized close bitmaps are not "
+                "row-wise equivalent"
+            )
+        if not bool(np.all(materialized_chunk)):
+            raise FailedSelectionAdoptionError(
+                "close bitmap contradicts the all-pairs-close authority"
+            )
+
+
 def _require_exact_path(value: Any, expected: Path, *, label: str) -> None:
     if not isinstance(value, str) or Path(value) != expected:
         raise FailedSelectionAdoptionError(f"{label} path changed")
@@ -2118,7 +2162,6 @@ def _validate_close_authority(
     bitmap, bitmap_shape, bitmap_dtype = _npy_metadata(bitmap_path)
     if bitmap_shape != (profile.physical_rows,) or bitmap_dtype != np.dtype(np.bool_):
         raise FailedSelectionAdoptionError("close bitmap schema changed")
-    del bitmap
 
     certificate_path = _physical_file(
         str(manifest.get("all_pairs_close_certificate_path") or ""),
@@ -2174,7 +2217,6 @@ def _validate_close_authority(
         or pair_contract.get("pair_axis") != ["parent_index", "candidate_index"]
         or pair_contract.get("pair_axis_all_rows_checked") is not True
         or pair_contract.get("pair_axis_mismatch_count") != 0
-        or pair_contract.get("close_bitmap_hash") != manifest.get("close_bitmap_hash")
         or pair_contract.get("normalized_distances") != str(distance_path)
         or pair_contract.get("normalized_distances_sha256")
         != identity.get("normalized_distances_sha256")
@@ -2200,12 +2242,17 @@ def _validate_close_authority(
     )
     if (
         semantics_bitmap_shape != (profile.physical_rows,)
-        or semantics_bitmap_dtype != np.dtype(np.bool_)
+        or semantics_bitmap_dtype != np.dtype(np.uint8)
     ):
         raise FailedSelectionAdoptionError(
-            "pair-semantics close bitmap schema changed"
+            "pair-semantics scan bitmap schema changed"
         )
-    del pair_semantics_bitmap
+    _validate_pair_bitmap_semantic_equivalence(
+        scan_bitmap=pair_semantics_bitmap,
+        materialized_bitmap=bitmap,
+        expected_rows=profile.physical_rows,
+    )
+    del pair_semantics_bitmap, bitmap
     pair_manifest_path = _physical_file(
         str(pair_contract.get("source_pair_store_manifest") or ""),
         label="physical pair-store manifest",

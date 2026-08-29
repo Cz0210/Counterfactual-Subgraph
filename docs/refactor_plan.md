@@ -23,6 +23,18 @@
 - [ ] Integrate into a new immutable AutoDL worktree and launch a fresh T4
   attempt; do not reuse or promote the quarantined namespace.
 
+## 2026-08-29: Validate typed AIDS bitmap semantic equivalence
+
+- [x] Preserve separate contract-owned SHA-256 identities for the canonical
+  pair-semantics scan and materialized close-view bitmap.
+- [x] Require scan `uint8` values in `{0, 1}`, materialized `bool`, exact row
+  counts, and bounded row-wise `uint8 -> bool` equivalence.
+- [x] Exercise the real nested scan topology and unequal byte hashes, plus
+  wrong-type, non-binary, and cross-block row-inequality rejection fixtures.
+- [ ] Integrate the independently reviewed commit into a fresh immutable
+  execution worktree, then retry adoption in a new direct child.  Do not reuse
+  failed empty attempts or signal the protected old brute worker.
+
 ## 2026-08-29: Taste NeuroSED canonical feature-schema producer
 
 - [x] Add a thin AutoDL producer that opens only SHA/role-bound train and
