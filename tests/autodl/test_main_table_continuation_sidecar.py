@@ -331,6 +331,45 @@ def test_optional_convergence_hook_persists_pass_without_handover(tmp_path: Path
     assert hook["handover_implemented_by_sidecar"] is False
 
 
+def test_convergence_hook_retries_not_ready_then_advances_2500_steps(
+    tmp_path: Path,
+) -> None:
+    spec_path, snapshots = _fixture(tmp_path, progress=17500)
+    launcher = FakeLauncher(iter(range(700, 710)), snapshots)
+    statuses = iter(("NOT_READY", "CONTINUE"))
+    calls: list[dict[str, object]] = []
+
+    def auditor(value: dict[str, object]) -> dict[str, object]:
+        calls.append(dict(value))
+        return {"status": next(statuses)}
+
+    sidecar = ContinuationSidecar(
+        spec_path,
+        gpu_reader=lambda: [_gpu(0, busy_pid=300), _gpu(1, busy_pid=301)],
+        lock_reader=lambda _root, _uuid: True,
+        process_reader=lambda pid: snapshots.get(pid),
+        launcher=launcher,
+        convergence_auditor=auditor,
+    )
+    first = sidecar.tick()
+    second = sidecar.tick()
+    third = sidecar.tick()
+    assert first["observations"]["bace_comrecgc"]["state"] == (
+        "AUDIT_NOT_READY_RETRYING"
+    )
+    assert second["observations"]["bace_comrecgc"]["state"] == "AUDIT_CONTINUE"
+    assert third["observations"]["bace_comrecgc"]["state"] == "DURABLE_PENDING"
+    assert len(calls) == 2
+    assert all(call["evaluation_step"] == 17500 for call in calls)
+    registration = json.loads(
+        (sidecar.state_root / "bace_comrecgc_convergence_registration.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert registration["next_trigger_step"] == 20000
+    assert registration["completed_audit_steps"] == [17500]
+
+
 def test_t9_rc75_abandons_every_identity_and_next_launch_is_uuid_fresh(
     tmp_path: Path,
 ) -> None:

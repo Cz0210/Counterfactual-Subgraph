@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 from typing import Sequence
+import uuid
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,8 +18,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.utils.autodl_main_table_continuation_sidecar import (  # noqa: E402
     ContinuationSidecar,
     ContinuationSidecarError,
+    load_continuation_spec,
     read_sidecar_status,
     run_child_with_terminal_receipt,
+)
+from src.eval.bace_comrecgc_convergence import (  # noqa: E402
+    audit_bace_comrecgc_convergence,
 )
 
 
@@ -45,6 +50,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _convergence_auditor(spec_path: Path):
+    spec = load_continuation_spec(spec_path)
+    authority = spec["observers"]["bace_comrecgc"].get("convergence_audit")
+    if authority is None:
+        return None
+
+    def run(hook_input):
+        evaluation_step = int(hook_input["evaluation_step"])
+        audit_root = Path(authority["audit_parent"]) / (
+            f"step-{evaluation_step:05d}-{uuid.uuid4()}"
+        )
+        return audit_bace_comrecgc_convergence(
+            resolved_config_path=authority["resolved_config_path"],
+            trace_chunks_dir=authority["trace_chunks_dir"],
+            local_checkpoint_root=authority["local_checkpoint_root"],
+            mirror_checkpoint_root=authority["mirror_checkpoint_root"],
+            audit_root=audit_root,
+            evaluation_step=evaluation_step,
+            expected_config_sha256=authority["expected_config_sha256"],
+            expected_parent_ids_sha256=authority[
+                "expected_parent_ids_sha256"
+            ],
+        )
+
+    return run
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -59,7 +91,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 terminal_receipt=args.terminal_receipt,
                 command=args.child_argv,
             )
-        with ContinuationSidecar(args.spec) as sidecar:
+        with ContinuationSidecar(
+            args.spec,
+            convergence_auditor=_convergence_auditor(args.spec),
+        ) as sidecar:
             return sidecar.run(once=args.command == "once")
     except (ContinuationSidecarError, OSError, ValueError) as exc:
         print(

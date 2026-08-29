@@ -103,7 +103,16 @@ start ticks, authority hashes, and paths from the same audit.
       "start_ticks": 8,
       "trigger_step": 17500,
       "progress_json": "/absolute/bace/comrec/progress.json",
-      "progress_pointer": "/progress"
+      "progress_pointer": "/last_checkpoint_step",
+      "convergence_audit": {
+        "resolved_config_path": "/absolute/bace/comrec/_native_aux/resolved_config.json",
+        "trace_chunks_dir": "/absolute/bace/comrec/_native_aux/trace/selected_action_trace_chunks",
+        "local_checkpoint_root": "/absolute/bace/comrec/_native_aux/checkpoints",
+        "mirror_checkpoint_root": "/absolute/bace/comrec/_native_aux/checkpoint_mirror",
+        "audit_parent": "/absolute/fresh/convergence/audits",
+        "expected_config_sha256": "<sha256>",
+        "expected_parent_ids_sha256": "<sha256>"
+      }
     }
   },
   "blocked_taste": {

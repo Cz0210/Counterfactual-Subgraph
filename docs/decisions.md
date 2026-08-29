@@ -12960,10 +12960,13 @@ return code independently so return code 75 abandons those identities across
 sidecar restarts.
 
 Observe AIDS exact, BACE GCF, GlobalGCE, and ComRecGC without writing their
-roots. Persist the ComRecGC step-17500 external-audit registration. Expose one
-optional read-only convergence hook, but keep process handover outside the
-sidecar. Reject GNN ablation and provide no matrix publication or process
-termination operation.
+roots. Persist the ComRecGC step-17500 registration. When the immutable spec
+also pins the resolved config, trace, checkpoint roots, and their frozen
+hashes, invoke the read-only convergence library at 2,500-step committed
+boundaries. Retry `NOT_READY`, advance only after `CONTINUE`, and retain a
+genuine convergence result for a separately managed exact-PID handover. Reject
+GNN ablation and provide no matrix publication or process termination
+operation.
 
 ### Consequences
 
@@ -12971,6 +12974,8 @@ termination operation.
 - A missing NeuroSED trainer argv remains explicit `WAITING_INPUT` rather than
   starting a guessed command.
 - Every T9 preflight return code 75 is auditable and the next attempt is fresh.
+- The convergence sidecar reads only CLOSED trace/checkpoint evidence and
+  writes each attempt to a fresh audit root; it never signals the live worker.
 - The sidecar is specific to this continuation and is not a new controller
   platform.
 

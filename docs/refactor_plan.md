@@ -2711,7 +2711,8 @@ Mutagenicity roadmaps.
 - [x] Add durable queue, state, heartbeat, event, attempt, and child-terminal
   receipts for one fixed continuation task table.
 - [x] Keep AIDS exact blocked/handover-forbidden and active BACE routes
-  read-only; durably register the ComRecGC step-17500 external audit.
+  read-only; durably register the ComRecGC step-17500 audit and invoke the
+  frozen read-only convergence library at committed 2,500-step boundaries.
 - [x] Keep T6/T7/T8 `BLOCKED_RELEASE` with zero launch attempts and leave T10
   outside this sidecar.
 - [x] Require a fresh T9 UUIDv4 for stage/final/run and abandon all identities

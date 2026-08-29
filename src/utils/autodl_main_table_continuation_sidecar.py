@@ -286,6 +286,49 @@ def load_continuation_spec(path: str | Path) -> dict[str, Any]:
         _absolute(comrec.get("progress_json"), label="bace_comrecgc.progress_json")
         if not str(comrec.get("progress_pointer") or "").startswith("/"):
             raise ContinuationSidecarError("bace_comrecgc.progress_pointer is required")
+    convergence = comrec.get("convergence_audit")
+    if convergence is not None:
+        if not isinstance(convergence, Mapping):
+            raise ContinuationSidecarError(
+                "bace_comrecgc.convergence_audit must be an object"
+            )
+        required_paths = {
+            "resolved_config_path",
+            "trace_chunks_dir",
+            "local_checkpoint_root",
+            "mirror_checkpoint_root",
+            "audit_parent",
+        }
+        required_hashes = {
+            "expected_config_sha256",
+            "expected_parent_ids_sha256",
+        }
+        missing = sorted(
+            key
+            for key in required_paths | required_hashes
+            if not str(convergence.get(key) or "")
+        )
+        if missing:
+            raise ContinuationSidecarError(
+                f"BACE convergence authority is incomplete: {missing}"
+            )
+        for key in required_paths:
+            source = _absolute(
+                convergence[key], label=f"bace_comrecgc.convergence_audit.{key}", existing=True
+            )
+            if key == "resolved_config_path" and not source.is_file():
+                raise ContinuationSidecarError(
+                    "BACE convergence resolved config must be a physical file"
+                )
+            if key != "resolved_config_path" and not source.is_dir():
+                raise ContinuationSidecarError(
+                    f"BACE convergence {key} must be a physical directory"
+                )
+        for key in required_hashes:
+            if HASH.fullmatch(str(convergence[key])) is None:
+                raise ContinuationSidecarError(
+                    f"BACE convergence {key} must be one lowercase SHA-256"
+                )
 
     blocked = value.get("blocked_taste")
     if not isinstance(blocked, Mapping) or set(blocked) != set(RELEASE_BLOCKED_TASKS):
@@ -555,8 +598,14 @@ class ContinuationSidecar:
                     "status": "DURABLE_PENDING",
                     "pid": binding["pid"],
                     "start_ticks": binding["start_ticks"],
-                    "external_convergence_audit_required": True,
-                    "sidecar_may_compute_convergence": False,
+                    "next_trigger_step": 17500,
+                    "completed_audit_steps": [],
+                    "external_convergence_audit_required": (
+                        self.convergence_auditor is None
+                    ),
+                    "sidecar_may_compute_convergence": (
+                        self.convergence_auditor is not None
+                    ),
                     "sidecar_may_stop_worker": False,
                 },
             )
@@ -622,11 +671,13 @@ class ContinuationSidecar:
         registration["observed_at"] = utc_now()
         registration["latest_observed_progress"] = progress
         registration["progress_error"] = progress_error
-        if progress is not None and progress >= 17500:
+        trigger_step = int(registration.get("next_trigger_step", 17500))
+        if progress is not None and progress >= trigger_step:
             registration["status"] = "READY_FOR_EXTERNAL_CONVERGENCE_CHECK"
             if self.convergence_auditor is not None:
                 hook_input = {
-                    "trigger_step": 17500,
+                    "trigger_step": trigger_step,
+                    "evaluation_step": trigger_step,
                     "latest_observed_progress": progress,
                     "pid": comrec_binding["pid"],
                     "start_ticks": comrec_binding["start_ticks"],
@@ -637,18 +688,21 @@ class ContinuationSidecar:
                 hook_path = (
                     self.state_root
                     / "bace_comrecgc_convergence_audits"
-                    / f"step-{progress}.json"
+                    / f"step-{trigger_step}.json"
                 )
+                hook_result: Mapping[str, Any] | None = None
                 if hook_path.is_file():
                     hook_receipt = _json_object(
                         hook_path, label="BACE convergence hook receipt"
                     )
-                    hook_result = hook_receipt.get("result")
-                    if not isinstance(hook_result, Mapping):
+                    existing_result = hook_receipt.get("result")
+                    if not isinstance(existing_result, Mapping):
                         raise ContinuationSidecarError(
                             "BACE convergence hook receipt has no result mapping"
                         )
-                else:
+                    if existing_result.get("status") != "NOT_READY":
+                        hook_result = existing_result
+                if hook_result is None:
                     hook_result = self.convergence_auditor(hook_input)
                     if not isinstance(hook_result, Mapping):
                         raise ContinuationSidecarError(
@@ -661,19 +715,41 @@ class ContinuationSidecar:
                             "written_at": utc_now(),
                             "input": hook_input,
                             "result": dict(hook_result),
+                            "attempt_count": int(
+                                registration.get("current_trigger_attempt_count", 0)
+                            )
+                            + 1,
                             "handover_implemented_by_sidecar": False,
                         },
                     )
+                    registration["current_trigger_attempt_count"] = int(
+                        registration.get("current_trigger_attempt_count", 0)
+                    ) + 1
                 registration["hook_result_status"] = hook_result.get("status")
                 registration["hook_result_path"] = str(hook_path)
-                registration["status"] = (
-                    "AUDIT_PASS_AWAITING_SEPARATE_HANDOVER"
-                    if hook_result.get("status") == "PASS"
-                    else "AUDIT_CONTINUE"
-                )
+                result_status = hook_result.get("status")
+                if result_status in {"PASS", "CONVERGED_EARLY_STOP"}:
+                    registration["status"] = "AUDIT_PASS_AWAITING_SEPARATE_HANDOVER"
+                elif result_status == "CONTINUE":
+                    completed = list(registration.get("completed_audit_steps", []))
+                    if trigger_step not in completed:
+                        completed.append(trigger_step)
+                    registration["completed_audit_steps"] = completed
+                    registration["next_trigger_step"] = trigger_step + 2500
+                    registration["current_trigger_attempt_count"] = 0
+                    registration["status"] = "AUDIT_CONTINUE"
+                elif result_status == "NOT_READY":
+                    registration["status"] = "AUDIT_NOT_READY_RETRYING"
+                else:
+                    registration["status"] = "AUDIT_FAIL_CLOSED"
         else:
             registration["status"] = "DURABLE_PENDING"
-        registration["sidecar_may_compute_convergence"] = False
+        registration["external_convergence_audit_required"] = (
+            self.convergence_auditor is None
+        )
+        registration["sidecar_may_compute_convergence"] = (
+            self.convergence_auditor is not None
+        )
         registration["sidecar_may_stop_worker"] = False
         atomic_write_json(registration_path, registration)
         aids = dict(self.spec["aids_exact"])
@@ -706,7 +782,9 @@ class ContinuationSidecar:
                 "process": comrec_process,
                 "latest_observed_progress": progress,
                 "registration": str(registration_path),
-                "external_convergence_audit_required": True,
+                "external_convergence_audit_required": (
+                    self.convergence_auditor is None
+                ),
                 "sidecar_may_stop_worker": False,
                 "action": "OBSERVE_ONLY",
             },
