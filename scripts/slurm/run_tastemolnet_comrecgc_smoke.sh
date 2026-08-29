@@ -18,13 +18,16 @@ echo "python=$(command -v python)"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 
-echo "TASTE_T9_AUTODL_ONLY: submit the reviewed AutoDL continuation route; Slurm execution is disabled" >&2
+echo "TASTE_T9_AUTODL_ONLY: run the trusted-single-operator managed-v2 GPU1 route; Slurm execution is disabled" >&2
 exit 64
 
 # Documentation-only CLI parity (unreachable by design):
 # python scripts/run_tastemolnet_comrecgc_smoke.py \
 #   --config configs/hpc.yaml --stage T9_COMRECGC_SMOKE \
+#   --stage-root "$TASTEMOLNET_T9_STAGE_ROOT" \
 #   --output-dir "$TASTEMOLNET_T9_OUTPUT" \
+#   --run-id "$TASTEMOLNET_T9_RUN_ID" \
+#   --gpu-uuid "$TASTEMOLNET_GPU1_UUID" \
 #   --t2-adoption-root "$TASTEMOLNET_T2_ADOPTION_ROOT" \
 #   --t2-adoption-gate-sha256 "$TASTEMOLNET_T2_ADOPTION_GATE_SHA256" \
 #   --t2-adoption-receipt-sha256 "$TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256" \

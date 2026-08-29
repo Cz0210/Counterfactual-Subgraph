@@ -102,6 +102,9 @@ See:
 - `docs/AUTODL_TASTEMOLNET_T8_GLOBALGCE_SMOKE.md` (release-disabled contract
   for the real bounded native GlobalGCE two-target smoke on physical GPU 2;
   the paired Slurm entrypoint is an intentional static refusal)
+- `docs/AUTODL_TASTEMOLNET_T9_COMRECGC_SMOKE.md` (trusted-single-operator,
+  GPU1-after-T4 M500 worker plus separate managed-v2 verifier and fresh atomic
+  aggregate-only publication; no test, full run, or paper claim)
 - `docs/TASTE_GCF_NEUROSED_PROTOCOL.md` (Taste-specific, train-fit/
   validation-select NeuroSED auxiliary distance model, official GREED/GCF
   runner semantics, no calibration/test access, and managed-v2 publication)
@@ -557,6 +560,12 @@ published T3 checkpoint and authenticated calibration graph cache, repeats the
 bounded three-class smoke in an independent verifier, and publishes aggregate
 evidence atomically. See
 `docs/AUTODL_TASTEMOLNET_T4_ORACLE_SMOKE_V2.md`.
+
+TasteMolNet T9 reuses that same T2/T3/T4 frozen-GINE chain and the pinned
+official COMRECGC implementation for an M500, checkpoint-250 smoke on GPU1
+after T4. Its trusted-single-operator worker stops at SEALED; a separate
+process reopens every exact input and performs the managed-v2 atomic publish.
+See `docs/AUTODL_TASTEMOLNET_T9_COMRECGC_SMOKE.md`.
 
 The production Taste GCFExplainer NeuroSED successor uses deterministic
 fixed-budget independent query-target pairs and only real pinned pyged/GEDLIB

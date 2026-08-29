@@ -275,7 +275,7 @@
 - [ ] Deploy the clean reviewed commit and run worker/verifier on GPU 1; do not
   launch from this implementation branch and do not start an ablation.
 
-## 2026-08-28: TasteMolNet T9 COMRECGC release-disabled core
+## 2026-08-29: TasteMolNet T9 COMRECGC managed-v2 GPU-1 successor
 
 - [x] Freeze the three-class bridge to `1 - p(Sweet)` walk importance and
   `argmax != Sweet` candidate membership; keep GINE embeddings distance-only.
@@ -293,19 +293,24 @@
 - [x] Add strict aggregate-only terminal documents/consumer, a disabled static
   release config, fail-closed AutoDL wrapper, AutoDL-only Slurm refusal,
   hostile tests, and an operator runbook.
-- [ ] Implement `run_tastemolnet_comrecgc_smoke` around retained managed ACTIVE,
-  T2 receipt-only, T3/T4, checkpoint, train CSV, official-source, GPU-2, and
-  fresh-output authorities; revalidate all authorities in the last fallible
-  callback before exposing PASS.
-- [ ] Add managed task/result dispatch for receipt kind `taste_t9_gpu2_v1`, task
-  `tastemolnet_t9_comrecgc_smoke`, stage `T9_COMRECGC_SMOKE`, and validator
-  `taste_t9_v1`; keep the scientific predecessor set exactly T2/T3/T4.
-- [ ] Integrate the continuation controller so GPU 2 schedules T8 before T9,
-  then independently held-reopens T9 before publishing managed COMPLETION.
-- [ ] After independent review of the final clean commit/tree, output parent,
-  storage authority, task manifests, and route receipt, create a one-parent
-  release successor changing only the release pins.  Do not deploy or run
-  science from this stage-freeze.
+- [x] Implement `run_tastemolnet_comrecgc_smoke` around the receipt-only T2,
+  held T3/T4, exact checkpoint, train CSV, and held official-source authorities.
+- [x] Replace the unfinished GPU2/controller draft with the explicitly scoped
+  `TRUSTED_SINGLE_OPERATOR_ROOT` successor on GPU1 after T4; retain exact clean
+  commit/tree and per-input hashes in both worker and verifier evidence.
+- [x] Add a managed-v2 worker SEALED handoff and a separate verifier process;
+  reserve verification/gate/PASS and fresh atomic no-replace publication for
+  that verifier.
+- [x] Reuse the standard AutoDL UUID GPU lock across worker, handoff, verifier,
+  and publish; do not introduce process-signal authority or a new controller.
+- [x] Keep the scientific predecessor set exactly T2/T3/T4 and keep test,
+  validation payload, calibration payload, RF, redistribution, and paper-result
+  eligibility closed.
+- [x] Synchronize the AutoDL wrapper, static-refusal Slurm entrypoints, focused
+  tests, and operator documentation.
+- [ ] After independent review and integration, deploy the clean immutable
+  commit and run the bounded M500 smoke on idle GPU1. Do not claim PASS from
+  code/tests and do not start full M50000.
 
 ## 2026-08-28: TasteMolNet T5 managed-v2 clean-base adoption
 

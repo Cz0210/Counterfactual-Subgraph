@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Release requires a one-parent reviewed successor that also fills the static
-# config and continuation-controller manifests. Environment cannot bypass it.
-TASTE_T9_COMRECGC_WRAPPER_RELEASED=0
-[[ "$TASTE_T9_COMRECGC_WRAPPER_RELEASED" == "1" ]] \
-  || { echo "TASTE_T9_COMRECGC_WRAPPER_NOT_RELEASED" >&2; exit 78; }
-
+# Current T9 authority is intentionally narrow: the project owner runs one
+# foreground chain as TRUSTED_SINGLE_OPERATOR_ROOT after T4. The standard UUID
+# GPU lock still covers worker, SEALED handoff, verifier, and atomic publish.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
@@ -23,28 +20,27 @@ source "$SCRIPT_DIR/common.sh"
   || { echo "GNN ablation is outside the Taste main route" >&2; exit 64; }
 
 for variable in \
+  TASTEMOLNET_T9_STAGE_ROOT \
   TASTEMOLNET_T9_OUTPUT \
+  TASTEMOLNET_T9_RUN_ID \
   TASTEMOLNET_T2_ADOPTION_ROOT \
   TASTEMOLNET_T2_ADOPTION_GATE_SHA256 \
   TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256 \
   TASTEMOLNET_T2_SOURCE_EVIDENCE_SHA256 \
   TASTEMOLNET_T3_OUTPUT_ROOT \
   TASTEMOLNET_T4_OUTPUT_ROOT \
-  TASTEMOLNET_T2_BUNDLE \
   TASTEMOLNET_TRAIN_CSV \
-  COMRECGC_OFFICIAL_ROOT \
-  TASTEMOLNET_MANAGED_CONTROLLER_MANIFEST \
-  TASTEMOLNET_MANAGED_TASK_MANIFEST \
-  TASTEMOLNET_MANAGED_RUN_ID; do
+  COMRECGC_OFFICIAL_ROOT; do
   [[ -n "${!variable:-}" ]] \
     || { echo "$variable is required" >&2; exit 64; }
 done
-[[ ! -e "$TASTEMOLNET_T9_OUTPUT" && ! -L "$TASTEMOLNET_T9_OUTPUT" ]] \
-  || { echo "T9 output must be one fresh absent path" >&2; exit 64; }
 
-RUNNER="$PROJECT_ROOT/scripts/run_tastemolnet_comrecgc_smoke.py"
-autodl_require_file "$RUNNER"
-autodl_require_file "$PROJECT_ROOT/configs/hpc.yaml"
+[[ -d "$TASTEMOLNET_T4_OUTPUT_ROOT" ]] \
+  || { echo "T9 requires the completed T4 predecessor" >&2; exit 64; }
+[[ ! -e "$TASTEMOLNET_T9_OUTPUT" && ! -L "$TASTEMOLNET_T9_OUTPUT" ]] \
+  || { echo "T9 final output must be one fresh absent path" >&2; exit 64; }
+install -d -m 700 "$TASTEMOLNET_T9_STAGE_ROOT"
+install -d -m 700 "$(dirname "$TASTEMOLNET_T9_OUTPUT")"
 
 GPU_JSON="$(
   "$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/gpu_inventory.py" \
@@ -57,65 +53,50 @@ GPU_JSON="$(
     --stable-seconds "$AUTODL_IDLE_STABLE_SECONDS" \
     --format json
 )"
-GPU_LINE="$(
+GPU_UUID="$(
   printf '%s' "$GPU_JSON" | "$AUTODL_PYTHON" -c '
 import json, sys
 payload = json.load(sys.stdin)
-matches = [row for row in payload["gpus"] if row["index"] == 2 and row["stable_idle"] and row["selected"]]
-if len(matches) != 1:
+rows = [row for row in payload["gpus"] if row["index"] == 1 and row["stable_idle"]]
+if len(rows) != 1:
     raise SystemExit(75)
-print(str(matches[0]["index"]) + "\t" + str(matches[0]["uuid"]))
+print(rows[0]["uuid"])
 '
 )" || {
   rc=$?
-  [[ $rc -ne 75 ]] || echo "WAITING_FOR_IDLE_GPU2" >&2
+  [[ $rc -ne 75 ]] || echo "WAITING_FOR_IDLE_GPU1_AFTER_T4" >&2
   exit "$rc"
 }
-IFS=$'\t' read -r GPU_INDEX GPU_UUID <<< "$GPU_LINE"
-[[ "$GPU_INDEX" == "2" && "$GPU_UUID" == GPU-* ]] \
-  || { echo "T9 physical GPU2 UUID binding failed" >&2; exit 64; }
+[[ "$GPU_UUID" == GPU-* ]] \
+  || { echo "T9 physical GPU1 UUID binding failed" >&2; exit 64; }
 
-exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
+RUNNER="$PROJECT_ROOT/scripts/autodl/tastemolnet_t9_managed_runner_v2.py"
+autodl_require_file "$RUNNER"
+autodl_require_file "$PROJECT_ROOT/scripts/autodl/gpu_lock.py"
+autodl_require_file "$PROJECT_ROOT/configs/hpc.yaml"
+
+exec "$AUTODL_PYTHON" -B "$PROJECT_ROOT/scripts/autodl/gpu_lock.py" \
   --project-root "$PROJECT_ROOT" \
   --data-root "$AUTODL_DATA_ROOT" \
   --config "$PROJECT_ROOT/configs/hpc.yaml" \
-  launch \
-  --dataset tastemolnet \
-  --stage T9_COMRECGC_SMOKE \
-  --run-id "$TASTEMOLNET_MANAGED_RUN_ID" \
-  --heavy \
-  --foreground \
-  --gpu-index 2 \
+  run \
+  --gpu-index 1 \
   --gpu-uuid "$GPU_UUID" \
-  --gpu-required \
-  --gpu-lock-mode exclusive \
-  --max-gpus 4 \
-  --gpu-hard-limit 4 \
-  --managed-controller-manifest "$TASTEMOLNET_MANAGED_CONTROLLER_MANIFEST" \
-  --managed-task-manifest "$TASTEMOLNET_MANAGED_TASK_MANIFEST" \
-  --execution-receipt-kind taste_t9_gpu2_v1 \
-  --strict-result-validator taste_t9_v1 \
-  --config-file "$PROJECT_ROOT/configs/hpc.yaml" \
-  --expected-output "$TASTEMOLNET_T9_OUTPUT" \
-  --required-output-file input_hashes.json \
-  --required-output-file state.json \
-  --required-output-file manifest.json \
-  --required-output-file comrecgc_smoke.json \
-  --required-output-file gate.json \
-  --required-output-file output_hashes.json \
-  --required-output-file PASS \
+  --run-id "$TASTEMOLNET_T9_RUN_ID" \
   -- \
-  "$AUTODL_PYTHON" -B "$RUNNER" \
+  "$AUTODL_PYTHON" -I -B "$RUNNER" \
     --config "$PROJECT_ROOT/configs/hpc.yaml" \
-    --stage T9_COMRECGC_SMOKE \
-    --output-dir "$TASTEMOLNET_T9_OUTPUT" \
+    --stage-root "$TASTEMOLNET_T9_STAGE_ROOT" \
+    --final-path "$TASTEMOLNET_T9_OUTPUT" \
+    --run-id "$TASTEMOLNET_T9_RUN_ID" \
+    --gpu-uuid "$GPU_UUID" \
     --t2-adoption-root "$TASTEMOLNET_T2_ADOPTION_ROOT" \
     --t2-adoption-gate-sha256 "$TASTEMOLNET_T2_ADOPTION_GATE_SHA256" \
     --t2-adoption-receipt-sha256 "$TASTEMOLNET_T2_ADOPTION_RECEIPT_SHA256" \
     --t2-source-evidence-sha256 "$TASTEMOLNET_T2_SOURCE_EVIDENCE_SHA256" \
     --t3-output-root "$TASTEMOLNET_T3_OUTPUT_ROOT" \
     --t4-output-root "$TASTEMOLNET_T4_OUTPUT_ROOT" \
-    --checkpoint-dir "$TASTEMOLNET_T2_BUNDLE" \
+    --checkpoint-dir "$TASTEMOLNET_T3_OUTPUT_ROOT/artifacts/checkpoint" \
     --train-csv "$TASTEMOLNET_TRAIN_CSV" \
     --official-root "$COMRECGC_OFFICIAL_ROOT" \
     --set inference.fallback_to_heuristic=false

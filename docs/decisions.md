@@ -137,6 +137,53 @@ pre/post stat, held-directory, terminal-reopen, and receipt-stat bindings.
   unchanged. Deployment still requires a newly reviewed immutable execution
   commit and a new adoption child.
 
+---
+
+## [2026-08-29] Release the bounded Taste T9 smoke through managed v2 on GPU1
+
+### Motivation
+
+The Taste T9 scientific core already froze native COMRECGC at M=500 with a
+real step-250 checkpoint/reload, but its only launcher referenced an unfinished
+GPU2 controller/result-dispatch contract and a nonexistent runner. The project
+owner now authorizes the shortest bounded smoke on GPU1 after T4 and permits a
+trusted single operator root, while still requiring exact provenance, separate
+verification, fresh publication, and no test access.
+
+### Decision
+
+Keep every scientific parameter and the pinned official source unchanged. Add
+`run_tastemolnet_comrecgc_smoke` as a managed-v2 worker route. Both worker and
+verifier retain the receipt-only T2 adoption, T3/T4 managed outputs, their one
+common frozen GINE, checkpoint payload hashes, checkpoint-declared train CSV,
+`configs/hpc.yaml`, clean execution commit/tree, and all seven official source
+files. The worker writes only aggregate science/input evidence, worker-exit
+evidence, and SEALED inventory. A different process reopens that closure and
+every input before using the existing atomic no-replace terminal publisher.
+
+Use the explicit launch semantic `TRUSTED_SINGLE_OPERATOR_ROOT` instead of
+inventing a replacement controller receipt. The AutoDL wrapper takes the
+existing UUID-scoped lock for physical GPU1 and holds it across worker,
+SEALED handoff, verifier, and publication. It requires T4 first, performs only
+one bounded idle check, never signals another process, and leaves GPU0/GPU3
+untouched. The old disabled GPU2 release config remains historical evidence,
+not an alternate path.
+
+### Consequences
+
+- The generic managed-v2 PASS is the physical terminal marker; the exact T9
+  method marker is nested in independent verification and printed afterward.
+- Terminal artifacts remain aggregate-only and explicitly record no validation
+  payload, calibration payload, test, RF, redistribution, or paper eligibility.
+- M=50000 remains unrun, and code/tests cannot claim a scientific PASS.
+- Paired Slurm entrypoints remain static AutoDL-only refusals.
+
+### Status
+
+Implemented for focused review; not deployed or executed.
+
+---
+
 ## [2026-08-29] Remove ETA and relative-speedup gates from AIDS old-brute handover
 
 ### Motivation

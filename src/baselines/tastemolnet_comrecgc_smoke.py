@@ -2989,6 +2989,51 @@ def execute_native_comrecgc_smoke(
     return result
 
 
+def run_tastemolnet_comrecgc_smoke(
+    *,
+    config_path: str | Path,
+    stage_root: str | Path,
+    output_dir: str | Path,
+    run_id: str,
+    gpu_uuid: str,
+    t2_adoption_root: str | Path,
+    t2_adoption_gate_sha256: str,
+    t2_adoption_receipt_sha256: str,
+    t2_source_evidence_sha256: str,
+    t3_output_root: str | Path,
+    t4_output_root: str | Path,
+    checkpoint_dir: str | Path,
+    train_csv: str | Path,
+    official_root: str | Path,
+) -> dict[str, Any]:
+    """Run the managed-v2 worker; terminal PASS remains verifier-only."""
+
+    from src.utils.tastemolnet_t9_managed_v2 import (
+        hold_t9_inputs,
+        run_t9_worker,
+    )
+
+    with hold_t9_inputs(
+        config_path=config_path,
+        run_id=run_id,
+        gpu_uuid=gpu_uuid,
+        t2_adoption_root=t2_adoption_root,
+        t2_adoption_gate_sha256=t2_adoption_gate_sha256,
+        t2_adoption_receipt_sha256=t2_adoption_receipt_sha256,
+        t2_source_evidence_sha256=t2_source_evidence_sha256,
+        t3_output_root=t3_output_root,
+        t4_output_root=t4_output_root,
+        checkpoint_dir=checkpoint_dir,
+        train_csv=train_csv,
+        official_root=official_root,
+    ) as inputs:
+        return run_t9_worker(
+            stage_root=stage_root,
+            final_path=output_dir,
+            inputs=inputs,
+        )
+
+
 __all__ = [
     "CanonicalNativeGraph",
     "DATASET",
@@ -3011,6 +3056,7 @@ __all__ = [
     "build_terminal_documents",
     "canonical_attributed_graph",
     "execute_native_comrecgc_smoke",
+    "run_tastemolnet_comrecgc_smoke",
     "score_and_candidate",
     "hold_tastemolnet_comrecgc_output",
     "validate_tastemolnet_comrecgc_output",

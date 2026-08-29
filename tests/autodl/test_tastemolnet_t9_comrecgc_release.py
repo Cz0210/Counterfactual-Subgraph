@@ -39,7 +39,7 @@ def _install_config(
     return path
 
 
-def test_tracked_t9_release_is_exact_and_disabled() -> None:
+def test_tracked_t9_gpu2_controller_draft_remains_exact_and_disabled() -> None:
     value = load_t9_release_config()
     assert value["release_enabled"] is False
     assert value["gpu_index"] == 2
@@ -74,7 +74,7 @@ def test_t9_release_config_rejects_hostile_types_or_partial_pins(
         load_t9_release_config(path)
 
 
-def test_t9_cli_refuses_before_output_or_science_import(
+def test_t9_cli_requires_complete_trusted_worker_arguments_before_science(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "never-created"
@@ -104,26 +104,25 @@ def test_t9_cli_refuses_before_output_or_science_import(
         "--set",
         "inference.fallback_to_heuristic=false",
     ]
-    assert cli_module.main(arguments) == 78
+    with pytest.raises(Exception, match="worker arguments are absent"):
+        cli_module.main(arguments)
     assert not output.exists()
 
 
-def test_t9_wrappers_are_gpu2_managed_and_slurm_is_static_refusal() -> None:
+def test_t9_successor_is_gpu1_managed_v2_and_slurm_is_static_refusal() -> None:
     autodl = (
         PROJECT_ROOT / "scripts/autodl/run_tastemolnet_comrecgc_smoke.sh"
     ).read_text(encoding="utf-8")
     slurm = (
         PROJECT_ROOT / "scripts/slurm/run_tastemolnet_comrecgc_smoke.sh"
     ).read_text(encoding="utf-8")
-    assert autodl.index("TASTE_T9_COMRECGC_WRAPPER_RELEASED=0") < autodl.index(
-        'source "$SCRIPT_DIR/common.sh"'
-    )
     for token in (
-        "--gpu-index 2",
-        "--gpu-lock-mode exclusive",
-        "--execution-receipt-kind taste_t9_gpu2_v1",
-        "--strict-result-validator taste_t9_v1",
-        "--foreground",
+        "TRUSTED_SINGLE_OPERATOR_ROOT",
+        "--gpu-index 1",
+        "scripts/autodl/gpu_lock.py",
+        "tastemolnet_t9_managed_runner_v2.py",
+        "TASTEMOLNET_T4_OUTPUT_ROOT",
+        "WAITING_FOR_IDLE_GPU1_AFTER_T4",
     ):
         assert token in autodl
     for token in (
