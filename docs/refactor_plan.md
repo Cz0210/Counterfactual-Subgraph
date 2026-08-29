@@ -1,5 +1,17 @@
 # Refactor Plan
 
+## 2026-08-29: Correct canonical AIDS component order
+
+- [x] Recompute the pinned anchor graph and confirm canonical sizes
+  `(114, 149, 3)`, seed component size 3, and minimum self-inclusive degree 3.
+- [x] Cross-check the independently hashed shortcut failure's reached count of
+  114 against canonical component zero.
+- [x] Correct only the authority tuple and add an asymmetric, interleaved graph
+  regression so descending-size order fails explicitly.
+- [ ] Integrate the reviewed commit into a new immutable AutoDL worktree and
+  retry from another fresh direct child; never reuse the empty failed child or
+  signal the protected old brute worker.
+
 ## 2026-08-29: Restore BACE full-graph WNode postprocessing
 
 - [x] Reproduce all four calibration shard failures at the first

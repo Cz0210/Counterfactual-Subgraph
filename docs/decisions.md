@@ -1,5 +1,41 @@
 # Decisions Log
 
+## [2026-08-29] Preserve canonical AIDS anchor-component order
+
+### Motivation
+
+The frozen, SHA-bound AIDS anchor-edge array has three connected components.
+Canonical IDs are assigned by increasing minimum selected-anchor position, so
+their sizes are `(114, 149, 3)`.  The frozen shortcut-failure certificate
+independently records that the traversal from anchor position zero reached 114
+anchors.  The adoption authority mistakenly pinned the same sizes in
+descending-first order as `(149, 114, 3)`, causing a genuine source to fail
+after all earlier byte and semantic checks passed.
+
+### Decision
+
+Pin the production authority to canonical component order `(114, 149, 3)`.
+Continue to recompute every component from the immutable edge array and bind
+the shortcut failure's `anchor_component_reached_count` to canonical component
+zero.  Use an asymmetric, interleaved graph regression so sorting component
+sizes instead of preserving canonical graph order cannot pass accidentally.
+
+### Consequences
+
+- The authority now agrees with both the frozen graph topology and the
+  independently hashed shortcut-failure certificate.
+- No edge, anchor, seed, selection, distance, or exact-recovery science is
+  changed or regenerated.
+- The failed empty adoption child remains unusable.  Deployment still requires
+  a new reviewed immutable worktree and a fresh direct child, and this change
+  authorizes no signal to the protected old process.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Use pair-keyed WNode for native full-graph BACE candidates
 
 ### Motivation

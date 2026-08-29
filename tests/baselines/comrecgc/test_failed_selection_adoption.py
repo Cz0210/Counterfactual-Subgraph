@@ -35,6 +35,7 @@ from src.baselines.comrecgc.failed_selection_adoption import (
     FailedSelectionAdoptionError,
     FailedSelectionAuthority,
     TaskStateAuthority,
+    _anchor_graph_summary,
     _create_or_validate_with_profile,
     _ready_marker_bytes,
     _stable_hash as _adoption_stable_hash,
@@ -95,7 +96,11 @@ def test_production_authority_is_exactly_the_c766_failed_route() -> None:
     assert PRODUCTION_AUTHORITY.physical_vectors_sha256 == (
         "68072364166c20364b8d079a08fd67f5008447db54f51b338f3f541eb54b39e5"
     )
-    assert PRODUCTION_AUTHORITY.initial_component_sizes == (149, 114, 3)
+    # The frozen shortcut failure starts from anchor position zero and records
+    # a reached count of 114.  Canonical component order is by minimum anchor
+    # position, not by descending component size.
+    assert PRODUCTION_AUTHORITY.initial_component_sizes == (114, 149, 3)
+    assert PRODUCTION_AUTHORITY.initial_component_sizes[0] == 114
     assert len(PRODUCTION_AUTHORITY.failed_tree_files) == 14
     assert PRODUCTION_AUTHORITY.close_state_authority.projection_sha256 == (
         "f2bcde0b4cf8b86082abb3bc9b7499c8a9459f1a1df92d8eada28996e332a780"
@@ -165,6 +170,29 @@ def test_production_authority_is_exactly_the_c766_failed_route() -> None:
             "pid",
             "start_ticks",
         }
+
+
+def test_anchor_component_order_uses_minimum_position_not_descending_size() -> None:
+    edges = np.asarray(
+        [
+            (0, 2),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (1, 6),
+            (2, 4),
+            (3, 5),
+            (3, 6),
+            (5, 6),
+        ],
+        dtype=np.intp,
+    )
+
+    sizes, labels, degrees, _neighborhoods = _anchor_graph_summary(7, edges)
+
+    assert sizes == (3, 4)
+    assert labels == (0, 1, 0, 1, 0, 1, 1)
+    assert min(degrees) == 3
 
 
 def _sha(path: Path) -> str:
@@ -806,6 +834,38 @@ def _rebind_materialized_bitmap(case: AuthorityFixture) -> None:
     )
 
 
+def _resign_shortcut_failure_reached_count(
+    case: AuthorityFixture,
+    reached_count: int,
+) -> None:
+    dbscan_root = case.final_root / "common_recourse/external_memory/dbscan"
+    failure_path = dbscan_root / "shortcut_failure.json"
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    failure["details"]["anchor_component_reached_count"] = reached_count
+    _json(failure_path, failure)
+
+    checkpoint_path = dbscan_root / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["shortcut_failure_sha256"] = _sha(failure_path)
+    checkpoint.pop("checkpoint_payload_sha256")
+    checkpoint["checkpoint_payload_sha256"] = external._stable_hash(checkpoint)
+    _json(checkpoint_path, checkpoint)
+
+    failed_tree_files = tuple(
+        (path.relative_to(case.final_root).as_posix(), _sha(path))
+        for path in sorted(
+            (value for value in case.final_root.rglob("*") if value.is_file()),
+            key=str,
+        )
+    )
+    case.profile = replace(
+        case.profile,
+        shortcut_failure_sha256=_sha(failure_path),
+        checkpoint_sha256=_sha(checkpoint_path),
+        failed_tree_files=failed_tree_files,
+    )
+
+
 def _rewrite_signed_terminal(case: AuthorityFixture, payload: dict) -> None:
     receipt = case.output / RECEIPT_NAME
     receipt.chmod(0o644)
@@ -857,6 +917,16 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
     assert first["ordinary_pass_dependency_eligible"] is False
     assert first["scientific_result_pass"] is False
     assert first["failed_selection"]["dbscan_partition_proven"] is False
+    assert first["failed_selection"]["initial_component_sizes"] == [3, 3]
+    shortcut_failure = json.loads(
+        Path(first["failed_selection"]["failure_artifact"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert shortcut_failure["details"]["anchor_component_reached_count"] == 3
+    assert shortcut_failure["details"]["anchor_component_reached_count"] == (
+        first["failed_selection"]["initial_component_sizes"][0]
+    )
     assert first["failed_selection"]["unique_seed_component"] is True
     assert first["failed_selection"]["seed_component_ids"] == [0, 0, 0]
     assert first["failed_selection"]["seed_component_size"] == 3
@@ -887,6 +957,22 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
         case.output / "failed_selection_adoption_receipt.json"
     )
     assert not (case.output / "PASS").exists()
+
+
+def test_shortcut_failure_reached_count_binds_canonical_component_zero(
+    tmp_path: Path,
+) -> None:
+    case = _build_fixture(tmp_path)
+    assert case.profile.initial_component_sizes == (3, 3)
+    _resign_shortcut_failure_reached_count(case, 4)
+
+    with pytest.raises(
+        FailedSelectionAdoptionError,
+        match="disconnected shortcut failure changed",
+    ):
+        _adopt(case)
+    assert not (case.output / RECEIPT_NAME).exists()
+    assert not (case.output / READY_NAME).exists()
 
 
 @pytest.mark.parametrize("dtype", [np.bool_, np.int16])

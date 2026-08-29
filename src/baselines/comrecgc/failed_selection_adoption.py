@@ -692,7 +692,7 @@ PRODUCTION_AUTHORITY = FailedSelectionAuthority(
     anchor_count=266,
     anchor_edge_count=16_860,
     seed_count=3,
-    initial_component_sizes=(149, 114, 3),
+    initial_component_sizes=(114, 149, 3),
 )
 
 
