@@ -56,6 +56,16 @@
 - [ ] Obtain an independent P0/P1 review, integrate the clean commit, and
   deploy one fresh T4 attempt on physical GPU 1. Runtime PASS remains unclaimed
   until the independent verifier publishes it.
+
+## 2026-08-29: Align AIDS adoption with the pinned real manifest shape
+
+- [x] Preserve the production manifest SHA and require the real absent
+  `run_tastemolnet` field instead of accepting a synthetic fixture-only zero.
+- [x] Update the adoption fixture to the production shape and add a rehashed
+  field-injection rejection test.
+- [ ] Obtain independent review, then retry only the existing fresh adoption
+  CID without signalling the protected old brute route.
+
 ## 2026-08-29: Content-bind the AIDS controller root preclaim
 
 - [x] Preserve the exact imported `a8c42be4` -> `4b7fcde1` -> `f4fcfcd8`

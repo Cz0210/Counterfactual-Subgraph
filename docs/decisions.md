@@ -200,6 +200,34 @@ that restores HUP/INT/TERM defaults is valid.
 - A fresh reviewed commit, detached AutoDL worktree, controller UUID, log, and
   output root remain required before another launch.
 
+## [2026-08-29] Match AIDS adoption structure to the pinned real manifest
+
+### Motivation
+
+The production adoption authority already pins the fixed controller manifest
+to SHA-256
+`7b2987bc2d223ebe3262cc15bc43bd1c0b030c6706a1c074959d154af5fd84d7`.
+A fresh AutoDL adoption nevertheless failed after that hash reopened because
+the validator required a synthetic `run_tastemolnet: 0` field. The pinned real
+manifest has no such field, while the unit fixture had accidentally invented
+it, making the structural check impossible to satisfy in production.
+
+### Decision
+
+Require `run_tastemolnet` to be absent from the fixed source manifest, matching
+the exact pinned bytes. Do not use a default that could make an absent field
+look equivalent to an explicit value. Make the fixture use the real shape and
+reject an injected field even when a test rebinds both the manifest SHA and the
+persistent snapshot.
+
+### Consequences
+
+- The hash-pinned real c766 manifest can pass its intended structural check.
+- Adding a Taste execution flag remains a fail-closed authority change.
+- This change does not authorize deployment, launch science, or signal the old
+  brute process; release review and the dedicated handover gate remain
+  mandatory.
+
 ## [2026-08-29] Replace the AIDS zero-byte root preclaim with a content-bound claim
 
 ### Motivation

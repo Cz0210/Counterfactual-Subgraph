@@ -541,7 +541,6 @@ def _build_fixture(tmp_path: Path) -> AuthorityFixture:
             "schema_version": 1,
             "controller_id": controller_id,
             "paper_frozen": True,
-            "run_tastemolnet": 0,
             "tasks": tasks,
         },
     )
@@ -843,6 +842,32 @@ def test_failed_selection_adoption_is_recovery_only_and_idempotent(
         case.output / "failed_selection_adoption_receipt.json"
     )
     assert not (case.output / "PASS").exists()
+
+
+def test_source_manifest_requires_real_absent_taste_flag_even_if_rehashed(
+    tmp_path: Path,
+) -> None:
+    case = _build_fixture(tmp_path)
+    original = json.loads(case.source_manifest.read_text(encoding="utf-8"))
+    assert "run_tastemolnet" not in original
+
+    injected = {**original, "run_tastemolnet": 0}
+    _json(case.source_manifest, injected)
+    rebound_sha256 = _sha(case.source_manifest)
+    snapshot = {
+        **injected,
+        "source_manifest": str(case.source_manifest),
+        "source_manifest_sha256": rebound_sha256,
+    }
+    _json(case.controller_root / "controller_manifest.json", snapshot)
+    case.profile = replace(
+        case.profile,
+        controller_manifest_sha256=rebound_sha256,
+    )
+
+    with pytest.raises(FailedSelectionAdoptionError, match="source controller"):
+        _adopt(case)
+    assert not (case.output / READY_NAME).exists()
 
 
 def test_pid_reuse_is_exit_evidence_but_live_original_generation_blocks(

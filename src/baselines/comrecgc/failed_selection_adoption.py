@@ -2639,7 +2639,7 @@ def _inspect_authority(
             source_manifest.get("schema_version") != 1
             or source_manifest.get("controller_id") != profile.controller_id
             or source_manifest.get("paper_frozen") is not True
-            or int(source_manifest.get("run_tastemolnet", -1)) != 0
+            or "run_tastemolnet" in source_manifest
         ):
             raise FailedSelectionAdoptionError("source controller manifest changed")
         expected_snapshot = dict(source_manifest)
