@@ -1,5 +1,38 @@
 # Decisions Log
 
+## [2026-08-29] Match the official GREED GEDLIB include as an exact line
+
+### Motivation
+
+The first authorized isolated AutoDL build stopped before compilation with
+`official CMake GEDLIB include anchor changed`.  The pinned GREED CMake file
+contains one standalone GEDLIB-root include plus seven valid include
+subpaths and three valid link subpaths.  Counting the root string as a raw
+substring therefore counted every subpath and rejected the authenticated
+official file.
+
+### Decision
+
+Authenticate exactly one complete standalone
+`${CMAKE_SOURCE_DIR}/ext/gedlib` line and assign its replacement by the exact
+line index, never by first-substring replacement.  Then replace every
+slash-delimited GEDLIB subpath and reject any remaining legacy GEDLIB-root
+reference.  Retain the existing fail-closed behavior for a missing or
+duplicate standalone line and retain the complete Gurobi-removal check.  Cover
+the official root-plus-seven-include-subpath shape, three link subpaths placed
+before the root, and missing, duplicate, and comment-hidden tamper cases in a
+focused regression.
+
+### Consequences
+
+- The overlay accepts the byte-authenticated pinned official CMake layout
+  without weakening its unique-root anchor.
+- Missing or duplicated root includes, comment-hidden legacy roots, and any
+  remaining Gurobi reference still block the build.
+- The failed AutoDL prefix remains non-PASS evidence.  A fresh retry and all
+  import, `ldd`, deterministic-fixture, and `python -I` checks remain required
+  before either provisioning PASS marker may be emitted.
+
 ## [2026-08-29] Authenticate the vendored GCFExplainer source against upstream
 
 ### Motivation

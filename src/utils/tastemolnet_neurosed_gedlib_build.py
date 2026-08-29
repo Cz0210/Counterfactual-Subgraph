@@ -209,11 +209,15 @@ def audit_preprovisioned_dependencies(
 def _offline_cmake_text(original: str, *, gedlib_root: Path) -> str:
     """Create a Gurobi-free F2 build overlay without changing pyged behavior."""
 
-    text = original
+    source_lines = original.splitlines()
     old_include = "\t${CMAKE_SOURCE_DIR}/ext/gedlib"
-    if text.count(old_include) != 1:
+    root_indexes = [
+        index for index, line in enumerate(source_lines) if line == old_include
+    ]
+    if len(root_indexes) != 1:
         raise TasteGEDLIBBuildError("official CMake GEDLIB include anchor changed")
-    text = text.replace(old_include, f"\t{gedlib_root}")
+    source_lines[root_indexes[0]] = f"\t{gedlib_root}"
+    text = "\n".join(source_lines) + "\n"
     text = text.replace("${CMAKE_SOURCE_DIR}/ext/gedlib/", f"{gedlib_root}/")
     lines = []
     for line in text.splitlines():
@@ -221,6 +225,10 @@ def _offline_cmake_text(original: str, *, gedlib_root: Path) -> str:
             continue
         lines.append(line)
     result = "\n".join(lines) + "\n"
+    if "${CMAKE_SOURCE_DIR}/ext/gedlib" in result:
+        raise TasteGEDLIBBuildError(
+            "legacy GEDLIB include reference remains in offline overlay"
+        )
     if "gurobi" in result.lower():
         raise TasteGEDLIBBuildError("Gurobi link reference remains in offline overlay")
     return result
