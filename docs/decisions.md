@@ -1,5 +1,35 @@
 # Decisions Log
 
+## [2026-08-29] Separate Taste T9 checkpoint authority from model loading
+
+### Motivation
+
+The T9 holder correctly retained `config.yaml` as part of its exact T3
+checkpoint authority, but passed that complete eight-file mapping to the
+frozen-GINE in-memory loader.  That loader deliberately accepts exactly seven
+runtime payloads and rejected the extra configuration evidence before science.
+
+### Decision
+
+Continue to retain, hash, and revalidate all eight authority payloads.  Before
+constructing the frozen GINE, require that exact authority key set and project
+only the loader's seven exact keys, excluding `config.yaml`.  Missing, empty,
+or injected authority payloads remain fail closed.
+
+### Consequences
+
+- The immutable checkpoint authority is not weakened or rewritten.
+- The model loader receives exactly its existing contract; no permissive
+  extra-key behavior is introduced.
+- The failed T9 stage remains unusable.  Runtime recovery requires a fresh
+  managed attempt from a newly integrated immutable execution commit.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Preserve canonical AIDS anchor-component order
 
 ### Motivation

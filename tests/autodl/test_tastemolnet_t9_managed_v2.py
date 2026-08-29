@@ -17,6 +17,7 @@ from src.utils.tastemolnet_t9_managed_v2 import (
     SCIENCE_FILE,
     T9_INPUT_AUTHORITY_SCHEMA,
     TRUST_MODEL,
+    _checkpoint_payloads_for_model_load,
     open_t9_sealed,
     seal_t9_worker_evidence,
     t9_managed_input_hashes,
@@ -26,6 +27,31 @@ from tests.baselines.test_tastemolnet_comrecgc_smoke import _valid_result
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_t9_separates_full_authority_from_exact_model_load_payloads() -> None:
+    authority_names = (
+        "model.pt",
+        "config.yaml",
+        "model_card.json",
+        "feature_schema.json",
+        "label_map.json",
+        "split_manifest.json",
+        "test_evaluation_status.json",
+        "temperature_scaling.json",
+    )
+    payloads = {name: name.encode("utf-8") for name in authority_names}
+
+    model_payloads = _checkpoint_payloads_for_model_load(payloads)
+
+    assert set(model_payloads) == set(authority_names) - {"config.yaml"}
+    assert "config.yaml" in payloads
+    with pytest.raises(Exception, match="held checkpoint payload set changed"):
+        _checkpoint_payloads_for_model_load(
+            {name: data for name, data in payloads.items() if name != "config.yaml"}
+        )
+    with pytest.raises(Exception, match="held checkpoint payload set changed"):
+        _checkpoint_payloads_for_model_load({**payloads, "unexpected.json": b"{}"})
 
 
 def _authority(tmp_path: Path) -> dict[str, object]:

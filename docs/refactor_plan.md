@@ -1,5 +1,15 @@
 # Refactor Plan
 
+## 2026-08-29: Separate Taste T9 checkpoint authority from model-load payloads
+
+- [x] Keep `config.yaml` in the exact descriptor-held T3 checkpoint authority.
+- [x] Project only the seven strict `load_gnn_checkpoint_payloads` keys into
+  each T9 frozen-GINE construction.
+- [x] Add positive and negative exact-key regressions for missing authority
+  payloads and injected extras.
+- [ ] Deploy only from a newly integrated immutable AutoDL worktree and a fresh
+  T9 attempt; never reuse the fail-closed stage namespace.
+
 ## 2026-08-29: Correct canonical AIDS component order
 
 - [x] Recompute the pinned anchor graph and confirm canonical sizes

@@ -73,9 +73,18 @@ _SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GPU_UUID_RE = re.compile(r"^GPU-[A-Za-z0-9-]+$")
 _SAFE_RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
-_CHECKPOINT_PAYLOADS = (
+_AUTHORITY_CHECKPOINT_PAYLOADS = (
     "model.pt",
     "config.yaml",
+    "model_card.json",
+    "feature_schema.json",
+    "label_map.json",
+    "split_manifest.json",
+    "test_evaluation_status.json",
+    "temperature_scaling.json",
+)
+_MODEL_LOAD_CHECKPOINT_PAYLOADS = (
+    "model.pt",
     "model_card.json",
     "feature_schema.json",
     "label_map.json",
@@ -140,6 +149,28 @@ def _json_object(data: bytes, *, label: str) -> dict[str, Any]:
     if type(value) is not dict:
         raise TasteT9ManagedV2Error(f"{label} must be one JSON object")
     return value
+
+
+def _checkpoint_payloads_for_model_load(
+    payloads: Mapping[str, bytes],
+) -> dict[str, bytes]:
+    """Project the full held authority onto the strict GNN loader contract."""
+
+    if type(payloads) is not dict or set(payloads) != set(
+        _AUTHORITY_CHECKPOINT_PAYLOADS
+    ):
+        raise TasteT9ManagedV2Error("T9 held checkpoint payload set changed")
+    if any(
+        type(payloads[name]) is not bytes or not payloads[name]
+        for name in payloads
+    ):
+        raise TasteT9ManagedV2Error("T9 held checkpoint payload bytes changed")
+    projected = {
+        name: payloads[name] for name in _MODEL_LOAD_CHECKPOINT_PAYLOADS
+    }
+    if set(projected) != set(_MODEL_LOAD_CHECKPOINT_PAYLOADS):
+        raise TasteT9ManagedV2Error("T9 model-load checkpoint payload set changed")
+    return projected
 
 
 def inspect_clean_execution() -> dict[str, str]:
@@ -366,7 +397,7 @@ def _validate_t9_input_authority(value: Mapping[str, Any]) -> dict[str, Any]:
             raise TasteT9ManagedV2Error("T9 checkpoint differs from T3/T4")
     payload_hashes = checkpoint.get("payload_sha256")
     if type(payload_hashes) is not dict or set(payload_hashes) != set(
-        _CHECKPOINT_PAYLOADS
+        _AUTHORITY_CHECKPOINT_PAYLOADS
     ):
         raise TasteT9ManagedV2Error("T9 checkpoint payload inventory changed")
     for name, digest in payload_hashes.items():
@@ -619,7 +650,7 @@ class HeldTasteT9Inputs:
             name: _sha256_bytes(
                 self.t3.files[f"artifacts/checkpoint/{name}"].bytes()
             )
-            for name in _CHECKPOINT_PAYLOADS
+            for name in _AUTHORITY_CHECKPOINT_PAYLOADS
         }
         t3 = dict(self.t3.binding)
         t3["checkpoint_inventory_sha256"] = _sha256_mapping(payload_hashes)
@@ -713,7 +744,7 @@ def hold_t9_inputs(
         t3.verify()
         payloads = {
             name: t3.files[f"artifacts/checkpoint/{name}"].bytes()
-            for name in _CHECKPOINT_PAYLOADS
+            for name in _AUTHORITY_CHECKPOINT_PAYLOADS
         }
         payload_hashes = {
             name: _sha256_bytes(data) for name, data in sorted(payloads.items())
@@ -1021,7 +1052,9 @@ def run_t9_worker(
         inputs.revalidate()
         science = execute_native_comrecgc_smoke(
             modules=inputs.official.modules,
-            checkpoint_payloads=inputs.checkpoint_payloads,
+            checkpoint_payloads=_checkpoint_payloads_for_model_load(
+                inputs.checkpoint_payloads
+            ),
             source_rows=inputs.source_rows,
             graph_schema=inputs.graph_schema,
             device="cuda:0",
