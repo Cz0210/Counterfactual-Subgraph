@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -212,6 +213,53 @@ def test_realistic_frozen_registry_row_omits_classifier_family(
 
     assert evidence["registry_status"] == "FROZEN_PASS"
     assert "classifier_family" not in evidence["registry_row"]
+
+
+def test_source_inventory_records_exact_physical_stat_fields(tmp_path: Path) -> None:
+    policy = _policy(tmp_path)
+
+    inventory = adoption._source_inventory(policy)
+
+    for name, recorded in inventory.items():
+        observed = (policy.source_root / name).stat(follow_symlinks=False)
+        assert recorded == {
+            "bytes": observed.st_size,
+            "sha256": policy.source_files[name],
+            "device": observed.st_dev,
+            "inode": observed.st_ino,
+            "mtime_ns": observed.st_mtime_ns,
+            "ctime_ns": observed.st_ctime_ns,
+            "link_count": observed.st_nlink,
+        }
+
+
+def test_receipt_rejects_source_hardlink_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    monkeypatch.setattr(adoption, "scan_live_writers", _writer_audit)
+    monkeypatch.setattr(
+        adoption, "audit_explicit_candidate", lambda *args, **kwargs: _candidate(policy)
+    )
+    matrix = tmp_path / "matrix"
+    matrix.mkdir()
+    output = matrix / "adoptions/bace_ours_frozen_hardlink_drift"
+    adoption.adopt_bace_ours_frozen_cell(
+        matrix_root=matrix,
+        output_root=output,
+        policy=policy,
+        require_clean_git=False,
+    )
+    source_file = policy.source_root / "summary.json"
+    before = source_file.stat(follow_symlinks=False)
+
+    os.link(source_file, tmp_path / "summary-hardlink.json")
+    after = source_file.stat(follow_symlinks=False)
+
+    assert after.st_nlink == before.st_nlink + 1
+    assert after.st_ctime_ns >= before.st_ctime_ns
+    with pytest.raises(adoption.BACEOursFreezeAdoptionError, match="closure changed"):
+        adoption.validate_adoption_receipt(output, policy=policy)
 
 
 @pytest.mark.parametrize(

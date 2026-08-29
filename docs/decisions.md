@@ -20,6 +20,11 @@ open and require that exact value in `summary.json`, `oracle_manifest.json`,
 source-file hash and no-writer closure.  A missing or changed value in any one
 of those four manifests remains fatal.
 
+The source inventory continues to bind the exact six-field physical identity
+`(device, inode, size, mtime_ns, ctime_ns, link_count)`.  Regression coverage
+compares every published field with the operating-system stat result and proves
+that adding an external hardlink after receipt publication invalidates reopen.
+
 ### Consequences
 
 - A real `FROZEN_PASS` row without `classifier_family` can reach the direct
