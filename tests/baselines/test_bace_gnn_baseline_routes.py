@@ -25,6 +25,7 @@ from src.eval.bace_native_baseline_gnn import (
     SELECTION_STAGE,
     TEST_STAGE,
     _authorize_split,
+    _fullgraph_pair_rows,
     _load_candidates,
     freeze_native_baseline_final,
 )
@@ -439,6 +440,56 @@ def test_candidate_loader_preserves_fullgraph_action_and_split_order(
     assert {row["action_kind"] for row in loaded} == {
         "full_counterfactual_graph"
     }
+
+
+def test_fullgraph_wnode_uses_pair_distance_without_fake_match_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PairOnlyProvider:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def distance(self, left: str, right: str) -> dict[str, object]:
+            self.calls.append((left, right))
+            return {"ok": True, "distance": 0.25, "error": None}
+
+        def distance_for_action(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("full-graph candidates have no match action context")
+
+    class Oracle:
+        @staticmethod
+        def predict_records(_graphs: object, *, batch_size: int) -> list[dict[str, object]]:
+            assert batch_size == 8
+            return [{"predicted_label": 0, "probabilities": [0.9, 0.1]}]
+
+    monkeypatch.setattr(
+        "src.eval.bace_native_baseline_gnn._graph",
+        lambda *_args, **_kwargs: object(),
+    )
+    provider = PairOnlyProvider()
+    rows = _fullgraph_pair_rows(
+        parents=[SimpleNamespace(parent_id="p0", smiles="CC")],
+        before_rows=[{"predicted_label": 1, "probabilities": [0.1, 0.9]}],
+        candidates=[
+            {
+                "candidate_id": "c0",
+                "canonical_smiles": "CO",
+                "rank": 1,
+                "native_rank": 1,
+            }
+        ],
+        featurizer=object(),
+        oracle=Oracle(),
+        provider=provider,
+        card={"checkpoint_id": CHECKPOINT_ID},
+        spec=baseline_spec("gcfexplainer"),
+        method_id="gcfexplainer",
+        oracle_batch_size=8,
+    )
+
+    assert provider.calls == [("CC", "CO")]
+    assert rows[0]["pair_strict_flip"] is True
+    assert rows[0]["wnode_distance"] == 0.25
 
 
 def test_final_freeze_uses_only_frozen_order_and_test_matrix(tmp_path: Path) -> None:

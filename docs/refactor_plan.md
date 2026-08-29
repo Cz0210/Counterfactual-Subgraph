@@ -1,5 +1,16 @@
 # Refactor Plan
 
+## 2026-08-29: Restore BACE full-graph WNode postprocessing
+
+- [x] Reproduce all four calibration shard failures at the first
+  `distance_for_action` call after the completed GCFExplainer candidate freeze.
+- [x] Route GCFExplainer/ComRecGC complete molecular graphs through the exact
+  pair-keyed WNode API instead of fabricating deletion match context.
+- [x] Add a regression whose provider rejects action calls and proves the
+  strict-flip row receives the exact pair distance.
+- [ ] Deploy a fresh adoption-only controller and fresh shard outputs; never
+  rerun the completed 50k VRRW generation or reuse the failed shard roots.
+
 ## 2026-08-29: Close the Taste T4 independent CUDA replay envelope
 
 - [x] Compare the SEALED worker with repeated GPU1 verifier science and isolate

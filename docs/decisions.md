@@ -1,5 +1,39 @@
 # Decisions Log
 
+## [2026-08-29] Use pair-keyed WNode for native full-graph BACE candidates
+
+### Motivation
+
+The adoption-only BACE GCFExplainer postprocess preserved the completed 50k
+generation and candidate freeze, but every calibration shard stopped before
+its first WNode result. The evaluator passed a complete generated molecule to
+the deletion-action cache API, whose truthful contract requires match atom
+indices and a match-selection policy. Neither exists for a native full-graph
+GCFExplainer or ComRecGC candidate.
+
+### Decision
+
+Evaluate native full-graph candidates with the exact MolCLR node-Wasserstein
+pair API. Keep the action-aware API for methods that actually apply a matched
+action. Do not invent empty match indices or a synthetic deletion policy to
+make the cache key pass.
+
+### Consequences
+
+- The WNode value remains the exact full-graph-to-full-graph EMD under the same
+  frozen MolCLR checkpoint and method-specific distance namespace.
+- Canonically identical graph pairs may share a symmetric cache entry, which
+  is scientifically correct because candidate IDs do not alter WNode.
+- Failed calibration shard roots remain terminal; postprocessing must use
+  fresh shard/controller namespaces while reusing the completed 50k generation
+  and PASS candidate universe.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-29] Bound only the observed Taste T4 CUDA replay aggregates
 
 ### Motivation

@@ -184,17 +184,13 @@ def _fullgraph_pair_rows(
             distance: float | None = None
             failure_reason: str | None = None
             if semantics.cf_flip:
-                result = provider.distance_for_action(
+                # Native GCFExplainer and ComRecGC candidates are complete
+                # molecular graphs, not matched deletion actions. They have no
+                # truthful match indices or match-selection policy, so use the
+                # exact full-graph pair key instead of fabricating that context.
+                result = provider.distance(
                     parent.smiles,
                     str(candidate["canonical_smiles"]),
-                    action_context={
-                        "parent_id": parent.parent_id,
-                        "candidate_id": candidate["candidate_id"],
-                        "teacher_sha256": card["checkpoint_id"],
-                        "oracle_checkpoint_id": card["checkpoint_id"],
-                        "action_kind": spec.action_kind,
-                        "action_semantics": spec.action_semantics,
-                    },
                 )
                 value = result.get("distance")
                 if (
