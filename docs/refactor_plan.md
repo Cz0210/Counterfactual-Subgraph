@@ -2681,3 +2681,21 @@ Mutagenicity roadmaps.
   O_EXCL publication, and timestamp backdating in focused tests.
 - [ ] Obtain independent P0/P1 review of this successor commit before any
   feature push, AutoDL deployment, handover execution, or old-process signal.
+
+## 2026-08-30: Fixed-task AutoDL main-table continuation sidecar
+
+- [x] Add durable queue, state, heartbeat, event, attempt, and child-terminal
+  receipts for one fixed continuation task table.
+- [x] Keep AIDS exact blocked/handover-forbidden and active BACE routes
+  read-only; durably register the ComRecGC step-17500 external audit.
+- [x] Keep T6/T7/T8 `BLOCKED_RELEASE` with zero launch attempts and leave T10
+  outside this sidecar.
+- [x] Require a fresh T9 UUIDv4 for stage/final/run and abandon all identities
+  after each preflight return code 75.
+- [x] Accept only an explicit NeuroSED label-manifest assertion set and trainer
+  argv, then wrap it with the existing GPU UUID lock on the first free GPU0/1.
+- [x] Add focused tests, AutoDL usage documentation, and the paired static-
+  refusal Slurm entrypoint; keep `RUN_GNN_ABLATION=0` fail-closed.
+- [ ] Deploy from an immutable AutoDL commit and write the exact live spec from
+  one refreshed audit. Code integration alone does not mark any method cell
+  PASS.

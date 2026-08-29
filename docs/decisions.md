@@ -12885,3 +12885,44 @@ failure even when the probability difference is below `1e-6`.
 Accepted
 
 ---
+
+## [2026-08-30] Use one fixed-task continuation sidecar for the live main table
+
+### Motivation
+
+The live AutoDL routes already have independent owners. The existing Taste-v2
+controller cannot accept the required T6/T8/T9 queue, while invoking unreleased
+wrappers on every poll would create noise and stale attempts. T9 additionally
+requires a new stage, final, and run UUID after every GPU-preflight return code
+75.
+
+### Decision
+
+Add one bounded sidecar whose task table is compiled as NeuroSED, T9,
+T6/T7/T8, and T10. Keep T6/T7/T8 terminally `BLOCKED_RELEASE`; keep T10
+waiting; launch NeuroSED only from a spec-pinned label manifest and argv under
+the existing UUID lock; and launch only the existing T9 GPU1 wrapper with one
+UUIDv4 shared across its fresh stage/final/run identities. Persist the child
+return code independently so return code 75 abandons those identities across
+sidecar restarts.
+
+Observe AIDS exact, BACE GCF, GlobalGCE, and ComRecGC without writing their
+roots. Persist the ComRecGC step-17500 external-audit registration. Expose one
+optional read-only convergence hook, but keep process handover outside the
+sidecar. Reject GNN ablation and provide no matrix publication or process
+termination operation.
+
+### Consequences
+
+- GPU0/GPU1 locks and compute PIDs are both required idle before launch.
+- A missing NeuroSED trainer argv remains explicit `WAITING_INPUT` rather than
+  starting a guessed command.
+- Every T9 preflight return code 75 is auditable and the next attempt is fresh.
+- The sidecar is specific to this continuation and is not a new controller
+  platform.
+
+### Status
+
+Accepted
+
+---
