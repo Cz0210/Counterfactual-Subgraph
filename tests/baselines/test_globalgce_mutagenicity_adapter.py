@@ -29,6 +29,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     _hash_open_regular_source,
     _import_official_modules,
     _load_general_train_rows,
+    _read_csv_payload,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
@@ -43,6 +44,12 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     validate_official_globalgce_api_signatures,
     validate_globalgce_generation_loader,
 )
+
+
+def test_descriptor_csv_payload_loader_uses_in_memory_bytes() -> None:
+    assert _read_csv_payload(b"molecule_id,label\na,1\n") == [
+        {"molecule_id": "a", "label": "1"}
+    ]
 
 
 def test_taste_generator_binds_exact_descriptor_authorized_gine_payloads(

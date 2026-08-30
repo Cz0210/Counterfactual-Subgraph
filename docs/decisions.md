@@ -6,7 +6,9 @@
 
 The fresh T8 run opened the authenticated Taste train split but rejected it
 because the dataset carries `model_smiles`, `canonical_smiles`, and
-`raw_smiles` rather than the legacy `smiles`/`parent_smiles` names.
+`raw_smiles` rather than the legacy `smiles`/`parent_smiles` names.  After that
+schema gate was repaired, the descriptor-held CSV path exposed a missing
+standard-library `io` import before native rule generation.
 
 ### Decision
 
@@ -14,11 +16,14 @@ Use the same SMILES-column precedence as the frozen molecular-GNN loader:
 `model_smiles`, then `canonical_smiles`, then legacy `smiles` and
 `parent_smiles`.  Keep the exact train-file hash, row/label counts, split
 checks, and three-class GINE authority unchanged.
+Import `io` for the already-defined in-memory CSV reader; do not replace the
+descriptor-held bytes with a path reopen.
 
 ### Consequences
 
 - T8 consumes the representation on which the frozen GINE was trained.
 - A missing supported column still fails closed.
+- Native generation continues from the exact held CSV bytes.
 - No dataset, split, oracle, or GlobalGCE algorithm setting changes.
 
 ### Status
@@ -13207,3 +13212,48 @@ Accepted
   rename can also block behind unrelated transfers; a partially observed
   heartbeat is ignored and replaced on the next 60-second cycle. No science or
   matrix artifact uses this relaxed heartbeat-only path.
+
+---
+
+## [2026-08-31] Resume AIDS from a descriptor-bound checkpoint and run Mut as exact multi-component DBSCAN
+
+### Motivation
+
+The AIDS exact worker reached 20,512,768 committed recovery rows, but its
+controller observed the checkpoint pathname during a legitimate atomic
+replacement and stopped with `path identity changed`.  The payload hash,
+scientific identity, vector hash, and progress ledger remained closed.  The
+completed Mutagenicity pair store is scientifically different: its first
+adaptive scan found 64,821 failures in 65,536 rows, so the AIDS
+single-component shortcut and its failure cap cannot represent that dataset.
+
+### Decision
+
+For AIDS, retain strict inode/mode/size/mtime/ctime and SHA checks, but bind an
+already-promoted checkpoint by opening it with `O_NOFOLLOW`, reading and
+hashing the opened descriptor, and requiring the final pathname to still name
+that exact `fstat` generation.  Retry only when a concurrent atomic generation
+is rejected.  A stopped nonzero checkpoint must receive an independently
+published verifier receipt before the resume-only exact-stage entrypoint may
+consume it.
+
+For Mutagenicity, adopt the completed pair store read-only and use the named
+`sklearn_float64_exact_multi_component_v1` route.  It converts the production
+vectors to float64, uses sklearn brute Euclidean radius queries with at most
+four workers, and runs the existing exact neighbor-count, core-union, and
+border-assignment passes.  It never invokes a single-component shortcut or a
+failure cap.  Deterministic production-derived subsets must match sklearn
+float64 labels and pass an independent terminal reload before full launch.
+
+### Consequences
+
+- AIDS retains the existing 20,512,768-row checkpoint; neither epsilon nor
+  checkpoint identity is relaxed.
+- Mutagenicity may contain any number of exact DBSCAN components and discloses
+  the float64 reference route and four-worker ceiling in its manifests.
+- Neither route regenerates the completed pair stores, reads test data, or
+  changes classifier/split/oracle semantics.
+
+### Status
+
+Accepted
