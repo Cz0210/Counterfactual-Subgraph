@@ -448,7 +448,81 @@ def _json_dumps(payload: Any) -> str:
     )
 
 
+def _atomic_write_text_at_directory(
+    directory_fd: int,
+    name: str,
+    text: str,
+) -> None:
+    """Atomically publish one direct child of a retained directory fd."""
+
+    if (
+        type(directory_fd) is not int
+        or directory_fd < 0
+        or type(name) is not str
+        or not name
+        or name in {".", ".."}
+        or Path(name).name != name
+    ):
+        raise ValueError("Descriptor-authorized atomic target is malformed.")
+    if not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+        raise ValueError("Descriptor-authorized atomic parent is not a directory.")
+    temporary = f".{name}.{os.getpid()}.{os.urandom(8).hex()}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+    try:
+        payload = text.encode("utf-8")
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("Descriptor-authorized atomic write made no progress.")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _direct_retained_directory_target(path: Path) -> tuple[int, str] | None:
+    parts = path.parts
+    if (
+        sys.platform.startswith("linux")
+        and len(parts) == 6
+        and parts[0] == os.sep
+        and parts[1:4] == ("proc", "self", "fd")
+        and parts[4].isdigit()
+    ):
+        return int(parts[4]), parts[5]
+    return None
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
+    retained_target = _direct_retained_directory_target(path)
+    if retained_target is not None:
+        _atomic_write_text_at_directory(
+            retained_target[0],
+            retained_target[1],
+            text,
+        )
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.",
@@ -480,6 +554,12 @@ def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         path,
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
     )
+
+
+def _source_atom_attribute_audit_path(output_dir: Path) -> Path:
+    """Keep each branch audit under its retained, independently owned root."""
+
+    return output_dir / "source_atom_attribute_audit.jsonl"
 
 
 def _append_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> int:
@@ -3367,8 +3447,8 @@ class OfficialGlobalGCEMutagenicityGenerator:
         codec_summary = probe_source_graph_codec(
             source_dataset,
             parents,
-            atom_attribute_audit_path=(
-                output_dir.parent / "source_atom_attribute_audit.jsonl"
+            atom_attribute_audit_path=_source_atom_attribute_audit_path(
+                output_dir
             ),
         )
         _write_json(output_dir / "source_codec_summary.json", codec_summary)

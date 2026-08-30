@@ -4,6 +4,7 @@ import csv
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 import sys
 from types import ModuleType
@@ -25,12 +26,15 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     TASTE_EXACT_ATOM_VOCABULARY_SOURCE,
     TrainParent,
     _add_bond_once,
+    _atomic_write_text_at_directory,
     _build_dense_dataset,
     _build_training_resume_identity,
     _hash_open_regular_source,
     _import_official_modules,
+    _direct_retained_directory_target,
     _load_general_train_rows,
     _read_csv_payload,
+    _source_atom_attribute_audit_path,
     _taste_train_observed_atom_symbols,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
@@ -57,6 +61,49 @@ def test_descriptor_csv_payload_loader_uses_in_memory_bytes() -> None:
     assert _read_csv_payload(b"molecule_id,label\na,1\n") == [
         {"molecule_id": "a", "label": "1"}
     ]
+
+
+def test_atomic_text_publish_uses_retained_directory_descriptor(
+    tmp_path: Path,
+) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(tmp_path, flags)
+    try:
+        _atomic_write_text_at_directory(
+            descriptor,
+            "source_atom_attribute_audit.jsonl",
+            '{"row":1}\n',
+        )
+        _atomic_write_text_at_directory(
+            descriptor,
+            "source_atom_attribute_audit.jsonl",
+            '{"row":2}\n',
+        )
+    finally:
+        os.close(descriptor)
+
+    assert (tmp_path / "source_atom_attribute_audit.jsonl").read_text() == (
+        '{"row":2}\n'
+    )
+    assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+
+def test_t8_source_atom_audit_stays_inside_retained_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    branch = Path("/proc/self/fd/37")
+    audit = _source_atom_attribute_audit_path(branch)
+
+    assert audit == branch / "source_atom_attribute_audit.jsonl"
+    assert audit.parent == branch
+    assert _direct_retained_directory_target(audit) == (
+        37,
+        "source_atom_attribute_audit.jsonl",
+    )
+    assert _direct_retained_directory_target(
+        Path("/proc/self/fd/source_atom_attribute_audit.jsonl")
+    ) is None
 
 
 def test_taste_generator_binds_exact_descriptor_authorized_gine_payloads(

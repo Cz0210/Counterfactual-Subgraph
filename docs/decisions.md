@@ -93,6 +93,10 @@ retain their existing vocabulary route.
   dataset-specific input dimensionality follows the frozen Taste train data.
 - Calibration/test data are not consulted, and both target branches share the
   same exact vocabulary and GINE schema.
+- Each branch writes its source-atom audit inside that branch's retained
+  directory authority.  Direct-child publication uses temporary creation and
+  atomic replacement relative to the already-open directory descriptor; it
+  never treats `/proc/self/fd` itself as the output parent.
 
 ### Status
 
