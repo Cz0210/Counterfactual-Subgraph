@@ -544,9 +544,11 @@ def build_stage_commands(
     project_commit: str,
     candidate_count: int,
     teacher_sha256: str,
+    execution_project_root: Path = PROJECT_ROOT,
 ) -> list[tuple[str, list[str], Path, str]]:
     """Return ordered stage commands and their required completion markers."""
 
+    execution_project_root = execution_project_root.expanduser().resolve(strict=True)
     contract = DATASET_CONTRACTS[inputs.dataset]
     python = sys.executable
     source_args: list[str] = []
@@ -564,7 +566,10 @@ def build_stage_commands(
 
     common_argv = [
         python,
-        str(PROJECT_ROOT / "scripts/baselines/comrecgc/run_common_recourse.py"),
+        str(
+            execution_project_root
+            / "scripts/baselines/comrecgc/run_common_recourse.py"
+        ),
         "--config",
         "configs/hpc.yaml",
         "--set",
@@ -657,13 +662,16 @@ def build_stage_commands(
         common_argv.append("--resume")
     chemistry_argv = [
         python,
-        str(PROJECT_ROOT / "scripts/baselines/comrecgc/audit_mutagenicity_chemistry.py"),
+        str(
+            execution_project_root
+            / "scripts/baselines/comrecgc/audit_mutagenicity_chemistry.py"
+        ),
         "--config",
         "configs/hpc.yaml",
         "--set",
         "inference.fallback_to_heuristic=false",
         "--project-root",
-        str(PROJECT_ROOT),
+        str(execution_project_root),
         "--dataset",
         inputs.dataset,
         "--dataset-dir",
@@ -690,7 +698,10 @@ def build_stage_commands(
     ]
     evaluation_argv = [
         python,
-        str(PROJECT_ROOT / "scripts/baselines/comrecgc/run_slot_unified_eval.py"),
+        str(
+            execution_project_root
+            / "scripts/baselines/comrecgc/run_slot_unified_eval.py"
+        ),
         "--config",
         "configs/hpc.yaml",
         "--set",
@@ -726,7 +737,7 @@ def build_stage_commands(
         evaluation_argv.extend(["--cost-cap", format(inputs.cost_cap, ".17g")])
     gate_argv = [
         python,
-        str(PROJECT_ROOT / "scripts/baselines/comrecgc/gate_recovery.py"),
+        str(execution_project_root / "scripts/baselines/comrecgc/gate_recovery.py"),
         "--stage",
         "project-full",
         "--dataset",
@@ -744,7 +755,10 @@ def build_stage_commands(
     ]
     freeze_argv = [
         python,
-        str(PROJECT_ROOT / "scripts/baselines/comrecgc/freeze_recovery_result.py"),
+        str(
+            execution_project_root
+            / "scripts/baselines/comrecgc/freeze_recovery_result.py"
+        ),
         "--dataset",
         inputs.dataset,
         "--source-dir",
@@ -2202,6 +2216,8 @@ def _validate_route_inputs(inputs: ContinuationInputs) -> None:
 
 def bootstrap_external_common_recovery_continuation(
     inputs: ContinuationInputs,
+    *,
+    execution_project_root: Path = PROJECT_ROOT,
 ) -> dict[str, Any]:
     """Create/reopen only the standardized continuation's immutable prelude.
 
@@ -2257,13 +2273,15 @@ def bootstrap_external_common_recovery_continuation(
         checkout = frozen_checkout
     else:
         write_json(checkout_path, checkout)
-    project_commit = _git_head()
+    execution_project_root = execution_project_root.expanduser().resolve(strict=True)
+    project_commit = _git_head(execution_project_root)
     teacher_sha256 = sha256_file(inputs.teacher_path)
     commands = build_stage_commands(
         inputs,
         project_commit=project_commit,
         candidate_count=int(adoption["counterfactual_candidate_count"]),
         teacher_sha256=teacher_sha256,
+        execution_project_root=execution_project_root,
     )
     contract = _resume_contract(
         inputs=inputs,

@@ -596,7 +596,8 @@ def run_exact_stage(
         )
 
         bootstrap = bootstrap_external_common_recovery_continuation(
-            _continuation_inputs(manifest, final_output)
+            _continuation_inputs(manifest, final_output),
+            execution_project_root=Path(str(manifest["project_root"])),
         )
         held.verify()
         evidence = _archive_failed_tree(
