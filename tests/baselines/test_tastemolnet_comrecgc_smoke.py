@@ -1049,6 +1049,84 @@ def test_bridge_does_not_relax_semantics_for_same_identity_model_graph_drift() -
         bridge.call([_graph()], {})
 
 
+def test_bridge_reuses_invalid_unscored_identity_across_node_permutations() -> None:
+    class _InvalidUnscoredAdapter:
+        @staticmethod
+        def score(graphs):
+            return SimpleNamespace(
+                probabilities=np.asarray(
+                    [[0.0, 1.0, 0.0] for _ in graphs], dtype=np.float64
+                ),
+                graph_embeddings=np.zeros((len(graphs), 3), dtype=np.float32),
+                valid_fullgraphs=tuple(False for _ in graphs),
+                identity_graph_payloads=tuple(None for _ in graphs),
+                model_graph_payloads=tuple(None for _ in graphs),
+            )
+
+    bridge = TasteComRecGCMulticlassBridge(
+        adapter=_InvalidUnscoredAdapter(),
+        feature_atomic_numbers=ATOMS,
+    )
+    importance, embeddings = bridge.call(
+        [_graph(), _graph(permutation=(2, 0, 1), source_index=1)],
+        {},
+    )
+    identities = [bridge.calculate_hash(row) for row in embeddings]
+
+    assert identities[0] == identities[1]
+    assert np.array_equal(
+        importance,
+        np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=float),
+    )
+    assert bridge.is_graph_counterfactual(identities[0]) is False
+    record = bridge.records[identities[0]]
+    assert record.probabilities == (0.0, 1.0, 0.0)
+    assert record.valid_fullgraph is False
+    assert record.model_graph_payload == {
+        "schema_version": "tastemolnet_gine_invalid_unscored_graph_v1",
+        "frozen_gine_scored": False,
+        "valid_fullgraph": False,
+    }
+    state = bridge.checkpoint_state()
+    restored = TasteComRecGCMulticlassBridge(
+        adapter=_InvalidUnscoredAdapter(),
+        feature_atomic_numbers=ATOMS,
+    )
+    restored.restore_checkpoint_state(state)
+    assert restored.checkpoint_state() == state
+
+
+def test_bridge_rejects_missing_explicit_model_evidence_for_valid_graph() -> None:
+    class _MissingValidModelEvidenceAdapter:
+        @staticmethod
+        def score(graphs):
+            return SimpleNamespace(
+                probabilities=np.asarray(
+                    [[0.2, 0.7, 0.1] for _ in graphs], dtype=np.float64
+                ),
+                graph_embeddings=np.asarray(
+                    [[1.0, 2.0, 3.0] for _ in graphs], dtype=np.float32
+                ),
+                valid_fullgraphs=tuple(True for _ in graphs),
+                identity_graph_payloads=tuple(
+                    {
+                        "canonical_graph": "CO",
+                        "num_nodes": 3,
+                        "num_edges": 2,
+                    }
+                    for _ in graphs
+                ),
+                model_graph_payloads=tuple(None for _ in graphs),
+            )
+
+    bridge = TasteComRecGCMulticlassBridge(
+        adapter=_MissingValidModelEvidenceAdapter(),
+        feature_atomic_numbers=ATOMS,
+    )
+    with pytest.raises(TasteComRecGCSmokeError, match="lacks GINE model evidence"):
+        bridge.call([_graph()], {})
+
+
 def test_bridge_reuses_first_canonical_row_across_cuda_low_bit_rescores() -> None:
     class _LowBitAdapter:
         def __init__(self) -> None:

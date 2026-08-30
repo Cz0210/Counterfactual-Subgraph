@@ -30,6 +30,46 @@ Accepted
 
 ---
 
+## [2026-08-31] Keep invalid Taste ComRecGC graphs outside the GINE model-graph channel
+
+### Motivation
+
+The Taste ComRecGC native adapter can reject a generated graph before frozen
+GINE inference.  In that case it deliberately returns an aligned
+`model_graph_payload=None`, `valid_fullgraph=false`, the fixed source-class
+probability row, and a zero embedding.  The bridge previously conflated this
+explicit unscored value with an older adapter that exposes no model-payload
+channel.  It therefore substituted node-order-sensitive native tensors as if
+they had been sent to GINE.  Two permutations of the same canonical invalid
+graph then appeared to change model semantics even though neither was scored.
+
+### Decision
+
+Represent only the explicit `valid_fullgraph=false` plus aligned
+`model_graph_payload=None` case with a fixed
+`tastemolnet_gine_invalid_unscored_graph_v1` sentinel.  A valid graph with an
+explicitly missing model payload is an error, as is an invalid graph carrying
+GINE model evidence.  Adapters that do not expose a model-payload channel keep
+the existing ordered native-tensor authority.
+
+Do not change the valid-graph model payload hash, probability, prediction,
+candidate, embedding dtype/shape, or numerical agreement gates.
+
+### Consequences
+
+- Node permutations of the same invalid, unscored graph share one stable
+  parent-free identity without claiming that GINE evaluated either graph.
+- Every valid generated graph still carries the complete lossless model input
+  and must reproduce frozen-GINE semantics.
+- Midpoint checkpoint/reload preserves the sentinel exactly; no classifier,
+  split, oracle, or counterfactual decision changes.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Keep ComRecGC exception cleanup bounded
 
 ### Background

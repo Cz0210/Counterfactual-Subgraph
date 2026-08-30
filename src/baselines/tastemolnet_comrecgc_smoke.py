@@ -623,6 +623,16 @@ def _native_model_graph_payload(graph: Any) -> dict[str, Any]:
     }
 
 
+def _invalid_unscored_model_graph_payload() -> dict[str, Any]:
+    """Represent an invalid native graph that was never sent to frozen GINE."""
+
+    return {
+        "schema_version": "tastemolnet_gine_invalid_unscored_graph_v1",
+        "frozen_gine_scored": False,
+        "valid_fullgraph": False,
+    }
+
+
 def _normalize_model_graph_payload(value: Any) -> dict[str, Any]:
     if type(value) is not dict or type(value.get("schema_version")) is not str:
         raise TasteComRecGCSmokeError(
@@ -834,11 +844,34 @@ class TasteComRecGCMulticlassBridge:
                     "Stable attributed graph SHA-256 collision detected"
                 )
             self.graph_collision_payloads[graph_identity_sha256] = collision
-            supplied_model = model_payloads[index] if model_payloads else None
+            if model_payloads:
+                supplied_model = model_payloads[index]
+                if supplied_model is None:
+                    if valid[index]:
+                        raise TasteComRecGCSmokeError(
+                            "Taste COMRECGC valid graph lacks GINE model evidence"
+                        )
+                    # The production adapter uses explicit None only when
+                    # decoding failed and the graph was never sent to GINE.
+                    # An ordered native tensor payload is not a model input in
+                    # that case and would make node permutations of the same
+                    # parent-free identity appear to change model semantics.
+                    raw_model_graph_payload = (
+                        _invalid_unscored_model_graph_payload()
+                    )
+                else:
+                    if not valid[index]:
+                        raise TasteComRecGCSmokeError(
+                            "Taste COMRECGC invalid graph has GINE model evidence"
+                        )
+                    raw_model_graph_payload = supplied_model
+            else:
+                # Backward-compatible adapter path: this adapter actually
+                # scores the native tensors and exposes no separate payload
+                # channel, so those exact tensors remain the model authority.
+                raw_model_graph_payload = _native_model_graph_payload(graph)
             model_graph_payload = _normalize_model_graph_payload(
-                _native_model_graph_payload(graph)
-                if supplied_model is None
-                else supplied_model
+                raw_model_graph_payload
             )
             model_graph_sha256 = _canonical_sha256(model_graph_payload)
             row = tuple(float(value) for value in probabilities[index].tolist())
