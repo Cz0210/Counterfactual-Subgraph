@@ -61,6 +61,240 @@ TEST_STAGE = "BASELINE_TEST_EVAL"
 SELECTION_STAGE = "BASELINE_CALIBRATION_SELECTOR"
 FINAL_STAGE = "BASELINE_FINAL_FREEZE"
 DISTANCE_NAMESPACE = "bace_native_fullgraph_frozen_gine_wnode_v1"
+_CALIBRATION_PREDECESSOR_ROOT_FIELDS = (
+    "train_candidates_root",
+    "source_train_candidates_root",
+    "generation_root",
+)
+_FORBIDDEN_PREDECESSOR_COMPONENTS = {"merged", "_native_aux"}
+
+
+def _manifest_value(manifest: Mapping[str, Any], field: str) -> Any:
+    """Read one lineage field from the shard or its explicit inputs block."""
+
+    if manifest.get(field) not in (None, ""):
+        return manifest[field]
+    inputs = manifest.get("inputs")
+    if isinstance(inputs, Mapping) and inputs.get(field) not in (None, ""):
+        return inputs[field]
+    return None
+
+
+def _lineage_path(value: Any, *, field: str) -> Path:
+    if isinstance(value, Mapping):
+        for key in ("path", "root", "output_root"):
+            if value.get(key) not in (None, ""):
+                value = value[key]
+                break
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError(f"Shard lineage field {field} is not a path")
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"Shard lineage field {field} must be absolute: {path}")
+    if path.name in {"candidate_universe.jsonl", "run_manifest.json"}:
+        path = path.parent
+    return path
+
+
+def _reject_forbidden_predecessor(path: Path) -> None:
+    forbidden = _FORBIDDEN_PREDECESSOR_COMPONENTS.intersection(path.parts)
+    if forbidden:
+        raise ValueError(
+            "BACE GCF predecessor cannot resolve through merged/_native_aux: "
+            f"{path}"
+        )
+
+
+def _has_calibration_predecessor_contract(path: Path) -> bool:
+    return (path / "run_manifest.json").is_file() and (
+        path / "candidate_universe.jsonl"
+    ).is_file()
+
+
+def _resolve_declared_predecessor_root(
+    *, field: str, value: Any, generation_attempt_id: str | None
+) -> Path:
+    declared = _lineage_path(value, field=field)
+    options = [declared]
+    if generation_attempt_id and declared.name != generation_attempt_id:
+        options.append(declared / generation_attempt_id)
+        options.append(declared / "train_candidates" / generation_attempt_id)
+    resolved: list[Path] = []
+    for option in options:
+        _reject_forbidden_predecessor(option)
+        if _has_calibration_predecessor_contract(option):
+            candidate = option.resolve(strict=True)
+            _reject_forbidden_predecessor(candidate)
+            if candidate not in resolved:
+                resolved.append(candidate)
+    if len(resolved) != 1:
+        raise ValueError(
+            f"Shard lineage field {field} does not identify exactly one train "
+            f"candidate attempt: {declared}"
+        )
+    return resolved[0]
+
+
+def _fallback_predecessor_root(shard_root: Path) -> Path:
+    calibration_root = next(
+        (
+            ancestor
+            for ancestor in (shard_root, *shard_root.parents)
+            if ancestor.name == "calibration"
+        ),
+        None,
+    )
+    if calibration_root is None:
+        raise ValueError(
+            f"Cannot derive BACE GCF run root from calibration shard: {shard_root}"
+        )
+    fallback = calibration_root.parent / "train_candidates" / "attempt-0"
+    _reject_forbidden_predecessor(fallback)
+    if not _has_calibration_predecessor_contract(fallback):
+        raise ValueError(
+            "Shard manifest lacks predecessor lineage and the only authorized "
+            f"fallback is incomplete: {fallback}"
+        )
+    return fallback.resolve(strict=True)
+
+
+def _sha256_claim(manifest: Mapping[str, Any], *, shard_index: int) -> str:
+    canonical = _manifest_value(manifest, "candidate_pool_sha256")
+    legacy = _manifest_value(manifest, "candidate_source_hash")
+    canonical_text = str(canonical).strip() if canonical not in (None, "") else ""
+    legacy_text = str(legacy).strip() if legacy not in (None, "") else ""
+    if canonical_text and legacy_text and canonical_text != legacy_text:
+        raise ValueError(
+            f"Shard {shard_index} candidate pool hashes conflict within manifest"
+        )
+    result = canonical_text or legacy_text
+    if len(result) != 64 or any(
+        character not in "0123456789abcdef" for character in result.lower()
+    ):
+        raise ValueError(f"Shard {shard_index} lacks a valid candidate pool SHA-256")
+    return result.lower()
+
+
+def _resolve_calibration_predecessor(
+    *,
+    manifests: Mapping[int, Mapping[str, Any]],
+    shard_roots: Mapping[int, Path],
+    predecessor_output: str | Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve the immutable train universe from shard lineage, never merge output.
+
+    Old PASS shards predate explicit lineage roots.  Their sole compatibility
+    path is the verified ``<run_root>/train_candidates/attempt-0`` location.
+    The CLI predecessor is retained as a diagnostic hint, not an authority.
+    """
+
+    roots: dict[int, Path] = {}
+    sources: dict[int, list[str]] = {}
+    explicit_attempt_ids: set[str] = set()
+    pool_hashes: dict[int, str] = {}
+    for index in range(NUM_SHARDS):
+        manifest = manifests[index]
+        attempt_value = _manifest_value(manifest, "generation_attempt_id")
+        attempt_id = (
+            str(attempt_value).strip() if attempt_value not in (None, "") else None
+        )
+        if attempt_id:
+            explicit_attempt_ids.add(attempt_id)
+        declared_roots: list[tuple[str, Path]] = []
+        for field in _CALIBRATION_PREDECESSOR_ROOT_FIELDS:
+            value = _manifest_value(manifest, field)
+            if value in (None, ""):
+                continue
+            declared_roots.append(
+                (
+                    field,
+                    _resolve_declared_predecessor_root(
+                        field=field,
+                        value=value,
+                        generation_attempt_id=attempt_id,
+                    ),
+                )
+            )
+        if declared_roots:
+            distinct = {root for _field, root in declared_roots}
+            if len(distinct) != 1:
+                raise ValueError(
+                    f"Shard {index} declares conflicting predecessor roots: "
+                    f"{declared_roots}"
+                )
+            roots[index] = next(iter(distinct))
+            sources[index] = [field for field, _root in declared_roots]
+        else:
+            roots[index] = _fallback_predecessor_root(shard_roots[index])
+            sources[index] = ["verified_run_root_fallback"]
+        pool_hashes[index] = _sha256_claim(manifest, shard_index=index)
+
+    if len(set(roots.values())) != 1:
+        raise ValueError(f"BACE GCF shards do not share one predecessor root: {roots}")
+    if len(explicit_attempt_ids) > 1:
+        raise ValueError(
+            "BACE GCF shards declare different generation_attempt_id values: "
+            f"{sorted(explicit_attempt_ids)}"
+        )
+    if len(set(pool_hashes.values())) != 1:
+        raise ValueError(f"BACE GCF shard candidate pool hashes differ: {pool_hashes}")
+
+    predecessor = next(iter(roots.values()))
+    candidate_path = predecessor / "candidate_universe.jsonl"
+    candidate_sha256 = sha256_file(candidate_path)
+    declared_sha256 = next(iter(pool_hashes.values()))
+    if candidate_sha256 != declared_sha256:
+        raise ValueError(
+            "BACE GCF predecessor candidate bytes differ from all shard manifests"
+        )
+    source_manifest = read_json(predecessor / "run_manifest.json")
+    source_hashes = {
+        str(source_manifest.get(field)).strip().lower()
+        for field in ("candidate_pool_sha256", "candidate_universe_hash")
+        if source_manifest.get(field) not in (None, "")
+    }
+    if source_hashes and source_hashes != {candidate_sha256}:
+        raise ValueError("BACE GCF source manifest candidate hash is inconsistent")
+    source_attempt = next(
+        (
+            str(source_manifest.get(field)).strip()
+            for field in ("generation_attempt_id", "attempt_id")
+            if source_manifest.get(field) not in (None, "")
+        ),
+        None,
+    )
+    if (
+        source_attempt
+        and explicit_attempt_ids
+        and source_attempt not in explicit_attempt_ids
+    ):
+        raise ValueError("BACE GCF generation attempt identity changed before merge")
+
+    hint = Path(predecessor_output).expanduser()
+    hint_status = "ignored_missing"
+    if not hint.is_absolute():
+        hint_status = "ignored_non_absolute"
+    elif _FORBIDDEN_PREDECESSOR_COMPONENTS.intersection(hint.parts):
+        hint_status = "ignored_forbidden_merged_or_native_aux"
+    elif hint.exists():
+        hint_status = (
+            "matched_authoritative_root"
+            if hint.resolve(strict=True) == predecessor
+            else "ignored_mismatch"
+        )
+    return predecessor, {
+        "schema_version": "bace_gcf_predecessor_resolution_v1",
+        "status": "PASS",
+        "authoritative_root": str(predecessor),
+        "candidate_pool_sha256": candidate_sha256,
+        "generation_attempt_id": next(iter(explicit_attempt_ids), source_attempt),
+        "shard_resolution_sources": {
+            str(index): sources[index] for index in range(NUM_SHARDS)
+        },
+        "cli_hint": str(hint),
+        "cli_hint_status": hint_status,
+        "forbidden_components": sorted(_FORBIDDEN_PREDECESSOR_COMPONENTS),
+    }
 
 
 def _graph(
@@ -645,6 +879,22 @@ def run_fullgraph_verification_shard(
         "created_at": utc_now(),
         "run_complete": True,
     }
+    if normalized_stage == CALIBRATION_STAGE and method_id == "gcfexplainer":
+        candidate_pool_sha256 = sha256_file(predecessor / "candidate_universe.jsonl")
+        generation_attempt_id = str(
+            predecessor_manifest.get("generation_attempt_id")
+            or predecessor_manifest.get("attempt_id")
+            or predecessor.name
+        )
+        manifest.update(
+            {
+                "train_candidates_root": str(predecessor),
+                "source_train_candidates_root": str(predecessor),
+                "generation_root": str(predecessor),
+                "generation_attempt_id": generation_attempt_id,
+                "candidate_pool_sha256": candidate_pool_sha256,
+            }
+        )
     atomic_json(output / "run_manifest.json", manifest)
     atomic_json(output / "oracle_provenance.json", provenance)
     atomic_marker(output / "PASS", "PASS")
@@ -676,6 +926,7 @@ def merge_fullgraph_verification_shards(
         "candidates": set(),
         "source": set(),
         "all_parents": set(),
+        "split": set(),
     }
     for path_like in shard_dirs:
         root = Path(path_like).expanduser().resolve(strict=True)
@@ -694,7 +945,18 @@ def merge_fullgraph_verification_shards(
         index = int(manifest.get("shard_index", -1))
         if index in manifests or not 0 <= index < NUM_SHARDS:
             raise ValueError("Duplicate or invalid native baseline shard")
-        local_parents = {str(value) for value in manifest.get("parent_ids", [])}
+        if int(manifest.get("num_shards", 0)) != NUM_SHARDS:
+            raise ValueError("Native baseline shard count is not frozen to four")
+        if manifest.get("shard_rule") != "sorted(parent_id)_position_mod_4":
+            raise ValueError("Native baseline shard partition rule changed")
+        local_parent_list = [str(value) for value in manifest.get("parent_ids", [])]
+        local_parents = set(local_parent_list)
+        if (
+            not local_parents
+            or len(local_parents) != len(local_parent_list)
+            or len(local_parent_list) != int(manifest.get("parent_count", -1))
+        ):
+            raise ValueError("Native baseline shard parent range is invalid")
         if parents & local_parents:
             raise ValueError("Native baseline shards overlap in parent identity")
         parents.update(local_parents)
@@ -705,6 +967,15 @@ def merge_fullgraph_verification_shards(
             "pair_details_identity"
         ):
             raise ValueError("Native baseline shard bytes changed after PASS")
+        local_candidate_ids = {
+            str(value) for value in manifest.get("candidate_ids", [])
+        }
+        if any(
+            str(row.get("parent_id")) not in local_parents
+            or str(row.get("candidate_id")) not in local_candidate_ids
+            for row in local_rows
+        ):
+            raise ValueError("Native baseline shard rows escaped their frozen range")
         pair_rows.extend(local_rows)
         manifests[index] = manifest
         shard_roots[index] = root
@@ -713,23 +984,81 @@ def merge_fullgraph_verification_shards(
         identities["candidates"].add(str(manifest.get("candidate_ids_sha256")))
         identities["source"].add(str(manifest.get("candidate_source_hash")))
         identities["all_parents"].add(str(manifest.get("all_parent_ids_sha256")))
+        split_identity = manifest.get("split_identity")
+        if not isinstance(split_identity, Mapping):
+            raise ValueError("Native baseline shard lacks split identity")
+        identities["split"].add(stable_sha256(dict(split_identity)))
     if set(manifests) != set(range(NUM_SHARDS)):
         raise ValueError("Native baseline shard set is incomplete")
     if any(len(values) != 1 for values in identities.values()):
         raise ValueError(f"Native baseline shard identities differ: {identities}")
     candidate_ids = list(manifests[0]["candidate_ids"])
+    if any(
+        [str(value) for value in manifests[index].get("candidate_ids", [])]
+        != candidate_ids
+        for index in range(NUM_SHARDS)
+    ):
+        raise ValueError("Native baseline shard candidate ordering differs")
+    sorted_parents = sorted(parents)
+    if stable_sha256(sorted_parents) != next(iter(identities["all_parents"])):
+        raise ValueError("Native baseline shards do not cover the frozen parent range")
+    for index in range(NUM_SHARDS):
+        expected = [
+            parent_id
+            for position, parent_id in enumerate(sorted_parents)
+            if position % NUM_SHARDS == index
+        ]
+        observed = [str(value) for value in manifests[index]["parent_ids"]]
+        if observed != expected:
+            raise ValueError(
+                f"Native baseline shard {index} differs from its frozen parent range"
+            )
     keys = [(str(row["parent_id"]), str(row["candidate_id"])) for row in pair_rows]
     if len(keys) != len(set(keys)) or len(keys) != len(parents) * len(candidate_ids):
         raise ValueError("Native baseline merged Cartesian product is incomplete")
     pair_rows.sort(key=lambda row: (str(row["parent_id"]), candidate_ids.index(str(row["candidate_id"]))))
-    predecessor = Path(predecessor_output).expanduser().resolve(strict=True)
-    if normalized_stage == CALIBRATION_STAGE:
-        candidates = read_jsonl(predecessor / "candidate_universe.jsonl")
-        predecessor_manifest_path = predecessor / "run_manifest.json"
+    if normalized_stage == CALIBRATION_STAGE and method_id == "gcfexplainer":
+        predecessor, predecessor_resolution = _resolve_calibration_predecessor(
+            manifests=manifests,
+            shard_roots=shard_roots,
+            predecessor_output=predecessor_output,
+        )
+        candidates, _predecessor_manifest, predecessor_manifest_path = _load_candidates(
+            method=method_id,
+            stage=normalized_stage,
+            predecessor_root=predecessor,
+            checkpoint_id=next(iter(identities["oracle"])),
+        )
+        cohort = "calibration"
+    elif normalized_stage == CALIBRATION_STAGE:
+        predecessor = Path(predecessor_output).expanduser().resolve(strict=True)
+        candidates, _predecessor_manifest, predecessor_manifest_path = _load_candidates(
+            method=method_id,
+            stage=normalized_stage,
+            predecessor_root=predecessor,
+            checkpoint_id=next(iter(identities["oracle"])),
+        )
+        predecessor_resolution = {
+            "schema_version": "bace_native_predecessor_resolution_v1",
+            "status": "PASS",
+            "authoritative_root": str(predecessor),
+            "resolution": "explicit_calibration_cli",
+        }
         cohort = "calibration"
     else:
-        candidates = [dict(row) for row in read_json(predecessor / "selected_top20.json")["candidates"]]
-        predecessor_manifest_path = predecessor / "frozen_selection_manifest.json"
+        predecessor = Path(predecessor_output).expanduser().resolve(strict=True)
+        candidates, _predecessor_manifest, predecessor_manifest_path = _load_candidates(
+            method=method_id,
+            stage=normalized_stage,
+            predecessor_root=predecessor,
+            checkpoint_id=next(iter(identities["oracle"])),
+        )
+        predecessor_resolution = {
+            "schema_version": "bace_gcf_predecessor_resolution_v1",
+            "status": "PASS",
+            "authoritative_root": str(predecessor),
+            "resolution": "frozen_selection_cli",
+        }
         cohort = "test"
     if [str(row["candidate_id"]) for row in candidates] != candidate_ids:
         raise ValueError("Native baseline merged candidate order changed")
@@ -774,6 +1103,7 @@ def merge_fullgraph_verification_shards(
         "inputs": {
             "cohort_name": cohort,
             "predecessor_manifest": file_identity(predecessor_manifest_path),
+            "predecessor_resolution": predecessor_resolution,
             "shard_manifests": [
                 file_identity(shard_roots[index] / "run_manifest.json")
                 for index in range(NUM_SHARDS)

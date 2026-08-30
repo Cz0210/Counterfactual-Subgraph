@@ -227,7 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     merge.add_argument("--shard-dir", action="append", required=True)
-    merge.add_argument("--predecessor-output", required=True)
+    merge.add_argument(
+        "--predecessor-output",
+        required=True,
+        help=(
+            "Compatibility hint. BACE GCF calibration merge resolves its "
+            "authoritative train universe from the four shard manifests, with "
+            "only the verified <run_root>/train_candidates/attempt-0 fallback."
+        ),
+    )
     merge.add_argument("--output-dir", required=True)
 
     select = sub.add_parser("select")
