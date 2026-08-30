@@ -411,3 +411,27 @@ def test_independent_verifier_is_the_only_neurosed_pass_writer() -> None:
     assert verify_body.index('_write_json(destination / "verification.json"') < (
         verify_body.index('_write_new(destination / "PASS"')
     )
+
+
+def test_production_model_card_includes_fixed_budget_pair_contract() -> None:
+    """Keep the real writer aligned with its fail-closed model-card gate."""
+
+    source = Path("src/train/tastemolnet_neurosed_fixed_budget.py").read_text(
+        encoding="utf-8"
+    )
+    model_card_body = source.split("    model_card = {", 1)[1].split(
+        "    validate_official_fixed_budget_model_card(", 1
+    )[0]
+    expected_claims = {
+        "fixed_budget_extension_documented": True,
+        "upstream_greed_independent_pair_role_semantics_unchanged": True,
+        "upstream_greed_sampler_byte_for_byte_unchanged": False,
+        "exhaustive_pairs": False,
+        "cartesian_product_materialized": False,
+        "independent_query_target_pairs": True,
+        "query_graph_id_differs_from_target_graph_id": True,
+        "parent_own_subgraph_shortcut": False,
+        "class_label_used_as_supervision": False,
+    }
+    for key, value in expected_claims.items():
+        assert f'"{key}": {value!r}' in model_card_body

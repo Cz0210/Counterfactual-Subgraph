@@ -1,5 +1,38 @@
 # Decisions Log
 
+## [2026-08-31] Align the fixed-budget NeuroSED writer with its pair contract
+
+### Background
+
+The first real 5000/1000 NeuroSED run completed 1214 epochs and the official
+batch-interleaved selector stopped normally, but final publication failed
+before writing `model_card.json`.  The validator required nine explicit pair
+and resource-budget declarations that its production writer omitted, even
+though the authenticated pair manifests and training path already satisfied
+all nine declarations.
+
+### Decision
+
+Write those existing facts into the production model card: the fixed-budget
+extension is documented; GREED independent query/target role semantics are
+preserved without claiming its sampler is byte-for-byte unchanged; pair search
+is neither exhaustive nor Cartesian; query and target are independent and
+distinct; no own-parent shortcut is used; and class labels are not training
+supervision.  Keep the 5000/1000 inventories, GED labels, model/loss/optimizer,
+selector, checkpoint ordering, split isolation, and runtime direction
+unchanged.
+
+### Consequences
+
+- The writer and fail-closed validator now express the same frozen contract.
+- The failed root remains non-PASS evidence; recovery uses a fresh attempt.
+- No checkpoint, result, split, oracle, or numerical tolerance is adopted or
+  relaxed by this metadata repair.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Finalize BACE ComRecGC from an exact resource-cap checkpoint
 
 ### Background

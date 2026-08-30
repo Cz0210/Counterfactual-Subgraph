@@ -238,6 +238,14 @@ are not published.
 
 ## 5. Checkpoints and training selection
 
+The production fixed-budget model-card writer carries the same explicit pair
+contract that its fail-closed verifier requires: the budget extension is
+documented, query and target are independent distinct graphs, no own-parent
+shortcut or Cartesian/exhaustive materialization is used, and class labels are
+not supervision.  These fields describe the already frozen 5000/1000 pair
+inventories; they do not change training data, GED labels, model architecture,
+selector behavior, or the generated-query-to-original-target direction.
+
 Every validation improvement creates a new UUIDv4 directory:
 
 ```text
