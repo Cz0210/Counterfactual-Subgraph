@@ -180,6 +180,29 @@ def run(spec_path: Path, *, once: bool) -> int:
     spec = load_spec(spec_path)
     state_root = _absolute(spec["state_root"], label="state_root")
     state_root.mkdir(parents=True, exist_ok=True)
+    spec_sha256 = _sha256(spec_path)
+    receipt_path = state_root / "controller_receipt.json"
+    if receipt_path.is_file():
+        receipt = _load_json(receipt_path)
+        if receipt.get("spec_sha256") != spec_sha256:
+            raise RuntimeError("deadline controller receipt is bound to another spec")
+    else:
+        _atomic_json(
+            receipt_path,
+            {
+                "schema_version": "deadline_main_completion_controller_receipt_v1",
+                "controller_id": spec["controller_id"],
+                "created_at": _utc_now(),
+                "execution_commit": spec["execution_commit"],
+                "execution_tree": spec["execution_tree"],
+                "spec_path": str(spec_path),
+                "spec_sha256": spec_sha256,
+                "scope": "READ_ONLY_DEADLINE_CONTINUATION_HEARTBEAT",
+                "process_termination_allowed": False,
+                "matrix_publication_allowed": False,
+                "run_gnn_ablation": False,
+            },
+        )
     lock = (state_root / "controller.lock").open("a+", encoding="utf-8")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
