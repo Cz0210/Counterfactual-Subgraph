@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -31,6 +32,10 @@ PAIR_STORE_SCHEMA = "comrecgc_external_pair_store_v1"
 PAIR_STORE_ADOPTION_SCHEMA = "comrecgc_read_only_pair_store_adoption_v1"
 SUMMARY_SCHEMA = "comrecgc_external_cluster_summary_v1"
 ONE_CLUSTER_SUMMARY_SCHEMA = "comrecgc_exact_one_cluster_summary_v2"
+
+_PROMOTED_STAT_STABLE_SECONDS = 0.5
+_PROMOTED_STAT_TIMEOUT_SECONDS = 5.0
+_PROMOTED_STAT_POLL_SECONDS = 0.05
 
 
 def _utc_now() -> str:
@@ -484,6 +489,12 @@ class ExternalPairStore:
             label="recourse vectors",
         )
         _fsync_directory(self.root)
+        # Some network-backed filesystems publish the rename ctime shortly
+        # after the directory fsync.  Do not let the DBSCAN consumer freeze a
+        # pre-promotion ctime: wait for the complete strict stat tuple to stay
+        # unchanged before returning the freshly promoted pair store.
+        _wait_for_promoted_stat_identity(pairs_final)
+        _wait_for_promoted_stat_identity(vectors_final)
         manifest = {
             "schema_version": PAIR_STORE_SCHEMA,
             "run_complete": True,
@@ -563,6 +574,42 @@ def _file_stat_identity(path: Path) -> dict[str, int]:
         "mtime_ns": int(value.st_mtime_ns),
         "ctime_ns": int(value.st_ctime_ns),
     }
+
+
+def _wait_for_promoted_stat_identity(
+    path: Path,
+    *,
+    stable_seconds: float = _PROMOTED_STAT_STABLE_SECONDS,
+    timeout_seconds: float = _PROMOTED_STAT_TIMEOUT_SECONDS,
+    poll_seconds: float = _PROMOTED_STAT_POLL_SECONDS,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    stat_reader: Callable[[Path], dict[str, int]] | None = None,
+) -> dict[str, int]:
+    """Return the strict post-promotion stat tuple after a bounded stable window."""
+
+    if stable_seconds <= 0 or timeout_seconds < stable_seconds or poll_seconds <= 0:
+        raise ValueError("invalid promoted-file stat stability budget")
+    monotonic = time.monotonic if clock is None else clock
+    sleep = time.sleep if sleeper is None else sleeper
+    read_stat = _file_stat_identity if stat_reader is None else stat_reader
+    started_at = monotonic()
+    stable_since = started_at
+    identity = read_stat(path)
+    while True:
+        now = monotonic()
+        if now - stable_since >= stable_seconds:
+            return identity
+        if now - started_at >= timeout_seconds:
+            raise ExternalMemoryDBSCANError(
+                f"promoted pair-store metadata did not stabilize: {path}"
+            )
+        sleep(poll_seconds)
+        observed = read_stat(path)
+        observed_at = monotonic()
+        if observed != identity:
+            identity = observed
+            stable_since = observed_at
 
 
 def _find_writable_process_references(

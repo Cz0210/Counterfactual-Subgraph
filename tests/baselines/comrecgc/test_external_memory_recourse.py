@@ -232,6 +232,47 @@ def test_pair_store_resume_preserves_global_pair_order_and_hash(tmp_path: Path) 
     assert manifest["candidate_major_parent_minor_order"] is True
 
 
+def test_promoted_stat_wait_freezes_delayed_ctime_without_relaxing_identity() -> None:
+    now = [0.0]
+    old = {
+        "device": 126,
+        "inode": 4525694,
+        "mode": 33188,
+        "size": 896,
+        "mtime_ns": 1788054829679615655,
+        "ctime_ns": 1788054829679615655,
+    }
+    promoted = {
+        **old,
+        "ctime_ns": 1788054829848970259,
+    }
+    observations = [old, old, promoted, promoted, promoted, promoted]
+
+    def clock() -> float:
+        return now[0]
+
+    def sleeper(seconds: float) -> None:
+        now[0] += seconds
+
+    def stat_reader(_path: Path) -> dict[str, int]:
+        return dict(observations.pop(0) if observations else promoted)
+
+    frozen = external_recourse._wait_for_promoted_stat_identity(
+        Path("unused"),
+        stable_seconds=0.25,
+        timeout_seconds=2.0,
+        poll_seconds=0.1,
+        clock=clock,
+        sleeper=sleeper,
+        stat_reader=stat_reader,
+    )
+
+    assert frozen == promoted
+    assert {key: frozen[key] for key in old if key != "ctime_ns"} == {
+        key: old[key] for key in old if key != "ctime_ns"
+    }
+
+
 def test_external_trace_selected_rows_are_elementwise_legacy_exact(
     tmp_path: Path,
 ) -> None:
