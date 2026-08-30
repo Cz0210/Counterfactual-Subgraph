@@ -374,6 +374,30 @@ def test_official_generator_accepts_two_taste_target_branches_on_one_three_class
     assert {row.label for row in loaded} == {0, 1, 2}
 
 
+def test_multiclass_native_train_prefers_frozen_model_smiles(
+    tmp_path: Path,
+) -> None:
+    train_csv = tmp_path / "taste_train.csv"
+    rows = [
+        {
+            "molecule_id": f"taste-{label}",
+            "model_smiles": "C" * (label + 2),
+            "canonical_smiles": "N" * (label + 2),
+            "label": label,
+            "split": "train",
+        }
+        for label in range(3)
+    ]
+    with train_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    loaded = _load_general_train_rows(train_csv, num_classes=3)
+
+    assert [row.smiles for row in loaded] == ["CC", "CCC", "CCCC"]
+
+
 @pytest.mark.parametrize("bad_label", ("0.9", "1.5", "NaN", "True", "+1", "01"))
 def test_multiclass_native_train_rejects_noncanonical_integer_labels(
     tmp_path: Path,

@@ -1097,7 +1097,19 @@ def _load_general_train_rows(
     if not rows:
         raise ValueError(f"Native GNN train CSV is empty: {path}")
     required = {"molecule_id", "label", "split"}
-    smiles_col = "smiles" if "smiles" in rows[0] else "parent_smiles"
+    smiles_col = next(
+        (
+            column
+            for column in (
+                "model_smiles",
+                "canonical_smiles",
+                "smiles",
+                "parent_smiles",
+            )
+            if column in rows[0]
+        ),
+        "model_smiles",
+    )
     required.add(smiles_col)
     missing = sorted(required - set(rows[0]))
     if missing:
