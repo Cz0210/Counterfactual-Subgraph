@@ -360,8 +360,12 @@ def _load_candidates(
             raise ValueError("Frozen selector and selected_top20 ordering differ")
     if str(manifest.get("method_id")) != spec.method_id:
         raise ValueError("Baseline predecessor belongs to a different method")
-    if len(candidates) < 20:
-        raise ValueError("Native BACE baseline evaluation requires at least 20 candidates")
+    minimum_candidates = 10 if spec.method_id == "comrecgc" else 20
+    if len(candidates) < minimum_candidates:
+        raise ValueError(
+            "Native BACE baseline evaluation requires at least "
+            f"{minimum_candidates} candidates for {spec.method}"
+        )
     ids = [str(row.get("candidate_id") or "") for row in candidates]
     if any(not value for value in ids) or len(ids) != len(set(ids)):
         raise ValueError("Native BACE candidate IDs must be non-empty and unique")
@@ -1145,10 +1149,22 @@ def run_native_baseline_selector(
     output = Path(output_dir).expanduser().resolve(strict=False)
     if output.exists():
         raise FileExistsError(f"Native selector output must be fresh: {output}")
+    calibration_rows = read_jsonl(matrix_root / "pair_matrix.jsonl")
+    calibration_candidate_ids = {
+        str(row.get("candidate_id") or "") for row in calibration_rows
+    }
+    if "" in calibration_candidate_ids:
+        raise ValueError("Calibration matrix contains an empty candidate ID")
+    effective_k = min(20, len(calibration_candidate_ids))
+    minimum_k = 10 if method_id == "comrecgc" else 20
+    if effective_k < minimum_k:
+        raise ValueError(
+            f"Native selector has {effective_k} candidates, below minimum {minimum_k}"
+        )
     run_mutagenicity_wnode_selector(
         matrix_run_dir=matrix_root,
         output_dir=output,
-        top_k=20,
+        top_k=effective_k,
         table_k=10,
         seed=int(seed),
         forbid_test=True,
@@ -1158,8 +1174,10 @@ def run_native_baseline_selector(
     selected = read_json(output / "variants" / variant / "selected_top20.json")
     candidates = [dict(row) for row in selected.get("candidates", [])]
     ids = [str(row.get("candidate_id") or "") for row in candidates]
-    if len(ids) != 20 or len(ids) != len(set(ids)):
-        raise ValueError("Native selector must freeze exactly twenty unique candidates")
+    if len(ids) != effective_k or len(ids) != len(set(ids)):
+        raise ValueError(
+            "Native selector did not freeze the complete effective unique prefix"
+        )
     thresholds = read_json(output / "thresholds.json")
     top20 = {
         "schema_version": "bace_native_baseline_selected_top20_v1",
@@ -1193,10 +1211,14 @@ def run_native_baseline_selector(
         "selection_frozen": True,
         "calibration_loaded": True,
         "test_loaded": False,
-        "K": 20,
+        "K": effective_k,
+        "K_MAX": 20,
+        "effective_rule_count": effective_k,
         "ordered_rule_ids": ids,
         "ordered_rule_ids_sha256": stable_sha256(ids),
-        "prefixes": {str(k): ids[:k] for k in range(1, 21)},
+        "prefixes": {
+            str(k): ids[: min(k, effective_k)] for k in range(1, 21)
+        },
         "thresholds": thresholds,
         "selected_variant": variant,
         "calibration_input_hash": sha256_file(matrix_root / "pair_matrix.jsonl"),
@@ -1277,6 +1299,8 @@ def freeze_native_baseline_final(
         "status": "PASS",
         "parent_count": len(by_parent),
         "ordered_rule_ids": ids,
+        "effective_rule_count": len(ids),
+        "K_MAX": 20,
         "theta_star": theta_star,
         "prefix_metrics": prefix_metrics,
         "selector_refit_on_test": False,
@@ -1306,6 +1330,8 @@ def freeze_native_baseline_final(
         "test_used_only_after_freeze": True,
         "all_hashes_frozen": True,
         "ordered_rule_ids": ids,
+        "effective_rule_count": len(ids),
+        "K_MAX": 20,
         "selection_manifest_identity": file_identity(selection_root / "frozen_selection_manifest.json"),
         "test_manifest_identity": file_identity(test_root / "run_manifest.json"),
         "test_pair_matrix_identity": file_identity(test_root / "pair_matrix.jsonl"),

@@ -477,6 +477,76 @@ def test_standardization_is_artifact_only_and_registry_complete(
     assert len(cell.figure3) == 20
 
 
+def test_resource_capped_comrecgc_standardization_plateaus_after_effective_k(
+    tmp_path: Path,
+) -> None:
+    checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
+    source = _source(
+        tmp_path,
+        method="ComRecGC",
+        checkpoint_id=checkpoint_id,
+        test_hash=test_hash,
+    )
+    ordered = [f"c{rank:02d}" for rank in range(1, 11)]
+    selection_path = source / "frozen_selection_manifest.json"
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    selection.update(
+        {
+            "ordered_rule_ids": ordered,
+            "K": 10,
+            "K_MAX": 20,
+            "effective_rule_count": 10,
+        }
+    )
+    _write_json(selection_path, selection)
+    pair_path = source / "pair_matrix.jsonl"
+    _write_jsonl(
+        pair_path,
+        [
+            row
+            for row in _pair_rows("ComRecGC", checkpoint_id)
+            if row["candidate_id"] in ordered
+        ],
+    )
+    metrics_path = source / "final_metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics.update(
+        {
+            "ordered_rule_ids": ordered,
+            "effective_rule_count": 10,
+            "K_MAX": 20,
+        }
+    )
+    _write_json(metrics_path, metrics)
+    final_path = source / "FINAL_PASS.json"
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    final.update(
+        {
+            "ordered_rule_ids": ordered,
+            "effective_rule_count": 10,
+            "K_MAX": 20,
+            "selection_manifest_identity": _identity(selection_path),
+            "test_pair_matrix_identity": _identity(pair_path),
+            "final_metrics_identity": _identity(metrics_path),
+        }
+    )
+    _write_json(final_path, final)
+    output = tmp_path / "standardized"
+    result = standardize_bace_frozen_cell(
+        method="ComRecGC",
+        source_final_root=source,
+        gnn_checkpoint=checkpoint,
+        output_dir=output,
+    )
+    assert result["effective_rule_count"] == 10
+    prefix = json.loads((output / "prefix_metrics.json").read_text(encoding="utf-8"))[
+        "prefix_metrics"
+    ]
+    assert len(prefix) == 20
+    assert prefix[9]["CCRCov"] == prefix[19]["CCRCov"]
+    assert prefix[19]["plateau_after_effective_k"] is True
+
+
 def test_standardization_rejects_pair_matrix_tamper(tmp_path: Path) -> None:
     checkpoint, checkpoint_id, test_hash = _checkpoint(tmp_path)
     source = _source(tmp_path, method="Ours", checkpoint_id=checkpoint_id, test_hash=test_hash)

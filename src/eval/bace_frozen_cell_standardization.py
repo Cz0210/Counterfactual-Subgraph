@@ -711,8 +711,15 @@ def _compute_metrics(
 ) -> dict[str, Any]:
     rows = _jsonl(inputs.pair_matrix_path)
     ordered = [str(value) for value in inputs.selection_manifest.get("ordered_rule_ids", [])]
-    if len(ordered) != MAX_K or len(set(ordered)) != MAX_K or any(not value for value in ordered):
-        raise BACECellStandardizationError("Frozen selector must bind 20 unique ordered rules")
+    minimum_rules = 10 if inputs.method_slug == "comrecgc" else MAX_K
+    if (
+        not minimum_rules <= len(ordered) <= MAX_K
+        or len(set(ordered)) != len(ordered)
+        or any(not value for value in ordered)
+    ):
+        raise BACECellStandardizationError(
+            f"Frozen selector must bind {minimum_rules}..{MAX_K} unique ordered rules"
+        )
     metric_order = [str(value) for value in inputs.final_metrics.get("ordered_rule_ids", ordered)]
     if metric_order != ordered:
         raise BACECellStandardizationError("Frozen final metrics changed candidate order")
@@ -845,6 +852,39 @@ def _compute_metrics(
                 }
             )
 
+    # The authorized resource-capped ComRecGC route may finish with R in
+    # [10, 20].  Figure 3 remains defined through K=20 by holding the complete
+    # R-rule prefix constant; no rule is copied or fabricated.
+    for k in range(len(ordered) + 1, MAX_K + 1):
+        plateau = dict(prefix[-1])
+        plateau["k"] = k
+        plateau["effective_rule_count"] = len(ordered)
+        plateau["plateau_after_effective_k"] = True
+        prefix.append(plateau)
+        for parent in parents:
+            value = best_by_parent[parent]
+            parent_best.append(
+                {
+                    "dataset": DATASET,
+                    "method": inputs.method,
+                    "k": k,
+                    "parent_id": parent,
+                    "best_distance": value[0] if value is not None else "N/A",
+                    "capped_distance": (
+                        min(value[0], cost_cap) if value is not None else cost_cap
+                    ),
+                    "best_candidate_id": value[2] if value is not None else "N/A",
+                    "destination_label": value[3] if value is not None else "N/A",
+                    "strict_recourse_available": value is not None,
+                    "theta_star_covered": (
+                        value is not None and value[0] <= theta_star
+                    ),
+                    "applicable": applicable[parent],
+                    "effective_rule_count": len(ordered),
+                    "plateau_after_effective_k": True,
+                }
+            )
+
     frozen_rows = inputs.final_metrics.get("prefix_metrics")
     if not isinstance(frozen_rows, list) or len(frozen_rows) != MAX_K:
         raise BACECellStandardizationError("Frozen final metrics lack K=1..20 prefix rows")
@@ -922,6 +962,7 @@ def _compute_metrics(
         "destination": destination,
         "parent_count": len(parents),
         "pair_count": len(rows),
+        "effective_rule_count": len(ordered),
     }
 
 
@@ -1073,6 +1114,8 @@ def standardize_bace_frozen_cell(
             "test_used_only_after_freeze": True,
             "raw_test_opened": False,
             "candidate_order_changed": False,
+            "effective_rule_count": metrics["effective_rule_count"],
+            "k_max": MAX_K,
             "selector_refit": False,
             "threshold_refit": False,
             "raw_output_root": str(source),
@@ -1085,6 +1128,7 @@ def standardize_bace_frozen_cell(
             "test_parent_count": metrics["parent_count"],
             "pair_count": metrics["pair_count"],
             "k_max": MAX_K,
+            "effective_rule_count": metrics["effective_rule_count"],
             "table2_k": TABLE_K,
             "theta_star": thresholds["theta_star"],
             "cost_cap": thresholds["cost_cap"],
@@ -1247,6 +1291,8 @@ def standardize_bace_frozen_cell(
         "split_hash": split["test_split_hash"],
         "molclr_checkpoint_hash": molclr_hash,
         "threshold_config_hash": thresholds["threshold_config_hash"],
+        "effective_rule_count": metrics["effective_rule_count"],
+        "k_max": MAX_K,
     }
 
 

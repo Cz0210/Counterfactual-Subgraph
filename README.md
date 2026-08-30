@@ -76,6 +76,10 @@ See:
 - `docs/AUTODL_BACE_GLOBALGCE_K20_EXTENSION.md` (GPU2-only, train-only
   80/200/500 raw native-rule escalation while the published selector remains
   fixed at K=20)
+- `docs/AUTODL_BACE_COMRECGC_RESOURCE_CAP_EXECUTOR.md` (exact-PID 20k/25k
+  resource-cap handover, checkpoint-only fresh materialization, and
+  post-generation BACE task continuation; it never signals a RUNNING_SLOW
+  worker before an eligible committed checkpoint)
 - `docs/AUTODL_AM_LEGACY_STANDARDIZATION.md` (strict frozen-result adoption and
   deterministic matched-protocol re-export plus fail-closed
   AIDS/Mutagenicity legacy inventory)

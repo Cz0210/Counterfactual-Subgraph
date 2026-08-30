@@ -28,6 +28,7 @@ from src.eval.bace_native_baseline_gnn import (
     _fullgraph_pair_rows,
     _load_candidates,
     freeze_native_baseline_final,
+    run_native_baseline_selector,
 )
 
 
@@ -442,6 +443,100 @@ def test_candidate_loader_preserves_fullgraph_action_and_split_order(
     }
 
 
+def test_resource_capped_comrecgc_accepts_ten_rules_without_weakening_gcf(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "generation"
+    root.mkdir()
+    rows = [_candidate("comrecgc", index) for index in range(10)]
+    atomic_jsonl(root / "candidate_universe.jsonl", rows)
+    manifest = {
+        "stage": "TRAIN_CANDIDATE_GENERATION",
+        "status": "PASS",
+        "run_complete": True,
+        "method_id": "comrecgc",
+        "oracle_backend": "gnn",
+        "classifier_family": "gine",
+        "rf_oracle_used": False,
+        "oracle_checkpoint_hash": CHECKPOINT_ID,
+        "calibration_loaded": False,
+        "test_loaded": False,
+    }
+    atomic_json(root / "run_manifest.json", manifest)
+    loaded, _manifest, _path = _load_candidates(
+        method="comrecgc",
+        stage=CALIBRATION_STAGE,
+        predecessor_root=root,
+        checkpoint_id=CHECKPOINT_ID,
+    )
+    assert len(loaded) == 10
+    manifest["method_id"] = "gcfexplainer"
+    atomic_json(root / "run_manifest.json", manifest)
+    atomic_jsonl(
+        root / "candidate_universe.jsonl",
+        [_candidate("gcfexplainer", index) for index in range(10)],
+    )
+    with pytest.raises(ValueError, match="at least 20"):
+        _load_candidates(
+            method="gcfexplainer",
+            stage=CALIBRATION_STAGE,
+            predecessor_root=root,
+            checkpoint_id=CHECKPOINT_ID,
+        )
+
+
+def test_resource_capped_comrecgc_selector_freezes_effective_k_and_plateau(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    matrix = tmp_path / "matrix"
+    matrix.mkdir()
+    atomic_json(
+        matrix / "run_manifest.json",
+        {
+            "stage": CALIBRATION_STAGE,
+            "status": "PASS",
+            "test_loaded": False,
+            "method_id": "comrecgc",
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": "b" * 64,
+            "candidate_universe_hash": "c" * 64,
+        },
+    )
+    candidates = [_candidate("comrecgc", index) for index in range(10)]
+    atomic_jsonl(
+        matrix / "pair_matrix.jsonl",
+        [
+            {"parent_id": "p0", "candidate_id": row["candidate_id"]}
+            for row in candidates
+        ],
+    )
+
+    def fake_selector(*, output_dir: Path, top_k: int, table_k: int, **_kwargs: object) -> None:
+        assert top_k == 10
+        assert table_k == 10
+        output = Path(output_dir)
+        (output / "variants/effective").mkdir(parents=True)
+        atomic_json(output / "calibration_decision.json", {"selected_variant": "effective"})
+        atomic_json(
+            output / "variants/effective/selected_top20.json",
+            {"candidates": candidates},
+        )
+        atomic_json(output / "thresholds.json", {"theta_star": 0.5})
+
+    monkeypatch.setattr(
+        "src.eval.bace_native_baseline_gnn.run_mutagenicity_wnode_selector",
+        fake_selector,
+    )
+    output = tmp_path / "selection"
+    frozen = run_native_baseline_selector(
+        method="comrecgc", matrix_output=matrix, output_dir=output
+    )
+    assert frozen["K"] == 10
+    assert frozen["K_MAX"] == 20
+    assert frozen["prefixes"]["10"] == frozen["prefixes"]["20"]
+    assert len(frozen["prefixes"]["20"]) == 10
+
+
 def test_fullgraph_wnode_uses_pair_distance_without_fake_match_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -544,3 +639,67 @@ def test_final_freeze_uses_only_frozen_order_and_test_matrix(tmp_path: Path) -> 
     assert (tmp_path / "final/PASS").is_file()
     metrics = json.loads((tmp_path / "final/final_metrics.json").read_text())
     assert metrics["prefix_metrics"][-1]["CCRCov"] == 1.0
+
+
+def test_resource_capped_comrecgc_final_metrics_plateau_after_ten_rules(
+    tmp_path: Path,
+) -> None:
+    selection = tmp_path / "selection"
+    test = tmp_path / "test_merge"
+    selection.mkdir()
+    test.mkdir()
+    ids = [f"candidate-{index:02d}" for index in range(10)]
+    atomic_json(
+        selection / "frozen_selection_manifest.json",
+        {
+            "stage": SELECTION_STAGE,
+            "status": "FROZEN",
+            "method_id": "comrecgc",
+            "selection_frozen": True,
+            "test_loaded": False,
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": "b" * 64,
+            "ordered_rule_ids": ids,
+            "effective_rule_count": 10,
+            "K_MAX": 20,
+            "thresholds": {"theta_star": 0.5},
+        },
+    )
+    atomic_json(
+        test / "run_manifest.json",
+        {
+            "stage": TEST_STAGE,
+            "status": "PASS",
+            "method_id": "comrecgc",
+            "selection_frozen_before_test": True,
+            "test_loaded": True,
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": "b" * 64,
+        },
+    )
+    atomic_jsonl(
+        test / "pair_matrix.jsonl",
+        [
+            {
+                "parent_id": parent,
+                "candidate_id": candidate,
+                "pair_strict_flip": index % 2 == 0,
+                "wnode_distance": 0.25 if index % 2 == 0 else None,
+            }
+            for parent in ("p0", "p1")
+            for index, candidate in enumerate(ids)
+        ],
+    )
+    result = freeze_native_baseline_final(
+        method="comrecgc",
+        selection_output=selection,
+        test_output=test,
+        output_dir=tmp_path / "final",
+    )
+    assert result["effective_rule_count"] == 10
+    metrics = json.loads((tmp_path / "final/final_metrics.json").read_text())
+    assert len(metrics["prefix_metrics"]) == 20
+    assert metrics["prefix_metrics"][9] == {
+        **metrics["prefix_metrics"][19],
+        "K": 10,
+    }

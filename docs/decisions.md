@@ -1,5 +1,50 @@
 # Decisions Log
 
+## [2026-08-31] Finalize BACE ComRecGC from an exact resource-cap checkpoint
+
+### Background
+
+The live BACE ComRecGC trajectory was configured for 50,000 steps, but the
+deadline policy now fixes a 20,000-step main budget with a 25,000-step fallback
+and at least ten clean unique rules.  A stale progress JSON did not prove a
+stall: a bounded read-only sample showed roughly one full CPU core of positive
+work.  The prior cap observer could write a request but intentionally had no
+signal or checkpoint-finalization authority.
+
+### Decision
+
+Keep any positive CPU, output, progress, checkpoint, or checkpoint-write
+evidence typed `RUNNING_SLOW` and send no signal.  After an eligible committed
+checkpoint request, a BACE-only executor reopens the checkpoint, binds its
+digest and rule/lineage counts, revalidates the exact PID/start-ticks/raw
+command/cwd/output/controller receipt immediately before signalling, and sends
+SIGTERM to that PID only.  SIGKILL, fuzzy matching, process-group signals, and
+test-derived decisions are absent.
+
+Finalize the official checkpoint state directly in a fresh namespace.  Copy
+and verify its selected-action trace chunks, rebuild the referentially complete
+payload from the checkpoint's authoritative store, and run no further walk
+step.  Retain the original 50k command as source provenance while recording
+`M_configured_max=20000`, `M_fallback_max=25000`, `M_effective`, cap/early-stop
+flags, and stop reason.  Persist the existing downstream BACE task fragment.
+For ComRecGC only, accept 10--19 frozen rules and hold every K>R metric at the
+complete R-rule prefix without copying rules; all other BACE method gates remain
+unchanged.
+
+### Consequences
+
+- The currently CPU-active worker is not terminated merely because its progress
+  file is stale.
+- A committed checkpoint can become a complete resource-capped generation
+  without changing RNG/model/data semantics or loading calibration/test data.
+- The exact signal and postprocess receipts are durable and fresh-root bound.
+- Deployment still requires a real >=20k eligible observer request; code and a
+  waiting controller do not claim BACE ComRecGC PASS.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Bind Taste GlobalGCE to the frozen model-SMILES column
 
 ### Background

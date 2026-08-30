@@ -1,5 +1,25 @@
 # Refactor Plan
 
+## 2026-08-31: Execute the BACE ComRecGC 20k/25k resource cap
+
+- [x] Keep positive CPU/output/checkpoint activity typed `RUNNING_SLOW`; require
+  a full hour with all science counters fixed and no checkpoint write before a
+  separate stalled-worker path may call the route stalled.
+- [x] Add one dataset-specific executor that consumes the existing read-only
+  cap request, validates a complete checkpoint reload and exact PID generation,
+  command, cwd, output, and controller receipt, then sends only SIGTERM.
+- [x] Materialize the selected committed state in a fresh root without another
+  random-walk step, retaining the original 50k command provenance while
+  disclosing configured/effective cap fields and no calibration/test access.
+- [x] Persist the existing common-recourse, candidate-freeze, calibration,
+  held-out test, final-freeze, and standardization tasks after generation.
+- [x] Allow only ComRecGC to use 10--19 unique rules, with K>R metrics held at
+  the complete R-rule prefix; never duplicate a rule and leave GCF/other BACE
+  routes at their existing 20-rule gate.
+- [ ] Deploy the executor in a fresh immutable AutoDL checkout.  The current
+  CPU-active 18k worker remains untouched until an eligible >=20k committed
+  checkpoint request exists.
+
 ## 2026-08-30: Recheck identity-bound DBSCAN anchor self-neighbors directly
 
 - [x] Reproduce the production-shaped `2000 x 64` / 273-anchor Gram path in
