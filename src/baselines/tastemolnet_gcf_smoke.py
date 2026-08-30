@@ -393,6 +393,12 @@ class NativeScoreBatch:
     graph_embeddings: Any
     valid_fullgraphs: tuple[bool, ...]
     failure_reasons: tuple[str, ...]
+    # Optional production evidence consumed by the Taste COMRECGC bridge.
+    # Identity payloads are canonical chemistry only; model payloads preserve
+    # every ordered node/edge tensor sent to the frozen GINE.  They must never
+    # be used to reconstruct one another.
+    identity_graph_payloads: tuple[Mapping[str, Any] | None, ...] = ()
+    model_graph_payloads: tuple[Mapping[str, Any] | None, ...] = ()
 
 
 class TasteFrozenGINENativeAdapter:
@@ -562,11 +568,68 @@ class TasteFrozenGINENativeAdapter:
         self.call_count += 1
         valid_positions: list[int] = []
         portable: list[Any] = []
+        identity_graph_payloads: list[Mapping[str, Any] | None] = [
+            None
+        ] * len(graphs)
+        model_graph_payloads: list[Mapping[str, Any] | None] = [
+            None
+        ] * len(graphs)
         failures = [""] * len(graphs)
         for index, graph in enumerate(graphs):
             try:
-                portable.append(self._portable(graph, index))
+                model_graph = self._portable(graph, index)
+                graph_payload = {
+                    "canonical_smiles": model_graph.smiles,
+                    "node_features": [list(row) for row in model_graph.x],
+                    "edge_index": [list(row) for row in model_graph.edge_index],
+                    "edge_features": [list(row) for row in model_graph.edge_attr],
+                    "schema_sha256": str(
+                        self.feature_schema.to_dict()["schema_sha256"]
+                    ),
+                }
+                encoded = json.dumps(
+                    graph_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+                if hashlib.sha256(encoded).hexdigest() != model_graph.graph_sha256:
+                    raise TasteGCFSmokeError(
+                        "Taste GINE model graph differs from its feature hash"
+                    )
+                identity_graph_payloads[index] = {
+                    "canonical_graph": model_graph.smiles,
+                    "num_nodes": model_graph.num_nodes,
+                    "num_edges": len(model_graph.edge_index[0]) // 2,
+                }
+                model_graph_payloads[index] = {
+                    "schema_version": "tastemolnet_gine_model_graph_v1",
+                    "canonical_smiles": model_graph.smiles,
+                    "graph_sha256": model_graph.graph_sha256,
+                    "feature_schema_sha256": graph_payload["schema_sha256"],
+                    "node_features": {
+                        "dtype": "int64",
+                        "shape": [model_graph.num_nodes, len(model_graph.x[0])],
+                        "values": graph_payload["node_features"],
+                    },
+                    "edge_index": {
+                        "dtype": "int64",
+                        "shape": [2, len(model_graph.edge_index[0])],
+                        "values": graph_payload["edge_index"],
+                    },
+                    "edge_attr": {
+                        "dtype": "int64",
+                        "shape": [
+                            len(model_graph.edge_attr),
+                            self.edge_feature_dim,
+                        ],
+                        "values": graph_payload["edge_features"],
+                    },
+                }
+                portable.append(model_graph)
                 valid_positions.append(index)
+            except TasteGCFSmokeError:
+                raise
             except Exception as exc:
                 reason = str(exc).strip() or type(exc).__name__
                 failures[index] = reason
@@ -605,6 +668,8 @@ class TasteFrozenGINENativeAdapter:
             # Exact failure categories are diagnostics only.  Colliding invalid
             # zero embeddings must have identical counterfactual semantics.
             failure_reasons=tuple("" if not value else "invalid_fullgraph" for value in failures),
+            identity_graph_payloads=tuple(identity_graph_payloads),
+            model_graph_payloads=tuple(model_graph_payloads),
         )
 
     def report(self) -> dict[str, Any]:

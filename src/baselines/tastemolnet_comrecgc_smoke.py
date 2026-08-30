@@ -405,6 +405,32 @@ class CanonicalNativeGraph:
         }
 
 
+def _identity_graph_sha256(payload: Mapping[str, Any]) -> str:
+    """Hash canonical chemistry evidence without making it a model input."""
+
+    if (
+        type(payload) is not dict
+        or set(payload) != {"canonical_graph", "num_nodes", "num_edges"}
+        or type(payload.get("canonical_graph")) is not str
+        or not payload["canonical_graph"]
+        or type(payload.get("num_nodes")) is not int
+        or payload["num_nodes"] < 0
+        or type(payload.get("num_edges")) is not int
+        or payload["num_edges"] < 0
+    ):
+        raise TasteComRecGCSmokeError(
+            "Taste COMRECGC identity graph payload is malformed"
+        )
+    return _canonical_sha256(
+        {
+            "schema_version": "tastemolnet_comrecgc_attributed_graph_v1",
+            **dict(payload),
+            "node_attribute": "atomic_number_from_frozen_one_hot",
+            "edge_attribute": "official_untyped_edge",
+        }
+    )
+
+
 def canonical_attributed_graph(
     graph: Any,
     *,
@@ -539,20 +565,78 @@ def canonical_attributed_graph(
         # identity.  It must never collapse onto the invalid scorer's shared
         # zero embedding or a parent-derived sidecar.
         canonical = "<EMPTY_ATTRIBUTED_GRAPH>"
-    identity_payload = {
-        "schema_version": "tastemolnet_comrecgc_attributed_graph_v1",
+    collision_payload = {
         "canonical_graph": canonical,
         "num_nodes": len(atomic_numbers),
         "num_edges": len(pairs),
-        "node_attribute": "atomic_number_from_frozen_one_hot",
-        "edge_attribute": "official_untyped_edge",
     }
     return CanonicalNativeGraph(
-        graph_identity_sha256=_canonical_sha256(identity_payload),
+        graph_identity_sha256=_identity_graph_sha256(collision_payload),
         canonical_graph=canonical,
         atomic_numbers=tuple(atomic_numbers),
         undirected_edges=tuple(pairs),
     )
+
+
+def _model_tensor_payload(value: Any, *, field: str) -> dict[str, Any]:
+    """Losslessly serialize one tensor that can influence frozen-GINE input."""
+
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - AutoDL dependency
+        raise TasteComRecGCSmokeError(
+            "NumPy is required for Taste COMRECGC model-graph evidence"
+        ) from exc
+    if hasattr(value, "detach"):
+        value = value.detach().cpu()
+    try:
+        array = np.ascontiguousarray(value)
+    except Exception as exc:
+        raise TasteComRecGCSmokeError(f"{field} is not tensor-like") from exc
+    if array.dtype.hasobject or (
+        array.dtype.kind in {"f", "c"} and not np.isfinite(array).all()
+    ):
+        raise TasteComRecGCSmokeError(f"{field} cannot be serialized losslessly")
+    return {
+        "dtype": array.dtype.str,
+        "shape": [int(item) for item in array.shape],
+        "values": array.tolist(),
+    }
+
+
+def _native_model_graph_payload(graph: Any) -> dict[str, Any]:
+    """Fallback model graph for adapters that score the native tensors itself."""
+
+    edge_attr = getattr(graph, "edge_attr", None)
+    return {
+        "schema_version": "tastemolnet_native_model_graph_v1",
+        "num_nodes": int(getattr(graph, "num_nodes")),
+        "node_features": _model_tensor_payload(
+            getattr(graph, "x", None), field="model_graph.x"
+        ),
+        "edge_index": _model_tensor_payload(
+            getattr(graph, "edge_index", None), field="model_graph.edge_index"
+        ),
+        "edge_attr": None
+        if edge_attr is None
+        else _model_tensor_payload(edge_attr, field="model_graph.edge_attr"),
+    }
+
+
+def _normalize_model_graph_payload(value: Any) -> dict[str, Any]:
+    if type(value) is not dict or type(value.get("schema_version")) is not str:
+        raise TasteComRecGCSmokeError(
+            "Taste COMRECGC model graph evidence is malformed"
+        )
+    try:
+        # Canonical JSON is both a deep, type-stable copy and a finite-value
+        # check.  It preserves the ordered tensor values; it is never decoded
+        # into a replacement model graph.
+        return json.loads(_canonical_bytes(value).decode("utf-8"))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise TasteComRecGCSmokeError(
+            "Taste COMRECGC model graph is not losslessly serializable"
+        ) from exc
 
 
 def _embedding_sha256(row: Any) -> str:
@@ -625,6 +709,8 @@ class TasteComRecGCRecord:
     score: float
     candidate: bool
     valid_fullgraph: bool
+    model_graph_sha256: str
+    model_graph_payload: Mapping[str, Any]
     embedding_sha256: str
     embedding_dtype: str
     embedding_values: tuple[float, ...]
@@ -638,6 +724,8 @@ class TasteComRecGCRecord:
             "score": self.score,
             "candidate": self.candidate,
             "valid_fullgraph": self.valid_fullgraph,
+            "model_graph_sha256": self.model_graph_sha256,
+            "model_graph_payload": dict(self.model_graph_payload),
             "embedding_sha256": self.embedding_sha256,
             "embedding_dtype": self.embedding_dtype,
             "embedding_values": list(self.embedding_values),
@@ -708,21 +796,51 @@ class TasteComRecGCMulticlassBridge:
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC adapter validity evidence is untyped"
             )
+        identity_payloads = tuple(
+            getattr(batch, "identity_graph_payloads", ()) or ()
+        )
+        model_payloads = tuple(
+            getattr(batch, "model_graph_payloads", ()) or ()
+        )
+        if identity_payloads and len(identity_payloads) != len(values):
+            raise TasteComRecGCSmokeError(
+                "Taste COMRECGC identity-graph evidence is unaligned"
+            )
+        if model_payloads and len(model_payloads) != len(values):
+            raise TasteComRecGCSmokeError(
+                "Taste COMRECGC model-graph evidence is unaligned"
+            )
         importance: list[tuple[float, float]] = []
         canonical_embeddings: list[Any] = []
         for index, graph in enumerate(values):
-            canonical = canonical_attributed_graph(
+            native_identity = canonical_attributed_graph(
                 graph, feature_atomic_numbers=self.feature_atomic_numbers
             )
-            collision = canonical.collision_payload()
+            supplied_identity = identity_payloads[index] if identity_payloads else None
+            if supplied_identity is None:
+                collision = native_identity.collision_payload()
+            elif type(supplied_identity) is dict:
+                collision = dict(supplied_identity)
+            else:
+                raise TasteComRecGCSmokeError(
+                    "Taste COMRECGC identity-graph evidence is malformed"
+                )
+            graph_identity_sha256 = _identity_graph_sha256(collision)
             previous_collision = self.graph_collision_payloads.get(
-                canonical.graph_identity_sha256
+                graph_identity_sha256
             )
             if previous_collision is not None and previous_collision != collision:
                 raise TasteComRecGCSmokeError(
                     "Stable attributed graph SHA-256 collision detected"
                 )
-            self.graph_collision_payloads[canonical.graph_identity_sha256] = collision
+            self.graph_collision_payloads[graph_identity_sha256] = collision
+            supplied_model = model_payloads[index] if model_payloads else None
+            model_graph_payload = _normalize_model_graph_payload(
+                _native_model_graph_payload(graph)
+                if supplied_model is None
+                else supplied_model
+            )
+            model_graph_sha256 = _canonical_sha256(model_graph_payload)
             row = tuple(float(value) for value in probabilities[index].tolist())
             score, prediction, candidate = score_and_candidate(row)
             raw_embedding = np.ascontiguousarray(embeddings[index])
@@ -732,23 +850,25 @@ class TasteComRecGCMulticlassBridge:
                 )
             embedding_sha = _embedding_sha256(raw_embedding)
             observed = TasteComRecGCRecord(
-                graph_identity_sha256=canonical.graph_identity_sha256,
-                canonical_graph=canonical.canonical_graph,
+                graph_identity_sha256=graph_identity_sha256,
+                canonical_graph=collision["canonical_graph"],
                 probabilities=row,
                 prediction=prediction,
                 score=score,
                 candidate=bool(valid[index] and candidate),
                 valid_fullgraph=valid[index],
+                model_graph_sha256=model_graph_sha256,
+                model_graph_payload=model_graph_payload,
                 embedding_sha256=embedding_sha,
                 embedding_dtype=raw_embedding.dtype.str,
                 embedding_values=tuple(
                     float(value) for value in raw_embedding.tolist()
                 ),
             )
-            previous = self.records.get(canonical.graph_identity_sha256)
+            previous = self.records.get(graph_identity_sha256)
             if previous is None:
                 record = observed
-                self.records[canonical.graph_identity_sha256] = record
+                self.records[graph_identity_sha256] = record
             else:
                 # CUDA scatter pooling may differ in low bits when the same
                 # structural graph is rescored in another official batch.
@@ -766,6 +886,10 @@ class TasteComRecGCMulticlassBridge:
                 )
                 if (
                     previous.canonical_graph != observed.canonical_graph
+                    or previous.model_graph_sha256
+                    != observed.model_graph_sha256
+                    or previous.model_graph_payload
+                    != observed.model_graph_payload
                     or previous.valid_fullgraph is not observed.valid_fullgraph
                     or previous.prediction != observed.prediction
                     or previous.candidate is not observed.candidate
@@ -800,13 +924,13 @@ class TasteComRecGCMulticlassBridge:
             canonical_embeddings.append(canonical_embedding)
             lineage = _lineage_evidence(
                 graph,
-                graph_identity_sha256=canonical.graph_identity_sha256,
+                graph_identity_sha256=graph_identity_sha256,
             )
             self.lineage_occurrences.setdefault(
-                canonical.graph_identity_sha256, Counter()
+                graph_identity_sha256, Counter()
             )[lineage] += 1
             self._pending_hashes.append(
-                (canonical.graph_identity_sha256, record.embedding_sha256)
+                (graph_identity_sha256, record.embedding_sha256)
             )
             importance.append((record.score, 1.0))
         self.call_count += 1
@@ -838,7 +962,7 @@ class TasteComRecGCMulticlassBridge:
     def checkpoint_state(self) -> dict[str, Any]:
         self._assert_idle()
         return {
-            "schema_version": "tastemolnet_comrecgc_bridge_checkpoint_v2",
+            "schema_version": "tastemolnet_comrecgc_bridge_checkpoint_v3",
             "records": {
                 key: value.semantic_payload()
                 for key, value in sorted(self.records.items())
@@ -866,7 +990,7 @@ class TasteComRecGCMulticlassBridge:
         if (
             type(payload) is not dict
             or payload.get("schema_version")
-            != "tastemolnet_comrecgc_bridge_checkpoint_v2"
+            != "tastemolnet_comrecgc_bridge_checkpoint_v3"
         ):
             raise TasteComRecGCSmokeError(
                 "Taste COMRECGC bridge checkpoint schema changed"
@@ -893,6 +1017,8 @@ class TasteComRecGCMulticlassBridge:
                 "score",
                 "candidate",
                 "valid_fullgraph",
+                "model_graph_sha256",
+                "model_graph_payload",
                 "embedding_sha256",
                 "embedding_dtype",
                 "embedding_values",
@@ -922,6 +1048,17 @@ class TasteComRecGCMulticlassBridge:
             embedding_sha = _lower_sha256(
                 raw.get("embedding_sha256"), field="checkpoint embedding SHA"
             )
+            model_graph_payload = _normalize_model_graph_payload(
+                raw.get("model_graph_payload")
+            )
+            model_graph_sha = _lower_sha256(
+                raw.get("model_graph_sha256"),
+                field="checkpoint model graph SHA",
+            )
+            if _canonical_sha256(model_graph_payload) != model_graph_sha:
+                raise TasteComRecGCSmokeError(
+                    "Taste COMRECGC checkpoint model graph bytes drifted"
+                )
             embedding_dtype = raw.get("embedding_dtype")
             embedding_values = raw.get("embedding_values")
             if (
@@ -962,6 +1099,8 @@ class TasteComRecGCMulticlassBridge:
                 score=score,
                 candidate=bool(raw["valid_fullgraph"] and candidate),
                 valid_fullgraph=raw["valid_fullgraph"],
+                model_graph_sha256=model_graph_sha,
+                model_graph_payload=model_graph_payload,
                 embedding_sha256=embedding_sha,
                 embedding_dtype=embedding_array.dtype.str,
                 embedding_values=tuple(
@@ -1474,15 +1613,29 @@ def _initialize_source_graphs(
     selected_indices: list[int] = []
     selected_identity_order: list[str] = []
     selected_identity_set: set[str] = set()
+    pool_identity_payloads = tuple(
+        getattr(scored, "identity_graph_payloads", ()) or ()
+    )
+    if pool_identity_payloads and len(pool_identity_payloads) != len(pool_graphs):
+        raise TasteComRecGCSmokeError(
+            "Taste COMRECGC source identity evidence is unaligned"
+        )
     for index, (valid, prediction) in enumerate(
         zip(scored.valid_fullgraphs, scored.predictions, strict=True)
     ):
         if not valid or prediction != SOURCE_LABEL:
             continue
-        identity = canonical_attributed_graph(
-            pool_graphs[index],
-            feature_atomic_numbers=graph_schema.feature_atomic_numbers,
-        ).graph_identity_sha256
+        supplied_identity = (
+            pool_identity_payloads[index] if pool_identity_payloads else None
+        )
+        identity = (
+            _identity_graph_sha256(dict(supplied_identity))
+            if type(supplied_identity) is dict
+            else canonical_attributed_graph(
+                pool_graphs[index],
+                feature_atomic_numbers=graph_schema.feature_atomic_numbers,
+            ).graph_identity_sha256
+        )
         if identity in selected_identity_set:
             continue
         selected_indices.append(index)

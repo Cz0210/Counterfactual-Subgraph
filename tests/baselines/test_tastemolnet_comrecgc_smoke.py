@@ -869,6 +869,109 @@ def test_bridge_uses_structure_for_identity_and_gine_hidden_only_for_alignment()
     assert report["unique_lineage_count"] == 2
 
 
+def _model_graph_payload(channel: int) -> dict[str, object]:
+    return {
+        "schema_version": "tastemolnet_gine_model_graph_v1",
+        "canonical_smiles": "C" if channel == 0 else "C=O",
+        "graph_sha256": hashlib.sha256(str(channel).encode()).hexdigest(),
+        "feature_schema_sha256": "f" * 64,
+        "node_features": {
+            "dtype": "int64",
+            "shape": [1, 2],
+            "values": [[channel, 1]],
+        },
+        "edge_index": {
+            "dtype": "int64",
+            "shape": [2, 0],
+            "values": [[], []],
+        },
+        "edge_attr": {
+            "dtype": "int64",
+            "shape": [0, 4],
+            "values": [],
+        },
+    }
+
+
+def test_bridge_separates_canonical_identity_from_lossless_gine_model_graph() -> None:
+    class _SeparatedAdapter:
+        @staticmethod
+        def score(graphs):
+            channels = [int(graph.comrecgc_source_index) for graph in graphs]
+            return SimpleNamespace(
+                probabilities=np.asarray(
+                    [[0.2, 0.7, 0.1] for _ in graphs], dtype=np.float64
+                ),
+                predictions=tuple(1 for _ in graphs),
+                graph_embeddings=np.asarray(
+                    [[float(channel), 2.0] for channel in channels],
+                    dtype=np.float32,
+                ),
+                valid_fullgraphs=tuple(True for _ in graphs),
+                identity_graph_payloads=tuple(
+                    {
+                        "canonical_graph": "C" if channel == 0 else "C=O",
+                        "num_nodes": 1 if channel == 0 else 2,
+                        "num_edges": 0 if channel == 0 else 1,
+                    }
+                    for channel in channels
+                ),
+                model_graph_payloads=tuple(
+                    _model_graph_payload(channel) for channel in channels
+                ),
+            )
+
+    bridge = TasteComRecGCMulticlassBridge(
+        adapter=_SeparatedAdapter(), feature_atomic_numbers=ATOMS
+    )
+    _importance, embeddings = bridge.call(
+        [_graph(source_index=0), _graph(source_index=1)], {}
+    )
+    identities = [bridge.calculate_hash(row) for row in embeddings]
+    assert identities[0] != identities[1]
+    assert bridge.records[identities[0]].model_graph_sha256 != (
+        bridge.records[identities[1]].model_graph_sha256
+    )
+    assert bridge.records[identities[1]].model_graph_payload[
+        "node_features"
+    ]["values"] == [[1, 1]]
+
+    state = bridge.checkpoint_state()
+    assert state["schema_version"] == "tastemolnet_comrecgc_bridge_checkpoint_v3"
+    restored = TasteComRecGCMulticlassBridge(
+        adapter=_SeparatedAdapter(), feature_atomic_numbers=ATOMS
+    )
+    restored.restore_checkpoint_state(state)
+    assert restored.checkpoint_state() == state
+
+
+def test_bridge_does_not_relax_semantics_for_same_identity_model_graph_drift() -> None:
+    class _ModelGraphDriftAdapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def score(self, graphs):
+            self.calls += 1
+            return SimpleNamespace(
+                probabilities=np.asarray([[0.2, 0.7, 0.1]], dtype=np.float64),
+                predictions=(1,),
+                graph_embeddings=np.asarray([[1.0, 2.0]], dtype=np.float32),
+                valid_fullgraphs=(True,),
+                identity_graph_payloads=(
+                    {"canonical_graph": "C", "num_nodes": 1, "num_edges": 0},
+                ),
+                model_graph_payloads=(_model_graph_payload(self.calls - 1),),
+            )
+
+    bridge = TasteComRecGCMulticlassBridge(
+        adapter=_ModelGraphDriftAdapter(), feature_atomic_numbers=ATOMS
+    )
+    _importance, embeddings = bridge.call([_graph()], {})
+    bridge.calculate_hash(embeddings[0])
+    with pytest.raises(TasteComRecGCSmokeError, match="changed GINE semantics"):
+        bridge.call([_graph()], {})
+
+
 def test_bridge_reuses_first_canonical_row_across_cuda_low_bit_rescores() -> None:
     class _LowBitAdapter:
         def __init__(self) -> None:

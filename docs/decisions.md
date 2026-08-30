@@ -1,5 +1,37 @@
 # Decisions Log
 
+## [2026-08-31] Separate Taste COMRECGC identity and model graphs
+
+### Background
+
+T9 used a canonicalized native atom/edge graph as both the stable COMRECGC
+identity and the authority for reusing a frozen-GINE row.  The actual GINE
+input is decoded with source lineage and then featurized with complete atom and
+bond attributes, so two simplified native graphs could share a key while
+representing different model inputs.
+
+### Decision
+
+Keep a canonical chemistry payload solely for deduplication, registry,
+lineage, and the official cache key.  Separately retain a canonical-JSON,
+lossless model payload containing the ordered node features, directed edge
+index, edge attributes, feature-schema hash, and graph hash that were sent to
+GINE.  Bind that payload into the bridge checkpoint and require the same
+stable identity to keep the exact model-graph digest plus the existing
+logit/probability/embedding agreement envelope.  Never reconstruct a model
+graph from the identity hash.
+
+### Consequences
+
+- Canonical identity no longer substitutes a simplified graph for GINE input.
+- Checkpoint reload verifies complete model-graph bytes and semantic replay.
+- The existing semantic assertion and tolerance remain unchanged; fresh T9
+  attempts use checkpoint schema v3.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Normalize fixed-budget NeuroSED CLI paths before dispatch
 
 ### Background
