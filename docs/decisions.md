@@ -13634,3 +13634,41 @@ float64 labels and pass an independent terminal reload before full launch.
 ### Status
 
 Accepted
+
+---
+
+## [2026-08-31] Stabilize T8 checkpoint metadata before publishing resume evidence
+
+### Motivation
+
+A fresh TasteMolNet GlobalGCE target-0 run completed exact top-k mining and
+wrote a valid epoch-0 checkpoint, but the planned-resume holder rejected it
+after the callback unwound.  The preserved checkpoint reloads with the expected
+`next_epoch=1` and resume identity, no temporary or alternate checkpoint exists,
+and both checkpoint leaves show the same approximately three-millisecond gap
+between write mtime and final ctime on the AutoDL persistent filesystem.  The
+old error combined every stat field and SHA under the misleading message
+`planned checkpoint bytes changed`.
+
+### Decision
+
+Before publishing checkpoint-file evidence to the T8 callback, retain the
+opened leaf and require two consecutive identical observations.  During this
+short bounded barrier, permit only a monotone `ctime_ns` settlement.  Device,
+inode, mode, owner, link count, byte count, mtime, and SHA-256 must remain exact;
+any change fails immediately.  Once settled evidence is published, the existing
+T8 retained-descriptor and named-leaf comparisons remain fully strict.
+
+Do not reuse the failed attempt, alter the official GlobalGCE algorithm, move
+training checkpoints into scratch, or relax checkpoint hashes.
+
+### Consequences
+
+- Delayed metadata publication cannot be mistaken for checkpoint corruption.
+- In-place byte changes, atomic leaf swaps, and SHA mismatches still fail.
+- Persistent checkpoint/result semantics and the frozen GINE/split/oracle are
+  unchanged.
+
+### Status
+
+Accepted

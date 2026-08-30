@@ -713,6 +713,9 @@ _CHECKPOINT_FILE_EVIDENCE_KEYS = {
     *(name for name, _attribute in _CHECKPOINT_STAT_FIELDS),
     "sha256",
 }
+_CHECKPOINT_METADATA_SETTLE_ATTEMPTS = 8
+_CHECKPOINT_METADATA_SETTLE_SECONDS = 0.01
+_CHECKPOINT_CTIME_STABLE_FIELDS = _CHECKPOINT_FILE_EVIDENCE_KEYS - {"ctime_ns"}
 
 
 def _hash_regular_fd(descriptor: int, size: int) -> str:
@@ -747,8 +750,29 @@ def _regular_fd_evidence(descriptor: int) -> dict[str, Any]:
     }
 
 
+def _named_checkpoint_stat(path: Path) -> dict[str, int]:
+    observed = os.stat(path, follow_symlinks=False)
+    return {
+        name: int(getattr(observed, attribute))
+        for name, attribute in _CHECKPOINT_STAT_FIELDS
+    }
+
+
+def _ctime_only_checkpoint_transition(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> bool:
+    """Accept only a monotone ctime settlement with identical checkpoint bytes."""
+
+    return (
+        all(before[key] == after[key] for key in _CHECKPOINT_CTIME_STABLE_FIELDS)
+        and type(before.get("ctime_ns")) is int
+        and type(after.get("ctime_ns")) is int
+        and int(after["ctime_ns"]) >= int(before["ctime_ns"])
+    )
+
+
 def _open_regular_file_evidence(path: Path) -> dict[str, Any]:
-    named_before = os.stat(path, follow_symlinks=False)
     descriptor = os.open(
         path,
         os.O_RDONLY
@@ -756,14 +780,45 @@ def _open_regular_file_evidence(path: Path) -> dict[str, Any]:
         | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
-        evidence = _regular_fd_evidence(descriptor)
-        for named in (named_before, os.stat(path, follow_symlinks=False)):
+        previous: dict[str, Any] | None = None
+        for attempt in range(_CHECKPOINT_METADATA_SETTLE_ATTEMPTS):
+            evidence = _regular_fd_evidence(descriptor)
+            named = _named_checkpoint_stat(path)
+            named_transition = {
+                **evidence,
+                "ctime_ns": named["ctime_ns"],
+            }
             if any(
-                int(getattr(named, attribute)) != evidence[name]
-                for name, attribute in _CHECKPOINT_STAT_FIELDS
+                named[name] != evidence[name]
+                for name, _attribute in _CHECKPOINT_STAT_FIELDS
+                if name != "ctime_ns"
             ):
-                raise RuntimeError("GlobalGCE checkpoint leaf changed while opening")
-        return evidence
+                raise RuntimeError(
+                    "GlobalGCE checkpoint leaf changed while opening"
+                )
+            named_matches = named["ctime_ns"] == evidence["ctime_ns"]
+            if not named_matches and not _ctime_only_checkpoint_transition(
+                evidence,
+                named_transition,
+            ):
+                raise RuntimeError(
+                    "GlobalGCE checkpoint ctime moved backwards while opening"
+                )
+            if named_matches and previous is not None:
+                if evidence == previous:
+                    return evidence
+                if not _ctime_only_checkpoint_transition(previous, evidence):
+                    raise RuntimeError(
+                        "GlobalGCE checkpoint bytes or physical identity changed "
+                        "before evidence publication"
+                    )
+            if named_matches:
+                previous = evidence
+            if attempt + 1 < _CHECKPOINT_METADATA_SETTLE_ATTEMPTS:
+                time.sleep(_CHECKPOINT_METADATA_SETTLE_SECONDS)
+        raise RuntimeError(
+            "GlobalGCE checkpoint ctime did not stabilize before evidence publication"
+        )
     finally:
         os.close(descriptor)
 

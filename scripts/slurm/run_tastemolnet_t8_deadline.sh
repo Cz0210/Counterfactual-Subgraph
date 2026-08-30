@@ -13,6 +13,7 @@ export TASTEMOLNET_T8_CONTROLLER_OWNED_GPU_SLOT=1
 : "${T8_TRAIN_CSV:?}" "${T8_OFFICIAL_ROOT:?}" "${T8_STATE_DIR:?}" "${T8_OUTPUT_DIR:?}"
 : "${T8_GSPAN_SCRATCH_ROOT:?}"
 echo "python=$(command -v python)"
+echo "checkpoint_evidence=sha_strict_ctime_settle_v1"
 python --version
 python -c 'import torch; print("cuda_available=", torch.cuda.is_available())'
 python -I -B scripts/autodl/run_tastemolnet_t8_deadline.py \

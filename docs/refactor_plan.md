@@ -2788,3 +2788,15 @@ Mutagenicity roadmaps.
 - [x] Add focused publication tests and AutoDL/Slurm CLI parity.
 - [ ] Run under an existing real controller and issue the separate typed T7
   release successor after its published final is independently pinned.
+
+## 2026-08-31: T8 epoch-checkpoint metadata stabilization
+
+- [x] Diagnose the failed target-0 run from preserved checkpoint, heartbeat,
+  exact-top-k proof, and scratch/persistent inventories without reusing it.
+- [x] Add a bounded pre-callback barrier that accepts only monotone ctime
+  settlement while keeping SHA, bytes, inode, mtime, ownership, and link count
+  exact.
+- [x] Cover delayed ctime settlement and positive SHA-change rejection in
+  focused tests; keep the paired Slurm diagnostic synchronized.
+- [ ] Launch a fresh UUID attempt from the reviewed immutable commit; never
+  resume or publish the failed attempt root.

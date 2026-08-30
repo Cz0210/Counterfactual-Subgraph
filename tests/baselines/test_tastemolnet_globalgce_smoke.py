@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.baselines import globalgce_resumable as resumable
 from src.baselines.globalgce_mutagenicity_adapter import (
     NativeGenerationResult,
 )
@@ -747,6 +748,82 @@ def test_retained_planned_checkpoint_rejects_same_byte_leaf_swap(
             holder.close()
         branch.close()
         state.close()
+
+
+def test_planned_checkpoint_evidence_waits_for_ctime_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "training_checkpoint.pt"
+    checkpoint.write_bytes(b"durable-epoch-zero")
+    descriptor = os.open(checkpoint, os.O_RDONLY)
+    try:
+        final = resumable._regular_fd_evidence(descriptor)
+    finally:
+        os.close(descriptor)
+    provisional = {**final, "ctime_ns": max(0, final["ctime_ns"] - 1)}
+    samples = iter((provisional, final, final))
+    calls = 0
+
+    def _sample(_descriptor: int) -> dict:
+        nonlocal calls
+        calls += 1
+        return dict(next(samples))
+
+    monkeypatch.setattr(resumable, "_regular_fd_evidence", _sample)
+    monkeypatch.setattr(
+        resumable,
+        "_named_checkpoint_stat",
+        lambda _path: {
+            name: int(final[name])
+            for name, _attribute in resumable._CHECKPOINT_STAT_FIELDS
+        },
+    )
+    monkeypatch.setattr(resumable.time, "sleep", lambda _seconds: None)
+
+    observed = resumable._open_regular_file_evidence(checkpoint)
+
+    assert observed == final
+    assert observed["sha256"] == hashlib.sha256(
+        b"durable-epoch-zero"
+    ).hexdigest()
+    assert calls == 3
+
+
+def test_planned_checkpoint_ctime_barrier_rejects_sha_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "training_checkpoint.pt"
+    checkpoint.write_bytes(b"durable-epoch-zero")
+    descriptor = os.open(checkpoint, os.O_RDONLY)
+    try:
+        original = resumable._regular_fd_evidence(descriptor)
+    finally:
+        os.close(descriptor)
+    changed = {**original, "sha256": "f" * 64}
+    samples = iter((original, changed))
+
+    monkeypatch.setattr(
+        resumable,
+        "_regular_fd_evidence",
+        lambda _descriptor: dict(next(samples)),
+    )
+    monkeypatch.setattr(
+        resumable,
+        "_named_checkpoint_stat",
+        lambda _path: {
+            name: int(original[name])
+            for name, _attribute in resumable._CHECKPOINT_STAT_FIELDS
+        },
+    )
+    monkeypatch.setattr(resumable.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        RuntimeError,
+        match="bytes or physical identity changed",
+    ):
+        resumable._open_regular_file_evidence(checkpoint)
 
 
 def test_terminal_documents_are_exact_aggregate_only_and_held(tmp_path: Path) -> None:
