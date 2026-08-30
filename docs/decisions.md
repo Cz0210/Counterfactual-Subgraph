@@ -13117,6 +13117,8 @@ Accepted
 - Motivation: AutoDL mounts the persistent control root through `fuse.autofs`.
   The first 723-byte receipt blocked indefinitely in `fsync()` while unrelated
   multi-gigabyte checkpoint I/O was active, preventing any heartbeat.
-- Decision: write a same-directory temporary file, flush userspace buffers, and
-  atomically rename it. This preserves complete-or-absent JSON while avoiding a
-  control-plane-only durability syscall that can stall the sidecar.
+- Decision: durable one-time receipts retain a same-directory temporary and
+  atomic rename. The replaceable heartbeat is written directly because FUSE
+  rename can also block behind unrelated transfers; a partially observed
+  heartbeat is ignored and replaced on the next 60-second cycle. No science or
+  matrix artifact uses this relaxed heartbeat-only path.

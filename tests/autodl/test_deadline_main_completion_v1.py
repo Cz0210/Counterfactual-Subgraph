@@ -57,3 +57,4 @@ def test_once_writes_controller_receipt_and_heartbeat(tmp_path: Path) -> None:
     )
     assert receipt["run_gnn_ablation"] is False
     assert heartbeat["sequence"] == 1
+    assert not (state_root / "state.json").exists()

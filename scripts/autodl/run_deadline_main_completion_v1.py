@@ -62,6 +62,14 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             temporary.unlink()
 
 
+def _heartbeat_json(path: Path, value: dict[str, Any]) -> None:
+    """Write ephemeral monitor state without FUSE rename/fsync barriers."""
+    data = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(data)
+        handle.flush()
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -221,8 +229,7 @@ def run(spec_path: Path, *, once: bool) -> int:
         while True:
             sequence += 1
             state = observe(spec, sequence=sequence)
-            _atomic_json(state_root / "state.json", state)
-            _atomic_json(heartbeat_path, state)
+            _heartbeat_json(heartbeat_path, state)
             if once or stop:
                 return 0
             time.sleep(spec["poll_seconds"])
