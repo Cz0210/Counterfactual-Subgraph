@@ -845,7 +845,23 @@ def load_taste_train_cohort(
         raise TasteGlobalGCESmokeError("T8 train CSV is not UTF-8") from exc
     reader = csv.DictReader(io.StringIO(text, newline=""))
     fields = set(reader.fieldnames or ())
-    smiles_field = "smiles" if "smiles" in fields else "parent_smiles"
+    # Match the frozen molecular-GNN dataset loader's schema precedence.  The
+    # prepared Taste split intentionally carries raw, canonical, and model
+    # columns; GINE was fitted from ``model_smiles`` and T8 must not silently
+    # switch to another representation merely because ``smiles`` is absent.
+    smiles_field = next(
+        (
+            name
+            for name in (
+                "model_smiles",
+                "canonical_smiles",
+                "smiles",
+                "parent_smiles",
+            )
+            if name in fields
+        ),
+        "model_smiles",
+    )
     required = {"molecule_id", "label", "split", smiles_field}
     if not required.issubset(fields):
         raise TasteGlobalGCESmokeError(

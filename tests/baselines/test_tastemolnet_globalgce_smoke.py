@@ -930,6 +930,21 @@ def test_train_parser_rejects_float_label_and_non_train_split() -> None:
         )
 
 
+def test_train_parser_uses_frozen_model_smiles_schema_precedence() -> None:
+    payload = (
+        "molecule_id,raw_smiles,canonical_smiles,model_smiles,label,split\n"
+        "a,[Na+],N,C,0,train\n"
+        "b,[Cl-],C,N,1,train\n"
+        "c,[K+],N,O,2,train\n"
+    ).encode()
+    cohort = t8.load_taste_train_cohort(
+        payload,
+        expected_row_count=3,
+        expected_label_counts={"0": 1, "1": 1, "2": 1},
+    )
+    assert [row.smiles for row in cohort.rows] == ["C", "N", "O"]
+
+
 def test_smoke_config_rejects_science_surface_drift_before_execution() -> None:
     with pytest.raises(t8.TasteGlobalGCESmokeError, match="frozen smoke"):
         t8.TasteGlobalGCESmokeConfig(source_parent_count=15).validate()

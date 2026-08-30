@@ -1,5 +1,30 @@
 # Decisions Log
 
+## [2026-08-31] Bind Taste GlobalGCE to the frozen model-SMILES column
+
+### Background
+
+The fresh T8 run opened the authenticated Taste train split but rejected it
+because the dataset carries `model_smiles`, `canonical_smiles`, and
+`raw_smiles` rather than the legacy `smiles`/`parent_smiles` names.
+
+### Decision
+
+Use the same SMILES-column precedence as the frozen molecular-GNN loader:
+`model_smiles`, then `canonical_smiles`, then legacy `smiles` and
+`parent_smiles`.  Keep the exact train-file hash, row/label counts, split
+checks, and three-class GINE authority unchanged.
+
+### Consequences
+
+- T8 consumes the representation on which the frozen GINE was trained.
+- A missing supported column still fails closed.
+- No dataset, split, oracle, or GlobalGCE algorithm setting changes.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Separate Taste COMRECGC identity and model graphs
 
 ### Background
