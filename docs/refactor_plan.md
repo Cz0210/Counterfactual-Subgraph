@@ -2724,3 +2724,19 @@ Mutagenicity roadmaps.
 - [ ] Deploy from an immutable AutoDL commit and write the exact live spec from
   one refreshed audit. Code integration alone does not mark any method cell
   PASS.
+
+## 2026-08-30: BACE ComRecGC 20k/25k resource-cap gate
+
+- [x] Add a pure decision function for the frozen 20k first cap, 25k absolute
+  cap, zero-lineage-error requirement, and minimum ten valid unique candidates.
+- [x] Add a persistent read-only observer that consumes the existing 2,500-step
+  convergence receipts and writes a checkpoint-bound handover request outside
+  the generation root.
+- [x] Keep pre-20k stopping restricted to a genuine pre-registered convergence
+  PASS and keep calibration/test absent from every cap decision.
+- [x] Keep the observer free of signal, process-group, kill, and post-processing
+  execution APIs; its request is evidence, not a completed handover.
+- [ ] Install a separately authorized exact-PID graceful-stop and
+  cap-checkpoint finalization/post-processing executor before the first 20k
+  committed checkpoint.  Until then the observer must report the execution
+  blocker rather than imply automation.

@@ -13039,3 +13039,44 @@ generation, trace, checkpoint, controller, or test artifacts.
 Accepted
 
 ---
+
+## [2026-08-30] Persist the BACE ComRecGC 20k/25k resource-cap gate read-only
+
+### Motivation
+
+The BACE ComRecGC run has an explicitly bounded resource policy in addition to
+the pre-registered convergence gate.  The first committed checkpoint at or
+above 20,000 steps may be adopted when lineage errors are zero and at least ten
+valid unique candidates exist.  An insufficient 20,000-step checkpoint may
+continue only to 25,000; an insufficient 25,000-step checkpoint is a scientific
+failure.  This decision must be durable before any separately authorized
+process handover.
+
+### Decision
+
+Add a pure decision function and a narrow read-only observer.  They consume
+only the existing convergence hook receipts, bind the exact committed step and
+checkpoint digest, and write a handover request outside the live generation
+root.  Pre-20k termination remains possible only through the unchanged
+two-window convergence PASS.  The observer exposes no signal or subprocess
+surface and records `signals_sent=false` and `postprocess_started=false`.
+
+Keep exact-PID `SIGTERM`, checkpoint materialization, and downstream
+post-processing outside this read-only component.  A handover request is not a
+cell PASS and requires a separate executor with explicit authority and an
+implemented cap-finalization path.
+
+### Consequences
+
+- The 2,500-step convergence cadence and its calibration/test isolation remain
+  unchanged.
+- A 20k gate failure cannot silently extend past 25k.
+- The observer can be deployed now without touching or stopping the live run.
+- Automatic handover remains explicitly blocked until its separate execution
+  boundary is reviewed and installed.
+
+### Status
+
+Accepted
+
+---
