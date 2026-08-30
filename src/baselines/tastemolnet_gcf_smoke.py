@@ -2568,7 +2568,10 @@ def execute_native_vrrw_smoke(
         or neurosed_evidence.get("marker") != "MANAGED_EXECUTION_V2_PASS"
         or type(consumer) is not dict
         or consumer.get("schema_version")
-        != "tastemolnet_gcf_neurosed_t7_consumer_v1"
+        not in {
+            "tastemolnet_gcf_neurosed_t7_consumer_v1",
+            "tastemolnet_gcf_neurosed_t7_fixed_budget_consumer_v2",
+        }
         or consumer.get("role")
         != "GCF_AUXILIARY_DISTANCE_MODEL"
         or consumer.get("classifier") is not False
@@ -2602,11 +2605,30 @@ def execute_native_vrrw_smoke(
         "sha256s_sha256",
     ):
         _sha256(neurosed_evidence.get(field), field=f"NeuroSED {field}")
-    for field in (
-        "neurosed_train_graph_ids_hash",
-        "neurosed_validation_graph_ids_hash",
+    if (
+        consumer.get("schema_version")
+        == "tastemolnet_gcf_neurosed_t7_consumer_v1"
     ):
-        _sha256(consumer.get(field), field=f"NeuroSED {field}")
+        for field in (
+            "neurosed_train_graph_ids_hash",
+            "neurosed_validation_graph_ids_hash",
+        ):
+            _sha256(consumer.get(field), field=f"NeuroSED {field}")
+    else:
+        from src.eval.tastemolnet_neurosed_fixed_budget_adoption import (
+            validate_t7_fixed_budget_consumer,
+        )
+
+        validate_t7_fixed_budget_consumer(
+            consumer,
+            checkpoint_sha256=str(neurosed_evidence["checkpoint_sha256"]),
+            feature_schema_sha256=str(
+                neurosed_evidence["feature_schema_sha256"]
+            ),
+            sha256s_sha256=str(neurosed_evidence["sha256s_sha256"]),
+            feature_atomic_numbers=list(graph_schema.feature_atomic_numbers),
+            feature_input_dim=graph_schema.node_feature_dim,
+        )
     checkpoint_path = Path(neurosed_checkpoint_path)
     if (
         not checkpoint_path.is_absolute()

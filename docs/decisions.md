@@ -41,6 +41,37 @@ test evaluation, freeze, and standardization require fresh output roots.
 
 Accepted
 
+## [2026-08-31] Losslessly adopt the fixed-budget NeuroSED PASS for T7
+
+### Motivation
+
+The independently verified fixed-budget Taste NeuroSED result publishes its
+scientific files at the root, while T7 consumes a generic managed-v2 final with
+the same files under `artifacts/`. The legacy T7 consumer names split graph-ID
+hashes that are not the fixed-budget pair authority.
+
+### Decision
+
+Add one dataset-specific adoption boundary. Its worker copies the complete
+fixed-budget PASS tree byte-for-byte into managed-v2 `artifacts/`. A separate
+verifier reopens and hashes the source and copy, validates the scientific PASS,
+checkpoint, feature schema, selector, generated-query/original-target
+direction, split isolation, and sampler/label bindings, then invokes the
+existing atomic publisher. Consumer-v2 records the real sampler/label hashes;
+it does not retrain, rewrite a model, invent a controller receipt, or change
+GCF, GINE, split, or oracle semantics.
+
+### Consequences
+
+- The original fixed-budget root remains unchanged.
+- T7 can consume `artifacts/best.pt` without a lossy conversion.
+- A real managed attempt and a separately pinned typed T7 release remain
+  mandatory; this implementation is not an execution release.
+
+### Status
+
+Accepted for implementation; not deployed or released.
+
 ---
 
 ## [2026-08-31] Separate Taste GlobalGCE live mining scratch from durable proof

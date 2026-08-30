@@ -974,7 +974,10 @@ def hold_managed_neurosed_predecessors(
         or published_inventory != neurosed_final.inventory.payload()
         or type(consumer) is not dict
         or consumer.get("schema_version")
-        != "tastemolnet_gcf_neurosed_t7_consumer_v1"
+        not in {
+            "tastemolnet_gcf_neurosed_t7_consumer_v1",
+            "tastemolnet_gcf_neurosed_t7_fixed_budget_consumer_v2",
+        }
         or consumer.get("dataset") != "tastemolnet"
         or consumer.get("role") != "GCF_AUXILIARY_DISTANCE_MODEL"
         or consumer.get("classifier") is not False
@@ -1003,10 +1006,32 @@ def hold_managed_neurosed_predecessors(
         "checkpoint_sha256",
         "feature_schema_sha256",
         "sha256s_sha256",
-        "neurosed_train_graph_ids_hash",
-        "neurosed_validation_graph_ids_hash",
     ):
         _sha256(consumer.get(field), field=f"Taste NeuroSED {field}")
+    if (
+        consumer.get("schema_version")
+        == "tastemolnet_gcf_neurosed_t7_consumer_v1"
+    ):
+        for field in (
+            "neurosed_train_graph_ids_hash",
+            "neurosed_validation_graph_ids_hash",
+        ):
+            _sha256(consumer.get(field), field=f"Taste NeuroSED {field}")
+    else:
+        from src.eval.tastemolnet_neurosed_fixed_budget_adoption import (
+            validate_t7_fixed_budget_consumer,
+        )
+
+        validate_t7_fixed_budget_consumer(
+            consumer,
+            checkpoint_sha256=neurosed_checkpoint.sha256,
+            feature_schema_sha256=neurosed_feature_schema.sha256,
+            sha256s_sha256=neurosed_sha256s.sha256,
+            feature_atomic_numbers=list(
+                feature_schema_payload["feature_atomic_numbers"]
+            ),
+            feature_input_dim=int(feature_schema_payload["input_dim"]),
+        )
     checksum_rows: dict[str, str] = {}
     for line in neurosed_sha256s.read_bytes().decode("utf-8").splitlines():
         digest, separator, relative = line.partition("  ")

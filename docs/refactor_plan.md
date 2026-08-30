@@ -2777,3 +2777,14 @@ Mutagenicity roadmaps.
   cap-checkpoint finalization/post-processing executor before the first 20k
   committed checkpoint.  Until then the observer must report the execution
   blocker rather than imply automation.
+
+## 2026-08-31: T7 fixed-budget NeuroSED managed-v2 adoption
+
+- [x] Copy the complete fixed-budget PASS tree into managed-v2 `artifacts/`
+  without changing the source or model bytes.
+- [x] Independently rehash source/copy and reuse the frozen managed-v2 atomic
+  publisher.
+- [x] Add a truthful fixed-budget T7 consumer-v2 while retaining legacy v1.
+- [x] Add focused publication tests and AutoDL/Slurm CLI parity.
+- [ ] Run under an existing real controller and issue the separate typed T7
+  release successor after its published final is independently pinned.

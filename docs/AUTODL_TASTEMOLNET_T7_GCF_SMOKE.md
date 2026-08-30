@@ -19,6 +19,15 @@ managed stage root, the one Taste NeuroSED generic managed final (root, PASS,
 gate, verification, checkpoint, feature schema, and checksum manifest), and the
 exact absent final path. The worker cannot choose or publish that final path.
 
+The official-semantics fixed-budget NeuroSED PASS is adopted without changing
+its scientific bytes by
+`scripts/autodl/adopt_tastemolnet_fixed_budget_neurosed_v2.py`. Copy mode runs
+as a child of the existing generic managed-v2 worker and copies the complete
+source tree into `MANAGED_ARTIFACT_ROOT`; a different process uses
+`verify-and-publish` to reopen and rehash both trees and invoke the existing
+atomic publisher. T7 accepts its fixed-budget consumer-v2 with truthfully named
+sampler/label hashes. This adapter does not enable the disabled T7 release.
+
 ## Why the BACE adapter is not reused
 
 The BACE GCF route is not a generic frozen-GINE adapter. It requires a BACE
