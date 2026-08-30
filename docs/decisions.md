@@ -1,5 +1,33 @@
 # Decisions Log
 
+## [2026-08-31] Normalize fixed-budget NeuroSED CLI paths before dispatch
+
+### Background
+
+The production trainer accepted `--config` as a string but called `resolve`
+on the unconverted value.  The fixed GED labels and split protocol were
+already complete; this type error alone prevented the real trainer launch.
+
+### Decision
+
+Normalize string and `Path` inputs through
+`Path(value).expanduser().resolve(strict=...)`.  Anchor the relative HPC
+configuration to the immutable checkout, require every scientific input and
+symlink target to exist, and permit only the fresh output root to be absent.
+Keep the 5000/1000 labels, non-MIP backend, selector, and generated-to-original
+inference direction unchanged.
+
+### Consequences
+
+- The production runner no longer dispatches `resolve` on a string.
+- Missing inputs fail before training; no labels or protocol choices are
+  recomputed.
+- Existing Slurm CLI arguments remain unchanged.
+
+### Status
+
+Accepted
+
 ## [2026-08-30] Add a narrow deadline-continuation heartbeat
 
 ### Background

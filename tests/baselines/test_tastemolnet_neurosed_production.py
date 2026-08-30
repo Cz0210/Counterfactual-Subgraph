@@ -308,16 +308,58 @@ def test_slurm_wrappers_match_new_entrypoints() -> None:
     assert "--train-and-verify" in trainer_wrapper
 
 
-def test_single_cli_train_and_verify_uses_independent_process_and_pass_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _load_neurosed_cli_module():
     script = Path("scripts/tastemolnet/train_fixed_budget_neurosed.py").resolve()
     spec = importlib.util.spec_from_file_location("production_neurosed_cli", script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_neurosed_path_normalization_accepts_str_path_relative_and_absolute(
+    tmp_path: Path,
+) -> None:
+    module = _load_neurosed_cli_module()
+    target = tmp_path / "input.json"
+    target.write_text("{}\n", encoding="utf-8")
+    assert module.normalize_path(str(target)) == target.resolve()
+    assert module.normalize_path(target) == target.resolve()
+    assert module.normalize_path(
+        Path("input.json"), relative_to=tmp_path
+    ) == target.resolve()
+
+
+def test_neurosed_path_normalization_resolves_symlinks_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    module = _load_neurosed_cli_module()
+    target = tmp_path / "target.json"
+    target.write_text("{}\n", encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    assert module.normalize_path(link) == target.resolve()
+    with pytest.raises(ValueError, match="does not exist"):
+        module.normalize_path(tmp_path / "missing.json")
+    with pytest.raises(TypeError, match="str or pathlib.Path"):
+        module.normalize_path(7)
+
+
+def test_single_cli_train_and_verify_uses_independent_process_and_pass_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_neurosed_cli_module()
     output_root = tmp_path / "run"
     subprocess_calls: list[list[str]] = []
+
+    for directory in (tmp_path / "labels", tmp_path / "train", tmp_path / "validation", tmp_path / "gcf"):
+        directory.mkdir()
+    for file_path in (
+        tmp_path / "features.json",
+        tmp_path / "selection.json",
+        tmp_path / "receipt.json",
+    ):
+        file_path.write_text("{}\n", encoding="utf-8")
 
     def fake_train(**kwargs):
         Path(kwargs["output_root"]).mkdir()

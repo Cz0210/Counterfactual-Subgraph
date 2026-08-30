@@ -23,6 +23,31 @@ from src.train.tastemolnet_neurosed_fixed_budget import (  # noqa: E402
 )
 
 
+def normalize_path(
+    value: str | Path,
+    *,
+    relative_to: Path | None = None,
+    must_exist: bool = True,
+) -> Path:
+    """Normalize one CLI path without ever dispatching ``resolve`` on a str.
+
+    Relative configuration paths are anchored to the immutable repository
+    checkout, not to the caller's working directory.  Scientific inputs fail
+    closed when their target (including a symlink target) is absent; only the
+    fresh output root is allowed not to exist yet.
+    """
+
+    if not isinstance(value, (str, Path)):
+        raise TypeError("NeuroSED paths must be str or pathlib.Path values")
+    path = Path(value).expanduser()
+    if not path.is_absolute() and relative_to is not None:
+        path = relative_to / path
+    try:
+        return path.resolve(strict=must_exist)
+    except FileNotFoundError as exc:
+        raise ValueError(f"NeuroSED path does not exist: {path}") from exc
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/hpc.yaml")
@@ -95,9 +120,9 @@ def _run_independent_verifier(args: argparse.Namespace) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    expected_config = REPO_ROOT / "configs" / "hpc.yaml"
-    config = args.config if Path(args.config).is_absolute() else REPO_ROOT / args.config
-    if config.resolve() != expected_config.resolve():
+    expected_config = normalize_path(REPO_ROOT / "configs" / "hpc.yaml")
+    config = normalize_path(args.config, relative_to=REPO_ROOT)
+    if config != expected_config:
         raise ValueError("fixed-budget NeuroSED requires configs/hpc.yaml")
     if args.set != ["inference.fallback_to_heuristic=false"]:
         raise ValueError(
@@ -105,14 +130,18 @@ def main(argv: list[str] | None = None) -> int:
             "inference.fallback_to_heuristic=false"
         )
     common = {
-        "ged_label_root": args.ged_label_root,
-        "train_pair_root": args.train_pair_root,
-        "validation_pair_root": args.validation_pair_root,
-        "feature_schema_path": args.feature_schema_json,
-        "non_mip_selection_manifest_path": args.non_mip_selection_manifest,
-        "non_mip_verifier_receipt_path": args.non_mip_verifier_receipt,
-        "vendored_gcf_root": args.vendored_gcf_root,
-        "output_root": args.output_root,
+        "ged_label_root": normalize_path(args.ged_label_root),
+        "train_pair_root": normalize_path(args.train_pair_root),
+        "validation_pair_root": normalize_path(args.validation_pair_root),
+        "feature_schema_path": normalize_path(args.feature_schema_json),
+        "non_mip_selection_manifest_path": normalize_path(
+            args.non_mip_selection_manifest
+        ),
+        "non_mip_verifier_receipt_path": normalize_path(
+            args.non_mip_verifier_receipt
+        ),
+        "vendored_gcf_root": normalize_path(args.vendored_gcf_root),
+        "output_root": normalize_path(args.output_root, must_exist=False),
         "execution_git_commit": args.execution_git_commit,
         "execution_git_tree": args.execution_git_tree,
         "device": args.device,
