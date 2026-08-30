@@ -284,10 +284,11 @@ def run_common_recourse(
     if engine not in {"legacy_in_memory", "external_memory_exact_v1"}:
         raise ValueError(f"Unsupported common-recourse engine: {engine}")
     if engine == "external_memory_exact_v1" and (
-        dataset != "aids" or device != "cpu"
+        dataset not in {"aids", "mutagenicity"} or device != "cpu"
     ):
         raise ValueError(
-            "external_memory_exact_v1 is released only for CPU-backed AIDS"
+            "external_memory_exact_v1 is released only for CPU-backed "
+            "AIDS or Mutagenicity"
         )
     chunk_source_requested = external_pair_store_source_checkpoint is not None
     if chunk_source_requested and external_close_pair_view_manifest is None:
