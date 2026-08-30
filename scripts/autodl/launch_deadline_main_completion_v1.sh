@@ -20,10 +20,15 @@ if [[ "$ACTION" == "status" ]]; then
   exec "$AUTODL_PYTHON" -I -B "$SCRIPT_DIR/status_deadline_main_completion_v1.py" --state-root "$STATE_ROOT"
 fi
 
+PYTHON_ACTION="$ACTION"
+if [[ "$ACTION" == "launch" ]]; then
+  PYTHON_ACTION="run"
+fi
+
 COMMAND=(
   "$AUTODL_PYTHON" -I -B "$SCRIPT_DIR/run_deadline_main_completion_v1.py"
   --config "$PROJECT_ROOT/configs/hpc.yaml"
-  "$ACTION"
+  "$PYTHON_ACTION"
   --spec "$DEADLINE_MAIN_COMPLETION_SPEC"
 )
 if [[ "$ACTION" == "run" ]]; then
