@@ -12,6 +12,7 @@ from src.baselines.comrecgc import external_memory_dbscan as external
 
 sklearn = pytest.importorskip("sklearn")
 from sklearn.cluster import DBSCAN  # noqa: E402
+from sklearn.neighbors import NearestNeighbors  # noqa: E402
 
 
 def _save(path: Path, values: np.ndarray) -> Path:
@@ -131,6 +132,116 @@ def _component_values(values: list[float]) -> np.ndarray:
     result = np.zeros((len(values), 64), dtype=np.float64)
     result[:, 0] = np.asarray(values, dtype=np.float64)
     return result
+
+
+def test_boundary_reference_resolver_uses_inclusive_sklearn_float64() -> None:
+    eps = 0.02
+    left = np.zeros(64, dtype=np.float64)
+    inside = np.zeros(64, dtype=np.float64)
+    inside[0] = np.nextafter(eps, 0.0)
+    outside = np.zeros(64, dtype=np.float64)
+    outside[0] = np.nextafter(eps, np.inf)
+
+    inside_membership, inside_distance = external.resolve_boundary_membership(
+        left, inside, eps
+    )
+    outside_membership, outside_distance = external.resolve_boundary_membership(
+        left, outside, eps
+    )
+
+    assert inside_membership is True
+    assert inside_distance <= eps
+    assert outside_membership is False
+    assert outside_distance > eps
+
+
+def test_boundary_reference_fallback_is_explicit_and_deterministic() -> None:
+    eps = 0.02
+    vectors = np.zeros((1, 64), dtype=np.float32)
+    query = np.zeros((1, 64), dtype=np.float64)
+    query[0, 0] = np.nextafter(eps, 0.0)
+
+    class MissingInsideModel:
+        @staticmethod
+        def radius_neighbors(_values, *, return_distance):
+            assert return_distance is False
+            return np.asarray([np.asarray([], dtype=np.intp)], dtype=object)
+
+    first = external._exact_query_membership(
+        model=MissingInsideModel(),
+        vectors=vectors,
+        query_vectors64=query,
+        start=0,
+        stop=1,
+        eps=eps,
+    )
+    replay = external._exact_query_membership(
+        model=MissingInsideModel(),
+        vectors=vectors,
+        query_vectors64=query,
+        start=0,
+        stop=1,
+        eps=eps,
+    )
+
+    within, distances, _near_count, rows = first
+    assert bool(within[0, 0]) is True
+    assert float(distances[0, 0]) <= eps
+    assert len(rows) == 1
+    assert rows[0]["row_id"] == 0
+    assert rows[0]["fast_membership"] is False
+    assert rows[0]["membership"] is True
+    assert rows[0]["reference_semantics"] == "SKLEARN_FLOAT64"
+    assert rows == replay[3]
+    assert np.array_equal(within, replay[0])
+    assert np.array_equal(distances, replay[1])
+
+
+def test_production_boundary_pair_uses_reference_membership() -> None:
+    vectors_path = Path(
+        os.environ.get(
+            "AIDS_BOUNDARY_PRODUCTION_VECTORS",
+            "/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/repairs/"
+            "four_methods_four_datasets_aids_comrecgc_exact_route_v5_pair_order_v1/"
+            "source_snapshot/attempt-0/pair_store/recourse_vectors.npy",
+        )
+    )
+    if not vectors_path.is_file():
+        pytest.skip("production boundary vector store is unavailable")
+    row_id = 5_025_392
+    anchor_id = 49_369_222
+    vectors = np.load(vectors_path, mmap_mode="r")
+    anchor64 = np.asarray(vectors[anchor_id : anchor_id + 1], dtype=np.float64)
+    model = NearestNeighbors(radius=0.02, algorithm="brute", metric="euclidean")
+    model.fit(np.asarray(vectors[anchor_id : anchor_id + 1]))
+
+    first = external._exact_query_membership(
+        model=model,
+        vectors=vectors,
+        query_vectors64=anchor64,
+        start=row_id,
+        stop=row_id + 1,
+        eps=0.02,
+    )
+    replay = external._exact_query_membership(
+        model=model,
+        vectors=vectors,
+        query_vectors64=anchor64,
+        start=row_id,
+        stop=row_id + 1,
+        eps=0.02,
+    )
+
+    within, distances, _near_count, rows = first
+    assert bool(within[0, 0]) is True
+    assert len(rows) == 1
+    assert rows[0]["row_id"] == row_id
+    assert rows[0]["fast_membership"] is False
+    assert rows[0]["membership"] is True
+    assert rows[0]["sklearn_reference_distance"] <= 0.02
+    assert rows == replay[3]
+    assert np.array_equal(within, replay[0])
+    assert np.array_equal(distances, replay[1])
 
 
 def test_adaptive_disconnected_anchor_components_are_bridged_by_data(

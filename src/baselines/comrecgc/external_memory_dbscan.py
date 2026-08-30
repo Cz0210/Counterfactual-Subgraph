@@ -775,6 +775,42 @@ def _adaptive_primary_query_anchors(
     return np.asarray(sorted(selected), dtype=np.intp), boundary_rows
 
 
+def resolve_boundary_membership(
+    vector_a: np.ndarray,
+    vector_b: np.ndarray,
+    eps: float,
+) -> tuple[bool, float]:
+    """Resolve one uncertain radius pair with sklearn float64 semantics."""
+
+    try:
+        from sklearn.metrics.pairwise import euclidean_distances
+    except Exception as exc:  # pragma: no cover - dependency gate
+        raise ExternalMemoryDBSCANError(
+            "boundary reference fallback requires scikit-learn"
+        ) from exc
+    left = np.asarray(vector_a, dtype=np.float64)
+    right = np.asarray(vector_b, dtype=np.float64)
+    if (
+        left.ndim != 1
+        or right.ndim != 1
+        or left.shape != right.shape
+        or left.size == 0
+        or not bool(np.isfinite(left).all())
+        or not bool(np.isfinite(right).all())
+    ):
+        raise ExternalMemoryDBSCANError(
+            "boundary reference fallback received invalid vectors"
+        )
+    reference_distance = float(
+        euclidean_distances(left[None, :], right[None, :])[0, 0]
+    )
+    if not np.isfinite(reference_distance):
+        raise ExternalMemoryDBSCANError(
+            "boundary reference fallback returned a nonfinite distance"
+        )
+    return bool(reference_distance <= float(eps)), reference_distance
+
+
 def _exact_query_membership(
     *,
     model: Any,
@@ -783,8 +819,15 @@ def _exact_query_membership(
     start: int,
     stop: int,
     eps: float,
-) -> tuple[np.ndarray, np.ndarray, int]:
-    """Return sklearn membership after exact float64 elementwise agreement."""
+) -> tuple[np.ndarray, np.ndarray, int, list[dict[str, Any]]]:
+    """Return membership under the frozen sklearn-float64 boundary contract.
+
+    The existing bounded sklearn query remains the fast path.  Only pairs for
+    which that membership disagrees with the direct float64 calculation are
+    sent through ``resolve_boundary_membership``.  Those exceptional pairs are
+    returned as explicit evidence so callers can bind them into the resumable
+    progress ledger; no boundary decision is silent.
+    """
 
     neighborhoods = model.radius_neighbors(
         vectors[start:stop], return_distance=False
@@ -824,11 +867,42 @@ def _exact_query_membership(
                 np.linalg.norm(block[int(row)] - query_vectors64[int(column)])
             )
     float64_within = distances <= float(eps)
-    if not np.array_equal(sklearn_within, float64_within):
-        raise ExternalMemoryDBSCANError(
-            "FLOAT_BOUNDARY_UNCERTAIN: sklearn/float64 recovery membership differs"
+    reference_rows: list[dict[str, Any]] = []
+    for row, column in np.argwhere(sklearn_within != float64_within).tolist():
+        row = int(row)
+        column = int(column)
+        fast_distance = float(distances[row, column])
+        fast_membership = bool(sklearn_within[row, column])
+        reference_membership, reference_distance = resolve_boundary_membership(
+            block[row], query_vectors64[column], float(eps)
         )
-    return sklearn_within, distances, near_count
+        distances[row, column] = reference_distance
+        sklearn_within[row, column] = reference_membership
+        reference_rows.append(
+            {
+                "row_id": int(start) + row,
+                "query_column": column,
+                "source_dtype": str(np.asarray(vectors[start:stop]).dtype),
+                "reference_dtype": "float64",
+                "dimension_count": int(block.shape[1]),
+                "eps": float(eps),
+                "fast_distance": fast_distance,
+                "fast_distance_float64_hex": fast_distance.hex(),
+                "fast_membership": fast_membership,
+                "sklearn_reference_distance": reference_distance,
+                "sklearn_reference_distance_float64_hex": (
+                    reference_distance.hex()
+                ),
+                "membership": reference_membership,
+                "absolute_difference": abs(reference_distance - fast_distance),
+                "absolute_difference_float64_hex": abs(
+                    reference_distance - fast_distance
+                ).hex(),
+                "label_contract": "distance <= eps",
+                "reference_semantics": "SKLEARN_FLOAT64",
+            }
+        )
+    return sklearn_within, distances, near_count, reference_rows
 
 
 def _failure_mask_for_block(
@@ -864,7 +938,7 @@ def _recovery_scan_block(
     verify_core_contract: bool,
     write_core_outputs: bool,
 ) -> dict[str, Any]:
-    within, distances, near_count = _exact_query_membership(
+    within, distances, near_count, reference_rows = _exact_query_membership(
         model=model,
         vectors=vectors,
         query_vectors64=query_vectors64,
@@ -872,6 +946,10 @@ def _recovery_scan_block(
         stop=stop,
         eps=float(eps),
     )
+    for row in reference_rows:
+        column = int(row["query_column"])
+        row["query_anchor_local_index"] = int(query_anchor_locals[column])
+        row["query_anchor_global_index"] = int(query_anchor_globals[column])
     failure_mask = _failure_mask_for_block(failures, start=start, stop=stop)
     nonfailure_mask = ~failure_mask
     query_column_by_global = {
@@ -1078,6 +1156,8 @@ def _recovery_scan_block(
             np.ascontiguousarray(within).tobytes(order="C")
         ).hexdigest(),
         "near_boundary_direct_norm_recompute_count": int(near_count),
+        "boundary_reference_fallback_count": len(reference_rows),
+        "boundary_reference_fallback_rows": reference_rows,
         "new_bridge_witnesses": witnesses,
         "component_parent_after": [
             _component_find(component_parent, value)
@@ -3598,6 +3678,8 @@ def _component_scan_result(
     boundary_edges = 0
     near_count = 0
     witness_count = 0
+    reference_fallback_count = 0
+    reference_max_difference = 0.0
     minimum_lower: int | None = None
     for entry in ledger["entries"]:
         payload = entry["payload"]
@@ -3607,6 +3689,19 @@ def _component_scan_result(
         boundary_edges += int(payload["count_certifying_edges_exactly_at_eps"])
         near_count += int(payload["near_boundary_direct_norm_recompute_count"])
         witness_count += len(payload["new_bridge_witnesses"])
+        fallback_rows = payload.get("boundary_reference_fallback_rows", [])
+        if int(payload.get("boundary_reference_fallback_count", -1)) != len(
+            fallback_rows
+        ):
+            raise ExternalMemoryDBSCANError(
+                "boundary reference fallback payload count mismatch"
+            )
+        reference_fallback_count += len(fallback_rows)
+        if fallback_rows:
+            reference_max_difference = max(
+                reference_max_difference,
+                max(float(row["absolute_difference"]) for row in fallback_rows),
+            )
         if verify_core_contract:
             block_minimum = int(payload["minimum_core_lower_bound"])
             minimum_lower = (
@@ -3628,6 +3723,11 @@ def _component_scan_result(
         ),
         "count_certifying_edges_exactly_at_eps": int(boundary_edges),
         "near_boundary_direct_norm_recompute_count": int(near_count),
+        "boundary_reference_fallback_count": int(reference_fallback_count),
+        "boundary_reference_max_absolute_difference": float(
+            reference_max_difference
+        ),
+        "boundary_reference_semantics": "SKLEARN_FLOAT64",
         "all_sklearn_float64_memberships_equal": True,
         "all_rows_core_proven": bool(verify_core_contract),
         "minimum_core_lower_bound": minimum_lower,
@@ -4100,6 +4200,7 @@ def _write_component_recovery_outputs(
     margins = [float(anchor_margin)]
     exact_boundary_edges = int(anchor_boundary_count)
     near_boundary_count = 0
+    reference_rows: list[dict[str, Any]] = []
     for phase in bridge_phases:
         result = ledgers[phase]["result"]
         margin = result.get("minimum_certifying_margin_hex")
@@ -4107,6 +4208,46 @@ def _write_component_recovery_outputs(
             margins.append(float.fromhex(str(margin)))
         exact_boundary_edges += int(result["count_certifying_edges_exactly_at_eps"])
         near_boundary_count += int(result["near_boundary_direct_norm_recompute_count"])
+        for entry in ledgers[phase]["entries"]:
+            for raw in entry["payload"].get(
+                "boundary_reference_fallback_rows", []
+            ):
+                reference_rows.append(
+                    {
+                        "phase": phase,
+                        "block_start": int(entry["start"]),
+                        "block_stop": int(entry["stop"]),
+                        **dict(raw),
+                    }
+                )
+    reference_rows.sort(
+        key=lambda row: (
+            str(row["phase"]),
+            int(row["row_id"]),
+            int(row["query_anchor_global_index"]),
+        )
+    )
+    reference_path = root / "boundary_reference_fallback.json"
+    reference_payload = {
+        "schema_version": "comrecgc_boundary_reference_fallback_v1",
+        "status": "PASS",
+        "reference_semantics": "SKLEARN_FLOAT64",
+        "metric": "euclidean",
+        "comparison": "distance <= eps",
+        "eps": float(contract.eps),
+        "fallback_count": len(reference_rows),
+        "max_absolute_difference": (
+            0.0
+            if not reference_rows
+            else max(float(row["absolute_difference"]) for row in reference_rows)
+        ),
+        "rows": reference_rows,
+    }
+    reference_sha = _ensure_exact_json(
+        reference_path,
+        reference_payload,
+        label="component boundary reference fallback evidence",
+    )
     scientific_identity_sha = _stable_hash(identity)
     boundary_path = root / "boundary_certificate.json"
     boundary = {
@@ -4124,6 +4265,13 @@ def _write_component_recovery_outputs(
         "float64_revalidation_complete": True,
         "float64_revalidated_row_count": n_samples,
         "sklearn_membership_exactly_matched": True,
+        "sklearn_reference_semantics": "SKLEARN_FLOAT64",
+        "boundary_reference_fallback_path": str(reference_path),
+        "boundary_reference_fallback_sha256": reference_sha,
+        "boundary_reference_fallback_count": len(reference_rows),
+        "boundary_reference_max_absolute_difference": reference_payload[
+            "max_absolute_difference"
+        ],
         "anchor_graph_float64_exactly_matched": True,
         "near_boundary_direct_norm_recompute_count": near_boundary_count,
         "minimum_margin_to_eps_among_certifying_edges": float(min(margins)),
@@ -5050,12 +5198,41 @@ def _validate_component_recovery_closure(
     all_core = loaded_certificates["all_core"]
     connectivity = loaded_certificates["connectivity"]
     partition = loaded_certificates["cluster_partition"]
+    reference_path = Path(
+        str(boundary.get("boundary_reference_fallback_path") or "")
+    ).resolve(strict=True)
+    if (
+        reference_path.parent != root
+        or _sha256_file(reference_path)
+        != boundary.get("boundary_reference_fallback_sha256")
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal boundary reference fallback evidence mismatch"
+        )
+    reference_payload = _load_object(reference_path)
+    if (
+        reference_payload.get("schema_version")
+        != "comrecgc_boundary_reference_fallback_v1"
+        or reference_payload.get("status") != "PASS"
+        or reference_payload.get("reference_semantics") != "SKLEARN_FLOAT64"
+        or reference_payload.get("comparison") != "distance <= eps"
+        or float(reference_payload.get("eps", float("nan")))
+        != float(boundary.get("eps", float("nan")))
+        or int(reference_payload.get("fallback_count", -1))
+        != len(reference_payload.get("rows", []))
+        or int(boundary.get("boundary_reference_fallback_count", -1))
+        != int(reference_payload.get("fallback_count", -2))
+    ):
+        raise ExternalMemoryDBSCANError(
+            "terminal boundary reference fallback evidence is incomplete"
+        )
     if (
         boundary.get("comparison") != "distance <= eps"
         or boundary.get("recheck_dtype") != "float64"
         or boundary.get("float64_revalidation_complete") is not True
         or int(boundary.get("float64_revalidated_row_count", -1)) != n_samples
         or boundary.get("sklearn_membership_exactly_matched") is not True
+        or boundary.get("sklearn_reference_semantics") != "SKLEARN_FLOAT64"
         or boundary.get("anchor_graph_float64_exactly_matched") is not True
         or int(boundary.get("uncertain_edges_accepted", -1)) != 0
         or all_core.get("all_points_core_proven") is not True
