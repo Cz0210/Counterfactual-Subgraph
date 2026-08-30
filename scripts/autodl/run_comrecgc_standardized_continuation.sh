@@ -60,11 +60,24 @@ if [[ -n "${COMMON_RECOURSE_ENGINE:-}" ]]; then
   args+=(--common-recourse-engine "$COMMON_RECOURSE_ENGINE")
 fi
 if [[ "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
+  exact_dbscan_mode="${COMRECGC_EXTERNAL_DBSCAN_SHORTCUT_MODE:-}"
+  if [[ -z "$exact_dbscan_mode" ]]; then
+    if [[ "$DATASET" == "mutagenicity" ]]; then
+      exact_dbscan_mode="sklearn_float64_exact_multi_component_v1"
+    else
+      exact_dbscan_mode="disabled"
+    fi
+  fi
+  if [[ "$DATASET" == "mutagenicity" \
+        && "$exact_dbscan_mode" != "sklearn_float64_exact_multi_component_v1" ]]; then
+    echo "Mutagenicity exact requires sklearn float64 multi-component mode" >&2
+    exit 64
+  fi
   args+=(
     --external-max-rss-gb "${COMRECGC_EXTERNAL_MAX_RSS_GB:-96}"
     --external-query-block-size "${COMRECGC_EXTERNAL_QUERY_BLOCK_SIZE:-8}"
     --external-checkpoint-interval-blocks "${COMRECGC_EXTERNAL_CHECKPOINT_INTERVAL_BLOCKS:-1}"
-    --external-dbscan-shortcut-mode "${COMRECGC_EXTERNAL_DBSCAN_SHORTCUT_MODE:-disabled}"
+    --external-dbscan-shortcut-mode "$exact_dbscan_mode"
     --external-shortcut-seed-count "${COMRECGC_EXTERNAL_SHORTCUT_SEED_COUNT:-3}"
     --external-shortcut-failure-cap "${COMRECGC_EXTERNAL_SHORTCUT_FAILURE_CAP:-4096}"
     --external-shortcut-query-block-size "${COMRECGC_EXTERNAL_SHORTCUT_QUERY_BLOCK_SIZE:-65536}"
@@ -132,6 +145,17 @@ export PYTHONPATH="$PROJECT_ROOT"
 export PYTHONDONTWRITEBYTECODE=1
 export TOKENIZERS_PARALLELISM=false
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+if [[ "$DATASET" == "mutagenicity" \
+      && "${COMMON_RECOURSE_ENGINE:-}" == "external_memory_exact_v1" ]]; then
+  # sklearn owns exactly four outer jobs for the frozen Mut route.  Keep each
+  # distance-kernel worker single-threaded so the process cannot silently
+  # exceed the user-authorized CPU4 ceiling through nested BLAS/OpenMP pools.
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1
+  export LOKY_MAX_CPU_COUNT=4
+fi
 
 echo "[COMRECGC_STANDARDIZED_CONTINUATION_START] dataset=$DATASET output=$OUTPUT_ROOT"
 exec "$PYTHON" "$PROJECT_ROOT/scripts/autodl/run_comrecgc_standardized_continuation.py" "${args[@]}"

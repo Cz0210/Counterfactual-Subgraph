@@ -46,7 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--external-dbscan-shortcut-mode",
-        choices=("disabled", "all_core_one_component_adaptive_anchor_v1"),
+        choices=(
+            "disabled",
+            "all_core_one_component_adaptive_anchor_v1",
+            "sklearn_float64_exact_multi_component_v1",
+        ),
         default="disabled",
     )
     parser.add_argument("--external-shortcut-seed-count", type=int, default=3)

@@ -2186,6 +2186,119 @@ def test_handover_checkpoint_reopens_authenticated_hash_chain(tmp_path: Path) ->
         )
 
 
+def test_stopped_checkpoint_adoption_is_replace_published_and_fd_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.baselines.comrecgc import external_memory_dbscan as dbscan
+
+    controller_root = tmp_path / "controller"
+    gates = controller_root / "gates"
+    gates.mkdir(parents=True)
+    checkpoint = controller_root / "science/dbscan/checkpoint.json"
+    checkpoint.parent.mkdir(parents=True)
+    vectors_sha = "a" * 64
+    identity = {"vectors_sha256": vectors_sha}
+    progress = 20_512_768
+    ledger = dbscan._new_progress_ledger(
+        phase="shortcut_anchor_scan", identity=identity
+    )
+    dbscan._append_progress_entry(
+        ledger,
+        start=0,
+        stop=progress,
+        payload={"fixture": "post-promotion"},
+    )
+    dbscan._checkpoint(
+        checkpoint,
+        identity=identity,
+        phase="adaptive_component_primary",
+        next_offset=progress,
+        peak_rss_bytes=1,
+        extra=dbscan._progress_checkpoint_extra(
+            {"shortcut_anchor_scan": ledger}, identity=identity
+        ),
+    )
+    manifest = {
+        "manifest_sha256": "b" * 64,
+        "controller_root": str(controller_root),
+        "source_authority": {"source_vectors_sha256": vectors_sha},
+        "resources": {
+            "proc_root": str(tmp_path / "proc"),
+            "budget": {
+                "max_output_bytes": 16 * 1024**2,
+                "safety_floor_bytes": 0,
+            },
+        },
+        "stages": [
+            {
+                "stage_id": recovery.EXACT_STAGE,
+                "progress_checkpoint_path": str(checkpoint),
+            }
+        ],
+    }
+    (tmp_path / "proc").mkdir()
+    monkeypatch.setattr(
+        recovery, "_load_launchable_manifest", lambda _path: manifest
+    )
+    monkeypatch.setattr(
+        recovery, "_load_state", lambda _root, _manifest: {}
+    )
+    replacements: list[tuple[Path, Path]] = []
+    real_replace = recovery.os.replace
+
+    def tracked_replace(source: str | Path, target: str | Path) -> None:
+        replacements.append((Path(source), Path(target)))
+        real_replace(source, target)
+
+    monkeypatch.setattr(recovery.os, "replace", tracked_replace)
+    result = recovery.publish_exact_checkpoint_adoption_receipt(
+        tmp_path / "manifest.json", expected_progress_rows=progress
+    )
+
+    receipt_path = Path(result["artifact"]["path"])
+    assert replacements == [(replacements[0][0], receipt_path)]
+    assert not replacements[0][0].exists()
+    assert receipt_path.stat().st_ino == result["artifact"]["stat_identity"]["inode"]
+    assert recovery.sha256_file(receipt_path) == result["artifact"]["content_sha256"]
+    assert result["payload"]["checkpoint_snapshot"]["progress_rows"] == progress
+    assert result["payload"]["publication_sequence"] == [
+        "producer_os_replace",
+        "producer_parent_fsync",
+        "verifier_o_nofollow_open",
+        "verifier_fstat",
+        "verifier_fd_sha256",
+    ]
+
+    reopened = recovery.publish_exact_checkpoint_adoption_receipt(
+        tmp_path / "manifest.json", expected_progress_rows=progress
+    )
+    assert reopened == result
+
+
+def test_checkpoint_generation_retry_never_accepts_replaced_fd_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "checkpoint.json"
+    replacement = tmp_path / "replacement.json"
+    _write_json(path, {"generation": 1})
+    _write_json(replacement, {"generation": 2})
+    real_pread = recovery.os.pread
+    replaced = False
+
+    def racing_pread(descriptor: int, size: int, offset: int) -> bytes:
+        nonlocal replaced
+        block = real_pread(descriptor, size, offset)
+        if not replaced and offset == 0:
+            replaced = True
+            os.replace(replacement, path)
+        return block
+
+    monkeypatch.setattr(recovery.os, "pread", racing_pread)
+    payload, artifact = recovery._read_stable_promoted_checkpoint_generation(path)
+    assert payload == {"generation": 2}
+    assert artifact["stat_identity"] == recovery._stat_identity(path)
+
+
 def test_handover_contract_binds_exact_old_pid_generation(tmp_path: Path) -> None:
     spec_path, value = _spec(tmp_path)
     contract = value["resources"]["old_brute_handover"]

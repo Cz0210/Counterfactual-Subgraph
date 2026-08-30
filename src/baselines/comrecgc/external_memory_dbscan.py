@@ -39,6 +39,10 @@ import numpy as np
 
 SCHEMA_VERSION = "comrecgc_external_memory_dbscan_v3"
 SHORTCUT_DISABLED = "disabled"
+SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT = (
+    "sklearn_float64_exact_multi_component_v1"
+)
+SKLEARN_FLOAT64_EXACT_MAX_WORKERS = 4
 ALL_CORE_ONE_COMPONENT_SHORTCUT = "all_core_one_component_anchor_v1"
 ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT = (
     "all_core_one_component_adaptive_anchor_v1"
@@ -103,6 +107,7 @@ class ExternalDBSCANContract:
             )
         if self.shortcut_mode not in {
             SHORTCUT_DISABLED,
+            SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
             ALL_CORE_ONE_COMPONENT_SHORTCUT,
             ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
         }:
@@ -384,7 +389,13 @@ def _bounded_block_size(
     return max(1, min(int(requested), int(safe)))
 
 
-def _fit_neighbors(vectors: np.ndarray, *, eps: float) -> tuple[Any, str, str]:
+def _fit_neighbors(
+    vectors: np.ndarray,
+    *,
+    eps: float,
+    algorithm: str = "auto",
+    worker_count: int | None = None,
+) -> tuple[Any, str, str]:
     try:
         import sklearn
         from sklearn.neighbors import NearestNeighbors
@@ -394,12 +405,12 @@ def _fit_neighbors(vectors: np.ndarray, *, eps: float) -> tuple[Any, str, str]:
         ) from exc
     model = NearestNeighbors(
         radius=float(eps),
-        algorithm="auto",
+        algorithm=str(algorithm),
         leaf_size=30,
         metric="euclidean",
         metric_params=None,
         p=None,
-        n_jobs=None,
+        n_jobs=None if worker_count is None else int(worker_count),
     )
     model.fit(vectors)
     method = str(getattr(model, "_fit_method", "UNKNOWN"))
@@ -6405,8 +6416,33 @@ def fit_external_memory_dbscan(
             f"vectors must preserve float32/float64 semantics, got {vectors.dtype}"
         )
     n_samples, n_features = (int(vectors.shape[0]), int(vectors.shape[1]))
+    radius_vectors: np.ndarray = vectors
+    neighbor_algorithm = "auto"
+    distance_reference_dtype = str(vectors.dtype)
+    if contract.shortcut_mode == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT:
+        # Mutagenicity is not eligible for the AIDS all-core/single-component
+        # shortcut.  Freeze the complete radius graph to sklearn's float64
+        # brute Euclidean kernel and let the normal three-pass implementation
+        # materialize every component.  The conversion is bounded explicitly;
+        # it is scientific input to all three passes, not an audit-only copy.
+        reference_bytes = n_samples * n_features * np.dtype(np.float64).itemsize
+        _check_rss(
+            contract.max_rss_bytes,
+            phase="sklearn_float64_reference_conversion",
+            reserved_bytes=reference_bytes,
+        )
+        radius_vectors = np.asarray(vectors, dtype=np.float64, order="C")
+        neighbor_algorithm = "brute"
+        distance_reference_dtype = "float64"
     neighbors, sklearn_version, fit_method = _fit_neighbors(
-        vectors, eps=float(contract.eps)
+        radius_vectors,
+        eps=float(contract.eps),
+        algorithm=neighbor_algorithm,
+        worker_count=(
+            SKLEARN_FLOAT64_EXACT_MAX_WORKERS
+            if contract.shortcut_mode == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+            else None
+        ),
     )
     if sklearn_version != contract.expected_sklearn_version:
         raise ExternalMemoryDBSCANError(
@@ -6448,6 +6484,17 @@ def fit_external_memory_dbscan(
             ),
             "selected_anchor_indices_sha256": None,
         }
+    elif contract.shortcut_mode == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT:
+        shortcut_identity = {
+            "mode": SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
+            "single_component_assumed": False,
+            "failure_cap_used": False,
+            "multi_component_labels_materialized": True,
+            "reference_semantics": "SKLEARN_FLOAT64",
+            "comparison": "distance <= eps",
+            "query_block_size": int(contract.query_block_size),
+            "worker_count": SKLEARN_FLOAT64_EXACT_MAX_WORKERS,
+        }
     else:
         shortcut_identity = {
             "mode": SHORTCUT_DISABLED,
@@ -6467,10 +6514,17 @@ def fit_external_memory_dbscan(
         "sklearn_version": sklearn_version,
         "nearest_neighbors_fit_method": fit_method,
         "nearest_neighbors_metric": "euclidean",
-        "nearest_neighbors_algorithm": "auto",
+        "nearest_neighbors_algorithm": neighbor_algorithm,
         "border_assignment": "minimum_cluster_label_of_adjacent_core_component",
         "shortcut_contract": shortcut_identity,
     }
+    if contract.shortcut_mode == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT:
+        identity.update(
+            {
+                "distance_reference_dtype": distance_reference_dtype,
+                "exact_worker_count": SKLEARN_FLOAT64_EXACT_MAX_WORKERS,
+            }
+        )
     state: dict[str, Any]
     if state_path.exists():
         state = _load_checkpoint(state_path)
@@ -6632,7 +6686,7 @@ def fit_external_memory_dbscan(
                 reserved_bytes=reserved,
             )
             neighborhoods = neighbors.radius_neighbors(
-                vectors[offset:stop], return_distance=False
+                radius_vectors[offset:stop], return_distance=False
             )
             counts[offset:stop] = np.fromiter(
                 (len(row) for row in neighborhoods),
@@ -6740,7 +6794,7 @@ def fit_external_memory_dbscan(
                 reserved_bytes=reserved,
             )
             neighborhoods = neighbors.radius_neighbors(
-                vectors[query_indices], return_distance=False
+                radius_vectors[query_indices], return_distance=False
             )
             for point, neighborhood in zip(query_indices.tolist(), neighborhoods):
                 neighbor_values = np.asarray(neighborhood, dtype=np.intp)
@@ -6843,7 +6897,7 @@ def fit_external_memory_dbscan(
                 reserved_bytes=reserved,
             )
             neighborhoods = neighbors.radius_neighbors(
-                vectors[query_indices], return_distance=False
+                radius_vectors[query_indices], return_distance=False
             )
             for point, neighborhood in zip(query_indices.tolist(), neighborhoods):
                 neighbor_values = np.asarray(neighborhood, dtype=np.intp)
@@ -6933,13 +6987,26 @@ def fit_external_memory_dbscan(
         "max_rss_bytes": int(contract.max_rss_bytes),
         "all_neighborhoods_materialized_simultaneously": False,
         "passes": ["neighbor_counts", "core_union", "border_assignment"],
-        "clustering_path": "three_pass_exact_radius_graph_v1",
+        "clustering_path": (
+            SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+            if contract.shortcut_mode == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+            else "three_pass_exact_radius_graph_v1"
+        ),
         "shortcut_proof_path": None,
         "shortcut_proof_sha256": None,
         "approximation_used": False,
         "sklearn_dbscan_label_semantics_preserved": True,
         "completed_at": _utc_now(),
     }
+    if contract.shortcut_mode == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT:
+        manifest.update(
+            {
+                "distance_reference_dtype": distance_reference_dtype,
+                "exact_worker_count": SKLEARN_FLOAT64_EXACT_MAX_WORKERS,
+                "single_component_shortcut_used": False,
+                "failure_cap_used": False,
+            }
+        )
     if manifest["peak_rss_bytes_observed"] > int(contract.max_rss_bytes):
         raise ExternalMemoryDBSCANError("recorded peak RSS exceeded the frozen budget")
     _assert_source_stat_identity(
@@ -6973,6 +7040,7 @@ __all__ = [
     "ExternalMemoryDBSCANError",
     "PROGRESS_LEDGER_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT",
     "SHORTCUT_DISABLED",
     "SHORTCUT_PROOF_SCHEMA_VERSION",
     "fit_external_memory_dbscan",

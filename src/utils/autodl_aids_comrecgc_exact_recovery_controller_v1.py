@@ -60,6 +60,9 @@ HANDOVER_RESUME_RECEIPT_SCHEMA = "aids_comrecgc_handover_resume_receipt_v2"
 HANDOVER_PROGRESS_OBSERVATION_SCHEMA = (
     "aids_comrecgc_handover_progress_observation_v2"
 )
+EXACT_CHECKPOINT_ADOPTION_SCHEMA = (
+    "aids_comrecgc_exact_checkpoint_adoption_v1"
+)
 HANDOVER_EVIDENCE_MAX_GENERATIONS = 32
 HANDOVER_EVIDENCE_MAX_OBSERVATIONS = 4096
 HANDOVER_EVIDENCE_MAX_BYTES = 256 * 1024
@@ -3738,7 +3741,9 @@ def _progress_value(stage: Mapping[str, Any]) -> int | None:
     field = stage.get("progress_field")
     if not path_value or not field or not Path(path_value).is_file():
         return None
-    value: Any = _read_json(path_value, label="exact progress checkpoint")
+    value, _artifact = _read_stable_promoted_checkpoint_generation(
+        Path(str(path_value))
+    )
     if field == EXACT_MONOTONIC_PROGRESS_FIELD:
         ledgers = value.get("progress_ledgers") if isinstance(value, Mapping) else None
         if not isinstance(ledgers, Mapping):
@@ -3773,14 +3778,128 @@ def _progress_value(stage: Mapping[str, Any]) -> int | None:
         return None
 
 
-def _validated_exact_checkpoint_snapshot(
+def _checkpoint_stat_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(value.st_dev),
+        "inode": int(value.st_ino),
+        "mode": int(value.st_mode),
+        "size": int(value.st_size),
+        "mtime_ns": int(value.st_mtime_ns),
+        "ctime_ns": int(value.st_ctime_ns),
+        "nlink": int(value.st_nlink),
+    }
+
+
+def _read_promoted_checkpoint_generation(
+    path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind one already-promoted checkpoint through its opened descriptor.
+
+    The DBSCAN writer publishes ``temp -> os.replace -> fsync(parent)``.  The
+    independent verifier starts after that promotion, opens the named result
+    with ``O_NOFOLLOW``, and accepts it only when the final path still names
+    the exact same fstat identity after the complete fd read.  A concurrent
+    replacement is rejected rather than treated as an equivalent checkpoint.
+    """
+
+    if path.is_symlink():
+        raise RecoveryControllerError("exact checkpoint is a symlink")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except (FileNotFoundError, OSError) as exc:
+        raise RecoveryControllerError(
+            "exact checkpoint is absent or not physical"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        expected = _checkpoint_stat_identity(opened)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size <= 0
+            or opened.st_nlink <= 0
+        ):
+            raise RecoveryControllerError(
+                "exact checkpoint descriptor is not a physical nonempty file"
+            )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < opened.st_size:
+            block = os.pread(
+                descriptor, min(1024 * 1024, opened.st_size - offset), offset
+            )
+            if not block:
+                raise RecoveryControllerError("exact checkpoint read was truncated")
+            chunks.append(block)
+            digest.update(block)
+            offset += len(block)
+        if os.pread(descriptor, 1, opened.st_size):
+            raise RecoveryControllerError("exact checkpoint grew during fd read")
+        after_fd = os.fstat(descriptor)
+        try:
+            named_after = path.lstat()
+        except FileNotFoundError as exc:
+            raise RecoveryControllerError(
+                "exact checkpoint path disappeared after fd read"
+            ) from exc
+        if (
+            _checkpoint_stat_identity(after_fd) != expected
+            or _checkpoint_stat_identity(named_after) != expected
+        ):
+            raise RecoveryControllerError(
+                "exact checkpoint promoted generation changed during fd read"
+            )
+        encoded = b"".join(chunks)
+        try:
+            payload = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecoveryControllerError("exact checkpoint JSON changed") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(payload, dict):
+        raise RecoveryControllerError("exact checkpoint must contain one JSON object")
+    return payload, {
+        "path": str(path),
+        "content_sha256": digest.hexdigest(),
+        "stat_identity": expected,
+    }
+
+
+def _read_stable_promoted_checkpoint_generation(
+    path: Path, *, max_attempts: int = 8
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Retry only rejected atomic generations; never weaken their identity."""
+
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be positive")
+    last_error: RecoveryControllerError | None = None
+    for _attempt in range(max_attempts):
+        try:
+            return _read_promoted_checkpoint_generation(path)
+        except RecoveryControllerError as exc:
+            message = str(exc)
+            if not any(
+                token in message
+                for token in (
+                    "promoted generation changed",
+                    "path disappeared after fd read",
+                    "absent or not physical",
+                )
+            ):
+                raise
+            last_error = exc
+    raise RecoveryControllerError(
+        "exact checkpoint did not expose one stable promoted generation"
+    ) from last_error
+
+
+def _validated_exact_checkpoint_snapshot_and_artifact(
     stage: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Strictly reopen the hash-chained exact checkpoint for handover use."""
 
     from src.baselines.comrecgc.external_memory_dbscan import (
         SCHEMA_VERSION as DBSCAN_SCHEMA_VERSION,
-        _load_checkpoint,
         _load_progress_ledgers,
         _stable_hash,
     )
@@ -3790,17 +3909,16 @@ def _validated_exact_checkpoint_snapshot(
         label="exact handover checkpoint",
         existing="file",
     )
-    checkpoint_sha_before = sha256_file(path)
-    try:
-        checkpoint = _load_checkpoint(path)
-    except Exception as exc:
+    checkpoint, artifact = _read_stable_promoted_checkpoint_generation(path)
+    expected_payload_sha = checkpoint.get("checkpoint_payload_sha256")
+    unsigned = dict(checkpoint)
+    unsigned.pop("checkpoint_payload_sha256", None)
+    if (
+        not _is_sha256(expected_payload_sha)
+        or expected_payload_sha != _stable_hash(unsigned)
+    ):
         raise RecoveryControllerError(
             "exact handover checkpoint authentication changed"
-        ) from exc
-    checkpoint_sha_after = sha256_file(path)
-    if checkpoint_sha_before != checkpoint_sha_after:
-        raise RecoveryControllerError(
-            "exact handover checkpoint changed during observation"
         )
     identity = checkpoint.get("identity")
     if (
@@ -3841,13 +3959,20 @@ def _validated_exact_checkpoint_snapshot(
         raise RecoveryControllerError("exact handover checkpoint vector SHA is absent")
     return {
         "path": str(path),
-        "sha256_at_observation": checkpoint_sha_after,
+        "sha256_at_observation": artifact["content_sha256"],
         "checkpoint_payload_sha256": checkpoint["checkpoint_payload_sha256"],
         "identity_sha256": checkpoint["identity_sha256"],
         "progress_ledgers_sha256": checkpoint["progress_ledgers_sha256"],
         "progress_rows": progress,
         "vectors_sha256": vectors_sha,
-    }
+    }, artifact
+
+
+def _validated_exact_checkpoint_snapshot(
+    stage: Mapping[str, Any],
+) -> dict[str, Any]:
+    snapshot, _artifact = _validated_exact_checkpoint_snapshot_and_artifact(stage)
+    return snapshot
 
 
 def _live_process_observation(
@@ -4048,15 +4173,11 @@ def _ensure_current_controller_generation(
 
 
 def _exact_checkpoint_observation(stage: Mapping[str, Any]) -> dict[str, Any]:
-    path = Path(str(stage["progress_checkpoint_path"]))
-    before = _stat_identity(path)
-    snapshot = _validated_exact_checkpoint_snapshot(stage)
-    after = _stat_identity(path)
-    if before != after:
-        raise RecoveryControllerError(
-            "exact handover checkpoint stat changed during observation"
-        )
-    return {**snapshot, "stat_identity_at_observation": after}
+    snapshot, artifact = _validated_exact_checkpoint_snapshot_and_artifact(stage)
+    return {
+        **snapshot,
+        "stat_identity_at_observation": dict(artifact["stat_identity"]),
+    }
 
 
 def _validate_checkpoint_observation_shape(
@@ -4124,6 +4245,234 @@ def _validate_checkpoint_observation_shape(
     ):
         raise RecoveryControllerError("handover checkpoint observation shape changed")
     return dict(checkpoint)
+
+
+def _checkpoint_adoption_receipt_path(
+    manifest: Mapping[str, Any], checkpoint: Mapping[str, Any]
+) -> Path:
+    digest = str(checkpoint.get("sha256_at_observation") or "")
+    if not _is_sha256(digest):
+        raise RecoveryControllerError("checkpoint adoption SHA256 is invalid")
+    return (
+        Path(str(manifest["controller_root"]))
+        / "gates"
+        / f"89_exact_checkpoint_adoption_{digest[:16]}.json"
+    )
+
+
+def _publish_checkpoint_adoption_replace(
+    *, manifest: Mapping[str, Any], path: Path, payload: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Publish a fresh verifier receipt via replace, then reopen by fd.
+
+    This is intentionally the same ordering required of the checkpoint
+    producer/consumer boundary: complete and fsync the private temp, replace
+    the final name, fsync its parent, then use ``O_NOFOLLOW``/``fstat`` and an
+    fd-derived SHA through ``_read_handover_artifact``.
+    """
+
+    gates = Path(str(manifest["controller_root"])) / "gates"
+    if (
+        path.parent != gates
+        or gates.is_symlink()
+        or gates.resolve(strict=True) != gates
+        or path.exists()
+        or path.is_symlink()
+    ):
+        raise RecoveryControllerError(
+            "checkpoint adoption receipt path is not fresh and bound"
+        )
+    encoded = _json_payload_bytes(payload)
+    if len(encoded) > HANDOVER_EVIDENCE_MAX_BYTES:
+        raise RecoveryControllerError("checkpoint adoption receipt is too large")
+    _reserve_output_growth(manifest, [(path, len(encoded), False)])
+    temporary = gates / f".{path.name}.{os.getpid()}.replace.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    replaced = False
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or opened.st_size != 0
+        ):
+            raise RecoveryControllerError(
+                "checkpoint adoption temp identity changed"
+            )
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise RecoveryControllerError(
+                    "checkpoint adoption receipt write made no progress"
+                )
+            offset += written
+        os.ftruncate(descriptor, len(encoded))
+        os.fsync(descriptor)
+        os.replace(temporary, path)
+        replaced = True
+        _fsync_directory(gates)
+    finally:
+        os.close(descriptor)
+        if not replaced:
+            temporary.unlink(missing_ok=True)
+    reopened, artifact = _read_handover_artifact(
+        path, label="published exact checkpoint adoption receipt"
+    )
+    if reopened != dict(payload):
+        raise RecoveryControllerError(
+            "published exact checkpoint adoption receipt changed"
+        )
+    return reopened, artifact
+
+
+def _validate_exact_checkpoint_adoption_receipt(
+    *,
+    manifest: Mapping[str, Any],
+    current_checkpoint: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    checkpoint = (
+        _exact_checkpoint_observation(_stage(manifest, EXACT_STAGE))
+        if current_checkpoint is None
+        else dict(current_checkpoint)
+    )
+    _validate_checkpoint_observation_shape(
+        manifest=manifest, checkpoint=checkpoint, require_positive=True
+    )
+    path = _checkpoint_adoption_receipt_path(manifest, checkpoint)
+    payload, artifact = _read_handover_artifact(
+        path, label="exact checkpoint adoption receipt"
+    )
+    projected = dict(payload)
+    receipt_sha = projected.pop("receipt_sha256", None)
+    if (
+        set(payload)
+        != {
+            "schema_version",
+            "controller_manifest_sha256",
+            "stage_id",
+            "checkpoint_snapshot",
+            "expected_progress_rows",
+            "science_writer_absent",
+            "publication_sequence",
+            "signals_sent",
+            "verified_at",
+            "receipt_sha256",
+        }
+        or payload.get("schema_version") != EXACT_CHECKPOINT_ADOPTION_SCHEMA
+        or payload.get("controller_manifest_sha256")
+        != manifest["manifest_sha256"]
+        or payload.get("stage_id") != EXACT_STAGE
+        or payload.get("checkpoint_snapshot") != checkpoint
+        or int(payload.get("expected_progress_rows", -1))
+        != int(checkpoint["progress_rows"])
+        or payload.get("science_writer_absent") is not True
+        or payload.get("publication_sequence")
+        != [
+            "producer_os_replace",
+            "producer_parent_fsync",
+            "verifier_o_nofollow_open",
+            "verifier_fstat",
+            "verifier_fd_sha256",
+        ]
+        or payload.get("signals_sent") != []
+        or not isinstance(payload.get("verified_at"), str)
+        or receipt_sha != stable_json_sha256(projected)
+    ):
+        raise RecoveryControllerError(
+            "exact checkpoint adoption receipt closure changed"
+        )
+    return {"payload": payload, "artifact": artifact}
+
+
+def publish_exact_checkpoint_adoption_receipt(
+    manifest_path: str | Path, *, expected_progress_rows: int
+) -> dict[str, Any]:
+    """Independently attest one stopped, promoted AIDS exact checkpoint."""
+
+    manifest = _load_launchable_manifest(manifest_path)
+    root = Path(str(manifest["controller_root"]))
+    state = _load_state(root, manifest)
+    proc_root = Path(str(manifest["resources"].get("proc_root", "/proc")))
+    worker = state.get("worker")
+    if isinstance(worker, Mapping) and worker.get("stage_id") == EXACT_STAGE:
+        pid = int(worker.get("pid", 0))
+        start_ticks = int(worker.get("start_ticks", 0))
+        if _pid_alive(pid, start_ticks, proc_root=proc_root):
+            raise RecoveryControllerError(
+                "independent checkpoint verifier found a live exact worker"
+            )
+        process_group_id = int(worker.get("process_group_id", pid))
+        members = _process_group_member_pids(process_group_id, proc_root=proc_root)
+        if members:
+            raise RecoveryControllerError(
+                "independent checkpoint verifier found a live exact process group"
+            )
+    controller = state.get("controller_process")
+    if isinstance(controller, Mapping) and _pid_alive(
+        int(controller.get("pid", 0)),
+        int(controller.get("start_ticks", 0)),
+        proc_root=proc_root,
+    ):
+        raise RecoveryControllerError(
+            "independent checkpoint verifier found a live controller"
+        )
+    checkpoint = _exact_checkpoint_observation(_stage(manifest, EXACT_STAGE))
+    _validate_checkpoint_observation_shape(
+        manifest=manifest, checkpoint=checkpoint, require_positive=True
+    )
+    if int(checkpoint["progress_rows"]) != int(expected_progress_rows):
+        raise RecoveryControllerError(
+            "exact checkpoint progress differs from the operator-frozen value"
+        )
+    path = _checkpoint_adoption_receipt_path(manifest, checkpoint)
+    if path.exists() or path.is_symlink():
+        return _validate_exact_checkpoint_adoption_receipt(
+            manifest=manifest, current_checkpoint=checkpoint
+        )
+    payload: dict[str, Any] = {
+        "schema_version": EXACT_CHECKPOINT_ADOPTION_SCHEMA,
+        "controller_manifest_sha256": manifest["manifest_sha256"],
+        "stage_id": EXACT_STAGE,
+        "checkpoint_snapshot": checkpoint,
+        "expected_progress_rows": int(expected_progress_rows),
+        "science_writer_absent": True,
+        "publication_sequence": [
+            "producer_os_replace",
+            "producer_parent_fsync",
+            "verifier_o_nofollow_open",
+            "verifier_fstat",
+            "verifier_fd_sha256",
+        ],
+        "signals_sent": [],
+        "verified_at": _utc_now(),
+    }
+    payload["receipt_sha256"] = stable_json_sha256(payload)
+    _publish_checkpoint_adoption_replace(
+        manifest=manifest, path=path, payload=payload
+    )
+    return _validate_exact_checkpoint_adoption_receipt(
+        manifest=manifest, current_checkpoint=checkpoint
+    )
+
+
+def validate_exact_checkpoint_adoption_receipt(
+    manifest_path: str | Path, *, expected_progress_rows: int
+) -> dict[str, Any]:
+    """Reopen a verifier receipt immediately before the adopted resume."""
+
+    manifest = _load_launchable_manifest(manifest_path)
+    checkpoint = _exact_checkpoint_observation(_stage(manifest, EXACT_STAGE))
+    if int(checkpoint["progress_rows"]) != int(expected_progress_rows):
+        raise RecoveryControllerError(
+            "exact checkpoint progress differs from the adopted value"
+        )
+    return _validate_exact_checkpoint_adoption_receipt(
+        manifest=manifest, current_checkpoint=checkpoint
+    )
 
 
 def _live_exact_worker_observation(
@@ -5281,6 +5630,7 @@ def _run_or_attach_stage(
     start_progress: int
     probe_argv_sha256: str
     start_time = time.monotonic()
+    checkpoint_adoption_validated = False
     try:
         state["resource_preflight"] = _disk_preflight(manifest)
     except Exception:
@@ -5357,6 +5707,9 @@ def _run_or_attach_stage(
                     f"stage={stage_id}:pgid={process_group_id}:"
                     f"members={list(members)[:16]}"
                 )
+            if stage_id == EXACT_STAGE and (_progress_value(stage) or 0) > 0:
+                _validate_exact_checkpoint_adoption_receipt(manifest=manifest)
+                checkpoint_adoption_validated = True
             resume_argv = stage["commands"]["resume"]
             if resume_argv is None:
                 raise RecoveryControllerError(f"dead stage has no safe resume command: {stage_id}")
@@ -5381,6 +5734,14 @@ def _run_or_attach_stage(
     if worker is None:
         output = Path(stage["output_dir"])
         fresh = not output.exists()
+        if (
+            stage_id == EXACT_STAGE
+            and not fresh
+            and not checkpoint_adoption_validated
+            and (_progress_value(stage) or 0) > 0
+        ):
+            _validate_exact_checkpoint_adoption_receipt(manifest=manifest)
+            checkpoint_adoption_validated = True
         argv = stage["commands"]["fresh" if fresh else "resume"]
         if argv is None:
             raise RecoveryControllerError(f"stage output exists without a resume command: {stage_id}")

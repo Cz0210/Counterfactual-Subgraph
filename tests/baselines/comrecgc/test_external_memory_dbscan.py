@@ -1907,6 +1907,75 @@ def test_external_labels_are_elementwise_sklearn_exact(tmp_path: Path, seed: int
     assert manifest["scientific_identity"]["sklearn_version"] == sklearn.__version__
 
 
+def test_mut_float64_multi_component_route_is_exact_and_cap_free(
+    tmp_path: Path,
+) -> None:
+    values = np.asarray(
+        [
+            [0.000, 0.0],
+            [0.008, 0.0],
+            [0.016, 0.0],
+            [1.000, 0.0],
+            [1.008, 0.0],
+            [1.016, 0.0],
+            [3.000, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    vectors = _save(tmp_path / "mut-vectors.npy", values)
+    contract = external.ExternalDBSCANContract(
+        eps=0.02,
+        min_samples=3,
+        query_block_size=2,
+        checkpoint_interval_blocks=1,
+        max_rss_bytes=external._rss_bytes() + 512 * 1024**2,
+        expected_sklearn_version=sklearn.__version__,
+        shortcut_mode=external.SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
+        # Deliberately tiny: this field belongs only to the forbidden adaptive
+        # shortcut and must have no effect on the named Mut route.
+        shortcut_failure_cap=1,
+    )
+    result = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "mut-exact",
+        contract=contract,
+    )
+    expected = DBSCAN(eps=0.02, min_samples=3, algorithm="brute").fit_predict(
+        values.astype(np.float64)
+    )
+    actual = np.load(result.labels_path, allow_pickle=False)
+    assert np.array_equal(actual, expected)
+    assert result.cluster_count == 2
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["clustering_path"] == (
+        external.SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+    )
+    assert manifest["distance_reference_dtype"] == "float64"
+    assert manifest["exact_worker_count"] == 4
+    assert manifest["single_component_shortcut_used"] is False
+    assert manifest["failure_cap_used"] is False
+    assert manifest["scientific_identity"]["nearest_neighbors_algorithm"] == "brute"
+    assert manifest["scientific_identity"]["shortcut_contract"] == {
+        "mode": external.SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
+        "single_component_assumed": False,
+        "failure_cap_used": False,
+        "multi_component_labels_materialized": True,
+        "reference_semantics": "SKLEARN_FLOAT64",
+        "comparison": "distance <= eps",
+        "query_block_size": 2,
+        "worker_count": 4,
+    }
+
+    reopened = external.fit_external_memory_dbscan(
+        vectors_path=vectors,
+        work_dir=tmp_path / "mut-exact",
+        contract=contract,
+        resume=True,
+    )
+    assert reopened.manifest_sha256 == result.manifest_sha256
+
+
 def test_ambiguous_border_uses_earliest_core_component_like_sklearn(
     tmp_path: Path,
 ) -> None:

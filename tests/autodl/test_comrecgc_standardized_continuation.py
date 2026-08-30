@@ -336,6 +336,44 @@ def test_pair_store_adoption_route_fails_before_output_on_contract_drift(
     assert not inputs.output_root.exists()
 
 
+def test_mut_pair_store_adoption_requires_float64_multi_component_route(
+    tmp_path: Path,
+) -> None:
+    source_manifest = _file(tmp_path / "mut-pair-store/run_manifest.json", "{}\n")
+    inputs = replace(
+        _inputs(tmp_path, dataset="mutagenicity"),
+        external_pair_store_source_manifest=source_manifest,
+        external_pair_store_source_owner_root=source_manifest.parent,
+        common_recourse_engine="external_memory_exact_v1",
+        external_dbscan_shortcut_mode=(
+            "sklearn_float64_exact_multi_component_v1"
+        ),
+        device="cpu",
+    )
+    continuation._validate_route_inputs(inputs)
+
+    forbidden = replace(
+        inputs,
+        external_dbscan_shortcut_mode=(
+            "all_core_one_component_adaptive_anchor_v1"
+        ),
+    )
+    with pytest.raises(ValueError, match="PAIR_STORE_ADOPTION_ROUTE_CONTRACT"):
+        continuation._validate_route_inputs(forbidden)
+
+    chunk_source = replace(
+        inputs,
+        external_pair_store_source_manifest=None,
+        external_pair_store_source_checkpoint=source_manifest,
+        external_close_pair_view_manifest=_file(tmp_path / "close.json", "{}\n"),
+        external_vector_cache_root=tmp_path / "cache",
+        external_vector_cache_lock=tmp_path / "cache.lock",
+        external_vector_cache_route_lock=tmp_path / "route.lock",
+    )
+    with pytest.raises(ValueError, match="PAIR_STORE_ADOPTION_ROUTE_CONTRACT"):
+        continuation._validate_route_inputs(chunk_source)
+
+
 def test_chunk_source_route_freezes_cache_and_owner_arguments(
     tmp_path: Path, _fake_procfs: Path
 ) -> None:

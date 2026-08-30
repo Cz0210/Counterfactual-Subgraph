@@ -28,6 +28,7 @@ from .external_memory_dbscan import (
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ExternalDBSCANContract,
     ExternalMemoryDBSCANError,
+    SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
     fit_external_memory_dbscan,
 )
 from .external_component_summary import (
@@ -290,6 +291,17 @@ def run_common_recourse(
             "external_memory_exact_v1 is released only for CPU-backed "
             "AIDS or Mutagenicity"
         )
+    if (
+        engine == "external_memory_exact_v1"
+        and dataset == "mutagenicity"
+        and str(external_dbscan_shortcut_mode)
+        != SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+    ):
+        raise ValueError(
+            "Mutagenicity external exact requires the sklearn-float64 "
+            "multi-component route; single-component shortcuts and "
+            "failure-cap recovery are forbidden"
+        )
     chunk_source_requested = external_pair_store_source_checkpoint is not None
     if chunk_source_requested and external_close_pair_view_manifest is None:
         raise ValueError(
@@ -333,12 +345,15 @@ def run_common_recourse(
         raise ValueError("pair-store owner root was provided without a source")
     root = require_empty_output(output_dir, resume=resume)
     if external_pair_store_source_manifest is not None or chunk_source_requested:
-        if (
-            str(external_dbscan_shortcut_mode)
-            != ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
-        ):
+        required_route = (
+            ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+            if dataset == "aids"
+            else SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+        )
+        if str(external_dbscan_shortcut_mode) != required_route:
             raise ValueError(
-                "read-only pair-store adoption requires the exact adaptive shortcut"
+                "read-only pair-store adoption route does not match the dataset's "
+                "frozen exact DBSCAN contract"
             )
         source_pair_artifact = Path(
             external_pair_store_source_manifest

@@ -43,6 +43,7 @@ from src.baselines.comrecgc.external_memory_dbscan import (  # noqa: E402
     ADAPTIVE_ALL_CORE_COMPONENT_RECOVERY,
     ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT,
     ALL_CORE_ONE_COMPONENT_SHORTCUT,
+    SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT,
     _validate_component_recovery_closure,
     _validate_shortcut_proof_closure,
 )
@@ -2176,17 +2177,27 @@ def _validate_route_inputs(inputs: ContinuationInputs) -> None:
         raise ValueError("PAIR_STORE_ADOPTION_OWNER_ROOT_MISSING")
     if not source_requested and inputs.external_pair_store_source_owner_root is not None:
         raise ValueError("PAIR_STORE_ADOPTION_OWNER_ROOT_WITHOUT_SOURCE")
-    if (
-        inputs.external_pair_store_source_manifest is not None
-        or inputs.external_pair_store_source_checkpoint is not None
-    ) and (
-        inputs.dataset != "aids"
-        or inputs.device != "cpu"
-        or inputs.common_recourse_engine != "external_memory_exact_v1"
-        or inputs.external_dbscan_shortcut_mode
-        != ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
-    ):
-        raise ValueError("PAIR_STORE_ADOPTION_ROUTE_CONTRACT_MISMATCH")
+    if source_requested:
+        route_matches = bool(
+            inputs.device == "cpu"
+            and inputs.common_recourse_engine == "external_memory_exact_v1"
+            and (
+                (
+                    inputs.dataset == "aids"
+                    and inputs.external_dbscan_shortcut_mode
+                    == ADAPTIVE_ALL_CORE_ONE_COMPONENT_SHORTCUT
+                )
+                or (
+                    inputs.dataset == "mutagenicity"
+                    and inputs.external_dbscan_shortcut_mode
+                    == SKLEARN_FLOAT64_EXACT_MULTI_COMPONENT
+                    and inputs.external_pair_store_source_manifest is not None
+                    and inputs.external_pair_store_source_checkpoint is None
+                )
+            )
+        )
+        if not route_matches:
+            raise ValueError("PAIR_STORE_ADOPTION_ROUTE_CONTRACT_MISMATCH")
 
 
 def bootstrap_external_common_recovery_continuation(
@@ -2516,7 +2527,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--external-dbscan-shortcut-mode",
-        choices=("disabled", "all_core_one_component_adaptive_anchor_v1"),
+        choices=(
+            "disabled",
+            "all_core_one_component_adaptive_anchor_v1",
+            "sklearn_float64_exact_multi_component_v1",
+        ),
         default="disabled",
     )
     parser.add_argument("--external-shortcut-seed-count", type=int, default=3)
