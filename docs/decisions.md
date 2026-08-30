@@ -1,5 +1,33 @@
 # Decisions Log
 
+## [2026-08-30] Add a narrow deadline-continuation heartbeat
+
+### Background
+
+The active 4x4 campaign now runs several already-owned science processes plus
+deadline-specific AIDS/Mut repairs, BACE resource caps, and Taste preflights.
+The existing continuation sidecar cannot accept these new observations without
+a restart, while restarting science owners would risk output completeness.
+
+### Decision
+
+Add a minimal read-only deadline sidecar.  Its immutable spec names exact
+process identities and terminal artifacts; it atomically writes one state and
+heartbeat every 60 seconds.  It cannot start or stop science, publish matrix
+cells, enable GNN ablations, or inspect calibration/test payloads.
+
+### Consequences
+
+- Existing science controllers keep ownership of their workers.
+- GED adoption, NeuroSED readiness, resource-cap receipts, and fresh Taste
+  attempts can be followed from one restartable heartbeat.
+- The sidecar introduces no general scheduler, trust model, or controller
+  protocol.
+
+### Status
+
+Accepted
+
 ## [2026-08-30] Directly recheck identity-bound AIDS DBSCAN self-neighbors
 
 ### Motivation
