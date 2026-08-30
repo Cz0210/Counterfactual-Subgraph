@@ -1016,7 +1016,15 @@ def merge_fullgraph_verification_shards(
     keys = [(str(row["parent_id"]), str(row["candidate_id"])) for row in pair_rows]
     if len(keys) != len(set(keys)) or len(keys) != len(parents) * len(candidate_ids):
         raise ValueError("Native baseline merged Cartesian product is incomplete")
-    pair_rows.sort(key=lambda row: (str(row["parent_id"]), candidate_ids.index(str(row["candidate_id"]))))
+    candidate_rank = {
+        candidate_id: rank for rank, candidate_id in enumerate(candidate_ids)
+    }
+    pair_rows.sort(
+        key=lambda row: (
+            str(row["parent_id"]),
+            candidate_rank[str(row["candidate_id"])],
+        )
+    )
     if normalized_stage == CALIBRATION_STAGE and method_id == "gcfexplainer":
         predecessor, predecessor_resolution = _resolve_calibration_predecessor(
             manifests=manifests,
