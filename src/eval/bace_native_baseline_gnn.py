@@ -48,7 +48,11 @@ from src.eval.bace_frozen_gnn_contracts import (
 )
 from src.eval.counterfactual_semantics import compute_counterfactual_semantics
 from src.eval.molclr_node_embeddings import checkpoint_identity
-from src.eval.mutagenicity_wnode_selector import run_mutagenicity_wnode_selector
+from src.eval.mutagenicity_wnode_selector import (
+    ThresholdBundle,
+    run_mutagenicity_wnode_selector,
+    threshold_bundle_from_dict,
+)
 from src.eval.node_wasserstein_distance import (
     MolCLRNodeWassersteinConfig,
     MolCLRNodeWassersteinDistance,
@@ -67,6 +71,9 @@ _CALIBRATION_PREDECESSOR_ROOT_FIELDS = (
     "generation_root",
 )
 _FORBIDDEN_PREDECESSOR_COMPONENTS = {"merged", "_native_aux"}
+BACE_OURS_B12_THRESHOLD_CONFIG_SHA256 = (
+    "37d7a265ee53fc0c31edaf59f8b412f41c79c62af4941d4ddf1f3e66c4afa427"
+)
 
 
 def _manifest_value(manifest: Mapping[str, Any], field: str) -> Any:
@@ -1132,8 +1139,152 @@ def merge_fullgraph_verification_shards(
     return manifest
 
 
+def _contains_path_route(path: Path, route: Sequence[str]) -> bool:
+    parts = tuple(part.lower() for part in path.parts)
+    expected = tuple(part.lower() for part in route)
+    width = len(expected)
+    return any(parts[index : index + width] == expected for index in range(len(parts)))
+
+
+def _verify_declared_file_identity(identity: Any, *, label: str) -> Path:
+    if not isinstance(identity, Mapping):
+        raise ValueError(f"{label} identity is missing")
+    raw_path = str(identity.get("path") or "").strip()
+    path = Path(raw_path).expanduser()
+    if not raw_path or not path.is_absolute():
+        raise ValueError(f"{label} identity path must be absolute")
+    if path.is_symlink():
+        raise ValueError(f"{label} identity must name one physical file")
+    path = path.resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"{label} identity must name one physical file")
+    if int(identity.get("size", -1)) != path.stat().st_size:
+        raise ValueError(f"{label} identity size changed")
+    if str(identity.get("sha256") or "").lower() != sha256_file(path):
+        raise ValueError(f"{label} identity SHA-256 changed")
+    return path
+
+
+def _load_ours_b12_thresholds(
+    thresholds_json: str | Path,
+    *,
+    matrix_manifest: Mapping[str, Any],
+) -> tuple[ThresholdBundle, dict[str, Any], dict[str, Any]]:
+    """Adopt the immutable Ours B12 grid without consulting held-out test data."""
+
+    unresolved_thresholds = Path(thresholds_json).expanduser()
+    if unresolved_thresholds.is_symlink():
+        raise ValueError("--thresholds-json must name one physical JSON file")
+    thresholds_path = unresolved_thresholds.resolve(strict=True)
+    if not thresholds_path.is_file():
+        raise ValueError("--thresholds-json must name one physical JSON file")
+    if thresholds_path.name != "thresholds.json" or not _contains_path_route(
+        thresholds_path, ("bace", "ours", "b12-selector")
+    ):
+        raise ValueError(
+            "GCFExplainer thresholds must come from bace/ours/b12-selector"
+        )
+    source_manifest_path = thresholds_path.parent / "frozen_selection_manifest.json"
+    if source_manifest_path.is_symlink() or not source_manifest_path.is_file():
+        raise ValueError("Ours B12 frozen_selection_manifest.json is missing")
+    thresholds_payload = read_json(thresholds_path)
+    thresholds = threshold_bundle_from_dict(thresholds_payload)
+    threshold_hash = stable_sha256(
+        [level.threshold for level in thresholds.levels]
+    )
+    if threshold_hash != BACE_OURS_B12_THRESHOLD_CONFIG_SHA256:
+        raise ValueError(
+            "Ours B12 threshold grid is not the preregistered BACE contract"
+        )
+
+    source_manifest = read_json(source_manifest_path)
+    required = {
+        "schema_version": "bace_frozen_gnn_selection_manifest_v1",
+        "dataset": DATASET,
+        "stage": "B12_SELECTOR",
+        "status": "FROZEN",
+        "selection_frozen": True,
+        "selector_fitted_on_calibration": True,
+        "calibration_loaded": True,
+        "test_loaded": False,
+        "test_used": False,
+        "oracle_backend": "gnn",
+        "classifier_type": "gnn",
+        "rf_oracle_used": False,
+        "source_label": SOURCE_LABEL,
+        "num_classes": 2,
+        "cf_mode": CF_MODE,
+    }
+    mismatches = [
+        f"{field}={source_manifest.get(field)!r}"
+        for field, expected in required.items()
+        if source_manifest.get(field) != expected
+    ]
+    if mismatches:
+        raise ValueError(
+            "Ours B12 frozen selection contract mismatch: " + ", ".join(mismatches)
+        )
+    if source_manifest.get("thresholds") != thresholds_payload:
+        raise ValueError("Ours B12 manifest does not bind thresholds.json exactly")
+    for field in ("oracle_checkpoint_hash", "molclr_checkpoint_hash"):
+        if source_manifest.get(field) != matrix_manifest.get(field):
+            raise ValueError(
+                f"Ours B12/GCF calibration identity mismatch: {field}"
+            )
+
+    b11_path = _verify_declared_file_identity(
+        source_manifest.get("matrix_manifest_identity"),
+        label="Ours B11 matrix manifest",
+    )
+    if not _contains_path_route(b11_path, ("bace", "ours", "b11-merged")):
+        raise ValueError("Ours B12 source is not bound to bace/ours/b11-merged")
+    b11_manifest = read_json(b11_path)
+    b11_required = {
+        "schema_version": "bace_frozen_gnn_verification_merge_v1",
+        "dataset": DATASET,
+        "stage": "B11_CROSS_PARENT_VERIFIED",
+        "status": "PASS",
+        "run_complete": True,
+        "calibration_loaded": True,
+        "test_loaded": False,
+        "oracle_backend": "gnn",
+        "classifier_type": "gnn",
+        "rf_oracle_used": False,
+        "source_label": SOURCE_LABEL,
+        "num_classes": 2,
+        "cf_mode": CF_MODE,
+    }
+    if any(b11_manifest.get(field) != value for field, value in b11_required.items()):
+        raise ValueError("Ours B11 threshold source is not a PASS calibration matrix")
+    if (b11_manifest.get("inputs") or {}).get("cohort_name") != "calibration":
+        raise ValueError("Ours B11 threshold source cohort is not calibration")
+    for field in ("oracle_checkpoint_hash", "molclr_checkpoint_hash"):
+        if b11_manifest.get(field) != source_manifest.get(field):
+            raise ValueError(f"Ours B11/B12 identity mismatch: {field}")
+
+    provenance = {
+        "schema_version": "bace_ours_b12_threshold_adoption_v1",
+        "mode": "frozen_ours_b12_selector",
+        "dataset": DATASET,
+        "source_method": "Ours",
+        "source_stage": "B12_SELECTOR",
+        "threshold_config_hash": threshold_hash,
+        "thresholds_json": file_identity(thresholds_path),
+        "source_selection_manifest": file_identity(source_manifest_path),
+        "source_matrix_manifest": file_identity(b11_path),
+        "test_loaded": False,
+        "test_used": False,
+    }
+    return thresholds, thresholds_payload, provenance
+
+
 def run_native_baseline_selector(
-    *, method: str, matrix_output: str | Path, output_dir: str | Path, seed: int = 13
+    *,
+    method: str,
+    matrix_output: str | Path,
+    output_dir: str | Path,
+    seed: int = 13,
+    thresholds_json: str | Path | None = None,
 ) -> dict[str, Any]:
     method_id = normalize_method(method)
     spec = baseline_spec(method_id)
@@ -1161,6 +1312,23 @@ def run_native_baseline_selector(
         raise ValueError(
             f"Native selector has {effective_k} candidates, below minimum {minimum_k}"
         )
+    frozen_thresholds: ThresholdBundle | None = None
+    threshold_payload: dict[str, Any] | None = None
+    threshold_provenance: dict[str, Any] | None = None
+    if method_id == "gcfexplainer":
+        if thresholds_json is None:
+            raise ValueError(
+                "GCFExplainer selection requires explicit --thresholds-json "
+                "from the frozen Ours B12 selector"
+            )
+        frozen_thresholds, threshold_payload, threshold_provenance = (
+            _load_ours_b12_thresholds(
+                thresholds_json,
+                matrix_manifest=matrix_manifest,
+            )
+        )
+    elif thresholds_json is not None:
+        raise ValueError("--thresholds-json is only supported for GCFExplainer")
     run_mutagenicity_wnode_selector(
         matrix_run_dir=matrix_root,
         output_dir=output,
@@ -1168,6 +1336,8 @@ def run_native_baseline_selector(
         table_k=10,
         seed=int(seed),
         forbid_test=True,
+        frozen_thresholds=frozen_thresholds,
+        frozen_threshold_provenance=threshold_provenance,
     )
     decision = read_json(output / "calibration_decision.json")
     variant = str(decision.get("selected_variant") or "")
@@ -1179,6 +1349,8 @@ def run_native_baseline_selector(
             "Native selector did not freeze the complete effective unique prefix"
         )
     thresholds = read_json(output / "thresholds.json")
+    if threshold_payload is not None and thresholds != threshold_payload:
+        raise ValueError("GCFExplainer selector changed the frozen Ours thresholds")
     top20 = {
         "schema_version": "bace_native_baseline_selected_top20_v1",
         "dataset": DATASET,
@@ -1226,6 +1398,11 @@ def run_native_baseline_selector(
         "selected_top20_hash": sha256_file(output / "selected_top20.json"),
         "created_at": utc_now(),
     }
+    if threshold_provenance is not None:
+        frozen["threshold_provenance"] = threshold_provenance
+        frozen["threshold_config_hash"] = threshold_provenance[
+            "threshold_config_hash"
+        ]
     atomic_json(output / "frozen_selection_manifest.json", frozen)
     atomic_marker(output / "PASS", "PASS")
     return frozen

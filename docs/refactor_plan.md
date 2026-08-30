@@ -1,5 +1,22 @@
 # Refactor Plan
 
+## 2026-08-31: Move T8 exact-top-k working SQLite off the inode-limited store
+
+- [x] Add one explicit exact-top-k scratch-root interface without changing the
+  mining fingerprint, traversal, stable Top20 selection, or storage floors.
+- [x] Keep live SQLite/WAL/SHM under target-disjoint scratch roots and apply the
+  existing 50 GiB/2 percent/100,000-inode guard to that filesystem.
+- [x] Atomically back up the completed SQLite database to the persistent branch
+  checkpoint tree, then publish persistent checkpoint/heartbeat/audit evidence
+  with no tmpfs or procfs path dependency.
+- [x] Reload a completed proof solely from its persistent audit and SQLite even
+  if the live scratch root is absent.
+- [x] Require a fresh absolute T8 deadline scratch CLI value and synchronize the
+  paired Slurm wrapper and focused regressions.
+- [ ] Deploy in a fresh immutable AutoDL checkout and launch a fresh T8 UUID
+  with `/dev/shm/fast16-t8-<UUID>`; do not adopt b466, lower the storage guard,
+  delete files, or use the currently under-capacity `/root/autodl-tmp`.
+
 ## 2026-08-31: Execute the BACE ComRecGC 20k/25k resource cap
 
 - [x] Keep positive CPU/output/checkpoint activity typed `RUNNING_SLOW`; require

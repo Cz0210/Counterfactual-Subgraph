@@ -12,6 +12,9 @@
 # V6 may pass either a deep --gspan-adoption-proof or the controller-owned
 # --gspan-mining-decision; the latter resolves to adoption or fresh exact-v2
 # mining and rejects any attempt to combine both routes.
+# GCFExplainer `select` and its task-fragment require an explicit
+# --thresholds-json from the immutable BACE Ours B12 selector; the Python
+# entrypoint validates its B11/B12 provenance and never re-fits that grid.
 # This wrapper never assumes a submodule is populated;
 # generic "$@" forwarding preserves exact AutoDL/Slurm CLI parity.
 #SBATCH --partition=A800

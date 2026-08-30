@@ -19,8 +19,9 @@ from src.baselines.bace_gine_native_adapter import (
     BACEFrozenGINENativeGraphAdapter,
 )
 from src.data.molecular_graph_featurizer import default_molecular_feature_schema
-from src.eval.bace_frozen_gnn_contracts import atomic_json, atomic_jsonl
+from src.eval.bace_frozen_gnn_contracts import atomic_json, atomic_jsonl, file_identity
 from src.eval.bace_native_baseline_gnn import (
+    BACE_OURS_B12_THRESHOLD_CONFIG_SHA256,
     CALIBRATION_STAGE,
     SELECTION_STAGE,
     TEST_STAGE,
@@ -30,9 +31,108 @@ from src.eval.bace_native_baseline_gnn import (
     freeze_native_baseline_final,
     run_native_baseline_selector,
 )
+from src.eval.mutagenicity_wnode_selector import ThresholdBundle, ThresholdLevel
 
 
 CHECKPOINT_ID = "a" * 64
+MOLCLR_ID = "b" * 64
+OURS_THRESHOLD_VALUES = (
+    0.0052997113994104825,
+    0.006084341066708124,
+    0.007764656724591062,
+    0.008413518173529859,
+    0.009050822647851559,
+    0.010458106267325823,
+    0.02956508038627219,
+)
+OURS_THRESHOLD_QUANTILES = (0.05, 0.10, 0.20, 0.30, 0.50, 0.70, 0.90)
+OURS_THRESHOLD_WEIGHTS = (4.0, 4.0, 3.0, 3.0, 2.0, 1.0, 1.0)
+
+
+def _ours_threshold_payload() -> dict[str, object]:
+    labels = tuple(f"q{int(quantile * 100):02d}" for quantile in OURS_THRESHOLD_QUANTILES)
+    return ThresholdBundle(
+        finite_distance_count=14,
+        requested_quantiles=OURS_THRESHOLD_QUANTILES,
+        requested_weights=OURS_THRESHOLD_WEIGHTS,
+        raw_thresholds=OURS_THRESHOLD_VALUES,
+        quantile_labels=labels,
+        levels=tuple(
+            ThresholdLevel(
+                threshold_id=label,
+                threshold=threshold,
+                weight=weight,
+                quantiles=(quantile,),
+                quantile_labels=(label,),
+            )
+            for label, threshold, weight, quantile in zip(
+                labels,
+                OURS_THRESHOLD_VALUES,
+                OURS_THRESHOLD_WEIGHTS,
+                OURS_THRESHOLD_QUANTILES,
+                strict=True,
+            )
+        ),
+        theta_star_quantile=0.30,
+        theta_star=OURS_THRESHOLD_VALUES[3],
+        cost_cap_quantile=0.90,
+        cost_cap=OURS_THRESHOLD_VALUES[-1],
+    ).to_dict()
+
+
+def _write_ours_b12_threshold_source(tmp_path: Path) -> Path:
+    b11 = tmp_path / "bace/ours/b11-merged/attempt-0"
+    b11.mkdir(parents=True)
+    atomic_json(
+        b11 / "matrix_manifest.json",
+        {
+            "schema_version": "bace_frozen_gnn_verification_merge_v1",
+            "dataset": "bace",
+            "stage": "B11_CROSS_PARENT_VERIFIED",
+            "status": "PASS",
+            "run_complete": True,
+            "calibration_loaded": True,
+            "test_loaded": False,
+            "oracle_backend": "gnn",
+            "classifier_type": "gnn",
+            "rf_oracle_used": False,
+            "source_label": 1,
+            "num_classes": 2,
+            "cf_mode": "strict_flip",
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": MOLCLR_ID,
+            "inputs": {"cohort_name": "calibration"},
+        },
+    )
+    b12 = tmp_path / "bace/ours/b12-selector/attempt-0"
+    b12.mkdir(parents=True)
+    thresholds = _ours_threshold_payload()
+    atomic_json(b12 / "thresholds.json", thresholds)
+    atomic_json(
+        b12 / "frozen_selection_manifest.json",
+        {
+            "schema_version": "bace_frozen_gnn_selection_manifest_v1",
+            "dataset": "bace",
+            "stage": "B12_SELECTOR",
+            "status": "FROZEN",
+            "selection_frozen": True,
+            "selector_fitted_on_calibration": True,
+            "calibration_loaded": True,
+            "test_loaded": False,
+            "test_used": False,
+            "oracle_backend": "gnn",
+            "classifier_type": "gnn",
+            "rf_oracle_used": False,
+            "source_label": 1,
+            "num_classes": 2,
+            "cf_mode": "strict_flip",
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": MOLCLR_ID,
+            "matrix_manifest_identity": file_identity(b11 / "matrix_manifest.json"),
+            "thresholds": thresholds,
+        },
+    )
+    return b12 / "thresholds.json"
 
 
 def _candidate(method: str, index: int) -> dict[str, object]:
@@ -64,11 +164,14 @@ def _fragment(tmp_path: Path, method: str) -> dict[str, object]:
         "molclr_root": tmp_path / "molclr",
         "molclr_checkpoint": tmp_path / "molclr.pt",
         "neurosed_checkpoint": tmp_path / "neurosed.pt",
+        "thresholds_json": tmp_path / "bace/ours/b12-selector/attempt-0/thresholds.json",
         "official_root": tmp_path / "official",
         "neurosed_manifest": tmp_path / "neurosed.json",
         "globalgce_source_manifest": tmp_path / "source_graph_manifest.jsonl",
         "globalgce_native_train_csv": tmp_path / "train.csv",
     }
+    if method != "GCFExplainer":
+        paths.pop("thresholds_json")
     return build_bace_baseline_controller_fragment(method=method, **paths)
 
 
@@ -248,6 +351,14 @@ def test_ready_controller_fragments_have_exact_dependencies_and_markers(
     final = tasks[f"{prefix}_final_freeze"]
     assert final["required_markers"] == ["PASS", "FINAL_PASS.json"]
     assert final["dependencies"] == [f"{prefix}_selection", f"{prefix}_test_merge"]
+    if method == "GCFExplainer":
+        selection = tasks["bace_gcfexplainer_selection"]
+        threshold_path = str(
+            (tmp_path / "bace/ours/b12-selector/attempt-0/thresholds.json").resolve()
+        )
+        flag = selection["argv"].index("--thresholds-json")
+        assert selection["argv"][flag + 1] == threshold_path
+        assert threshold_path in selection["inputs"]
     if method == "ComRecGC":
         preflight = tasks["bace_comrecgc_preflight"]
         official = str((tmp_path / "official").resolve())
@@ -535,6 +646,110 @@ def test_resource_capped_comrecgc_selector_freezes_effective_k_and_plateau(
     assert frozen["K_MAX"] == 20
     assert frozen["prefixes"]["10"] == frozen["prefixes"]["20"]
     assert len(frozen["prefixes"]["20"]) == 10
+
+
+def test_gcf_selector_adopts_exact_ours_b12_thresholds_without_refit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    matrix = tmp_path / "gcf-matrix"
+    matrix.mkdir()
+    candidates = [_candidate("gcfexplainer", index) for index in range(20)]
+    atomic_jsonl(
+        matrix / "pair_matrix.jsonl",
+        [
+            {"parent_id": "p0", "candidate_id": row["candidate_id"]}
+            for row in candidates
+        ],
+    )
+    atomic_json(
+        matrix / "run_manifest.json",
+        {
+            "stage": CALIBRATION_STAGE,
+            "status": "PASS",
+            "test_loaded": False,
+            "method_id": "gcfexplainer",
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": MOLCLR_ID,
+            "candidate_universe_hash": "c" * 64,
+        },
+    )
+    thresholds_path = _write_ours_b12_threshold_source(tmp_path)
+    observed: dict[str, object] = {}
+
+    def fake_selector(
+        *,
+        output_dir: Path,
+        frozen_thresholds: ThresholdBundle,
+        frozen_threshold_provenance: dict[str, object],
+        **_kwargs: object,
+    ) -> None:
+        observed["thresholds"] = frozen_thresholds.to_dict()
+        observed["provenance"] = frozen_threshold_provenance
+        output = Path(output_dir)
+        (output / "variants/effective").mkdir(parents=True)
+        atomic_json(
+            output / "calibration_decision.json",
+            {"selected_variant": "effective"},
+        )
+        atomic_json(
+            output / "variants/effective/selected_top20.json",
+            {"candidates": candidates},
+        )
+        atomic_json(output / "thresholds.json", frozen_thresholds.to_dict())
+
+    monkeypatch.setattr(
+        "src.eval.bace_native_baseline_gnn.run_mutagenicity_wnode_selector",
+        fake_selector,
+    )
+    frozen = run_native_baseline_selector(
+        method="GCFExplainer",
+        matrix_output=matrix,
+        output_dir=tmp_path / "gcf-selection",
+        thresholds_json=thresholds_path,
+    )
+    assert observed["thresholds"] == _ours_threshold_payload()
+    provenance = observed["provenance"]
+    assert isinstance(provenance, dict)
+    assert provenance["source_method"] == "Ours"
+    assert provenance["test_used"] is False
+    assert frozen["thresholds"] == _ours_threshold_payload()
+    assert (
+        frozen["threshold_config_hash"]
+        == BACE_OURS_B12_THRESHOLD_CONFIG_SHA256
+    )
+    assert frozen["ordered_rule_ids"] == [
+        row["candidate_id"] for row in candidates
+    ]
+
+
+def test_gcf_selector_requires_explicit_ours_b12_thresholds(tmp_path: Path) -> None:
+    matrix = tmp_path / "gcf-matrix"
+    matrix.mkdir()
+    atomic_json(
+        matrix / "run_manifest.json",
+        {
+            "stage": CALIBRATION_STAGE,
+            "status": "PASS",
+            "test_loaded": False,
+            "method_id": "gcfexplainer",
+            "oracle_checkpoint_hash": CHECKPOINT_ID,
+            "molclr_checkpoint_hash": MOLCLR_ID,
+            "candidate_universe_hash": "c" * 64,
+        },
+    )
+    atomic_jsonl(
+        matrix / "pair_matrix.jsonl",
+        [
+            {"parent_id": "p0", "candidate_id": f"candidate-{index:02d}"}
+            for index in range(20)
+        ],
+    )
+    with pytest.raises(ValueError, match="explicit --thresholds-json"):
+        run_native_baseline_selector(
+            method="GCFExplainer",
+            matrix_output=matrix,
+            output_dir=tmp_path / "selection",
+        )
 
 
 def test_fullgraph_wnode_uses_pair_distance_without_fake_match_context(

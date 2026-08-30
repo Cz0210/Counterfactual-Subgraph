@@ -103,6 +103,12 @@ $PY scripts/autodl/build_four_by_four_manifest.py \
   --output "$CONTROL/manifests/${CONTROLLER_ID}.json"
 ```
 
+When `METHOD=GCFExplainer`, the fragment command also requires
+`--thresholds-json "$BACE_OURS_B12_THRESHOLDS"`.  That path must be the
+physical `thresholds.json` beside the frozen Ours B12 selection manifest; the
+controller records it as a read-only selection input.  Other methods must not
+pass this option.
+
 The production manifest loader recognizes the baseline selector as a genuine
 calibration freeze and permits only the three explicit baseline held-out
 stages after that selector. Each held-out task must still declare both
@@ -291,6 +297,23 @@ $PY scripts/autodl/run_bace_baseline_gnn_route.py select \
   --method "$METHOD" --matrix-output "$OUTPUT_ROOT/calibration/merged" \
   --output-dir "$OUTPUT_ROOT/selection"
 ```
+
+For GCFExplainer, use the explicit shared-grid form instead:
+
+```bash
+$PY scripts/autodl/run_bace_baseline_gnn_route.py select \
+  --method GCFExplainer \
+  --matrix-output "$OUTPUT_ROOT/calibration/merged" \
+  --thresholds-json "$BACE_OURS_B12_THRESHOLDS" \
+  --output-dir "$OUTPUT_ROOT/selection"
+```
+
+The selector validates the Ours B12 and B11 manifests, the frozen GINE and
+MolCLR hashes, calibration/test isolation, and numeric grid hash
+`37d7a265ee53fc0c31edaf59f8b412f41c79c62af4941d4ddf1f3e66c4afa427`.
+It adopts that bundle byte-for-byte and never derives GCF-specific thresholds.
+Because the shared thresholds can change the selected prefix, held-out test
+shards, test merge, final freeze, and standardization must all use fresh roots.
 
 Only after `selection/frozen_selection_manifest.json` and `selection/PASS`
 exist may the controller schedule test shards:

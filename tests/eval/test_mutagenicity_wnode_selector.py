@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -449,6 +450,75 @@ def test_full_fake_selector_writes_nested_top_prefix_and_passes_audit(
         forbid_test=True,
     )
     assert audit["audit_passed"] is True
+
+
+def test_selector_can_audit_immutable_external_calibration_thresholds(
+    tmp_path: Path,
+) -> None:
+    matrix_dir = _write_fake_matrix(tmp_path / "calibration_matrix")
+    source = tmp_path / "frozen_source"
+    source.mkdir()
+    thresholds = derive_thresholds(
+        np.asarray([0.01, 0.02, 0.03, 0.04, 0.08], dtype=np.float64)
+    )
+    threshold_path = source / "thresholds.json"
+    selection_path = source / "frozen_selection_manifest.json"
+    threshold_path.write_text(
+        json.dumps(thresholds.to_dict(), sort_keys=True), encoding="utf-8"
+    )
+    selection_path.write_text(
+        json.dumps(
+            {
+                "thresholds": thresholds.to_dict(),
+                "test_loaded": False,
+                "test_used": False,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    def identity(path: Path) -> dict[str, object]:
+        return {
+            "path": str(path.resolve()),
+            "size": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    provenance = {
+        "mode": "frozen_ours_b12_selector",
+        "thresholds_json": identity(threshold_path),
+        "source_selection_manifest": identity(selection_path),
+        "test_loaded": False,
+        "test_used": False,
+    }
+    output_dir = tmp_path / "selector"
+    run_mutagenicity_wnode_selector(
+        matrix_run_dir=matrix_dir,
+        output_dir=output_dir,
+        top_k=3,
+        table_k=2,
+        prefix_weights=(1.0, 1.0, 0.5),
+        frozen_thresholds=thresholds,
+        frozen_threshold_provenance=provenance,
+    )
+    manifest = json.loads((output_dir / "run_manifest.json").read_text())
+    assert manifest["config"]["threshold_mode"] == "frozen_external"
+    assert json.loads((output_dir / "thresholds.json").read_text()) == (
+        thresholds.to_dict()
+    )
+    audit = audit_mutagenicity_wnode_selector(
+        run_dir=output_dir,
+        matrix_run_dir=matrix_dir,
+        expected_parent_count=4,
+        expected_candidate_count=6,
+        expected_top_k=3,
+        expected_table_k=2,
+        require_all_variants=True,
+        forbid_test=True,
+    )
+    assert audit["audit_passed"] is True
+    assert audit["threshold_mode"] == "frozen_external"
 
 
 def test_test_path_or_test_cohort_is_rejected(tmp_path: Path) -> None:

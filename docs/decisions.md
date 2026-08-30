@@ -1,5 +1,100 @@
 # Decisions Log
 
+## [2026-08-31] Bind BACE GCFExplainer to the frozen Ours B12 threshold grid
+
+### Background
+
+The completed BACE GCFExplainer calibration shards were scientifically valid,
+but the native selector re-derived its seven WNode thresholds from the GCF
+calibration matrix.  That produced threshold identity `b4aaf264...`, while the
+already-frozen BACE Ours cell and the paper matrix use the method-shared B12
+numeric grid identity `37d7a265...`.  The registry therefore correctly rejected
+the otherwise standardized GCF cell as a cross-method threshold conflict.
+
+### Decision
+
+The GCFExplainer `select` stage must receive an explicit `--thresholds-json`
+pointing to the immutable `bace/ours/b12-selector` output.  Before selection it
+re-opens and hash-validates that file, its sibling frozen-selection manifest,
+and the referenced Ours B11 calibration manifest.  The source must prove the
+frozen BACE GINE and MolCLR identities, calibration-only fitting,
+`test_loaded=false`, `test_used=false`, and numeric threshold hash
+`37d7a265ee53fc0c31edaf59f8b412f41c79c62af4941d4ddf1f3e66c4afa427`.
+
+The selector adopts the frozen bundle exactly; it does not re-fit thresholds,
+open test data, regenerate candidates, or alter the calibration candidate
+universe.  Its output records immutable source identities and is independently
+reload-auditable.  Because the shared grid changes the GCF selection objective,
+the prior GCF test/freeze/standardized roots are not adopted: selection, held-out
+test evaluation, freeze, and standardization require fresh output roots.
+
+### Consequences
+
+- Ours and GCFExplainer now share exactly one BACE threshold grid.
+- Missing, copied-look-alike, mutated, test-derived, wrong-GINE, or wrong-MolCLR
+  threshold sources fail closed before selector output is created.
+- Existing calibration shards remain reusable because neither their pair
+  matrix nor candidate order is modified.
+- This is a local code repair only; it does not deploy or start an experiment.
+
+### Status
+
+Accepted
+
+---
+
+## [2026-08-31] Separate Taste GlobalGCE live mining scratch from durable proof
+
+### Background
+
+The fresh T8 route reached real exact-top-k gSpan mining, then stopped at the
+unchanged storage guard because `/autodl-fs/data` had fewer than 100,000 free
+inodes.  `/root/autodl-tmp` has ample inodes but only about 18 GiB free, so it
+also fails the existing 50 GiB free-space floor.  Lowering either guard would
+hide the resource condition, while storing terminal proof only on tmpfs would
+make the branch unreloadable after process exit.
+
+### Decision
+
+Give exact-top-k mining one explicit, science-neutral scratch root.  Keep the
+live SQLite database and its WAL/SHM companions there and apply the unchanged
+50 GiB, 2 percent, and 100,000-inode guard to that filesystem.  For the current
+AutoDL host, a fresh attempt-specific `/dev/shm/fast16-t8-<UUID>` root satisfies
+those floors; `/root/autodl-tmp` does not.
+
+Before exact mining can return, create a transactionally consistent SQLite
+backup in a temporary file on the persistent checkpoint filesystem, fsync it,
+and atomically replace the durable database name.  Then publish the complete
+checkpoint and heartbeat, and publish the exact-top-k audit last.  Exact proof
+identities written through a held `/proc/self/fd` directory carry the verified
+stable named persistent path, never the procfs or tmpfs spelling.  A later
+reload validates and consumes the durable audit/database directly without
+requiring the live scratch root.
+
+The deadline T8 runner requires an absolute fresh `--gspan-scratch-root` and
+gives targets 0 and 2 disjoint children.  It records only that external scratch
+was used and durable proof was published; terminal manifests contain no
+scratch path.  The failed b466 attempt had zero completed roots and is not
+adopted or resumed; a deployment must use a fresh UUID/state/output/scratch
+namespace.
+
+### Consequences
+
+- The official GlobalGCE traversal, stable Top20 ordering, train split, frozen
+  three-class GINE, target branches, and guard thresholds do not change.
+- Loss of `/dev/shm` after durable proof publication cannot invalidate branch
+  reload or terminal verification.
+- A storage stop before durable proof remains non-PASS and may retain only
+  scratch-local partial progress.
+- This change performs no deployment, cleanup, GPU launch, or scientific
+  adoption.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Canonicalize the AIDS continuation interpreter path
 
 ### Background

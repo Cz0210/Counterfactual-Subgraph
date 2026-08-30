@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -101,6 +101,151 @@ class ThresholdBundle:
             "threshold_source": "calibration_all_finite_strict_flip_pairs",
             "test_used": False,
         }
+
+
+def threshold_bundle_from_dict(payload: Mapping[str, Any]) -> ThresholdBundle:
+    """Load one immutable threshold payload without re-fitting its values.
+
+    The round-trip equality check is intentional: an externally frozen bundle
+    must use the exact selector schema, rather than a permissive look-alike
+    containing only ``theta_star`` or an incomplete threshold grid.
+    """
+
+    if payload.get("quantile_method") != "linear":
+        raise ValueError("Frozen thresholds require quantile_method=linear.")
+    if payload.get("dtype") != "float64":
+        raise ValueError("Frozen thresholds require dtype=float64.")
+    if payload.get("threshold_source") != (
+        "calibration_all_finite_strict_flip_pairs"
+    ):
+        raise ValueError("Frozen thresholds are not calibration-derived.")
+    if payload.get("test_used") is not False:
+        raise ValueError("Frozen thresholds do not prove test_used=false.")
+    try:
+        finite_count = int(payload["finite_strict_flip_distance_count"])
+        requested_quantiles = tuple(
+            float(value) for value in payload["requested_quantiles"]
+        )
+        requested_weights = tuple(
+            float(value) for value in payload["requested_weights"]
+        )
+        raw_rows = tuple(payload["raw_quantile_thresholds"])
+        merged_rows = tuple(payload["merged_thresholds"])
+        theta_star_quantile = float(payload["theta_star_quantile"])
+        theta_star = float(payload["theta_star"])
+        cost_cap_quantile = float(payload["cost_cap_quantile"])
+        cost_cap = float(payload["cost_cap"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Frozen threshold payload is incomplete or malformed.") from exc
+    if finite_count <= 0:
+        raise ValueError("Frozen thresholds require a positive calibration count.")
+    if (
+        not requested_quantiles
+        or len(requested_quantiles) != len(requested_weights)
+        or len(raw_rows) != len(requested_quantiles)
+        or not merged_rows
+    ):
+        raise ValueError("Frozen threshold grid dimensions are inconsistent.")
+    if any(
+        not math.isfinite(value) or value < 0.0 or value > 1.0
+        for value in requested_quantiles
+    ):
+        raise ValueError("Frozen threshold quantiles must be finite and in [0, 1].")
+    if any(not math.isfinite(value) or value < 0.0 for value in requested_weights):
+        raise ValueError("Frozen threshold weights must be finite and non-negative.")
+    if sum(requested_weights) <= 0.0:
+        raise ValueError("Frozen thresholds require a positive total weight.")
+
+    raw_thresholds: list[float] = []
+    quantile_labels: list[str] = []
+    for index, row in enumerate(raw_rows):
+        if not isinstance(row, Mapping):
+            raise ValueError("Frozen raw threshold row is not an object.")
+        quantile = requested_quantiles[index]
+        weight = requested_weights[index]
+        label = _quantile_label(quantile)
+        try:
+            row_quantile = float(row["quantile"])
+            row_weight = float(row["weight"])
+            threshold = float(row["threshold"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Frozen raw threshold row is malformed.") from exc
+        if (
+            row_quantile != quantile
+            or row_weight != weight
+            or row.get("quantile_label") != label
+            or not math.isfinite(threshold)
+            or threshold < 0.0
+        ):
+            raise ValueError("Frozen raw threshold row violates its declared grid.")
+        raw_thresholds.append(threshold)
+        quantile_labels.append(label)
+
+    levels: list[ThresholdLevel] = []
+    for row in merged_rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("Frozen merged threshold row is not an object.")
+        try:
+            threshold = float(row["threshold"])
+            weight = float(row["weight"])
+            quantiles = tuple(float(value) for value in row["quantiles"])
+            labels = tuple(str(value) for value in row["quantile_labels"])
+            threshold_id = str(row["threshold_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Frozen merged threshold row is malformed.") from exc
+        if (
+            not math.isfinite(threshold)
+            or threshold < 0.0
+            or not math.isfinite(weight)
+            or weight < 0.0
+            or not quantiles
+            or len(quantiles) != len(labels)
+            or threshold_id != labels[0]
+        ):
+            raise ValueError("Frozen merged threshold row is invalid.")
+        levels.append(
+            ThresholdLevel(
+                threshold_id=threshold_id,
+                threshold=threshold,
+                weight=weight,
+                quantiles=quantiles,
+                quantile_labels=labels,
+            )
+        )
+    if any(
+        right.threshold <= left.threshold
+        for left, right in zip(levels, levels[1:])
+    ):
+        raise ValueError("Frozen merged thresholds must be strictly increasing.")
+    for value, label in (
+        (theta_star_quantile, "theta_star_quantile"),
+        (cost_cap_quantile, "cost_cap_quantile"),
+    ):
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"Frozen {label} must be in [0, 1].")
+    if (
+        not math.isfinite(theta_star)
+        or theta_star < 0.0
+        or not math.isfinite(cost_cap)
+        or cost_cap < theta_star
+    ):
+        raise ValueError("Frozen theta_star/cost_cap is invalid.")
+
+    bundle = ThresholdBundle(
+        finite_distance_count=finite_count,
+        requested_quantiles=requested_quantiles,
+        requested_weights=requested_weights,
+        raw_thresholds=tuple(raw_thresholds),
+        quantile_labels=tuple(quantile_labels),
+        levels=tuple(levels),
+        theta_star_quantile=theta_star_quantile,
+        theta_star=theta_star,
+        cost_cap_quantile=cost_cap_quantile,
+        cost_cap=cost_cap,
+    )
+    if bundle.to_dict() != dict(payload):
+        raise ValueError("Frozen threshold payload is not canonical selector schema.")
+    return bundle
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +494,59 @@ def _file_identity(path: Path) -> dict[str, Any]:
         "mtime_ns": int(stat.st_mtime_ns),
         "sha256": digest.hexdigest() if resolved.is_file() else None,
     }
+
+
+def _verify_external_file_identity(identity: Any, *, label: str) -> Path:
+    if not isinstance(identity, Mapping):
+        raise ValueError(f"{label} identity is missing.")
+    raw_path = str(identity.get("path") or "").strip()
+    if not raw_path or not Path(raw_path).expanduser().is_absolute():
+        raise ValueError(f"{label} identity path must be absolute.")
+    unresolved = Path(raw_path).expanduser()
+    if unresolved.is_symlink():
+        raise ValueError(f"{label} identity must name one physical file: {unresolved}")
+    path = unresolved.resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"{label} identity must name one physical file: {path}")
+    actual = _file_identity(path)
+    for field in ("kind", "size", "sha256"):
+        if identity.get(field, actual[field]) != actual[field]:
+            raise ValueError(f"{label} identity changed: {field}.")
+    if "mtime_ns" in identity and int(identity["mtime_ns"]) != actual["mtime_ns"]:
+        raise ValueError(f"{label} identity changed: mtime_ns.")
+    return path
+
+
+def _validate_external_threshold_provenance(
+    thresholds: ThresholdBundle,
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-open immutable source files and prove a calibration-only adoption."""
+
+    normalized = dict(provenance)
+    if normalized.get("mode") != "frozen_ours_b12_selector":
+        raise ValueError("Unsupported external threshold provenance mode.")
+    if normalized.get("test_loaded") is not False or normalized.get("test_used") is not False:
+        raise ValueError("External thresholds do not prove test isolation.")
+    thresholds_path = _verify_external_file_identity(
+        normalized.get("thresholds_json"), label="thresholds_json"
+    )
+    selection_path = _verify_external_file_identity(
+        normalized.get("source_selection_manifest"),
+        label="source_selection_manifest",
+    )
+    source_thresholds = _read_json(thresholds_path)
+    source_selection = _read_json(selection_path)
+    expected = thresholds.to_dict()
+    if source_thresholds != expected:
+        raise ValueError("External thresholds changed after adoption.")
+    if source_selection.get("thresholds") != expected:
+        raise ValueError("Source selection manifest does not bind the threshold payload.")
+    if source_selection.get("test_loaded") is not False or source_selection.get(
+        "test_used"
+    ) is not False:
+        raise ValueError("Source selection manifest does not prove test isolation.")
+    return normalized
 
 
 def _git_commit(repo_root: Path) -> str | None:
@@ -1668,6 +1866,8 @@ def run_mutagenicity_wnode_selector(
     local_swap_passes: int = 2,
     seed: int = 13,
     forbid_test: bool = True,
+    frozen_thresholds: ThresholdBundle | None = None,
+    frozen_threshold_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     destination = Path(output_dir).expanduser().resolve()
     if destination.exists() and any(destination.iterdir()):
@@ -1687,13 +1887,27 @@ def run_mutagenicity_wnode_selector(
     )
     if len(matrix.candidate_rows) < int(top_k):
         raise ValueError("Selected candidate subset is smaller than top_k.")
-    thresholds = derive_thresholds(
-        matrix.full_finite_distances,
-        quantiles=threshold_quantiles,
-        weights=threshold_weights,
-        theta_star_quantile=theta_star_quantile,
-        cost_cap_quantile=cost_cap_quantile,
-    )
+    if (frozen_thresholds is None) != (frozen_threshold_provenance is None):
+        raise ValueError(
+            "frozen_thresholds and frozen_threshold_provenance must be provided together."
+        )
+    if frozen_thresholds is None:
+        thresholds = derive_thresholds(
+            matrix.full_finite_distances,
+            quantiles=threshold_quantiles,
+            weights=threshold_weights,
+            theta_star_quantile=theta_star_quantile,
+            cost_cap_quantile=cost_cap_quantile,
+        )
+        threshold_mode = "derived_from_matrix"
+        threshold_provenance: dict[str, Any] | None = None
+    else:
+        thresholds = frozen_thresholds
+        threshold_mode = "frozen_external"
+        threshold_provenance = _validate_external_threshold_provenance(
+            thresholds,
+            frozen_threshold_provenance,
+        )
     chemistry = build_candidate_chemistry(
         matrix.candidate_rows,
         size_normalization_rows=matrix.full_candidate_rows,
@@ -1770,6 +1984,7 @@ def run_mutagenicity_wnode_selector(
         },
         "cohort": "calibration",
         "test_loaded": False,
+        "threshold_provenance": threshold_provenance,
         "config": {
             "top_k": int(top_k),
             "table_k": int(table_k),
@@ -1783,6 +1998,7 @@ def run_mutagenicity_wnode_selector(
             "local_swap_passes": int(local_swap_passes),
             "seed": int(seed),
             "forbid_test": bool(forbid_test),
+            "threshold_mode": threshold_mode,
         },
         "run_complete": False,
     }
@@ -1907,30 +2123,46 @@ def audit_mutagenicity_wnode_selector(
     if top_k != int(expected_top_k) or table_k != int(expected_table_k):
         raise AssertionError("Selector top_k/table_k mismatch.")
     prefix_weights = tuple(float(value) for value in config["prefix_weights"])
-    thresholds = derive_thresholds(
-        matrix.full_finite_distances,
-        quantiles=tuple(float(value) for value in config["threshold_quantiles"]),
-        weights=tuple(float(value) for value in config["threshold_weights"]),
-        theta_star_quantile=float(config["theta_star_quantile"]),
-        cost_cap_quantile=float(config["cost_cap_quantile"]),
-    )
     persisted_thresholds = _read_json(root / "thresholds.json")
-    expected_thresholds = thresholds.to_dict()
-    if persisted_thresholds != expected_thresholds:
-        raise AssertionError("thresholds.json is not derived from all calibration distances.")
-    if not math.isclose(
-        thresholds.theta_star,
-        float(
-            np.quantile(
-                matrix.full_finite_distances,
-                np.float64(0.30),
-                method="linear",
+    threshold_mode = str(config.get("threshold_mode") or "derived_from_matrix")
+    if threshold_mode == "derived_from_matrix":
+        thresholds = derive_thresholds(
+            matrix.full_finite_distances,
+            quantiles=tuple(float(value) for value in config["threshold_quantiles"]),
+            weights=tuple(float(value) for value in config["threshold_weights"]),
+            theta_star_quantile=float(config["theta_star_quantile"]),
+            cost_cap_quantile=float(config["cost_cap_quantile"]),
+        )
+        if persisted_thresholds != thresholds.to_dict():
+            raise AssertionError(
+                "thresholds.json is not derived from all calibration distances."
             )
-        ),
-        abs_tol=FLOAT_TOLERANCE,
-        rel_tol=0.0,
-    ):
-        raise AssertionError("theta_star is not exactly calibration q30.")
+        if not math.isclose(
+            thresholds.theta_star,
+            float(
+                np.quantile(
+                    matrix.full_finite_distances,
+                    np.float64(0.30),
+                    method="linear",
+                )
+            ),
+            abs_tol=FLOAT_TOLERANCE,
+            rel_tol=0.0,
+        ):
+            raise AssertionError("theta_star is not exactly calibration q30.")
+    elif threshold_mode == "frozen_external":
+        thresholds = threshold_bundle_from_dict(persisted_thresholds)
+        try:
+            _validate_external_threshold_provenance(
+                thresholds,
+                manifest.get("threshold_provenance") or {},
+            )
+        except ValueError as exc:
+            raise AssertionError(
+                f"Frozen external threshold provenance failed: {exc}"
+            ) from exc
+    else:
+        raise AssertionError(f"Unknown selector threshold mode: {threshold_mode}")
 
     chemistry = build_candidate_chemistry(
         matrix.candidate_rows,
@@ -2092,6 +2324,7 @@ def audit_mutagenicity_wnode_selector(
         "theta_star": thresholds.theta_star,
         "cost_cap": thresholds.cost_cap,
         "finite_threshold_distance_count": thresholds.finite_distance_count,
+        "threshold_mode": threshold_mode,
         "test_loaded": False,
         "run_complete": True,
     }
@@ -2128,6 +2361,7 @@ __all__ = [
     "run_mutagenicity_wnode_selector",
     "sequence_objective_components",
     "single_threshold_coverage",
+    "threshold_bundle_from_dict",
     "variant_decision_sort_key",
     "weighted_coverage_jaccard",
     "weighted_multi_threshold_utility",

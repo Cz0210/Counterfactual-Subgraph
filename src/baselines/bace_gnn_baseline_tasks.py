@@ -32,6 +32,7 @@ def build_bace_baseline_controller_fragment(
     molclr_root: str | Path,
     molclr_checkpoint: str | Path,
     neurosed_checkpoint: str | Path,
+    thresholds_json: str | Path | None = None,
     official_root: str | Path | None = None,
     neurosed_manifest: str | Path | None = None,
     globalgce_source_manifest: str | Path | None = None,
@@ -58,6 +59,18 @@ def build_bace_baseline_controller_fragment(
     molclr_project = _absolute(molclr_root, field="molclr_root")
     molclr_ckpt = _absolute(molclr_checkpoint, field="molclr_checkpoint")
     neurosed = _absolute(neurosed_checkpoint, field="neurosed_checkpoint")
+    if spec.method_id == "gcfexplainer":
+        if thresholds_json is None:
+            raise ValueError(
+                "GCFExplainer task fragment requires frozen Ours B12 thresholds_json"
+            )
+        frozen_thresholds = _absolute(
+            thresholds_json, field="thresholds_json"
+        )
+    else:
+        if thresholds_json is not None:
+            raise ValueError("thresholds_json is only supported for GCFExplainer")
+        frozen_thresholds = None
     prefix = f"bace_{spec.method_id}"
     common_env = {
         "PYTHONPATH": project,
@@ -573,24 +586,29 @@ def build_bace_baseline_controller_fragment(
     )
     selection_id = f"{prefix}_selection"
     selection_out = f"{root}/selection"
+    selection_argv = [
+        py,
+        script,
+        "select",
+        "--method",
+        spec.method,
+        "--matrix-output",
+        calibration_merge_out,
+        "--output-dir",
+        selection_out,
+    ]
+    selection_inputs = [calibration_merge_out]
+    if frozen_thresholds is not None:
+        selection_argv.extend(["--thresholds-json", frozen_thresholds])
+        selection_inputs.append(frozen_thresholds)
     add(
         selection_id,
         resource="cpu",
-        argv=[
-            py,
-            script,
-            "select",
-            "--method",
-            spec.method,
-            "--matrix-output",
-            calibration_merge_out,
-            "--output-dir",
-            selection_out,
-        ],
+        argv=selection_argv,
         output=selection_out,
         markers=["PASS"],
         dependencies=[calibration_merge_id],
-        inputs=[calibration_merge_out],
+        inputs=selection_inputs,
     )
     test_ids: list[str] = []
     for shard in range(NUM_SHARDS):

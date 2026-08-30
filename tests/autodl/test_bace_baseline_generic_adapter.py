@@ -27,10 +27,10 @@ from src.baselines.bace_gnn_baseline_tasks import (
 )
 
 
-def _paths(tmp_path: Path) -> dict[str, Path]:
+def _paths(tmp_path: Path, method: str | None = None) -> dict[str, Path]:
     fixture = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
     root = Path("/persistent") / fixture
-    return {
+    paths = {
         "python": root / "env/bin/python",
         "project_root": root / "project",
         "output_root": root / "outputs/bace-baselines",
@@ -46,11 +46,16 @@ def _paths(tmp_path: Path) -> dict[str, Path]:
         "globalgce_source_manifest": root / "source_graph_manifest.jsonl",
         "globalgce_native_train_csv": root / "train.csv",
     }
+    if method == "GCFExplainer":
+        paths["thresholds_json"] = (
+            root / "bace/ours/b12-selector/attempt-0/thresholds.json"
+        )
+    return paths
 
 
 def _generic(tmp_path: Path, method: str) -> dict:
     return build_bace_baseline_generic_controller_fragment(
-        method=method, **_paths(tmp_path)
+        method=method, **_paths(tmp_path, method)
     )
 
 
@@ -80,7 +85,7 @@ def _production_manifest(tmp_path: Path, tasks: list[dict]) -> Path:
 
 def test_native_fragment_contract_is_not_changed(tmp_path: Path) -> None:
     native = build_bace_baseline_controller_fragment(
-        method="GCFExplainer", **_paths(tmp_path)
+        method="GCFExplainer", **_paths(tmp_path, "GCFExplainer")
     )
     first = native["tasks"][0]
     assert native["schema_version"] == "bace_baseline_controller_fragment_v1"

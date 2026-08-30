@@ -67,6 +67,7 @@ def _fragment_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--molclr-root", required=True)
     parser.add_argument("--molclr-checkpoint", required=True)
     parser.add_argument("--neurosed-checkpoint", required=True)
+    parser.add_argument("--thresholds-json")
     parser.add_argument("--official-root")
     parser.add_argument("--neurosed-manifest")
     parser.add_argument("--globalgce-source-manifest")
@@ -93,6 +94,7 @@ def _fragment_kwargs(args: argparse.Namespace) -> dict[str, object]:
         "molclr_root": args.molclr_root,
         "molclr_checkpoint": args.molclr_checkpoint,
         "neurosed_checkpoint": args.neurosed_checkpoint,
+        "thresholds_json": args.thresholds_json,
         "official_root": args.official_root,
         "neurosed_manifest": args.neurosed_manifest,
         "globalgce_source_manifest": args.globalgce_source_manifest,
@@ -241,6 +243,13 @@ def build_parser() -> argparse.ArgumentParser:
     select = sub.add_parser("select")
     select.add_argument("--method", required=True)
     select.add_argument("--matrix-output", required=True)
+    select.add_argument(
+        "--thresholds-json",
+        help=(
+            "Required for GCFExplainer: immutable thresholds.json from the "
+            "frozen BACE Ours B12 selector."
+        ),
+    )
     select.add_argument("--output-dir", required=True)
     select.add_argument("--seed", type=int, default=13)
 
@@ -456,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
             matrix_output=args.matrix_output,
             output_dir=args.output_dir,
             seed=args.seed,
+            thresholds_json=args.thresholds_json,
         )
     elif args.stage == "freeze":
         result = freeze_native_baseline_final(
