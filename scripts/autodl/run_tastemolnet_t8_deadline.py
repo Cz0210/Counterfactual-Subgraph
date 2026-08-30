@@ -57,6 +57,25 @@ def _absolute(path: Path, label: str) -> Path:
     return path.resolve(strict=True)
 
 
+def _fresh_scratch_root(path: Path) -> Path:
+    """Validate one fresh absolute scratch root without creating it."""
+
+    if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+        raise TasteGlobalGCESmokeError(
+            "T8 deadline gSpan scratch root must be absolute"
+        )
+    if path.exists() or path.is_symlink():
+        raise TasteGlobalGCESmokeError(
+            "T8 deadline gSpan scratch root must be fresh"
+        )
+    parent = path.parent.resolve(strict=True)
+    if parent != path.parent or not parent.is_dir():
+        raise TasteGlobalGCESmokeError(
+            "T8 deadline gSpan scratch parent must be one named directory"
+        )
+    return path
+
+
 def _uuid4(value: str) -> str:
     try:
         parsed = uuid.UUID(value)
@@ -136,6 +155,8 @@ def deadline_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[s
         "official_runtime_source_authority": official["runtime_source_authority"],
         "num_classes": NUM_CLASSES, "rf_oracle_used": False, "calibration_loaded": False,
         "test_loaded": False, "gnn_ablation_started": False,
+        "gspan_external_scratch_used": True,
+        "gspan_terminal_proof_persistent": True,
     }
     return evidence, payloads, train_payload
 
@@ -149,6 +170,7 @@ def _write_ready(path: Path, evidence: dict[str, Any]) -> None:
 
 
 def run_deadline(args: argparse.Namespace) -> int:
+    scratch_root = _fresh_scratch_root(args.gspan_scratch_root)
     evidence, payloads, train_payload = deadline_preflight(args)
     if args.preflight_only:
         if args.ready_receipt is None:
@@ -167,6 +189,7 @@ def run_deadline(args: argparse.Namespace) -> int:
         if path.exists() or path.is_symlink():
             raise TasteGlobalGCESmokeError(f"T8 deadline {label} root must be fresh")
         path.parent.mkdir(parents=True, exist_ok=True)
+    scratch_root.mkdir(mode=0o700)
     config = TasteGlobalGCESmokeConfig()
     scorer = FrozenTasteGINEScorer(payloads, device="cuda:0", batch_size=config.oracle_batch_size)
     state_root = FreshOutputDirectory.create(args.state_dir)
@@ -178,7 +201,8 @@ def run_deadline(args: argparse.Namespace) -> int:
                 min_freq=config.min_freq, frozen_gine_checkpoint=evidence["checkpoint_dir"],
                 source_label=SOURCE_LABEL, target_label=target_label, num_classes=NUM_CLASSES,
                 frozen_gine_payloads=payloads, native_train_payload=train_payload,
-                official_source_authority=evidence["official_runtime_source_authority"], require_isolated_imports=True)
+                official_source_authority=evidence["official_runtime_source_authority"], require_isolated_imports=True,
+                gspan_scratch_root=scratch_root / f"target-{target_label}")
         science, state_tree = run_t8_science(
             train_payload=train_payload, expected_train_row_count=evidence["train_rows"],
             expected_train_label_counts=evidence["train_label_counts"], scorer=scorer,
@@ -212,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attempt-id", required=True); parser.add_argument("--t3-output", type=Path, required=True)
     parser.add_argument("--t4-output", type=Path, required=True); parser.add_argument("--gnn-checkpoint", type=Path, required=True)
     parser.add_argument("--train-csv", type=Path, required=True); parser.add_argument("--official-root", type=Path, required=True)
+    parser.add_argument("--gspan-scratch-root", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True); parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--preflight-only", action="store_true"); parser.add_argument("--ready-receipt", type=Path)
     return parser

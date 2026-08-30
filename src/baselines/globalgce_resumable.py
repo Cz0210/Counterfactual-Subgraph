@@ -115,6 +115,51 @@ def _descriptor_path_or_resolve(
     return path.resolve(strict=strict)
 
 
+def _portable_identity_path(path_like: str | Path) -> Path:
+    """Return a durable named path for evidence written through ``/proc/self/fd``.
+
+    T8 keeps its private state directory open and gives the generator a procfs
+    descriptor path so writes remain anchored to that held directory.  Procfs
+    paths stop resolving when the worker exits, so they must never be embedded
+    in a reloadable exact-top-k proof.  Resolve only the held descriptor's
+    *name* for evidence, and require that it still identifies the same inode as
+    the descriptor-anchored leaf before returning it.
+    """
+
+    anchored = _descriptor_path_or_resolve(path_like, strict=True)
+    parts = anchored.parts
+    if not (
+        sys.platform.startswith("linux")
+        and len(parts) >= 5
+        and parts[0] == os.sep
+        and parts[1:4] == ("proc", "self", "fd")
+        and parts[4].isdigit()
+    ):
+        return anchored.resolve(strict=True)
+    descriptor_link = Path(os.sep, "proc", "self", "fd", parts[4])
+    target_text = os.readlink(descriptor_link)
+    if target_text.endswith(" (deleted)"):
+        raise RuntimeError(
+            "GlobalGCE cannot publish proof identity from a deleted held directory"
+        )
+    target = Path(target_text)
+    if not target.is_absolute():
+        raise RuntimeError(
+            "GlobalGCE held directory descriptor has no absolute named path"
+        )
+    portable = target.joinpath(*parts[5:]).resolve(strict=True)
+    anchored_stat = os.stat(anchored, follow_symlinks=False)
+    portable_stat = os.stat(portable, follow_symlinks=False)
+    if (int(anchored_stat.st_dev), int(anchored_stat.st_ino)) != (
+        int(portable_stat.st_dev),
+        int(portable_stat.st_ino),
+    ):
+        raise RuntimeError(
+            "GlobalGCE named proof leaf differs from its held descriptor leaf"
+        )
+    return portable
+
+
 def _is_sha256(value: Any) -> bool:
     return (
         type(value) is str
@@ -515,6 +560,51 @@ def _atomic_pickle(path: Path, payload: Any) -> None:
     _atomic_bytes(path, pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL))
 
 
+def _atomic_sqlite_backup(
+    source: sqlite3.Connection,
+    destination: Path,
+) -> None:
+    """Publish one transactionally consistent SQLite snapshot atomically.
+
+    The temporary database is created on the destination filesystem, so the
+    final replace is same-filesystem even when the live WAL database is on
+    tmpfs.  No live ``-wal``/``-shm`` inode becomes part of terminal evidence.
+    """
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".backup.tmp",
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    backup: sqlite3.Connection | None = None
+    try:
+        backup = sqlite3.connect(temporary, timeout=120)
+        source.backup(backup)
+        backup.commit()
+        backup.close()
+        backup = None
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        directory_fd = os.open(
+            destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if backup is not None:
+            backup.close()
+        temporary.unlink(missing_ok=True)
+        Path(f"{temporary}-journal").unlink(missing_ok=True)
+        Path(f"{temporary}-wal").unlink(missing_ok=True)
+        Path(f"{temporary}-shm").unlink(missing_ok=True)
+
+
 def _typed_fingerprint_value(value: Any) -> Any:
     """Encode values without collapsing types that affect native traversal."""
 
@@ -756,8 +846,9 @@ def _load_torch_checkpoint_held(
 
 def _file_identity(path: Path) -> dict[str, Any]:
     resolved = _descriptor_path_or_resolve(path, strict=True)
+    portable = _portable_identity_path(resolved)
     return {
-        "path": str(resolved),
+        "path": str(portable),
         "bytes": resolved.stat().st_size,
         "sha256": _sha256_file(resolved),
     }
@@ -818,9 +909,10 @@ def validate_exact_top_k_audit(audit_path: str | Path) -> dict[str, Any]:
         raise ValueError("GlobalGCE exact-top-k checkpoint hash binding failed.")
     if audit.get("input_fingerprint") != checkpoint.get("input_fingerprint"):
         raise ValueError("GlobalGCE exact-top-k fingerprint closure failed.")
-    if _descriptor_path_or_resolve(
-        str(checkpoint.get("sqlite_path") or "")
-    ) != database_path:
+    claimed_database = _descriptor_path_or_resolve(
+        str(checkpoint.get("sqlite_path") or ""), strict=True
+    )
+    if not os.path.samefile(claimed_database, database_path):
         raise ValueError("GlobalGCE exact-top-k SQLite path closure failed.")
     top_k = int(audit.get("top_k") or 0)
     if top_k <= 0:
@@ -877,7 +969,7 @@ def validate_exact_top_k_audit(audit_path: str | Path) -> dict[str, Any]:
         "selected_identity_sha256": selected_identity,
         "audit": _file_identity(audit_file),
         "checkpoint": checkpoint_identity,
-        "sqlite_path": str(database_path),
+        "sqlite_path": str(_portable_identity_path(database_path)),
     }
 
 
@@ -931,6 +1023,7 @@ def resumable_gspan_root_chunks(
     gspan_module: Any,
     *,
     checkpoint_root: str | Path,
+    scratch_root: str | Path | None = None,
     top_k: int | None = None,
     flush_every: int | None = None,
     max_in_memory_candidates: int | None = None,
@@ -948,7 +1041,14 @@ def resumable_gspan_root_chunks(
     """
 
     root = _descriptor_path_or_resolve(checkpoint_root)
+    scratch = (
+        root
+        if scratch_root is None
+        else _descriptor_path_or_resolve(scratch_root)
+    )
+    external_scratch = scratch_root is not None
     root.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=True)
     gspan_class = gspan_module.gSpan
     original_run = gspan_class.run
     original_report = gspan_class._report
@@ -971,6 +1071,10 @@ def resumable_gspan_root_chunks(
         raise ValueError("GlobalGCE spill limits must be positive.")
     if exact_top_k_pruning and (top_k is None or int(top_k) <= 0):
         raise ValueError("Exact GlobalGCE top-k pruning requires a positive top_k.")
+    if external_scratch and not exact_top_k_pruning:
+        raise ValueError(
+            "External GlobalGCE scratch is supported only for exact-top-k mining."
+        )
     commit_every = min(configured_flush, configured_max)
     min_free_bytes = int(
         float(os.environ.get("GLOBALGCE_STORAGE_MIN_FREE_GIB", "50")) * 1024**3
@@ -1066,7 +1170,9 @@ def resumable_gspan_root_chunks(
             context["connection"].commit()
             context["uncommitted"] = 0
             context["state"]["peak_rss_mib"] = peak_rss_mib()
-            context["state"].update(storage_snapshot(context["support_root"]))
+            context["state"].update(
+                storage_snapshot(context["scratch_support_root"])
+            )
             if context["state"]["storage_guard_pass"] is not True:
                 context["state"]["stage"] = "storage_guard_stop"
                 _atomic_json(context["checkpoint_path"], context["state"])
@@ -1132,9 +1238,36 @@ def resumable_gspan_root_chunks(
             ),
         }
         fingerprint = _graph_input_fingerprint(self._nx_graph_list, settings)
-        support_root = root / f"support_{int(self._min_support)}_{fingerprint[:16]}"
+        support_name = f"support_{int(self._min_support)}_{fingerprint[:16]}"
+        support_root = root / support_name
+        scratch_support_root = scratch / support_name
         support_root.mkdir(parents=True, exist_ok=True)
-        database_path = support_root / "frequent_patterns.sqlite3"
+        scratch_support_root.mkdir(parents=True, exist_ok=True)
+        terminal_database_path = support_root / "frequent_patterns.sqlite3"
+        audit_path = support_root / "exact_top_k_audit.json"
+        if exact_top_k_pruning and audit_path.is_file():
+            proof = validate_exact_top_k_audit(audit_path)
+            if (
+                proof.get("input_fingerprint") != fingerprint
+                or int(proof.get("top_k") or -1) != int(top_k)
+            ):
+                raise ValueError(
+                    "GlobalGCE persisted exact-top-k proof/input mismatch."
+                )
+            with sqlite3.connect(
+                f"file:{terminal_database_path}?mode=ro", uri=True, timeout=120
+            ) as terminal_connection:
+                selected = terminal_connection.execute(
+                    "SELECT support, root_index, local_index, payload FROM patterns "
+                    "ORDER BY support DESC, root_index ASC, local_index ASC LIMIT ?",
+                    (int(top_k),),
+                ).fetchall()
+            self.freq_collection = [int(row[0]) for row in selected]
+            self.fs_collection = [pickle.loads(row[3]) for row in selected]
+            self._frequent_subgraphs = []
+            session["completed_exact_top_k_proofs"].append(proof)
+            return self.fs_collection, self.freq_collection
+        database_path = scratch_support_root / "frequent_patterns.sqlite3"
         connection = sqlite3.connect(database_path, timeout=120)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
@@ -1189,11 +1322,12 @@ def resumable_gspan_root_chunks(
             "current_root_index": None,
             "frequent_subgraph_count": 0,
             "sqlite_path": str(database_path),
+            "scratch_database_active": bool(external_scratch),
             "flush_every": configured_flush,
             "max_in_memory_candidates": configured_max,
             "exact_top_k_pruning": bool(exact_top_k_pruning),
             "peak_rss_mib": peak_rss_mib(),
-            **storage_snapshot(support_root),
+            **storage_snapshot(scratch_support_root),
         }
         try:
             with _Heartbeat(support_root / "heartbeat.json", state):
@@ -1253,7 +1387,7 @@ def resumable_gspan_root_chunks(
                             "local_index": 0,
                             "uncommitted": 0,
                             "state": state,
-                            "support_root": support_root,
+                            "scratch_support_root": scratch_support_root,
                             "checkpoint_path": support_root / "checkpoint.json",
                             "retained_top_k": (
                                 _load_retained_top_k(connection)
@@ -1359,12 +1493,24 @@ def resumable_gspan_root_chunks(
                 selected_rows = _selected_rows_from_database(
                     connection, top_k=int(top_k)
                 )
+                connection.commit()
+                if external_scratch:
+                    _atomic_sqlite_backup(connection, terminal_database_path)
+                terminal_database_path = _descriptor_path_or_resolve(
+                    terminal_database_path, strict=True
+                )
                 state.update(
                     {
                         "stage": "complete",
                         "current_root_index": None,
                         "selected_top_k_count": len(selected),
                         "peak_rss_mib": peak_rss_mib(),
+                        "sqlite_path": str(
+                            _portable_identity_path(terminal_database_path)
+                        ),
+                        "sqlite_bytes": terminal_database_path.stat().st_size,
+                        "scratch_database_active": False,
+                        "terminal_sqlite_published": True,
                     }
                 )
                 # The complete checkpoint closes first.  The exact audit is the
@@ -1372,6 +1518,10 @@ def resumable_gspan_root_chunks(
                 # run whose latest checkpoint still says ``mining``.
                 checkpoint_path = support_root / "checkpoint.json"
                 _atomic_json(checkpoint_path, state)
+                _atomic_json(
+                    support_root / "heartbeat.json",
+                    {**state, "heartbeat_epoch_seconds": time.time()},
+                )
                 audit_payload = {
                     "schema_version": "globalgce_exact_stable_topk_audit_v2",
                     "status": "PASS",
@@ -1409,7 +1559,6 @@ def resumable_gspan_root_chunks(
                         connection.execute("SELECT COUNT(*) FROM patterns").fetchone()[0]
                     ),
                 }
-                audit_path = support_root / "exact_top_k_audit.json"
                 _atomic_json(audit_path, audit_payload)
                 session["completed_exact_top_k_proofs"].append(
                     validate_exact_top_k_audit(audit_path)
@@ -1538,6 +1687,7 @@ def train_globalgce_resumable(
     gspan_flush_every: int = 256,
     gspan_max_in_memory_candidates: int = 256,
     gspan_exact_top_k_pruning: bool = False,
+    gspan_scratch_root: str | Path | None = None,
     gspan_adoption_proof: str | Path | None = None,
     on_exact_top_k_proof: Callable[[dict[str, Any]], None] | None = None,
     on_gspan_adoption_proof: Callable[[dict[str, Any]], None] | None = None,
@@ -1555,6 +1705,10 @@ def train_globalgce_resumable(
     if gspan_adoption_proof is not None and gspan_exact_top_k_pruning:
         raise ValueError(
             "GlobalGCE mining adoption and fresh exact-top-k mining are mutually exclusive"
+        )
+    if gspan_adoption_proof is not None and gspan_scratch_root is not None:
+        raise ValueError(
+            "GlobalGCE mining adoption does not consume a live scratch root"
         )
     config = {"epochs": int(epochs), "learning_rate": float(learning_rate)}
     normalized_resume_identity: dict[str, Any] | None = None
@@ -1608,6 +1762,7 @@ def train_globalgce_resumable(
         with resumable_gspan_root_chunks(
             gspan_module,
             checkpoint_root=checkpoint_root / "gspan",
+            scratch_root=gspan_scratch_root,
             top_k=int(model.fsg.topk),
             flush_every=int(gspan_flush_every),
             max_in_memory_candidates=int(gspan_max_in_memory_candidates),

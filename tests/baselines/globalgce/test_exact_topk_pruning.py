@@ -5,6 +5,7 @@ import json
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -238,6 +239,109 @@ def test_exact_topk_antimonotone_pruning_matches_stable_reference(
     assert validate_exact_top_k_audit(
         next(tmp_path.glob("support_*/exact_top_k_audit.json"))
     )["status"] == "PASS"
+
+
+def test_external_scratch_publishes_self_contained_persistent_proof(
+    tmp_path, monkeypatch
+) -> None:
+    _disable_storage_floor(monkeypatch)
+    persistent = tmp_path / "persistent"
+    scratch = tmp_path / "ephemeral-scratch"
+    reference = _ExactTopKFakeGSpan().run()
+
+    candidate = _ExactTopKFakeGSpan()
+    with resumable_gspan_root_chunks(
+        _module(),
+        checkpoint_root=persistent,
+        scratch_root=scratch,
+        top_k=3,
+        flush_every=1,
+        exact_top_k_pruning=True,
+    ) as session:
+        observed = candidate.run()
+
+    assert observed == reference
+    persistent_support = next(persistent.glob("support_*"))
+    scratch_support = next(scratch.glob("support_*"))
+    persistent_database = persistent_support / "frequent_patterns.sqlite3"
+    assert persistent_database.is_file()
+    assert (scratch_support / "frequent_patterns.sqlite3").is_file()
+    proof = session["completed_exact_top_k_proofs"][-1]
+    assert validate_exact_top_k_proof_identity(proof) == proof
+    checkpoint = json.loads(
+        (persistent_support / "checkpoint.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint["sqlite_path"] == str(persistent_database.resolve())
+    assert checkpoint["scratch_database_active"] is False
+    assert checkpoint["terminal_sqlite_published"] is True
+    persistent_evidence = {
+        "checkpoint": checkpoint,
+        "heartbeat": json.loads(
+            (persistent_support / "heartbeat.json").read_text(encoding="utf-8")
+        ),
+        "audit": json.loads(
+            (persistent_support / "exact_top_k_audit.json").read_text(
+                encoding="utf-8"
+            )
+        ),
+        "proof": proof,
+    }
+    assert str(scratch.resolve()) not in json.dumps(
+        persistent_evidence, sort_keys=True
+    )
+
+    detached = tmp_path / "detached-scratch"
+    scratch.rename(detached)
+    _ExactTopKFakeGSpan.crash_on_name = "root-a"
+    try:
+        resumed = _ExactTopKFakeGSpan()
+        with resumable_gspan_root_chunks(
+            _module(),
+            checkpoint_root=persistent,
+            scratch_root=scratch,
+            top_k=3,
+            flush_every=1,
+            exact_top_k_pruning=True,
+        ):
+            resumed_result = resumed.run()
+    finally:
+        _ExactTopKFakeGSpan.crash_on_name = None
+    assert resumed_result == reference
+    assert not list(scratch.glob("support_*/frequent_patterns.sqlite3"))
+
+
+def test_external_scratch_keeps_the_original_guard_on_scratch_filesystem(
+    tmp_path, monkeypatch
+) -> None:
+    persistent = (tmp_path / "low-inode-persistent").resolve()
+    scratch = (tmp_path / "healthy-scratch").resolve()
+    monkeypatch.setenv("GLOBALGCE_STORAGE_MIN_FREE_GIB", "1")
+    monkeypatch.setenv("GLOBALGCE_STORAGE_MIN_FREE_RATIO", "0.02")
+    monkeypatch.setenv("GLOBALGCE_STORAGE_MIN_FREE_INODES", "100")
+
+    def is_scratch(path) -> bool:
+        return Path(path).resolve().is_relative_to(scratch)
+
+    def disk_usage(path):
+        if is_scratch(path):
+            return SimpleNamespace(total=4 * 1024**3, free=2 * 1024**3)
+        return SimpleNamespace(total=4 * 1024**3, free=0)
+
+    def statvfs(path):
+        return SimpleNamespace(f_favail=1000 if is_scratch(path) else 0)
+
+    monkeypatch.setattr(resumable_module.shutil, "disk_usage", disk_usage)
+    monkeypatch.setattr(resumable_module.os, "statvfs", statvfs)
+    with resumable_gspan_root_chunks(
+        _module(),
+        checkpoint_root=persistent,
+        scratch_root=scratch,
+        top_k=3,
+        flush_every=1,
+        exact_top_k_pruning=True,
+    ):
+        observed = _ExactTopKFakeGSpan().run()
+    assert observed == _ExactTopKFakeGSpan().run()
 
 
 def test_exact_topk_root_restart_restores_pre_root_snapshot(

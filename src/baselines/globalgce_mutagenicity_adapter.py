@@ -3035,6 +3035,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             Mapping[str, Mapping[str, Any]] | None
         ) = None,
         require_isolated_imports: bool = False,
+        gspan_scratch_root: str | Path | None = None,
     ) -> None:
         self.official_src = _resolve_official_src(official_root)
         repo_root = Path(__file__).resolve().parents[2]
@@ -3077,6 +3078,11 @@ class OfficialGlobalGCEMutagenicityGenerator:
         if type(require_isolated_imports) is not bool:
             raise ValueError("GlobalGCE isolated-import requirement must be boolean.")
         self.require_isolated_imports = require_isolated_imports
+        self.gspan_scratch_root = (
+            None
+            if gspan_scratch_root is None
+            else _descriptor_path_or_resolve(gspan_scratch_root)
+        )
         if native_train_payload is not None and (
             type(native_train_payload) is not bytes or not native_train_payload
         ):
@@ -3910,6 +3916,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 gspan_flush_every=int(gspan_flush_every),
                 gspan_max_in_memory_candidates=int(gspan_max_in_memory_candidates),
                 gspan_exact_top_k_pruning=bool(gspan_exact_top_k_pruning),
+                gspan_scratch_root=self.gspan_scratch_root,
                 gspan_adoption_proof=gspan_adoption_proof,
                 on_exact_top_k_proof=(
                     _record_exact_top_k_proof
@@ -3943,6 +3950,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "learning_rate": float(learning_rate),
                 "dropout": float(dropout),
                 "gspan_exact_top_k_pruning": bool(gspan_exact_top_k_pruning),
+                "gspan_external_scratch_used": self.gspan_scratch_root is not None,
+                "gspan_terminal_proof_persistent": bool(
+                    gspan_exact_top_k_pruning
+                ),
                 "gspan_adoption_identity": (
                     dict(gspan_adoption_identity)
                     if gspan_adoption_proof is not None
@@ -4058,6 +4069,10 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "gspan_root_chunks_plus_epoch_atomic_identity_v2"
             ),
             "gspan_exact_top_k_pruning": bool(gspan_exact_top_k_pruning),
+            "gspan_external_scratch_used": self.gspan_scratch_root is not None,
+            "gspan_terminal_proof_persistent": bool(
+                gspan_exact_top_k_pruning
+            ),
             "unused_pandas_report_materialization": False,
             **codec_summary,
             "saved_results_candidates_used": False,
