@@ -519,6 +519,67 @@ def test_runtime_installs_and_restores_compact_full_transition_cache(
     assert transition_audit["model_recomputation_count"] == 0
 
 
+def test_runtime_exception_cleanup_skips_full_live_graph_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.baselines.comrecgc.runtime as runtime
+
+    original_call = object()
+    original_neighbor = lambda graph, action: graph
+    original_move = object()
+    source_graph = SimpleNamespace(
+        x=[[1.0]],
+        edge_index=[[], []],
+        num_nodes=1,
+    )
+    module = SimpleNamespace(
+        call=original_call,
+        neighbor_graph_access=original_neighbor,
+        move_to_next_graph=original_move,
+        graph_map={"source": [source_graph]},
+        graph_index_map={"source": 0},
+        counterfactual_candidates=[],
+        transitions={},
+    )
+    monkeypatch.setattr(runtime, "_safe_call_factory", lambda **_kwargs: object())
+
+    def forbidden_full_audit(_self: object) -> dict[str, object]:
+        raise AssertionError("exception cleanup must not reconstruct transition graphs")
+
+    monkeypatch.setattr(runtime.LiveGraphState, "audit", forbidden_full_audit)
+    audit: dict[str, object] = {}
+
+    with pytest.raises(RuntimeError, match="fail-closed stop"):
+        with patched_official_runtime(
+            module,
+            model=object(),
+            embedding_model=object(),
+            gnn_device="cpu",
+            embedding_device="cpu",
+            batch_size=1,
+            compatibility_audit=audit,
+            preserve_active_transitions=True,
+            compact_transitions=True,
+            graph_state_dir=tmp_path,
+            seed=0,
+        ):
+            raise RuntimeError("fail-closed stop")
+
+    graph_audit = audit["live_graph_state"]
+    assert graph_audit["audit_scope"] == "exception_cleanup_runtime_diagnostics"
+    assert graph_audit["integrity_audit_complete"] is False
+    assert graph_audit["hot_cache_size"] == 1
+    assert graph_audit["backing_store_size"] == 0
+    assert type(module.graph_map) is dict
+    assert module.graph_map == {"source": [source_graph]}
+    assert module.transitions == {}
+    assert module.call is original_call
+    assert module.neighbor_graph_access is original_neighbor
+    assert module.move_to_next_graph is original_move
+    assert not hasattr(module, "comrecgc_live_graph_state")
+
+
 @pytest.mark.parametrize("raise_inside", [False, True])
 def test_endpoint_safe_runtime_restores_plain_map_and_official_functions(
     monkeypatch, raise_inside: bool

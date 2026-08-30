@@ -589,11 +589,13 @@ def patched_official_runtime(
         # transition updates, streamed trace writes, and deferred cleanup.
         patched_move = live_graph_state.wrap_move(patched_move)
     module.move_to_next_graph = patched_move
+    completed_normally = False
     try:
         yield PatchedRuntimeHandles(
             live_graph_state=live_graph_state,
             transition_map=transition_map,
         )
+        completed_normally = True
     finally:
         try:
             if compatibility_audit is not None:
@@ -610,7 +612,23 @@ def patched_official_runtime(
                 if transition_map is not None:
                     compatibility_audit["transition_state"] = transition_map.audit()
                 if live_graph_state is not None:
-                    compatibility_audit["live_graph_state"] = live_graph_state.audit()
+                    if completed_normally:
+                        compatibility_audit["live_graph_state"] = (
+                            live_graph_state.audit()
+                        )
+                    else:
+                        # A full graph-state audit can reconstruct every compact
+                        # transition target.  On a fail-closed exception (for
+                        # example a storage-guard stop), that turns teardown into
+                        # an unbounded CPU task and delays the durable failure
+                        # marker even though the checkpoint is already safe.
+                        # Frequent diagnostics are constant-time and preserve the
+                        # exact failure context without mutating scientific state.
+                        compatibility_audit["live_graph_state"] = {
+                            **live_graph_state.runtime_diagnostics(),
+                            "audit_scope": "exception_cleanup_runtime_diagnostics",
+                            "integrity_audit_complete": False,
+                        }
         finally:
             module.graph_map = dict(endpoint_safe_graph_map)
             if transition_map is not None:

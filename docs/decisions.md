@@ -1,5 +1,37 @@
 # Decisions Log
 
+## [2026-08-31] Keep ComRecGC exception cleanup bounded
+
+### Background
+
+The BACE generation route committed a complete, resume-safe step-18000
+checkpoint and then raised its storage guard because the shared filesystem had
+fewer than 100,000 free inodes.  Exception unwinding nevertheless invoked the
+full live-graph integrity audit, which reconstructs historical compact
+transition targets and can consume a CPU indefinitely after science has
+already stopped.
+
+### Decision
+
+Run the full live-graph audit only after normal completion.  On an exception,
+record constant-time runtime diagnostics and explicitly mark the integrity
+audit incomplete.  Checkpoint validation and normal-completion auditing remain
+unchanged; a resumed attempt must still pass the full terminal audit.
+
+### Consequences
+
+- Fail-closed storage stops can terminate promptly and preserve their real
+  error instead of appearing to be slow science.
+- The committed checkpoint and scientific state are not changed or adopted by
+  this cleanup-only fix.
+- No failed run can be published from the abbreviated exception diagnostic.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Align the fixed-budget NeuroSED writer with its pair contract
 
 ### Background
