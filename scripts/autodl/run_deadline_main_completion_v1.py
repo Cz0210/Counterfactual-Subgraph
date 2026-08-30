@@ -46,6 +46,9 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    # AutoDL's persistent control root is fuse.autofs.  fsync() on tiny
+    # heartbeat files can block indefinitely behind unrelated large transfers;
+    # a same-directory temporary plus atomic rename still prevents partial JSON.
     data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -53,13 +56,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
-            os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     finally:
         if temporary.exists():
             temporary.unlink()

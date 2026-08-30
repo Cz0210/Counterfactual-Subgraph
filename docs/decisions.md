@@ -13108,3 +13108,15 @@ implemented cap-finalization path.
 Accepted
 
 ---
+
+# 2026-08-30: Deadline heartbeat uses atomic rename without FUSE fsync
+
+- Scope: the read-only `deadline_main_completion_v1` controller receipt and
+  heartbeat only; science checkpoints, matrix publication, and result exports
+  retain their existing durability rules.
+- Motivation: AutoDL mounts the persistent control root through `fuse.autofs`.
+  The first 723-byte receipt blocked indefinitely in `fsync()` while unrelated
+  multi-gigabyte checkpoint I/O was active, preventing any heartbeat.
+- Decision: write a same-directory temporary file, flush userspace buffers, and
+  atomically rename it. This preserves complete-or-absent JSON while avoiding a
+  control-plane-only durability syscall that can stall the sidecar.
