@@ -155,6 +155,36 @@ def test_external_common_recovery_bootstrap_is_idempotent_and_starts_no_stage(
         assert (values.output_root / name).is_file()
 
 
+def test_stage_commands_bind_physical_python_across_launcher_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _inputs(tmp_path)
+    physical_python = _file(tmp_path / "bin/python3.10", "python\n")
+    launcher_python = physical_python.with_name("python")
+    launcher_python.symlink_to(physical_python.name)
+    kwargs = {
+        "project_commit": "b" * 40,
+        "candidate_count": 100,
+        "teacher_sha256": "d" * 64,
+    }
+
+    monkeypatch.setattr(continuation.sys, "executable", str(launcher_python))
+    through_symlink = continuation.build_stage_commands(inputs, **kwargs)
+    monkeypatch.setattr(continuation.sys, "executable", str(physical_python))
+    through_physical_path = continuation.build_stage_commands(inputs, **kwargs)
+
+    assert through_symlink == through_physical_path
+    for _, argv, _, _ in through_symlink:
+        assert argv[0] == str(physical_python.resolve(strict=True))
+    assert [
+        continuation.stable_json_sha256(argv)
+        for _, argv, _, _ in through_symlink
+    ] == [
+        continuation.stable_json_sha256(argv)
+        for _, argv, _, _ in through_physical_path
+    ]
+
+
 def test_adopts_recovered_generation_hashes_large_payload_exactly_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

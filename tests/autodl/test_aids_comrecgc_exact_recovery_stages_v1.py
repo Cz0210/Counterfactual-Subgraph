@@ -337,6 +337,7 @@ def test_exact_stage_archives_13_small_files_bootstraps_and_never_copies_failed(
     manifest = {
         "manifest_path": str(manifest_path),
         "manifest_sha256": "a" * 64,
+        "project_root": str(tmp_path),
         "controller_root": str(controller_root),
         "adoption_contract": {
             "expected_task_state_projection_sha256": {"close": "b" * 64, "final": "c" * 64}
@@ -382,7 +383,10 @@ def test_exact_stage_archives_13_small_files_bootstraps_and_never_copies_failed(
         lambda path: {"identity": {"contract": asdict(contract)}},
     )
 
-    def fake_bootstrap(inputs: object) -> dict[str, object]:
+    def fake_bootstrap(
+        inputs: object, *, execution_project_root: Path
+    ) -> dict[str, object]:
+        assert execution_project_root == tmp_path
         science.mkdir(parents=True, exist_ok=True)
         value = {
             "status": "READY_FOR_EXTERNAL_COMMON_RECOVERY",

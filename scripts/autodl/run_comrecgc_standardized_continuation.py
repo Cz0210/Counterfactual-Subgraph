@@ -550,7 +550,12 @@ def build_stage_commands(
 
     execution_project_root = execution_project_root.expanduser().resolve(strict=True)
     contract = DATASET_CONTRACTS[inputs.dataset]
-    python = sys.executable
+    # ``sys.executable`` preserves the lexical path used by the launcher.  A
+    # managed resume may enter through the ``python`` symlink while the frozen
+    # first run entered through its physical ``python3.10`` target.  Bind the
+    # stage argv to the same physical interpreter so an inode-identical launch
+    # spelling cannot change every frozen argv digest.
+    python = str(Path(sys.executable).expanduser().resolve(strict=True))
     source_args: list[str] = []
     if inputs.source_csv is not None:
         source_args = ["--source-csv", str(inputs.source_csv)]

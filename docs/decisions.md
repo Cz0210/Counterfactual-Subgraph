@@ -1,5 +1,35 @@
 # Decisions Log
 
+## [2026-08-31] Canonicalize the AIDS continuation interpreter path
+
+### Background
+
+The adopted AIDS checkpoint and all frozen scientific inputs matched, but the
+resume launcher named the same Python executable through its `python` symlink
+instead of the frozen run's physical `python3.10` path.  Because argv hashes
+are part of the continuation contract, this lexical-only difference rejected
+all five otherwise identical stages.
+
+### Decision
+
+Resolve `sys.executable` to its strict physical path before constructing and
+hashing continuation stage argv.  Continue comparing the complete argv and all
+existing checkpoint, input, schema, and project hashes without exemptions.
+
+### Consequences
+
+- Symlink and physical spellings of the same interpreter yield one frozen argv
+  contract.
+- Different interpreters or any scientific argument still fail closed.
+- The verified checkpoint remains adopted at offset 20,512,768; no scientific
+  payload is rewritten by this launcher-only repair.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Keep ComRecGC exception cleanup bounded
 
 ### Background
