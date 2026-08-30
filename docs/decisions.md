@@ -35,6 +35,37 @@ Accepted
 
 ---
 
+## [2026-08-31] Keep Taste ComRecGC cohort identity authority stable on replay
+
+### Motivation
+
+The frozen GINE adapter selects the Taste source cohort with its decoded,
+attributed identity graph.  A later replay check incorrectly replaced that
+identity with the native explicit-hydrogen graph, so all selected parents were
+rejected even though their frozen-GINE predictions and supplied identities were
+unchanged.
+
+### Decision
+
+When the frozen adapter supplies identity graph payloads, require aligned
+payloads on replay and use them for both cohort selection and replay identity
+validation.  Continue to use the original attributed model graph for GINE
+inference and chemical intervention.  The native-graph fallback remains only
+for adapters that supply no identity payloads at either step.
+
+### Consequences
+
+- Cohort deduplication and replay now use one stable authority.
+- GINE logits, probabilities, model graph features, and the frozen train pool
+  are unchanged.
+- Missing or misaligned replay identity evidence fails closed.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Give Taste GlobalGCE a lossless train-observed atom vocabulary
 
 ### Motivation

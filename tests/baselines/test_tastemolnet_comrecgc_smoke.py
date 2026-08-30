@@ -847,6 +847,83 @@ def test_canonical_identity_rejects_asymmetric_or_non_one_hot_graph() -> None:
         canonical_attributed_graph(non_one_hot, feature_atomic_numbers=ATOMS)
 
 
+def test_source_cohort_replay_uses_the_same_decoded_identity_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.baselines import tastemolnet_gcf_smoke as gcf_smoke
+
+    class _CloneableOrigins(list):
+        def clone(self):
+            return _CloneableOrigins(self)
+
+    def fake_encode(row, _schema):
+        return dict(row)
+
+    def fake_to_pyg(record, *, origin_index):
+        graph = _graph(source_index=origin_index)
+        graph.gcf_node_origin = _CloneableOrigins([0, 1, 2])
+        graph.record_key = record["record_key"]
+        return graph
+
+    class _DecodedIdentityAdapter:
+        def __init__(
+            self,
+            _checkpoint_payloads,
+            *,
+            source_records,
+            graph_schema,
+            device,
+        ) -> None:
+            assert graph_schema.feature_atomic_numbers == ATOMS
+            assert device == "cpu"
+            self.source_records = tuple(source_records)
+
+        @staticmethod
+        def score(graphs):
+            return SimpleNamespace(
+                valid_fullgraphs=tuple(True for _ in graphs),
+                predictions=tuple(1 for _ in graphs),
+                # The decoded GINE graph can intentionally differ from the
+                # expanded, untyped native graph (for example implicit versus
+                # explicit hydrogens).  This payload is the identity authority
+                # used by the COMRECGC bridge and must also be used on replay.
+                identity_graph_payloads=tuple(
+                    {
+                        "canonical_graph": f"decoded-{graph.record_key}",
+                        "num_nodes": 2,
+                        "num_edges": 1,
+                    }
+                    for graph in graphs
+                ),
+            )
+
+    monkeypatch.setattr(gcf_smoke, "encode_taste_source_graph", fake_encode)
+    monkeypatch.setattr(gcf_smoke, "taste_record_to_pyg", fake_to_pyg)
+    monkeypatch.setattr(
+        gcf_smoke,
+        "TasteFrozenGINENativeAdapter",
+        _DecodedIdentityAdapter,
+    )
+    source_rows = tuple(
+        {"record_key": f"source-{index:03d}"} for index in range(64)
+    )
+    graphs, records, _adapter, evidence = smoke_module._initialize_source_graphs(
+        checkpoint_payloads={"model.pt": b"held"},
+        source_rows=source_rows,
+        graph_schema=SimpleNamespace(feature_atomic_numbers=ATOMS),
+        device="cpu",
+        parameters=TasteComRecGCSmokeParameters(),
+    )
+    assert [record["record_key"] for record in records] == [
+        f"source-{index:03d}" for index in range(8)
+    ]
+    assert [graph.record_key for graph in graphs] == [
+        f"source-{index:03d}" for index in range(8)
+    ]
+    assert evidence["source_count"] == 8
+    assert evidence["source_graph_identities_unique"] is True
+
+
 def test_bridge_uses_structure_for_identity_and_gine_hidden_only_for_alignment() -> None:
     adapter = _Adapter()
     bridge = TasteComRecGCMulticlassBridge(

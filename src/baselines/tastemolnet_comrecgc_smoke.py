@@ -1679,11 +1679,28 @@ def _initialize_source_graphs(
         raise TasteComRecGCSmokeError(
             "Taste COMRECGC selected source changed during exact replay"
         )
+    replay_identity_payloads = tuple(
+        getattr(replay, "identity_graph_payloads", ()) or ()
+    )
+    if bool(replay_identity_payloads) != bool(pool_identity_payloads):
+        raise TasteComRecGCSmokeError(
+            "Taste COMRECGC source identity evidence changed during replay"
+        )
+    if replay_identity_payloads and len(replay_identity_payloads) != len(graphs):
+        raise TasteComRecGCSmokeError(
+            "Taste COMRECGC replay source identity evidence is unaligned"
+        )
     identities = [
-        canonical_attributed_graph(
-            graph, feature_atomic_numbers=graph_schema.feature_atomic_numbers
-        ).graph_identity_sha256
-        for graph in graphs
+        (
+            _identity_graph_sha256(dict(replay_identity_payloads[index]))
+            if replay_identity_payloads
+            and type(replay_identity_payloads[index]) is dict
+            else canonical_attributed_graph(
+                graph,
+                feature_atomic_numbers=graph_schema.feature_atomic_numbers,
+            ).graph_identity_sha256
+        )
+        for index, graph in enumerate(graphs)
     ]
     if identities != selected_identity_order or len(set(identities)) != len(
         identities
