@@ -22,6 +22,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     OfficialGlobalGCEMutagenicityGenerator,
     PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES,
     PoolBuildConfig,
+    TASTE_EXACT_ATOM_VOCABULARY_SOURCE,
     TrainParent,
     _add_bond_once,
     _build_dense_dataset,
@@ -30,6 +31,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     _import_official_modules,
     _load_general_train_rows,
     _read_csv_payload,
+    _taste_train_observed_atom_symbols,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
@@ -43,6 +45,11 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     stable_candidate_id,
     validate_official_globalgce_api_signatures,
     validate_globalgce_generation_loader,
+)
+from src.data.molecular_graph_featurizer import (
+    CategoricalFeatureField,
+    MolecularFeatureSchema,
+    default_molecular_feature_schema,
 )
 
 
@@ -396,6 +403,80 @@ def test_multiclass_native_train_prefers_frozen_model_smiles(
     loaded = _load_general_train_rows(train_csv, num_classes=3)
 
     assert [row.smiles for row in loaded] == ["CC", "CCC", "CCCC"]
+
+
+def test_taste_dense_codec_preserves_every_train_observed_element_exactly() -> None:
+    torch = pytest.importorskip("torch")
+    feature_schema = default_molecular_feature_schema()
+    symbols = ("B", "Si", "Ge", "As", "Se", "Sn", "Sb", "Hg")
+    parents = [
+        TrainParent(
+            f"taste-{symbol.lower()}",
+            f"[{symbol}]",
+            index % 3,
+            "train",
+        )
+        for index, symbol in enumerate(symbols)
+    ]
+
+    dataset = _build_dense_dataset(
+        parents,
+        train_idx=list(range(len(parents) - 1)),
+        val_idx=[len(parents) - 1],
+        test_idx=[],
+        torch_module=torch,
+        dataset_name="TasteMolNet",
+        num_classes=3,
+        source_label=1,
+        frozen_gine_feature_schema=feature_schema,
+    )
+
+    expected = tuple(
+        symbol
+        for _, symbol in sorted(
+            (Chem.GetPeriodicTable().GetAtomicNumber(symbol), symbol)
+            for symbol in symbols
+        )
+    )
+    assert tuple(dataset.atom_symbols) == expected
+    assert dataset.node_feat_dim == len(expected) + 1
+    assert dataset.atom_vocabulary_source == TASTE_EXACT_ATOM_VOCABULARY_SOURCE
+    assert dataset.atom_vocabulary_feature_schema_sha256 == (
+        feature_schema.to_dict()["schema_sha256"]
+    )
+    metadata = GlobalGCECodecMetadata.from_dataset(dataset).to_dict()
+    assert tuple(metadata["node_label_mapping"].values())[1:] == expected
+    assert metadata["atom_vocabulary_feature_schema_sha256"] == (
+        feature_schema.to_dict()["schema_sha256"]
+    )
+
+
+def test_taste_atom_codec_refuses_frozen_gine_unknown_bucket_mapping() -> None:
+    base = default_molecular_feature_schema()
+    schema = MolecularFeatureSchema(
+        node_fields=(
+            CategoricalFeatureField(
+                "atomic_num",
+                ("0", "1", "6", "7", "8", "<UNK>"),
+            ),
+            *base.node_fields[1:],
+        ),
+        edge_fields=base.edge_fields,
+        node_schema_version=base.node_schema_version,
+        edge_schema_version=base.edge_schema_version,
+        graph_schema_version=base.graph_schema_version,
+    )
+    molecule = Chem.MolFromSmiles("[As]")
+    assert molecule is not None
+
+    with pytest.raises(
+        GlobalGCEMutagenicityCodecError,
+        match="unknown-bucket mapping is forbidden",
+    ):
+        _taste_train_observed_atom_symbols(
+            [molecule],
+            feature_schema=schema,
+        )
 
 
 @pytest.mark.parametrize("bad_label", ("0.9", "1.5", "NaN", "True", "+1", "01"))

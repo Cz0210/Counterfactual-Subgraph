@@ -76,6 +76,9 @@ OFFICIAL_MUTAGENICITY_EDGE_LABEL_TO_BOND = {
     1: "double",
     2: "triple",
 }
+TASTE_EXACT_ATOM_VOCABULARY_SOURCE = (
+    "taste_train_observed_exact_symbols_frozen_gine_atomic_num_v1"
+)
 DEFAULT_EXPECTED_PARENT_COUNT = 1448
 DEFAULT_NATIVE_TRAIN_CSV = (
     "outputs/hpc/datasets/final/mutagenicity_v1_processed/train.csv"
@@ -165,6 +168,10 @@ class GlobalGCECodecMetadata:
     source_atom_mapping_method: str = (
         "rdkit_atom_index_preserved_by_dense_builder"
     )
+    atom_vocabulary_source: str = (
+        "official_mutagenicity_train_observed_exact_symbols_v1"
+    )
+    atom_vocabulary_feature_schema_sha256: str | None = None
 
     @classmethod
     def from_dataset(cls, dataset: Any) -> "GlobalGCECodecMetadata":
@@ -195,6 +202,23 @@ class GlobalGCECodecMetadata:
                     "rdkit_atom_index_preserved_by_dense_builder",
                 )
             ),
+            atom_vocabulary_source=str(
+                getattr(
+                    dataset,
+                    "atom_vocabulary_source",
+                    "official_mutagenicity_train_observed_exact_symbols_v1",
+                )
+            ),
+            atom_vocabulary_feature_schema_sha256=(
+                None
+                if getattr(
+                    dataset,
+                    "atom_vocabulary_feature_schema_sha256",
+                    None,
+                )
+                is None
+                else str(dataset.atom_vocabulary_feature_schema_sha256)
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -220,6 +244,10 @@ class GlobalGCECodecMetadata:
             },
             "formal_charge_encoded_by_native": (
                 self.formal_charge_encoded_by_native
+            ),
+            "atom_vocabulary_source": self.atom_vocabulary_source,
+            "atom_vocabulary_feature_schema_sha256": (
+                self.atom_vocabulary_feature_schema_sha256
             ),
             "atom_attribute_source": self.atom_attribute_source,
             "source_atom_mapping_method": self.source_atom_mapping_method,
@@ -343,6 +371,10 @@ class _DenseMoleculeDataset:
         source_atom_attributes: Sequence[Sequence[dict[str, Any]]],
         dataset_name: str = DATASET_NAME,
         num_classes: int = 2,
+        atom_vocabulary_source: str = (
+            "official_mutagenicity_train_observed_exact_symbols_v1"
+        ),
+        atom_vocabulary_feature_schema_sha256: str | None = None,
     ) -> None:
         self.dataset_name = str(dataset_name)
         self.parent_ids = list(parent_ids)
@@ -377,6 +409,12 @@ class _DenseMoleculeDataset:
         self.atom_attribute_source = "source_anchored"
         self.source_atom_mapping_method = (
             "rdkit_atom_index_preserved_by_dense_builder"
+        )
+        self.atom_vocabulary_source = str(atom_vocabulary_source)
+        self.atom_vocabulary_feature_schema_sha256 = (
+            None
+            if atom_vocabulary_feature_schema_sha256 is None
+            else str(atom_vocabulary_feature_schema_sha256)
         )
 
     def __len__(self) -> int:
@@ -1256,6 +1294,85 @@ def _source_atom_attribute_sidecar(
     return sidecar
 
 
+def _load_frozen_gine_feature_schema(
+    checkpoint: Path,
+    payloads: Mapping[str, bytes] | None,
+) -> Any:
+    """Load the exact categorical schema carried by one frozen GINE.
+
+    Managed Taste runs provide descriptor-authorized checkpoint bytes, so the
+    node vocabulary is derived without reopening the path.  The path fallback
+    preserves the existing non-managed frozen-GINE entrypoint.
+    """
+
+    from src.data.molecular_graph_featurizer import MolecularFeatureSchema
+
+    try:
+        raw = (
+            payloads["feature_schema.json"]
+            if payloads is not None
+            else (checkpoint / "feature_schema.json").read_bytes()
+        )
+        decoded = json.loads(raw.decode("utf-8"))
+        if type(decoded) is not dict:
+            raise TypeError("feature schema is not one JSON object")
+        return MolecularFeatureSchema.from_dict(decoded)
+    except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise GlobalGCEMutagenicityCodecError(
+            "Frozen GINE feature schema is unavailable or malformed."
+        ) from exc
+
+
+def _taste_train_observed_atom_symbols(
+    molecules: Sequence[Any],
+    *,
+    feature_schema: Any,
+) -> tuple[str, ...]:
+    """Return a lossless train-only atom vocabulary accepted by the GINE.
+
+    Every observed element remains its own official-GlobalGCE node category.
+    Ordering by atomic number is deterministic and independent of CSV order.
+    Unknown-bucket encoding is explicitly forbidden because it would merge
+    chemically distinct elements before the frozen classifier sees them.
+    """
+
+    atomic_fields = [
+        field
+        for field in feature_schema.node_fields
+        if str(field.name) == "atomic_num"
+    ]
+    if len(atomic_fields) != 1:
+        raise GlobalGCEMutagenicityCodecError(
+            "Taste frozen GINE must expose exactly one atomic_num field."
+        )
+    atomic_field = atomic_fields[0]
+    observed: dict[int, str] = {}
+    for molecule in molecules:
+        for atom in molecule.GetAtoms():
+            atomic_number = int(atom.GetAtomicNum())
+            symbol = str(atom.GetSymbol())
+            prior = observed.setdefault(atomic_number, symbol)
+            if prior != symbol:
+                raise GlobalGCEMutagenicityCodecError(
+                    "RDKit returned inconsistent symbols for one atomic number."
+                )
+    if not observed:
+        raise GlobalGCEMutagenicityCodecError(
+            "Taste native train cohort contains no atoms."
+        )
+    unsupported = [
+        {"atomic_number": atomic_number, "symbol": observed[atomic_number]}
+        for atomic_number in sorted(observed)
+        if str(atomic_number) not in atomic_field.values[: atomic_field.unknown_index]
+    ]
+    if unsupported:
+        raise GlobalGCEMutagenicityCodecError(
+            "Taste train atoms are absent from the exact frozen GINE atomic_num "
+            f"vocabulary; unknown-bucket mapping is forbidden: {unsupported}"
+        )
+    return tuple(observed[atomic_number] for atomic_number in sorted(observed))
+
+
 def _build_dense_dataset(
     parents: Sequence[TrainParent],
     *,
@@ -1268,6 +1385,9 @@ def _build_dense_dataset(
     dataset_name: str = DATASET_NAME,
     num_classes: int = 2,
     source_label: int = SOURCE_LABEL,
+    frozen_gine_feature_schema: Any | None = None,
+    atom_vocabulary_source: str | None = None,
+    atom_vocabulary_feature_schema_sha256: str | None = None,
 ) -> _DenseMoleculeDataset:
     if (
         type(num_classes) is not int
@@ -1288,19 +1408,39 @@ def _build_dense_dataset(
             for molecule in molecules
             for atom in molecule.GetAtoms()
         }
-        official_symbols = tuple(
-            OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL.values()
-        )
-        unknown_symbols = present_symbols - set(official_symbols)
-        if unknown_symbols:
-            raise GlobalGCEMutagenicityCodecError(
-                "Current native train molecules contain atom symbols absent "
-                "from official Mutagenicity node metadata: "
-                f"{sorted(unknown_symbols)}"
+        if get_dataset_spec(dataset_name).dataset_id == "tastemolnet":
+            if frozen_gine_feature_schema is None:
+                raise GlobalGCEMutagenicityCodecError(
+                    "Taste native GlobalGCE tensors require the exact frozen "
+                    "GINE feature schema."
+                )
+            symbols = list(
+                _taste_train_observed_atom_symbols(
+                    molecules,
+                    feature_schema=frozen_gine_feature_schema,
+                )
             )
-        symbols = [
-            symbol for symbol in official_symbols if symbol in present_symbols
-        ]
+            atom_vocabulary_source = TASTE_EXACT_ATOM_VOCABULARY_SOURCE
+            atom_vocabulary_feature_schema_sha256 = str(
+                frozen_gine_feature_schema.to_dict()["schema_sha256"]
+            )
+        else:
+            official_symbols = tuple(
+                OFFICIAL_MUTAGENICITY_NODE_LABEL_TO_SYMBOL.values()
+            )
+            unknown_symbols = present_symbols - set(official_symbols)
+            if unknown_symbols:
+                raise GlobalGCEMutagenicityCodecError(
+                    "Current native train molecules contain atom symbols absent "
+                    "from official Mutagenicity node metadata: "
+                    f"{sorted(unknown_symbols)}"
+                )
+            symbols = [
+                symbol for symbol in official_symbols if symbol in present_symbols
+            ]
+            atom_vocabulary_source = (
+                "official_mutagenicity_train_observed_exact_symbols_v1"
+            )
     symbol_index = {symbol: index + 1 for index, symbol in enumerate(symbols)}
     for molecule in molecules:
         unknown = {
@@ -1372,6 +1512,13 @@ def _build_dense_dataset(
         source_atom_attributes=source_atom_attributes,
         dataset_name=dataset_name,
         num_classes=num_classes,
+        atom_vocabulary_source=(
+            atom_vocabulary_source
+            or "explicit_exact_atom_symbols_v1"
+        ),
+        atom_vocabulary_feature_schema_sha256=(
+            atom_vocabulary_feature_schema_sha256
+        ),
     )
 
 
@@ -2725,6 +2872,7 @@ def _prepare_native_and_source_datasets(
     native_train_payload: bytes | None = None,
     num_classes: int = 2,
     source_label: int = SOURCE_LABEL,
+    frozen_gine_feature_schema: Any | None = None,
 ) -> tuple[
     list[TrainParent],
     list[int],
@@ -2753,6 +2901,7 @@ def _prepare_native_and_source_datasets(
         dataset_name=dataset_name,
         num_classes=num_classes,
         source_label=source_label,
+        frozen_gine_feature_schema=frozen_gine_feature_schema,
     )
     source_train_idx, source_val_idx = _stable_split(parents, seed=int(seed))
     source_dataset = _build_dense_dataset(
@@ -2769,6 +2918,10 @@ def _prepare_native_and_source_datasets(
         dataset_name=dataset_name,
         num_classes=num_classes,
         source_label=source_label,
+        atom_vocabulary_source=native_dataset.atom_vocabulary_source,
+        atom_vocabulary_feature_schema_sha256=(
+            native_dataset.atom_vocabulary_feature_schema_sha256
+        ),
     )
     return (
         native_parents,
@@ -2983,6 +3136,14 @@ class OfficialGlobalGCEMutagenicityGenerator:
             "num_classes": self.num_classes,
         }
 
+    def _frozen_feature_schema_for_native_codec(self) -> Any | None:
+        if self.frozen_gine_checkpoint is None:
+            return None
+        return _load_frozen_gine_feature_schema(
+            self.frozen_gine_checkpoint,
+            self.frozen_gine_payloads,
+        )
+
     def probe_codec(
         self,
         parents: Sequence[TrainParent],
@@ -3017,6 +3178,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
             native_train_payload=self.native_train_payload,
             num_classes=self.num_classes,
             source_label=self.source_label,
+            frozen_gine_feature_schema=(
+                self._frozen_feature_schema_for_native_codec()
+            ),
         )
         attribute_audit_path = (
             _descriptor_path_or_resolve(output_path).parent
@@ -3168,6 +3332,9 @@ class OfficialGlobalGCEMutagenicityGenerator:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(seed))
         resolved_device = torch.device(device)
+        frozen_gine_feature_schema = (
+            self._frozen_feature_schema_for_native_codec()
+        )
         (
             native_parents,
             native_train_idx,
@@ -3186,6 +3353,7 @@ class OfficialGlobalGCEMutagenicityGenerator:
             native_train_payload=self.native_train_payload,
             num_classes=self.num_classes,
             source_label=self.source_label,
+            frozen_gine_feature_schema=frozen_gine_feature_schema,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         official_api_signature_sha256 = _write_canonical_identity_once(
@@ -3324,6 +3492,15 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     bond_names=tuple(source_dataset.bond_names),
                     device=resolved_device,
                     expected_num_classes=self.num_classes,
+                )
+            if (
+                frozen_gine_feature_schema is None
+                or bridge.feature_schema.to_dict()
+                != frozen_gine_feature_schema.to_dict()
+            ):
+                raise GlobalGCEMutagenicityCodecError(
+                    "Native GlobalGCE atom vocabulary and frozen GINE bridge "
+                    "did not use the same feature schema."
                 )
             legacy_bace_target_view = (
                 self.num_classes == 2

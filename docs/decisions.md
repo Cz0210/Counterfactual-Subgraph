@@ -33,6 +33,42 @@ unchanged.
 
 Accepted
 
+---
+
+## [2026-08-31] Give Taste GlobalGCE a lossless train-observed atom vocabulary
+
+### Motivation
+
+TasteMolNet train molecules contain elements outside the historical
+Mutagenicity TU node-label table.  Rejecting those molecules blocks the T8
+route, while dropping them or mapping distinct elements to one category would
+change the frozen split and classifier semantics.
+
+### Decision
+
+For TasteMolNet only, derive the official GlobalGCE dense node categories from
+the exact elements observed in the frozen train CSV, ordered deterministically
+by atomic number.  Keep each element as a separate category and require its
+atomic number to be an explicit (non-unknown) token in the same frozen
+three-class GINE feature schema loaded from the checkpoint payload.  Bind the
+schema hash and vocabulary source into codec metadata.  Mutagenicity and BACE
+retain their existing vocabulary route.
+
+### Consequences
+
+- No molecule or atom is discarded, substituted, or collapsed into an unknown
+  bucket.
+- The official GlobalGCE model and rule algorithm remain unchanged; only its
+  dataset-specific input dimensionality follows the frozen Taste train data.
+- Calibration/test data are not consulted, and both target branches share the
+  same exact vocabulary and GINE schema.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Finalize BACE ComRecGC from an exact resource-cap checkpoint
 
 ### Background
