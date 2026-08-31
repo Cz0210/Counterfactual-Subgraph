@@ -82,6 +82,7 @@ DATASET_CONTRACTS: dict[str, dict[str, int]] = {
 }
 
 _PROC_ROOT = Path("/proc")
+_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS = (0.05, 0.10, 0.20, 0.40)
 _CRITICAL_SOURCE_MANIFESTS = (
     "run_manifest.json",
     "_RUN_COMPLETE.json",
@@ -242,6 +243,57 @@ def _assert_snapshots_equal(
     raise ValueError(f"SOURCE_CLOSURE_CHANGED:{label}:changed={changed}")
 
 
+def _inspect_proc_descriptor(
+    descriptor: Path,
+) -> tuple[os.stat_result | None, Path | None, int]:
+    """Resolve one live FD without mistaking a short-lived procfs race for a writer.
+
+    Some processes temporarily become non-dumpable while execing.  Linux then
+    returns EACCES for their ``/proc/<pid>/fd`` symlinks even to the container
+    root user.  A process that exits (or closes the descriptor) during a short,
+    bounded retry can no longer hold that FD open; a descriptor that remains
+    unreadable is still rejected fail-closed.
+    """
+
+    permission_failures = 0
+    for attempt in range(len(_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            descriptor_stat_before = descriptor.stat()
+            target = descriptor.resolve(strict=True)
+            descriptor_stat_after = descriptor.stat()
+        except FileNotFoundError:
+            return None, None, permission_failures
+        except PermissionError as exc:
+            permission_failures += 1
+            if attempt >= len(_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS):
+                raise ValueError(
+                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
+                    f"cannot inspect pid={descriptor.parent.parent.name} "
+                    f"fd={descriptor.name} after bounded retry"
+                ) from exc
+            time.sleep(_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS[attempt])
+            continue
+        identity_before = (
+            int(descriptor_stat_before.st_dev),
+            int(descriptor_stat_before.st_ino),
+        )
+        identity_after = (
+            int(descriptor_stat_after.st_dev),
+            int(descriptor_stat_after.st_ino),
+        )
+        if identity_before != identity_after:
+            if attempt >= len(_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS):
+                raise ValueError(
+                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
+                    f"unstable pid={descriptor.parent.parent.name} "
+                    f"fd={descriptor.name} after bounded retry"
+                )
+            time.sleep(_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS[attempt])
+            continue
+        return descriptor_stat_after, target, permission_failures
+    raise AssertionError("bounded procfs descriptor retry exhausted unexpectedly")
+
+
 def _scan_live_source_writers(
     source: Path,
     *,
@@ -264,6 +316,7 @@ def _scan_live_source_writers(
     }
     writers: list[dict[str, Any]] = []
     scanned_processes = 0
+    resolved_permission_races: list[dict[str, int]] = []
     for pid_dir in proc.iterdir():
         if not pid_dir.name.isdigit():
             continue
@@ -280,16 +333,19 @@ def _scan_live_source_writers(
         for descriptor in descriptors:
             if not descriptor.name.isdigit():
                 continue
-            try:
-                descriptor_stat = descriptor.stat()
-                target = descriptor.resolve(strict=True)
-            except FileNotFoundError:
+            descriptor_stat, target, permission_failures = _inspect_proc_descriptor(
+                descriptor
+            )
+            if permission_failures:
+                resolved_permission_races.append(
+                    {
+                        "pid": int(pid_dir.name),
+                        "fd": int(descriptor.name),
+                        "permission_failures": permission_failures,
+                    }
+                )
+            if descriptor_stat is None or target is None:
                 continue
-            except PermissionError as exc:
-                raise ValueError(
-                    "LIVE_WRITER_AUDIT_UNAVAILABLE: "
-                    f"cannot inspect pid={pid_dir.name} fd={descriptor.name}"
-                ) from exc
             inode = (int(descriptor_stat.st_dev), int(descriptor_stat.st_ino))
             try:
                 target.relative_to(source)
@@ -347,6 +403,8 @@ def _scan_live_source_writers(
         "scanned_process_count": scanned_processes,
         "writable_fd_count": 0,
         "writers": [],
+        "resolved_permission_race_count": len(resolved_permission_races),
+        "resolved_permission_races": resolved_permission_races,
     }
 
 

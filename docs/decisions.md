@@ -84,6 +84,43 @@ do not copy rules or weaken the final paper gate.
 
 Accepted
 
+---
+
+## [2026-08-31] Bound transient procfs permission races during frozen-source adoption
+
+### Motivation
+
+The fresh AIDS ComRecGC postprocess verified the complete exact source, then
+failed while globally auditing open descriptors because a short-lived,
+unrelated process temporarily returned `EACCES` for `/proc/<pid>/fd/0` and
+exited.  Treating this exec-time procfs race as a source writer is not evidence
+of mutation, but ignoring a persistent unreadable descriptor would weaken the
+read-only adoption gate.
+
+### Decision
+
+Retry only the exact unreadable descriptor for a bounded 0.75 seconds.  Reopen
+and compare its target device/inode before accepting it.  If the descriptor
+closes, record the resolved permission race; if it becomes readable, continue
+the existing source-path/inode and writable-flags checks; if it remains
+unreadable or unstable, fail closed.  Keep the source snapshots and SHA checks
+before and after adoption unchanged.
+
+### Consequences
+
+- A process that has exited or closed the descriptor cannot spuriously abort
+  AIDS postprocess.
+- A persistent inaccessible FD, a writable source FD, or an inode-changing FD
+  still prevents adoption.
+- No DBSCAN, generation, classifier, split, threshold, or evaluation semantics
+  change.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-08-31] Add the executable TasteMolNet T13 native GlobalGCE full route
 
 ### Motivation

@@ -234,6 +234,99 @@ def test_rejects_live_procfs_writer(
         continuation.validate_adopted_generation(inputs)
 
 
+def test_procfs_permission_race_retries_and_still_detects_writer(
+    tmp_path: Path,
+    _fake_procfs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _inputs(tmp_path)
+    pid = _fake_procfs / "424243"
+    (pid / "fd").mkdir(parents=True)
+    (pid / "fdinfo").mkdir()
+    descriptor = pid / "fd" / "7"
+    descriptor.symlink_to(inputs.source_generation_root / "counterfactuals.pt")
+    (pid / "fdinfo" / "7").write_text("flags:\t0100001\n", encoding="utf-8")
+    real_stat = Path.stat
+    permission_injected = False
+
+    def transient_permission(self: Path, *args: object, **kwargs: object):
+        nonlocal permission_injected
+        if self == descriptor and not permission_injected:
+            permission_injected = True
+            raise PermissionError("injected exec-time procfs race")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", transient_permission)
+    monkeypatch.setattr(
+        continuation, "_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS", (0.0,)
+    )
+    with pytest.raises(ValueError, match="LIVE_WRITER_DETECTED"):
+        continuation.validate_adopted_generation(inputs)
+    assert permission_injected is True
+
+
+def test_procfs_permission_race_records_descriptor_that_closes(
+    tmp_path: Path,
+    _fake_procfs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _inputs(tmp_path)
+    pid = _fake_procfs / "424244"
+    (pid / "fd").mkdir(parents=True)
+    (pid / "fdinfo").mkdir()
+    descriptor = pid / "fd" / "8"
+    descriptor.symlink_to(tmp_path / "unrelated")
+    real_stat = Path.stat
+    permission_injected = False
+
+    def close_during_permission(self: Path, *args: object, **kwargs: object):
+        nonlocal permission_injected
+        if self == descriptor and not permission_injected:
+            permission_injected = True
+            descriptor.unlink()
+            raise PermissionError("injected exiting process")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", close_during_permission)
+    monkeypatch.setattr(
+        continuation, "_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS", (0.0,)
+    )
+    result = continuation.validate_adopted_generation(inputs)
+    before = result["source_integrity"]["live_writer_audit_before_payload_hash"]
+    assert before["writable_fd_count"] == 0
+    assert before["resolved_permission_race_count"] == 1
+    assert before["resolved_permission_races"] == [
+        {"pid": 424244, "fd": 8, "permission_failures": 1}
+    ]
+    assert permission_injected is True
+
+
+def test_procfs_persistent_permission_denial_remains_fail_closed(
+    tmp_path: Path,
+    _fake_procfs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _inputs(tmp_path)
+    pid = _fake_procfs / "424245"
+    (pid / "fd").mkdir(parents=True)
+    (pid / "fdinfo").mkdir()
+    descriptor = pid / "fd" / "9"
+    descriptor.symlink_to(tmp_path / "unrelated")
+    real_stat = Path.stat
+
+    def persistent_permission(self: Path, *args: object, **kwargs: object):
+        if self == descriptor:
+            raise PermissionError("injected persistent denial")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", persistent_permission)
+    monkeypatch.setattr(
+        continuation, "_PROC_DESCRIPTOR_PERMISSION_RETRY_DELAYS_SECONDS", (0.0, 0.0)
+    )
+    with pytest.raises(ValueError, match="after bounded retry"):
+        continuation.validate_adopted_generation(inputs)
+
+
 def test_rejects_closure_manifest_change_after_entry_gate(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     adoption = continuation.validate_adopted_generation(inputs)

@@ -2954,3 +2954,14 @@ Mutagenicity roadmaps.
 - [x] Add status, AutoDL launch, static-refusal Slurm parity, and focused tests.
 - [ ] Deploy a fresh spec containing the refreshed live PID generations and
   start its 60-second heartbeat after the concrete stages are launched.
+
+## 2026-08-31: AIDS frozen-source procfs race closure
+
+- [x] Reproduce the production failure as an unrelated short-lived FD becoming
+  inaccessible during the global writer audit.
+- [x] Add a sub-second exact-descriptor retry with device/inode stability and
+  explicit resolved-race evidence.
+- [x] Preserve fail-closed behavior for persistent permission denial and live
+  writable source descriptors in focused tests.
+- [ ] Launch a fresh AIDS postprocess root from the immutable reviewed commit;
+  never reuse either failed postprocess root.
