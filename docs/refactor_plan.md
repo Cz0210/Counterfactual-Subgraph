@@ -24,6 +24,21 @@
 - [ ] Pin the external NeuroSED distance and shared WNode threshold
   authorities; never infer either from test/default values.
 
+## 2026-09-01: TasteMolNet calibration-only threshold authorities
+
+- [x] Confirm no existing valid Taste NeuroSED or shared WNode authority; do
+  not adopt upstream defaults, test fixtures, or `MISSING_NOT_INFERRED`.
+- [x] Bind threshold selection to the frozen T3/T4 calibration contract and
+  replay the exact 64-parent/733-deletion/38-strict-flip terminal cohort.
+- [x] Compute generated-query-to-original-target normalized NeuroSED q30 and
+  the method-shared WNode q-grid/theta/cap in one dataset-specific process.
+- [x] Add strict receipts, downstream-loader tests, held-out-test exclusion,
+  a thin CLI, and its synchronized Slurm wrapper.
+- [ ] Run the selector once on AutoDL from a clean immutable checkout and pass
+  `tastemolnet.json` to T11/T13 and the typed NeuroSED value/receipt to T7.
+- [ ] Do not treat either authority as a paper cell; T12 remains blocked on
+  its independently documented cross-process VRRW issue.
+
 ## 2026-09-01: TasteMolNet T12 cross-process VRRW blocker
 
 - [x] Audit the complete T7 checkpoint payload: official mutable maps/lists,

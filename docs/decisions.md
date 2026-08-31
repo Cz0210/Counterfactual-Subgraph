@@ -101,6 +101,52 @@ Identity and restart substrate accepted; production remains gated.
 
 ---
 
+## [2026-09-01] Fit Taste distance thresholds on the frozen T4 calibration cohort
+
+### Motivation
+
+Taste T7 still required a typed NeuroSED distance threshold and the full
+methods still required one method-shared WNode grid.  No reviewed authority
+existed: the matrix placeholder explicitly said `MISSING_NOT_INFERRED`, while
+the only numeric values in tests or upstream defaults were not fitted on this
+dataset.  The frozen T3 split manifest reserves `calibration` for threshold
+and selector work; the NeuroSED validation pairs already selected its model
+checkpoint and therefore are not a substitute for that task split.
+
+### Decision
+
+Replay the independently published T4 terminal calibration cohort exactly:
+the first 64 calibration Sweet parents predicted Sweet, at most 16 connected
+one-/two-atom deletions per parent, 733 valid deletions, and all 38 strict
+flips.  Measure every strict-flip residual as the generated query and its
+parent as the original target.  Select the official normalized NeuroSED
+threshold as the float64 linear q30 of those 38 values.  On the same pairs,
+select the shared MolCLR node-Wasserstein q05/q10/q20/q30/q50/q70/q90 grid,
+with theta=q30 and cost cap=q90.  Identical WNode quantiles merge into one
+level, retaining the earliest lower-quantile name and summed weights.
+
+The selector opens only the frozen calibration graph cache, verifies the T3,
+T4, NeuroSED, GCF, and MolCLR inputs, and publishes receipts rather than a
+paper method cell.  Train, validation, and test payloads remain unopened;
+there is no upstream-default or test-derived fallback.
+
+### Consequences
+
+- T7 receives a generated-query-to-original-target threshold fitted to the
+  same method-independent strict-flip calibration semantics used downstream.
+- T11/T12/T13/T14 can consume the exact same WNode contract without
+  method-specific tuning.
+- One T4 replay produces both authorities, avoiding duplicate GINE work.
+- The selector does not repair or relax the separate T12 cross-process VRRW
+  blocker and does not publish any matrix result.
+
+### Status
+
+Implemented; requires one short AutoDL A800 selector run to materialize the
+numeric authorities.
+
+---
+
 ## [2026-09-01] Keep Taste T12 blocked on deterministic cross-process VRRW resume
 
 ### Motivation
