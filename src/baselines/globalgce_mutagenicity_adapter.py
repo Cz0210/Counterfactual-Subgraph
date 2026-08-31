@@ -113,6 +113,9 @@ OFFICIAL_GLOBALGCE_MODULE_PROVENANCE_SCHEMA = (
 )
 OFFICIAL_API_SIGNATURE_FILE = "official_api_signature.json"
 PYTHON_MODULE_PROVENANCE_FILE = "python_module_provenance.json"
+OFFICIAL_AFFINE_EDGE_HARD_DECODE = (
+    "pinned_official_affine_edge_scores_argmax_v1"
+)
 PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES = {
     "models.GTGNN.GTGNN": (
         "(x_dim, h_dim, n_out, num_edge_attr, device, save_model_path)"
@@ -2914,6 +2917,118 @@ def _detach_tensor_tree(value: Any) -> Any:
     return value
 
 
+def _hard_decode_official_edge_scores(value: Any) -> Any:
+    """Decode the pinned official edge-score tensor at its hard graph boundary.
+
+    In pinned GlobalGCE commit ``157e65c``, ``decoder_edge_attr`` ends in an
+    affine ``Linear`` because the apparent ``Sigmoid`` is passed as that
+    layer's positional ``bias`` argument.  The official graph codec consumes
+    those unrestricted finite class scores with row-wise ``argmax``.  Native
+    rule catalogs are hard graph artifacts, so they must store that exact
+    categorical decode rather than incorrectly validate the affine scores as
+    probabilities in ``[0, 1]``.
+
+    Node and adjacency tensors deliberately remain untouched.  Their existing
+    ambiguity/range checks continue to reject scientifically indeterminate
+    rules; this helper corrects only the already frozen affine-edge contract.
+    """
+
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - AutoDL dependency.
+        raise RuntimeError(
+            "GlobalGCE native edge-score decoding requires PyTorch."
+        ) from exc
+    if (
+        not hasattr(value, "detach")
+        or value.ndim != 2
+        or int(value.shape[-1]) < 2
+        or not bool(torch.isfinite(value).all().item())
+    ):
+        raise GlobalGCEMutagenicityCodecError(
+            "GlobalGCE affine edge scores must be one finite rank-2 class tensor."
+        )
+    labels = value.detach().argmax(dim=-1)
+    return torch.nn.functional.one_hot(
+        labels,
+        num_classes=int(value.shape[-1]),
+    ).to(dtype=torch.float32, device="cpu")
+
+
+def _frozen_gine_native_rule_row(
+    *,
+    rules: Mapping[str, Any],
+    rule_index: int,
+    atom_symbols: Sequence[str],
+    bond_names: Sequence[str],
+    oracle_checkpoint_hash: str,
+) -> dict[str, Any]:
+    """Materialize one candidate row from the official learned tensors."""
+
+    from src.baselines.globalgce_bace_native_rules import (
+        stable_rule_id,
+    )
+
+    decoded_rhs_edge_attr = _hard_decode_official_edge_scores(
+        rules["edge_attrs_reconst"][rule_index]
+    )
+    raw_rule = {
+        "native_rule_index": rule_index,
+        "lhs_feature": rules["feat"][rule_index].detach().cpu().tolist(),
+        "lhs_adjacency": rules["adj"][rule_index].detach().cpu().tolist(),
+        "lhs_edge_attr": rules["edge_attr"][rule_index]
+        .detach()
+        .cpu()
+        .tolist(),
+        "rhs_feature": rules["features_reconst"][rule_index]
+        .detach()
+        .cpu()
+        .tolist(),
+        "rhs_adjacency": rules["adj_reconst"][rule_index]
+        .detach()
+        .cpu()
+        .tolist(),
+        "rhs_edge_attr": decoded_rhs_edge_attr.tolist(),
+        "atom_symbols": [str(value) for value in atom_symbols],
+        "bond_names": [str(value) for value in bond_names],
+    }
+    candidate_id = stable_rule_id(raw_rule)
+    raw_rule["rule_id"] = candidate_id
+    row = {
+        "candidate_id": candidate_id,
+        "rank": rule_index + 1,
+        "native_rank": rule_index + 1,
+        "action_kind": "lhs_rhs_graph_transformation_rule",
+        "action_semantics": "native_lhs_to_rhs_attachment_aware_v1",
+        "oracle_backend": "gnn",
+        "classifier_family": "gine",
+        "rf_oracle_used": False,
+        "oracle_checkpoint_hash": oracle_checkpoint_hash,
+        "source_split": "train",
+        "edge_score_contract": (
+            "pinned_official_unbounded_affine_class_scores"
+        ),
+        "edge_score_hard_decode": OFFICIAL_AFFINE_EDGE_HARD_DECODE,
+        "rule": raw_rule,
+    }
+    return row
+
+
+def _validate_frozen_gine_native_rule_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Hard-validate and annotate one materialized native rule row."""
+
+    from src.baselines.globalgce_bace_native_rules import GlobalGCENativeRule
+
+    parsed_rule = GlobalGCENativeRule.from_payload(row)
+    row["rule_content_hash"] = parsed_rule.content_hash()
+    row["canonical_fragment"] = "N/A"
+    row["canonical_fragment_reason"] = (
+        "GlobalGCE uses a native attachment-aware LHS-to-RHS rule"
+    )
+    row["selector_chemistry"] = parsed_rule.selector_chemistry()
+    return row
+
+
 def _augmented_rows_by_source_parent(
     augmented_dataset: Any,
     source_expansion_order: Sequence[int],
@@ -4120,11 +4235,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
                 "fresh_exact_top_k" if gspan_exact_top_k_pruning else "fresh_exhaustive"
             )
         if use_frozen_gine:
-            from src.baselines.globalgce_bace_native_rules import (
-                GlobalGCENativeRule,
-                stable_rule_id,
-            )
-
             required_rule_tensors = (
                 "feat",
                 "adj",
@@ -4147,43 +4257,17 @@ class OfficialGlobalGCEMutagenicityGenerator:
             rule_rows: list[dict[str, Any]] = []
             rejected_rule_rows: list[dict[str, Any]] = []
             for rule_index in range(rule_count):
-                raw_rule = {
-                    "native_rule_index": rule_index,
-                    "lhs_feature": rules["feat"][rule_index].detach().cpu().tolist(),
-                    "lhs_adjacency": rules["adj"][rule_index].detach().cpu().tolist(),
-                    "lhs_edge_attr": rules["edge_attr"][rule_index].detach().cpu().tolist(),
-                    "rhs_feature": rules["features_reconst"][rule_index]
-                    .detach()
-                    .cpu()
-                    .tolist(),
-                    "rhs_adjacency": rules["adj_reconst"][rule_index]
-                    .detach()
-                    .cpu()
-                    .tolist(),
-                    "rhs_edge_attr": rules["edge_attrs_reconst"][rule_index]
-                    .detach()
-                    .cpu()
-                    .tolist(),
-                    "atom_symbols": list(source_dataset.atom_symbols),
-                    "bond_names": list(source_dataset.bond_names),
-                }
-                candidate_id = stable_rule_id(raw_rule)
-                raw_rule["rule_id"] = candidate_id
-                row = {
-                    "candidate_id": candidate_id,
-                    "rank": rule_index + 1,
-                    "native_rank": rule_index + 1,
-                    "action_kind": "lhs_rhs_graph_transformation_rule",
-                    "action_semantics": "native_lhs_to_rhs_attachment_aware_v1",
-                    "oracle_backend": "gnn",
-                    "classifier_family": "gine",
-                    "rf_oracle_used": False,
-                    "oracle_checkpoint_hash": bridge.checkpoint_id,
-                    "source_split": "train",
-                    "rule": raw_rule,
-                }
+                candidate_id = f"native-index-{rule_index}"
                 try:
-                    parsed_rule = GlobalGCENativeRule.from_payload(row)
+                    row = _frozen_gine_native_rule_row(
+                        rules=rules,
+                        rule_index=rule_index,
+                        atom_symbols=source_dataset.atom_symbols,
+                        bond_names=source_dataset.bond_names,
+                        oracle_checkpoint_hash=bridge.checkpoint_id,
+                    )
+                    candidate_id = str(row["candidate_id"])
+                    row = _validate_frozen_gine_native_rule_row(row)
                 except Exception as exc:
                     rejected_rule_rows.append(
                         {
@@ -4193,12 +4277,6 @@ class OfficialGlobalGCEMutagenicityGenerator:
                         }
                     )
                     continue
-                row["rule_content_hash"] = parsed_rule.content_hash()
-                row["canonical_fragment"] = "N/A"
-                row["canonical_fragment_reason"] = (
-                    "GlobalGCE uses a native attachment-aware LHS-to-RHS rule"
-                )
-                row["selector_chemistry"] = parsed_rule.selector_chemistry()
                 rule_rows.append(row)
             _write_jsonl(output_dir / "native_rule_catalog.jsonl", rule_rows)
             _write_jsonl(
@@ -4209,6 +4287,12 @@ class OfficialGlobalGCEMutagenicityGenerator:
                     "native_rule_count": rule_count,
                     "valid_native_rule_count": len(rule_rows),
                     "rejected_native_rule_count": len(rejected_rule_rows),
+                    "native_rule_edge_score_contract": (
+                        "pinned_official_unbounded_affine_class_scores"
+                    ),
+                    "native_rule_edge_score_hard_decode": (
+                        OFFICIAL_AFFINE_EDGE_HARD_DECODE
+                    ),
                     "native_rule_catalog": str(
                         (output_dir / "native_rule_catalog.jsonl").resolve()
                     ),

@@ -19,6 +19,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     GlobalGCEMutagenicityCodecError,
     NativeGenerationResult,
     NativeGeneratorProtocol,
+    OFFICIAL_AFFINE_EDGE_HARD_DECODE,
     OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA,
     OfficialGlobalGCEMutagenicityGenerator,
     PINNED_OFFICIAL_GLOBALGCE_API_SIGNATURES,
@@ -29,13 +30,16 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     _atomic_write_text_at_directory,
     _build_dense_dataset,
     _build_training_resume_identity,
+    _frozen_gine_native_rule_row,
     _hash_open_regular_source,
+    _hard_decode_official_edge_scores,
     _import_official_modules,
     _direct_retained_directory_target,
     _load_general_train_rows,
     _read_csv_payload,
     _source_atom_attribute_audit_path,
     _taste_train_observed_atom_symbols,
+    _validate_frozen_gine_native_rule_row,
     attach_globalgce_generation_dataset,
     audit_mutagenicity_train_pool,
     build_mutagenicity_train_pool,
@@ -61,6 +65,93 @@ def test_descriptor_csv_payload_loader_uses_in_memory_bytes() -> None:
     assert _read_csv_payload(b"molecule_id,label\na,1\n") == [
         {"molecule_id": "a", "label": "1"}
     ]
+
+
+def test_official_affine_edge_scores_use_exact_hard_argmax_decode() -> None:
+    torch = pytest.importorskip("torch")
+    scores = torch.tensor(
+        [
+            [-37.91477966308594, 0.25, 40.193115234375, -4.0],
+            [0.5, 0.5, -1.0, -2.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    decoded = _hard_decode_official_edge_scores(scores)
+
+    assert OFFICIAL_AFFINE_EDGE_HARD_DECODE == (
+        "pinned_official_affine_edge_scores_argmax_v1"
+    )
+    assert decoded.tolist() == [
+        [0.0, 0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ]
+    assert decoded.argmax(dim=-1).tolist() == scores.argmax(dim=-1).tolist()
+    assert scores[0, 0].item() < 0.0
+    assert scores[0, 2].item() > 1.0
+
+    with pytest.raises(
+        GlobalGCEMutagenicityCodecError,
+        match="finite rank-2 class tensor",
+    ):
+        _hard_decode_official_edge_scores(
+            torch.tensor([[0.0, float("nan")]], dtype=torch.float32)
+        )
+
+
+def test_native_rule_catalog_hard_decodes_only_official_affine_edges() -> None:
+    torch = pytest.importorskip("torch")
+    from src.baselines.globalgce_bace_native_rules import (
+        GlobalGCENativeRule,
+        GlobalGCENativeRuleError,
+    )
+
+    rules = {
+        "feat": torch.tensor(
+            [[[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]],
+            dtype=torch.float32,
+        ),
+        "adj": torch.tensor([[[0.0, 1.0], [1.0, 0.0]]]),
+        "edge_attr": torch.tensor([[[0.0, 1.0]]]),
+        "features_reconst": torch.tensor(
+            [[[0.0, 0.9, 0.1], [0.0, 0.1, 0.9]]],
+            dtype=torch.float32,
+        ),
+        "adj_reconst": torch.tensor([[[0.0, 0.8], [0.8, 0.0]]]),
+        "edge_attrs_reconst": torch.tensor([[[-37.0, 40.0]]]),
+    }
+
+    row = _validate_frozen_gine_native_rule_row(
+        _frozen_gine_native_rule_row(
+            rules=rules,
+            rule_index=0,
+            atom_symbols=("C", "N"),
+            bond_names=("no_edge", "single"),
+            oracle_checkpoint_hash="a" * 64,
+        )
+    )
+
+    assert row["edge_score_hard_decode"] == OFFICIAL_AFFINE_EDGE_HARD_DECODE
+    assert row["rule"]["rhs_edge_attr"] == [[0.0, 1.0]]
+    assert GlobalGCENativeRule.from_payload(row).content_hash() == row[
+        "rule_content_hash"
+    ]
+
+    tied_node_rules = dict(rules)
+    tied_node_rules["features_reconst"] = torch.tensor(
+        [[[0.0, 1.0, 1.0], [0.0, 0.1, 0.9]]],
+        dtype=torch.float32,
+    )
+    with pytest.raises(GlobalGCENativeRuleError, match="ambiguous hard label"):
+        _validate_frozen_gine_native_rule_row(
+            _frozen_gine_native_rule_row(
+                rules=tied_node_rules,
+                rule_index=0,
+                atom_symbols=("C", "N"),
+                bond_names=("no_edge", "single"),
+                oracle_checkpoint_hash="a" * 64,
+            )
+        )
 
 
 def test_atomic_text_publish_uses_retained_directory_descriptor(

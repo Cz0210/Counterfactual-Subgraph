@@ -9,6 +9,22 @@
 - [x] Cover reordered membership acceptance and missing-member rejection.
 - [ ] Launch a fresh T6 attempt from the immutable successor; do not adopt the
   completed-but-terminally-failed five-step attempt.
+## 2026-08-31: Repair T8 terminal native-rule catalog materialization
+
+- [x] Reopen the failed target-0 state and distinguish an absent catalog from
+  the observed zero-byte catalog plus twenty explicit rejection rows.
+- [x] Preserve Top20 mining/training and decode only the pinned official
+  unrestricted affine edge scores with the official hard `argmax` at catalog
+  materialization; retain all node/adjacency/chemistry rejection gates.
+- [x] Require at least one hard-valid rule from each smoke branch while keeping
+  an empty terminal catalog fail-closed and leaving the later merged-ten-rule
+  paper gate unchanged.
+- [x] Cover planned-stop-without-catalog, resumed multi-chunk terminal catalog,
+  nonempty subsets, empty-terminal rejection, production-range affine edge
+  scores, and retained node-tie rejection.
+- [ ] Integrate and deploy only from a new immutable commit, then launch a
+  fresh T8 UUID/state/scratch/final attempt; never reuse or adopt
+  `1ed059be-3f95-4334-80e4-3bb35d82ea4d`.
 
 ## 2026-08-31: Reconcile AIDS freeze-only trace RNG evidence
 

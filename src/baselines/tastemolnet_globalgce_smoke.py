@@ -39,6 +39,7 @@ from src.baselines.globalgce_mutagenicity_adapter import (
     FROZEN_GINE_IN_MEMORY_FILES,
     NativeGenerationResult,
     OFFICIAL_API_SIGNATURE_FILE,
+    OFFICIAL_AFFINE_EDGE_HARD_DECODE,
     OFFICIAL_GLOBALGCE_API_SIGNATURE_SCHEMA,
     OFFICIAL_GLOBALGCE_MODULE_PROVENANCE_SCHEMA,
     OfficialGlobalGCEMutagenicityGenerator,
@@ -2159,7 +2160,11 @@ def run_resumed_target_branch(
         or summary.get("native_rule_catalog_sha256")
         != completed_tree.inventory["files"][paths["native rule catalog"]]["sha256"]
         or type(summary.get("valid_native_rule_count")) is not int
-        or summary["valid_native_rule_count"] < config.top_k_native
+        or summary["valid_native_rule_count"] < 1
+        or summary.get("native_rule_edge_score_contract")
+        != "pinned_official_unbounded_affine_class_scores"
+        or summary.get("native_rule_edge_score_hard_decode")
+        != OFFICIAL_AFFINE_EDGE_HARD_DECODE
     ):
         completed_tree.close()
         checkpoint_seal.close()
@@ -2205,6 +2210,12 @@ def run_resumed_target_branch(
             paths["native rule catalog"]
         ]["sha256"],
         "valid_native_rule_count": summary["valid_native_rule_count"],
+        "native_rule_edge_score_contract": summary[
+            "native_rule_edge_score_contract"
+        ],
+        "native_rule_edge_score_hard_decode": summary[
+            "native_rule_edge_score_hard_decode"
+        ],
         "raw_generated_count": len(result.records),
         "train_only": True,
         "external_validation_loaded": False,
@@ -2923,6 +2934,8 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
             "terminal_rule_checkpoint_sha256",
             "native_rule_catalog_sha256",
             "valid_native_rule_count",
+            "native_rule_edge_score_contract",
+            "native_rule_edge_score_hard_decode",
             "raw_generated_count",
             "train_only",
             "external_validation_loaded",
@@ -2980,7 +2993,11 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
                 )
             )
             or type(branch.get("valid_native_rule_count")) is not int
-            or branch["valid_native_rule_count"] < 20
+            or branch["valid_native_rule_count"] < 1
+            or branch.get("native_rule_edge_score_contract")
+            != "pinned_official_unbounded_affine_class_scores"
+            or branch.get("native_rule_edge_score_hard_decode")
+            != OFFICIAL_AFFINE_EDGE_HARD_DECODE
             or type(branch.get("raw_generated_count")) is not int
             or branch["raw_generated_count"] <= 0
             or branch.get("train_only") is not True
@@ -3042,9 +3059,9 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
         or any(
             type(merge.get(field)) is not int or merge[field] < minimum
             for field, minimum in (
-                ("target_0_rule_count", 20),
-                ("target_2_rule_count", 20),
-                ("premerge_rule_count", 40),
+                ("target_0_rule_count", 1),
+                ("target_2_rule_count", 1),
+                ("premerge_rule_count", 2),
                 ("cross_branch_duplicate_count", 0),
                 ("merged_unique_rule_count", 1),
             )

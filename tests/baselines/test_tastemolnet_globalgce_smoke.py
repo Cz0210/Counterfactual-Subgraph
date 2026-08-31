@@ -88,9 +88,9 @@ def _rule_payload(target: int) -> dict:
     }
 
 
-def _rule_payloads(target: int) -> list[dict]:
+def _rule_payloads(target: int, *, count: int = 20) -> list[dict]:
     rows = []
-    for index in range(20):
+    for index in range(count):
         row = _rule_payload(target)
         row["rule"]["lhs_feature"] = [[float(index), 1.0, 0.0]]
         rows.append(row)
@@ -98,11 +98,21 @@ def _rule_payloads(target: int) -> list[dict]:
 
 
 class _FakeGenerator:
-    def __init__(self, target_label: int):
+    def __init__(
+        self,
+        target_label: int,
+        *,
+        valid_rule_count: int = 20,
+        emit_one_record_per_chunk: bool = False,
+    ):
         self.target_label = target_label
+        self.valid_rule_count = valid_rule_count
+        self.emit_one_record_per_chunk = emit_one_record_per_chunk
         self.calls = 0
         self.completion_calls = 0
         self.planned_checkpoint = None
+        self.catalog_present_at_planned_stop = None
+        self.resumed_generation_chunks = []
 
     @staticmethod
     def _file_evidence(path: Path) -> dict:
@@ -162,6 +172,9 @@ class _FakeGenerator:
         checkpoint_path = checkpoint_root / "training_checkpoint.pt"
         heartbeat_path = checkpoint_root / "training_heartbeat.json"
         if self.calls == 1:
+            self.catalog_present_at_planned_stop = (
+                root / "native_rule_catalog.jsonl"
+            ).exists()
             checkpoint_path.write_bytes(f"checkpoint-{self.target_label}".encode())
             heartbeat_path.write_text(
                 json.dumps(
@@ -321,18 +334,33 @@ class _FakeGenerator:
         )
         catalog_path = root / "native_rule_catalog.jsonl"
         catalog_path.write_text(
-            "".join(json.dumps(row) + "\n" for row in _rule_payloads(self.target_label))
+            "".join(
+                json.dumps(row) + "\n"
+                for row in _rule_payloads(
+                    self.target_label,
+                    count=self.valid_rule_count,
+                )
+            )
         )
         candidate = "C" if self.target_label == 0 else "N"
-        record = {
-            "raw_smiles": candidate,
-            "source_parent_id": parents[0].parent_id,
-            "source_parent_smiles": parents[0].smiles,
-            "source_split": "train",
-            "generator_method": "GlobalGCE",
-            "native_conversion_ok": True,
-            "native_codec_decoded": True,
-        }
+        records = []
+        for parent_start in range(0, len(parents), generation_chunk_size):
+            parent_end = min(len(parents), parent_start + generation_chunk_size)
+            self.resumed_generation_chunks.append((parent_start, parent_end))
+            if records and not self.emit_one_record_per_chunk:
+                continue
+            parent = parents[parent_start]
+            records.append(
+                {
+                    "raw_smiles": candidate,
+                    "source_parent_id": parent.parent_id,
+                    "source_parent_smiles": parent.smiles,
+                    "source_split": "train",
+                    "generator_method": "GlobalGCE",
+                    "native_conversion_ok": True,
+                    "native_codec_decoded": True,
+                }
+            )
         summary = {
             "prediction_backend": "frozen_gine_differentiable_bridge",
             "classifier_family": "gine",
@@ -345,7 +373,13 @@ class _FakeGenerator:
             "test_loaded": False,
             "generation_input_split": "train",
             "training_resume_identity_sha256": identity,
-            "valid_native_rule_count": 20,
+            "valid_native_rule_count": self.valid_rule_count,
+            "native_rule_edge_score_contract": (
+                "pinned_official_unbounded_affine_class_scores"
+            ),
+            "native_rule_edge_score_hard_decode": (
+                t8.OFFICIAL_AFFINE_EDGE_HARD_DECODE
+            ),
             "native_rule_catalog_sha256": hashlib.sha256(
                 catalog_path.read_bytes()
             ).hexdigest(),
@@ -359,7 +393,7 @@ class _FakeGenerator:
             "isolated_python": True,
             "no_user_site": True,
         }
-        result = NativeGenerationResult([record], summary)
+        result = NativeGenerationResult(records, summary)
         self.completion_calls += 1
         on_generation_complete()
         return result
@@ -518,6 +552,8 @@ def test_real_branch_contract_runs_both_planned_checkpoint_resumes(tmp_path: Pat
     try:
         assert generators[0].calls == 2
         assert generators[2].calls == 2
+        assert generators[0].catalog_present_at_planned_stop is False
+        assert generators[2].catalog_present_at_planned_stop is False
         assert generators[0].completion_calls == 1
         assert generators[2].completion_calls == 1
         for target in ("0", "2"):
@@ -541,6 +577,76 @@ def test_real_branch_contract_runs_both_planned_checkpoint_resumes(tmp_path: Pat
         assert "per_example_predictions" not in serialized
     finally:
         tree.close()
+        state.close()
+
+
+def test_resumed_smoke_accepts_nonempty_hard_valid_subset_of_top20(
+    tmp_path: Path,
+) -> None:
+    """Top20 remains the trained surface; smoke needs one valid rule/branch."""
+
+    state = FreshOutputDirectory.create(tmp_path / "state")
+    generators = {
+        target: _FakeGenerator(
+            target,
+            valid_rule_count=1,
+            emit_one_record_per_chunk=True,
+        )
+        for target in (0, 2)
+    }
+    tree = None
+    try:
+        science, tree = t8.run_t8_science(
+            train_payload=_train_csv(),
+            expected_train_row_count=18,
+            expected_train_label_counts={"0": 1, "1": 16, "2": 1},
+            scorer=_FakeScorer(),
+            generator_factory=lambda target: generators[target],
+            state_root=state,
+            config=_config(),
+        )
+        assert science["config"]["top_k_native"] == 20
+        assert science["branches"]["0"]["valid_native_rule_count"] == 1
+        assert science["branches"]["2"]["valid_native_rule_count"] == 1
+        assert science["rule_merge"]["merged_unique_rule_count"] == 2
+        assert all(
+            generator.catalog_present_at_planned_stop is False
+            for generator in generators.values()
+        )
+        assert all(
+            generator.resumed_generation_chunks == [(0, 8), (8, 16)]
+            for generator in generators.values()
+        )
+    finally:
+        if tree is not None:
+            tree.close()
+        state.close()
+
+
+def test_resumed_smoke_still_rejects_empty_terminal_rule_catalog(
+    tmp_path: Path,
+) -> None:
+    state = FreshOutputDirectory.create(tmp_path / "state")
+    generators = {
+        target: _FakeGenerator(target, valid_rule_count=0)
+        for target in (0, 2)
+    }
+    try:
+        with pytest.raises(
+            t8.TasteGlobalGCESmokeError,
+            match="native rule catalog is absent after resume",
+        ):
+            t8.run_t8_science(
+                train_payload=_train_csv(),
+                expected_train_row_count=18,
+                expected_train_label_counts={"0": 1, "1": 16, "2": 1},
+                scorer=_FakeScorer(),
+                generator_factory=lambda target: generators[target],
+                state_root=state,
+                config=_config(),
+            )
+        assert generators[0].catalog_present_at_planned_stop is False
+    finally:
         state.close()
 
 

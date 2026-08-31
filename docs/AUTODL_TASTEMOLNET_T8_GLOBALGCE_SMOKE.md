@@ -25,6 +25,8 @@ The smoke is one bounded native GlobalGCE execution with these fixed choices:
 - independent target branches 0 and 2;
 - `min_freq=2`, native Top20, training parameter `epochs=5`, learning rate
   `0.1`, dropout `0.5`, bounded generation/oracle/gSpan chunks;
+- Top20 is the mined/trained surface; terminal smoke acceptance requires at
+  least one hard-valid native rule from each branch, not twenty valid slots;
 - established native attachment-aware LHS-to-RHS rewrite semantics;
 - original-order three-class final acceptance
   `pred_before == 1 and pred_after != 1`;
@@ -35,6 +37,17 @@ after the epoch-0 checkpoint and heartbeat are durable. The second call must
 restore the same identity-bound model, optimizer, scheduler, and
 Python/NumPy/Torch RNG state and then reach the terminal rule catalog. Cross-
 target, cohort, GINE, official-source, or configuration resume is rejected.
+The epoch-zero planned interruption need not yet have a rule catalog.  A
+nonempty catalog is mandatory at the resumed generator-completion boundary and
+in the independent terminal verifier.
+
+Pinned official `decoder_edge_attr` emits unrestricted finite affine class
+scores: its apparent sigmoid is the final `Linear` layer's positional bias
+argument, not a sequential activation.  Catalog materialization therefore
+uses the official row-wise hard `argmax` and stores one-hot edge labels while
+retaining the raw learned checkpoint by hash.  It does not clamp scores or
+coerce node ties; non-finite edge scores, ambiguous node labels, malformed
+adjacency, and invalid/disconnected native rules remain rejected.
 
 The freshly created target directory and its epoch-0 checkpoint/heartbeat
 leaves remain open by descriptor across interruption and reload. The resumed

@@ -63,6 +63,51 @@ verification.
 Accepted
 
 ---
+## [2026-08-31] Decode T8 affine edge scores at the native catalog boundary
+
+### Motivation
+
+Fresh T8 attempt `1ed059be-3f95-4334-80e4-3bb35d82ea4d` completed target-0
+exact Top20 mining, the planned epoch checkpoint/reload, five training epochs,
+and both eight-parent generation chunks.  Its terminal catalog path existed
+but was empty: twelve learned rules retained an ambiguous node maximum and the
+other eight were rejected only because the catalog validator treated the
+pinned official edge decoder's unrestricted affine scores as probabilities in
+`[0,1]`.  The latter contradicts the already accepted official hard-codec
+contract, which decodes those finite scores with row-wise `argmax`.
+
+### Decision
+
+Keep the official model, training, raw rule checkpoint, continuous generation,
+and attachment-aware action unchanged.  When materializing the private hard
+native-rule catalog, decode only `edge_attrs_reconst` with the pinned official
+row-wise `argmax` into one-hot edge labels and record the named decode contract.
+Continue to reject non-finite/malformed edge scores, ambiguous node labels,
+invalid adjacency, disconnected LHS rules, and every other existing native
+rule failure.
+
+Top20 remains the mined and optimized smoke surface.  The bounded T8 smoke
+requires a nonempty hard-valid catalog from each target branch, matching its
+pre-registered at-least-one-rule/strict-flip purpose; it does not require all
+twenty learned slots to hard-validate.  An absent or empty catalog is accepted
+at neither terminal branch capture nor independent verification.  The catalog
+is required only after the deliberate resume reaches the generator completion
+boundary, not at the epoch-zero planned interruption.
+
+### Consequences
+
+- The preserved failed attempt remains non-adoptable and no state file is
+  modified; a retry must use a fresh UUID, state root, scratch root, and final
+  root.
+- The observed target-0 checkpoint yields eight hard-valid unique rules under
+  the already frozen edge `argmax` semantics while the twelve node-tie rules
+  remain rejected.
+- Empty catalogs, silent clamping, node-tie coercion, RF/binary fallback, and
+  a lowered Top20 training surface remain forbidden.
+
+### Status
+
+Accepted for the narrow T8 fresh-retry repair.
 
 ## [2026-08-31] Bind omitted AIDS freeze-only RNG evidence to its recovery receipt
 
