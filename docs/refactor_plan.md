@@ -1,5 +1,19 @@
 # Refactor Plan
 
+## 2026-09-01: Bounded TasteMolNet T8 zero-candidate recovery
+
+- [x] Diagnose the fresh five-epoch failure as nonempty native generation with
+  zero candidates surviving the unchanged chemistry/connectivity gates.
+- [x] Preserve the same frozen train cohort, three-class GINE, target branches,
+  native action, resume contract, and no-test boundary.
+- [x] Add one explicit fixed 25-epoch recovery selected only with the failed
+  source UUID and a fresh attempt/root; reject every other epoch budget.
+- [x] Persist the recovery contract and exact science configuration in runner
+  evidence and synchronize the Slurm wrapper.
+- [x] Add focused default/recovery/fresh-UUID/terminal-epoch tests.
+- [ ] Deploy the commit to AutoDL and launch one fresh recovery attempt. Do
+  not resume or adopt attempt `4376be2b-42de-46d4-a3c6-ad291dd3f9f0`.
+
 ## 2026-09-01: TasteMolNet T12 deterministic restart substrate
 
 - [x] Record the explicit authorization to replace only T12's salted raw-

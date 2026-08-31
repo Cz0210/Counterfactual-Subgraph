@@ -619,7 +619,11 @@ class _HeldFixtureTerminalAuthority:
         return json.loads(json.dumps(self.official_startup))
 
 
-def _run_science(tmp_path: Path):
+def _run_science(
+    tmp_path: Path,
+    *,
+    config: t8.TasteGlobalGCESmokeConfig | None = None,
+):
     state = FreshOutputDirectory.create(tmp_path / "state")
     generators = {target: _FakeGenerator(target) for target in (0, 2)}
     science, tree = t8.run_t8_science(
@@ -629,7 +633,7 @@ def _run_science(tmp_path: Path):
         scorer=_FakeScorer(),
         generator_factory=lambda target: generators[target],
         state_root=state,
-        config=_config(),
+        config=_config() if config is None else config,
     )
     return state, tree, science, generators
 
@@ -1341,6 +1345,31 @@ def test_train_parser_uses_frozen_model_smiles_schema_precedence() -> None:
 def test_smoke_config_rejects_science_surface_drift_before_execution() -> None:
     with pytest.raises(t8.TasteGlobalGCESmokeError, match="frozen smoke"):
         t8.TasteGlobalGCESmokeConfig(source_parent_count=15).validate()
+
+
+def test_smoke_config_accepts_only_fixed_zero_candidate_recovery_budget(
+    tmp_path: Path,
+) -> None:
+    recovery = t8.TasteGlobalGCESmokeConfig(
+        epochs=t8.ZERO_CANDIDATE_RECOVERY_EPOCHS
+    )
+    recovery.validate()
+    with pytest.raises(t8.TasteGlobalGCESmokeError, match="epochs must be"):
+        t8.TasteGlobalGCESmokeConfig(epochs=24).validate()
+
+    state, tree, science, _generators = _run_science(
+        tmp_path, config=recovery
+    )
+    try:
+        assert science["config"]["epochs"] == 25
+        assert all(
+            science["branches"][target]["terminal_next_epoch"] == 26
+            for target in ("0", "2")
+        )
+        t8.validate_science_summary(science)
+    finally:
+        tree.close()
+        state.close()
 
 
 def test_terminal_rejects_per_example_or_binary_claim(tmp_path: Path) -> None:

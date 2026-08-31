@@ -27,6 +27,54 @@ missing old authority root.
 
 ---
 
+## [2026-09-01] Bound the T8 zero-candidate recovery at 25 train-only epochs
+
+### Motivation
+
+Fresh deadline attempt `4376be2b-42de-46d4-a3c6-ad291dd3f9f0` completed both
+native GlobalGCE branches and produced 4,860 raw generations per branch, but
+none survived the existing parseability, chemistry, substructure, connectivity,
+and strict-flip gates. Replaying the hard catalogs on the same 16 frozen train
+parents also produced no valid candidate. Target 0 was rejected by native
+adjacency/deletion connectivity constraints and target 2 by sanitization. The
+failure is therefore not an empty generator, record-field mismatch, or
+classifier/split/oracle error; the five-epoch decoder was under-trained for
+this fixed cohort.
+
+### Decision
+
+Keep the historical smoke default at five epochs and permit exactly one
+explicit zero-candidate recovery budget of 25 epochs, the minimum training
+budget already accepted by the Taste GlobalGCE full configuration. The
+deadline CLI requires both `--zero-candidate-recovery` and the canonical UUIDv4
+of the failed source attempt, while the new attempt ID and state/output roots
+remain fresh. The recovery records its source attempt, reason, and exact
+science configuration in preflight, manifest, and gate evidence.
+
+The recovery keeps the same 16-of-64 train-only cohort, seed 7, calibrated
+three-class GINE, Sweet source label, independent targets 0 and 2, native
+Top20/min-frequency/action semantics, checkpoint resume proof, and all strict
+candidate filters. It does not load validation, calibration, or test, and it
+does not repair, coerce, or relax invalid native graphs. Any epoch value other
+than 5 or 25 fails before execution. If the fixed 25-epoch fresh attempt still
+has no valid connected candidate, T8 remains a scientific failure; no further
+automatic budget tier is authorized.
+
+### Consequences
+
+- The training-resource change is explicit and hash-visible, while the
+  classifier, split, oracle, target branches, native action, and acceptance
+  semantics remain unchanged.
+- Existing five-epoch results cannot be relabeled or resumed as recovery.
+- The measured single-GPU estimate is approximately eight to nine hours; the
+  estimate is operational only and is not part of the acceptance gate.
+
+### Status
+
+Accepted
+
+---
+
 ## [2026-09-01] Bound Taste T14 transition memory without changing the walk
 
 ### Motivation

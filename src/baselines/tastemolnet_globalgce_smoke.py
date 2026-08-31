@@ -78,6 +78,7 @@ DESTINATION_LABELS = (0, 2)
 PHYSICAL_GPU_INDEX = 2
 VISIBLE_DEVICE = "cuda:0"
 SEED = 7
+ZERO_CANDIDATE_RECOVERY_EPOCHS = 25
 PASS_MARKER = "[TASTE_T8_GLOBALGCE_SMOKE_PASS]"
 MANAGED_TASK_ID = "tastemolnet_t8_globalgce_smoke"
 MANAGED_V2_PROTOCOL = "managed_execution_v2"
@@ -182,10 +183,14 @@ class TasteGlobalGCESmokeConfig:
             raise TasteGlobalGCESmokeError("T8 dropout must be strictly inside (0,1)")
         if type(self.seed) is not int or self.seed != SEED:
             raise TasteGlobalGCESmokeError("T8 is frozen to seed 7")
+        if self.epochs not in {5, ZERO_CANDIDATE_RECOVERY_EPOCHS}:
+            raise TasteGlobalGCESmokeError(
+                "T8 epochs must be the frozen five-epoch smoke or the fixed "
+                "25-epoch zero-candidate recovery"
+            )
         if (
             self.source_parent_count,
             self.source_scan_limit,
-            self.epochs,
             self.top_k_native,
             self.min_freq,
             self.learning_rate.hex(),
@@ -198,7 +203,6 @@ class TasteGlobalGCESmokeConfig:
         ) != (
             16,
             64,
-            5,
             20,
             2,
             "0x1.999999999999ap-4",
@@ -210,7 +214,8 @@ class TasteGlobalGCESmokeConfig:
             1,
         ):
             raise TasteGlobalGCESmokeError(
-                "T8 bounded science configuration differs from the frozen smoke"
+                "T8 bounded science configuration differs from the frozen smoke "
+                "and zero-candidate recovery"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -2855,12 +2860,19 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
         temperature = float.fromhex(science["temperature_hex"])
     except (TypeError, ValueError) as exc:
         raise TasteGlobalGCESmokeError("T8 science temperature identity changed") from exc
+    accepted_configs = (
+        TasteGlobalGCESmokeConfig().to_dict(),
+        TasteGlobalGCESmokeConfig(
+            epochs=ZERO_CANDIDATE_RECOVERY_EPOCHS
+        ).to_dict(),
+    )
+    science_config = science.get("config")
     if (
         type(science["temperature_hex"]) is not str
         or not math.isfinite(temperature)
         or temperature <= 0.0
         or temperature.hex() != science["temperature_hex"]
-        or science.get("config") != TasteGlobalGCESmokeConfig().to_dict()
+        or science_config not in accepted_configs
     ):
         raise TasteGlobalGCESmokeError("T8 science config/temperature changed")
     train = science.get("train_boundary")
@@ -2997,7 +3009,7 @@ def validate_science_summary(science: Mapping[str, Any]) -> None:
             or branch.get("optimizer_state_restored") is not True
             or branch.get("scheduler_state_restored") is not True
             or branch.get("rng_state_restored") is not True
-            or branch.get("terminal_next_epoch") != 6
+            or branch.get("terminal_next_epoch") != science_config["epochs"] + 1
             or any(
                 not _is_sha256(branch.get(field))
                 for field in (
@@ -3962,6 +3974,7 @@ __all__ = [
     "STAGE",
     "TARGET_BRANCHES",
     "TasteGlobalGCESmokeConfig",
+    "ZERO_CANDIDATE_RECOVERY_EPOCHS",
     "TasteGlobalGCESmokeError",
     "TasteGlobalGCETerminalAuthority",
     "build_terminal_documents",

@@ -21,12 +21,13 @@ from src.baselines.globalgce_mutagenicity_adapter import OfficialGlobalGCEMutage
 from src.baselines.tastemolnet_globalgce_smoke import (  # noqa: E402
     DATASET, GINE_PAYLOAD_FILES, NUM_CLASSES, PASS_MARKER, SOURCE_LABEL, STAGE,
     FrozenTasteGINEScorer, TasteGlobalGCESmokeConfig, TasteGlobalGCESmokeError,
-    run_t8_science,
+    ZERO_CANDIDATE_RECOVERY_EPOCHS, run_t8_science,
 )
 from src.utils.retained_output_directory import FreshOutputDirectory, prepare_terminal_output  # noqa: E402
 from src.utils.tastemolnet_t8_globalgce_release import _checkpoint_train_contract  # noqa: E402
 
-SCHEMA = "tastemolnet_t8_deadline_runner_v1"
+SCHEMA = "tastemolnet_t8_deadline_runner_v2"
+RECOVERY_SCHEMA = "tastemolnet_t8_zero_candidate_recovery_v1"
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -86,6 +87,52 @@ def _uuid4(value: str) -> str:
     return value
 
 
+def _zero_candidate_recovery_contract(
+    args: argparse.Namespace,
+    *,
+    attempt_id: str,
+) -> tuple[dict[str, Any], TasteGlobalGCESmokeConfig]:
+    """Select exactly the frozen smoke or its one bounded train-only recovery."""
+
+    enabled = getattr(args, "zero_candidate_recovery", False)
+    source_value = getattr(args, "recovery_source_attempt_id", None)
+    if type(enabled) is not bool:
+        raise TasteGlobalGCESmokeError(
+            "T8 zero-candidate recovery selector must be boolean"
+        )
+    if not enabled:
+        if source_value is not None:
+            raise TasteGlobalGCESmokeError(
+                "T8 recovery source attempt requires --zero-candidate-recovery"
+            )
+        config = TasteGlobalGCESmokeConfig()
+        return {
+            "schema_version": RECOVERY_SCHEMA,
+            "enabled": False,
+            "source_attempt_id": None,
+            "stop_reason": None,
+            "epochs": config.epochs,
+        }, config
+    if source_value is None:
+        raise TasteGlobalGCESmokeError(
+            "T8 zero-candidate recovery requires --recovery-source-attempt-id"
+        )
+    source_attempt_id = _uuid4(source_value)
+    if source_attempt_id == attempt_id:
+        raise TasteGlobalGCESmokeError(
+            "T8 zero-candidate recovery must use a fresh attempt UUID"
+        )
+    config = TasteGlobalGCESmokeConfig(epochs=ZERO_CANDIDATE_RECOVERY_EPOCHS)
+    config.validate()
+    return {
+        "schema_version": RECOVERY_SCHEMA,
+        "enabled": True,
+        "source_attempt_id": source_attempt_id,
+        "stop_reason": "prior_native_generation_had_zero_valid_connected_candidates",
+        "epochs": config.epochs,
+    }, config
+
+
 def _terminal_pass(root: Path, label: str) -> dict[str, Any]:
     gate = _read_json(root / "gate.json", f"{label} gate")
     verification = _read_json(root / "verification.json", f"{label} verification")
@@ -103,6 +150,9 @@ def deadline_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[s
     if args.set != ["inference.fallback_to_heuristic=false"]:
         raise TasteGlobalGCESmokeError("T8 deadline forbids heuristic fallback")
     attempt_id = _uuid4(args.attempt_id)
+    recovery, science_config = _zero_candidate_recovery_contract(
+        args, attempt_id=attempt_id
+    )
     t3_root = _absolute(args.t3_output, "T3 root")
     t4_root = _absolute(args.t4_output, "T4 root")
     t3 = _terminal_pass(t3_root, "T3")
@@ -157,6 +207,8 @@ def deadline_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[s
         "test_loaded": False, "gnn_ablation_started": False,
         "gspan_external_scratch_used": True,
         "gspan_terminal_proof_persistent": True,
+        "science_config": science_config.to_dict(),
+        "zero_candidate_recovery": recovery,
     }
     return evidence, payloads, train_payload
 
@@ -190,7 +242,13 @@ def run_deadline(args: argparse.Namespace) -> int:
             raise TasteGlobalGCESmokeError(f"T8 deadline {label} root must be fresh")
         path.parent.mkdir(parents=True, exist_ok=True)
     scratch_root.mkdir(mode=0o700)
-    config = TasteGlobalGCESmokeConfig()
+    config = TasteGlobalGCESmokeConfig(
+        epochs=evidence["science_config"]["epochs"]
+    )
+    if config.to_dict() != evidence["science_config"]:
+        raise TasteGlobalGCESmokeError(
+            "T8 deadline science configuration was not exactly retained"
+        )
     scorer = FrozenTasteGINEScorer(payloads, device="cuda:0", batch_size=config.oracle_batch_size)
     state_root = FreshOutputDirectory.create(args.state_dir)
     state_tree = prepared = None
@@ -220,7 +278,8 @@ def run_deadline(args: argparse.Namespace) -> int:
         output.write_new("gate.json", _json_bytes({"schema_version": SCHEMA, "status": "PASS", "marker": PASS_MARKER,
             "attempt_id": evidence["attempt_id"], "checkpoint_id": evidence["checkpoint_id"], "target_branches": [0, 2],
             "strict_flip_count": manifest["strict_flip_count"], "destination_distribution": manifest["destination_distribution"],
-            "rf_oracle_used": False, "test_loaded": False}))
+            "rf_oracle_used": False, "test_loaded": False,
+            "zero_candidate_recovery": evidence["zero_candidate_recovery"]}))
         prepared = prepare_terminal_output(output, marker_name="PASS", marker_payload=(PASS_MARKER + "\n").encode())
         prepared.commit(retained_input_closure=lambda: (state_root.revalidate(), state_tree.revalidate()))
         print(PASS_MARKER); print(json.dumps(manifest, sort_keys=True)); return 0
@@ -238,6 +297,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-csv", type=Path, required=True); parser.add_argument("--official-root", type=Path, required=True)
     parser.add_argument("--gspan-scratch-root", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True); parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--zero-candidate-recovery", action="store_true")
+    parser.add_argument("--recovery-source-attempt-id")
     parser.add_argument("--preflight-only", action="store_true"); parser.add_argument("--ready-receipt", type=Path)
     return parser
 

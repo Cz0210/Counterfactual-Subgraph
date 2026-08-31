@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 from scripts.autodl import run_tastemolnet_t8_deadline as deadline
 
@@ -22,11 +23,66 @@ def test_scratch_root_is_explicit_absolute_and_fresh(tmp_path: Path) -> None:
         deadline._fresh_scratch_root(Path("relative-t8-scratch"))
 
 
+def test_zero_candidate_recovery_is_one_fixed_fresh_attempt_budget() -> None:
+    attempt = "70db9c1b-3f28-4ae9-bc21-d81027b2e53d"
+    source = "4376be2b-42de-46d4-a3c6-ad291dd3f9f0"
+    contract, config = deadline._zero_candidate_recovery_contract(
+        SimpleNamespace(
+            zero_candidate_recovery=True,
+            recovery_source_attempt_id=source,
+        ),
+        attempt_id=attempt,
+    )
+    assert contract == {
+        "schema_version": deadline.RECOVERY_SCHEMA,
+        "enabled": True,
+        "source_attempt_id": source,
+        "stop_reason": (
+            "prior_native_generation_had_zero_valid_connected_candidates"
+        ),
+        "epochs": 25,
+    }
+    assert config.epochs == 25
+    assert config.to_dict()["epochs"] == 25
+
+    with pytest.raises(Exception, match="fresh attempt UUID"):
+        deadline._zero_candidate_recovery_contract(
+            SimpleNamespace(
+                zero_candidate_recovery=True,
+                recovery_source_attempt_id=attempt,
+            ),
+            attempt_id=attempt,
+        )
+    with pytest.raises(Exception, match="requires --recovery-source-attempt-id"):
+        deadline._zero_candidate_recovery_contract(
+            SimpleNamespace(
+                zero_candidate_recovery=True,
+                recovery_source_attempt_id=None,
+            ),
+            attempt_id=attempt,
+        )
+
+
+def test_recovery_source_cannot_silently_change_default_smoke() -> None:
+    attempt = "70db9c1b-3f28-4ae9-bc21-d81027b2e53d"
+    with pytest.raises(Exception, match="requires --zero-candidate-recovery"):
+        deadline._zero_candidate_recovery_contract(
+            SimpleNamespace(
+                zero_candidate_recovery=False,
+                recovery_source_attempt_id=(
+                    "4376be2b-42de-46d4-a3c6-ad291dd3f9f0"
+                ),
+            ),
+            attempt_id=attempt,
+        )
+
+
 def test_runner_reuses_frozen_two_target_science_without_rf_or_test_paths() -> None:
     text = (PROJECT_ROOT / "scripts/autodl/run_tastemolnet_t8_deadline.py").read_text()
     for expected in ("run_t8_science", "OfficialGlobalGCEMutagenicityGenerator", '"target_branches": [0, 2]',
                      "source_label=SOURCE_LABEL", "target_label=target_label", "num_classes=NUM_CLASSES",
                      '"rf_oracle_used": False', '"test_loaded": False',
+                     '"zero_candidate_recovery": recovery',
                      "gspan_scratch_root=scratch_root / f\"target-{target_label}\"",
                      '"gspan_terminal_proof_persistent": True'):
         assert expected in text
@@ -42,5 +98,8 @@ def test_slurm_wrapper_keeps_hpc_contract() -> None:
                      "cd /share/home/u20526/czx/counterfactual-subgraph", "export PYTHONPATH=$PWD",
                      "--config configs/hpc.yaml", "--set inference.fallback_to_heuristic=false",
                      '"${T8_GSPAN_SCRATCH_ROOT:?}"',
-                     '--gspan-scratch-root "$T8_GSPAN_SCRATCH_ROOT"'):
+                     '--gspan-scratch-root "$T8_GSPAN_SCRATCH_ROOT"',
+                     'T8_ZERO_CANDIDATE_RECOVERY',
+                     '--zero-candidate-recovery',
+                     '--recovery-source-attempt-id "$T8_RECOVERY_SOURCE_ATTEMPT_ID"'):
         assert expected in text

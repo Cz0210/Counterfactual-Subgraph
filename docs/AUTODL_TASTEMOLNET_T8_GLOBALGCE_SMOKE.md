@@ -32,6 +32,31 @@ The smoke is one bounded native GlobalGCE execution with these fixed choices:
   `pred_before == 1 and pred_after != 1`;
 - at least one accepted strict flip attributable to each branch.
 
+### Fixed zero-candidate recovery
+
+The five-epoch setting remains the default smoke. After a fresh attempt has
+completed nonempty native generation but produced no valid connected candidate,
+the deadline runner permits one bounded train-only recovery at exactly 25
+epochs. It requires a new UUIDv4 and fresh state/output/scratch roots, plus an
+explicit reference to the failed attempt:
+
+```bash
+python -I -B scripts/autodl/run_tastemolnet_t8_deadline.py \
+  --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
+  --zero-candidate-recovery \
+  --recovery-source-attempt-id 4376be2b-42de-46d4-a3c6-ad291dd3f9f0 \
+  ...
+```
+
+The paired Slurm wrapper exposes the same selection through
+`T8_ZERO_CANDIDATE_RECOVERY=1` and `T8_RECOVERY_SOURCE_ATTEMPT_ID=<failed-uuid>`.
+No arbitrary epoch argument exists. The 16-of-64 train cohort, seed, frozen
+three-class GINE, target branches 0 and 2, Top20/min-frequency settings, native
+rewrite, strict filters, and no-validation/calibration/test boundary are
+unchanged. A 25-epoch attempt with no accepted candidate fails closed; it does
+not unlock a further escalation or post-hoc graph repair.
+
 Each branch is called twice. The first call is deliberately interrupted only
 after the epoch-0 checkpoint and heartbeat are durable. The second call must
 restore the same identity-bound model, optimizer, scheduler, and
