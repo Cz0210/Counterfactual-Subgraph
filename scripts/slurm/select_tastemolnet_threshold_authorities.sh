@@ -46,4 +46,4 @@ python -B scripts/select_tastemolnet_threshold_authorities.py \
   --wnode-cache-db "$WNODE_CACHE_DB" \
   --node-embedding-cache-dir "$NODE_EMBEDDING_CACHE_DIR" \
   --device cuda:0 \
-  --batch-size 64
+  --batch-size 32

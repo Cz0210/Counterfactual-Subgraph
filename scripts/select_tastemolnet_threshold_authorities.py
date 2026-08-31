@@ -40,7 +40,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wnode-cache-db", type=_absolute, required=True)
     parser.add_argument("--node-embedding-cache-dir", type=_absolute, required=True)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=32)
     return parser.parse_args(argv)
 
 

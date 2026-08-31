@@ -596,7 +596,7 @@ def run_tastemolnet_threshold_authority_selector(
     wnode_cache_db: str | Path,
     node_embedding_cache_dir: str | Path,
     device: str = "cuda:0",
-    batch_size: int = 64,
+    batch_size: int = 32,
 ) -> dict[str, Any]:
     """Replay T4 once and atomically publish two non-paper authorities."""
 
