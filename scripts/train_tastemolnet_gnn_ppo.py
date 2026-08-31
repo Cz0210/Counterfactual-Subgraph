@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import logging
@@ -26,7 +26,7 @@ from scripts.train_ppo import (  # noqa: E402
     apply_config_overrides,
     apply_decoded_chem_generation_defaults,
     build_hf_dataset,
-    build_policy_model,
+    build_quantized_base_model,
     build_tokenizer,
     build_value_model,
     collect_runtime_environment_debug,
@@ -309,7 +309,7 @@ def _assert_execution_released() -> dict[str, Any]:
         or type(release.get("release_enabled")) is not bool
         or type(release.get("release_state")) is not str
         or type(release.get("gpu_index")) is not int
-        or release.get("gpu_index") != 1
+        or release.get("gpu_index") != 0
     ):
         raise RuntimeError("TASTE_T6_RELEASE_CONFIG_INVALID")
     pinned_fields = (
@@ -571,6 +571,7 @@ def _hold_external_release_authority(
         "max_concurrent_taste_full",
         "gpu0_gpu3_excluded",
         "gnn_ablation_enabled",
+        "frozen_oracle_identity",
     }
     if set(payload) != expected_keys:
         raise RuntimeError("Taste T6 external authority keys changed")
@@ -587,13 +588,13 @@ def _hold_external_release_authority(
             "t5_output_inventory_sha256"
         ],
         "controller_receipt_sha256": release["controller_receipt_sha256"],
-        "gpu_index": 1,
-        "cuda_visible_devices": "1",
+        "gpu_index": 0,
+        "cuda_visible_devices": "0",
         "output_parent": release["output_parent"],
         "minimum_persistent_free_gb": 20,
         "minimum_free_after_reservations_gb": 100,
         "max_concurrent_taste_full": 2,
-        "gpu0_gpu3_excluded": True,
+        "gpu0_gpu3_excluded": False,
         "gnn_ablation_enabled": False,
     }
     if any(
@@ -603,7 +604,51 @@ def _hold_external_release_authority(
         raise RuntimeError("Taste T6 external authority values changed")
     gpu_uuid = payload.get("gpu_uuid")
     if type(gpu_uuid) is not str or not gpu_uuid.startswith("GPU-"):
-        raise RuntimeError("Taste T6 external authority lacks GPU1 UUID")
+        raise RuntimeError("Taste T6 external authority lacks GPU0 UUID")
+    frozen = payload.get("frozen_oracle_identity")
+    frozen_keys = {
+        "dataset", "backbone", "num_classes", "label_map", "source_label",
+        "strict_flip", "rf_oracle_used", "checkpoint_dir", "checkpoint_id",
+        "checkpoint_sha256", "checkpoint_inventory_sha256",
+        "checkpoint_stat_inventory_sha256", "checkpoint_sha256s_sha256",
+        "feature_schema_sha256", "temperature_calibration_sha256",
+        "downstream_policy_sha256", "t2_adoption_binding", "t3_output_root",
+        "t3_gate_sha256", "t3_root_inventory_sha256", "t4_output_root",
+        "t4_gate_sha256", "t4_root_inventory_sha256",
+    }
+    if type(frozen) is not dict or set(frozen) != frozen_keys:
+        raise RuntimeError("Taste T6 frozen-oracle authority schema changed")
+    frozen_exact = {
+        "dataset": "tastemolnet",
+        "backbone": "gine",
+        "num_classes": 3,
+        "label_map": {"0": "Bitter", "1": "Sweet", "2": "Tasteless"},
+        "source_label": 1,
+        "strict_flip": "pred_before == 1 and pred_after != 1",
+        "rf_oracle_used": False,
+        "t3_gate_sha256": release["t3_gate_sha256"],
+        "t4_gate_sha256": release["t4_gate_sha256"],
+    }
+    if any(
+        type(frozen.get(key)) is not type(value) or frozen.get(key) != value
+        for key, value in frozen_exact.items()
+    ):
+        raise RuntimeError("Taste T6 frozen-oracle scientific identity changed")
+    for key in (
+        "checkpoint_id", "checkpoint_sha256", "checkpoint_inventory_sha256",
+        "checkpoint_stat_inventory_sha256", "checkpoint_sha256s_sha256",
+        "feature_schema_sha256", "temperature_calibration_sha256",
+        "downstream_policy_sha256", "t3_root_inventory_sha256",
+        "t4_root_inventory_sha256",
+    ):
+        if not _is_sha256(frozen.get(key)):
+            raise RuntimeError(f"Taste T6 frozen-oracle {key} is malformed")
+    if frozen["checkpoint_id"] != frozen["checkpoint_sha256"]:
+        raise RuntimeError("Taste T6 frozen checkpoint identity changed")
+    for key in ("checkpoint_dir", "t3_output_root", "t4_output_root"):
+        _normalized_absolute(frozen.get(key), label=f"frozen oracle {key}")
+    if type(frozen.get("t2_adoption_binding")) is not dict:
+        raise RuntimeError("Taste T6 frozen oracle lacks T2 adoption binding")
     receipt_path = _normalized_absolute(
         payload.get("controller_receipt_path"),
         label="controller receipt",
@@ -621,14 +666,14 @@ def _hold_external_release_authority(
     return authority, payload, receipt
 
 
-def _assert_gpu1_runtime(authority: Mapping[str, Any]) -> None:
+def _assert_gpu_runtime(authority: Mapping[str, Any]) -> None:
     expected_uuid = authority["gpu_uuid"]
     if (
-        os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != "1"
+        os.environ.get("AUTODL_PHYSICAL_GPU_INDEX") != "0"
         or os.environ.get("AUTODL_PHYSICAL_GPU_UUID") != expected_uuid
-        or os.environ.get("CUDA_VISIBLE_DEVICES") != "1"
+        or os.environ.get("CUDA_VISIBLE_DEVICES") != "0"
     ):
-        raise RuntimeError("Taste T6 GPU1 environment differs from authority")
+        raise RuntimeError("Taste T6 GPU0 environment differs from authority")
     completed = subprocess.run(
         [
             "/usr/bin/nvidia-smi",
@@ -645,8 +690,8 @@ def _assert_gpu1_runtime(authority: Mapping[str, Any]) -> None:
         if not separator:
             raise RuntimeError("Taste T6 GPU inventory is malformed")
         inventory[int(index_text.strip())] = uuid.strip()
-    if inventory.get(1) != expected_uuid:
-        raise RuntimeError("Taste T6 physical GPU1 UUID changed")
+    if inventory.get(0) != expected_uuid:
+        raise RuntimeError("Taste T6 physical GPU0 UUID changed")
 
 
 def _checkpoint_and_train_contract(
@@ -860,17 +905,200 @@ def _fresh_output(path: Path, *, inputs: list[Path]) -> FreshOutputDirectory:
     return FreshOutputDirectory.create(unresolved)
 
 
+@dataclass(slots=True)
+class _HeldT6CleanBase:
+    """Direct T6 consumer for the independently verified managed T5 base."""
+
+    managed: Any
+    source: Any
+    evidence: Mapping[str, Any]
+    managed_evidence: Mapping[str, Any]
+
+    def source_load_path(self) -> Path:
+        self.revalidate()
+        return self.source.stable_load_path()
+
+    def revalidate(self) -> dict[str, Any]:
+        if self.managed.revalidate() != dict(self.managed_evidence):
+            raise RuntimeError("Taste T6 managed T5 final changed")
+        source = self.source.revalidate()
+        if (
+            source.get("source_model_path")
+            != self.evidence.get("source_model_path")
+            or source.get("source_model_inventory_sha256")
+            != self.evidence.get("source_model_inventory_sha256")
+        ):
+            raise RuntimeError("Taste T6 held clean-base source changed")
+        return dict(self.evidence)
+
+    def close(self) -> None:
+        self.source.close()
+        self.managed.close()
+
+    def __enter__(self) -> "_HeldT6CleanBase":
+        self.revalidate()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+def _hold_t6_clean_base(root: Path) -> _HeldT6CleanBase:
+    """Adopt T5's clean generic base without claiming an adapter or training."""
+
+    from src.train.tastemolnet_clean_policy import (
+        hold_source_model_for_clean_policy,
+    )
+    from src.utils.managed_final_consumer_v2 import hold_verified_managed_final
+
+    required = (
+        "artifacts/clean_base_adoption_candidate.json",
+        "artifacts/source_inventory.json",
+    )
+    managed = hold_verified_managed_final(root, required_relative_paths=required)
+    source = None
+    try:
+        verification = managed.verification_payload.get("verification")
+        if type(verification) is not dict:
+            raise RuntimeError("Taste T6 managed T5 verification body is absent")
+        exact = {
+            "schema_version": "tastemolnet_t5_clean_base_adoption_v2",
+            "status": "PASS",
+            "stage": "T5_CLEAN_POLICY_READY",
+            "task_id": "T5_CLEAN_BASE_ADOPTION",
+            "marker": "[TASTE_T5_CLEAN_SFT_PASS]",
+            "semantic_state": "ADOPTED_CLEAN_GENERIC_BASE",
+            "independent_scientific_verifier": True,
+            "downstream_clean_base_authority": True,
+            "optimizer_steps": 0,
+            "training_performed": False,
+            "taste_splits_loaded": [],
+            "validation_loaded": False,
+            "calibration_loaded": False,
+            "test_loaded": False,
+            "rf_reference_count": 0,
+            "gnn_reward_used": False,
+            "source_adapter_present": False,
+            "peft_present": False,
+            "source_weights_copied": False,
+            "matrix_method_cell": False,
+        }
+        if any(
+            type(verification.get(key)) is not type(value)
+            or verification.get(key) != value
+            for key, value in exact.items()
+        ):
+            raise RuntimeError("Taste T6 managed T5 scientific contract changed")
+        source_path = _normalized_absolute(
+            verification.get("source_model_path"), label="T5 clean source"
+        )
+        source_inventory = verification.get("source_model_inventory_sha256")
+        if not _is_sha256(source_inventory):
+            raise RuntimeError("Taste T6 managed T5 source inventory is malformed")
+        candidate = _json_from_bytes(
+            managed.file(required[0]).read_bytes(), label="T5 clean candidate"
+        )
+        source_receipt = _json_from_bytes(
+            managed.file(required[1]).read_bytes(), label="T5 source inventory"
+        )
+        if (
+            candidate.get("source_model_path") != str(source_path)
+            or source_receipt.get("source_model_path") != str(source_path)
+            or candidate.get("source_model_inventory_sha256") != source_inventory
+            or source_receipt.get("source_model_inventory_sha256")
+            != source_inventory
+            or candidate.get("optimizer_steps") != 0
+            or candidate.get("training_performed") is not False
+            or candidate.get("source_adapter_present") is not False
+        ):
+            raise RuntimeError("Taste T6 managed T5 source/candidate binding changed")
+        managed_evidence = dict(managed.revalidate())
+        source = hold_source_model_for_clean_policy(source_path, source_inventory)
+        evidence = {
+            "schema_version": "tastemolnet_t6_clean_base_adoption_v1",
+            "status": "PASS",
+            "stage": "T5_CLEAN_POLICY_READY",
+            "semantic_state": "ADOPTED_CLEAN_GENERIC_BASE",
+            "output_root": str(root),
+            "source_model_dir": str(source_path),
+            "source_model_path": str(source_path),
+            "source_model_inventory_sha256": source_inventory,
+            "t5_gate_sha256": managed_evidence["gate_sha256"],
+            "t5_output_inventory_sha256": managed_evidence[
+                "published_inventory_sha256"
+            ],
+            "optimizer_step_count": 0,
+            "training_performed": False,
+            "taste_splits_loaded": [],
+            "source_adapter_present": False,
+            "adapter_materialization": "T6_RUNTIME_IN_MEMORY_ZERO_STEP_LORA",
+        }
+        held = _HeldT6CleanBase(
+            managed=managed,
+            source=source,
+            evidence=evidence,
+            managed_evidence=managed_evidence,
+        )
+        held.revalidate()
+        return held
+    except BaseException:
+        if source is not None:
+            source.close()
+        managed.close()
+        raise
+
+
+def _build_zero_step_lora_model(
+    deps: Mapping[str, Any],
+    *,
+    model_path: Path,
+    lexical_model_path: Path,
+    seed: int,
+    is_trainable: bool,
+) -> Any:
+    """Materialize the reviewed zero-step LoRA in memory from managed T5."""
+
+    try:
+        from peft import LoraConfig, TaskType, get_peft_model
+    except ImportError as exc:  # pragma: no cover - AutoDL dependency
+        raise RuntimeError("Taste T6 zero-step LoRA requires PEFT") from exc
+    deps["set_seed"](seed)
+    base = build_quantized_base_model(
+        dict(deps),
+        model_path=model_path,
+        trust_remote_code=True,
+        local_files_only=True,
+        prepare_for_training=is_trainable,
+    )
+    if getattr(base, "peft_config", None):
+        raise RuntimeError("Taste T6 managed clean base unexpectedly contains PEFT")
+    config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        bias="none",
+        target_modules=["wqkv", "wo", "w1", "w2", "w3"],
+    )
+    model = get_peft_model(base, config)
+    for item in model.peft_config.values():
+        item.base_model_name_or_path = str(lexical_model_path)
+    if not is_trainable:
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        model.eval()
+    return model
+
+
 def _stage_authorities(
     stack: ExitStack,
     t5_root: Path,
     *,
+    frozen: Mapping[str, Any],
     downstream_policy: Path,
     base_policy: Path,
 ) -> tuple[Any, Any, Any, Any, Any]:
     from src.eval.tastemolnet_gnn_stages import hold_taste_stage_output
-    from src.train.tastemolnet_clean_policy import (
-        hold_clean_policy_load_authority,
-    )
     from src.utils.tastemolnet_gine_pass_adoption_v1 import (
         hold_t2_gine_pass_adoption,
     )
@@ -878,10 +1106,7 @@ def _stage_authorities(
         load_tastemolnet_downstream_policy,
     )
 
-    t5_load = stack.enter_context(hold_clean_policy_load_authority(t5_root))
-    t5 = t5_load.output
-    t5_evidence = t5.revalidate()
-    frozen = t5_evidence["frozen_oracle_identity"]
+    t5_load = stack.enter_context(_hold_t6_clean_base(t5_root))
     t2_binding = frozen.get("t2_adoption_binding")
     if type(t2_binding) is not dict:
         raise ValueError("Taste T5 lacks the fresh T2 adoption binding")
@@ -912,7 +1137,7 @@ def _stage_authorities(
     exact_stage = {
         "mode": "train_only_frozen_gine_reward_ppo_smoke",
         "device": "cuda:0",
-        "physical_gpu_index": 1,
+        "physical_gpu_index": 0,
         "gpu_uuid_binding_required": True,
         "fresh_output_required": True,
         "frozen_gine_reward_required": True,
@@ -943,6 +1168,9 @@ def _stage_authorities(
         "frozen_train_csv",
     ]:
         raise ValueError("Taste Ours allowed-input authority changed")
+    policy_binding = policy.revalidate(stage=STAGE)
+    if frozen.get("downstream_policy_sha256") != policy.file_sha256:
+        raise ValueError("Taste T6 frozen oracle/downstream policy binding changed")
     t3_evidence = t3.revalidate()
     t4_evidence = t4.revalidate()
     checkpoint_fields = {
@@ -1000,7 +1228,8 @@ def _stage_authorities(
     if frozen.get("checkpoint_sha256") != frozen.get("checkpoint_id"):
         raise ValueError("Taste T5 frozen selected checkpoint identity changed")
     t5_load.revalidate()
-    policy.revalidate(stage=STAGE)
+    if policy.revalidate(stage=STAGE) != policy_binding:
+        raise ValueError("Taste T6 downstream policy changed while held")
     t2.revalidate()
     return t2, t3, t4, t5_load, policy
 
@@ -1019,20 +1248,20 @@ def run(args: Any) -> int:
         release_authority, execution_authority, controller_receipt = (
             _hold_external_release_authority(stack, release)
         )
-        _assert_gpu1_runtime(execution_authority)
+        _assert_gpu_runtime(execution_authority)
+        frozen = execution_authority["frozen_oracle_identity"]
         t2_adoption, t3, t4, t5_load, policy = _stage_authorities(
             stack,
             args.t5_output,
+            frozen=frozen,
             downstream_policy=args.downstream_policy,
             base_policy=args.base_policy,
         )
-        t5 = t5_load.output
-        t5_evidence = t5.revalidate()
+        t5_evidence = t5_load.revalidate()
         if requested_model != _normalized_absolute(
             t5_evidence["source_model_path"], label="T5 source model"
         ):
             raise ValueError("Taste Ours base model differs from T5 authority")
-        frozen = t5_evidence["frozen_oracle_identity"]
         expected_runtime = {
             "t3_gate_sha256": release["t3_gate_sha256"],
             "t4_gate_sha256": release["t4_gate_sha256"],
@@ -1165,44 +1394,73 @@ def run(args: Any) -> int:
             )
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        load_token = t5_load.load_token()
+        source_load_path = t5_load.source_load_path()
         tokenizer = build_tokenizer(
             deps,
-            model_path=load_token.source_model_load_path,
+            model_path=source_load_path,
             trust_remote_code=args.trust_remote_code,
             local_files_only=True,
         )
-        t5_load.revalidate_load_token(load_token)
-        adapter = Path(t5_evidence["adapter_dir"])
-        policy_model = build_policy_model(
+        t5_load.revalidate()
+        adapter = "T6_RUNTIME_IN_MEMORY_ZERO_STEP_LORA"
+        policy_model = _build_zero_step_lora_model(
             deps,
-            model_path=load_token.source_model_load_path,
-            adapter_path=load_token.adapter_load_path,
-            trust_remote_code=args.trust_remote_code,
-            local_files_only=True,
+            model_path=source_load_path,
+            lexical_model_path=requested_model,
+            seed=int(args.seed),
             is_trainable=True,
         )
-        policy_t5_identity_before = t5_load.verify_loaded_policy(
-            policy_model,
-            token=load_token,
-            role="policy",
-        )
-        reference_model = build_policy_model(
+        reference_model = _build_zero_step_lora_model(
             deps,
-            model_path=load_token.source_model_load_path,
-            adapter_path=load_token.adapter_load_path,
-            trust_remote_code=args.trust_remote_code,
-            local_files_only=True,
+            model_path=source_load_path,
+            lexical_model_path=requested_model,
+            seed=int(args.seed),
             is_trainable=False,
         )
-        reference_t5_identity_before = t5_load.verify_loaded_policy(
-            reference_model,
-            token=load_token,
-            role="reference",
+        initial_policy_adapter = adapter_parameter_identity_from_model(policy_model)[
+            "parameter_sha256"
+        ]
+        initial_reference_adapter = adapter_parameter_identity_from_model(
+            reference_model
+        )["parameter_sha256"]
+        if initial_policy_adapter != initial_reference_adapter:
+            raise RuntimeError("Taste T6 zero-step policy/reference LoRA differ")
+        policy_initializer_hash = _canonical_sha256(
+            {
+                "schema_version": "tastemolnet_t6_runtime_initializer_v1",
+                "managed_t5_inventory_sha256": t5_evidence[
+                    "t5_output_inventory_sha256"
+                ],
+                "source_model_inventory_sha256": t5_evidence[
+                    "source_model_inventory_sha256"
+                ],
+                "adapter_parameter_sha256": initial_policy_adapter,
+                "optimizer_step_count": 0,
+                "taste_splits_loaded": [],
+            }
         )
+        reference_policy_hash = _canonical_sha256(
+            {
+                "schema_version": "tastemolnet_t6_reference_policy_v1",
+                "source_model_inventory_sha256": t5_evidence[
+                    "source_model_inventory_sha256"
+                ],
+                "adapter_parameter_sha256": initial_reference_adapter,
+                "policy_initializer_hash": policy_initializer_hash,
+            }
+        )
+        policy_t5_identity_before = reference_policy_hash
+        reference_t5_identity_before = reference_policy_hash
+        t5_evidence = {
+            **t5_evidence,
+            "frozen_oracle_identity": dict(frozen),
+            "policy_initializer_hash": policy_initializer_hash,
+            "reference_policy_hash": reference_policy_hash,
+            "adapter_parameter_sha256": initial_policy_adapter,
+        }
         value_model = build_value_model(
             deps,
-            model_path=load_token.source_model_load_path,
+            model_path=source_load_path,
             tokenizer=tokenizer,
             trust_remote_code=args.trust_remote_code,
             local_files_only=True,
@@ -1219,7 +1477,7 @@ def run(args: Any) -> int:
             policy_model=policy_model,
             requested_model=requested_model,
         )
-        t5_load.revalidate_load_token(load_token)
+        t5_load.revalidate()
         for authority in (
             t2_adoption,
             t3,
@@ -1250,7 +1508,7 @@ def run(args: Any) -> int:
             checkpoint_dir=checkpoint,
             device=rollout_device if args.gnn_device == "cuda" else args.gnn_device,
             policy_initializer_hash=t5_evidence["policy_initializer_hash"],
-            reference_policy_hash=load_token.reference_policy_hash,
+            reference_policy_hash=reference_policy_hash,
             config=GNNPPORewardConfig(
                 dataset="tastemolnet",
                 num_classes=3,
@@ -1358,11 +1616,15 @@ def run(args: Any) -> int:
             value_model.v_head.state_dict()
         )["parameter_sha256"]
         reference_after = model_parameter_hash(reference_model)
-        reference_t5_identity_after = t5_load.verify_loaded_policy(
-            reference_model,
-            token=load_token,
-            role="reference",
-        )
+        if (
+            adapter_parameter_identity_from_model(reference_model)[
+                "parameter_sha256"
+            ]
+            != initial_reference_adapter
+        ):
+            raise RuntimeError("Taste T6 frozen reference LoRA changed")
+        reference_t5_identity_after = reference_policy_hash
+        t5_load.revalidate()
         final_reload = validate_taste_adapter_checkpoint_reload(
             output,
             checkpoint_path_is_retained=True,
@@ -1395,7 +1657,7 @@ def run(args: Any) -> int:
             policy_t5_identity_before=policy_t5_identity_before,
             reference_t5_identity_before=reference_t5_identity_before,
             reference_t5_identity_after=reference_t5_identity_after,
-            expected_t5_reference_policy_hash=load_token.reference_policy_hash,
+            expected_t5_reference_policy_hash=reference_policy_hash,
             observer=observer,
             checkpoint_reload=final_reload,
             periodic_checkpoint_reload=periodic_reload,
@@ -1519,7 +1781,7 @@ def run(args: Any) -> int:
         )
 
         def retained_input_closure() -> None:
-            _assert_gpu1_runtime(execution_authority)
+            _assert_gpu_runtime(execution_authority)
             if _verify_execution_checkout(release) != execution_identity:
                 raise RuntimeError("Taste T6 execution identity drifted at PASS boundary")
             for authority in (
@@ -1533,7 +1795,7 @@ def run(args: Any) -> int:
                 controller_receipt,
             ):
                 authority.revalidate()
-            t5_load.revalidate_load_token(load_token)
+            t5_load.revalidate()
             policy.revalidate(stage=STAGE)
             observed_final_reload = validate_taste_adapter_checkpoint_reload(
                 output,

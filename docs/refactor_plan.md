@@ -1,5 +1,18 @@
 # Refactor Plan
 
+## 2026-08-31: release the dataset-specific Taste T6 PPO smoke
+
+- [x] Consume the independently verified managed T5 generic-base adoption
+  without claiming SFT, an adapter, or a Taste split.
+- [x] Bind T2/T3/T4 through one explicit frozen-oracle authority and preserve
+  the same three-class GINE, split, temperature, and no-test contract.
+- [x] Deterministically materialize matching zero-step policy/reference LoRAs
+  in memory and require five real optimizer steps, policy change, frozen
+  reference, reloadable checkpoints, and real candidates.
+- [x] Add a separate strict terminal verifier and paired AutoDL/Slurm entrypoint.
+- [ ] Fill the immutable execution pins, deploy a clean checkout, and launch
+  one fresh managed attempt; code/tests alone are not a scientific PASS.
+
 ## 2026-08-31: Append BACE GCFExplainer to the frozen 7/16 authority
 
 - [x] Reopen and hash-close the existing 7/16 matrix authority instead of

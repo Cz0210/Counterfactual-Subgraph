@@ -91,10 +91,9 @@ See:
   recovery from the c766 disconnected-anchor evidence into an exact
   multi-component partition and streaming downstream; release pins remain
   mandatory and the failed source is never treated as an ordinary PASS)
-- `docs/AUTODL_TASTEMOLNET_T6_OURS_PPO.md` (release-disabled implementation
-  contract for the real bounded three-class TasteMolNet Ours PPO smoke; it
-  cannot run until a reviewed controller receipt and strict terminal consumer
-  are integrated)
+- `docs/AUTODL_TASTEMOLNET_T6_OURS_PPO.md` (typed release contract for the real
+  bounded three-class TasteMolNet Ours PPO smoke, direct managed-T5 clean-base
+  adoption, and its separate strict terminal verifier)
 - `docs/AUTODL_MANAGED_EXECUTION_V2.md` (UUID attempt/checkpoint identities,
   launcher+worker lineage, quarantine-without-signals, SEALED worker evidence,
   independent verification, and atomic directory publication without mutable

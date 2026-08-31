@@ -25,7 +25,7 @@ python scripts/train_tastemolnet_gnn_ppo.py \
   --dataset-path /absolute/private/tastemolnet/train.csv \
   --output-dir /absolute/fresh/private/t6-ours-smoke \
   --gnn-checkpoint /absolute/private/tastemolnet/gine/calibrated \
-  --t5-output /absolute/private/tastemolnet/clean-policy-initializer \
+  --t5-output /absolute/private/tastemolnet/adopted-clean-base-managed-final \
   --downstream-policy configs/data_usage/tastemolnet_downstream_research_no_redistribution_v1.json \
   --base-policy configs/data_usage/tastemolnet_research_reporting_no_redistribution.yaml \
   --gnn-device cuda \

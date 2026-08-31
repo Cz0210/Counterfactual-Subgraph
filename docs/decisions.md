@@ -1,5 +1,41 @@
 # Decisions Log
 
+## [2026-08-31] Adopt the managed T5 generic base directly for Taste T6
+
+### Background
+
+The verified T5 result is an unchanged generic ChemLLM base with zero optimizer
+steps and no Taste split or adapter. The older T6 candidate instead required a
+never-released T5 zero-step adapter root, so treating the managed base as that
+root would fabricate predecessor semantics.
+
+### Decision
+
+T6 holds the published managed-v2 T5 final and its complete source inventory,
+while a separately pinned external authority carries the exact common
+T2/T3/T4 frozen-oracle identity. T6 deterministically materializes matching
+rank-8 zero-step LoRAs in memory for policy and reference; it does not train or
+copy the base and does not relabel the T5 adoption as SFT. The policy must
+change after at least five real PPO steps and the reference must remain
+unchanged.
+
+After the trainer publishes its strict terminal root, a separate process calls
+the existing held T6 consumer and atomically publishes a fresh verifier
+receipt. The managed task adopts that verifier receipt, not a path-only PASS
+check. No validation, calibration payload, test, RF, or GNN ablation is opened.
+
+### Consequences
+
+- T5's real `ADOPTED_CLEAN_GENERIC_BASE` semantics remain truthful.
+- T6 retains the existing three-class GINE reward and stable decoded-chem PPO
+  implementation instead of adding a training framework.
+- Release still requires exact immutable predecessor, checkout, controller,
+  GPU, output, and storage pins plus a fresh attempt UUID.
+
+### Status
+
+Accepted for the deadline T6 dataset-specific release.
+
 ## [2026-08-31] Advance the matrix only by strict authority append
 
 ### Background

@@ -97,7 +97,7 @@
         "minimum_optimizer_steps": 5,
         "mode": "train_only_frozen_gine_reward_ppo_smoke",
         "num_classes": 3,
-        "physical_gpu_index": 1,
+        "physical_gpu_index": 0,
         "rf_oracle_used": false,
         "run": 1,
         "source_label": 1,

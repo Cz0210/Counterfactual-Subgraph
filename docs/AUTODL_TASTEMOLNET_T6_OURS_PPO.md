@@ -1,17 +1,14 @@
 # AutoDL TasteMolNet T6 Ours PPO contract
 
-## Status
+## Status and release boundary
 
-The checked-in T6 implementation is deliberately **release disabled**. It is
-code and test evidence, not permission to start science. The authoritative
-release file is
-`configs/autodl/tastemolnet_t6_execution_release_v1.json`; its release bit is
-false and all deployment/evidence pins are null. The AutoDL wrapper exits 78
-before storage or GPU discovery, and the paired Slurm script exits 64 because
-Taste policy-v2 science is AutoDL-only.
-
-Do not edit those bits by hand. A reviewed controller-issued receipt is a
-prerequisite for any later activation.
+The authoritative switch is
+`configs/autodl/tastemolnet_t6_execution_release_v1.json`. A disabled file has
+null deployment pins and makes the AutoDL wrapper stop before GPU discovery.
+A release is valid only as the immediate child of the pinned implementation
+commit and may change exactly that file plus the AutoDL wrapper. The paired
+Slurm script remains a static refusal because Taste policy-v2 science is
+AutoDL-only.
 
 ## Scientific contract
 
@@ -43,15 +40,24 @@ boundary:
 
 - exact T3 calibrated-adoption output and gate;
 - exact T4 GINE oracle-smoke output and gate;
-- exact T5 clean-policy output, source model, adapter, and loaded policy/
-  reference tensor identity;
+- exact independently verified managed-v2 T5 clean generic-base adoption and
+  its complete source-model inventory;
+- one deterministic runtime zero-step LoRA materialization for policy and
+  reference, using the reviewed rank/alpha/dropout/target-module contract;
 - exact frozen GINE checkpoint bundle;
 - exact train CSV path, bytes, hash, and record contract;
 - downstream and base policy-v2 documents;
 - external release document and controller receipt;
-- immutable execution commit/tree and GPU-1 runtime identity.
+- immutable execution commit/tree and release-bound physical GPU identity.
 
 No validation, calibration split payload, or test payload is opened.
+
+T5 does not claim to contain a trained adapter. T6 loads the adopted generic
+base through a retained source descriptor, resets seed 7 before each of the
+policy/reference LoRA constructions, and requires their initial tensor hashes
+to match. The reference is frozen, its adapter and complete model hash must
+remain unchanged, while the policy adapter must change after at least five
+real optimizer steps.
 
 ## Terminal output
 
@@ -83,6 +89,13 @@ Downstream code must call `hold_taste_ppo_output()` or
 `validate_taste_ppo_output()`. Merely checking for `PASS`, required files, or a
 log marker is not authoritative.
 
+The managed GPU worker therefore runs a second Python process after the
+trainer closes all writers. That process invokes the strict consumer and
+atomically publishes a separate fresh verification receipt. The managed task
+is successful only when the receipt contains
+`[TASTE_T6_OURS_PPO_INDEPENDENT_VERIFIER_PASS]`; it never writes into the
+scientific root.
+
 The T0--T16 marker contract for this stage is exactly
 `[TASTE_T6_OURS_PPO_SMOKE_PASS]`. The same already-bracketed string is stored
 in every structured `marker` field, printed as the log marker, and written to
@@ -98,19 +111,19 @@ T2 downstream binding and all three hashes are written into T6 input and gate
 evidence and must match T3, T4, and T5 exactly. This is provenance validation,
 not an execution release; the tracked release gate remains false.
 
-## Remaining release gates
+## Execution-release gates
 
 Before any T6 science, a successor must:
 
-1. create a typed, controller-owned external receipt after the final immutable
-   integration commit exists;
-2. bind controller/task/run ID, live PID/start generation, GPU-1 UUID and held
-   exclusive lease, execution commit/tree, release/config/wrapper blobs,
-   T3--T5 gates, storage authority, and one fresh output root;
-3. make the controller run the strict terminal consumer before adopting PASS;
-4. verify on the real `/autodl-fs` output parent, without starting science,
-   that held-inode `linkat`, unlink, directory fsync, and strict reopen work;
-5. independently review the exact integration tree and production receipt.
-
-Until all five pass, the truthful state is
-`TASTE_T6_EXECUTION_NOT_RELEASED`; no launch command is provided here.
+1. pin the exact T2 adoption plus T3/T4 roots, gates, root inventories, common
+   GINE checkpoint, feature schema, validation-fitted temperature, and
+   downstream policy inside the external frozen-oracle authority;
+2. pin the managed T5 gate/published inventory and complete generic-base
+   inventory without inventing an adapter or Taste training step;
+3. bind one fresh science root, one fresh verification root, execution
+   commit/tree, controller receipt, physical GPU UUID, exclusive project lock,
+   and storage reservation;
+4. run the trainer and independent strict terminal consumer as one managed
+   command; only the verifier receipt is the manager's expected terminal root;
+5. preserve the two-commit release delta and use a fresh UUID for every
+   attempt.
