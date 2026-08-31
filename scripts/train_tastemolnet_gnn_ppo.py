@@ -1097,37 +1097,17 @@ def _stage_authorities(
     frozen: Mapping[str, Any],
     downstream_policy: Path,
     base_policy: Path,
-) -> tuple[Any, Any, Any, Any, Any]:
-    from src.eval.tastemolnet_gnn_stages import hold_taste_stage_output
-    from src.utils.tastemolnet_gine_pass_adoption_v1 import (
-        hold_t2_gine_pass_adoption,
+) -> tuple[Any, Any, Any]:
+    from src.train.tastemolnet_clean_policy_init import (
+        hold_taste_managed_evidence_binding_v2,
     )
     from src.utils.tastemolnet_downstream_policy import (
         load_tastemolnet_downstream_policy,
     )
 
     t5_load = stack.enter_context(_hold_t6_clean_base(t5_root))
-    t2_binding = frozen.get("t2_adoption_binding")
-    if type(t2_binding) is not dict:
-        raise ValueError("Taste T5 lacks the fresh T2 adoption binding")
-    t2 = stack.enter_context(
-        hold_t2_gine_pass_adoption(
-            t2_binding.get("adoption_root"),
-            expected_gate_sha256=t2_binding.get("gate_sha256"),
-            expected_receipt_sha256=t2_binding.get("receipt_sha256"),
-            expected_source_evidence_sha256=t2_binding.get(
-                "source_evidence_sha256"
-            ),
-        )
-    )
-    if t2.revalidate() != t2_binding:
-        raise ValueError("Taste T5/T6 fresh T2 adoption authority differs")
-    t3 = stack.enter_context(
-        hold_taste_stage_output(Path(frozen["t3_output_root"]))
-    )
-    t4 = stack.enter_context(
-        hold_taste_stage_output(Path(frozen["t4_output_root"]))
-    )
+    managed_binding = hold_taste_managed_evidence_binding_v2(frozen)
+    stack.callback(managed_binding.close)
     policy = stack.enter_context(
         load_tastemolnet_downstream_policy(
             downstream_policy, base_policy_path=base_policy
@@ -1169,69 +1149,16 @@ def _stage_authorities(
     ]:
         raise ValueError("Taste Ours allowed-input authority changed")
     policy_binding = policy.revalidate(stage=STAGE)
-    if frozen.get("downstream_policy_sha256") != policy.file_sha256:
+    held_frozen = managed_binding.revalidate().evidence()
+    if held_frozen != dict(frozen):
+        raise ValueError("Taste T6 managed-v2 frozen oracle authority changed")
+    if held_frozen.get("downstream_policy_sha256") != policy.file_sha256:
         raise ValueError("Taste T6 frozen oracle/downstream policy binding changed")
-    t3_evidence = t3.revalidate()
-    t4_evidence = t4.revalidate()
-    checkpoint_fields = {
-        "checkpoint_dir",
-        "checkpoint_id",
-        "checkpoint_inventory_sha256",
-        "checkpoint_stat_inventory_sha256",
-        "checkpoint_sha256s_sha256",
-    }
-    if any(
-        t3_evidence.get(field) != t4_evidence.get(field)
-        for field in checkpoint_fields
-    ):
-        raise ValueError("Taste T3/T4 do not bind one common frozen GINE")
-    expected_stage_bindings = {
-        "t3": {
-            "stage": "T3_GINE_CALIBRATED",
-            "output_root": frozen.get("t3_output_root"),
-            "gate_sha256": frozen.get("t3_gate_sha256"),
-            "root_inventory_sha256": frozen.get("t3_root_inventory_sha256"),
-        },
-        "t4": {
-            "stage": "T4_ORACLE_SMOKE",
-            "output_root": frozen.get("t4_output_root"),
-            "gate_sha256": frozen.get("t4_gate_sha256"),
-            "root_inventory_sha256": frozen.get("t4_root_inventory_sha256"),
-        },
-    }
-    for label, evidence in (("t3", t3_evidence), ("t4", t4_evidence)):
-        expected = expected_stage_bindings[label]
-        observed = {
-            "stage": evidence.get("stage"),
-            "output_root": str(t3.root if label == "t3" else t4.root),
-            "gate_sha256": evidence.get("gate_sha256"),
-            "root_inventory_sha256": evidence.get("root_inventory_sha256"),
-        }
-        if observed != expected:
-            raise ValueError(f"Taste {label.upper()} differs from T5 frozen authority")
-    for field in checkpoint_fields:
-        if frozen.get(field) != t3_evidence.get(field):
-            raise ValueError("Taste T5 frozen GINE differs from T3/T4 authority")
-    expected_t2_stage = {
-        "t2_adoption_gate_sha256": t2_binding.get("gate_sha256"),
-        "t2_adoption_receipt_sha256": t2_binding.get("receipt_sha256"),
-        "t2_adoption_binding_sha256": _canonical_sha256(t2_binding),
-    }
-    for label, evidence in (("T3", t3_evidence), ("T4", t4_evidence)):
-        if any(
-            evidence.get(key) != expected
-            for key, expected in expected_t2_stage.items()
-        ):
-            raise ValueError(
-                f"Taste {label} T2 adoption differs from T5 frozen authority"
-            )
-    if frozen.get("checkpoint_sha256") != frozen.get("checkpoint_id"):
-        raise ValueError("Taste T5 frozen selected checkpoint identity changed")
     t5_load.revalidate()
     if policy.revalidate(stage=STAGE) != policy_binding:
         raise ValueError("Taste T6 downstream policy changed while held")
-    t2.revalidate()
-    return t2, t3, t4, t5_load, policy
+    managed_binding.revalidate()
+    return managed_binding, t5_load, policy
 
 
 def run(args: Any) -> int:
@@ -1250,13 +1177,14 @@ def run(args: Any) -> int:
         )
         _assert_gpu_runtime(execution_authority)
         frozen = execution_authority["frozen_oracle_identity"]
-        t2_adoption, t3, t4, t5_load, policy = _stage_authorities(
+        managed_oracle, t5_load, policy = _stage_authorities(
             stack,
             args.t5_output,
             frozen=frozen,
             downstream_policy=args.downstream_policy,
             base_policy=args.base_policy,
         )
+        checkpoint_authority = managed_oracle.checkpoint
         t5_evidence = t5_load.revalidate()
         if requested_model != _normalized_absolute(
             t5_evidence["source_model_path"], label="T5 source model"
@@ -1280,15 +1208,6 @@ def run(args: Any) -> int:
         }
         if observed_runtime != expected_runtime:
             raise ValueError("Taste Ours predecessor release pins differ")
-        from src.eval.tastemolnet_gnn_stages import hold_taste_checkpoint_bundle
-
-        t3_evidence = t3.revalidate()
-        checkpoint_authority = stack.enter_context(
-            hold_taste_checkpoint_bundle(
-                checkpoint,
-                expected_stage_evidence=t3_evidence,
-            )
-        )
         checkpoint_payload_names = (
             "model.pt",
             "model_card.json",
@@ -1479,9 +1398,7 @@ def run(args: Any) -> int:
         )
         t5_load.revalidate()
         for authority in (
-            t2_adoption,
-            t3,
-            t4,
+            managed_oracle,
             t5_load,
             checkpoint_authority,
             train_authority,
@@ -1734,8 +1651,7 @@ def run(args: Any) -> int:
         }
         atomic_json(output / "state.json", state)
         for authority in (
-            t3,
-            t4,
+            managed_oracle,
             t5_load,
             checkpoint_authority,
             train_authority,
@@ -1785,9 +1701,7 @@ def run(args: Any) -> int:
             if _verify_execution_checkout(release) != execution_identity:
                 raise RuntimeError("Taste T6 execution identity drifted at PASS boundary")
             for authority in (
-                t2_adoption,
-                t3,
-                t4,
+                managed_oracle,
                 t5_load,
                 checkpoint_authority,
                 train_authority,

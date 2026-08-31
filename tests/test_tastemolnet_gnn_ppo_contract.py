@@ -1089,7 +1089,7 @@ def test_formal_t6_entrypoints_freeze_real_stable_loop_and_no_test_access() -> N
     assert '"test_loaded": False' in trainer
     assert "BatchedGNNPPORewardAdapter.from_payloads(" in trainer
     assert "BatchedGNNPPORewardAdapter.from_checkpoint(" not in trainer
-    assert "hold_taste_checkpoint_bundle(" in trainer
+    assert "hold_taste_managed_evidence_binding_v2(" in trainer
     assert "read_frozen_gine_payload(name)" in trainer
     assert "hold_readonly_file(train_csv" in trainer
     assert "FreshOutputDirectory" in trainer

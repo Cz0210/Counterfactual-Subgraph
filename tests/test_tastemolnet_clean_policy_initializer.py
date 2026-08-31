@@ -1266,3 +1266,8 @@ def test_cli_and_paired_wrappers_expose_only_zero_step_autodl_route() -> None:
     assert "REFUSING_HPC_EXECUTION" in slurm
     assert "exit 78" in slurm
     assert "sbatch" not in autodl.lower()
+
+
+def test_t6_managed_v2_binding_exports_exact_frozen_identity_type() -> None:
+    assert t5.TasteManagedEvidenceBindingV2 is t5.TasteFrozenOracleIdentity
+    assert callable(t5.hold_taste_managed_evidence_binding_v2)

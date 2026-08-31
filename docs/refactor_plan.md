@@ -17,6 +17,9 @@
   without claiming SFT, an adapter, or a Taste split.
 - [x] Bind T2/T3/T4 through one explicit frozen-oracle authority and preserve
   the same three-class GINE, split, temperature, and no-test contract.
+- [x] Replace the stale legacy held-stage reopen path with the real managed-v2
+  `HeldT2Receipt`, `HeldPublishedT3`, and `hold_t4_managed_final` binding, and
+  keep the AutoDL wrapper pinned to GPU0.
 - [x] Deterministically materialize matching zero-step policy/reference LoRAs
   in memory and require five real optimizer steps, policy change, frozen
   reference, reloadable checkpoints, and real candidates.

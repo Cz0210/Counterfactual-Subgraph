@@ -17,7 +17,7 @@ TASTE_T6_WRAPPER_RELEASED=0
 [[ "${TASTE_PAPER_RESULTS_ALLOWED:-0}" == "1" ]] || { echo "Taste paper reporting is not authorized" >&2; exit 64; }
 [[ "${TASTE_DATA_REDISTRIBUTION_ALLOWED:-1}" == "0" ]] || { echo "Taste data redistribution must remain forbidden" >&2; exit 64; }
 [[ "${RUN_GNN_ABLATION:-0}" == "0" ]] || { echo "GNN ablation is outside the Taste main route" >&2; exit 64; }
-[[ "${TASTEMOLNET_T6_GPU_INDEX:-1}" == "1" ]] || { echo "T6 Ours smoke is frozen to physical GPU1" >&2; exit 64; }
+[[ "${TASTEMOLNET_T6_GPU_INDEX:-0}" == "0" ]] || { echo "T6 Ours smoke is frozen to physical GPU0" >&2; exit 64; }
 
 MIN_PERSISTENT_FREE_GB="${MIN_PERSISTENT_FREE_GB:-100}"
 MIN_FREE_AFTER_RESERVATIONS_GB="${MIN_FREE_AFTER_RESERVATIONS_GB:-100}"
@@ -74,19 +74,19 @@ GPU_LINE="$(
   printf '%s' "$GPU_JSON" | "$AUTODL_PYTHON" -c '
 import json, sys
 payload = json.load(sys.stdin)
-matches = [row for row in payload["gpus"] if row["index"] == 1 and row["stable_idle"] and row["selected"]]
+matches = [row for row in payload["gpus"] if row["index"] == 0 and row["stable_idle"] and row["selected"]]
 if len(matches) != 1:
     raise SystemExit(75)
 print(str(matches[0]["index"]) + "\t" + str(matches[0]["uuid"]))
 '
 )" || {
   rc=$?
-  [[ $rc -ne 75 ]] || echo "WAITING_FOR_IDLE_GPU1" >&2
+  [[ $rc -ne 75 ]] || echo "WAITING_FOR_IDLE_GPU0" >&2
   exit "$rc"
 }
 IFS=$'\t' read -r GPU_INDEX GPU_UUID <<< "$GPU_LINE"
-[[ "$GPU_INDEX" == "1" && "$GPU_UUID" == GPU-* ]] \
-  || { echo "T6 physical GPU1 UUID binding failed" >&2; exit 64; }
+[[ "$GPU_INDEX" == "0" && "$GPU_UUID" == GPU-* ]] \
+  || { echo "T6 physical GPU0 UUID binding failed" >&2; exit 64; }
 
 exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   --project-root "$PROJECT_ROOT" \
@@ -95,7 +95,7 @@ exec "$AUTODL_PYTHON" "$SCRIPT_DIR/exp_run.py" \
   --dataset tastemolnet \
   --stage T6_OURS_SMOKE \
   --heavy \
-  --gpu-index 1 \
+  --gpu-index 0 \
   --gpu-uuid "$GPU_UUID" \
   --gpu-required \
   --gpu-lock-mode exclusive \

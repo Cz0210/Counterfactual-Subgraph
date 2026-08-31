@@ -626,6 +626,9 @@ class TasteFrozenOracleIdentity:
         }
 
 
+TasteManagedEvidenceBindingV2 = TasteFrozenOracleIdentity
+
+
 @dataclass(slots=True)
 class TasteCleanPolicyReleaseAuthority:
     path: Path
@@ -1084,6 +1087,13 @@ class HeldTasteFrozenOracleAuthority:
             if callable(close):
                 close()
 
+    def __enter__(self) -> "HeldTasteFrozenOracleAuthority":
+        self.revalidate()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
 
 def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozenOracleAuthority:
     hold_stage, hold_checkpoint = _load_taste_gnn_stage_api()
@@ -1147,6 +1157,14 @@ def _hold_frozen_oracle_authority(payload: Mapping[str, Any]) -> HeldTasteFrozen
             if callable(close):
                 close()
         raise
+
+
+def hold_taste_managed_evidence_binding_v2(
+    payload: Mapping[str, Any],
+) -> HeldTasteFrozenOracleAuthority:
+    """Hold the exact managed-v2 T2/T3/T4 evidence consumed by Taste T6."""
+
+    return _hold_frozen_oracle_authority(payload)
 
 
 def _git_identity(project_root: Path) -> tuple[str, str]:
@@ -3304,11 +3322,14 @@ __all__ = [
     "HeldTasteCleanPolicyOutput",
     "HeldTasteCleanPolicyLoadAuthority",
     "HeldTasteCleanPolicySourceModel",
+    "HeldTasteFrozenOracleAuthority",
     "TasteCleanPolicyLoadToken",
     "TasteCleanPolicyReleaseAuthority",
     "TasteCleanPolicyReleaseDisabled",
+    "TasteManagedEvidenceBindingV2",
     "TasteFrozenOracleIdentity",
     "build_clean_policy_initializer",
+    "hold_taste_managed_evidence_binding_v2",
     "inspect_generic_chemllm_base",
     "hold_clean_policy_output",
     "hold_clean_policy_load_authority",

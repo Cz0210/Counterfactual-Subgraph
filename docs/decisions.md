@@ -67,6 +67,37 @@ check. No validation, calibration payload, test, RF, or GNN ablation is opened.
 
 Accepted for the deadline T6 dataset-specific release.
 
+## [2026-08-31] Bind Taste T6 directly to the real managed-v2 T2/T3/T4 receipts
+
+### Background
+
+The first deadline T6 integration still reopened legacy held-stage roots, while
+the real Taste predecessors are the T2 receipt bundle, the published managed-v2
+T3 root, and the managed-final T4 root. That mismatch leaves T6 unable to hold
+the exact frozen checkpoint and oracle evidence used by production Taste runs.
+
+### Decision
+
+Expose one dataset-specific managed-v2 binding entrypoint from the existing T5
+release module and make T6 consume that retained authority directly. The held
+binding remains exact to the real `HeldT2Receipt`, `HeldPublishedT3`, and
+`hold_t4_managed_final` contracts, preserves the same checkpoint payload reads,
+and keeps the wrapper frozen to physical GPU0. No generic controller or new
+cross-dataset abstraction is introduced.
+
+### Consequences
+
+- T6 now revalidates the real managed-v2 predecessor layout instead of a stale
+  legacy stage-output schema.
+- The frozen GINE checkpoint payloads remain descriptor-held through the same
+  no-test, no-RF, three-class Taste contract.
+- Execution still remains release-gated until fresh external pins are filled
+  and a clean AutoDL checkout launches the science run.
+
+### Status
+
+Accepted for local integration and focused verification.
+
 ## [2026-08-31] Advance the matrix only by strict authority append
 
 ### Background
