@@ -23,6 +23,8 @@ adapter only with the already-defined standardized terminal contract.
 
 - reaching 20k can automatically continue through common recourse,
   calibration-only selection, held-out test, freeze, and standardization;
+- the scoped CPU-only sidecar waits for the executor fragment, launches the
+  composed controller once, verifies its heartbeat, and then exits;
 - no generation step is rerun and no test artifact enters the stop decision;
 - a changed cap receipt, generation manifest, task topology, or unresolved
   path sentinel fails closed before controller launch.

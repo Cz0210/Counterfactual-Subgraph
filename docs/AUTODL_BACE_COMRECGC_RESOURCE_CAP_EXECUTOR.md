@@ -90,3 +90,11 @@ attempt roots.  It also includes the final BACE frozen-cell standardization
 task.  Only the resulting manifest may be passed to
 `scripts/autodl/launch_four_by_four.sh`; the native fragment must never be
 launched directly or edited by hand.
+
+For an unattended deadline handoff, run
+`scripts/autodl/wait_launch_bace_comrecgc_cap_postprocess.sh` under `nohup`
+with `BACE_CAP_SOURCE_FRAGMENT`, one fresh `BACE_CAP_QUEUE_ROOT`, and one fresh
+`BACE_CAP_CONTROLLER_ID`.  The CPU-only sidecar writes an atomic heartbeat
+while the 20k checkpoint is pending, stops on an executor scientific failure,
+and exits after independently reopening the launched controller heartbeat.
+It does not signal, restart, or own the generation worker.

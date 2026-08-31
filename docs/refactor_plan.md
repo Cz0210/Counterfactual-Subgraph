@@ -8,9 +8,11 @@
   downstream cache/output through fresh generic-controller attempt roots.
 - [x] Add the BACE standardized terminal contract to the existing adapter and
   atomically compose a fresh runnable manifest.
-- [ ] Deploy a persistent sidecar that waits for `POSTPROCESS_QUEUE_READY`,
+- [x] Add a persistent sidecar that waits for `POSTPROCESS_QUEUE_READY`,
   prepares the fresh manifest, launches it once, and leaves matrix publication
   to the strict cell-authority publisher.
+- [ ] Deploy the sidecar against the live resume executor and verify its first
+  waiting heartbeat.
 
 ## 2026-09-01: Strict TasteMolNet paper-cell matrix append
 
