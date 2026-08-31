@@ -526,6 +526,32 @@ def _restore_numpy_rng_state(numpy_module: Any, payload: Mapping[str, Any]) -> N
     )
 
 
+def _normalize_torch_rng_state(torch_module: Any, value: Any, *, label: str) -> Any:
+    if not isinstance(value, torch_module.Tensor):
+        raise ValueError(f"{label} must be a torch.Tensor")
+    normalized = value.detach().cpu().contiguous()
+    if normalized.dtype != torch_module.uint8:
+        raise ValueError(f"{label} must have dtype torch.uint8")
+    if normalized.dim() != 1:
+        raise ValueError(f"{label} must be one-dimensional")
+    return normalized
+
+
+def _normalize_cuda_rng_state_all(torch_module: Any, value: Any) -> list[Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("GlobalGCE CUDA RNG state must be a sequence")
+    return [
+        _normalize_torch_rng_state(
+            torch_module,
+            item,
+            label=f"GlobalGCE CUDA RNG state[{index}]",
+        )
+        for index, item in enumerate(value)
+    ]
+
+
 def _atomic_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -1862,9 +1888,19 @@ def train_globalgce_resumable(
             )
         else:
             numpy_module.random.set_state(checkpoint["numpy_rng_state"])
-        torch_module.set_rng_state(checkpoint["torch_rng_state"])
-        if torch_module.cuda.is_available() and checkpoint.get("cuda_rng_state"):
-            torch_module.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+        torch_module.set_rng_state(
+            _normalize_torch_rng_state(
+                torch_module,
+                checkpoint["torch_rng_state"],
+                label="GlobalGCE CPU RNG state",
+            )
+        )
+        normalized_cuda_rng = _normalize_cuda_rng_state_all(
+            torch_module,
+            checkpoint.get("cuda_rng_state"),
+        )
+        if torch_module.cuda.is_available() and normalized_cuda_rng:
+            torch_module.cuda.set_rng_state_all(normalized_cuda_rng)
         if on_resume_checkpoint is not None:
             if loaded_checkpoint_file is None:
                 raise RuntimeError(

@@ -419,6 +419,75 @@ def test_epoch_callback_can_prove_planned_stop_and_exact_resume(
     assert resumed["scheduler_state_restored"] is True
 
 
+class _DeviceLikeByteTensor(torch.Tensor):
+    cpu_calls = 0
+
+    @staticmethod
+    def __new__(cls, base: torch.Tensor) -> "_DeviceLikeByteTensor":
+        return torch.Tensor._make_subclass(cls, base, require_grad=False)
+
+    def cpu(self) -> torch.Tensor:
+        type(self).cpu_calls += 1
+        return self.detach().clone().as_subclass(torch.Tensor)
+
+
+def test_normalize_torch_rng_state_calls_cpu_on_device_like_tensor() -> None:
+    original = torch.get_rng_state().clone()
+    _DeviceLikeByteTensor.cpu_calls = 0
+    value = _DeviceLikeByteTensor(original)
+    normalized = resumable_module._normalize_torch_rng_state(
+        torch,
+        value,
+        label="test torch rng state",
+    )
+    assert _DeviceLikeByteTensor.cpu_calls == 1
+    assert isinstance(normalized, torch.Tensor)
+    assert type(normalized) is torch.Tensor
+    assert normalized.dtype == torch.uint8
+    assert normalized.dim() == 1
+    assert normalized.device.type == "cpu"
+    assert normalized.is_contiguous()
+    assert torch.equal(normalized, original.cpu())
+
+
+def test_normalize_cuda_rng_state_all_normalizes_each_tensor() -> None:
+    original = torch.get_rng_state().clone()
+    _DeviceLikeByteTensor.cpu_calls = 0
+    normalized = resumable_module._normalize_cuda_rng_state_all(
+        torch,
+        [_DeviceLikeByteTensor(original), _DeviceLikeByteTensor(original.clone())],
+    )
+    assert normalized is not None
+    assert len(normalized) == 2
+    assert _DeviceLikeByteTensor.cpu_calls == 2
+    assert all(type(item) is torch.Tensor for item in normalized)
+    assert all(item.dtype == torch.uint8 for item in normalized)
+    assert all(item.dim() == 1 for item in normalized)
+    assert all(item.device.type == "cpu" for item in normalized)
+    assert all(item.is_contiguous() for item in normalized)
+
+
+def test_normalize_torch_rng_state_rejects_wrong_dtype_and_dim() -> None:
+    with pytest.raises(ValueError, match="dtype torch.uint8"):
+        resumable_module._normalize_torch_rng_state(
+            torch,
+            torch.arange(8, dtype=torch.int64),
+            label="bad dtype rng state",
+        )
+    with pytest.raises(ValueError, match="one-dimensional"):
+        resumable_module._normalize_torch_rng_state(
+            torch,
+            torch.zeros((2, 4), dtype=torch.uint8),
+            label="bad dim rng state",
+        )
+    with pytest.raises(ValueError, match="must be a torch.Tensor"):
+        resumable_module._normalize_torch_rng_state(
+            torch,
+            [1, 2, 3],
+            label="bad type rng state",
+        )
+
+
 def test_expected_checkpoint_rejects_same_byte_physical_leaf_swap(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
