@@ -2828,3 +2828,17 @@ Mutagenicity roadmaps.
   the delayed-ctime production failure shape in focused tests.
 - [ ] Launch a fresh UUID attempt from the immutable successor commit; do not
   resume either preserved failed attempt.
+
+## 2026-08-31: TasteMolNet T14 fixed-cohort 20k/25k full route
+
+- [x] Freeze all and only train rows with true Sweet label and frozen T3 GINE
+  Sweet prediction; retain duplicate molecular graphs and stable-sort by
+  molecule ID plus canonical graph hash.
+- [x] Reuse the verified native T9 bridge with private 2,500-step complete-state
+  checkpoints and deterministic resume.
+- [x] Implement the 20k cap, one 25k fallback, minimum ten valid unique strict
+  train-side flips, and explicit scientific-failure terminal.
+- [x] Add independent terminal reopen, focused tests, an AutoDL GPU1 launcher,
+  and paired static-refusal Slurm parity.
+- [ ] Launch one fresh UUID output from the immutable reviewed commit; generation
+  must not open validation, calibration, or test.

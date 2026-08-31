@@ -81,6 +81,44 @@ test evaluation, freeze, and standardization require fresh output roots.
 
 Accepted
 
+---
+
+## [2026-08-31] Bound TasteMolNet ComRecGC full generation to a frozen train cohort
+
+### Motivation
+
+The completed T9 smoke proves the native three-class bridge, but its 64-row
+cohort and 500-step budget are not a paper result.  The deadline protocol now
+fixes both the full cohort and a disclosed resource cap, so the full route no
+longer needs a new framework or any held-out-data decision.
+
+### Decision
+
+T14 selects every training row with true label 1 whose frozen T3 calibrated
+GINE prediction is also 1.  It applies no canonical-graph deduplication and
+orders rows by molecule identifier and canonical attributed-graph hash before
+writing a SHA-bound cohort manifest.  Generation uses only that train cohort,
+the verified T9 bridge, and the official native ComRecGC implementation.
+
+Write private reloadable checkpoints every 2,500 steps.  At 20,000, stop and
+post-process when at least ten canonical valid unique, lineage-closed strict
+train-side flips exist.  Otherwise extend once to 25,000; fewer than ten there
+is a scientific failure.  Validation, calibration, and test remain unopened
+during generation and the resource decision.
+
+### Consequences
+
+- The result discloses configured 20k, fallback 25k, effective M, cap use, and
+  stop reason.
+- Resume restores official collector, transition, bridge, loop, and RNG state;
+  it cannot change the cohort.
+- An independent terminal reopen validates cohort hashes, the effective
+  checkpoint, valid-rule count, resource receipt, and held-out isolation.
+
+### Status
+
+Accepted
+
 ## [2026-08-31] Losslessly adopt the fixed-budget NeuroSED PASS for T7
 
 ### Motivation
