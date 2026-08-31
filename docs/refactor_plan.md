@@ -2974,3 +2974,17 @@ Mutagenicity roadmaps.
   exact-path rejection cases.
 - [ ] Retrigger T6 with a fresh UUID/root from the immutable successor commit;
   never adopt the pre-model policy-gate failure.
+
+## 2026-08-31: Mutagenicity exact read-only postprocess
+
+- [x] Add a dataset-specific validator for the adopted completed exact root;
+  close its terminal, controller receipt, selected recourses, DBSCAN labels,
+  generation manifest, and live-writer state without invoking science again.
+- [x] Continue only through chemistry, WNode, full gate, freeze, and a strict
+  one-cell atomic matrix append; pin the chemistry input to all 100 selected
+  common recourses.
+- [x] Add deterministic downstream resume, paired Slurm submission, focused
+  tests, and explicit no-rerun provenance for pair store/DBSCAN/common recourse.
+- [ ] Produce and review the missing `mut_trace_on_off_parity_v1` PASS receipt,
+  then submit the fresh postprocess root.  Until that receipt exists, fail
+  before creating output rather than weakening the Mut trace gate.

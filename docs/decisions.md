@@ -14201,3 +14201,46 @@ capture.
 ### Status
 
 Accepted
+
+---
+
+## [2026-08-31] Continue Mutagenicity ComRecGC from completed exact science read-only
+
+### Motivation
+
+The adopted Mutagenicity full root has already completed candidate labeling,
+the exact multi-component DBSCAN partition, centroid/radius calculation,
+coverage, and official greedy selection.  Re-running any of those stages would
+create a second scientific writer and could diverge from the hash-closed result.
+The remaining paper-cell work is deterministic chemistry, standardized WNode
+evaluation, freeze, and matrix publication.  The generation trace is present,
+but the current trace-only summary does not prove Mut trace-on/off parity.
+
+### Decision
+
+Add one Mutagenicity-specific read-only continuation.  It must independently
+reopen the exact adoption receipt, source controller terminal, common-recourse
+terminal, DBSCAN artifacts, generation manifest, and all frozen hashes before
+running downstream work.  Chemistry must consume exactly the 100 selected
+common recourses.  Pair-store, DBSCAN, and common-recourse commands are absent
+from the runner and recorded as not rerun.
+
+Require an explicit `mut_trace_on_off_parity_v1` PASS receipt before creating a
+fresh output root.  Do not apply the AIDS/BACE trace-integrity waiver to Mut.
+After freeze, publish only a strict one-cell `Mutagenicity/ComRecGC` successor
+whose other 15 matrix rows are unchanged and whose shared identity agrees with
+the frozen Mut/Ours cell.
+
+### Consequences
+
+- Completed exact science remains immutable and cannot acquire a second writer.
+- Missing parity is reported at its actual scientific gate rather than hidden
+  behind a chemistry or matrix failure.
+- Interrupted chemistry/WNode/freeze stages can resume under an exact frozen
+  input/argv contract without rerunning common recourse.
+- Matrix publication cannot silently alter another method cell or impute a
+  missing result.
+
+### Status
+
+Accepted
