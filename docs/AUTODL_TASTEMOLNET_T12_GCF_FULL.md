@@ -13,10 +13,15 @@ producer is implemented in
 `src/baselines/tastemolnet_gcf_replay_canary.py` and exposed by
 `scripts/run_tastemolnet_gcf_replay_canary_worker.py`.  It reconstructs the
 same descriptor-held T7 GINE/NeuroSED/official-source authority and runs the
-official VRRW loop; it is not a mock producer.  This release is still not a
-T12 paper-result release and exposes no T12 cell PASS marker.  Production
-remains closed until this producer passes on a real A800 and the later 20k
-train/calibration/test/export worker is implemented.
+official VRRW loop; it is not a mock producer.  The train-side 20k producer now
+uses the dataset-specific exact external transition store in
+`src/baselines/tastemolnet_gcf_transition_store.py`, the lossless native
+candidate archive in `src/baselines/tastemolnet_gcf_candidate_store.py`, and
+the fresh/resume entry point `scripts/run_tastemolnet_gcf_full.py`.  This is
+still not a T12 paper-result release: generation verification prints only
+`[TASTE_T12_GCF_GENERATION_PASS]`.  The paper marker `[TASTE_GCF_PASS]`
+remains closed until calibration-only freeze, held-out test, standardized
+exports and their separate verifier are implemented and pass.
 
 ## Authorized identity change
 
@@ -78,13 +83,17 @@ cohort the checked bridge proof is:
 - a 5,310,251,008-byte bridge checkpoint formula under 8 GiB; and
 - a 32-GiB hard cap on any complete checkpoint before publication.
 
-This is not yet a full-route RAM proof.  The unchanged official transition
-dictionary can reference 200,020,000 coverage rows: 3,022,702,240,000 bytes as
-dense float32, or 94,459,445,000 bytes even if coverage alone is bit-packed.
-The production checkpoint orchestrator therefore rejects a raw dict and
-requires a later dataset-specific external compact transition store with a
-bounded expanded LRU and exact checkpoint export.  Lowering `sample_size` or
-`candidate_capacity` is not an authorized workaround.
+The official transition mapping is now replaced only at its persistence
+boundary by a T12-specific append-only journal.  Already-computed binary
+coverage is row-major bit-packed; graph hashes, action order, importance dtype
+and values are retained, and one expanded official tuple is held in a
+deterministic LRU.  Checkpoints contain only the authenticated journal prefix,
+active insertion order and LRU keys.  Independent reopen scans and rehashes
+the complete prefix and reconstructs the exact numeric tuple without model
+calls, action enumeration or RNG.  A raw dictionary, non-binary coverage,
+more than two expanded rows, or any `sample_size`/`candidate_capacity` change
+remains a hard failure.  The external store is capped at 128 GiB; the
+persistent launcher requires 220 GiB free for all T12 generation artifacts.
 
 ## Mandatory real-GPU replay gate
 
@@ -218,23 +227,66 @@ all three phases.  Replace that envelope with the first real receipt/log
 measurement; the 16/8-step walk is bounded, but model/source loading dominates
 and cluster load can vary.
 
-## Remaining production work
+## Direct 10k -> 20k production and generation verification
 
-The following must still be implemented and reviewed before launching the T12
-20k main-table worker:
+Use one fresh UUID/root and one generation token across two distinct science
+processes. `T12_EXACT_REPLAY_GATE` must name the existing real-A800 gate-v2
+JSON, not only its marker file. The other paths are the adopted T7/T3
+authorities already used by that canary.
 
-1. run gate v2 over the completed real A800 `91b` observations and retain its
-   exact replay receipt (the three workers need not be repeated);
-2. implement the remaining external compact official-transition store and its
-   bounded expanded LRU; the bridge history and 10k/20k orchestration are now
-   implemented, but the raw transition state is deliberately rejected;
-3. run the production resource preflight against the real 3,778-parent route
+```bash
+export CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONHASHSEED=7 CUDA_VISIBLE_DEVICES=1
+export T12_ATTEMPT_ID=$(python -c 'import uuid; print(uuid.uuid4())')
+export T12_GENERATION_TOKEN=$(python -c 'import secrets; print(secrets.token_hex(32))')
+export T12_OUTPUT_ROOT=/autodl-fs/data/counterfactual-subgraph-runtime/outputs/autodl/tastemolnet/gcfexplainer/t12-production/attempt-$T12_ATTEMPT_ID
+export T12_GPU_UUID=$(nvidia-smi -i 1 --query-gpu=uuid --format=csv,noheader,nounits | tr -d '[:space:]')
+
+python scripts/run_tastemolnet_gcf_full.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --mode fresh --output-root "$T12_OUTPUT_ROOT" --attempt-id "$T12_ATTEMPT_ID" --generation-token "$T12_GENERATION_TOKEN" --gpu-uuid "$T12_GPU_UUID" --managed-neurosed-root "$TASTE_MANAGED_NEUROSED_ROOT" --t3-root "$TASTE_T3_ROOT" --official-root "$TASTE_OFFICIAL_GCF_ROOT" --neurosed-threshold-authority "$TASTE_T7_NEUROSED_THRESHOLD_AUTHORITY" --exact-replay-gate "$T12_EXACT_REPLAY_GATE"
+
+python scripts/run_tastemolnet_gcf_full.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --mode resume --checkpoint-manifest "$T12_OUTPUT_ROOT/checkpoints/checkpoint-00010000.manifest.json" --output-root "$T12_OUTPUT_ROOT" --attempt-id "$T12_ATTEMPT_ID" --generation-token "$T12_GENERATION_TOKEN" --gpu-uuid "$T12_GPU_UUID" --managed-neurosed-root "$TASTE_MANAGED_NEUROSED_ROOT" --t3-root "$TASTE_T3_ROOT" --official-root "$TASTE_OFFICIAL_GCF_ROOT" --neurosed-threshold-authority "$TASTE_T7_NEUROSED_THRESHOLD_AUTHORITY" --exact-replay-gate "$T12_EXACT_REPLAY_GATE"
+
+python scripts/verify_tastemolnet_gcf_full_generation.py --config configs/hpc.yaml --set inference.fallback_to_heuristic=false --production-root "$T12_OUTPUT_ROOT" --output-root "$T12_OUTPUT_ROOT/generation_verification"
+```
+
+The verifier independently rescans both transition/history prefixes, reopens
+both checkpoints, proves that the 20k trace and journals retain the committed
+10k prefix, binds both official native archives to their checkpoint states,
+and reopens the terminal candidate archive. Its PASS is generation-only and
+records `paper_cell_pass=false`.
+
+### Persistent GPU1 handover after T11
+
+For the currently frozen T11 manager, launch the narrow sidecar once from the
+deployed immutable checkout. It polls `/proc/605212/stat` for exact start ticks
+`763435090`, never signals T11, waits for GPU1 to have no compute process, runs
+fresh 10k, resume 20k in a new process, then the independent verifier.
+Heartbeats and logs survive the launching shell.
+
+```bash
+export T12_REPO_ROOT=/absolute/deployed/integration-checkout
+export T12_WAIT_PID=605212
+export T12_WAIT_PID_START_TICKS=763435090
+export T12_GPU_INDEX=1
+export T12_MIN_FREE_GB=220
+export TASTE_OFFICIAL_GCF_ROOT=$T12_REPO_ROOT/baselines/gcfexplainer_official
+# Also export the adopted NeuroSED root, T3 root, threshold JSON and gate JSON.
+bash scripts/autodl/launch_tastemolnet_t12_after_t11_v1.sh
+```
+
+The launcher prints the controller PID/root and status command. A concurrent
+second launch is rejected by a dedicated T12 lock; no general controller
+platform is introduced.
+
+## Remaining paper-cell work
+
+The following remains before publishing the T12 method cell:
+
+1. retain and rehash the already-passed real A800 gate-v2 receipt at launch;
+2. run the production resource preflight against the real 3,778-parent route
    and publish the measured checkpoint/RSS receipt below the hard caps;
-4. lossless native candidate graph persistence and train-only candidate
-   materialization;
-5. calibration-only ordering with the externally frozen shared WNode
+3. calibration-only ordering with the externally frozen shared WNode
    threshold contract;
-6. post-freeze held-out test evaluation, standardized Figure 3/Figure 4/Table
+4. post-freeze held-out test evaluation, standardized Figure 3/Figure 4/Table
    2 exports, and a separate replaying terminal verifier.
 
 The NeuroSED distance threshold and shared WNode threshold contract remain

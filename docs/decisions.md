@@ -153,6 +153,53 @@ terminal contract so its current replay canary remains ineligible.
 
 ---
 
+## [2026-09-01] Externalize only Taste T12 transition persistence
+
+### Motivation
+
+The exact A800 replay canary passed with canonical attributed-graph identity,
+but the pinned production route (`M=20000`, `sample_size=10000`, `k=100000`,
+3,778 parents) could not retain the official transition coverage dictionary in
+RAM or a model checkpoint. Lowering those scientific parameters or recomputing
+neighbors after resume would change the method.
+
+### Decision
+
+Use a T12-only append-only transition journal. Persist every already-computed
+target hash, native action, importance dtype/value and binary coverage
+exactly; bit-pack only the binary coverage representation; retain one expanded
+tuple in a deterministic LRU. At 10k and 20k, fsync and export a small prefix
+closure containing journal hashes, insertion order and LRU keys. A new process
+must rescan and authenticate the entire committed prefix before continuing.
+Reopen adds no model call, edit enumeration or RNG draw. Reject non-binary
+coverage, parameter drift, more than two expanded tuples, aliases, truncation
+or hash-chain drift.
+
+At 20k, persist the complete ordered official graph/candidate registry in one
+immutable Torch archive and independently reopen both raw bytes and its
+recursive semantic digest. Bind each official native `counterfactuals.pt` to
+the corresponding live checkpoint state. A separate generation verifier
+reopens both checkpoints, transition prefixes, compact history prefixes,
+official native results and terminal candidate archive. It may emit only
+`[TASTE_T12_GCF_GENERATION_PASS]` with `paper_cell_pass=false`.
+
+### Consequences
+
+- The authorized official walk, candidate predicate, GINE,
+  generated-query-to-original-target NeuroSED direction, sample size,
+  capacity and RNG are unchanged.
+- Production generation is directly runnable as fresh 1--10k and a distinct
+  resume 10001--20k process, including a narrow GPU1-after-T11 sidecar.
+- The T12 matrix cell remains incomplete until calibration-only ordering,
+  frozen selection, held-out test, standardized exports and the independent
+  paper terminal verifier produce `[TASTE_GCF_PASS]`.
+
+### Status
+
+Implemented and focused-tested locally; real A800 20k generation is pending.
+
+---
+
 ## [2026-09-01] Compare T12 native results by exact scientific content
 
 ### Motivation

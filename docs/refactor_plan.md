@@ -135,13 +135,15 @@
   mode with complete live-registry rows plus a fixed-record reopenable history
   hash chain.  Bind official `sample_size=10000`, `k=100000`, derive the 20k
   bridge RAM/checkpoint caps, and enforce the 10k/20k segment plan.
-- [ ] Replace the raw official GCF transition dictionary with a
+- [x] Replace the raw official GCF transition dictionary with a
   dataset-specific external compact transition store plus bounded expanded
   LRU.  At 3,778 parents its worst pinned transition coverage is ~3.02 TB
   dense float32/~94.46 GB bit-packed, so production remains fail-closed even
   though the bridge itself is bounded.  Do not lower sample size or k.
-- [ ] Add lossless native candidate persistence, calibration-only ordering,
-  held-out test, standardized exports and the separate terminal verifier.
+- [x] Add lossless native candidate persistence plus an independent generation
+  verifier that reopens the 10k/20k journals, checkpoints and terminal archive.
+- [ ] Add calibration-only ordering, held-out test, standardized exports and
+  the separate paper-cell terminal verifier.
 - [ ] Pin the external shared WNode threshold authority for the full
   calibration/export route; never infer it from test/default values.
 

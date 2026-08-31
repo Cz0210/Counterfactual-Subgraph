@@ -49,6 +49,17 @@ from src.baselines.tastemolnet_gcf_production_state import (
     T12ProductionBounds,
     TasteT12ProductionStateError,
 )
+from src.baselines.tastemolnet_gcf_candidate_store import (
+    TasteT12CandidateStoreError,
+    reopen_native_candidate_snapshot,
+    write_native_candidate_snapshot,
+)
+from src.baselines.tastemolnet_gcf_transition_store import (
+    TRANSITION_SNAPSHOT_SCHEMA,
+    TRANSITION_STORE_POLICY,
+    T12ExternalTransitionStore,
+    TasteT12TransitionStoreError,
+)
 
 
 STAGE = "T12_GCF_FULL"
@@ -694,36 +705,50 @@ class T12StableGCFBridge:
                 raise TasteGCFFullResumeError(
                     "T12 candidate/index registry differs during pruning"
                 )
-        transition_target_count = 0
-        for source, transition in transitions.items():
-            source = _stable_graph_hash(
-                source, field="T12 live transition source"
-            )
-            if (
-                source not in live
-                or not isinstance(transition, (list, tuple))
-                or len(transition) != 4
-            ):
-                raise TasteGCFFullResumeError(
-                    "T12 live transition payload is malformed"
+        if getattr(transitions, "T12_BOUNDED_TRANSITION_STATE", False) is True:
+            try:
+                transition_audit = transitions.validate_live_domain(
+                    live_sources=live,
+                    known_target=lambda target: (
+                        self.production_history.lookup_first(target) is not None
+                    ),
                 )
-            targets = transition[0]
-            if (
-                not isinstance(targets, (list, tuple))
-                or len(targets) > self.production_bounds.sample_size + 1
-            ):
-                raise TasteGCFFullResumeError(
-                    "T12 transition target count exceeds the pinned sample size"
+            except TasteT12TransitionStoreError as exc:
+                raise TasteGCFFullResumeError(str(exc)) from exc
+            transition_target_count = transition_audit[
+                "transition_target_reference_count"
+            ]
+        else:
+            transition_target_count = 0
+            for source, transition in transitions.items():
+                source = _stable_graph_hash(
+                    source, field="T12 live transition source"
                 )
-            transition_target_count += len(targets)
-            for target in targets:
-                target = _stable_graph_hash(
-                    target, field="T12 live transition target"
-                )
-                if self.production_history.lookup_first(target) is None:
+                if (
+                    source not in live
+                    or not isinstance(transition, (list, tuple))
+                    or len(transition) != 4
+                ):
                     raise TasteGCFFullResumeError(
-                        "T12 transition target is absent from compact history"
+                        "T12 live transition payload is malformed"
                     )
+                targets = transition[0]
+                if (
+                    not isinstance(targets, (list, tuple))
+                    or len(targets) > self.production_bounds.sample_size + 1
+                ):
+                    raise TasteGCFFullResumeError(
+                        "T12 transition target count exceeds the pinned sample size"
+                    )
+                transition_target_count += len(targets)
+                for target in targets:
+                    target = _stable_graph_hash(
+                        target, field="T12 live transition target"
+                    )
+                    if self.production_history.lookup_first(target) is None:
+                        raise TasteGCFFullResumeError(
+                            "T12 transition target is absent from compact history"
+                        )
         missing = live - set(self.records)
         if missing:
             raise TasteGCFFullResumeError(
@@ -1282,6 +1307,10 @@ def _validate_stable_official_state(
     candidates = state.get("counterfactual_candidates")
     transitions = state.get("transitions")
     traversed = state.get("traversed_hashes")
+    transition_snapshot = (
+        type(transitions) is dict
+        and transitions.get("schema_version") == TRANSITION_SNAPSHOT_SCHEMA
+    )
     if (
         not isinstance(graph_map, Mapping)
         or not isinstance(graph_index_map, Mapping)
@@ -1302,12 +1331,30 @@ def _validate_stable_official_state(
         key = _stable_graph_hash(row.get("graph_hash"), field="T12 candidate graph identity")
         if key not in graph_map or graph_index_map.get(key) != index:
             raise TasteGCFFullResumeError("T12 candidate/index registry differs")
-    for source, transition in transitions.items():
-        _stable_graph_hash(source, field="T12 transition source")
-        if source not in graph_map or not isinstance(transition, (list, tuple)) or len(transition) != 4:
-            raise TasteGCFFullResumeError("T12 transition payload is malformed")
-        for target in transition[0]:
-            _stable_graph_hash(target, field="T12 transition target")
+    if transition_snapshot:
+        active_sources = transitions.get("active_sources")
+        if (
+            transitions.get("policy") != TRANSITION_STORE_POLICY
+            or type(active_sources) is not list
+            or transitions.get("active_entry_count") != len(active_sources)
+            or len(set(active_sources)) != len(active_sources)
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 external transition checkpoint is malformed"
+            )
+        for source in active_sources:
+            source = _stable_graph_hash(source, field="T12 transition source")
+            if source not in graph_map:
+                raise TasteGCFFullResumeError(
+                    "T12 external transition source left the graph registry"
+                )
+    else:
+        for source, transition in transitions.items():
+            _stable_graph_hash(source, field="T12 transition source")
+            if source not in graph_map or not isinstance(transition, (list, tuple)) or len(transition) != 4:
+                raise TasteGCFFullResumeError("T12 transition payload is malformed")
+            for target in transition[0]:
+                _stable_graph_hash(target, field="T12 transition target")
 
 
 def capture_checkpoint_payload(
@@ -1350,12 +1397,31 @@ def capture_checkpoint_payload(
                 "T12 raw official transition state is not production bounded: "
                 f"bitpacked_coverage_bytes={report['minimum_bitpacked_coverage_bytes']}"
             )
+        production_transition_bound_report(
+            bounds=bridge.production_bounds, transition_store=transitions
+        )
+        transition_audit = transitions.audit()
+        if (
+            transition_audit.get("contract_sha256")
+            != production_transition_contract_sha256(frozen_identity)
+            or transition_audit.get("attempt_id") != frozen_identity["attempt_id"]
+            or transition_audit.get("generation_token")
+            != frozen_identity["generation_token"]
+        ):
+            raise TasteGCFFullResumeError(
+                "T12 external transition store identity differs from the checkpoint"
+            )
     current = _stable_graph_hash(
         current_graph_identity, field="T12 checkpoint current graph"
     )
     if len(vrrw.traversed_hashes) != frozen_identity["checkpoint_cursor"]:
         raise TasteGCFFullResumeError("T12 checkpoint cursor differs from official trace")
     official = {field: getattr(vrrw, field) for field in _VRRW_PROGRESS_STATE_FIELDS}
+    if frozen_identity["purpose"] == "production":
+        try:
+            official["transitions"] = vrrw.transitions.export_checkpoint_state()
+        except TasteT12TransitionStoreError as exc:
+            raise TasteGCFFullResumeError(str(exc)) from exc
     _validate_stable_official_state(official, current_graph_identity=current)
     bridge_state = bridge.checkpoint_state()
     adapter_state = _adapter_state(adapter)
@@ -1570,6 +1636,16 @@ def reopen_checkpoint(
     except TypeError:  # pragma: no cover - older supported Torch
         loaded = torch.load(payload_path, map_location="cpu")
     validated = validate_checkpoint_payload(loaded, expected_identity=identity)
+    transition_state = validated["state"]["official"].get("transitions")
+    if (
+        validated["identity"]["purpose"] == "production"
+        and type(transition_state) is dict
+        and transition_state.get("schema_version") == TRANSITION_SNAPSHOT_SCHEMA
+    ):
+        try:
+            T12ExternalTransitionStore.verify_checkpoint_state(transition_state)
+        except TasteT12TransitionStoreError as exc:
+            raise TasteGCFFullResumeError(str(exc)) from exc
     for field in ("identity_sha256", "state_sha256", "rng_sha256"):
         if manifest.get(field) != validated[field]:
             raise TasteGCFFullResumeError(f"T12 checkpoint manifest {field} changed")
@@ -1591,8 +1667,36 @@ def restore_checkpoint_payload(
 
     validated = validate_checkpoint_payload(payload, expected_identity=expected_identity)
     state = validated["state"]
+    transition_state = state["official"].get("transitions")
+    is_external_transition = (
+        validated["identity"]["purpose"] == "production"
+        and type(transition_state) is dict
+        and transition_state.get("schema_version") == TRANSITION_SNAPSHOT_SCHEMA
+    )
     for field in _VRRW_PROGRESS_STATE_FIELDS:
-        setattr(vrrw, field, state["official"][field])
+        if field != "transitions" or not is_external_transition:
+            setattr(vrrw, field, state["official"][field])
+    if is_external_transition:
+        current_store = getattr(vrrw, "transitions", None)
+        try:
+            if getattr(current_store, "T12_BOUNDED_TRANSITION_STATE", False) is True:
+                current_store.restore_checkpoint_state(transition_state)
+            else:
+                current_store = T12ExternalTransitionStore(
+                    root=transition_state["root"],
+                    parent_count=transition_state["parent_count"],
+                    sample_size=transition_state["sample_size"],
+                    candidate_capacity=transition_state["candidate_capacity"],
+                    contract_sha256=transition_state["contract_sha256"],
+                    attempt_id=transition_state["attempt_id"],
+                    generation_token=transition_state["generation_token"],
+                    expanded_capacity=transition_state["expanded_capacity"],
+                    max_store_bytes=transition_state["max_store_bytes"],
+                    resume_snapshot=transition_state,
+                )
+                setattr(vrrw, "transitions", current_store)
+        except TasteT12TransitionStoreError as exc:
+            raise TasteGCFFullResumeError(str(exc)) from exc
     bridge.restore_checkpoint_state(state["bridge"])
     _restore_adapter_state(adapter, state["adapter"])
     action_counts.clear()
@@ -1602,8 +1706,18 @@ def restore_checkpoint_payload(
         action_counts[key] = _native_int(value, field=f"T12 restored action {key}")
     _restore_rng_state(validated["rng"], np=np, torch=torch)
     # Capture the scientific state again without consuming RNG.
+    observed_official = {
+        field: getattr(vrrw, field) for field in _VRRW_PROGRESS_STATE_FIELDS
+    }
+    if is_external_transition:
+        try:
+            observed_official["transitions"] = (
+                vrrw.transitions.export_checkpoint_state()
+            )
+        except TasteT12TransitionStoreError as exc:
+            raise TasteGCFFullResumeError(str(exc)) from exc
     observed_state = {
-        "official": {field: getattr(vrrw, field) for field in _VRRW_PROGRESS_STATE_FIELDS},
+        "official": observed_official,
         "bridge": bridge.checkpoint_state(),
         "adapter": _adapter_state(adapter),
         "action_counts": dict(action_counts),
@@ -1653,8 +1767,24 @@ def production_checkpoint_identity(
     return validate_checkpoint_identity(value)
 
 
+def production_transition_contract_sha256(
+    identity: Mapping[str, Any],
+) -> str:
+    """Bind one external transition journal across the 10k/20k cursors."""
+
+    frozen = validate_checkpoint_identity(identity)
+    if frozen["purpose"] != "production":
+        raise TasteGCFFullResumeError(
+            "T12 transition journal requires a production identity"
+        )
+    invariant = {
+        key: value for key, value in frozen.items() if key != "checkpoint_cursor"
+    }
+    return _sha256_bytes(_canonical_bytes(invariant))
+
+
 def production_transition_bound_report(
-    *, bounds: T12ProductionBounds
+    *, bounds: T12ProductionBounds, transition_store: Any | None = None
 ) -> dict[str, Any]:
     """Expose why the raw official transition dictionary cannot run at 20k.
 
@@ -1666,6 +1796,29 @@ def production_transition_bound_report(
     transition_entries = min(bounds.total_steps, bounds.max_full_live_records)
     target_rows = transition_entries * (bounds.sample_size + 1)
     coverage_bits = target_rows * bounds.parent_count
+    installed = (
+        getattr(transition_store, "T12_BOUNDED_TRANSITION_STATE", False) is True
+        and callable(getattr(transition_store, "export_checkpoint_state", None))
+        and callable(getattr(transition_store, "validate_live_domain", None))
+    )
+    store_audit = transition_store.audit() if installed else None
+    if installed and (
+        store_audit.get("policy") != TRANSITION_STORE_POLICY
+        or store_audit.get("parent_count") != bounds.parent_count
+        or store_audit.get("sample_size") != bounds.sample_size
+        or store_audit.get("candidate_capacity") != bounds.candidate_capacity
+        or store_audit.get("expanded_capacity", 3) > 2
+        or store_audit.get("external_journal_is_authority") is not True
+        or store_audit.get("coverage_payload_in_ram_is_lru_bounded") is not True
+        or store_audit.get("model_recomputation_count") != 0
+        or store_audit.get("rng_calls_added") != 0
+        or store_audit.get("neighbor_order_changed") is not False
+        or store_audit.get("candidate_order_changed") is not False
+        or store_audit.get("scientific_parameters_changed") is not False
+    ):
+        raise TasteGCFFullResumeError(
+            "T12 external transition store failed its scientific resource audit"
+        )
     return {
         "schema_version": "tastemolnet_t12_transition_bound_audit_v1",
         "bounds_sha256": bounds.sha256,
@@ -1682,7 +1835,9 @@ def production_transition_bound_report(
             "dataset_specific_external_compact_transition_store_with_"
             "bounded_expanded_lru"
         ),
-        "production_launch_ready": False,
+        "external_transition_store_installed": installed,
+        "external_transition_store_audit": store_audit,
+        "production_launch_ready": installed,
     }
 
 
@@ -1748,6 +1903,18 @@ class T12ProductionCheckpointOrchestrator:
             "test_loaded": False,
         }
 
+    def identity_at(self, checkpoint_cursor: int) -> dict[str, Any]:
+        """Return one validated immutable production checkpoint identity."""
+
+        cursor = _native_int(
+            checkpoint_cursor, field="T12 production identity cursor", minimum=1
+        )
+        if cursor not in self._identities:
+            raise TasteGCFFullResumeError(
+                "T12 production identity cursor must be 10k or 20k"
+            )
+        return dict(self._identities[cursor])
+
     def commit(
         self,
         *,
@@ -1776,6 +1943,13 @@ class T12ProductionCheckpointOrchestrator:
             raise TasteGCFFullResumeError(
                 "T12 raw official transition state is not production bounded: "
                 f"bitpacked_coverage_bytes={report['minimum_bitpacked_coverage_bytes']}"
+            )
+        report = production_transition_bound_report(
+            bounds=self.bounds, transition_store=transitions
+        )
+        if report["production_launch_ready"] is not True:
+            raise TasteGCFFullResumeError(
+                "T12 external transition store is not production ready"
             )
         bridge.retain_official_live_domain(
             vrrw=vrrw, current_graph_identity=current_graph_identity
@@ -1807,6 +1981,62 @@ class T12ProductionCheckpointOrchestrator:
             expected_identity=self._identities[cursor],
             torch=torch,
         )
+
+    def materialize_terminal_candidates(
+        self,
+        *,
+        vrrw: Any,
+        completed_steps: int,
+        torch: Any,
+    ) -> Path:
+        """Persist the exact ordered train-side native pool after 20k."""
+
+        cursor = _native_int(
+            completed_steps, field="T12 candidate cursor", minimum=1
+        )
+        if cursor != PRODUCTION_TOTAL_STEPS:
+            raise TasteGCFFullResumeError(
+                "T12 native candidates may be materialized only after 20k"
+            )
+        identity = self._identities[PRODUCTION_TOTAL_STEPS]
+        manifest = self.checkpoint_root / (
+            f"checkpoint-{PRODUCTION_TOTAL_STEPS:08d}.manifest.json"
+        )
+        if not manifest.is_file():
+            raise TasteGCFFullResumeError(
+                "T12 terminal checkpoint must commit before candidate persistence"
+            )
+        # Reopen the checkpoint first so a candidate archive can never outrun
+        # the exact generation closure it is intended to materialize.
+        self.reopen(
+            manifest,
+            checkpoint_cursor=PRODUCTION_TOTAL_STEPS,
+            torch=torch,
+        )
+        try:
+            result = write_native_candidate_snapshot(
+                self.checkpoint_root.parent / "native_candidates",
+                vrrw=vrrw,
+                checkpoint_cursor=cursor,
+                contract_sha256=production_transition_contract_sha256(identity),
+                attempt_id=identity["attempt_id"],
+                generation_token=identity["generation_token"],
+                torch=torch,
+            )
+            # A distinct read immediately proves both raw bytes and exact
+            # recursive scientific content before returning to calibration.
+            reopen_native_candidate_snapshot(
+                result,
+                expected_contract_sha256=production_transition_contract_sha256(
+                    identity
+                ),
+                expected_attempt_id=identity["attempt_id"],
+                expected_generation_token=identity["generation_token"],
+                torch=torch,
+            )
+            return result
+        except TasteT12CandidateStoreError as exc:
+            raise TasteGCFFullResumeError(str(exc)) from exc
 
 
 def build_replay_scientific_state(
@@ -2431,6 +2661,7 @@ __all__ = [
     "compare_canary_observations",
     "production_checkpoint_identity",
     "production_segment_bounds",
+    "production_transition_contract_sha256",
     "production_transition_bound_report",
     "reopen_checkpoint",
     "restore_checkpoint_payload",
