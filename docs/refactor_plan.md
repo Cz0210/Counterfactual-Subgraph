@@ -1,5 +1,18 @@
 # Refactor Plan
 
+## 2026-09-01: Execute the BACE ComRecGC resource-cap continuation
+
+- [x] Reopen the executor cap receipt and materialized train-only generation
+  before accepting its native postprocess fragment.
+- [x] Preserve only the immutable adopted generation path while routing every
+  downstream cache/output through fresh generic-controller attempt roots.
+- [x] Add the BACE standardized terminal contract to the existing adapter and
+  atomically compose a fresh runnable manifest.
+- [ ] Deploy a persistent sidecar that waits for `POSTPROCESS_QUEUE_READY`,
+  prepares the fresh manifest, launches it once, and leaves matrix publication
+  to the strict cell-authority publisher.
+
+
 ## 2026-09-01: Route AIDS chemistry through its frozen untyped candidate space
 
 - [x] Preserve the original typed AIDS source/no-op component, tensor,

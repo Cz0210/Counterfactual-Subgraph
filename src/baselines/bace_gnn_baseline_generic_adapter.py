@@ -166,6 +166,28 @@ def _required_output_files(task_id: str) -> list[str]:
             "run_manifest.json",
             "PASS",
         ]
+    if task_id.endswith("_standardized"):
+        method_id = task_id.removeprefix("bace_").removesuffix("_standardized")
+        if method_id not in {"ours", "gcfexplainer", "globalgce", "comrecgc"}:
+            raise ValueError(f"Unknown standardized BACE method task: {task_id}")
+        return [
+            "figure3_coverage_vs_k.csv",
+            "figure4_coverage_vs_threshold.csv",
+            f"table2_{method_id}_k10.csv",
+            "prefix_metrics.csv",
+            "prefix_metrics.json",
+            "parent_best_distances.csv",
+            "destination_distribution.csv",
+            "summary.json",
+            "run_manifest.json",
+            "oracle_manifest.json",
+            "evaluation_manifest.json",
+            "artifact_manifest.json",
+            "freeze_manifest.json",
+            "_FINALIZED.json",
+            "final_artifact_audit.json",
+            "PASS",
+        ]
     raise ValueError(f"No generic output contract for native task: {task_id}")
 
 
@@ -182,6 +204,8 @@ def _required_log_marker(task_id: str) -> str:
         return '"run_complete": true'
     if task_id.endswith("_selection"):
         return '"status": "FROZEN"'
+    if task_id.endswith("_standardized"):
+        return "[BACE_FROZEN_CELL_STANDARDIZATION_PASS]"
     return '"status": "PASS"'
 
 
@@ -212,6 +236,8 @@ def _stage_contract(task_id: str) -> tuple[str, list[str], bool, bool, bool]:
         return "BACE_BASELINE_TEST_MERGE", ["test"], False, True, True
     if task_id.endswith("_final_freeze"):
         return "BACE_BASELINE_FINAL_FREEZE", ["test"], False, True, True
+    if task_id.endswith("_standardized"):
+        return "BACE_BASELINE_STANDARDIZED", ["test"], False, True, True
     raise ValueError(f"No generic stage contract for native task: {task_id}")
 
 
@@ -244,6 +270,8 @@ def _priority(task_id: str, *, method_id: str) -> int:
         return 140 + method_offset
     if task_id.endswith("_final_freeze"):
         return 150 + method_offset
+    if task_id.endswith("_standardized"):
+        return 160 + method_offset
     raise ValueError(f"No generic priority contract for native task: {task_id}")
 
 

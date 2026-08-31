@@ -65,3 +65,28 @@ writes only `WAITING_RESOURCE_CAP_REQUEST` heartbeat/state files.
 The emitted postprocess fragment must be appended to the existing minimal
 continuation controller.  The executor itself does not allocate a GPU or infer
 matrix PASS from its own heartbeat.
+
+## Postprocess queue preparation
+
+`POSTPROCESS_QUEUE_READY` is not itself an executable controller manifest.
+The executor deliberately emits the native BACE task schema and omits the
+already materialized generation task.  Prepare a fresh generic fragment and
+controller manifest with:
+
+```bash
+python scripts/autodl/prepare_bace_comrecgc_resource_cap_postprocess.py \
+  --config configs/hpc.yaml \
+  --set inference.fallback_to_heuristic=false \
+  --source-fragment /absolute/executor/postprocess.tasks.json \
+  --generic-fragment-output /absolute/fresh/postprocess.generic.tasks.json \
+  --manifest-output /absolute/fresh/postprocess.manifest.json \
+  --controller-id bace-comrecgc-cap-postprocess-UUID
+```
+
+The preparer reopens the cap receipt and the exact materialized generation
+manifest, preserves that generation root as one immutable external input, and
+still rewrites every mutable cache and downstream output into controller-owned
+attempt roots.  It also includes the final BACE frozen-cell standardization
+task.  Only the resulting manifest may be passed to
+`scripts/autodl/launch_four_by_four.sh`; the native fragment must never be
+launched directly or edited by hand.

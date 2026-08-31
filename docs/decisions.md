@@ -1,5 +1,34 @@
 # Decisions Log
 
+## [2026-09-01] Make the BACE ComRecGC resource-cap fragment executable
+
+### Motivation
+
+The live 20k executor correctly stops and materializes the exact committed
+checkpoint, but its terminal `postprocess.tasks.json` uses the native BACE task
+schema.  The generic controller cannot launch that file directly, and the
+generation task is intentionally absent because its output was already
+materialized from the frozen checkpoint.
+
+### Decision
+
+Add one dataset-specific preparation step.  It hash-reopens the cap receipt,
+`_RUN_COMPLETE.json`, and generation manifest; temporarily protects only that
+read-only generation path while the existing generic adapter relocates all
+mutable postprocess outputs/caches; restores the exact generation path; then
+atomically composes a fresh controller manifest.  Extend the existing BACE
+adapter only with the already-defined standardized terminal contract.
+
+### Consequences
+
+- reaching 20k can automatically continue through common recourse,
+  calibration-only selection, held-out test, freeze, and standardization;
+- no generation step is rerun and no test artifact enters the stop decision;
+- a changed cap receipt, generation manifest, task topology, or unresolved
+  path sentinel fails closed before controller launch.
+
+---
+
 ## [2026-09-01] Separate T14 train generation from paper-cell evaluation
 
 ### Motivation
